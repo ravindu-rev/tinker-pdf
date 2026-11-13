@@ -1228,13 +1228,58 @@ colours count in `Transforms::bytes_bound`.
   at every node over its inputs' intervals — 33 points an axis up to three
   inputs, 17 for four, 9 for five and six, 5 beyond — the grid's entries
   counted against `MAX_CLUT_ENTRIES`. Every count it can spend is capped,
-  and a program past a cap is a typed refusal: operations, main function and
-  sub-elements together, `MAX_CALC_OPERATIONS` (65 536, the bound
-  `Function::PostScript` holds its tokens to); stack depth
-  `MAX_CALC_STACK` (1 024; ICC.2 reserves 65 535 where a profile states
-  no limit); sub-element nesting `MAX_CALC_DEPTH` (16); temporary channels
-  `MAX_CALC_TEMPORARIES` (1 024). A `calculatorLimits` extension (`clmt`)
-  stricter than a cap is honoured.
+  and a program past a cap is a typed refusal, `IccError::CalculatorLimit`
+  naming it:
+  - `MAX_CALC_OPERATIONS` (65 536, the bound `Function::PostScript` holds
+    its tokens to): the operations the element and its sub-elements hold,
+    each counted once, and the steps one run takes. A step is a value an
+    operation takes from the stack or gives to it, one at the least for each
+    operation, so a vector operation counts its width; a `solv` adds its
+    elimination's multiplications, a conditional counts its longer stream,
+    and an invoked sub-element its own steps each time it is invoked — a
+    curve set a curve, a matrix a coefficient, a grid a corner and output,
+    a calculator its run's and one for the run.
+  - `MAX_CALC_STACK` (1 024; ICC.2 reserves 65 535 where a profile states no
+    limit): the deepest the stack goes.
+  - `MAX_CALC_DEPTH` (16): sub-elements within one another, and conditional
+    streams within one another.
+  - `MAX_CALC_TEMPORARIES` (1 024): the temporary channels a program
+    reaches.
+  - `MAX_CALC_WORK` (67 108 864): the steps a tag's calculators take while
+    the tag is read — a calculator stage's run at each node of its grid, a
+    sampled calculator curve's at each of its entries, each counted as its
+    program's steps and one more for the run, before any of them is made.
+
+  A `calculatorLimits` extension (`clmt`) stricter than a cap is honoured,
+  for the element's sub-calculators too; its operation count bounds the
+  operations they hold, as 11.2.1 states it, and a program within it reads
+  however many steps its runs take. Sub-elements naming one position and
+  size are one sub-element, and are otherwise apart from one another and
+  from the main function (11.2.1); a curve set's channels naming one curve
+  share it, its curves otherwise stored one after another (11.2.2.1). Each
+  is read once, so a calculator's bytes are read once however its
+  sub-elements name them, and every table a sub-element holds — a curve's
+  numbers, a matrix's coefficients and offsets, a grid's values — is spent
+  from the tag's `MAX_CLUT_ENTRIES` beside its stages' own.
+  - **How the program is read.** Table 104 puts an `else` header right after
+    its `if`'s, and both before their streams, as Tables 105 and 106 put
+    every `case` and `dflt` header before theirs; every stream of a
+    conditional leaves the stack as deep as the others, and a `sel` with no
+    `dflt` as deep as running no case would. `tint`, `tJab` and `fJab` are
+    refused by name (the non-goals above); `env` answers `true` as there and
+    one, and every other variable as not there, as Table 92 has a CMM given
+    none do. Table 102 prints −1 for a positive value under `sign`, which
+    reads +1. The arithmetic is `f64`'s four operations and square root and
+    `tinker_pdf_math`'s transcendentals; `asin` and `acos`, which that crate
+    does not keep, are its `atan2` of the value against √(1 − x²) and of
+    √(1 − x²) against the value.
+  - **A sampled calculator curve** (`clcf`, 11.2.2.3) runs its calculator
+    at its recommended entry count — held to 4 096, the resolution a curve
+    is sampled at after — over its range when the curve is read, and is a
+    single sampled curve from then on.
+  - **A segmented curve finds its segment by halving its break-points**,
+    which never decrease, so a curve of many segments costs a sample or an
+    invocation no more than a curve of few.
 - **A spectral connection space** (RC-20.12): a `DToBx` tag giving
   reflectance or transmission spectra is reduced to XYZ when built, each
   spectrum integrated against the observer and illuminant the profile's
@@ -1257,10 +1302,11 @@ colours count in `Transforms::bytes_bound`.
 | `MAX_DEVICE_CHANNELS` | 15 | a table's output channels, a link's, a named colour's device coordinates | RC-20.16, its document figure the census's most channels a `B2A*` table gives |
 | `MAX_NAMED_COLOURS` | 65 536 | an `ncl2` tag's count | RC-20.9 |
 | `MAX_MPE_ELEMENTS` | 64 | a multi-process tag's elements (RC-01.4's constant) | RC-20.10 |
-| `MAX_CALC_OPERATIONS` | 65 536 | a calculator's operations, its sub-elements' among them | RC-20.11 |
+| `MAX_CALC_OPERATIONS` | 65 536 | a calculator's operations, its sub-elements' among them, and the steps one run takes | RC-20.11 |
 | `MAX_CALC_STACK` | 1 024 | the stack a calculator's program reaches | RC-20.11 |
-| `MAX_CALC_DEPTH` | 16 | sub-element invocations within one another | RC-20.11 |
+| `MAX_CALC_DEPTH` | 16 | sub-elements, and conditional streams, within one another | RC-20.11 |
 | `MAX_CALC_TEMPORARIES` | 1 024 | temporary channels | RC-20.11 |
+| `MAX_CALC_WORK` | 67 108 864 | the steps a tag's calculators take while it is read | RC-20.11 |
 | `MAX_SPECTRAL_STEPS` | 1 024 | a spectral range's steps | RC-20.12 |
 
 Fifteen is 7.2.6's `FCLR`, the most channels a data colour space has. Each
@@ -1342,7 +1388,7 @@ reads them in a local run over the fetched corpora and raises the floor.
 | --- | --- |
 | An inverted curve or matrix is ill-conditioned and the output transform amplifies a rounding into a visible error | The inverse is built in `f64` and held to s15.16; a determinant under one step or a decreasing curve is `NoInverse`; `forward_then_output_is_the_identity_for_a_matrix_profile` holds the round trip within a table step |
 | The Lab correction for `mft1` and `mAB ` moves pages that render today | No pinned page paints through a Lab table of either type; the corpus pages that do move, each Lab component by at most 0.4 % of its range, toward what 10.9 and 10.10 say, and RC-20.16's run counts them |
-| A calculator program costs without bound | Every count it can spend is capped and checked before it runs, and it runs only when a table is built, never per colour, the precedent `Function::PostScript` set |
+| A calculator program costs without bound | Every count it can spend is capped and checked before it runs, the steps a run takes and the steps all of a tag's runs take among them, and it runs only when a table is built, never per colour, the precedent `Function::PostScript` set |
 | A spectral profile reduced against a guessed observer | Only the observer and illuminant the profile carries are used; a standard observer named without its table is refused by name, never assumed |
 | v5's precedence differs from ICC.1's for a profile carrying `AToB3` | Absolute colorimetric's row reads `A2B3` before `A2B1` for a version 5 profile only; every version 2 and 4 profile keeps RC-01's rows |
 | An element ICC.2 defines is read wrongly because no published table settles its arithmetic | Each element's known-answer test recomputes it from the clause; an element this design does not read is refused by name, so its tag is passed over rather than half-read |

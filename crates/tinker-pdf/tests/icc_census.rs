@@ -519,6 +519,9 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
                     // makes; named all the same, so a parse that began to
                     // make it would be counted as what it is.
                     IccError::NoInverse => "NoInverse",
+                    // A calculator past a cap, which only a version 5
+                    // profile's elements hold.
+                    IccError::CalculatorLimit(_) => "CalculatorLimit",
                 };
                 *refused.entry(name.to_string()).or_default() += 1;
             }

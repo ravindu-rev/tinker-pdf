@@ -8,16 +8,19 @@
 //! (`matf`), multi-dimensional lookup tables (`clut`, and ICC.2's extended
 //! `xclt`, whose values may be 8- or 16-bit integers or half floats), and
 //! the `bACS` and `eACS` placeholders, which pass their channels through
-//! (10.14.2.5). A curve set's curve is a segmented curve (`curf`) of formula
+//! (10.14.2.5), and ICC.2's calculator (`calc`, 11.2.1, the `calc` module),
+//! whose program is run over a grid of its inputs' intervals when the stage
+//! is built. A curve set's curve is a segmented curve (`curf`) of formula
 //! segments — ICC.1's three and ICC.2's five more (Table 111) — and sampled
-//! ones, or ICC.2's single sampled curve (`sngf`, 11.2.2.2). Their numbers
-//! are floats in the file. They are read once, when the pipeline is built,
-//! and compiled into fixed-point stages — a curve sampled over the interval
-//! its input can take, a matrix and a grid in s15.16 — so that a colour's
-//! evaluation is integer arithmetic and nothing on the pixel path rounds
-//! differently on another target (ruling 4). The formulas a curve segment is
-//! made of are evaluated with `tinker_pdf_math` while it is sampled, never
-//! per colour.
+//! ones, ICC.2's single sampled curve (`sngf`, 11.2.2.2), or its sampled
+//! calculator curve (`clcf`, 11.2.2.3), a calculator sampled into a single
+//! sampled curve when it is read. Their numbers are floats in the file. They
+//! are read once, when the pipeline is built, and compiled into fixed-point
+//! stages — a curve sampled over the interval its input can take, a matrix
+//! and a grid in s15.16 — so that a colour's evaluation is integer
+//! arithmetic and nothing on the pixel path rounds differently on another
+//! target (ruling 4). The formulas a curve segment is made of are evaluated
+//! with `tinker_pdf_math` while it is sampled, never per colour.
 //!
 //! A tag runs from the device to the connection space (a `D2B*` tag, a
 //! version 5 `A2B*`), from the connection space to the device (a `B2D*`
@@ -31,8 +34,7 @@
 //! by the element's name, [`IccError::UnsupportedElement`]: 10.14.1 makes such
 //! a tag unusable, and ICC.1 8.10.2 a) passes it over, so the intent converts
 //! through its `A2B*` table instead (`docs/design/icc.md`, "The table each
-//! intent compiles"). So is a curve of ICC.2's sampled calculator type
-//! (`clcf`, 11.2.2.3), whose calculator this module does not run.
+//! intent compiles").
 //!
 //! # Every count is bounded before it is allocated
 //!
@@ -41,12 +43,16 @@
 //! product of them (ruling 1). The element count is held to
 //! [`MAX_MPE_ELEMENTS`], every channel count to `MAX_LUT_INPUTS`, a grid to
 //! `MAX_CLUT_ENTRIES`, and every table the pipeline compiles — grid entries
-//! and sampled curve entries together — to `MAX_CLUT_ENTRIES` in all; a
-//! segment or sample count is checked against the bytes that would hold it
-//! before anything is read.
+//! and sampled curve entries together, a calculator's sub-element tables and
+//! its sampled calculator curves among them — to `MAX_CLUT_ENTRIES` in all;
+//! a segment or sample count is checked against the bytes that would hold it
+//! before anything is read. The steps the tag's calculators take while it is
+//! read are held to `MAX_CALC_WORK` in all, each run counted before it is
+//! made ([`Budget`]).
 
 use std::mem::size_of;
 
+use super::calc::{Calculator, CalculatorLimit, MAX_CALC_WORK};
 use super::{
     half_float, IccError, Reader, CURVE_ENTRIES, MAX_CLUT_ENTRIES, MAX_DEVICE_CHANNELS,
     MAX_LUT_INPUTS,
@@ -85,6 +91,47 @@ const CURVE_SAMPLES: usize = CURVE_ENTRIES;
 
 /// One in s15.16, the fixed point every stage computes in.
 const ONE: i64 = 1 << 16;
+
+/// What reading one `multiProcessElementsType` tag may still spend: table
+/// entries — grids, sampled curves, a calculator's sub-element tables and
+/// its sampled calculator curves together — and the steps its calculators
+/// take while it is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Budget {
+    /// Entries still to spend, of [`MAX_CLUT_ENTRIES`].
+    pub(super) entries: usize,
+    /// Calculator steps still to spend, of [`MAX_CALC_WORK`].
+    pub(super) steps: usize,
+}
+
+impl Budget {
+    /// A whole tag's.
+    pub(super) const TAG: Budget = Budget {
+        entries: MAX_CLUT_ENTRIES,
+        steps: MAX_CALC_WORK,
+    };
+
+    /// `entries` more entries spent: [`IccError::TooLarge`] past what is
+    /// left, which is then unchanged.
+    pub(super) fn spend_entries(&mut self, entries: usize) -> Result<(), IccError> {
+        self.entries = self
+            .entries
+            .checked_sub(entries)
+            .ok_or(IccError::TooLarge)?;
+        Ok(())
+    }
+
+    /// `runs` runs of a calculator spent, each the `steps` its program takes
+    /// at the most and one more for the run:
+    /// [`IccError::CalculatorLimit`]`(`[`CalculatorLimit::Work`]`)` past what
+    /// is left, which is then unchanged — found before any of them is made.
+    pub(super) fn spend_runs(&mut self, runs: usize, steps: usize) -> Result<(), IccError> {
+        let past = IccError::CalculatorLimit(CalculatorLimit::Work);
+        let spent = runs.checked_mul(steps.saturating_add(1)).ok_or(past)?;
+        self.steps = self.steps.checked_sub(spent).ok_or(past)?;
+        Ok(())
+    }
+}
 
 /// The most XYZ the connection space encodes: `u1Fixed15`'s `1 + 32 767 /
 /// 32 768` (ICC.1 6.3.4.2), the top of the interval a tag out of an XYZ
@@ -160,6 +207,15 @@ enum Stage {
         outputs: usize,
         values: Vec<i32>,
     },
+    /// A calculator, sampled when the stage was built: a grid over each
+    /// input's interval — its low end and its span, in s15.16 — the last
+    /// axis varying fastest, `outputs` values a point in s15.16.
+    Calculated {
+        domain: Vec<(i64, i64)>,
+        grids: Vec<usize>,
+        outputs: usize,
+        values: Vec<i32>,
+    },
 }
 
 /// A curve sampled at evenly spaced points over `low ..= low + span`, its
@@ -171,26 +227,39 @@ struct Sampled {
     table: Vec<i32>,
 }
 
-/// One curve of a curve set, as the file states it.
-enum Curve {
+/// One curve of a curve set, as the file states it: what a pipeline samples
+/// and a calculator evaluates.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Curve {
     /// A segmented curve (`curf`).
     Segmented(Segmented),
-    /// ICC.2's single sampled curve (`sngf`, 11.2.2.2).
+    /// ICC.2's single sampled curve (`sngf`, 11.2.2.2), or its sampled
+    /// calculator curve (`clcf`, 11.2.2.3) once its calculator is sampled.
     Single(SingleSampled),
 }
 
 impl Curve {
     /// The curve at `x`.
-    fn eval(&self, x: f64) -> f64 {
+    pub(super) fn eval(&self, x: f64) -> f64 {
         match self {
             Curve::Segmented(curve) => curve.eval(x),
             Curve::Single(curve) => curve.eval(x),
         }
     }
+
+    /// The numbers it keeps, which a calculator's sub-element spends as
+    /// entries.
+    pub(super) fn held(&self) -> usize {
+        match self {
+            Curve::Segmented(curve) => curve.held(),
+            Curve::Single(curve) => curve.values.len(),
+        }
+    }
 }
 
 /// A segmented curve (`curf`, 10.14.2.2), as the file states it.
-struct Segmented {
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Segmented {
     /// The break-points, `segments.len() - 1` of them, never decreasing.
     breaks: Vec<f64>,
     segments: Vec<Segment>,
@@ -200,6 +269,7 @@ struct Segmented {
 }
 
 /// One segment of a segmented curve.
+#[derive(Clone, Debug, PartialEq)]
 enum Segment {
     /// `parf`: a formula, by function type and its parameters in order.
     Formula { function: u16, params: [f64; 7] },
@@ -210,7 +280,8 @@ enum Segment {
 /// ICC.2's single sampled curve (11.2.2.2): `values` evenly spaced from
 /// `first` to `last`, read linearly between them, and beyond them clipped to
 /// the end value or extended along the line through the two end entries.
-struct SingleSampled {
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct SingleSampled {
     first: f64,
     last: f64,
     extrapolate: bool,
@@ -371,7 +442,7 @@ fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
             .ok_or(IccError::MalformedTag)?;
         if !matches!(
             &signature,
-            b"cvst" | b"matf" | b"clut" | b"xclt" | b"bACS" | b"eACS"
+            b"cvst" | b"matf" | b"clut" | b"xclt" | b"calc" | b"bACS" | b"eACS"
         ) {
             return Err(IccError::UnsupportedElement(signature));
         }
@@ -386,7 +457,7 @@ fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
         .map(|&(low, high)| (fixed(low), fixed(high)))
         .collect();
     let mut intervals = start;
-    let mut budget = MAX_CLUT_ENTRIES;
+    let mut budget = Budget::TAG;
     let mut stages = Vec::new();
     for (signature, element) in elements {
         let reader = Reader { bytes: element };
@@ -430,6 +501,7 @@ fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
                     (16, 32, encoding),
                 )?);
             }
+            b"calc" => stages.push(calculated(element, q, &mut intervals, &mut budget)?),
             // `bACS` and `eACS`: pass-through, with as many channels out as
             // in (10.14.2.5).
             _ => {
@@ -509,6 +581,15 @@ pub(super) fn bound(data: &[u8]) -> usize {
             Some(b"xclt") => {
                 entries = entries.saturating_add(grid(16));
                 beside = beside.saturating_add(p * size_of::<usize>());
+            }
+            Some(b"calc") => {
+                let points = calculator_points(p);
+                entries = entries.saturating_add(
+                    (0..p)
+                        .fold(1usize, |nodes, _| nodes.saturating_mul(points))
+                        .saturating_mul(q),
+                );
+                beside = beside.saturating_add(p * (size_of::<usize>() + size_of::<(i64, i64)>()));
             }
             _ => {}
         }
@@ -610,6 +691,16 @@ impl Stage {
             Stage::Grid { grids, values, .. } => {
                 grids.capacity() * size_of::<usize>() + values.capacity() * size_of::<i32>()
             }
+            Stage::Calculated {
+                domain,
+                grids,
+                values,
+                ..
+            } => {
+                domain.capacity() * size_of::<(i64, i64)>()
+                    + grids.capacity() * size_of::<usize>()
+                    + values.capacity() * size_of::<i32>()
+            }
         }
     }
 
@@ -642,30 +733,62 @@ impl Stage {
                 outputs,
                 values: table,
             } => {
-                let mut base = Vec::with_capacity(grids.len());
-                let mut fractions = Vec::with_capacity(grids.len());
-                for (axis, &points) in grids.iter().enumerate() {
-                    // 10.14.2.4: an input outside `0..=1` reads the nearer
-                    // end of the range.
-                    let x = values.get(axis).copied().unwrap_or(0).clamp(0, ONE);
-                    let scaled = x * (points as i64 - 1);
-                    let cell = ((scaled >> 16) as usize).min(points - 2);
-                    base.push(cell);
-                    fractions.push(scaled - ((cell as i64) << 16));
-                }
-                let lookup = Lookup {
-                    grids,
-                    outputs: *outputs,
-                    table,
-                    base: &base,
-                    fractions: &fractions,
-                };
-                (0..*outputs)
-                    .map(|channel| lookup.corner(0, 0, channel))
-                    .collect()
+                // 10.14.2.4: an input outside `0..=1` reads the nearer end of
+                // the range.
+                let held: Vec<i64> = (0..grids.len())
+                    .map(|axis| values.get(axis).copied().unwrap_or(0).clamp(0, ONE))
+                    .collect();
+                look_up(grids, *outputs, table, &held)
+            }
+            // A calculator's grid spans each input's interval: the value's
+            // place along it, held to it, is where the grid is read.
+            Stage::Calculated {
+                domain,
+                grids,
+                outputs,
+                values: table,
+            } => {
+                let held: Vec<i64> = domain
+                    .iter()
+                    .enumerate()
+                    .map(|(axis, &(low, span))| {
+                        if span <= 0 {
+                            return 0;
+                        }
+                        let along = values.get(axis).copied().unwrap_or(0) - low;
+                        ((i128::from(along) << 16) / i128::from(span)).clamp(0, i128::from(ONE))
+                            as i64
+                    })
+                    .collect();
+                look_up(grids, *outputs, table, &held)
             }
         }
     }
+}
+
+/// A grid of `table`, `grids` points along each axis and `outputs` values a
+/// point, read at `held`, each coordinate in s15.16 over `0..=1`:
+/// multilinearly, one axis at a time.
+fn look_up(grids: &[usize], outputs: usize, table: &[i32], held: &[i64]) -> Vec<i64> {
+    let mut base = Vec::with_capacity(grids.len());
+    let mut fractions = Vec::with_capacity(grids.len());
+    for (axis, &points) in grids.iter().enumerate() {
+        let x = held.get(axis).copied().unwrap_or(0);
+        let scaled = x * (points as i64 - 1);
+        let cell = ((scaled >> 16) as usize).min(points - 2);
+        base.push(cell);
+        fractions.push(scaled - ((cell as i64) << 16));
+    }
+    let lookup = Lookup {
+        grids,
+        outputs,
+        table,
+        base: &base,
+        fractions: &fractions,
+    };
+    (0..outputs)
+        .map(|channel| lookup.corner(0, 0, channel))
+        .collect()
 }
 
 /// One evaluation of a grid: the cell a colour falls in and how far along
@@ -764,7 +887,7 @@ impl Sampled {
 fn curve_set(
     element: &[u8],
     intervals: &mut [(f64, f64)],
-    budget: &mut usize,
+    budget: &mut Budget,
 ) -> Result<Stage, IccError> {
     let reader = Reader { bytes: element };
     let mut curves = Vec::with_capacity(intervals.len());
@@ -776,17 +899,8 @@ fn curve_set(
             .checked_add(size)
             .and_then(|end| element.get(offset..end))
             .ok_or(IccError::MalformedTag)?;
-        let curve = match (Reader { bytes: data }).sig(0).as_ref() {
-            Some(b"curf") => Curve::Segmented(segmented(data)?),
-            Some(b"sngf") => Curve::Single(single_sampled(data)?),
-            // ICC.2's sampled calculator curve (11.2.2.3) is a calculator
-            // element's function, which this module does not run.
-            Some(b"clcf") => return Err(IccError::UnsupportedElement(*b"clcf")),
-            _ => return Err(IccError::MalformedTag),
-        };
-        *budget = budget
-            .checked_sub(CURVE_SAMPLES)
-            .ok_or(IccError::TooLarge)?;
+        let curve = read_curve(data, budget, &mut Calculator::read)?;
+        budget.spend_entries(CURVE_SAMPLES)?;
         let sampled = Sampled::of(&curve, *interval)?;
         *interval = sampled.range();
         curves.push(sampled);
@@ -839,11 +953,44 @@ fn grid(
     element: &[u8],
     q: usize,
     intervals: &mut Vec<(f64, f64)>,
-    budget: &mut usize,
+    budget: &mut Budget,
     layout: (usize, usize, Values),
 ) -> Result<Stage, IccError> {
-    let (counts_at, values_at, encoding) = layout;
     let p = intervals.len();
+    let (grids, read) = grid_layout(element, p, q, layout, budget.entries)?;
+    budget.spend_entries(read.len())?;
+    let values: Vec<i32> = read.into_iter().map(fixed32).collect();
+    // Interpolation mixes nodes, so each output stays within its nodes.
+    let next: Vec<(f64, f64)> = (0..q)
+        .map(|channel| {
+            let mut column = values.iter().skip(channel).step_by(q).copied();
+            let first = column.next().unwrap_or(0);
+            let (low, high) = column.fold((first, first), |(low, high), value| {
+                (low.min(value), high.max(value))
+            });
+            (f64::from(low) / ONE as f64, f64::from(high) / ONE as f64)
+        })
+        .collect();
+    *intervals = next;
+    Ok(Stage::Grid {
+        grids,
+        outputs: q,
+        values,
+    })
+}
+
+/// A grid element's counts and values, in `f64` as its encoding states them
+/// (`layout`: where its sixteen counts start, where its values start, and
+/// their encoding), over `p` inputs to `q` outputs, its entries held to
+/// `budget` and [`MAX_CLUT_ENTRIES`] before any is read.
+fn grid_layout(
+    element: &[u8],
+    p: usize,
+    q: usize,
+    layout: (usize, usize, Values),
+    budget: usize,
+) -> Result<(Vec<usize>, Vec<f64>), IccError> {
+    let (counts_at, values_at, encoding) = layout;
     let mut grids = Vec::with_capacity(p);
     let mut points = 1usize;
     for axis in 0..p {
@@ -863,7 +1010,7 @@ fn grid(
         grids.push(count);
     }
     let entries = points.checked_mul(q).ok_or(IccError::TooLarge)?;
-    if entries > MAX_CLUT_ENTRIES || entries > *budget {
+    if entries > MAX_CLUT_ENTRIES || entries > budget {
         return Err(IccError::TooLarge);
     }
     // The bytes are there before anything is allocated for them.
@@ -874,15 +1021,118 @@ fn grid(
     if end > element.len() {
         return Err(IccError::MalformedTag);
     }
-    *budget -= entries;
     let reader = Reader { bytes: element };
     let mut values = Vec::with_capacity(entries);
     for index in 0..entries {
-        values.push(fixed32(
-            encoding.read(&reader, values_at + encoding.width() * index)?,
-        ));
+        values.push(encoding.read(&reader, values_at + encoding.width() * index)?);
     }
-    // Interpolation mixes nodes, so each output stays within its nodes.
+    Ok((grids, values))
+}
+
+/// A grid element — `clut` or `xclt` — of `p` inputs and `q` outputs as a
+/// calculator's sub-element reads it: its counts and its values in `f64`,
+/// its entries spent from `budget` before any is read.
+pub(super) fn grid_values(
+    element: &[u8],
+    p: usize,
+    q: usize,
+    budget: &mut Budget,
+) -> Result<(Vec<usize>, Vec<f64>), IccError> {
+    let reader = Reader { bytes: element };
+    let layout = match reader.sig(0).as_ref() {
+        Some(b"clut") => (12, 28, Values::Float32),
+        Some(b"xclt") => (
+            16,
+            32,
+            reader
+                .u32(12)
+                .and_then(Values::of)
+                .ok_or(IccError::MalformedTag)?,
+        ),
+        _ => return Err(IccError::MalformedTag),
+    };
+    let (grids, values) = grid_layout(element, p, q, layout, budget.entries)?;
+    budget.spend_entries(values.len())?;
+    Ok((grids, values))
+}
+
+/// A matrix element of `p` inputs and `q` outputs as a calculator's
+/// sub-element reads it: its `p × q` coefficients row by row, then its `q`
+/// offsets, in `f64`, each finite.
+pub(super) fn matrix_values(element: &[u8], p: usize, q: usize) -> Result<Vec<f64>, IccError> {
+    let reader = Reader { bytes: element };
+    let count = p * q + q;
+    if 12 + 4 * count > element.len() {
+        return Err(IccError::MalformedTag);
+    }
+    (0..count)
+        .map(|index| float32(&reader, 12 + 4 * index))
+        .collect()
+}
+
+/// The grid points along each axis a calculator's stage samples it at, by
+/// how many inputs it takes (`docs/design/icc.md`, "Version 5"): 33 up to
+/// three, 17 for four, 9 for five and six, 5 beyond.
+fn calculator_points(inputs: usize) -> usize {
+    match inputs {
+        0..=3 => 33,
+        4 => 17,
+        5 | 6 => 9,
+        _ => 5,
+    }
+}
+
+/// A calculator element (ICC.2 11.2.1) as a stage: its program read and
+/// validated, then run at every node of a grid over its inputs' intervals —
+/// [`calculator_points`] an axis — the grid's entries held to `budget` and
+/// [`MAX_CLUT_ENTRIES`], and the runs to the steps `budget` has left, before
+/// any node is run. Each output is held to s15.16 as every stage's is, a
+/// value that is not a number taken as zero; the interval of each is its
+/// nodes'.
+fn calculated(
+    element: &[u8],
+    q: usize,
+    intervals: &mut Vec<(f64, f64)>,
+    budget: &mut Budget,
+) -> Result<Stage, IccError> {
+    let p = intervals.len();
+    let calculator = Calculator::read(element, budget)?;
+    if calculator.inputs() != p || calculator.outputs() != q {
+        return Err(IccError::MalformedTag);
+    }
+    let points = calculator_points(p);
+    let nodes = (0..p).try_fold(1usize, |nodes, _| nodes.checked_mul(points));
+    let entries = nodes.and_then(|nodes| nodes.checked_mul(q));
+    if entries.is_none_or(|entries| entries > MAX_CLUT_ENTRIES || entries > budget.entries) {
+        return Err(IccError::TooLarge);
+    }
+    let nodes = nodes.unwrap_or(0);
+    let entries = entries.unwrap_or(0);
+    budget.spend_runs(nodes, calculator.steps())?;
+    budget.spend_entries(entries)?;
+    let domain: Vec<(i64, i64)> = intervals
+        .iter()
+        .map(|&(low, high)| {
+            let low_fixed = fixed(low);
+            (low_fixed, (fixed(high) - low_fixed).max(0))
+        })
+        .collect();
+    let mut values = Vec::with_capacity(entries);
+    let mut input = vec![0.0f64; p];
+    for node in 0..nodes {
+        // The node's place along each axis, the first axis slowest.
+        let mut rest = node;
+        for axis in (0..p).rev() {
+            let index = rest % points;
+            rest /= points;
+            let (low, span) = domain[axis];
+            input[axis] =
+                (low as f64 + span as f64 * index as f64 / (points - 1) as f64) / ONE as f64;
+        }
+        for value in calculator.evaluate(&input) {
+            values.push(fixed32(value));
+        }
+    }
     let next: Vec<(f64, f64)> = (0..q)
         .map(|channel| {
             let mut column = values.iter().skip(channel).step_by(q).copied();
@@ -894,11 +1144,61 @@ fn grid(
         })
         .collect();
     *intervals = next;
-    Ok(Stage::Grid {
-        grids,
+    Ok(Stage::Calculated {
+        domain,
+        grids: vec![points; p],
         outputs: q,
         values,
     })
+}
+
+/// One curve of a curve set read from `data`: a segmented curve, a single
+/// sampled curve, or a sampled calculator curve (`clcf`, ICC.2 11.2.2.3),
+/// whose calculator `calculator` reads and which is sampled at once into a
+/// single sampled curve of its recommended entries — held to
+/// [`CURVE_SAMPLES`], the resolution every curve is sampled at after — over
+/// its range, clipped or extended past it as its extension type says. Its
+/// calculator's runs are spent from `budget` before any is made.
+pub(super) fn read_curve(
+    data: &[u8],
+    budget: &mut Budget,
+    calculator: &mut dyn FnMut(&[u8], &mut Budget) -> Result<Calculator, IccError>,
+) -> Result<Curve, IccError> {
+    let reader = Reader { bytes: data };
+    match reader.sig(0).as_ref() {
+        Some(b"curf") => Ok(Curve::Segmented(segmented(data)?)),
+        Some(b"sngf") => Ok(Curve::Single(single_sampled(data)?)),
+        Some(b"clcf") => {
+            let recommended = reader.u32(8).ok_or(IccError::MalformedTag)? as usize;
+            let first = float32(&reader, 12)?;
+            let last = float32(&reader, 16)?;
+            let extension = reader.u16(20).ok_or(IccError::MalformedTag)?;
+            if recommended < 2 || first >= last || extension > 1 {
+                return Err(IccError::MalformedTag);
+            }
+            let program = calculator(data.get(24..).ok_or(IccError::MalformedTag)?, budget)?;
+            // 11.2.2.3: the embedded calculator takes one channel and gives
+            // one.
+            if program.inputs() != 1 || program.outputs() != 1 {
+                return Err(IccError::MalformedTag);
+            }
+            let entries = recommended.min(CURVE_SAMPLES);
+            budget.spend_runs(entries, program.steps())?;
+            let values = (0..entries)
+                .map(|index| {
+                    let x = first + (last - first) * index as f64 / (entries - 1) as f64;
+                    program.evaluate(&[x]).first().copied().unwrap_or(0.0)
+                })
+                .collect();
+            Ok(Curve::Single(SingleSampled {
+                first,
+                last,
+                extrapolate: extension == 1,
+                values,
+            }))
+        }
+        _ => Err(IccError::MalformedTag),
+    }
 }
 
 /// A single sampled curve (`sngf`, ICC.2 11.2.2.2): its entry count, the
@@ -1084,16 +1384,36 @@ impl Segmented {
         }
     }
 
-    /// The curve at `x`: the first segment whose range holds it — the first
-    /// up to and including the first break-point, each other from the
-    /// break-point before it, excluded, to the one after it, included.
+    /// The curve at `x`, by its [`Segmented::segment`].
     fn eval(&self, x: f64) -> f64 {
-        let index = self
-            .breaks
+        self.value(self.segment(x), x)
+    }
+
+    /// Which segment `x` falls in: the first whose range holds it — the
+    /// first up to and including the first break-point, each other from the
+    /// break-point before it, excluded, to the one after it, included — and
+    /// the last for a value that is not a number. The break-points never
+    /// decrease, so it is found by halving them, whatever their count.
+    fn segment(&self, x: f64) -> usize {
+        if x.is_nan() {
+            self.breaks.len()
+        } else {
+            self.breaks.partition_point(|&point| point < x)
+        }
+    }
+
+    /// The numbers it keeps: its break-points, each segment's start, a
+    /// formula's parameters and a sampled segment's samples.
+    fn held(&self) -> usize {
+        let segments: usize = self
+            .segments
             .iter()
-            .position(|&point| x <= point)
-            .unwrap_or(self.breaks.len());
-        self.value(index, x)
+            .map(|segment| match segment {
+                Segment::Formula { params, .. } => params.len(),
+                Segment::Samples(values) => values.len(),
+            })
+            .sum();
+        self.breaks.len() + self.starts.len() + segments
     }
 
     /// Segment `index` at `x`.
@@ -1600,7 +1920,8 @@ mod tests {
     /// `B2A*` table's are: more than fifteen outputs is too many before any
     /// element is read, another count than the data space's another space,
     /// and four inputs where the connection space has three malformed. A
-    /// sampled calculator curve (`clcf`) is refused by name.
+    /// sampled calculator curve (`clcf`) too short to hold its header is
+    /// malformed.
     #[test]
     fn a_tag_out_of_the_connection_space_takes_its_range() {
         let curves = curves_of(3, &formula_curve(0, &[1.0, 1.0, 0.0, 0.0]));
@@ -1642,7 +1963,7 @@ mod tests {
         let calculated = curves_of(3, b"clcf\0\0\0\0");
         assert_eq!(
             read(&tag(3, 3, &[calculated]), false),
-            Err(IccError::UnsupportedElement(*b"clcf"))
+            Err(IccError::MalformedTag)
         );
     }
 
@@ -1682,5 +2003,51 @@ mod tests {
         broken.extend_from_slice(&segment);
         broken.extend_from_slice(&segment);
         assert_eq!(segmented(&broken).err(), Some(IccError::MalformedTag));
+    }
+
+    /// **A segmented curve finds its segment by halving its break-points**:
+    /// over a curve of a thousand segments, some break-points repeated, the
+    /// segment a value falls in is the one walking the break-points in
+    /// order finds — the first whose break-point is at or above it, and the
+    /// last past them all or for a value that is not a number — at every
+    /// break-point, between them and beyond both ends, and each segment
+    /// gives its own value there.
+    #[test]
+    fn a_segmented_curve_finds_its_segment_by_halving() {
+        let count = 1000usize;
+        // Break-point `i` at `i / 1000`, every tenth one repeated.
+        let breaks: Vec<f64> = (1..count)
+            .map(|index| stored((index - usize::from(index % 10 == 0)) as f64 / count as f64))
+            .collect();
+        let mut data = b"curf".to_vec();
+        data.extend_from_slice(&[0; 4]);
+        data.extend_from_slice(&(count as u16).to_be_bytes());
+        data.extend_from_slice(&[0; 2]);
+        for &point in &breaks {
+            data.extend_from_slice(&float(point));
+        }
+        // Segment `i` is the constant `i`: (0 X + 1)^1 + (i − 1).
+        for index in 0..count {
+            data.extend_from_slice(&formula_curve(0, &[1.0, 0.0, 1.0, index as f64 - 1.0])[12..]);
+        }
+        let curve = segmented(&data).expect("the curve reads");
+        let walked = |x: f64| {
+            breaks
+                .iter()
+                .position(|&point| x <= point)
+                .unwrap_or(breaks.len())
+        };
+        let mut probes: Vec<f64> = breaks.clone();
+        probes.extend(breaks.iter().map(|&point| point + 1e-6));
+        probes.extend(breaks.iter().map(|&point| point - 1e-6));
+        probes.extend([-1.0, 0.0, 1.0, 2.0]);
+        for x in probes {
+            let index = curve.segment(x);
+            assert_eq!(index, walked(x), "{x}");
+            assert_eq!(curve.eval(x), index as f64, "{x}");
+        }
+        assert_eq!(curve.segment(f64::NEG_INFINITY), 0);
+        assert_eq!(curve.segment(f64::INFINITY), count - 1);
+        assert_eq!(curve.segment(f64::NAN), count - 1);
     }
 }

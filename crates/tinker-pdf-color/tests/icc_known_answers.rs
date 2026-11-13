@@ -3609,3 +3609,394 @@ fn a_v5_profile_with_a_multi_process_transform_converts() {
     v4[8..12].copy_from_slice(&0x0430_0000u32.to_be_bytes());
     assert_eq!(Profile::parse(&v4), Err(IccError::NeedsLut));
 }
+
+// ---- the calculator element ------------------------------------------------------
+//
+// ICC.2's calculator (11.2.1): a main function of operations in reverse Polish
+// notation — eight bytes each, a signature and four data bytes — over input,
+// output and temporary channels. A pipeline runs it at every node of a grid
+// over its inputs' intervals when the table is built: 33 nodes an axis over
+// three inputs, so at a node the pipeline gives what the program gives there.
+
+/// A calculator operation: a signature and four data bytes.
+type Operation = [u8; 8];
+
+/// An operation of a 16-bit `s` and `t`.
+fn calc_op(signature: &[u8; 4], s: u16, t: u16) -> Operation {
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(signature);
+    out[4..6].copy_from_slice(&s.to_be_bytes());
+    out[6..].copy_from_slice(&t.to_be_bytes());
+    out
+}
+
+/// `data`: `value` pushed as a float32.
+fn calc_push(value: f64) -> Operation {
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(b"data");
+    out[4..].copy_from_slice(&(value as f32).to_bits().to_be_bytes());
+    out
+}
+
+/// An operation carrying a 32-bit count: `if`, `else`, `case`, `dflt`.
+fn calc_counted(signature: &[u8; 4], count: usize) -> Operation {
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(signature);
+    out[4..].copy_from_slice(&(count as u32).to_be_bytes());
+    out
+}
+
+/// A calculator element of three inputs and three outputs whose main
+/// function is `ops`, with no sub-elements.
+fn calc_element(ops: &[Operation]) -> Vec<u8> {
+    let mut out = b"calc".to_vec();
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&3u16.to_be_bytes());
+    out.extend_from_slice(&3u16.to_be_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&24u32.to_be_bytes());
+    out.extend_from_slice(&((12 + 8 * ops.len()) as u32).to_be_bytes());
+    out.extend_from_slice(b"func");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(ops.len() as u32).to_be_bytes());
+    for op in ops {
+        out.extend_from_slice(op);
+    }
+    out
+}
+
+/// One program and the values it gives, recomputed here.
+struct Program {
+    what: &'static str,
+    ops: Vec<Operation>,
+    want: fn([f64; 3]) -> [f64; 3],
+}
+
+/// `in` of channel `s` alone.
+fn input(s: u16) -> Operation {
+    calc_op(b"in  ", s, 0)
+}
+
+/// `out` of channel `s` alone.
+fn output(s: u16) -> Operation {
+    calc_op(b"out ", s, 0)
+}
+
+/// A one-value vector function.
+fn unary(signature: &[u8; 4]) -> Operation {
+    calc_op(signature, 0, 0)
+}
+
+/// The programs [`the_calculator_computes_what_its_program_says`] runs, one
+/// an operation family each.
+fn programs() -> Vec<Program> {
+    vec![
+        Program {
+            what: "arithmetic",
+            ops: vec![
+                input(0),
+                input(1),
+                input(2),
+                unary(b"mul "),
+                unary(b"add "),
+                output(0),
+                input(0),
+                input(1),
+                unary(b"sub "),
+                input(2),
+                calc_push(1.0),
+                unary(b"add "),
+                unary(b"div "),
+                output(1),
+                input(0),
+                calc_push(0.5),
+                unary(b"add "),
+                calc_push(2.5),
+                unary(b"pow "),
+                calc_push(0.7),
+                unary(b"mod "),
+                output(2),
+            ],
+            want: |[x, y, z]| {
+                let base = (x + 0.5).powf(2.5);
+                let seven = f64::from(0.7f32);
+                [
+                    x + y * z,
+                    (x - y) / (z + 1.0),
+                    base - (base / seven).trunc() * seven,
+                ]
+            },
+        },
+        Program {
+            what: "transcendentals",
+            ops: vec![
+                input(0),
+                unary(b"sin "),
+                input(1),
+                unary(b"cos "),
+                unary(b"add "),
+                output(0),
+                input(2),
+                unary(b"sqrt"),
+                input(0),
+                unary(b"neg "),
+                unary(b"exp "),
+                unary(b"mul "),
+                output(1),
+                input(1),
+                calc_push(1.0),
+                unary(b"add "),
+                unary(b"ln  "),
+                input(2),
+                calc_push(1.0),
+                unary(b"add "),
+                unary(b"log "),
+                unary(b"add "),
+                input(0),
+                unary(b"atan"),
+                unary(b"add "),
+                output(2),
+            ],
+            want: |[x, y, z]| {
+                [
+                    x.sin() + y.cos(),
+                    z.sqrt() * (-x).exp(),
+                    (y + 1.0).ln() + (z + 1.0).log10() + x.atan(),
+                ]
+            },
+        },
+        Program {
+            what: "comparisons and logic",
+            ops: vec![
+                input(0),
+                input(1),
+                unary(b"lt  "),
+                input(1),
+                input(2),
+                unary(b"ge  "),
+                calc_push(0.5),
+                unary(b"mul "),
+                unary(b"add "),
+                output(0),
+                calc_op(b"in  ", 0, 2),
+                calc_op(b"max ", 1, 0),
+                calc_op(b"in  ", 0, 2),
+                calc_op(b"min ", 1, 0),
+                unary(b"sub "),
+                output(1),
+                input(0),
+                input(1),
+                calc_op(b"and ", 0, 0),
+                input(1),
+                input(2),
+                calc_op(b"or  ", 0, 0),
+                unary(b"add "),
+                input(2),
+                unary(b"not "),
+                unary(b"add "),
+                output(2),
+            ],
+            want: |[x, y, z]| {
+                let truth = |b: bool| f64::from(u8::from(b));
+                [
+                    truth(x < y) + 0.5 * truth(y >= z),
+                    x.max(y).max(z) - x.min(y).min(z),
+                    truth(x >= 0.5 && y >= 0.5) + truth(y >= 0.5 || z >= 0.5) + truth(z < 0.5),
+                ]
+            },
+        },
+        Program {
+            what: "selection",
+            ops: [
+                vec![input(0), calc_counted(b"if  ", 1), calc_counted(b"else", 1)],
+                vec![input(1), input(2), output(0)],
+                vec![
+                    input(2),
+                    calc_push(3.0),
+                    unary(b"mul "),
+                    calc_op(b"sel ", 0, 0),
+                    calc_counted(b"case", 1),
+                    calc_counted(b"case", 1),
+                    calc_counted(b"case", 1),
+                    calc_counted(b"dflt", 1),
+                    calc_push(0.125),
+                    calc_push(0.25),
+                    calc_push(0.375),
+                    calc_push(0.5),
+                    output(1),
+                ],
+                vec![
+                    input(0),
+                    calc_push(0.5),
+                    unary(b"sub "),
+                    unary(b"sign"),
+                    input(1),
+                    calc_push(4.0),
+                    unary(b"mul "),
+                    unary(b"rond"),
+                    calc_push(4.0),
+                    unary(b"div "),
+                    unary(b"add "),
+                    input(2),
+                    calc_push(2.0),
+                    unary(b"mul "),
+                    unary(b"flor"),
+                    unary(b"add "),
+                    input(0),
+                    unary(b"ceil"),
+                    unary(b"sub "),
+                    input(1),
+                    calc_push(3.0),
+                    unary(b"mul "),
+                    unary(b"trnc"),
+                    unary(b"add "),
+                    output(2),
+                ],
+            ]
+            .concat(),
+            want: |[x, y, z]| {
+                let sign = |v: f64| {
+                    if v < 0.0 {
+                        -1.0
+                    } else if v > 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                };
+                let round = |v: f64| {
+                    if v < 0.0 {
+                        (v - 0.5).trunc()
+                    } else {
+                        (v + 0.5).trunc()
+                    }
+                };
+                let selector = round(z * 3.0);
+                [
+                    if x >= 0.5 { y } else { z },
+                    match selector as i64 {
+                        0 => 0.125,
+                        1 => 0.25,
+                        2 => 0.375,
+                        _ => 0.5,
+                    },
+                    sign(x - 0.5) + round(y * 4.0) / 4.0 + (z * 2.0).floor() - x.ceil()
+                        + (y * 3.0).trunc(),
+                ]
+            },
+        },
+        Program {
+            what: "the stack and temporary channels",
+            ops: vec![
+                calc_op(b"in  ", 0, 2),
+                calc_op(b"rotl", 2, 0),
+                calc_op(b"tput", 0, 2),
+                calc_op(b"tget", 1, 0),
+                calc_op(b"tget", 0, 0),
+                unary(b"sub "),
+                output(0),
+                calc_op(b"tget", 2, 0),
+                calc_op(b"copy", 0, 0),
+                unary(b"mul "),
+                output(1),
+                calc_op(b"tget", 0, 2),
+                calc_op(b"flip", 1, 0),
+                calc_op(b"posd", 2, 0),
+                calc_op(b"pop ", 0, 0),
+                calc_op(b"rotr", 2, 0),
+                calc_op(b"sum ", 1, 0),
+                output(2),
+            ],
+            want: |[x, y, z]| [z - y, x * x, x + y + z],
+        },
+        Program {
+            what: "XYZ to Lab",
+            ops: vec![
+                calc_op(b"in  ", 0, 2),
+                calc_op(b"tLab", 0, 0),
+                calc_op(b"tput", 0, 2),
+                calc_op(b"tget", 0, 0),
+                calc_push(100.0),
+                unary(b"div "),
+                output(0),
+                calc_op(b"tget", 1, 0),
+                calc_push(128.0),
+                unary(b"add "),
+                calc_push(255.0),
+                unary(b"div "),
+                output(1),
+                calc_op(b"tget", 2, 0),
+                calc_push(128.0),
+                unary(b"add "),
+                calc_push(255.0),
+                unary(b"div "),
+                output(2),
+            ],
+            want: |[x, y, z]| {
+                let f = |t: f64| {
+                    if t > (6.0f64 / 29.0).powi(3) {
+                        t.cbrt()
+                    } else {
+                        841.0 / 108.0 * t + 4.0 / 29.0
+                    }
+                };
+                let (fx, fy, fz) = (f(x), f(y), f(z));
+                [
+                    (116.0 * fy - 16.0) / 100.0,
+                    (500.0 * (fx - fy) + 128.0) / 255.0,
+                    (200.0 * (fy - fz) + 128.0) / 255.0,
+                ]
+            },
+        },
+    ]
+}
+
+/// **The calculator computes what its program says** (ICC.2 11.2.1). A
+/// version 5 profile's `A2B1` is a multi-process tag of one calculator
+/// element, and for each program — arithmetic, transcendentals, comparisons
+/// with the sequence functions and logic, conditional and selected streams
+/// with rounding, the stack operations and temporary channels, and XYZ to
+/// Lab — the connection-space value at each node of the grid it is run over
+/// is the program's answer recomputed here from Table 102's definitions,
+/// within the fixed point the stage holds it in.
+#[test]
+fn the_calculator_computes_what_its_program_says() {
+    let levels = [0usize, 5, 13, 16, 23, 32];
+    for program in programs() {
+        let tag = {
+            let element = calc_element(&program.ops);
+            let mut out = b"mpet".to_vec();
+            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&3u16.to_be_bytes());
+            out.extend_from_slice(&3u16.to_be_bytes());
+            out.extend_from_slice(&1u32.to_be_bytes());
+            out.extend_from_slice(&24u32.to_be_bytes());
+            out.extend_from_slice(&(element.len() as u32).to_be_bytes());
+            out.extend(element);
+            out
+        };
+        let bytes = v5_profile(b"RGB ", b"XYZ ", [0; 4], [0; 3], &[(*b"A2B1", tag)]);
+        let parsed =
+            Profile::parse(&bytes).unwrap_or_else(|error| panic!("{}: {error:?}", program.what));
+        for &i in &levels {
+            for &j in &levels {
+                for &k in &levels {
+                    let x = [i, j, k].map(|n| n as f64 / 32.0);
+                    let got = parsed
+                        .connection_value(Intent::RelativeColorimetric, &x)
+                        .expect("a value");
+                    let want = (program.want)(x);
+                    for channel in 0..3 {
+                        assert!(
+                            (got[channel] - want[channel]).abs() < 2e-5,
+                            "{}, {x:?}, output {channel}: {} against {}",
+                            program.what,
+                            got[channel],
+                            want[channel]
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

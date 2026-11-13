@@ -30,6 +30,9 @@
 //! `multiProcessElementsType`, curve sets, matrices and grids chained, read
 //! by the `mpe` module and compiled into integer stages — and converts its
 //! intent before that intent's `A2B*` table, as ICC.1 8.10.2 a) puts it.
+//! ICC.2's calculator element (the `calc` module) is one of its elements: a
+//! program validated and bounded before it runs, and run over a grid of its
+//! inputs when its table is built.
 //!
 //! The other direction, from the connection space to a profile's device
 //! components, is [`Output`]: through a `B2A*` table — `mft1`, `mft2` or
@@ -79,10 +82,15 @@ use std::sync::{Arc, OnceLock};
 
 use crate::{ColorSpace, XYZ_D50_TO_SRGB};
 
+mod calc;
 mod mpe;
 mod named;
 mod output;
 
+pub use calc::{
+    CalculatorLimit, MAX_CALC_DEPTH, MAX_CALC_OPERATIONS, MAX_CALC_STACK, MAX_CALC_TEMPORARIES,
+    MAX_CALC_WORK,
+};
 pub use mpe::MAX_MPE_ELEMENTS;
 pub use named::{NamedColour, NamedColours, MAX_NAMED_COLOURS};
 pub use output::{lab_to_xyz, xyz_to_lab, DeviceColour, Link, Output, MAX_DEVICE_CHANNELS};
@@ -236,6 +244,15 @@ pub enum IccError {
     /// determinant is below one s15.16 step, or a tone curve that decreases
     /// anywhere or never rises.
     NoInverse,
+    /// A calculator element's program (ICC.2 11.2.1) past one of the caps
+    /// every count it can spend is held to, named: its operations and the
+    /// steps a run takes ([`MAX_CALC_OPERATIONS`]), its stack
+    /// ([`MAX_CALC_STACK`]), its nesting ([`MAX_CALC_DEPTH`]) or its
+    /// temporary channels ([`MAX_CALC_TEMPORARIES`]), or a stricter
+    /// `calculatorLimits` the element states; or a tag whose calculators'
+    /// runs would take more steps than [`MAX_CALC_WORK`]. Found before the
+    /// program runs.
+    CalculatorLimit(CalculatorLimit),
 }
 
 /// The most tags a profile may declare.
@@ -4316,7 +4333,13 @@ pub(crate) mod tests {
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 18] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 19] = [
+            // A version 5 profile whose `A2B0` is a calculator element —
+            // channels in and out, a matrix sub-element, temporary channels,
+            // a conditional and a selection — and whose `B2A0` takes the
+            // connection space through sampled calculator curves: the seed
+            // that reaches the calculator and its validation.
+            ("calc-v5", calc_seed(), Reaches::Output),
             // A matrix/TRC profile with a `D2B0` of gamma curves and a
             // matrix, and a `B2D0` of single sampled curves, a matrix and an
             // extended grid of 16-bit values: the seed that reaches the
@@ -4791,6 +4814,147 @@ pub(crate) mod tests {
                         vec![1.2, -0.2, 0.0],
                         vec![-0.1, 1.1, 0.0],
                         vec![0.0, -0.1, 1.1],
+                    ],
+                    &[0.0, 0.0, 0.0],
+                ),
+            ],
+        );
+        let mut out = build(b"RGB ", b"XYZ ", &[(*b"A2B0", forward), (*b"B2A0", back)]);
+        out[8..12].copy_from_slice(&0x0500_0000u32.to_be_bytes());
+        out
+    }
+
+    /// A calculator operation (ICC.2 11.2.1) of a 16-bit `s` and `t`.
+    fn calc_op(signature: &[u8; 4], s: u16, t: u16) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        out[..4].copy_from_slice(signature);
+        out[4..6].copy_from_slice(&s.to_be_bytes());
+        out[6..].copy_from_slice(&t.to_be_bytes());
+        out
+    }
+
+    /// A calculator operation carrying a 32-bit count, or a float32's bits.
+    fn calc_word(signature: &[u8; 4], word: u32) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        out[..4].copy_from_slice(signature);
+        out[4..].copy_from_slice(&word.to_be_bytes());
+        out
+    }
+
+    /// `data`: `value` pushed, as a float32.
+    fn calc_data(value: f64) -> [u8; 8] {
+        calc_word(b"data", (value as f32).to_bits())
+    }
+
+    /// A calculator element of `inputs` and `outputs` channels whose main
+    /// function is `ops`, after its header and sub-element positions, and
+    /// whose sub-elements `subs` follow it, each on a four-byte boundary.
+    fn calc_of(inputs: u16, outputs: u16, ops: &[[u8; 8]], subs: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = b"calc".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&inputs.to_be_bytes());
+        out.extend_from_slice(&outputs.to_be_bytes());
+        out.extend_from_slice(&[0; 2]);
+        out.extend_from_slice(&(subs.len() as u16).to_be_bytes());
+        let header = 24 + 8 * subs.len();
+        let function = 12 + 8 * ops.len();
+        out.extend_from_slice(&(header as u32).to_be_bytes());
+        out.extend_from_slice(&(function as u32).to_be_bytes());
+        let start = header + function;
+        let mut body = Vec::new();
+        for sub in subs {
+            while (start + body.len()) % 4 != 0 {
+                body.push(0);
+            }
+            out.extend_from_slice(&((start + body.len()) as u32).to_be_bytes());
+            out.extend_from_slice(&(sub.len() as u32).to_be_bytes());
+            body.extend_from_slice(sub);
+        }
+        out.extend_from_slice(b"func");
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(ops.len() as u32).to_be_bytes());
+        for op in ops {
+            out.extend_from_slice(op);
+        }
+        out.extend(body);
+        out
+    }
+
+    /// A sampled calculator curve (`clcf`, ICC.2 11.2.2.3) of `entries`
+    /// recommended samples from `first` to `last`, clipped past them, its
+    /// curve `calculator`'s.
+    fn clcf(entries: u32, first: f64, last: f64, calculator: &[u8]) -> Vec<u8> {
+        let mut out = b"clcf".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&entries.to_be_bytes());
+        out.extend_from_slice(&float(first));
+        out.extend_from_slice(&float(last));
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(calculator);
+        out
+    }
+
+    /// The `calc-v5` seed: a version 5 display profile whose `A2B0` is one
+    /// calculator element — its inputs through a matrix sub-element into
+    /// three temporary channels, then the second where the first is at
+    /// least a half and the third otherwise, the second times three
+    /// selecting one of three constants, and the third's square root — and
+    /// whose `B2A0` squares each component through sampled calculator
+    /// curves of sixteen samples over XYZ's range, then mixes them.
+    fn calc_seed() -> Vec<u8> {
+        let mixing = matf(
+            &[
+                vec![0.6, 0.3, 0.1],
+                vec![0.2, 0.7, 0.1],
+                vec![0.1, 0.1, 0.8],
+            ],
+            &[0.0, 0.0, 0.0],
+        );
+        let program = [
+            calc_op(b"in  ", 0, 2),
+            calc_op(b"mtx ", 0, 0),
+            calc_op(b"tput", 0, 2),
+            calc_op(b"tget", 0, 0),
+            calc_word(b"if  ", 1),
+            calc_word(b"else", 1),
+            calc_op(b"tget", 1, 0),
+            calc_op(b"tget", 2, 0),
+            calc_op(b"tget", 1, 0),
+            calc_data(3.0),
+            calc_op(b"mul ", 0, 0),
+            calc_word(b"sel ", 0),
+            calc_word(b"case", 1),
+            calc_word(b"case", 1),
+            calc_word(b"dflt", 1),
+            calc_data(0.1),
+            calc_data(0.2),
+            calc_data(0.3),
+            calc_op(b"tget", 2, 0),
+            calc_op(b"sqrt", 0, 0),
+            calc_op(b"out ", 0, 2),
+        ];
+        let forward = mpet(3, 3, &[calc_of(3, 3, &program, &[mixing])]);
+        let square = calc_of(
+            1,
+            1,
+            &[
+                calc_op(b"in  ", 0, 0),
+                calc_op(b"sq  ", 0, 0),
+                calc_op(b"out ", 0, 0),
+            ],
+            &[],
+        );
+        let curve = clcf(16, 0.0, 2.0, &square);
+        let back = mpet(
+            3,
+            3,
+            &[
+                cvst(&[curve.clone(), curve.clone(), curve]),
+                matf(
+                    &[
+                        vec![1.0, 0.0, 0.0],
+                        vec![0.0, 1.0, 0.0],
+                        vec![0.0, 0.0, 1.0],
                     ],
                     &[0.0, 0.0, 0.0],
                 ),
@@ -7343,18 +7507,20 @@ pub(crate) mod tests {
         }
     }
 
-    /// An element of a type this build does not read.
+    /// An element of a type this build does not read: ICC.2's `JtoX`, a
+    /// colour appearance element (11.2.9), outside what this engine reads.
     fn unread_element() -> Vec<u8> {
-        element_of(b"calc", 3, 3, &[0; 16])
+        element_of(b"JtoX", 3, 3, &[0; 16])
     }
 
     /// **An unread element is refused by name**, and its intent falls to its
-    /// `A2B*` tag. A `D2B*` tag holding a `calc` element — a calculator,
-    /// ICC.2's — is refused as `UnsupportedElement(calc)` wherever the element
-    /// stands, whatever is wrong elsewhere in the tag; a profile carrying it
-    /// beside an `A2B1` converts every intent through the table, and one
-    /// carrying nothing else is refused for it, by name. The `bACS` and
-    /// `eACS` placeholders read, and pass their channels through unchanged.
+    /// `A2B*` tag. A `D2B*` tag holding a `JtoX` element — ICC.2's colour
+    /// appearance element — is refused as `UnsupportedElement(JtoX)` wherever
+    /// the element stands, whatever is wrong elsewhere in the tag; a profile
+    /// carrying it beside an `A2B1` converts every intent through the table,
+    /// and one carrying nothing else is refused for it, by name. The `bACS`
+    /// and `eACS` placeholders read, and pass their channels through
+    /// unchanged.
     #[test]
     fn an_unread_element_is_refused_by_name() {
         let chain = Chain { t: 0.0 };
@@ -7381,7 +7547,7 @@ pub(crate) mod tests {
         ] {
             assert_eq!(
                 mpe::read(&mpet(3, 3, &elements), false),
-                Err(IccError::UnsupportedElement(*b"calc")),
+                Err(IccError::UnsupportedElement(*b"JtoX")),
                 "{} elements",
                 elements.len()
             );
@@ -7411,7 +7577,7 @@ pub(crate) mod tests {
         // Alone: refused, by the element's name.
         assert_eq!(
             Profile::parse(&build(b"RGB ", b"XYZ ", &[(*b"D2B1", broken)])),
-            Err(IccError::UnsupportedElement(*b"calc"))
+            Err(IccError::UnsupportedElement(*b"JtoX"))
         );
 
         // A tag at a `D2B*` tag that is not a multi-process one.

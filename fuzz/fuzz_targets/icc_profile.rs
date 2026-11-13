@@ -10,7 +10,12 @@
 //! tables: a curve with an absurd count, a matrix of infinities, a gamma that
 //! makes `pow` return something that is not a number, a multi-process
 //! element's sample count, grid encoding or half float. A version 5 header
-//! is read, and its `A2B*` and `B2A*` tags may hold elements. Applying a lookup-table
+//! is read, and its `A2B*` and `B2A*` tags may hold elements, the calculator
+//! among them: a program whose every count — its operations and the steps a
+//! run takes, its stack, its nesting, its temporary channels, and the steps
+//! a tag's runs take in all — is checked before it runs, and which runs at
+//! each node of its stage's grid when the pipeline is built (`calc-v5.icc`
+//! is the seed that reaches it). Applying a lookup-table
 //! transform over one, three or four inputs reads it through its grid, which
 //! evaluates the table's pipeline at each node the colours reach
 //! (`docs/design/icc.md`, P-22), so a hostile table builds its grid here too.

@@ -47,8 +47,24 @@ integer stages, and converts its intent before that intent's `A2B*` table;
 a tag holding an element of another type is refused by the element's name
 and passed over. ICC.2's elements read beside ICC.1's: formula segments of
 function types 3 to 7 (Table 111), single sampled curves clipped or extended
-past their ends, and extended grids of half floats or 8- or 16-bit
-fractions. **A version 5 profile** (ICC.2) reads its header's fields past
+past their ends, extended grids of half floats or 8- or 16-bit fractions,
+and the **calculator element** (11.2.1), a program in reverse Polish
+notation over input, output and temporary channels, with conditional and
+selected streams and sub-elements it invokes — validated whole before it
+runs, every operation known, every channel index in range and the stack
+never taken below what is on it, and run at every node of a grid over its
+inputs' intervals when the table is built, never per colour; a sampled
+calculator curve runs its calculator into a sampled curve when it is read.
+Every count a program can spend is capped — the operations it holds, and the
+steps one run takes, a step a value an operation moves, 65 536; its stack,
+1 024; sub-elements and conditionals within one another, 16; temporary
+channels, 1 024; the steps all of a tag's calculator runs take while it is
+read, 67 108 864 — and a program past a cap is refused as
+`IccError::CalculatorLimit`, naming it, before it runs. A calculator's
+sub-elements, and a curve set's curves, are each read once however many
+positions name them, and the tables they hold count against the tag's grid
+entries. A segmented curve finds its segment by halving its break-points.
+**A version 5 profile** (ICC.2) reads its header's fields past
 byte 100 — the spectral connection space, its wavelength ranges, the
 multiplex space and the sub-class (`Profile::version5`) — and its `A2B*` and
 `B2A*` tags may hold such elements, read as a `D2B*` tag's are; it adds

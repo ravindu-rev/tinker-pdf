@@ -599,7 +599,10 @@ use tinker_pdf::xps::{
     MAX_XPS_SEGMENTS,
 };
 use tinker_pdf::{MAX_ANNOTATION_BYTES, MAX_ASSOCIATED_FILE_BYTES, MAX_OUTPUT_INTENT_BYTES};
-use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS, MAX_MPE_ELEMENTS, MAX_NAMED_COLOURS};
+use tinker_pdf_color::icc::{
+    MAX_CALC_DEPTH, MAX_CALC_OPERATIONS, MAX_CALC_STACK, MAX_CALC_TEMPORARIES, MAX_CALC_WORK,
+    MAX_CLUT_ENTRIES, MAX_ICC_BYTES, MAX_ICC_TAGS, MAX_MPE_ELEMENTS, MAX_NAMED_COLOURS,
+};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
     MAX_BMP_SAMPLES, MAX_GIF_SAMPLES, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
@@ -646,6 +649,9 @@ const ICC_NAMED: &str = include_str!("../../tinker-pdf-color/src/icc/named.rs");
 /// The ICC engine's multi-process elements, which keep their cap and its
 /// firing test in the module that reads them.
 const ICC_MPE: &str = include_str!("../../tinker-pdf-color/src/icc/mpe.rs");
+/// The ICC engine's calculator element, which keeps its five caps and their
+/// firing tests in the module that reads it.
+const ICC_CALC: &str = include_str!("../../tinker-pdf-color/src/icc/calc.rs");
 const JBIG2: &str = include_str!("../../tinker-pdf-filters/src/jbig2.rs");
 /// Tier 0's memory row: the two runtime bounds, and the two sources that prove
 /// them. `RENDER` is the first `declared_in` here that is a whole crate root
@@ -1882,7 +1888,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_TAGS",
             cap: MAX_ICC_TAGS as u128,
             published: "1 024",
-            // `srgb-first-party.icc`, the busiest of the eighteen `.icc` seeds
+            // `srgb-first-party.icc`, the busiest of the nineteen `.icc` seeds
             // `fuzz/corpus/icc_profile/` commits, which the `icc_profile`
             // target hands straight to `Profile::parse`. No `.pdf` or `.xps`
             // fixture in this repository embeds a profile at all — measured,
@@ -1920,7 +1926,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_BYTES",
             cap: MAX_ICC_BYTES as u128,
             published: "2 MiB",
-            // `srgb-first-party.icc`, the largest of the eighteen committed
+            // `srgb-first-party.icc`, the largest of the nineteen committed
             // seeds: the engine's own sRGB profile, which `tinker-pdf-color`'s
             // `build.rs` computes.
             fixtures: 2_624,
@@ -2865,6 +2871,110 @@ fn ledger() -> Vec<Bound> {
                 ICC_MPE,
             ),
         },
+        Bound {
+            name: "MAX_CALC_OPERATIONS",
+            cap: MAX_CALC_OPERATIONS as u128,
+            published: "65 536",
+            // The firing test reads and runs a program of exactly the cap.
+            fixtures: MAX_CALC_OPERATIONS as u128,
+            // No comic page or book picture carries a profile this parser
+            // opens (`MAX_ICC_TAGS`'s row says why).
+            comic: 0,
+            // ICC.2 Annex F's projector model (F.3), the longest of its
+            // examples, rounded up.
+            document: 64,
+            book: 0,
+            // The count is a 32-bit field read before the operations.
+            reachable: 1 << 32,
+            reachable_because: "a 32-bit operation count, checked before the operations it \
+                                describes",
+            declared_in: ICC_CALC,
+            fires_in: (
+                "a_calculator_past_the_operation_cap_is_refused_before_it_runs",
+                ICC_CALC,
+            ),
+        },
+        Bound {
+            name: "MAX_CALC_STACK",
+            cap: MAX_CALC_STACK as u128,
+            published: "1 024",
+            // The firing test reads and runs a program pushing the cap.
+            fixtures: MAX_CALC_STACK as u128,
+            comic: 0,
+            // Annex F's projector model holds nine values at its deepest.
+            document: 16,
+            book: 0,
+            // One `copy` duplicates 65 536 values 65 536 times.
+            reachable: 1 << 32,
+            reachable_because: "a `copy` of 65 536 values repeated 65 536 times",
+            declared_in: ICC_CALC,
+            fires_in: (
+                "a_calculator_past_the_stack_cap_is_refused_before_it_runs",
+                ICC_CALC,
+            ),
+        },
+        Bound {
+            name: "MAX_CALC_DEPTH",
+            cap: MAX_CALC_DEPTH as u128,
+            published: "16",
+            // The firing test reads and runs conditionals nested to the cap.
+            fixtures: MAX_CALC_DEPTH as u128,
+            comic: 0,
+            // Annex F's projector model nests three conditionals.
+            document: 4,
+            book: 0,
+            // A level costs an operation slot, and a function may hold the
+            // operation cap's.
+            reachable: MAX_CALC_OPERATIONS as u128,
+            reachable_because: "an `if` in each of MAX_CALC_OPERATIONS slots, each holding the \
+                                next",
+            declared_in: ICC_CALC,
+            fires_in: (
+                "a_calculator_nested_past_the_depth_cap_is_refused_before_it_runs",
+                ICC_CALC,
+            ),
+        },
+        Bound {
+            name: "MAX_CALC_TEMPORARIES",
+            cap: MAX_CALC_TEMPORARIES as u128,
+            published: "1 024",
+            // The firing test reads and runs a program reaching the last
+            // channel under the cap.
+            fixtures: MAX_CALC_TEMPORARIES as u128,
+            comic: 0,
+            // Annex F's projector model keeps six.
+            document: 8,
+            book: 0,
+            // A 16-bit start and a 16-bit count reach channel 131 070.
+            reachable: 1 << 17,
+            reachable_because: "a channel operation's 16-bit start and 16-bit count",
+            declared_in: ICC_CALC,
+            fires_in: (
+                "a_calculator_past_the_temporary_cap_is_refused_before_it_runs",
+                ICC_CALC,
+            ),
+        },
+        Bound {
+            name: "MAX_CALC_WORK",
+            cap: MAX_CALC_WORK as u128,
+            published: "67 108 864",
+            // The firing test samples a calculator curve of exactly the cap.
+            fixtures: MAX_CALC_WORK as u128,
+            comic: 0,
+            // Annex F's projector model, 170 steps a run, at each of a
+            // three-input stage's 35 937 nodes, rounded up.
+            document: 8_388_608,
+            book: 0,
+            // Every entry a tag's tables may hold, each a run of the steps
+            // one run may take.
+            reachable: MAX_CLUT_ENTRIES as u128 * MAX_CALC_OPERATIONS as u128,
+            reachable_because: "MAX_CLUT_ENTRIES runs of MAX_CALC_OPERATIONS steps each",
+            declared_in: ICC_CALC,
+            fires_in: (
+                "a_tag_past_the_calculator_work_cap_is_refused_before_it_runs",
+                ICC_CALC,
+            ),
+        },
     ]
 }
 
@@ -2918,8 +3028,10 @@ fn segment_size() -> u128 {
 /// `MAX_IMPORTED_WORDS`; and the formats-in tier's Netpbm decoder adds
 /// `MAX_NETPBM_SAMPLES`; and the hyphenation row adds
 /// `MAX_HYPHENATED_WORD`; and the ICC engine's named colours add
-/// `MAX_NAMED_COLOURS`, and its multi-process elements `MAX_MPE_ELEMENTS`.
-/// All **seventy-one** are here, and a bound added
+/// `MAX_NAMED_COLOURS`, its multi-process elements `MAX_MPE_ELEMENTS`, and
+/// its calculator `MAX_CALC_OPERATIONS`, `MAX_CALC_STACK`, `MAX_CALC_DEPTH`,
+/// `MAX_CALC_TEMPORARIES` and `MAX_CALC_WORK`. All **seventy-six** are
+/// here, and a bound added
 /// without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2998,6 +3110,11 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_HYPHENATED_WORD",
             "MAX_NAMED_COLOURS",
             "MAX_MPE_ELEMENTS",
+            "MAX_CALC_OPERATIONS",
+            "MAX_CALC_STACK",
+            "MAX_CALC_DEPTH",
+            "MAX_CALC_TEMPORARIES",
+            "MAX_CALC_WORK",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -3103,7 +3220,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 71, "the ledger is seventy-one rows");
+    assert_eq!(measured, 76, "the ledger is seventy-six rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -3135,7 +3252,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 71, "the ledger is seventy-one rows");
+    assert_eq!(ledger().len(), 76, "the ledger is seventy-six rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -3448,6 +3565,7 @@ fn every_bound_names_a_test_that_exists() {
         TABLES_TESTS,
         ICC_NAMED,
         ICC_MPE,
+        ICC_CALC,
     ] {
         assert!(
             !source.contains("Instant::now"),
