@@ -31,6 +31,7 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-shape/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-shape/data/text-rendering-tests` | [unicode-org/text-rendering-tests](https://github.com/unicode-org/text-rendering-tests) at `26cfb96` (2026-08-24) | `Unicode-3.0` |
 | `crates/tinker-pdf-shape/data/devanagari` | [notofonts/devanagari](https://github.com/notofonts/devanagari), release `NotoSansDevanagari-v2.007` (2026-09-08), its unhinted TrueType Regular as [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) publishes it | `OFL-1.1` |
+| `crates/tinker-pdf-shape/data/graphite` | Three faces carrying Graphite tables, each the Regular of its release archive: [silnrsi/font-daibannasil](https://github.com/silnrsi/font-daibannasil) release `v4.000` (2022-08-23), [silnrsi/font-tagmukay](https://github.com/silnrsi/font-tagmukay) release `v2.000` (2017-07-21) and [silnrsi/font-awami](https://github.com/silnrsi/font-awami) release `v3.500` (2026-11-05) | `OFL-1.1` |
 | `crates/tinker-pdf-xml/data/xhtml-entities` | XHTML 1.0's three entity sets as XHTML Modularization 1.1 (2010-07-29) publishes them, from [w3c/markup-validator](https://github.com/w3c/markup-validator) `htdocs/sgml-lib/REC-xhtml-modularization-20100729/` at `724a15b` (fetched 2026-09-26) | `W3C` |
 | `crates/tinker-pdf-content/data/ucd` | The Unicode Character Database, version 17.0.0, via [unicode-org/unicodetools](https://github.com/unicode-org/unicodetools) `unicodetools/data/ucd/17.0.0` at `0509b4b` (fetched 2026-09-26) | `Unicode-3.0` |
 | `crates/tinker-pdf-archive/data/zstd-golden` | [facebook/zstd](https://github.com/facebook/zstd) `tests/golden-decompression/` and `tests/golden-decompression-errors/`, branch `dev` as served on 2026-09-26 (no commit could be resolved; pinned by SHA-256 below) | `BSD-3-Clause` |
@@ -614,6 +615,54 @@ clause 2 requires its copyright notice and licence to travel with it, which
 they do — the notice in the face's own `name` table and at the head of
 `LICENSE`, the licence in `LICENSE` in full. The licence names no reserved
 font name. `deny.toml` already allows `OFL-1.1`.
+
+### `crates/tinker-pdf-shape/data/graphite`
+
+Three faces whose layout is a Graphite description, the fixture faces
+[docs/design/shaping.md](docs/design/shaping.md)'s *Graphite shaping* names:
+the readers of `Glat`, `Gloc`, `Feat`, `Sill` and `Silf` are held to bytes
+their authors' compiler wrote, H-64's person writes expectations against
+them, and the fingerprint and the speed row shape through them. Nothing else
+the tree commits carries a Graphite table.
+
+| File | What it is |
+| --- | --- |
+| `DaiBannaSIL-Regular.ttf` | Dai Banna SIL 4.000, New Tai Lue and Latin: `Silf` 4.0, `Glat` 1, `Gloc`, `Feat` 1 and `Sill`, and no `GSUB`, `GPOS` or `GDEF`; 68 172 bytes |
+| `LICENSE-DaiBannaSIL` | Its release's `OFL.txt`, verbatim |
+| `Tagmukay-Regular.ttf` | Tagmukay 2.000, Tifinagh and Latin: `Silf` 2.0, `Glat` 1, `Gloc`, `Feat` 2 and `Sill` beside `GDEF` and `GSUB`; 124 240 bytes |
+| `LICENSE-Tagmukay` | Its release's `OFL.txt`, verbatim |
+| `AwamiNastaliq-Regular.ttf` | Awami Nastaliq 3.500, Arabic in Nastaliq: `Silf` 5.1 and `Glat` 3, both compressed, `Gloc`, `Feat` 2 and `Sill` beside a `GPOS` of one lookup; 644 356 bytes |
+| `LICENSE-AwamiNastaliq` | Its release's `OFL.txt`, verbatim |
+
+Each face is the release's own file, taken from the archive its GitHub
+release publishes (`DaiBannaSIL-4.000.zip`, `Tagmukay-2.000.zip`,
+`AwamiNastaliq-3.500.zip`), whole and unmodified; its `name` table reads the
+release's version (`Version 4.000`, `Version 2.000`, `Version 3.500`).
+Fetched on 2026-11-13. The SHA-256 of each file:
+
+```text
+7756d1c25925ba89130aef675d2d11f419602564c1091e9520fef1ac9ed8f193  DaiBannaSIL-Regular.ttf
+58e2ecc7d7147a7c8268553c1bed2354331c2003829396fa6f9506852144e46e  LICENSE-DaiBannaSIL
+c0beeaac194bfd731e21671a63641dd38eae1332a36d37940faab87990ca9646  Tagmukay-Regular.ttf
+33bec58a40ec554cbbf581e1d951dda30a9e2b65c7a1e6501fb98c0bad5235e2  LICENSE-Tagmukay
+0c12b56a6209b439d8bc97150422f0212808edd4c69cc5f825a4f401b0160b91  AwamiNastaliq-Regular.ttf
+9f75a86a3d90a38dd1c7ad36c19dd9aa4774837c03d2c3dbc807676f250fa86f  LICENSE-AwamiNastaliq
+```
+
+**Nothing here is compiled into the library.** No build script reads the
+directory; the tests take the faces by `include_bytes!`. It is published with
+the crate because every tree under a crate's `data/` is (`xtask`'s
+`a_crate_that_vendors_data_publishes_it`), which redistributes the bytes as
+the Liberation and Devanagari faces' are: the OFL lets a font travel with any
+software as long as it is not sold by itself, and clause 2 requires its
+copyright notice and licence to travel with it, which they do — the notice in
+each face's own `name` table and at the head of its `LICENSE-` file, the
+licence in that file in full. Each licence reserves names — "SIL" for all
+three, "Tagmukay" and "Awami" for their own — and clause 3 binds only a
+Modified Version, which is why each face is vendored whole: a face with a
+table cut out would be one, and could not keep its name. A test that wants a
+face's Graphite tables without its OpenType ones builds that view in memory
+and never writes it. `deny.toml` already allows `OFL-1.1`.
 
 ### `crates/tinker-pdf-xml/data/xhtml-entities`
 

@@ -534,3 +534,147 @@ fn a_column_over_a_graphite_only_face_is_named_too() {
         .warnings()
         .contains(&Warning::VerticalMetricsSynthesized));
 }
+
+// --- the vendored faces (FT-07d.3) ---------------------------------------
+//
+// By `include_bytes!`, so no test here depends on a filesystem it could find
+// missing and skip, and so a run under `wasm32-wasip1`, which grants none,
+// reads the same faces.
+
+/// Dai Banna SIL 4.000: a Graphite description and no OpenType Layout.
+const DAI_BANNA: &[u8] = include_bytes!("../data/graphite/DaiBannaSIL-Regular.ttf");
+/// Tagmukay 2.000: a Graphite description beside a `GSUB`.
+const TAGMUKAY: &[u8] = include_bytes!("../data/graphite/Tagmukay-Regular.ttf");
+/// Awami Nastaliq 3.500: compressed tables beside a one-lookup `GPOS`.
+const AWAMI: &[u8] = include_bytes!("../data/graphite/AwamiNastaliq-Regular.ttf");
+
+/// The table tag `tag` as `Sfnt::table` takes it.
+fn tag(tag: &[u8; 4]) -> u32 {
+    u32::from_be_bytes(*tag)
+}
+
+/// The `name` table's Windows, Unicode BMP, US English string `id`, read by
+/// this test's own few lines: a format 0 or 1 header, its records, and
+/// UTF-16BE storage.
+fn name(face: &Sfnt<'_>, id: u16) -> Option<String> {
+    let table = face.table(tag(b"name"))?;
+    let u16_at = |at: usize| -> Option<u16> {
+        Some(u16::from_be_bytes([*table.get(at)?, *table.get(at + 1)?]))
+    };
+    let count = usize::from(u16_at(2)?);
+    let storage = usize::from(u16_at(4)?);
+    for record in 0..count {
+        let at = 6 + record * 12;
+        let (platform, encoding, language, name_id) = (
+            u16_at(at)?,
+            u16_at(at + 2)?,
+            u16_at(at + 4)?,
+            u16_at(at + 6)?,
+        );
+        if (platform, encoding, language, name_id) != (3, 1, 0x0409, id) {
+            continue;
+        }
+        let length = usize::from(u16_at(at + 8)?);
+        let start = storage + usize::from(u16_at(at + 10)?);
+        let bytes = table.get(start..start + length)?;
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        return String::from_utf16(&units).ok();
+    }
+    None
+}
+
+/// Each vendored face is the release THIRDPARTY.md records: it parses as an
+/// sfnt, carries the four Graphite tables and `Sill`, names the family and
+/// version its release names, is the length its release's file is, and
+/// carries exactly the OpenType Layout tables the design's precedence turns
+/// on.
+#[test]
+fn the_fixture_faces_are_the_ones_vendored() {
+    // (bytes, family, version, length, GSUB, GPOS)
+    let faces: [(&[u8], &str, &str, usize, bool, bool); 3] = [
+        (
+            DAI_BANNA,
+            "Dai Banna SIL",
+            "Version 4.000",
+            68_172,
+            false,
+            false,
+        ),
+        (TAGMUKAY, "Tagmukay", "Version 2.000", 124_240, true, false),
+        (
+            AWAMI,
+            "Awami Nastaliq",
+            "Version 3.500",
+            644_356,
+            false,
+            true,
+        ),
+    ];
+    for (bytes, family, version, length, gsub, gpos) in faces {
+        assert_eq!(bytes.len(), length, "{family}'s length");
+        let face = Sfnt::parse(bytes).unwrap_or_else(|| panic!("{family} parses"));
+        for table in [b"Silf", b"Glat", b"Gloc", b"Feat", b"Sill"] {
+            assert!(
+                face.table(tag(table)).is_some_and(|t| !t.is_empty()),
+                "{family} carries {}",
+                String::from_utf8_lossy(table)
+            );
+        }
+        assert_eq!(name(&face, 1).as_deref(), Some(family), "the family");
+        assert_eq!(
+            name(&face, 5).as_deref(),
+            Some(version),
+            "{family}'s version"
+        );
+        assert_eq!(face.table(tag(b"GSUB")).is_some(), gsub, "{family}'s GSUB");
+        assert_eq!(face.table(tag(b"GPOS")).is_some(), gpos, "{family}'s GPOS");
+        assert!(
+            face.table(tag(b"morx")).is_none(),
+            "{family} carries no morx"
+        );
+    }
+}
+
+/// The vendored Graphite-only face is refused by name on a real face's
+/// bytes, and shapes as its `cmap` alone gives it: U+0301 is in its
+/// pseudo-glyph map and not in its `cmap`, so until its passes run the
+/// accent is `.notdef`. The two faces carrying OpenType Layout beside their
+/// Graphite tables take that path and are not named.
+#[test]
+fn the_vendored_faces_take_the_path_the_precedence_gives() {
+    let dai_banna = Sfnt::parse(DAI_BANNA).expect("Dai Banna SIL parses");
+    let text = "e\u{301}";
+    let runs = line_runs(&Shaper::new(&dai_banna), text);
+    assert!(!runs.is_empty());
+    for run in &runs {
+        assert_eq!(refusals(run.warnings()), 1, "{:?}", run.warnings());
+    }
+    let shaped = glyphs(&runs);
+    let e = dai_banna.glyph_for_char('e').expect("Dai Banna SIL maps e");
+    assert_eq!(
+        dai_banna.glyph_for_char('\u{301}'),
+        None,
+        "U+0301 is not in its cmap"
+    );
+    assert_eq!(
+        shaped.iter().map(|g| g.glyph).collect::<Vec<u16>>(),
+        vec![e, 0],
+        "e and .notdef, uncomposed"
+    );
+
+    for (bytes, family, text) in [
+        (TAGMUKAY, "Tagmukay", "\u{2D30}\u{2D31}\u{2D33}"),
+        (AWAMI, "Awami Nastaliq", "\u{627}\u{631}\u{62F}\u{648}"),
+    ] {
+        let face = Sfnt::parse(bytes).unwrap_or_else(|| panic!("{family} parses"));
+        let runs = line_runs(&Shaper::new(&face), text);
+        assert!(!runs.is_empty(), "{family} shapes");
+        assert!(
+            runs.iter().all(|run| refusals(run.warnings()) == 0),
+            "{family} is not named"
+        );
+    }
+}
