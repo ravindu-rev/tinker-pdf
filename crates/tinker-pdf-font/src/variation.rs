@@ -41,6 +41,8 @@
 #![deny(clippy::float_arithmetic)]
 
 pub mod cvar;
+pub mod item_store;
+pub mod metrics;
 pub mod tuple;
 
 use crate::sfnt::Sfnt;
@@ -1002,6 +1004,87 @@ pub enum VariationError {
     DeltasPastEnd,
     /// A run of packed deltas holds more than the count has left.
     DeltaRunsOverrun,
+    /// An item variation store's header or offset array runs past its end.
+    StorePastEnd,
+    /// An item variation store's format is not 1.
+    StoreFormat {
+        /// The format it declares.
+        format: u16,
+    },
+    /// The variation region list runs past the store's end.
+    RegionsPastEnd,
+    /// The region list declares 32 768 regions or more.
+    RegionCount {
+        /// The count it declares.
+        count: u16,
+    },
+    /// A region index past the region list.
+    RegionIndex {
+        /// The index named.
+        index: u16,
+        /// How many regions there are.
+        count: u16,
+    },
+    /// A delta-set index past the store's subtables, or past a subtable's
+    /// rows.
+    DeltaSetIndex {
+        /// The subtable.
+        outer: u16,
+        /// The row.
+        inner: u16,
+    },
+    /// An item variation data subtable runs past the store's end.
+    DataPastEnd {
+        /// The subtable.
+        outer: u16,
+    },
+    /// A subtable's `wordDeltaCount` exceeds its `regionIndexCount`.
+    WordDeltaCount {
+        /// The subtable.
+        outer: u16,
+        /// The long deltas it declares.
+        words: u16,
+        /// The regions it names.
+        regions: u16,
+    },
+    /// A delta-set index map runs past the bytes it is read from.
+    MapPastEnd,
+    /// A delta-set index map of a format the chapter does not define.
+    MapFormat {
+        /// The format it declares.
+        format: u8,
+    },
+    /// A delta-set index map with no entries, so no last entry for an item
+    /// past them to take.
+    EmptyMap,
+    /// A map entry whose outer index needs more than sixteen bits.
+    MapEntryOuter {
+        /// The outer index it gives.
+        outer: u32,
+    },
+    /// A map of a format the table that holds it does not use: `HVAR` and
+    /// `VVAR` use format 0 only.
+    MapFormatIn {
+        /// The table.
+        table: Tag,
+        /// The format it declares.
+        format: u8,
+    },
+    /// A table that needs an item variation store points at none.
+    NoStore {
+        /// The table.
+        table: Tag,
+    },
+    /// `MVAR`'s `valueRecordSize` is under the eight bytes a record holds.
+    ValueRecordSize {
+        /// The size it declares.
+        size: u16,
+    },
+    /// `MVAR`'s value records run past the table's end.
+    ValueRecordsPastEnd {
+        /// The count it declares.
+        count: u16,
+    },
 }
 
 /// A tag as the four characters it is, for a message.
@@ -1100,6 +1183,61 @@ impl core::fmt::Display for VariationError {
             VariationError::DeltasPastEnd => write!(f, "packed deltas end early"),
             VariationError::DeltaRunsOverrun => {
                 write!(f, "a run of packed deltas passes its count")
+            }
+            VariationError::StorePastEnd => {
+                write!(f, "an item variation store's header runs past its end")
+            }
+            VariationError::StoreFormat { format } => {
+                write!(f, "an item variation store of format {format}, not 1")
+            }
+            VariationError::RegionsPastEnd => {
+                write!(f, "a variation region list runs past its store's end")
+            }
+            VariationError::RegionCount { count } => write!(
+                f,
+                "a variation region list declares {count} regions, not fewer than 32768"
+            ),
+            VariationError::RegionIndex { index, count } => {
+                write!(f, "region {index} named of a list of {count}")
+            }
+            VariationError::DeltaSetIndex { outer, inner } => {
+                write!(f, "delta set {outer}/{inner} is past its store")
+            }
+            VariationError::DataPastEnd { outer } => write!(
+                f,
+                "item variation data subtable {outer} runs past its store's end"
+            ),
+            VariationError::WordDeltaCount {
+                outer,
+                words,
+                regions,
+            } => write!(
+                f,
+                "item variation data subtable {outer} has {words} long deltas of {regions}"
+            ),
+            VariationError::MapPastEnd => write!(f, "a delta-set index map runs past its end"),
+            VariationError::MapFormat { format } => {
+                write!(f, "a delta-set index map of format {format}")
+            }
+            VariationError::EmptyMap => write!(f, "a delta-set index map with no entries"),
+            VariationError::MapEntryOuter { outer } => {
+                write!(f, "a delta-set index map entry names subtable {outer}")
+            }
+            VariationError::MapFormatIn { table, format } => write!(
+                f,
+                "the {} table holds a delta-set index map of format {format}, not 0",
+                tag_text(*table)
+            ),
+            VariationError::NoStore { table } => write!(
+                f,
+                "the {} table points at no item variation store",
+                tag_text(*table)
+            ),
+            VariationError::ValueRecordSize { size } => {
+                write!(f, "MVAR's value records are {size} bytes, under eight")
+            }
+            VariationError::ValueRecordsPastEnd { count } => {
+                write!(f, "MVAR's {count} value records run past the table's end")
             }
         }
     }

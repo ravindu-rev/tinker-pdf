@@ -500,6 +500,274 @@ pub fn cvt(values: &[i16]) -> Vec<u8> {
     out
 }
 
+// ---- The item variation store and the metrics tables -----------------------
+
+/// One region as a test states it: `(start, peak, end)` an axis, in 2.14.
+pub type RegionSpec = Vec<(i16, i16, i16)>;
+
+/// One item variation data subtable as a test states it.
+#[derive(Clone, Debug)]
+pub struct DataSpec {
+    /// The regions its columns name.
+    pub regions: Vec<u16>,
+    /// How many columns, from the first, use the long type.
+    pub word_count: u16,
+    /// Whether the long type is 32 bits and the short 16 (`LONG_WORDS`).
+    pub long_words: bool,
+    /// The rows, a delta a column.
+    pub rows: Vec<Vec<i32>>,
+}
+
+/// An item variation store (common formats, 'Item Variation Store Header and
+/// Item Variation Data Subtables'): format 1, the offsets, the region list,
+/// then the subtables — `None` writing a NULL offset.
+pub fn item_store(axis_count: u16, regions: &[RegionSpec], data: &[Option<DataSpec>]) -> Vec<u8> {
+    let mut list = Vec::new();
+    push16(&mut list, axis_count);
+    push16(
+        &mut list,
+        u16::try_from(regions.len()).expect("few regions"),
+    );
+    for region in regions {
+        assert_eq!(region.len(), usize::from(axis_count), "an entry an axis");
+        for (start, peak, end) in region {
+            push_i16(&mut list, *start);
+            push_i16(&mut list, *peak);
+            push_i16(&mut list, *end);
+        }
+    }
+    let header = 8 + 4 * data.len();
+    let mut out = Vec::new();
+    push16(&mut out, 1);
+    push32(&mut out, u32::try_from(header).expect("small"));
+    push16(&mut out, u16::try_from(data.len()).expect("few"));
+    let mut subtables = Vec::new();
+    let mut at = header + list.len();
+    for spec in data {
+        let Some(spec) = spec else {
+            push32(&mut out, 0);
+            continue;
+        };
+        push32(&mut out, u32::try_from(at).expect("small"));
+        let mut table = Vec::new();
+        push16(
+            &mut table,
+            u16::try_from(spec.rows.len()).expect("few rows"),
+        );
+        push16(
+            &mut table,
+            spec.word_count | if spec.long_words { 0x8000 } else { 0 },
+        );
+        push16(&mut table, u16::try_from(spec.regions.len()).expect("few"));
+        for region in &spec.regions {
+            push16(&mut table, *region);
+        }
+        for row in &spec.rows {
+            assert_eq!(row.len(), spec.regions.len(), "a delta a column");
+            for (column, delta) in row.iter().enumerate() {
+                let long = column < usize::from(spec.word_count);
+                match (spec.long_words, long) {
+                    (true, true) => push_i32(&mut table, *delta),
+                    (true, false) | (false, true) => {
+                        push_i16(&mut table, i16::try_from(*delta).expect("a word"));
+                    }
+                    (false, false) => {
+                        table.push(i8::try_from(*delta).expect("a byte") as u8);
+                    }
+                }
+            }
+        }
+        at += table.len();
+        subtables.extend(table);
+    }
+    out.extend(list);
+    out.extend(subtables);
+    out
+}
+
+/// A delta-set index map (common formats, 'Associating Target Items to
+/// Variation Data'): its format, entries of `entry_size` bytes with
+/// `inner_bits` bits of inner index, each `(outer, inner)`.
+pub fn index_map(format: u8, entry_size: u8, inner_bits: u8, entries: &[(u32, u32)]) -> Vec<u8> {
+    assert!((1..=4).contains(&entry_size) && (1..=16).contains(&inner_bits));
+    let mut out = vec![format, ((entry_size - 1) << 4) | (inner_bits - 1)];
+    let count = u32::try_from(entries.len()).expect("few");
+    if format == 0 {
+        push16(&mut out, u16::try_from(count).expect("sixteen bits"));
+    } else {
+        push32(&mut out, count);
+    }
+    for (outer, inner) in entries {
+        assert!(*inner < (1 << inner_bits), "the inner index fits");
+        let entry = (u64::from(*outer) << inner_bits) | u64::from(*inner);
+        assert!(
+            entry < (1u64 << (u32::from(entry_size) * 8)),
+            "the entry fits"
+        );
+        for byte in (0..entry_size).rev() {
+            out.push((entry >> (u32::from(byte) * 8)) as u8);
+        }
+    }
+    out
+}
+
+/// A metrics table (`HVAR` or `VVAR`): version 1.0, the store's offset, then
+/// one offset a map, NULL where the map is `None`; the store and maps after.
+pub fn metrics_variations(store: &[u8], maps: &[Option<Vec<u8>>]) -> Vec<u8> {
+    let header = 8 + 4 * maps.len();
+    let mut out = Vec::new();
+    push16(&mut out, 1);
+    push16(&mut out, 0);
+    push32(&mut out, u32::try_from(header).expect("small"));
+    let mut body = store.to_vec();
+    let mut at = header + store.len();
+    for map in maps {
+        match map {
+            Some(map) => {
+                push32(&mut out, u32::try_from(at).expect("small"));
+                at += map.len();
+                body.extend_from_slice(map);
+            }
+            None => push32(&mut out, 0),
+        }
+    }
+    out.extend(body);
+    out
+}
+
+/// An `HVAR` table: the store, and the advance, left and right side-bearing
+/// maps.
+pub fn hvar(
+    store: &[u8],
+    advance: Option<Vec<u8>>,
+    left: Option<Vec<u8>>,
+    right: Option<Vec<u8>>,
+) -> Vec<u8> {
+    metrics_variations(store, &[advance, left, right])
+}
+
+/// A `VVAR` table: the store, and the advance, top, bottom and origin maps.
+pub fn vvar(
+    store: &[u8],
+    advance: Option<Vec<u8>>,
+    top: Option<Vec<u8>>,
+    bottom: Option<Vec<u8>>,
+    origin: Option<Vec<u8>>,
+) -> Vec<u8> {
+    metrics_variations(store, &[advance, top, bottom, origin])
+}
+
+/// An `MVAR` table: version 1.0, eight-byte value records in the order
+/// given, and the store after them.
+pub fn mvar(store: &[u8], records: &[(Tag, u16, u16)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push16(&mut out, 1);
+    push16(&mut out, 0);
+    push16(&mut out, 0); // reserved
+    push16(&mut out, 8); // valueRecordSize
+    push16(&mut out, u16::try_from(records.len()).expect("few"));
+    let store_at = if records.is_empty() {
+        0
+    } else {
+        12 + 8 * records.len()
+    };
+    push16(&mut out, u16::try_from(store_at).expect("small"));
+    for (tag, outer, inner) in records {
+        out.extend_from_slice(tag);
+        push16(&mut out, *outer);
+        push16(&mut out, *inner);
+    }
+    if !records.is_empty() {
+        out.extend_from_slice(store);
+    }
+    out
+}
+
+/// An `hhea` table, its caret slope and offset stated and `numberOfHMetrics`.
+pub fn hhea(long_metrics: u16, caret: (i16, i16, i16)) -> Vec<u8> {
+    let mut out = vec![0u8; 36];
+    out[0..2].copy_from_slice(&1u16.to_be_bytes());
+    out[18..20].copy_from_slice(&caret.0.to_be_bytes());
+    out[20..22].copy_from_slice(&caret.1.to_be_bytes());
+    out[22..24].copy_from_slice(&caret.2.to_be_bytes());
+    out[34..36].copy_from_slice(&long_metrics.to_be_bytes());
+    out
+}
+
+/// An `hmtx` or `vmtx` table: long metrics, then the bearings after them.
+pub fn metrics(long: &[(u16, i16)], bearings: &[i16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (advance, bearing) in long {
+        push16(&mut out, *advance);
+        push_i16(&mut out, *bearing);
+    }
+    for bearing in bearings {
+        push_i16(&mut out, *bearing);
+    }
+    out
+}
+
+/// A `vhea` table, version 1.1: ascent, descent and line gap, the caret
+/// slope and offset, and `numOfLongVerMetrics`.
+pub fn vhea(long_metrics: u16, lines: (i16, i16, i16), caret: (i16, i16, i16)) -> Vec<u8> {
+    let mut out = vec![0u8; 36];
+    out[0..4].copy_from_slice(&0x0001_1000u32.to_be_bytes());
+    out[4..6].copy_from_slice(&lines.0.to_be_bytes());
+    out[6..8].copy_from_slice(&lines.1.to_be_bytes());
+    out[8..10].copy_from_slice(&lines.2.to_be_bytes());
+    out[18..20].copy_from_slice(&caret.0.to_be_bytes());
+    out[20..22].copy_from_slice(&caret.1.to_be_bytes());
+    out[22..24].copy_from_slice(&caret.2.to_be_bytes());
+    out[34..36].copy_from_slice(&long_metrics.to_be_bytes());
+    out
+}
+
+/// A `VORG` table: the default origin and per-glyph ones, sorted by glyph.
+pub fn vorg(default: i16, records: &[(u16, i16)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push16(&mut out, 1);
+    push16(&mut out, 0);
+    push_i16(&mut out, default);
+    push16(&mut out, u16::try_from(records.len()).expect("few"));
+    for (glyph, origin) in records {
+        push16(&mut out, *glyph);
+        push_i16(&mut out, *origin);
+    }
+    out
+}
+
+/// An `OS/2` table, version 4 — 96 bytes — with the fields at the offsets
+/// given set to the values given, and zero elsewhere.
+pub fn os2(fields: &[(usize, u16)]) -> Vec<u8> {
+    let mut out = vec![0u8; 96];
+    out[0..2].copy_from_slice(&4u16.to_be_bytes());
+    for (at, value) in fields {
+        out[*at..*at + 2].copy_from_slice(&value.to_be_bytes());
+    }
+    out
+}
+
+/// A `post` table, version 3.0, its underline position and thickness stated.
+pub fn post(position: i16, thickness: i16) -> Vec<u8> {
+    let mut out = vec![0u8; 32];
+    out[0..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
+    out[8..10].copy_from_slice(&position.to_be_bytes());
+    out[10..12].copy_from_slice(&thickness.to_be_bytes());
+    out
+}
+
+/// A `gasp` table, version 1: `(rangeMaxPPEM, rangeGaspBehavior)` ranges.
+pub fn gasp(ranges: &[(u16, u16)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push16(&mut out, 1);
+    push16(&mut out, u16::try_from(ranges.len()).expect("few"));
+    for (max, behavior) in ranges {
+        push16(&mut out, *max);
+        push16(&mut out, *behavior);
+    }
+    out
+}
+
 // ---- The specification's arithmetic, a second time -------------------------
 
 /// The overview chapter's normalisation and interpolation, transcribed from
@@ -698,6 +966,24 @@ pub mod spec {
             }
         }
         values
+    }
+
+    /// One item's net adjustment in 16.16, as the overview's algorithm
+    /// computes it from what a test stated: each delta of the row times the
+    /// scalar of the region its column names, summed.
+    pub fn item_delta(
+        regions: &[super::RegionSpec],
+        data: &super::DataSpec,
+        row: usize,
+        coordinates: &[i16],
+    ) -> i64 {
+        data.regions
+            .iter()
+            .zip(&data.rows[row])
+            .map(|(region, delta)| {
+                region_scalar(&regions[usize::from(*region)], coordinates) * i64::from(*delta)
+            })
+            .sum()
     }
 
     /// The overview's normalisation of user values on axes stated as

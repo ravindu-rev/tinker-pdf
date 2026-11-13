@@ -404,6 +404,28 @@ store with none shared, and point numbers or deltas that end early, run past
 their count or add up past 65 535. The varied `cvt ` reaches no page by
 itself.
 
+`variation::item_store` reads the item variation store — the region list and
+its item variation data subtables, rows of 8- and 16-bit deltas or, under
+`LONG_WORDS`, 16- and 32-bit ones, a NULL offset and the index 0xFFFF/0xFFFF
+meaning no variation — and the delta-set index maps of formats 0 and 1, an
+item past the count taking the last entry. `region_scalars` evaluates every
+region once at a location, and `delta` sums one row exactly in 16.16, so the
+shaper's `GDEF` variations and `CFF2`'s blends read the same store under the
+same integers. `variation::metrics` holds its three clients, each at a
+`Location`: `Hvar` — the advance through its map or, with none, the glyph id
+as the inner index of the first subtable, and the side bearings through
+theirs; `Vvar` — the advance height, the side bearings and the vertical
+origin `VORG` records; and `Mvar` — a value record by tag, its delta added to
+the field `METRIC_FIELDS` names in `OS/2`, `hhea`, `vhea`, `post` or `gasp`,
+a tag no record names constant. `Sfnt::left_side_bearing` gives the default
+the left side-bearing delta applies to, beside `Sfnt::advance`, and the
+vertical deltas apply to `Sfnt::vertical_advance` and `Sfnt::vorg_origin`. Refused by name: a store of another format, a header,
+region list, subtable or map past its bytes, 32 768 regions or more, a region
+or delta-set index past what it indexes, more long deltas than columns, a map
+with no entries or an outer index past sixteen bits, a map of format 1 in
+`HVAR` or `VVAR`, which use format 0 only, a table with no store, an `MVAR`
+record under eight bytes, and a region list whose axis count is not `fvar`'s.
+
 ## API
 
 Everything reaches callers through the facade (ruling 11). Reading:
@@ -1225,7 +1247,16 @@ corpora already vendored here. So every name stays on the list.
   the chapter's own examples, the all-points form, private and shared points,
   `gvar`'s shared tuples by index, the `cvt ` at every named instance and at
   coordinates no instance names equal to the defaults plus the deltas the
-  test scales, and every refusal by name.
+  test scales, and every refusal by name. The item store's: region scalars
+  over a grid of locations, rows in every delta width read back as written,
+  each delta set's adjustment equal to the specification's sum, maps in every
+  entry size and both formats with an item past the count, `HVAR`'s advances
+  with a map and with the implicit one, its side bearings, `VVAR`'s advance
+  heights, side bearings and `VORG` origins, and every `MVAR` tag's value at
+  every named instance and at coordinates no instance names — each the
+  default the test wrote plus the adjustment the test computed — with every
+  refusal by name and every truncation and single-byte change of the three
+  tables read or refused without a panic.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

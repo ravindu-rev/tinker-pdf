@@ -349,6 +349,30 @@ impl<'a> Sfnt<'a> {
         VerticalOrigins { face: self, source }
     }
 
+    /// A glyph's left side bearing from `hmtx`, in font units: the second
+    /// half of its long metric, or, for a glyph past `numberOfHMetrics`, its
+    /// entry of the `leftSideBearings` array after them, which the `hmtx`
+    /// clause sizes to the face's glyph count, so a glyph at or past `maxp`'s
+    /// count has none — as [`Sfnt::top_side_bearing`] reads `vmtx`. The
+    /// default an `HVAR` side-bearing delta applies to.
+    #[must_use]
+    pub fn left_side_bearing(&self, glyph: u16) -> Option<i16> {
+        let hmtx = self.table(0x686D_7478)?;
+        let long = self.num_h_metrics;
+        if long == 0 {
+            return None;
+        }
+        let at = if glyph < long {
+            usize::from(glyph) * 4 + 2
+        } else {
+            if self.glyph_count().is_some_and(|glyphs| glyph >= glyphs) {
+                return None;
+            }
+            usize::from(long) * 4 + usize::from(glyph - long) * 2
+        };
+        be16(hmtx, at).map(|value| value as i16)
+    }
+
     /// A character's glyph index, through the best `cmap` subtable available.
     #[must_use]
     pub fn glyph_for_char(&self, c: char) -> Option<u16> {
@@ -1657,6 +1681,29 @@ mod tests {
         let sfnt = Sfnt::parse(&data).expect("a valid directory");
         assert_eq!(sfnt.vorg_origin(4), Some(777));
         assert_eq!(sfnt.vorg_origin(9), Some(880));
+    }
+
+    /// Two long metrics and two side bearings after them: glyphs 2 and 3
+    /// repeat glyph 1's advance and keep their own bearings.
+    #[test]
+    fn left_side_bearings_come_from_the_long_metrics_and_the_array_after_them() {
+        let mut hhea = vec![0u8; 36];
+        hhea[34..36].copy_from_slice(&2u16.to_be_bytes());
+        let mut hmtx = Vec::new();
+        for (advance, bearing) in [(500u16, 10i16), (600, -20)] {
+            hmtx.extend_from_slice(&advance.to_be_bytes());
+            hmtx.extend_from_slice(&bearing.to_be_bytes());
+        }
+        hmtx.extend_from_slice(&30i16.to_be_bytes());
+        hmtx.extend_from_slice(&(-40i16).to_be_bytes());
+        let data = sfnt_with_tables(&[(b"hhea", hhea), (b"hmtx", hmtx)]);
+        let sfnt = Sfnt::parse(&data).expect("a face");
+        assert_eq!(sfnt.left_side_bearing(0), Some(10));
+        assert_eq!(sfnt.left_side_bearing(1), Some(-20));
+        assert_eq!(sfnt.left_side_bearing(2), Some(30));
+        assert_eq!(sfnt.left_side_bearing(3), Some(-40));
+        assert_eq!(sfnt.left_side_bearing(4), None, "past the array");
+        assert_eq!(sfnt.advance(3), Some(600));
     }
 
     #[test]

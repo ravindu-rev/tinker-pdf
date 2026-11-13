@@ -11,16 +11,20 @@
 mod variable_support;
 
 use tinker_pdf_font::variation::cvar::{cvt_at, Cvar};
+use tinker_pdf_font::variation::item_store::{DeltaSetIndex, DeltaSetIndexMap, ItemVariationStore};
+use tinker_pdf_font::variation::metrics::{metric_default, Hvar, Mvar, Vvar, METRIC_FIELDS};
 use tinker_pdf_font::variation::tuple::{
     unpack_deltas, unpack_points, PointNumbers, SharedTuples, TupleStore,
 };
 use tinker_pdf_font::variation::{
-    AxisValueMap, DesignSpace, Fixed, Instance, Location, UserCoordinate, VariationError, MAX_AXES,
+    AxisValueMap, DesignSpace, Fixed, Instance, Location, Tag, UserCoordinate, VariationError,
+    MAX_AXES,
 };
 use tinker_pdf_font::Sfnt;
 use variable_support::{
-    avar, cvar, cvt, f2dot14, fvar, fvar_with_sizes, identity_map, pack_deltas, pack_points, spec,
-    tuple_store, AxisSpec, Face, InstanceSpec, Points, TupleSpec,
+    avar, cvar, cvt, f2dot14, fvar, fvar_with_sizes, gasp, hhea, hvar, identity_map, index_map,
+    item_store, metrics, mvar, os2, pack_deltas, pack_points, post, spec, tuple_store, vhea, vorg,
+    vvar, AxisSpec, DataSpec, Face, InstanceSpec, Points, RegionSpec, TupleSpec,
 };
 
 // ---- The design space (FT-05.2) --------------------------------------------
@@ -1203,4 +1207,851 @@ fn gvars_shared_tuples_give_a_peak_by_index() {
         store.tuples().err(),
         Some(VariationError::SharedTupleIndex { index: 1, count: 1 })
     );
+}
+
+// ---- The item variation store and the metrics tables (FT-05.5) -------------
+
+/// Six regions over the two axes: each axis's two extremes, a corner, and an
+/// intermediate region on the weight whose width peak is zero.
+fn regions() -> Vec<RegionSpec> {
+    vec![
+        vec![(0, 16_384, 16_384), (0, 0, 0)],
+        vec![(-16_384, -16_384, 0), (0, 0, 0)],
+        vec![(0, 0, 0), (0, 16_384, 16_384)],
+        vec![(0, 16_384, 16_384), (0, 16_384, 16_384)],
+        vec![(4_096, 8_192, 16_384), (-16_384, 0, 16_384)],
+        vec![(0, 0, 0), (-16_384, -16_384, 0)],
+    ]
+}
+
+/// Item variation data in every delta width: a 16-bit column and two 8-bit
+/// ones, six rows; three 16-bit columns; a 32-bit column and a 16-bit one; a
+/// NULL subtable; two 8-bit columns.
+fn data_tables() -> Vec<Option<DataSpec>> {
+    vec![
+        Some(DataSpec {
+            regions: vec![0, 1, 2],
+            word_count: 1,
+            long_words: false,
+            rows: vec![
+                vec![300, -12, 40],
+                vec![-1_000, 127, -128],
+                vec![0, 0, 0],
+                vec![32_767, 5, -5],
+                vec![-32_768, 1, 2],
+                vec![7, -7, 77],
+            ],
+        }),
+        Some(DataSpec {
+            regions: vec![3, 4, 5],
+            word_count: 3,
+            long_words: false,
+            rows: vec![
+                vec![1_000, -2_000, 3_000],
+                vec![-1, 2, -3],
+                vec![500, 500, -500],
+            ],
+        }),
+        Some(DataSpec {
+            regions: vec![0, 3],
+            word_count: 1,
+            long_words: true,
+            rows: vec![vec![100_000, -30_000], vec![-2_000_000, 32_767]],
+        }),
+        None,
+        Some(DataSpec {
+            regions: vec![1, 4],
+            word_count: 0,
+            long_words: false,
+            rows: vec![vec![-128, 127], vec![10, -10]],
+        }),
+    ]
+}
+
+fn store_bytes() -> Vec<u8> {
+    item_store(2, &regions(), &data_tables())
+}
+
+/// The adjustment the specification computes for a delta-set index.
+fn expected_delta(outer: u32, inner: u32, coordinates: &[i16]) -> i64 {
+    if (outer, inner) == (0xFFFF, 0xFFFF) {
+        return 0;
+    }
+    match &data_tables()[outer as usize] {
+        None => 0,
+        Some(data) => spec::item_delta(&regions(), data, inner as usize, coordinates),
+    }
+}
+
+/// Locations over a grid of 2.14 coordinates, on and between region points.
+fn location_grid() -> Vec<[i16; 2]> {
+    let values = [
+        -16_384, -9_000, -8_192, -1, 0, 4_096, 6_144, 8_192, 12_000, 16_384,
+    ];
+    let mut grid = Vec::new();
+    for weight in values {
+        for width in values {
+            grid.push([weight, width]);
+        }
+    }
+    grid
+}
+
+#[test]
+fn region_scalars_and_delta_sets_decode_in_every_delta_width() {
+    let bytes = store_bytes();
+    let store = ItemVariationStore::parse(&bytes).expect("a store");
+    assert_eq!(store.axis_count(), 2);
+    assert_eq!(store.region_count(), 6);
+    assert_eq!(store.data_count(), 5);
+    for (index, stated) in regions().iter().enumerate() {
+        let region: Vec<(i16, i16, i16)> = store
+            .region(u16::try_from(index).expect("few"))
+            .expect("a region")
+            .iter()
+            .map(|axis| (axis.start, axis.peak, axis.end))
+            .collect();
+        assert_eq!(&region, stated);
+    }
+    assert_eq!(
+        store.region(6).err(),
+        Some(VariationError::RegionIndex { index: 6, count: 6 })
+    );
+
+    for coordinates in location_grid() {
+        let scalars = store.region_scalars(&Location::new(coordinates.to_vec()));
+        assert_eq!(scalars.len(), 6);
+        for (index, region) in regions().iter().enumerate() {
+            assert_eq!(
+                scalars[index].bits(),
+                spec::region_scalar(region, &coordinates),
+                "region {index} at {coordinates:?}"
+            );
+        }
+        for (outer, stated) in data_tables().iter().enumerate() {
+            let outer = u16::try_from(outer).expect("few");
+            let read = store.data(outer).expect("a subtable");
+            let Some(stated) = stated else {
+                assert!(read.is_none(), "a NULL offset is no subtable");
+                assert_eq!(
+                    store.delta(DeltaSetIndex::new(outer, 3), &scalars),
+                    Ok(Fixed::ZERO)
+                );
+                continue;
+            };
+            let data = read.expect("a subtable");
+            assert_eq!(data.region_indexes(), stated.regions.as_slice());
+            assert_eq!(data.word_count(), stated.word_count);
+            assert_eq!(data.long_words(), stated.long_words);
+            assert_eq!(usize::from(data.item_count()), stated.rows.len());
+            for (inner, row) in stated.rows.iter().enumerate() {
+                let inner = u16::try_from(inner).expect("few");
+                assert_eq!(&data.deltas(inner).expect("a row"), row);
+                let delta = store
+                    .delta(DeltaSetIndex::new(outer, inner), &scalars)
+                    .expect("a delta");
+                assert_eq!(
+                    delta.bits(),
+                    expected_delta(u32::from(outer), u32::from(inner), &coordinates),
+                    "delta set {outer}/{inner} at {coordinates:?}"
+                );
+            }
+            assert_eq!(
+                data.deltas(data.item_count()).err(),
+                Some(VariationError::DeltaSetIndex {
+                    outer,
+                    inner: data.item_count()
+                })
+            );
+        }
+        assert_eq!(
+            store.delta(DeltaSetIndex::NO_VARIATION, &scalars),
+            Ok(Fixed::ZERO)
+        );
+        assert_eq!(
+            store.delta(DeltaSetIndex::new(5, 0), &scalars).err(),
+            Some(VariationError::DeltaSetIndex { outer: 5, inner: 0 })
+        );
+    }
+}
+
+#[test]
+fn hostile_item_stores_are_refused_by_name() {
+    let good = store_bytes();
+    let set16 = |bytes: &[u8], at: usize, value: u16| {
+        let mut bytes = bytes.to_vec();
+        bytes[at..at + 2].copy_from_slice(&value.to_be_bytes());
+        bytes
+    };
+    let refuse = |bytes: &[u8]| ItemVariationStore::parse(bytes).err();
+    assert_eq!(
+        refuse(&set16(&good, 0, 2)),
+        Some(VariationError::StoreFormat { format: 2 })
+    );
+    assert_eq!(refuse(&good[..7]), Some(VariationError::StorePastEnd));
+    assert_eq!(refuse(&good[..20]), Some(VariationError::StorePastEnd));
+    // The region list follows the header's five offsets, at 28.
+    assert_eq!(
+        refuse(&set16(&good, 30, 0x8000)),
+        Some(VariationError::RegionCount { count: 0x8000 })
+    );
+    assert_eq!(
+        refuse(&set16(&good, 30, 0x7FFF)),
+        Some(VariationError::RegionsPastEnd)
+    );
+    assert_eq!(
+        refuse(&set16(&good, 28, 65)),
+        Some(VariationError::TooManyAxes { count: 65 })
+    );
+    assert_eq!(refuse(&good[..30]), Some(VariationError::RegionsPastEnd));
+
+    // A subtable naming a region past the list, more long deltas than
+    // regions, and rows past the end.
+    let mut naming = data_tables();
+    if let Some(data) = naming[0].as_mut() {
+        data.regions[2] = 9;
+    }
+    let bytes = item_store(2, &regions(), &naming);
+    let store = ItemVariationStore::parse(&bytes).expect("parses");
+    assert_eq!(
+        store.data(0).err(),
+        Some(VariationError::RegionIndex { index: 9, count: 6 })
+    );
+    let mut wordy = data_tables();
+    if let Some(data) = wordy[1].as_mut() {
+        data.word_count = 4;
+    }
+    let bytes = item_store(2, &regions(), &wordy);
+    let store = ItemVariationStore::parse(&bytes).expect("parses");
+    assert_eq!(
+        store.data(1).err(),
+        Some(VariationError::WordDeltaCount {
+            outer: 1,
+            words: 4,
+            regions: 3
+        })
+    );
+    let cut = &good[..good.len() - 1];
+    let store = ItemVariationStore::parse(cut).expect("the header is whole");
+    assert_eq!(
+        store.data(4).err(),
+        Some(VariationError::DataPastEnd { outer: 4 })
+    );
+    for cut in 0..=good.len() {
+        if let Ok(store) = ItemVariationStore::parse(&good[..cut]) {
+            let scalars = store.region_scalars(&Location::new(vec![8_192, -8_192]));
+            for outer in 0..6 {
+                for inner in 0..7 {
+                    let _ = store.delta(DeltaSetIndex::new(outer, inner), &scalars);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_delta_set_index_map_maps_every_glyph() {
+    let cases: Vec<(u8, u8, u8, Vec<(u32, u32)>)> = vec![
+        (0, 1, 3, vec![(0, 5), (1, 0), (2, 3), (0, 0)]),
+        (0, 1, 1, vec![(0, 1), (127, 0)]),
+        (0, 2, 8, vec![(0, 200), (1, 0), (2, 255), (255, 17)]),
+        (1, 3, 16, vec![(0, 65_535), (255, 0), (17, 1_234)]),
+        (1, 4, 16, vec![(65_535, 65_535), (1_000, 2), (0, 0)]),
+        (1, 2, 4, vec![(4_095, 15), (3, 9)]),
+    ];
+    for (format, size, bits, entries) in cases {
+        let bytes = index_map(format, size, bits, &entries);
+        let map = DeltaSetIndexMap::parse(&bytes).expect("a map");
+        assert_eq!(map.format(), format);
+        assert_eq!(map.len() as usize, entries.len());
+        assert!(!map.is_empty());
+        for item in 0..entries.len() + 3 {
+            let (outer, inner) = entries[item.min(entries.len() - 1)];
+            let index = map
+                .get(u32::try_from(item).expect("few"))
+                .expect("an index");
+            assert_eq!(
+                (u32::from(index.outer), u32::from(index.inner)),
+                (outer, inner),
+                "item {item}, past the count taking the last entry"
+            );
+        }
+    }
+    // The refusals: a format the chapter does not define, no entries,
+    // entries past the end, and an outer index past sixteen bits.
+    let mut unknown = index_map(0, 1, 3, &[(0, 1)]);
+    unknown[0] = 2;
+    assert_eq!(
+        DeltaSetIndexMap::parse(&unknown).err(),
+        Some(VariationError::MapFormat { format: 2 })
+    );
+    assert_eq!(
+        DeltaSetIndexMap::parse(&index_map(0, 1, 3, &[])).err(),
+        Some(VariationError::EmptyMap)
+    );
+    let entries = index_map(0, 2, 8, &[(0, 1), (1, 2)]);
+    assert_eq!(
+        DeltaSetIndexMap::parse(&entries[..entries.len() - 1]).err(),
+        Some(VariationError::MapPastEnd)
+    );
+    assert_eq!(
+        DeltaSetIndexMap::parse(&entries[..3]).err(),
+        Some(VariationError::MapPastEnd)
+    );
+    let wide = index_map(1, 4, 1, &[(70_000, 1)]);
+    let map = DeltaSetIndexMap::parse(&wide).expect("parses");
+    assert_eq!(
+        map.get(0).err(),
+        Some(VariationError::MapEntryOuter { outer: 70_000 })
+    );
+
+    // With no advance map, HVAR takes the glyph id as the inner index of
+    // the first subtable.
+    let table = hvar(&store_bytes(), None, None, None);
+    let hvar = Hvar::parse(&table, 2).expect("an HVAR");
+    for glyph in [0u16, 3, 5, 900] {
+        assert_eq!(hvar.advance_index(glyph), Ok(DeltaSetIndex::new(0, glyph)));
+    }
+}
+
+/// The glyphs' horizontal metrics: four long ones and two bearings after.
+fn horizontal_long() -> Vec<(u16, i16)> {
+    vec![(500, 10), (600, 20), (700, -30), (800, 40)]
+}
+
+fn horizontal_bearings() -> Vec<i16> {
+    vec![50, -60]
+}
+
+/// The advance map, into every kind of subtable: a 16-bit one, the 32-bit
+/// one, the 8-bit one, the index of no variation, and a NULL subtable.
+fn advance_entries() -> Vec<(u32, u32)> {
+    vec![(1, 2), (0, 1), (2, 0), (4, 1), (0xFFFF, 0xFFFF), (3, 7)]
+}
+
+fn left_entries() -> Vec<(u32, u32)> {
+    vec![(1, 0), (1, 1), (4, 0), (0, 5), (2, 1), (1, 2)]
+}
+
+/// Fewer entries than glyphs: the last two glyphs take the last entry.
+fn right_entries() -> Vec<(u32, u32)> {
+    vec![(0, 3), (4, 1), (0, 0), (1, 2)]
+}
+
+fn hvar_face(advance_map: bool) -> Vec<u8> {
+    let advance = advance_map.then(|| index_map(0, 4, 16, &advance_entries()));
+    Face::truetype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"hhea", hhea(4, (1, 0, 0)))
+        .with(
+            *b"hmtx",
+            metrics(&horizontal_long(), &horizontal_bearings()),
+        )
+        .with(
+            *b"HVAR",
+            hvar(
+                &store_bytes(),
+                advance,
+                Some(index_map(0, 2, 8, &left_entries())),
+                Some(index_map(0, 1, 3, &right_entries())),
+            ),
+        )
+        .build()
+}
+
+/// Every location the metric tests read: each named instance, and user
+/// coordinates no instance names.
+fn metric_locations() -> Vec<(Instance, [f64; 2])> {
+    let mut out: Vec<(Instance, [f64; 2])> = six_instances()
+        .iter()
+        .enumerate()
+        .map(|(index, stated)| {
+            (
+                Instance::Named(u16::try_from(index).expect("few")),
+                [stated.coordinates[0], stated.coordinates[1]],
+            )
+        })
+        .collect();
+    for weight in [100.0, 260.0, 400.0, 555.5, 650.0, 900.0] {
+        for width in [50.0, 75.0, 100.0, 133.333, 200.0] {
+            out.push((
+                Instance::User(vec![
+                    UserCoordinate::new(*b"wght", weight),
+                    UserCoordinate::new(*b"wdth", width),
+                ]),
+                [weight, width],
+            ));
+        }
+    }
+    out
+}
+
+#[test]
+fn hvar_advances_at_an_instance_equal_the_deltas_applied_in_the_test() {
+    let ranges = axis_ranges();
+    for advance_map in [false, true] {
+        let face = hvar_face(advance_map);
+        let sfnt = Sfnt::parse(&face).expect("a face");
+        let space = DesignSpace::read(&sfnt).expect("a design space");
+        let hvar = Hvar::read(&sfnt, &space)
+            .expect("an HVAR")
+            .expect("it carries one");
+        for (instance, user) in metric_locations() {
+            let coordinates = spec::location(&ranges, &user);
+            let location = space.location(&instance).expect("a location");
+            assert_eq!(location.coordinates(), coordinates);
+            let scalars = hvar.scalars(&location);
+            for glyph in 0u16..6 {
+                let default = i64::from(horizontal_long()[usize::from(glyph).min(3)].0);
+                let (outer, inner) = if advance_map {
+                    advance_entries()[usize::from(glyph)]
+                } else {
+                    (0, u32::from(glyph))
+                };
+                let expected = default * 65_536 + expected_delta(outer, inner, &coordinates);
+                let advance = hvar
+                    .advance_at(&sfnt, glyph, &location)
+                    .expect("an advance")
+                    .expect("hmtx gives one");
+                assert_eq!(
+                    advance.bits(),
+                    expected,
+                    "glyph {glyph} at {user:?}, map {advance_map}"
+                );
+                let (outer, inner) = left_entries()[usize::from(glyph)];
+                assert_eq!(
+                    hvar.left_side_bearing_delta(glyph, &scalars)
+                        .expect("a delta")
+                        .map(Fixed::bits),
+                    Some(expected_delta(outer, inner, &coordinates))
+                );
+                let right = right_entries();
+                let (outer, inner) = right[usize::from(glyph).min(right.len() - 1)];
+                assert_eq!(
+                    hvar.right_side_bearing_delta(glyph, &scalars)
+                        .expect("a delta")
+                        .map(Fixed::bits),
+                    Some(expected_delta(outer, inner, &coordinates))
+                );
+            }
+        }
+        // At the default every scalar is zero, so the advance is hmtx's.
+        let default = hvar
+            .advance_at(&sfnt, 2, &space.default_location())
+            .expect("an advance");
+        assert_eq!(default, Some(Fixed::from_int(700)));
+    }
+    // Without side-bearing maps there are no side-bearing deltas.
+    let bare = hvar(&store_bytes(), None, None, None);
+    let hvar = Hvar::parse(&bare, 2).expect("an HVAR");
+    let scalars = hvar.scalars(&Location::new(vec![16_384, 0]));
+    assert_eq!(hvar.left_side_bearing_delta(0, &scalars), Ok(None));
+    assert_eq!(hvar.right_side_bearing_delta(0, &scalars), Ok(None));
+    // A face without HVAR, or that does not vary, reads none.
+    let face = Face::truetype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .build();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    assert!(Hvar::read(&sfnt, &space).expect("none").is_none());
+    let face = Face::truetype().with(*b"HVAR", bare).build();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("no axes");
+    assert!(Hvar::read(&sfnt, &space).expect("none").is_none());
+}
+
+fn vertical_long() -> Vec<(u16, i16)> {
+    vec![(1_000, 80), (1_100, 90), (1_200, 100)]
+}
+
+fn vertical_bearings() -> Vec<i16> {
+    vec![110, 120, 130]
+}
+
+fn origins() -> Vec<(u16, i16)> {
+    vec![(1, 900), (4, 870)]
+}
+
+fn vvar_face() -> Vec<u8> {
+    Face::opentype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"vhea", vhea(3, (880, -120, 0), (0, 1, 0)))
+        .with(*b"vmtx", metrics(&vertical_long(), &vertical_bearings()))
+        .with(*b"VORG", vorg(880, &origins()))
+        .with(
+            *b"VVAR",
+            vvar(
+                &store_bytes(),
+                None,
+                Some(index_map(0, 2, 8, &left_entries())),
+                Some(index_map(0, 1, 3, &right_entries())),
+                Some(index_map(0, 4, 16, &advance_entries())),
+            ),
+        )
+        .build()
+}
+
+#[test]
+fn vvar_metrics_likewise() {
+    let ranges = axis_ranges();
+    let face = vvar_face();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let vvar = Vvar::read(&sfnt, &space)
+        .expect("a VVAR")
+        .expect("it carries one");
+    for (instance, user) in metric_locations() {
+        let coordinates = spec::location(&ranges, &user);
+        let location = space.location(&instance).expect("a location");
+        let scalars = vvar.scalars(&location);
+        for glyph in 0u16..6 {
+            let at = usize::from(glyph);
+            // No advance map: the glyph id is the inner index.
+            let default = i64::from(vertical_long()[at.min(2)].0);
+            let expected = default * 65_536 + expected_delta(0, u32::from(glyph), &coordinates);
+            let advance = vvar
+                .advance_at(&sfnt, glyph, &location)
+                .expect("an advance")
+                .expect("vmtx gives one");
+            assert_eq!(advance.bits(), expected, "glyph {glyph} at {user:?}");
+            let (outer, inner) = left_entries()[at];
+            assert_eq!(
+                vvar.top_side_bearing_delta(glyph, &scalars)
+                    .expect("a delta")
+                    .map(Fixed::bits),
+                Some(expected_delta(outer, inner, &coordinates))
+            );
+            let right = right_entries();
+            let (outer, inner) = right[at.min(right.len() - 1)];
+            assert_eq!(
+                vvar.bottom_side_bearing_delta(glyph, &scalars)
+                    .expect("a delta")
+                    .map(Fixed::bits),
+                Some(expected_delta(outer, inner, &coordinates))
+            );
+            let (outer, inner) = advance_entries()[at];
+            let stated = origins()
+                .iter()
+                .find(|(g, _)| *g == glyph)
+                .map_or(880, |(_, origin)| *origin);
+            let origin = vvar
+                .origin_at(&sfnt, glyph, &location)
+                .expect("an origin")
+                .expect("VORG gives one");
+            assert_eq!(
+                origin.bits(),
+                i64::from(stated) * 65_536 + expected_delta(outer, inner, &coordinates),
+                "glyph {glyph}'s origin at {user:?}"
+            );
+            assert_eq!(sfnt.vorg_origin(glyph), Some(stated));
+        }
+    }
+    // No VORG: no origin to vary.
+    let face = Face::opentype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"vhea", vhea(3, (880, -120, 0), (0, 1, 0)))
+        .with(*b"vmtx", metrics(&vertical_long(), &vertical_bearings()))
+        .with(
+            *b"VVAR",
+            variable_support::vvar(&store_bytes(), None, None, None, None),
+        )
+        .build();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let vvar = Vvar::read(&sfnt, &space).expect("a VVAR").expect("one");
+    let location = Location::new(vec![16_384, 16_384]);
+    assert_eq!(vvar.origin_at(&sfnt, 0, &location), Ok(None));
+    assert_eq!(
+        vvar.origin_delta(0, &vvar.scalars(&location)),
+        Ok(None),
+        "and no origin map"
+    );
+}
+
+/// Every `OS/2` field `MVAR` names, with the value the test writes there.
+fn os2_values() -> Vec<(Tag, usize, i32)> {
+    vec![
+        (*b"hasc", 68, 800),
+        (*b"hdsc", 70, -200),
+        (*b"hlgp", 72, 90),
+        (*b"hcla", 74, 950),
+        (*b"hcld", 76, 40_000),
+        (*b"xhgt", 86, 480),
+        (*b"cpht", 88, 700),
+        (*b"sbxs", 10, 650),
+        (*b"sbys", 12, 600),
+        (*b"sbxo", 14, -3),
+        (*b"sbyo", 16, 75),
+        (*b"spxs", 18, 651),
+        (*b"spys", 20, 601),
+        (*b"spxo", 22, 4),
+        (*b"spyo", 24, 350),
+        (*b"strs", 26, 50),
+        (*b"stro", 28, 250),
+    ]
+}
+
+/// The default every value tag has in the face the MVAR test builds; `None`
+/// for the `gasp` ranges it does not write.
+fn stated_default(tag: Tag) -> Option<i32> {
+    if let Some((_, _, value)) = os2_values().iter().find(|(t, _, _)| *t == tag) {
+        return Some(*value);
+    }
+    let others: [(Tag, i32); 13] = [
+        (*b"hcrs", 11),
+        (*b"hcrn", 12),
+        (*b"hcof", 13),
+        (*b"vasc", 880),
+        (*b"vdsc", -120),
+        (*b"vlgp", 30),
+        (*b"vcrs", 21),
+        (*b"vcrn", 22),
+        (*b"vcof", 23),
+        (*b"undo", -100),
+        (*b"unds", 50),
+        (*b"gsp0", 8),
+        (*b"gsp1", 16),
+    ];
+    if let Some((_, value)) = others.iter().find(|(t, _)| *t == tag) {
+        return Some(*value);
+    }
+    (tag == *b"gsp2").then_some(65_535)
+}
+
+/// The value records, in binary order of their tags.
+fn value_records() -> Vec<(Tag, u16, u16)> {
+    vec![
+        (*b"cpht", 1, 0),
+        (*b"gsp0", 0, 1),
+        (*b"gsp1", 4, 0),
+        (*b"hasc", 0, 2),
+        (*b"hcla", 2, 0),
+        (*b"hcrs", 1, 1),
+        (*b"hdsc", 0, 3),
+        (*b"stro", 1, 2),
+        (*b"undo", 2, 1),
+        (*b"unds", 4, 1),
+        (*b"vasc", 0, 4),
+        (*b"vcof", 0, 5),
+        (*b"xhgt", 3, 0),
+    ]
+}
+
+fn mvar_face() -> Vec<u8> {
+    let fields: Vec<(usize, u16)> = os2_values()
+        .iter()
+        .map(|(_, at, value)| (*at, *value as u16))
+        .collect();
+    Face::truetype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"OS/2", os2(&fields))
+        .with(*b"hhea", hhea(1, (11, 12, 13)))
+        .with(*b"vhea", vhea(1, (880, -120, 30), (21, 22, 23)))
+        .with(*b"post", post(-100, 50))
+        .with(*b"gasp", gasp(&[(8, 2), (16, 7), (0xFFFF, 15)]))
+        .with(*b"MVAR", mvar(&store_bytes(), &value_records()))
+        .build()
+}
+
+#[test]
+fn mvar_values_by_tag_likewise() {
+    let ranges = axis_ranges();
+    let face = mvar_face();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let mvar = Mvar::read(&sfnt, &space)
+        .expect("an MVAR")
+        .expect("it carries one");
+    let tags: Vec<Tag> = value_records().iter().map(|(tag, _, _)| *tag).collect();
+    assert_eq!(mvar.tags(), tags);
+    assert_eq!(
+        METRIC_FIELDS.len(),
+        38,
+        "the chapter's 28 metrics and ten ranges"
+    );
+    for field in METRIC_FIELDS {
+        assert_eq!(metric_default(&sfnt, field.tag), stated_default(field.tag));
+    }
+    for (instance, user) in metric_locations() {
+        let coordinates = spec::location(&ranges, &user);
+        let location = space.location(&instance).expect("a location");
+        for field in METRIC_FIELDS {
+            let record = value_records()
+                .into_iter()
+                .find(|(tag, _, _)| *tag == field.tag);
+            let value = mvar.value_at(&sfnt, field.tag, &location).expect("a value");
+            let Some(default) = stated_default(field.tag) else {
+                assert_eq!(value, None, "no default to vary");
+                continue;
+            };
+            let delta = record.map_or(0, |(_, outer, inner)| {
+                expected_delta(u32::from(outer), u32::from(inner), &coordinates)
+            });
+            assert_eq!(
+                value.map(Fixed::bits),
+                Some(i64::from(default) * 65_536 + delta),
+                "{} at {user:?}",
+                String::from_utf8_lossy(&field.tag)
+            );
+        }
+    }
+    // A tag no record names is constant, and one the chapter does not
+    // define has no default.
+    let location = Location::new(vec![16_384, 16_384]);
+    assert_eq!(mvar.delta(*b"hlgp", &mvar.scalars(&location)), Ok(None));
+    assert_eq!(mvar.index(*b"hlgp"), None);
+    assert_eq!(mvar.value_at(&sfnt, *b"ZZZZ", &location), Ok(None));
+    // A table with no records has no store and varies nothing.
+    let empty = variable_support::mvar(&store_bytes(), &[]);
+    let table = Mvar::parse(&empty, 2).expect("an empty MVAR");
+    assert!(table.store().is_none());
+    assert_eq!(
+        table.value_at(&sfnt, *b"hasc", &location),
+        Ok(Some(Fixed::from_int(800)))
+    );
+}
+
+#[test]
+fn hostile_metrics_tables_are_refused_by_name() {
+    let set = |bytes: &[u8], at: usize, value: &[u8]| {
+        let mut bytes = bytes.to_vec();
+        bytes[at..at + value.len()].copy_from_slice(value);
+        bytes
+    };
+    let good = hvar(&store_bytes(), None, None, None);
+    assert_eq!(
+        Hvar::parse(&set(&good, 0, &[0, 2]), 2).err(),
+        Some(VariationError::UnknownVersion {
+            table: *b"HVAR",
+            major: 2,
+            minor: 0
+        })
+    );
+    assert_eq!(
+        Hvar::parse(&good[..10], 2).err(),
+        Some(VariationError::HeaderPastEnd { table: *b"HVAR" })
+    );
+    assert_eq!(
+        Hvar::parse(&set(&good, 4, &[0, 0, 0, 0]), 2).err(),
+        Some(VariationError::NoStore { table: *b"HVAR" })
+    );
+    assert_eq!(
+        Hvar::parse(&good, 3).err(),
+        Some(VariationError::AxisCount {
+            table: *b"HVAR",
+            found: 2,
+            expected: 3
+        })
+    );
+    let format_one = hvar(
+        &store_bytes(),
+        Some(index_map(1, 2, 8, &[(0, 1)])),
+        None,
+        None,
+    );
+    assert_eq!(
+        Hvar::parse(&format_one, 2).err(),
+        Some(VariationError::MapFormatIn {
+            table: *b"HVAR",
+            format: 1
+        })
+    );
+    let vvar_table = vvar(&store_bytes(), None, None, None, None);
+    assert_eq!(
+        Vvar::parse(&vvar_table[..20], 2).err(),
+        Some(VariationError::HeaderPastEnd { table: *b"VVAR" })
+    );
+    assert_eq!(
+        Vvar::parse(&vvar_table, 1).err(),
+        Some(VariationError::AxisCount {
+            table: *b"VVAR",
+            found: 2,
+            expected: 1
+        })
+    );
+    let mvar_table = mvar(&store_bytes(), &value_records());
+    assert_eq!(
+        Mvar::parse(&set(&mvar_table, 6, &[0, 6]), 2).err(),
+        Some(VariationError::ValueRecordSize { size: 6 })
+    );
+    assert_eq!(
+        Mvar::parse(&mvar_table[..40], 2).err(),
+        Some(VariationError::ValueRecordsPastEnd { count: 13 })
+    );
+    assert_eq!(
+        Mvar::parse(&set(&mvar_table, 10, &[0, 0]), 2).err(),
+        Some(VariationError::NoStore { table: *b"MVAR" })
+    );
+    assert_eq!(
+        Mvar::parse(&mvar_table[..11], 2).err(),
+        Some(VariationError::HeaderPastEnd { table: *b"MVAR" })
+    );
+    // A record naming a delta set past the store is refused when read.
+    let past = mvar(&store_bytes(), &[(*b"hasc", 9, 0)]);
+    let table = Mvar::parse(&past, 2).expect("parses");
+    assert_eq!(
+        table.delta(*b"hasc", &table.scalars(&Location::new(vec![0, 0]))),
+        Err(VariationError::DeltaSetIndex { outer: 9, inner: 0 })
+    );
+}
+
+#[test]
+fn every_truncation_and_byte_change_of_a_metrics_table_is_read_or_refused_without_panicking() {
+    let location = Location::new(vec![6_144, -9_000]);
+    let hvar_table = hvar(
+        &store_bytes(),
+        Some(index_map(0, 4, 16, &advance_entries())),
+        Some(index_map(0, 2, 8, &left_entries())),
+        Some(index_map(0, 1, 3, &right_entries())),
+    );
+    let mvar_table = mvar(&store_bytes(), &value_records());
+    let mut variants: Vec<Vec<u8>> = Vec::new();
+    for cut in 0..=hvar_table.len() {
+        variants.push(hvar_table[..cut].to_vec());
+    }
+    for at in 0..hvar_table.len() {
+        for value in [0x00, 0x7F, 0x80, 0xFF] {
+            let mut bytes = hvar_table.clone();
+            bytes[at] = value;
+            variants.push(bytes);
+        }
+    }
+    for bytes in &variants {
+        if let Ok(hvar) = Hvar::parse(bytes, 2) {
+            let scalars = hvar.scalars(&location);
+            for glyph in 0..8 {
+                let _ = hvar.advance_delta(glyph, &scalars);
+                let _ = hvar.left_side_bearing_delta(glyph, &scalars);
+                let _ = hvar.right_side_bearing_delta(glyph, &scalars);
+            }
+        }
+        if let Ok(vvar) = Vvar::parse(bytes, 2) {
+            let scalars = vvar.scalars(&location);
+            for glyph in 0..8 {
+                let _ = vvar.advance_delta(glyph, &scalars);
+                let _ = vvar.origin_delta(glyph, &scalars);
+            }
+        }
+    }
+    for cut in 0..=mvar_table.len() {
+        if let Ok(mvar) = Mvar::parse(&mvar_table[..cut], 2) {
+            let scalars = mvar.scalars(&location);
+            for field in METRIC_FIELDS {
+                let _ = mvar.delta(field.tag, &scalars);
+            }
+        }
+    }
+    for at in 0..mvar_table.len() {
+        for value in [0x00, 0x7F, 0x80, 0xFF] {
+            let mut bytes = mvar_table.clone();
+            bytes[at] = value;
+            if let Ok(mvar) = Mvar::parse(&bytes, 2) {
+                let scalars = mvar.scalars(&location);
+                for field in METRIC_FIELDS {
+                    let _ = mvar.delta(field.tag, &scalars);
+                }
+                let _ = mvar.tags();
+            }
+        }
+    }
 }
