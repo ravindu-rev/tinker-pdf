@@ -28,7 +28,7 @@ recorded in the roadmap row it closes:
 | The gates — fmt, clippy, the tests, the determinism and shaping fingerprints, the examples, `cargo xtask check` | `python3 -I tools/gates.py` |
 | Fuzzing, on Linux | `cargo fuzz build`, then each target's binary under its `fuzz/limits.tsv` row, `-max_total_time=20 -timeout=20`, as *Never panic, fuzz-enforced* gives it |
 | The fuzzing service's build, on Linux | `fuzz/service/Dockerfile`'s image built over `git archive HEAD`, its `compile` run, then `cargo xtask fuzz --service-out DIR` (`fuzz/README.md`) |
-| The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner |
+| The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner, and `determinism.rs` again with `--features hyphenation` |
 | Native against wasm, over fuzz corpora | `wasm_parity.rs` natively, then on `wasm32-wasip1` under wasmtime granted the same documents and held to the native list ("Native against wasm") |
 | The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
 | The benches | `cargo bench -p tinker-pdf`, then `cargo xtask bench-check --machine NAME` |
@@ -370,7 +370,10 @@ an ink floor and an `UnreadableFont` guard, so a fixture that draws nothing
 fails rather than becoming a baseline. The analytic tier's own pages are among
 them, hashed through the same builders `render_analytic.rs` evaluates them
 with, so the page a formula adjudicates and the page a hash covers are one
-document. Details, and which targets are measured versus claimed, are in
+document. One page, the hyphenated book's, needs the `hyphenation` feature's
+dictionaries, so the file runs twice on each target, without the feature and
+with it, and the gates' `determinism` gate runs both. Details, and which
+targets are measured versus claimed, are in
 [features/determinism.md](features/determinism.md).
 
 ### Native against wasm

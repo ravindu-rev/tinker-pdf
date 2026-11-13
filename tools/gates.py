@@ -4,7 +4,8 @@ usage: python3 -I tools/gates.py [GATE ...] [--first] [--log DIR] [--list]
 
 The gates are a change's local proof, in this order: fmt; clippy; the
 workspace's tests; the determinism and shaping fingerprints, with the lines
-that say they ran; the font crate and the facade without default features;
+that say they ran, the determinism ones again with `hyphenation`, whose page
+needs the dictionaries; the font crate and the facade without default features;
 the facade with `bundled-fonts`, and its clippy; the seven examples, each
 with the line it must print; and `xtask check`. CI runs the test gates alone,
 on pull requests (`.github/workflows/ci.yml`). Name gates to run only those.
@@ -48,6 +49,8 @@ GATES = [
     ('clippy', [(['cargo', 'clippy', '--workspace', '--all-targets', '--', '-D', 'warnings'], [], False)]),
     ('test', [(['cargo', 'test', '--workspace'], [], False)]),
     ('determinism', [(['cargo', 'test', '-p', 'tinker-pdf', '--test', 'determinism'],
+                      [r'test result: ok\. [1-9][0-9]* passed', r'rendering_is_stable_across_targets [.]{3} ok'], False),
+                     (['cargo', 'test', '-p', 'tinker-pdf', '--features', 'hyphenation', '--test', 'determinism'],
                       [r'test result: ok\. [1-9][0-9]* passed', r'rendering_is_stable_across_targets [.]{3} ok'], False)]),
     ('shaping', [(['cargo', 'test', '-p', 'tinker-pdf-shape', '--test', 'fingerprints'],
                   [r'test result: ok\. [1-9][0-9]* passed', r'shaping_is_stable_across_targets [.]{3} ok',

@@ -57,7 +57,8 @@ each page of its table — `text`, `curves`, `shading`, `pattern`, `optional`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
 `analytic_image`, `default_spaces`, `gs_text`, `strokes`, `bilevel`, `icc`,
 `jpeg_minified`, `jpx_minified`, `intents`, `substituted_cjk`,
-`substituted_symbols`, `multiple_master` — each a hash of
+`substituted_symbols`, `multiple_master`, and in a build with the
+`hyphenation` feature `hyphenation` — each a hash of
 rendered pixels
 plus the page dimensions and
 ink counts it is computed from. `strokes` is the stroker's whole pen: the
@@ -122,6 +123,17 @@ the program's maps, the masters weighted by their corners and blended by the
 blend othersubrs ([fonts](fonts.md)), so the instance is one picture on every
 target; `multiple_master.rs` holds the same page to a plain Type 1 twin drawn
 from the instance's outlines.
+`hyphenation` is the first page of a book generated in the test, one
+chapter in British English whose paragraph of long words is set in
+`hyphens: auto`, opened at 288 × 360 points: its lines break at the vendored
+`en-GB` dictionary's points ([design/hyphenation.md](../design/hyphenation.md))
+and draw a hyphen there, so the trie's walk, the points joined to the line
+breaker's opportunities and the hyphen at a line's end are one picture on
+every target. Its text holds no hyphen of its own, and the fixture asserts
+that at least one of the page's lines ends in one, at an automatic point,
+before it is hashed. It needs the dictionaries, so the page, and its entry
+in each of the file's tables, exist only in a build with the feature, and
+the file is run once without it and once with it on every target.
 
 The `analytic_` pages are a different kind of fixture from the rest: their
 pixels have a **closed-form right answer**, which
@@ -276,7 +288,10 @@ reflowable book, whose pagination is a function of the open options.
 CI's tests measure the two native targets on every pull request. The
 `wasm32-wasip1` run is local proof, made by whoever changes what a fingerprint
 covers: each fingerprint test built with `--target wasm32-wasip1` and run with
-wasmtime as the runner. `aarch64-apple-darwin` is run nowhere, so on it the
+wasmtime as the runner, and `determinism.rs` once more with `--features
+hyphenation`, as the gates' `determinism` gate runs it natively. CI's tests
+build no `hyphenation`, so the `hyphenation` page is held on every target by
+those local runs. `aarch64-apple-darwin` is run nowhere, so on it the
 contract is claimed. Between them the three measured targets vary everything
 below the arithmetic — a different `std`, allocator and linker — and
 `wasm32-wasip1` varies width as well: 64-bit against 32-bit, where a `usize`

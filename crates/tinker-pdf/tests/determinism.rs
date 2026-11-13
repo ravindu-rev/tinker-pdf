@@ -108,6 +108,18 @@ enum Open {
     /// ZapfDingbats fonts embed nothing, drawn by each code's glyph name
     /// (`docs/design/symbol-faces.md`).
     Symbolic,
+    /// [`Open::Book`], for a book set in `hyphens: auto` whose text holds no
+    /// hyphen of its own: [`opened`] holds the page at `at` to ending at
+    /// least one line at an automatic point
+    /// ([`assert_a_line_ends_at_an_automatic_point`]) before anything hashes
+    /// it. Built with the `hyphenation` feature, whose dictionaries it needs.
+    #[cfg(feature = "hyphenation")]
+    Hyphenated {
+        /// The page box in points, which decides the page count.
+        page: (f64, f64),
+        /// Which page is hashed.
+        at: u32,
+    },
 }
 
 /// A named page: how to build it, and the least ink it may draw.
@@ -201,6 +213,19 @@ fn opened(fixture: &Fixture) -> (Document, u32) {
             ),
             0,
         ),
+        #[cfg(feature = "hyphenation")]
+        Open::Hyphenated { page, at } => {
+            let document = converted(
+                "opened",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::at_page(page.0, page.1).with_fonts(book_face()),
+                )
+                .expect("it opens"),
+            );
+            assert_a_line_ends_at_an_automatic_point(fixture, &document, at);
+            (document, at)
+        }
     }
 }
 
@@ -1848,6 +1873,143 @@ fn epub_book() -> Vec<u8> {
     include_bytes!("epub/pandoc-book-cover.epub").to_vec()
 }
 
+/// The long words of [`hyphenated_text`]: British English of twelve letters
+/// and more, each ASCII and none holding a hyphen, so a line whose last word
+/// does not fit has letters enough to break inside it.
+#[cfg(feature = "hyphenation")]
+const LONG_WORDS: [&str; 16] = [
+    "accommodation",
+    "administration",
+    "characteristic",
+    "communication",
+    "consideration",
+    "environmental",
+    "establishment",
+    "extraordinary",
+    "independently",
+    "international",
+    "investigation",
+    "neighbourhood",
+    "organisation",
+    "particularly",
+    "responsibility",
+    "understanding",
+];
+
+/// The short words [`hyphenated_text`] sets between the long ones.
+#[cfg(feature = "hyphenation")]
+const SHORT_WORDS: [&str; 8] = ["the", "of", "and", "in", "with", "for", "an", "by"];
+
+/// The text of [`hyphenated_book`]'s one paragraph: sixty pairs of a long
+/// word and a short one, in sentences of six pairs, the long words stepping
+/// through [`LONG_WORDS`] by seven and the short through [`SHORT_WORDS`] by
+/// three, so it is one text on every target. It holds no hyphen and no soft
+/// hyphen, which [`hyphenated_book`] asserts: a line of its page that ends
+/// in a hyphen ends at an automatic point.
+#[cfg(feature = "hyphenation")]
+fn hyphenated_text() -> String {
+    let mut text = String::new();
+    for i in 0..60 {
+        let long = LONG_WORDS[(i * 7) % LONG_WORDS.len()];
+        if i % 6 == 0 {
+            if i > 0 {
+                text.push_str(". ");
+            }
+            let mut letters = long.chars();
+            if let Some(first) = letters.next() {
+                text.extend(first.to_uppercase());
+                text.push_str(letters.as_str());
+            }
+        } else {
+            text.push(' ');
+            text.push_str(long);
+        }
+        text.push(' ');
+        text.push_str(SHORT_WORDS[(i * 3) % SHORT_WORDS.len()]);
+    }
+    text.push('.');
+    text
+}
+
+/// **A page of a generated book set in `hyphens: auto`** (`css-text-3` §5.3,
+/// FT-15.7): one chapter in British English, `xml:lang="en-GB"` on its root,
+/// whose one paragraph, [`hyphenated_text`], its stylesheet sets in
+/// `hyphens: auto`, so the vendored `en-GB` dictionary's points are break
+/// opportunities and a line whose last word does not fit breaks inside it,
+/// at a point, and draws a hyphen there.
+///
+/// A ZIP of stored entries, as [`cbz_page`]'s is, so the book's bytes are
+/// literals and checksums and no encoder's output. It embeds no face, so its
+/// lines break by the standard 14's metrics and its glyphs are drawn by
+/// [`book_face`], as the `epub` fixture's are; opened at 288 x 360 points
+/// (`Open::Hyphenated`), its paragraph runs onto a second page, so the page
+/// hashed, the first, is full of lines.
+#[cfg(feature = "hyphenation")]
+fn hyphenated_book() -> Vec<u8> {
+    let text = hyphenated_text();
+    assert!(
+        !text.contains('-') && !text.contains('\u{AD}'),
+        "the book's text holds a hyphen of its own, so a line ending in one \
+         would not say that the line broke at an automatic point"
+    );
+    let container = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">"#,
+        r#"<rootfiles><rootfile full-path="EPUB/content.opf" "#,
+        r#"media-type="application/oebps-package+xml"/></rootfiles></container>"#
+    );
+    let package = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+        r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+        r#"<dc:identifier id="pub-id">urn:uuid:1f0c2c1e-0000-4000-8000-0000000000d1</dc:identifier>"#,
+        r#"<dc:title>A Hyphenated Book</dc:title><dc:language>en-GB</dc:language>"#,
+        r#"</metadata><manifest>"#,
+        r#"<item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/>"#,
+        r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+    );
+    let chapter = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en-GB"><head>"#,
+            r#"<title>A Hyphenated Chapter</title><style>p {{ hyphens: auto }}</style>"#,
+            r#"</head><body><p>{text}</p></body></html>"#
+        ),
+        text = text
+    );
+    zip_archive(&[
+        ("mimetype", b"application/epub+zip".to_vec()),
+        ("META-INF/container.xml", container.as_bytes().to_vec()),
+        ("EPUB/content.opf", package.as_bytes().to_vec()),
+        ("EPUB/chapter.xhtml", chapter.into_bytes()),
+    ])
+}
+
+/// The page at `at` of an [`Open::Hyphenated`] fixture ends at least one of
+/// its lines in a hyphen. Its book's text holds none, nor a soft hyphen, so
+/// each line that does ends at an automatic point, drawn and read back as
+/// U+002D (`docs/design/hyphenation.md`): the fixture's fingerprint is about
+/// hyphenation, and a build whose dictionaries stopped breaking words fails
+/// here before its page is hashed.
+#[cfg(feature = "hyphenation")]
+#[track_caller]
+fn assert_a_line_ends_at_an_automatic_point(fixture: &Fixture, document: &Document, at: u32) {
+    let text = document.page(at).expect("a page").text();
+    let lines: Vec<String> = text
+        .lines()
+        .iter()
+        .map(|line| line.text.trim_end().to_string())
+        .collect();
+    let automatic = lines.iter().filter(|line| line.ends_with('-')).count();
+    assert!(
+        automatic > 0,
+        "the {} fixture's page {at} ends none of its {} lines at an automatic \
+         point, so its fingerprint is not about hyphenation. Its lines: {lines:?}",
+        fixture.name,
+        lines.len(),
+    );
+}
+
 /// Default colour spaces (8.6.5.6): a page whose device colours are drawn
 /// through the defaults its `/ColorSpace` names.
 ///
@@ -2677,6 +2839,26 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 300,
     },
+    // A page of a generated book set in `hyphens: auto` in British English
+    // (FT-15.7, `hyphenated_book`), in a build with the dictionaries: its
+    // lines broken at the `en-GB` dictionary's points, and at least one of
+    // them ending at one, which `opened` asserts before the page is hashed.
+    // About twenty lines of some forty characters fill its 216 x 288 pt of
+    // text, and a page of running text in this face paints some sixteen
+    // pixels a character (the `epub` page's density), so the floor is under
+    // a third of that: a page that stops laying out its paragraph lands
+    // under it, and one laid out with no hyphen keeps its ink and fails the
+    // line-end assertion instead.
+    #[cfg(feature = "hyphenation")]
+    Fixture {
+        name: "hyphenation",
+        build: hyphenated_book,
+        open: Open::Hyphenated {
+            page: (288.0, 360.0),
+            at: 0,
+        },
+        least_ink: 4_000,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2935,6 +3117,13 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // An `/MMType1` font's embedded multiple-master program drawn at the
     // instance its name gives, on every target.
     ("multiple_master", ""),
+    // A page of a generated book set in `hyphens: auto` in British English,
+    // its lines broken at the vendored `en-GB` dictionary's points (FT-15.7):
+    // the trie walk, the points joined to UAX #14's opportunities and the
+    // hyphen drawn at a line's end, on every target. Held in a build with the
+    // `hyphenation` feature, which the page needs; its value is a run's.
+    #[cfg(feature = "hyphenation")]
+    ("hyphenation", ""),
 ];
 
 #[test]
@@ -3324,6 +3513,8 @@ fn svg_output_is_stable_across_targets() {
         ("substituted_cjk", ""),
         ("substituted_symbols", ""),
         ("multiple_master", ""),
+        #[cfg(feature = "hyphenation")]
+        ("hyphenation", ""),
     ];
     assert_eq!(
         expected.len(),
@@ -3713,6 +3904,8 @@ const MARK_BOXES: &[(&str, &str)] = &[
     ("substituted_cjk", ""),
     ("substituted_symbols", ""),
     ("multiple_master", ""),
+    #[cfg(feature = "hyphenation")]
+    ("hyphenation", ""),
 ];
 
 /// **The page analysis's box is the same number on every target.** The box is
@@ -3957,6 +4150,8 @@ const COMMAND_STREAMS: &[(&str, &str)] = &[
     ("substituted_cjk", ""),
     ("substituted_symbols", ""),
     ("multiple_master", ""),
+    #[cfg(feature = "hyphenation")]
+    ("hyphenation", ""),
 ];
 
 /// **The command stream is the same bytes on every target** (RC-18.4): every
@@ -4236,6 +4431,20 @@ fn opened_under(fixture: &Fixture, limits: CacheLimits) -> (Document, u32) {
                 .expect("it opens"),
             ),
             0,
+        ),
+        #[cfg(feature = "hyphenation")]
+        Open::Hyphenated { page, at } => (
+            converted(
+                "opened under a budget",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::at_page(page.0, page.1)
+                        .with_fonts(book_face())
+                        .with_cache_limits(limits),
+                )
+                .expect("it opens"),
+            ),
+            at,
         ),
     }
 }
