@@ -17,6 +17,7 @@ pub(crate) fn hex_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (Vec
     let mut complete = false;
 
     for (i, &b) in input.iter().enumerate() {
+        w.step_by(1);
         if b == b'>' {
             // 7.4.2: a final odd digit is taken as if followed by a zero.
             if let Some(h) = half.take() {
@@ -84,6 +85,7 @@ pub(crate) fn a85_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (Vec
 
     while let Some(&b) = input.get(i) {
         i += 1;
+        w.step_by(1);
         if b == b'~' {
             // 7.4.3: the EOD is "~>"; a lone '~' still ends the data. White
             // space after the marker is the stream's end-of-line only where

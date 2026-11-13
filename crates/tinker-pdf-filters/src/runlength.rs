@@ -8,6 +8,7 @@ pub(crate) fn rle_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (Vec
 
     while let Some(&tag) = input.get(i) {
         i += 1;
+        w.step_by(1);
         // 7.4.5: 128 is EOD, 0..=127 a literal run of tag+1, 129..=255 a
         // repeat of the next byte 257-tag times.
         if tag == 128 {

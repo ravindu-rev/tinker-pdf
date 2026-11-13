@@ -68,17 +68,17 @@ mod xxhash;
 
 use core::fmt;
 
-pub use bmp::{bmp_decode, BmpError, BmpImage, MAX_BMP_SAMPLES};
-pub use brotli::{brotli_decode, BrotliError};
+pub use bmp::{bmp_decode, bmp_decode_counted, BmpError, BmpImage, MAX_BMP_SAMPLES};
+pub use brotli::{brotli_decode, brotli_decode_counted, BrotliError};
 pub use ccitt::{
-    decode as ccitt_decode, g4_encode as ccitt_g4_encode, CcittEncodeError, CcittParams,
-    CcittSource, T6Rows,
+    decode as ccitt_decode, decode_counted as ccitt_decode_counted, g4_encode as ccitt_g4_encode,
+    CcittEncodeError, CcittParams, CcittSource, T6Rows,
 };
 pub use crc32::{crc32, Crc32};
 pub use deflate::{
     deflate, deflate_at, zlib_compress, zlib_compress_at, DeflateLevel, Deflater, ZlibDeflater,
 };
-pub use gif::{gif_decode, GifError, GifImage, MAX_GIF_SAMPLES};
+pub use gif::{gif_decode, gif_decode_counted, GifError, GifImage, MAX_GIF_SAMPLES};
 pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{
     decode as jbig2_decode, decode_attributed as jbig2_decode_attributed,
@@ -101,16 +101,16 @@ pub use jxr::{
 };
 pub use mq::{encoder::MqEncoder, MqContext, MqContexts, MqDecoder};
 pub use png::{
-    colour_type_depth_is_legal, png_decode, png_encode, png_encode_counted, png_scan, ChunkType,
-    PngColour, PngEncodeError, PngError, PngHeader, PngHeld, PngImage, PngScan, PngSource,
-    PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
+    colour_type_depth_is_legal, png_decode, png_decode_counted, png_encode, png_encode_counted,
+    png_scan, ChunkType, PngColour, PngEncodeError, PngError, PngHeader, PngHeld, PngImage,
+    PngScan, PngSource, PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
 pub use raster::ImagePixels;
 pub use tiff::{
-    tiff_decode, tiff_scan, tiff_scan_directory, TiffCcitt, TiffColour, TiffCompression, TiffError,
-    TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffSampleFormat,
-    TiffSampleRange, TiffScan, MAX_TIFF_SAMPLES,
+    tiff_decode, tiff_decode_counted, tiff_scan, tiff_scan_directory, TiffCcitt, TiffColour,
+    TiffCompression, TiffError, TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution,
+    TiffSampleFormat, TiffSampleRange, TiffScan, MAX_TIFF_SAMPLES,
 };
 pub use webp::{webp_decode, WebpError, WebpImage, MAX_WEBP_SAMPLES};
 pub use xxhash::xxh64;
@@ -622,9 +622,15 @@ impl Tail {
 /// Deduplicating warning sink. Keeps first-occurrence order and bounds the
 /// vector by the size of the `Warning` set, so a pathological stream cannot
 /// turn leniency into an allocation attack.
+///
+/// It is the decode path's one context, so it also counts the steps the
+/// decode took (`docs/design/resource-exhaustion.md`, "The counters"): each
+/// decoder adds a step where it reads a symbol, a code, a row or a byte, and
+/// a counted door hands the total back with what it decoded.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Warnings {
     list: Vec<Warning>,
+    steps: u64,
 }
 
 impl Warnings {
@@ -634,10 +640,28 @@ impl Warnings {
         }
     }
 
+    /// Both lists of warnings, and both counts of steps: a decode run on a
+    /// sink of its own is this one's work all the same.
     pub(crate) fn merge(&mut self, other: &Self) {
         for w in &other.list {
             self.push(*w);
         }
+        self.step_by(other.steps);
+    }
+
+    /// `n` steps more, saturating.
+    pub(crate) fn step_by(&mut self, n: u64) {
+        self.steps = self.steps.saturating_add(n);
+    }
+
+    /// `n` bytes or entries more, as steps.
+    pub(crate) fn step_len(&mut self, n: usize) {
+        self.step_by(u64::try_from(n).unwrap_or(u64::MAX));
+    }
+
+    /// The steps counted so far.
+    pub(crate) fn steps(&self) -> u64 {
+        self.steps
     }
 
     pub(crate) fn into_vec(self) -> Vec<Warning> {
@@ -769,9 +793,21 @@ pub fn flate_decode(
     limits: &Limits,
     predictor: Option<&PredictorParams>,
 ) -> Result<Decoded, FilterError> {
+    flate_decode_counted(input, limits, predictor).0
+}
+
+/// [`flate_decode`], and the steps it took
+/// (`docs/design/resource-exhaustion.md`, "The counters"): a step for each
+/// symbol, header field and code length the inflater read, each byte the
+/// predictor unfiltered, and each byte the decode returned.
+pub fn flate_decode_counted(
+    input: &[u8],
+    limits: &Limits,
+    predictor: Option<&PredictorParams>,
+) -> (Result<Decoded, FilterError>, u64) {
     let mut w = Warnings::default();
     let (data, complete) = inflate::flate_bytes(input, limits, Tail::WhiteSpace, &mut w);
-    finish(data, complete, predictor, limits, w)
+    finish_counted(data, complete, predictor, limits, w)
 }
 
 /// LZWDecode (7.4.4), then the predictor if one was given.
@@ -787,45 +823,77 @@ pub fn lzw_decode(
     early_change: bool,
     predictor: Option<&PredictorParams>,
 ) -> Result<Decoded, FilterError> {
+    lzw_decode_counted(input, limits, early_change, predictor).0
+}
+
+/// [`lzw_decode`], and the steps it took: a step for each code read, each
+/// byte of the string it expands to, each byte the predictor unfiltered, and
+/// each byte the decode returned.
+pub fn lzw_decode_counted(
+    input: &[u8],
+    limits: &Limits,
+    early_change: bool,
+    predictor: Option<&PredictorParams>,
+) -> (Result<Decoded, FilterError>, u64) {
     let mut w = Warnings::default();
     let (data, complete) = lzw::lzw_bytes(input, limits, early_change, Tail::WhiteSpace, &mut w);
-    finish(data, complete, predictor, limits, w)
+    finish_counted(data, complete, predictor, limits, w)
 }
 
 /// ASCIIHexDecode (7.4.2).
 #[must_use]
 pub fn ascii_hex_decode(input: &[u8], limits: &Limits) -> Decoded {
+    ascii_hex_decode_counted(input, limits).0
+}
+
+/// [`ascii_hex_decode`], and the steps it took: a step for each byte read
+/// and each byte returned.
+pub fn ascii_hex_decode_counted(input: &[u8], limits: &Limits) -> (Decoded, u64) {
     let mut w = Warnings::default();
     let (data, complete) = ascii::hex_bytes(input, limits, &mut w);
-    Decoded {
-        data,
-        complete,
-        warnings: w.into_vec(),
-    }
+    decoded_counted(data, complete, w)
+}
+
+/// What a decode returned, and its steps with a step for each byte of it.
+fn decoded_counted(data: Vec<u8>, complete: bool, mut w: Warnings) -> (Decoded, u64) {
+    w.step_len(data.len());
+    let steps = w.steps();
+    (
+        Decoded {
+            data,
+            complete,
+            warnings: w.into_vec(),
+        },
+        steps,
+    )
 }
 
 /// ASCII85Decode (7.4.3).
 #[must_use]
 pub fn ascii85_decode(input: &[u8], limits: &Limits) -> Decoded {
+    ascii85_decode_counted(input, limits).0
+}
+
+/// [`ascii85_decode`], and the steps it took: a step for each byte read and
+/// each byte returned.
+pub fn ascii85_decode_counted(input: &[u8], limits: &Limits) -> (Decoded, u64) {
     let mut w = Warnings::default();
     let (data, complete) = ascii::a85_bytes(input, limits, &mut w);
-    Decoded {
-        data,
-        complete,
-        warnings: w.into_vec(),
-    }
+    decoded_counted(data, complete, w)
 }
 
 /// RunLengthDecode (7.4.5).
 #[must_use]
 pub fn run_length_decode(input: &[u8], limits: &Limits) -> Decoded {
+    run_length_decode_counted(input, limits).0
+}
+
+/// [`run_length_decode`], and the steps it took: a step for each length byte
+/// read and each byte returned.
+pub fn run_length_decode_counted(input: &[u8], limits: &Limits) -> (Decoded, u64) {
     let mut w = Warnings::default();
     let (data, complete) = runlength::rle_bytes(input, limits, &mut w);
-    Decoded {
-        data,
-        complete,
-        warnings: w.into_vec(),
-    }
+    decoded_counted(data, complete, w)
 }
 
 /// PackBits (TIFF 6.0 §9), the run-length scheme TIFF compression 32773 names.
@@ -856,13 +924,24 @@ pub fn predictor_decode(
     params: &PredictorParams,
     limits: &Limits,
 ) -> Result<Decoded, FilterError> {
+    predictor_decode_counted(input, params, limits).0
+}
+
+/// [`predictor_decode`], and the steps it took: a step for each byte a row
+/// unfiltered and each byte returned.
+pub fn predictor_decode_counted(
+    input: &[u8],
+    params: &PredictorParams,
+    limits: &Limits,
+) -> (Result<Decoded, FilterError>, u64) {
     let mut w = Warnings::default();
-    let (data, complete) = predictors::unpredict(input, params, limits, &mut w)?;
-    Ok(Decoded {
-        data,
-        complete,
-        warnings: w.into_vec(),
-    })
+    match predictors::unpredict(input, params, limits, &mut w) {
+        Ok((data, complete)) => {
+            let (decoded, steps) = decoded_counted(data, complete, w);
+            (Ok(decoded), steps)
+        }
+        Err(e) => (Err(e), w.steps()),
+    }
 }
 
 /// Runs a `/Filter` chain in order.
@@ -965,19 +1044,22 @@ fn stage_predictor(
     }
 }
 
-fn finish(
+/// What a decode returned, its predictor applied, and the steps of both, a
+/// step for each byte returned among them.
+fn finish_counted(
     data: Vec<u8>,
     complete: bool,
     predictor: Option<&PredictorParams>,
     limits: &Limits,
     mut w: Warnings,
-) -> Result<Decoded, FilterError> {
-    let (data, complete) = stage_predictor(data, complete, predictor, limits, &mut w)?;
-    Ok(Decoded {
-        data,
-        complete,
-        warnings: w.into_vec(),
-    })
+) -> (Result<Decoded, FilterError>, u64) {
+    match stage_predictor(data, complete, predictor, limits, &mut w) {
+        Ok((data, complete)) => {
+            let (decoded, steps) = decoded_counted(data, complete, w);
+            (Ok(decoded), steps)
+        }
+        Err(e) => (Err(e), w.steps()),
+    }
 }
 
 #[cfg(test)]

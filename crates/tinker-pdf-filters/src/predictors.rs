@@ -167,6 +167,7 @@ fn png(input: &[u8], g: &Geometry, limits: &Limits, w: &mut Warnings) -> (Vec<u8
 
 fn unfilter(tag: u8, cur: &mut [u8], prev: &[u8], bpp: usize, w: &mut Warnings) {
     let n = cur.len();
+    w.step_len(n);
     match tag {
         0 => {}
         1 => {
@@ -245,6 +246,7 @@ fn tiff(input: &[u8], g: &Geometry, limits: &Limits, w: &mut Warnings) -> (Vec<u
         pos += avail;
         if let Some(r) = row.get_mut(..avail) {
             tiff_row(r, g);
+            w.step_len(avail);
         }
 
         let room = limits.max_output.saturating_sub(out.len());

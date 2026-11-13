@@ -30,6 +30,7 @@ pub(crate) fn lzw_bytes(
     let mut prev: Option<u16> = None;
 
     loop {
+        w.step_by(1);
         let Some(code) = read_code(input, bitpos, total_bits, width) else {
             w.push(Warning::EarlyEod);
             return (out, false);
@@ -81,6 +82,7 @@ pub(crate) fn lzw_bytes(
             return (out, false);
         }
 
+        w.step_len(scratch.len());
         let room = limits.max_output.saturating_sub(out.len());
         let n = scratch.len().min(room);
         if let Some(s) = scratch.get(..n) {
@@ -114,6 +116,8 @@ pub(crate) fn lzw_bytes(
 
 /// Walks a code's chain into `scratch`, in order. `false` means the chain is
 /// broken or cyclic.
+/// Each byte of the string is a step its caller counts by the string's
+/// length.
 fn expand(code: u16, prefix: &[u16], suffix: &[u8], scratch: &mut Vec<u8>) -> bool {
     scratch.clear();
     let mut c = code;

@@ -336,11 +336,16 @@ fn after(changes: &[usize], at: isize, columns: usize) -> usize {
 fn encode_row(bits: &mut BitWriter, current: &[usize], reference: &[usize], columns: usize) {
     let mut a0: isize = -1;
     let mut white = true;
+    // The decoder's own cursor over the reference line, so the two searches
+    // agree and neither restarts from the line's start at every code.
+    let mut passed = super::Passed::default();
+    let steps = &mut 0u64;
 
     loop {
         let a1 = after(current, a0, columns);
-        let b1 = next_change(reference, a0, white, columns);
-        let b2 = super::following(reference, b1, columns);
+        passed.reach(reference, a0, steps);
+        let b1 = next_change(reference, a0, white, columns, passed.start, steps);
+        let b2 = super::following(reference, b1, columns, passed.start, steps);
 
         if b2 < a1 {
             // Pass. a0 moves to the element under b2 and the colour does not

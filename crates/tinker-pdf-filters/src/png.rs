@@ -102,7 +102,7 @@
 //! hostile file and the other is serialising a buffer that already exists.
 
 use crate::crc32::Crc32;
-use crate::{inflate, predictor_decode, Limits, PredictorParams, Tail, Warning, Warnings};
+use crate::{inflate, predictor_decode_counted, Limits, PredictorParams, Tail, Warning, Warnings};
 
 mod encode;
 
@@ -762,6 +762,20 @@ pub fn png_decode(input: &[u8], limits: &Limits) -> Result<PngImage, PngError> {
     png_scan(input)?.decode(limits)
 }
 
+/// [`png_decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): a byte for each one of IDAT data the chunk walk gathered,
+/// and what [`PngScan::decode_counted`] counts.
+pub fn png_decode_counted(input: &[u8], limits: &Limits) -> (Result<PngImage, PngError>, u64) {
+    match png_scan(input) {
+        Ok(scan) => {
+            let (image, steps) = scan.decode_counted(limits);
+            let gathered = u64::try_from(scan.idat.len()).unwrap_or(u64::MAX);
+            (image, steps.saturating_add(gathered))
+        }
+        Err(e) => (Err(e), 0),
+    }
+}
+
 /// The output raster, plus everything needed to address a pixel in it.
 struct Raster<'a> {
     data: &'a mut [u8],
@@ -782,6 +796,19 @@ impl PngScan {
     /// caller's ceiling. Damaged *data* never errors here: the IDAT has already
     /// been found, so what remains is degradation (ruling 2).
     pub fn decode(&self, limits: &Limits) -> Result<PngImage, PngError> {
+        self.decode_counted(limits).0
+    }
+
+    /// [`PngScan::decode`], and the steps it took: each symbol the inflater
+    /// read, each byte a row unfiltered, each row placed and each byte of the
+    /// raster returned.
+    pub fn decode_counted(&self, limits: &Limits) -> (Result<PngImage, PngError>, u64) {
+        let mut steps = 0u64;
+        let image = self.decode_with(limits, &mut steps);
+        (image, steps)
+    }
+
+    fn decode_with(&self, limits: &Limits, steps: &mut u64) -> Result<PngImage, PngError> {
         let h = self.header;
         let mut w = Warnings::default();
         for &warning in &self.warnings {
@@ -886,7 +913,9 @@ impl PngScan {
             let row_cap = Limits::new(
                 usize::try_from(row_bytes.saturating_mul(u64::from(ph))).unwrap_or(usize::MAX),
             );
-            let Ok(rows) = predictor_decode(slice, &params, &row_cap) else {
+            let (rows, unfiltered) = predictor_decode_counted(slice, &params, &row_cap);
+            w.step_by(unfiltered);
+            let Ok(rows) = rows else {
                 // Unreachable for a header this crate accepted: /Colors and
                 // /Columns are both at least one and /BitsPerComponent is one
                 // of Table 11.1's five. Degrading on a surprise is still
@@ -901,6 +930,8 @@ impl PngScan {
             self.place(pass, pw, ph, &rows.data, &mut raster, &mut w);
         }
 
+        w.step_len(data.len());
+        *steps = w.steps();
         Ok(PngImage {
             width: h.width,
             height: h.height,
@@ -958,6 +989,7 @@ impl PngScan {
         let pixel_stride = raster.colour.components() as usize * raster.bpc;
 
         for y in 0..pass_height {
+            w.step_by(1);
             let off = (y as usize).saturating_mul(row_bytes);
             let end = off.saturating_add(row_bytes).min(rows.len());
             if off >= end {

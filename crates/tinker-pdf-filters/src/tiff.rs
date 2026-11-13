@@ -650,6 +650,15 @@ pub fn tiff_decode(bytes: &[u8], limits: &Limits) -> Result<TiffImage, TiffError
     tiff_scan(bytes)?.decode(limits)
 }
 
+/// [`tiff_decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): what [`TiffScan::decode_counted`] counts.
+pub fn tiff_decode_counted(bytes: &[u8], limits: &Limits) -> (Result<TiffImage, TiffError>, u64) {
+    match tiff_scan(bytes) {
+        Ok(scan) => scan.decode_counted(limits),
+        Err(e) => (Err(e), 0),
+    }
+}
+
 /// Reads the header and the first image file directory, and finds every strip
 /// or tile, **without decompressing any of them**.
 ///
@@ -736,6 +745,19 @@ impl TiffScan<'_> {
     /// caller's ceiling. Damaged *data* never errors here: the segments have
     /// been found, so what remains is degradation (ruling 2).
     pub fn decode(&self, limits: &Limits) -> Result<TiffImage, TiffError> {
+        self.decode_counted(limits).0
+    }
+
+    /// [`TiffScan::decode`], and the steps it took: each strip or tile
+    /// placed, the steps of the filter each was decompressed through, each
+    /// byte a predictor unfiltered and each byte of the raster returned.
+    pub fn decode_counted(&self, limits: &Limits) -> (Result<TiffImage, TiffError>, u64) {
+        let mut steps = 0u64;
+        let image = self.decode_with(limits, &mut steps);
+        (image, steps)
+    }
+
+    fn decode_with(&self, limits: &Limits, steps: &mut u64) -> Result<TiffImage, TiffError> {
         let mut w = Warnings::default();
         for &warning in &self.warnings {
             w.push(warning);
@@ -778,10 +800,13 @@ impl TiffScan<'_> {
                 // is simply never read.
                 continue;
             };
+            w.step_by(1);
             let ok = self.segment_into(&mut raster, segment, &place, limits, &mut w);
             complete &= ok;
         }
 
+        w.step_len(raster.data.len());
+        *steps = w.steps();
         Ok(TiffImage {
             width: self.width,
             height: self.height,

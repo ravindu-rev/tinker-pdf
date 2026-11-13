@@ -125,7 +125,14 @@ parameters are honoured — `/K`, `/Columns`, `/Rows`, `/BlackIs1`,
 `/EncodedByteAlign`, `/EndOfLine`, `/EndOfBlock` — with EOL, RTC and EOFB
 recognised wherever they appear (T.4 4.1.2). A row that will not decode is
 one row, not the rest of the page: the row above is replicated with a warning,
-which is the standard fax recovery. Output is packed one bit per pixel,
+which is the standard fax recovery. A two-dimensional code finds b1 and b2 on
+the reference line from the changes its row has not yet passed rather than
+from the line's start: every change before that point is at or left of an
+`a0` that has not moved back since, so it can be neither, and a damaged code
+that moves `a0` back starts the search again from the line's start. Every
+answer is the one a search from the start gives, and a row costs work in
+proportion to its changes rather than to their square; the G4 encoder shares
+both searches and the cursor. Output is packed one bit per pixel,
 MSB-first, rows byte-padded — exactly the shape `/BitsPerComponent 1`
 describes, so `/ImageMask`, `/Decode` and `/ColorSpace` compose with a fax
 the way they do with any other image.
@@ -725,7 +732,18 @@ match apply_chain(&bytes, &chain, &Limits::new(64 << 20))? {
 
 Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 `lzw_decode`, `ascii_hex_decode`, `ascii85_decode`, `run_length_decode`,
-`predictor_decode`. The image codecs are `jpeg_decode` (returns `JpegImage`),
+`predictor_decode`. Each has a counted sibling — `flate_decode_counted` and
+so on, with `brotli_decode_counted`, `ccitt_decode_counted`,
+`png_decode_counted` (and `PngScan::decode_counted`), `tiff_decode_counted`
+(and `TiffScan::decode_counted`), `gif_decode_counted` and
+`bmp_decode_counted` beside them — that returns its uncounted sibling's answer
+and the steps the decode took ([resource
+exhaustion](../design/resource-exhaustion.md), "The counters"): each
+symbol, code, field or length byte read, each byte a row unfiltered, each row,
+strip, run or reference change, and each byte returned. The steps ride the
+decode path's own context, the warnings accumulator every decoder is handed,
+or the decoder's own bit reader where it has no other; `jbig2_decode_measured`
+is JBIG2's, its `Jbig2SymbolExtent::work`. The image codecs are `jpeg_decode` (returns `JpegImage`),
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `JpxImage`), with `jpx_header` beside it: every stage of that decode before
@@ -901,6 +919,15 @@ wants the reason to survive it.
 
 ## Verified
 
+- `crates/tinker-pdf-filters/tests/complexity.rs` — one test a codec, holding
+  each to [resource exhaustion](../design/resource-exhaustion.md)'s
+  size-scaling law through its counted door: the work at four times a size is
+  at most 4.4 times the work at that size, for inflate's compressed text and
+  stored blocks, LZW's codes, ASCIIHex's digits, ASCII85's groups,
+  RunLength's runs, the PNG and TIFF predictors' rows, brotli's meta-blocks,
+  CCITT's G4 rows, a G4 row of more changes and G3 rows, a JBIG2 generic
+  region's rows, and the rows of a PNG, a TIFF, a GIF and a BMP. Each decode
+  gives back what was written, alike through the uncounted door.
 - `crates/tinker-pdf-filters/tests/vectors.rs` — byte-vector fixtures for
   the byte filters and predictors, each with recorded provenance: genuine zlib output,
   a libtiff-produced LZW strip, the `-----A---B` example of 7.4.4.2 verbatim.

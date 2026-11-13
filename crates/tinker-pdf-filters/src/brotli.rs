@@ -125,7 +125,19 @@ impl core::fmt::Display for BrotliError {
 /// [`BrotliError`] — truncated input, a rule of the format broken, or the
 /// output ceiling reached.
 pub fn brotli_decode(input: &[u8], limits: &Limits) -> Result<Vec<u8>, BrotliError> {
-    Decoder::new(input, limits).run()
+    brotli_decode_counted(input, limits).0
+}
+
+/// [`brotli_decode`], and the steps it took
+/// (`docs/design/resource-exhaustion.md`, "The counters"): each read of the
+/// bit stream — a bit, a field, or a byte of an uncompressed meta-block — and
+/// each byte returned.
+pub fn brotli_decode_counted(input: &[u8], limits: &Limits) -> (Result<Vec<u8>, BrotliError>, u64) {
+    let mut decoder = Decoder::new(input, limits);
+    let result = decoder.run();
+    let written = u64::try_from(decoder.out.len()).unwrap_or(u64::MAX);
+    let steps = decoder.bits.reads.saturating_add(written);
+    (result.map(|()| core::mem::take(&mut decoder.out)), steps)
 }
 
 // ---- the bit reader ---------------------------------------------------------
@@ -139,14 +151,21 @@ struct Bits<'a> {
     data: &'a [u8],
     /// Position in **bits** from the start of `data`.
     at: usize,
+    /// Reads made: each bit, each field and each byte of a run of bytes.
+    reads: u64,
 }
 
 impl<'a> Bits<'a> {
     fn new(data: &'a [u8]) -> Bits<'a> {
-        Bits { data, at: 0 }
+        Bits {
+            data,
+            at: 0,
+            reads: 0,
+        }
     }
 
     fn read_bit(&mut self) -> Result<u32, BrotliError> {
+        self.reads = self.reads.saturating_add(1);
         let byte = *self.data.get(self.at >> 3).ok_or(BrotliError::Truncated)?;
         let bit = (byte >> (self.at & 7)) & 1;
         self.at += 1;
@@ -156,6 +175,7 @@ impl<'a> Bits<'a> {
     /// `n` integer bits, least significant first. `n` is at most 24 anywhere
     /// in this format, which is what lets the accumulator be four bytes wide.
     fn read_bits(&mut self, n: u32) -> Result<u32, BrotliError> {
+        self.reads = self.reads.saturating_add(1);
         debug_assert!(n <= 24, "no field in RFC 7932 is wider than 24 bits");
         if n == 0 {
             return Ok(0);
@@ -185,6 +205,9 @@ impl<'a> Bits<'a> {
 
     /// `n` whole bytes from a byte-aligned position.
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], BrotliError> {
+        self.reads = self
+            .reads
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
         debug_assert!(self.at & 7 == 0, "read_bytes is only called after align");
         let from = self.at >> 3;
         let to = from.checked_add(n).ok_or(BrotliError::Truncated)?;
@@ -768,13 +791,13 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn run(mut self) -> Result<Vec<u8>, BrotliError> {
+    fn run(&mut self) -> Result<(), BrotliError> {
         self.window = read_window_size(&mut self.bits)?;
         loop {
             let last = self.bits.read_bit()? == 1;
             if last && self.bits.read_bit()? == 1 {
                 // ISLASTEMPTY: the stream ends here.
-                return Ok(self.out);
+                return Ok(());
             }
             let nibbles = match self.bits.read_bits(2)? {
                 0 => 4,
@@ -811,7 +834,7 @@ impl<'a> Decoder<'a> {
 
             self.meta_block(mlen)?;
             if last {
-                return Ok(self.out);
+                return Ok(());
             }
         }
     }

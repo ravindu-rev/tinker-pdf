@@ -351,6 +351,9 @@ struct Inflate {
     lens: [u8; 320],
     rep_kind: u8,
     stored_left: u32,
+    /// Turns of the state machine: a header field, a code length or a symbol
+    /// read each.
+    steps: u64,
 }
 
 impl Inflate {
@@ -370,12 +373,14 @@ impl Inflate {
             lens: [0; 320],
             rep_kind: 0,
             stored_left: 0,
+            steps: 0,
         }
     }
 
     #[allow(clippy::too_many_lines)]
     fn run(&mut self, src: &mut Bits<'_>, out: &mut Vec<u8>, max_output: usize) -> Progress {
         loop {
+            self.steps = self.steps.saturating_add(1);
             match self.state {
                 State::Done => return Progress::Finished,
 
@@ -737,6 +742,7 @@ fn raw_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> Raw {
     let mut src = Bits { input, pos: 0 };
     let mut out = Vec::new();
     let p = inf.run(&mut src, &mut out, limits.max_output);
+    w.step_by(inf.steps);
     match p {
         Progress::NeedInput => w.push(Warning::TruncatedInput),
         Progress::Corrupt => w.push(Warning::CorruptDeflateStream),

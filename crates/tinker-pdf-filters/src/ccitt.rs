@@ -486,6 +486,30 @@ fn pack_row(changes: &[usize], columns: usize, black_is_1: bool, row: &mut [u8])
 /// `max_output` bounds the whole result in bytes.
 #[must_use]
 pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>, Vec<Warning>) {
+    decode_counted(data, params, max_output).0
+}
+
+/// [`decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each code read, each change of the reference line a
+/// two-dimensional code examined, each row and each byte returned.
+#[must_use]
+pub fn decode_counted(
+    data: &[u8],
+    params: &CcittParams,
+    max_output: usize,
+) -> ((Vec<u8>, Vec<Warning>), u64) {
+    let mut steps = 0u64;
+    let decoded = decode_with(data, params, max_output, &mut steps);
+    steps = steps.saturating_add(u64::try_from(decoded.0.len()).unwrap_or(u64::MAX));
+    (decoded, steps)
+}
+
+fn decode_with(
+    data: &[u8],
+    params: &CcittParams,
+    max_output: usize,
+    steps: &mut u64,
+) -> (Vec<u8>, Vec<Warning>) {
     let mut warnings = Vec::new();
     let columns = params.columns.clamp(1, 1 << 16) as usize;
     let stride = row_bytes(columns);
@@ -567,7 +591,9 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
             break;
         }
 
-        let Some(changes) = decode_row(&mut bits, &reference, columns, two_dimensional) else {
+        *steps = steps.saturating_add(1);
+        let Some(changes) = decode_row(&mut bits, &reference, columns, two_dimensional, steps)
+        else {
             // A row that will not decode is one row, not the rest of the page.
             // Repeating the row above is what every fax decoder does with a
             // damaged line: it keeps the image legible and localises the loss.
@@ -674,7 +700,8 @@ impl<'a> T6Rows<'a> {
         if row.len() < self.row_bytes() || self.bits.exhausted() {
             return false;
         }
-        let Some(changes) = decode_row(&mut self.bits, &self.reference, self.columns, true) else {
+        let Some(changes) = decode_row(&mut self.bits, &self.reference, self.columns, true, &mut 0)
+        else {
             return false;
         };
         pack_row(&changes, self.columns, true, row);
@@ -685,26 +712,31 @@ impl<'a> T6Rows<'a> {
     }
 }
 
-/// Decodes one row, returning the positions where its colour changes.
+/// Decodes one row, returning the positions where its colour changes, and
+/// counting each code read and each reference change examined into `steps`.
 fn decode_row(
     bits: &mut Bits,
     reference: &[usize],
     columns: usize,
     two_dimensional: bool,
+    steps: &mut u64,
 ) -> Option<Vec<usize>> {
     let mut changes: Vec<usize> = Vec::new();
     let mut a0: isize = -1;
     let mut white = true;
+    let mut passed = Passed::default();
 
     while (a0 as usize) < columns || a0 < 0 {
+        *steps = steps.saturating_add(1);
         if bits.exhausted() {
             return (!changes.is_empty()).then_some(changes);
         }
 
         if two_dimensional {
             // T.6 mode codes, longest first so a prefix cannot shadow one.
-            let b1 = next_change(reference, a0, white, columns);
-            let b2 = following(reference, b1, columns);
+            passed.reach(reference, a0, steps);
+            let b1 = next_change(reference, a0, white, columns, passed.start, steps);
+            let b2 = following(reference, b1, columns, passed.start, steps);
 
             if bits.peek(4) == 0b0001 {
                 // Pass: the run continues past b2.
@@ -777,13 +809,51 @@ fn decode_row(
     Some(changes)
 }
 
+/// The reference changes a row's codes have passed: every change before
+/// `start` is at or left of the `a0` it was measured at, so it is at or left
+/// of every `a0` after it while `a0` does not move back — and neither search
+/// below can return one. A code that moves `a0` back, which only a damaged
+/// stream writes, starts the count again, so every answer is the one a search
+/// from the line's start gives.
+#[derive(Clone, Copy, Default)]
+struct Passed {
+    start: usize,
+    a0: Option<isize>,
+}
+
+impl Passed {
+    /// Moves past the changes at or left of `a0`.
+    fn reach(&mut self, reference: &[usize], a0: isize, steps: &mut u64) {
+        if self.a0.is_some_and(|before| a0 < before) {
+            self.start = 0;
+        }
+        self.a0 = Some(a0);
+        while let Some(&position) = reference.get(self.start) {
+            if position as isize > a0 {
+                break;
+            }
+            *steps = steps.saturating_add(1);
+            self.start += 1;
+        }
+    }
+}
+
 /// b1: the first change on the reference line right of `a0` with the opposite
-/// colour of `a0` (T.4 figure 1).
-fn next_change(reference: &[usize], a0: isize, white: bool, columns: usize) -> usize {
-    let mut index = 0usize;
+/// colour of `a0` (T.4 figure 1), searched from `from`, before which no change
+/// is right of `a0` ([`Passed`]).
+fn next_change(
+    reference: &[usize],
+    a0: isize,
+    white: bool,
+    columns: usize,
+    from: usize,
+    steps: &mut u64,
+) -> usize {
+    let mut index = from;
     // Changes alternate colour starting from white, so the parity of the
     // index says which colour a change begins.
     while let Some(&position) = reference.get(index) {
+        *steps = steps.saturating_add(1);
         if (position as isize) > a0 && (index % 2 == 0) == white {
             return position.min(columns);
         }
@@ -792,13 +862,24 @@ fn next_change(reference: &[usize], a0: isize, white: bool, columns: usize) -> u
     columns
 }
 
-fn following(reference: &[usize], b1: usize, columns: usize) -> usize {
-    reference
-        .iter()
-        .copied()
-        .find(|&position| position > b1)
-        .unwrap_or(columns)
-        .min(columns)
+/// b2: the first change on the reference line right of `b1`, searched from
+/// `from`: `b1` is right of `a0`, and no change before `from` is.
+fn following(
+    reference: &[usize],
+    b1: usize,
+    columns: usize,
+    from: usize,
+    steps: &mut u64,
+) -> usize {
+    let mut index = from;
+    while let Some(&position) = reference.get(index) {
+        *steps = steps.saturating_add(1);
+        if position > b1 {
+            return position.min(columns);
+        }
+        index += 1;
+    }
+    columns
 }
 
 #[cfg(test)]

@@ -227,6 +227,19 @@ struct Header {
 /// # Errors
 /// Any [`BmpError`].
 pub fn bmp_decode(bytes: &[u8], limits: &Limits) -> Result<BmpImage, BmpError> {
+    bmp_decode_counted(bytes, limits).0
+}
+
+/// [`bmp_decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each row read, each run or escape of an RLE stream, and
+/// each byte of the picture returned.
+pub fn bmp_decode_counted(bytes: &[u8], limits: &Limits) -> (Result<BmpImage, BmpError>, u64) {
+    let mut steps = 0u64;
+    let image = decode_with(bytes, limits, &mut steps);
+    (image, steps)
+}
+
+fn decode_with(bytes: &[u8], limits: &Limits, steps: &mut u64) -> Result<BmpImage, BmpError> {
     let header = read_header(bytes)?;
     let mut w = Warnings::default();
 
@@ -294,6 +307,8 @@ pub fn bmp_decode(bytes: &[u8], limits: &Limits) -> Result<BmpImage, BmpError> {
         direct(data, &header, masks, alpha, &mut w)
     };
 
+    w.step_len(pixels.data().len());
+    *steps = w.steps();
     Ok(BmpImage {
         width: header.width as u32,
         height: header.height as u32,
@@ -514,6 +529,7 @@ fn packed_indices(data: &[u8], header: &Header, out: &mut [u8], w: &mut Warnings
     let bits = usize::from(header.bits);
     let mut complete = true;
     for stored in 0..header.height {
+        w.step_by(1);
         let start = stored.saturating_mul(stride);
         let row = data.get(start..).unwrap_or(&[]);
         let row = row.get(..stride).unwrap_or(row);
@@ -556,6 +572,7 @@ fn direct(
     let mut complete = true;
 
     for stored in 0..header.height {
+        w.step_by(1);
         let start = stored.saturating_mul(stride);
         let row = data.get(start..).unwrap_or(&[]);
         let y = target_row(header, stored);
@@ -619,6 +636,7 @@ fn rle(data: &[u8], header: &Header, out: &mut [u8], w: &mut Warnings) -> bool {
     };
 
     while y < header.height {
+        w.step_by(1);
         let (Some(&count), Some(&value)) = (data.get(at), data.get(at + 1)) else {
             cut = at < data.len();
             break;

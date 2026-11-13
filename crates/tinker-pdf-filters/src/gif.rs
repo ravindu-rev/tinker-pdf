@@ -269,6 +269,19 @@ fn table<'a>(r: &mut Reader<'a>, packed: u8) -> Option<&'a [u8]> {
 /// # Errors
 /// Any [`GifError`].
 pub fn gif_decode(bytes: &[u8], limits: &Limits) -> Result<GifImage, GifError> {
+    gif_decode_counted(bytes, limits).0
+}
+
+/// [`gif_decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each LZW code read and each byte of the picture
+/// returned.
+pub fn gif_decode_counted(bytes: &[u8], limits: &Limits) -> (Result<GifImage, GifError>, u64) {
+    let mut steps = 0u64;
+    let image = decode_with(bytes, limits, &mut steps);
+    (image, steps)
+}
+
+fn decode_with(bytes: &[u8], limits: &Limits, steps: &mut u64) -> Result<GifImage, GifError> {
     if !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
         return Err(GifError::NotGif);
     }
@@ -441,6 +454,8 @@ pub fn gif_decode(bytes: &[u8], limits: &Limits) -> Result<GifImage, GifError> {
         }
     };
 
+    w.step_len(pixels.data().len());
+    *steps = w.steps();
     Ok(GifImage {
         width: canvas_w as u32,
         height: canvas_h as u32,
@@ -542,6 +557,7 @@ fn lzw(data: &[u8], min: u8, out: &mut [u8], w: &mut Warnings) -> usize {
     let total_bits = (data.len() as u64) * 8;
 
     while written < out.len() {
+        w.step_by(1);
         if bitpos + u64::from(width) > total_bits {
             break;
         }
