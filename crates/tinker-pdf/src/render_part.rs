@@ -251,9 +251,9 @@ impl Page {
     /// `/NoRotate` placed for `options.magnification` and the page's `/Rotate`
     /// — and the bitmap is `/Rect`, placed as the appearance is, in the
     /// page's pixels, rounded outward and trimmed to the page, unless
-    /// `options.region` names a rectangle. `options.annotations` is not
-    /// consulted: asking for one annotation is asking for it drawn, where the
-    /// usage draws it.
+    /// `options.region` names a rectangle. `options.annotations`, `widgets`,
+    /// `other_annotations` and `content` are not consulted: asking for one
+    /// annotation is asking for it drawn alone, where the usage draws it.
     ///
     /// **It is byte-equal to the same rectangle of the page rendered with
     /// annotations on**, where the page draws nothing else there.

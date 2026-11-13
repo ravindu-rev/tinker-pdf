@@ -30,7 +30,7 @@ mod written_support;
 use render_support::curvy_font;
 use tinker_pdf::{
     Bitmap, Document, DocumentBuilder, FormXObject, ImageData, NotDrawn, PixelFormat, PixelRegion,
-    RenderOptions, RenderPartError, Usage,
+    RenderOptions, RenderPartError, RenderWarning, Usage,
 };
 
 /// Non-white pixels.
@@ -676,6 +676,293 @@ fn a_part_the_usage_hides_is_refused_by_name() {
             "{said}"
         );
     }
+}
+
+/// A 150 x 100 page with a grey bar of its own and three annotations, each
+/// `/F 4` so a print render draws it too: a square markup annotation, and two
+/// widgets — a check box whose `/AS` picks its `/On` appearance of two, a
+/// black square, over its `/Off` one, a grey fill, and a text field. `content`,
+/// `markup` and `widgets` say which parts the page carries; one left out is
+/// an empty content stream or an `/Annots` without it, so each combination's
+/// twin is this page too.
+fn parts_page(content: bool, markup: bool, widgets: bool) -> Vec<u8> {
+    let annots: Vec<&str> = [(markup, "5 0 R"), (widgets, "6 0 R 7 0 R")]
+        .into_iter()
+        .filter_map(|(on, entries)| on.then_some(entries))
+        .collect();
+    let stream = if content {
+        "0.4 0.4 0.4 rg 100 60 40 30 re f"
+    } else {
+        ""
+    };
+    let form = |bbox: &str, body: &str| {
+        format!(
+            "<< /Type /XObject /Subtype /Form /BBox [{bbox}] /Length {} >>\nstream\n{body}\nendstream",
+            body.len()
+        )
+    };
+    let objects = [
+        (
+            5,
+            "<< /Type /Annot /Subtype /Square /F 4 /Rect [10 10 50 40] /AP << /N 8 0 R >> >>"
+                .to_string(),
+        ),
+        (
+            6,
+            "<< /Type /Annot /Subtype /Widget /FT /Btn /F 4 /Rect [60 60 80 80] /AS /On \
+             /AP << /N << /On 9 0 R /Off 10 0 R >> >> >>"
+                .to_string(),
+        ),
+        (
+            7,
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /F 4 /Rect [90 10 140 30] /AP << /N 11 0 R >> >>"
+                .to_string(),
+        ),
+        (8, form("0 0 40 30", "1 0 0 RG 2 w 1 1 38 28 re S")),
+        (9, form("0 0 20 20", "0 g 4 4 12 12 re f")),
+        (10, form("0 0 20 20", "0.8 g 0 0 20 20 re f")),
+        (11, form("0 0 50 20", "0 0 1 rg 0 0 50 20 re f")),
+    ];
+    let mut out = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 150 100]\n\
+   /Annots [{}] /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{stream}\nendstream\nendobj\n",
+        annots.join(" "),
+        stream.len()
+    );
+    for (number, body) in objects {
+        out.push_str(&format!("{number} 0 obj\n{body}\nendobj\n"));
+    }
+    out.push_str("trailer\n<< /Size 12 /Root 1 0 R >>\n%%EOF\n");
+    out.into_bytes()
+}
+
+/// **The content, the annotations and the widgets render separately**
+/// (RC-13.5): [`parts_page`] under each of the eight combinations of its three
+/// parts — the seven that draw something and the one that draws nothing —
+/// equals its twin, the page with the parts left out deleted from its content
+/// stream or its `/Annots`, byte for byte, directly and from a display list;
+/// `annotations` off still draws no annotation of either kind, whatever the
+/// two kinds' switches say; and each widget draws the normal appearance its
+/// `/AS` names, its print render equal to its view render, alone and on the
+/// page.
+#[test]
+fn content_annotations_and_widgets_render_separately() {
+    let document = Document::open(parts_page(true, true, true)).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let list = page.display_list();
+    assert!(list.is_retained(), "{list:?}");
+    for content in [true, false] {
+        for markup in [true, false] {
+            for widgets in [true, false] {
+                let what = format!("content {content}, markup {markup}, widgets {widgets}");
+                let options = RenderOptions {
+                    content,
+                    other_annotations: markup,
+                    widgets,
+                    ..RenderOptions::default()
+                };
+                let twin = Document::open(parts_page(content, markup, widgets))
+                    .expect("the twin opens")
+                    .page(0)
+                    .expect("a page")
+                    .render(&RenderOptions::default());
+                let direct = page.render(&options);
+                same(&direct, &twin, &format!("{what}, directly"));
+                same(
+                    &list.render(&options),
+                    &twin,
+                    &format!("{what}, from a list"),
+                );
+                let drawn = ink(&direct);
+                if content || markup || widgets {
+                    assert!(drawn > 100, "{what}: drew {drawn} pixels");
+                } else {
+                    assert_eq!(drawn, 0, "{what}: nothing is drawn");
+                }
+            }
+        }
+    }
+    let content_only = Document::open(parts_page(true, false, false))
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let no_annotations = RenderOptions {
+        annotations: false,
+        ..RenderOptions::default()
+    };
+    same(
+        &page.render(&no_annotations),
+        &content_only,
+        "annotations off, directly",
+    );
+    same(
+        &list.render(&no_annotations),
+        &content_only,
+        "annotations off, from a list",
+    );
+
+    let usage = |usage| RenderOptions {
+        usage,
+        ..RenderOptions::default()
+    };
+    let (view, print) = (usage(Some(Usage::View)), usage(Some(Usage::Print)));
+    for index in [1, 2] {
+        let viewed = page
+            .render_annotation(index, &view)
+            .expect("a widget draws");
+        let printed = page
+            .render_annotation(index, &print)
+            .expect("a widget prints");
+        same(
+            &printed,
+            &viewed,
+            &format!("widget {index}, print against view"),
+        );
+    }
+    let widgets_only = |usage: Option<Usage>| RenderOptions {
+        usage,
+        content: false,
+        other_annotations: false,
+        ..RenderOptions::default()
+    };
+    same(
+        &page.render(&widgets_only(Some(Usage::Print))),
+        &page.render(&widgets_only(Some(Usage::View))),
+        "the widgets on the page, print against view",
+    );
+    // The check box draws its `/On` square, never its `/Off` grey fill.
+    let check = page
+        .render_annotation(1, &view)
+        .expect("the check box draws");
+    let pixels: Vec<&[u8]> = check.data.chunks_exact(check.components()).collect();
+    assert!(
+        pixels.iter().any(|p| p[..3] == [0, 0, 0]),
+        "the /On appearance is drawn"
+    );
+    assert!(
+        !pixels.iter().any(|p| p[..3] == [204, 204, 204]),
+        "the /Off appearance is not"
+    );
+}
+
+/// A 100 x 100 page whose content draws a one-point form in a transparency
+/// group 2 001 times — one more than a render opens, so its recording spends
+/// the group budget — and whose one annotation's appearance draws, at half
+/// opacity, a form in a transparency group of two overlapping squares, so
+/// whether that group opens shows: opened, the overlap is the squares' one
+/// colour at half strength; declined, each square is laid down at half
+/// strength and the overlap is darker.
+fn budget_page() -> Vec<u8> {
+    let content = "q /G Do Q ".repeat(2_001);
+    let stream = |dict: &str, body: &str| {
+        format!(
+            "<< {dict} /Length {} >>\nstream\n{body}\nendstream",
+            body.len()
+        )
+    };
+    let objects = [
+        (
+            5,
+            "<< /Type /Annot /Subtype /Square /F 4 /Rect [20 20 80 80] /AP << /N 6 0 R >> >>"
+                .to_string(),
+        ),
+        (
+            6,
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 60 60] \
+                 /Resources << /ExtGState << /Half << /ca 0.5 >> >> /XObject << /Pair 7 0 R >> >>",
+                "/Half gs /Pair Do",
+            ),
+        ),
+        (
+            7,
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 60 60] /Group << /S /Transparency >>",
+                "0 0 1 rg 0 0 40 40 re f 20 20 40 40 re f",
+            ),
+        ),
+        (
+            8,
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Group << /S /Transparency >>",
+                "0 g 0 0 1 1 re f",
+            ),
+        ),
+    ];
+    let mut out = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
+   /Resources << /XObject << /G 8 0 R >> >> /Annots [5 0 R] /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+        content.len()
+    );
+    for (number, body) in objects {
+        out.push_str(&format!("{number} 0 obj\n{body}\nendobj\n"));
+    }
+    out.push_str("trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
+    out.into_bytes()
+}
+
+/// **A list leaving out a part recorded before one it draws, where the
+/// recording spent the group budget, draws the direct way** (RC-13.5): the
+/// annotation of [`budget_page`] was recorded after the content had spent
+/// every group a render opens, so its group was recorded declined; a render
+/// that leaves the content out opens it, and the list renders that render as
+/// the page does — the same pixels and warnings — rather than replaying the
+/// declined group. The page drawn whole declines it and says so, which is
+/// what makes the two renders differ where the squares overlap.
+#[test]
+fn a_list_leaving_out_a_part_that_spent_the_group_budget_draws_the_direct_way() {
+    let document = Document::open(budget_page()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let list = page.display_list();
+    assert!(list.is_retained(), "{list:?}");
+    let off = RenderOptions {
+        content: false,
+        ..RenderOptions::default()
+    };
+    let direct = page.render(&off);
+    let listed = list.render(&off);
+    assert_eq!((listed.width, listed.height), (direct.width, direct.height));
+    assert!(listed.data == direct.data, "the list draws the direct way");
+    assert_eq!(listed.warnings, direct.warnings);
+    assert!(
+        !direct
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::GroupBudgetSpent { .. })),
+        "the annotation alone opens its one group: {:?}",
+        direct.warnings
+    );
+
+    let whole = page.render(&RenderOptions::default());
+    assert!(
+        whole
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::GroupBudgetSpent { .. })),
+        "the page drawn whole spends its budget: {:?}",
+        whole.warnings
+    );
+    // The overlap of the two squares, user 40 to 60 both ways: rows and
+    // columns 40 to 60 of a page 100 points tall, at 1x.
+    let overlap = PixelRegion::new(42, 42, 16, 16);
+    assert_ne!(
+        crop(&whole, overlap),
+        crop(&direct, overlap),
+        "the declined group lays the squares down one at a time"
+    );
+    // And the list replays the whole page as the page draws it.
+    let replayed = list.render(&RenderOptions::default());
+    assert!(replayed.data == whole.data);
+    assert_eq!(replayed.warnings, whole.warnings);
 }
 
 /// A small fixed-seed generator, so a failure reproduces.

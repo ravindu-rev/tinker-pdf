@@ -43,7 +43,12 @@
 //! recorded, and interpreted at each replay where the render's magnification
 //! and the page's `/Rotate` put it, as a direct render interprets it; a page
 //! drawing one is drawn whole rather than in bands, since its calls are only
-//! the render's to make.
+//! the render's to make. The content's calls and each annotation's, beside
+//! whether it is a widget, are kept apart, so a replay draws only the parts
+//! its render asks for (`RenderOptions::content`, `widgets`,
+//! `other_annotations`); the one state a part hands on to the next is the
+//! group budget, and a render leaving out a part recorded before one it draws
+//! on a page whose recording spent it draws the direct way.
 //!
 //! # A list draws its own usage
 //!
@@ -112,7 +117,7 @@ use tinker_pdf_pool::{on_worker, Executor, MAX_THREADS};
 use tinker_pdf_raster::image::{image_bounds_in, Transform};
 use tinker_pdf_render::{DisplayRecorder, Renderer};
 
-use crate::annots::{self, AppearanceDevice, Placement, Recorded};
+use crate::annots::{self, AppearanceDevice, Kept, Kinds, Placement, Recorded};
 use crate::resources::PageResources;
 use crate::stats::Counter;
 use crate::{
@@ -146,6 +151,11 @@ pub struct DisplayList {
     /// the recorded calls carry; a render naming another draws the direct
     /// way.
     usage: Option<Usage>,
+    /// Whether the recording spent its group budget (`Admission`): the one
+    /// state the content's calls hand on to the annotations recorded after
+    /// them, and each annotation's to the next, so a render that leaves out
+    /// a part recorded before a part it draws draws the direct way.
+    budget_spent: bool,
 }
 
 impl Page {
@@ -214,6 +224,7 @@ impl Page {
                 resources.operation(),
             )
         };
+        let budget_spent = recorder.admission().budget_spent();
         let resources = resources.kept();
         if recorder.overflowed() {
             // Everything recorded is dropped here, the content's calls too:
@@ -227,6 +238,7 @@ impl Page {
                 interpreted_repairs: Vec::new(),
                 retained: false,
                 usage,
+                budget_spent,
             };
         }
         DisplayList {
@@ -238,6 +250,7 @@ impl Page {
             interpreted_repairs,
             retained: true,
             usage,
+            budget_spent,
         }
     }
 }
@@ -247,9 +260,10 @@ impl DisplayList {
     ///
     /// Every option applies exactly as it does there — the scale and its
     /// clamp, the region, the format, the anti-aliasing, a transparent or
-    /// premultiplied page, cancellation, and whether annotations are drawn —
-    /// because this is the same pipeline with the interpretation replaced by
-    /// a replay of what the interpretation produced.
+    /// premultiplied page, cancellation, and which parts are drawn: the
+    /// content, the widgets and the other annotations — because this is the
+    /// same pipeline with the interpretation replaced by a replay of what the
+    /// interpretation produced, the parts it leaves out not replayed.
     ///
     /// With [`RenderOptions::parallelism`] asking for two threads or more,
     /// the page is drawn in horizontal bands on that many threads of the
@@ -260,10 +274,13 @@ impl DisplayList {
     /// calling [`Page::render`], on the caller, and so does a render naming
     /// a usage other than the one the list was recorded for
     /// ([`DisplayList::usage`]): its calls carry that usage's
-    /// optional-content states.
+    /// optional-content states. So does a render that leaves out a part
+    /// recorded before a part it draws, on a page whose recording spent its
+    /// group budget: what the left-out part spent shaped the answers the
+    /// later one was recorded with.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
-        if !self.retained || options.usage != self.usage {
+        if !self.retained || options.usage != self.usage || !self.parts_replay_alike(options) {
             // On the caller: a page asked for in bands asks its list for
             // them, and a list that keeps nothing, or another usage's
             // states, draws it the direct way.
@@ -299,32 +316,38 @@ impl DisplayList {
         target: &mut (impl Target + AppearanceDevice),
         resources: &PageResources,
     ) {
-        let replayed = replay(&self.content, target);
-        if !replayed.cancelled {
-            resources.note_missing_fonts(&self.interpreted_missing);
-            resources.note_repaired_spaces(&self.interpreted_repairs);
+        // The content's calls and what their interpretation met, where the
+        // render draws the content.
+        if options.content {
+            let replayed = replay(&self.content, target);
+            if !replayed.cancelled {
+                resources.note_missing_fonts(&self.interpreted_missing);
+                resources.note_repaired_spaces(&self.interpreted_repairs);
+            }
         }
         target.settle();
-        if options.annotations {
-            let placement = self.placement(options.magnification);
-            for annotation in &self.annotations {
-                match annotation {
-                    Recorded::Calls { scope, events } => {
-                        target.push(resources.bind(scope));
-                        replay(events, target);
-                        target.pop();
-                    }
-                    // 12.5.3: placed for this render's magnification and the
-                    // page's turn, as the direct render places it.
-                    Recorded::Placed(appearance) => annots::draw_prepared(
-                        &self.page.doc,
-                        appearance,
-                        self.page.fonts.as_ref(),
-                        target,
-                        resources.operation(),
-                        placement,
-                    ),
+        let kinds = Kinds::of(options);
+        let placement = self.placement(options.magnification);
+        for annotation in &self.annotations {
+            if !kinds.draws(annotation.widget) {
+                continue;
+            }
+            match &annotation.kept {
+                Kept::Calls { scope, events } => {
+                    target.push(resources.bind(scope));
+                    replay(events, target);
+                    target.pop();
                 }
+                // 12.5.3: placed for this render's magnification and the
+                // page's turn, as the direct render places it.
+                Kept::Placed(appearance) => annots::draw_prepared(
+                    &self.page.doc,
+                    appearance,
+                    self.page.fonts.as_ref(),
+                    target,
+                    resources.operation(),
+                    placement,
+                ),
             }
         }
     }
@@ -335,12 +358,37 @@ impl DisplayList {
         Placement::new(magnification, self.page.inner.rotation)
     }
 
-    /// Whether the list keeps an annotation `/NoZoom` or `/NoRotate` places
-    /// at render time, whose calls only a render makes.
-    fn places_an_annotation(&self) -> bool {
-        self.annotations
-            .iter()
-            .any(|annotation| matches!(annotation, Recorded::Placed(_)))
+    /// Whether the list keeps an annotation of the `kinds` drawn that
+    /// `/NoZoom` or `/NoRotate` places at render time, whose calls only a
+    /// render makes.
+    fn places_an_annotation(&self, kinds: Kinds) -> bool {
+        self.annotations.iter().any(|annotation| {
+            kinds.draws(annotation.widget) && matches!(annotation.kept, Kept::Placed(_))
+        })
+    }
+
+    /// Whether every part `options` draws was recorded with the answers a
+    /// render drawing only those parts gives it (`docs/design/render-usage.md`,
+    /// "What a display list records"). The parts are recorded in order — the
+    /// content, then each annotation in `/Annots` order — and the one state a
+    /// part hands on to the next is the group budget, so the answers hold
+    /// unless the recording spent the budget and a part left out was recorded
+    /// before a part drawn. A list where they do not hold draws the direct
+    /// way.
+    pub(crate) fn parts_replay_alike(&self, options: &RenderOptions) -> bool {
+        if !self.budget_spent {
+            return true;
+        }
+        let kinds = Kinds::of(options);
+        let mut left_out = !options.content;
+        for annotation in &self.annotations {
+            let drawn = kinds.draws(annotation.widget);
+            if drawn && left_out {
+                return false;
+            }
+            left_out |= !drawn;
+        }
+        true
     }
 
     /// The list drawn in horizontal bands on the threads
@@ -371,7 +419,7 @@ impl DisplayList {
         // An annotation placed at render time has no calls a cut could be
         // planned around — its image runs are the render's to make — so the
         // page is drawn whole: the same bitmap, on the caller.
-        if options.annotations && self.places_an_annotation() {
+        if self.places_an_annotation(Kinds::of(options)) {
             return None;
         }
         let page = &self.page;
@@ -519,14 +567,16 @@ impl DisplayList {
         base: &Matrix,
         page: (u32, u32),
     ) -> Vec<(u32, u32)> {
+        let kinds = Kinds::of(options);
+        let content: &[Event] = if options.content { &self.content } else { &[] };
         let annotations = self
             .annotations
             .iter()
-            .filter(|_| options.annotations)
-            .flat_map(|annotation| match annotation {
-                Recorded::Calls { events, .. } => events.as_slice(),
+            .filter(|annotation| kinds.draws(annotation.widget))
+            .flat_map(|annotation| match &annotation.kept {
+                Kept::Calls { events, .. } => events.as_slice(),
                 // Refused bands by `render_in_bands`, so never reached there.
-                Recorded::Placed(_) => &[],
+                Kept::Placed(_) => &[],
             });
         let mut runs = Vec::new();
         // The open sequence's first row, its row past the last, and its draws.
@@ -538,7 +588,7 @@ impl DisplayList {
                 }
             }
         };
-        for event in self.content.iter().chain(annotations) {
+        for event in content.iter().chain(annotations) {
             match event {
                 Event::DrawImage { state, .. } => {
                     // A call recorded with no state is replayed in the

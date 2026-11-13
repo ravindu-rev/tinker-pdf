@@ -48,13 +48,53 @@ impl AppearanceDevice for Renderer<'_, PageResources> {
     }
 }
 
-/// Draws every annotation of a page that `op`, the render's operation, draws
-/// — by its flags and its `/OC` under the operation's usage and states
-/// ([`prepare`]) — each placed where `placement` puts it, each appearance's
-/// scopes read through its decoded streams, so an appearance two annotations
-/// share and a font two appearances draw are decoded once, and count into its
-/// tally when the render is counting. One whose `/OC` hides it is reported as
-/// content in that layer is ([`note_hidden`]).
+/// Which annotations a render draws by their kind: widget annotations
+/// (12.5.6.19), and every other kind beside them
+/// (`crate::RenderOptions::widgets` and `other_annotations`,
+/// `docs/design/render-usage.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Kinds {
+    /// Whether widgets are drawn.
+    pub(crate) widgets: bool,
+    /// Whether every annotation that is not a widget is drawn.
+    pub(crate) others: bool,
+}
+
+impl Kinds {
+    /// Every kind: a page's annotations as a render with the defaults draws
+    /// them, and as a display list records them.
+    pub(crate) const ALL: Kinds = Kinds {
+        widgets: true,
+        others: true,
+    };
+
+    /// The kinds `options` draws: none where `annotations` is off, which
+    /// still means no annotation of any kind.
+    pub(crate) fn of(options: &crate::RenderOptions) -> Kinds {
+        Kinds {
+            widgets: options.annotations && options.widgets,
+            others: options.annotations && options.other_annotations,
+        }
+    }
+
+    /// Whether an annotation, a widget or not, is drawn.
+    pub(crate) fn draws(self, widget: bool) -> bool {
+        if widget {
+            self.widgets
+        } else {
+            self.others
+        }
+    }
+}
+
+/// Draws every annotation of a page of the `kinds` asked for that `op`, the
+/// render's operation, draws — by its flags and its `/OC` under the
+/// operation's usage and states ([`prepare`]) — each placed where `placement`
+/// puts it, each appearance's scopes read through its decoded streams, so an
+/// appearance two annotations share and a font two appearances draw are
+/// decoded once, and count into its tally when the render is counting. One
+/// whose `/OC` hides it is reported as content in that layer is
+/// ([`note_hidden`]).
 pub(crate) fn draw(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
@@ -62,8 +102,9 @@ pub(crate) fn draw(
     device: &mut impl AppearanceDevice,
     op: &Operation,
     placement: Placement,
+    kinds: Kinds,
 ) {
-    each_appearance(doc, page, op, |entry| match entry {
+    each_appearance(doc, page, op, kinds, |_, entry| match entry {
         Entry::Draws(appearance) => {
             draw_prepared(doc, &appearance, provider, device, op, placement);
         }
@@ -81,8 +122,18 @@ fn note_hidden(device: &mut impl Device, layer: &str) {
     device.end_marked_content();
 }
 
-/// One annotation's appearance as a retained page keeps it.
-pub(crate) enum Recorded {
+/// One annotation's appearance as a retained page keeps it: what it draws,
+/// beside whether it is a widget, so a replay draws only the kinds its render
+/// asks for (`crate::RenderOptions::widgets`, `other_annotations`).
+pub(crate) struct Recorded {
+    /// Whether it is a widget annotation (12.5.6.19).
+    pub(crate) widget: bool,
+    /// What it draws.
+    pub(crate) kept: Kept,
+}
+
+/// What a retained page keeps of one annotation's appearance.
+pub(crate) enum Kept {
     /// The calls its content makes, and the scope the renderer resolves its
     /// names in.
     Calls {
@@ -121,19 +172,22 @@ pub(crate) fn record(
     op: &Operation,
 ) -> Vec<Recorded> {
     let mut out = Vec::new();
-    each_appearance(doc, page, op, |entry| {
+    each_appearance(doc, page, op, Kinds::ALL, |widget, entry| {
         let appearance = match entry {
             Entry::Draws(appearance) => appearance,
             Entry::Hidden(layer) => {
                 note_hidden(recorder, layer);
-                out.push(Recorded::Calls {
-                    scope: Arc::new(PageResources::from_dict_in(
-                        doc,
-                        Dict::new(),
-                        provider,
-                        Operation::none(),
-                    )),
-                    events: recorder.take(),
+                out.push(Recorded {
+                    widget,
+                    kept: Kept::Calls {
+                        scope: Arc::new(PageResources::from_dict_in(
+                            doc,
+                            Dict::new(),
+                            provider,
+                            Operation::none(),
+                        )),
+                        events: recorder.take(),
+                    },
                 });
                 return;
             }
@@ -152,7 +206,10 @@ pub(crate) fn record(
                 &resources,
             );
             drop(recorder.take());
-            out.push(Recorded::Placed(appearance));
+            out.push(Recorded {
+                widget,
+                kept: Kept::Placed(appearance),
+            });
             return;
         }
         // Two resource objects over one dictionary, as `draw_prepared` makes
@@ -173,9 +230,12 @@ pub(crate) fn record(
             recorder,
             &resources,
         );
-        out.push(Recorded::Calls {
-            scope,
-            events: recorder.take(),
+        out.push(Recorded {
+            widget,
+            kept: Kept::Calls {
+                scope,
+                events: recorder.take(),
+            },
         });
     });
     out
@@ -190,14 +250,17 @@ enum Entry<'a> {
     Hidden(&'a str),
 }
 
-/// Every annotation of a page that `op` draws, prepared, in `/Annots` order,
-/// each appearance decoded once `op`, the render's operation — and every one
-/// its `/OC` hides, by its layer's label.
+/// Every annotation of a page of the `kinds` asked for that `op` draws,
+/// prepared, in `/Annots` order, beside whether it is a widget, each
+/// appearance decoded once `op`, the render's operation — and every one its
+/// `/OC` hides, by its layer's label. An annotation of a kind not asked for is
+/// passed over before anything of it is read.
 fn each_appearance(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     op: &Operation,
-    mut each: impl FnMut(Entry<'_>),
+    kinds: Kinds,
+    mut each: impl FnMut(bool, Entry<'_>),
 ) {
     let Ok(object) = doc.get(page.reference) else {
         return;
@@ -222,13 +285,17 @@ fn each_appearance(
         let Some(annotation) = annotation else {
             continue;
         };
+        let widget = is_widget(doc, &annotation);
+        if !kinds.draws(widget) {
+            continue;
+        }
         match prepare(doc, &annotation, op) {
-            Ok(appearance) => each(Entry::Draws(appearance)),
+            Ok(appearance) => each(widget, Entry::Draws(appearance)),
             // Content in a layer that is off is reported, and so is an
             // annotation its layer hides (ruling 10).
             Err(NotDrawn::OptionalContentOff) => {
                 if let Some(layer) = hidden_by(doc, &annotation, op) {
-                    each(Entry::Hidden(&layer));
+                    each(widget, Entry::Hidden(&layer));
                 }
             }
             // Every other reason `prepare` gives for drawing nothing is a
@@ -269,6 +336,12 @@ fn flag_refusal(doc: &CosDocument, annotation: &Dict, usage: Option<Usage>) -> O
         Some(Usage::Print) => (!flags.print()).then_some(NotDrawn::NotPrinted),
         Some(Usage::View | Usage::Export) | None => flags.no_view().then_some(NotDrawn::NoView),
     }
+}
+
+/// Whether `annotation` is a widget annotation (12.5.6.19), a form field's
+/// appearance on the page: its `/Subtype` is `/Widget`.
+fn is_widget(doc: &CosDocument, annotation: &Dict) -> bool {
+    subtype(doc, annotation).is_some_and(|name| name.as_ref() == b"Widget")
 }
 
 /// The annotation's `/Subtype`, as the name's bytes.

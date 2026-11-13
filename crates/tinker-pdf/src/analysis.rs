@@ -49,7 +49,7 @@ use tinker_pdf_raster::image::Transform;
 use tinker_pdf_raster::stroke::{stroke_mapped_with, stroke_with, LineCap, LineJoin, StrokeStyle};
 use tinker_pdf_render::{user_space_pen, Admission, GlyphSource};
 
-use crate::annots::{self, AppearanceDevice, Recorded};
+use crate::annots::{self, AppearanceDevice, Kept};
 use crate::pdfa::colour::{is_transparency_group, ALPHA_TOLERANCE};
 use crate::resources::PageResources;
 use crate::{Bitmap, DisplayList, Page, PixelRegion, RenderOptions};
@@ -130,12 +130,13 @@ impl Page {
     /// this records and drops: a caller who also renders the page asks the
     /// list it renders from instead, and pays for one interpretation.
     ///
-    /// Four of `options` are read, because a render reads them: `usage`,
-    /// whose optional-content states decide what is hidden; `annotations`,
-    /// whether the page's annotation appearances are part of what it draws;
-    /// `magnification`, where an annotation `/NoZoom` keeps its size draws;
-    /// and `scale`, with the clamp [`Page::pixel_size`] applies, for the box
-    /// in pixels. The region, the format and the rest change no answer.
+    /// Seven of `options` are read, because a render reads them: `usage`,
+    /// whose optional-content states decide what is hidden; `content`,
+    /// `annotations`, `widgets` and `other_annotations`, which parts of the
+    /// page are part of what it draws; `magnification`, where an annotation
+    /// `/NoZoom` keeps its size draws; and `scale`, with the clamp
+    /// [`Page::pixel_size`] applies, for the box in pixels. The region, the
+    /// format and the rest change no answer.
     #[must_use]
     pub fn analysis(&self, options: &RenderOptions) -> PageAnalysis {
         self.display_list_for(options.usage).analysis(options)
@@ -160,30 +161,38 @@ pub(crate) fn analyse(list: &DisplayList, options: &RenderOptions) -> PageAnalys
     let resources = list.resources();
     let mut analyser = Analyser::new(resources, page.crop_box());
     let placement = list.placement(options.magnification);
-    if list.is_retained() {
-        replay(list.content(), &mut analyser);
-        if options.annotations {
-            for annotation in list.annotation_layers() {
-                match annotation {
-                    Recorded::Calls { scope, events } => {
-                        analyser.push_scope(resources.bind(scope));
-                        replay(events, &mut analyser);
-                        analyser.pop_scope();
-                    }
-                    Recorded::Placed(appearance) => annots::draw_prepared(
-                        &page.doc,
-                        appearance,
-                        page.fonts.as_ref(),
-                        &mut analyser,
-                        resources.operation(),
-                        placement,
-                    ),
+    let kinds = annots::Kinds::of(options);
+    // A list whose parts' answers depend on a part these options leave out
+    // is answered by interpreting the page, as a render of them draws it.
+    if list.is_retained() && list.parts_replay_alike(options) {
+        if options.content {
+            replay(list.content(), &mut analyser);
+        }
+        for annotation in list.annotation_layers() {
+            if !kinds.draws(annotation.widget) {
+                continue;
+            }
+            match &annotation.kept {
+                Kept::Calls { scope, events } => {
+                    analyser.push_scope(resources.bind(scope));
+                    replay(events, &mut analyser);
+                    analyser.pop_scope();
                 }
+                Kept::Placed(appearance) => annots::draw_prepared(
+                    &page.doc,
+                    appearance,
+                    page.fonts.as_ref(),
+                    &mut analyser,
+                    resources.operation(),
+                    placement,
+                ),
             }
         }
     } else {
-        let content = cos_pages::content_bytes(&page.doc, &page.inner);
-        interpret(&content, Matrix::IDENTITY, &mut analyser, resources);
+        if options.content {
+            let content = cos_pages::content_bytes(&page.doc, &page.inner);
+            interpret(&content, Matrix::IDENTITY, &mut analyser, resources);
+        }
         if options.annotations {
             annots::draw(
                 &page.doc,
@@ -192,6 +201,7 @@ pub(crate) fn analyse(list: &DisplayList, options: &RenderOptions) -> PageAnalys
                 &mut analyser,
                 resources.operation(),
                 placement,
+                kinds,
             );
         }
     }

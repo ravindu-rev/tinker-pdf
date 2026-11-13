@@ -635,7 +635,32 @@ pub struct RenderOptions {
     /// the render's optional-content states turn off is not drawn either,
     /// and is reported as [`RenderWarning::HiddenOptionalContent`] as content
     /// in that layer is.
+    ///
+    /// Off, no annotation of any kind is drawn, whatever
+    /// [`RenderOptions::widgets`] and [`RenderOptions::other_annotations`]
+    /// say; on, those two choose between the kinds.
     pub annotations: bool,
+    /// Whether the page's own content stream is drawn. On by default.
+    ///
+    /// Off, a render draws the page's annotations alone — the kinds
+    /// [`RenderOptions::annotations`], [`RenderOptions::widgets`] and
+    /// [`RenderOptions::other_annotations`] ask for — over the page's white,
+    /// or over nothing on a [`RenderOptions::transparent`] page, exactly as
+    /// the page whose content stream were empty draws them; its content is not
+    /// read, and nothing it would have reported is.
+    /// `docs/design/render-usage.md` states the parts a render draws apart.
+    pub content: bool,
+    /// Whether widget annotations — form fields' appearances on the page
+    /// (12.5.6.19) — are drawn, where [`RenderOptions::annotations`] is on.
+    /// On by default.
+    ///
+    /// A widget draws the normal appearance its `/AS` state names, in every
+    /// usage, a print render's included: there is no highlight to leave out.
+    pub widgets: bool,
+    /// Whether every annotation that is not a widget is drawn — markup
+    /// annotations, links, stamps and watermarks alike — where
+    /// [`RenderOptions::annotations`] is on. On by default.
+    pub other_annotations: bool,
     /// Which part of the page to render, or `None` for all of it.
     ///
     /// A rectangle of the **rendered bitmap's own pixels**, counting down from
@@ -958,6 +983,9 @@ impl Default for RenderOptions {
             format: PixelFormat::Rgb8,
             cancel: None,
             annotations: true,
+            content: true,
+            widgets: true,
+            other_annotations: true,
             region: None,
             allow_cmyk: false,
             antialias: true,
@@ -3043,10 +3071,17 @@ impl Page {
         // gives once, for every scope the render opens, and keeps what it
         // computes in the document's cache where the document has one.
         let op = self.render_operation(options, options.usage);
-        let content = stats::content(&self.doc, &self.inner, op.work());
+        // A render that leaves the content out does not read it.
+        let content = if options.content {
+            stats::content(&self.doc, &self.inner, op.work())
+        } else {
+            Vec::new()
+        };
         let mut reach = tinker_pdf_render::RunReach::default();
         let bitmap = self.render_layer(options, None, op, |renderer, resources| {
-            interpret(&content, Matrix::IDENTITY, renderer, resources);
+            if options.content {
+                interpret(&content, Matrix::IDENTITY, renderer, resources);
+            }
             if options.annotations {
                 // After the content, because an annotation sits on top of the
                 // page rather than under it.
@@ -3057,6 +3092,7 @@ impl Page {
                     renderer,
                     resources.operation(),
                     annots::Placement::new(options.magnification, self.inner.rotation),
+                    annots::Kinds::of(options),
                 );
             }
             reach = renderer.run_reach();

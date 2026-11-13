@@ -889,6 +889,27 @@ the placed `/Rect`; a display list keeps such an annotation prepared and
 interprets it at each replay where that render places it, and a page drawing
 one is drawn whole rather than in bands; `to_svg`, at magnification 1, places
 `/NoRotate`; a patch's rectangle is the placed one.
+
+**The content, the widgets and the other annotations render separately.**
+Beside `RenderOptions::annotations`, which off still draws no annotation of
+any kind, three switches, each on by default so that no render changes:
+`content`, the page's content stream, which off is not read and reports
+nothing; `widgets`, widget annotations (12.5.6.19); and `other_annotations`,
+every annotation that is not a widget — markup annotations, links, stamps
+and watermarks alike. Three, because a page's widgets alone, and its content
+with its widgets alone, are two of the seven combinations of the three parts
+and need a switch of their own for the annotations that are not widgets. A
+direct render draws only the parts that are on, each as the page whose other
+parts were deleted draws it, and an annotation of a kind left out is passed
+over before anything of it is read. A widget draws the normal appearance its
+`/AS` names in every usage, print included: there is no field highlight to
+leave out. A display list keeps the content's calls and each annotation's
+apart, beside whether it is a widget, and replays only the parts on; the one
+state a part hands on to the next is the group budget, so on a page whose
+recording spent it, a render that leaves out a part recorded before a part it
+draws draws the direct way. The page analysis reads the same switches;
+`Page::render_annotation` reads none of them; `to_svg` keeps its own
+`annotations` switch and writes every part.
 **Page geometry.** `page_view_transform` applies `/Rotate` (7.7.3.3,
 normalised to quarter turns) and the `/CropBox` origin, so the bitmap is the
 page's displayed size. Pixel dimensions round *outward* — a page never loses
@@ -1435,7 +1456,8 @@ events, and `determinism.rs` pins every fingerprinted page's box.
 The facade is the whole public surface (ruling 11): `Page::render` takes a
 `RenderOptions` — `scale` (pixels per point, or `RenderOptions::at_dpi`),
 `magnification` (1; the viewer's zoom, which `/NoZoom` reads),
-`format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
+`content`, `widgets` and `other_annotations` (each on; the parts drawn, below
+`annotations`), `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
 checked between operations and scanline bands), `annotations` (on by
 default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
@@ -2170,6 +2192,16 @@ under it, so the copy holds every canvas the walk closes onto.
   `to_svg_writes_the_annotations_the_screen_draws` holds the SVG writer's
   annotations to a twin; and `annots.rs`'s unit tests work the flag table and
   the placement by hand.
+- Parts drawn apart: `render_parts.rs`'s
+  `content_annotations_and_widgets_render_separately` holds a page of
+  content, a markup annotation and two widgets under each combination of the
+  three parts to the page with the others deleted, directly and from a
+  display list, `annotations` off to no annotation of either kind, and each
+  widget's print render to its view render, its `/AS` state's appearance
+  drawn; `a_list_leaving_out_a_part_that_spent_the_group_budget_draws_the_direct_way`
+  holds a list whose content spent the group budget, rendered without its
+  content, to the direct render; and `render_options.rs`'s
+  `the_default_is_unchanged` passes as it stands.
 - Output options: `crates/tinker-pdf/tests/render_options.rs` pins each
   `RenderOptions` field that changes what a page's bytes are with its own
   SHA-256, computed as `determinism.rs` computes one and floored by ink the same
