@@ -57,7 +57,8 @@ open of this design — the refused profiles — is listed in the
   [overprint-separations.md](overprint-separations.md).
 - **Black point compensation, gamut mapping beyond intent selection,
   iccMAX/v5 profiles, named-colour tags.** Refused by name, per ruling 2;
-  [ROADMAP](../ROADMAP.md) rows RC-02 and RC-20.
+  [ROADMAP](../ROADMAP.md) rows RC-02 and RC-20, the second designed in
+  [ICC engine completion](#icc-engine-completion-rc-20).
 - **Profiles embedded inside image codecs.** JPX colour boxes have their own
   path in `tinker-pdf-filters`; routing them through this CMM is scheduled by
   corpus evidence (ruling 3), not assumed here.
@@ -942,6 +943,313 @@ selections a default rides on, with no default anywhere:
 A JPEG or JPEG 2000 image reads its `/ColorSpace` as a sampled image does,
 so `default_spaces.rs` holds both to twins like every other path, in grey and
 RGB, the families the encoder and the decoder's fixtures have.
+
+### ICC engine completion (RC-20)
+
+Roadmap row RC-20. The CMM above converts one way, from a profile's device
+values to the connection space and on to sRGB, through the transforms
+ICC.1:2010 (ISO 15076-1) defines for that direction. This section designs
+the rest of the format: the transform the other way, from the connection
+space to a device; device links; the gamut tag; named colours; and the
+version 5 profiles of ICC.2:2023 (ISO 20677, iccMAX). Every layout and
+encoding below is read from those two specifications, ICC.1 by its 2010
+clause numbers and ICC.2 by its 2023 ones.
+
+#### Scope
+
+- **The output transform**, `icc::Output`: a profile's transform from the
+  connection space to its device components, compiled for an intent by the
+  precedence RC-01 reads (8.10.2 for `BToDx` and `BToAx` as for the forward
+  tags), from the `B2D*` and `B2A*` tables or from the model inverted.
+- **Each model's output**: a matrix/TRC and a grey model inverted; `B2A*`
+  tables in `mft1`, `mft2` and `mBA `.
+- **Device links**, class `link`: a device-to-device transform.
+- **The gamut tag**, `gamt`: whether a connection-space value is in gamut.
+- **Named colours**: `ncl2`, looked up by name; class `nmcl`.
+- **Version 5**: ICC.2's header, multi-process elements in both directions
+  with the curve forms and elements ICC.2 adds, the calculator element, and
+  a spectral connection space reduced to a colorimetric one.
+- **The Lab encodings** each table type carries, settled below, and the
+  forward reading corrected where it is wrong.
+- **The census ratchet**: `icc_census.rs` holds the compiled count as a
+  floor and the refused shapes as a ceiling.
+
+A profile whose model contradicts its header and which carries a table is
+read through the table already (RC-01.9, [The table each intent
+compiles](#the-table-each-intent-compiles)); one carrying no table it can
+convert through stays `ColorSpace::Approximated`.
+
+#### Non-goals
+
+- **Rendering intents** (RC-01), **black-point compensation** (RC-02),
+  **soft proofing** (RC-05), **converting a document** to an output intent
+  (ED-06b) and **throughput** (P-22): each its own row, which this section
+  supplies with transforms and does not drive.
+- **What ICC.2 defines and no PDF reaches**: BRDF and directional tags,
+  multiplex connection spaces (`AToM0`, `MToA0` and the `mid `, `mlnk` and
+  `mvis` classes), extended-to-standard range tags (`HdrToSdr*`), gamut
+  boundary descriptions (`gbd `), embedded images and the colour encoding
+  space class (`cenc`). Parsed past: a profile carrying them converts by
+  the tags this design reads, and one with nothing else is refused by name.
+- **Spectra other than reflectance and transmission**: emission (`es`),
+  bi-spectral (`bs`) and sparse-matrix (`sm`) connection spaces, and the
+  elements that compute them — the emission and reflectance CLUT, matrix
+  and observer elements, the colour appearance elements `JabToXYZ` and
+  `XYZToJab`, sparse matrices, tint arrays and tone maps. Refused by name.
+- **A standard observer named without its table** (ICC.2 10.2.22, Table X):
+  refused by name. The table would be vendored data, and data enters only
+  under a licence the allowlist admits (ruling 18); ICC.2:2023 grants none.
+
+#### Design
+
+##### The connection space each table type encodes
+
+Every table reads its connection-space side in the profile header's PCS,
+and the encoding is the tag type's, not the profile's:
+
+| Tag type | PCSXYZ | PCSLAB | Clause |
+| --- | --- | --- | --- |
+| `mft2` (`lut16Type`) | `u1Fixed15`, `8000h` is 1.0 | legacy: `L*` 100 at `FF00h`; `a*`, `b*` 0 at `8000h` and 127 at `FF00h` | ICC.1 10.8, Tables 39 and 40 |
+| `mft1` (`lut8Type`) | not defined, "implementation specific" | 8-bit: `L*` 100 at `FFh`, `a*`, `b*` 0 at `80h`; times 257, the 16-bit encoding of 6.3.4.2 | ICC.1 10.9, 6.3.4.2 Tables 12 and 13 |
+| `mAB `, `mBA ` | `u1Fixed15` | each component's range scaled to `0..1`: `L*` 100 at 1.0 (`FFFFh`), `a*` and `b*` from −128 at 0 to 127 at 1.0 | ICC.1 10.10.1, 10.11.1, 6.3.4.2 |
+| `ncl2` (`namedColor2Type`) | `u1Fixed15` | legacy, as `mft2` | ICC.1 10.15, Table 63 |
+| `mpet` (`multiProcessElementsType`) | float32, the value itself | float32, the value itself | ICC.1 6.3.4.2, 10.14 |
+
+So only `lut16Type` and `namedColor2Type` keep version 2's legacy scale, as
+ICC.1 6.3.4.2's note 3 says. `Lut::to_rgb` decodes every table's Lab as
+legacy: right for `mft2`, and for `mft1` and `mAB ` a factor of
+65 535/65 280 off — `L*` 100 reads 100.39 and `a*` 0 reads 0.5. RC-20.5
+corrects `mft1`'s forward reading and RC-20.6 `mAB `'s, beside the output
+tables each adds; no committed fingerprint or golden paints through a Lab
+table of either type, so none moves. `mft1` under PCSXYZ stays read as its
+16-bit widening in `u1Fixed15`, the reading ICC.1 leaves to the
+implementation. A curve or grid value outside `0..1` is clipped there, as
+10.10.5 clips `mAB `'s matrix output.
+
+##### The output transform
+
+- **Surface.** `icc::Output::compile(&Profile, Intent) -> Option<Output>`,
+  and `apply(&self, pcs: [f64; 3]) -> DeviceColour`: the connection-space
+  value in the profile's own PCS, as real numbers (D50 XYZ with the PCS
+  white's `Y` at one, or `L*a*b*`), in; the profile's data-space channels,
+  each a `u16` from 0 to 65 535, out, at most `MAX_DEVICE_CHANNELS` of them.
+  A caller holding the other PCS converts with `icc::xyz_to_lab` or
+  `icc::lab_to_xyz`, 6.4's ISO 13655 relations in `tinker_pdf_math`.
+- **Which table.** By the forward rows of [The table each intent
+  compiles](#the-table-each-intent-compiles), with `B` for `A`: the
+  intent's `B2D*` (RC-20.10), its `B2A*`, `B2A0`, the model inverted, then
+  the other `B2A*` tables; absolute colorimetric's value divided by the
+  media scale before it enters, except through `B2D3`.
+- **Matrix/TRC inverted** (RC-20.4): the inverse of the columns, computed
+  in `f64` when built and held in s15.16; each channel's curve inverted by
+  bisection over its compiled table into `CURVE_ENTRIES` entries. A matrix
+  whose determinant is below one s15.16 step, or a curve that decreases
+  anywhere, has no inverse, `IccError::NoInverse`. The table step its known
+  answers hold each channel to is the difference between the two inverted
+  entries its value falls between, since the curve is monotone, and one
+  `u16` unit for the rounding of the entries and of the matrix.
+- **Grey inverted**: `Y` (under Lab, `L*` with `a*`, `b*` ignored) through
+  the inverted `kTRC`.
+- **`mft1` and `mft2`** (RC-20.5): `B2A1`, `B2A0`, `B2A2` read into the
+  table evaluator with its output count generalised from three to the data
+  space's; the PCS encoded on the way in as the table above says, and
+  `mft2`'s matrix applied, since 10.8 makes it the identity unless the input
+  is PCSXYZ and a `B2A*` tag's input is the PCS.
+- **`mBA `** (RC-20.6): 10.11's order, `B` curves, the matrix with offsets
+  (its outputs clipped to `0..1`, and present only with three outputs), `M`
+  curves, the grid, `A` curves, each stage present where its offset is not
+  zero; `mBA ` at an `A2B*` tag stays `NeedsLut`.
+
+##### Device links
+
+A `link` profile (ICC.1 8.6) holds one `AToB0` — `mft1`, `mft2`, `mAB `, or
+a `DToB0` — from its data colour space to the space its PCS field names,
+which is a device space; the header's rendering intent says which intent
+the link was built for and selects nothing. It parses into a link transform
+(RC-20.7): device components in, device components out, through the
+N-channel evaluator with no connection-space encoding at either end, both
+channel counts bounded by `MAX_LUT_INPUTS` and `MAX_DEVICE_CHANNELS`.
+`Transform::compile` answers `None` for a link: an `ICCBased` space's
+profile may not be one (ISO 32000-2 Table 67), and its output is a
+device's, not sRGB, so a page naming one keeps 8.6.5.5's alternate-space
+reading. The link is
+`icc::Link::apply`, which ED-06b converts documents with.
+
+##### The gamut tag
+
+`gamt` (ICC.1 9.2.28) is a table from the PCS to one channel, in `mft1`,
+`mft2` or `mBA `, read beside a profile's output tables. 9.2.28: an output of
+zero is in gamut and any other value out. The table interpolates, so a value
+is out of gamut where its interpolated output, in the table's own precision,
+is half a step or more — a step of 1/255 for an `mft1` or 8-bit `mBA ` grid,
+of 1/65 535 otherwise — and in gamut below it (RC-20.8). A profile with no
+`gamt` answers `None`, never in gamut. A proof's gamut warning is RC-05's use
+of it; nothing here maps a colour.
+
+##### Named colours
+
+`ncl2` (ICC.1 10.15, Table 63): a vendor flag, the count `n`, the device
+coordinate count `m`, a 32-byte prefix and suffix, then `n` entries of
+`38 + 2m` bytes — a 32-byte root name, three PCS coordinates in the
+encoding of the table above, and `m` device coordinates from `0000h` to
+`FFFFh`. Names are 7-bit ASCII, each field NUL-terminated, and a colour's
+name is prefix, root and suffix joined. `icc::NamedColours` (RC-20.9) is
+looked up by that name and answers the PCS and device coordinates; sRGB
+comes through the existing XYZ and Lab paths. A profile of class `nmcl`
+(8.9) parses with its colours and no transform. Bounds, before an entry is
+walked: `m` within `MAX_DEVICE_CHANNELS`, `n` within `MAX_NAMED_COLOURS`,
+and `n × (38 + 2m)` within the tag's own size, both being file fields.
+
+##### Version 5
+
+- **The header** (ICC.2 7.2.2, Table 12): the first hundred bytes are
+  ICC.1's; bytes 100 to 103 the spectral PCS (Table 21: `rs`, `ts`, `es`,
+  `bs` or `sm` and a 16-bit channel count), 104 to 109 its range and 110 to
+  115 the bi-spectral range (each a `spectralRange`, 4.2.8: a `float16`
+  start and end wavelength and a `u16` step count), 116 to 119 the MCS, 120
+  to 123 the sub-class. A spectral-only profile has a PCS field of zero and
+  spectral `DToBx` and `BToDx` tags only. Bytes 100 to 127 are read only for
+  a version 5 profile; a version 2 or 4 profile's are reserved.
+- **Tags** (ICC.2 9.2): `AToB3` and `BToA3` join, ICC-absolute
+  colorimetric's own, and absolute colorimetric's row takes `A2B3` after
+  `D2B3` and before `A2B1`, unscaled; ICC.2 8.14.2's b) to d) read `AToB0`,
+  `AToB1` and `AToB3` in turn after the intent's own, which the rows here
+  already reach.
+- **Multi-process elements in both directions** (RC-20.10): RC-01.4's reader
+  (`icc/mpe.rs`) takes `BToD*` tags as well, the first element's input
+  interval the PCS's range; ICC.2's `segmentedCurve` formula types `0003h`
+  to `0007h` (Table 111), its `singleSampledCurve` and
+  `sampledCalculatorCurve` curves (11.2.2.2, 11.2.2.3) and the extended CLUT
+  (11.2.7) join ICC.1's elements. Which of a multi-process tag and an `A2B*`
+  table a profile carrying both converts through is RC-01's rule: the
+  `D2B*` tag, 8.10.2 a).
+- **The calculator element** (RC-20.11, ICC.2 11.2.1): a main function of
+  operations in reverse Polish notation — eight bytes each, a signature and
+  four data bytes — over input, output and temporary channels, with
+  sub-elements it may invoke. It is validated before it runs (operations
+  known, channel indexes in range, the stack never under- or overflowing,
+  found by walking the program once), and it runs when the table is built,
+  never per colour: the element becomes a grid stage, the program evaluated
+  at every node over its inputs' intervals — 33 points an axis up to three
+  inputs, 17 for four, 9 for five and six, 5 beyond — the grid's entries
+  counted against `MAX_CLUT_ENTRIES`. Every count it can spend is capped,
+  and a program past a cap is a typed refusal: operations, main function and
+  sub-elements together, `MAX_CALC_OPERATIONS` (65 536, the bound
+  `Function::PostScript` holds its tokens to); stack depth
+  `MAX_CALC_STACK` (1 024; ICC.2 reserves 65 535 where a profile states
+  no limit); sub-element nesting `MAX_CALC_DEPTH` (16); temporary channels
+  `MAX_CALC_TEMPORARIES` (1 024). A `calculatorLimits` extension (`clmt`)
+  stricter than a cap is honoured.
+- **A spectral connection space** (RC-20.12): a `DToBx` tag giving
+  reflectance or transmission spectra is reduced to XYZ when built, each
+  spectrum integrated against the observer and illuminant the profile's
+  `spectralViewingConditionsTag` (`svcn`, ICC.2 9.2.111, of 10.2.22's
+  Table 69) carries, both resampled linearly to the spectral PCS range:
+  `X = Σ R(λ) S(λ) x̄(λ) / Σ S(λ) ȳ(λ)`, alike for `Y` and `Z`, so a
+  perfect reflector has `Y` of one. Viewing conditions other than the CIE
+  1931 observer under D50 connect through the profile's
+  `customToStandardPccTag` (9.2.57), and the output direction's through
+  its `standardToCustomPccTag` (9.2.113), where it carries one, and are
+  refused by name where it does not, as 10.2.22 has a CMM do. A profile with no
+  `svcn`, or one naming a standard observer with zero steps, is refused by
+  name (the non-goal above); the step count is held to
+  `MAX_SPECTRAL_STEPS` (1 024; the field allows 65 535).
+
+##### Caps, each a `bounds_ledger.rs` row
+
+| Cap | Value | Bounds | Row's step |
+| --- | ---: | --- | --- |
+| `MAX_DEVICE_CHANNELS` | 15 | a table's output channels, a link's, a named colour's device coordinates | RC-20.5 |
+| `MAX_NAMED_COLOURS` | 65 536 | an `ncl2` tag's count | RC-20.9 |
+| `MAX_MPE_ELEMENTS` | 64 | a multi-process tag's elements (RC-01.4's constant) | RC-20.10 |
+| `MAX_CALC_OPERATIONS` | 65 536 | a calculator's operations, its sub-elements' among them | RC-20.11 |
+| `MAX_CALC_STACK` | 1 024 | the stack a calculator's program reaches | RC-20.11 |
+| `MAX_CALC_DEPTH` | 16 | sub-element invocations within one another | RC-20.11 |
+| `MAX_CALC_TEMPORARIES` | 1 024 | temporary channels | RC-20.11 |
+| `MAX_SPECTRAL_STEPS` | 1 024 | a spectral range's steps | RC-20.12 |
+
+Fifteen is 7.2.6's `FCLR`, the most channels a data colour space has. Each
+row carries the ledger's yardsticks — the most any fixture spends, a comic,
+a document, a book, and what the format can reach — and names the test that
+fires it before what it bounds is allocated.
+
+##### Integers per colour
+
+Ruling 4's split stands: floats and `tinker_pdf_math` when a table is built,
+integers when a colour is converted. An inverted curve is a table, a
+multi-process pipeline integer stages, a calculator or a spectral reduction
+a grid; only the connection-space conversions at the ends — 6.4's relations,
+`lab_to_rgb` — use `tinker_pdf_math`, as the forward pipeline does, which
+a forward transform's grid runs once a node rather than once a colour
+([P-22](#p-22--colour-conversion-throughput)).
+
+##### Fuzzing
+
+The `icc_profile` target keeps taking a raw profile, with no control prefix
+(`xtask/src/fuzzaudit.rs`): it drives the output transform, a link, the
+gamut tag and the named-colour lookup with fixed inputs, as it drives every
+intent's forward transform now.
+
+##### The census
+
+`icc_census.rs` becomes a ratchet (RC-20.2): `COMPILED` a floor and
+`REFUSED_SHAPES` a ceiling, so a parser that reads one more corpus profile
+records a gain and one that reads fewer fails; `STREAMS` stays exact, the
+lock file's population. The censuses print each refused profile's version,
+class, spaces and tags with the structure at each table tag, and count
+`B2A*` tags by structure, `D2B*` and `B2D*` tags, `gamt`, `ncl2`, the `link`
+and `nmcl` classes, and version 5 profiles with their tag types. RC-20.16
+reads them in a local run over the fetched corpora and raises the floor.
+
+#### Milestones
+
+1. RC-20.2: the census ratchet.
+   `a_census_that_compiles_more_is_a_gain_and_less_a_failure`.
+2. RC-20.4: the output surface; matrix/TRC and grey inverted.
+   `icc_known_answers.rs`'s
+   `a_matrix_profile_takes_xyz_back_to_its_device_values`,
+   `a_grey_profile_takes_luminance_back_through_its_curve` and
+   `forward_then_output_is_the_identity_for_a_matrix_profile`.
+3. RC-20.5: `B2A*` in `mft1` and `mft2`, and `mft1`'s Lab read in its own
+   encoding.
+   `a_b2a_lut16_takes_the_connection_space_through_its_matrix_curves_and_grid`,
+   `a_b2a_lut8_writes_four_channels_of_ink`,
+   `the_relative_colorimetric_b2a_is_chosen_first` and
+   `an_mft1_lab_table_reads_in_its_own_encoding`.
+4. RC-20.6: `mBA `, and `mAB `'s Lab read in its own encoding.
+   `an_mba_tag_runs_its_stages_in_icc_1s_order` and
+   `a_v4_table_reads_and_writes_lab_in_its_own_encoding`.
+5. RC-20.7: device links. `a_device_link_maps_device_values_through_its_table`
+   and `a_link_names_its_output_space_in_the_connection_space_field`.
+6. RC-20.8: the gamut tag.
+   `a_gamut_tag_answers_in_and_out_where_its_table_says`.
+7. RC-20.9: named colours. `a_named_colour_answers_its_coordinates_by_name`
+   and `a_named_colour_converts_through_its_connection_space`.
+8. RC-20.10: multi-process pipelines both ways and the version 5 header.
+   `a_curve_set_matrix_clut_pipeline_is_recomputed` and
+   `a_v5_profile_with_a_multi_process_transform_converts`.
+9. RC-20.11: the calculator. `the_calculator_computes_what_its_program_says`.
+10. RC-20.12: a spectral connection space.
+    `a_spectral_profile_integrates_against_its_own_observer`.
+11. RC-20.13: the record catches up with the parser: the crate doc, the
+    PDF/A notes and these milestones marked.
+12. RC-20.14: fingerprints. `determinism.rs`'s
+    `icc_transforms_are_stable_across_targets` and
+    `a_v5_profiled_page_renders_the_same_on_every_target`.
+13. RC-20.15a: the speed row `an ICC-based image to sRGB through a v5
+    multi-process profile`; RC-20.15b: its wall-clock figure.
+14. RC-20.16: the corpus figure, ratcheted.
+
+#### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| An inverted curve or matrix is ill-conditioned and the output transform amplifies a rounding into a visible error | The inverse is built in `f64` and held to s15.16; a determinant under one step or a decreasing curve is `NoInverse`; `forward_then_output_is_the_identity_for_a_matrix_profile` holds the round trip within a table step |
+| The Lab correction for `mft1` and `mAB ` moves pages that render today | No pinned page paints through a Lab table of either type; the corpus pages that do move, each Lab component by at most 0.4 % of its range, toward what 10.9 and 10.10 say, and RC-20.16's run counts them |
+| A calculator program costs without bound | Every count it can spend is capped and checked before it runs, and it runs only when a table is built, never per colour, the precedent `Function::PostScript` set |
+| A spectral profile reduced against a guessed observer | Only the observer and illuminant the profile carries are used; a standard observer named without its table is refused by name, never assumed |
+| v5's precedence differs from ICC.1's for a profile carrying `AToB3` | Absolute colorimetric's row reads `A2B3` before `A2B1` for a version 5 profile only; every version 2 and 4 profile keeps RC-01's rows |
+| An element ICC.2 defines is read wrongly because no published table settles its arithmetic | Each element's known-answer test recomputes it from the clause; an element this design does not read is refused by name, so its tag is passed over rather than half-read |
 
 ## Milestones
 
