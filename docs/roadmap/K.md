@@ -129,18 +129,6 @@ K-08 extends the mechanism to every new rendered surface.
 | K-08.5 | test | A golden family for fields under formatting scripts: a page of text fields whose appearances show the values `AFNumber_Format`, `AFPercent_Format`, `AFDate_Format` and `AFSpecial_Format` produce, its header naming its clause, entering `UNREVIEWED`, once a formatted value reaches a field's appearance. *Note:* No appearance draws a formatted value today: `formatted_value` returns a `DisplayString` no writer takes (`docs/features/forms.md`). FJ-07's formatting after a committed change is taken as the row that adds the surface. | `crates/tinker-pdf/tests/surface_goldens.rs` (new), `crates/tinker-pdf/tests/goldens/surfaces/formatted-fields.ppm` (new) | `every_surface_golden_is_what_this_build_draws` holds `formatted-fields` byte for byte above its ink floor, `unreviewed` and listed in `UNREVIEWED`, in the default and `bundled-fonts` builds. | K-08.1, FJ-07 |
 | K-08.6 | test | A golden family for OCR text-layer alignment: a scanned-page fixture with its imported invisible text layer drawn visibly over it (each word's box and baseline), so a reviewer sees the layer sit on the words; its header naming its clause, entering `UNREVIEWED`. *Note:* The layer is OC-01's import seam's; the recogniser's own layer (OC-02) joins the family in that row. | `crates/tinker-pdf/tests/surface_goldens.rs` (new), `crates/tinker-pdf/tests/goldens/surfaces/ocr-layer-alignment.ppm` (new) | `every_surface_golden_is_what_this_build_draws` holds `ocr-layer-alignment` byte for byte above its ink floor, `unreviewed` and listed in `UNREVIEWED`, in the default and `bundled-fonts` builds. | K-08.1, OC-01.3 |
 
-## K-09 — A naming lint over the roadmap
-
-**A naming lint over the roadmap** that keeps the names out of the tree too: `cargo xtask check` hashes every word and word pair of `docs/ROADMAP.md` and compares them against a committed list of SHA-256 hashes, so the names are not written in plain text anywhere in the tree. That stops a grep and not a determined reader — a hash of a short public name is reversed by hashing candidate names — so the lint keeps names out of the roadmap and claims nothing about keeping the list secret
-
-**Exit criterion.** `cargo xtask check` fails on a hash match anywhere in the file, with no exemption — the corpus table names its suites by role; a test injects a hashed name and sees it caught
-
-**Doc:** — · **Depends on:** — (H-07 sets whether it reaches beyond the roadmap)
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| K-09.2 | ci | Commit the hash list the lint compares against: the SHA-256 of every name the never-name rule covers (engines, viewers, validators, document tools, browsers and OCR engines; one-word names, and two-word ones in the scan's normalised form), generated from a candidate list that is never committed, so only hashes enter the tree. *Note:* Whether the list is complete is the owner's to say (H-75); a name added later is one more line. `xtask/never-named.sha256` is the file K-09.1 creates. | `xtask/never-named.sha256` (new), `docs/verification.md` | `names.rs` `the_committed_list_is_hashes_only` (new) holds every line of `xtask/never-named.sha256` to 64 lowercase hex digits, sorted and unique; `cargo xtask check` is green over today's `docs/ROADMAP.md` and `docs/roadmap/`. | K-09.1 |
-
 ## K-10 — Continuous fuzzing at scale
 
 **Continuous fuzzing at scale** — the build and seed-corpus files a public continuous-fuzzing service needs, maintained in-tree

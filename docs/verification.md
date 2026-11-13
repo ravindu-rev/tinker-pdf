@@ -911,6 +911,25 @@ so the caps are properties of inputs, not of machines.
   engine, viewer, validator or document tool), `check`, `corpus-fetch` /
   `corpus-run` / `corpus-licences`, `release`, `nuget-stage`.
 
+`cargo xtask names` holds the roadmap to the owner's answer on how far the
+never-name rule reaches (ruling 23, H-07): `docs/ROADMAP.md` and every file
+under `docs/roadmap/` name no engine, viewer, validator or document tool,
+and each corpus by its role, while the provenance files keep the names. The
+names themselves are not written in the tree. `xtask/never-named.sha256`
+holds the SHA-256 of each — engines, viewers, validators, document tools,
+browsers and OCR engines, and the names of the fetched corpora and of the
+suites they hold — one a line and sorted, each lowercased and a two-word
+name as its two words joined by one space, written from a candidate list
+that is never committed; a name that is also a word the roadmap uses enters
+only in its two-word form. The scan splits each file on every character
+that is not a letter or a digit, line breaks included, hashes every word
+and every pair of adjacent words with `tinker-pdf-crypto`'s SHA-256, and
+fails on a listed hash with the file, the line and the hash, never the
+word; nothing exempts a line. A hash of a short public name is reversed by
+hashing candidate names, so the list keeps the names out of the roadmap
+and claims nothing about keeping itself secret, and a name it lacks is one
+more line.
+
 ## Clocks: outside the suite, and not nowhere
 
 Clocks are banned from **tests**. `bounds_ledger.rs` bans `Instant::now` from

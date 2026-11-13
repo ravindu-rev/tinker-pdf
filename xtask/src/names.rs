@@ -406,6 +406,34 @@ mod tests {
         }
     }
 
+    /// The committed list is hashes and nothing else — no comment, no name,
+    /// no blank line — sorted and each once, so a name added later is one
+    /// line in its place and a diff of the file shows nothing but hashes.
+    #[test]
+    fn the_committed_list_is_hashes_only() {
+        let text = std::fs::read_to_string(crate::repo_root().join(LIST)).expect("the list");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            !lines.is_empty(),
+            "{LIST} holds no hash, so nothing is checked"
+        );
+        assert!(text.ends_with('\n'), "{LIST}'s last line has no line feed");
+        for (number, line) in lines.iter().enumerate() {
+            assert!(
+                is_hash(line),
+                "{LIST}:{}: not 64 lowercase hex digits",
+                number + 1
+            );
+        }
+        for (number, pair) in lines.windows(2).enumerate() {
+            assert!(
+                pair[0] < pair[1],
+                "{LIST}:{}: out of order or repeated",
+                number + 2
+            );
+        }
+    }
+
     /// The lint runs against this repository, which is the point of it.
     #[test]
     fn the_roadmap_names_nothing_the_list_holds() {

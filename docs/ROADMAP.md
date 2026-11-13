@@ -12,7 +12,8 @@ document needs goes before the row none has asked for yet.
 
 Nothing in the roadmap names another engine, viewer, validator or document
 tool, the corpora included, each of which is named by its role. A capability
-is described on its own terms.
+is described on its own terms. `cargo xtask names`, inside `cargo xtask
+check`, fails on a name its hash list holds ([verification.md](verification.md)).
 
 ## Bugs
 
@@ -21,11 +22,12 @@ fixes it. A case a row's work cannot fix by the owner's rules is listed here,
 and its row is narrowed to it.
 
 - **Page one of a linearized file, opened from its head, with
-  `bundled-fonts`.** `crates/tinker-pdf/tests/streaming_open.rs`'s
-  `linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads`
-  fails with `bundled-fonts` where the qpdf corpus is fetched: some files
-  draw a page one other than the buffered open draws. The default build
-  draws the same page, and CI, which fetches no corpus, skips it.
+  `bundled-fonts`.** `crates/tinker-pdf/tests/streaming_open.rs`'s test
+  that renders page one of each linearized file of the file-structure
+  torture corpus from the file's head fails with `bundled-fonts` where
+  that corpus is fetched: some files draw a page one other than the
+  buffered open draws. The default build draws the same page, and CI,
+  which fetches no corpus, skips it.
 - **A line of a right-to-left paragraph read alone.** The reader puts each
   line in logical order by itself, so a line of an Arabic paragraph that
   opens with `25٪`, on a page that does not state its text, reads
