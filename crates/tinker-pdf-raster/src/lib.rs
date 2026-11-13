@@ -15,6 +15,7 @@ pub mod geom;
 pub mod image;
 pub mod mesh;
 pub mod stroke;
+pub mod toolbox;
 
 pub use canvas::{Canvas, Color, MaskKind, PixelFormat};
 pub use fill::{fill, fill_outline, fill_with, FillScratch, Mask};

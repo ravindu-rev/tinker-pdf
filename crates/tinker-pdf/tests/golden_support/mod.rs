@@ -237,6 +237,59 @@ pub fn ppm_samples(bytes: &[u8]) -> &[u8] {
     &bytes[(at + 1).min(bytes.len())..]
 }
 
+/// A raster golden as the picture it holds: an `Rgb8` bitmap of the width and
+/// height its header states, its samples [`ppm_samples`]'s. `None` for bytes
+/// that are not a binary PPM of eight-bit samples whose raster is whole.
+pub fn ppm_bitmap(bytes: &[u8]) -> Option<Bitmap> {
+    if bytes.get(..2) != Some(b"P6".as_slice()) {
+        return None;
+    }
+    // The same walk `ppm_samples` makes, keeping the three numbers.
+    let mut at = 2;
+    let mut numbers = Vec::with_capacity(3);
+    while at < bytes.len() && numbers.len() < 3 {
+        let byte = bytes[at];
+        if byte == b'#' {
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+        } else if byte.is_ascii_digit() {
+            let start = at;
+            while at < bytes.len() && bytes[at].is_ascii_digit() {
+                at += 1;
+            }
+            numbers.push(
+                std::str::from_utf8(&bytes[start..at])
+                    .ok()?
+                    .parse::<u32>()
+                    .ok()?,
+            );
+            continue;
+        }
+        at += 1;
+    }
+    let [width, height, max] = numbers[..] else {
+        return None;
+    };
+    let samples = ppm_samples(bytes);
+    let length = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(3)?;
+    if max != 255 || width == 0 || height == 0 || samples.len() < length {
+        return None;
+    }
+    Some(Bitmap {
+        width,
+        height,
+        format: tinker_pdf::PixelFormat::Rgb8,
+        stride: width as usize * 3,
+        data: samples[..length].to_vec(),
+        warnings: Vec::new(),
+        premultiplied: false,
+        stats: None,
+    })
+}
+
 /// How a committed raster golden and what this build draws differ, or
 /// `None` when they are byte for byte the same picture.
 pub fn ppm_mismatch(family: &str, committed: &[u8], bitmap: &Bitmap) -> Option<String> {

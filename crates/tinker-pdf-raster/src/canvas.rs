@@ -1161,7 +1161,12 @@ fn place(
 /// where a Lab group loses precision relative to the space itself — about a
 /// third of a unit of `L*` per step — and it is the price of blending with the
 /// same integer arithmetic every other buffer uses.
-fn lab_bytes(color: Color) -> (u8, u8, u8) {
+///
+/// `pub` beside [`lab_to_rgb`], its inverse, because the bitmap toolbox
+/// encodes a colour into a Lab bitmap exactly as a Lab buffer is filled, and a
+/// test that holds it there has to compute the same bytes.
+#[must_use]
+pub fn lab_bytes(color: Color) -> (u8, u8, u8) {
     let (l, a, b) = tinker_pdf_color::srgb_to_lab(color.r, color.g, color.b);
     let byte = |v: f64| -> u8 { v.clamp(0.0, 255.0).round() as u8 };
     (byte(l / 100.0 * 255.0), byte(a + 128.0), byte(b + 128.0))

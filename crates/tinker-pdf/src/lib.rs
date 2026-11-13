@@ -491,7 +491,7 @@ pub use tinker_pdf_crypto::Permissions;
 /// disagree with itself.
 pub use tinker_pdf_filters::CcittParams;
 pub use tinker_pdf_filters::PngError;
-pub use tinker_pdf_raster::canvas::PixelFormat;
+pub use tinker_pdf_raster::canvas::{Color, PixelFormat};
 pub use tinker_pdf_render::{CancelToken, PixelRegion, RenderWarning};
 /// Signature verdicts (12.8), behind [`Document::verify_signatures`].
 pub use verdict::{
@@ -809,6 +809,99 @@ impl Bitmap {
     #[must_use]
     pub fn components(&self) -> usize {
         self.format.components()
+    }
+
+    /// The toolbox's view of this bitmap: its fields, beside its bytes.
+    fn layout(&self) -> tinker_pdf_raster::toolbox::Layout {
+        tinker_pdf_raster::toolbox::Layout {
+            format: self.format,
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            premultiplied: self.premultiplied,
+        }
+    }
+
+    // ---- The toolbox (`docs/design/bitmap-toolbox.md`) ----------------------
+    //
+    // Each is one call into `tinker_pdf_raster::toolbox`, where the arithmetic
+    // is, because that crate is on `cargo xtask libm`'s pixel paths and this
+    // one is not (ruling 4). Every map acts on straight colour — a
+    // premultiplied bitmap is straightened a pixel at a time and premultiplied
+    // again — never writes an alpha byte or a row's padding, and changes
+    // nothing on a bitmap that is not a picture, `to_png`'s condition; every
+    // reduction answers `None` for one.
+
+    /// Every tone component through gamma's table, `floor(255 * pow(v / 255,
+    /// gamma) + 0.5)`: a grey or an RGB component `v` becomes `T[v]`, an ink
+    /// `255 - T[255 - v]` (an ink is the light it takes away), a Lab bitmap's
+    /// `L*` byte `T[v]` with `a*` and `b*` kept. One is the identity, below one
+    /// lightens and above darkens; a `gamma` that is not finite and greater
+    /// than zero changes nothing.
+    pub fn gamma(&mut self, gamma: f64) {
+        let layout = self.layout();
+        tinker_pdf_raster::toolbox::gamma(&layout, &mut self.data, gamma);
+    }
+
+    /// Every colour byte `v` becomes `255 - v`, in every format: light
+    /// complemented, ink the ink of the complementary light, Lab's `L*` turned
+    /// over and `a*` and `b*` reflected.
+    pub fn invert(&mut self) {
+        let layout = self.layout();
+        tinker_pdf_raster::toolbox::invert(&layout, &mut self.data);
+    }
+
+    /// Lightness inverted and chroma kept, for a dark reading mode: each sRGB
+    /// component `c` becomes `clamp(c + 255 - 2Y, 0, 255)` for the pixel's
+    /// lightness `Y` ([`Color::luma`]) — T.871's YCbCr with `Y` turned over —
+    /// a grey `255 - v`, and a Lab bitmap's `L*` byte `255 - L` with `a*` and
+    /// `b*` kept. An ink bitmap goes through light and back, so its split is
+    /// re-derived: a rich black comes back as black ink alone.
+    pub fn invert_luminance(&mut self) {
+        let layout = self.layout();
+        tinker_pdf_raster::toolbox::invert_luminance(&layout, &mut self.data);
+    }
+
+    /// Every pixel's lightness `Y` placed on the ramp from `dark` to `light`,
+    /// each sRGB channel `(dark * (255 - Y) + light * Y + 127) / 255`, and the
+    /// ramp's colour written in this bitmap's format as a canvas of it is
+    /// filled. Black goes to `dark` and white to `light`; the two colours'
+    /// alphas are not read.
+    pub fn tint(&mut self, dark: Color, light: Color) {
+        let layout = self.layout();
+        tinker_pdf_raster::toolbox::tint(&layout, &mut self.data, dark, light);
+    }
+
+    /// Every pixel its own lightness, in its own format: RGB `(Y, Y, Y)`, ink
+    /// black ink alone, Lab its `L*` with `a*` and `b*` neutral; a grey bitmap
+    /// is unchanged.
+    pub fn grayscale(&mut self) {
+        let layout = self.layout();
+        tinker_pdf_raster::toolbox::grayscale(&layout, &mut self.data);
+    }
+
+    /// How many distinct pixels this bitmap holds, every byte compared as
+    /// stored — alpha included, premultiplied or not — or `limit` once that
+    /// many are found: counting stops there, so it holds at most `limit`
+    /// pixels however large the bitmap is.
+    #[must_use]
+    pub fn colour_count(&self, limit: usize) -> Option<usize> {
+        tinker_pdf_raster::toolbox::colour_count(&self.layout(), &self.data, limit)
+    }
+
+    /// Whether every pixel is the same, every byte compared as stored.
+    #[must_use]
+    pub fn is_unicolour(&self) -> Option<bool> {
+        tinker_pdf_raster::toolbox::is_unicolour(&self.layout(), &self.data)
+    }
+
+    /// Whether every pixel is opaque black or opaque white: its sRGB `(0, 0,
+    /// 0)` or `(255, 255, 255)`, read as a canvas reads its format, and its
+    /// alpha, where the format has one, 255. An ink pixel of all four inks is
+    /// black, as one of black ink alone is.
+    #[must_use]
+    pub fn is_monochrome(&self) -> Option<bool> {
+        tinker_pdf_raster::toolbox::is_monochrome(&self.layout(), &self.data)
     }
 
     /// This bitmap as a complete PNG file (ISO/IEC 15948), 8 bits a component.

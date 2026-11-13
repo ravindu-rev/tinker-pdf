@@ -999,6 +999,29 @@ asymmetry: the largest page this engine renders writes a PNG this will not
 read back, because a reader's budget against a thirteen-byte header asking for
 2^63 samples is not a writer's.
 
+**The bitmap toolbox** works on a rendered `Bitmap` in place, every closed
+form the one [bitmap toolbox](../design/bitmap-toolbox.md) states and every
+byte of its arithmetic in `tinker_pdf_raster::toolbox`, which `cargo xtask
+libm` binds. `Bitmap::gamma` takes every tone component through a table of
+`floor(255 * pow(v / 255, gamma) + 0.5)` built through `tinker_pdf_math::pow`
+— an ink as the light it takes away, a Lab bitmap's `L*` alone — and ignores
+an exponent that is not finite and positive; `invert` complements every colour
+byte; `invert_luminance` turns each pixel's lightness `Y` (`Color::luma`) over
+and keeps its chroma, `c + 255 - 2Y` clamped, a Lab bitmap's `L*` alone, an
+ink bitmap through light and back; `tint(dark, light)` places each pixel's
+lightness on the ramp between two `Color`s, each channel
+`(dark * (255 - Y) + light * Y + 127) / 255`, written in the bitmap's own
+format as a canvas of it is filled; and `grayscale` makes each pixel its own
+lightness — RGB `(Y, Y, Y)`, ink black ink alone, Lab its `L*` with neutral
+`a*` and `b*`. Alpha is never mapped, and a premultiplied bitmap is mapped
+straight, each pixel straightened and premultiplied again. Three reductions
+answer about the whole bitmap, reading the bytes as stored:
+`colour_count(limit)`, the distinct pixels counted to `limit` and no further;
+`is_unicolour`; and `is_monochrome`, every pixel opaque black or opaque white
+by the canvas's reading of its format. Each walks the rows over `stride` and
+touches none of a row's padding, and on a bitmap that is not a picture — `to_png`'s
+condition — a map changes nothing and a reduction answers `None`.
+
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
 
@@ -1118,6 +1141,17 @@ defect to hide in.
   decoded layout, both refusals, and a fixed-seed campaign of random and
   mutated files that must never panic and must reach both a picture and a
   refusal more than five hundred times each.
+- The bitmap toolbox: `crates/tinker-pdf/tests/bitmap_toolbox.rs` holds every
+  map and every reduction to its closed form over every reviewed raster
+  golden, read through `golden_support`'s PPM reader, in each of the six
+  formats, with an alpha plane the test lays on, straight and premultiplied,
+  computing each byte from the design's formula and the canvas's colour
+  relations; gamma at exponents of a half, one and two, whose powers it
+  computes exactly in integers. It holds a padded stride unread and unwritten
+  and a bitmap that is not a picture refused whole.
+  `tinker-pdf-raster`'s `toolbox` tests hold gamma's table to its formula at
+  other exponents and the toolbox's decoding and encoding of each format to
+  the canvas's own.
 - SVG output: `crates/tinker-pdf/tests/svg_output.rs` reads every file the
   writer makes back through `tinker-pdf-svg` and compares the scene with what
   the page states, worked out from the content stream's own numbers — a

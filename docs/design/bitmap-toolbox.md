@@ -255,7 +255,10 @@ a tile of a forced-colour page is the page's subregion byte for byte.
    reviewed golden in `tests/goldens/`, read through `golden_support`'s PPM
    reader, in every one of the six formats, and over each with an alpha plane
    the test lays on, straight and premultiplied, every byte and answer equals
-   the closed form computed in the test; `a_padded_stride_is_neither_read_nor_written`.
+   the closed form computed in the test — gamma at exponents of one half, one
+   and two, whose powers the test computes exactly in integers, `round(sqrt(255
+   v))`, `v` and `(v^2 + 127) / 255`, none of them within a rounding of `pow`
+   of a tie; `a_padded_stride_is_neither_read_nor_written`.
 2. **RC-09.3, scale and subsample.** `bitmap_toolbox.rs`
    `a_scaled_render_is_the_area_average_the_test_computes`, at whole and
    fractional ratios, down and up, and

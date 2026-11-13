@@ -460,6 +460,18 @@ The crate root re-exports the working set: `Path`, `Verb`, `Point`,
 from PDF vocabulary — `/BM` names to `BlendMode`, content-stream operators
 to paths — lives one layer up, in [rendering](rendering.md).
 
+`toolbox` is the arithmetic of the facade's bitmap toolbox
+([bitmap toolbox](../design/bitmap-toolbox.md)): over a buffer described by a
+`toolbox::Layout` — its format, size, stride and whether it is premultiplied —
+`gamma`, `invert`, `invert_luminance`, `tint` and `grayscale` map every pixel
+in place and `colour_count`, `is_unicolour` and `is_monochrome` answer about
+them, refusing whole a buffer that is not a picture (`Layout::is_picture`) and
+never reading or writing a row's padding. `gamma_table` is gamma's 256 bytes,
+built through `tinker_pdf_math::pow`, and `decode` and `encode` are a pixel's
+sRGB and a colour's bytes exactly as a `Canvas` of the format reads and fills
+them; `canvas::lab_bytes` is public beside `lab_to_rgb`, its inverse, so the
+toolbox and its tests encode Lab as a Lab canvas does.
+
 ## Refused by name
 
 | What | Typed variant / named bound | Why (one line) | See |
