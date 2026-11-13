@@ -36,7 +36,15 @@ Type 2 charstrings — implicit width on the first stack-clearing operator,
 `endchar` among them, where `seac`'s four operands are not a width and a
 fifth before them is (Type 2 charstring specification, appendix C),
 `hintmask` operand counting (hints are parsed exactly far enough to skip),
-local and global subroutines with the count-dependent bias. Glyph selection is
+local and global subroutines with the count-dependent bias, which is resolved
+once per INDEX when the face is parsed. A caller reading many glyphs keeps one
+`cff::Machine` and one `Outline` and runs each glyph through them
+(`Cff::outline_into`): the operand stack and the segment buffer are allocated
+once, while the stack is cleared and the operation budget, the subroutine
+depth cap and the transient array start afresh at every glyph, so a glyph
+draws the same segments whichever glyphs came before it; `Cff::outline` is
+that call with a fresh pair. `Cff::advance` runs a charstring only as far as
+the operator that settles its width and builds no outline. Glyph selection is
 the charset's job, never the character code's: all three written charset
 formats (0, 1, 2) plus the three predefined ones (ISOAdobe, Expert,
 ExpertSubset), names resolved through the 391 standard strings and the font's

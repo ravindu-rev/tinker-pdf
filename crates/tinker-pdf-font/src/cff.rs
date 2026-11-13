@@ -19,6 +19,20 @@
 //! CID-keyed one, and [`Cff::gid_for_code`] for the encoding the font program
 //! carries itself. A caller that used the character code as a glyph index
 //! would draw whatever glyph happened to be at that position.
+//!
+//! # One machine for many glyphs
+//!
+//! [`Cff::outline_into`] runs a glyph on a caller's [`Machine`] and writes it
+//! into a caller's [`Outline`], so a caller reading every glyph of a face
+//! allocates the operand stack and the segment buffer once rather than once a
+//! glyph; [`Cff::outline`] is that call with a fresh pair. Only the buffers
+//! are carried: the stack is cleared before each glyph, and the operation
+//! budget, the subroutine depth cap and the transient array are each glyph's
+//! own. The two subroutine biases (Type 2 charstring specification, 4.7) are
+//! a property of the INDEXes, so they are resolved when the face is parsed —
+//! the global one and each Private DICT's local one — and a `callsubr` reads
+//! the stored number. [`Cff::advance`] runs a charstring only as far as the
+//! operator that settles its width, and builds no outline.
 
 use crate::outline::{Outline, Segment};
 
@@ -27,6 +41,8 @@ use crate::outline::{Outline, Segment};
 pub struct Cff<'a> {
     charstrings: Index<'a>,
     global_subrs: Index<'a>,
+    /// The bias of [`Cff::global_subrs`], resolved when the face was parsed.
+    global_bias: i32,
     strings: Index<'a>,
     /// The top-level Private DICT: local subroutines and the two widths.
     private: Private<'a>,
@@ -55,11 +71,25 @@ pub struct Cff<'a> {
 }
 
 /// A Private DICT's contribution to running a charstring.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct Private<'a> {
     local_subrs: Index<'a>,
+    /// The bias of `local_subrs`, resolved when the DICT was read.
+    local_bias: i32,
     default_width: f64,
     nominal_width: f64,
+}
+
+impl Default for Private<'_> {
+    fn default() -> Self {
+        Private {
+            local_subrs: Index::default(),
+            // An empty INDEX's bias, which a DICT with no Subrs keeps.
+            local_bias: EMPTY_INDEX_BIAS,
+            default_width: 0.0,
+            nominal_width: 0.0,
+        }
+    }
 }
 
 /// A CFF INDEX: a count, offsets, then the data.
@@ -244,6 +274,7 @@ impl<'a> Cff<'a> {
         read(steps, strings.len() + 1);
         let (global_subrs, _) = Index::parse(data, at)?;
         read(steps, global_subrs.len() + 1);
+        let global_bias = bias(global_subrs.len());
 
         let top = parse_dict(top_dicts.get(0)?);
 
@@ -308,6 +339,7 @@ impl<'a> Cff<'a> {
         Some(Cff {
             charstrings,
             global_subrs,
+            global_bias,
             strings,
             private,
             charset,
@@ -437,6 +469,9 @@ impl<'a> Cff<'a> {
     }
 
     /// One glyph's outline, in the font's own units.
+    ///
+    /// [`Cff::outline_into`] with a fresh outline and machine: a caller that
+    /// reads many glyphs keeps one of each and calls that instead.
     #[must_use]
     pub fn outline(&self, glyph: u16) -> Option<Outline> {
         self.outline_counted(glyph).0
@@ -447,36 +482,74 @@ impl<'a> Cff<'a> {
     /// it called — what the machine spends of its budget.
     #[must_use]
     pub fn outline_counted(&self, glyph: u16) -> (Option<Outline>, u64) {
-        let Some(charstring) = self.charstrings.get(usize::from(glyph)) else {
-            return (None, 0);
-        };
-        let mut ctx = self.charstring_context(glyph);
+        let mut outline = Outline::default();
+        let mut machine = Machine::new();
+        match self.interpret(glyph, &mut outline, &mut machine) {
+            Some(steps) => (Some(outline), steps),
+            None => (None, 0),
+        }
+    }
+
+    /// One glyph's outline, in the font's own units, written into `outline`
+    /// through `machine`'s operand stack.
+    ///
+    /// The segments are [`Cff::outline`]'s, segment for segment; what
+    /// differs is where they are kept. `outline`'s segments are replaced and
+    /// its allocation kept, and `machine` keeps its stack, so a caller that
+    /// reads every glyph of a face through one of each allocates both once.
+    /// Nothing else carries from one glyph to the next: the stack is cleared
+    /// first, and the budget, the depth cap and the transient array start
+    /// afresh, so the order glyphs are read in changes no outline.
+    ///
+    /// False, with `outline` emptied, for a glyph the font does not have.
+    pub fn outline_into(&self, glyph: u16, outline: &mut Outline, machine: &mut Machine) -> bool {
+        self.interpret(glyph, outline, machine).is_some()
+    }
+
+    /// Runs one glyph's charstring into `outline`, and says how many steps it
+    /// took, or `None` for a glyph the font does not have.
+    fn interpret(&self, glyph: u16, outline: &mut Outline, machine: &mut Machine) -> Option<u64> {
+        outline.segments.clear();
+        let charstring = self.charstrings.get(usize::from(glyph))?;
+        let mut ctx = self.charstring_context(glyph, Some(outline), &mut machine.stack);
         ctx.run(charstring);
         if ctx.open {
-            ctx.outline.push(Segment::Close);
+            ctx.emit(Segment::Close);
         }
-        let steps = u64::from(CHARSTRING_BUDGET - ctx.budget);
-        (Some(ctx.outline), steps)
+        Some(u64::from(CHARSTRING_BUDGET - ctx.budget))
     }
 
     /// A glyph's advance, when the charstring declares one.
+    ///
+    /// The width is settled by the first stack-clearing operator and nothing
+    /// after it changes it, so the charstring is run only that far, and no
+    /// outline is built.
     #[must_use]
     pub fn advance(&self, glyph: u16) -> Option<f64> {
         let charstring = self.charstrings.get(usize::from(glyph))?;
-        let mut ctx = self.charstring_context(glyph);
+        let mut machine = Machine::new();
+        let mut ctx = self.charstring_context(glyph, None, &mut machine.stack);
         ctx.run(charstring);
         Some(ctx.width.unwrap_or(ctx.private.default_width))
     }
 
-    fn charstring_context(&self, glyph: u16) -> Charstring<'a, '_> {
+    /// The machine one glyph runs on: its Private DICT, where its segments
+    /// go — nowhere when only the width is wanted — and the stack, cleared.
+    fn charstring_context<'c>(
+        &'c self,
+        glyph: u16,
+        outline: Option<&'c mut Outline>,
+        stack: &'c mut Vec<f64>,
+    ) -> Charstring<'a, 'c> {
+        stack.clear();
         Charstring {
             cff: self,
             private: match self.fd_for(glyph) {
                 Some((private, _)) => private,
                 None => &self.private,
             },
-            outline: Outline::default(),
-            stack: Vec::new(),
+            outline,
+            stack,
             x: 0.0,
             y: 0.0,
             stems: 0,
@@ -548,6 +621,7 @@ fn read_private<'a>(data: &'a [u8], operands: &[f64]) -> Option<Private<'a>> {
             if subrs >= 0.0 {
                 if let Some((index, _)) = Index::parse(data, offset.saturating_add(subrs as usize))
                 {
+                    private.local_bias = bias(index.len());
                     private.local_subrs = index;
                 }
             }
@@ -1615,9 +1689,15 @@ const EXPERT_SUBSET_CHARSET: &[u16] = &[
 ];
 
 /// The bias applied to subroutine indices (Type 2 charstring specification).
+///
+/// A property of the INDEX, not of the call: [`Cff::parse`] resolves it once
+/// for the global subroutines and once for each Private DICT's local ones,
+/// and the subsetter for each INDEX it rebuilds.
 pub(crate) fn bias(count: usize) -> i32 {
+    #[cfg(test)]
+    counters::bias_resolved();
     if count < 1240 {
-        107
+        EMPTY_INDEX_BIAS
     } else if count < 33900 {
         1131
     } else {
@@ -1625,17 +1705,89 @@ pub(crate) fn bias(count: usize) -> i32 {
     }
 }
 
+/// The bias of an INDEX of fewer than 1 240 subroutines, an empty one
+/// included.
+const EMPTY_INDEX_BIAS: i32 = 107;
+
 /// The operands and operators one glyph's Type 2 machine may read, its
 /// subroutines' included, before it stops.
 const CHARSTRING_BUDGET: u32 = 64_000;
+
+/// The operands the Type 2 stack holds (Type 2 charstring specification,
+/// appendix B); a longer one is corruption, and the excess is dropped.
+const MAX_OPERANDS: usize = 48;
+
+/// The Type 2 machine's operand stack, kept across the glyphs a caller reads.
+///
+/// [`Cff::outline_into`] runs each glyph it is handed on this one buffer, so
+/// a caller reading a whole face allocates the stack once. It carries nothing
+/// from one glyph to the next: each run clears it first, and a glyph that
+/// ends with operands left on it hands none of them on.
+#[derive(Debug)]
+pub struct Machine {
+    stack: Vec<f64>,
+}
+
+impl Machine {
+    /// A machine whose stack has room for every operand a charstring may
+    /// push, so running a glyph never grows it.
+    #[must_use]
+    pub fn new() -> Machine {
+        #[cfg(test)]
+        counters::machine_made();
+        Machine {
+            stack: Vec::with_capacity(MAX_OPERANDS),
+        }
+    }
+}
+
+impl Default for Machine {
+    fn default() -> Machine {
+        Machine::new()
+    }
+}
+
+/// What the tests count of the interpreter's work: the machines made and the
+/// subroutine biases resolved, per thread so that tests run side by side do
+/// not see each other's.
+#[cfg(test)]
+mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static MACHINES: Cell<u64> = const { Cell::new(0) };
+        static BIASES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn machine_made() {
+        MACHINES.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(super) fn bias_resolved() {
+        BIASES.with(|count| count.set(count.get() + 1));
+    }
+
+    /// How many machines this thread has made.
+    pub(super) fn machines() -> u64 {
+        MACHINES.with(Cell::get)
+    }
+
+    /// How many biases this thread has resolved.
+    pub(super) fn biases() -> u64 {
+        BIASES.with(Cell::get)
+    }
+}
 
 struct Charstring<'a, 'b> {
     cff: &'b Cff<'a>,
     /// The Private DICT this glyph runs under, which in a CID-keyed font is
     /// its Font DICT's rather than the top-level one.
     private: &'b Private<'a>,
-    outline: Outline,
-    stack: Vec<f64>,
+    /// Where the segments go: the caller's outline, or nowhere, when only the
+    /// width is wanted — and then the run stops once the width is known.
+    outline: Option<&'b mut Outline>,
+    /// The caller's operand stack, cleared before the glyph runs.
+    stack: &'b mut Vec<f64>,
     x: f64,
     y: f64,
     stems: usize,
@@ -1647,6 +1799,31 @@ struct Charstring<'a, 'b> {
 }
 
 impl Charstring<'_, '_> {
+    /// Appends a segment to the outline, if there is one.
+    fn emit(&mut self, segment: Segment) {
+        if let Some(outline) = self.outline.as_deref_mut() {
+            outline.push(segment);
+        }
+    }
+
+    /// Whether a run that wants only the width has it, which nothing after
+    /// the first stack-clearing operator changes.
+    fn done(&self) -> bool {
+        self.outline.is_none() && self.width.is_some()
+    }
+
+    /// Runs a drawing operator over the operands, then clears them.
+    ///
+    /// The stack is lent to `draw` rather than copied: a drawing operator
+    /// reads its operands while it moves the pen and pushes none, so the
+    /// buffer goes back, cleared, with its allocation intact.
+    fn with_operands(&mut self, draw: impl FnOnce(&mut Self, &[f64])) {
+        let mut operands = core::mem::take(self.stack);
+        draw(self, &operands);
+        operands.clear();
+        *self.stack = operands;
+    }
+
     /// Takes the width if this is the first stack-clearing operator and the
     /// stack holds one more operand than the operator needs.
     fn take_width(&mut self, even: bool) {
@@ -1681,10 +1858,15 @@ impl Charstring<'_, '_> {
 
     fn move_to(&mut self, x: f64, y: f64) {
         if self.open {
-            self.outline.push(Segment::Close);
+            self.emit(Segment::Close);
         }
-        self.outline.push(Segment::MoveTo { x, y });
+        self.emit(Segment::MoveTo { x, y });
         self.open = true;
+    }
+
+    fn line_to(&mut self) {
+        let (x, y) = (self.x, self.y);
+        self.emit(Segment::LineTo { x, y });
     }
 
     fn run(&mut self, code: &[u8]) {
@@ -1694,6 +1876,11 @@ impl Charstring<'_, '_> {
         let mut at = 0usize;
 
         while at < code.len() {
+            // Checked before the next byte is read, so a width settled inside
+            // a subroutine ends the caller's loop too.
+            if self.done() {
+                return;
+            }
             self.budget = self.budget.saturating_sub(1);
             if self.budget == 0 {
                 return;
@@ -1777,74 +1964,57 @@ impl Charstring<'_, '_> {
                 }
 
                 // rlineto
-                5 => {
-                    let args = self.stack.clone();
+                5 => self.with_operands(|ctx, args| {
                     for pair in args.chunks_exact(2) {
-                        self.x += pair[0];
-                        self.y += pair[1];
-                        self.outline.push(Segment::LineTo {
-                            x: self.x,
-                            y: self.y,
-                        });
+                        ctx.x += pair[0];
+                        ctx.y += pair[1];
+                        ctx.line_to();
                     }
-                    self.stack.clear();
-                }
+                }),
                 // hlineto and vlineto alternate axes.
-                6 | 7 => {
-                    let args = self.stack.clone();
+                6 | 7 => self.with_operands(|ctx, args| {
                     let mut horizontal = b == 6;
-                    for value in args {
+                    for &value in args {
                         if horizontal {
-                            self.x += value;
+                            ctx.x += value;
                         } else {
-                            self.y += value;
+                            ctx.y += value;
                         }
-                        self.outline.push(Segment::LineTo {
-                            x: self.x,
-                            y: self.y,
-                        });
+                        ctx.line_to();
                         horizontal = !horizontal;
                     }
-                    self.stack.clear();
-                }
+                }),
 
                 // rrcurveto
-                8 => {
-                    let args = self.stack.clone();
+                8 => self.with_operands(|ctx, args| {
                     for six in args.chunks_exact(6) {
-                        self.curve(six[0], six[1], six[2], six[3], six[4], six[5]);
+                        ctx.curve(six[0], six[1], six[2], six[3], six[4], six[5]);
                     }
-                    self.stack.clear();
-                }
-                // hhcurveto
-                27 => {
-                    let mut args = self.stack.clone();
-                    let mut dy1 = 0.0;
-                    if args.len() % 4 == 1 && !args.is_empty() {
-                        dy1 = args.remove(0);
-                    }
-                    for four in args.chunks_exact(4) {
-                        self.curve(four[0], dy1, four[1], four[2], four[3], 0.0);
+                }),
+                // hhcurveto: an odd operand out is the first curve's dy1.
+                27 => self.with_operands(|ctx, args| {
+                    let (mut dy1, rest) = match args.split_first() {
+                        Some((&first, rest)) if args.len() % 4 == 1 => (first, rest),
+                        _ => (0.0, args),
+                    };
+                    for four in rest.chunks_exact(4) {
+                        ctx.curve(four[0], dy1, four[1], four[2], four[3], 0.0);
                         dy1 = 0.0;
                     }
-                    self.stack.clear();
-                }
-                // vvcurveto
-                26 => {
-                    let mut args = self.stack.clone();
-                    let mut dx1 = 0.0;
-                    if args.len() % 4 == 1 && !args.is_empty() {
-                        dx1 = args.remove(0);
-                    }
-                    for four in args.chunks_exact(4) {
-                        self.curve(dx1, four[0], four[1], four[2], 0.0, four[3]);
+                }),
+                // vvcurveto: an odd operand out is the first curve's dx1.
+                26 => self.with_operands(|ctx, args| {
+                    let (mut dx1, rest) = match args.split_first() {
+                        Some((&first, rest)) if args.len() % 4 == 1 => (first, rest),
+                        _ => (0.0, args),
+                    };
+                    for four in rest.chunks_exact(4) {
+                        ctx.curve(dx1, four[0], four[1], four[2], 0.0, four[3]);
                         dx1 = 0.0;
                     }
-                    self.stack.clear();
-                }
+                }),
                 // hvcurveto and vhcurveto alternate their starting axis.
-                31 | 30 => {
-                    let args = self.stack.clone();
+                31 | 30 => self.with_operands(|ctx, args| {
                     let mut horizontal = b == 31;
                     let mut i = 0usize;
                     while i + 4 <= args.len() {
@@ -1856,62 +2026,52 @@ impl Charstring<'_, '_> {
                         };
                         let (a, bb, c, d) = (args[i], args[i + 1], args[i + 2], args[i + 3]);
                         if horizontal {
-                            self.curve(a, 0.0, bb, c, extra, d);
+                            ctx.curve(a, 0.0, bb, c, extra, d);
                         } else {
-                            self.curve(0.0, a, bb, c, d, extra);
+                            ctx.curve(0.0, a, bb, c, d, extra);
                         }
                         horizontal = !horizontal;
                         i += 4;
                     }
-                    self.stack.clear();
-                }
+                }),
 
                 // rcurveline
-                24 => {
-                    let args = self.stack.clone();
+                24 => self.with_operands(|ctx, args| {
                     let curves = (args.len().saturating_sub(2)) / 6;
                     for k in 0..curves {
                         let s = k * 6;
                         if let Some(six) = args.get(s..s + 6) {
-                            self.curve(six[0], six[1], six[2], six[3], six[4], six[5]);
+                            ctx.curve(six[0], six[1], six[2], six[3], six[4], six[5]);
                         }
                     }
                     if let Some(tail) = args.get(curves * 6..curves * 6 + 2) {
-                        self.x += tail[0];
-                        self.y += tail[1];
-                        self.outline.push(Segment::LineTo {
-                            x: self.x,
-                            y: self.y,
-                        });
+                        ctx.x += tail[0];
+                        ctx.y += tail[1];
+                        ctx.line_to();
                     }
-                    self.stack.clear();
-                }
+                }),
                 // rlinecurve
-                25 => {
-                    let args = self.stack.clone();
+                25 => self.with_operands(|ctx, args| {
                     let lines = (args.len().saturating_sub(6)) / 2;
                     for k in 0..lines {
                         if let Some(pair) = args.get(k * 2..k * 2 + 2) {
-                            self.x += pair[0];
-                            self.y += pair[1];
-                            self.outline.push(Segment::LineTo {
-                                x: self.x,
-                                y: self.y,
-                            });
+                            ctx.x += pair[0];
+                            ctx.y += pair[1];
+                            ctx.line_to();
                         }
                     }
                     if let Some(six) = args.get(lines * 2..lines * 2 + 6) {
-                        self.curve(six[0], six[1], six[2], six[3], six[4], six[5]);
+                        ctx.curve(six[0], six[1], six[2], six[3], six[4], six[5]);
                     }
-                    self.stack.clear();
-                }
+                }),
 
-                // callsubr
+                // callsubr, biased by the number the Private DICT's INDEX
+                // was given when the face was parsed.
                 10 => {
                     let Some(index) = self.stack.pop() else {
                         return;
                     };
-                    let biased = index as i32 + bias(self.private.local_subrs.len());
+                    let biased = index as i32 + self.private.local_bias;
                     if let Ok(index) = usize::try_from(biased) {
                         if let Some(code) = self.private.local_subrs.get(index) {
                             self.depth += 1;
@@ -1920,12 +2080,12 @@ impl Charstring<'_, '_> {
                         }
                     }
                 }
-                // callgsubr
+                // callgsubr, likewise for the global INDEX.
                 29 => {
                     let Some(index) = self.stack.pop() else {
                         return;
                     };
-                    let biased = index as i32 + bias(self.cff.global_subrs.len());
+                    let biased = index as i32 + self.cff.global_bias;
                     if let Ok(index) = usize::try_from(biased) {
                         if let Some(code) = self.cff.global_subrs.get(index) {
                             self.depth += 1;
@@ -1942,7 +2102,7 @@ impl Charstring<'_, '_> {
                     let expected = if self.stack.len() >= 4 { 4 } else { 0 };
                     self.take_width_for(expected);
                     if self.open {
-                        self.outline.push(Segment::Close);
+                        self.emit(Segment::Close);
                         self.open = false;
                     }
                     return;
@@ -1963,48 +2123,40 @@ impl Charstring<'_, '_> {
     fn escaped(&mut self, op: u8) {
         match op {
             // flex, hflex, hflex1, flex1: two curves in one operator.
-            35 => {
-                let a = self.stack.clone();
+            35 => self.with_operands(|ctx, a| {
                 if a.len() >= 12 {
-                    self.curve(a[0], a[1], a[2], a[3], a[4], a[5]);
-                    self.curve(a[6], a[7], a[8], a[9], a[10], a[11]);
+                    ctx.curve(a[0], a[1], a[2], a[3], a[4], a[5]);
+                    ctx.curve(a[6], a[7], a[8], a[9], a[10], a[11]);
                 }
-                self.stack.clear();
-            }
-            34 => {
-                let a = self.stack.clone();
+            }),
+            34 => self.with_operands(|ctx, a| {
                 if a.len() >= 7 {
-                    let y = self.y;
-                    self.curve(a[0], 0.0, a[1], a[2], a[3], 0.0);
-                    self.curve(a[4], 0.0, a[5], y - self.y, a[6], 0.0);
+                    let y = ctx.y;
+                    ctx.curve(a[0], 0.0, a[1], a[2], a[3], 0.0);
+                    ctx.curve(a[4], 0.0, a[5], y - ctx.y, a[6], 0.0);
                 }
-                self.stack.clear();
-            }
-            36 => {
-                let a = self.stack.clone();
+            }),
+            36 => self.with_operands(|ctx, a| {
                 if a.len() >= 9 {
-                    let start_y = self.y;
-                    self.curve(a[0], a[1], a[2], a[3], a[4], 0.0);
-                    self.curve(a[5], 0.0, a[6], a[7], a[8], start_y - self.y - a[7]);
+                    let start_y = ctx.y;
+                    ctx.curve(a[0], a[1], a[2], a[3], a[4], 0.0);
+                    ctx.curve(a[5], 0.0, a[6], a[7], a[8], start_y - ctx.y - a[7]);
                 }
-                self.stack.clear();
-            }
-            37 => {
-                let a = self.stack.clone();
+            }),
+            37 => self.with_operands(|ctx, a| {
                 if a.len() >= 11 {
-                    let (sx, sy) = (self.x, self.y);
-                    self.curve(a[0], a[1], a[2], a[3], a[4], a[5]);
+                    let (sx, sy) = (ctx.x, ctx.y);
+                    ctx.curve(a[0], a[1], a[2], a[3], a[4], a[5]);
                     let dx: f64 = a[0] + a[2] + a[4] + a[6] + a[8];
                     let dy: f64 = a[1] + a[3] + a[5] + a[7] + a[9];
                     // The last coordinate is whichever axis moved less.
                     if dx.abs() > dy.abs() {
-                        self.curve(a[6], a[7], a[8], a[9], a[10], sy - self.y - a[7] - a[9]);
+                        ctx.curve(a[6], a[7], a[8], a[9], a[10], sy - ctx.y - a[7] - a[9]);
                     } else {
-                        self.curve(a[6], a[7], a[8], a[9], sx - self.x - a[6] - a[8], a[10]);
+                        ctx.curve(a[6], a[7], a[8], a[9], sx - ctx.x - a[6] - a[8], a[10]);
                     }
                 }
-                self.stack.clear();
-            }
+            }),
             // put/get, the transient array.
             20 => {
                 let (Some(index), Some(value)) = (self.stack.pop(), self.stack.pop()) else {
@@ -2036,19 +2188,20 @@ impl Charstring<'_, '_> {
         let c2y = c1y + dy2;
         self.x = c2x + dx3;
         self.y = c2y + dy3;
-        self.outline.push(Segment::CurveTo {
+        let (x, y) = (self.x, self.y);
+        self.emit(Segment::CurveTo {
             c1x,
             c1y,
             c2x,
             c2y,
-            x: self.x,
-            y: self.y,
+            x,
+            y,
         });
     }
 
     fn push(&mut self, value: f64) {
         // The specification caps the stack at 48; a longer one is corruption.
-        if self.stack.len() < 48 && value.is_finite() {
+        if self.stack.len() < MAX_OPERANDS && value.is_finite() {
             self.stack.push(value);
         }
     }
@@ -2172,6 +2325,8 @@ mod tests {
         encoding: Table,
         private: Vec<u8>,
         subrs: Vec<Vec<u8>>,
+        /// The Global Subr INDEX.
+        gsubrs: Vec<Vec<u8>>,
         /// `ROS`, which is what makes the font CID-keyed.
         cid: bool,
         /// The FDArray, one entry per Font DICT.
@@ -2210,7 +2365,7 @@ mod tests {
             let header = [1u8, 0, 4, 4];
             let names = wide_index(&[b"Fixture".to_vec()]);
             let strings = wide_index(&self.strings);
-            let gsubrs = wide_index(&[]);
+            let gsubrs = wide_index(&self.gsubrs);
             let charstrings = wide_index(&self.charstrings);
 
             let table = |t: &Table| match t {
@@ -3050,5 +3205,407 @@ mod tests {
         font.windows(6)
             .position(|w| w[0] == 29 && w[5] == tail)
             .map(|at| at + 5)
+    }
+
+    /// Every CFF program the repository commits, by file name: the
+    /// `fuzz/corpus/cff` seeds as they are, and the `CFF ` table of every
+    /// OpenType face the shaping fixtures and the `sfnt` seeds carry — the set
+    /// MS-04's fonts group outlines. `None` where this checkout has no such
+    /// tree, as a published crate does not.
+    fn committed_programs() -> Option<Vec<(String, Vec<u8>)>> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut out = Vec::new();
+        for (dir, extension, whole) in [
+            ("../../fuzz/corpus/cff", "cff", true),
+            ("../tinker-pdf-shape/data/aots/fonts", "otf", false),
+            (
+                "../tinker-pdf-shape/data/text-rendering-tests/fonts",
+                "otf",
+                false,
+            ),
+            ("../../fuzz/corpus/sfnt", "otf", false),
+        ] {
+            let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(root.join(dir))
+                .ok()?
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|e| e == extension))
+                .collect();
+            paths.sort();
+            for path in paths {
+                let bytes = std::fs::read(&path).ok()?;
+                let program = if whole {
+                    bytes
+                } else {
+                    let table = crate::sfnt::Sfnt::parse(&bytes).and_then(|face| {
+                        face.table(u32::from_be_bytes(*b"CFF ")).map(<[u8]>::to_vec)
+                    });
+                    match table {
+                        Some(table) => table,
+                        None => continue,
+                    }
+                };
+                out.push((path.file_name()?.to_string_lossy().into_owned(), program));
+            }
+        }
+        Some(out)
+    }
+
+    /// The width a glyph's whole charstring settles, run to its end with its
+    /// outline built: the answer [`Cff::advance`] has to give having stopped
+    /// at the width.
+    fn width_of_whole_run(cff: &Cff<'_>, glyph: u16) -> Option<f64> {
+        let charstring = cff.charstrings.get(usize::from(glyph))?;
+        let mut outline = Outline::default();
+        let mut stack = Vec::new();
+        let mut ctx = cff.charstring_context(glyph, Some(&mut outline), &mut stack);
+        ctx.run(charstring);
+        Some(ctx.width.unwrap_or(ctx.private.default_width))
+    }
+
+    /// Every glyph of `cff` read through one machine and one outline, forwards
+    /// and then backwards, against [`Cff::outline`]'s fresh pair, segment for
+    /// segment; and every advance against the whole run's width. How many
+    /// glyphs that was.
+    fn assert_reused_path_is_fresh_path(cff: &Cff<'_>, name: &str) -> usize {
+        let count = u16::try_from(cff.glyph_count()).expect("an INDEX holds at most 65 535 items");
+        let fresh: Vec<(Outline, u64)> = (0..count)
+            .map(|glyph| {
+                let (outline, steps) = cff.outline_counted(glyph);
+                (outline.expect("every glyph below the count"), steps)
+            })
+            .collect();
+        let made = counters::machines();
+        let mut machine = Machine::new();
+        let mut outline = Outline::default();
+        // Forwards and then backwards: whatever one glyph leaves behind, the
+        // next one in either order would read.
+        for glyph in (0..count).chain((0..count).rev()) {
+            let (expected, steps) = &fresh[usize::from(glyph)];
+            assert_eq!(
+                cff.interpret(glyph, &mut outline, &mut machine),
+                Some(*steps),
+                "{name}, glyph {glyph}: the budget it spent"
+            );
+            assert_eq!(
+                outline.segments, expected.segments,
+                "{name}, glyph {glyph}: the reused path drew otherwise"
+            );
+        }
+        // A glyph past the last, through the same pair, is refused and leaves
+        // nothing behind of the one before it.
+        assert!(!cff.outline_into(count, &mut outline, &mut machine));
+        assert!(outline.is_empty(), "{name}: the refused glyph's outline");
+        assert_eq!(
+            counters::machines() - made,
+            1,
+            "{name}: one machine read every glyph"
+        );
+        for glyph in 0..count {
+            assert_eq!(
+                cff.advance(glyph),
+                width_of_whole_run(cff, glyph),
+                "{name}, glyph {glyph}: the advance read as far as its width"
+            );
+        }
+        usize::from(count)
+    }
+
+    /// P-26.1: the reused buffers draw what fresh ones draw, over every glyph
+    /// of every committed CFF program, and one machine reads a whole face.
+    #[test]
+    fn every_glyph_interprets_into_one_reused_buffer() {
+        let Some(programs) = committed_programs() else {
+            println!("cff-reused-buffer: SKIPPED (no fuzz or shaping fixture tree)");
+            return;
+        };
+        let (mut faces, mut glyphs) = (0usize, 0usize);
+        for (name, program) in &programs {
+            let Some(cff) = Cff::parse(program) else {
+                continue;
+            };
+            faces += 1;
+            glyphs += assert_reused_path_is_fresh_path(&cff, name);
+        }
+        assert!(
+            programs.iter().any(|(name, _)| name.ends_with(".cff")),
+            "the fuzz seeds were read"
+        );
+        assert!(faces > programs.len() / 2, "most programs parse");
+        assert!(glyphs > 0, "no glyph was read");
+        println!(
+            "RAN cff-reused-buffer: {faces} of {} programs, {glyphs} glyphs",
+            programs.len()
+        );
+
+        // The built fixtures too: local subroutines, a CID-keyed font whose
+        // Font DICTs each have their own, and `seac`.
+        for (name, program) in [
+            ("three glyphs", three_glyph_program()),
+            ("CID-keyed", cid_fixture(vec![0, 0, 0, 1, 1]).build()),
+            ("named", named_glyphs().build()),
+            (
+                "seac",
+                program_with(&[&[14][..], &[189, 139, 204, 247, 85, 14][..]]),
+            ),
+        ] {
+            let cff = Cff::parse(&program).expect(name);
+            assert_reused_path_is_fresh_path(&cff, name);
+        }
+    }
+
+    /// P-26.1: the biases are resolved when the face is parsed, one per
+    /// subroutine INDEX, and never again however many glyphs are read.
+    #[test]
+    fn the_bias_is_resolved_once_per_face() {
+        // Read every glyph by every road there is, and say how many biases
+        // that resolved.
+        let read_everything = |cff: &Cff<'_>| {
+            let before = counters::biases();
+            let mut machine = Machine::new();
+            let mut outline = Outline::default();
+            for glyph in 0..u16::try_from(cff.glyph_count()).unwrap_or(u16::MAX) {
+                let _ = cff.outline(glyph);
+                let _ = cff.outline_counted(glyph);
+                let _ = cff.outline_into(glyph, &mut outline, &mut machine);
+                let _ = cff.advance(glyph);
+            }
+            counters::biases() - before
+        };
+
+        // Exact counts where the INDEXes are known: the empty global INDEX and
+        // the one Private DICT's Subrs.
+        let program = three_glyph_program();
+        let before = counters::biases();
+        let cff = Cff::parse(&program).expect("a CFF font");
+        assert_eq!(counters::biases() - before, 2, "global and local");
+        assert_eq!(read_everything(&cff), 0, "no glyph resolves a bias");
+
+        // A CID-keyed font: the global INDEX and each Font DICT's local one;
+        // the top-level Private DICT carries no Subrs, so it has none to
+        // resolve.
+        let program = cid_fixture(vec![0, 0, 0, 1, 1]).build();
+        let before = counters::biases();
+        let cff = Cff::parse(&program).expect("a CID-keyed font");
+        assert_eq!(counters::biases() - before, 3, "global and two Font DICTs");
+        assert_eq!(read_everything(&cff), 0, "no glyph resolves a bias");
+
+        let Some(programs) = committed_programs() else {
+            println!("cff-bias-once: SKIPPED (no fuzz or shaping fixture tree)");
+            return;
+        };
+        let mut faces = 0usize;
+        for (name, program) in &programs {
+            let before = counters::biases();
+            let Some(cff) = Cff::parse(program) else {
+                continue;
+            };
+            faces += 1;
+            // The global INDEX, the top-level Private DICT's and each Font
+            // DICT's: at most one each.
+            let indexes = 2 + cff.fds.len() as u64;
+            let parsed = counters::biases() - before;
+            assert!(
+                parsed <= indexes,
+                "{name}: {parsed} biases for {indexes} subroutine INDEXes"
+            );
+            assert_eq!(read_everything(&cff), 0, "{name}: a glyph resolved a bias");
+        }
+        println!("RAN cff-bias-once: {faces} programs");
+    }
+
+    /// A bias stored at parse is the one its own INDEX needs: past 1 239
+    /// subroutines a call to subroutine 0 is the operand -1131, and only that
+    /// bias reaches it. The global and the local INDEX are counted apart, so
+    /// each call is biased by its own.
+    #[test]
+    fn each_index_is_biased_by_its_own_count() {
+        // -1131, in the 16-bit operand form.
+        let mut call = vec![28u8];
+        call.extend_from_slice(&(-1131i16).to_be_bytes());
+        let many = |first: Vec<u8>| {
+            let mut subrs = vec![first];
+            subrs.extend(std::iter::repeat_with(|| vec![11u8]).take(1239));
+            subrs
+        };
+        for (op, local) in [(10u8, true), (29, false)] {
+            let mut glyph = call.clone();
+            glyph.extend_from_slice(&[op, 14]);
+            let fixture = Fixture {
+                charstrings: vec![vec![14], glyph],
+                private: private_dict(500, 400, local),
+                subrs: if local {
+                    many(box_glyph(300))
+                } else {
+                    Vec::new()
+                },
+                gsubrs: if local {
+                    Vec::new()
+                } else {
+                    many(box_glyph(300))
+                },
+                ..Fixture::default()
+            };
+            let program = fixture.build();
+            let cff = Cff::parse(&program).expect("a CFF font");
+            let outline = cff.outline(1).expect("glyph 1");
+            assert_eq!(
+                outline.bounds(),
+                Some((0.0, 0.0, 300.0, 300.0)),
+                "callsubr {op} reached subroutine 0 through a bias of 1131"
+            );
+        }
+        // And the small INDEX beside a large one keeps 107: a local call of
+        // -107 under 1 240 global subroutines reaches local subroutine 0.
+        let fixture = Fixture {
+            charstrings: vec![vec![14], subr_glyph()],
+            private: private_dict(500, 400, true),
+            subrs: vec![box_glyph(200)],
+            gsubrs: many(vec![11]),
+            ..Fixture::default()
+        };
+        let program = fixture.build();
+        let cff = Cff::parse(&program).expect("a CFF font");
+        assert_eq!(
+            cff.outline(1).and_then(|outline| outline.bounds()),
+            Some((0.0, 0.0, 200.0, 200.0))
+        );
+    }
+
+    /// A reused machine hands nothing on: not the operands a glyph left on the
+    /// stack, not the transient array it wrote, not the budget it spent or the
+    /// depth it reached.
+    #[test]
+    fn a_glyph_hands_nothing_to_the_next() {
+        let fixture = Fixture {
+            charstrings: vec![
+                vec![14],
+                // Three operands pushed and never consumed.
+                vec![139, 139, 139],
+                // `rlineto` with nothing pushed: no segment, unless the
+                // operands above were carried in.
+                vec![5, 14],
+                // `5 0 put`, writing the transient array.
+                vec![144, 139, 12, 20, 14],
+                // `0 get 0 rlineto`: a line to x = whatever slot 0 holds.
+                vec![139, 12, 21, 139, 5, 14],
+                // Subroutine 0 calls itself four times a level, so this runs
+                // the budget dry at the depth cap.
+                vec![32, 10, 14],
+                box_glyph(100),
+            ],
+            private: private_dict(500, 400, true),
+            subrs: vec![vec![32, 10, 32, 10, 32, 10, 32, 10, 11]],
+            ..Fixture::default()
+        };
+        let program = fixture.build();
+        let cff = Cff::parse(&program).expect("a CFF font");
+        assert_reused_path_is_fresh_path(&cff, "leftovers");
+
+        let mut machine = Machine::new();
+        let mut outline = Outline::default();
+        for glyph in [1u16, 2] {
+            assert!(cff.outline_into(glyph, &mut outline, &mut machine));
+        }
+        assert!(outline.is_empty(), "the stack carried glyph 1's operands");
+        for glyph in [3u16, 4] {
+            assert!(cff.outline_into(glyph, &mut outline, &mut machine));
+        }
+        assert_eq!(
+            outline.segments,
+            [Segment::LineTo { x: 0.0, y: 0.0 }],
+            "the transient array carried glyph 3's write"
+        );
+        let (_, spent) = cff.outline_counted(5);
+        assert_eq!(
+            spent,
+            u64::from(CHARSTRING_BUDGET),
+            "glyph 5 spends the whole budget"
+        );
+        for glyph in [5u16, 6] {
+            assert!(cff.outline_into(glyph, &mut outline, &mut machine));
+        }
+        assert_eq!(
+            outline.bounds(),
+            Some((0.0, 0.0, 100.0, 100.0)),
+            "the box after a spent budget is drawn whole"
+        );
+    }
+
+    /// `advance` stops at the operator that settles the width, and the width
+    /// it reads is the one the whole run settles, wherever the operator is:
+    /// first, inside a subroutine, after drawing operators a hostile glyph put
+    /// before it, at `endchar` with `seac`'s operands, or nowhere at all.
+    #[test]
+    fn advance_reads_as_far_as_the_width_and_no_further() {
+        let fixture = Fixture {
+            charstrings: vec![
+                vec![14],
+                // `11 0 0 rmoveto`: the width is the odd operand out.
+                vec![150, 139, 139, 21, 239, 139, 5, 14],
+                // The width set by `hstem` inside subroutine 0.
+                vec![150, 32, 10, 239, 139, 5, 14],
+                // A line first, then `11 0 0 rmoveto`.
+                vec![239, 139, 5, 150, 139, 139, 21, 14],
+                // No stack-clearing operator at all.
+                vec![239, 139, 5],
+                // `seac`'s four, carrying no width.
+                vec![189, 139, 204, 247, 85, 14],
+                // Nothing but `endchar`.
+                vec![14],
+            ],
+            private: private_dict(500, 400, true),
+            subrs: vec![vec![239, 239, 1, 11]],
+            ..Fixture::default()
+        };
+        let program = fixture.build();
+        let cff = Cff::parse(&program).expect("a CFF font");
+        for (glyph, width) in [
+            (1u16, 411.0),
+            (2, 411.0),
+            (3, 411.0),
+            (4, 500.0),
+            (5, 500.0),
+            (6, 500.0),
+        ] {
+            assert_eq!(cff.advance(glyph), Some(width), "glyph {glyph}");
+            assert_eq!(
+                width_of_whole_run(&cff, glyph),
+                Some(width),
+                "glyph {glyph}"
+            );
+        }
+        assert_eq!(cff.advance(7), None, "a glyph the font does not have");
+    }
+
+    /// Hostile charstrings, generated: bytes drawn at random, operators and
+    /// operands alike, under subroutines that call each other. Whatever they
+    /// do, the reused path draws what the fresh one draws and the advance is
+    /// the whole run's.
+    #[test]
+    fn generated_charstrings_read_alike_through_either_path() {
+        // A fixed linear congruential sequence, so a failure reproduces.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        };
+        let mut random = |len: usize| -> Vec<u8> { (0..len).map(|_| next()).collect() };
+        let charstrings: Vec<Vec<u8>> = (0..300).map(|n| random(n % 61)).collect();
+        // Subroutines a call of -107 to -104 reaches, each drawing or calling.
+        let subrs: Vec<Vec<u8>> = (0..4).map(|n| random(8 + n * 5)).collect();
+        let gsubrs: Vec<Vec<u8>> = (0..4).map(|n| random(6 + n * 7)).collect();
+        let fixture = Fixture {
+            charstrings,
+            private: private_dict(500, 400, true),
+            subrs,
+            gsubrs,
+            ..Fixture::default()
+        };
+        let program = fixture.build();
+        let cff = Cff::parse(&program).expect("a CFF font of random charstrings");
+        assert_eq!(assert_reused_path_is_fresh_path(&cff, "generated"), 300);
     }
 }

@@ -12,13 +12,18 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** Every table
-//! walk and every charstring run below is discarded with `let _ =`, so an
-//! outline built from the wrong offsets, a charset read one glyph out, or an
-//! FDSelect that picks the wrong private dictionary all pass. So a run that
-//! returned the *wrong* answer passes this target exactly as a correct one
-//! does, and a green `cargo fuzz` here is evidence about ruling 1 and about
-//! nothing else.
+//! **That the code did not panic, hang, or exhaust memory, and that a reused
+//! machine draws what a fresh one does.** Every glyph is read twice, through
+//! `Cff::outline`'s fresh stack and through one `Machine` kept for the whole
+//! font, and the two outlines must be equal: that holds the reused path to
+//! the fresh one on whatever a mutator writes, a charstring that leaves its
+//! operands on the stack included. Every other table walk and charstring run
+//! below is discarded with `let _ =`, so an outline built from the wrong
+//! offsets, a charset read one glyph out, or an FDSelect that picks the wrong
+//! private dictionary all pass. So a run that returned the *wrong* answer
+//! passes this target exactly as a correct one does, and a green `cargo fuzz`
+//! here is evidence about ruling 1 and the reused machine, and about nothing
+//! else.
 //!
 //! That is worth writing down rather than leaving implied. Correctness lives
 //! in `crates/tinker-pdf-font`'s own tests and in the `cff_fonts.rs` suite
@@ -31,7 +36,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_font::Cff;
+use tinker_pdf_font::cff::Machine;
+use tinker_pdf_font::{Cff, Outline};
 
 fuzz_target!(|data: &[u8]| {
     let Some(cff) = Cff::parse(data) else {
@@ -39,8 +45,22 @@ fuzz_target!(|data: &[u8]| {
     };
     let count = cff.glyph_count().min(64) as u16;
 
+    // One machine and one outline for every glyph, as a caller reading a
+    // whole face keeps them: the one assertion here beyond not panicking.
+    // Each glyph through them draws what a fresh pair draws, so nothing a
+    // hostile charstring leaves on the stack reaches the glyph after it.
+    let mut machine = Machine::new();
+    let mut reused = Outline::default();
     for glyph in 0..count {
-        let _ = cff.outline(glyph);
+        let fresh = cff.outline(glyph);
+        let drawn = cff.outline_into(glyph, &mut reused, &mut machine);
+        assert_eq!(drawn, fresh.is_some(), "glyph {glyph}: one path refused it");
+        if let Some(fresh) = fresh {
+            assert!(
+                fresh.segments == reused.segments,
+                "glyph {glyph}: the reused machine drew otherwise"
+            );
+        }
         let _ = cff.advance(glyph);
         // A CID-keyed font may carry a matrix per Font DICT, so this reads
         // FDSelect and the FDArray for every glyph.

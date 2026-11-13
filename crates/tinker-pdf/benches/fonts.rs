@@ -13,7 +13,8 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use support::{inputs, Group, Per};
-use tinker_pdf_font::{glyf, Cff, Sfnt};
+use tinker_pdf_font::cff::Machine;
+use tinker_pdf_font::{glyf, Cff, Outline, Sfnt};
 use tinker_pdf_shape::bidi::BaseDirection;
 use tinker_pdf_shape::{ShapedRun, Shaper};
 
@@ -70,19 +71,23 @@ fn assert_outlines(bytes: &[u8], glyphs: u16, name: &str) {
 }
 
 /// One call of the CFF outline operation: each program parsed, then every
-/// glyph's outline read. How many outlines that is: a program the parser
-/// refuses has none.
+/// glyph's outline read into one outline through one machine per program, as
+/// a caller reading a whole face keeps them (`Cff::outline_into`). How many
+/// outlines that is: a program the parser refuses has none.
 fn outline_programs(programs: &[&[u8]]) -> usize {
     let mut outlines = 0;
     for program in programs {
         let Some(cff) = Cff::parse(program) else {
             continue;
         };
+        let mut machine = Machine::new();
+        let mut outline = Outline::default();
         for glyph in 0..cff.glyph_count() {
             let glyph = u16::try_from(glyph).expect("a CFF glyph index fits 16 bits");
-            if black_box(cff.outline(glyph)).is_some() {
+            if black_box(cff.outline_into(glyph, &mut outline, &mut machine)) {
                 outlines += 1;
             }
+            black_box(&outline);
         }
     }
     outlines
