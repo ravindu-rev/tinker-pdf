@@ -352,9 +352,9 @@ build's version and reads it back as a parse does
 refusal; it keeps its commands, so it finishes again. A kind or a tag its
 enum does not declare, the end pushed, and null data with a count are
 refused at the push, naming them. A command is read through a pointer the
-caller passes, so Ruby's Fiddle could call every function, and no callback
-crosses the boundary. The .NET and Java wrappers project these calls (below);
-Go and Ruby carry no stream yet (the refusal table's row).
+caller passes, so Ruby's Fiddle calls every function, and no callback
+crosses the boundary. The .NET, Java, Go and Ruby wrappers project these
+calls (below).
 
 **The command stream in Python and JavaScript** crosses directly from the
 facade, as the rest of their surfaces do, through no C ABI between
@@ -441,6 +441,48 @@ naming one method and one that throws; holds each outline and decode
 accessor to its record's fields, the cursor's end and rewind, the replay's
 render to the page's render, and the encoder's and the reader's refusals;
 and exits non-zero on any difference.
+
+**The command stream in Go and Ruby** projects the same calls one for one
+(`bindings/go/read.go`, `bindings/ruby/lib/tinker_pdf.rb`).
+`Document.CommandStream(index)` and `Document#command_stream(index)` hand back
+the page's bytes, and `ParseCommandStream` and `CommandStream.parse` read them
+into a handle whose refusal is an `*Error` or a `TinkerPdf::Error` of
+`BadArgument` carrying the reader's sentence. The cursor, `Next`/`next`, reads
+one `Command` a call — its kind, the C ABI's -1 in Go and `nil` in Ruby for a
+kind the build does not know, its number on the wire, its place and its field
+count — and the end after the last until `Rewind`/`rewind`;
+`CommandAt`/`command_at`, `FieldAt`/`field_at` and `RecordAt`/`record_at` read
+one by its place, and `Records`/`records` every record in order. A
+`CommandField` is its `CommandFieldTag` and a value copied out of the stream —
+Go's a struct of the tag and the one of `Natural`, `Integer`, `Real`, `Bytes`,
+`Reals`, `Naturals` and `Strings` the tag names, Ruby's an Integer, a Float, a
+binary String or an Array of them — equal to another of the same tag and
+value, a real by its bits, and made again by its tag's constructor
+(`UnsignedField`, `CommandField.unsigned`, and so on). `OutlineAt`/`outline_at`
+and `ImageAt`/`image_at` read the two tables a host draws from as a
+`GlyphOutline` and a `DecodedImage` (an `ImageAnswer`, the size, the window,
+the samples and the colours), and `ToBytes`, `Version`, `PageIndex`, `Size`
+and `Render` project the facade's own. `NewCommandEncoder` and
+`CommandEncoder.new` push records by kind and fields — Go writing each field
+and its arrays into C memory for the length of the call, since Go memory
+handed to C may hold no Go pointer — and finish them into bytes.
+`Replay`/`replay` hands each record, in the stream's order, to the device's
+method named for its kind, a kind the build does not know to
+`Unknown`/`unknown`: Go's `CommandDevice` is an interface a device fills by
+embedding `IgnoreCommands`, whose every method does nothing, and an error a
+method returns ends the replay and is returned; Ruby's device includes
+`TinkerPdf::CommandDevice`, whose every method does nothing, or responds to the
+kinds it draws alone, the rest passed over, and an exception a method raises
+ends the replay. Go names the header's own constants for the three enums
+(`CommandGlyphRun CommandKind = C.TPDF_COMMAND_KIND_GLYPH_RUN`), so cgo checks
+each number; Ruby writes them out, its end `CommandKind::END_` since `END` is
+a Ruby keyword, and the C crate's
+`the_command_stream_enums_have_the_numbers_the_bindings_transcribe` pins them.
+Neither standard library has a 2D vector canvas — Go's `image/draw`
+composites rasters and draws no paths — so each ships the device interface
+alone. Each smoke program runs the leg the .NET and Java ones run, over the
+same page and the same three kinds pushed by hand, and exits non-zero on any
+difference.
 
 **The write surface, and its shape.** What separates it from the read
 surface is shape, not capability: `DocumentEditor::transaction(|tx| ..)` and
@@ -675,9 +717,9 @@ Swift's statuses each to its own constant. The two enums no binding
 keeps as a table, `TpdfTargetKind` and `TpdfSanitiseList`, are a literal 0
 or 1 at the one place each crosses, and both arms of each cross in a parity
 script; the command stream's three, `TpdfCommandKind`,
-`TpdfCommandFieldTag` and `TpdfImageAnswer`, are carried by .NET and Java,
-held to the header as every other enum is, and by neither Go nor Ruby, which
-project no stream yet. Python and JavaScript name arms by string over the facade, so no
+`TpdfCommandFieldTag` and `TpdfImageAnswer`, are carried by all four and held
+to the header as every other enum is, Ruby's end spelled `END_` because `END`
+is a Ruby keyword. Python and JavaScript name arms by string over the facade, so no
 number crosses there; the same file holds each of their string-to-arm
 lines, both directions, to the rule that the string is the arm's own name
 (the page boundaries' `"trim"` for `TrimBox` the one stated exception).
@@ -687,7 +729,9 @@ lines, both directions, to the rule that the string is the arm's own name
   every enum constant is the header's own.
   `bindings/go/tinkerpdf.go` links `target/release` with that directory as
   its run path; `go run ./cmd/smoke testdata/simple-text.pdf FACE.ttf` and
-  `go run ./cmd/parity testdata/form-fields.pdf` from `bindings/go`. Every
+  `go run ./cmd/parity testdata/form-fields.pdf` from `bindings/go`, the
+  smoke program's command stream leg reading the checkout's Liberation Serif
+  and an ICC profile from beside the `testdata` directory it is given. Every
   C call runs with its goroutine's OS thread locked until the error message
   has been read, because `tpdf_last_error_message` is per thread and a
   goroutine may otherwise move between the call and the read. Streaming is
@@ -698,7 +742,8 @@ lines, both directions, to the rule that the string is the arm's own name
 - **Ruby** is Fiddle, from the standard library, so there is no gem and no
   compiler: `ruby -Ilib test/smoke.rb …` and `ruby -Ilib test/write_parity.rb
   …` from `bindings/ruby`, loading `TINKER_PDF_LIB` or the release library in
-  this checkout. Structs cross as packed strings; their layouts are the C
+  this checkout, the smoke script's command stream leg reading the face and
+  the profile the Go one reads. Structs cross as packed strings; their layouts are the C
   crate's, pinned by `crates/tinker-pdf-ffi/tests/layout.rs` with
   `offset_of!`, so a field moved there fails there. The one function it does
   not call is `tpdf_document_open_streaming` (below).
@@ -1220,7 +1265,7 @@ cargo xtask bindings-coverage
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
 | Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats`; `Document::page_counted`, `Page::text_counted`, `Page::images_counted`, `SaveOptions::stats`, `Saved::stats`, `DocumentEditor::count_work`, `Document::inferred_orders_counted`, `Bitmap::to_png_counted`, and `Document::validate_pdfa_counted`, `Document::validate_pdfua_counted` and `Document::validate_pdfx_counted` | not projected; `tpdf_page_render`, every binding's render, text, save and validation count nothing and hand back no stats | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, as each counted sibling does, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [performance](../design/performance.md) |
 | Render parts, placement, usage and layers: `RenderOptions::content`, `RenderOptions::widgets`, `RenderOptions::other_annotations`, `RenderOptions::magnification`, `RenderOptions::usage`, `RenderOptions::layers`, `LayerOptions::*` and `LayerUser::*` | not projected; `tpdf_page_render` and every binding's render draw the page's content and every annotation, as a render naming no usage draws them, at magnification 1, in `/D`'s states | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so each needs an entry point of its own or a struct of options that can grow, as `RenderOptions::stats` does. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [design/render-usage.md](../design/render-usage.md) |
-| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; in Python and JavaScript as their `CommandStream` classes, records, fields, kinds, budgets and device protocol, with no display list and no record built field by field (`CommandRecord::with`) or read by the facade's typed reader (`CommandRecord::read`); in .NET and Java as their `CommandStream`, commands, records, fields, tables, encoder and device interface over the C ABI's calls; Go and Ruby hand back no stream and read none | RC-18.8 projects it in Go and Ruby; until it lands, their surfaces carry no stream | [design](../design/command-stream.md) |
+| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; in Python and JavaScript as their `CommandStream` classes, records, fields, kinds, budgets and device protocol, with no display list and no record built field by field (`CommandRecord::with`) or read by the facade's typed reader (`CommandRecord::read`); in .NET, Java, Go and Ruby as their `CommandStream`, commands, records, fields, tables, encoder and device interface over the C ABI's calls | what a surface lacks of these stands here until RC-18.9 holds every surface's stream to one recorded answer and takes this row off | [design](../design/command-stream.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge; a CommonJS entry that re-exports the one ESM build cannot | [ROADMAP](../ROADMAP.md) SU-14 |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |

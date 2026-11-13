@@ -396,14 +396,15 @@ has none, in its smoke program, where it runs — and never binding API.
    of a page holding every command kind to the facade's bytes, and drive a
    recording device that receives every kind in the order the facade's
    decoder gives them.
-7. **RC-18.7, landed: .NET and Java**, and **RC-18.8, Go and Ruby**: each
+7. **RC-18.7 and RC-18.8, landed: .NET, Java, Go and Ruby**: each
    wrapper's smoke program decodes and re-encodes the same page's stream
    through its own types to the facade's bytes, dispatches every kind to a
-   recording device, and exits non-zero on any difference;
-   `bindings/dotnet/tests/Smoke/Program.cs` and `bindings/java/test/Smoke.java`
-   do, and the FFI's
-   `the_command_stream_enums_have_the_numbers_the_bindings_transcribe` pins
-   the three enums both transcribe.
+   recording device, and exits non-zero on any difference —
+   `bindings/dotnet/tests/Smoke/Program.cs`, `bindings/java/test/Smoke.java`,
+   `bindings/go/cmd/smoke/main.go` and `bindings/ruby/test/smoke.rb` — and
+   the FFI's `the_command_stream_enums_have_the_numbers_the_bindings_transcribe`
+   pins the three enums .NET and Ruby transcribe and Java passes by position,
+   while Go names the header's constants.
 8. **RC-18.9, parity.** `cargo xtask bindings-parity --require-all` prints
    the recorded `command-stream` hash from every surface, and
    `cargo xtask bindings-coverage` passes with no refusal line left for the

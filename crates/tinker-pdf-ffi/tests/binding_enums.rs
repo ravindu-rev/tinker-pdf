@@ -355,35 +355,17 @@ fn compare(
 /// the report (0 removed, 1 deleted). Neither is checked here; both arms of
 /// each cross in a parity script -- `build-a-document` links a page and a
 /// URI, `sanitise-report` lists removed entries and deleted objects -- so a
-/// swapped pair changes a recorded hash. Ruby and Go leave out three more,
-/// the command stream's -- `TpdfCommandKind`, `TpdfCommandFieldTag` and
-/// `TpdfImageAnswer` -- which neither projects yet: the stream's row in
-/// `docs/features/bindings.md`'s refusal table names that gap, and the step
-/// that projects the stream there takes its enums off this list. Java and
-/// .NET carry them, and are held to the header here like every other enum.
+/// swapped pair changes a recorded hash. The command stream's three --
+/// `TpdfCommandKind`, `TpdfCommandFieldTag` and `TpdfImageAnswer` -- every
+/// binding carries, each held to the header here like every other enum:
+/// Ruby's end is `CommandKind::END_`, since `END` is a Ruby keyword, and this
+/// reader takes it for the arm `END`, as it takes every name with its
+/// underscores ignored.
 const NOT_CARRIED: &[(&str, &[&str])] = &[
-    (
-        "ruby",
-        &[
-            "TpdfCommandFieldTag",
-            "TpdfCommandKind",
-            "TpdfImageAnswer",
-            "TpdfSanitiseList",
-            "TpdfTargetKind",
-        ],
-    ),
+    ("ruby", &["TpdfSanitiseList", "TpdfTargetKind"]),
     ("java", &["TpdfSanitiseList", "TpdfTargetKind"]),
     ("dotnet", &["TpdfSanitiseList", "TpdfTargetKind"]),
-    (
-        "go",
-        &[
-            "TpdfCommandFieldTag",
-            "TpdfCommandKind",
-            "TpdfImageAnswer",
-            "TpdfSanitiseList",
-            "TpdfTargetKind",
-        ],
-    ),
+    ("go", &["TpdfSanitiseList", "TpdfTargetKind"]),
 ];
 
 #[test]

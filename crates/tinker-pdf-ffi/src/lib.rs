@@ -5185,9 +5185,10 @@ endobj
     }
 
     /// The command stream's three enums, pinned for the same reason:
-    /// `bindings/dotnet/TinkerPdf.cs` writes every arm's number out by hand
-    /// and Java passes `ordinal()`, so an arm moved here would compile on
-    /// both sides and name another kind, tag or answer on each. The kinds'
+    /// `bindings/dotnet/TinkerPdf.cs` and `bindings/ruby/lib/tinker_pdf.rb`
+    /// write every arm's number out by hand and Java passes `ordinal()`, so
+    /// an arm moved here would compile on every side and name another kind,
+    /// tag or answer on each. The kinds'
     /// and the tags' lists are counted against every arm their enums declare,
     /// so an arm added without a line here fails.
     #[test]

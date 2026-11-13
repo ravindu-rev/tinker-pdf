@@ -339,6 +339,26 @@ module TinkerPdf
     extern 'int tpdf_builder_set_language(void *builder, const char *language)'
     extern 'int tpdf_builder_map_role(void *builder, const uint8_t *custom, size_t custom_len, ' \
            'const uint8_t *standard, size_t standard_len)'
+
+    extern 'int tpdf_page_command_stream(const void *doc, uint32_t index, void **out)'
+    extern 'int tpdf_command_stream_parse(const uint8_t *bytes, size_t len, void **out)'
+    extern 'uint32_t tpdf_command_stream_count(const void *stream)'
+    extern 'int tpdf_command_stream_next(void *stream, void *out)'
+    extern 'int tpdf_command_stream_rewind(void *stream)'
+    extern 'int tpdf_command_stream_record(const void *stream, uint32_t index, void *out)'
+    extern 'int tpdf_command_stream_field(const void *stream, uint32_t index, uint32_t field, void *out)'
+    extern 'int tpdf_command_stream_outline(const void *stream, uint32_t index, void *out)'
+    extern 'int tpdf_command_stream_image(const void *stream, uint32_t index, void *out)'
+    extern 'int tpdf_command_stream_to_bytes(const void *stream, void **out)'
+    extern 'int tpdf_command_stream_version(const void *stream, uint16_t *major, uint16_t *minor)'
+    extern 'int tpdf_command_stream_page_index(const void *stream, uint32_t *out)'
+    extern 'int tpdf_command_stream_size(const void *stream, double *width, double *height)'
+    extern 'int tpdf_command_stream_render(const void *stream, double scale, int format, void **out)'
+    extern 'void tpdf_command_stream_free(void *stream)'
+    extern 'int tpdf_command_encoder_new(void **out)'
+    extern 'int tpdf_command_encoder_push(void *encoder, int kind, const void *fields, size_t count)'
+    extern 'int tpdf_command_encoder_finish(const void *encoder, void **out)'
+    extern 'void tpdf_command_encoder_free(void *encoder)'
   end
 
   # The TPDF_SCRIPT_* policy bits and TPDF_ENTROPY_LEN, transcribed.
@@ -1616,6 +1636,436 @@ module TinkerPdf
 
     def map_role(custom, standard)
       Raw.check(Native.tpdf_builder_map_role(@pointer, custom, custom.bytesize, standard, standard.bytesize))
+    end
+  end
+
+  # ---- the command stream (docs/design/command-stream.md) -------------------
+  #
+  # Over crates/tinker-pdf-ffi's src/commands.rs, call for call: the cursor and
+  # a record read by its place, each field as plain values copied out of the
+  # stream's storage before its handle is closed, the two tables a host draws
+  # from, the encoder, the stream's own facts and its render. Replay is a loop
+  # of those reads, handing each record to the device method its kind names.
+  # The structs cross as packed strings at the offsets
+  # crates/tinker-pdf-ffi/tests/layout.rs pins: TpdfCommand 16 bytes,
+  # TpdfCommandField 48, TpdfCommandBytes 16, TpdfCommandOutline 56 and
+  # TpdfCommandImage 128.
+
+  # TpdfCommandKind, transcribed: numbered from zero in the order the kinds
+  # were added, which is not a kind's number on the wire. The end is END_,
+  # since END is a Ruby keyword.
+  module CommandKind
+    END_ = 0
+    FUNCTION = 1
+    HALFTONE = 2
+    STORED = 3
+    COLORANTS = 4
+    SOURCE = 5
+    STATE = 6
+    BEGIN_TEXT = 7
+    GLYPH_RUN = 8
+    END_TEXT = 9
+    FILL_PATH = 10
+    STROKE_PATH = 11
+    CLIP_PATH = 12
+    SAVE_STATE = 13
+    RESTORE_STATE = 14
+    DRAW_IMAGE = 15
+    DRAW_SHADING = 16
+    BEGIN_MARKED_CONTENT = 17
+    END_MARKED_CONTENT = 18
+    BEGIN_FORM = 19
+    END_FORM = 20
+    BEGIN_GROUP = 21
+    END_GROUP = 22
+    BEGIN_SOFT_MASK = 23
+    END_SOFT_MASK = 24
+    CLEAR_SOFT_MASK = 25
+    GROUP_BUDGET_SPENT = 26
+    RECURSION_REFUSED = 27
+    NESTED_BUDGET_SPENT = 28
+    PAGE = 29
+    ANNOTATION = 30
+    MISSING_FONT = 31
+    REPAIRED_SPACE = 32
+    SCOPE = 33
+    OUTLINE = 34
+    FONT_IDENTITY = 35
+    PROFILE = 36
+    COLOR_SPACE = 37
+    IMAGE = 38
+    INLINE_IMAGE = 39
+    IMAGE_DECODE = 40
+    SHADING_DEFINITION = 41
+    SHADING = 42
+    PATTERN = 43
+    CELL = 44
+  end
+
+  # TpdfCommandFieldTag, transcribed: what a field holds, its tag on the wire.
+  module CommandFieldTag
+    NOTHING = 0
+    UNSIGNED = 1
+    SIGNED = 2
+    REAL = 3
+    BYTES = 4
+    REALS = 5
+    NATURALS = 6
+    STRINGS = 7
+  end
+
+  # TpdfImageAnswer, transcribed: what the page's resources answered for an
+  # image at one reduction.
+  module ImageAnswer
+    ABSENT = 0
+    IMAGE = 1
+    REFUSED = 2
+  end
+
+  # The device method each kind names, by the kind's number: the facade's
+  # kind's name in snake case, nil for the end, which no record is of.
+  COMMAND_METHODS = [
+    nil, :function, :halftone, :stored, :colorants, :source, :state, :begin_text, :glyph_run, :end_text,
+    :fill_path, :stroke_path, :clip_path, :save_state, :restore_state, :draw_image, :draw_shading,
+    :begin_marked_content, :end_marked_content, :begin_form, :end_form, :begin_group, :end_group,
+    :begin_soft_mask, :end_soft_mask, :clear_soft_mask, :group_budget_spent, :recursion_refused,
+    :nested_budget_spent, :page, :annotation, :missing_font, :repaired_space, :scope, :outline,
+    :font_identity, :profile, :color_space, :image, :inline_image, :image_decode, :shading_definition,
+    :shading, :pattern, :cell
+  ].freeze
+
+  # A method a kind, and no more: a kind added to CommandKind without its
+  # method here fails as the library loads.
+  raise 'COMMAND_METHODS names a method for every kind' unless COMMAND_METHODS.size == CommandKind.constants.size
+
+  # One record as the cursor reads it: its kind, nil for a kind this build
+  # does not know, which a stream of a newer minor version holds; the kind's
+  # number on the wire; the record's place, from 0, which the stream's
+  # accessors name it by, the end standing at the number of records; and how
+  # many fields it holds.
+  Command = Struct.new(:kind, :number, :index, :field_count, keyword_init: true)
+
+  # A record and its fields, in their places. What each place holds is the
+  # kind's (docs/design/command-stream.md, "The records"): a command's state
+  # is its field 0, a reference to the STATE records before it in their order.
+  CommandRecord = Struct.new(:kind, :number, :index, :fields, keyword_init: true)
+
+  # A glyph's outline record: the scope it was asked in (0 the page's, n the
+  # nth scope record's), its font as the glyph runs name it, its code, whether
+  # the font gave it an outline, a byte a segment (0 a move, 1 a line, 2 a
+  # quadratic, 3 a cubic, 4 a close) and the segments' numbers in an em.
+  GlyphOutline = Struct.new(:scope, :font_id, :code, :found, :operators, :numbers, keyword_init: true)
+
+  # An image's decode at one reduction: the image record it is of, the
+  # reduction, the ImageAnswer, the size in samples, the window the samples
+  # are ([x, y, width, height], its top edge counting down) or nil for all of
+  # the decode, whether it is a stencil mask, its /Interpolate, a refused
+  # decode's codec, three bytes a sample of RGB, a byte a sample of opacity,
+  # a byte a sample choosing between colours' two, and the red, green, blue
+  # and alpha of a sample of zero and then of any other.
+  DecodedImage = Struct.new(:image, :reduction, :answer, :width, :height, :window, :stencil, :interpolate,
+                            :codec, :rgb, :alpha, :two_colour, :colours, keyword_init: true)
+
+  # One field of a record: its tag beside the value the tag says it holds --
+  # nil, an Integer, a Float, a binary String, or an Array of Floats, of
+  # Integers or of binary Strings -- each a copy. Two are equal when their
+  # tags and values are, a real by its bits.
+  class CommandField
+    attr_reader :tag
+
+    def initialize(tag, value)
+      @tag = tag
+      @value = value
+    end
+    private_class_method :new
+
+    # An absent value.
+    def self.nothing = new(CommandFieldTag::NOTHING, nil)
+    # An unsigned integer. A reference to a record is one.
+    def self.unsigned(value) = new(CommandFieldTag::UNSIGNED, Integer(value))
+    # A signed integer.
+    def self.signed(value) = new(CommandFieldTag::SIGNED, Integer(value))
+    # A real, its bits as given.
+    def self.real(value) = new(CommandFieldTag::REAL, Float(value))
+    # Bytes, copied.
+    def self.bytes(value) = new(CommandFieldTag::BYTES, value.b)
+    # Reals, copied.
+    def self.reals(values) = new(CommandFieldTag::REALS, values.map { |value| Float(value) })
+    # Unsigned integers, copied.
+    def self.naturals(values) = new(CommandFieldTag::NATURALS, values.map { |value| Integer(value) })
+    # Byte strings, each copied.
+    def self.strings(values) = new(CommandFieldTag::STRINGS, values.map(&:b))
+
+    # The value, as the tag says it is held; a String or an Array is a copy.
+    def value
+      case @value
+      when String then @value.dup
+      when Array then @value.map { |each| each.is_a?(String) ? each.dup : each }
+      else @value
+      end
+    end
+
+    def ==(other)
+      other.is_a?(CommandField) && other.tag == @tag && other.bits == bits
+    end
+    alias eql? ==
+
+    def hash = [@tag, bits].hash
+
+    def inspect = "#<TinkerPdf::CommandField tag=#{@tag} #{@value.inspect}>"
+    alias to_s inspect
+
+    protected
+
+    # The value with every real as its bits, which equality compares.
+    def bits
+      case @tag
+      when CommandFieldTag::REAL then [@value].pack('G')
+      when CommandFieldTag::REALS then @value.pack('G*')
+      else @value
+      end
+    end
+  end
+
+  # What a replay hands records to: one method a kind, each handed the
+  # record, and #unknown for a kind this build does not know. A device
+  # includes this, whose every method does nothing, and defines the kinds it
+  # draws; a device that does not respond to a kind's method is passed over
+  # for that kind as well. An exception a method raises ends the replay and is
+  # raised. A record's tables, its glyphs' outlines and its images' decodes,
+  # are the stream's #outline_at and #image_at, which a device that draws them
+  # holds the stream for. Ruby's standard library has no 2D vector canvas, so
+  # the binding ships the interface alone.
+  module CommandDevice
+    COMMAND_METHODS.compact.each do |name|
+      define_method(name) { |_record| nil }
+    end
+
+    def unknown(_record) = nil
+  end
+
+  # A command stream read, held by the engine: a page's drawing as versioned
+  # bytes, from Document#command_stream. Everything it hands back is a copy
+  # that outlives it. Bytes the reader refuses raise Error with
+  # Status::BAD_ARGUMENT and the reader's own sentence.
+  class CommandStream
+    attr_reader :pointer
+
+    # Reads a stream's bytes, which are read and not kept.
+    def self.parse(bytes)
+      new(Raw.handle { |out| Native.tpdf_command_stream_parse(bytes, bytes.bytesize, out) })
+    end
+
+    def initialize(pointer)
+      @pointer = pointer
+    end
+
+    # Releases the stream. What was read from it stays valid.
+    def close
+      Native.tpdf_command_stream_free(@pointer) unless @pointer.nil?
+      @pointer = nil
+    end
+
+    # How many records the stream holds before its end.
+    def count = Native.tpdf_command_stream_count(@pointer)
+
+    # The cursor: the next record's command, moving past it. After the last
+    # record it reads the end, at the number of records, until #rewind.
+    def next
+      out = Raw.slot(16)
+      Raw.check(Native.tpdf_command_stream_next(@pointer, out))
+      CommandStream.command(out)
+    end
+
+    # Puts the cursor back on the stream's first record.
+    def rewind = Raw.check(Native.tpdf_command_stream_rewind(@pointer))
+
+    # Record index's command, wherever the cursor stands.
+    def command_at(index)
+      out = Raw.slot(16)
+      Raw.check(Native.tpdf_command_stream_record(@pointer, index, out))
+      CommandStream.command(out)
+    end
+
+    # Field `field` of record index, copied.
+    def field_at(index, field)
+      out = Raw.slot(48)
+      Raw.check(Native.tpdf_command_stream_field(@pointer, index, field, out))
+      tag, natural, integer, real, data, count = out[0, 48].unpack('lx4QqdQQ')
+      case tag
+      when CommandFieldTag::NOTHING then CommandField.nothing
+      when CommandFieldTag::UNSIGNED then CommandField.unsigned(natural)
+      when CommandFieldTag::SIGNED then CommandField.signed(integer)
+      when CommandFieldTag::REAL then CommandField.real(real)
+      when CommandFieldTag::BYTES then CommandField.bytes(CommandStream.lent(data, count))
+      when CommandFieldTag::REALS then CommandField.reals(CommandStream.lent(data, count * 8).unpack('d*'))
+      when CommandFieldTag::NATURALS then CommandField.naturals(CommandStream.lent(data, count * 8).unpack('Q*'))
+      when CommandFieldTag::STRINGS
+        list = CommandStream.lent(data, count * 16).unpack('Q*').each_slice(2)
+        CommandField.strings(list.map { |pointer, length| CommandStream.lent(pointer, length) })
+      else raise "field #{field} of record #{index} is of tag #{tag}, which this binding does not read"
+      end
+    end
+
+    # Record index: its command and every one of its fields.
+    def record_at(index)
+      command = command_at(index)
+      CommandRecord.new(kind: command.kind, number: command.number, index: command.index,
+                        fields: (0...command.field_count).map { |at| field_at(index, at) })
+    end
+
+    # Every record, in the stream's order.
+    def records = (0...count).map { |index| record_at(index) }
+
+    # Outline record index's glyph. A record of another kind is refused,
+    # naming both.
+    def outline_at(index)
+      out = Raw.slot(56)
+      Raw.check(Native.tpdf_command_stream_outline(@pointer, index, out))
+      scope, font_id, code, found, operators, operator_count, numbers, number_count = out[0, 56].unpack('QQLlQQQQ')
+      GlyphOutline.new(scope: scope, font_id: font_id, code: code, found: !found.zero?,
+                       operators: CommandStream.lent(operators, operator_count),
+                       numbers: CommandStream.lent(numbers, number_count * 8).unpack('d*'))
+    end
+
+    # Image decode record index. A record of another kind is refused, naming
+    # both.
+    def image_at(index)
+      out = Raw.slot(128)
+      Raw.check(Native.tpdf_command_stream_image(@pointer, index, out))
+      image, reduction, answer, width, height, has_window, window_x, window_y, window_width, window_height,
+        stencil, interpolate, codec, codec_len, rgb, rgb_len, alpha, alpha_len, two_colour, two_colour_len,
+        *colours = out[0, 128].unpack('QLlLLlLLLLllx4QQQQQQQQC8')
+      DecodedImage.new(
+        image: image, reduction: reduction, answer: answer, width: width, height: height,
+        window: has_window.zero? ? nil : [window_x, window_y, window_width, window_height],
+        stencil: !stencil.zero?, interpolate: !interpolate.zero?,
+        codec: CommandStream.lent(codec, codec_len).force_encoding(Encoding::UTF_8),
+        rgb: CommandStream.lent(rgb, rgb_len), alpha: CommandStream.lent(alpha, alpha_len),
+        two_colour: CommandStream.lent(two_colour, two_colour_len), colours: colours
+      )
+    end
+
+    # The stream's bytes, written back at its own version.
+    def to_bytes = Raw.take_buffer(Raw.handle { |out| Native.tpdf_command_stream_to_bytes(@pointer, out) })
+
+    # The stream's major and minor version.
+    def version
+      major = Raw.slot(2)
+      minor = Raw.slot(2)
+      Raw.check(Native.tpdf_command_stream_version(@pointer, major, minor))
+      [Raw.u16(major), Raw.u16(minor)]
+    end
+
+    # Which page of its document the stream is of.
+    def page_index
+      out = Raw.slot(4)
+      Raw.check(Native.tpdf_command_stream_page_index(@pointer, out))
+      Raw.u32(out)
+    end
+
+    # The page's size in points after rotation.
+    def size
+      width = Raw.slot
+      height = Raw.slot
+      Raw.check(Native.tpdf_command_stream_size(@pointer, width, height))
+      [Raw.f64(width), Raw.f64(height)]
+    end
+
+    # Draws the stream as a render draws its page, through the engine's own
+    # renderer; a scale of 1.0 is 72 dots per inch.
+    def render(scale: 1.0, format: PixelFormat::RGB8)
+      Bitmap.new(Raw.handle { |out| Native.tpdf_command_stream_render(@pointer, scale, format, out) })
+    end
+
+    # Hands every record, in the stream's order, to the method of device
+    # named for its kind (COMMAND_METHODS), and a record of a kind this build
+    # does not know to #unknown, each where the device responds to it. An
+    # exception a method raises ends the replay and is raised.
+    def replay(device)
+      (0...count).each do |index|
+        record = record_at(index)
+        name = record.kind.nil? ? :unknown : COMMAND_METHODS[record.kind]
+        device.public_send(name, record) if !name.nil? && device.respond_to?(name)
+      end
+      nil
+    end
+
+    # A TpdfCommand read into `out`.
+    def self.command(out)
+      kind, number, index, field_count = out[0, 16].unpack('lLLL')
+      Command.new(kind: kind.negative? ? nil : kind, number: number, index: index, field_count: field_count)
+    end
+
+    # `length` bytes the stream lends at `address`, copied; empty for none.
+    def self.lent(address, length)
+      address.zero? || length.zero? ? ''.b : Fiddle::Pointer.new(address)[0, length]
+    end
+  end
+
+  # TpdfCommandEncoder: records pushed by kind and fields, copied, and
+  # finished into a stream's bytes at this build's version, read back as
+  # CommandStream.parse reads them. A kind or a tag the C ABI does not
+  # declare, the end pushed, and records whose stream the reader refuses raise
+  # Error with Status::BAD_ARGUMENT naming them. The encoder keeps its
+  # records, so it finishes again.
+  class CommandEncoder
+    # An encoder holding no records.
+    def initialize
+      @pointer = Raw.handle { |out| Native.tpdf_command_encoder_new(out) }
+    end
+
+    def close
+      Native.tpdf_command_encoder_free(@pointer) unless @pointer.nil?
+      @pointer = nil
+    end
+
+    # Appends a record of `kind` and its fields.
+    def push(kind, fields)
+      kept = []
+      raw = fields.map { |field| CommandEncoder.lay(field, kept) }.join
+      Raw.check(Native.tpdf_command_encoder_push(@pointer, kind, fields.empty? ? nil : raw, fields.size))
+    end
+
+    # Appends `record`'s kind and fields; a kind this build does not know
+    # crosses as the C ABI's -1, which it refuses.
+    def push_record(record) = push(record.kind.nil? ? -1 : record.kind, record.fields)
+
+    # The records pushed so far as a stream's bytes.
+    def finish = Raw.take_buffer(Raw.handle { |out| Native.tpdf_command_encoder_finish(@pointer, out) })
+
+    # `field` as a packed TpdfCommandField, every array it points to held in
+    # `kept` for the length of the push.
+    def self.lay(field, kept)
+      value = field.value
+      natural = integer = data = count = 0
+      real = 0.0
+      case field.tag
+      when CommandFieldTag::UNSIGNED then natural = value
+      when CommandFieldTag::SIGNED then integer = value
+      when CommandFieldTag::REAL then real = value
+      when CommandFieldTag::BYTES then data, count = keep(kept, value), value.bytesize
+      when CommandFieldTag::REALS then data, count = keep(kept, value.pack('d*')), value.size
+      when CommandFieldTag::NATURALS then data, count = keep(kept, value.pack('Q*')), value.size
+      when CommandFieldTag::STRINGS
+        list = value.map { |string| [keep(kept, string), string.bytesize].pack('QQ') }.join
+        data, count = keep(kept, list), value.size
+      end
+      [field.tag, natural, integer, real, data, count].pack('lx4QqdQQ')
+    end
+
+    # The address of `bytes`, held in `kept` so it outlives the call.
+    def self.keep(kept, bytes)
+      kept << bytes
+      Raw.address(bytes)
+    end
+  end
+
+  class Document
+    # The page's drawing as a command stream's versioned bytes, which
+    # CommandStream.parse reads.
+    def command_stream(index)
+      Raw.take_buffer(Raw.handle { |out| Native.tpdf_page_command_stream(@pointer, index, out) })
     end
   end
 
