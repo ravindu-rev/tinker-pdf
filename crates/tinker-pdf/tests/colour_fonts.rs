@@ -875,6 +875,7 @@ fn layered_face() -> Face {
             vec![[255, 0, 0, 255], [0, 0, 255, HALF]],
             vec![[255, 255, 0, 255], [0, 255, 255, HALF]],
         ]),
+        ..Colour::default()
     })
 }
 
@@ -1569,6 +1570,7 @@ fn v1_face(
         rectangles: V1_RECTS.to_vec(),
         colr,
         cpal: v1_palette(),
+        ..Colour::default()
     })
 }
 
@@ -2735,6 +2737,725 @@ fn a_composite_needing_transparency_under_a_profile_without_it_is_drawn_as_the_o
         let got = pixel(&bitmap, at_units(pen, unit), 100.0);
         assert!(close(got, want, 2), "{pen} {unit:?}: {got:?}, not {want:?}");
     }
+}
+
+// ---- Bitmap glyphs: sbix, CBLC and CBDT -----------------------------------
+
+/// A PNG of `width` × `height` RGBA pixels, row-major from the top: colour
+/// type 6 at eight bits (11.2.2), every row of filter type 0 (9.2), one
+/// `IDAT`, each chunk's CRC over its type and data (5.3).
+fn rgba_png(width: u32, height: u32, pixels: &[[u8; 4]]) -> Vec<u8> {
+    png(width, height, pixels, true)
+}
+
+/// [`rgba_png`]'s picture with its alpha dropped: colour type 2, which a
+/// writer can pass through with no soft mask.
+fn rgb_png(width: u32, height: u32, pixels: &[[u8; 4]]) -> Vec<u8> {
+    png(width, height, pixels, false)
+}
+
+/// A PNG of `pixels`, colour type 6 where `alpha` and 2 where not.
+fn png(width: u32, height: u32, pixels: &[[u8; 4]], alpha: bool) -> Vec<u8> {
+    let chunk = |kind: &[u8; 4], data: &[u8]| {
+        let mut out = Vec::new();
+        out.extend_from_slice(&u32::try_from(data.len()).expect("small").to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut both = kind.to_vec();
+        both.extend_from_slice(data);
+        out.extend_from_slice(&tinker_pdf_filters::crc32(&both).to_be_bytes());
+        out
+    };
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, if alpha { 6 } else { 2 }, 0, 0, 0]);
+    let mut raw = Vec::new();
+    for row in pixels.chunks(width as usize) {
+        raw.push(0);
+        for pixel in row {
+            raw.extend_from_slice(if alpha { &pixel[..] } else { &pixel[..3] });
+        }
+    }
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    out.extend_from_slice(&chunk(b"IHDR", &ihdr));
+    out.extend_from_slice(&chunk(b"IDAT", &tinker_pdf_filters::zlib_compress(&raw)));
+    out.extend_from_slice(&chunk(b"IEND", b""));
+    out
+}
+
+/// A baseline RGB TIFF (TIFF 6.0, section 6), little-endian, uncompressed,
+/// one strip: its nine required fields in tag order, `BitsPerSample`'s three
+/// values after the directory, and the samples after them.
+fn rgb_tiff(width: u16, height: u16, pixels: &[[u8; 3]]) -> Vec<u8> {
+    let entries: u16 = 9;
+    let directory_end = 8 + 2 + 12 * usize::from(entries) + 4;
+    let bits_at = u32::try_from(directory_end).expect("small");
+    let strip_at = bits_at + 6;
+    let strip_len = u32::from(width) * u32::from(height) * 3;
+    let mut out = b"II".to_vec();
+    out.extend_from_slice(&42u16.to_le_bytes());
+    out.extend_from_slice(&8u32.to_le_bytes());
+    out.extend_from_slice(&entries.to_le_bytes());
+    // tag, type (3 SHORT, 4 LONG), count, value or offset.
+    let mut entry = |tag: u16, kind: u16, count: u32, value: u32| {
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+    };
+    entry(256, 3, 1, u32::from(width)); // ImageWidth
+    entry(257, 3, 1, u32::from(height)); // ImageLength
+    entry(258, 3, 3, bits_at); // BitsPerSample, at its offset
+    entry(259, 3, 1, 1); // Compression: none
+    entry(262, 3, 1, 2); // PhotometricInterpretation: RGB
+    entry(273, 4, 1, strip_at); // StripOffsets
+    entry(277, 3, 1, 3); // SamplesPerPixel
+    entry(278, 3, 1, u32::from(height)); // RowsPerStrip: one strip
+    entry(279, 4, 1, strip_len); // StripByteCounts
+    out.extend_from_slice(&0u32.to_le_bytes()); // no next directory
+    for _ in 0..3 {
+        out.extend_from_slice(&8u16.to_le_bytes());
+    }
+    for pixel in pixels {
+        out.extend_from_slice(pixel);
+    }
+    out
+}
+
+/// A baseline JPEG of `width` × `height` RGB pixels, by this engine's own
+/// encoder: the claim here is where a glyph's graphic is drawn, and the
+/// colour each of its pixels is held to is the one this engine's decoder
+/// gives it.
+fn rgb_jpeg(width: u32, height: u32, pixels: &[[u8; 3]]) -> Vec<u8> {
+    let data: Vec<u8> = pixels.iter().flatten().copied().collect();
+    tinker_pdf_filters::jpeg_encode(
+        &tinker_pdf_filters::JpegSource {
+            width,
+            height,
+            colour: tinker_pdf_filters::JpegSourceColour::Rgb,
+            stride: width as usize * 3,
+            data: &data,
+        },
+        &tinker_pdf_filters::JpegOptions::default(),
+    )
+    .expect("an encodable raster")
+}
+
+/// The pixel `(x, y)` of a JPEG as this engine's decoder gives it.
+fn jpeg_pixel(bytes: &[u8], x: usize, y: usize) -> [u8; 3] {
+    let image = tinker_pdf_filters::jpeg_decode(bytes, 1 << 20).expect("decodes");
+    let at = (y * image.width as usize + x) * 3;
+    [image.data[at], image.data[at + 1], image.data[at + 2]]
+}
+
+/// An 8 × 8 picture of four 4 × 4 quadrants: `corner` at the top left, green
+/// at the top right, blue at the bottom left, and `last` at half an alpha at
+/// the bottom right.
+fn quadrants(corner: [u8; 3], last: [u8; 3]) -> Vec<[u8; 4]> {
+    let mut out = Vec::with_capacity(64);
+    for y in 0..8 {
+        for x in 0..8 {
+            out.push(match (x < 4, y < 4) {
+                (true, true) => [corner[0], corner[1], corner[2], 255],
+                (false, true) => [GREEN[0], GREEN[1], GREEN[2], 255],
+                (true, false) => [BLUE[0], BLUE[1], BLUE[2], 255],
+                (false, false) => [last[0], last[1], last[2], HALF],
+            });
+        }
+    }
+    out
+}
+
+/// Each quadrant's middle pixel, `(i, j)` from the top left: a pixel whose
+/// eight neighbours share its colour, where the design samples a bitmap.
+const QUADRANT_MIDDLES: [(usize, usize); 4] = [(1, 1), (6, 1), (1, 6), (6, 6)];
+
+/// One glyph's record in an `sbix` strike (*Glyph data*).
+#[derive(Clone, Debug)]
+enum SbixRecord {
+    /// A graphic: its origin offsets in the strike's pixels, its type and its
+    /// bytes.
+    Graphic([i16; 2], [u8; 4], Vec<u8>),
+    /// `dupe`: the glyph whose bitmap this one uses.
+    Dupe(u16),
+}
+
+/// An `sbix` (*Header*, *Strikes*, *Glyph data*): `flags`, and each strike's
+/// ppem and the records of the glyphs it holds, over a face of `count`
+/// glyphs, a glyph with no record holding no data.
+fn sbix_table(flags: u16, strikes: &[(u16, Vec<(u16, SbixRecord)>)], count: u16) -> Vec<u8> {
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    for (ppem, records) in strikes {
+        let first = 4 + 4 * (usize::from(count) + 1);
+        let mut offsets = Vec::new();
+        let mut data = Vec::new();
+        for glyph in 0..count {
+            offsets.push(first + data.len());
+            if let Some((_, record)) = records.iter().find(|(g, _)| *g == glyph) {
+                match record {
+                    SbixRecord::Graphic([x, y], tag, bytes) => {
+                        data.extend_from_slice(&x.to_be_bytes());
+                        data.extend_from_slice(&y.to_be_bytes());
+                        data.extend_from_slice(tag);
+                        data.extend_from_slice(bytes);
+                    }
+                    SbixRecord::Dupe(named) => {
+                        data.extend_from_slice(&[0, 0, 0, 0]);
+                        data.extend_from_slice(b"dupe");
+                        data.extend_from_slice(&named.to_be_bytes());
+                    }
+                }
+            }
+        }
+        offsets.push(first + data.len());
+        let mut body = Vec::new();
+        body.extend_from_slice(&ppem.to_be_bytes());
+        body.extend_from_slice(&72u16.to_be_bytes()); // ppi
+        for offset in offsets {
+            body.extend_from_slice(&u32::try_from(offset).expect("small").to_be_bytes());
+        }
+        body.extend_from_slice(&data);
+        bodies.push(body);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // version
+    out.extend_from_slice(&flags.to_be_bytes());
+    out.extend_from_slice(&u32::try_from(strikes.len()).expect("few").to_be_bytes());
+    let mut at = 8 + 4 * strikes.len();
+    for body in &bodies {
+        out.extend_from_slice(&u32::try_from(at).expect("small").to_be_bytes());
+        at += body.len();
+    }
+    for body in bodies {
+        out.extend_from_slice(&body);
+    }
+    out
+}
+
+/// One glyph of a `CBDT` strike (*Glyph bitmap data formats*): its id, its
+/// data format, its metrics as `BigGlyphMetrics` lays them out — height,
+/// width, horizontal bearings and advance, vertical bearings and advance — and
+/// its PNG. Format 17 writes the first five as `SmallGlyphMetrics`, 18 all
+/// eight, and 19 none, its index subtable (format 2) carrying them.
+#[derive(Clone, Debug)]
+struct CbdtEntry {
+    glyph: u16,
+    format: u16,
+    metrics: [u8; 8],
+    png: Vec<u8>,
+}
+
+/// A `CBLC` and its `CBDT` (*CblcHeader*, *BitmapSize record*,
+/// *IndexSubtableList*): each strike its `ppemX` and `ppemY`, its glyphs each
+/// one index subtable of a one-glyph range — format 1 for data formats 17 and
+/// 18, format 2 for 19 — at bit depth 32 with horizontal metrics.
+fn cbdt_tables(strikes: &[([u8; 2], Vec<CbdtEntry>)]) -> (Vec<u8>, Vec<u8>) {
+    let mut cbdt = vec![0, 3, 0, 0];
+    let mut lists: Vec<(Vec<u8>, u32, u16, u16)> = Vec::new();
+    for (_, entries) in strikes {
+        let records = 8 * entries.len();
+        let mut array = Vec::new();
+        let mut subtables = Vec::new();
+        for entry in entries {
+            let at = cbdt.len();
+            match entry.format {
+                17 => cbdt.extend_from_slice(&entry.metrics[..5]),
+                18 => cbdt.extend_from_slice(&entry.metrics),
+                _ => {}
+            }
+            cbdt.extend_from_slice(&u32::try_from(entry.png.len()).expect("small").to_be_bytes());
+            cbdt.extend_from_slice(&entry.png);
+            let size = u32::try_from(cbdt.len() - at).expect("small");
+            let at = u32::try_from(at).expect("small");
+            array.extend_from_slice(&entry.glyph.to_be_bytes());
+            array.extend_from_slice(&entry.glyph.to_be_bytes());
+            array.extend_from_slice(
+                &u32::try_from(records + subtables.len())
+                    .expect("small")
+                    .to_be_bytes(),
+            );
+            if entry.format == 19 {
+                subtables.extend_from_slice(&2u16.to_be_bytes());
+                subtables.extend_from_slice(&19u16.to_be_bytes());
+                subtables.extend_from_slice(&at.to_be_bytes());
+                subtables.extend_from_slice(&size.to_be_bytes());
+                subtables.extend_from_slice(&entry.metrics);
+            } else {
+                subtables.extend_from_slice(&1u16.to_be_bytes());
+                subtables.extend_from_slice(&entry.format.to_be_bytes());
+                subtables.extend_from_slice(&at.to_be_bytes());
+                subtables.extend_from_slice(&0u32.to_be_bytes());
+                subtables.extend_from_slice(&size.to_be_bytes());
+            }
+        }
+        array.extend_from_slice(&subtables);
+        let first = entries.iter().map(|e| e.glyph).min().unwrap_or(0);
+        let last = entries.iter().map(|e| e.glyph).max().unwrap_or(0);
+        lists.push((
+            array,
+            u32::try_from(entries.len()).expect("few"),
+            first,
+            last,
+        ));
+    }
+    let mut cblc = vec![0, 3, 0, 0];
+    cblc.extend_from_slice(&u32::try_from(strikes.len()).expect("few").to_be_bytes());
+    let mut at = 8 + 48 * strikes.len();
+    for (([ppem_x, ppem_y], _), (list, count, first, last)) in strikes.iter().zip(&lists) {
+        cblc.extend_from_slice(&u32::try_from(at).expect("small").to_be_bytes());
+        cblc.extend_from_slice(&u32::try_from(list.len()).expect("small").to_be_bytes());
+        cblc.extend_from_slice(&count.to_be_bytes());
+        cblc.extend_from_slice(&0u32.to_be_bytes()); // colorRef
+        cblc.extend_from_slice(&[0; 24]); // hori and vert SbitLineMetrics
+        cblc.extend_from_slice(&first.to_be_bytes());
+        cblc.extend_from_slice(&last.to_be_bytes());
+        cblc.extend_from_slice(&[*ppem_x, *ppem_y, 32, 0x01]);
+        at += list.len();
+    }
+    for (list, ..) in &lists {
+        cblc.extend_from_slice(list);
+    }
+    (cblc, cbdt)
+}
+
+/// The face the bitmap tests draw: `ABCD` at a thousand units, a full em
+/// each, and one rectangle glyph whose box starts at (100, 200), its tables
+/// made by `tables` from the face's glyph ids — `.notdef`, which has no
+/// contour, `A` to `D`, and the rectangle — and its glyph count.
+fn bitmap_face(tables: impl Fn([u16; 6], u16) -> Colour) -> (Face, [u16; 6]) {
+    let base = Face::new("Fixture Bitmap", "ABCD").with_advance(1000);
+    let letter = |c: char| base.glyph_of(c).expect("a covered letter");
+    let ids = [
+        0,
+        letter('A'),
+        letter('B'),
+        letter('C'),
+        letter('D'),
+        base.colour_glyph(0),
+    ];
+    let count = base.glyph_count(1);
+    let mut colour = tables(ids, count);
+    colour.rectangles = vec![[100, 200, 600, 700]];
+    (base.with_colour(colour), ids)
+}
+
+/// `glyphs`, each `(id, pen)`, drawn as one run of `face`'s colour glyphs at
+/// [`RUN_SIZE`] from [`RUN_ORIGIN`], in a text colour of `0 0.5 0`, the face's
+/// bitmaps at the strike `strike` picks: the document and what the face
+/// warned.
+fn bitmap_document(
+    face: &Face,
+    strike: tinker_pdf_font::StrikeChoice,
+    glyphs: &[(u16, f64)],
+    builder: DocumentBuilder,
+) -> (Vec<u8>, Vec<ColourWarning>) {
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("the fixture face is a valid sfnt");
+    let colour = ColourFace::new(&sfnt, PaletteChoice::Default).with_strike(strike);
+    assert!(colour.has_colour());
+    let mut builder = builder;
+    assert!(colour.register(&mut builder, b"C0", b"FixtureBitmap"));
+    assert!(colour.add_glyphs(&mut builder, b"C0", glyphs.iter().map(|(id, _)| *id)));
+    let placed: Vec<PlacedGlyph<'_>> = glyphs
+        .iter()
+        .map(|&(id, pen)| PlacedGlyph {
+            glyph: Glyph { id, text: "x" },
+            x: pen * RUN_SIZE,
+            rise: 0.0,
+        })
+        .collect();
+    let mut content = b"0 0.5 0 rg\n".to_vec();
+    assert!(builder.colour_glyph_run(
+        &mut content,
+        b"C0",
+        RUN_SIZE,
+        [1.0, 0.0, 0.0, 1.0, RUN_ORIGIN.0, RUN_ORIGIN.1],
+        &placed
+    ));
+    builder.add_page(900.0, 100.0, |page| page.raw(&content));
+    (builder.finish(), colour.warnings())
+}
+
+/// How many colour images a written document holds: image XObjects in
+/// `DeviceRGB`, which every bitmap here is and no `/SMask` is.
+fn colour_images(bytes: &[u8]) -> usize {
+    let cos = CosDocument::open(bytes.to_vec()).expect("opens");
+    (1..=cos.max_object_number())
+        .filter_map(|num| cos.get(ObjRef { num, gen: 0 }).ok())
+        .filter(|object| {
+            object.as_stream().is_some_and(|stream| {
+                name(&cos, &entry(&cos, &stream.dict, b"Subtype")) == b"Image"
+                    && name(&cos, &entry(&cos, &stream.dict, b"ColorSpace")) == b"DeviceRGB"
+            })
+        })
+        .count()
+}
+
+/// **FT-06.15's exit.** Bitmap glyphs drawn from each table at each strike
+/// option: for every option the strike *The strike a glyph is drawn at* says
+/// it picks, each glyph's picture placed where that strike's metrics put it —
+/// an `sbix` graphic by its origin offsets in the strike's pixels from the
+/// drawing position for a glyph with no contour and from its box's lower left
+/// for one with contours, a `CBDT` one by its bearings from the pen — every
+/// strike pixel `unitsPerEm / ppem` of the em, and at each quadrant's middle
+/// the bitmap's own pixel over the page. A `dupe` draws the glyph it names,
+/// a `jpg ` and a `tiff` graphic draw as a PNG does, against the pixels
+/// this engine's decoders give, and a bitmap drawn by two glyphs and twice
+/// is one image.
+#[test]
+fn bitmap_glyphs_draw_their_strike_where_its_metrics_put_it() {
+    use tinker_pdf_font::StrikeChoice;
+    // Each strike's own colour, at the top left of every picture it holds.
+    let signature = |ppem: u16| match ppem {
+        20 => RED,
+        25 => PLUM,
+        _ => AZURE,
+    };
+    let jpeg_pixels: Vec<[u8; 3]> = (0..256)
+        .map(|at| match ((at % 16) < 8, (at / 16) < 8) {
+            (true, true) => ORANGE,
+            (false, true) => LEAF,
+            (true, false) => AZURE,
+            (false, false) => PLUM,
+        })
+        .collect();
+    let jpeg = rgb_jpeg(16, 16, &jpeg_pixels);
+    let tiff_pixels: Vec<[u8; 3]> = quadrants(LEAF, ORANGE)
+        .iter()
+        .map(|[r, g, b, _]| [*r, *g, *b])
+        .collect();
+    let tiff = rgb_tiff(8, 8, &tiff_pixels);
+
+    // sbix: strikes of 20, 25 and 50 pixels an em, each holding `.notdef`
+    // (no contour), `A`, `B` as a `dupe` of `A`, and the rectangle; the
+    // largest also `C` as a JPEG and `D` as a TIFF.
+    let sbix_offsets = |glyph: usize| -> [i16; 2] {
+        match glyph {
+            0 => [1, 3],
+            5 => [-1, 2],
+            _ => [2, 1],
+        }
+    };
+    let pictures = |ppem: u16, glyph: usize| -> Vec<[u8; 4]> {
+        let last = match glyph {
+            0 => LEAF,
+            5 => PLUM,
+            _ => ORANGE,
+        };
+        quadrants(signature(ppem), last)
+    };
+    let (sbix_face, ids) = bitmap_face(|ids, count| {
+        let strikes: Vec<(u16, Vec<(u16, SbixRecord)>)> = [20u16, 25, 50]
+            .iter()
+            .map(|&ppem| {
+                let mut records = Vec::new();
+                for at in [0usize, 1, 5] {
+                    let png = rgba_png(8, 8, &pictures(ppem, at));
+                    records.push((
+                        ids[at],
+                        SbixRecord::Graphic(sbix_offsets(at), *b"png ", png),
+                    ));
+                }
+                records.push((ids[2], SbixRecord::Dupe(ids[1])));
+                if ppem == 50 {
+                    records.push((ids[3], SbixRecord::Graphic([0, 0], *b"jpg ", jpeg.clone())));
+                    records.push((ids[4], SbixRecord::Graphic([1, -1], *b"tiff", tiff.clone())));
+                }
+                (ppem, records)
+            })
+            .collect();
+        Colour {
+            sbix: sbix_table(0x0001, &strikes, count),
+            ..Colour::default()
+        }
+    });
+    let run: Vec<(u16, f64)> = [0usize, 1, 2, 5, 3, 4, 1]
+        .iter()
+        .enumerate()
+        .map(|(pen, &at)| (ids[at], pen as f64 * 1.2))
+        .collect();
+    for (choice, ppem) in [
+        (StrikeChoice::Largest, 50u16),
+        (StrikeChoice::AtLeast(22), 25),
+        (StrikeChoice::AtLeast(60), 50),
+        (StrikeChoice::Multiple(10), 20),
+        (StrikeChoice::Nearest(30), 25),
+        (StrikeChoice::Nearest(40), 50),
+    ] {
+        let (bytes, warnings) = bitmap_document(&sbix_face, choice, &run, DocumentBuilder::new());
+        assert!(warnings.is_empty(), "{choice:?}: {warnings:?}");
+        // `.notdef`, `A` and `B`'s one picture, the rectangle's, the JPEG and
+        // the TIFF: `A` drawn twice and named by `B`'s `dupe` is one image.
+        assert_eq!(colour_images(&bytes), 5, "{choice:?}");
+        let (bitmap, _) = rendered(bytes);
+        let scale = 1000.0 / f64::from(ppem);
+        for (pen, &(id, x)) in run.iter().enumerate() {
+            let at = ids.iter().position(|g| *g == id).expect("a fixture glyph");
+            let pen_ems = x / RUN_SIZE;
+            match at {
+                3 => {
+                    // The JPEG, from the largest strike whatever is asked:
+                    // no other holds it.
+                    let s = 1000.0 / 50.0;
+                    for (i, j) in [(3usize, 3usize), (11, 3), (3, 11), (11, 11)] {
+                        let unit = [(i as f64 + 0.5) * s, (16.0 - j as f64 - 0.5) * s];
+                        let got = pixel(&bitmap, at_units(pen_ems, unit), 100.0);
+                        let want = jpeg_pixel(&jpeg, i, j);
+                        assert!(
+                            close(got, want, 2),
+                            "{choice:?}: jpeg ({i}, {j}): {got:?}, not {want:?}"
+                        );
+                    }
+                }
+                4 => {
+                    let s = 1000.0 / 50.0;
+                    for (i, j) in QUADRANT_MIDDLES {
+                        let unit = [
+                            (1.0 + i as f64 + 0.5) * s,
+                            (-1.0 + 8.0 - j as f64 - 0.5) * s,
+                        ];
+                        let got = pixel(&bitmap, at_units(pen_ems, unit), 100.0);
+                        let want = tiff_pixels[j * 8 + i];
+                        assert!(
+                            close(got, want, 2),
+                            "{choice:?}: tiff ({i}, {j}): {got:?}, not {want:?}"
+                        );
+                    }
+                }
+                _ => {
+                    // `B` is `A`'s picture at `A`'s offsets; the rectangle's
+                    // starts from its box's corner, (100, 200).
+                    let picture_of = if at == 2 { 1 } else { at };
+                    let [ox, oy] = sbix_offsets(picture_of);
+                    let base = if at == 5 { [100.0, 200.0] } else { [0.0, 0.0] };
+                    let picture = pictures(ppem, picture_of);
+                    for (i, j) in QUADRANT_MIDDLES {
+                        let unit = [
+                            base[0] + (f64::from(ox) + i as f64 + 0.5) * scale,
+                            base[1] + (f64::from(oy) + 8.0 - j as f64 - 0.5) * scale,
+                        ];
+                        let [r, g, b, a] = picture[j * 8 + i];
+                        let want = over([r, g, b], a, WHITE);
+                        let got = pixel(&bitmap, at_units(pen_ems, unit), 100.0);
+                        assert!(
+                            close(got, want, 2),
+                            "{choice:?}: glyph {id} pen {pen} ({i}, {j}) at {unit:?}: {got:?}, not {want:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // CBDT: strikes of 20 and 50 pixels an em, each holding `A` in format 17,
+    // `C` in 18 and `D` in 19, its metrics in its index subtable.
+    let bearings = |glyph: usize| -> [i8; 2] {
+        match glyph {
+            1 => [1, 7],
+            3 => [-1, 6],
+            _ => [2, 9],
+        }
+    };
+    let cbdt_pictures = |ppem: u16, glyph: usize| -> Vec<[u8; 4]> {
+        let last = match glyph {
+            1 => ORANGE,
+            3 => LEAF,
+            _ => PLUM,
+        };
+        quadrants(signature(ppem), last)
+    };
+    let (cbdt_face, ids) = bitmap_face(|ids, _| {
+        let strikes: Vec<([u8; 2], Vec<CbdtEntry>)> = [20u8, 50]
+            .iter()
+            .map(|&ppem| {
+                let entries = [(1usize, 17u16), (3, 18), (4, 19)]
+                    .iter()
+                    .map(|&(at, format)| {
+                        let [x, y] = bearings(at);
+                        CbdtEntry {
+                            glyph: ids[at],
+                            format,
+                            metrics: [8, 8, x as u8, y as u8, 10, 0, 0, 10],
+                            png: rgba_png(8, 8, &cbdt_pictures(u16::from(ppem), at)),
+                        }
+                    })
+                    .collect();
+                ([ppem, ppem], entries)
+            })
+            .collect();
+        let (cblc, cbdt) = cbdt_tables(&strikes);
+        Colour {
+            cblc,
+            cbdt,
+            ..Colour::default()
+        }
+    });
+    let run: Vec<(u16, f64)> = [1usize, 3, 4]
+        .iter()
+        .enumerate()
+        .map(|(pen, &at)| (ids[at], pen as f64 * 1.2))
+        .collect();
+    for (choice, ppem) in [
+        (StrikeChoice::Largest, 50u16),
+        (StrikeChoice::AtLeast(30), 50),
+        (StrikeChoice::AtLeast(10), 20),
+        (StrikeChoice::Nearest(25), 20),
+        (StrikeChoice::Multiple(25), 50),
+        (StrikeChoice::Multiple(20), 20),
+    ] {
+        let (bytes, warnings) = bitmap_document(&cbdt_face, choice, &run, DocumentBuilder::new());
+        assert!(warnings.is_empty(), "{choice:?}: {warnings:?}");
+        assert_eq!(colour_images(&bytes), 3, "{choice:?}");
+        let (bitmap, _) = rendered(bytes);
+        let scale = 1000.0 / f64::from(ppem);
+        for &(id, x) in &run {
+            let at = ids.iter().position(|g| *g == id).expect("a fixture glyph");
+            let [bx, by] = bearings(at);
+            let picture = cbdt_pictures(ppem, at);
+            for (i, j) in QUADRANT_MIDDLES {
+                // The top edge `horiBearingY` above the baseline, rows down.
+                let unit = [
+                    (f64::from(bx) + i as f64 + 0.5) * scale,
+                    (f64::from(by) - j as f64 - 0.5) * scale,
+                ];
+                let [r, g, b, a] = picture[j * 8 + i];
+                let want = over([r, g, b], a, WHITE);
+                let got = pixel(&bitmap, at_units(x / RUN_SIZE, unit), 100.0);
+                assert!(
+                    close(got, want, 2),
+                    "{choice:?}: glyph {id} ({i}, {j}) at {unit:?}: {got:?}, not {want:?}"
+                );
+            }
+        }
+    }
+}
+
+/// `sbix`'s flags bit 1 draws the outline over the bitmap, in the text's
+/// colour (*Header*); a graphic its decoder refuses, a type the chapter does
+/// not define and a `dupe` of a `dupe` are named and drawn as the outline;
+/// and under a profile that forbids transparency a PNG with an alpha, which
+/// needs a soft mask, is drawn as the outline and named, and one without is
+/// drawn.
+#[test]
+fn bitmap_glyphs_the_writer_cannot_draw_as_given_are_named() {
+    use tinker_pdf::colour_glyphs::BitmapRefusal;
+    use tinker_pdf_font::{SbixRefusal, StrikeChoice};
+    let opaque: Vec<[u8; 4]> = quadrants(RED, ORANGE)
+        .iter()
+        .map(|[r, g, b, _]| [*r, *g, *b, 255])
+        .collect();
+    let (face, ids) = bitmap_face(|ids, count| {
+        let records = vec![
+            // `A`: an opaque picture; `B`: one with an alpha.
+            (
+                ids[1],
+                SbixRecord::Graphic([2, 1], *b"png ", rgb_png(8, 8, &opaque)),
+            ),
+            (
+                ids[2],
+                SbixRecord::Graphic([2, 1], *b"png ", rgba_png(8, 8, &quadrants(RED, ORANGE))),
+            ),
+            // `C`: bytes no PNG reader reads; `D`: a `pdf ` graphic.
+            (
+                ids[3],
+                SbixRecord::Graphic([0, 0], *b"png ", b"no picture".to_vec()),
+            ),
+            (
+                ids[4],
+                SbixRecord::Graphic([0, 0], *b"pdf ", b"%PDF".to_vec()),
+            ),
+            // The rectangle: a `dupe` of `.notdef`, itself a `dupe`.
+            (ids[0], SbixRecord::Dupe(ids[5])),
+            (ids[5], SbixRecord::Dupe(ids[0])),
+        ];
+        Colour {
+            sbix: sbix_table(0x0001 | 0x0002, &[(20, records)], count),
+            ..Colour::default()
+        }
+    });
+    let run: Vec<(u16, f64)> = [1usize, 2, 3, 4, 5]
+        .iter()
+        .enumerate()
+        .map(|(pen, &at)| (ids[at], pen as f64 * 1.2))
+        .collect();
+    let (bytes, warnings) =
+        bitmap_document(&face, StrikeChoice::Largest, &run, DocumentBuilder::new());
+    let named = |at: usize, refusal| ColourWarning::BitmapRefused {
+        glyph: ids[at],
+        refusal,
+    };
+    assert_eq!(
+        warnings,
+        [
+            named(3, BitmapRefusal::Undecodable),
+            named(4, BitmapRefusal::Sbix(SbixRefusal::GraphicType(*b"pdf "))),
+            named(5, BitmapRefusal::Sbix(SbixRefusal::DupeChain)),
+        ]
+    );
+    let (bitmap, _) = rendered(bytes);
+    // Bit 1 set: `A` and `B` are each their bitmap with their box outline over
+    // it, so the text's green covers the bitmap wherever the box does.
+    for pen in [0.0, 1.2] {
+        let got = pixel(&bitmap, at_units(pen, [150.0, 100.0]), 100.0);
+        assert!(close(got, TEXT_GREEN, 2), "{pen}: {got:?}");
+    }
+    // `C`, `D` and the rectangle drawn as their outlines.
+    for (pen, unit) in [
+        (2.4, [350.0, 350.0]),
+        (3.6, [350.0, 350.0]),
+        (4.8, [350.0, 450.0]),
+    ] {
+        let got = pixel(&bitmap, at_units(pen, unit), 100.0);
+        assert!(close(got, TEXT_GREEN, 2), "{pen}: {got:?}");
+    }
+
+    // A part 1 profile, the outline not asked for: `A` draws its opaque
+    // bitmap, `B` needs a soft mask and is its outline.
+    let (face, ids) = bitmap_face(|ids, count| {
+        let records = vec![
+            (
+                ids[1],
+                SbixRecord::Graphic([2, 1], *b"png ", rgb_png(8, 8, &opaque)),
+            ),
+            (
+                ids[2],
+                SbixRecord::Graphic([2, 1], *b"png ", rgba_png(8, 8, &quadrants(RED, ORANGE))),
+            ),
+        ];
+        Colour {
+            sbix: sbix_table(0x0001, &[(20, records)], count),
+            ..Colour::default()
+        }
+    });
+    let builder = DocumentBuilder::archival(tinker_pdf_cos::ArchivalProfile {
+        part: tinker_pdf_cos::ArchivalPart::One,
+        level: Some(tinker_pdf_cos::ArchivalLevel::B),
+        destination_profile: pdfa_support::srgb_like(),
+        destination_space: tinker_pdf_cos::DeviceSpace::Rgb,
+        output_condition: "Custom".to_string(),
+        language: None,
+    });
+    let run = [(ids[1], 0.0), (ids[2], 1.2)];
+    let (bytes, warnings) = bitmap_document(&face, StrikeChoice::Largest, &run, builder);
+    assert_eq!(
+        warnings,
+        [ColourWarning::TransparencyForbidden { glyph: ids[2] }]
+    );
+    let (bitmap, _) = rendered(bytes);
+    // `A`'s top left quadrant, red, at (2, 1) pixels of 50 units; `B` its
+    // outline, the box from 0 to 700, in the text's green.
+    let red_middle = [(2.0 + 1.5) * 50.0, (1.0 + 8.0 - 1.5) * 50.0];
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, red_middle), 100.0),
+        RED,
+        2
+    ));
+    assert!(close(
+        pixel(&bitmap, at_units(1.2, [350.0, 350.0]), 100.0),
+        TEXT_GREEN,
+        2
+    ));
 }
 
 /// What version 1 cannot draw falls to the glyph's next table, named: a

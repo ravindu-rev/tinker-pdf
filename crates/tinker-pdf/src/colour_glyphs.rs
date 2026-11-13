@@ -4,9 +4,10 @@
 //! Feature documentation: `docs/features/fonts.md`.
 //!
 //! A [`ColourFace`] reads a face's `COLR` and `CPAL` once, under the palette
-//! its caller chose, and turns each glyph a run draws into a procedure in the
-//! face's own units, from the first of the design's tables that describes the
-//! glyph (*Which table draws a glyph*):
+//! its caller chose, and its `sbix` and `CBLC`/`CBDT` strikes, drawn at the
+//! strike its caller chose, and turns each glyph a run draws into a procedure
+//! in the face's own units, from the first of the design's tables that
+//! describes the glyph (*Which table draws a glyph*):
 //!
 //! 1. `COLR` version 1's paint graph, each paint as the design's construct:
 //!    a layer list drawn bottom first, a solid fill of the clip region in its
@@ -26,7 +27,10 @@
 //!    named with their mode.
 //! 2. `COLR` version 0's layers, each layer's outline filled in turn with its
 //!    palette colour and alpha.
-//! 3. Its outline, unfilled by any colour of its own, so it paints in the
+//! 3. `sbix`, then `CBDT`: the chosen strike's graphic as an image XObject,
+//!    registered once however many glyphs draw it, placed by the strike's
+//!    metrics scaled into the em by `unitsPerEm / ppem`.
+//! 4. Its outline, unfilled by any colour of its own, so it paints in the
 //!    text's.
 //!
 //! A foreground colour sets no colour at all, so it paints in whatever colour
@@ -55,16 +59,18 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use tinker_pdf_cos::build::{
-    BlendMode, CalculatorOp, ColourGlyph, DeviceSpace, DocumentBuilder, ExtGState, FormXObject,
-    Function, MaskKind, Shading, StateMask, TransparencyGroup,
+    BlendMode, CalculatorOp, ColourGlyph, CompressedImage, DeviceSpace, DocumentBuilder, ExtGState,
+    FormXObject, Function, ImageData, MaskKind, Shading, StateMask, TransparencyGroup,
 };
-use tinker_pdf_cos::ArchivalPart;
+use tinker_pdf_cos::{jpeg_shape, png_image, tiff_image, ArchivalPart};
+use tinker_pdf_filters::Limits;
 use tinker_pdf_font::colr::{
     f2dot14, fixed, ClipBox, ColourLine, ColrWarning, CompositeMode, Extend, Paint, PaintGraph,
     PaintId,
 };
 use tinker_pdf_font::{
-    glyf, Cff, ColourIndex, Colr, Cpal, Layer, LayerColour, Outline, PaletteChoice, Segment, Sfnt,
+    glyf, CbdtRefusal, Cff, ColourBitmaps, ColourIndex, Colr, Cpal, Graphic, Layer, LayerColour,
+    Outline, PaletteChoice, Sbix, SbixRefusal, Segment, Sfnt, StrikeChoice,
 };
 use tinker_pdf_svg::{transform, Spread};
 
@@ -78,6 +84,18 @@ const CFF: u32 = u32::from_be_bytes(*b"CFF ");
 const COLR: u32 = u32::from_be_bytes(*b"COLR");
 /// `CPAL`.
 const CPAL: u32 = u32::from_be_bytes(*b"CPAL");
+/// `sbix`.
+const SBIX: u32 = u32::from_be_bytes(*b"sbix");
+/// `CBLC`.
+const CBLC: u32 = u32::from_be_bytes(*b"CBLC");
+/// `CBDT`.
+const CBDT: u32 = u32::from_be_bytes(*b"CBDT");
+
+/// The most bytes one bitmap glyph's graphic may decode to: 64 MiB, a strike
+/// of four thousand pixels to the em in RGBA, past any a face carries. One
+/// past it is refused by its decoder and the glyph drawn as its next table
+/// (ruling 1); a graphic passed through builds no raster and meets no cap.
+pub const MAX_BITMAP_BYTES: usize = 1 << 26;
 
 /// The most paints one glyph's version 1 graph is walked through, counting a
 /// node each time a path reaches it outside a shared form.
@@ -177,6 +195,33 @@ pub enum ColourWarning {
         /// The reader's warning.
         warning: ColrWarning,
     },
+    /// A bitmap glyph whose bitmap was not drawn, and why: the glyph is
+    /// drawn as its next table, or its outline.
+    BitmapRefused {
+        /// The glyph.
+        glyph: u16,
+        /// Why.
+        refusal: BitmapRefusal,
+    },
+}
+
+/// Why a bitmap glyph's bitmap was not drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BitmapRefusal {
+    /// The `sbix` reader refused the glyph's data in a strike, and no strike
+    /// holds a bitmap it reads.
+    Sbix(SbixRefusal),
+    /// The `CBLC`/`CBDT` reader refused it likewise.
+    Cbdt(CbdtRefusal),
+    /// The graphic is no PNG, JPEG or TIFF its decoder reads, decodes past
+    /// [`MAX_BITMAP_BYTES`], or is one the builder refused.
+    Undecodable,
+    /// A bitmap with nothing to place it by: a strike of no pixels an em, a
+    /// `CBDT` glyph of no width or height, or one whose metrics carry no
+    /// horizontal bearings — small metrics its strike's flags give vertical
+    /// text alone — which a horizontal run cannot place.
+    Unplaced,
 }
 
 /// A face's colour glyphs, read under one palette, for one document.
@@ -191,13 +236,40 @@ pub struct ColourFace<'a> {
     colr: Option<Colr<'a>>,
     cpal: Option<Cpal<'a>>,
     palette: u16,
+    /// The `sbix` strikes.
+    sbix: Option<Sbix<'a>>,
+    /// The `CBLC`/`CBDT` strikes.
+    bitmaps: Option<ColourBitmaps<'a>>,
+    /// Which strike a bitmap glyph is drawn at.
+    strike: StrikeChoice,
     /// The paint alphas whose `/ExtGState` this face has registered.
     alphas: RefCell<BTreeSet<u8>>,
     /// The composite modes whose blend mode's `/ExtGState` this face has
     /// registered, by `compositeMode`.
     blends: RefCell<BTreeSet<u8>>,
+    /// Each distinct bitmap graphic the face's glyphs drew, by its type and
+    /// its bytes: the image it was registered as, or why it was not.
+    images: RefCell<BTreeMap<(u8, &'a [u8]), Result<Embedded, Unembedded>>>,
     /// What drawing its glyphs met, each once, in the order met.
     warnings: RefCell<Vec<ColourWarning>>,
+}
+
+/// A bitmap graphic registered as an image XObject: its name and its size in
+/// pixels.
+#[derive(Clone, Debug)]
+struct Embedded {
+    name: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// Why a bitmap graphic was not registered.
+#[derive(Clone, Copy, Debug)]
+enum Unembedded {
+    /// Its decoder or the builder refused it.
+    Refused,
+    /// It needs a soft mask, and the profile forbids transparency.
+    Forbidden,
 }
 
 impl core::fmt::Debug for ColourFace<'_> {
@@ -206,6 +278,9 @@ impl core::fmt::Debug for ColourFace<'_> {
             .field("colr", &self.colr.as_ref().map(Colr::version))
             .field("cpal", &self.cpal.is_some())
             .field("palette", &self.palette)
+            .field("sbix", &self.sbix.is_some())
+            .field("cbdt", &self.bitmaps.is_some())
+            .field("strike", &self.strike)
             .finish_non_exhaustive()
     }
 }
@@ -228,21 +303,52 @@ impl<'a> ColourFace<'a> {
         let cpal = sfnt.table(CPAL).and_then(Cpal::parse);
         let colr = cpal.as_ref().and(sfnt.table(COLR)).and_then(Colr::parse);
         let palette = cpal.as_ref().map_or(0, |cpal| cpal.choose(palette));
+        // *Table dependencies*: a strike's offsets run over `maxp`'s glyphs.
+        let sbix = sfnt
+            .glyph_count()
+            .zip(sfnt.table(SBIX))
+            .and_then(|(count, table)| Sbix::parse(table, count));
+        let bitmaps = sfnt
+            .table(CBLC)
+            .zip(sfnt.table(CBDT))
+            .and_then(|(cblc, cbdt)| ColourBitmaps::parse(cblc, cbdt));
         ColourFace {
             sfnt,
             colr,
             cpal,
             palette,
+            sbix,
+            bitmaps,
+            strike: StrikeChoice::Largest,
             alphas: RefCell::new(BTreeSet::new()),
             blends: RefCell::new(BTreeSet::new()),
+            images: RefCell::new(BTreeMap::new()),
             warnings: RefCell::new(Vec::new()),
         }
     }
 
-    /// Whether the face carries colour glyphs this module draws.
+    /// The same face, each bitmap glyph drawn at the strike `strike` picks
+    /// among those that hold it (`docs/design/colour-fonts.md`, *The strike a
+    /// glyph is drawn at*). A face is drawn at [`StrikeChoice::Largest`]
+    /// until it is told otherwise: the most pixels an em, which a page zoomed
+    /// or printed loses least of.
+    #[must_use]
+    pub fn with_strike(mut self, strike: StrikeChoice) -> ColourFace<'a> {
+        self.strike = strike;
+        self
+    }
+
+    /// The strike the face's bitmap glyphs are drawn at.
+    #[must_use]
+    pub fn strike(&self) -> StrikeChoice {
+        self.strike
+    }
+
+    /// Whether the face carries colour glyphs this module draws: a `COLR`
+    /// with its `CPAL`, an `sbix`, or a `CBLC` with its `CBDT`.
     #[must_use]
     pub fn has_colour(&self) -> bool {
-        self.colr.is_some()
+        self.colr.is_some() || self.sbix.is_some() || self.bitmaps.is_some()
     }
 
     /// The palette the glyphs are drawn in.
@@ -322,7 +428,243 @@ impl<'a> ColourFace<'a> {
                 }
             }
         }
+        if let Some(drawn) = self.sbix_bitmap(builder, resource, glyph) {
+            return drawn;
+        }
+        if let Some(drawn) = self.cbdt_bitmap(builder, resource, glyph) {
+            return drawn;
+        }
         self.plain(glyph)
+    }
+
+    /// The glyph's `sbix` bitmap at the strike [`ColourFace::with_strike`]
+    /// picks, as an image placed by *Glyph data*: its left edge
+    /// `originOffsetX` and its bottom `originOffsetY` of the strike's pixels
+    /// from the graphic's origin, which is the drawing position for a glyph
+    /// with no contour and its bounding box's lower left for one with
+    /// contours, every pixel `unitsPerEm / ppem` of the em — and the outline
+    /// over it in the text's colour where bit 1 of the header's flags asks for
+    /// it (*Header*).
+    ///
+    /// `None` where no strike holds the glyph — a strike whose data the
+    /// reader refused named — or where its graphic was not embedded.
+    fn sbix_bitmap(
+        &self,
+        builder: &mut DocumentBuilder,
+        resource: &[u8],
+        glyph: u16,
+    ) -> Option<Drawn> {
+        let sbix = self.sbix.as_ref()?;
+        let Some(strike) = sbix.choose_strike(glyph, self.strike) else {
+            let refused = (0..sbix.strikes().len()).find_map(|at| sbix.glyph(at, glyph).err());
+            if let Some(refusal) = refused {
+                self.warn(ColourWarning::BitmapRefused {
+                    glyph,
+                    refusal: BitmapRefusal::Sbix(refusal),
+                });
+            }
+            return None;
+        };
+        let found = sbix.glyph(strike, glyph).ok().flatten()?;
+        let ppem = sbix.strikes().get(strike).map_or(0, |size| size.ppem);
+        if ppem == 0 {
+            self.warn(ColourWarning::BitmapRefused {
+                glyph,
+                refusal: BitmapRefusal::Unplaced,
+            });
+            return None;
+        }
+        let embedded = self.embed(builder, resource, glyph, found.graphic, found.data)?;
+        let scale = f64::from(self.sfnt.units_per_em.max(1)) / f64::from(ppem);
+        let outline = outline_of(self.sfnt, glyph).filter(|o| !o.is_empty());
+        let (x, y) = outline
+            .as_ref()
+            .and_then(Outline::bounds)
+            .map_or((0.0, 0.0), |(x0, y0, _, _)| (x0, y0));
+        let left = x + f64::from(found.origin_x) * scale;
+        let bottom = y + f64::from(found.origin_y) * scale;
+        let rect = [
+            left,
+            bottom,
+            left + f64::from(embedded.width) * scale,
+            bottom + f64::from(embedded.height) * scale,
+        ];
+        let mut content = Vec::new();
+        place_image(&mut content, &embedded.name, rect);
+        let mut bbox = is_area(&rect).then_some(rect);
+        if sbix.draws_outlines() {
+            if let Some(outline) = &outline {
+                path(&mut content, outline);
+                content.extend_from_slice(b"f\n");
+                bbox = union(bbox, box_of(outline));
+            }
+        }
+        Some(Drawn { content, bbox })
+    }
+
+    /// The glyph's `CBDT` bitmap at the strike [`ColourFace::with_strike`]
+    /// picks, as an image placed by its metrics (*Glyph metrics*): its left
+    /// edge `horiBearingX` and its top `horiBearingY` of the strike's pixels
+    /// from the pen, `width` by `height` of them, every pixel `unitsPerEm /
+    /// ppemX` of the em across and `unitsPerEm / ppemY` up.
+    ///
+    /// `None` where no strike holds the glyph — a strike whose data the
+    /// reader refused named — where its metrics carry no horizontal bearings,
+    /// or where its graphic was not embedded.
+    fn cbdt_bitmap(
+        &self,
+        builder: &mut DocumentBuilder,
+        resource: &[u8],
+        glyph: u16,
+    ) -> Option<Drawn> {
+        let bitmaps = self.bitmaps.as_ref()?;
+        let Some(strike) = bitmaps.choose_strike(glyph, self.strike) else {
+            let refused =
+                (0..bitmaps.strikes().len()).find_map(|at| bitmaps.glyph(at, glyph).err());
+            if let Some(refusal) = refused {
+                self.warn(ColourWarning::BitmapRefused {
+                    glyph,
+                    refusal: BitmapRefusal::Cbdt(refusal),
+                });
+            }
+            return None;
+        };
+        let found = bitmaps.glyph(strike, glyph).ok().flatten()?;
+        let metrics = found.metrics;
+        let unplaced = ColourWarning::BitmapRefused {
+            glyph,
+            refusal: BitmapRefusal::Unplaced,
+        };
+        let Some(bearings) = metrics.horizontal else {
+            self.warn(unplaced);
+            return None;
+        };
+        if found.ppem_x == 0 || found.ppem_y == 0 || metrics.width == 0 || metrics.height == 0 {
+            self.warn(unplaced);
+            return None;
+        }
+        let embedded = self.embed(builder, resource, glyph, Graphic::Png, found.png)?;
+        let em = f64::from(self.sfnt.units_per_em.max(1));
+        let (across, up) = (em / f64::from(found.ppem_x), em / f64::from(found.ppem_y));
+        let left = f64::from(bearings.bearing_x) * across;
+        let top = f64::from(bearings.bearing_y) * up;
+        let rect = [
+            left,
+            top - f64::from(metrics.height) * up,
+            left + f64::from(metrics.width) * across,
+            top,
+        ];
+        let mut content = Vec::new();
+        place_image(&mut content, &embedded.name, rect);
+        Some(Drawn {
+            content,
+            bbox: Some(rect),
+        })
+    }
+
+    /// `data`, a graphic of type `graphic`, as an image XObject of the face,
+    /// registered once per distinct graphic however many glyphs or runs draw
+    /// it (*Bitmaps in a PDF*): a PNG through `tinker_pdf_cos::png_image`,
+    /// which passes its `IDAT` through where K-03.9's rule admits it and
+    /// otherwise decodes it, its alpha an `/SMask`; a JPEG as it is, under
+    /// `/DCTDecode`; a TIFF through `tinker_pdf_cos::tiff_image`. Its samples
+    /// are the device space the graphic states, which for a `CBDT` PNG is
+    /// sRGB whatever its chunks say (*Compressed color bitmaps*), as every
+    /// RGB colour here is.
+    ///
+    /// `None`, named for `glyph`, where its decoder refuses it, it decodes
+    /// past [`MAX_BITMAP_BYTES`], the builder refuses it, or it needs a soft
+    /// mask and the profile forbids transparency.
+    fn embed(
+        &self,
+        builder: &mut DocumentBuilder,
+        resource: &[u8],
+        glyph: u16,
+        graphic: Graphic,
+        data: &'a [u8],
+    ) -> Option<Embedded> {
+        let key = (graphic_key(graphic), data);
+        let known = self.images.borrow().get(&key).cloned();
+        let outcome = match known {
+            Some(outcome) => outcome,
+            None => {
+                let outcome = self.register_image(builder, resource, graphic, data);
+                self.images.borrow_mut().insert(key, outcome.clone());
+                outcome
+            }
+        };
+        match outcome {
+            Ok(embedded) => Some(embedded),
+            Err(Unembedded::Refused) => {
+                self.warn(ColourWarning::BitmapRefused {
+                    glyph,
+                    refusal: BitmapRefusal::Undecodable,
+                });
+                None
+            }
+            Err(Unembedded::Forbidden) => {
+                self.warn(ColourWarning::TransparencyForbidden { glyph });
+                None
+            }
+        }
+    }
+
+    /// One graphic, prepared and registered under the next name of the
+    /// face's own.
+    fn register_image(
+        &self,
+        builder: &mut DocumentBuilder,
+        resource: &[u8],
+        graphic: Graphic,
+        data: &[u8],
+    ) -> Result<Embedded, Unembedded> {
+        let limits = Limits::new(MAX_BITMAP_BYTES);
+        let mut name = resource.to_vec();
+        name.extend_from_slice(format!(".b{}", self.images.borrow().len()).as_bytes());
+        let register = |builder: &mut DocumentBuilder, image: &ImageData<'_>, width, height| {
+            let masked = matches!(
+                image,
+                ImageData::Compressed(CompressedImage {
+                    soft_mask: Some(_),
+                    ..
+                })
+            );
+            if masked && forbids_transparency(builder) {
+                return Err(Unembedded::Forbidden);
+            }
+            if !builder.add_image(&name, image) {
+                return Err(Unembedded::Refused);
+            }
+            Ok(Embedded {
+                name: name.clone(),
+                width,
+                height,
+            })
+        };
+        match graphic {
+            Graphic::Png => {
+                let prepared = png_image(data, &limits).map_err(|_| Unembedded::Refused)?;
+                register(
+                    builder,
+                    &prepared.image(),
+                    prepared.width(),
+                    prepared.height(),
+                )
+            }
+            Graphic::Tiff => {
+                let prepared = tiff_image(data, &limits).map_err(|_| Unembedded::Refused)?;
+                register(
+                    builder,
+                    &prepared.image(),
+                    prepared.width(),
+                    prepared.height(),
+                )
+            }
+            Graphic::Jpeg => {
+                let (width, height, _) = jpeg_shape(data).ok_or(Unembedded::Refused)?;
+                register(builder, &ImageData::Jpeg(data), width, height)
+            }
+        }
     }
 
     /// The glyph's outline, filled in whatever colour the text is shown in.
@@ -1892,6 +2234,35 @@ fn clip_rect(clip: ClipBox) -> [f64; 4] {
 /// `re`'s operands for a rectangle `[x0 y0 x1 y1]`.
 fn rect_operands(rect: [f64; 4]) -> [f64; 4] {
     [rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]]
+}
+
+/// An image XObject drawn over the rectangle `[x0 y0 x1 y1]`: 8.9.4's unit
+/// square taken there by `cm`.
+fn place_image(out: &mut Vec<u8>, name: &[u8], rect: [f64; 4]) {
+    out.extend_from_slice(b"q\n");
+    operator(
+        out,
+        &[
+            rect[2] - rect[0],
+            0.0,
+            0.0,
+            rect[3] - rect[1],
+            rect[0],
+            rect[1],
+        ],
+        b"cm",
+    );
+    crate::form_data::write_name(out, name);
+    out.extend_from_slice(b" Do\nQ\n");
+}
+
+/// A graphic type as one byte, for the face's map of its images.
+fn graphic_key(graphic: Graphic) -> u8 {
+    match graphic {
+        Graphic::Png => 0,
+        Graphic::Jpeg => 1,
+        Graphic::Tiff => 2,
+    }
 }
 
 /// Whether a rectangle encloses an area.

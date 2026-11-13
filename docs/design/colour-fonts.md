@@ -444,18 +444,29 @@ gradients — is drawn through its form with no `/Group`.
 
 ### Bitmaps in a PDF
 
-A strike's graphic becomes an image XObject drawn in the procedure: a PNG
-with an alpha channel or a `tRNS` chunk as its colour channels and an
-`/SMask` of its alpha (Table 87, 11.6.5.2), one with neither passed through as
+A strike's graphic becomes an image XObject drawn in the procedure, through
+the one door every PNG and TIFF a document embeds goes through
+(`tinker_pdf_cos::png_image`, `tiff_image`): a PNG with an alpha channel as
+its colour channels and an `/SMask` of its alpha (Table 87, 11.6.5.2), one
+whose `tRNS` names one colour or one run of indices passed through under the
+`/Mask` that range test is (8.9.6.4), one with neither passed through as
 `ImageData::Compressed` where K-03.9's rule admits it — the inflate verified
 once, and a PNG whose data does not match its header decoded instead — a
-`jpg ` passed through as `DCTDecode`, and a `tiff` decoded. `CBDT`'s
+`jpg ` passed through as `DCTDecode`, and a `tiff` placed or decoded as its
+strips allow; a graphic decodes to at most `MAX_BITMAP_BYTES`, 64 MiB.
+`CBDT`'s
 *Compressed color bitmaps* says a glyph's PNG is sRGB whatever its chunks say,
 so its samples are written as `DeviceRGB`, as every RGB colour is. The image
 is placed by the strike's metrics scaled into the em by `unitsPerEm / ppem`:
-`sbix` by its origin offsets from the origin *Glyph data* names, `CBDT` by its
-bearings from the pen (`horiBearingY` to the top edge). A bitmap used by
-several glyphs or several runs is written once.
+`sbix` by its origin offsets from the origin *Glyph data* names, the graphic's
+own pixels its size; `CBDT` by its bearings from the pen (`horiBearingY` to
+the top edge), its metrics' `width` and `height` its size, `ppemX` across and
+`ppemY` up. A `CBDT` glyph whose metrics carry no horizontal bearings, which a
+horizontal run cannot place, falls to the glyph's next table and is named, as
+is a graphic its decoder refuses. A bitmap used by several glyphs or several
+runs — the same bytes, a `dupe` among them — is written once. Under a profile
+that forbids transparency a graphic that needs an `/SMask` falls to the next
+table and is named; one that needs none is drawn.
 
 ### How tests compare pixels
 

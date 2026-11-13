@@ -1572,8 +1572,18 @@ What it does:
   so a fan-out writes its tables and not its paths. COLR version 0's layers
   come next, bottom first, each layer's outline filled under `q`/`Q` in its
   palette colour and alpha, a foreground layer setting no colour so it paints
-  in the text's own; and a glyph no table describes is its outline in the
-  text's colour. Every number is rounded once to a ten-thousandth of a unit,
+  in the text's own. Then the bitmaps, `sbix` before `CBLC`/`CBDT`, at the
+  strike `ColourFace::with_strike`'s `StrikeChoice` picks among those that
+  hold the glyph — `Largest` until a caller names another: the graphic an
+  image XObject through `tinker_pdf_cos::png_image`, `tiff_image` or as a
+  `DCTDecode` JPEG, its alpha an `/SMask`, registered once a face for each
+  distinct graphic however many glyphs, `dupe`s or runs draw it, and placed
+  by `cm` with every strike pixel `unitsPerEm / ppem` of the em — an `sbix`
+  graphic its origin offsets from the drawing position for a glyph with no
+  contour and from its box's lower left for one with contours, with the
+  outline over it in the text's colour where the header's bit 1 asks; a
+  `CBDT` one its bearings from the pen, its metrics its size. A glyph no
+  table describes is its outline in the text's colour. Every number is rounded once to a ten-thousandth of a unit,
   so the procedures are the same bytes on every target. What a glyph cannot
   be drawn as is named on `ColourFace::warnings` and drawn as its next table:
   a graph with no clip box that a fill leaves unbounded
@@ -1582,9 +1592,13 @@ What it does:
   (`GraphTooLarge`), one naming a palette entry the palette lacks
   (`PaletteEntryMissing`), one whose gradient stop names the text's own
   colour, which a procedure every run shares cannot state
-  (`ForegroundStop`), and, under a profile that forbids transparency, one
-  needing an alpha, a soft mask, a group or a blend mode
-  (`TransparencyForbidden`, the builder refusing nothing). A composite is
+  (`ForegroundStop`), a bitmap a strike's data the reader refused, whose
+  graphic its decoder refuses or that nothing places — a strike of no size,
+  a `CBDT` glyph with no horizontal bearings (`BitmapRefused`, with a
+  `BitmapRefusal` saying which) — and, under a profile that forbids
+  transparency, one needing an alpha, a soft mask, a group or a blend mode,
+  a bitmap's `/SMask` among them (`TransparencyForbidden`, the builder
+  refusing nothing). A composite is
   its mode's construct, over the region it paints inside: `CLEAR` nothing,
   `SRC` and `DEST` the one paint, `SRC_OVER` and `DEST_OVER` the two one
   over the other; the `IN` and `OUT` modes the paint they keep, in an
@@ -2019,6 +2033,7 @@ corpora already vendored here. So every name stays on the list.
 | A COLR version 1 gradient whose colour line names the text's own colour, written into a document | `ColourWarning::ForegroundStop` | A glyph's procedure is shared by every run that shows it, so it cannot state the colour a run is shown in, and the CPAL chapter's interpolation of that colour in linear light has no construct that leaves it unstated; the glyph is drawn as its next table, a glyph with a fill missing being a different picture | [design](../design/colour-fonts.md) |
 | A COLR version 1 composite in `SRC_ATOP`, `DEST_ATOP`, `XOR` or `PLUS`, written into a document | `ColourWarning::CompositeDrawnSourceOver` | Each sums two terms, and ISO 32000-2's transparency composites one over the other; drawn source-over, the backdrop then the source, until the owner rules how (H-141 (c)) and its own step writes it | [ROADMAP](../ROADMAP.md) FT-06.18 |
 | A COLR version 1 graph with no clip box that a fill leaves unbounded, or whose walk passes `MAX_DRAWN_PAINTS` | `ColourWarning::Unbounded`, `GraphTooLarge` | The chapter forbids drawing an unbounded glyph; a graph of 2^64 paths is a few hundred bytes (ruling 1); the glyph is drawn as its next table | [design](../design/colour-fonts.md) |
+| A bitmap glyph, written into a document, whose graphic no decoder reads or that decodes past `MAX_BITMAP_BYTES`, whose strike's data the reader refused, or that nothing places — a strike of no size, a `CBDT` glyph with only vertical metrics in a horizontal run | `ColourWarning::BitmapRefused` with its `BitmapRefusal` | A picture half read is a different picture, and one with no position has no place to be drawn; the glyph is drawn as its next table | [design](../design/colour-fonts.md) |
 | TrueType and Type 2 hinting | none — outlines are unhinted, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree. Stem darkening, the bytecode interpreter, CFF hints and an autohinter are roadmap rows, the small-text judgement a person's | [ROADMAP](../ROADMAP.md) FT-04a…FT-04d |
 
 ## Verified
@@ -2388,7 +2403,15 @@ corpora already vendored here. So every name stays on the list.
   neither, against W3C Compositing Level 1's Porter-Duff and blend formulas
   the test evaluates, the four no construct expresses drawn source-over and
   named with their mode, and the modes needing transparency drawn as the
-  outline under a part 1 profile; a gradient stop in the text's colour, an unbounded
+  outline under a part 1 profile; `sbix` and `CBDT` glyphs at every strike
+  option, each quadrant of their pictures sampled where the strike's
+  metrics put it — origin offsets in the strike's pixels from the drawing
+  position or the box's corner, bearings from the pen, CBDT's data formats
+  17, 18 and 19 — a `dupe`, a JPEG and a TIFF graphic, and a bitmap drawn by
+  two glyphs and twice written once; the outline over the bitmap where the
+  flags ask, a graphic no decoder reads, a `pdf ` graphic and a `dupe` chain
+  named, and an alpha bitmap under a part 1 profile drawn as the outline; a
+  gradient stop in the text's colour, an unbounded
   graph and a missing palette entry falling to the outline, named; a cycle
   named and the rest drawn; a
   million-path fan-out of one shared table written in kilobytes, and one no

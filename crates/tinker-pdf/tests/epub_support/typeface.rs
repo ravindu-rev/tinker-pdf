@@ -84,8 +84,9 @@ fn rectangle_glyph(rect: [i16; 4]) -> Vec<u8> {
 }
 
 /// A colour face's tables (`docs/design/colour-fonts.md`): the outline glyphs
-/// its colour descriptions draw, and the `COLR` and `CPAL` a test writes byte
-/// by byte from the chapters' layouts.
+/// its colour descriptions draw, and the `COLR`, `CPAL`, `sbix` and
+/// `CBLC`/`CBDT` a test writes byte by byte from the chapters' layouts. A
+/// table left empty is not written.
 #[derive(Clone, Debug, Default)]
 pub struct Colour {
     /// Outline glyphs after every other glyph of the face, each a rectangle
@@ -96,6 +97,14 @@ pub struct Colour {
     pub colr: Vec<u8>,
     /// The `CPAL` table, written as given.
     pub cpal: Vec<u8>,
+    /// The `sbix` table, written as given: its strikes hold an offset for
+    /// every glyph of the face and one more, so a test writes it knowing the
+    /// face's glyph count ([`Face::glyph_count`]).
+    pub sbix: Vec<u8>,
+    /// The `CBLC` table, written as given.
+    pub cblc: Vec<u8>,
+    /// The `CBDT` table, written as given.
+    pub cbdt: Vec<u8>,
 }
 
 /// How a synthesised face is described: what it covers and how wide it is.
@@ -382,6 +391,13 @@ impl Face {
         u16::try_from(self.base_glyph_count() + n).unwrap_or(u16::MAX)
     }
 
+    /// How many glyphs the face has — `maxp`'s `numGlyphs` — when its colour
+    /// tables carry `rectangles` outline glyphs.
+    #[must_use]
+    pub fn glyph_count(&self, rectangles: usize) -> u16 {
+        self.colour_glyph(rectangles)
+    }
+
     /// The glyphs the face has before its colour tables' outlines: `.notdef`,
     /// one a covered character, the ligature's, and the joining forms'.
     fn base_glyph_count(&self) -> usize {
@@ -631,11 +647,21 @@ fn build(face: &Face) -> Vec<u8> {
     // Built as a list rather than as two hard-coded arrays, because `GPOS` and
     // `GSUB` are independent: a face may have either, both or neither, and the
     // four cases written out would be four places to forget a table.
-    // Alphabetical by tag, which is where the two upper-case ones sort.
-    let mut tables: Vec<(&[u8; 4], &Vec<u8>)> = Vec::with_capacity(12);
+    // Sorted by tag before it is assembled, the directory's order, where the
+    // upper-case ones come first.
+    let mut tables: Vec<(&[u8; 4], &Vec<u8>)> = Vec::with_capacity(16);
     if let Some(colour) = face.colour.as_ref() {
-        tables.push((b"COLR", &colour.colr));
-        tables.push((b"CPAL", &colour.cpal));
+        for (tag, table) in [
+            (b"COLR", &colour.colr),
+            (b"CPAL", &colour.cpal),
+            (b"sbix", &colour.sbix),
+            (b"CBLC", &colour.cblc),
+            (b"CBDT", &colour.cbdt),
+        ] {
+            if !table.is_empty() {
+                tables.push((tag, table));
+            }
+        }
     }
     if let Some(gpos) = gpos.as_ref() {
         tables.push((b"GPOS", gpos));
@@ -653,6 +679,7 @@ fn build(face: &Face) -> Vec<u8> {
         (b"maxp", &maxp),
         (b"name", &name),
     ]);
+    tables.sort_by_key(|(tag, _)| **tag);
     assemble(&tables)
 }
 
