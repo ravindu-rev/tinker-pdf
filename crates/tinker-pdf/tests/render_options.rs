@@ -655,6 +655,7 @@ fn the_default_is_unchanged() {
         graphics_bits: 8,
         text_bits: 8,
         hard_edge: HardEdge::Half,
+        thinnest_line: None,
         transparent: false,
         premultiplied: false,
         forced_colours: None,
@@ -2050,7 +2051,15 @@ fn quantised_coverage(c: u8, bits: u8) -> u8 {
 fn coverage_at_each_level_is_the_eight_bit_coverage_quantised() {
     for index in 0..5 {
         let text = index == 0;
-        let twin = render(element_page(index), &RenderOptions::default());
+        // Every render of this test strokes at one floor, a whole pixel,
+        // so that the hairline is one shape at every level and only its
+        // coverage is quantised: the floors are
+        // `a_hairline_at_the_minimum_width_drops_out_nowhere`'s.
+        let floor = RenderOptions {
+            thinnest_line: Some(1.0),
+            ..RenderOptions::default()
+        };
+        let twin = render(element_page(index), &floor);
         assert!(
             twin.data.chunks_exact(3).any(|p| p[0] != 0 && p[0] != 255),
             "element {index} has partial pixels"
@@ -2064,7 +2073,7 @@ fn coverage_at_each_level_is_the_eight_bit_coverage_quantised() {
             let options = RenderOptions {
                 graphics_bits,
                 text_bits,
-                ..RenderOptions::default()
+                ..floor.clone()
             };
             let level = render(element_page(index), &options);
             for (at, (got, was)) in level
@@ -2088,7 +2097,7 @@ fn coverage_at_each_level_is_the_eight_bit_coverage_quantised() {
                 &RenderOptions {
                     graphics_bits,
                     text_bits,
-                    ..RenderOptions::default()
+                    ..floor.clone()
                 },
             );
             assert_eq!(
@@ -2272,6 +2281,9 @@ fn each_rule_reaches_every_coverage_site() {
                 &RenderOptions {
                     antialias: false,
                     hard_edge,
+                    // One floor under every rule, so that a stroke is one
+                    // shape whichever rule reads it.
+                    thinnest_line: Some(1.0),
                     ..RenderOptions::default()
                 },
             );
@@ -2315,6 +2327,7 @@ fn each_rule_reaches_every_coverage_site() {
                     graphics_bits,
                     text_bits,
                     hard_edge: HardEdge::AnyPart,
+                    thinnest_line: Some(1.0),
                     ..RenderOptions::default()
                 },
             )
@@ -2333,6 +2346,228 @@ fn each_rule_reaches_every_coverage_site() {
         );
         assert!(other, "{name}: the other class at 0 bits leaves it soft");
     }
+}
+
+// ---- the minimum line width (RC-11.6) ---------------------------------------
+
+/// A 120 by 140 page holding one zero-width black stroke from `from` to `to`.
+fn hairline_page(from: (f64, f64), to: (f64, f64)) -> Vec<u8> {
+    let content = format!("0 w {} {} m {} {} l S", from.0, from.1, to.0, to.1);
+    format!(
+        "%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+         2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+         3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 140] \
+         /Contents 4 0 R >>\nendobj\n\
+         4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+         trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// Whether column `x` of a render holds ink in any row, and row `y` in any
+/// column: a pixel short of white.
+fn column_inked(bitmap: &Bitmap, x: u32) -> bool {
+    (0..bitmap.height).any(|y| bitmap.data[y as usize * bitmap.stride + x as usize * 3] < 255)
+}
+
+fn row_inked(bitmap: &Bitmap, y: u32) -> bool {
+    (0..bitmap.width).any(|x| bitmap.data[y as usize * bitmap.stride + x as usize * 3] < 255)
+}
+
+/// **A hairline at the minimum width drops out nowhere** (RC-11.6).
+///
+/// Zero-width strokes at the slopes
+/// `a_hard_edged_hairline_leaves_no_column_it_crosses_empty` sweeps — level
+/// to one in one, each from a phase of its own and at four more — across the
+/// page, where every column a line crosses must hold ink, and the same slopes
+/// turned down the page, steeper than one in one past the first, where every
+/// row must: at 8 bits, at 7, 4, 2 and 1, at 0 bits under each rule with
+/// anti-aliasing on, and with it off under each rule, each at the floor its
+/// level and rule take by default (`docs/design/anti-aliasing.md`'s table:
+/// 0.8 at 8 bits, 1 at 1 to 7 bits and under `Half`, 65/64 under `Centre`,
+/// 1/256 under `AnyPart`, whose edges reach the pixels they pass through).
+#[test]
+fn a_hairline_at_the_minimum_width_drops_out_nowhere() {
+    let mut settings: Vec<(String, RenderOptions)> = Vec::new();
+    for bits in [8u8, 7, 4, 2, 1] {
+        settings.push((
+            format!("{bits} bits"),
+            RenderOptions {
+                graphics_bits: bits,
+                ..RenderOptions::default()
+            },
+        ));
+    }
+    for hard_edge in [HardEdge::Half, HardEdge::Centre, HardEdge::AnyPart] {
+        settings.push((
+            format!("0 bits under {hard_edge:?}"),
+            RenderOptions {
+                graphics_bits: 0,
+                hard_edge,
+                ..RenderOptions::default()
+            },
+        ));
+        settings.push((
+            format!("anti-aliasing off under {hard_edge:?}"),
+            RenderOptions {
+                antialias: false,
+                hard_edge,
+                ..RenderOptions::default()
+            },
+        ));
+    }
+    let rises = [0.0, 0.37, 1.5, 3.0, 11.0, 37.0, 60.0, 99.5];
+    for (name, options) in &settings {
+        for (index, rise) in rises.iter().enumerate() {
+            for phase in [0.0, 0.29, 0.5, 0.71, 0.83] {
+                let shift = index as f64 * 0.13 + phase;
+                let y0 = 20.3 + shift;
+                let across = render(hairline_page((10.0, y0), (110.0, y0 + rise)), options);
+                for x in 11..109u32 {
+                    assert!(
+                        column_inked(&across, x),
+                        "{name}: rise {rise} at phase {phase}: column {x} of the line is empty"
+                    );
+                }
+                let x0 = 5.3 + shift;
+                let down = render(hairline_page((x0, 15.0), (x0 + rise, 115.0)), options);
+                for y in 26..124u32 {
+                    assert!(
+                        row_inked(&down, y),
+                        "{name}: drift {rise} at phase {phase}: row {y} of the line is empty"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The pinned renders of [`levels_rules_and_widths_are_pinned`], each its
+/// name and its committed hash.
+///
+/// A value is a run's output: one left empty is recorded from the first
+/// target's run, which prints the lines to paste, and held on every target
+/// after it — Linux, Windows and `wasm32-wasip1` — and one two targets
+/// disagree on is a determinism bug, never an edit of this table.
+const LEVELS_RULES_AND_WIDTHS: [(&str, &str); 8] = [
+    ("graphics at 2 bits and text at 4, at 1x", ""),
+    ("graphics at 1 bit and text at 7, at 1.7x", ""),
+    ("graphics at 0 bits under the centre rule, at 1x", ""),
+    ("text at 0 bits under the any-part rule, at 1.7x", ""),
+    ("anti-aliasing off under the centre rule, at 1x", ""),
+    ("anti-aliasing off under the any-part rule, at 1.7x", ""),
+    ("a thinnest line of 2.5 pixels, at 1x", ""),
+    (
+        "anti-aliasing off under the any-part rule, a thinnest line of a quarter pixel, at 1.7x",
+        "",
+    ),
+];
+
+/// **The levels, rules and widths are pinned** (RC-11.6): the hard-edge page
+/// rendered at levels apart and together, at 0 bits under each rule with the
+/// other class anti-aliased, with anti-aliasing off under the centre and
+/// any-part rules, and at explicit thinnest lines, at 1x and at 1.7x — each
+/// hashed as `determinism.rs` hashes a page, to its committed value
+/// ([`LEVELS_RULES_AND_WIDTHS`]). Every row is checked before any fails, and
+/// a failure prints every line that moved.
+#[test]
+fn levels_rules_and_widths_are_pinned() {
+    let at = |scale: f64, options: RenderOptions| RenderOptions { scale, ..options };
+    let cases = [
+        at(
+            1.0,
+            RenderOptions {
+                graphics_bits: 2,
+                text_bits: 4,
+                ..RenderOptions::default()
+            },
+        ),
+        at(
+            1.7,
+            RenderOptions {
+                graphics_bits: 1,
+                text_bits: 7,
+                ..RenderOptions::default()
+            },
+        ),
+        at(
+            1.0,
+            RenderOptions {
+                graphics_bits: 0,
+                hard_edge: HardEdge::Centre,
+                ..RenderOptions::default()
+            },
+        ),
+        at(
+            1.7,
+            RenderOptions {
+                text_bits: 0,
+                hard_edge: HardEdge::AnyPart,
+                ..RenderOptions::default()
+            },
+        ),
+        at(
+            1.0,
+            RenderOptions {
+                antialias: false,
+                hard_edge: HardEdge::Centre,
+                ..RenderOptions::default()
+            },
+        ),
+        at(
+            1.7,
+            RenderOptions {
+                antialias: false,
+                hard_edge: HardEdge::AnyPart,
+                ..RenderOptions::default()
+            },
+        ),
+        at(
+            1.0,
+            RenderOptions {
+                thinnest_line: Some(2.5),
+                ..RenderOptions::default()
+            },
+        ),
+        at(
+            1.7,
+            RenderOptions {
+                antialias: false,
+                hard_edge: HardEdge::AnyPart,
+                thinnest_line: Some(0.25),
+                ..RenderOptions::default()
+            },
+        ),
+    ];
+    let mut moved = Vec::new();
+    for (options, (name, want)) in cases.iter().zip(LEVELS_RULES_AND_WIDTHS) {
+        let bitmap = render(hard_edge_page(), options);
+        assert!(bitmap.warnings.is_empty(), "{name}: {:?}", bitmap.warnings);
+        // About 1 780 pixels at 1x and 4 983 at 1.7x anti-aliasing off; the
+        // floor is under half.
+        let least = (800.0 * options.scale * options.scale) as usize;
+        let drawn = painted(&bitmap);
+        assert!(
+            drawn >= least,
+            "{name} painted {drawn} pixels, fewer than {least}: it is measuring less than it claims"
+        );
+        let actual = fingerprint(&bitmap);
+        if actual != want {
+            moved.push(format!("    (\"{name}\", \"{actual}\"),"));
+        }
+    }
+    assert!(
+        moved.is_empty(),
+        "{} of the {} pinned renders moved.\n\n\
+         If two targets disagree, this is a determinism bug: find the arithmetic that \
+         is not target-stable and do not update the values.\n\
+         If the table was committed empty, or this is a deliberate rendering change \
+         said in its commit, paste:\n\n{}",
+        moved.len(),
+        LEVELS_RULES_AND_WIDTHS.len(),
+        moved.join("\n")
+    );
 }
 
 /// What `builder` writes, held to the validate-on-save helper as a document

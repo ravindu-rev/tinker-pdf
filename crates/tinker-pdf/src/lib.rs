@@ -682,10 +682,11 @@ pub struct RenderOptions {
     /// Only coverage is hardened. A constant alpha, a soft mask, an image's own
     /// alpha channel and the colours inside an image are the document's, and a
     /// page that uses them still has intermediate values where it asked for
-    /// them. A stroke is at least one whole pixel wide with this off (8.4.3.2's
-    /// thinnest line, on a device that cannot draw part of one), because a
-    /// narrower line straddling two pixels would leave each less than half
-    /// covered and disappear. A feature of a glyph narrower than half a pixel
+    /// them. A stroke is at least one whole pixel wide with this off under the
+    /// default rule (8.4.3.2's thinnest line, on a device that cannot draw
+    /// part of one), because a narrower line straddling two pixels would leave
+    /// each less than half covered and disappear; the other rules take floors
+    /// of their own ([`RenderOptions::thinnest_line`]). A feature of a glyph narrower than half a pixel
     /// can still disappear where it straddles a pixel edge, which is the price
     /// every threshold pays.
     ///
@@ -728,6 +729,16 @@ pub struct RenderOptions {
     /// anti-aliasing off it applies to everything; with it on, to the class
     /// whose level is 0.
     pub hard_edge: HardEdge,
+    /// The thinnest stroke the render draws, in device pixels, for every
+    /// stroke: `None`, the default, takes the floor of each stroke's own level
+    /// and rule (`docs/design/anti-aliasing.md`) — 0.8, or 0.6 for a stroked
+    /// glyph, at 8 bits; 1 at 1 to 7 bits and at 0 under [`HardEdge::Half`];
+    /// 65/64 under [`HardEdge::Centre`]; 1/256 under [`HardEdge::AnyPart`] —
+    /// each the narrowest at which a zero-width line (8.4.3.2) leaves no
+    /// column it crosses empty, so the defaults draw the strokes they did. A
+    /// width that is not a finite number above zero reads as `None`. A tile
+    /// draws the page's strokes.
+    pub thinnest_line: Option<f64>,
     /// Whether the page starts with nothing painted on it rather than white.
     /// Off by default.
     ///
@@ -880,6 +891,7 @@ impl Default for RenderOptions {
             graphics_bits: 8,
             text_bits: 8,
             hard_edge: HardEdge::Half,
+            thinnest_line: None,
             transparent: false,
             premultiplied: false,
             stats: false,
@@ -3180,7 +3192,8 @@ impl Page {
             .with_page_size(full_width, full_height)
             .with_antialias(options.antialias)
             .with_levels(options.graphics_bits, options.text_bits)
-            .with_hard_edge(options.hard_edge);
+            .with_hard_edge(options.hard_edge)
+            .with_thinnest_line(options.thinnest_line);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }

@@ -1075,9 +1075,18 @@ silhouette before it is quantised) and a tiling cell's renderer
 applied where the coverage is made, before the clip and the soft mask multiply
 in, and a tile at every level and rule is the page under it. Under `AnyPart`
 the renderer's scratch keeps each stroke's pieces, which the rule reads where
-an edge passes; under every other rule a stroke holds its edges alone. The
-thinnest stroke is still 8.4.3.2's floor, eight tenths of a pixel (six tenths
-for a stroked glyph) with anti-aliasing on and a whole pixel with it off.
+an edge passes; under every other rule a stroke holds its edges alone.
+
+**The minimum line width.** 8.4.3.2's thinnest line is a floor in device
+pixels of the page's frame for every stroke, at the level and rule of the
+stroke's own class — a path's the graphics level, a stroked glyph's the text
+level: 0.8, or 0.6 for a stroked glyph, at 8 bits; 1 at 1 to 7 bits and at 0
+under `Half`; 65/64 under `Centre`; 1/256 under `AnyPart`. Each is the
+narrowest width at which a zero-width line leaves no column it crosses (no
+row, past one in one) empty — the design argues each — so the default and
+`antialias: false` keep the floors they had. `RenderOptions::thinnest_line`
+replaces the table for every stroke; a width that is not a finite number above
+zero reads as none. A tiling cell's renderer takes the page's.
 
 **A stroke under a transform that is not a similarity.** 8.4.3.2 measures
 the line width in user space — a stroke paints every point within half the
@@ -1161,7 +1170,7 @@ default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 light), `antialias` (on; off makes every pixel of every shape whole or
 empty), `graphics_bits` and `text_bits` (8 each; the bits of coverage each
 class keeps), `hard_edge` (`HardEdge::Half`; the rule at 0 bits),
-`transparent` (off; on starts a page whose format has alpha with
+`thinnest_line` (`None`; the thinnest stroke, in device pixels), `transparent` (off; on starts a page whose format has alpha with
 nothing painted rather than white), `premultiplied` (off), `stats` (off;
 on counts the render's work, below) and `parallelism` (`Parallelism::Serial`;
 the threads a page walk spends, below) — and returns a `Bitmap`: `width`,
@@ -1809,6 +1818,10 @@ under it, so the copy holds every canvas the walk closes onto.
   painting every pixel the other two paint and more, and each site's own class
   at 0 bits hard where the other's leaves it soft;
   `with_anti_aliasing_off_the_levels_read_as_zero` holds the switch's meaning;
+  `a_hairline_at_the_minimum_width_drops_out_nowhere` sweeps zero-width lines
+  across and down the page at every level and rule, each at its floor, for a
+  column or a row left empty, and `levels_rules_and_widths_are_pinned` pins the
+  hard-edge page at levels, rules and widths;
   and `render_regions.rs`'s
   `a_tile_at_every_level_and_rule_is_the_page_under_it` tiles every fixture at
   levels and rules apart and together. `tinker-pdf-render`'s

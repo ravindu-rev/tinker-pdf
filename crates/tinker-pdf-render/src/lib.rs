@@ -409,6 +409,9 @@ pub struct TileRequest {
     pub text_bits: u8,
     /// The page's rule at level 0 ([`Renderer::with_hard_edge`]).
     pub hard_edge: HardEdge,
+    /// The page's thinnest stroke, in device pixels, which a cell drawn at
+    /// the page's resolution keeps ([`Renderer::with_thinnest_line`]).
+    pub thinnest_line: Option<f64>,
 }
 
 /// One rasterized tiling-pattern cell.
@@ -1255,6 +1258,9 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// The rule a pixel is whole by at level 0. See
     /// [`Renderer::with_hard_edge`].
     hard_edge: HardEdge,
+    /// The thinnest stroke, in device pixels, in place of the table's. See
+    /// [`Renderer::with_thinnest_line`].
+    thinnest_line: Option<f64>,
     /// Glyphs being shown: what they paint is text however it is painted.
     showing: u32,
     /// The count of open text objects at each save, innermost last: what its
@@ -1586,6 +1592,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             graphics_bits: 8,
             text_bits: 8,
             hard_edge: HardEdge::Half,
+            thinnest_line: None,
             showing: 0,
             text_saves: Vec::new(),
             text_streams: Vec::new(),
@@ -1758,11 +1765,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// colours of its samples are the document's, not the rasterizer's
     /// approximation of an edge.
     ///
-    /// A stroke is at least a whole pixel wide when this is off, where it is
-    /// eight tenths of one otherwise. 8.4.3.2 asks for the thinnest line the
-    /// device can render and a hard-edged device can render a pixel; a line
-    /// narrower than that, straddling two pixels, would leave each less than
-    /// half covered and vanish.
+    /// A stroke is at least a whole pixel wide when this is off under
+    /// [`HardEdge::Half`], where it is eight tenths of one otherwise. 8.4.3.2
+    /// asks for the thinnest line the device can render and a hard-edged
+    /// device can render a pixel; a line narrower than that, straddling two
+    /// pixels, would leave each less than half covered and vanish. The other
+    /// rules and levels take the floors `Renderer::thinnest` tables.
     ///
     /// Off, every coverage is at level 0 whatever [`Renderer::with_levels`]
     /// says, under the rule [`Renderer::with_hard_edge`] names, whose
@@ -1849,16 +1857,46 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
     }
 
-    /// The thinnest stroke this render draws, in device pixels: 8.4.3.2's
-    /// "thinnest line that can be rendered", which is `soft` with
-    /// anti-aliasing on and a whole pixel with it off. See
-    /// [`Renderer::with_antialias`].
-    fn thinnest(&self, soft: f64) -> f64 {
-        if self.antialias {
-            soft
-        } else {
-            1.0
+    /// The thinnest stroke this render draws, in device pixels, in the page's
+    /// frame: 8.4.3.2's "thinnest line that can be rendered" at the level
+    /// and rule of the stroke's own class (`docs/design/anti-aliasing.md`),
+    /// graphics for a path and text for a stroked glyph —
+    ///
+    /// | Level | Rule | A path | A stroked glyph |
+    /// | --- | --- | --- | --- |
+    /// | 8 | — | 0.8 | 0.6 |
+    /// | 1 to 7 | — | 1 | 1 |
+    /// | 0 | `Half` | 1 | 1 |
+    /// | 0 | `Centre` | 65/64 | 65/64 |
+    /// | 0 | `AnyPart` | 1/256 | 1/256 |
+    ///
+    /// — each the narrowest width at which a hairline leaves no column it
+    /// crosses (no row, past one in one) empty, or the width
+    /// [`Renderer::with_thinnest_line`] asks for. So the default, level 8,
+    /// and anti-aliasing off, level 0 under `Half`, keep the floors they had.
+    fn thinnest(&self, glyph: bool) -> f64 {
+        if let Some(width) = self.thinnest_line {
+            return width;
         }
+        match (self.level(), self.hard_edge) {
+            (8.., _) if glyph => 0.6,
+            (8.., _) => 0.8,
+            (1..=7, _) | (0, HardEdge::Half) => 1.0,
+            (0, HardEdge::Centre) => 65.0 / 64.0,
+            (0, HardEdge::AnyPart) => 1.0 / 256.0,
+        }
+    }
+
+    /// The thinnest stroke the render draws, in device pixels, for every
+    /// stroke — a path's and a stroked glyph's at every level and rule — in
+    /// place of `Renderer::thinnest`'s table; `None`, the default, takes
+    /// the table. A width that is not a finite number above zero is read as
+    /// `None`. A floor in device pixels of the page's frame, so a tile draws
+    /// the page's strokes (ruling 5).
+    #[must_use]
+    pub fn with_thinnest_line(mut self, width: Option<f64>) -> Self {
+        self.thinnest_line = width.filter(|width| width.is_finite() && *width > 0.0);
+        self
     }
 
     /// Installs a cancellation token.
@@ -3515,6 +3553,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             graphics_bits: self.graphics_bits,
             text_bits: self.text_bits,
             hard_edge: self.hard_edge,
+            thinnest_line: self.thinnest_line,
         };
         let Some(tile) = self.glyphs.tile(name, &request) else {
             return false;
@@ -4862,7 +4901,7 @@ impl<G: GlyphSource> Renderer<'_, G> {
                 ..StrokeStyle::default()
             };
             let stop = self.stop_predicate();
-            let outlined = self.pen(&path, state, style, self.thinnest(0.6), &stop);
+            let outlined = self.pen(&path, state, style, self.thinnest(true), &stop);
             if let Some(name) = state.stroke_pattern.clone() {
                 self.fill_with_pattern(
                     outlined,
@@ -4962,7 +5001,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 ..stroke_style(state)
             };
             let stop = self.stop_predicate();
-            let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
+            let outline = self.pen(&built, state, style, self.thinnest(false), &stop);
             let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
             self.paint_inked(
                 outline,
@@ -5134,7 +5173,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // fine array expands into a hundred thousand pieces per segment before
         // a single row of it is filled.
         let stop = self.stop_predicate();
-        let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
+        let outline = self.pen(&built, state, style, self.thinnest(false), &stop);
 
         // 8.7.3: a stroke painted with a pattern takes its paint from the
         // pattern, exactly as a fill does — and a stroke *is* a fill, of the
@@ -6514,6 +6553,93 @@ mod tests {
             PathSegment::LineTo { x: 10.0, y: side },
             PathSegment::Close,
         ]
+    }
+
+    /// **The thinnest stroke is the design's at each level and rule**
+    /// (RC-11.6): 0.8 for a path and 0.6 for a stroked glyph at 8 bits, 1 at
+    /// 1 to 7 bits and at 0 under `Half`, 65/64 under `Centre` and 1/256 under
+    /// `AnyPart`, each read at the level of the stroke's own class — a path's
+    /// the graphics level, a glyph's the text level — and 0 bits for both
+    /// with anti-aliasing off. The default and anti-aliasing off keep the
+    /// floors they had, 0.8 and 0.6, and 1. An explicit width replaces the
+    /// table for every stroke, and one that is not a finite number above zero
+    /// is no width.
+    #[test]
+    fn the_thinnest_stroke_is_the_designs_at_each_level_and_rule() {
+        let make = || {
+            Renderer::new(
+                Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE),
+                page_transform(4.0, 1.0),
+                &NoGlyphs,
+            )
+        };
+        let floors = |r: &Renderer<'_, NoGlyphs>| (r.thinnest(false), r.thinnest(true));
+        assert_eq!(floors(&make()), (0.8, 0.6), "the default");
+        assert_eq!(
+            floors(&make().with_antialias(false)),
+            (1.0, 1.0),
+            "anti-aliasing off"
+        );
+        for bits in 1..=7u8 {
+            assert_eq!(
+                floors(&make().with_levels(bits, bits)),
+                (1.0, 1.0),
+                "{bits} bits"
+            );
+        }
+        for (edge, floor) in [
+            (HardEdge::Half, 1.0),
+            (HardEdge::Centre, 65.0 / 64.0),
+            (HardEdge::AnyPart, 1.0 / 256.0),
+        ] {
+            let at_zero = make().with_levels(0, 0).with_hard_edge(edge);
+            assert_eq!(floors(&at_zero), (floor, floor), "{edge:?} at 0 bits");
+            let off = make().with_antialias(false).with_hard_edge(edge);
+            assert_eq!(
+                floors(&off),
+                (floor, floor),
+                "{edge:?} with anti-aliasing off"
+            );
+            // A rule at 8 bits is not read.
+            assert_eq!(
+                floors(&make().with_hard_edge(edge)),
+                (0.8, 0.6),
+                "{edge:?} at 8 bits"
+            );
+        }
+        // Each stroke at its own class's level: a path at the graphics level,
+        // a stroked glyph at the text level while it is shown.
+        let mut split = make().with_levels(8, 0).with_hard_edge(HardEdge::Centre);
+        assert_eq!(split.thinnest(false), 0.8, "a path at 8 bits");
+        split.showing = 1;
+        assert_eq!(split.thinnest(true), 65.0 / 64.0, "a glyph at 0 bits");
+        split.showing = 0;
+        split.begin_text();
+        assert_eq!(
+            split.thinnest(false),
+            65.0 / 64.0,
+            "a path inside a text object is text's"
+        );
+        for width in [Some(2.5), Some(0.01)] {
+            let fixed = make()
+                .with_levels(3, 0)
+                .with_hard_edge(HardEdge::AnyPart)
+                .with_thinnest_line(width);
+            assert_eq!(floors(&fixed), (width.unwrap_or(0.0), width.unwrap_or(0.0)));
+        }
+        for width in [
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            None,
+        ] {
+            assert_eq!(
+                floors(&make().with_thinnest_line(width)),
+                (0.8, 0.6),
+                "{width:?} is no width"
+            );
+        }
     }
 
     /// **What a text object paints is text, and no text object outlives its

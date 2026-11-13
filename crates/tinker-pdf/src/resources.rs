@@ -4089,7 +4089,8 @@ impl GlyphSource for PageResources {
             .with_pattern_depth(request.depth)
             .with_antialias(request.antialias)
             .with_levels(request.graphics_bits, request.text_bits)
-            .with_hard_edge(request.hard_edge);
+            .with_hard_edge(request.hard_edge)
+            .with_thinnest_line(request.thinnest_line);
 
         // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already
         // that box rounded outward, so this only takes back the part of a
