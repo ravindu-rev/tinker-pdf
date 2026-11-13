@@ -311,6 +311,33 @@ operand holds exactly, a charstring past 65 535 bytes or charstrings past
 sixteen times the program's length, and a conversion that draws, names or
 encodes a glyph otherwise.
 
+**Extending a subset** ([design](../design/subsetting.md), *Extension*).
+`tinker_pdf_font::extend_subset(subset, face, glyphs)` answers a subset with
+glyphs of its source face added: the face cut again, by the subsetter above
+for its format, to the glyphs the subset keeps and the ones asked for — with
+the components a composite among them names, and `.notdef` — at their own
+identifiers, so every glyph the subset kept draws as it did and nothing else
+is added. A source test comes first, which a subset that renumbered its
+glyphs fails: for TrueType, the same glyph count, `cmap`, `hmtx`, `hhea`,
+`OS/2`, `cvt `, `fpgm` and `prep` byte for byte the face's, and every glyph
+the subset's `glyf` holds the face's at its index but for up to three bytes
+of padding; for CFF, bare or in an `OpenType` face (its copied tables and
+`head` held to the face's too), the same glyph count, names or CIDs,
+collection, built-in encoding and font matrices, every glyph that draws in
+the subset outlining and advancing as the face's, and one that draws nothing
+kept where it advances as the face's; for Type 1, the same clear text, and
+every charstring of the subset the face's of that name, outlining and
+advancing alike. A Type 1 answer carries its three lengths and its names. What
+it refuses it names (`ExtendRefusal`): two formats, a face that is not the
+source, a glyph past the face's last, a cut that does not rebuild, and a
+comparison past its work budget. `tinker_pdf::subset::extend(editor, font,
+face, glyphs)` writes the answer over the program a font dictionary embeds,
+its stream's lengths stated, a new 9.6.4 subset tag on every font naming the
+program, its descendant and its descriptor, and a Type 1 descriptor's
+`/CharSet` rewritten to the new names; which codes reach the new glyphs —
+`/Encoding`, `/Widths`, `/W`, `/ToUnicode` — stays the caller's, and a later
+save cuts glyphs nothing draws, so the text that draws them comes first.
+
 **A multiple-master program** (the Type 1 Font Format Supplement's section 3;
 [design](../design/type42-and-multiple-master.md)) is read with its
 `/WeightVector` — two to sixteen numbers, its default instance — and its blend

@@ -25,6 +25,12 @@
 //! answer carries the three segment lengths a `/FontFile` stream states and
 //! the names of the glyphs it keeps. `post` glyph names are dropped
 //! wholesale rather than subsetted.
+//!
+//! [`extend_subset`] runs the other way (`docs/design/subsetting.md`,
+//! *Extension*): handed a subset and the face a test proves it was cut from,
+//! it cuts the face again to the subset's glyphs and the ones asked for, so a
+//! subset this crate wrote — which never renumbers — gains glyphs at their own
+//! identifiers.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -645,6 +651,361 @@ pub fn glyphs_for(program: &[u8], text: &str) -> BTreeSet<u16> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Extending a subset (FT-11.9).
+// ---------------------------------------------------------------------------
+
+/// A subset with glyphs of its source face added (`docs/design/subsetting.md`,
+/// *Extension*): the face cut to the subset's glyphs and the new ones.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Extended {
+    /// The program.
+    pub program: Vec<u8>,
+    /// A Type 1 program's three lengths (ISO 32000-2 Table 125); `None` for
+    /// every other format.
+    pub lengths: Option<[usize; 3]>,
+    /// A Type 1 program's glyph names, in program order, for `/CharSet`;
+    /// `None` for every other format.
+    pub names: Option<Vec<Vec<u8>>>,
+}
+
+/// Why [`extend_subset`] did not extend a subset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ExtendRefusal {
+    /// The subset and the face are not one format this extends — TrueType,
+    /// CFF bare or in an `OpenType` face, or Type 1 — or not the same one.
+    Format,
+    /// The face is not the subset's source: a table, the glyph count, a
+    /// name, an encoding, a matrix or a glyph differs where the subset keeps
+    /// the face's.
+    NotTheSource,
+    /// A glyph asked for is past the face's last.
+    NoSuchGlyph,
+    /// The face cut to the subset's glyphs and the new ones does not rebuild.
+    NotRebuildable,
+    /// Comparing the two programs' glyphs spent the work it may.
+    Budget,
+}
+
+impl core::fmt::Display for ExtendRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            ExtendRefusal::Format => "the subset and the face are not one format this extends",
+            ExtendRefusal::NotTheSource => "the face is not the subset's source",
+            ExtendRefusal::NoSuchGlyph => "a glyph asked for is past the face's last",
+            ExtendRefusal::NotRebuildable => "the face cut to the glyphs does not rebuild",
+            ExtendRefusal::Budget => "comparing the programs' glyphs spent its work",
+        })
+    }
+}
+
+/// The outline steps one extension may spend comparing a subset's glyphs
+/// with its face's (ruling 1): each glyph's run is bounded, a face of many
+/// glyphs is not.
+const EXTEND_BUDGET: u64 = 40_000_000;
+
+/// The tables of a `glyf` face this crate's subsetter copies through, which a
+/// subset of it carries byte for byte.
+const COPIED: &[u32] = &[
+    0x636D_6170, // cmap
+    0x686D_7478, // hmtx
+    0x6868_6561, // hhea
+    0x4F53_2F32, // OS/2
+    0x6376_7420, // cvt
+    0x6670_676D, // fpgm
+    0x7072_6570, // prep
+];
+
+/// The tables of an `OpenType/CFF` face the subsetter copies through.
+const COPIED_CFF: &[u32] = &[
+    0x636D_6170, // cmap
+    0x6868_6561, // hhea
+    0x686D_7478, // hmtx
+    0x6D61_7870, // maxp
+    0x4F53_2F32, // OS/2
+    0x564F_5247, // VORG
+];
+
+/// `subset` with `glyphs` added: `face`, which the source test proves the
+/// subset was cut from, cut again to the glyphs the subset keeps and to
+/// `glyphs` — with every component a composite among them names, and
+/// `.notdef` — at their own identifiers (`docs/design/subsetting.md`,
+/// *Extension*). Every glyph the subset keeps draws as it did, by the test,
+/// and nothing else is added.
+///
+/// `glyphs` are glyph identifiers of the face: glyph indices for TrueType and
+/// CFF, and for Type 1 the charstrings' positions in the order
+/// [`crate::Type1::parse`] reads the face's.
+///
+/// The source test, which a subset that renumbered its glyphs fails:
+///
+/// - **TrueType**: the same glyph count; `cmap`, `hmtx`, `hhea`, `OS/2`,
+///   `cvt `, `fpgm` and `prep` byte for byte the face's, as this crate's
+///   subsetter copies them; every glyph the subset's `glyf` holds the face's
+///   at the same index, give or take the three bytes of padding a glyph may
+///   carry.
+/// - **CFF**, bare or in an `OpenType` face (whose copied tables are held to
+///   the face's too, and `head` but its checksum): the same glyph count, the
+///   same names or CIDs, collection, built-in encoding and font matrix of
+///   every glyph; every glyph that draws in the subset outlining and
+///   advancing as the face's at the same index, and one that draws nothing
+///   kept where it advances as the face's.
+/// - **Type 1**: the same clear-text portion; every charstring of the subset
+///   named in the face, outlining and advancing as the face's of that name.
+///
+/// # Errors
+///
+/// An [`ExtendRefusal`] naming why; the caller keeps the subset, and a
+/// document editor falls back to another font.
+pub fn extend_subset(
+    subset: &[u8],
+    face: &[u8],
+    glyphs: &BTreeSet<u16>,
+) -> Result<Extended, ExtendRefusal> {
+    let mut budget = EXTEND_BUDGET;
+    match (Sfnt::parse(subset), Sfnt::parse(face)) {
+        (Some(held), Some(source)) => {
+            match (held.table(TAG_GLYF), source.table(TAG_GLYF)) {
+                (Some(_), Some(_)) => return extend_truetype(&held, &source, face, glyphs),
+                (None, None) => {}
+                _ => return Err(ExtendRefusal::Format),
+            }
+            let (Some(held_cff), Some(source_cff)) = (held.table(TAG_CFF), source.table(TAG_CFF))
+            else {
+                return Err(ExtendRefusal::Format);
+            };
+            for &tag in COPIED_CFF {
+                if held.table(tag) != source.table(tag) {
+                    return Err(ExtendRefusal::NotTheSource);
+                }
+            }
+            // `head` but `checkSumAdjustment`, which the subsetter computes.
+            let unsummed = |table: Option<&[u8]>| {
+                table.map(|head| {
+                    let mut head = head.to_vec();
+                    if let Some(sum) = head.get_mut(8..12) {
+                        sum.fill(0);
+                    }
+                    head
+                })
+            };
+            if unsummed(held.table(TAG_HEAD)) != unsummed(source.table(TAG_HEAD)) {
+                return Err(ExtendRefusal::NotTheSource);
+            }
+            let keep = cff_kept(held_cff, source_cff, glyphs, &mut budget)?;
+            let program =
+                crate::subset::subset(face, &keep).ok_or(ExtendRefusal::NotRebuildable)?;
+            Ok(Extended {
+                program,
+                lengths: None,
+                names: None,
+            })
+        }
+        (None, None) => {
+            if crate::Type1::parse(subset).is_some() && crate::Type1::parse(face).is_some() {
+                return extend_type1(subset, face, glyphs, &mut budget);
+            }
+            if Cff::parse(subset).is_none() || Cff::parse(face).is_none() {
+                return Err(ExtendRefusal::Format);
+            }
+            let keep = cff_kept(subset, face, glyphs, &mut budget)?;
+            let program =
+                crate::cff_subset::subset_cff(face, &keep).ok_or(ExtendRefusal::NotRebuildable)?;
+            Ok(Extended {
+                program,
+                lengths: None,
+                names: None,
+            })
+        }
+        _ => Err(ExtendRefusal::Format),
+    }
+}
+
+/// Whether two `glyf` entries are one glyph: equal, but for up to three
+/// bytes of zero padding a subsetter or a producer appends.
+fn same_glyph(a: &[u8], b: &[u8]) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    long.starts_with(short)
+        && long.len() - short.len() <= 3
+        && long[short.len()..].iter().all(|byte| *byte == 0)
+}
+
+/// The `glyf` route: the source test, then the face cut to the subset's
+/// glyphs and `glyphs`.
+fn extend_truetype(
+    held: &Sfnt<'_>,
+    source: &Sfnt<'_>,
+    face: &[u8],
+    glyphs: &BTreeSet<u16>,
+) -> Result<Extended, ExtendRefusal> {
+    let count = |sfnt: &Sfnt<'_>| sfnt.table(0x6D61_7870).and_then(|maxp| be16(maxp, 4));
+    let glyph_count = count(source).ok_or(ExtendRefusal::NotTheSource)?;
+    if count(held) != Some(glyph_count) {
+        return Err(ExtendRefusal::NotTheSource);
+    }
+    for &tag in COPIED {
+        if held.table(tag) != source.table(tag) {
+            return Err(ExtendRefusal::NotTheSource);
+        }
+    }
+    let (Some(held_glyf), Some(source_glyf)) = (held.table(TAG_GLYF), source.table(TAG_GLYF))
+    else {
+        return Err(ExtendRefusal::Format);
+    };
+    let mut keep: BTreeSet<u16> = BTreeSet::from([0]);
+    for glyph in 0..glyph_count {
+        let (start, end) = glyph_range(held, glyph).ok_or(ExtendRefusal::NotTheSource)?;
+        if start == end {
+            continue;
+        }
+        let kept = held_glyf
+            .get(start..end)
+            .ok_or(ExtendRefusal::NotTheSource)?;
+        let (from, to) = glyph_range(source, glyph).ok_or(ExtendRefusal::NotTheSource)?;
+        let own = source_glyf
+            .get(from..to)
+            .ok_or(ExtendRefusal::NotTheSource)?;
+        if !same_glyph(kept, own) {
+            return Err(ExtendRefusal::NotTheSource);
+        }
+        keep.insert(glyph);
+    }
+    if glyphs.iter().any(|glyph| *glyph >= glyph_count) {
+        return Err(ExtendRefusal::NoSuchGlyph);
+    }
+    keep.extend(glyphs.iter().copied());
+    let program = subset(face, &keep).ok_or(ExtendRefusal::NotRebuildable)?;
+    Ok(Extended {
+        program,
+        lengths: None,
+        names: None,
+    })
+}
+
+/// The CFF source test over two CFF tables, and the glyphs to cut the face
+/// to: those the subset keeps, `.notdef`, and `glyphs`.
+fn cff_kept(
+    held: &[u8],
+    source: &[u8],
+    glyphs: &BTreeSet<u16>,
+    budget: &mut u64,
+) -> Result<BTreeSet<u16>, ExtendRefusal> {
+    let (Some(held), Some(source)) = (Cff::parse(held), Cff::parse(source)) else {
+        return Err(ExtendRefusal::Format);
+    };
+    let count = source.glyph_count();
+    if held.glyph_count() != count
+        || held.is_cid() != source.is_cid()
+        || held.registry_ordering() != source.registry_ordering()
+        || held.font_matrix != source.font_matrix
+    {
+        return Err(ExtendRefusal::NotTheSource);
+    }
+    if !source.is_cid()
+        && (0..=255u8).any(|code| held.gid_for_code(code) != source.gid_for_code(code))
+    {
+        return Err(ExtendRefusal::NotTheSource);
+    }
+    let mut spend = |steps: u64| -> Result<(), ExtendRefusal> {
+        *budget = budget.checked_sub(steps).ok_or(ExtendRefusal::Budget)?;
+        Ok(())
+    };
+    let mut keep: BTreeSet<u16> = BTreeSet::from([0]);
+    for gid in 0..count {
+        let glyph = u16::try_from(gid).map_err(|_| ExtendRefusal::NotTheSource)?;
+        if held.glyph_name(glyph) != source.glyph_name(glyph)
+            || held.cid_for_gid(glyph) != source.cid_for_gid(glyph)
+            || held.font_matrix_for(glyph) != source.font_matrix_for(glyph)
+        {
+            return Err(ExtendRefusal::NotTheSource);
+        }
+        let (kept, kept_steps) = held.outline_counted(glyph);
+        let (own, own_steps) = source.outline_counted(glyph);
+        spend(kept_steps.saturating_add(own_steps).saturating_mul(2))?;
+        let (Some(kept), Some(own)) = (kept, own) else {
+            return Err(ExtendRefusal::NotTheSource);
+        };
+        let advances = held.advance(glyph) == source.advance(glyph);
+        if !kept.is_empty() {
+            // A glyph that draws in the subset is the face's.
+            if kept.segments != own.segments || !advances {
+                return Err(ExtendRefusal::NotTheSource);
+            }
+            keep.insert(glyph);
+        } else if own.is_empty() && advances {
+            // One that draws nothing in either, kept with its advance.
+            keep.insert(glyph);
+        }
+    }
+    if glyphs.iter().any(|glyph| usize::from(*glyph) >= count) {
+        return Err(ExtendRefusal::NoSuchGlyph);
+    }
+    keep.extend(glyphs.iter().copied());
+    Ok(keep)
+}
+
+/// The Type 1 route: the source test, then the face cut by
+/// [`crate::subset_type1`] to the subset's glyphs and `glyphs`.
+fn extend_type1(
+    subset: &[u8],
+    face: &[u8],
+    glyphs: &BTreeSet<u16>,
+    budget: &mut u64,
+) -> Result<Extended, ExtendRefusal> {
+    let (Some(held_layout), Some(source_layout)) = (
+        crate::type1::Layout::read(subset),
+        crate::type1::Layout::read(face),
+    ) else {
+        return Err(ExtendRefusal::Format);
+    };
+    let held_clear = held_layout.data.get(..held_layout.encrypted_at);
+    if held_clear != source_layout.data.get(..source_layout.encrypted_at) {
+        return Err(ExtendRefusal::NotTheSource);
+    }
+    let (Some(held), Some(source)) = (crate::Type1::parse(subset), crate::Type1::parse(face))
+    else {
+        return Err(ExtendRefusal::Format);
+    };
+    let mut spend = |steps: u64| -> Result<(), ExtendRefusal> {
+        *budget = budget.checked_sub(steps).ok_or(ExtendRefusal::Budget)?;
+        Ok(())
+    };
+    let mut keep: BTreeSet<u16> = BTreeSet::new();
+    for index in 0..held.glyph_count() {
+        let name = held.glyph_name(index).ok_or(ExtendRefusal::NotTheSource)?;
+        let own = source
+            .glyph_for_name(name)
+            .ok_or(ExtendRefusal::NotTheSource)?;
+        let glyph = u16::try_from(index).map_err(|_| ExtendRefusal::NotTheSource)?;
+        let (kept, kept_steps) = held.outline_counted(glyph);
+        let (drawn, drawn_steps) = source.outline_counted(own);
+        spend(kept_steps.saturating_add(drawn_steps).saturating_mul(2))?;
+        let same = match (kept, drawn) {
+            (Some(a), Some(b)) => a.segments == b.segments,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same || held.advance(glyph) != source.advance(own) {
+            return Err(ExtendRefusal::NotTheSource);
+        }
+        keep.insert(own);
+    }
+    if glyphs
+        .iter()
+        .any(|glyph| usize::from(*glyph) >= source.glyph_count())
+    {
+        return Err(ExtendRefusal::NoSuchGlyph);
+    }
+    keep.extend(glyphs.iter().copied());
+    let cut = crate::subset_type1(face, &keep).map_err(|_| ExtendRefusal::NotRebuildable)?;
+    Ok(Extended {
+        program: cut.program,
+        lengths: Some(cut.lengths),
+        names: Some(cut.names),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1223,5 +1584,297 @@ mod tests {
         let subset = subset(&program, &wanted).expect("it subsets");
         let sfnt = Sfnt::parse(&subset).expect("the subset parses");
         assert!(crate::glyf::outline(&sfnt, 1).is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Extending a subset (FT-11.9).
+    // -----------------------------------------------------------------------
+
+    /// The glyphs a `glyf` program holds: every index whose entry is not
+    /// empty.
+    fn held(program: &[u8]) -> BTreeSet<u16> {
+        let sfnt = Sfnt::parse(program).expect("an sfnt");
+        let count = be16(sfnt.table(0x6D61_7870).expect("maxp"), 4).expect("a count");
+        (0..count)
+            .filter(|glyph| glyph_range(&sfnt, *glyph).is_some_and(|(start, end)| end > start))
+            .collect()
+    }
+
+    /// Type 1 numbers in their shortest forms (chapter 6.2).
+    fn n(values: &[i32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &v in values {
+            if (-107..=107).contains(&v) {
+                out.push((v + 139) as u8);
+            } else if (108..=1131).contains(&v) {
+                let v = v - 108;
+                out.push((v / 256 + 247) as u8);
+                out.push((v % 256) as u8);
+            } else {
+                let v = -v - 108;
+                out.push((v / 256 + 251) as u8);
+                out.push((v % 256) as u8);
+            }
+        }
+        out
+    }
+
+    /// A glyph `width` wide drawing a `w` by `h` box at `(x, y)`: `hsbw`,
+    /// `rmoveto`, three sides, `closepath`, `endchar`.
+    fn boxed(width: i32, x: i32, y: i32, w: i32, h: i32) -> Vec<u8> {
+        [
+            n(&[0, width]),
+            vec![13],
+            n(&[x, y]),
+            vec![21],
+            n(&[w]),
+            vec![6],
+            n(&[h]),
+            vec![7],
+            n(&[-w]),
+            vec![6, 9, 14],
+        ]
+        .concat()
+    }
+
+    /// A Type 1 program of `.notdef` and `A` to `E`, boxes each `size` apart,
+    /// encoded at 65 to 69, and no subroutines.
+    fn type1_face(size: i32) -> Vec<u8> {
+        use crate::type1::{encrypt, CHARSTRING_KEY, EEXEC_KEY};
+        let lead = [0x55u8; 4];
+        let mut glyphs = vec![(".notdef".to_owned(), [n(&[0, 250]), vec![13, 14]].concat())];
+        for (at, name) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+            let at = at as i32;
+            glyphs.push(((*name).to_owned(), boxed(600, 50, 0, size + at * 10, 400)));
+        }
+        let mut clear = b"%!PS-AdobeFont-1.0: Fixture 001.000\n11 dict begin\n\
+            /FontName /Fixture def\n/FontType 1 def\n\
+            /FontMatrix [0.001 0 0 0.001 0 0] readonly def\n\
+            /FontBBox {0 0 1000 1000} readonly def\n\
+            /Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\n"
+            .to_vec();
+        for (code, name) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+            clear.extend_from_slice(format!("dup {} /{name} put\n", 65 + code).as_bytes());
+        }
+        clear.extend_from_slice(b"readonly def\ncurrentdict end\ncurrentfile eexec\n");
+        let mut private = b"dup /Private 8 dict dup begin\n/lenIV 4 def\n/Subrs 0 array\nND\n\
+            2 index /CharStrings 6 dict dup begin\n"
+            .to_vec();
+        for (name, code) in &glyphs {
+            let encrypted = encrypt(code, CHARSTRING_KEY, &lead);
+            private.extend_from_slice(format!("/{name} {} RD ", encrypted.len()).as_bytes());
+            private.extend_from_slice(&encrypted);
+            private.extend_from_slice(b" ND\n");
+        }
+        private.extend_from_slice(
+            b"end\nend\nreadonly put\nnoaccess put\n\
+              dup /FontName get exch definefont pop\nmark currentfile closefile\n",
+        );
+        let mut out = clear;
+        out.extend(encrypt(&private, EEXEC_KEY, &lead));
+        out.extend_from_slice(b"\n0000000000000000\ncleartomark\n");
+        out
+    }
+
+    /// The CFF the Type 1 face converts to, and the CFF glyph of each of its
+    /// names.
+    fn cff_face(size: i32) -> (Vec<u8>, BTreeMap<String, u16>) {
+        let converted = crate::type1_to_cff(&type1_face(size)).expect("the fixture converts");
+        let gids = converted
+            .names
+            .iter()
+            .enumerate()
+            .map(|(gid, name)| (String::from_utf8_lossy(name).into_owned(), gid as u16))
+            .collect();
+        (converted.program, gids)
+    }
+
+    /// **A TrueType subset gains exactly the glyphs asked for**, at their own
+    /// indices, every glyph it kept the face's, and nothing else.
+    #[test]
+    fn a_truetype_subset_extends_with_exactly_the_glyphs_asked_for() {
+        let face = font(10);
+        let cut = subset(&face, &[2u16, 5].into_iter().collect()).expect("it subsets");
+        assert_eq!(held(&cut), [0u16, 2, 5].into_iter().collect());
+
+        let extended =
+            extend_subset(&cut, &face, &[3u16, 7].into_iter().collect()).expect("it extends");
+        assert_eq!(extended.lengths, None);
+        assert_eq!(
+            held(&extended.program),
+            [0u16, 2, 3, 5, 7].into_iter().collect()
+        );
+        assert_eq!(
+            extended.program,
+            subset(&face, &[2u16, 3, 5, 7].into_iter().collect()).expect("the cut"),
+            "the face cut to the subset's glyphs and the new ones"
+        );
+        let (before, after) = (
+            Sfnt::parse(&face).expect("face"),
+            Sfnt::parse(&extended.program).expect("extension"),
+        );
+        for glyph in [0u16, 2, 3, 5, 7] {
+            assert_eq!(
+                crate::glyf::outline(&after, glyph).map(|o| o.segments),
+                crate::glyf::outline(&before, glyph).map(|o| o.segments),
+                "glyph {glyph}"
+            );
+        }
+        // Extending again with a glyph it holds adds nothing.
+        let again = extend_subset(&extended.program, &face, &[3u16].into_iter().collect())
+            .expect("it extends");
+        assert_eq!(again.program, extended.program);
+    }
+
+    /// A face that is not the subset's source is refused: another glyph
+    /// count, and one glyph drawn otherwise.
+    #[test]
+    fn a_truetype_face_that_is_not_the_source_is_refused() {
+        let face = font(10);
+        let cut = subset(&face, &[2u16].into_iter().collect()).expect("it subsets");
+        let wanted: BTreeSet<u16> = [3u16].into_iter().collect();
+        assert_eq!(
+            extend_subset(&cut, &font(11), &wanted),
+            Err(ExtendRefusal::NotTheSource)
+        );
+        // Glyph 2's last y delta, one more in a face otherwise the same.
+        let mut other = face.clone();
+        let sfnt = Sfnt::parse(&face).expect("it parses");
+        let glyf = sfnt.table(0x676C_7966).expect("glyf");
+        let glyf_at = glyf.as_ptr() as usize - face.as_ptr() as usize;
+        let (start, _) = glyph_range(&sfnt, 2).expect("glyph 2");
+        other[glyf_at + start + 25] = other[glyf_at + start + 25].wrapping_add(1);
+        assert_eq!(
+            extend_subset(&cut, &other, &wanted),
+            Err(ExtendRefusal::NotTheSource)
+        );
+        // A table the subsetter copies, changed.
+        let mut reshaped = BTreeMap::new();
+        reshaped.insert(2u16, 900.0);
+        let widened = subset_with(
+            &face,
+            &[2u16].into_iter().collect(),
+            &Reshape {
+                advances: reshaped,
+                cmap: None,
+            },
+        )
+        .expect("it subsets");
+        assert_eq!(
+            extend_subset(&widened, &face, &wanted),
+            Err(ExtendRefusal::NotTheSource)
+        );
+    }
+
+    #[test]
+    fn a_glyph_past_the_face_is_refused() {
+        let face = font(10);
+        let cut = subset(&face, &[2u16].into_iter().collect()).expect("it subsets");
+        assert_eq!(
+            extend_subset(&cut, &face, &[10u16].into_iter().collect()),
+            Err(ExtendRefusal::NoSuchGlyph)
+        );
+    }
+
+    /// **A CFF subset gains exactly the glyphs asked for**: the kept and the
+    /// new draw as in the face, every other glyph is empty.
+    #[test]
+    fn a_cff_subset_extends_with_exactly_the_glyphs_asked_for() {
+        let (face, gids) = cff_face(100);
+        let cut = crate::subset_cff(&face, &[gids["A"], gids["C"]].into_iter().collect())
+            .expect("it subsets");
+        let extended =
+            extend_subset(&cut, &face, &[gids["D"]].into_iter().collect()).expect("it extends");
+        let (source, after) = (
+            Cff::parse(&face).expect("face"),
+            Cff::parse(&extended.program).expect("extension"),
+        );
+        assert_eq!(after.glyph_count(), source.glyph_count());
+        for (name, &gid) in &gids {
+            let drawn = after.outline(gid).expect("it answers");
+            if ["A", "C", "D"].contains(&name.as_str()) {
+                assert_eq!(
+                    drawn.segments,
+                    source.outline(gid).expect("face").segments,
+                    "{name}"
+                );
+                assert_eq!(after.advance(gid), source.advance(gid), "{name}");
+            } else {
+                assert!(drawn.is_empty(), "{name} was not asked for");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cff_face_that_is_not_the_source_is_refused() {
+        let (face, gids) = cff_face(100);
+        let cut = crate::subset_cff(&face, &[gids["A"]].into_iter().collect()).expect("it subsets");
+        let (other, _) = cff_face(120);
+        assert_eq!(
+            extend_subset(&cut, &other, &[gids["B"]].into_iter().collect()),
+            Err(ExtendRefusal::NotTheSource)
+        );
+        assert_eq!(
+            extend_subset(&cut, &face, &[60u16].into_iter().collect()),
+            Err(ExtendRefusal::NoSuchGlyph)
+        );
+    }
+
+    /// **A Type 1 subset gains the charstrings asked for**, with its three
+    /// lengths and its names, every kept glyph drawing as in the face.
+    #[test]
+    fn a_type1_subset_extends_with_the_glyphs_asked_for() {
+        let face = type1_face(100);
+        let source = crate::Type1::parse(&face).expect("the face parses");
+        let index = |name: &[u8]| source.glyph_for_name(name).expect("in the face");
+        let cut =
+            crate::subset_type1(&face, &[index(b"A")].into_iter().collect()).expect("it subsets");
+        let extended = extend_subset(&cut.program, &face, &[index(b"C")].into_iter().collect())
+            .expect("it extends");
+        assert_eq!(
+            extended.names,
+            Some(vec![b".notdef".to_vec(), b"A".to_vec(), b"C".to_vec()])
+        );
+        let lengths = extended.lengths.expect("Table 125's lengths");
+        assert_eq!(lengths.iter().sum::<usize>(), extended.program.len());
+        let after = crate::Type1::parse(&extended.program).expect("the extension parses");
+        for name in [b".notdef".as_slice(), b"A", b"C"] {
+            let (a, b) = (after.glyph_for_name(name).expect("kept"), index(name));
+            assert_eq!(
+                after.outline(a).map(|o| o.segments),
+                source.outline(b).map(|o| o.segments)
+            );
+            assert_eq!(after.advance(a), source.advance(b));
+        }
+        // Another face of the same names is not its source.
+        assert_eq!(
+            extend_subset(
+                &cut.program,
+                &type1_face(120),
+                &[index(b"C")].into_iter().collect()
+            ),
+            Err(ExtendRefusal::NotTheSource)
+        );
+    }
+
+    /// Programs of two formats, and bytes that are no program, are not
+    /// extended.
+    #[test]
+    fn programs_of_two_formats_are_refused() {
+        let truetype = font(10);
+        let (cff, _) = cff_face(100);
+        let type1 = type1_face(100);
+        let none = BTreeSet::new();
+        for (subset, face) in [
+            (truetype.as_slice(), cff.as_slice()),
+            (cff.as_slice(), type1.as_slice()),
+            (type1.as_slice(), truetype.as_slice()),
+            (b"not a font".as_slice(), truetype.as_slice()),
+        ] {
+            assert_eq!(
+                extend_subset(subset, face, &none),
+                Err(ExtendRefusal::Format)
+            );
+        }
     }
 }

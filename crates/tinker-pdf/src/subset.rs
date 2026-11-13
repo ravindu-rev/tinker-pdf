@@ -138,6 +138,16 @@
 //! and named in [`SubsetReport::unconverted`] with the reason. Nothing is
 //! converted by default.
 //!
+//! # Extending a subset
+//!
+//! [`extend`] runs the cut the other way, for an editor adding text over a
+//! subset font (`docs/design/subsetting.md`, *Extension*): handed the
+//! face the program was cut from — which [`tinker_pdf_font::extend_subset`]'s
+//! source test proves — it writes the face cut to the subset's glyphs and the
+//! ones asked for over the program, every glyph the subset kept drawing as it
+//! did, under a new subset tag on every font that names the program. A
+//! subset this module wrote extends in place, since no cut renumbers.
+//!
 //! # Type 3 fonts
 //!
 //! A Type 3 font has no program (9.6.5): each glyph is a content stream in
@@ -2397,6 +2407,126 @@ pub(crate) fn strip_tag(base_font: &[u8]) -> &[u8] {
         return &base_font[7..];
     }
     base_font
+}
+
+// ---------------------------------------------------------------------------
+// Extending an embedded subset (FT-11.9).
+// ---------------------------------------------------------------------------
+
+/// What [`extend`] wrote: the program it extended, the name every font
+/// naming it is written under now, and the program's size before and after.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Extension {
+    /// The stream the program is in.
+    pub program: ObjRef,
+    /// The `/BaseFont` the font is written with now, its new subset tag
+    /// included.
+    pub base_font: String,
+    /// How many bytes the program carried before.
+    pub before: usize,
+    /// How many it carries now.
+    pub after: usize,
+}
+
+/// Why [`extend`] wrote nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ExtendError {
+    /// The object is no font dictionary whose descriptor — its descendant's,
+    /// for a composite font — embeds a program.
+    NoProgram,
+    /// The program's stream does not decode.
+    Unreadable,
+    /// [`tinker_pdf_font::extend_subset`] refused, by name: most often the
+    /// face is not the one the subset was cut from.
+    Refused(tinker_pdf_font::ExtendRefusal),
+}
+
+impl core::fmt::Display for ExtendError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ExtendError::NoProgram => f.write_str("the object is no font that embeds a program"),
+            ExtendError::Unreadable => f.write_str("the program's stream does not decode"),
+            ExtendError::Refused(why) => write!(f, "the subset was not extended: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for ExtendError {}
+
+/// Adds `glyphs` of `face` to the embedded subset the font at `font` draws
+/// with, in place (`docs/design/subsetting.md`, *Extension*): what an editor
+/// adding text to a document over a subset font needs.
+///
+/// `face` must be the face the subset was cut from, which
+/// [`tinker_pdf_font::extend_subset`]'s source test proves; the program is
+/// then the face cut to the glyphs the subset keeps and to `glyphs` — glyph
+/// indices of the face, or for a Type 1 program its charstrings' positions in
+/// the face — every glyph the subset kept drawing as it did. It is written
+/// over the program's stream, with a TrueType program's `/Length1` and a
+/// Type 1 program's three lengths stated, and every font dictionary naming
+/// that program, its descendant and its descriptor take a new 9.6.4 subset
+/// tag, since the tag names a set of glyphs; a Type 1 descriptor carrying
+/// `/CharSet` has it rewritten to the new names. Which codes reach the new
+/// glyphs — the font's `/Encoding`, `/Widths`, `/W`, `/ToUnicode` — is the
+/// caller's to write, and nothing here touches them.
+///
+/// A later save cuts the program to the glyphs the pages draw unless it is
+/// asked to keep it ([`crate::write::FontPolicy::Keep`]), so a caller adds
+/// the text that draws the new glyphs before it saves.
+///
+/// # Errors
+///
+/// [`ExtendError::NoProgram`] for an object that is no font embedding a
+/// program, [`ExtendError::Unreadable`] for a program that does not decode,
+/// and [`ExtendError::Refused`] where the font crate refuses; the editor is
+/// then as it was.
+pub fn extend(
+    editor: &mut DocumentEditor,
+    font: ObjRef,
+    face: &[u8],
+    glyphs: &BTreeSet<u16>,
+) -> Result<Extension, ExtendError> {
+    let doc = editor.shared_document();
+    let sites = sweep(editor, &doc);
+    let program = sites
+        .iter()
+        .find(|site| site.font == font)
+        .and_then(|site| program_of(editor, &doc, site))
+        .ok_or(ExtendError::NoProgram)?;
+    // Every font naming the program draws with it, and every one is renamed.
+    let job = Job {
+        sites: sites
+            .into_iter()
+            .filter(|site| program_of(editor, &doc, site) == Some(program))
+            .collect(),
+        glyphs: BTreeSet::new(),
+        refused: None,
+    };
+    let op = Operation::new(editor.work().cloned());
+    let bytes = bytes_of(editor, program, &op).ok_or(ExtendError::Unreadable)?;
+    let extended =
+        tinker_pdf_font::extend_subset(&bytes, face, glyphs).map_err(ExtendError::Refused)?;
+    let reduced = Cut {
+        bytes: extended.program,
+        lengths: extended.lengths,
+        names: extended.names,
+        converted: false,
+    };
+    let tag = subset_tag(&reduced.bytes);
+    let after = reduced.bytes.len();
+    let names = reduced.names.clone();
+    write_program(editor, &doc, program, &job, reduced);
+    let base_font = rename(editor, &doc, &job, &tag);
+    if let Some(names) = names {
+        charset(editor, &job, &names);
+    }
+    Ok(Extension {
+        program,
+        base_font,
+        before: bytes.len(),
+        after,
+    })
 }
 
 // ---------------------------------------------------------------------------

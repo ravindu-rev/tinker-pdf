@@ -481,10 +481,14 @@ readers are handed without being asked.
 ED-02 adds text to a document whose font is already a subset, and needs the
 glyphs the new text draws. `tinker_pdf_font::extend_subset(subset, face,
 glyphs)` (FT-11.9) answers the subset with exactly the asked-for glyphs — and
-the components a composite among them names — added at their own
-identifiers, or a refusal; the facade's call writes it over the program
-under a new subset tag. The dictionary entries for new codes stay the
-editor's (ED-02).
+the components a composite among them names, and `.notdef` — added at their
+own identifiers, or an `ExtendRefusal`; `tinker_pdf::subset::extend` writes it
+over the program a font embeds, its stream's lengths stated, under a new
+subset tag on every font naming the program, and a Type 1 `/CharSet`
+rewritten. The dictionary entries for new codes stay the editor's (ED-02).
+The asked-for glyphs are the face's identifiers: glyph indices for TrueType
+and CFF, and for Type 1 the face's charstrings in the order `Type1::parse`
+reads them.
 
 **The source test**, which a producer's subset that renumbered fails, so that
 ED-02 falls back:
@@ -492,17 +496,28 @@ ED-02 falls back:
 - **TrueType**: both carry `glyf`; the same `maxp` glyph count; the
   subset's `cmap`, `hmtx`, `hhea`, `OS/2`, `cvt `, `fpgm` and `prep` byte for
   byte the face's, as this engine's subsetter copies them; and every glyph
-  the subset's `glyf` holds byte for byte the face's at the same index.
-- **CFF**: the same glyph count, the same charset and String INDEX bytes, the
-  same `ROS` or none, the same font matrix per glyph; and every glyph that
-  draws in the subset outlining and advancing as the face's at the same
-  identifier.
+  the subset's `glyf` holds byte for byte the face's at the same index, but
+  for up to three bytes of zero padding either holds after it. A subset whose
+  advances or `cmap` the embedding pass reshaped is not one the face is the
+  source of, and is refused.
+- **CFF**, bare or in an `OpenType` face, whose copied tables (`cmap`,
+  `hhea`, `hmtx`, `maxp`, `OS/2`, `VORG`) and `head` but its checksum are held
+  to the face's as well: the same glyph count, the same names or CIDs, the
+  same `ROS` or none, the same built-in encoding, the same font matrix per
+  glyph; every glyph that draws in the subset outlining and advancing as the
+  face's at the same identifier, and a glyph that draws nothing in either kept
+  where it advances as the face's. A glyph that draws nothing in the subset
+  and something in the face is one the subset dropped, whatever charstring a
+  producer wrote for it.
 - **Type 1**: the same clear-text portion; the subset's charstring names a
   subset of the face's; and every charstring of the subset outlining and
   advancing as the face's of the same name.
 
 The answer is the face cut to the subset's glyphs and the new ones, which
-keeps every old glyph as it was by the test and adds nothing else.
+keeps every old glyph as it was by the test and adds nothing else. The test
+outlines both programs' glyphs within a budget of its own (ruling 1). A glyph
+past the face's last is refused, as are two formats and a cut the subsetter
+declines.
 
 ### What is measured
 
