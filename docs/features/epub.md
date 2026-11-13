@@ -111,7 +111,17 @@ Line breaking is **UAX #14** over vendored Unicode 17.0.0 data, checked
 against every case of Unicode's own `LineBreakTest.txt`
 (`tinker-pdf-layout/tests/uax14_conformance.rs`). Advances come from the face
 (embedded, host-provided, or the standard-14 metrics for an unembedded
-family), one per character.
+family), one per character. Which face a character is drawn in is
+`css-fonts-4` §5's per-character walk of its run's `font-family` list — the
+author's order, a family's embedded face before the standard face it maps to,
+the book's own faces as the last resort — and a run's list is resolved once
+into a plan (`epub::paint::FamilyPlan`): each distinct named family folded
+once, its embedded faces found by the folded key and ordered by §5.2's slope
+and weight distances for the run, and the standard face its name maps to read
+once, so each character is answered from the plan without a string compared,
+a name folded or a font program parsed twice. EPUB, HTML, Markdown and
+SVG-in-book runs take it through `face_runs`, and every per-run walk of a
+run's characters makes one.
 
 **A `<br>` is a forced line break** — HTML §15.3.4's `br { display-outside:
 newline; }`, from the XML reader's tree and HTML's parser's alike.
@@ -1150,6 +1160,17 @@ rather than zero.
   by its own rule of as many, and a rule of more declarations cascaded over
   the elements it matches. Each cascade gives the computed style the sheet
   says.
+- `crates/tinker-pdf/src/epub/tests.rs`'s font-choice plan:
+  `a_run_folds_each_family_once_whatever_its_length` counts, under
+  `cfg(test)`, the names a run's list folds and the
+  `Standard14::from_base_font` calls it makes — one for each distinct name,
+  for a run of one character and of a thousand alike — and
+  `the_plan_chooses_what_choose_chose` holds the plan to the walk of the list
+  at every character, over generated lists of the book's families, standard
+  names, unknown names and generics, at five weights and three slopes, for
+  characters one face of a family covers and another does not, the kana face
+  alone, the standard 14 alone, nothing, and the coverage-blind question a
+  line height asks.
 - **Committed books from real producers** (pandoc 3.10.2 and 3.11, calibre
   9.13.0 and 9.14.0, KCC 11.0.1) over text authored here, in
   `crates/tinker-pdf/tests/epub/`, with epubcheck 5.3.0 verdicts recorded in

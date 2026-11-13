@@ -3114,3 +3114,254 @@ fn a_line_no_drawing_reads_right_states_its_text_round_its_runs_sequences() {
     );
     assert_eq!(structured.unmarked, 0);
 }
+
+// ---- Font choice by a plan of the family list (P-18.1) -----------------------
+
+/// A font program whose `cmap` (3, 1) format 4 subtable maps each of `ranges`
+/// to glyphs counted from 1, and nothing else: enough of an sfnt for
+/// coverage, which is all font choice asks of one.
+fn coverage_program(ranges: &[(char, char)]) -> Vec<u8> {
+    let mut segments: Vec<(u16, u16, u16)> = Vec::new();
+    let mut glyph = 1u16;
+    for &(first, last) in ranges {
+        let (first, last) = (u32::from(first) as u16, u32::from(last) as u16);
+        segments.push((first, last, glyph.wrapping_sub(first)));
+        glyph += last - first + 1;
+    }
+    // The closing segment, whose one code maps to glyph 0.
+    segments.push((0xFFFF, 0xFFFF, 1));
+    let count = segments.len() as u16;
+    let mut power = 1u16;
+    let mut selector = 0u16;
+    while power * 2 <= count {
+        power *= 2;
+        selector += 1;
+    }
+    let mut sub = Vec::new();
+    for value in [
+        4,
+        16 + 8 * count,
+        0,
+        2 * count,
+        2 * power,
+        selector,
+        2 * count - 2 * power,
+    ] {
+        sub.extend_from_slice(&value.to_be_bytes());
+    }
+    for (_, last, _) in &segments {
+        sub.extend_from_slice(&last.to_be_bytes());
+    }
+    sub.extend_from_slice(&0u16.to_be_bytes());
+    for (first, _, _) in &segments {
+        sub.extend_from_slice(&first.to_be_bytes());
+    }
+    for (_, _, delta) in &segments {
+        sub.extend_from_slice(&delta.to_be_bytes());
+    }
+    for _ in &segments {
+        sub.extend_from_slice(&0u16.to_be_bytes());
+    }
+    let mut cmap = Vec::new();
+    for value in [0u16, 1, 3, 1] {
+        cmap.extend_from_slice(&value.to_be_bytes());
+    }
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&sub);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    out.extend_from_slice(b"cmap");
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&28u32.to_be_bytes());
+    out.extend_from_slice(&(cmap.len() as u32).to_be_bytes());
+    out.extend_from_slice(&cmap);
+    out
+}
+
+/// A book's faces for the matching tests: a family in three faces that
+/// cover different letters, a kana face, and a face under a name the
+/// standard 14 also answer to.
+fn matching_faces() -> super::typeface::FaceSet {
+    use super::typeface::{EmbeddedFace, FaceSet};
+    use tinker_pdf_css::property::FontStyle;
+
+    let face = |family: &str, weight: (u16, u16), style: FontStyle, ranges: &[(char, char)]| {
+        EmbeddedFace {
+            family: family.to_owned(),
+            weight,
+            style,
+            path: format!("fonts/{family}.otf"),
+            program: coverage_program(ranges),
+            resource: Vec::new(),
+        }
+    };
+    FaceSet::of(vec![
+        face("body", (400, 400), FontStyle::Normal, &[('a', 'z')]),
+        face("body", (700, 700), FontStyle::Normal, &[('a', 'z')]),
+        face("body", (400, 400), FontStyle::Italic, &[('A', 'Z')]),
+        face(
+            "cjk",
+            (400, 400),
+            FontStyle::Normal,
+            &[('\u{3040}', '\u{30FF}')],
+        ),
+        face("times", (100, 900), FontStyle::Normal, &[('0', '9')]),
+    ])
+}
+
+/// The family names and generic families the matching tests draw lists from:
+/// the book's families in two spellings, names the standard 14 answer to,
+/// names they do not, and every generic.
+fn family_pool() -> Vec<tinker_pdf_css::property::FontFamily> {
+    use tinker_pdf_css::property::FontFamily;
+    let mut pool: Vec<FontFamily> = [
+        "Body",
+        "BODY",
+        "cjk",
+        "Times",
+        "Times New Roman",
+        "Helvetica Neue",
+        "Arial Black",
+        "Courier New",
+        "Georgia",
+        "Symbol",
+        "Zapf Dingbats",
+    ]
+    .into_iter()
+    .map(|name| FontFamily::Named(name.to_owned()))
+    .collect();
+    pool.extend([
+        FontFamily::Serif,
+        FontFamily::SansSerif,
+        FontFamily::Monospace,
+        FontFamily::Cursive,
+        FontFamily::Fantasy,
+    ]);
+    pool
+}
+
+/// **A run folds each family once, whatever its length** (P-18.1): the
+/// names a run's list folds and the `Standard14::from_base_font` calls it
+/// makes are one for each distinct name, for a run of one character and of a
+/// thousand alike — the plan is made once a run and asked at each character.
+#[test]
+fn a_run_folds_each_family_once_whatever_its_length() {
+    use super::paint::{face_runs, BASE_FONT_CALLS, FAMILY_FOLDS};
+    use tinker_pdf_css::property::{FontFamily, FontKerning, FontStyle};
+    use tinker_pdf_layout::metrics::FontRequest;
+
+    let faces = matching_faces();
+    // Three distinct names, one of them twice, and a generic.
+    let families = vec![
+        FontFamily::Named("Georgia".to_owned()),
+        FontFamily::Named("Body".to_owned()),
+        FontFamily::Serif,
+        FontFamily::Named("Georgia".to_owned()),
+        FontFamily::Named("Times New Roman".to_owned()),
+    ];
+    let font = FontRequest {
+        families: &families,
+        weight: 400,
+        style: FontStyle::Normal,
+        size: 12.0,
+        kerning: FontKerning::Auto,
+        features: &[],
+    };
+    for length in [1usize, 10, 1000] {
+        let text: String = "body text \u{3042}7 \u{e9}"
+            .chars()
+            .cycle()
+            .take(length)
+            .collect();
+        FAMILY_FOLDS.with(|n| n.set(0));
+        BASE_FONT_CALLS.with(|n| n.set(0));
+        let runs = face_runs(&faces, &font, &text);
+        assert!(!runs.is_empty(), "{length} characters make a run");
+        assert_eq!(
+            FAMILY_FOLDS.with(std::cell::Cell::get),
+            3,
+            "{length} characters: Georgia, Body and Times New Roman, folded once each"
+        );
+        assert_eq!(
+            BASE_FONT_CALLS.with(std::cell::Cell::get),
+            3,
+            "{length} characters: each name's standard face read once"
+        );
+    }
+}
+
+/// **The plan chooses what `choose` chose** (P-18.1): over generated family
+/// lists, weights, slopes and characters — covered by one face of a family
+/// and not another, by the kana face alone, by the standard 14 alone, by
+/// nothing, and the coverage-blind question a line height asks — a run's
+/// plan answers every character as the walk of the list at every character
+/// did, embedded face, standard face and last resort alike.
+#[test]
+fn the_plan_chooses_what_choose_chose() {
+    use super::paint::{choose_by_walk, Chosen, FamilyPlan};
+    use tinker_pdf_css::property::{FontFamily, FontKerning, FontStyle};
+    use tinker_pdf_layout::metrics::FontRequest;
+
+    let faces = matching_faces();
+    let pool = family_pool();
+    let characters = [
+        Some('a'),
+        Some('Q'),
+        Some('7'),
+        Some('\u{e9}'),
+        Some('\u{20ac}'),
+        Some('\u{3042}'),
+        Some('\u{4e2d}'),
+        Some('\u{301}'),
+        Some(' '),
+        None,
+    ];
+    let mut state = 0x2545_F491u32;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+    let mut asked = 0usize;
+    let mut embedded = 0usize;
+    for _ in 0..600 {
+        let length = (next() % 5) as usize;
+        let families: Vec<FontFamily> = (0..length)
+            .map(|_| pool[(next() as usize) % pool.len()].clone())
+            .collect();
+        for weight in [100u16, 400, 600, 700, 900] {
+            for style in [FontStyle::Normal, FontStyle::Italic, FontStyle::Oblique] {
+                let font = FontRequest {
+                    families: &families,
+                    weight,
+                    style,
+                    size: 12.0,
+                    kerning: FontKerning::Auto,
+                    features: &[],
+                };
+                let plan = FamilyPlan::new(&faces, &font);
+                for ch in characters {
+                    let walked = choose_by_walk(&faces, &font, ch);
+                    assert_eq!(
+                        plan.choose(ch),
+                        walked,
+                        "{families:?} at {weight} {style:?}, {ch:?}"
+                    );
+                    if matches!(walked, Chosen::Embedded(_)) {
+                        embedded += 1;
+                    }
+                    asked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(asked, 600 * 5 * 3 * characters.len());
+    assert!(
+        embedded > asked / 10 && embedded < asked,
+        "the lists reach the book's faces and the standard ones both: {embedded} of {asked}"
+    );
+}

@@ -264,6 +264,16 @@ impl FaceSet {
         FaceSet::default()
     }
 
+    /// A set of the faces given, for the tests that hold font matching to
+    /// faces of their own.
+    #[cfg(test)]
+    pub(crate) fn of(faces: Vec<EmbeddedFace>) -> FaceSet {
+        FaceSet {
+            faces,
+            defects: Vec::new(),
+        }
+    }
+
     /// The faces, in declaration order.
     #[must_use]
     pub fn faces(&self) -> &[EmbeddedFace] {
@@ -345,7 +355,7 @@ impl FaceSet {
 }
 
 /// §5.2's slope distance: italic and oblique substitute for one another.
-fn style_distance(have: FontStyle, want: FontStyle) -> u32 {
+pub(crate) fn style_distance(have: FontStyle, want: FontStyle) -> u32 {
     match (have, want) {
         (a, b) if a == b => 0,
         (FontStyle::Italic, FontStyle::Oblique) | (FontStyle::Oblique, FontStyle::Italic) => 1,
@@ -354,7 +364,7 @@ fn style_distance(have: FontStyle, want: FontStyle) -> u32 {
 }
 
 /// §5.2's weight distance, with the direction the specification prefers.
-fn weight_distance(range: (u16, u16), wanted: u16) -> u32 {
+pub(crate) fn weight_distance(range: (u16, u16), wanted: u16) -> u32 {
     let (low, high) = range;
     if wanted >= low && wanted <= high {
         return 0;

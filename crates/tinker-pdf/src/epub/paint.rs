@@ -79,7 +79,7 @@
 //! the standard-14 limit stays, and [`Fonts::unrepresented`] counts what it
 //! costs.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 
 use tinker_pdf_cos::build::{
@@ -206,8 +206,207 @@ pub fn standard_covers(ch: char) -> bool {
 /// the initial `serif` face, which may not cover `ch` at all. The caller is
 /// what says so: [`Fonts::note`] counts a character that arrives here
 /// uncovered, and the reader warns by name rather than leaving a blank.
+///
+/// The question for one character, through a [`FamilyPlan`] of the list; a
+/// caller asking about a run's characters makes the plan once and asks it.
 #[must_use]
 pub fn choose(faces: &FaceSet, font: &FontRequest<'_>, ch: Option<char>) -> Chosen {
+    FamilyPlan::new(faces, font).choose(ch)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Names [`FamilyPlan::new`] folded, on this thread.
+    pub(crate) static FAMILY_FOLDS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    /// [`Standard14::from_base_font`] calls [`FamilyPlan::new`] made, on this
+    /// thread.
+    pub(crate) static BASE_FONT_CALLS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// One step more of a `cfg(test)` count.
+#[cfg(test)]
+fn tally(count: &'static std::thread::LocalKey<core::cell::Cell<u64>>) {
+    count.with(|n| n.set(n.get() + 1));
+}
+
+/// One family of a [`FamilyPlan`], resolved.
+#[derive(Clone, Debug)]
+struct PlannedFamily {
+    /// The book's faces this family names, best first for the run's weight
+    /// and slope: `css-fonts-4` §5.2's slope distance, then its weight
+    /// distance, then declaration order. The first of them that covers a
+    /// character is the one [`FaceSet::best`] would choose for it.
+    embedded: Vec<usize>,
+    /// The standard face's generic family the name maps to, or `None` for a
+    /// family this build substitutes nothing for, which §5's walk passes over.
+    standard: Option<Generic>,
+}
+
+/// A run's `font-family` list resolved once, for [`choose`]'s question about
+/// each of its characters.
+///
+/// Each named family is folded once, its faces among the book's found by the
+/// folded key and ordered for the run's weight and slope, and the standard
+/// face it maps to read once ([`Standard14::from_base_font`]) — once for each
+/// distinct name, however often the list repeats it — so asking about a
+/// character compares no string, folds nothing and allocates nothing: it reads
+/// the families in order, asks each face's parsed program whether it covers
+/// the character, and parses a program at most once a plan. The order is
+/// [`choose`]'s: the author's, an embedded face before the standard
+/// substitute, the book's own faces as the last resort, coverage per
+/// character.
+pub struct FamilyPlan<'f> {
+    faces: &'f FaceSet,
+    families: Vec<PlannedFamily>,
+    bold: bool,
+    italic: bool,
+    /// Each face's program, parsed the first time the plan asks about it.
+    programs: Vec<OnceCell<Option<Sfnt<'f>>>>,
+}
+
+impl<'f> FamilyPlan<'f> {
+    /// The plan of `font`'s family list against `faces`.
+    #[must_use]
+    pub fn new(faces: &'f FaceSet, font: &FontRequest<'_>) -> FamilyPlan<'f> {
+        // Each distinct name, folded and resolved once, kept by its spelling.
+        let mut named: Vec<(&str, PlannedFamily)> = Vec::new();
+        let mut families = Vec::with_capacity(font.families.len());
+        for family in font.families {
+            let planned = match family {
+                FontFamily::Serif | FontFamily::Cursive | FontFamily::Fantasy => PlannedFamily {
+                    embedded: Vec::new(),
+                    standard: Some(Generic::Serif),
+                },
+                FontFamily::SansSerif => PlannedFamily {
+                    embedded: Vec::new(),
+                    standard: Some(Generic::SansSerif),
+                },
+                FontFamily::Monospace => PlannedFamily {
+                    embedded: Vec::new(),
+                    standard: Some(Generic::Monospace),
+                },
+                FontFamily::Named(name) => {
+                    match named.iter().find(|(seen, _)| *seen == name.as_str()) {
+                        Some((_, planned)) => planned.clone(),
+                        None => {
+                            let planned = Self::named(faces, name, font);
+                            named.push((name.as_str(), planned.clone()));
+                            planned
+                        }
+                    }
+                }
+            };
+            families.push(planned);
+        }
+        FamilyPlan {
+            faces,
+            families,
+            bold: font.weight >= 600,
+            italic: font.style != FontStyle::Normal,
+            programs: (0..faces.faces().len()).map(|_| OnceCell::new()).collect(),
+        }
+    }
+
+    /// One named family, folded and resolved.
+    fn named(faces: &FaceSet, name: &str, font: &FontRequest<'_>) -> PlannedFamily {
+        #[cfg(test)]
+        tally(&FAMILY_FOLDS);
+        let folded = name.to_ascii_lowercase();
+        let mut ranked: Vec<(u32, u32, usize)> = faces
+            .faces()
+            .iter()
+            .enumerate()
+            .filter(|(_, face)| face.family.eq_ignore_ascii_case(&folded))
+            .map(|(index, face)| {
+                (
+                    super::typeface::style_distance(face.style, font.style),
+                    super::typeface::weight_distance(face.weight, font.weight),
+                    index,
+                )
+            })
+            .collect();
+        ranked.sort_unstable();
+        let embedded = ranked.into_iter().map(|(_, _, index)| index).collect();
+        #[cfg(test)]
+        tally(&BASE_FONT_CALLS);
+        let standard = match Standard14::from_base_font(name) {
+            Some(Standard14::Courier) => Some(Generic::Monospace),
+            Some(Standard14::Helvetica | Standard14::HelveticaBold) => Some(Generic::SansSerif),
+            Some(
+                Standard14::TimesRoman
+                | Standard14::TimesBold
+                | Standard14::TimesItalic
+                | Standard14::TimesBoldItalic,
+            ) => Some(Generic::Serif),
+            // Symbol and ZapfDingbats are not text faces, and a family this
+            // build has never heard of is not a match at all: §5's algorithm
+            // moves to the next entry rather than stopping, which is what makes
+            // `Georgia, serif` fall through to `serif` when `Georgia` is
+            // absent.
+            _ => None,
+        };
+        PlannedFamily { embedded, standard }
+    }
+
+    /// Whether the book's face `index` covers `ch`, as
+    /// [`super::typeface::EmbeddedFace::covers`] answers, from its program
+    /// parsed once a plan.
+    fn covers(&self, index: usize, ch: char) -> bool {
+        let Some(slot) = self.programs.get(index) else {
+            return false;
+        };
+        slot.get_or_init(|| {
+            self.faces
+                .faces()
+                .get(index)
+                .and_then(|face| Sfnt::parse(&face.program))
+        })
+        .as_ref()
+        .and_then(|sfnt| sfnt.glyph_for_char(ch))
+        .is_some_and(|id| id != 0)
+    }
+
+    /// Which face `ch` is drawn in: [`choose`]'s answer.
+    #[must_use]
+    pub fn choose(&self, ch: Option<char>) -> Chosen {
+        for family in &self.families {
+            for &index in &family.embedded {
+                if ch.is_none_or(|ch| self.covers(index, ch)) {
+                    return Chosen::Embedded(index);
+                }
+            }
+            if let Some(generic) = family.standard {
+                if ch.is_none_or(standard_covers) {
+                    return Chosen::Standard(Face {
+                        generic,
+                        bold: self.bold,
+                        italic: self.italic,
+                    });
+                }
+            }
+        }
+        // §5.3's last resort. The book's own faces are tried before giving
+        // up, because they are the only faces this reading system has that the
+        // standard 14 are not — a book that ships a CJK face under a family
+        // its `body` rule never mentions still gets its Japanese line drawn.
+        if let Some(ch) = ch {
+            if let Some(index) = (0..self.programs.len()).find(|&index| self.covers(index, ch)) {
+                return Chosen::Embedded(index);
+            }
+        }
+        Chosen::Standard(Face {
+            generic: Generic::Serif,
+            bold: self.bold,
+            italic: self.italic,
+        })
+    }
+}
+
+/// [`choose`] as it walked the family list before [`FamilyPlan`]: each
+/// family's faces looked up and its standard face read at every character.
+/// Kept to hold the plan to (`the_plan_chooses_what_choose_chose`).
+#[cfg(test)]
+pub(crate) fn choose_by_walk(faces: &FaceSet, font: &FontRequest<'_>, ch: Option<char>) -> Chosen {
     let bold = font.weight >= 600;
     let italic = font.style != FontStyle::Normal;
     for family in font.families {
@@ -284,9 +483,10 @@ pub fn face_runs(
     font: &FontRequest<'_>,
     text: &str,
 ) -> Vec<(core::ops::Range<usize>, Chosen)> {
+    let plan = FamilyPlan::new(faces, font);
     let mut out: Vec<(core::ops::Range<usize>, Chosen)> = Vec::new();
     for (at, ch) in text.char_indices() {
-        let chosen = choose(faces, font, Some(ch));
+        let chosen = plan.choose(Some(ch));
         let end = at + ch.len_utf8();
         match out.last_mut() {
             Some((range, last)) if *last == chosen => range.end = end,
@@ -1028,8 +1228,9 @@ impl<'a> Fonts<'a> {
     /// Records every character one run will draw.
     pub fn note(&mut self, run: &TextRun) {
         let font = request(run);
+        let plan = FamilyPlan::new(self.faces, &font);
         for ch in run.text.chars() {
-            match choose(self.faces, &font, Some(ch)) {
+            match plan.choose(Some(ch)) {
                 Chosen::Embedded(index) => {
                     if let Some(slot) = self.used_embedded.get_mut(index) {
                         *slot = true;
@@ -1859,11 +2060,12 @@ impl<'a> Fonts<'a> {
             return (false, false);
         }
         let font = request(run);
+        let plan = FamilyPlan::new(self.faces, &font);
         let unshaped = run
             .text
             .chars()
             .filter(|c| !c.is_whitespace())
-            .any(|c| matches!(choose(self.faces, &font, Some(c)), Chosen::Standard(_)));
+            .any(|c| matches!(plan.choose(Some(c)), Chosen::Standard(_)));
         (kerning && unshaped, features && unshaped)
     }
 
@@ -7723,13 +7925,14 @@ fn plan_coded(
         None
     };
 
+    let plan = FamilyPlan::new(fonts.faces(), &font);
     for (at, &(ch, rides)) in order.iter().enumerate() {
         let mark = rides || bidi_class(ch) == BidiClass::NSM;
         if !mark {
             base = None;
             leading = false;
         }
-        let chosen = choose(fonts.faces(), &font, Some(ch));
+        let chosen = plan.choose(Some(ch));
         let Some(coded) = fonts.encode(chosen, ch) else {
             // No code at all: the character is not drawn. Counted by
             // `Fonts::note` when the run was walked, so the page is short of
