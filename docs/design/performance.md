@@ -4244,3 +4244,274 @@ renders: the rectangle's pixels and one interpretation of the page, held to
 | A patch misses a pixel the edit changed | The rectangle covers each changed annotation's `/Rect` before and after, rounded outward with a pixel of slack; changed content, an unbounded appearance and a reorder render whole; `a_patched_render_is_the_full_render_after_every_annotation_edit` |
 | An image run decided in the tile differs from the page's | The region render reports every run image the canvas does not hold whole, and the patch grows around it |
 | A patch's warnings differ from the full render's | A `previous` with warnings is rendered whole, and a clean page's only warnings after the edit are the changed annotations', inside the rectangle |
+
+## P-25 — Transparency groups and soft masks
+
+*For [ROADMAP](../ROADMAP.md) row P-25.* A transparency group pays for more
+than its buffer. A non-isolated group copies its backdrop out of the canvas
+beneath it and keeps the copy beside its buffer for as long as it is open, a
+knockout group keeps a snapshot of its buffer's starting state beside it too,
+and a luminosity soft mask whose `/BC` is not black is installed as a field
+the size of the canvas rather than of its box. Inside a group's buffer, which
+carries alpha and starts transparent, an opaque Normal paint takes `blend` at
+nearly every pixel, because P-07's opaque path hands every pixel whose
+destination is not yet opaque to `blend`. This section fixes how a
+non-isolated group reads its initial backdrop and a knockout group its initial
+state without those copies, how a soft mask carries the value it reads outside
+its box, what each consumer of a mask does with that value, what the guards
+count as a group-buffer pixel, and which paints into a group buffer take an
+opaque Normal path beyond P-07's.
+
+### Scope
+
+- **Backdrops without a copy** (P-25.3): a non-isolated group reads its
+  initial backdrop, and a knockout group its initial state, from the canvas
+  it will be composited onto.
+- **A soft mask at its box** (P-25.2): a `Mask` that reads a stated value
+  outside its rectangle, every consumer's rule for it, and `to_mask` read
+  row by row in integer.
+- **The counts and the guards** (P-25.2, P-25.3): four renderer counts and
+  the two bounds `crates/tinker-pdf/tests/group_buffers.rs` holds them to.
+- **The opaque Normal path inside groups** (P-25.4): the paints and formats
+  it takes, and why it is `blend` exactly.
+- **The row's close** (P-25.5).
+
+### Non-goals
+
+- **Any change to a pixel.** 11.4.4's adoption, 11.4.5's per-element restore,
+  11.4.7.2's removal and 11.6.5.2's soft masks compute what they compute
+  at the tip; every fingerprint, golden and pinned render holds, on the four
+  targets.
+- **Shape and opacity as two channels.** `knock_out` weights a partially
+  covered pixel between its state and the initial one, the approximation the
+  engine's single alpha carries, and keeps doing so.
+- **A buffer smaller than the group's region.** A group's buffer stays the
+  rectangle `open_group` computes — the clip's overlap with the canvas, or the
+  canvas — and a mask group's stays its `/BBox`'s paint region; bounding a
+  group by what it paints is not this row's.
+- **The mask group's own drawing.** The fixture's mask fills its box with an
+  axial shading, whose per-pixel evaluation is P-14's.
+- **Threads and display lists.** P-15's bands and the admission a display list
+  records with are untouched; a group opens, holds and closes in one
+  renderer.
+
+### Design
+
+#### What a group holds at the tip
+
+`open_group` (`crates/tinker-pdf-render/src/lib.rs`) allocates the group's
+buffer over its region and, for a non-isolated group, `Canvas::extract`s the
+same rectangle of the canvas beneath into a second canvas in the group's
+format, which `adopt_backdrop` composites into the buffer's colour channels and
+then keeps as the buffer's `backdrop`. For a knockout group it then takes
+`snapshot()`, a third canvas of the same size, kept in `GroupFrame::initial`
+and read by every `knock_out`. `close_soft_mask` turns the mask group's buffer
+into a `Mask` the size of its box, and when `/BC` reads as anything but zero
+it allocates `Mask::uniform` over the whole canvas and `overwrite`s the box
+into it, because a `Mask` reads zero outside itself.
+
+What the copy is read for is `blend`'s `initial`, the backdrop's alpha `a0`,
+at every pixel a paint composites (`fill_blended`, `blend_pixel_level`,
+`composite`), and `C0`, the backdrop's colour, once a pixel when
+`remove_backdrop` takes it back out at close. Any scheme without the copy has
+to answer both.
+
+#### The backdrop is the parent
+
+While a group is open its parent canvas sits in `GroupFrame::parent` and
+nothing paints into it: every paint goes to the group's buffer, and a nested
+group's buffer replaces that one in turn. So the bytes the copy holds are the
+parent's own bytes at the same device pixels, and P-25.3 reads them there.
+
+**The parent moves into the group's buffer** for as long as the group is open,
+into the slot the copy occupies at the tip, whatever the group's kind: a move
+of the canvas, never of its pixels. A non-isolated buffer reads it as its
+backdrop; an isolated one holds it and reads nothing from it, which is
+11.4.4's zero `a0`. `close_group` takes it back out before anything else, as
+it restores the parent before compositing at the tip, so a cancelled render
+still hands back the page. `GroupFrame` keeps the rest — where the buffer
+stands, the alpha, the mode, the masks, the frame and the clip depth — and no
+canvas.
+
+The parent is read at device pixels: the buffer's pixel `(col, row)` is device
+pixel `origin + (col, row)`, which is the parent's pixel `that - its origin`.
+A group's region never leaves its parent's canvas — `open_group` intersects
+the clip with that canvas, or takes the canvas — so every read is in range;
+one that were not would read as transparent, as `extract` answers off the
+canvas at the tip.
+
+- **`a0`** is the parent's alpha byte there, or 255 for a format that carries
+  none, in the parent's own format: an alpha needs no conversion, so the read
+  `blend` makes at every composited pixel is one byte, as it is at the tip.
+- **`C0`** is the parent's pixel in the group's format, through `source_from`,
+  the conversion `extract` reads through at the tip: `adopt_backdrop` writes it
+  into the buffer at open and `remove_backdrop` reads it again at close, the
+  same bytes both times.
+
+**A knockout group's initial state is a function, not a snapshot.** The
+snapshot is taken straight after adoption, so it is fully transparent in an
+isolated group and, in a non-isolated one, the parent's colour in the group's
+format at zero alpha — exactly what `adopt_backdrop` wrote. `knock_out` reads
+it that way: every channel zero, or `C0` from the parent with its alpha zero.
+`GroupFrame::initial` becomes a `knockout` flag, which `in_knockout` reads.
+
+Ruling 5 holds by the same fact that makes the copy redundant. A tile's group
+buffer is the group's region clipped to the tile, its parent is the tile's
+canvas, and the tile's canvas holds the page's bytes at every pixel it shares
+with the page; so a tile reads, at every pixel, the backdrop a whole-page
+render reads.
+
+#### A soft mask at its box, and the value outside it
+
+**A `Mask` gains `outside: u8`**, what it reads beyond its rectangle. Every
+clip, every paint's coverage and every mask `to_mask` returns has zero there,
+which is the tip's behaviour exactly — a clip must not change. An installed
+soft mask carries `MaskFrame::outside`, the luminosity of `/BC` through
+`/TR` (zero for `/Alpha` and for the black default), so `close_soft_mask`
+installs the box-sized mask with that value instead of a field the size of
+the canvas, and `Mask::uniform` and the field's `overwrite` leave that path.
+
+Each consumer's rule:
+
+- **`Mask::at`** returns `outside` beyond the rectangle, where it returns zero
+  at the tip.
+- **`overlap_at`**, the rectangle a consumer walks, returns the whole canvas
+  for a mask whose `outside` is not zero, every canvas pixel then carrying
+  coverage; for zero it returns the rectangle clamped to the canvas, as
+  at the tip.
+- **`intersect`** multiplies two masks into one whose `outside` is the product
+  of theirs. Its rectangle is the common one when both outsides are zero (as
+  at the tip), the zero-outside mask's own when one is — the product is zero
+  outside it — and the smallest holding both when neither is.
+  `combined_mask`, a clip times a soft mask, is the first or the second case,
+  and reads zero outside the clip as it does at the tip.
+- **`paint_region`** limits a paint by each mask's rectangle through
+  `Bounds::of_mask`; a mask whose `outside` is not zero limits nothing, which
+  is the limit the canvas-sized field set by covering the canvas.
+- **`soft_bounds`**, the soft mask's rectangle on a whole-page render, stays
+  the frame for a mask whose `outside` is not zero, as it is at the tip when
+  the field is installed, and the box's page rectangle otherwise; so
+  `page_region` and `page_limit`, and the frames groups open in, compute what
+  they compute at the tip.
+- **Every reader of `data` by index reads inside the rectangle.**
+  `fill_opaque` slices mask rows, so a mask whose `outside` is not zero takes
+  `fill_blended`'s per-pixel walk through `at`; `intersect_in_place`'s
+  receiver is always a paint's own coverage, whose `outside` is zero, so the
+  product keeps zero outside it; `harden` touches paint masks only;
+  `knock_out` and `composite` read through `at`.
+
+A tile's soft mask is the box clipped to the tile with the same `outside`,
+and reads at every pixel of the tile what the page's reads there (ruling 5).
+
+**`to_mask` reads rows**, per buffer format, in integer, where it asks
+`Canvas::pixel` for a `Color` at the tip: a grey channel is its own
+luminosity, the weights summing to 1 000; an RGB pixel takes
+`Color::luminosity`'s integer weights directly; an ink pixel goes through
+`cmyk_to_rgb`, which is integer; an alpha mask reads the alpha byte. A `LabA8`
+buffer reaches light only through `lab_to_rgb`'s floats and keeps that read.
+Each format's value is the one `pixel` and `luminosity` give, bit for bit.
+
+#### What the guards count
+
+`RenderCounts` gains four counts, handed back by `finish_counted` and added to
+the operation's `Work` by `add_render`, as `glyphs_shown` is. All four are
+quantities, so `work()` leaves them out.
+
+| Count | One unit is |
+| --- | --- |
+| `group_buffer_pixels` | a pixel of a buffer a transparency group or a soft-mask group allocates for its own pixels while it is open — its canvas, and at the tip the backdrop copy and the knockout snapshot — counted at the allocation as width × height |
+| `group_bound_pixels` | a pixel of a group's region, once a group: the rectangle `open_group` or `open_soft_mask` allocates its canvas over |
+| `soft_mask_pixels` | a pixel of a soft mask `close_soft_mask` installs |
+| `soft_mask_bound_pixels` | a pixel of that mask group's region, once a mask |
+
+The parent a group reads is not a group-buffer pixel: it was allocated before
+the group opened and belongs to the canvas beneath. A pattern cell's canvas, a
+glyph mask and a paint's coverage are not group buffers.
+
+`group_buffers.rs` holds `soft_mask_pixels` to at most 1.1 ×
+`soft_mask_bound_pixels` (P-25.2) and `group_buffer_pixels` to at most 1.1 ×
+`group_bound_pixels` (P-25.3), whole page and in tiles, the bounds then being
+each tile's own regions. At the tip a non-isolated group counts twice its
+region, a knockout one twice, a non-isolated knockout one three times, and a
+pale `/BC` mask the canvas over its box, so each guard fails before its step
+lands and holds after.
+
+#### The opaque Normal path inside groups
+
+At full effective alpha under `Normal`, `blend` writes the source and an alpha
+of 255 whatever the destination holds. The union alpha is 255, Normal's mix is
+the source channel, and the colour comes out `mul255(255 − ab, cs) +
+mul255(ab, cs)` renormalised against 255, which is `cs` for every backdrop
+alpha `ab` and every channel value `cs` — an identity in `mul255`'s rounding,
+held exhaustively by P-25.4's test. A subtractive channel enters Normal
+complemented and leaves it complemented again, so an ink buffer gets the
+source ink.
+
+So **wherever coverage, the colour's alpha and the state's alpha multiply to
+255 under `Normal`, a paint into a group buffer writes the source bytes and
+255**, whatever the buffer's alpha, its backdrop or its format: `GrayA8`,
+`Rgba8`, `CmykA8` — the document's ink, as `fill_mask_inked` passes it — and
+`LabA8`. That reaches past P-07's path three ways: P-07 sends a destination
+that is not opaque to `blend`, and refuses a buffer with a backdrop and an ink
+buffer outright; for a full-alpha pixel P-25.4 takes all three.
+
+The paints it serves:
+
+- **a fill and a glyph mask**: `fill_mask_inked`'s run of full coverage;
+- **an image run and a shading's pixels**: `blend_pixel_level` at level 255
+  over a sample whose alpha is 255;
+- **a nested group's composite**: `composite` where the nested buffer's own
+  alpha, the `Do`'s `ca` and the mask's coverage multiply to 255.
+
+A partially covered pixel keeps the tip's route. In a knockout group the
+restore runs before the paint, as at the tip, and a full-alpha paint replaces
+whatever the restore left, which `blend` does too.
+
+### Milestones
+
+1. **P-25.1: this section.**
+2. **P-25.2: soft masks at their box.** Exit: `group_buffers.rs`
+   `a_soft_mask_is_kept_at_its_box` (new) — the installed soft mask's pixels
+   for the committed transparency fixture's luminosity mask (`/BC [0.2]`) at
+   150 dpi, whole page and in four tiles, at most 1.1 × its `/BBox` clipped to
+   the region; `fill.rs` `every_mask_consumer_reads_the_outside_value` (new),
+   each rule above against a canvas-sized field holding the same values;
+   `canvas.rs` `to_mask_reads_every_format_as_pixel_does` (new), exhaustive
+   over each format's bytes; `soft_mask_clips.rs`, `transparency_groups.rs`,
+   `render_regions.rs`'s transparency tiles, the `transparency.ppm` golden and
+   the `transparency` fingerprint unchanged on the four targets.
+3. **P-25.3: group backdrops at their clipped bounds, once.** Exit:
+   `group_buffers.rs` `group_buffers_hold_their_clipped_bounds_once` (new) —
+   over the transparency fixture and generated pages (a non-isolated group
+   under a blend mode, an isolated and a non-isolated knockout group, groups
+   nested three deep, a page group), whole and in tiles, group-buffer pixels at
+   most 1.1 × the groups' clipped bounds; `tinker-pdf-render`'s
+   `a_group_left_open_hands_back_the_page` (new), a cancelled render and a
+   renderer finished inside a non-isolated and an isolated group each
+   handing back the page with its pixels; `blend_modes.rs`,
+   `transparency_groups.rs`, `render_regions.rs`, the goldens and every
+   fingerprint unchanged on the four targets.
+4. **P-25.4: the opaque Normal path inside groups.** Exit: `canvas.rs`
+   `the_opaque_normal_path_is_blend_in_every_group_format` (new) — over every
+   source and destination channel value against a lattice of own and backdrop
+   alphas, what the path writes is what `blend` writes, for `GrayA8`, `Rgba8`,
+   `CmykA8` and `LabA8`; `an_opaque_paint_inside_a_group_skips_blend` (new),
+   no `blend` call for an opaque Normal paint inside an isolated, a
+   non-isolated and a knockout group; every group and blend test, golden and
+   fingerprint unchanged on the four targets.
+5. **P-25.5: the row's close** in MS-02's paired run: the transparency fixture
+   at 150 dpi, its floor raised to 2.8× against the planning baseline once
+   P-14 has landed; `group_buffers.rs`'s guards green on linux and windows in
+   CI's tests and on `wasm32-wasip1` locally; the `transparency`, `blend` and
+   `analytic_blend` fingerprints holding on the four targets.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The parent, moved into a group, is not handed back — a cancelled render, a group left open at `finish` | Taking it back is `close_group`'s first act, before compositing, as restoring is at the tip, and `finish` closes every group left open through it; `a_group_left_open_hands_back_the_page` and the renderer's cancellation tests |
+| A read from the parent is not the byte the copy held | Both go through `source_from` from the same pixels, and nothing can paint into a parent a group owns; P-25.3's suites, goldens and fingerprints on four targets |
+| A mask consumer reads `data` past the rectangle and takes the outside for zero, masking a pale-`/BC` page beyond the box | Every consumer is named above with its rule; `every_mask_consumer_reads_the_outside_value`, `soft_mask_clips.rs` and the renderer's pale-backdrop mask off the page's edge |
+| The fast path rounds apart from `blend` | The identity is exhaustive in `mul255`, and `the_opaque_normal_path_is_blend_in_every_group_format` compares every channel and alpha lattice point per format |
+| A group in a space other than its parent's converts `C0` at open and again at close, where the copy converted once | The common group shares its parent's format, where the conversion is a copy; `a0`, read at every pixel, needs none; P-25.5's paired run times the fixture's DeviceRGB group |
+| A count changes what a render does | The counts are additions beside allocations, read only by the door; `stats.rs`'s `stats_do_not_change_a_pixel`, pages and tiles |
