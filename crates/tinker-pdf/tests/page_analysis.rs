@@ -11,7 +11,7 @@ mod render_support;
 
 use tinker_pdf::{
     Bitmap, Document, GreyThresholds, Greyness, Overprint, PageAnalysis, Parallelism, PixelFormat,
-    PixelRegion, RenderOptions,
+    PixelRegion, RenderOptions, Usage,
 };
 
 // ---- building pages -------------------------------------------------------------
@@ -1057,4 +1057,54 @@ fn the_statistics_count_what_the_render_drew() {
     }
     // Not asked, nothing counted.
     assert_eq!(opened.render(&RenderOptions::default()).stats, None);
+}
+
+// ---- the usage ------------------------------------------------------------------------
+
+/// **The answers follow the usage the options name**: a group on in the
+/// default configuration and off in print, under an `/AS` entry for print,
+/// holds one of two squares, so the box is both squares for no usage and for
+/// view, and the square outside the group alone for print — from the page,
+/// from a list recorded for no usage and from one recorded for print, each
+/// answering another usage's options as that usage's own list does.
+#[test]
+fn the_answers_follow_the_usage_the_options_name() {
+    let page = Page {
+        catalog: "/OCProperties << /OCGs [5 0 R] /D << /ON [5 0 R] \
+                  /AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>] >> >>",
+        resources: "/Properties << /P 5 0 R >>",
+        content: "/OC /P BDC 1 0 0 rg 10 10 20 20 re f EMC 0 0 1 rg 50 10 20 20 re f",
+        extra: vec![object(
+            "<< /Type /OCG /Name (Screen only) /Usage << /Print << /PrintState /OFF >> >> >>",
+        )],
+        ..Page::default()
+    };
+    let document = Document::open(page.bytes()).expect("the page opens");
+    let opened = document.page(0).expect("its page");
+    let for_none = opened.display_list();
+    let for_print = opened.display_list_for(Some(Usage::Print));
+    let points = |analysis: PageAnalysis| analysis.marks.map(|marks| marks.points);
+    let both = Some((10.0, 10.0, 70.0, 30.0));
+    let outside = Some((50.0, 10.0, 70.0, 30.0));
+    for (what, usage, want) in [
+        ("no usage", None, both),
+        ("view", Some(Usage::View), both),
+        ("print", Some(Usage::Print), outside),
+    ] {
+        let options = RenderOptions {
+            usage,
+            ..RenderOptions::default()
+        };
+        assert_eq!(points(opened.analysis(&options)), want, "the page, {what}");
+        assert_eq!(
+            points(for_none.analysis(&options)),
+            want,
+            "a list for no usage, {what}"
+        );
+        assert_eq!(
+            points(for_print.analysis(&options)),
+            want,
+            "a list for print, {what}"
+        );
+    }
 }

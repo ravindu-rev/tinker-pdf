@@ -50,8 +50,9 @@ row RC-17, and names the test that holds each.
 `Page::analysis(&RenderOptions) -> PageAnalysis` and
 `DisplayList::analysis(&RenderOptions) -> PageAnalysis` answer the box, the
 transparency and the overprint questions. A page's analysis is its display
-list's: `Page::analysis` records the page once through `Page::display_list`
-and runs one analysis device over the recorded events
+list's: `Page::analysis` records the page once through
+`Page::display_list_for` the usage the options name and runs one analysis
+device over the recorded events
 (`tinker_pdf_content::replay`) with the list's resources, so the two doors
 give one answer by construction. A list that is not retained — a page past
 `MAX_DISPLAY_LIST_BYTES` — interprets the page into the same device instead,
@@ -59,9 +60,12 @@ its annotations drawn through it as `Page::render` draws them through the
 renderer (`annots::draw` takes any device that resolves names in a scope it is
 handed).
 
-Of the options, two are read, both because a render reads them: `annotations`,
+Of the options, three are read, all because a render reads them: `usage`,
+whose optional-content states decide what is hidden — a list asked with
+another usage's options answers with the page's list for that usage, as
+`DisplayList::render` draws another usage the direct way; `annotations`,
 which decides whether the page's annotation appearances are part of what it
-draws, and `scale`, which with `Page::scales`' clamp decides the pixel box. The
+draws; and `scale`, which with `Page::scales`' clamp decides the pixel box. The
 rest — the format, the region, anti-aliasing, a transparent canvas — change no
 answer. No pixel is touched, so the three answers cost an interpretation and a
 walk of its events.

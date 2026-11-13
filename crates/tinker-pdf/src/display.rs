@@ -520,6 +520,10 @@ impl DisplayList {
     /// interpreter's questions as the renderer does, so it walks the brackets
     /// a render walks. A list that is not retained ([`DisplayList::is_retained`])
     /// interprets the page into the same device instead, and answers alike.
+    /// Options naming a usage other than the list's ([`DisplayList::usage`])
+    /// are answered by the page's list for that usage, whose
+    /// optional-content states hide what that usage hides, as
+    /// [`DisplayList::render`] draws them the direct way.
     #[must_use]
     pub fn analysis(&self, options: &RenderOptions) -> crate::PageAnalysis {
         crate::analysis::analyse(self, options)

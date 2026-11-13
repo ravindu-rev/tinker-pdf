@@ -1166,8 +1166,10 @@ page's analysis is its display list's, the list's events replayed into one
 analysis device (`analysis.rs`) that paints nothing and answers the
 interpreter's questions through the renderer's own `Admission`, and a list
 that is not retained interprets the page into the same device, its
-annotations drawn through it. Of the options, `annotations` decides whether
-the appearances are part of the page and `scale`, with the clamp
+annotations drawn through it. Of the options, `usage` decides what optional
+content hides, a list answering options of another usage by the page's list
+for that usage as its render draws them the direct way; `annotations` decides
+whether the appearances are part of the page; and `scale`, with the clamp
 `Page::pixel_size` applies, the box in pixels; nothing else is read.
 **`marks`** is the bounding box of every mark a render paints — a fill's path
 by its exact bounds, a stroke's outline as the renderer's stroker writes it

@@ -125,24 +125,36 @@ impl Page {
     /// (`docs/design/page-analysis.md`): the bounding box of its marks,
     /// whether it uses transparency and which of its paints overprint.
     ///
-    /// The analysis of the page's display list ([`DisplayList::analysis`]),
-    /// which this records and drops: a caller who also renders the page asks
-    /// the list it renders from instead, and pays for one interpretation.
+    /// The analysis of the page's display list for the usage `options`
+    /// names ([`Page::display_list_for`], [`DisplayList::analysis`]), which
+    /// this records and drops: a caller who also renders the page asks the
+    /// list it renders from instead, and pays for one interpretation.
     ///
-    /// Two of `options` are read, because a render reads them: `annotations`,
-    /// whether the page's annotation appearances are part of what it draws,
+    /// Three of `options` are read, because a render reads them: `usage`,
+    /// whose optional-content states decide what is hidden; `annotations`,
+    /// whether the page's annotation appearances are part of what it draws;
     /// and `scale`, with the clamp [`Page::pixel_size`] applies, for the box
     /// in pixels. The region, the format and the rest change no answer.
     #[must_use]
     pub fn analysis(&self, options: &RenderOptions) -> PageAnalysis {
-        self.display_list().analysis(options)
+        self.display_list_for(options.usage).analysis(options)
     }
 }
 
 /// [`DisplayList::analysis`]: the list's events replayed into one
 /// [`Analyser`], or, for a list that is not retained, the page interpreted
 /// into it, its annotations drawn through it as a render draws them.
+///
+/// A list carries the optional-content states of the usage it was recorded
+/// for, so another usage is answered by the page's list for that usage, as a
+/// render of another usage is drawn the direct way.
 pub(crate) fn analyse(list: &DisplayList, options: &RenderOptions) -> PageAnalysis {
+    if options.usage != list.usage() {
+        return list
+            .page()
+            .display_list_for(options.usage)
+            .analysis(options);
+    }
     let page = list.page();
     let resources = list.resources();
     let mut analyser = Analyser::new(resources, page.crop_box());
