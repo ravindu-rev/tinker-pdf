@@ -87,8 +87,9 @@ pub struct Consumed {
     /// line breaks at it.
     pub hyphens: Hyphens,
     /// The element's content language (`selectors-4` §6.5.1), carried by
-    /// every piece of an inline formatting context [`crate::flow`] lays out.
-    /// One shared tag, eight bytes here.
+    /// every piece of an inline formatting context [`crate::flow`] lays out:
+    /// what finds a word's hyphenation table under `hyphens: auto`
+    /// ([`crate::hyphenate::dictionary`]). One shared tag, eight bytes here.
     pub language: Option<Language>,
     /// `color`.
     pub color: Color,

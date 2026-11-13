@@ -233,7 +233,17 @@ Portuguese and Slovak, every one of the published collection whose licence
 the allowlist admits and which publishes hyphenated words
 (`THIRDPARTY.md`) — each found by a content language through RFC 4647's
 lookup (`hyphenate::dictionary`), so `en-GB-oxendict` finds British English
-and `en-US` nothing.
+and `en-US` nothing. The layout API sets `Hyphens::Auto` on a style itself,
+and layout honours it: the words of the pieces of an inline formatting
+context set in `auto` whose language has a table — found across inline
+boxes, each looked up once for the context and its letters charged to the
+break budget — gain their points as break opportunities, a word holding a
+soft hyphen excepted (§5.3), and a point is kept where the character before it
+is in a piece of the word's own table and UAX #14 has no break of its own. A
+line that breaks at one is measured with its hyphen and flagged
+`TextRun::hyphenated`, by the one test that decides a soft hyphen's
+(`flow::ends_in_hyphen`), so `paint::hyphenate` draws both alike. Without a
+table `auto` breaks as `manual`.
 
 **`direction` and `unicode-bidi`** (`css-writing-modes-3` §2) decide the
 line, not each line's first letter: every run carries its block's direction

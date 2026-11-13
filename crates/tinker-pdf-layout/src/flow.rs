@@ -73,12 +73,14 @@ use tinker_pdf_css::property::{
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
+use crate::hyphenate::{self, Dictionary};
 use crate::limits::MAX_EMBEDDING_DEPTH;
 use crate::metrics::{FirstStrong, FontRequest, Metrics, Neighbour, ShapingContext, CONTEXT_BYTES};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
 use crate::uax14;
+use crate::unicode;
 use crate::{
     BoxNode, Budget, Content, Embedding, EmbeddingKind, Intrinsic, Limits, Options, Refusal,
     TextRun, Warning,
@@ -4727,12 +4729,23 @@ impl<M: Metrics> Builder<'_, M> {
         }
         self.budget.spend_breaks(content.chars().count())?;
         let mut opportunities = uax14::opportunities(&content, container.tailoring);
-        // `css-text-3` §5.4: under `hyphens: none` a soft hyphen is no place
+        // `css-text-3` §5.3: under `hyphens: none` a soft hyphen is no place
         // to break a word, though UAX #14 makes it one (class `BA`).
         opportunities.retain(|opportunity| {
             soft_hyphen_before(&content, opportunity.at).is_none()
-                || hyphen_shown(&content, &spans, pieces, opportunity.at)
+                || ends_in_hyphen(&content, &spans, pieces, &[], opportunity.at)
         });
+        // §5.3's `auto`: the words of the pieces set in it whose language has
+        // a table, each looked up once for this context, their points joining
+        // the opportunities as breaks that end a line in a hyphen.
+        let automatic = self.automatic_points(&content, &spans, pieces, &opportunities)?;
+        if !automatic.is_empty() {
+            opportunities.extend(automatic.iter().map(|&at| uax14::Opportunity {
+                at,
+                mandatory: false,
+            }));
+            opportunities.sort_by_key(|opportunity| opportunity.at);
+        }
 
         let indent = match container.text_indent {
             LengthPercentage::Px(px) => px,
@@ -4799,6 +4812,7 @@ impl<M: Metrics> Builder<'_, M> {
                 &spans,
                 pieces,
                 &opportunities[cursor..],
+                &automatic,
                 start,
                 available,
             );
@@ -4811,12 +4825,14 @@ impl<M: Metrics> Builder<'_, M> {
             // wrong until somebody counted.
             let justify =
                 container.text_align == TextAlign::Justify && !hard && end < content.len();
-            // §5.4: a line that breaks at a soft hyphen ends in a hyphen. The
-            // end of the text is not a break at one, and nor is a break
-            // inside a word (`overflow-wrap`) that lands after a soft hyphen
-            // `hyphens: none` holds: under `none` it is never a hyphen.
-            let hyphenated =
-                !hard && end < content.len() && hyphen_shown(&content, &spans, pieces, end);
+            // §5.3: a line that breaks at a soft hyphen or at an automatic
+            // point ends in a hyphen. The end of the text is not a break at
+            // one, and nor is a break inside a word (`overflow-wrap`) that
+            // lands after a soft hyphen `hyphens: none` holds: under `none` it
+            // is never a hyphen.
+            let hyphenated = !hard
+                && end < content.len()
+                && ends_in_hyphen(&content, &spans, pieces, &automatic, end);
             self.line(
                 &content,
                 &spans,
@@ -4986,6 +5002,86 @@ impl<M: Metrics> Builder<'_, M> {
         ))
     }
 
+    /// `hyphens: auto`'s points over one context's text (`css-text-3` §5.3,
+    /// `docs/design/hyphenation.md`), in order.
+    ///
+    /// A piece is asked about where it is set in `auto`, holds text that
+    /// wraps, and has a content language a table is found for; its table is
+    /// found once for the context. Each word ([`words`]) is looked up once,
+    /// its letters charged to the break budget beside the characters UAX #14
+    /// was charged for. A point is kept where the character before it is in a
+    /// piece of the word's own table — a word that runs on into a piece in
+    /// another setting breaks only in the first — and where UAX #14 has no
+    /// opportunity of its own, which stays a break that draws no hyphen.
+    fn automatic_points(
+        &mut self,
+        content: &str,
+        spans: &[(usize, usize, usize)],
+        pieces: &[Piece],
+        opportunities: &[uax14::Opportunity],
+    ) -> Result<Vec<usize>, Refusal> {
+        if !pieces
+            .iter()
+            .any(|piece| piece.style.hyphens == Hyphens::Auto)
+        {
+            return Ok(Vec::new());
+        }
+        let tables: Vec<Option<&'static Dictionary>> = pieces
+            .iter()
+            .map(|piece| {
+                let asked = piece.style.hyphens == Hyphens::Auto
+                    && piece.atomic.is_none()
+                    && text::wraps(piece.style.white_space);
+                if !asked {
+                    return None;
+                }
+                piece
+                    .style
+                    .language
+                    .as_ref()
+                    .and_then(|language| hyphenate::dictionary(language.as_str()))
+            })
+            .collect();
+        if tables.iter().all(Option::is_none) {
+            return Ok(Vec::new());
+        }
+        let words = words(content, spans, &tables);
+        let letters: usize = words
+            .iter()
+            .map(|&(start, end, _)| {
+                content
+                    .get(start..end)
+                    .map_or(0, |word| word.chars().count())
+            })
+            .sum();
+        self.budget.spend_breaks(letters)?;
+        let mut points = Vec::new();
+        let mut found = Vec::new();
+        for (start, end, table) in words {
+            let Some(word) = content.get(start..end) else {
+                continue;
+            };
+            found.clear();
+            table.points(word, &mut found);
+            for &offset in &found {
+                let at = start + offset;
+                let own = content
+                    .get(..at)
+                    .and_then(|before| before.chars().next_back())
+                    .and_then(|last| piece_at(spans, at - last.len_utf8()))
+                    .and_then(|piece| tables.get(piece).copied().flatten())
+                    .is_some_and(|before| std::ptr::eq(before, table));
+                let taken = opportunities
+                    .binary_search_by_key(&at, |opportunity| opportunity.at)
+                    .is_ok();
+                if own && !taken {
+                    points.push(at);
+                }
+            }
+        }
+        Ok(points)
+    }
+
     /// Where the next line ends: the last break opportunity that fits, or the
     /// first one if none does.
     ///
@@ -5000,12 +5096,14 @@ impl<M: Metrics> Builder<'_, M> {
     /// the first iteration and sets every paragraph as one line — which is a
     /// book with no line breaking at all, and every English fixture that
     /// happens to be shorter than a line still passes.
+    #[allow(clippy::too_many_arguments)]
     fn fit(
         &mut self,
         content: &str,
         spans: &[(usize, usize, usize)],
         pieces: &[Piece],
         opportunities: &[uax14::Opportunity],
+        automatic: &[usize],
         start: usize,
         available: f64,
     ) -> (usize, bool) {
@@ -5020,12 +5118,12 @@ impl<M: Metrics> Builder<'_, M> {
             width += self.measure(content, spans, pieces, cursor, opportunity.at, start);
             cursor = opportunity.at;
             let trailing = self.trailing(content, spans, pieces, start, opportunity.at);
-            // A break at a soft hyphen sets a hyphen at the line's end, and
-            // the line has to have room for it (§5.4).
+            // A break at a soft hyphen or an automatic point sets a hyphen at
+            // the line's end, and the line has to have room for it (§5.3).
             let hyphen = if hard || opportunity.at >= content.len() {
                 0.0
             } else {
-                self.hyphen_width(content, spans, pieces, opportunity.at)
+                self.hyphen_width(content, spans, pieces, automatic, opportunity.at)
             };
             if width - trailing + hyphen <= available {
                 if hard {
@@ -5103,20 +5201,27 @@ impl<M: Metrics> Builder<'_, M> {
         piece_at(spans, at).map_or(OverflowWrap::Normal, |p| pieces[p].style.overflow_wrap)
     }
 
-    /// The width of the hyphen a line breaking at byte `at` would end in: the
-    /// advance of a hyphen in the style of the soft hyphen just before it,
-    /// with its `letter-spacing`, or nothing where there is no soft hyphen
-    /// there (§5.4).
+    /// The width of the hyphen a line breaking at byte `at` would end in, or
+    /// nothing where it would end in none ([`ends_in_hyphen`], §5.3): the
+    /// advance of a hyphen in the style of the character just before the
+    /// break — the soft hyphen, where it is one — with its `letter-spacing`.
     fn hyphen_width(
         &self,
         content: &str,
         spans: &[(usize, usize, usize)],
         pieces: &[Piece],
+        automatic: &[usize],
         at: usize,
     ) -> f64 {
-        let Some(style) = soft_hyphen_before(content, at)
-            .and_then(|shy| piece_at(spans, shy))
-            .map(|piece| &pieces[piece].style)
+        if !ends_in_hyphen(content, spans, pieces, automatic, at) {
+            return 0.0;
+        }
+        let Some(style) = content
+            .get(..at)
+            .and_then(|before| before.chars().next_back())
+            .and_then(|last| piece_at(spans, at - last.len_utf8()))
+            .and_then(|piece| pieces.get(piece))
+            .map(|piece| &piece.style)
         else {
             return 0.0;
         };
@@ -5440,8 +5545,11 @@ impl<M: Metrics> Builder<'_, M> {
             // line, both ends of which are known now.
             let context = context_of(content, spans, pieces, span_at, lo..hi, start..end);
             // The run that ends a hyphenated line is measured with the hyphen
-            // set after it, in its context, as the painter draws it.
-            let ends_hyphenated = hyphenated && hi == end && text.ends_with(SOFT_HYPHEN);
+            // set after it, in its context, as the painter draws it. Which
+            // lines end in one is [`ends_in_hyphen`]'s to say, a soft
+            // hyphen's break or an automatic point's alike, and the run that
+            // ends there holds the character before the break.
+            let ends_hyphenated = hyphenated && hi == end;
             let measured = if ends_hyphenated {
                 let mut drawn = text.clone();
                 drawn.push(HYPHEN);
@@ -6744,20 +6852,26 @@ fn soft_hyphen_before(content: &str, at: usize) -> Option<usize> {
         .map(|_| at - SOFT_HYPHEN.len_utf8())
 }
 
-/// Whether a line that ends at byte `at` ends in a hyphen: it ends just
-/// after a soft hyphen whose element's `hyphens` is not `none`
-/// (`css-text-3` §5.4).
+/// Whether a line that ends at byte `at` ends in a hyphen (`css-text-3`
+/// §5.3): it ends just after a soft hyphen whose element's `hyphens` is not
+/// `none`, or at a point `hyphens: auto` found (`automatic`, sorted).
 ///
-/// The one test both halves ask — which soft hyphens are break
-/// opportunities, and which line ends show a hyphen — so that a break that
-/// reaches a soft hyphen another way, `overflow-wrap`'s break inside a word,
-/// cannot show one `none` forbids (review of lane 8C).
-fn hyphen_shown(
+/// The one test every question about a line-end hyphen asks — which soft
+/// hyphens are break opportunities, which breaks reserve a hyphen's width,
+/// which line ends draw one — so that a break that reaches a soft hyphen
+/// another way, `overflow-wrap`'s break inside a word, cannot show one `none`
+/// forbids (review of lane 8C), and a soft hyphen's break and an automatic
+/// point are one path from here on.
+fn ends_in_hyphen(
     content: &str,
     spans: &[(usize, usize, usize)],
     pieces: &[Piece],
+    automatic: &[usize],
     at: usize,
 ) -> bool {
+    if automatic.binary_search(&at).is_ok() {
+        return true;
+    }
     soft_hyphen_before(content, at).is_some_and(|shy| {
         piece_at(spans, shy).is_none_or(|p| {
             pieces
@@ -6765,6 +6879,70 @@ fn hyphen_shown(
                 .is_none_or(|piece| piece.style.hyphens != Hyphens::None)
         })
     })
+}
+
+/// A word `hyphens: auto` asks a table about: its byte range in the
+/// context's text, and the table.
+type Word = (usize, usize, &'static Dictionary);
+
+/// The words of a context's text that a table is asked about
+/// (`docs/design/hyphenation.md`), given each piece's table.
+///
+/// A word starts at a character of a piece that has a table and runs while
+/// its characters are that table's letters, or letters, numbers or combining
+/// marks of any alphabet, or soft hyphens — across inline boxes, which §5.3
+/// says do not bound a word. The first other character ends it. A word that
+/// holds a soft hyphen is left out: §5.3 sets such a word at its soft hyphens
+/// alone.
+fn words(
+    content: &str,
+    spans: &[(usize, usize, usize)],
+    tables: &[Option<&'static Dictionary>],
+) -> Vec<Word> {
+    let mut out = Vec::new();
+    // The word open so far: where it starts, its table, and whether it holds
+    // a soft hyphen.
+    let mut open: Option<(usize, &'static Dictionary, bool)> = None;
+    // The spans are in order and disjoint, so the piece of each character in
+    // turn is found by moving forward.
+    let mut cursor = 0usize;
+    for (at, c) in content.char_indices() {
+        if let Some((start, table, softly)) = open {
+            if c == SOFT_HYPHEN {
+                open = Some((start, table, true));
+                continue;
+            }
+            if table.knows(c) || word_character(c) {
+                continue;
+            }
+            if !softly {
+                out.push((start, at, table));
+            }
+            open = None;
+        }
+        while spans.get(cursor).is_some_and(|&(_, end, _)| end <= at) {
+            cursor += 1;
+        }
+        let table = spans
+            .get(cursor)
+            .filter(|&&(start, _, _)| start <= at)
+            .and_then(|&(_, _, piece)| tables.get(piece).copied().flatten());
+        if let Some(table) = table {
+            if table.knows(c) || word_character(c) {
+                open = Some((at, table, false));
+            }
+        }
+    }
+    if let Some((start, table, false)) = open {
+        out.push((start, content.len(), table));
+    }
+    out
+}
+
+/// A character of a word whatever its alphabet: General_Category L or N, or
+/// a combining mark.
+fn word_character(c: char) -> bool {
+    unicode::is_letter_or_number(c) || unicode::is_combining(c)
 }
 
 /// The level an inline box opens round its content, from its `unicode-bidi`

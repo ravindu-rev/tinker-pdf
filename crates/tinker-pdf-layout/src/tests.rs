@@ -1248,6 +1248,268 @@ fn an_emergency_break_after_a_soft_hyphen_under_none_shows_no_hyphen() {
     );
 }
 
+// ---- css-text-3 section 5.3, hyphens: auto ------------------------------------
+//
+// The words below are the vendored dictionaries' own published words — British
+// English's `uni-ver-sity` and `how-ever`, Dutch's `aan-dachts-trek-ker` — so
+// every point a test expects is the dictionary author's, never this crate's
+// answer recorded.
+
+/// Text in `language`, set in `hyphens`, at the ten-point base.
+fn speaking(language: &str, hyphens: Hyphens) -> ComputedStyle {
+    let mut style = base();
+    style.language = tinker_pdf_css::cascade::Language::new(language);
+    style.hyphens = hyphens;
+    style
+}
+
+/// One paragraph of `children` at `width`: each run's text, width and
+/// whether its line ends in a hyphen.
+fn hyphen_lines(children: Vec<BoxNode>, width: f64) -> Vec<(String, f64, bool)> {
+    let laid = run(&BoxNode::element(block(), children), width, 400.0);
+    laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.width, run.hyphenated))
+        .collect()
+}
+
+fn line(text: &str, width: f64, hyphenated: bool) -> (String, f64, bool) {
+    (text.to_owned(), width, hyphenated)
+}
+
+/// **`hyphens: auto` breaks a word at the last of its dictionary's points
+/// that fits, and its line is measured with the hyphen** (`css-text-3`
+/// §5.3).
+///
+/// `university` is ten ten-point letters and its points are `uni-ver-sity`.
+/// At seventy-five points `univer` and its hyphen are seventy, which fits, and
+/// the whole word does not; at forty-five only `uni` and its hyphen do, then
+/// `ver` and its. A capital is the dictionary's letter folded: Dutch's
+/// `Aandachtstrekker` breaks where `aan-dachts-trek-ker` says, after the
+/// ninth letter at a hundred and five.
+#[cfg(feature = "hyphenation")]
+#[test]
+fn hyphens_auto_breaks_a_word_at_its_dictionarys_points() {
+    let british = || {
+        vec![BoxNode::text(
+            speaking("en-GB", Hyphens::Auto),
+            "university",
+        )]
+    };
+    assert_eq!(
+        hyphen_lines(british(), 75.0),
+        vec![line("univer", 70.0, true), line("sity", 40.0, false)]
+    );
+    assert_eq!(
+        hyphen_lines(british(), 45.0),
+        vec![
+            line("uni", 40.0, true),
+            line("ver", 40.0, true),
+            line("sity", 40.0, false),
+        ]
+    );
+    let dutch = vec![BoxNode::text(
+        speaking("nl-BE", Hyphens::Auto),
+        "Aandachtstrekker",
+    )];
+    assert_eq!(
+        hyphen_lines(dutch, 105.0),
+        vec![line("Aandachts", 100.0, true), line("trekker", 70.0, false)]
+    );
+}
+
+/// **`hyphens: auto` in a language this build has no table for breaks as
+/// `manual` does** (§5.3: *"the UA must therefore only automatically
+/// hyphenate text for which the content language is known and for which it
+/// has an appropriate hyphenation resource"*): a soft hyphen is still a
+/// break that draws a hyphen, and a word without one overflows whole — for
+/// a language with no dictionary, for American English, whose patterns are
+/// not vendored, and for text with no language at all. In every build.
+#[test]
+fn hyphens_auto_in_a_language_without_a_table_breaks_as_manual() {
+    let manual = |body: &str, width: f64| {
+        hyphen_lines(
+            vec![BoxNode::text(speaking("en-GB", Hyphens::Manual), body)],
+            width,
+        )
+    };
+    for language in ["xx", "en-US", ""] {
+        let auto = |body: &str, width: f64| {
+            hyphen_lines(
+                vec![BoxNode::text(speaking(language, Hyphens::Auto), body)],
+                width,
+            )
+        };
+        assert_eq!(
+            auto("aaa bbbb\u{AD}cc", 90.0),
+            vec![line("aaa bbbb\u{AD}", 90.0, true), line("cc", 20.0, false)],
+            "{language:?}"
+        );
+        assert_eq!(
+            auto("aaa bbbb\u{AD}cc", 90.0),
+            manual("aaa bbbb\u{AD}cc", 90.0)
+        );
+        assert_eq!(
+            auto("university", 75.0),
+            vec![line("university", 100.0, false)],
+            "{language:?}: no table, no point"
+        );
+    }
+}
+
+/// **`manual` and `none` take no automatic point**, though the language has
+/// a table: `university` overflows its line whole under both.
+#[cfg(feature = "hyphenation")]
+#[test]
+fn manual_and_none_take_no_automatic_point() {
+    for hyphens in [Hyphens::Manual, Hyphens::None] {
+        assert_eq!(
+            hyphen_lines(
+                vec![BoxNode::text(speaking("en-GB", hyphens), "university")],
+                75.0
+            ),
+            vec![line("university", 100.0, false)],
+            "{hyphens:?}"
+        );
+    }
+}
+
+/// **A word that holds a soft hyphen takes no automatic point** (§5.3:
+/// *"automatic hyphenation opportunities elsewhere within a word must be
+/// ignored if the word contains a conditional hyphen"*): `uni&#173;versity`
+/// at seventy-five breaks at its soft hyphen, `uni` and a hyphen, and not at
+/// the dictionary's `univer`, which fits; the next word, which holds none,
+/// takes its points.
+#[cfg(feature = "hyphenation")]
+#[test]
+fn a_word_holding_a_soft_hyphen_takes_no_automatic_point() {
+    assert_eq!(
+        hyphen_lines(
+            vec![BoxNode::text(
+                speaking("en-GB", Hyphens::Auto),
+                "uni\u{AD}versity university"
+            )],
+            75.0
+        ),
+        vec![
+            line("uni\u{AD}", 40.0, true),
+            line("versity", 70.0, false),
+            line("univer", 70.0, true),
+            line("sity", 40.0, false),
+        ]
+    );
+}
+
+/// **A point is kept only where the character before it is in a piece set
+/// in `auto` with the word's table** — a word is found across inline boxes
+/// (§5.3), and broken only where its own setting allows: `uni` in British
+/// English under `auto` and `versity` under `manual` break after `uni` and
+/// not after `univer`.
+#[cfg(feature = "hyphenation")]
+#[test]
+fn a_point_is_kept_only_where_its_piece_is_set_in_auto() {
+    assert_eq!(
+        hyphen_lines(
+            vec![
+                BoxNode::text(speaking("en-GB", Hyphens::Auto), "uni"),
+                BoxNode::text(speaking("en-GB", Hyphens::Manual), "versity"),
+            ],
+            75.0
+        ),
+        vec![line("uni", 40.0, true), line("versity", 70.0, false)]
+    );
+    // And the whole word in `auto` across the same two boxes breaks as one.
+    assert_eq!(
+        hyphen_lines(
+            vec![
+                BoxNode::text(speaking("en-GB", Hyphens::Auto), "uni"),
+                BoxNode::text(speaking("en-GB", Hyphens::Auto), "versity"),
+            ],
+            75.0
+        ),
+        vec![
+            line("uni", 30.0, false),
+            line("ver", 40.0, true),
+            line("sity", 40.0, false),
+        ]
+    );
+}
+
+/// **Each word is looked up once for its context**, however many lines the
+/// paragraph takes and however many opportunities are tried, its letters
+/// charged to the break budget once beside the characters; text that does
+/// not wrap, or is not in `auto`, is not looked up at all.
+#[cfg(feature = "hyphenation")]
+#[test]
+fn each_word_is_looked_up_once_a_context() {
+    use crate::hyphenate::LOOKUPS;
+    let body = "university university however";
+    let spent = |style: ComputedStyle| {
+        let tree = BoxNode::element(block(), vec![BoxNode::text(style, body)]);
+        let mut budget = Budget::new(&Limits::DEFAULT);
+        LOOKUPS.with(|n| n.set(0));
+        layout_with(
+            &tree,
+            &METRICS,
+            &Options::new(45.0, 400.0),
+            &Limits::DEFAULT,
+            &mut budget,
+        )
+        .expect("under every cap");
+        (LOOKUPS.with(std::cell::Cell::get), budget.breaks())
+    };
+    let (looked_up, auto) = spent(speaking("en-GB", Hyphens::Auto));
+    assert_eq!(looked_up, 3, "three words, each once");
+    let (none, manual) = spent(speaking("en-GB", Hyphens::Manual));
+    assert_eq!(none, 0);
+    assert_eq!(
+        auto - manual,
+        10 + 10 + 7,
+        "each word's letters charged once"
+    );
+    let mut unwrapped = speaking("en-GB", Hyphens::Auto);
+    unwrapped.white_space = WhiteSpace::NoWrap;
+    assert_eq!(
+        spent(unwrapped).0,
+        0,
+        "a line that does not wrap asks nothing"
+    );
+}
+
+/// **A shrink-to-fit box breaks its words at their points** — `university`
+/// in an `inline-block` with no width, inside seventy-five points, is
+/// `univer` and its hyphen over `sity` — since the content sizes a box is
+/// measured at go through the same line filler, its points included.
+#[cfg(feature = "hyphenation")]
+#[test]
+fn hyphenation_reaches_a_shrink_to_fit_box() {
+    let mut boxed = block();
+    boxed.display = Display::InlineBlock;
+    let mut container = block();
+    container.width = Size::Length(LengthPercentage::Px(75.0));
+    let tree = BoxNode::element(
+        container,
+        vec![BoxNode::element(
+            boxed,
+            vec![BoxNode::text(
+                speaking("en-GB", Hyphens::Auto),
+                "university",
+            )],
+        )],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    let lines: Vec<(String, bool)> = laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.hyphenated))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![("univer".to_owned(), true), ("sity".to_owned(), false)]
+    );
+}
+
 // ---- CSS 2.2 section 12.5, list markers -------------------------------------
 
 /// The five counting styles, at the boundaries a table would get wrong.

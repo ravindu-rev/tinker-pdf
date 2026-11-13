@@ -161,7 +161,7 @@ pub const MAX_BOX_TREE_NODES: usize = 2_097_152;
 /// | | Opportunities |
 /// | --- | --- |
 /// | The most any fixture in this repository spends | 4 000 001 (the paragraph built *past* this cap, at the real constant rather than a lowered copy of it; the longest real content document in the committed corpus spends about 3 000) |
-/// | A 400-page novel | ~700 000, at 120 000 words of about six characters |
+/// | A 400-page novel | ~700 000, at 120 000 words of about six characters, and under 1 300 000 set in `hyphens: auto` |
 /// | A 200-page comic | 0 |
 /// | A 200-page fixed document | 0 |
 /// | **This cap** | **4 000 000** |
@@ -172,6 +172,12 @@ pub const MAX_BOX_TREE_NODES: usize = 2_097_152;
 /// rather than per word -- and a book's character count is bounded only by
 /// `MAX_ZIP_INFLATED`, a gigabyte, which is two hundred and fifty times this
 /// cap.
+///
+/// `hyphens: auto` charges it again for each letter a hyphenation table is
+/// asked about (`crate::hyphenate`), beside the characters of the same
+/// context and before any is looked up: a word's walk is bounded by its
+/// length times its dictionary's longest pattern, so letters are the unit
+/// its work is linear in.
 ///
 /// It is charged **before** the breaker is entered rather than as the pair table
 /// walks, which is `tinker-pdf-zip`'s posture -- a permit is what has been

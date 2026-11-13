@@ -946,13 +946,13 @@ pub enum UnicodeBidi {
     Plaintext,
 }
 
-/// `hyphens`, `css-text-3` §5.4, at the two values this build sets.
+/// `hyphens`, `css-text-3` §5.3.
 ///
-/// `auto` is refused by value: it asks for a word to be hyphenated where a
-/// hyphenation dictionary for its language says it may be, and this build
-/// has none — so a book that asks is counted rather than set as `manual`
-/// and called honoured. The declaration then does not apply, and the
-/// element keeps the `manual` it inherits or starts with.
+/// All three values are layout's (`tinker_pdf_layout`'s `hyphens: auto`
+/// breaks a word at its dictionary's points), and the parser still refuses
+/// `auto` by value: a book that asks is counted rather than set, and the
+/// declaration does not apply, so the element keeps the `manual` it inherits
+/// or starts with. A caller of the layout API sets `Auto` on a style itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hyphens {
     /// `none`: a word breaks nowhere inside itself, a soft hyphen included,
@@ -962,6 +962,11 @@ pub enum Hyphens {
     /// says it may — after a hyphen, or at a soft hyphen (U+00AD), which is
     /// invisible unless the line breaks at it and a hyphen where it does.
     Manual,
+    /// `auto`: `manual`'s breaks, and where the element's content language
+    /// has a hyphenation table, its dictionary's points in every word that
+    /// holds no soft hyphen, each a break that draws a hyphen. Without a
+    /// table it is `manual`.
+    Auto,
 }
 
 /// `text-transform`, `css-text-3` §2.1, at the four values this build sets.

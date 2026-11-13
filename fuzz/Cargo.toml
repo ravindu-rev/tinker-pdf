@@ -26,7 +26,9 @@ tinker-pdf-xml = { path = "../crates/tinker-pdf-xml" }
 tinker-pdf-color = { path = "../crates/tinker-pdf-color" }
 tinker-pdf-css = { path = "../crates/tinker-pdf-css" }
 tinker-pdf-svg = { path = "../crates/tinker-pdf-svg" }
-tinker-pdf-layout = { path = "../crates/tinker-pdf-layout" }
+# With the hyphenation tables, so `layout`'s `hyphens: auto` reaches a
+# dictionary's walk and not only the no-table path.
+tinker-pdf-layout = { path = "../crates/tinker-pdf-layout", features = ["hyphenation"] }
 tinker-pdf-shape = { path = "../crates/tinker-pdf-shape" }
 
 # Detaches from the parent workspace so `cargo build` at the root never tries

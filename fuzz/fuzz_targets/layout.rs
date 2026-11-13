@@ -58,7 +58,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_css::cascade::ComputedStyle;
+use tinker_pdf_css::cascade::{ComputedStyle, Language};
 use tinker_pdf_css::property::{
     BorderStyle, BoxSizing, Clear, Direction, Display, Float, Hyphens, LengthPercentage,
     LineBreakStrictness,
@@ -183,11 +183,19 @@ fn style(bytes: &mut Bytes<'_>, block: bool) -> ComputedStyle {
         Direction::Ltr
     };
     // A soft hyphen is a break that measures nothing until it is taken and
-    // a hyphen's width when it is, and `hyphens: none` takes it away.
-    style.hyphens = if (a ^ d) & 2 != 0 {
-        Hyphens::None
-    } else {
-        Hyphens::Manual
+    // a hyphen's width when it is, and `hyphens: none` takes it away;
+    // `hyphens: auto` adds a dictionary's points where the language has a
+    // table (this target builds with the tables), and none where it has not.
+    style.hyphens = match (a ^ d) & 6 {
+        2 | 6 => Hyphens::None,
+        4 => Hyphens::Auto,
+        _ => Hyphens::Manual,
+    };
+    style.language = match (c ^ d) & 3 {
+        0 => None,
+        1 => Language::new("en-GB"),
+        2 => Language::new("nl"),
+        _ => Language::new("xx"),
     };
     style.unicode_bidi = match (b ^ c) & 3 {
         0 => UnicodeBidi::Normal,
