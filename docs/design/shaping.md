@@ -1177,17 +1177,30 @@ lands, such a face is refused by name (*Warnings*, below).
 
 ### Graphite design
 
-**Precedence.** A face's Graphite tables run only where it carries no
-readable `GSUB` or `GPOS` and no `morx`: wherever it carries either OpenType
-Layout table it shapes through it exactly as it does today, and a face
-carrying `morx` takes the path *AAT shaping* above sets for it. Every face
-that shapes today shapes the same way afterwards. The price is
-stated rather than chosen: of the three vendored faces, Awami Nastaliq
-carries a `GPOS` of one `kern` lookup for `deva` and nothing else, so it
-takes the OpenType path and is drawn unshaped, and a precedence that let
-Graphite run past such a table is the owner's to choose. The tests reach its
-Graphite tables through a view of the face with its OpenType tables left
-out.
+**Precedence.** A face's Graphite tables run for a run whose script its
+OpenType Layout tables declare no lookup for: neither its `GSUB` nor its
+`GPOS` has a script record for the run's script tag, nor a `DFLT` one, so no
+feature could name a lookup there. Wherever either table's script list holds
+the run's script or `DFLT`, the run shapes through OpenType exactly as it
+does today; a face carrying `morx` takes the path *AAT shaping* above sets
+for it; and a face with no readable `GSUB` or `GPOS` takes its Graphite
+tables for every run. A run whose script the face's OpenType tables cover
+therefore takes exactly today's path, and what moves is only a run that is
+drawn unshaped today: a script a face carrying both covers in Graphite alone.
+
+The case that decided it is the vendored Awami Nastaliq. It is
+Graphite-first and carries a 70-byte `GPOS`: one `kern` feature for script
+`deva` alone, one single-adjustment lookup moving glyph 1 by one unit. Read
+as "any `GSUB` or `GPOS` sends the face down the OpenType path", that table
+would draw every Urdu run in the face unshaped — no `arab` record and no
+`DFLT`, so no lookup — even after its passes run. Under the precedence
+above an Urdu run takes the face's Graphite passes and a Devanagari run its
+`GPOS`; Tagmukay, whose `GSUB` holds `DFLT`, `latn` and `tfng`, keeps the
+OpenType path for every run; and Dai Banna SIL, which carries neither, takes
+its passes for every run. FT-07d.12 lands the precedence in `Shaper::shape`;
+until it does, every face carrying a readable `GSUB` or `GPOS` takes the
+OpenType path, and the tests reach a description's passes through
+`graphite`'s own types.
 
 **What is decompressed.** From `Silf` 5 and `Glat` 3 a table may be
 compressed: its version, then a word whose top five bits are the scheme and
@@ -1606,7 +1619,7 @@ the person-written rows land, and FT-07d.17 reads them through it.
 | The specification numbers no slot attribute and no glyph metric, and a number read wrong moves the wrong thing silently | Each number is read off a vendored face's compiled code against its published source and held by a test against that code; an attribute no vendored code reveals is refused by name rather than guessed; H-64's fixtures run the faces whole |
 | The two GTF editions disagree (the octabox diagonals' order, a lookup class's search range, `PushFeat`'s operands, the stack machine's opcode range) and `pseudosOffset` names a field the text does not | Each disagreement is settled in *Graphite design* by the vendored faces' bytes, and a test holds the reading to them |
 | Collision avoidance's search is described by its costs, not by its steps, so a face tuned to another search can come out units apart | The search is integer and deterministic, inside every limit the GDL states; H-64's fixtures for Awami Nastaliq are what hold its positions |
-| A Graphite-first face carries a stub `GPOS`, as Awami Nastaliq does, and the precedence draws it unshaped | The price is the owner's, stated here; nothing that shapes today changes |
+| A Graphite-first face carries a stub `GPOS` for another script, as Awami Nastaliq does | The precedence asks whether the run's script has a lookup to take, not whether a table is present, so its Urdu takes its passes; a run whose script the OpenType tables cover keeps today's path |
 | A hostile description: offsets anywhere, counts that lie, a machine that never jams, code that loops or divides by zero, attachment cycles | Every read through `read::Bytes`; every count bounded (*Ceilings*); code checked before it runs; the `shape` fuzz target drives each table directly and through the sfnt directory (FT-07d.14) |
 | A compressed table names a size it does not decode to, or a size meant to exhaust memory | The stated size is bounded before a byte is decoded, and the decoded length must equal it |
 | An inserted or reordered slot breaks cluster monotonicity | Clusters are merged as `Buffer::reorder` merges them, and the fuzz target's assertion that clusters never go backwards carries over |
