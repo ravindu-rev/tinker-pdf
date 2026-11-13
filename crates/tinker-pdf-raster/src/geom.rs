@@ -93,7 +93,6 @@ impl Path {
         ));
     }
 
-    /// Closes the current subpath.
     /// Appends another path's verbs to this one.
     ///
     /// The two keep their own subpaths — nothing is joined — which is what
@@ -102,6 +101,7 @@ impl Path {
         self.verbs.extend_from_slice(other.verbs());
     }
 
+    /// Closes the current subpath.
     pub fn close(&mut self) {
         self.push(Verb::Close);
     }
@@ -152,6 +152,53 @@ impl Path {
         }
     }
 
+    /// The path with every contour moved outward by `horizontal` device units
+    /// across and `vertical` down: stem darkening's outline offset
+    /// (`docs/design/hinting.md`, *Stem darkening*).
+    ///
+    /// Every point of each contour, on and off the curve alike, moves along
+    /// the bisector of its two edges' outward normals by the miter vector
+    /// `(n_in + n_out) / (1 + n_in · n_out)`, its `x` scaled by `horizontal`
+    /// and its `y` by `vertical`, so each edge of the control polygon moves
+    /// out in proportion to its normal and an axis-aligned rectangle grows by
+    /// exactly twice each amount. Outward is the side that grows the path's
+    /// total signed area: a contour wound with the total grows and one wound
+    /// against it — a counter — shrinks, whichever winding the glyph uses.
+    ///
+    /// A point's edges run to the nearest points of its contour that differ
+    /// from it, so a zero-length edge keeps its point with its neighbours',
+    /// and a contour of one point keeps it. A miter longer than
+    /// [`OFFSET_MITER_LIMIT`] is held there along the bisector, and a turn
+    /// straight back, where the bisector vanishes, keeps its point; a move
+    /// that is not finite keeps its point too. A subpath the path leaves open
+    /// is offset as the closed contour a fill makes of it (8.5.3.1), and one
+    /// that begins after a `Close` without a `MoveTo` gains one at its first
+    /// point. Amounts that are not finite, both amounts zero, and a path whose
+    /// total area is zero or not finite give the path back as it came.
+    ///
+    /// Only `sqrt`, which IEEE 754 rounds correctly, and the four operations
+    /// are used, so the offset is the same on every target (ruling 4).
+    #[must_use]
+    pub fn offset(&self, horizontal: f64, vertical: f64) -> Path {
+        if !horizontal.is_finite()
+            || !vertical.is_finite()
+            || (horizontal == 0.0 && vertical == 0.0)
+        {
+            return self.clone();
+        }
+        let contours = Contour::all(self);
+        let total: f64 = contours.iter().map(Contour::twice_area).sum();
+        if !total.is_finite() || total == 0.0 {
+            return self.clone();
+        }
+        let hand = if total > 0.0 { 1.0 } else { -1.0 };
+        let mut out = Path::new();
+        for contour in &contours {
+            contour.offset_into(&mut out, hand, horizontal, vertical);
+        }
+        out
+    }
+
     /// The path's bounding box as `(x0, y0, x1, y1)`, control points included.
     #[must_use]
     pub fn bounds(&self) -> Option<(f64, f64, f64, f64)> {
@@ -179,6 +226,233 @@ impl Path {
         }
         bounds
     }
+}
+
+/// The longest a point's move may be, in units of the offset's amount: past
+/// it the miter is held at this length along the bisector, so a spike — a turn
+/// sharper than about 151° — grows by four times the amount and no more.
+pub const OFFSET_MITER_LIMIT: f64 = 4.0;
+
+/// Which verb a run of a contour's control points came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drawn {
+    Line,
+    Quad,
+    Cubic,
+}
+
+/// One subpath as [`Path::offset`] reads it: its start, then each drawing
+/// verb's points in order, and whether a `Close` ended it.
+#[derive(Debug, Default)]
+struct Contour {
+    points: Vec<Point>,
+    drawn: Vec<Drawn>,
+    closed: bool,
+}
+
+impl Contour {
+    /// The path's subpaths, begun where [`flatten`] begins them: at a
+    /// `MoveTo`, and after a `Close` or at the very start of the path, at the
+    /// point the pen stands on.
+    fn all(path: &Path) -> Vec<Contour> {
+        let mut out = Vec::new();
+        let mut current: Option<Contour> = None;
+        let mut start = Point::new(0.0, 0.0);
+        let mut cursor = start;
+        let open = |current: &mut Option<Contour>, cursor: Point| {
+            current.get_or_insert_with(|| Contour {
+                points: vec![cursor],
+                ..Contour::default()
+            });
+        };
+        for verb in path.verbs() {
+            match *verb {
+                Verb::MoveTo(p) => {
+                    out.extend(current.take());
+                    current = Some(Contour {
+                        points: vec![p],
+                        ..Contour::default()
+                    });
+                    start = p;
+                    cursor = p;
+                }
+                Verb::LineTo(p) => {
+                    open(&mut current, cursor);
+                    if let Some(contour) = current.as_mut() {
+                        contour.points.push(p);
+                        contour.drawn.push(Drawn::Line);
+                    }
+                    cursor = p;
+                }
+                Verb::QuadTo(c, p) => {
+                    open(&mut current, cursor);
+                    if let Some(contour) = current.as_mut() {
+                        contour.points.extend([c, p]);
+                        contour.drawn.push(Drawn::Quad);
+                    }
+                    cursor = p;
+                }
+                Verb::CurveTo(c1, c2, p) => {
+                    open(&mut current, cursor);
+                    if let Some(contour) = current.as_mut() {
+                        contour.points.extend([c1, c2, p]);
+                        contour.drawn.push(Drawn::Cubic);
+                    }
+                    cursor = p;
+                }
+                Verb::Close => {
+                    if let Some(mut contour) = current.take() {
+                        contour.closed = true;
+                        out.push(contour);
+                    }
+                    cursor = start;
+                }
+            }
+        }
+        out.extend(current);
+        out
+    }
+
+    /// Twice the signed area of the contour's closed control polygon, taken
+    /// about its first point so that a contour far from the origin keeps its
+    /// precision.
+    fn twice_area(&self) -> f64 {
+        let Some(&first) = self.points.first() else {
+            return 0.0;
+        };
+        let ahead = self.points.iter().cycle().skip(1);
+        self.points
+            .iter()
+            .zip(ahead)
+            .map(|(a, b)| (a.x - first.x) * (b.y - first.y) - (b.x - first.x) * (a.y - first.y))
+            .sum()
+    }
+
+    /// Writes the contour, offset, into `out`: a `MoveTo` at its first point,
+    /// its verbs with their points moved, and its `Close` if it had one.
+    fn offset_into(&self, out: &mut Path, hand: f64, horizontal: f64, vertical: f64) {
+        let moved = self.moved(hand, horizontal, vertical);
+        let mut at = moved.iter().copied();
+        let Some(first) = at.next() else {
+            return;
+        };
+        out.move_to(first.x, first.y);
+        for drawn in &self.drawn {
+            match drawn {
+                Drawn::Line => {
+                    if let Some(p) = at.next() {
+                        out.line_to(p.x, p.y);
+                    }
+                }
+                Drawn::Quad => {
+                    if let (Some(c), Some(p)) = (at.next(), at.next()) {
+                        out.quad_to(c.x, c.y, p.x, p.y);
+                    }
+                }
+                Drawn::Cubic => {
+                    if let (Some(c1), Some(c2), Some(p)) = (at.next(), at.next(), at.next()) {
+                        out.curve_to(c1.x, c1.y, c2.x, c2.y, p.x, p.y);
+                    }
+                }
+            }
+        }
+        if self.closed {
+            out.close();
+        }
+    }
+
+    /// Every point of the contour, moved. Consecutive equal points — around
+    /// the contour, the last beside the first — are one run and one vertex:
+    /// each run's neighbours are the runs either side, read once around, so
+    /// the work is linear however many points repeat.
+    fn moved(&self, hand: f64, horizontal: f64, vertical: f64) -> Vec<Point> {
+        let points = &self.points;
+        let n = points.len();
+        let mut out = points.clone();
+        // Whether a point differs from the one before it around the contour,
+        // which starts a run.
+        let differs = |i: usize| match (points.get(i), points.get((i + n - 1) % n)) {
+            (Some(here), Some(before)) => here != before,
+            _ => false,
+        };
+        // A contour with no such point is a single point, however often it is
+        // written, and keeps it.
+        let Some(begin) = (0..n).find(|&i| differs(i)) else {
+            return out;
+        };
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for step in 0..n {
+            let i = (begin + step) % n;
+            match runs.last_mut() {
+                Some((_, len)) if !differs(i) => *len += 1,
+                _ => runs.push((i, 1)),
+            }
+        }
+        // Two runs at least, since `begin` differs from the point before it.
+        let count = runs.len();
+        let vertex = |r: usize| {
+            runs.get(r % count)
+                .and_then(|(first, _)| points.get(*first))
+                .copied()
+        };
+        for (r, &(first, len)) in runs.iter().enumerate() {
+            let (Some(previous), Some(here), Some(next)) =
+                (vertex(r + count - 1), vertex(r), vertex(r + 1))
+            else {
+                continue;
+            };
+            let Some(step) = miter(previous, here, next, hand) else {
+                continue;
+            };
+            let to = Point::new(here.x + horizontal * step.x, here.y + vertical * step.y);
+            if !to.is_finite() {
+                continue;
+            }
+            for k in 0..len {
+                if let Some(point) = out.get_mut((first + k) % n) {
+                    *point = to;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The unit vector along `(x, y)`, or `None` for a zero or non-finite one.
+/// Scaled by its larger component before the root, so no square overflows.
+fn unit(x: f64, y: f64) -> Option<Point> {
+    let largest = x.abs().max(y.abs());
+    if largest == 0.0 || !largest.is_finite() {
+        return None;
+    }
+    let (sx, sy) = (x / largest, y / largest);
+    let length = (sx * sx + sy * sy).sqrt();
+    Some(Point::new(sx / length, sy / length))
+}
+
+/// The move, per unit of offset, of the vertex `here` between the edges from
+/// `previous` and to `next`: the miter vector of their outward normals, held
+/// at [`OFFSET_MITER_LIMIT`]. `None` keeps the vertex: an edge with no
+/// direction, or a turn straight back.
+fn miter(previous: Point, here: Point, next: Point, hand: f64) -> Option<Point> {
+    let incoming = unit(here.x - previous.x, here.y - previous.y)?;
+    let outgoing = unit(next.x - here.x, next.y - here.y)?;
+    // The normal on the right of each edge's direction, for a path of positive
+    // total area; on the left for one of negative.
+    let n_in = Point::new(hand * incoming.y, -hand * incoming.x);
+    let n_out = Point::new(hand * outgoing.y, -hand * outgoing.x);
+    let sum = Point::new(n_in.x + n_out.x, n_in.y + n_out.y);
+    let length = (sum.x * sum.x + sum.y * sum.y).sqrt();
+    if length <= 1e-9 {
+        return None;
+    }
+    let cosine = 1.0 + (n_in.x * n_out.x + n_in.y * n_out.y);
+    // `|m|` is `sqrt(2 / cosine)`, which reaches the limit at `2 / limit²`.
+    if cosine < 2.0 / (OFFSET_MITER_LIMIT * OFFSET_MITER_LIMIT) {
+        let scale = OFFSET_MITER_LIMIT / length;
+        return Some(Point::new(sum.x * scale, sum.y * scale));
+    }
+    Some(Point::new(sum.x / cosine, sum.y / cosine))
 }
 
 /// A path may not describe more verbs than this. A content stream can ask for
@@ -735,6 +1009,382 @@ mod tests {
             assert_eq!(begin, points.len(), "every point is in a subpath");
             let nested: Vec<_> = flatten(&path, tolerance).into_iter().map(Some).collect();
             assert_eq!(flat, nested, "at tolerance {tolerance}");
+        }
+    }
+
+    /// Every point a path's verbs carry, in order.
+    fn points_of(path: &Path) -> Vec<Point> {
+        let mut out = Vec::new();
+        for verb in path.verbs() {
+            match *verb {
+                Verb::MoveTo(p) | Verb::LineTo(p) => out.push(p),
+                Verb::QuadTo(c, p) => out.extend([c, p]),
+                Verb::CurveTo(a, b, c) => out.extend([a, b, c]),
+                Verb::Close => {}
+            }
+        }
+        out
+    }
+
+    /// Whether two paths have the same verbs, each the same kind.
+    fn same_shape(a: &Path, b: &Path) -> bool {
+        a.verbs().len() == b.verbs().len()
+            && a.verbs()
+                .iter()
+                .zip(b.verbs())
+                .all(|(x, y)| std::mem::discriminant(x) == std::mem::discriminant(y))
+    }
+
+    /// The square from (x, y) to (x + side, y + side), its corners in the
+    /// order given: `true` counter-clockwise in a y-up frame, positive area.
+    fn square(path: &mut Path, x: f64, y: f64, side: f64, positive: bool) {
+        let corners = [(x, y), (x + side, y), (x + side, y + side), (x, y + side)];
+        let order: [usize; 4] = if positive { [0, 1, 2, 3] } else { [0, 3, 2, 1] };
+        let (sx, sy) = corners[order[0]];
+        path.move_to(sx, sy);
+        for &i in &order[1..] {
+            path.line_to(corners[i].0, corners[i].1);
+        }
+        path.close();
+    }
+
+    /// FT-04a.2: a rectangle's every corner moves out by each amount on its
+    /// axis, so it grows by exactly twice each, at every whole size of the
+    /// design's table from 8 to 16 pixels an em.
+    #[test]
+    fn an_axis_aligned_square_grows_by_twice_the_amount_per_axis() {
+        for ppem in 8..=16 {
+            let across = f64::from(24 - ppem) / 64.0;
+            let down = f64::from(24 - ppem) / 128.0;
+            let mut path = Path::new();
+            path.rect(10.0, 20.0, 30.0, 40.0);
+            let grown = path.offset(across, down);
+            assert!(same_shape(&path, &grown), "the same verbs at {ppem}");
+            assert_eq!(
+                grown.bounds(),
+                Some((10.0 - across, 20.0 - down, 40.0 + across, 60.0 + down)),
+                "{ppem} pixels an em"
+            );
+            let expected = [
+                (10.0 - across, 20.0 - down),
+                (40.0 + across, 20.0 - down),
+                (40.0 + across, 60.0 + down),
+                (10.0 - across, 60.0 + down),
+            ];
+            let got: Vec<(f64, f64)> = points_of(&grown).iter().map(|p| (p.x, p.y)).collect();
+            assert_eq!(got, expected, "each corner, exactly");
+        }
+        // The amounts are independent: across alone moves no y.
+        let mut path = Path::new();
+        path.rect(0.0, 0.0, 4.0, 2.0);
+        assert_eq!(path.offset(0.5, 0.0).bounds(), Some((-0.5, 0.0, 4.5, 2.0)));
+        assert_eq!(
+            path.offset(0.0, 0.25).bounds(),
+            Some((0.0, -0.25, 4.0, 2.25))
+        );
+        // A negative amount shrinks.
+        assert_eq!(
+            path.offset(-0.5, -0.25).bounds(),
+            Some((0.5, 0.25, 3.5, 1.75))
+        );
+    }
+
+    /// FT-04a.2: a counter, wound against its outer contour, shrinks by the
+    /// amount its outer contour grows by, so a stem between them gains the
+    /// amount on each side.
+    #[test]
+    fn a_counter_shrinks_as_its_outer_contour_grows() {
+        let mut path = Path::new();
+        square(&mut path, 0.0, 0.0, 10.0, true);
+        square(&mut path, 3.0, 3.0, 4.0, false);
+        let grown = path.offset(0.5, 0.25);
+        assert!(same_shape(&path, &grown));
+        let points = points_of(&grown);
+        let (outer, counter) = points.split_at(4);
+        for p in outer {
+            assert!(p.x == -0.5 || p.x == 10.5, "{p:?}");
+            assert!(p.y == -0.25 || p.y == 10.25, "{p:?}");
+        }
+        for p in counter {
+            assert!(
+                p.x == 3.5 || p.x == 6.5,
+                "the counter's sides move in: {p:?}"
+            );
+            assert!(p.y == 3.25 || p.y == 6.75, "{p:?}");
+        }
+    }
+
+    /// FT-04a.2: outward is the side that grows the path's total area, so a
+    /// glyph drawn in either winding grows, and its counters shrink in
+    /// either.
+    #[test]
+    fn either_winding_grows_outward() {
+        for positive in [true, false] {
+            let mut path = Path::new();
+            square(&mut path, 0.0, 0.0, 10.0, positive);
+            assert_eq!(
+                path.offset(1.0, 0.5).bounds(),
+                Some((-1.0, -0.5, 11.0, 10.5)),
+                "wound {}",
+                if positive { "positively" } else { "negatively" }
+            );
+
+            let mut glyph = Path::new();
+            square(&mut glyph, 0.0, 0.0, 10.0, positive);
+            square(&mut glyph, 3.0, 3.0, 4.0, !positive);
+            let points = points_of(&glyph.offset(1.0, 0.5));
+            for p in &points[4..] {
+                assert!(p.x == 4.0 || p.x == 6.0, "{positive}: {p:?}");
+                assert!(p.y == 3.5 || p.y == 6.5, "{positive}: {p:?}");
+            }
+        }
+    }
+
+    /// FT-04a.2: a zero-length edge keeps its point with its neighbours', a
+    /// collinear point moves along its edge's normal, a turn straight back
+    /// keeps its point, and a contour of one or two distinct points keeps
+    /// them; nothing is a NaN.
+    #[test]
+    fn a_zero_length_edge_or_collinear_point_gives_no_nan() {
+        let mut path = Path::new();
+        path.move_to(0.0, 0.0);
+        path.line_to(0.0, 0.0); // a zero-length edge
+        path.line_to(5.0, 0.0); // collinear
+        path.line_to(10.0, 0.0);
+        path.line_to(10.0, 10.0);
+        path.line_to(5.0, 10.0);
+        path.line_to(5.0, 15.0); // up a spike
+        path.line_to(5.0, 10.0); // and straight back
+        path.line_to(0.0, 10.0);
+        path.line_to(0.0, 0.0); // back to the start, written out
+        path.close();
+        path.move_to(20.0, 20.0); // a contour of one point
+        path.move_to(30.0, 30.0); // and one of two
+        path.line_to(40.0, 30.0);
+        path.close();
+        let grown = path.offset(0.5, 0.25);
+        assert!(same_shape(&path, &grown));
+        let points = points_of(&grown);
+        assert!(points.iter().all(Point::is_finite), "{points:?}");
+        let at = |i: usize| (points[i].x, points[i].y);
+        assert_eq!(at(0), (-0.5, -0.25), "the corner");
+        assert_eq!(at(1), (-0.5, -0.25), "its zero-length twin moves with it");
+        assert_eq!(
+            at(2),
+            (5.0, -0.25),
+            "a collinear point moves along the normal"
+        );
+        assert_eq!(at(3), (10.5, -0.25));
+        assert_eq!(at(4), (10.5, 10.25));
+        assert_eq!(at(5), (5.5, 10.25), "the spike's foot, on its right");
+        assert_eq!(at(6), (5.0, 15.0), "a turn straight back keeps its point");
+        assert_eq!(at(7), (4.5, 10.25), "the spike's foot, on its left");
+        assert_eq!(at(8), (-0.5, 10.25));
+        assert_eq!(at(9), (-0.5, -0.25), "the written-out return");
+        assert_eq!(at(10), (20.0, 20.0), "one point keeps it");
+        assert_eq!(at(11), (30.0, 30.0), "two points keep theirs");
+        assert_eq!(at(12), (40.0, 30.0));
+    }
+
+    /// A subpath left open is offset as the closed contour a fill makes of
+    /// it, and one begun after a `Close` with no `MoveTo` gains one at the
+    /// point the fill begins it at.
+    #[test]
+    fn open_and_implicit_subpaths_are_offset_as_the_fill_reads_them() {
+        let mut open = Path::new();
+        open.move_to(0.0, 0.0);
+        open.line_to(10.0, 0.0);
+        open.line_to(10.0, 10.0);
+        open.line_to(0.0, 10.0);
+        let grown = open.offset(1.0, 1.0);
+        assert!(same_shape(&open, &grown), "no Close is added");
+        assert_eq!(grown.bounds(), Some((-1.0, -1.0, 11.0, 11.0)));
+
+        let mut path = Path::new();
+        path.rect(0.0, 0.0, 10.0, 10.0);
+        path.line_to(20.0, 0.0);
+        path.line_to(20.0, 10.0);
+        path.line_to(15.0, 10.0);
+        let grown = path.offset(1.0, 1.0);
+        let kinds: Vec<&str> = grown
+            .verbs()
+            .iter()
+            .map(|verb| match verb {
+                Verb::MoveTo(_) => "move",
+                Verb::LineTo(_) => "line",
+                Verb::QuadTo(..) => "quad",
+                Verb::CurveTo(..) => "curve",
+                Verb::Close => "close",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["move", "line", "line", "line", "close", "move", "line", "line", "line"]
+        );
+        // Both flatten to polygons of the same points, so the fill reads one
+        // shape: the second subpath begins where the first did.
+        let flat = flatten(&grown, 0.1);
+        assert_eq!(flat.len(), 2);
+        assert!(flat.iter().flatten().all(Point::is_finite));
+    }
+
+    /// Amounts that are not finite or both zero, and a path with no area,
+    /// come back as they went in.
+    #[test]
+    fn no_amount_or_no_area_gives_the_path_back() {
+        let mut path = Path::new();
+        path.rect(1.0, 2.0, 3.0, 4.0);
+        for (across, down) in [
+            (0.0, 0.0),
+            (f64::NAN, 1.0),
+            (1.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 0.0),
+        ] {
+            assert_eq!(
+                path.offset(across, down).verbs(),
+                path.verbs(),
+                "{across} {down}"
+            );
+        }
+        let mut line = Path::new();
+        line.move_to(0.0, 0.0);
+        line.line_to(10.0, 10.0);
+        assert_eq!(line.offset(1.0, 1.0).verbs(), line.verbs(), "no area");
+        assert!(Path::new().offset(1.0, 1.0).is_empty());
+        let mut far = Path::new();
+        far.rect(-1e308, -1e308, 1e308, 1e308);
+        far.rect(1e308, 1e308, -1e308, -1e308);
+        let back = far.offset(1.0, 1.0);
+        assert!(points_of(&back).iter().all(Point::is_finite));
+    }
+
+    /// A curve's control points move with their contour: a circle of four
+    /// cubics and one of four quadratics each grow, the on-curve points on the
+    /// axes by exactly the amount.
+    #[test]
+    fn curves_move_their_control_points_with_their_contour() {
+        let k = 0.552_284_75 * 10.0;
+        let mut cubic = Path::new();
+        cubic.move_to(10.0, 0.0);
+        cubic.curve_to(10.0, k, k, 10.0, 0.0, 10.0);
+        cubic.curve_to(-k, 10.0, -10.0, k, -10.0, 0.0);
+        cubic.curve_to(-10.0, -k, -k, -10.0, 0.0, -10.0);
+        cubic.curve_to(k, -10.0, 10.0, -k, 10.0, 0.0);
+        cubic.close();
+        let mut quad = Path::new();
+        quad.move_to(10.0, 0.0);
+        quad.quad_to(10.0, 10.0, 0.0, 10.0);
+        quad.quad_to(-10.0, 10.0, -10.0, 0.0);
+        quad.quad_to(-10.0, -10.0, 0.0, -10.0);
+        quad.quad_to(10.0, -10.0, 10.0, 0.0);
+        quad.close();
+        for path in [cubic, quad] {
+            let grown = path.offset(1.0, 1.0);
+            assert!(same_shape(&path, &grown));
+            let points = points_of(&grown);
+            assert!(points.iter().all(Point::is_finite));
+            assert_eq!(
+                (points[0].x, points[0].y),
+                (11.0, 0.0),
+                "an on-curve point on the axis moves by the amount"
+            );
+            for (before, after) in points_of(&path).iter().zip(&points) {
+                let d0 = before.x * before.x + before.y * before.y;
+                let d1 = after.x * after.x + after.y * after.y;
+                assert!(d1 > d0, "{before:?} moved out to {after:?}");
+            }
+        }
+    }
+
+    /// Ruling 1: generated paths of every verb, at every scale from the
+    /// subnormal to the largest finite, with points repeated and amounts from
+    /// zero to the largest finite, offset to paths whose every point is
+    /// finite and whose verbs are at most one more a subpath.
+    #[test]
+    fn every_point_of_an_offset_stays_finite() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let scales = [
+            0.0,
+            5e-324,
+            1e-300,
+            1e-6,
+            1.0,
+            37.5,
+            1e3,
+            1e150,
+            1e300,
+            f64::MAX,
+        ];
+        let amounts = [
+            0.0,
+            0.25,
+            -0.25,
+            0.125,
+            1e-300,
+            1e10,
+            1e300,
+            -f64::MAX,
+            f64::MAX,
+        ];
+        for _ in 0..2_000 {
+            let mut path = Path::new();
+            let mut last = Point::new(0.0, 0.0);
+            let verbs = (next() % 24) as usize;
+            let point = |next: &mut dyn FnMut() -> u64, last: &mut Point| {
+                if next() % 4 == 0 {
+                    return *last;
+                }
+                let scale = scales[(next() % scales.len() as u64) as usize];
+                let x = (next() % 2001) as f64 / 1000.0 - 1.0;
+                let y = (next() % 2001) as f64 / 1000.0 - 1.0;
+                let p = Point::new(x * scale, y * scale);
+                *last = p;
+                p
+            };
+            for _ in 0..verbs {
+                match next() % 6 {
+                    0 => {
+                        let p = point(&mut next, &mut last);
+                        path.move_to(p.x, p.y);
+                    }
+                    1 | 2 => {
+                        let p = point(&mut next, &mut last);
+                        path.line_to(p.x, p.y);
+                    }
+                    3 => {
+                        let c = point(&mut next, &mut last);
+                        let p = point(&mut next, &mut last);
+                        path.quad_to(c.x, c.y, p.x, p.y);
+                    }
+                    4 => {
+                        let a = point(&mut next, &mut last);
+                        let b = point(&mut next, &mut last);
+                        let p = point(&mut next, &mut last);
+                        path.curve_to(a.x, a.y, b.x, b.y, p.x, p.y);
+                    }
+                    _ => path.close(),
+                }
+            }
+            let across = amounts[(next() % amounts.len() as u64) as usize];
+            let down = amounts[(next() % amounts.len() as u64) as usize];
+            let grown = path.offset(across, down);
+            let points = points_of(&grown);
+            assert!(
+                points.iter().all(Point::is_finite),
+                "{path:?} by ({across}, {down}) gave {grown:?}"
+            );
+            let subpaths = path
+                .verbs()
+                .iter()
+                .filter(|verb| matches!(verb, Verb::MoveTo(_) | Verb::Close))
+                .count();
+            assert!(grown.verbs().len() <= path.verbs().len() + subpaths + 1);
         }
     }
 }

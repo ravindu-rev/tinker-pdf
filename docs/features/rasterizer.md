@@ -26,6 +26,20 @@ divergence ruling 4 exists to forbid. Single-point subpaths are kept, because
 stroking draws them as dots under a round or square cap (8.4.3.3). Non-finite
 points are dropped at construction, so nothing downstream ever sees a NaN.
 
+**Offsetting an outline.** `Path::offset(horizontal, vertical)` moves every
+contour outward by one amount across and another down, stem darkening's
+offset ([design](../design/hinting.md#stem-darkening)): each point, on and off
+the curve alike, moves along the bisector of its two edges' outward normals
+by their miter vector, `x` scaled by the one amount and `y` by the other, so
+an axis-aligned rectangle grows by exactly twice each. Outward is the side
+that grows the path's total signed area, so a contour wound with the total
+grows and a counter wound against it shrinks, in either winding. The miter is
+held at `OFFSET_MITER_LIMIT`, four times the amount; a turn straight back and
+a move that is not finite keep their points, and the points of a zero-length
+edge move as one vertex; a subpath left open is offset as the closed contour a
+fill makes of it. It uses `sqrt` and the four operations alone (ruling 4). No
+render calls it.
+
 **Filling.** `fill` rasterizes a path into a coverage `Mask` under the
 non-zero winding (8.5.3.3.2) or even-odd (8.5.3.3.3) rule. Coverage is
 accumulated at sixteen sub-scanlines per pixel row with exact horizontal
