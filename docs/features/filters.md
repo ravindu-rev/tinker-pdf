@@ -166,6 +166,15 @@ the four bytes after it. The scan starts past the adaptive pixels, because a
 nominal AT pair is the bytes `FF FE` and a template-0 region carries four of
 them.
 
+**A generic region is decoded along its rows.** 6.2.5.7's context is carried
+from pixel to pixel rather than gathered afresh, and its rows above are read a
+byte at a time, one load per eight pixels per row. Where the adaptive pixels
+sit at the figures' own places, which is what an encoder writes unless it has
+a reason, the decided pixels are gathered and written a byte at a time too,
+each row's last byte as the row ends; an adaptive pixel anywhere else is read
+where the segment puts it, the row being decoded included, so that layout
+writes each pixel as it is decided.
+
 **Symbol dictionaries (6.5) and text regions (6.4) decode**, through the
 shared coder and through Annex B's Huffman tables (below): Annex A's integer
 procedures and A.3's symbol-index procedure over the shared

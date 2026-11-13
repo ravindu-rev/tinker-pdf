@@ -4135,6 +4135,52 @@ impl Bitmap {
         }
     }
 
+    /// Byte `index` of row `y`: eight pixels of [`Bitmap::get`] in one read,
+    /// the leftmost in bit 7, or 0 for a row or a byte outside the bitmap.
+    ///
+    /// The bits past the width are cleared, because 6.2.5.2 reads every pixel
+    /// outside the region as 0 and the last byte's padding is not the
+    /// region's: a width that is not a multiple of eight ends on a partial
+    /// byte.
+    fn row_byte(&self, y: i32, index: usize) -> u32 {
+        let Ok(row) = usize::try_from(y) else {
+            return 0;
+        };
+        if row >= self.height as usize || index >= self.stride {
+            return 0;
+        }
+        #[cfg(test)]
+        tests::LOADS.with(|loads| loads.set(loads.get() + 1));
+        let byte = self
+            .bits
+            .get(row * self.stride + index)
+            .copied()
+            .unwrap_or(0);
+        // `index < stride` puts at least one of the byte's pixels inside, so
+        // at most seven are past the width.
+        let past = (8 * (index + 1)).saturating_sub(self.width as usize);
+        u32::from(byte) & (0xFF << past)
+    }
+
+    /// Writes the pixels row `y` has decided since its last store — the low
+    /// bits of `gathered`, the pixel at `x` in bit 0 — into the byte holding
+    /// `x`, from that byte's first pixel to `x`: one write for eight
+    /// [`Bitmap::set`]s.
+    ///
+    /// The bits after `x` keep what they held, so a partial byte at the end
+    /// of a row leaves its padding as a pixel-at-a-time write would.
+    fn store_byte(&mut self, x: u32, y: u32, gathered: u32) {
+        #[cfg(test)]
+        tests::STORES.with(|stores| stores.set(stores.get() + 1));
+        let count = (x & 7) + 1;
+        let mask = (0xFF00u32 >> count) as u8;
+        let value = ((gathered << (8 - count)) & 0xFF) as u8;
+        let at = (y as usize) * self.stride + (x as usize >> 3);
+        if let Some(byte) = self.bits.get_mut(at) {
+            *byte = (*byte & !mask) | (value & mask);
+        }
+    }
+
     /// Copies row `from` over row `to`. TPGDON's whole purpose (6.2.5.7).
     fn copy_row(&mut self, from: u32, to: u32) {
         let (Some(f), Some(t)) = (
@@ -4750,9 +4796,14 @@ fn refinement_offset(target: i64, reference: u32, coded: i32) -> i64 {
 /// budget at template 0 took 5.5 seconds a call — eleven a fuzz input, which
 /// decodes twice. But a template's *fixed* pixels are runs along at
 /// most three rows, and moving one pixel to the right shifts each run by one:
-/// so each run is kept as a window, one new pixel enters each row above, and
-/// the row being decoded enters through the pixel just decided. That is two
-/// reads a pixel in the rows above at templates 0 to 2 and one at template 3.
+/// so each run is kept as a window and the row being decoded enters through
+/// the pixel just decided.
+///
+/// **The rows above are read a byte at a time.** A window is a slice of its
+/// row's bits, so each row above is held as three of its bytes about the
+/// pixel's ([`RowAbove`]) and the window is shifted out of them: one load per
+/// eight pixels per row above, where a pixel at a time was one bounds-checked
+/// [`Bitmap::get`] per pixel per row.
 ///
 /// **The adaptive pixels at their nominal places are window bits too.** Every
 /// figure puts them on the same two rows, just past the fixed run — template
@@ -4772,19 +4823,62 @@ struct RolledContext {
     /// Whether the adaptive pixels are at the figure's own places and in the
     /// windows, rather than read one at a time.
     nominal: bool,
-    /// The row two above: its window, the rightmost offset the template reads
-    /// there, and the window's mask. Template 3 reads only one row above, and
-    /// its mask of zero keeps this empty.
-    two: u32,
-    two_right: i32,
-    two_mask: u32,
-    /// The row above, likewise.
-    one: u32,
-    one_right: i32,
-    one_mask: u32,
+    /// The row two above, and its window. Template 3 reads only one row
+    /// above, so it has none.
+    two: Option<RowAbove>,
+    /// The row above.
+    one: RowAbove,
     /// The row being decoded: the pixels already decided to the left.
     here: u32,
     here_mask: u32,
+}
+
+/// One row above the pixel being decided, as [`RolledContext`] reads it.
+///
+/// `bits` holds three of the row's bytes — the one before the pixel's, the
+/// pixel's own and the one after — so in byte `k`, the pixel's, column
+/// `8k + j` is bit `15 - j`, and a window reaching at most three columns past
+/// the pixel on either side never leaves them. Columns off either end of the
+/// row read 0, and so does every column of a row above the first, as 6.2.5.2
+/// has them.
+#[derive(Clone, Copy, Debug)]
+struct RowAbove {
+    bits: u32,
+    /// The row's offset from the one being decoded: -1 or -2.
+    dy: i32,
+    /// The window's rightmost column, as an offset from the pixel.
+    right: i32,
+    mask: u32,
+}
+
+impl RowAbove {
+    /// The row `dy` above row `y`, at pixel 0, its window over the columns
+    /// `left..=right` about the pixel.
+    fn start(bitmap: &Bitmap, y: i32, dy: i32, (left, right): (i32, i32)) -> RowAbove {
+        let row = y + dy;
+        RowAbove {
+            bits: (bitmap.row_byte(row, 0) << 8) | bitmap.row_byte(row, 1),
+            dy,
+            right,
+            mask: (1u32 << (right - left + 1)) - 1,
+        }
+    }
+
+    /// The window about pixel `x`, its leftmost column in its top bit.
+    fn window(&self, x: i32) -> u32 {
+        (self.bits >> (15 - (x & 7) - self.right)) & self.mask
+    }
+
+    /// Moves from pixel `x` of row `y` to `x + 1`: where that crosses into
+    /// the next byte, the byte after it is loaded.
+    fn advance(&mut self, bitmap: &Bitmap, x: i32, y: i32) {
+        let next = x + 1;
+        if next & 7 == 0 {
+            let byte = usize::try_from(next >> 3)
+                .map_or(0, |index| bitmap.row_byte(y + self.dy, index + 1));
+            self.bits = (self.bits << 8) | byte;
+        }
+    }
 }
 
 impl RolledContext {
@@ -4810,19 +4904,11 @@ impl RolledContext {
             (_, true) => (None, (-3, 2), 4),
             (_, false) => (None, (-3, 1), 4),
         };
-        let window = |(left, right): (i32, i32), row: i32| {
-            (left..=right).fold(0u32, |bits, dx| (bits << 1) | bitmap.get(dx, row))
-        };
-        let mask = |(left, right): (i32, i32)| (1u32 << (right - left + 1)) - 1;
         RolledContext {
             template,
             nominal,
-            two: two.map_or(0, |run| window(run, y - 2)),
-            two_right: two.map_or(0, |(_, right)| right),
-            two_mask: two.map_or(0, mask),
-            one: window(one, y - 1),
-            one_right: one.1,
-            one_mask: mask(one),
+            two: two.map(|run| RowAbove::start(bitmap, y, -2, run)),
+            one: RowAbove::start(bitmap, y, -1, one),
             here: 0,
             here_mask: (1u32 << here) - 1,
         }
@@ -4830,14 +4916,16 @@ impl RolledContext {
 
     /// The context of pixel `(x, y)`: [`context`]'s value, bit for bit.
     fn at(&self, bitmap: &Bitmap, at: &[(i32, i32); 4], x: i32, y: i32) -> usize {
+        let two = self.two.map_or(0, |row| row.window(x));
+        let one = self.one.window(x);
         if self.nominal {
             // Each window is the figure's run with its adaptive pixels at
             // either end, already in the order the figure numbers them.
             let value = match self.template {
-                0 => (self.two << 11) | (self.one << 4) | self.here,
-                1 => (self.two << 9) | (self.one << 3) | self.here,
-                2 => (self.two << 7) | (self.one << 2) | self.here,
-                _ => (self.one << 4) | self.here,
+                0 => (two << 11) | (one << 4) | self.here,
+                1 => (two << 9) | (one << 3) | self.here,
+                2 => (two << 7) | (one << 2) | self.here,
+                _ => (one << 4) | self.here,
             };
             return value as usize;
         }
@@ -4845,16 +4933,16 @@ impl RolledContext {
         let value = match self.template {
             0 => {
                 (a(3) << 15)
-                    | (self.two << 12)
+                    | (two << 12)
                     | (a(2) << 11)
                     | (a(1) << 10)
-                    | (self.one << 5)
+                    | (one << 5)
                     | (a(0) << 4)
                     | self.here
             }
-            1 => (self.two << 9) | (self.one << 4) | (a(0) << 3) | self.here,
-            2 => (self.two << 7) | (self.one << 3) | (a(0) << 2) | self.here,
-            _ => (self.one << 5) | (a(0) << 4) | self.here,
+            1 => (two << 9) | (one << 4) | (a(0) << 3) | self.here,
+            2 => (two << 7) | (one << 3) | (a(0) << 2) | self.here,
+            _ => (one << 5) | (a(0) << 4) | self.here,
         };
         value as usize
     }
@@ -4862,11 +4950,10 @@ impl RolledContext {
     /// Moves the windows from `x` to `x + 1`, with `pixel` the value just
     /// given to `(x, y)`.
     fn advance(&mut self, bitmap: &Bitmap, x: i32, y: i32, pixel: u32) {
-        if self.two_mask != 0 {
-            self.two =
-                ((self.two << 1) | bitmap.get(x + 1 + self.two_right, y - 2)) & self.two_mask;
+        if let Some(two) = self.two.as_mut() {
+            two.advance(bitmap, x, y);
         }
-        self.one = ((self.one << 1) | bitmap.get(x + 1 + self.one_right, y - 1)) & self.one_mask;
+        self.one.advance(bitmap, x, y);
         self.here = ((self.here << 1) | (pixel & 1)) & self.here_mask;
     }
 }
@@ -4966,6 +5053,15 @@ fn decode_arithmetic(
 /// carried across all of them, so the state that makes symbol two cheap is the
 /// state symbol one left behind. Restarting either per symbol decodes the
 /// first one correctly and then noise.
+///
+/// **Decided pixels are stored a byte at a time where nothing reads them
+/// sooner.** With the adaptive pixels at their nominal places the context
+/// reads the row being decoded only through [`RolledContext`]'s own bits, so
+/// a row's pixels are gathered and each byte written once
+/// ([`Bitmap::store_byte`]), the last byte of a row when the row ends — before
+/// the next row's windows or TPGDON's [`Bitmap::copy_row`] read it. An
+/// adaptive pixel anywhere else may read the row being decoded through
+/// [`Bitmap::get`], so that layout writes each pixel as it is decided.
 fn decode_generic_into(
     coder: &mut MqDecoder<'_>,
     contexts: &mut MqContexts,
@@ -4990,6 +5086,8 @@ fn decode_generic_into(
             }
         }
         let mut rolled = RolledContext::start(into, template, at, y as i32);
+        let gathering = rolled.nominal;
+        let mut gathered = 0u32;
         for x in 0..into.width {
             // 6.2.5.7's USESKIP: a pixel the caller has already decided is
             // outside anything is not coded at all, so it is set to zero and
@@ -5001,7 +5099,15 @@ fn decode_generic_into(
                 let cx = rolled.at(into, at, x as i32, y as i32);
                 u32::from(coder.decode_at(contexts, cx))
             };
-            into.set(x, y, pixel);
+            if gathering {
+                gathered = (gathered << 1) | pixel;
+                if x & 7 == 7 || x + 1 == into.width {
+                    into.store_byte(x, y, gathered);
+                    gathered = 0;
+                }
+            } else {
+                into.set(x, y, pixel);
+            }
             rolled.advance(into, x as i32, y as i32, pixel);
         }
     }
@@ -5939,6 +6045,10 @@ mod tests {
         /// many reads a decoded pixel costs — a property of the code rather
         /// than of the machine, which is what a clock is.
         pub(super) static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Every byte [`Bitmap::row_byte`] has read, likewise.
+        pub(super) static LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Every [`Bitmap::store_byte`], likewise.
+        pub(super) static STORES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     /// A deterministic picture with no structure to lean on: a linear
@@ -7974,6 +8084,124 @@ mod tests {
         }
     }
 
+    /// [`decode_generic_into`]'s row loop read and written a pixel at a time:
+    /// [`context`]'s transcription at every pixel, and each decided pixel
+    /// written alone through [`Bitmap::set`].
+    fn decode_generic_a_pixel_at_a_time(
+        coder: &mut MqDecoder<'_>,
+        contexts: &mut MqContexts,
+        template: u8,
+        tpgdon: bool,
+        at: &[(i32, i32); 4],
+        skip: Option<&Bitmap>,
+        into: &mut Bitmap,
+    ) {
+        let mut ltp = 0u8;
+        for y in 0..into.height {
+            if tpgdon {
+                ltp ^= coder.decode_at(contexts, tpgdon_context(template));
+                if ltp == 1 {
+                    if y > 0 {
+                        into.copy_row(y - 1, y);
+                    }
+                    continue;
+                }
+            }
+            for x in 0..into.width {
+                let pixel = if skip.is_some_and(|map| map.get(x as i32, y as i32) == 1) {
+                    0
+                } else {
+                    let cx = context(into, template, at, x as i32, y as i32);
+                    u32::from(coder.decode_at(contexts, cx))
+                };
+                into.set(x, y, pixel);
+            }
+        }
+    }
+
+    /// **A generic region read and written a byte at a time is the
+    /// transcription read and written a pixel at a time.**
+    ///
+    /// The same coded bytes through [`decode_generic_into`] and through
+    /// [`decode_generic_a_pixel_at_a_time`], at every template, with the
+    /// nominal adaptive pixels and with ones that read the row being decoded
+    /// on either side, the row below and far outside the windows; at every
+    /// width from 1 to 17, so every partial last byte is met, and wider; with
+    /// TPGDON and USESKIP each on and off; into a fresh bitmap and into one
+    /// whose every byte, padding included, already holds noise, so a store
+    /// that wrote past its pixels or before the row was decided shows. Both
+    /// must give the same bytes and leave every adaptive state where the other
+    /// left it: a decision taken in another context moves a state even where
+    /// it decides the same pixel.
+    #[test]
+    fn a_region_decoded_a_byte_at_a_time_is_the_transcription_a_pixel_at_a_time() {
+        let coded: Vec<u8> = (0..160u32)
+            .map(|i| (i.wrapping_mul(0x9E37_79B9) >> 24) as u8)
+            .collect();
+        let height = 6;
+        for template in 0..4u8 {
+            let layouts = [
+                NOMINAL_AT[usize::from(template)],
+                CUSTOM_AT,
+                [(2, 0), (0, 1), (-128, -128), (127, -1)],
+            ];
+            for at in layouts {
+                for width in (1..=17).chain([40, 64]) {
+                    for (tpgdon, skipping, filled) in
+                        (0..8).map(|i| (i & 1 != 0, i & 2 != 0, i & 4 != 0))
+                    {
+                        let skip = skipping.then(|| noise(width, height, 3));
+                        let mut start = Bitmap::new(width, height, 1 << 20).expect("bitmap");
+                        if filled {
+                            for (index, byte) in start.bits.iter_mut().enumerate() {
+                                *byte = ((index as u32 + 1).wrapping_mul(0x85EB_CA6B) >> 24) as u8;
+                            }
+                        }
+                        let (mut ours, mut theirs) = (start.clone(), start);
+                        let states = 1 << template_bits(template);
+                        let (mut our_coder, mut their_coder) =
+                            (MqDecoder::new(&coded), MqDecoder::new(&coded));
+                        let (mut our_contexts, mut their_contexts) =
+                            (MqContexts::new(states), MqContexts::new(states));
+                        decode_generic_into(
+                            &mut our_coder,
+                            &mut our_contexts,
+                            template,
+                            tpgdon,
+                            &at,
+                            skip.as_ref(),
+                            &mut ours,
+                        );
+                        decode_generic_a_pixel_at_a_time(
+                            &mut their_coder,
+                            &mut their_contexts,
+                            template,
+                            tpgdon,
+                            &at,
+                            skip.as_ref(),
+                            &mut theirs,
+                        );
+                        let case = format!(
+                            "template {template}, adaptive pixels {at:?}, width {width}, \
+                             TPGDON {tpgdon}, USESKIP {skipping}, filled {filled}"
+                        );
+                        assert_eq!(ours.bits, theirs.bits, "{case}: the bytes differ");
+                        assert_eq!(
+                            our_coder.take_decisions(),
+                            their_coder.take_decisions(),
+                            "{case}: the decision counts differ"
+                        );
+                        assert!(
+                            (0..states)
+                                .all(|cx| our_contexts.state(cx) == their_contexts.state(cx)),
+                            "{case}: an adaptive state differs"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// **The rolled refinement context is [`refinement_context`], at every
     /// pixel, and its typical-row test is 6.3.5.6's.**
     ///
@@ -8036,34 +8264,48 @@ mod tests {
         }
     }
 
-    /// **What a decoded pixel costs, counted in reads.**
+    /// **What a decoded pixel costs, counted in reads, loads and stores.**
     ///
     /// The `jbig2` fuzz target's slow unit was a symbol dictionary spending
     /// its work budget at template 0, and its dearest shape a refinement
     /// region as large as the ceiling: sixteen and thirteen bounds-checked
     /// reads a pixel, each instrumented under the sanitizers. The rolled
-    /// contexts read one pixel a row above — two at template 0, with its
-    /// nominal adaptive pixels folded into the windows — and four for a
-    /// refinement. Counted through [`READS`], so a change
-    /// that went back to gathering every pixel afresh fails here by its cause
-    /// on any machine, where a clock would pass on a fast one.
+    /// generic context reads its rows above a byte at a time — one load per
+    /// eight pixels per row, with template 0's nominal adaptive pixels folded
+    /// into the windows — and stores what it decides a byte at a time, so a
+    /// nominal generic region reads no pixel alone at all; a refinement reads
+    /// four a pixel. Counted through [`READS`], [`LOADS`] and [`STORES`], so a
+    /// change that went back to gathering every pixel afresh fails here by its
+    /// cause on any machine, where a clock would pass on a fast one.
     #[test]
     fn a_decoded_pixel_costs_the_reads_its_rolled_context_needs() {
         let (width, height) = (64u32, 32u32);
         let pixels = u64::from(width * height);
         let coded = [0x4F, 0xE7, 0x8D, 0x68, 0x1B, 0xA5, 0x3C, 0x91, 0x07, 0xF2];
+        let counted = || {
+            (
+                READS.with(std::cell::Cell::get),
+                LOADS.with(std::cell::Cell::get),
+                STORES.with(std::cell::Cell::get),
+            )
+        };
+        let reset = || {
+            READS.with(|reads| reads.set(0));
+            LOADS.with(|loads| loads.set(0));
+            STORES.with(|stores| stores.set(0));
+        };
 
         let mut generic = Bitmap::new(width, height, 1 << 20).expect("bitmap");
-        READS.with(|reads| reads.set(0));
+        reset();
         decode_arithmetic(&coded, 0, false, &NOMINAL_AT[0], None, &mut generic);
-        let generic_reads = READS.with(std::cell::Cell::get);
+        let (generic_reads, generic_loads, generic_stores) = counted();
 
         // And with the adaptive pixels somewhere else, which is the shape of
         // the slow unit's dictionary — each of the four is then a read.
         let mut custom = Bitmap::new(width, height, 1 << 20).expect("bitmap");
-        READS.with(|reads| reads.set(0));
+        reset();
         decode_arithmetic(&coded, 0, false, &CUSTOM_AT, None, &mut custom);
-        let custom_reads = READS.with(std::cell::Cell::get);
+        let (custom_reads, custom_loads, _) = counted();
 
         let reference = noise(width, height, 7);
         let template = refine_template(0, NOMINAL_REFINE_AT);
@@ -8082,20 +8324,36 @@ mod tests {
         );
         let refinement_reads = READS.with(std::cell::Cell::get);
 
-        // The windows' starts are a few reads a row on top of the per-pixel
-        // figure, which is what the second term allows.
-        assert!(
-            generic_reads <= 2 * pixels + 12 * u64::from(height),
-            "template 0 read {generic_reads} times for {pixels} pixels, which is \
-             {} a pixel; the transcription reads sixteen",
-            generic_reads / pixels
+        // Template 0 reads two rows above, each a load per eight of its
+        // pixels, and a decided row is a store per eight of its pixels.
+        let bytes = pixels / 8;
+        assert_eq!(
+            generic_reads, 0,
+            "template 0 with its nominal adaptive pixels read {generic_reads} pixels \
+             one at a time; the transcription reads sixteen a pixel"
         );
         assert!(
-            custom_reads <= 6 * pixels + 8 * u64::from(height),
+            generic_loads <= 2 * bytes,
+            "template 0 loaded {generic_loads} bytes of its rows above for {pixels} \
+             pixels, more than one per eight pixels of its two rows"
+        );
+        assert!(
+            generic_stores <= bytes,
+            "template 0 stored {generic_stores} times for {pixels} decided pixels, \
+             more than one per eight"
+        );
+        assert!(
+            custom_reads <= 4 * pixels,
             "template 0 with its adaptive pixels moved read {custom_reads} times \
-             for {pixels} pixels, which is {} a pixel; the transcription reads \
-             sixteen",
+             for {pixels} pixels, which is {} a pixel; its four adaptive pixels are \
+             four, and the transcription reads sixteen",
             custom_reads / pixels
+        );
+        assert!(
+            custom_loads <= 2 * bytes,
+            "template 0 with its adaptive pixels moved loaded {custom_loads} bytes \
+             of its rows above for {pixels} pixels, more than one per eight pixels \
+             of its two rows"
         );
         assert!(
             refinement_reads <= 4 * pixels + 12 * u64::from(height),
