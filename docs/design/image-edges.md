@@ -49,9 +49,9 @@ hundreds of them.
 **Coverage is the quad, filled.** `draw_image` builds the unit square's four
 corners through the transform and fills them with the non-zero rule over the
 rectangle the draw already visits. Reusing `fill` buys the sixteen-sub-scanline
-grid, exact 1/256 spans, integer accumulation, the active-edge sweep and the
-cancellation contract — five properties a second edge walker would have to earn
-again, and could then disagree with `fill` about.
+grid, exact 1/256 spans, integer accumulation, the row walk over cells that
+sorts nothing, and the cancellation contract — five properties a second edge
+walker would have to earn again, and could then disagree with `fill` about.
 
 The corners are **snapped to that 1/256 grid** before filling. An image
 rectangle placed by a translation lands on a grid line far more often than not,

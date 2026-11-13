@@ -3,9 +3,10 @@
 *For [ROADMAP](../ROADMAP.md) row P-07.* `fill` computes a coverage mask by
 sampling each pixel row at sixteen sub-scanlines and measuring, on each, the
 horizontal spans the fill rule calls inside in exact 1/256-pixel units
-([rasterizer](../features/rasterizer.md)). Today it sorts the edges by their
-tops, keeps an active-edge list per sub-scanline, sorts each sub-scanline's
-crossings by `x` and sweeps them into a `u16` accumulator one span at a time.
+([rasterizer](../features/rasterizer.md)). The sorted sweep that defines
+those numbers — edges sorted by their tops, an active-edge list per
+sub-scanline, each sub-scanline's crossings sorted by `x` and swept into a `u16`
+accumulator one span at a time — is kept, test-only, as `fill_reference.rs`.
 This document fixes how the same numbers are computed without either sort: from
 integer cells, one row at a time, prefix-summed along the row. It also fixes
 where the fill's memory lives, the two fast paths that skip work the cells show

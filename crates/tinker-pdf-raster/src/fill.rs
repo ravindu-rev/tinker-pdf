@@ -296,9 +296,9 @@ const SUBSTEP_BITS: u32 = 16;
 /// a multiple of the step and therefore commutes with translating the whole
 /// shape by a whole number of pixels — a tile's frame and the page's quantise
 /// a crossing to the same unit. It is also the *nearest* unit rather than the
-/// one below, which is the unbiased choice: [`add_span`] is linear in the
-/// crossing, so the nearest unit is the one whose span is nearest the span the
-/// geometry states.
+/// one below, which is the unbiased choice: a pixel's coverage is linear in
+/// the crossing, so the nearest unit is the one whose coverage is nearest the
+/// coverage the geometry states.
 const SUBSTEP: i64 = 1 << SUBSTEP_BITS;
 
 /// One edge, in sub-scanline space.
@@ -315,6 +315,9 @@ struct Edge {
     winding: i32,
 }
 
+/// The end of a list: no edge, no block of list heads, no later crossing.
+const NONE: u32 = u32::MAX;
+
 /// Rasterizes a path into a coverage mask clipped to the given region.
 ///
 /// The region bounds the work: a path far larger than the page costs only the
@@ -327,6 +330,17 @@ struct Edge {
 /// than a missing one and the caller is discarding the canvas anyway if the
 /// stop was real. `None` is the whole of the previous behaviour: no predicate
 /// is called and no row is skipped.
+///
+/// **Nothing is ordered.** A row of the region is a line of [`Cell`]s, one per
+/// pixel, each with a lane per sub-scanline; every edge reaching the row
+/// deposits its crossings into the lanes, and the row is walked left to right
+/// carrying each lane's winding — a prefix sum — and turned into bytes as it
+/// goes. No edge is sorted by its top and no sub-scanline's crossings by `x`:
+/// a pixel's coverage on a sub-scanline is the count of its 1/256 units the
+/// rule calls inside, which the crossings decide whatever order they come in.
+/// The bytes are the sorted sweep's, which `fill_reference.rs` keeps and
+/// compares with this byte for byte; `docs/design/rasterizer-accumulation.md`
+/// is the design.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn fill(
@@ -344,121 +358,442 @@ pub fn fill(
         return mask;
     }
 
-    let polys = flatten(path, tolerance);
     let mut edges = Vec::new();
-    for poly in &polys {
-        build_edges(poly, &mut edges);
+    let mut open = false;
+    for poly in &flatten(path, tolerance) {
+        open |= build_edges(poly, &mut edges);
     }
-    if edges.is_empty() {
+    let rows = active_rows(&edges, y0, height);
+    if rows.is_empty() {
         return mask;
     }
 
-    // The active-edge list wants the edges in the order they begin. The sort
-    // is stable, so edges starting on the same sub-scanline keep the order the
-    // path gave them — which changes nothing, because the accumulation below
-    // is order-independent, but it costs nothing to keep.
-    edges.sort_by_key(|edge| edge.top);
+    // Each edge waits in the list of the row it begins in, or of the first
+    // row when it begins above the region; an edge that ends above the region
+    // or begins below it is in no list. Lists, not a sort: the order an edge
+    // joins the active set in decides nothing.
+    let samples = i64::from(SAMPLES);
+    let first_row = i64::from(y0) + i64::from(rows.start);
+    let mut starts = vec![NONE; (rows.end - rows.start) as usize];
+    let mut next = vec![NONE; edges.len()];
+    for (index, edge) in edges.iter().enumerate() {
+        let begins = i64::from(edge.top).div_euclid(samples);
+        let ends = (i64::from(edge.bottom) - 1).div_euclid(samples);
+        if ends < first_row {
+            continue;
+        }
+        let slot = (begins.max(first_row) - first_row) as usize;
+        if let (Some(head), Some(link)) = (starts.get_mut(slot), next.get_mut(index)) {
+            *link = *head;
+            *head = index as u32;
+        }
+    }
 
-    // Accumulate coverage per row: each sub-scanline contributes its spans.
-    let mut accumulator = vec![0u16; width as usize];
-    let mut crossings: Vec<(i64, i32)> = Vec::new();
-    // Indices into `edges` of those crossing the current sub-scanline, and how
-    // far into `edges` the sweep has reached.
-    let mut active: Vec<usize> = Vec::new();
-    let mut pending = 0usize;
+    let mut cells = Row::new(width as usize);
+    let mut sweep = Sweep::default();
+    let mut active: Vec<u32> = Vec::new();
+    let origin = i64::from(x0) * 256;
+    let units = i64::from(width) * 256;
 
-    for (step, row) in active_rows(&edges, y0, height).enumerate() {
-        // Row granularity, not pixel granularity: a row is bounded by the
-        // canvas width, and stopping inside one would leave a half-computed
-        // accumulator to reason about for no promptness anyone can perceive.
+    for (step, row) in rows.enumerate() {
+        // Row granularity, not pixel granularity, and before the row's
+        // deposit: a stop leaves no row half converted and the cells clear.
         if step % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
             return mask;
         }
-        accumulator.iter_mut().for_each(|slot| *slot = 0);
-        let row_top = y0.saturating_add(row as i32).saturating_mul(SAMPLES);
-
-        for sample in 0..SAMPLES {
-            let sub = row_top.saturating_add(sample);
-            crossings.clear();
-
-            // Sub-scanlines only ever increase, so an edge joins the list once
-            // and leaves it once and the whole fill is a single pass over the
-            // sorted edges. Testing every edge at every sample cost
-            // `height x 16 x edges`, which is why a page-tall region made a
-            // hundred-edge path expensive whatever it covered.
-            while let Some(edge) = edges.get(pending) {
-                if edge.top > sub {
-                    break;
-                }
-                active.push(pending);
-                pending += 1;
-            }
-            active.retain(|index| edges.get(*index).is_some_and(|edge| edge.bottom > sub));
-
-            for index in &active {
-                let Some(edge) = edges.get(*index) else {
-                    continue;
-                };
-                // Saturating throughout: a path may reach ±1e9, whose
-                // sub-scanline index alone exceeds i32, and the slope times
-                // the height then exceeds i64. Clamping puts the crossing far
-                // outside the region, which is where it belongs.
-                let steps = i64::from(sub).saturating_sub(i64::from(edge.top));
-                // Down to the 1/256 the spans are measured in, **rounded**
-                // rather than floored. The rounding is `+ half, >> bits`,
-                // which is a `floor` of a
-                // shifted value and therefore commutes with moving the whole
-                // shape by a whole pixel -- the property a tile rests on, and
-                // the reason the shift is spelled from [`SUBSTEP_BITS`] rather
-                // than written out beside a constant that could move without
-                // it.
-                let x = edge
-                    .dxdy
-                    .saturating_mul(steps)
-                    .saturating_add(edge.x)
-                    .saturating_add(SUBSTEP / 2)
-                    >> SUBSTEP_BITS;
-                crossings.push((x, edge.winding));
-            }
-            if crossings.len() < 2 {
-                continue;
-            }
-            crossings.sort_by_key(|(x, _)| *x);
-
-            let mut winding = 0i32;
-            let mut span_start = 0i64;
-            for (x, w) in &crossings {
-                let was_inside = inside(winding, rule);
-                winding += w;
-                let is_inside = inside(winding, rule);
-
-                if !was_inside && is_inside {
-                    span_start = *x;
-                } else if was_inside && !is_inside {
-                    add_span(&mut accumulator, x0, width, span_start, *x);
-                }
-            }
+        let mut at = starts.get(step).copied().unwrap_or(NONE);
+        while let Some(link) = next.get(at as usize) {
+            active.push(at);
+            at = *link;
         }
 
-        // Each sub-scanline contributes at most 256 units of a pixel's width,
-        // over SAMPLES rows: scale to 0..=255.
-        //
-        // **One bounds check for the row rather than one per pixel.**
-        // `SAMPLES` is 16, so this is a shift, and the accumulator is `u16`
-        // whose largest value is 256 * 16 = 4 096, which divides and clamps
-        // in `u16` as it would in any wider type. The compiler sees a slice
-        // as long as the accumulator instead of an indexed `get_mut`, and a
-        // shift-and-saturate over a known trip count is a loop it will
-        // vectorise.
+        // The row's first sub-scanline. `active_rows` keeps every row the
+        // edges reach between `i32::MIN / 16` and `i32::MAX / 16`, so this is
+        // the sweep's `(y0 + row) × 16` with nothing to saturate.
+        let top = (i64::from(y0) + i64::from(row)) * samples;
         let base = (row as usize) * (width as usize);
-        if let Some(out) = mask.data.get_mut(base..base + accumulator.len()) {
-            for (slot, total) in out.iter_mut().zip(accumulator.iter()) {
-                *slot = (*total / SAMPLES as u16).min(255) as u8;
+        let Some(out) = mask.data.get_mut(base..base + width as usize) else {
+            break;
+        };
+        if open && sweep.is_open(&edges, &active, top, rule) {
+            sweep.row(&edges, &active, top, rule, (x0, width), out);
+        } else {
+            for index in &active {
+                let Some(edge) = edges.get(*index as usize) else {
+                    continue;
+                };
+                for sub in i64::from(edge.top).max(top)..i64::from(edge.bottom).min(top + samples) {
+                    let rel = crossing(edge, sub).saturating_sub(origin);
+                    cells.deposit((sub - top) as usize, rel, units, edge.winding);
+                }
+            }
+            cells.convert(rule, out);
+        }
+
+        // The edges that end in this row leave; the hole takes the last.
+        let below = top + samples;
+        let mut at = 0;
+        while let Some(index) = active.get(at) {
+            if edges
+                .get(*index as usize)
+                .is_none_or(|edge| i64::from(edge.bottom) <= below)
+            {
+                active.swap_remove(at);
+            } else {
+                at += 1;
             }
         }
     }
 
     mask
+}
+
+/// Where `edge` meets sub-scanline `sub`, in 1/256 pixel.
+///
+/// Saturating throughout: a path may reach ±1e9, whose sub-scanline index
+/// alone exceeds `i32`, and the slope times the height then exceeds `i64`.
+/// Clamping puts the crossing far outside the region, which is where it
+/// belongs. Down to the 1/256 the coverage is measured in, **rounded** rather
+/// than floored: `+ half, >> bits` is a `floor` of a shifted value and
+/// therefore commutes with moving the whole shape by a whole pixel — the
+/// property a tile rests on, and the reason the shift is spelled from
+/// [`SUBSTEP_BITS`] rather than written out beside a constant that could move
+/// without it.
+fn crossing(edge: &Edge, sub: i64) -> i64 {
+    let steps = sub.saturating_sub(i64::from(edge.top));
+    edge.dxdy
+        .saturating_mul(steps)
+        .saturating_add(edge.x)
+        .saturating_add(SUBSTEP / 2)
+        >> SUBSTEP_BITS
+}
+
+/// 1 where the rule calls a winding inside, 0 where it does not.
+fn inside_as(winding: i32, rule: FillRule) -> i32 {
+    match rule {
+        FillRule::NonZero => i32::from(winding != 0),
+        FillRule::EvenOdd => winding & 1,
+    }
+}
+
+/// One pixel of the row being filled: a **lane** for each of its sixteen
+/// sub-scanlines.
+///
+/// A lane's first crossing is held in the cell; the crossings after it, which
+/// only a crowded pixel has, are lists through the row's [`Row::later`], one
+/// head a lane in a block of sixteen the cell takes from [`Row::heads`] when a
+/// lane first holds two. Forty bytes.
+#[derive(Clone, Copy)]
+struct Cell {
+    /// The lanes holding at least one crossing.
+    lanes: u16,
+    /// The lanes holding two or more.
+    multi: u16,
+    /// A lane's first crossing: its winding.
+    w: [i8; 16],
+    /// And its offset in the pixel, `x & 255`.
+    off: [u8; 16],
+    /// The cell's block of sixteen list heads in [`Row::heads`], or [`NONE`].
+    more: u32,
+}
+
+impl Cell {
+    const CLEAR: Cell = Cell {
+        lanes: 0,
+        multi: 0,
+        w: [0; 16],
+        off: [0; 16],
+        more: NONE,
+    };
+}
+
+/// A crossing after the first in its lane of a cell.
+#[derive(Clone, Copy)]
+struct Later {
+    /// Its offset in the pixel.
+    off: u8,
+    /// Its winding.
+    w: i8,
+    /// The lane's next later crossing, or [`NONE`].
+    next: u32,
+}
+
+/// The cells of one row, and what turning them into bytes needs.
+struct Row {
+    /// One a pixel of the region's width, clear between rows.
+    cells: Vec<Cell>,
+    /// Each lane's winding from the crossings left of the region.
+    left: [i32; 16],
+    /// Blocks of sixteen list heads, one block a crowded cell.
+    heads: Vec<u32>,
+    /// The crossings after a lane's first.
+    later: Vec<Later>,
+    /// A crowded lane's windings summed at each offset, clear between lanes.
+    table: [i32; 256],
+    /// The offsets of `table` a crowded lane took, clear between lanes.
+    map: [u64; 4],
+}
+
+impl Row {
+    fn new(width: usize) -> Row {
+        Row {
+            cells: vec![Cell::CLEAR; width],
+            left: [0; 16],
+            heads: Vec::new(),
+            later: Vec::new(),
+            table: [0; 256],
+            map: [0; 4],
+        }
+    }
+
+    /// Puts a crossing with winding `w` on `lane`, at `rel` 1/256 units right
+    /// of the region's left edge, `units` being the region's width in them.
+    ///
+    /// Left of the region it is folded into the lane's winding there; at or
+    /// right of the region's right edge it can change no pixel of it.
+    fn deposit(&mut self, lane: usize, rel: i64, units: i64, w: i32) {
+        let lane = lane & 15;
+        if rel < 0 {
+            self.left[lane] += w;
+            return;
+        }
+        if rel >= units {
+            return;
+        }
+        let Some(cell) = self.cells.get_mut((rel >> 8) as usize) else {
+            return;
+        };
+        let off = (rel & 255) as u8;
+        let bit = 1u16 << lane;
+        if cell.lanes & bit == 0 {
+            cell.lanes |= bit;
+            cell.w[lane] = w as i8;
+            cell.off[lane] = off;
+            return;
+        }
+        cell.multi |= bit;
+        if cell.more == NONE {
+            cell.more = (self.heads.len() / 16) as u32;
+            self.heads.extend_from_slice(&[NONE; 16]);
+        }
+        if let Some(head) = self.heads.get_mut(cell.more as usize * 16 + lane) {
+            self.later.push(Later {
+                off,
+                w: w as i8,
+                next: *head,
+            });
+            *head = (self.later.len() - 1) as u32;
+        }
+    }
+
+    /// Walks the row's cells left to right into `out`, one byte a cell, and
+    /// leaves every cell clear.
+    ///
+    /// The walk carries each lane's winding at its position and the count of
+    /// lanes the rule calls inside. A cell with no crossing is `16 × inside`:
+    /// each lane inside covers its 256 units. A cell with crossings starts
+    /// from `256 × inside`, and each of its lanes' crossings at offset `o`
+    /// adds `(256 − o) × (I(W + w) − I(W))` as it moves the lane's winding —
+    /// the units from the crossing to the cell's right edge change sides
+    /// together. The lanes are independent, so the order they are taken in
+    /// decides nothing; inside one lane the crossings are taken by offset,
+    /// bucketed rather than compared, those at one offset summed first, which
+    /// is the sweep's zero-length span. The byte is `min(total / 16, 255)`,
+    /// as the sweep's.
+    fn convert(&mut self, rule: FillRule, out: &mut [u8]) {
+        let Row {
+            cells,
+            left,
+            heads,
+            later,
+            table,
+            map,
+        } = self;
+        let mut winding = *left;
+        let mut inside: i32 = winding.iter().map(|w| inside_as(*w, rule)).sum();
+        for (cell, byte) in cells.iter_mut().zip(out.iter_mut()) {
+            if cell.lanes == 0 {
+                *byte = (16 * inside).min(255) as u8;
+                continue;
+            }
+            let mut total = 256 * inside;
+            let mut lanes = cell.lanes;
+            while lanes != 0 {
+                let lane = (lanes.trailing_zeros() & 15) as usize;
+                lanes &= lanes - 1;
+                if cell.multi & (1 << lane) == 0 {
+                    let before = inside_as(winding[lane], rule);
+                    winding[lane] += i32::from(cell.w[lane]);
+                    let change = inside_as(winding[lane], rule) - before;
+                    total += (256 - i32::from(cell.off[lane])) * change;
+                    inside += change;
+                    continue;
+                }
+
+                // A crowded lane: its windings bucketed by offset.
+                let mut put = |off: u8, w: i8| {
+                    table[usize::from(off)] += i32::from(w);
+                    map[usize::from(off >> 6)] |= 1 << (off & 63);
+                };
+                put(cell.off[lane], cell.w[lane]);
+                let mut crowd = 1u64;
+                let mut at = heads
+                    .get(cell.more as usize * 16 + lane)
+                    .copied()
+                    .unwrap_or(NONE);
+                while let Some(item) = later.get(at as usize) {
+                    put(item.off, item.w);
+                    crowd += 1;
+                    at = item.next;
+                }
+                count::shared(crowd);
+                for (word, bits) in map.iter_mut().enumerate() {
+                    let mut taken = core::mem::take(bits);
+                    while taken != 0 {
+                        let off = word * 64 + taken.trailing_zeros() as usize;
+                        taken &= taken - 1;
+                        let d = core::mem::take(&mut table[off & 255]);
+                        let before = inside_as(winding[lane], rule);
+                        winding[lane] += d;
+                        let change = inside_as(winding[lane], rule) - before;
+                        total += (256 - off as i32) * change;
+                        inside += change;
+                    }
+                }
+            }
+            *byte = (total / 16).min(255) as u8;
+            *cell = Cell::CLEAR;
+        }
+        *left = [0; 16];
+        heads.clear();
+        later.clear();
+    }
+}
+
+/// The rows of a fill some of whose sub-scanlines do not close, swept as the
+/// reference sweeps them.
+///
+/// Every subpath is closed before it is filled, so on every sub-scanline the
+/// windings of the crossings sum to zero — unless [`build_edges`] dropped an
+/// edge that covers it (a point past the finite, a slope that is not, a `dy`
+/// under `f64::EPSILON`). Such a sub-scanline ends inside, the sweep never
+/// adds the span it last opened, and what it does add depends on the order of
+/// crossings at one `x`. So a row holding one is swept as the sweep sweeps it:
+/// its crossings sorted by position, then by their edge's top, then by its
+/// place in the path — the order the sweep's two stable sorts leave them in —
+/// and walked span by span. It is the only comparison a fill makes, and no
+/// closed path reaches it.
+#[derive(Default)]
+struct Sweep {
+    /// Coverage of the row, in 1/256 units summed over its sub-scanlines.
+    accumulator: Vec<u16>,
+    /// A sub-scanline's crossings: position, the edge's top, its index and
+    /// its winding.
+    crossings: Vec<(i64, i32, u32, i32)>,
+}
+
+impl Sweep {
+    /// Whether any sub-scanline of the row starting at sub-scanline `top`
+    /// ends inside: its windings, over every edge covering it, summing to a
+    /// value the rule calls inside.
+    fn is_open(&self, edges: &[Edge], active: &[u32], top: i64, rule: FillRule) -> bool {
+        let mut total = [0i32; 16];
+        for edge in active.iter().filter_map(|index| edges.get(*index as usize)) {
+            for sub in i64::from(edge.top).max(top)..i64::from(edge.bottom).min(top + 16) {
+                total[((sub - top) & 15) as usize] += edge.winding;
+            }
+        }
+        total.iter().any(|w| inside(*w, rule))
+    }
+
+    /// The row starting at sub-scanline `top`, swept into `out`.
+    fn row(
+        &mut self,
+        edges: &[Edge],
+        active: &[u32],
+        top: i64,
+        rule: FillRule,
+        (x0, width): (i32, u32),
+        out: &mut [u8],
+    ) {
+        self.accumulator.clear();
+        self.accumulator.resize(width as usize, 0);
+        for sub in top..top + i64::from(SAMPLES) {
+            self.crossings.clear();
+            for index in active {
+                let Some(edge) = edges.get(*index as usize) else {
+                    continue;
+                };
+                if i64::from(edge.top) <= sub && sub < i64::from(edge.bottom) {
+                    self.crossings
+                        .push((crossing(edge, sub), edge.top, *index, edge.winding));
+                }
+            }
+            if self.crossings.len() < 2 {
+                continue;
+            }
+            self.crossings.sort_unstable_by(|a, b| {
+                count::compared();
+                (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2))
+            });
+
+            let mut winding = 0i32;
+            let mut span_start = 0i64;
+            for (x, _, _, w) in &self.crossings {
+                let was_inside = inside(winding, rule);
+                winding += w;
+                let is_inside = inside(winding, rule);
+                if !was_inside && is_inside {
+                    span_start = *x;
+                } else if was_inside && !is_inside {
+                    add_span(&mut self.accumulator, x0, width, span_start, *x);
+                }
+            }
+        }
+        for (slot, total) in out.iter_mut().zip(self.accumulator.iter()) {
+            *slot = (*total / SAMPLES as u16).min(255) as u8;
+        }
+    }
+}
+
+/// Work a fill does, counted for the guards: compiled only under `cfg(test)`
+/// and kept per thread, so tests running side by side cannot add into each
+/// other's.
+#[cfg(test)]
+pub(crate) mod count {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static COMPARED: Cell<u64> = const { Cell::new(0) };
+        static SHARED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One comparison made ordering edges or crossings.
+    pub(crate) fn compared() {
+        COMPARED.with(|count| count.set(count.get() + 1));
+    }
+
+    /// `crowd` crossings sharing a lane of a cell.
+    pub(crate) fn shared(crowd: u64) {
+        SHARED.with(|count| count.set(count.get() + crowd));
+    }
+
+    /// The comparisons and the shared crossings counted on this thread since
+    /// the last call, which starts both again from zero.
+    pub(crate) fn take() -> (u64, u64) {
+        (
+            COMPARED.with(|c| c.replace(0)),
+            SHARED.with(|c| c.replace(0)),
+        )
+    }
+}
+
+/// The counters outside tests: nothing.
+#[cfg(not(test))]
+mod count {
+    pub(crate) fn compared() {}
+
+    pub(crate) fn shared(_crowd: u64) {}
 }
 
 /// The rows of the region any edge can reach, as a half-open range of row
@@ -556,7 +891,16 @@ fn add_span(accumulator: &mut [u16], x0: i32, width: u32, from: i64, to: i64) {
 /// its two edges both run downward, every sub-scanline holds one crossing and
 /// never a span. A subpath the stroker or a `re` closed already ends on its
 /// first point, so the closing pair is degenerate there and adds no edge.
-fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
+///
+/// Returns whether it **dropped an edge that may cover a sub-scanline** — one
+/// with a point past the finite, a `y` whose sixteenfold is not finite, a `dy`
+/// under `f64::EPSILON` across a sub-scanline, or a slope or first crossing
+/// that is not finite. Only such a drop can leave a sub-scanline whose
+/// windings do not sum to zero, which [`Sweep`] is for; an edge whose ends
+/// round to one sub-scanline covers none, and dropping it closes everything it
+/// would have closed.
+fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) -> bool {
+    let mut dropped = false;
     let closing = match (poly.first(), poly.last()) {
         (Some(first), Some(last)) if first != last => Some([*last, *first]),
         _ => None,
@@ -569,6 +913,7 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
             continue;
         };
         if !a.is_finite() || !b.is_finite() {
+            dropped = true;
             continue;
         }
 
@@ -577,6 +922,7 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
         let y_top = (top.y * f64::from(SAMPLES)).ceil();
         let y_bottom = (bottom.y * f64::from(SAMPLES)).ceil();
         if !y_top.is_finite() || !y_bottom.is_finite() {
+            dropped = true;
             continue;
         }
         let (y_top, y_bottom) = (y_top as i32, y_bottom as i32);
@@ -586,6 +932,7 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
 
         let dy = bottom.y - top.y;
         if dy.abs() < f64::EPSILON {
+            dropped = true;
             continue;
         }
         let slope = (bottom.x - top.x) / dy;
@@ -596,11 +943,12 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
         let dxdy = slope / f64::from(SAMPLES);
 
         if !x_first.is_finite() || !dxdy.is_finite() {
+            dropped = true;
             continue;
         }
 
         // Into 1/256 of a pixel with [`SUBSTEP`]'s extra bits under it, which
-        // is what the sweep accumulates in.
+        // is what [`crossing`] reduces from.
         //
         // **No clamp to the segment's own ends here, and none on the crossings
         // either.** One stood in both places while ruling 5's guard was being
@@ -609,8 +957,8 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
         // points that produced it. It cannot: `y_first` is `ceil(y x 16) / 16`
         // and every operation reaching it is exact, `y_first - top.y` and
         // `bottom.y - top.y` are both exact by Sterbenz, so the only error in
-        // `x_first` is the one rounding of the division, and the reduction
-        // below is monotone -- a crossing inside `[min x, max x]` reduces to a
+        // `x_first` is the one rounding of the division, and the reduction in
+        // [`crossing`] is monotone -- a crossing inside `[min x, max x]` reduces to a
         // unit inside their two rounded units. Instrumented over the whole
         // workspace suite, a clamp on the crossings fired **zero** times.
         //
@@ -630,9 +978,9 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
             // stating here because an earlier draft of this comment claimed it
             // was and the claim is measurably wrong.
             //
-            // The load-bearing rounding is the *reduction* in the sweep above:
+            // The load-bearing rounding is the *reduction* in [`crossing`]:
             // that one takes a crossing to the nearest 1/256 unit, which is
-            // the unit the spans are measured in and the unit a translation
+            // the unit coverage is measured in and the unit a translation
             // has to commute with. Injecting a truncation there fails seven
             // tests, `tiles_at_other_scales_are_byte_equal_too` among them.
             // This conversion is two-to-the-sixteen finer than that: truncating
@@ -641,8 +989,8 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
             // half-step. Injected on 15 September 2026 it failed **nothing**
             // in a 4 653-test workspace.
             //
-            // So it stays on its own merits and no others: `add_span` is
-            // linear in the crossing, the nearest representable value is the
+            // So it stays on its own merits and no others: a pixel's coverage
+            // is linear in the crossing, the nearest representable value is the
             // one whose span is nearest the geometry's, and `round` is
             // correctly rounded by IEEE 754 and named in ruling 4 as safe on a
             // pixel path, so it costs no target stability.
@@ -657,6 +1005,7 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
             winding,
         });
     }
+    dropped
 }
 
 #[cfg(test)]
@@ -941,20 +1290,18 @@ mod tests {
         assert_eq!(huge.overlap(10, 10), (10, 0, 10, 10));
     }
 
-    /// Ruling 4's claim under the active-edge list, checked rather than
-    /// assumed: the order edges arrive in cannot change a pixel.
+    /// Ruling 4's claim under the cells, checked rather than assumed: the
+    /// order edges arrive in cannot change a pixel.
     ///
-    /// The plan's risk table says integer accumulation is order-independent
-    /// "by construction". It is, but the construction is worth naming, because
-    /// if any of it were floating-point the mitigation would be false. Within
-    /// one sub-scanline the crossings are sorted by x and swept left to right;
-    /// crossings at the *same* x can be swept in either order, and the two
-    /// sweeps can decompose the same interval differently — `[a, x] + [x, b]`
-    /// against `[a, b]`. `add_span` measures each pixel's overlap in exact
-    /// 1/256 units of `i64` and adds them into a `u16` that cannot reach its
-    /// ceiling (sixteen sub-scanlines of at most 256 each), so the two
-    /// decompositions add to the same integer. No float, no saturation, no
-    /// reordering hazard.
+    /// Integer accumulation is order-independent by construction, and the
+    /// construction is worth naming, because if any of it were floating-point
+    /// the claim would be false. An edge's crossings land in the lanes of the
+    /// cells by position alone; the walk takes each cell's lanes
+    /// independently, and a lane holding several crossings sums those at one
+    /// offset before it applies them, so crossings at the *same* x come to the
+    /// same winding in either order. Every pixel's total is a count of exact
+    /// 1/256 units in an `i32` that cannot pass 4 096. No float, no
+    /// saturation, no reordering hazard.
     ///
     /// These two paths hold the same subpaths in the opposite order, so the
     /// edge list is a permutation, and the vertical edges are deliberately
@@ -1053,6 +1400,93 @@ mod tests {
         path.close();
         let mask = fill(&path, FillRule::NonZero, 0, 0, 8, 8, 0.1, None);
         assert_eq!(mask.data.len(), 64);
+    }
+
+    /// **A fill orders nothing** (P-07.3's guard).
+    ///
+    /// Comparisons made ordering edges or crossings are counted, and on every
+    /// closed path the harness generates — overlapping, self-intersecting,
+    /// crowded, slivers, far, stroked — and on the 300 triangles of the
+    /// `render/300 triangles` benchmark page at 150 dpi there are none, so
+    /// there are at most as many as the crossings sharing a pixel on one
+    /// sub-scanline. Those are counted beside them, and must be what the
+    /// reference sweep's own arithmetic says they are: crowded lanes are met
+    /// and bucketed, not compared.
+    #[test]
+    fn a_fill_sorts_nothing() {
+        use crate::fill_reference::{census, generate, region, Class, Stream, CLASSES};
+
+        let mut s = Stream::new(0x736f_7274);
+        let (mut fills, mut crowded) = (0u64, 0u64);
+        for class in CLASSES {
+            if class == Class::Dropped {
+                continue;
+            }
+            for index in 0..24 {
+                let path = generate(class, index, &mut s);
+                let tolerance = s.range(0.05, 0.5);
+                let (x0, y0, width, height) = region(&mut s);
+                for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                    count::take();
+                    let _ = fill(&path, rule, x0, y0, width, height, tolerance, None);
+                    let (compared, shared) = count::take();
+                    assert_eq!(
+                        compared, 0,
+                        "{class:?} path {index} under {rule:?}: a closed path compared"
+                    );
+                    let met = census(&path, rule, x0, y0, width, height, tolerance);
+                    assert_eq!(
+                        shared, met.shared,
+                        "{class:?} path {index} under {rule:?}: the crowded lanes are the                          crossings the sweep finds sharing a pixel"
+                    );
+                    fills += 1;
+                    crowded += shared;
+                }
+            }
+        }
+        assert_eq!(fills, 6 * 24 * 2, "every closed class filled");
+        assert!(crowded > 10_000, "{crowded} crossings shared a lane");
+
+        let scale = 150.0 / 72.0;
+        let mut crowded = 0u64;
+        for index in 0..300 {
+            let step = f64::from(index);
+            let (x, y) = (20.0 + (step * 37.0) % 520.0, 20.0 + (step * 61.0) % 760.0);
+            let size = 18.0 + (step * 7.0) % 44.0;
+            let corners = [
+                (x, y),
+                (x + size * 0.93, y + size * 0.37),
+                (x + size * 0.41, y + size),
+            ];
+            let mut path = Path::new();
+            for (at, (cx, cy)) in corners.iter().enumerate() {
+                let (px, py) = (cx * scale, (842.0 - cy) * scale);
+                if at == 0 {
+                    path.move_to(px, py);
+                } else {
+                    path.line_to(px, py);
+                }
+            }
+            path.close();
+            let (left, top) = ((x * scale).floor(), ((842.0 - y - size) * scale).floor());
+            let side = (size * scale).ceil() as u32 + 2;
+            count::take();
+            let mask = fill(
+                &path,
+                FillRule::NonZero,
+                left as i32,
+                top as i32,
+                side,
+                side,
+                0.2,
+                None,
+            );
+            assert!(mask.data.contains(&255), "triangle {index} drew its inside");
+            let (compared, shared) = count::take();
+            assert_eq!(compared, 0, "triangle {index} compared");
+            crowded += shared;
+        }
+        assert!(crowded > 0, "the triangles' corners crowd a lane");
     }
 
     // -----------------------------------------------------------------------

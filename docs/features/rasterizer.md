@@ -30,9 +30,30 @@ points are dropped at construction, so nothing downstream ever sees a NaN.
 non-zero winding (8.5.3.3.2) or even-odd (8.5.3.3.3) rule. Coverage is
 accumulated at sixteen sub-scanlines per pixel row with exact horizontal
 spans in 1/256-pixel fixed point, entirely in integer arithmetic — the
-choice ruling 4 pays for over analytic exact-area coverage. The sweep keeps
-an active-edge list and visits only the rows a shape reaches, so a glyph-tall
-fill on a page-tall region does the shape's work, not the paper's.
+choice ruling 4 pays for over analytic exact-area coverage. The fill visits
+only the rows a shape reaches, so a glyph-tall fill on a page-tall region
+does the shape's work, not the paper's.
+
+*Nothing is sorted* ([design](../design/rasterizer-accumulation.md)). A row
+of the region is a line of cells, one per pixel, each with a lane per
+sub-scanline; every edge reaching the row deposits its crossings into the
+lanes by position, and the row is walked left to right carrying each lane's
+winding — a prefix sum — turning each cell into its byte as it passes. A
+pixel's coverage on a sub-scanline is the count of its 1/256 units the rule
+calls inside, which the crossings decide whatever order they come in, so no
+edge is ordered by its top and no sub-scanline's crossings by `x`. A lane
+holding several crossings in one pixel has them bucketed by their offset in
+the pixel rather than compared, so a crowded pixel costs its crossings and no
+more. An edge waits in a list of the row it begins in and leaves the active
+set when it ends, and a cancellation is asked before a row's deposit, so a
+stop leaves no row half converted. A sub-scanline closes — its windings sum
+to zero — wherever every edge of a closed subpath reaches it, so the only row
+that does not is one where an edge was dropped — a point past the finite or
+too large to take sixteen times, a slope that is not finite, a height under
+`f64::EPSILON` across a sub-scanline; such a row is
+swept as a sorted sweep sweeps it, crossings ordered by position, then the
+edge's top, then its place in the path, and that is the one comparison a
+fill can make.
 
 *Every subpath is closed before it is filled* (8.5.3.1), and before it clips
 (8.5.4), which reaches the same `fill`: the segment from a polyline's last point
@@ -316,7 +337,15 @@ tiny pattern over a long line cannot generate millions of pieces.
   quadratic flattens point-for-point like its exact cubic equivalent across
   seven curve shapes and five tolerances, and that flattening is
   deterministic; `fill.rs` covers both fill rules, mask algebra and the
-  partial-mask stop; `stroke.rs` covers caps, joins, the miter limit and
+  partial-mask stop, and `a_fill_sorts_nothing` counts the comparisons a fill
+  makes — none on any closed path or on the 300 triangles of the benchmark
+  page — beside the crossings that share a lane, which must be the count the
+  sorted sweep's own arithmetic gives; `fill_reference.rs` keeps that sweep,
+  test-only, and `fill_is_the_reference_sweep_on_generated_paths` holds `fill`
+  to it byte for byte under both rules over seven classes of generated path —
+  overlapping subpaths wound either way, self-intersections, crowded pixels,
+  slivers, coordinates near 1e9, every cap, join and dash of the stroker, and
+  dropped edges; `stroke.rs` covers caps, joins, the miter limit and
   dash phase; `blend.rs` pins all sixteen modes in integers; `image.rs`
   measures the sampling policy against numbers — a magnified gradient's
   largest step, a 2:1 checkerboard averaging to uniform 128, and an image
