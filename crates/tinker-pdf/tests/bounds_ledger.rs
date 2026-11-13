@@ -4720,6 +4720,20 @@ fn fuzz_paths() -> Vec<FuzzPath> {
             vec![OUTLINE_CAP],
         ),
         written(
+            "type42",
+            vec![
+                buffer(Input, 1, 1, "the face its sfnts strings reassemble"),
+                buffer(
+                    Input,
+                    PARSED,
+                    1,
+                    "the wrapper's tokens, its names, and the face's tables read",
+                ),
+                outline(),
+            ],
+            vec![OUTLINE_CAP],
+        ),
+        written(
             "webp",
             vec![buffer(
                 Value(1 << 22),

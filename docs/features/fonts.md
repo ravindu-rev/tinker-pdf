@@ -165,6 +165,24 @@ side bearing, `seac` accent composition, and `flex` through the
 `callothersubr`/`pop` callback protocol. Glyphs are addressed by name, via
 the encoding the font dictionary specifies or the program's built-in one.
 
+**Type 42** (Adobe Technical Note #5012;
+[design](../design/type42-and-multiple-master.md)). `Type42::parse` reads the
+PostScript dictionary around a TrueType face structurally, running nothing:
+`/FontType 42`; `/FontMatrix`; the built-in `/Encoding` — `StandardEncoding`,
+an array set by `dup … put`, or a literal array of names; `/CharStrings`,
+glyph name to glyph index, written `dict … begin … end` or `<< … >>`, the first
+index a name is given kept and an entry that is a procedure passed over and
+counted; and the `/sfnts` strings, hexadecimal or binary (`RD`, `-|`), each
+string of odd length losing the padding byte the note's section 4.2 appends,
+concatenated into the face `Sfnt::parse` reads. Each structure must close, and
+what does not — a string, an array, a dictionary, a procedure nested past 64
+levels, a `/CharStrings` of more than 65 536 entries — is declined as a
+`Type42Refusal` naming it; a CID-keyed wrapper and a face whose glyphs are in a
+`/GlyphDirectory` are refused by name. `Type42::is_type42` recognises a program
+by its first line, `%!PS-TrueTypeFont`, or its `/FontType 42`. A page whose
+font embeds one is not routed to it yet ([ROADMAP](../ROADMAP.md) FT-10.3), and
+draws as before.
+
 **Type 3** (9.6.5). A Type 3 glyph is a content stream, not an outline: it
 can fill, stroke, draw images. The content interpreter fetches the procedure
 named by `/Encoding /Differences` out of `/CharProcs` and runs it recursively
@@ -1470,6 +1488,15 @@ corpora already vendored here. So every name stays on the list.
   order or overcounted are read as written; and `glyf::bounds` reads the
   header as written, bounds an empty glyph at its origin and a missing one
   not at all. The `sfnt` fuzz target asks for each of them.
+- `crates/tinker-pdf-font/src/type42.rs` — a face wrapped as hexadecimal and
+  as binary strings, whole, split at a table boundary and inside a table,
+  padded and not, mixed, reads back byte for byte; each name reaches its glyph
+  through `/CharStrings`, and each code through the built-in `/Encoding` in its
+  three forms; every truncation of a program is declined; each refusal is its
+  own variant, the caps on nesting and on `/CharStrings` among them; and every
+  single-byte change of a program is read without a panic.
+  `tests/fuzz_seeds.rs` replays `fuzz/corpus/type42`, which the tests' own
+  wrapper writes.
 - `crates/tinker-pdf-shape/tests/vertical.rs` — vertical shaping. The
   compiled `Vertical_Orientation` against the vendored file at every code
   point; a column of CJK, Latin and Mongolian cut by orientation, clusters
@@ -1731,8 +1758,8 @@ corpora already vendored here. So every name stays on the list.
   the test, a collection file's faces read one by one, the storage forms over
   the committed WOFF fixtures, the `name` reading, and the candidate list
   against the design's table.
-- Fuzzing: the `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1` and
-  `woff` targets exercise this feature (ruling 1).
+- Fuzzing: the `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`,
+  `type42` and `woff` targets exercise this feature (ruling 1).
 - Determinism: the `text` render fingerprint in
   `crates/tinker-pdf/tests/determinism.rs` embeds a synthetic six-glyph face
   built in the test itself and pins glyph rasterisation bit-for-bit across

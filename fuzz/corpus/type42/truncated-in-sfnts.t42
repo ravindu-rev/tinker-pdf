@@ -1,0 +1,15 @@
+%!PS-TrueTypeFont-65536-65536-1
+11 dict begin
+/FontName /Test42 def
+/Encoding 256 array
+0 1 255{1 index exch/.notdef put}for
+dup 65 /A put
+dup 66 /B put
+readonly def
+/PaintType 0 def
+/FontMatrix [1 0 0 1 0 0] def
+/FontBBox[0 0 1000 1000] def
+/FontType 42 def
+/FontInfo 2 dict dup begin /Notice (A (nested) test face) def end def
+/sfnts[<000100000004000000000000676C7966
+000000000000004C00000016

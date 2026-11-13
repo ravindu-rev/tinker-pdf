@@ -26,6 +26,7 @@ pub mod sfnt;
 pub mod subset;
 pub mod symbolic;
 pub mod type1;
+pub mod type42;
 pub mod variation;
 pub mod woff;
 
@@ -47,4 +48,5 @@ pub use sfnt::{Sfnt, VerticalOrigins};
 pub use subset::{glyphs_for, subset};
 pub use symbolic::{substitute_glyph, SymbolRoute};
 pub use type1::Type1;
+pub use type42::{Type42, Type42Refusal};
 pub use woff::{packaging, Packaging, WoffError};

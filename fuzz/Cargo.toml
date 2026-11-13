@@ -155,6 +155,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "type42"
+path = "fuzz_targets/type42.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "cmap"
 path = "fuzz_targets/cmap.rs"
 test = false

@@ -1,10 +1,10 @@
-//! Six committed font corpora, replayed on stable, measured for *reach*.
+//! Seven committed font corpora, replayed on stable, measured for *reach*.
 //!
-//! `woff_seeds.rs` does the same for `fuzz/corpus/woff`. These six share a
-//! file because they share a shape: five of the six targets open with
-//! `let Some(x) = X::parse(data) else { return; }`, so a seed that does not
-//! parse makes the whole target a no-op and the fuzzer spends its budget
-//! mutating something that was never a font.
+//! `woff_seeds.rs` does the same for `fuzz/corpus/woff`. These seven share a
+//! file because they share a shape: six of the seven targets open with
+//! `let Some(x) = X::parse(data) else { return; }`, or `type42`'s `let
+//! Ok(…)`, so a seed that does not parse makes the whole target a no-op and
+//! the fuzzer spends its budget mutating something that was never a font.
 //!
 //! # Why "it did not panic" is not the question here
 //!
@@ -37,7 +37,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_font::{cmap, substitute_glyph, BuiltInEncoding, Cff, Sfnt, Type1};
+use tinker_pdf_font::{cmap, substitute_glyph, BuiltInEncoding, Cff, Sfnt, Type1, Type42};
 
 /// One corpus directory, or `None` when the fuzz tree is not in this checkout.
 fn seeds(name: &str) -> Option<Vec<(String, Vec<u8>)>> {
@@ -300,6 +300,36 @@ fn the_type1_seeds_reach_the_charstrings() {
         }
     }
     report("type1", files.len(), reached, &missed);
+}
+
+#[test]
+fn the_type42_seeds_reach_the_face() {
+    let Some(files) = seeds("type42") else {
+        println!("type42-seeds: SKIPPED (no fuzz/corpus/type42)");
+        return;
+    };
+    let (mut reached, mut missed) = (0, Vec::new());
+    for (label, data) in &files {
+        assert!(
+            Type42::is_type42(data),
+            "{label}: every seed is a Type 42 program by its first line"
+        );
+        match Type42::parse(data) {
+            Ok(font) => {
+                reached += 1;
+                // A wrapper that read with no face behind it, or no glyph to
+                // outline, would leave the target nothing to do past the
+                // wrapper.
+                let face = font.sfnt().expect("a parsed program's face reads");
+                assert!(font.charstring_count() > 0, "{label}: no /CharStrings");
+                for (_, glyph) in font.glyph_names() {
+                    let _ = tinker_pdf_font::glyf::outline(&face, glyph);
+                }
+            }
+            Err(_) => missed.push(label.clone()),
+        }
+    }
+    report("type42", files.len(), reached, &missed);
 }
 
 #[test]

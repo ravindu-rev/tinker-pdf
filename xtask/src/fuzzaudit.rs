@@ -108,6 +108,9 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
     m.insert("jxr", vec![sig(0, b"II\xbc"), sig(0, b"WMPHOTO\0")]);
     m.insert("woff", vec![sig(0, b"wOFF"), sig(0, b"wOF2")]);
     m.insert("jpeg", vec![sig(0, b"\xff\xd8\xff")]);
+    // The part of a Type 42 program's first line TN #5012 section 2.1
+    // requires; the target eats no control prefix.
+    m.insert("type42", vec![sig(0, b"%!PS-TrueTypeFont")]);
     m.insert("cos_document", vec![sig(0, b"%PDF-")]);
     // The command stream's magic (`docs/design/command-stream.md`).
     m.insert("command_stream", vec![sig(0, b"\x89TPCMD\r\n")]);
