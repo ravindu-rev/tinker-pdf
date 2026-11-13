@@ -359,6 +359,32 @@ it may not have.
 [W3C REC 2012]: https://www.w3.org/TR/WOFF/
 [W3C REC 2024]: https://www.w3.org/TR/WOFF2/
 
+**Variable fonts** (OpenType 1.9.1; [design](../design/variable-fonts.md)).
+`tinker_pdf_font::variation` reads a face's design space.
+`DesignSpace::read` takes `fvar`'s axes — tag, minimum, default, maximum,
+flags and name — and its named instances, each record read `axisSize` or
+`instanceSize` from the last so that a longer record is a compatible
+extension, and `avar`'s segment maps, a record out of order ignored and an
+axis whose maps lack −1→−1, 0→0 and 1→1 left unmodified, as the `avar`
+chapter has it. `DesignSpace::location` turns an `Instance` — a named
+instance's index, or user coordinates by axis tag, the last value of a tag
+winning and an unknown tag ignored — into a `Location`: one normalised 2.14
+coordinate an axis, computed as the overview's 'Coordinate Scales and
+Normalization' requires. The user value is clamped to its axis, the default
+normalisation and `avar` run in 16.16 with every quotient and product rounded
+to the nearest 1/65 536 and a half rounding up, and the result becomes 2.14 by
+adding 2 and shifting right by 2. The module is integer throughout
+(`#![deny(clippy::float_arithmetic)]`), so the shaper can call it; an `f64`
+user value reaches 16.16 through `Fixed::from_f64`, the overview's own
+conversion. A face with no `fvar`, or one whose axis count is zero, has no
+axes, and every coordinate asked of it is the default. A hostile table is
+refused by name (`VariationError`): more than 64 axes, an axis record under
+twenty bytes, axes, named instances or a segment map past the table's end, an
+instance record too small for its coordinates, an axis whose default lies
+outside its range, an `avar` whose axis count is not `fvar`'s, and a version
+neither chapter defines. Reading a design space varies no outline or metric by
+itself.
+
 ## API
 
 Everything reaches callers through the facade (ruling 11). Reading:
@@ -1159,6 +1185,21 @@ corpora already vendored here. So every name stays on the list.
   because a seed corpus nothing reads stops describing the parser. Which must
   decode and which must be refused are both asserted, and prefixes and
   single-byte flips of them reach an answer rather than a panic (ruling 1).
+- `crates/tinker-pdf-font/tests/variations.rs` — variable faces built byte by
+  byte by `tests/variable_support/mod.rs`, every expected value computed in
+  the test by `variable_support::spec`, the overview's formulas written a
+  second time in exact rationals and never by the code under test: axes and
+  named instances, extended record sizes, user coordinates normalised against
+  minimum, default and maximum and clamped outside them, `avar` at and between
+  its points, a named instance resolved, tags given twice or naming nothing,
+  and every refusal by name, with every truncation and single-byte change of
+  the two tables read or refused without a panic. `TestGPOSFour.ttf`, from the
+  vendored text-rendering tests, is read against a second reader in the test
+  that decodes its directory, `fvar` and `avar` from the chapters' field lists:
+  two axes and thirty-six named instances, each instance's location as the
+  specification computes it. `src/variation.rs`'s unit tests hold the
+  conversion, each rounding and every branch of the region scalar's
+  pseudo-code, and the overview's own normalisation and `avar` examples.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

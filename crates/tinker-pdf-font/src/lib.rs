@@ -20,6 +20,7 @@ pub mod sfnt;
 pub mod subset;
 pub mod symbolic;
 pub mod type1;
+pub mod variation;
 pub mod woff;
 
 pub use base14::Standard14;
