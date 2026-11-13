@@ -38,13 +38,27 @@ Policy: [`docs/verification.md`](../docs/verification.md). Among them:
 
 ## Running
 
-*Running* these needs a nightly toolchain and `cargo-fuzz`:
+*Running* these needs a nightly toolchain and `cargo-fuzz`, and every
+session runs under its target's row of [`limits.tsv`](limits.tsv): the
+`-rss_limit_mb` and `-malloc_limit_mb` `crates/tinker-pdf/tests/bounds_ledger.rs`
+derives from the bounds the target's path reaches, on a stack of `stack_kib`.
+[`docs/verification.md`](../docs/verification.md) gives the loop that runs
+every target that way, and one target is the same thing alone:
 
 ```sh
 cargo install cargo-fuzz
-cargo +nightly fuzz run cos_document
-cargo +nightly fuzz run cos_document -- -max_total_time=3600   # a long soak
+cargo +nightly fuzz build
+export ASAN_OPTIONS=quarantine_size_mb=64:allocator_release_to_os_interval_ms=500
+IFS=$'\t' read -r _ rss malloc stack < <(grep -P '^cos_document\t' fuzz/limits.tsv)
+( ulimit -s "$stack" &&
+  fuzz/target/x86_64-unknown-linux-gnu/release/cos_document fuzz/corpus/cos_document \
+    -rss_limit_mb="$rss" -malloc_limit_mb="$malloc" -max_total_time=3600 )   # a long soak
 ```
+
+The table is written by `cargo test -p tinker-pdf --test bounds_ledger
+write_the_fuzz_limits -- --ignored` and never by hand: a session that fails
+under its limits has found an allocation its bounds do not admit, and the fix
+is a bound, not a larger number.
 
 *Compiling* them needs neither, and `cargo xtask fuzz` — inside `cargo
 xtask check` — does it:
@@ -162,8 +176,13 @@ Replaying a corpus without mutating it is the cheapest check that a seed
 still reaches what it was chosen for:
 
 ```sh
-cargo +nightly fuzz run cff corpus/cff -- -runs=0
+IFS=$'\t' read -r _ rss malloc stack < <(grep -P '^cff\t' fuzz/limits.tsv)
+( ulimit -s "$stack" &&
+  fuzz/target/x86_64-unknown-linux-gnu/release/cff fuzz/corpus/cff \
+    -rss_limit_mb="$rss" -malloc_limit_mb="$malloc" -runs=0 )
 ```
+
+under the same limits as a session.
 
 Two things a run does to `corpus/` that are easy to be surprised by: it
 writes every new unit it finds straight into the directory it was given, and

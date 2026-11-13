@@ -26,7 +26,7 @@ recorded in the roadmap row it closes:
 | Check | How it runs |
 | --- | --- |
 | The gates — fmt, clippy, the tests, the determinism and shaping fingerprints, the examples, `cargo xtask check` | `python3 -I tools/gates.py` |
-| Fuzzing, on Linux | `cargo fuzz build`, then `cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=20 -timeout=20` a target |
+| Fuzzing, on Linux | `cargo fuzz build`, then each target's binary under its `fuzz/limits.tsv` row, `-max_total_time=20 -timeout=20`, as *Never panic, fuzz-enforced* gives it |
 | The fuzzing service's build, on Linux | `fuzz/service/Dockerfile`'s image built over `git archive HEAD`, its `compile` run, then `cargo xtask fuzz --service-out DIR` (`fuzz/README.md`) |
 | The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner |
 | The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
@@ -44,12 +44,60 @@ Ruling 1 makes a fuzz crash a release blocker. cargo-fuzz targets in
 `fuzz/fuzz_targets/` cover every input format, each landing in the same change
 as its parser, and each has a seed corpus of its own name in `fuzz/corpus/`.
 
-They run locally, on Linux. `cargo fuzz build` builds every target, and
-`cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=20
--timeout=20` replays a target's seeds and mutates from them for twenty
-seconds; a longer session is the same command with a longer
-`-max_total_time`. A change to a parser runs its target before it lands, and
-an input a session finds is committed as a seed of that target.
+They run locally, on Linux. `cargo fuzz build` builds every target, and each
+target's binary then runs under its row of `fuzz/limits.tsv`: the
+`-rss_limit_mb` and `-malloc_limit_mb` the row derives, on a stack of the
+row's `stack_kib`, with the sanitiser's quarantine and page release pinned as
+[design/resource-exhaustion.md](design/resource-exhaustion.md) states, so a
+session that passes either limit or runs out of stack fails:
+
+```sh
+cargo +nightly fuzz build
+export ASAN_OPTIONS=quarantine_size_mb=64:allocator_release_to_os_interval_ms=500
+tail -n +2 fuzz/limits.tsv | while IFS=$'\t' read -r target rss malloc stack; do
+  echo "$target: rss_limit_mb=$rss malloc_limit_mb=$malloc stack_kib=$stack"
+  mkdir -p "fuzz/artifacts/$target"
+  ( ulimit -s "$stack" &&
+    "fuzz/target/x86_64-unknown-linux-gnu/release/$target" "fuzz/corpus/$target" \
+      -rss_limit_mb="$rss" -malloc_limit_mb="$malloc" \
+      -max_total_time=20 -timeout=20 -artifact_prefix="fuzz/artifacts/$target/" \
+      </dev/null )
+done
+```
+
+That replays a target's seeds and mutates from them for twenty seconds; a
+longer session is the same command with a longer `-max_total_time`, and the
+seed replay alone is the same command with `-runs=0` in its place, under the
+same limits. The binary is started directly rather than through
+`cargo fuzz run`, so the lowered stack is the target's and not cargo's, and
+the first line each target prints is its limits, so a session's log shows
+what it ran under. A change to a parser runs its target before it lands, and
+an input a session finds is committed as a seed of that target. A session that
+fails under its limits is a finding, fixed by bounding the parser — never by
+editing the table, which only the derivation writes.
+
+On Windows the targets build with MSVC and the stack is the image's: the same
+loop in PowerShell, after building with the stack set at link time to
+`stack_kib` times 1 024, which the derivation holds to 512 on every row:
+
+```powershell
+$env:RUSTFLAGS = '-C link-arg=/STACK:524288'
+cargo +nightly fuzz build
+$env:ASAN_OPTIONS = 'quarantine_size_mb=64:allocator_release_to_os_interval_ms=500'
+Get-Content fuzz/limits.tsv | Select-Object -Skip 1 | ForEach-Object {
+  $target, $rss, $malloc, $stack = $_ -split "`t"
+  "${target}: rss_limit_mb=$rss malloc_limit_mb=$malloc stack_kib=$stack"
+  New-Item -ItemType Directory -Force "fuzz/artifacts/$target" | Out-Null
+  & "fuzz/target/x86_64-pc-windows-msvc/release/$target.exe" "fuzz/corpus/$target" `
+    "-rss_limit_mb=$rss" "-malloc_limit_mb=$malloc" -max_total_time=20 -timeout=20 `
+    "-artifact_prefix=fuzz/artifacts/$target/"
+}
+```
+
+A resident-set failure saves whichever input was running when libFuzzer read
+the resident set, so it is reproduced before it is fixed: the saved input run
+alone under the same limits, and if it passes alone, the inputs the session
+added before it, in order, until one fails.
 
 The build a public continuous-fuzzing service runs is in the tree too,
 `fuzz/service/build.sh` ([design/continuous-fuzzing.md](design/continuous-fuzzing.md)):
