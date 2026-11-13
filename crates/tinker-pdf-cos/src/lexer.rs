@@ -232,8 +232,10 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Reads the next token, recording any leniency it needed into `sink`.
+    /// Reads the next token, recording any leniency it needed into `sink`,
+    /// and the token itself as one step the parse took.
     pub fn next_token(&mut self, sink: &mut WarningSink) -> Token {
+        sink.lexed();
         self.skip_space();
         let start = self.pos;
         let Some(b) = self.peek() else {

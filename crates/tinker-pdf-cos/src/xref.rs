@@ -513,7 +513,11 @@ impl Walker<'_> {
             let window = self.bytes.window(at, want)?;
             let reaches_end = window.end() >= self.len;
             let mut scratch = WarningSink::new();
-            match self.try_classic(&window, at, reaches_end, &mut scratch)? {
+            let attempt = self.try_classic(&window, at, reaches_end, &mut scratch);
+            // An abandoned attempt's diagnostics describe a window, and are
+            // dropped; the tokens it lexed are work all the same.
+            sink.add_steps(scratch.steps());
+            match attempt? {
                 Attempt::Read { entries, section } => {
                     for (num, entry) in entries {
                         self.table.insert_new(num, entry);
@@ -540,10 +544,26 @@ impl Walker<'_> {
         reaches_end: bool,
         sink: &mut WarningSink,
     ) -> Option<Attempt> {
+        // The table's tokens are lexed into a scratch sink, so a row's lexing
+        // leniency is reported as the row's own warning rather than twice;
+        // the steps are the section's all the same.
         let mut scratch = WarningSink::new();
+        let attempt = self.try_classic_lexing(window, at, reaches_end, sink, &mut scratch);
+        sink.add_steps(scratch.steps());
+        attempt
+    }
+
+    fn try_classic_lexing(
+        &self,
+        window: &Window<'_>,
+        at: u64,
+        reaches_end: bool,
+        sink: &mut WarningSink,
+        scratch: &mut WarningSink,
+    ) -> Option<Attempt> {
         let start = window.local(at)?;
         let mut lexer = Lexer::at(window.bytes(), start);
-        if lexer.next_token(&mut scratch).kind != TokenKind::Keyword(Keyword::Xref) {
+        if lexer.next_token(scratch).kind != TokenKind::Keyword(Keyword::Xref) {
             return None;
         }
 
@@ -552,7 +572,7 @@ impl Walker<'_> {
         let mut end = self.len;
         loop {
             let save = lexer.offset();
-            let token = lexer.next_token(&mut scratch);
+            let token = lexer.next_token(scratch);
             match token.kind {
                 TokenKind::Keyword(Keyword::Trailer) => {
                     let parsed =
@@ -574,7 +594,7 @@ impl Walker<'_> {
                     break;
                 }
                 TokenKind::Int(first) => {
-                    let TokenKind::Int(count) = lexer.next_token(&mut scratch).kind else {
+                    let TokenKind::Int(count) = lexer.next_token(scratch).kind else {
                         sink.warn(window.abs(save), WarningKind::XrefSubsectionMalformed);
                         break;
                     };
@@ -624,11 +644,28 @@ impl Walker<'_> {
         entries: &mut Vec<(u32, XrefEntry)>,
         sink: &mut WarningSink,
     ) -> Option<bool> {
-        let Subsection { first, count } = run;
         let mut scratch = WarningSink::new();
+        let read =
+            self.subsection_rows(window, lexer, run, reaches_end, entries, sink, &mut scratch);
+        sink.add_steps(scratch.steps());
+        read
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn subsection_rows(
+        &self,
+        window: &Window<'_>,
+        lexer: &mut Lexer<'_>,
+        run: Subsection,
+        reaches_end: bool,
+        entries: &mut Vec<(u32, XrefEntry)>,
+        sink: &mut WarningSink,
+        scratch: &mut WarningSink,
+    ) -> Option<bool> {
+        let Subsection { first, count } = run;
         for i in 0..count {
             let save = lexer.offset();
-            let field1 = lexer.next_token(&mut scratch);
+            let field1 = lexer.next_token(scratch);
             let TokenKind::Int(field1) = field1.kind else {
                 if field1.kind == TokenKind::Eof && !reaches_end {
                     return None;
@@ -637,7 +674,7 @@ impl Walker<'_> {
                 sink.warn(window.abs(save), WarningKind::XrefEntryMalformed);
                 return Some(false);
             };
-            let field2 = lexer.next_token(&mut scratch);
+            let field2 = lexer.next_token(scratch);
             let TokenKind::Int(field2) = field2.kind else {
                 if field2.kind == TokenKind::Eof && !reaches_end {
                     return None;
@@ -646,7 +683,7 @@ impl Walker<'_> {
                 sink.warn(window.abs(save), WarningKind::XrefEntryMalformed);
                 return Some(false);
             };
-            let marker = lexer.next_token(&mut scratch);
+            let marker = lexer.next_token(scratch);
             if marker.kind == TokenKind::Eof && !reaches_end {
                 return None;
             }
@@ -670,6 +707,7 @@ impl Walker<'_> {
                     return Some(true);
                 }
             };
+            sink.read_entry();
             if let Ok(num) = u32::try_from(first.saturating_add(i)) {
                 entries.push((num, entry));
             }
@@ -691,7 +729,9 @@ impl Walker<'_> {
             let reaches_end = window.end() >= self.len;
             let local = window.local(at)?;
             let mut scratch = WarningSink::new();
-            match parse_indirect_at(window.bytes(), local, &self.names.table, &mut scratch) {
+            let parsed = parse_indirect_at(window.bytes(), local, &self.names.table, &mut scratch);
+            sink.add_steps(scratch.steps());
+            match parsed {
                 Some(parsed) => break (window, parsed),
                 None if reaches_end => return None,
                 None => want = want.saturating_mul(2),
@@ -815,6 +855,7 @@ impl Walker<'_> {
                         XrefEntry::Free { next: 0, gen: 0 }
                     }
                 };
+                sink.read_entry();
                 if let Ok(num) = u32::try_from(first.saturating_add(i)) {
                     self.table.insert_new(num, entry);
                 }

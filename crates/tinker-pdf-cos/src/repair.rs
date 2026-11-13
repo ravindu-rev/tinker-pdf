@@ -31,28 +31,26 @@ use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
 use crate::parse::parse_indirect_at;
 use crate::streams::resolve_extent_in;
-use crate::warn::{WarningKind, WarningSink};
-
-#[cfg(test)]
-thread_local! {
-    /// The bytes [`find_from`] has looked through, on this thread.
-    static EXAMINED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
+use crate::warn::{ParseSteps, WarningKind, WarningSink};
 
 /// The first occurrence of `needle` in `hay` at or after `from`.
-///
-/// **Counted here, in every search, rather than in the pass**, so that a
-/// pass which goes back to searching afresh at every hit is counted whoever
-/// writes it: under `cfg(test)` the bytes from `from` to the end of the hit,
-/// or to the end of `hay` when there is none, are added to the count a test
-/// holds the repair pass to. Everywhere else it is nothing.
 pub(crate) fn find_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    first_from(hay, needle, from)
+}
+
+/// [`find_from`], adding the bytes it looked through to `examined`: from
+/// `from` to the end of the hit, or to the end of `hay` when there is none.
+///
+/// **Counted in every search rather than in the pass**, so that a pass which
+/// goes back to searching afresh at every hit is counted whoever writes it:
+/// the pass searches only through [`Searches`], whose every look comes here,
+/// and what it adds up is [`crate::work::Stats::bytes_scanned`] — the one
+/// count the pass's own test and MS-01's tally both read.
+fn find_counted(hay: &[u8], needle: &[u8], from: usize, examined: &mut u64) -> Option<usize> {
     let found = first_from(hay, needle, from);
-    #[cfg(test)]
-    EXAMINED.with(|examined| {
-        let end = found.map_or(hay.len(), |p| p.saturating_add(needle.len()));
-        examined.set(examined.get().saturating_add(end.saturating_sub(from)));
-    });
+    let end = found.map_or(hay.len(), |p| p.saturating_add(needle.len()));
+    let looked = u64::try_from(end.saturating_sub(from)).unwrap_or(u64::MAX);
+    *examined = examined.saturating_add(looked);
     found
 }
 
@@ -174,11 +172,17 @@ struct NextHit {
     needle: &'static [u8],
     /// The last search that looked: where it started, and what it found.
     last: Option<(usize, Option<usize>)>,
+    /// The bytes every search that looked has looked through.
+    examined: u64,
 }
 
 impl NextHit {
     const fn new(needle: &'static [u8]) -> NextHit {
-        NextHit { needle, last: None }
+        NextHit {
+            needle,
+            last: None,
+            examined: 0,
+        }
     }
 
     /// What [`find_from`] answers for `from`.
@@ -188,7 +192,7 @@ impl NextHit {
                 return hit;
             }
         }
-        let hit = find_from(buf, self.needle, from);
+        let hit = find_counted(buf, self.needle, from, &mut self.examined);
         self.last = Some((from, hit));
         hit
     }
@@ -219,6 +223,14 @@ impl<'a> Searches<'a> {
     /// The buffer searched.
     pub(crate) const fn buf(&self) -> &'a [u8] {
         self.buf
+    }
+
+    /// The bytes the three searches have looked through between them.
+    pub(crate) fn examined(&self) -> u64 {
+        self.obj
+            .examined
+            .saturating_add(self.trailer.examined)
+            .saturating_add(self.endstream.examined)
     }
 
     /// The first `obj` at or after `from`.
@@ -272,6 +284,9 @@ pub(crate) struct ScanIndex {
     objstms: Vec<u32>,
     catalog: Option<ObjRef>,
     info: Option<ObjRef>,
+    /// What the pass read: the tokens its parses lexed, the objects they
+    /// parsed and the bytes its searches looked through.
+    steps: ParseSteps,
 }
 
 impl ScanIndex {
@@ -290,6 +305,11 @@ impl ScanIndex {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.objects.is_empty()
+    }
+
+    /// What the pass that built this index read, for the operation it ran in.
+    pub(crate) fn steps(&self) -> ParseSteps {
+        self.steps
     }
 
     /// `base` filled in from every trailer-shaped dictionary the pass found,
@@ -358,6 +378,8 @@ impl ScanIndex {
             i = advanced.max(i + 1);
             scratch.take();
         }
+        index.steps = scratch.steps();
+        index.steps.scanned = search.examined();
         index
     }
 
@@ -593,9 +615,9 @@ mod tests {
     /// The index over `file`, and the bytes its searches looked through.
     fn counted(file: &[u8]) -> (ScanIndex, usize) {
         let names = DocNames::new();
-        EXAMINED.with(|examined| examined.set(0));
         let index = ScanIndex::build(file, &names);
-        (index, EXAMINED.with(core::cell::Cell::get))
+        let examined = usize::try_from(index.steps().scanned).unwrap_or(usize::MAX);
+        (index, examined)
     }
 
     #[test]

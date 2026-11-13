@@ -219,11 +219,18 @@ already carries it.
 | `bytes_decoded` | a byte a filter chain returned — a quantity | the same | built |
 | `png_image_scratch` | a byte of a buffer a PNG write sized from the image rather than from a row or a constant, the most held at once — a maximum, the quantity A8 holds to none | `tinker-pdf-filters`' PNG writer, handed back as a value (`PngHeld`), and the facade's PNG door for a copy it converts | built |
 | `png_peak` | a byte a PNG write held, its file included, the most at once — a maximum, A8's peak | the same | built |
+| `tokens_lexed` | a token cos's lexer produced, for an object, a section, a trailer, an object stream's prologue or a repair scan's parse — a window read again counts again (`docs/design/resource-exhaustion.md`, "The counters") | cos's parse path, into the `WarningSink` each parse is handed, and out through `CosDocument::open_counted` and `get_counted` | built |
+| `xref_entries_read` | a row of a classic table's subsection or of a cross-reference stream, on every section of the `/Prev` chain | the same | built |
+| `objects_parsed` | an indirect object parsed, from the file, a window, the repair scan or an object stream | the same | built |
+| `bytes_scanned` | a byte the repair scan's keyword searches looked through, a step rather than a quantity | the same, from the searches' own count, which the repair pass's unit test reads too | built |
+| `content_tokens_read` | a token the content interpreter took from its tokenizer, nested content included | `tinker-pdf-content`'s interpreter, in its own state, added once a run by `interpret_counted` | built |
+| `operators_run` | an operator the content interpreter ran, nested content included | the same | built |
 
 `work()` sums every counter that counts a step taken, and leaves out maxima and
 quantities — `most_decodes_of_one_stream`, `bytes_decoded`, and every byte or
 pixel figure a later row adds — because a byte total grows with the page and
-can hide a step count that grows with the document. A page loop whose `page(i)`
+can hide a step count that grows with the document. `bytes_scanned` is in: a
+byte the repair scan looked through is a step it took, not output. A page loop whose `page(i)`
 reads `i + 1` nodes, over pages that decode 20 kB each, is 4.29 times as
 much work at 4 000 pages as at 1 000 when its bytes are summed in, inside A2's
 4.4, and 15.99 times without them. A row that adds a counter says which kind it

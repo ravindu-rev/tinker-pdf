@@ -684,6 +684,15 @@ state's — once an object, a stitching function once for each depth it is read
 at; `graphics_states_read`, each graphics state a scope reads out of
 `/ExtGState`, at the first `gs` of its name; `pages_interpreted`, each page a
 reading-order inference interprets, which no render does
+([content and text](content-and-text.md)); `tokens_lexed`,
+`xref_entries_read`, `objects_parsed` and `bytes_scanned`, the COS parser's
+steps — each token its lexer produced, each cross-reference row read, each
+indirect object parsed and each byte the repair scan's searches looked
+through — which only `CosDocument::open_counted` and
+`CosDocument::get_counted` count ([opening](opening.md));
+`content_tokens_read` and `operators_run`, each token the content interpreter
+took and each operator it ran, nested content included, which only
+`tinker_pdf_content::interpret_counted` counts
 ([content and text](content-and-text.md)); and
 `streams_decoded`, each run of a stream's filter chain — the page's content;
 once a render, each stream its scopes read: a form's, a Type 3 glyph's

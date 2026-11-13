@@ -277,6 +277,21 @@ second dependency. On `CosDocument`: `get`, `resolve`, `trailer`,
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an
 image codec).
 
+`CosDocument::open_counted(bytes, &Work)` and `CosDocument::get_counted(r,
+&Work)` are `open` and `get` counting what the parser read into MS-01's tally
+(`tinker_pdf_cos::Work`): `Stats::tokens_lexed`, every token the lexer
+produced, a window grown and read again or a run given back and re-read
+counted again; `xref_entries_read`, every row of a table's subsections and of
+a cross-reference stream, on every section of the `/Prev` chain;
+`objects_parsed`, every indirect object parsed, from the file, a window of it,
+the repair scan or an object stream; and `bytes_scanned`, every byte the
+repair scan's keyword searches looked through, a search that remembers its
+answer looking through nothing again. The counts ride the parse path's own
+context, the `WarningSink` each parse is handed, a probe's or an abandoned
+window's steps included, and a door adds them to its tally once, at its end:
+the document and the object are the uncounted door's, and a read the store
+answers parses nothing and counts nothing.
+
 `tinker_pdf::standalone` exposes the sniff as its own question —
 `sniff(bytes) -> Option<Standalone>` with `Standalone::{Svg, Html,
 Image(ImageFormat)}` (`#[non_exhaustive]`, re-exported on the facade) and
@@ -405,7 +420,16 @@ The tests that cover opening ([verification](../verification.md)):
   the work stays within three looks through the file, and twenty times the
   objects costs at most about twenty times the work
   (`the_index_costs_work_linear_in_the_objects`); a remembered search
-  answers what a fresh one does, cursor forward or back.
+  answers what a fresh one does, cursor forward or back. The bytes are the
+  index's own count, the one `Stats::bytes_scanned` hands out.
+- **`crates/tinker-pdf-cos/tests/complexity.rs`** — the parser held to
+  [resource exhaustion](../design/resource-exhaustion.md)'s size-scaling law
+  through the counted doors: the work of reading a document whole at four
+  times a size is at most 4.4 times the work at that size, for objects under
+  one classic table, an array nested deeper, a longer `/Prev` chain, an object
+  stream of more objects and the repair scan over a larger damaged file, each
+  read back as written and alike through the uncounted doors
+  (`a_read_the_store_answers_parses_nothing` pins the store's answer).
 - **`crates/tinker-pdf-cos/tests/strict_validator.rs`** — the ladder read
   from the other side. `validate` opens a file with every leniency counted as
   a defect and walks the cross-reference sections out of the bytes, so it

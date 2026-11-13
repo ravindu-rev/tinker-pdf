@@ -10,6 +10,7 @@ use core::fmt;
 use crate::limits;
 use crate::name::Name;
 use crate::object::ObjRef;
+use crate::work::{Counter, Work};
 
 /// One leniency action, addressed to the byte that caused it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -456,17 +457,58 @@ impl fmt::Display for WarningKind {
     }
 }
 
+/// What a parse read: the steps of this crate's parser that MS-01's tally
+/// counts (`docs/design/resource-exhaustion.md`, "The counters").
+///
+/// Plain integers, added where the step is taken, because a parse is handed
+/// its sink by `&mut` and a lock a token would be the cost of counting. A
+/// counted door adds them to its operation's [`Work`] once, at its end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ParseSteps {
+    /// [`crate::work::Stats::tokens_lexed`].
+    pub(crate) tokens: u64,
+    /// [`crate::work::Stats::xref_entries_read`].
+    pub(crate) entries: u64,
+    /// [`crate::work::Stats::objects_parsed`].
+    pub(crate) objects: u64,
+    /// [`crate::work::Stats::bytes_scanned`].
+    pub(crate) scanned: u64,
+}
+
+impl ParseSteps {
+    /// Both, summed.
+    pub(crate) fn add(&mut self, other: ParseSteps) {
+        self.tokens = self.tokens.saturating_add(other.tokens);
+        self.entries = self.entries.saturating_add(other.entries);
+        self.objects = self.objects.saturating_add(other.objects);
+        self.scanned = self.scanned.saturating_add(other.scanned);
+    }
+
+    /// Adds these steps to `work`.
+    pub(crate) fn tally(&self, work: &Work) {
+        work.add(Counter::TokensLexed, self.tokens);
+        work.add(Counter::XrefEntriesRead, self.entries);
+        work.add(Counter::ObjectsParsed, self.objects);
+        work.add(Counter::BytesScanned, self.scanned);
+    }
+}
+
 /// A bounded collector of [`Warning`]s with an optional current object.
 ///
 /// The sink retains at most [`limits::MAX_WARNINGS`] entries. When it fills,
 /// the final retained entry is [`WarningKind::WarningCapReached`] and every
 /// later warning is counted in [`WarningSink::dropped`] and discarded.
+///
+/// It is the parse path's one context, so it also carries what the parse
+/// read, [`ParseSteps`]: a counted door hands those steps to its operation's
+/// tally, and every other caller drops them with the sink.
 #[derive(Clone, Debug, Default)]
 pub struct WarningSink {
     warnings: Vec<Warning>,
     context: Option<ObjRef>,
     dropped: u64,
     capped: bool,
+    steps: ParseSteps,
 }
 
 impl WarningSink {
@@ -558,6 +600,32 @@ impl WarningSink {
     /// Whether the cap has been reached.
     pub fn is_capped(&self) -> bool {
         self.capped
+    }
+
+    /// One token lexed.
+    pub(crate) fn lexed(&mut self) {
+        self.steps.tokens = self.steps.tokens.saturating_add(1);
+    }
+
+    /// One cross-reference entry read.
+    pub(crate) fn read_entry(&mut self) {
+        self.steps.entries = self.steps.entries.saturating_add(1);
+    }
+
+    /// One indirect object parsed.
+    pub(crate) fn parsed_object(&mut self) {
+        self.steps.objects = self.steps.objects.saturating_add(1);
+    }
+
+    /// The steps a parse took with a sink of its own — a probe's, a scratch
+    /// one whose warnings are dropped — which are this one's work all the same.
+    pub(crate) fn add_steps(&mut self, steps: ParseSteps) {
+        self.steps.add(steps);
+    }
+
+    /// What the parses handed this sink have read.
+    pub(crate) fn steps(&self) -> ParseSteps {
+        self.steps
     }
 }
 

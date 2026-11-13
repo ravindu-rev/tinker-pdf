@@ -231,6 +231,46 @@ pub struct Stats {
     ///
     /// Counted with `png_image_scratch`.
     pub png_peak: u64,
+    /// Tokens this crate's lexer produced: each call that read one, the end of
+    /// the input included, for the objects, sections and trailers a parse
+    /// reads, the object stream prologues and the repair scan's parses. A
+    /// token lexed twice — a window grown and read again, a run given back and
+    /// re-read — is two.
+    ///
+    /// Counted by this crate's parse path, into the context every parse is
+    /// handed, and handed out by the two counted doors,
+    /// [`crate::CosDocument::open_counted`] and
+    /// [`crate::CosDocument::get_counted`].
+    pub tokens_lexed: u64,
+    /// Cross-reference entries read: each row of a table's subsections and
+    /// each row of a cross-reference stream, on every section of the `/Prev`
+    /// chain, whether or not a newer section had already defined its object.
+    ///
+    /// Counted with `tokens_lexed`.
+    pub xref_entries_read: u64,
+    /// Indirect objects parsed: each `N G obj` header a parse read through to
+    /// its object, from the file, from a window of it or in the repair scan,
+    /// and each object read out of an object stream.
+    ///
+    /// Counted with `tokens_lexed`.
+    pub objects_parsed: u64,
+    /// Bytes the repair scan's keyword searches examined, one step a byte: a
+    /// search that remembered its answer examines nothing again.
+    ///
+    /// Counted with `tokens_lexed`.
+    pub bytes_scanned: u64,
+    /// Tokens the content interpreter took from its tokenizer: each operand
+    /// and each operator of the stream it was handed, and of every form, soft
+    /// mask's group and Type 3 glyph procedure that stream runs.
+    ///
+    /// Counted by `tinker-pdf-content`'s interpreter, in its own state, and
+    /// added to the tally once a run by `interpret_counted`.
+    pub content_tokens_read: u64,
+    /// Operators the content interpreter ran, nested content included, an
+    /// inline image's `BI` among them.
+    ///
+    /// Counted with `content_tokens_read`.
+    pub operators_run: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -283,6 +323,18 @@ pub enum Counter {
     GraphicsStatesRead,
     /// [`Stats::pages_interpreted`].
     PagesInterpreted,
+    /// [`Stats::tokens_lexed`].
+    TokensLexed,
+    /// [`Stats::xref_entries_read`].
+    XrefEntriesRead,
+    /// [`Stats::objects_parsed`].
+    ObjectsParsed,
+    /// [`Stats::bytes_scanned`].
+    BytesScanned,
+    /// [`Stats::content_tokens_read`].
+    ContentTokensRead,
+    /// [`Stats::operators_run`].
+    OperatorsRun,
 }
 
 impl Stats {
@@ -292,7 +344,8 @@ impl Stats {
     /// The maxima and the quantity are left out — `most_decodes_of_one_stream`,
     /// `bytes_decoded`, `png_image_scratch` and `png_peak` — because a byte
     /// total grows with the page and would hide a step count that grows with
-    /// the document.
+    /// the document. `bytes_scanned` is in: each of its bytes is a step the
+    /// repair scan took, not output.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -319,6 +372,12 @@ impl Stats {
             self.graphics_states_read,
             self.pages_interpreted,
             self.streams_decoded,
+            self.tokens_lexed,
+            self.xref_entries_read,
+            self.objects_parsed,
+            self.bytes_scanned,
+            self.content_tokens_read,
+            self.operators_run,
         ]
         .into_iter()
         .fold(0u64, u64::saturating_add)
@@ -349,6 +408,12 @@ impl Stats {
             Counter::FunctionsRead => &mut self.functions_read,
             Counter::GraphicsStatesRead => &mut self.graphics_states_read,
             Counter::PagesInterpreted => &mut self.pages_interpreted,
+            Counter::TokensLexed => &mut self.tokens_lexed,
+            Counter::XrefEntriesRead => &mut self.xref_entries_read,
+            Counter::ObjectsParsed => &mut self.objects_parsed,
+            Counter::BytesScanned => &mut self.bytes_scanned,
+            Counter::ContentTokensRead => &mut self.content_tokens_read,
+            Counter::OperatorsRun => &mut self.operators_run,
         }
     }
 }
@@ -423,6 +488,16 @@ impl Add for Stats {
             bytes_decoded: self.bytes_decoded.saturating_add(other.bytes_decoded),
             png_image_scratch: self.png_image_scratch.max(other.png_image_scratch),
             png_peak: self.png_peak.max(other.png_peak),
+            tokens_lexed: self.tokens_lexed.saturating_add(other.tokens_lexed),
+            xref_entries_read: self
+                .xref_entries_read
+                .saturating_add(other.xref_entries_read),
+            objects_parsed: self.objects_parsed.saturating_add(other.objects_parsed),
+            bytes_scanned: self.bytes_scanned.saturating_add(other.bytes_scanned),
+            content_tokens_read: self
+                .content_tokens_read
+                .saturating_add(other.content_tokens_read),
+            operators_run: self.operators_run.saturating_add(other.operators_run),
         }
     }
 }
@@ -527,7 +602,7 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 22] = [
+    const ALL: [Counter; 28] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::FontDictionariesResolved,
@@ -550,6 +625,12 @@ mod tests {
         Counter::FunctionsRead,
         Counter::GraphicsStatesRead,
         Counter::PagesInterpreted,
+        Counter::TokensLexed,
+        Counter::XrefEntriesRead,
+        Counter::ObjectsParsed,
+        Counter::BytesScanned,
+        Counter::ContentTokensRead,
+        Counter::OperatorsRun,
     ];
 
     #[test]

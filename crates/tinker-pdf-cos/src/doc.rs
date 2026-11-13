@@ -46,6 +46,7 @@ use crate::source::{Backing, ByteSource, Bytes};
 use crate::store::{LockExt, MutexExt, ResolveCtx, SlotStore};
 use crate::validate::hints;
 use crate::warn::{Warning, WarningKind, WarningSink};
+use crate::work::Work;
 use crate::xref::{self, Revision, XrefBuild, XrefEntry, XrefTable};
 use crate::Dict;
 use crate::ObjRef;
@@ -388,7 +389,26 @@ impl CosDocument {
     /// degraded content — check [`CosDocument::ladder_level`] and
     /// [`CosDocument::warnings`] to see what had to be repaired.
     pub fn open(bytes: impl Into<Arc<[u8]>>) -> Result<CosDocument, OpenError> {
-        CosDocument::open_backing(Backing::whole_buffer(bytes.into()))
+        CosDocument::open_backing(Backing::whole_buffer(bytes.into()), None)
+    }
+
+    /// [`CosDocument::open`], counting what the open read into `work`: the
+    /// tokens lexed, the cross-reference entries read, the objects parsed and
+    /// the bytes the repair scan looked through, the `/Encrypt` dictionary's
+    /// load and the object streams a rescan expands included
+    /// (`docs/design/resource-exhaustion.md`, "The counters").
+    ///
+    /// The document is the one [`CosDocument::open`] returns; nothing is kept
+    /// on it, so a later read counts only through
+    /// [`CosDocument::get_counted`].
+    ///
+    /// # Errors
+    /// As [`CosDocument::open`]; a failed open's steps are counted too.
+    pub fn open_counted(
+        bytes: impl Into<Arc<[u8]>>,
+        work: &Work,
+    ) -> Result<CosDocument, OpenError> {
+        CosDocument::open_backing(Backing::whole_buffer(bytes.into()), Some(work))
     }
 
     /// Opens a document whose bytes are fetched from `source` as they are
@@ -405,12 +425,26 @@ impl CosDocument {
     /// [`OpenError::NoObjects`] as [`CosDocument::open`], and for a source
     /// that could not supply the bytes the open path needed.
     pub fn open_source(source: Arc<dyn ByteSource>) -> Result<CosDocument, OpenError> {
-        CosDocument::open_backing(Backing::chunked(source))
+        CosDocument::open_backing(Backing::chunked(source), None)
     }
 
-    fn open_backing(backing: Backing) -> Result<CosDocument, OpenError> {
-        let names = DocNames::new();
+    fn open_backing(backing: Backing, work: Option<&Work>) -> Result<CosDocument, OpenError> {
         let mut sink = WarningSink::new();
+        let opened = CosDocument::open_into(backing, &mut sink, work);
+        // A failed open read what it read; a successful one has handed its
+        // sink to the document already, and counted its steps on the way.
+        if let (Err(_), Some(work)) = (&opened, work) {
+            sink.steps().tally(work);
+        }
+        opened
+    }
+
+    fn open_into(
+        backing: Backing,
+        sink: &mut WarningSink,
+        work: Option<&Work>,
+    ) -> Result<CosDocument, OpenError> {
+        let names = DocNames::new();
         let streamed = backing.is_streamed();
 
         // 7.5.2: bytes before %PDF- shift every offset the file stores. One
@@ -420,7 +454,7 @@ impl CosDocument {
             Ok(head) => head,
             Err(miss) => return Err(OpenError::SourceUnavailable(miss)),
         };
-        let shift = xref::header_shift(&head, &mut sink);
+        let shift = xref::header_shift(&head, sink);
         drop(head);
 
         // The walk reads windows: the tail for `startxref` (7.5.5), then each
@@ -443,7 +477,7 @@ impl CosDocument {
         // same clauses.
         let mut linearized = None;
         let fast = if streamed {
-            linearized_open(&backing, &names, shift, &mut sink)
+            linearized_open(&backing, &names, shift, sink)
         } else {
             None
         };
@@ -452,8 +486,8 @@ impl CosDocument {
                 linearized = Some(params);
                 built
             }
-            None => match xref::startxref(&view, &mut sink) {
-                Some(start) => xref::build(view, start, shift, &names, &mut sink),
+            None => match xref::startxref(&view, sink) {
+                Some(start) => xref::build(view, start, shift, &names, sink),
                 None => XrefBuild::default(),
             },
         };
@@ -499,10 +533,11 @@ impl CosDocument {
             // One forward pass over everything, which is the point of it. A
             // streamed document therefore fetches the whole source, and says
             // so first (ruling 10).
-            let Some(buffer) = fetch_whole(&backing, &mut sink) else {
+            let Some(buffer) = fetch_whole(&backing, sink) else {
                 return Err(OpenError::NoObjects);
             };
             let index = ScanIndex::build(&buffer, &names);
+            sink.add_steps(index.steps());
             if index.is_empty() {
                 return Err(OpenError::NoObjects);
             }
@@ -517,7 +552,7 @@ impl CosDocument {
                 );
             }
             table = rebuilt;
-            trailer = index.synthesized_trailer(trailer, &mut sink);
+            trailer = index.synthesized_trailer(trailer, sink);
             if revisions.is_empty() {
                 revisions.push(Revision {
                     byte_range: 0..backing.len(),
@@ -529,10 +564,12 @@ impl CosDocument {
             scan = Some(Arc::new(index));
         } else if !failures.is_empty() {
             ladder = LadderLevel::Patch;
-            let Some(buffer) = fetch_whole(&backing, &mut sink) else {
+            let Some(buffer) = fetch_whole(&backing, sink) else {
                 return Err(OpenError::NoObjects);
             };
-            let index = Arc::new(ScanIndex::build(&buffer, &names));
+            let index = ScanIndex::build(&buffer, &names);
+            sink.add_steps(index.steps());
+            let index = Arc::new(index);
             for num in failures {
                 let offset = match table.get(num) {
                     Some(XrefEntry::Offset { offset, .. }) => offset,
@@ -592,14 +629,17 @@ impl CosDocument {
             shift,
             verdict: OnceLock::new(),
         };
-        doc.absorb(sink);
+        if let Some(work) = work {
+            sink.steps().tally(work);
+        }
+        doc.absorb(core::mem::take(sink));
         if ladder == LadderLevel::Rescan {
             // The scanner sees `N G obj` headers, which objects inside an
             // object stream do not have. Their containers do, so the streams
             // found by the scan are expanded into type-2 entries (7.5.7).
-            doc.expand_object_streams();
+            doc.expand_object_streams(work);
         }
-        doc.extract_encrypt();
+        doc.extract_encrypt(work);
         Ok(doc)
     }
 
@@ -1231,9 +1271,28 @@ impl CosDocument {
     /// Never, today. The result type is the API's, because a later phase's
     /// per-object failures belong here rather than in a panic.
     pub fn get(&self, r: ObjRef) -> Result<Arc<Object>, CosError> {
+        self.get_with(r, None)
+    }
+
+    /// [`CosDocument::get`], counting what the read parsed into `work`: the
+    /// tokens lexed and the objects parsed, an object stream's prologue and
+    /// the member read out of it, and a repair scan the read had to build. A
+    /// read the store answers parses nothing and counts nothing
+    /// (`docs/design/resource-exhaustion.md`, "The counters").
+    ///
+    /// # Errors
+    /// As [`CosDocument::get`].
+    pub fn get_counted(&self, r: ObjRef, work: &Work) -> Result<Arc<Object>, CosError> {
+        self.get_with(r, Some(work))
+    }
+
+    fn get_with(&self, r: ObjRef, work: Option<&Work>) -> Result<Arc<Object>, CosError> {
         let mut sink = WarningSink::new();
         let mut ctx = ResolveCtx::new();
         let object = self.load(r.num, &mut ctx, &mut sink);
+        if let Some(work) = work {
+            sink.steps().tally(work);
+        }
         self.absorb(sink);
         Ok(object)
     }
@@ -1360,7 +1419,10 @@ impl CosDocument {
         let mut ctx = ResolveCtx::new();
         let found = xref::offset_candidates(len, hint_at, params.shift)
             .into_iter()
-            .find_map(|at| self.parse_windowed(at, &mut ctx).map(|(p, _)| (at, p)));
+            .find_map(|at| {
+                self.parse_windowed(at, &mut ctx, &mut WarningSink::new())
+                    .map(|(p, _)| (at, p))
+            });
         let Some((at, parsed)) = found else {
             self.warn_offset(hint_at, WarningKind::LinearizedHintsUnusable);
             return None;
@@ -1850,7 +1912,9 @@ impl CosDocument {
             return None;
         }
         let buffer = fetch_whole(&self.buffer, sink)?;
-        let index = Arc::new(ScanIndex::build(&buffer, &self.names));
+        let index = ScanIndex::build(&buffer, &self.names);
+        sink.add_steps(index.steps());
+        let index = Arc::new(index);
         let mut slot = self.scan.write_lock();
         // Another thread may have built the same index meanwhile; it read the
         // same bytes, so whichever is there wins and this one is dropped.
@@ -1874,6 +1938,7 @@ impl CosDocument {
         &self,
         offset: u64,
         ctx: &mut ResolveCtx,
+        sink: &mut WarningSink,
     ) -> Option<(ParsedIndirect, Vec<Warning>)> {
         let view = self.buffer.view();
         let mut want = limits::OBJECT_WINDOW;
@@ -1892,8 +1957,12 @@ impl CosDocument {
             let reaches_end = window.end() >= self.buffer.len();
             let local_at = window.local(offset)?;
             let mut local = WarningSink::new();
-            let mut parsed =
-                parse_indirect_at(window.bytes(), local_at, &self.names.table, &mut local)?;
+            let parsed = parse_indirect_at(window.bytes(), local_at, &self.names.table, &mut local);
+            // A window that turns out too short is parsed again, larger: both
+            // parses are the load's steps, and only the last one's warnings
+            // are the object's.
+            sink.add_steps(local.steps());
+            let mut parsed = parsed?;
             let consumed = match &parsed.object {
                 Object::Stream(stream) => stream.data_start,
                 _ => parsed.end_offset,
@@ -1935,7 +2004,7 @@ impl CosDocument {
         ctx: &mut ResolveCtx,
         sink: &mut WarningSink,
     ) -> Option<Object> {
-        let (parsed, warnings) = self.parse_windowed(offset, ctx)?;
+        let (parsed, warnings) = self.parse_windowed(offset, ctx, sink)?;
         if parsed.reference.num != num {
             return None;
         }
@@ -2001,6 +2070,8 @@ impl CosDocument {
 
         let mut local = WarningSink::new();
         let parsed = parse_object_at(&stm.data, offset, &self.names.table, &mut local);
+        sink.add_steps(local.steps());
+        sink.parsed_object();
         // 7.5.7: a contained object is never itself a stream.
         if objstm::is_stream_at(&stm.data, parsed.end_offset) {
             sink.warn_at(
@@ -2056,14 +2127,16 @@ impl CosDocument {
             .map(|r| r.num)
     }
 
-    fn extract_encrypt(&mut self) {
+    fn extract_encrypt(&mut self, work: Option<&Work>) {
         let Some(entry) = self.trailer.get(Name::ENCRYPT).cloned() else {
             return;
         };
         let (dict, reference) = match entry {
             Object::Dict(dict) => (Some(dict), None),
             Object::Ref(r) => {
-                let object = self.get(r).unwrap_or_else(|_| Arc::new(Object::Null));
+                let object = self
+                    .get_with(r, work)
+                    .unwrap_or_else(|_| Arc::new(Object::Null));
                 (object.as_dict().cloned(), Some(r))
             }
             _ => (None, None),
@@ -2078,7 +2151,7 @@ impl CosDocument {
         }
     }
 
-    fn expand_object_streams(&mut self) {
+    fn expand_object_streams(&mut self, work: Option<&Work>) {
         let Some(scan) = self.scan.read_lock().clone() else {
             return;
         };
@@ -2097,6 +2170,9 @@ impl CosDocument {
         }
         for (num, entry) in additions {
             self.xref.insert_new(num, entry);
+        }
+        if let Some(work) = work {
+            sink.steps().tally(work);
         }
         self.absorb(sink);
     }

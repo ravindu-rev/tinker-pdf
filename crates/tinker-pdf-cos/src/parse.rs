@@ -76,8 +76,11 @@ pub fn parse_indirect_at(
     // The header is lexed into a scratch sink so that probing an offset that
     // turns out not to be a header leaves no trace in the document's warnings.
     let mut header_sink = WarningSink::new();
-    let reference = parser.indirect_header(&mut header_sink)?;
+    let header = parser.indirect_header(&mut header_sink);
+    sink.add_steps(header_sink.steps());
+    let reference = header?;
     sink.extend(header_sink.take());
+    sink.parsed_object();
 
     let previous = sink.set_context(Some(reference));
     let object = parser.parse_object(sink);

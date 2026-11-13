@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tinker_pdf_color::Function;
 use tinker_pdf_cos::decode_text_string;
+use tinker_pdf_cos::{Counter, Work};
 
 /// Everything the interpreter needs from a page's resources.
 ///
@@ -758,6 +759,43 @@ pub fn interpret<D: Device, F: FontSource>(
     device: &mut D,
     fonts: &F,
 ) {
+    interpret_steps(content, initial, device, fonts);
+}
+
+/// [`interpret`], counting what the run read into `work`: every token the
+/// interpreter took from its tokenizer and every operator it ran, in the
+/// stream and in every form, soft mask's group and Type 3 glyph procedure the
+/// stream runs ([`Stats::content_tokens_read`](tinker_pdf_cos::Stats::content_tokens_read),
+/// [`Stats::operators_run`](tinker_pdf_cos::Stats::operators_run);
+/// `docs/design/resource-exhaustion.md`, "The counters").
+///
+/// What the device hears is what [`interpret`] makes it hear: the counts are
+/// the interpreter's own integers, added to `work` once, when the run ends.
+pub fn interpret_counted<D: Device, F: FontSource>(
+    content: &[u8],
+    initial: Matrix,
+    device: &mut D,
+    fonts: &F,
+    work: &Work,
+) {
+    let steps = interpret_steps(content, initial, device, fonts);
+    work.add(Counter::ContentTokensRead, steps.tokens);
+    work.add(Counter::OperatorsRun, steps.operators);
+}
+
+/// What one interpretation read.
+#[derive(Clone, Copy, Debug, Default)]
+struct Steps {
+    tokens: u64,
+    operators: u64,
+}
+
+fn interpret_steps<D: Device, F: FontSource>(
+    content: &[u8],
+    initial: Matrix,
+    device: &mut D,
+    fonts: &F,
+) -> Steps {
     let mut interp = Interpreter {
         device,
         fonts: Scope::Borrowed(fonts),
@@ -783,6 +821,7 @@ pub fn interpret<D: Device, F: FontSource>(
         reached: u64::try_from(content.len()).unwrap_or(u64::MAX),
         nested_spent: 0,
         nested_budget_told: false,
+        steps: Steps::default(),
     };
     interp.run(content);
     // 14.6.2: a stream may end with scopes still open, and a device left
@@ -792,6 +831,7 @@ pub fn interpret<D: Device, F: FontSource>(
     // clip and mask what it draws next — an annotation's appearance after the
     // page's content — by this stream's state.
     interp.close_open_saves();
+    interp.steps
 }
 
 struct Interpreter<'d, D: Device, F: FontSource> {
@@ -845,6 +885,9 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     nested_spent: u64,
     /// Whether the device has heard [`Device::nested_budget_spent`].
     nested_budget_told: bool,
+    /// What this run has read, nested content included: the counts
+    /// [`interpret_counted`] hands to its tally.
+    steps: Steps,
 }
 
 impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
@@ -855,6 +898,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             if self.device.is_cancelled() {
                 return;
             }
+            self.steps.tokens = self.steps.tokens.saturating_add(1);
 
             let Token::Operator(op) = token else {
                 self.stack.push(token);
@@ -865,6 +909,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
                 continue;
             };
+            self.steps.operators = self.steps.operators.saturating_add(1);
 
             match op.as_slice() {
                 b"BI" => {

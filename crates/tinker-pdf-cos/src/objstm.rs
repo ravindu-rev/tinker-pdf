@@ -136,6 +136,7 @@ impl ObjStm {
         if out_of_range {
             sink.warn(at, WarningKind::ObjStmEntryOutOfRange);
         }
+        sink.add_steps(scratch.steps());
         ObjStm { data, entries }
     }
 }

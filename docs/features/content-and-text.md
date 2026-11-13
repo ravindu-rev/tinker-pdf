@@ -551,6 +551,15 @@ box each, and `TextWriter` serialises pages as JSON, XML or HTML.
 `Page::images()` returns `Vec<PageImage>`; `ImageSpace`, `ImageMask` and
 `SampleCodec` are the types it is built from, all `#[non_exhaustive]`.
 
+**The interpreter's own count.** `tinker_pdf_content::interpret_counted`
+is `interpret` adding what the run read to MS-01's tally:
+`Stats::content_tokens_read`, every token taken from the tokenizer, and
+`operators_run`, every operator run, `BI` among them, in the stream and in
+every form, soft mask's group and Type 3 glyph procedure it runs. They are
+the interpreter's own integers, added to the tally once when the run ends, so
+the device hears exactly what `interpret` makes it hear. The facade's doors
+interpret uncounted, so neither counter appears in what they hand out.
+
 **Counted work.** `Page::text_counted(&TextOptions)` returns what
 `Page::text_with` returns for the same options, to the byte, with a `Stats` of
 what extracting it did ([rendering](rendering.md) names the counters): the
@@ -1059,6 +1068,14 @@ hand-written page holds the rest of the space the same way — a `CalGray`,
 under an indexed base, a separation's alternate and an ICC space's own
 `/Alternate` each in its own file — and a stencil mask's samples, a refused
 image and a damaged fax's leniency each reported under its image.
+
+`crates/tinker-pdf-content/tests/complexity.rs` holds the interpreter to
+[resource exhaustion](../design/resource-exhaustion.md)'s size-scaling law
+through `interpret_counted`: the tokens and operators of a stream at four
+times a size are at most 4.4 times those at that size, for more operators,
+a longer run of operands, deeper `q` and `BDC` nesting, more inline images, a
+form drawn more often and forms nested deeper, each with the device's calls
+counted from the shape and alike through `interpret`.
 
 Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),
