@@ -2490,3 +2490,251 @@ fn a_gamut_tag_answers_in_and_out_where_its_table_says() {
     let output = Output::compile(&broken, Intent::RelativeColorimetric).expect("the model");
     assert_eq!(output.in_gamut([0.5, 0.5, 0.4]), None);
 }
+
+// ---- named colours -------------------------------------------------------------
+//
+// `ncl2` (ICC.1 10.15, Table 63): a vendor flag, the colour count `n`, the
+// device coordinate count `m`, a 32-byte prefix and suffix, then `n` entries
+// of a 32-byte root name, three connection-space coordinates in `lut16Type`'s
+// encoding and `m` device coordinates. A colour's name is prefix, root and
+// suffix joined.
+
+/// An `ncl2` tag naming `entries` — each a root name, its three
+/// connection-space coordinates and its `device` device coordinates — with
+/// `prefix` and `suffix`, its vendor flag zero.
+fn ncl2(
+    prefix: &str,
+    suffix: &str,
+    device: usize,
+    entries: &[(&str, [u16; 3], Vec<u16>)],
+) -> Vec<u8> {
+    let field = |text: &str| {
+        let mut out = text.as_bytes().to_vec();
+        out.resize(32, 0);
+        out
+    };
+    let mut out = b"ncl2".to_vec();
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(device as u32).to_be_bytes());
+    out.extend_from_slice(&field(prefix));
+    out.extend_from_slice(&field(suffix));
+    for (root, pcs, coordinates) in entries {
+        assert_eq!(coordinates.len(), device);
+        out.extend_from_slice(&field(root));
+        for value in pcs.iter().chain(coordinates) {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// Three coordinates in `lut16Type`'s encoding as the value they encode: XYZ
+/// in `u1Fixed15`, 1.0 at `8000h`; Lab in version 2's legacy encoding, `L*`
+/// 100 at `FF00h`, `a*` and `b*` 0 at `8000h` (Table 63, 10.8).
+fn legacy(encoded: [u16; 3], lab: bool) -> [f64; 3] {
+    if lab {
+        let unit = encoded.map(|v| f64::from(v) / 65280.0);
+        [
+            unit[0] * 100.0,
+            unit[1] * 255.0 - 128.0,
+            unit[2] * 255.0 - 128.0,
+        ]
+    } else {
+        encoded.map(|v| f64::from(v) / 32768.0)
+    }
+}
+
+/// The ink library the tests here name: three spot colours over CMYK, each
+/// with its four device coordinates.
+fn inks() -> Vec<(&'static str, [u16; 3], Vec<u16>)> {
+    vec![
+        ("185", [0x7A00, 0xD200, 0xA600], vec![0, 0xF5C2, 0xC28F, 0]),
+        (
+            "Process Blue",
+            [0x5F00, 0x6E00, 0x2800],
+            vec![0xFFFF, 0x2E14, 0, 0x051E],
+        ),
+        (
+            "Cool Gray 9",
+            [0x8A00, 0x7F80, 0x7C00],
+            vec![0x3333, 0x2666, 0x199A, 0x570A],
+        ),
+    ]
+}
+
+/// **A named colour answers its coordinates by name** (ICC.1 10.15, 8.9). A
+/// profile of class `nmcl` over CMYK and Lab, its `ncl2` naming three inks
+/// with the prefix `PMS ` and the suffix ` C`, parses with its colours and no
+/// transform: each colour is found by its whole name — prefix, root and
+/// suffix — and answers the connection-space coordinates its entry encodes,
+/// in the legacy Lab encoding, and its four device coordinates as stored;
+/// a root alone, or a name missing its suffix, finds nothing. Under an XYZ
+/// connection space the coordinates read in `u1Fixed15`. A printer profile
+/// carrying the tag beside its tables keeps both. A named-colour profile
+/// with no `ncl2`, one whose `ncl2` does not read, and one whose connection
+/// space is neither `XYZ` nor `Lab` are refused.
+#[test]
+fn a_named_colour_answers_its_coordinates_by_name() {
+    let library = inks();
+    let tag = ncl2("PMS ", " C", 4, &library);
+    for (pcs, lab) in [(b"Lab ", true), (b"XYZ ", false)] {
+        let parsed = Profile::parse(&profile_of(
+            b"nmcl",
+            b"CMYK",
+            pcs,
+            &[(*b"ncl2", tag.clone())],
+        ))
+        .unwrap_or_else(|error| panic!("{pcs:?}: {error:?}"));
+        let named = parsed.named.as_ref().expect("its colours");
+        assert_eq!((named.len(), named.device_channels()), (3, 4));
+        assert_eq!((named.prefix(), named.suffix()), ("PMS ", " C"));
+        for (root, encoded, device) in &library {
+            let name = format!("PMS {root} C");
+            let colour = named
+                .get(&name)
+                .unwrap_or_else(|| panic!("{name} is named"));
+            assert_eq!(colour.name(), name);
+            assert_eq!(colour.lab(), lab);
+            assert_eq!(colour.pcs(), legacy(*encoded, lab), "{name}");
+            assert_eq!(colour.device(), device.as_slice(), "{name}");
+            assert!(named.get(root).is_none(), "{root} alone");
+            assert!(
+                named.get(&format!("PMS {root}")).is_none(),
+                "{root} with no suffix"
+            );
+        }
+        for intent in Intent::ALL {
+            assert!(Transform::compile(&parsed, intent).is_none(), "{intent:?}");
+            assert_eq!(
+                Output::compile(&parsed, intent),
+                Err(IccError::MissingTags),
+                "{intent:?}"
+            );
+        }
+        assert!(Transforms::compile(parsed.clone()).is_none());
+    }
+
+    // Beside a printer profile's tables, both.
+    let forward = forward_table(true, 4, |_| [32_768, 32_768, 32_768]);
+    let printer = Profile::parse(&profile_of(
+        b"prtr",
+        b"CMYK",
+        b"Lab ",
+        &[(*b"A2B0", forward.tag()), (*b"ncl2", tag.clone())],
+    ))
+    .expect("a printer profile");
+    assert!(Transform::compile(&printer, Intent::RelativeColorimetric).is_some());
+    assert_eq!(printer.named.as_ref().map(|named| named.len()), Some(3));
+
+    let mut broken = tag.clone();
+    broken.truncate(tag.len() - 2);
+    for (tags, pcs, expected, what) in [
+        (Vec::new(), b"Lab ", IccError::MissingTags, "no ncl2"),
+        (
+            vec![(*b"ncl2", broken)],
+            b"Lab ",
+            IccError::MalformedTag,
+            "entries cut short",
+        ),
+        (
+            vec![(*b"ncl2", tag)],
+            b"CMYK",
+            IccError::UnsupportedPcs,
+            "a device connection space",
+        ),
+    ] {
+        assert_eq!(
+            Profile::parse(&profile_of(b"nmcl", b"CMYK", pcs, &tags)),
+            Err(expected),
+            "{what}"
+        );
+    }
+}
+
+/// The D50 white the connection space's Lab is relative to (6.3.4.3, 6.4),
+/// as the engine's Lab relation reads it.
+const LAB_WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+
+/// D50 XYZ to linear sRGB: IEC 61966-2-1's primaries and D65 white, adapted
+/// to D50 by the Bradford transform — the matrix every connection-space value
+/// reaches sRGB through.
+const D50_TO_SRGB: [[f64; 3]; 3] = [
+    [3.134_136, -1.617_036, -0.490_662],
+    [-0.978_755, 1.916_143, 0.033_454],
+    [0.071_95, -0.228_988, 1.405_386],
+];
+
+/// IEC 61966-2-1's encoding of linear light, held to 0..=1, as a byte.
+fn srgb_byte(linear: f64) -> i32 {
+    let v = linear.clamp(0.0, 1.0);
+    let encoded = if v <= 0.003_130_8 {
+        12.92 * v
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as i32
+}
+
+/// **A named colour converts through its connection space.** Each ink of
+/// the library, under a Lab and an XYZ connection space, is the sRGB the test
+/// recomputes from its stored coordinates: decoded from `lut16Type`'s
+/// encoding, Lab taken to D50 XYZ by 6.4's relation against the white the
+/// engine's Lab is relative to, XYZ through the D50-adapted sRGB matrix, and
+/// IEC 61966-2-1's transfer; within one level in every channel, at eight bits
+/// and at sixteen, whose top byte is the eight-bit answer.
+#[test]
+fn a_named_colour_converts_through_its_connection_space() {
+    let library = inks();
+    let tag = ncl2("", "", 4, &library);
+    for (pcs, lab) in [(b"Lab ", true), (b"XYZ ", false)] {
+        let parsed = Profile::parse(&profile_of(
+            b"nmcl",
+            b"CMYK",
+            pcs,
+            &[(*b"ncl2", tag.clone())],
+        ))
+        .expect("the library parses");
+        let named = parsed.named.as_ref().expect("its colours");
+        for (root, encoded, _) in &library {
+            let value = legacy(*encoded, lab);
+            let xyz = if lab {
+                let fy = (value[0] + 16.0) / 116.0;
+                let finv = |t: f64| {
+                    const DELTA: f64 = 6.0 / 29.0;
+                    if t > DELTA {
+                        t * t * t
+                    } else {
+                        3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
+                    }
+                };
+                [
+                    LAB_WHITE[0] * finv(fy + value[1] / 500.0),
+                    LAB_WHITE[1] * finv(fy),
+                    LAB_WHITE[2] * finv(fy - value[2] / 200.0),
+                ]
+            } else {
+                value
+            };
+            let want: Vec<i32> = D50_TO_SRGB
+                .iter()
+                .map(|row| srgb_byte(row[0] * xyz[0] + row[1] * xyz[1] + row[2] * xyz[2]))
+                .collect();
+            let colour = named.get(root).expect("named by its root");
+            let (r, g, b) = colour.to_rgb();
+            for (got, want) in [r, g, b].iter().zip(&want) {
+                assert!(
+                    (i32::from(*got) - want).abs() <= 1,
+                    "{pcs:?} {root}: {:?} against {want:?}",
+                    (r, g, b)
+                );
+            }
+            let wide = colour.to_rgb16();
+            assert_eq!(
+                wide.map(|channel| (channel >> 8) as u8),
+                [r, g, b],
+                "{pcs:?} {root}: sixteen bits top out at the bytes"
+            );
+        }
+    }
+}

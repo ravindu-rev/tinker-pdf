@@ -27,6 +27,9 @@
 //! `mft2` or `mAB `) when it is parsed, and its transform is applied to
 //! components of every count, where a table whose counts are not the two
 //! spaces' is a typed refusal (`docs/design/icc.md`, "Device links").
+//! Named colours — an `ncl2` tag, whose colour count and device coordinate
+//! count are file fields checked before an entry is walked — are looked up
+//! and converted to sRGB, every one of them.
 //!
 //! # What this target checks, and what it does not
 //!
@@ -56,6 +59,15 @@ fuzz_target!(|data: &[u8]| {
     // A device link's transform, device to device, where the profile is one.
     if let Ok(link) = Link::compile(&profile) {
         link_all(&link);
+    }
+    // Named colours, each converted, and looked up by a name and by none.
+    if let Some(named) = &profile.named {
+        for colour in named.iter() {
+            let _ = colour.to_rgb();
+            let _ = colour.to_rgb16();
+            let _ = named.get(colour.name());
+        }
+        let _ = named.get("");
     }
     // Every intent's transform, each compiled on its own and through the set
     // a colour space carries: an intent reads a table relative colorimetric's

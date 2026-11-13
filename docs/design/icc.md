@@ -1173,12 +1173,18 @@ coordinate count `m`, a 32-byte prefix and suffix, then `n` entries of
 `38 + 2m` bytes — a 32-byte root name, three PCS coordinates in the
 encoding of the table above, and `m` device coordinates from `0000h` to
 `FFFFh`. Names are 7-bit ASCII, each field NUL-terminated, and a colour's
-name is prefix, root and suffix joined. `icc::NamedColours` (RC-20.9) is
-looked up by that name and answers the PCS and device coordinates; sRGB
-comes through the existing XYZ and Lab paths. A profile of class `nmcl`
-(8.9) parses with its colours and no transform. Bounds, before an entry is
-walked: `m` within `MAX_DEVICE_CHANNELS`, `n` within `MAX_NAMED_COLOURS`,
-and `n × (38 + 2m)` within the tag's own size, both being file fields.
+name is prefix, root and suffix joined; a field holding a byte past 7 bits,
+or no NUL, is a malformed tag. `icc::NamedColours` (RC-20.9),
+`Profile::named`, is looked up by that name (`NamedColours::get`) and
+answers the PCS and device coordinates; sRGB comes through the existing XYZ
+and Lab paths (`NamedColour::to_rgb`, `to_rgb16`). A profile of class `nmcl`
+(8.9) parses with its colours and no transform, and is refused where its
+`ncl2` is absent or does not read, or its PCS is neither `XYZ` nor `Lab`;
+any other profile carries its colours beside its transforms, and one whose
+`ncl2` does not read carries none. Bounds, before an entry is walked: `m`
+within `MAX_DEVICE_CHANNELS`, `n` within `MAX_NAMED_COLOURS`, and
+`n × (38 + 2m)` within the tag's own size, both being file fields. The
+colours count in `Transforms::bytes_bound`.
 
 ##### Version 5
 

@@ -35,7 +35,9 @@
 //! components, is [`Output`]: through a `B2A*` table — `mft1`, `mft2` or
 //! v4's `mBA ` — or a matrix/TRC or grey model inverted when it is built and
 //! integer per colour (`docs/design/icc.md`, "The output transform"). A
-//! device link, which takes one device's values to another's, is [`Link`].
+//! device link, which takes one device's values to another's, is [`Link`],
+//! and the colours an `ncl2` tag names, looked up by name, are
+//! [`NamedColours`].
 //!
 //! The same census found the versions: v2 2 739, v4 9, v5 2. So v2 is not a
 //! legacy case to tolerate on the way to v4 — it is the case, and the two
@@ -78,9 +80,11 @@ use std::sync::{Arc, OnceLock};
 use crate::{ColorSpace, XYZ_D50_TO_SRGB};
 
 mod mpe;
+mod named;
 mod output;
 
 pub use mpe::MAX_MPE_ELEMENTS;
+pub use named::{NamedColour, NamedColours, MAX_NAMED_COLOURS};
 pub use output::{lab_to_xyz, xyz_to_lab, DeviceColour, Link, Output, MAX_DEVICE_CHANNELS};
 
 /// A rendering intent: ICC.1's four (6.1), the ones a transform is compiled
@@ -410,6 +414,10 @@ pub struct Profile {
     /// the profile carries one that reads. ICC-absolute colorimetry scales
     /// by it ([`Profile::media_scale`]); no other intent reads it.
     pub white: Option<[f64; 3]>,
+    /// The colours its `namedColor2Tag` (`ncl2`, ICC.1 10.15) names, where it
+    /// carries one that reads: what a profile of class `nmcl` (8.9) is made
+    /// of, and what any other may carry beside its transforms.
+    pub named: Option<NamedColours>,
 }
 
 /// The PCS white, 6.3.4.3's D50, as the s15Fixed16Numbers an `XYZType` tag
@@ -2128,6 +2136,30 @@ impl Profile {
         // with the PCS white for it (`Profile::media_scale`), and refuses
         // nothing a relative transform could be built from.
         let white = find(b"wtpt").and_then(|data| read_xyz(data).ok());
+        let lab = &pcs == b"Lab ";
+        // Named colours (10.15), their coordinates in the profile's
+        // connection space: what a profile of class `nmcl` is (8.9), so one
+        // whose tag is absent or does not read is refused for it; any other
+        // profile carries them beside its transforms, and one that does not
+        // read refuses nothing a transform could be built from.
+        let named = find(b"ncl2").map(|data| NamedColours::read(data, lab));
+        if &class == b"nmcl" {
+            if !lab && &pcs != b"XYZ " {
+                return Err(IccError::UnsupportedPcs);
+            }
+            let named = named.ok_or(IccError::MissingTags)??;
+            return Ok(Profile {
+                space,
+                pcs,
+                class,
+                version,
+                model: None,
+                tables: Tables::none(lab),
+                white,
+                named: Some(named),
+            });
+        }
+        let named = named.and_then(Result::ok);
 
         // A device link (8.6) converts one device's values to another's: its
         // connection-space field names the space its transform gives, a
@@ -2157,13 +2189,13 @@ impl Profile {
                 model: None,
                 tables,
                 white,
+                named: None,
             });
         }
 
         let has_matrix =
             find(b"rXYZ").is_some() && find(b"gXYZ").is_some() && find(b"bXYZ").is_some();
         let has_grey = find(b"kTRC").is_some();
-        let lab = &pcs == b"Lab ";
 
         // The matrix/TRC or grey model, where the profile carries the tags of
         // one: ICC.1 8.10.2 d), read whether or not relative colorimetric
@@ -2258,6 +2290,7 @@ impl Profile {
             model: model.and_then(Result::ok),
             tables,
             white,
+            named,
         })
     }
 }
@@ -3518,7 +3551,8 @@ impl Transforms {
 
     /// The most bytes these transforms can come to hold, whichever intents
     /// conversions ask for later and whatever they convert: the profile's
-    /// model, and its tables and pipelines as read — one not read yet at the
+    /// model and its named colours, and its tables and pipelines as read —
+    /// one not read yet at the
     /// most reading it can allocate ([`lut_bound`], [`mpe::bound`]) — and
     /// every transform an intent compiles of its own at the most it holds
     /// once its grid's every node is filled and its row tables built
@@ -3535,6 +3569,11 @@ impl Transforms {
     #[must_use]
     pub fn bytes_bound(&self) -> usize {
         let model = self.profile.model.as_ref().map_or(0, Model::held_bytes);
+        let named = self
+            .profile
+            .named
+            .as_ref()
+            .map_or(0, NamedColours::held_bytes);
         let compiled = self
             .profile
             .model
@@ -3543,6 +3582,7 @@ impl Transforms {
             .max(self.profile.tables.grid_bound());
         size_of::<Transforms>()
             .saturating_add(model)
+            .saturating_add(named)
             .saturating_add(self.profile.tables.held_bound())
             .saturating_add(self.relative.bytes_bound())
             .saturating_add(transform_bound(0, compiled).saturating_mul(3))
@@ -3554,7 +3594,12 @@ impl Transforms {
     /// share it.
     #[cfg(test)]
     fn held_bytes(&self) -> usize {
-        let model = self.profile.model.as_ref().map_or(0, Model::held_bytes);
+        let model = self.profile.model.as_ref().map_or(0, Model::held_bytes)
+            + self
+                .profile
+                .named
+                .as_ref()
+                .map_or(0, NamedColours::held_bytes);
         let mut counted = vec![Arc::as_ptr(&self.relative)];
         let mut others = 0;
         for other in self.others.iter().filter_map(OnceLock::get) {
@@ -4036,11 +4081,19 @@ pub(crate) mod tests {
             /// Parses as a device link, whose transform the target drives,
             /// and builds no transform to sRGB.
             Link,
+            /// Parses with named colours, which the target looks up and
+            /// converts, and builds no transform.
+            Named,
             /// Refused by name, after the tag table was walked.
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 15] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 16] = [
+            // A named-colour profile (ICC.1 8.9) over CMYK and Lab whose
+            // `ncl2` names three inks with a prefix and a suffix, each with
+            // its four device coordinates: the seed that reaches the
+            // named-colour reader.
+            ("named-nmcl", named_seed(), Reaches::Named),
             // [`b2a_seed`]'s profile with a gamut tag beside its `B2A0`: the
             // seed that reaches the `gamt` reader and its answer.
             ("gamut-mft2-cmyk", gamut_seed(), Reaches::Output),
@@ -4161,6 +4214,17 @@ pub(crate) mod tests {
         for (name, bytes, reaches) in &seeds {
             let got = Profile::parse(bytes);
             match reaches {
+                Reaches::Named => {
+                    let profile = got.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                    assert!(
+                        profile
+                            .named
+                            .as_ref()
+                            .is_some_and(|named| !named.is_empty()),
+                        "{name}: no named colours"
+                    );
+                    assert!(Transforms::compile(profile).is_none(), "{name}");
+                }
                 Reaches::Link => {
                     let profile = got.unwrap_or_else(|e| panic!("{name}: {e:?}"));
                     assert!(Link::compile(&profile).is_ok(), "{name}: no link");
@@ -4257,6 +4321,63 @@ pub(crate) mod tests {
                     }),
                 ),
             ],
+        )
+    }
+
+    /// An `ncl2` tag (ICC.1 10.15, Table 63) naming `entries` — a root name,
+    /// three connection-space coordinates and `device` device coordinates
+    /// each — with `prefix` and `suffix`, its vendor flag zero.
+    fn ncl2_tag(
+        prefix: &str,
+        suffix: &str,
+        device: usize,
+        entries: &[(&str, [u16; 3], &[u16])],
+    ) -> Vec<u8> {
+        let field = |text: &str| {
+            let mut out = text.as_bytes().to_vec();
+            out.resize(32, 0);
+            out
+        };
+        let mut out = b"ncl2".to_vec();
+        out.extend_from_slice(&[0; 8]);
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        out.extend_from_slice(&(device as u32).to_be_bytes());
+        out.extend(field(prefix));
+        out.extend(field(suffix));
+        for (root, pcs, coordinates) in entries {
+            out.extend(field(root));
+            for value in pcs.iter().chain(coordinates.iter()) {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        out
+    }
+
+    /// The `named-nmcl` seed: a named-colour profile over CMYK and Lab whose
+    /// `ncl2` names `Ink 1 C`, `Ink 2 C` and `Ink 3 C`, each with its legacy
+    /// Lab coordinates and four device coordinates.
+    fn named_seed() -> Vec<u8> {
+        build_as(
+            b"nmcl",
+            b"CMYK",
+            b"Lab ",
+            &[(
+                *b"ncl2",
+                ncl2_tag(
+                    "Ink ",
+                    " C",
+                    4,
+                    &[
+                        ("1", [0x7A00, 0xD200, 0xA600], &[0, 0xF5C2, 0xC28F, 0]),
+                        ("2", [0x5F00, 0x6E00, 0x2800], &[0xFFFF, 0x2E14, 0, 0x051E]),
+                        (
+                            "3",
+                            [0x8A00, 0x7F80, 0x7C00],
+                            &[0x3333, 0x2666, 0x199A, 0x570A],
+                        ),
+                    ],
+                ),
+            )],
         )
     }
 

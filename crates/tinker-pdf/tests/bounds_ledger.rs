@@ -599,7 +599,7 @@ use tinker_pdf::xps::{
     MAX_XPS_SEGMENTS,
 };
 use tinker_pdf::{MAX_ANNOTATION_BYTES, MAX_ASSOCIATED_FILE_BYTES, MAX_OUTPUT_INTENT_BYTES};
-use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
+use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS, MAX_NAMED_COLOURS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
     MAX_BMP_SAMPLES, MAX_GIF_SAMPLES, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
@@ -640,6 +640,9 @@ const XPS_GLYPH_TESTS: &str = include_str!("xps_glyphs.rs");
 /// separate module — so `declared_in` and the `fires_in` source are the same
 /// text, and there is nowhere for a ledger and its firing test to drift apart.
 const ICC: &str = include_str!("../../tinker-pdf-color/src/icc.rs");
+/// The ICC engine's named colours, which keep their cap and the test that
+/// fires it in the module that reads them, as `icc.rs` does.
+const ICC_NAMED: &str = include_str!("../../tinker-pdf-color/src/icc/named.rs");
 const JBIG2: &str = include_str!("../../tinker-pdf-filters/src/jbig2.rs");
 /// Tier 0's memory row: the two runtime bounds, and the two sources that prove
 /// them. `RENDER` is the first `declared_in` here that is a whole crate root
@@ -1876,7 +1879,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_TAGS",
             cap: MAX_ICC_TAGS as u128,
             published: "1 024",
-            // `srgb-first-party.icc`, the busiest of the fifteen `.icc` seeds
+            // `srgb-first-party.icc`, the busiest of the sixteen `.icc` seeds
             // `fuzz/corpus/icc_profile/` commits, which the `icc_profile`
             // target hands straight to `Profile::parse`. No `.pdf` or `.xps`
             // fixture in this repository embeds a profile at all — measured,
@@ -1914,7 +1917,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_BYTES",
             cap: MAX_ICC_BYTES as u128,
             published: "2 MiB",
-            // `srgb-first-party.icc`, the largest of the fifteen committed
+            // `srgb-first-party.icc`, the largest of the sixteen committed
             // seeds: the engine's own sRGB profile, which `tinker-pdf-color`'s
             // `build.rs` computes.
             fixtures: 2_624,
@@ -2808,6 +2811,31 @@ fn ledger() -> Vec<Bound> {
             declared_in: LAYOUT_LIMITS,
             fires_in: ("a_word_past_the_cap_has_no_points", LAYOUT_HYPHENATE),
         },
+        Bound {
+            name: "MAX_NAMED_COLOURS",
+            cap: MAX_NAMED_COLOURS as u128,
+            published: "65 536",
+            // The firing test declares exactly the cap, which is admitted to
+            // the size check, and one past it; the `named-nmcl` seed names
+            // three.
+            fixtures: MAX_NAMED_COLOURS as u128,
+            // No comic page or book picture carries a profile this parser
+            // opens (`MAX_ICC_TAGS`'s row says why), and a fixed document's
+            // profiles convert colours: an `ICCBased` space's profile is
+            // never of class `nmcl` (ISO 32000-2 Table 67), nor an XPS
+            // `ContextColor`'s.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // The count is a 32-bit field read before the entries it sizes.
+            reachable: 1 << 32,
+            reachable_because: "a 32-bit colour count, checked before the entries it sizes",
+            declared_in: ICC_NAMED,
+            fires_in: (
+                "a_named_colour_count_past_the_cap_is_refused_before_an_entry_is_read",
+                ICC_NAMED,
+            ),
+        },
     ]
 }
 
@@ -2859,8 +2887,10 @@ fn segment_size() -> u128 {
 /// and the review of lane 8C adds `MAX_EMBEDDING_DEPTH`; and the `jbig2` fuzz
 /// sweep adds `MAX_JBIG2_WORK_MULTIPLE`; and the OCR import seam adds
 /// `MAX_IMPORTED_WORDS`; and the formats-in tier's Netpbm decoder adds
-/// `MAX_NETPBM_SAMPLES`; and the hyphenation row adds `MAX_HYPHENATED_WORD`.
-/// All **sixty-nine** are here, and a bound added without a row fails this.
+/// `MAX_NETPBM_SAMPLES`; and the hyphenation row adds
+/// `MAX_HYPHENATED_WORD`; and the ICC engine's named colours add
+/// `MAX_NAMED_COLOURS`. All **seventy** are here, and a bound added
+/// without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2936,6 +2966,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_EMBEDDING_DEPTH",
             "MAX_IMPORTED_WORDS",
             "MAX_HYPHENATED_WORD",
+            "MAX_NAMED_COLOURS",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -3041,7 +3072,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 69, "the ledger is sixty-nine rows");
+    assert_eq!(measured, 70, "the ledger is seventy rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -3073,7 +3104,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 69, "the ledger is sixty-nine rows");
+    assert_eq!(ledger().len(), 70, "the ledger is seventy rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -3384,6 +3415,7 @@ fn every_bound_names_a_test_that_exists() {
         TAGGED_PDF_TESTS,
         PDF20_TESTS,
         TABLES_TESTS,
+        ICC_NAMED,
     ] {
         assert!(
             !source.contains("Instant::now"),

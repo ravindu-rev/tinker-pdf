@@ -186,6 +186,20 @@ name. No transform to sRGB is built from a link, nor one out of the
 connection space: an `ICCBased` space's profile may not be one (ISO 32000-2
 Table 67), so a page naming one keeps 8.6.5.5's alternate-space reading.
 
+**Named colours**, a profile's `ncl2` tag (ICC.1 10.15), are
+`Profile::named`: each colour's name is the tag's prefix, its root and the
+tag's suffix joined, each field 7-bit ASCII ended by a NUL, and
+`NamedColours::get(name)` answers its connection-space coordinates — XYZ in
+`u1Fixed15`, Lab in version 2's legacy encoding, relative colorimetric — and
+its device coordinates as stored, each from 0 to 65 535; `NamedColour::to_rgb`
+converts it to sRGB through the connection space's own path, as a table's
+value goes. A profile of class `nmcl` (8.9) parses with its colours and no
+transform, and is refused where its `ncl2` is absent or does not read; any
+other profile carries its colours beside its transforms. The device
+coordinate count is held to fifteen and the colour count to 65 536
+(`icc::MAX_NAMED_COLOURS`) before any entry is read, and their entries to
+the tag's own bytes. No render converts through a named colour.
+
 **`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.2,
 8.6.5.3): the components go through `/Gamma`, `/Matrix` takes them into XYZ
 relative to `/WhitePoint`, and the white point is adapted to D50 before the
