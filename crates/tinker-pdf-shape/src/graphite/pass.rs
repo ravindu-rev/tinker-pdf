@@ -51,11 +51,18 @@ pub fn substitute(
     let mirrors = description.bidi != 255 && description.table_version() >= 4 && right_to_left;
     let mut refusals = Vec::new();
     if mirrors && bidi < end {
-        run_passes(slots, 0..bidi, limits, budget, &mut refusals);
+        run_stage(slots, 0..bidi, right_to_left, limits, budget, &mut refusals);
         mirror(slots, &mut refusals);
-        run_passes(slots, bidi..end, limits, budget, &mut refusals);
+        run_stage(
+            slots,
+            bidi..end,
+            right_to_left,
+            limits,
+            budget,
+            &mut refusals,
+        );
     } else {
-        run_passes(slots, 0..end, limits, budget, &mut refusals);
+        run_stage(slots, 0..end, right_to_left, limits, budget, &mut refusals);
         if mirrors {
             mirror(slots, &mut refusals);
         }
@@ -68,17 +75,17 @@ pub fn substitute(
 /// What they set is resolved into positions by [`super::position::place`].
 ///
 /// Returns what the passes refused, each once, in the order met.
-pub fn position(slots: &mut Slots<'_>, limits: &Limits, budget: &mut Budget) -> Vec<Refusal> {
+pub fn position(
+    slots: &mut Slots<'_>,
+    right_to_left: bool,
+    limits: &Limits,
+    budget: &mut Budget,
+) -> Vec<Refusal> {
     let description = slots.face().description;
     let start = usize::from(description.positioning);
     let mut refusals = Vec::new();
-    run_passes(
-        slots,
-        start..usize::from(description.passes),
-        limits,
-        budget,
-        &mut refusals,
-    );
+    let range = start..usize::from(description.passes);
+    run_stage(slots, range, right_to_left, limits, budget, &mut refusals);
     refusals
 }
 
@@ -116,6 +123,19 @@ pub fn run_passes(
     budget: &mut Budget,
     refusals: &mut Vec<Refusal>,
 ) {
+    run_stage(slots, range, false, limits, budget, refusals);
+}
+
+/// The passes of `range`, in order, each followed by its collision
+/// avoidance where its flags ask for it, laid out in the run's direction.
+fn run_stage(
+    slots: &mut Slots<'_>,
+    range: Range<usize>,
+    right_to_left: bool,
+    limits: &Limits,
+    budget: &mut Budget,
+    refusals: &mut Vec<Refusal>,
+) {
     let description = slots.face().description;
     let count = usize::from(description.passes);
     for index in range.start..range.end.min(count) {
@@ -123,7 +143,11 @@ pub fn run_passes(
             break;
         }
         match description.pass(index, limits) {
-            Ok(pass) => run_pass(slots, &pass, index, limits, budget, refusals),
+            Ok(pass) => {
+                if run_pass(slots, &pass, index, limits, budget, refusals) {
+                    super::collision::avoid(slots, &pass, right_to_left, refusals);
+                }
+            }
             Err(refusal) => refuse(refusals, refusal),
         }
     }
@@ -167,7 +191,8 @@ fn program<'c>(
     entry.as_ref().and_then(Option::as_ref)
 }
 
-/// Runs one pass over the stream.
+/// Runs one pass's rules over the stream; false where its pass constraint
+/// skipped it, which skips its collision avoidance too.
 fn run_pass(
     slots: &mut Slots<'_>,
     pass: &Pass<'_>,
@@ -175,7 +200,7 @@ fn run_pass(
     limits: &Limits,
     budget: &mut Budget,
     refusals: &mut Vec<Refusal>,
-) {
+) -> bool {
     let description = slots.face().description;
     let features = slots.face().features.map_or(0, |features| features.len());
     let bounds = Bounds::for_pass(description, features, index);
@@ -193,15 +218,15 @@ fn run_pass(
             .and_then(|program| machine::holds(&program, &*slots, frame, budget));
         match holds {
             Ok(true) => {}
-            Ok(false) => return,
+            Ok(false) => return false,
             Err(refusal) => {
                 refuse(refusals, refusal);
-                return;
+                return false;
             }
         }
     }
     if !pass.has_machine() {
-        return;
+        return true;
     }
     let reversed = pass.is_reversed();
     if reversed {
@@ -322,4 +347,5 @@ fn run_pass(
     if reversed {
         slots.reverse();
     }
+    true
 }

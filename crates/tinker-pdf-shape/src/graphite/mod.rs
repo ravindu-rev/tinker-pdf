@@ -44,6 +44,7 @@ use crate::common::Tag;
 use crate::limits::Limits;
 use crate::read::Bytes;
 
+mod collision;
 pub mod feat;
 pub mod glat;
 mod lz4;
@@ -204,6 +205,16 @@ pub enum Refusal {
     /// The run spent [`Limits::max_instructions`]; the rest of its code did
     /// not run.
     TooManyInstructions,
+    /// Collision avoidance found no place inside a slot's rectangle that
+    /// clears the ink in its way: the slot keeps its place.
+    CollisionUnresolved {
+        /// The slot's glyph.
+        glyph: u16,
+    },
+    /// The run compared [`Limits::max_collision_work`] slot pairs: the
+    /// slots collision avoidance had not yet fixed or kerned keep their
+    /// places.
+    CollisionWorkExceeded,
     /// A slot's attachment chain comes back to itself: every slot of the
     /// cycle is placed where its pen puts it, attached to nothing.
     AttachmentCycle {

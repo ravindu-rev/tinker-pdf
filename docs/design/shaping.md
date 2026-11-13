@@ -1588,17 +1588,38 @@ fixable slot kept inside its movement rectangle, whose x limits are right and
 left whatever the run's direction; a cluster bounded by the start and end
 flags; kerning that adds space after a kerned slot so the next cluster clears
 its margin, counting the width of an intervening space and ignoring the y
-limits. This design's search is its own and integer: for each slot flagged to
-move, the candidates are its own position and the positions inside its
-rectangle at which an edge of its octabox shape meets an edge of a
-neighbour's, widened by the neighbour's margin, along x and along y — the
-shapes sub-boxes where a glyph has them; the least-cost candidate wins, the
-nearest to its start breaking a tie, and a move smaller than the pass's
-collision threshold is not made; the cluster is run over as many times as the
-pass's flags give; and a kerned slot takes the least x that clears the
-following cluster by its margin, inside its x limits. The work per slot pair
-is bounded by `Limits::max_collision_work`, past which a slot keeps its place
-and is named.
+limits. This design's search is its own and integer. A glyph's shape is its
+box from `glyf` cut by its octabox's four diagonals, read as FT-07d.4 holds
+them, and the shape of the exclusion glyph a slot names at its offset. The
+sub-boxes are not used: their bytes match the vendored Awami Nastaliq's
+outlines neither as 255ths of the glyph's box nor as 255ths of their cell, so
+their scale is not settled and a guessed one would move glyphs silently. A
+range is the slots from one flagged to start a range to one flagged to end
+it, a run with neither one range; a slot flagged to ignore is neither moved
+nor in the way, and a glyph with no outline has no shape. For each slot
+flagged to move, in stream order, the candidates are its place before any
+fix, the fix it has, and the places inside its rectangle at which an edge of
+its shape meets an edge of a neighbour's in its range, widened by the
+neighbour's margin, along x and along y. Each is weighed by the distance
+moved, a weight of 1; the ink it would overlap, at a weight past any move a
+rectangle allows; the neighbour's margin it would intrude on, weighted by its
+own `marginweight`; `NOABOVE` and `NOBELOW` against its proximate class's
+glyphs, kept as ink is; and its alignment with a glyph of its own class, the
+dearer by `sequence.valign.weight` the nearer their centres are than
+`valign.height`. The diagonal sequence regions of `LEFTDOWN` are not weighed:
+the GDL draws them in a figure whose geometry its text does not fix. The
+least-cost candidate wins, the nearest to its start breaking a tie; a slot no
+candidate clears of ink keeps its place and is named; a move smaller than
+the pass's collision threshold is not made; and the ranges are run over as
+many times as the pass's flags give. A kerned slot's advance then changes by
+the least that leaves the sequence after it — up to the next slot kerned,
+past any space — clear by its margin and the width of the spaces between,
+along x alone and wherever the two overlap in height, inside its x limits; a
+sequence nothing overlaps in height is kerned in as far as `min.x` allows. A
+slot's fix is read back as `collision.fix.x` and moves where positioning
+places it. Every slot pair compared is charged against
+`Limits::max_collision_work`, past which the slots not yet fixed or kerned
+keep their places, and that is named.
 
 **Justification.** A description's levels name, for each, the glyph
 attributes of its stretch, shrink, step and weight; layout's justify call
@@ -1626,7 +1647,7 @@ work past each bound is refused by name.
 | `Limits::max_instructions` | 4 000 000, or 64 000 a glyph where that is more | the instructions a run executes |
 | `Limits::max_glyphs` | as today | the slots insertions may grow the stream to |
 | `Limits::max_attachment_depth` | 64 | an attachment chain |
-| `Limits::max_collision_work` | scaled to the run | the slot pairs collision fixing compares |
+| `Limits::max_collision_work` | 4 000 000, or 64 000 a glyph where that is more | the slot pairs collision fixing compares |
 
 Rules, states and transitions are bounded by their tables' own sizes, which
 the walk reads no further than its context bound; a pass's own `maxRuleLoop`

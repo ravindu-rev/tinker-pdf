@@ -5605,7 +5605,12 @@ fn placed(
     let mut slots = Slots::new(source, &stream, &[]).with_limits(limits);
     let mut budget = Budget::new(limits);
     let mut refusals = pass::substitute(&mut slots, right_to_left, limits, &mut budget);
-    refusals.extend(pass::position(&mut slots, limits, &mut budget));
+    refusals.extend(pass::position(
+        &mut slots,
+        right_to_left,
+        limits,
+        &mut budget,
+    ));
     let users = (0..slots.len())
         .map(|at| {
             [0u8, 1, 2].map(|index| {
@@ -6232,4 +6237,381 @@ fn an_attachment_cycle_is_refused_and_named() {
             drawn(43, 3, 300, 0, 0),
         ]
     );
+}
+
+// --- collision avoidance (FT-07d.11) -------------------------------------
+//
+// `colliding_face` is a face whose description has a collision pass and
+// its collision settings from glyph attribute 20 on — flags, `min.x`,
+// `min.y`, `max.x`, `max.y`, `margin`, `marginweight`, `sequence.class`,
+// `proxClass` and `order` — over glyphs of stated boxes. Passes set flags
+// and shifts as the GDL's example does, and what collision avoidance does
+// is read back as each slot's fix and advance and each glyph's ink.
+
+/// The glyph attribute collision settings start at.
+const COLLISIONS: u16 = 20;
+
+/// A face of 16 glyphs with the boxes, advances and collision settings the
+/// tests give, and positioning passes `passes`.
+fn colliding_face(
+    advances: &[(u16, u16)],
+    boxes: &[(u16, [i16; 4])],
+    settings: &[(u16, &[(u16, i16)])],
+    passes: Vec<PassSpec>,
+) -> Vec<u8> {
+    let mut description = passing_description(passes, &[vec![0]], &[], 4);
+    description.order = [0, 0, 0, 255];
+    description.flags = 0x20;
+    description.attr_collisions = u8::try_from(COLLISIONS).expect("small");
+    let silf = silf_table(4, &[description]);
+    let mut maps = vec![BTreeMap::new(); 16];
+    for (glyph, values) in settings {
+        maps[usize::from(*glyph)] = values
+            .iter()
+            .map(|(offset, value)| (COLLISIONS + offset, *value))
+            .collect();
+    }
+    let index = Index {
+        long: false,
+        names: false,
+    };
+    let (glat, gloc) = glat_and_gloc(GlatVersion::Two, &maps, &[], index, 8);
+    let mut face = Face::new(16, &[]);
+    for (glyph, advance) in advances {
+        face.advances[usize::from(*glyph)] = *advance;
+    }
+    let mut glyf: Vec<u8> = Vec::new();
+    let mut loca: Vec<u8> = Vec::new();
+    for glyph in 0..16u16 {
+        loca.extend(u16::try_from(glyf.len() / 2).expect("short").to_be_bytes());
+        let edges = boxes
+            .iter()
+            .find(|(g, _)| *g == glyph)
+            .map_or([0; 4], |(_, edges)| *edges);
+        glyf.extend(0i16.to_be_bytes());
+        for edge in edges {
+            glyf.extend(edge.to_be_bytes());
+        }
+    }
+    loca.extend(u16::try_from(glyf.len() / 2).expect("short").to_be_bytes());
+    face.with(b"Silf", silf)
+        .with(b"Glat", glat)
+        .with(b"Gloc", gloc)
+        .with(b"glyf", glyf)
+        .with(b"loca", loca)
+        .build()
+}
+
+/// A pass of `rules` whose flags give `fix` collision runs, and kerning
+/// where `kern`, its threshold `threshold`.
+fn collision_pass(rules: &[RuleSpec], fix: u8, kern: bool, threshold: u8) -> PassSpec {
+    let mut pass = compile(rules, 16, 5, 0);
+    pass.flags = fix | if kern { 0x08 } else { 0 };
+    pass.collision_threshold = threshold;
+    pass
+}
+
+/// A rule over one glyph setting `mask` of its `collision.flags`.
+fn flag_rule(glyphs: &[u16], mask: u8) -> RuleSpec {
+    rule_of(
+        0,
+        &[glyphs],
+        vec![],
+        vec![
+            0x1E, 0, 0x28, 57, 0, 0x41, 0, mask, 0, mask, 0x23, 57, 0x19, 0x31,
+        ],
+    )
+}
+
+/// A rule over one glyph setting its `shift.x` and `shift.y`.
+fn shift_rule(glyph: u16, x: i16, y: i16) -> RuleSpec {
+    let [xh, xl] = x.to_be_bytes();
+    let [yh, yl] = y.to_be_bytes();
+    rule_of(
+        0,
+        &[&[glyph]],
+        vec![],
+        vec![
+            0x1E, 0, 0x03, xh, xl, 0x23, 20, 0x03, yh, yl, 0x23, 21, 0x19, 0x31,
+        ],
+    )
+}
+
+/// What the face makes of `glyphs`: the run placed, what was refused, and
+/// each slot's fix and advance after its passes.
+fn fixed(
+    bytes: &[u8],
+    glyphs: &[u16],
+    right_to_left: bool,
+    limits: &Limits,
+) -> (Vec<ShapedGlyph>, Vec<Refusal>, Vec<(i32, i32)>, Vec<i32>) {
+    let sfnt = Sfnt::parse(bytes).expect("the face parses");
+    let tables = Tables::parse(&sfnt, limits).expect("a description");
+    let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+    let description = silf.description(0).expect("its description");
+    let attributes = tables
+        .attributes(limits)
+        .map(|read| read.expect("its attributes read"));
+    let source = Source {
+        sfnt: &sfnt,
+        attributes: attributes.as_ref(),
+        description: &description,
+        features: None,
+    };
+    let stream: Vec<(u16, u32, u32)> = glyphs
+        .iter()
+        .enumerate()
+        .map(|(at, glyph)| {
+            let at = u32::try_from(at).expect("a short run");
+            (*glyph, at, at)
+        })
+        .collect();
+    let mut slots = Slots::new(source, &stream, &[]).with_limits(limits);
+    let mut budget = Budget::new(limits);
+    let mut refusals = pass::substitute(&mut slots, right_to_left, limits, &mut budget);
+    refusals.extend(pass::position(
+        &mut slots,
+        right_to_left,
+        limits,
+        &mut budget,
+    ));
+    let fixes = (0..slots.len()).map(|at| slots.fix(at)).collect();
+    let advances = (0..slots.len())
+        .map(|at| {
+            slots
+                .slot_attribute(at, SlotAttribute::AdvanceX, 0)
+                .expect("answers")
+        })
+        .collect();
+    let (out, cut) = position::place(&slots, right_to_left);
+    refusals.extend(cut);
+    (out, refusals, fixes, advances)
+}
+
+/// Each glyph's ink, `(left, bottom, right, top)`, where the run draws it,
+/// walking a left-to-right run's pen.
+fn ink(out: &[ShapedGlyph], boxes: &[(u16, [i16; 4])]) -> Vec<Option<[i32; 4]>> {
+    let mut pen = 0i32;
+    out.iter()
+        .map(|glyph| {
+            let edges = boxes
+                .iter()
+                .find(|(g, _)| *g == glyph.glyph)
+                .map(|(_, e)| *e);
+            let x = pen + glyph.x_offset;
+            let y = glyph.y_offset;
+            pen += glyph.x_advance;
+            edges.filter(|e| e[0] < e[2]).map(|e| {
+                [
+                    x + i32::from(e[0]),
+                    y + i32::from(e[1]),
+                    x + i32::from(e[2]),
+                    y + i32::from(e[3]),
+                ]
+            })
+        })
+        .collect()
+}
+
+/// Whether two boxes share any ink.
+fn overlap(a: [i32; 4], b: [i32; 4]) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+/// The GDL's Nastaliq example (6.8.3), each pass held to what its text
+/// states: in its pass 2 the nuqtas are fixed inside the ranges spaces
+/// start and end, the collision removed and each inside its rectangle, a
+/// nuqta across a space not compared; in its pass 4 a diacritic is fixed
+/// and kept above the nuqtas, and a final kerned along x alone, clear of
+/// the next word by its margin and the space between.
+#[test]
+fn collision_avoidance_reproduces_the_specifications_examples() {
+    let mut held = 0usize;
+    // Base 1, 500 wide; upper nuqta 3, `min.x=-300m; max.x=300m;
+    // min.y=-200m; max.y=500m`, `margin = 150m; marginweight = 200`, class
+    // 1; space 4, 300 wide and no ink; upper diacritic 5, `margin = 200m;
+    // marginweight = 200; min.x = -300m; max.x = 300m; min.y = -300m; max.y
+    // = 800m`, class 3, `order = ORDER_NOBELOW; proxClass = SEQ_UNUQTA`;
+    // final 6, `margin = 200m; min.x = -1000m; max.x = 5000m`; initial 7,
+    // its ink reaching 600 left of its origin.
+    let boxes = [
+        (1u16, [0i16, 0, 500, 400]),
+        (3, [0, 0, 100, 100]),
+        (5, [0, 0, 100, 100]),
+        (6, [0, 0, 400, 400]),
+        (7, [-600, 0, 400, 400]),
+    ];
+    let nuqta: &[(u16, i16)] = &[
+        (1, -300),
+        (2, -200),
+        (3, 300),
+        (4, 500),
+        (5, 150),
+        (6, 200),
+        (7, 1),
+    ];
+    let diacritic: &[(u16, i16)] = &[
+        (1, -300),
+        (2, -300),
+        (3, 300),
+        (4, 800),
+        (5, 200),
+        (6, 200),
+        (7, 3),
+        (8, 1),
+        (9, 8),
+    ];
+    let last: &[(u16, i16)] = &[(1, -1000), (3, 5000), (5, 200)];
+    let advances = [(1, 500), (3, 0), (4, 300), (5, 0), (6, 400), (7, 400)];
+    let settings = [(3u16, nuqta), (5, diacritic), (6, last)];
+
+    // Pass 2: the nuqtas, raised over their bases by a pass before, two of
+    // them overlapping; spaces start and end the ranges.
+    let face = colliding_face(
+        &advances,
+        &boxes,
+        &settings,
+        vec![
+            compile(&[shift_rule(3, 0, 500)], 16, 5, 0),
+            collision_pass(&[flag_rule(&[3], 1), flag_rule(&[4], 12)], 3, false, 0),
+        ],
+    );
+    let glyphs = [1, 3, 3, 4, 1, 3];
+    let (out, refusals, fixes, _) = fixed(&face, &glyphs, false, &Limits::DEFAULT);
+    assert!(refusals.is_empty(), "{refusals:?}");
+    let drawn = ink(&out, &boxes);
+    let nuqta_ink = |at: usize| drawn[at].expect("a nuqta's ink");
+    assert!(!overlap(nuqta_ink(1), nuqta_ink(2)), "{drawn:?}");
+    for at in [1, 2, 5] {
+        let (x, y) = fixes[at];
+        assert!(
+            (-300..=300).contains(&x) && (-200..=500).contains(&y),
+            "{at}: {x} {y}"
+        );
+    }
+    assert_ne!(fixes[1..3], [(0, 0), (0, 0)], "one of the two was moved");
+    assert_eq!(
+        fixes[5],
+        (0, 0),
+        "the nuqta past the space collides with nothing"
+    );
+    held += 1;
+
+    // Pass 4: the diacritic, raised onto the nuqta, fixed above it; the
+    // final kerned clear of the initial across the space.
+    let face = colliding_face(
+        &advances,
+        &boxes,
+        &settings,
+        vec![
+            compile(&[shift_rule(3, 0, 500), shift_rule(5, 0, 520)], 16, 5, 0),
+            collision_pass(
+                &[
+                    flag_rule(&[5], 1),
+                    flag_rule(&[6], 1 | 16),
+                    flag_rule(&[4], 4 | 8 | 128),
+                ],
+                3,
+                true,
+                0,
+            ),
+        ],
+    );
+    let glyphs = [3, 5, 6, 4, 7];
+    let (out, refusals, fixes, advances_after) = fixed(&face, &glyphs, false, &Limits::DEFAULT);
+    assert!(refusals.is_empty(), "{refusals:?}");
+    let drawn = ink(&out, &boxes);
+    let (nuqta, above) = (drawn[0].expect("ink"), drawn[1].expect("ink"));
+    assert!(!overlap(nuqta, above));
+    assert!(
+        above[1] >= nuqta[3],
+        "kept above the nuqta: {above:?} {nuqta:?}"
+    );
+    let (x, y) = fixes[1];
+    assert!((-300..=300).contains(&x) && (-300..=800).contains(&y));
+    // Kerned by 800: the gap was −300, and wants the margin and the space.
+    assert_eq!(advances_after[2], 1_200);
+    let (last_ink, first_ink) = (drawn[2].expect("ink"), drawn[4].expect("ink"));
+    assert_eq!(first_ink[0] - last_ink[2], 200 + 300);
+    assert_eq!(fixes[2], (0, 0), "kerning moves no glyph along y");
+    assert_eq!((out[2].y_offset, out[4].y_offset), (0, 0));
+    held += 1;
+
+    assert_eq!(held, 2, "the collision examples the design counts");
+}
+
+/// A slot flagged to move takes the cheapest place inside its rectangle
+/// that clears what is in its way, the nearest its start among equals; a
+/// move under the pass's threshold is not made; the rectangle's x limits
+/// are right and left whatever the run's direction.
+#[test]
+fn two_colliding_slots_are_moved_apart_within_their_limits() {
+    // Mark 3 flagged to move, mark 5 in its way 50 to its right; neither
+    // has a margin.
+    let boxes = [(3u16, [0i16, 0, 100, 100]), (5, [0, 0, 100, 100])];
+    let room: &[(u16, i16)] = &[(1, -300), (2, -300), (3, 300), (4, 300)];
+    let narrow: &[(u16, i16)] = &[(1, -40), (2, -300), (3, 300), (4, 300)];
+    let face_of = |limits: &'static [(u16, i16)], threshold: u8| {
+        colliding_face(
+            &[(3, 0), (5, 0)],
+            &boxes,
+            &[(3, limits)],
+            vec![
+                compile(&[shift_rule(5, 50, 0)], 16, 5, 0),
+                collision_pass(&[flag_rule(&[3], 1)], 1, false, threshold),
+            ],
+        )
+    };
+    let (_, refusals, fixes, _) = fixed(&face_of(room, 0), &[3, 5], false, &Limits::DEFAULT);
+    assert!(refusals.is_empty());
+    assert_eq!(
+        fixes[0],
+        (-50, 0),
+        "fifty to the left is the cheapest clear place"
+    );
+    // Under a threshold of 60 the fifty is not moved.
+    let (_, refusals, fixes, _) = fixed(&face_of(room, 60), &[3, 5], false, &Limits::DEFAULT);
+    assert!(refusals.is_empty());
+    assert_eq!(fixes[0], (0, 0));
+    // Kept to `min.x = -40`: the next cheapest, a hundred down.
+    let (out, _, fixes, _) = fixed(&face_of(narrow, 0), &[3, 5], false, &Limits::DEFAULT);
+    assert_eq!(fixes[0], (0, -100));
+    let drawn = ink(&out, &boxes);
+    assert!(!overlap(drawn[0].expect("ink"), drawn[1].expect("ink")));
+    // Right to left the obstacle stands 50 to its left; the limits still
+    // name right and left, so `min.x = -40` cannot reach past it and the
+    // mark goes to the right.
+    let (_, _, fixes, _) = fixed(&face_of(room, 0), &[3, 5], true, &Limits::DEFAULT);
+    assert_eq!(fixes[0], (50, 0));
+}
+
+/// A slot whose rectangle leaves no place clear of the ink in its way keeps
+/// its place and is named; and once the run's collision ceiling is spent
+/// the slots not yet fixed keep theirs, and that is named.
+#[test]
+fn a_slot_with_no_room_keeps_its_place_and_is_named() {
+    let boxes = [(3u16, [0i16, 0, 100, 100]), (5, [0, 0, 100, 100])];
+    let stuck: &[(u16, i16)] = &[];
+    let room: &[(u16, i16)] = &[(1, -300), (2, -300), (3, 300), (4, 300)];
+    let face_of = |limits: &'static [(u16, i16)]| {
+        colliding_face(
+            &[(3, 0), (5, 0)],
+            &boxes,
+            &[(3, limits)],
+            vec![
+                compile(&[shift_rule(5, 50, 0)], 16, 5, 0),
+                collision_pass(&[flag_rule(&[3], 1)], 1, false, 0),
+            ],
+        )
+    };
+    let (_, refusals, fixes, _) = fixed(&face_of(stuck), &[3, 5], false, &Limits::DEFAULT);
+    assert_eq!(fixes[0], (0, 0));
+    assert_eq!(refusals, vec![Refusal::CollisionUnresolved { glyph: 3 }]);
+    let starved = Limits {
+        max_collision_work: 1,
+        ..Limits::DEFAULT
+    };
+    let (_, refusals, fixes, _) = fixed(&face_of(room), &[3, 5], false, &starved);
+    assert_eq!(fixes[0], (0, 0));
+    assert_eq!(refusals, vec![Refusal::CollisionWorkExceeded]);
 }

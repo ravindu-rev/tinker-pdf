@@ -108,6 +108,9 @@ pub struct Slot {
     components: Vec<(u8, u32)>,
     /// Its feature values, where `SetFeat` changed one; the run's otherwise.
     features: Option<Vec<i16>>,
+    /// The shift collision avoidance gave it along y; along x it is the
+    /// read-only `collision.fix.x`.
+    fix_y: i32,
 }
 
 impl Slot {
@@ -169,6 +172,8 @@ pub struct Slots<'f> {
     features: Vec<i16>,
     /// How deep an attachment chain is followed.
     attachment_depth: usize,
+    /// How many slot pairs collision avoidance may still compare.
+    collision_work: u64,
     /// Each slot's height above the baseline, as positioning resolves it,
     /// kept until the stream next changes.
     heights: RefCell<Option<Vec<i32>>>,
@@ -192,6 +197,7 @@ impl<'f> Slots<'f> {
                 attach_to: None,
                 components: Vec::new(),
                 features: None,
+                fix_y: 0,
             })
             .collect();
         let issued = u32::try_from(slots.len()).unwrap_or(u32::MAX);
@@ -202,6 +208,7 @@ impl<'f> Slots<'f> {
             issued,
             features: features.to_vec(),
             attachment_depth: Limits::DEFAULT.max_attachment_depth,
+            collision_work: u64::from(Limits::DEFAULT.max_collision_work),
             heights: RefCell::new(None),
         };
         stream.reindex();
@@ -213,7 +220,68 @@ impl<'f> Slots<'f> {
     #[must_use]
     pub fn with_limits(mut self, limits: &Limits) -> Slots<'f> {
         self.attachment_depth = limits.max_attachment_depth;
+        self.collision_work = u64::from(limits.max_collision_work);
         self
+    }
+
+    /// The fix collision avoidance gave slot `at`, along x and y.
+    #[must_use]
+    pub fn fix(&self, at: usize) -> (i32, i32) {
+        self.slots.get(at).map_or((0, 0), |slot| {
+            (
+                slot.set_value(SlotAttribute::CollisionFixX, 0).unwrap_or(0),
+                slot.fix_y,
+            )
+        })
+    }
+
+    /// Gives slot `at` the fix `(x, y)`.
+    pub(crate) fn set_fix(&mut self, at: usize, fix: (i32, i32)) {
+        self.changed();
+        if let Some(slot) = self.slots.get_mut(at) {
+            slot.store(SlotAttribute::CollisionFixX, 0, fix.0);
+            slot.fix_y = fix.1;
+        }
+    }
+
+    /// Adds `by` to slot `at`'s advance, as collision kerning does.
+    pub(crate) fn kern(&mut self, at: usize, by: i32) {
+        let now = self
+            .slot_attribute(at, SlotAttribute::AdvanceX, 0)
+            .unwrap_or(0);
+        self.changed();
+        if let Some(slot) = self.slots.get_mut(at) {
+            slot.store(SlotAttribute::AdvanceX, 0, now.wrapping_add(by));
+        }
+    }
+
+    /// Charges `pairs` against the collision ceiling; false, and nothing
+    /// charged, where it does not hold them.
+    pub(crate) fn spend_collision_work(&mut self, pairs: u64) -> bool {
+        match self.collision_work.checked_sub(pairs) {
+            Some(left) => {
+                self.collision_work = left;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Slot `at`'s glyph's `sequence.valign.height` and `weight`: the glyph
+    /// attributes 14 and 15 past `attCollisions`, where the description has
+    /// a collision pass.
+    pub(crate) fn sequence_alignment(&self, at: usize) -> (i64, i64) {
+        if !self.face.has_collisions() {
+            return (0, 0);
+        }
+        let glyph = self.slots.get(at).map_or(0, |slot| slot.glyph);
+        let first = u16::from(self.face.description.attr_collisions);
+        let read = |offset: u16| {
+            self.face
+                .glyph_attribute(glyph, first + offset)
+                .map_or(0, i64::from)
+        };
+        (read(14), read(15))
     }
 
     /// How deep the stream follows an attachment chain.
@@ -776,6 +844,7 @@ impl<'f> Slots<'f> {
             attach_to: None,
             components: Vec::new(),
             features: None,
+            fix_y: 0,
         });
         self.changed();
         slot.id = self.next_id();

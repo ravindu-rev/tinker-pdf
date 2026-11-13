@@ -241,6 +241,18 @@ pub struct Limits {
     /// (`graphite::Refusal::AttachmentTooDeep`). A face's ceiling, which
     /// [`Limits::for_glyphs`] leaves alone.
     pub max_attachment_depth: usize,
+
+    /// How many slot pairs Graphite collision avoidance may compare in one
+    /// run.
+    ///
+    /// **Four million, or sixty-four thousand a glyph where that is more.**
+    /// Fixing a slot weighs every candidate position against every other
+    /// slot of its range, and kerning a slot weighs its sequence against the
+    /// next, so the work grows with the square of a range the face's flags
+    /// draw. Past the ceiling the slots not yet fixed keep their places and
+    /// the run says so (`graphite::Refusal::CollisionWorkExceeded`). Scaled
+    /// by [`Limits::for_glyphs`].
+    pub max_collision_work: u32,
 }
 
 impl Limits {
@@ -268,6 +280,7 @@ impl Limits {
         max_stack_depth: 256,
         max_instructions: 4_000_000,
         max_attachment_depth: 64,
+        max_collision_work: 4_000_000,
     };
 
     /// The default ceilings, with the four work numbers scaled to a run of
@@ -308,11 +321,15 @@ impl Limits {
         let instructions = count32
             .saturating_mul(64_000)
             .max(Self::DEFAULT.max_instructions);
+        let collisions = count32
+            .saturating_mul(64_000)
+            .max(Self::DEFAULT.max_collision_work);
         Self {
             max_operations: ops,
             max_glyphs: glyphs,
             max_transitions: transitions,
             max_instructions: instructions,
+            max_collision_work: collisions,
             ..Self::DEFAULT
         }
     }
@@ -396,6 +413,8 @@ mod tests {
         assert_eq!(Limits::for_glyphs(62).max_instructions, 4_000_000);
         assert_eq!(Limits::for_glyphs(63).max_instructions, 4_032_000);
         assert_eq!(Limits::for_glyphs(1_000).max_instructions, 64_000_000);
+        assert_eq!(Limits::for_glyphs(1_000).max_collision_work, 64_000_000);
+        assert_eq!(Limits::for_glyphs(0).max_collision_work, 4_000_000);
         // The stack's ceiling is a face's: no run moves it.
         for count in [0usize, 1, 1_000, usize::MAX] {
             assert_eq!(Limits::for_glyphs(count).max_stack_depth, 256);

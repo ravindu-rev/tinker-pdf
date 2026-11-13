@@ -1103,8 +1103,15 @@ What it does:
   a shift moving a slot and what is attached to it, an advance moving the
   slots after it, the cluster widened by the font topics' guard space, and an
   attachment cycle or a chain past `Limits::max_attachment_depth` cut and
-  named. No run is shaped through any of it yet: the refused-by-name table
-  below says what a run over such a face does.
+  named. A pass whose flags ask for collision avoidance then shifts each slot
+  flagged to move to the least-cost place inside its rectangle, its shape its
+  box cut by its octabox's diagonals, weighing distance, ink, the margin it
+  intrudes on and its sequence order and alignment, and kerns each slot
+  flagged to kern clear of the sequence after it by its margin and any space
+  between, every slot pair charged against `Limits::max_collision_work`; a
+  slot with no room, and a spent ceiling, are named. No run is shaped through
+  any of it yet: the refused-by-name table below says what a run over such a
+  face does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

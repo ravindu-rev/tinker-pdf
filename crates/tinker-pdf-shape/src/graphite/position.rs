@@ -148,7 +148,7 @@ fn chains(slots: &Slots<'_>, tree: &Tree) -> Chains {
 pub(crate) fn heights(slots: &Slots<'_>, tree: &Tree) -> Vec<i32> {
     let chains = chains(slots, tree);
     (0..slots.len())
-        .map(|at| clamp(chains.attached[at].1 + chains.shifted[at].1))
+        .map(|at| clamp(chains.attached[at].1 + chains.shifted[at].1 + i64::from(slots.fix(at).1)))
         .collect()
 }
 
@@ -192,15 +192,28 @@ fn clamp(value: i64) -> i32 {
     i32::try_from(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
 }
 
-/// The run's glyphs as the crate hands a run on: one a slot in logical
-/// order, each the real glyph a pseudo-glyph stands for, with its cluster,
-/// its advance and its offset from the pen, x to the right. A right-to-left
-/// run is drawn by walking its glyphs backwards, as every run of this crate
-/// is, so its pen before a glyph is the advances of the glyphs after it.
-///
-/// Returns the glyphs and the attachments cut, each once.
-#[must_use]
-pub fn place(slots: &Slots<'_>, right_to_left: bool) -> (Vec<ShapedGlyph>, Vec<Refusal>) {
+/// Where each slot of the stream stands along the line and above the
+/// baseline, x to the right, each cluster's advance, and the root of each
+/// slot's cluster; what laying it out cut.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Geometry {
+    /// Each slot's x, from the run's left edge.
+    pub x: Vec<i64>,
+    /// Each slot's y.
+    pub y: Vec<i64>,
+    /// Each slot's advance: a cluster's root carries its cluster's, a member
+    /// none.
+    pub advances: Vec<i64>,
+    /// The root of each slot's cluster.
+    pub roots: Vec<usize>,
+    /// The attachments cut, each once.
+    pub refusals: Vec<Refusal>,
+}
+
+/// The stream laid out along the line, in the run's direction: each
+/// cluster's guard space, each slot's attachment and shifts, and each
+/// collision fix.
+pub(crate) fn geometry(slots: &Slots<'_>, right_to_left: bool) -> Geometry {
     let count = slots.len();
     let tree = tree(slots, slots.attachment_depth());
     let chains = chains(slots, &tree);
@@ -229,7 +242,7 @@ pub fn place(slots: &Slots<'_>, right_to_left: bool) -> (Vec<ShapedGlyph>, Vec<R
             high[root] = high[root].max(origin + width);
         }
     }
-    let cluster: Vec<i64> = (0..count)
+    let advances: Vec<i64> = (0..count)
         .map(|at| {
             if chains.roots[at] == at {
                 high[at] - low[at]
@@ -238,7 +251,7 @@ pub fn place(slots: &Slots<'_>, right_to_left: bool) -> (Vec<ShapedGlyph>, Vec<R
             }
         })
         .collect();
-    let total: i64 = cluster.iter().sum();
+    let total: i64 = advances.iter().sum();
     // Each root's left edge along the line.
     let mut edge = vec![0i64; count];
     let mut along = 0i64;
@@ -247,16 +260,14 @@ pub fn place(slots: &Slots<'_>, right_to_left: bool) -> (Vec<ShapedGlyph>, Vec<R
             continue;
         }
         edge[at] = if right_to_left {
-            total - along - cluster[at]
+            total - along - advances[at]
         } else {
             along
         };
-        along += cluster[at];
+        along += advances[at];
     }
-    let clusters = slots.clusters();
-    let glyphs = slots.real_glyphs();
-    let mut pen = if right_to_left { total } else { 0 };
-    let mut out = Vec::with_capacity(count);
+    let mut x = Vec::with_capacity(count);
+    let mut y = Vec::with_capacity(count);
     for at in 0..count {
         let root = chains.roots[at];
         let shift = if right_to_left {
@@ -264,22 +275,51 @@ pub fn place(slots: &Slots<'_>, right_to_left: bool) -> (Vec<ShapedGlyph>, Vec<R
         } else {
             chains.shifted[at].0
         };
-        let x = edge[root] - low[root] + chains.attached[at].0 + shift;
-        let y = chains.attached[at].1 + chains.shifted[at].1;
+        let fix = slots.fix(at);
+        x.push(edge[root] - low[root] + chains.attached[at].0 + shift + i64::from(fix.0));
+        y.push(chains.attached[at].1 + chains.shifted[at].1 + i64::from(fix.1));
+    }
+    Geometry {
+        x,
+        y,
+        advances,
+        roots: chains.roots,
+        refusals: tree.refusals,
+    }
+}
+
+/// The run's glyphs as the crate hands a run on: one a slot in logical
+/// order, each the real glyph a pseudo-glyph stands for, with its cluster,
+/// its advance and its offset from the pen, x to the right. A right-to-left
+/// run is drawn by walking its glyphs backwards, as every run of this crate
+/// is, so its pen before a glyph is the advances of the glyphs after it.
+///
+/// Returns the glyphs and the attachments cut, each once.
+#[must_use]
+pub fn place(slots: &Slots<'_>, right_to_left: bool) -> (Vec<ShapedGlyph>, Vec<Refusal>) {
+    let geometry = geometry(slots, right_to_left);
+    let count = slots.len();
+    let total: i64 = geometry.advances.iter().sum();
+    let clusters = slots.clusters();
+    let glyphs = slots.real_glyphs();
+    let mut pen = if right_to_left { total } else { 0 };
+    let mut out = Vec::with_capacity(count);
+    for at in 0..count {
+        let advance = geometry.advances[at];
         if right_to_left {
-            pen -= cluster[at];
+            pen -= advance;
         }
         out.push(ShapedGlyph {
             glyph: glyphs.get(at).copied().unwrap_or(0),
             cluster: clusters.get(at).copied().unwrap_or(0),
-            x_advance: clamp(cluster[at]),
+            x_advance: clamp(advance),
             y_advance: 0,
-            x_offset: clamp(x - pen),
-            y_offset: clamp(y),
+            x_offset: clamp(geometry.x[at] - pen),
+            y_offset: clamp(geometry.y[at]),
         });
         if !right_to_left {
-            pen += cluster[at];
+            pen += advance;
         }
     }
-    (out, tree.refusals)
+    (out, geometry.refusals)
 }
