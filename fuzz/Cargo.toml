@@ -355,3 +355,9 @@ name = "cos_syntax"
 path = "fuzz_targets/cos_syntax.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "content_stream"
+path = "fuzz_targets/content_stream.rs"
+test = false
+doc = false

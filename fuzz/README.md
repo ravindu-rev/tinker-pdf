@@ -29,6 +29,7 @@ Policy: [`docs/verification.md`](../docs/verification.md). Among them:
 | `cmap` | CMap syntax as an embedded stream, then splitting a string by the codespaces it declared |
 | `crypt` | The standard security handler: the input is carved into `/Encrypt`'s fields **at widths it also chooses**, since the widths are the file's to declare and a wrong one is what reaches the early returns. A valid revision-6 handler is built once per process, so `FileKey`'s whole surface — the per-object key, both decryption doors — is driven on every input rather than on the two seeds that happen to authenticate |
 | `crypt_ciphers` | AES, RC4, MD5 and SHA-2 driven directly, with no key derivation anywhere: round trips and two-door cross-checks, because a cipher has no other oracle. Kept apart from `crypt`, where the handler's hardened hash dominates every input |
+| `content_stream` | A page a generator writes (`src/content.rs`): content of every operator of Annex A, its operands of the shape each takes or of a wrong one, blocks balanced and not, inline images, and forms, a Type 3 font's glyph procedures, patterns and appearances of generated content, over generated fonts, images, graphics states, colour spaces, shadings and property lists, rendered with generated options. **Structure-aware**, and its assertion is a relation: the page's display list replays to the bitmap `Page::render` draws — shape, every byte, and the warnings |
 | `content_tokenizer` | The content-stream tokenizer |
 | `form_script` | The form calculation and format scripts, as an interpreter over attacker-controlled source |
 | `render_page` | Open, extract, and render arbitrary bytes end to end |
@@ -130,6 +131,7 @@ account for:
 | `ascii_filters` | Hand-written hex, ASCII85 and RunLength streams, plus rows shaped for a PNG-Up predictor |
 | `ccitt` | `ccitt.rs`'s own `pack` fixtures, behind the two control bytes the target reads first |
 | `cff` | `cff.rs`'s own fixtures — the same bytes, built by the tests so the two cannot drift, and rewritten by `cargo test -p tinker-pdf-font write_the_fuzz_seeds -- --ignored`: a three-glyph program, a format 0 charset with an encoding supplement and a string INDEX name, the same font with a format 2 charset, and a CID-keyed font with `ROS`, an FDArray and a format 3 FDSelect |
+| `content_stream` | Choice sequences, written by `cargo test --release --manifest-path fuzz/Cargo.toml --lib write_the_fuzz_seeds -- --ignored` as `cos_syntax`'s are, each named for what its page holds — text in the Type 3 font, forms in transparency groups, inline images and a stencil, image XObjects, patterns and shadings, a soft mask, annotations, marked content, a page of two content streams, a Separation, a DeviceN and a Lab space, and a region rendered in ink — and `plain`, the empty input, whose page is its opening rectangle alone |
 | `content_tokenizer` | Hand-written operator streams: text, paths, an inline image, escapes, comments |
 | `cos_document` | `testdata/` PDFs and the pages `determinism.rs` builds |
 | `cos_object` | Hand-written 7.3 objects: dictionary, stream, nested array, every number form, two unterminated |

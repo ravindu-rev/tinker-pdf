@@ -443,7 +443,7 @@ impl<'c, 'a> Spell<'c, 'a> {
     /// Writes `token` after whatever separation the bytes before it need:
     /// two regular characters side by side would read as one token, and so
     /// would the empty name `/` and a regular character after it (7.3.5).
-    fn token(&mut self, out: &mut Vec<u8>, token: &[u8], lead: bool) {
+    pub fn token(&mut self, out: &mut Vec<u8>, token: &[u8], lead: bool) {
         if !lead {
             let needed = match (out.last(), token.first()) {
                 (Some(&before), Some(&first)) => {

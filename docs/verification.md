@@ -131,12 +131,13 @@ UTF-16 document, which XML permits, and `css/repeated-class` carries raw
 exception list is a check that has been talked out of firing. `svg` has a
 replay of its own in `crates/tinker-pdf-svg/src/tests.rs`.
 
-`cos_syntax`, `crypt`, `crypt_ciphers`, `form_script`, `layout`, `render_page`
-and `signatures` are structured generators: the body is carved into fields
-rather than parsed as a format, so every seed reaches the code by construction
-and there is no reachability question of this shape to ask. `cos_syntax`'s
-seeds are choice sequences its generator's `write_the_fuzz_seeds` writes, each
-named for the feature it reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
+`content_stream`, `cos_syntax`, `crypt`, `crypt_ciphers`, `form_script`,
+`layout`, `render_page` and `signatures` are structured generators: the body is
+carved into fields rather than parsed as a format, so every seed reaches the
+code by construction and there is no reachability question of this shape to
+ask. The seeds of `content_stream` and `cos_syntax` are choice sequences their
+generators' `write_the_fuzz_seeds` write, each named for the feature it
+reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
 `cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
 by the signature check above or have no gate to fail at.
 
@@ -197,7 +198,10 @@ clean on `Trust` with no warning and no structure-tier defect, and a lying
 `/Length` recovered wherever 7.3.8.2 leaves it recoverable. Its residual is
 `cff_subset`'s: the writer and the reader are both this repository's, so a
 clause both misread round-trips perfectly; the corpus ratchet is what holds the
-reader to files other producers wrote.
+reader to files other producers wrote. `content_stream` asserts a relation: a
+generated page's display list replays to the bitmap `Page::render` draws, every
+byte and every warning — and a defect the two share draws the same wrong pixels
+twice, so the analytic tier and the goldens remain what say a page is right.
 
 `cff_subset` is the strongest target and still not exempt: it fuzzes a
 *writer*, and its round trip goes through **this repository's own** parser, so

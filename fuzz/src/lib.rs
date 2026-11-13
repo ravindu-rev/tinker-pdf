@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+pub mod content;
 pub mod cos;
 
 /// A target's input, read front to back as a sequence of decisions.

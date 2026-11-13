@@ -163,6 +163,10 @@ const UNSIGNED: &[(&str, &str)] = &[
     ),
     ("cmap", "a CMap is PostScript text"),
     (
+        "content_stream",
+        "a structured generator: the body chooses a page's operators, resources and render",
+    ),
+    (
         "content_tokenizer",
         "a content stream is unframed operator text",
     ),
