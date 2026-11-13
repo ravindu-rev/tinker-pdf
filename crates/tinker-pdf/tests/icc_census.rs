@@ -515,6 +515,10 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
                     IccError::MissingTags => "MissingTags",
                     IccError::MalformedTag => "MalformedTag",
                     IccError::UnsupportedElement(_) => "UnsupportedElement",
+                    // The output direction's refusal, which a parse never
+                    // makes; named all the same, so a parse that began to
+                    // make it would be counted as what it is.
+                    IccError::NoInverse => "NoInverse",
                 };
                 *refused.entry(name.to_string()).or_default() += 1;
             }

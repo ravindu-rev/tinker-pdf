@@ -119,6 +119,24 @@ converts through its tables. One with no table it can convert through is
 `ColorSpace::Approximated`, read by component count, which is the
 alternate-space reading 8.6.5.5 permits.
 
+**The other direction**, a profile's transform out of the connection space,
+is `tinker_pdf_color::icc::Output::compile(profile, intent)`: a value in the
+profile's own connection space — D50 XYZ with the PCS white's `Y` at one, or
+`L*a*b*` — to its device channels, each from 0 to 65 535, at most fifteen
+(`DeviceColour`). A matrix/TRC profile's columns are inverted when it is
+built, by their cofactors in `f64`, and held in s15.16, and each tone curve
+is inverted by bisection over its compiled table into 4 096 entries read
+between them in fixed point; a grey profile takes `Y`, or `L*` over 100
+under Lab, through its inverted `grayTRC`. Every intent reaches the model,
+and absolute colorimetric first divides the value by the media white over
+the PCS white, which a grey Lab profile does through `Y`
+(`icc::lab_to_xyz`, `icc::xyz_to_lab`). Per colour it is integer, the value
+quantized once on the way in. A matrix whose determinant is below one s15.16
+step, or a curve that decreases anywhere or never rises, is refused as
+`IccError::NoInverse`, and a profile carrying no model as `MissingTags`. No
+render converts through it; it is the colour crate's transform toward a
+device.
+
 **`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.2,
 8.6.5.3): the components go through `/Gamma`, `/Matrix` takes them into XYZ
 relative to `/WhitePoint`, and the white point is adapted to D50 before the

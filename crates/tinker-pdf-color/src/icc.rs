@@ -31,6 +31,10 @@
 //! by the `mpe` module and compiled into integer stages — and converts its
 //! intent before that intent's `A2B*` table, as ICC.1 8.10.2 a) puts it.
 //!
+//! The other direction, from the connection space to a profile's device
+//! components, is [`Output`]: a matrix/TRC or grey model inverted when it is
+//! built, integer per colour (`docs/design/icc.md`, "The output transform").
+//!
 //! The same census found the versions: v2 2 739, v4 9, v5 2. So v2 is not a
 //! legacy case to tolerate on the way to v4 — it is the case, and the two
 //! agree about everything this module reads.
@@ -72,8 +76,10 @@ use std::sync::{Arc, OnceLock};
 use crate::{ColorSpace, XYZ_D50_TO_SRGB};
 
 mod mpe;
+mod output;
 
 pub use mpe::MAX_MPE_ELEMENTS;
+pub use output::{lab_to_xyz, xyz_to_lab, DeviceColour, Output, MAX_DEVICE_CHANNELS};
 
 /// A rendering intent: ICC.1's four (6.1), the ones a transform is compiled
 /// for.
@@ -208,6 +214,11 @@ pub enum IccError {
     /// signature: ICC.1 10.14.1 makes a `multiProcessElementsType` tag
     /// holding one unusable, and 8.10.2 a) passes such a `D2B*` tag over.
     UnsupportedElement([u8; 4]),
+    /// A model with no inverse, so no transform out of the connection space
+    /// can be built from it ([`Output::compile`]): colorant columns whose
+    /// determinant is below one s15.16 step, or a tone curve that decreases
+    /// anywhere or never rises.
+    NoInverse,
 }
 
 /// The most tags a profile may declare.
@@ -3730,6 +3741,36 @@ pub(crate) mod tests {
             ],
         );
         assert_eq!(Profile::parse(&bad_curve), Err(IccError::MalformedTag));
+
+        // The output direction's: a model with no inverse. Columns all one
+        // colour, which still convert forward, and a grey curve that falls.
+        let singular = build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"rXYZ", xyz(0.3, 0.3, 0.3)),
+                (*b"gXYZ", xyz(0.3, 0.3, 0.3)),
+                (*b"bXYZ", xyz(0.3, 0.3, 0.3)),
+                (*b"rTRC", gamma(1.0)),
+                (*b"gTRC", gamma(1.0)),
+                (*b"bTRC", gamma(1.0)),
+            ],
+        );
+        let singular = Profile::parse(&singular).expect("one colour still converts forward");
+        assert_eq!(
+            Output::compile(&singular, Intent::RelativeColorimetric),
+            Err(IccError::NoInverse)
+        );
+        let mut falling = b"curv".to_vec();
+        falling.extend_from_slice(&[0; 4]);
+        falling.extend_from_slice(&2u32.to_be_bytes());
+        falling.extend_from_slice(&[0xFF, 0xFF, 0x00, 0x00]);
+        let falling = build(b"GRAY", b"XYZ ", &[(*b"kTRC", falling)]);
+        let falling = Profile::parse(&falling).expect("a falling curve still converts forward");
+        assert_eq!(
+            Output::compile(&falling, Intent::Perceptual),
+            Err(IccError::NoInverse)
+        );
     }
 
     /// **A grey profile is one curve and a white point**, and 323 of the

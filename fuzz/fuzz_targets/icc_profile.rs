@@ -12,6 +12,10 @@
 //! transform over one, three or four inputs reads it through its grid, which
 //! evaluates the table's pipeline at each node the colours reach
 //! (`docs/design/icc.md`, P-22), so a hostile table builds its grid here too.
+//! The other direction is compiled for every intent as well: a profile's
+//! transform out of the connection space inverts its matrix and its curves
+//! when it is built, where a singular matrix or a falling curve is a typed
+//! refusal (`docs/design/icc.md`, "The output transform").
 //!
 //! # What this target checks, and what it does not
 //!
@@ -32,7 +36,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_color::icc::{Intent, Profile, Transform, Transforms};
+use tinker_pdf_color::icc::{Intent, Output, Profile, Transform, Transforms};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(profile) = Profile::parse(data) else {
@@ -45,6 +49,11 @@ fuzz_target!(|data: &[u8]| {
         if let Some(transform) = Transform::compile(&profile, intent) {
             apply_all(&transform);
         }
+        // And the other direction: a model inverted when it is built, where
+        // a hostile matrix or curve is a refusal and never a panic.
+        if let Ok(output) = Output::compile(&profile, intent) {
+            output_all(&output);
+        }
     }
     let Some(transforms) = Transforms::compile(profile) else {
         return;
@@ -53,6 +62,22 @@ fuzz_target!(|data: &[u8]| {
         apply_all(transforms.get(intent));
     }
 });
+
+/// A transform out of the connection space must answer for any value a
+/// caller hands it: black, the PCS white, a Lab white, values past either end
+/// of the axis, and values that are not numbers.
+fn output_all(output: &Output) {
+    for pcs in [
+        [0.0, 0.0, 0.0],
+        [0.9642, 1.0, 0.8249],
+        [100.0, 0.0, 0.0],
+        [0.5, 0.25, 0.75],
+        [-1.0, 2.0, 1e300],
+        [f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
+    ] {
+        let _ = output.apply(pcs);
+    }
+}
 
 /// A compiled transform must answer for any components a content stream
 /// could name, including the ones outside 0..1 that `scn` is free to write,

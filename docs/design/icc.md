@@ -1058,28 +1058,37 @@ implementation. A curve or grid value outside `0..1` is clipped there, as
 
 ##### The output transform
 
-- **Surface.** `icc::Output::compile(&Profile, Intent) -> Option<Output>`,
-  and `apply(&self, pcs: [f64; 3]) -> DeviceColour`: the connection-space
-  value in the profile's own PCS, as real numbers (D50 XYZ with the PCS
-  white's `Y` at one, or `L*a*b*`), in; the profile's data-space channels,
-  each a `u16` from 0 to 65 535, out, at most `MAX_DEVICE_CHANNELS` of them.
-  A caller holding the other PCS converts with `icc::xyz_to_lab` or
-  `icc::lab_to_xyz`, 6.4's ISO 13655 relations in `tinker_pdf_math`.
+- **Surface.** `icc::Output::compile(&Profile, Intent) -> Result<Output,
+  IccError>`, and `apply(&self, pcs: [f64; 3]) -> DeviceColour`: the
+  connection-space value in the profile's own PCS, as real numbers (D50 XYZ
+  with the PCS white's `Y` at one, or `L*a*b*`), in; the profile's data-space
+  channels, each a `u16` from 0 to 65 535, out, at most `MAX_DEVICE_CHANNELS`
+  of them. A component that is not a number is taken as zero and one past
+  four as four, and light below zero or past one is held there. A caller
+  holding the other PCS converts with `icc::xyz_to_lab` or `icc::lab_to_xyz`,
+  6.4's relations against the D50 white the forward pipeline's Lab reads,
+  the cube root `tinker_pdf_math`'s.
 - **Which table.** By the forward rows of [The table each intent
   compiles](#the-table-each-intent-compiles), with `B` for `A`: the
   intent's `B2D*` (RC-20.10), its `B2A*`, `B2A0`, the model inverted, then
   the other `B2A*` tables; absolute colorimetric's value divided by the
   media scale before it enters, except through `B2D3`.
-- **Matrix/TRC inverted** (RC-20.4): the inverse of the columns, computed
-  in `f64` when built and held in s15.16; each channel's curve inverted by
-  bisection over its compiled table into `CURVE_ENTRIES` entries. A matrix
-  whose determinant is below one s15.16 step, or a curve that decreases
-  anywhere, has no inverse, `IccError::NoInverse`. The table step its known
-  answers hold each channel to is the difference between the two inverted
-  entries its value falls between, since the curve is monotone, and one
-  `u16` unit for the rounding of the entries and of the matrix.
-- **Grey inverted**: `Y` (under Lab, `L*` with `a*`, `b*` ignored) through
-  the inverted `kTRC`.
+- **Matrix/TRC inverted** (RC-20.4): the inverse of the columns, by their
+  cofactors over their determinant, computed in `f64` when built and held in
+  s15.16, absolute colorimetric's division by the media scale folded into
+  its columns; each channel's curve inverted by bisection over its compiled
+  table into `CURVE_ENTRIES` entries, each the first table entry at or above
+  its light interpolated with the one before it, and read per colour between
+  two of them in 16-bit fixed point. A matrix whose determinant is below one
+  s15.16 step, or a curve that decreases anywhere or never rises, has no
+  inverse, `IccError::NoInverse`. The table step its known answers hold each
+  channel to is the span of the curve's exact inverse over the interval of
+  inverted entries its light falls in and the one either side of it — the
+  matrix's rounding, under one interval, can move a light across an entry —
+  and one `u16` unit for the rounding of the entries.
+- **Grey inverted**: `Y` (under Lab, `L*` over 100 with `a*`, `b*` ignored)
+  through the inverted `kTRC`; under absolute colorimetric `Y` over the
+  media scale's, and under Lab the lightness found again from that `Y`.
 - **`mft1` and `mft2`** (RC-20.5): `B2A1`, `B2A0`, `B2A2` read into the
   table evaluator with its output count generalised from three to the data
   space's; the PCS encoded on the way in as the table above says, and
