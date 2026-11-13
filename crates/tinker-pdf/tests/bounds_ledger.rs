@@ -3979,25 +3979,32 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                     Value(1 << 22),
                     1,
                     1,
-                    "the generated codestream, under 4 MiB at its generator's caps: images                      of 40 samples a side in four components over three tiles across, four                      layers, thirteen passes a code-block, and pieces of raw code-block data                      of twelve bytes, which the input's own length bounds (estimate)",
+                    "the generated codestream, under 4 MiB at its generator's caps: images \
+                     of 40 samples a side in four components over three tiles across, four \
+                     layers, thirteen passes a code-block, and pieces of raw code-block data \
+                     of twelve bytes, which the input's own length bounds (estimate)",
                 ),
                 buffer(
                     Value(1 << 22),
                     8,
                     1,
-                    "the generator's model and its copies: the code-blocks with their                      pieces, the tag trees, each tile's packets and parts, and the                      codestream they are joined into (estimate)",
+                    "the generator's model and its copies: the code-blocks with their \
+                     pieces, the tag trees, each tile's packets and parts, and the \
+                     codestream they are joined into (estimate)",
                 ),
                 buffer(
                     Value(1 << 22),
                     4,
                     1,
-                    "the decode's state: each tile's data joined from its parts, and its                      precincts, code-blocks and coefficients (estimate)",
+                    "the decode's state: each tile's data joined from its parts, and its \
+                     precincts, code-blocks and coefficients (estimate)",
                 ),
                 buffer(
                     Value(1 << 20),
                     6,
                     1,
-                    "the output at the target's ceiling, and the wavelet's 32-bit planes                      (estimate)",
+                    "the output at the target's ceiling, and the wavelet's 32-bit planes \
+                     (estimate)",
                 ),
             ],
             vec![
