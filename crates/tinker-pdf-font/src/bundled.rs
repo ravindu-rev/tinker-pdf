@@ -57,6 +57,11 @@
 //! the facade hold every table each one decodes to against the published
 //! face's (`crates/tinker-pdf/tests/cjk_faces.rs`).
 //!
+//! The facade's `BundledFonts` answers an unembedded composite font of those
+//! collections with its region's face, after the host's provider and before
+//! the Latin families, whatever its name or its symbolic flag says, and
+//! never with a Latin face; the face is read by character, as a host's is.
+//!
 //! Nothing reads a font directory: that is an operating-system dependency and
 //! `wasm32-unknown-unknown` has no filesystem at all.
 

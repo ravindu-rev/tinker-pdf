@@ -692,6 +692,70 @@ fn a_host_provider_is_asked_first_and_the_bundled_faces_only_after() {
         ink(&bitmap),
         ink(&bundled)
     );
+
+    // And for a CJK request (FT-01.9): the host is asked first for an
+    // unembedded Adobe-Japan1 font, and its face draws `日` as that face's
+    // lower-left quarter box and nothing else of the em; a host that
+    // declines is asked as well, and Source Han Sans JP draws the character
+    // after it, with nothing reported.
+    #[cfg(feature = "cmap-predefined")]
+    {
+        use render_support::{LOWER_RIGHT, UPPER_LEFT};
+
+        struct Hosting {
+            asked: AtomicUsize,
+            face: Option<Vec<u8>>,
+        }
+        impl FontProvider for Hosting {
+            fn substitute(&self, _: &FontRequest) -> Option<Arc<Vec<u8>>> {
+                self.asked.fetch_add(1, Ordering::Relaxed);
+                self.face.clone().map(Arc::new)
+            }
+        }
+
+        let (_, encoding, info, characters) = CJK_COLLECTIONS[0];
+        let drawn = |provider: Arc<Hosting>| {
+            Document::open(cjk_collection_page(encoding, info, characters))
+                .expect("it opens")
+                .with_fonts(provider)
+                .page(0)
+                .expect("a page")
+                .render(&RenderOptions::default())
+        };
+        let host = Arc::new(Hosting {
+            asked: AtomicUsize::new(0),
+            face: Some(fallback_face(true, false)),
+        });
+        let hosted = drawn(Arc::clone(&host));
+        assert!(host.asked.load(Ordering::Relaxed) > 0, "the host was asked");
+        assert!(!reports(&hosted), "{:?}", hosted.warnings);
+        let pen = CJK_PENS[0];
+        assert!(
+            inked(&hosted, 120.0, pen, CJK_SIZE, centre(LOWER_LEFT)),
+            "the host's 日 is its lower-left box"
+        );
+        for quarter in [LOWER_RIGHT, UPPER_LEFT, UPPER_RIGHT] {
+            assert!(
+                !inked(&hosted, 120.0, pen, CJK_SIZE, centre(quarter)),
+                "and nothing of the em but that box"
+            );
+        }
+
+        let declining = Arc::new(Hosting {
+            asked: AtomicUsize::new(0),
+            face: None,
+        });
+        let bundled = drawn(Arc::clone(&declining));
+        assert!(
+            declining.asked.load(Ordering::Relaxed) > 0,
+            "a declining host is asked too"
+        );
+        assert!(bundled.warnings.is_empty(), "{:?}", bundled.warnings);
+        assert!(
+            ink_in_em(&bundled, 120.0, pen, CJK_SIZE) > drawn_floor(CJK_SIZE),
+            "the bundled face draws 日 after the host declines"
+        );
+    }
 }
 
 /// **A symbolic font is still declined**, feature or no feature.
@@ -1340,6 +1404,202 @@ fn without_the_tables_unembedded_cjk_text_is_reported() {
     for pen in CJK_PENS {
         assert!(inked(&bitmap, 120.0, pen, CJK_SIZE, centre(NOTDEF_BOX)));
         assert!(!inked(&bitmap, 120.0, pen, CJK_SIZE, DECOY_ONLY));
+    }
+}
+
+// ---- the bundled CJK faces (FT-01.9) ------------------------------------------
+
+/// The registry's five CJK collections, each with the UTF-16 CMap its page is
+/// encoded in, its `/CIDSystemInfo`, and three characters of its own script
+/// its page shows: the pages a bundled build draws with each region's face.
+const CJK_COLLECTIONS: [(&str, &str, &str, [char; 3]); 5] = [
+    (
+        "Japan1",
+        "/UniJIS-UTF16-H",
+        JAPAN1,
+        ['\u{65e5}', '\u{672c}', '\u{8a9e}'],
+    ),
+    (
+        "GB1",
+        "/UniGB-UTF16-H",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 5 >>",
+        ['\u{4e2d}', '\u{6587}', '\u{5b57}'],
+    ),
+    (
+        "CNS1",
+        "/UniCNS-UTF16-H",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (CNS1) /Supplement 7 >>",
+        ['\u{4e2d}', '\u{570b}', '\u{5b57}'],
+    ),
+    (
+        "Korea1",
+        "/UniKS-UTF16-H",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >>",
+        ['\u{d55c}', '\u{ad6d}', '\u{c5b4}'],
+    ),
+    (
+        "KR",
+        "/UniAKR-UTF16-H",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (KR) /Supplement 9 >>",
+        ['\u{d55c}', '\u{ad6d}', '\u{c5b4}'],
+    ),
+];
+
+/// A 300 by 120 page showing `characters` in one unembedded Type 0 font of
+/// `encoding` and `/CIDSystemInfo` `info` — a CJK font's shape, its
+/// descriptor symbolic — at [`CJK_SIZE`], each at its own pen of
+/// [`CJK_PENS`].
+fn cjk_collection_page(encoding: &str, info: &str, characters: [char; 3]) -> Vec<u8> {
+    let mut content = String::new();
+    for ((x, y), c) in CJK_PENS.iter().zip(characters) {
+        content.push_str(&format!(
+            "BT /{FONT} {CJK_SIZE} Tf {x} {y} Td <{:04X}> Tj ET\n",
+            u32::from(c)
+        ));
+    }
+    composite_fonts_page(
+        300.0,
+        120.0,
+        &[UnembeddedFont {
+            name: FONT,
+            encoding,
+            subtype: "CIDFontType0",
+            info,
+            to_unicode: None,
+        }],
+        &content,
+    )
+}
+
+/// How many pixels of a glyph's em are inked: the square `size` points wide
+/// from its origin, from the descender a CJK font's descriptor states, 120
+/// units below the baseline, to its ascender 880 above, on a page `height`
+/// points tall drawn at 1x.
+#[cfg(any(not(feature = "cjk-fonts"), feature = "cmap-predefined"))]
+fn ink_in_em(bitmap: &tinker_pdf::Bitmap, height: f64, origin: (f64, f64), size: f64) -> usize {
+    let (left, right) = (origin.0.floor(), (origin.0 + size).ceil());
+    let top = (height - (origin.1 + 0.88 * size)).floor().max(0.0);
+    let bottom = (height - (origin.1 - 0.12 * size)).ceil();
+    let (left, right, top, bottom) = (left as usize, right as usize, top as usize, bottom as usize);
+    let mut inked = 0;
+    for y in top..bottom.min(bitmap.height as usize) {
+        for x in left..right.min(bitmap.width as usize) {
+            let at = y * bitmap.stride + x * bitmap.components();
+            if bitmap.data.get(at).is_some_and(|value| *value < 128) {
+                inked += 1;
+            }
+        }
+    }
+    inked
+}
+
+/// The least a character's em is inked by a glyph that draws it: a
+/// twentieth of the em, which a real ideograph or syllable passes many times
+/// over and a `.notdef`, or no glyph at all, does not reach.
+#[cfg(all(feature = "cjk-fonts", feature = "cmap-predefined"))]
+fn drawn_floor(size: f64) -> usize {
+    (size * size / 20.0) as usize
+}
+
+/// **A bundled build draws unembedded CJK text in every collection**
+/// (FT-01.9): a page of each of the registry's five collections, its font
+/// unembedded, its descriptor symbolic and no host provider installed, inks
+/// every character's em through its region's face and reports nothing.
+#[cfg(all(feature = "cjk-fonts", feature = "cmap-predefined"))]
+#[test]
+fn a_bundled_build_draws_unembedded_cjk_text_in_every_collection() {
+    for (ordering, encoding, info, characters) in CJK_COLLECTIONS {
+        let bitmap = Document::open(cjk_collection_page(encoding, info, characters))
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        assert!(
+            bitmap.warnings.is_empty(),
+            "{ordering}: nothing is reported, {:?}",
+            bitmap.warnings
+        );
+        for (pen, c) in CJK_PENS.iter().zip(characters) {
+            let ink = ink_in_em(&bitmap, 120.0, *pen, CJK_SIZE);
+            assert!(
+                ink > drawn_floor(CJK_SIZE),
+                "{ordering}: {c} inks its em ({ink} pixels)"
+            );
+        }
+    }
+}
+
+/// **A CJK request is never answered with a Latin face** (FT-01.9): an
+/// unembedded Adobe-Japan1 font named `Helvetica`, its descriptor not
+/// symbolic — the name and flags the Liberation faces answer — draws `日本`
+/// through Source Han Sans JP and reports nothing, where Liberation Sans,
+/// which has neither character, would draw `.notdef` and report it.
+#[cfg(all(feature = "cjk-fonts", feature = "cmap-predefined"))]
+#[test]
+fn a_cjk_request_is_never_answered_with_a_latin_face() {
+    let page = described_page(
+        "<< /Type /Font /Subtype /Type0 /BaseFont /Helvetica /Encoding /UniJIS-UTF16-H \
+         /DescendantFonts [7 0 R] >>",
+        "<< /Type /FontDescriptor /FontName /Helvetica /Flags 32 \
+         /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 \
+         /CapHeight 700 /StemV 80 >>",
+        Some(
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica \
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> \
+             /FontDescriptor 6 0 R /DW 1000 >>",
+        ),
+        "BT /F0 80 Tf 20 10 Td <65E5> Tj ET BT /F0 80 Tf 110 10 Td <672C> Tj ET",
+    );
+    let bitmap = Document::open(page)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert!(bitmap.warnings.is_empty(), "{:?}", bitmap.warnings);
+    for (x, c) in [(20.0, '\u{65e5}'), (110.0, '\u{672c}')] {
+        let ink = ink_in_em(&bitmap, 100.0, (x, 10.0), 80.0);
+        assert!(ink > drawn_floor(80.0), "{c} inks its em ({ink} pixels)");
+    }
+}
+
+/// **Without the tables, the CJK faces draw no CID by guess**: a build with
+/// `cjk-fonts` and without `cmap-predefined` maps no `Uni*-UTF16-H` code to
+/// a CID and inverts no collection, so each collection's page reports the
+/// font it could not draw, though its region's face is carried.
+#[cfg(all(feature = "cjk-fonts", not(feature = "cmap-predefined")))]
+#[test]
+fn without_the_tables_the_cjk_faces_draw_no_cid_by_guess() {
+    for (ordering, encoding, info, characters) in CJK_COLLECTIONS {
+        let bitmap = Document::open(cjk_collection_page(encoding, info, characters))
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        assert!(reports(&bitmap), "{ordering}: {:?}", bitmap.warnings);
+    }
+}
+
+/// **Without the CJK profile, unembedded CJK text is reported** (FT-01.9):
+/// a build without `cjk-fonts` carries no CJK face, so with no host
+/// provider each collection's page draws nothing and reports the font it
+/// could not draw.
+#[cfg(not(feature = "cjk-fonts"))]
+#[test]
+fn without_the_cjk_profile_unembedded_cjk_text_is_reported() {
+    for (ordering, encoding, info, characters) in CJK_COLLECTIONS {
+        let bitmap = Document::open(cjk_collection_page(encoding, info, characters))
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        assert!(reports(&bitmap), "{ordering}: {:?}", bitmap.warnings);
+        for pen in CJK_PENS.iter().take(3) {
+            assert_eq!(
+                ink_in_em(&bitmap, 120.0, *pen, CJK_SIZE),
+                0,
+                "{ordering}: nothing is drawn"
+            );
+        }
     }
 }
 

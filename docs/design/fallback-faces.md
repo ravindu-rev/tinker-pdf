@@ -350,9 +350,12 @@ FT-01's exit falls from.
 8. **FT-01.9: the bundled faces answer.** Exit: `substitute_fonts.rs`
    `a_bundled_build_draws_unembedded_cjk_text_in_every_collection`,
    `a_cjk_request_is_never_answered_with_a_latin_face`,
-   `without_the_cjk_profile_unembedded_cjk_text_is_reported`, and
+   `without_the_cjk_profile_unembedded_cjk_text_is_reported`,
+   `without_the_tables_the_cjk_faces_draw_no_cid_by_guess`, and
    `a_host_provider_is_asked_first_and_the_bundled_faces_only_after` extended
-   to a CJK request.
+   to a CJK request; the facade's `fonts.rs`
+   `a_cjk_collection_is_answered_by_its_regions_face` and
+   `a_cjk_request_is_answered_by_no_latin_face`.
 9. **FT-01.10: the profile's footprint.** Exit: a local MS-06 footprint check
    green with a CJK profile row at its committed figure and the default
    profile's figure unmoved.

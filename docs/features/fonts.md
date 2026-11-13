@@ -8,7 +8,9 @@ policy: that is an operating-system dependency `wasm32-unknown-unknown` does
 not have. It bundles no font programs **by default** either — a face is a
 licensing decision, and the host that has one supplies it — but the
 `bundled-fonts` feature carries twelve Liberation faces for the host that has
-none. A document that embeds its fonts needs nothing else; one that does not
+none, and `cjk-fonts`, which it turns on, four CJK fallback faces for the
+registry's CJK collections. A document that embeds its fonts needs nothing
+else; one that does not
 draws no text without a host-supplied [`FontProvider`](#api), and the gap is
 reported, never silent.
 
@@ -1187,6 +1189,19 @@ through `woff.rs` on its region's first request and shared after
 (`tinker_pdf_font::bundled::cjk_face`). Every table a file unpacks to is the
 published face's but the three WOFF2 §5 changes, and the faces keep the name
 their licence reserves.
+
+`BundledFonts` answers an unembedded composite font of those collections
+with its region's face, after the host's provider and before the Latin
+families, whatever the font's name or its descriptor's symbolic flag says: a
+CJK font's descriptor says it is symbolic, and its name is often a Latin
+family's. A Latin face is never the answer to such a request — its CIDs stand
+for characters no Liberation face has — and the face is read by character,
+through the collection's inverted CMaps, as a host's face is, so a CID its
+characters do not reach still draws `.notdef` and reports. A build with
+`cjk-fonts` and without `bundled-fonts`, the wasm CJK profile, answers the CJK
+requests alone. A composite font of `Adobe-Identity`, or of any other
+collection, is not a CJK request, and the Latin families read it by its name
+and flags as before.
 
 ## Shaping, and what it is allowed to claim
 
@@ -2576,7 +2591,20 @@ corpora already vendored here. So every name stays on the list.
   to the published face's through the record `cjk_faces.tsv`, held whole by
   `the_record_is_whole` and to the published faces by
   `the_record_is_the_published_faces`, `RAN`/`SKIPPED`; and `xtask`'s
-  `each_cjk_face_crate_publishes_its_face_under_the_ceiling`.
+  `each_cjk_face_crate_publishes_its_face_under_the_ceiling`. The faces
+  answering: `substitute_fonts.rs`'s
+  `a_bundled_build_draws_unembedded_cjk_text_in_every_collection` — a page of
+  each of the five collections, its descriptor symbolic and no provider
+  installed, inks every character's em and reports nothing —
+  `a_cjk_request_is_never_answered_with_a_latin_face`, over a font named
+  `Helvetica`, and `a_host_provider_is_asked_first_and_the_bundled_faces_only_after`
+  for a CJK request; without the faces,
+  `without_the_cjk_profile_unembedded_cjk_text_is_reported`, and without the
+  tables, `without_the_tables_the_cjk_faces_draw_no_cid_by_guess`; and
+  `fonts.rs`'s `a_cjk_collection_is_answered_by_its_regions_face`,
+  `a_cjk_request_is_answered_by_no_latin_face`,
+  `a_collection_of_no_region_falls_to_the_latin_families` and
+  `without_the_latin_faces_only_a_cjk_request_is_answered`.
 - `crates/tinker-pdf-font/src/type1_subset/tests.rs` — programs built byte by
   byte through the crate's own cipher, whose `type1.rs` tests hold it to
   chapter 7.3's worked example: every kept glyph outlining and advancing as
