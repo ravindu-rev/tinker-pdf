@@ -1054,20 +1054,62 @@ cover the file the namespace names. The XLink schema states none.
 not redistributed in any built artefact.
 
 `crates/tinker-pdf-crypto/tests/data/cavp/` holds NIST CAVP known-answer
-vectors for RSA and ECDSA signature verification, for Triple DES, for AES-128
-and AES-256 in CBC mode, and for SHA-224, SHA-256, SHA-512/224 and
-SHA-512/256, from the DSS, block-cipher and secure-hashing test-vector
-archives at csrc.nist.gov (the AES files are AESAVS's, from `aes/KAT_AES.zip`,
-`aes/aesmmt.zip` and `aes/aesmct.zip`; the hashing ones are from
-`shs/shabytetestvectors.zip`, its byte-oriented SHAVS files). NIST publications
-are works of the United States Government and carry no copyright, so there is
-no licence to reproduce. Each file's own header comment records the archive it
-came from, the date it was fetched, the SHA-256 of that archive, the SHA-256 of
-the file inside it, and what was taken — for the two ECDSA files, which curve
-groups were dropped and why; for the seven Triple DES files, the twelve AES
-files and the twelve SHA-2 files, that nothing was dropped at all. They are
-`cargo test` inputs, compiled in only under `#[cfg(test)]`, and are not in any
-built artefact.
+vectors for RSA and ECDSA signature verification, for RSA signature
+generation, for Triple DES, for AES-128 and AES-256 in CBC mode, and for
+SHA-224, SHA-256, SHA-512/224 and SHA-512/256, from the DSS, block-cipher and
+secure-hashing test-vector archives at csrc.nist.gov (the AES files are
+AESAVS's, from `aes/KAT_AES.zip`, `aes/aesmmt.zip` and `aes/aesmct.zip`; the
+hashing ones are from `shs/shabytetestvectors.zip`, its byte-oriented SHAVS
+files). NIST publications are works of the United States Government and carry
+no copyright, so there is no licence to reproduce. Each file's own header
+comment records the archive it came from, the date it was fetched, the
+SHA-256 of that archive, the SHA-256 of the file inside it, and what was
+taken — for the two ECDSA files, which curve groups were dropped and why; for
+the seven Triple DES files, the twelve AES files, the twelve SHA-2 files and
+the four signature-generation files, that nothing was dropped at all. They
+are `cargo test` inputs, compiled in only under `#[cfg(test)]` or into
+`tests/`, and are not in any built artefact.
+
+The four signature-generation files — `rsa_siggen15.rsp`,
+`rsa_siggen15_truncated.rsp`, `rsa_siggen_pss.rsp` and
+`rsa_siggen_pss_truncated.rsp` — are `SigGen15_186-3.txt`,
+`SigGen15_186-3_TruncatedSHAs.txt`, `SigGenPSS_186-3.txt` and
+`SigGenPSS_186-3_TruncatedSHAs.txt` from `dss/186-3rsatestvectors.zip`,
+fetched on 13 November 2026, SHA-256
+`8405aeb3572a4f98ed4b1a3ccb3f2f49e725462dd28ec4759d6a15d88855d19c` as
+served. The archive's `ReadmeRSA.txt` says its `.txt` files are the `.rsp`
+files of the same names with the private exponent `d` added for testing (and,
+for PSS, each signature's salt), which is why the `.txt` ones were taken: a
+signature-generation vector without its private key is a verification vector.
+Each member is CRLF in the archive, normalised to LF here, and its header
+records the member's own SHA-256; `crates/tinker-pdf-crypto/tests/rsa_sign.rs`
+restores the CRLF and holds each committed body to that SHA-256.
+
+`crates/tinker-pdf-crypto/tests/data/wycheproof/` holds five of Project
+Wycheproof's test-vector files — `rsa_pkcs1_1024_sig_gen_test.json`,
+`rsa_pkcs1_1536_sig_gen_test.json`, `rsa_pkcs1_2048_sig_gen_test.json`,
+`rsa_pkcs1_3072_sig_gen_test.json` and `rsa_pkcs1_4096_sig_gen_test.json`, its
+RSASSA-PKCS1-v1_5 signature-generation vectors, each group's private key as
+PKCS#8 beside the signatures it makes — and the project's `LICENSE`, the
+Apache License 2.0 under which it publishes them, which `deny.toml` admits
+(ruling 18). The project ships no `NOTICE` file. They were fetched on 13
+November 2026 from `https://github.com/C2SP/wycheproof` at commit
+`65ca494727a52944c204441c860b039e6786b99b`, from `testvectors_v1/`, and are
+committed byte for byte as served, which `.gitattributes` keeps (`-text`):
+nothing in them is changed. JSON carries no comment for a header, so their
+SHA-256s are recorded here and `tests/rsa_sign.rs` holds each file to its own:
+
+| File | SHA-256 |
+| --- | --- |
+| `rsa_pkcs1_1024_sig_gen_test.json` | `d29bb1d43016e8932937554291e997dc509455373b0d3cfe89ebffaee80ec9cd` |
+| `rsa_pkcs1_1536_sig_gen_test.json` | `251da3f00f11cba07f8e89c94363e25ea16ef4b35aaa270063e4f763c283a8bd` |
+| `rsa_pkcs1_2048_sig_gen_test.json` | `587b3d27d3429f2118cb02818da4d08eb3f36f50c747939eb550fae4337ccbf0` |
+| `rsa_pkcs1_3072_sig_gen_test.json` | `45153219d486fd135d35aa968a957a0c015c7829e8dc59bea5f87e6c30912677` |
+| `rsa_pkcs1_4096_sig_gen_test.json` | `f13eadbec6c45291cb33e6b2fa0a0c2b862d0bd2eaec29f930d3b78067cd48c7` |
+| `LICENSE` | `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd` |
+
+Like the CAVP files they are `cargo test` inputs only and reach no built
+artefact.
 
 `crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt` is RSA Laboratories'
 PKCS #1 v2.1 RSASSA-PSS test vectors (`pkcs-1v2-1d2-vec.zip`), which RSA no

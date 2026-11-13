@@ -120,6 +120,16 @@ crates/tinker-pdf-archive/data/** -text linguist-vendored
 # a different stream, and several have no structure that would survive it.
 crates/tinker-pdf-filters/tests/brotli/** binary
 
+# Wycheproof's RSA signature-generation vectors and the licence they are
+# published under (THIRDPARTY.md). `-text` keeps them byte for byte as they
+# were fetched: JSON has nowhere to put a provenance header, so the record
+# names each file's SHA-256 and `tests/rsa_sign.rs` holds the committed bytes
+# to it, and the Apache License asks a redistribution to say what it changed.
+# `linguist-vendored` keeps them out of the diff a reviewer reads and out of
+# the language statistics. The CAVP files beside them carry their provenance
+# in a header and are normalised like the rest of the tree.
+crates/tinker-pdf-crypto/tests/data/wycheproof/** -text linguist-vendored
+
 # The WOFF corpus (tier 4, `crates/tinker-pdf-font/tests/woff/`). Two faces and
 # five packings of them, named binary for a reason that is sharper here than
 # for any other fixture in this tree.

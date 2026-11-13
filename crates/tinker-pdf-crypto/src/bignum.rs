@@ -1251,7 +1251,7 @@ mod tests {
     struct Draws(u64);
 
     impl Draws {
-        fn next(&mut self) -> u64 {
+        fn draw(&mut self) -> u64 {
             self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = self.0;
             z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -1285,7 +1285,7 @@ mod tests {
     fn drawn<const N: usize>(draws: &mut Draws, bits: usize) -> Uint<N> {
         let mut value = Uint::<N>::zero();
         for i in 0..bits.div_ceil(64) {
-            value.set_limb(i, draws.next());
+            value.set_limb(i, draws.draw());
         }
         clear_above(&mut value, bits);
         value

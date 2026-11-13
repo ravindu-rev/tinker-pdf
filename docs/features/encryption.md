@@ -322,6 +322,17 @@ limb products, window-table reads, masked selections and loop iterations —
 equal over exponents of every shape and bases of every size under one
 modulus (`the_private_path_counts_alike_over_every_exponent`).
 
+The signature-generation vectors RSA signing is held to are committed beside
+the verification ones: NIST CAVP's `SigGen15` and `SigGenPSS` files and their
+SHA-512/224 and SHA-512/256 companions (`tests/data/cavp/rsa_siggen*.rsp`),
+each with its private exponent and, for PSS, each signature's salt, and
+Wycheproof's RSASSA-PKCS1-v1_5 generation files for 1 024- to 4 096-bit keys
+(`tests/data/wycheproof/`, Apache-2.0, with its licence). `tests/rsa_sign.rs`
+reads every file, holds each one to the SHA-256 it was fetched with
+(`THIRDPARTY.md`), and asserts its counts: keys, signatures per digest, salt
+lengths against the file's own header, and every Wycheproof group's PKCS#8 a
+two-prime key whose numbers are the group's.
+
 `crates/tinker-pdf-cos/tests/encryption.rs` decrypts real encrypted
 fixtures: user and owner passwords told apart, a wrong password refused,
 `/P` surviving its reserved bits, the owner password lifting restrictions,
