@@ -945,20 +945,28 @@ pub(crate) fn ladder<A: Arith>(
                 write_band(&ctx, band, &mut next, (0, 0), false, clamped)?;
             }
         } else {
-            // F.3.3's interleave: the previous resolution supplies the even
-            // rows and columns, and this resolution's three bands supply the
-            // rest.
+            // F.3.3's interleave places every subband by its **absolute**
+            // position on this resolution's grid: LL's `(u, v)` at `(2u, 2v)`,
+            // HL's at `(2u + 1, 2v)`, LH's at `(2u, 2v + 1)`, HH's at
+            // `(2u + 1, 2v + 1)`. The plane starts at `(x0, y0)`, so a low
+            // sample sits at an even index of it when `x0` is even and at an
+            // odd one when `x0` is odd, a high sample the other way — the
+            // parity `synthesise_2d` hands the synthesis as `i0`. An origin
+            // of either parity is legal: an odd `XOsiz`, a tile or a
+            // subsampled component starting at an odd sample, or the
+            // rounding up of B-14 at a lower resolution.
+            let (px, py) = (resolution.x0 % 2, resolution.y0 % 2);
             for y in 0..plane.height {
                 for x in 0..plane.width {
-                    next.set(2 * x, 2 * y, plane.get(x, y));
+                    next.set(2 * x + px, 2 * y + py, plane.get(x, y));
                 }
             }
             for (k, band) in resolution.bands.iter().enumerate() {
                 let offsets = match band.orientation {
-                    Orientation::Hl => (1, 0),
-                    Orientation::Lh => (0, 1),
-                    Orientation::Hh => (1, 1),
-                    Orientation::Ll => (0, 0),
+                    Orientation::Hl => (1 - px, py),
+                    Orientation::Lh => (px, 1 - py),
+                    Orientation::Hh => (1 - px, 1 - py),
+                    Orientation::Ll => (px, py),
                 };
                 let ctx = BandContext {
                     stream,
