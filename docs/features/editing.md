@@ -658,6 +658,22 @@ replaced, never stacked. One thing moves on the stream: `/Length1`, which
 Table 126 defines as the decoded length of a `/FontFile2`; a `/FontFile3` has
 none and a stale one is dropped rather than carried.
 
+**A Type 1 program** (`/FontFile`) is cut by `tinker_pdf_font::subset_type1`
+([design](../design/subsetting.md), *Type 1 on save*), over the glyphs the
+walk records through the one Type 1 selection the renderer draws by — each
+shown code's charstring, and, where the code's text and the program's
+built-in encoding reach two, both. It names its glyphs, so its charstrings
+can go: the subset keeps the shown glyphs, `.notdef` and every `seac`
+component, deletes the rest, and rewrites each subroutine no kept glyph
+reaches as `return` at its own number. Its stream states the subset's
+`/Length1`, `/Length2` and `/Length3` — clear text, encrypted portion,
+trailer (ISO 32000-2 Table 125) — and a descriptor carrying `/CharSet` has
+it rewritten to the subset's names, or dropped where a name cannot be
+written as one; one with none gains none. A program it refuses by name is
+left whole as `ProgramNotRebuildable`, a code only a guess reaches leaves the
+font whole as `CodeNotMapped`, and a `/FontFile` whose bytes are no Type 1
+program is cut as what they are.
+
 **The unit of work is the program, not the font dictionary.** Two font
 dictionaries may point at one `/FontFile2`, and subsetting it for one of them
 would take the other's glyphs away, so every font that names a given stream is
@@ -834,7 +850,7 @@ encrypted input decrypted; whether the save doors refuse is
 | Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`). What the procedure draws is left with it: a form it invokes is not cut, nor a soft mask's group it sets, and emptying the procedure removes neither from the file; a group is named `PatternOrMask` when it shows text or an image under a rectangle at a use, whatever removed the use (the soft mask row above), and a form is not named | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. Rewriting the procedure streams is [ROADMAP](../ROADMAP.md) ED-35 | 9.6.5 |
 | Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and `RedactionWarning::UnboundedProcedure` names the font and counts the uses (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`). It names the font as well whenever what the procedure draws past where the budget stopped is in no group named for it, whatever removed the use — the glyph's own box included (`a_covered_use_whose_measurement_ran_out_says_so`), since a group set there is not cut and was never read | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
 | Removing an annotation's own text — `/Contents`, a rich-text `/RC`, a field's `/V` — when its appearance is cut | left as it was; only what the annotation draws is cut | what a redaction measures is what a page draws, and these have no position to compare with a rectangle. Deleting an annotation outright is the caller's decision, through the editor | 12.5 |
-| Subsetting a program `tinker_pdf_font::subset` will not rebuild — a Type 1 program, a CFF whose charstrings cannot be renumbered without guessing, bytes that are neither | the program is written through exactly as it arrived, `UntouchedReason::ProgramNotRebuildable` | ruling 2: a document that renders is worth more than one that is small | [fonts](fonts.md) |
+| Subsetting a program `tinker_pdf_font::subset` or `subset_type1` will not rebuild — a CFF whose charstrings cannot be renumbered without guessing, a Type 1 program refused by one of `Type1Refusal`'s names, bytes that are no sfnt, CFF or Type 1 program | the program is written through exactly as it arrived, `UntouchedReason::ProgramNotRebuildable` | ruling 2: a document that renders is worth more than one that is small | [fonts](fonts.md) |
 | A subset that comes out no smaller than the face | whole face, `SubsetNotSmaller` (`a_subset_that_is_no_smaller_is_refused_and_named`) | the face is both smaller and the one the producer tested — the same reason the builder refuses it | [fonts](fonts.md) |
 | Subsetting a font any of whose shown codes resolved only by 9.6.6.4's **closing guess** — read the code as the glyph index | whole face, `CodeNotMapped` (`a_font_whose_codes_resolve_only_by_guess_is_left_whole_and_reported`) | the guess is not a statement the font made, and two readers are free to guess differently; a glyph dropped on one guess is a glyph the other reader draws and no longer has | 9.6.6.4 |
 | Subsetting a font the AcroForm `/DR` names for a field's `/DA` | whole face, `FieldResource` (`a_font_the_acroform_default_resources_name_is_left_whole_and_reported`) | a `/DA` is a promise about *future* uses: the field's value can be retyped and the generated appearance may draw any character the font has, so there is no set to bound | 12.7.3.3 |
@@ -1072,7 +1088,15 @@ encrypted input decrypted; whether the save doors refuse is
   into the resources, left whole and listed; and `removed()` false over the
   first and true once it is walked. `redact.rs`'s `glyph_procedures` carries
   the disclosure half: a procedure whose last use was redacted is the empty
-  one after the default save.
+  one after the default save. `tests/subset_breadth.rs` saves Type 1 fonts
+  written byte by byte in the test through the default save: every page
+  drawing pixel for pixel as before from a program holding exactly the drawn
+  glyphs, `.notdef` and an accent's components; the strict validator empty;
+  the bytes before and after reported under the new tag; the three lengths
+  adding up to the subset; `/CharSet` rewritten and none added; both glyphs
+  kept where a code's text and the built-in encoding part; a program two
+  fonts share cut once for both; and a code only a guess reaches, and a
+  program the subsetter refuses, each left whole and named.
 - **The same pass, over the corpus**:
   `crates/tinker-pdf/tests/cff_subset_census.rs` runs
   `subset::apply` over every fetched PDF and asserts, over documents

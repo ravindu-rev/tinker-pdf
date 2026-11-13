@@ -925,8 +925,10 @@ fn census_of_the_corpus_rewrite_subsets() {
                     .push(format!("{name}: descriptor {number} vanished"));
                 continue;
             };
-            if without(doc.cos(), original, &[b"FontName"])
-                != without(doc.cos(), &after, &[b"FontName"])
+            // A Type 1 subset's descriptor rewrites its `/CharSet` to the
+            // subset's names (`docs/design/subsetting.md`, *Type 1 on save*).
+            if without(doc.cos(), original, &[b"FontName", b"CharSet"])
+                != without(doc.cos(), &after, &[b"FontName", b"CharSet"])
             {
                 divergences
                     .descriptors
@@ -970,6 +972,10 @@ fn census_of_the_corpus_rewrite_subsets() {
                         ));
                     }
                 }
+                // A Type 1 program addresses its glyphs by name and its
+                // subset keeps fewer of them, so there is no count to hold;
+                // it must read.
+                (_, None) if tinker_pdf_font::Type1::parse(&after).is_some() => {}
                 (_, None) => divergences
                     .unreadable
                     .push(format!("{name}: {} does not parse", subsetted.program.num)),
@@ -995,6 +1001,15 @@ fn census_of_the_corpus_rewrite_subsets() {
             {
                 if let Some(declared) = dict.get_int(doc.cos().intern(b"Length1")) {
                     length1_checked += 1;
+                    // ISO 32000-2 Table 125: a Type 1 program's three lengths
+                    // are its clear text, encrypted portion and trailer, and
+                    // add up to it.
+                    let two = dict.get_int(doc.cos().intern(b"Length2"));
+                    let three = dict.get_int(doc.cos().intern(b"Length3"));
+                    let declared = match (two, three) {
+                        (Some(two), Some(three)) => declared + two + three,
+                        _ => declared,
+                    };
                     if declared != after.len() as i64 {
                         divergences.length1.push(format!(
                             "{name}: {} declares /Length1 {declared} over {} bytes",

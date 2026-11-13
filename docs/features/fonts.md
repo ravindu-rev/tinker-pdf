@@ -497,7 +497,11 @@ every annotation `/AP` — and leaves whole, by name, any program it cannot
 bound. The encoding needs no repair because glyph identifiers are never
 renumbered; only `/BaseFont`, the descendant's `/BaseFont` and the
 descriptor's `/FontName` move, all three to the same 9.6.4 name, from the same
-`subset_tag` this page's builder uses. A Type 3 font, which has no program, has
+`subset_tag` this page's builder uses. A Type 1 program, whose glyphs are
+named rather than numbered, is cut by `subset_type1` over the glyphs the
+Type 1 selection above reaches, its stream stating the subset's three
+lengths and a descriptor's `/CharSet` rewritten to the subset's names
+([editing](editing.md)). A Type 3 font, which has no program, has
 the procedures nothing shown runs emptied in place instead, its dictionary
 untouched. It is an editing operation and lives with the rest of them: see
 [editing](editing.md).

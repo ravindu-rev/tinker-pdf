@@ -42,6 +42,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "the_synthesised_book_is_the_same_bytes_on_every_target",
     },
+    // The default save of a page drawing a Type 1 font, its program cut down
+    // (FT-11.4).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "the_saved_type1_subset_is_the_same_bytes_on_every_target",
+    },
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "a_display_list_replays_every_fingerprinted_page_byte_for_byte",

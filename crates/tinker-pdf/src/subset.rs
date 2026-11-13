@@ -69,9 +69,10 @@
 //!
 //! # When subsetting cannot be done
 //!
-//! Ruling 2: degrade, do not fail. A program the subsetter refuses — a Type 1
-//! program, a CFF whose charstrings cannot be renumbered without guessing,
-//! bytes that are neither — is written through **exactly as it arrived**,
+//! Ruling 2: degrade, do not fail. A program the subsetter refuses — a CFF
+//! whose charstrings cannot be renumbered without guessing, a Type 1 program
+//! [`tinker_pdf_font::subset_type1`] declines by one of its names, bytes that
+//! are none of these — is written through **exactly as it arrived**,
 //! because a document that renders is worth more than one that is small. A
 //! subset that came out no smaller than the face is refused for the same
 //! reason the builder refuses it: the whole face is then both smaller and the
@@ -94,7 +95,8 @@
 //! `/Encoding`, `/Differences`, `/CIDToGIDMap` and `/ToUnicode` correct after
 //! the cut **because they are unchanged** — and this module changes none of
 //! them. `font_dictionaries_are_untouched_except_for_the_subset_tag` pins
-//! that: the only keys that move are the three that name the font.
+//! that: the only keys that move are the three that name the font — and, for
+//! a Type 1 program, its descriptor's `/CharSet`, below.
 //!
 //! Three things do have to move, and all three are about the *name*:
 //!
@@ -111,7 +113,12 @@
 //! And one thing about the stream: `/Length1` is the *decoded* length of a
 //! `/FontFile2` program (Table 126), so it is rewritten to the subset's
 //! length. A `/FontFile3` has no `/Length1` — its `/Subtype` is what says what
-//! the bytes are — so a stale one is dropped rather than carried.
+//! the bytes are — so a stale one is dropped rather than carried. A
+//! `/FontFile` program's `/Length1`, `/Length2` and `/Length3` are its
+//! subset's clear text, encrypted portion and trailer (ISO 32000-2 Table
+//! 125), and a descriptor that lists the face's glyphs in `/CharSet` (Table
+//! 120) has it rewritten to the subset's names, or dropped where a name
+//! cannot be written as one (`docs/design/subsetting.md`).
 //!
 //! # Type 3 fonts
 //!
@@ -235,8 +242,8 @@ use std::sync::{Arc, Mutex};
 use tinker_pdf_content::record::{Capture, Event, RecordingDevice};
 use tinker_pdf_content::{interpret, FontSource, Matrix};
 use tinker_pdf_cos::{
-    font as cos_font, subset_tag, CosDocument, Dict, DocumentEditor, Name, ObjRef, Object, Resolve,
-    StreamData,
+    font as cos_font, subset_tag, CosDocument, Dict, DocumentEditor, Name, ObjRef, Object,
+    PdfString, Resolve, StreamData,
 };
 
 use crate::resources::{Operation, PageResources};
@@ -260,9 +267,11 @@ pub(crate) const MAX_SWEPT_OBJECTS: usize = 1 << 21;
 /// about the document rather than the face.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UntouchedReason {
-    /// [`tinker_pdf_font::subset`] would not rebuild the program: a Type 1
-    /// program, a CFF whose charstrings cannot be renumbered without guessing,
-    /// or bytes that are neither an sfnt nor a CFF.
+    /// [`tinker_pdf_font::subset`] or [`tinker_pdf_font::subset_type1`]
+    /// would not rebuild the program: a CFF whose charstrings cannot be
+    /// renumbered without guessing, a Type 1 program refused by one of
+    /// `Type1Refusal`'s names, or bytes that are no sfnt, CFF or Type 1
+    /// program.
     ProgramNotRebuildable,
     /// The subset came out no smaller than the face, so the face — which is
     /// both smaller and the one the producer tested — is what goes in.
@@ -1284,7 +1293,12 @@ fn show(usage: &mut Usage, doc: &CosDocument, scope: &PageResources, font_id: u6
 
     match scope.selection(font_id, code) {
         Some(chosen) if chosen.stated => {
-            usage.glyphs.entry(object).or_default().insert(chosen.glyph);
+            let glyphs = usage.glyphs.entry(object).or_default();
+            glyphs.insert(chosen.glyph);
+            // A Type 1 code this renderer draws by its text and a reader
+            // following 9.6.5.2 by the built-in encoding keeps both
+            // (`docs/design/subsetting.md`).
+            glyphs.extend(chosen.also);
         }
         Some(_) => usage.refuse(object, UntouchedReason::CodeNotMapped),
         // No embedded program, or one no parser here reads. Nothing here can
@@ -1536,19 +1550,23 @@ fn rewrite(
             leave(reason, &mut report);
             continue;
         }
-        let Some(reduced) = tinker_pdf_font::subset(&bytes, &job.glyphs) else {
+        let Some(reduced) = cut(&bytes, &job) else {
             leave(UntouchedReason::ProgramNotRebuildable, &mut report);
             continue;
         };
-        if reduced.len() >= bytes.len() {
+        if reduced.bytes.len() >= bytes.len() {
             leave(UntouchedReason::SubsetNotSmaller, &mut report);
             continue;
         }
 
-        let tag = subset_tag(&reduced);
-        let after = reduced.len();
+        let tag = subset_tag(&reduced.bytes);
+        let after = reduced.bytes.len();
+        let names = reduced.names.clone();
         write_program(editor, doc, program, &job, reduced);
         let named = rename(editor, doc, &job, &tag);
+        if let Some(names) = names {
+            charset(editor, &job, &names);
+        }
 
         report.subsetted.push(Subsetted {
             program,
@@ -1970,13 +1988,51 @@ fn program_of(editor: &DocumentEditor, doc: &CosDocument, site: &Site) -> Option
     descriptor.get_ref(doc.intern(key))
 }
 
+/// A program cut down, and what its stream and its descriptors state of it.
+struct Cut {
+    bytes: Vec<u8>,
+    /// ISO 32000-2 Table 125's three lengths, for a Type 1 program.
+    lengths: Option<[usize; 3]>,
+    /// The glyph names a Type 1 subset keeps, for `/CharSet`.
+    names: Option<Vec<Vec<u8>>>,
+}
+
+/// Cuts one job's program down to its glyphs, or `None` where it cannot be
+/// rebuilt.
+///
+/// A `/FontFile` program goes to [`tinker_pdf_font::subset_type1`]; one it
+/// refuses by name stays whole, and a `/FontFile` whose bytes are no Type 1
+/// program at all is cut as what they are, as every other program is, by
+/// [`tinker_pdf_font::subset`] (`docs/design/subsetting.md`, *Type 1 on
+/// save*).
+fn cut(bytes: &[u8], job: &Job) -> Option<Cut> {
+    if matches!(job.key(), Some(cos_font::ProgramKey::FontFile)) {
+        match tinker_pdf_font::subset_type1(bytes, &job.glyphs) {
+            Ok(subset) => {
+                return Some(Cut {
+                    bytes: subset.program,
+                    lengths: Some(subset.lengths),
+                    names: Some(subset.names),
+                })
+            }
+            Err(_) if tinker_pdf_font::Type1::parse(bytes).is_some() => return None,
+            Err(_) => {}
+        }
+    }
+    tinker_pdf_font::subset(bytes, &job.glyphs).map(|bytes| Cut {
+        bytes,
+        lengths: None,
+        names: None,
+    })
+}
+
 /// Replaces the program, keeping the stream's dictionary consistent with it.
 fn write_program(
     editor: &mut DocumentEditor,
     doc: &CosDocument,
     program: ObjRef,
     job: &Job,
-    reduced: Vec<u8>,
+    reduced: Cut,
 ) {
     let existing = doc
         .get(program)
@@ -1994,23 +2050,87 @@ fn write_program(
     // so it moves with the program. A `/FontFile3` has none — its `/Subtype`
     // says what the bytes are — and a stale one is dropped rather than
     // carried, because a number that is wrong is worse than one that is
-    // absent.
+    // absent. A Type 1 program's three — its clear text, its encrypted
+    // portion and its trailer (ISO 32000-2 Table 125) — are the subset's.
     //
     // The filter keys are deliberately not copied: `put_stream` is handed the
     // decoded bytes and computes `/Length` for them, so a `/Filter` carried
     // over would declare an encoding these bytes are not in.
-    if matches!(job.key(), Some(cos_font::ProgramKey::FontFile2)) {
-        let length = i64::try_from(reduced.len()).unwrap_or(i64::MAX);
-        dict.insert(editor.intern(b"Length1"), Object::Int(length));
+    let length = |n: usize| Object::Int(i64::try_from(n).unwrap_or(i64::MAX));
+    if let Some([clear, encrypted, fixed]) = reduced.lengths {
+        dict.insert(editor.intern(b"Length1"), length(clear));
+        dict.insert(editor.intern(b"Length2"), length(encrypted));
+        dict.insert(editor.intern(b"Length3"), length(fixed));
+    } else if matches!(job.key(), Some(cos_font::ProgramKey::FontFile2)) {
+        dict.insert(editor.intern(b"Length1"), length(reduced.bytes.len()));
     }
 
     editor.put_stream(
         program,
         StreamData {
             dict,
-            data: reduced,
+            data: reduced.bytes,
         },
     );
+}
+
+/// Rewrites the `/CharSet` of every descriptor of `job` that carries one to
+/// the names a Type 1 subset keeps (ISO 32000-2 Table 120: each name in PDF
+/// syntax, `.notdef` omitted), or drops it where a name cannot be written as
+/// a PDF name — one holding a NUL byte, or none at all (7.3.5) — since a
+/// `/CharSet` that lists less than the program holds is worse than none. A
+/// descriptor with none gains none: PDF 2.0 deprecates the entry, and the
+/// face, which was not a subset, carried none.
+fn charset(editor: &mut DocumentEditor, job: &Job, names: &[Vec<u8>]) {
+    let key = editor.intern(b"CharSet");
+    let written = charset_names(names);
+    let mut done: HashSet<u32> = HashSet::new();
+    for site in &job.sites {
+        if !done.insert(site.descriptor.num) {
+            continue;
+        }
+        let Some(Object::Dict(dict)) = editor.get(site.descriptor) else {
+            continue;
+        };
+        if !dict.contains_key(key) {
+            continue;
+        }
+        let mut rebuilt = Dict::with_capacity(dict.len());
+        for (name, value) in dict.iter() {
+            if *name != key {
+                rebuilt.insert(*name, value.clone());
+            } else if let Some(written) = &written {
+                rebuilt.insert(key, Object::String(PdfString::literal(written.clone())));
+            }
+        }
+        editor.put(site.descriptor, Object::Dict(rebuilt));
+    }
+}
+
+/// A `/CharSet` string for `names`: each a PDF name, a byte outside 7.3.5's
+/// regular characters written as `#` and two hexadecimal digits, `.notdef`
+/// omitted; `None` where a name holds a NUL byte or nothing, which no name
+/// can spell.
+fn charset_names(names: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for name in names {
+        if name.as_slice() == b".notdef" {
+            continue;
+        }
+        if name.is_empty() || name.contains(&0) {
+            return None;
+        }
+        out.push(b'/');
+        for &byte in name {
+            let regular = (0x21..=0x7E).contains(&byte) && !b"()<>[]{}/%#".contains(&byte);
+            if regular {
+                out.push(byte);
+            } else {
+                out.extend_from_slice(format!("#{byte:02X}").as_bytes());
+            }
+        }
+    }
+    Some(out)
 }
 
 impl Job {
@@ -2098,6 +2218,26 @@ mod tests {
     fn an_untagged_name_is_returned_whole() {
         assert_eq!(strip_tag(b"Times-Roman"), b"Times-Roman");
         assert_eq!(strip_tag(b""), b"");
+    }
+
+    /// Table 120's `/CharSet` names each kept glyph as a PDF name, `.notdef`
+    /// left out and every byte outside 7.3.5's regular characters written as
+    /// `#` and two hexadecimal digits; a name no PDF name can spell drops the
+    /// entry rather than listing less than the program holds.
+    #[test]
+    fn a_charset_spells_each_name_and_refuses_what_no_name_can_hold() {
+        let names = |list: &[&[u8]]| list.iter().map(|n| n.to_vec()).collect::<Vec<_>>();
+        assert_eq!(
+            charset_names(&names(&[b".notdef", b"A", b"Aacute"])),
+            Some(b"/A/Aacute".to_vec())
+        );
+        assert_eq!(
+            charset_names(&names(&[b"a#b", b"x y", b"(p)", b"\xE9"])),
+            Some(b"/a#23b/x#20y/#28p#29/#E9".to_vec())
+        );
+        assert_eq!(charset_names(&names(&[b".notdef"])), Some(Vec::new()));
+        assert_eq!(charset_names(&names(&[b"A", b"a\0b"])), None);
+        assert_eq!(charset_names(&names(&[b""])), None);
     }
 
     /// **Pages' usages folded in page order are the serial walk's.** Two

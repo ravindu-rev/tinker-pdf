@@ -4441,6 +4441,134 @@ fn the_synthesised_fixed_document_is_the_same_bytes_on_every_target() {
     );
 }
 
+/// The bytes the facade's default save writes for a page drawing a Type 1
+/// font: its program cut down to the glyphs the page draws (FT-11.4,
+/// `docs/design/subsetting.md`), the encrypted portion written again with
+/// zero lead bytes, its three lengths stated and its `/CharSet` rewritten.
+///
+/// A run's output, recorded from `cargo test` on the first target it runs
+/// on, which prints the value to paste, and held there on every other.
+const SAVED_TYPE1_SUBSET: &str = "";
+
+/// A page drawing `AB` and `Aacute` in a Type 1 font whose program also
+/// carries `C`, a subroutine only `C` calls and the flex and hint
+/// subroutines 0 to 3.
+fn type1_subset_page() -> Vec<u8> {
+    use type1_support::{n, rect, CALLSUBR, CLOSEPATH, ENDCHAR, HLINETO, HSBW, RETURN, RMOVETO};
+    let calls = |subr: i32| {
+        [
+            n(&[0, 800]),
+            vec![HSBW],
+            n(&[100, 0]),
+            vec![RMOVETO],
+            n(&[subr]),
+            vec![CALLSUBR, CLOSEPATH, ENDCHAR],
+        ]
+        .concat()
+    };
+    let side = |length: i32| {
+        [
+            n(&[length]),
+            vec![HLINETO],
+            n(&[length]),
+            vec![7],
+            n(&[-length]),
+            vec![HLINETO, RETURN],
+        ]
+        .concat()
+    };
+    let program = type1_support::program(
+        &[
+            (".notdef", [n(&[0, 800]), vec![HSBW, ENDCHAR]].concat()),
+            ("A", calls(4)),
+            ("B", rect(800, 50, 50, 600, 300)),
+            ("C", calls(5)),
+            ("acute", rect(300, 100, 750, 150, 150)),
+            (
+                "Aacute",
+                [
+                    n(&[0, 800]),
+                    vec![HSBW],
+                    n(&[0, 200, 50, 65, 194]),
+                    type1_support::SEAC.to_vec(),
+                ]
+                .concat(),
+            ),
+        ],
+        &[
+            (0, vec![RETURN]),
+            (1, vec![RETURN]),
+            (2, vec![RETURN]),
+            (3, vec![RETURN]),
+            (4, side(500)),
+            (5, side(300)),
+        ],
+        &[
+            (65, "A"),
+            (66, "B"),
+            (67, "C"),
+            (194, "acute"),
+            (201, "Aacute"),
+        ],
+    );
+    let widths = vec!["800"; 201 - 65 + 1].join(" ");
+    render_support::raw_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 80] \
+          /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        render_support::raw_stream("", b"BT /F0 40 Tf 10 20 Td (AB\\311) Tj ET"),
+        format!(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /FirstChar 65 \
+             /LastChar 201 /Widths [{widths}] /FontDescriptor 6 0 R >>"
+        )
+        .into_bytes(),
+        b"<< /Type /FontDescriptor /FontName /Fixture /Flags 32 \
+          /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0 \
+          /CapHeight 700 /StemV 80 /FontFile 7 0 R /CharSet (/A/B/C/acute/Aacute) >>"
+            .to_vec(),
+        type1_support::font_file(&program),
+    ])
+}
+
+/// **The default save of a Type 1 font's page is the same bytes on every
+/// target** (FT-11.4). A rendered hash cannot see the program a save
+/// writes — a subset that kept every glyph draws the same page — so the
+/// written bytes get a claim of their own, as the synthesised documents' do.
+#[test]
+fn the_saved_type1_subset_is_the_same_bytes_on_every_target() {
+    use tinker_pdf::write::{save, SaveOptions};
+
+    let original = type1_subset_page();
+    let doc = Document::open(original.clone()).expect("it opens");
+    let mut editor = doc.editor();
+    let saved = save(&mut editor, &SaveOptions::default());
+
+    // The document this hash is about, asserted rather than assumed: one
+    // program cut, keeping `.notdef`, A, B, Aacute and its accent, and
+    // nothing left whole.
+    let report = saved.fonts.report().expect("the font pass ran");
+    assert!(report.untouched.is_empty(), "{report:?}");
+    assert_eq!(report.subsetted.len(), 1, "{report:?}");
+    assert!(report.subsetted[0].after < report.subsetted[0].before);
+    let written = written_support::rewritten(
+        "the saved Type 1 subset is the same bytes on every target",
+        &original,
+        &saved.bytes,
+    );
+    assert!(written.validate().is_empty());
+
+    let hash = sha(&saved.bytes);
+    println!("SAVED_TYPE1_SUBSET: {hash}");
+    assert_eq!(
+        hash,
+        SAVED_TYPE1_SUBSET,
+        "the saved Type 1 subset is not the bytes it was. The document is {} bytes.",
+        saved.bytes.len()
+    );
+}
+
 /// Every fingerprinted page's mark box (`docs/design/page-analysis.md`), as
 /// [`the_mark_boxes_are_the_same_on_every_target`] prints it: the box in
 /// points, each number at its shortest, and in pixels at 72 dpi as
