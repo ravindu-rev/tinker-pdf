@@ -233,6 +233,11 @@ pub struct ComputedStyle {
     /// `font-feature-settings`, §6.12, in the order written; empty for
     /// `normal`.
     pub font_feature_settings: Vec<FeatureSetting>,
+    /// `font-variation-settings`, §8.2: each axis once, at its last value;
+    /// empty for `normal`.
+    pub font_variation_settings: Vec<VariationSetting>,
+    /// `font-optical-sizing`, §8.1.
+    pub font_optical_sizing: FontOpticalSizing,
     /// `direction`, `css-writing-modes-3` §2.1.
     pub direction: Direction,
     /// `unicode-bidi`, §2.2.
@@ -413,6 +418,8 @@ impl ComputedStyle {
             color_scheme: ColorScheme::Normal,
             font_kerning: FontKerning::Auto,
             font_feature_settings: Vec::new(),
+            font_variation_settings: Vec::new(),
+            font_optical_sizing: FontOpticalSizing::Auto,
             direction: Direction::Ltr,
             unicode_bidi: UnicodeBidi::Normal,
             hyphens: Hyphens::Manual,
@@ -518,6 +525,8 @@ impl ComputedStyle {
         style.color_scheme = parent.color_scheme;
         style.font_kerning = parent.font_kerning;
         style.font_feature_settings = parent.font_feature_settings.clone();
+        style.font_variation_settings = parent.font_variation_settings.clone();
+        style.font_optical_sizing = parent.font_optical_sizing;
         style.direction = parent.direction;
         style.hyphens = parent.hyphens;
         // Not a property, and copied all the same: a box with no element of
@@ -612,6 +621,8 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::ColorScheme(value) => style.color_scheme = *value,
         Property::FontKerning(value) => style.font_kerning = *value,
         Property::FontFeatureSettings(value) => style.font_feature_settings = value.clone(),
+        Property::FontVariationSettings(value) => style.font_variation_settings = value.clone(),
+        Property::FontOpticalSizing(value) => style.font_optical_sizing = *value,
         Property::Direction(value) => style.direction = *value,
         Property::UnicodeBidi(value) => style.unicode_bidi = *value,
         Property::Hyphens(value) => style.hyphens = *value,
@@ -2565,6 +2576,10 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::FontFeatureSettings => {
             into.font_feature_settings = from.font_feature_settings.clone();
         }
+        Longhand::FontVariationSettings => {
+            into.font_variation_settings = from.font_variation_settings.clone();
+        }
+        Longhand::FontOpticalSizing => into.font_optical_sizing = from.font_optical_sizing,
         Longhand::Direction => into.direction = from.direction,
         Longhand::UnicodeBidi => into.unicode_bidi = from.unicode_bidi,
         Longhand::Hyphens => into.hyphens = from.hyphens,

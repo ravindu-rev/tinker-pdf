@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence a hundred and fourteen unit variants, one per name this build implements as a
+//! Hence a hundred and sixteen unit variants, one per name this build implements as a
 //! longhand. The twenty shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! A hundred and fourteen variants across four consumers is not hand-written code, and a
+//! A hundred and sixteen variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -77,6 +77,10 @@ pub enum Longhand {
     FontKerning,
     /// `font-feature-settings`
     FontFeatureSettings,
+    /// `font-variation-settings`
+    FontVariationSettings,
+    /// `font-optical-sizing`
+    FontOpticalSizing,
     /// `direction`
     Direction,
     /// `unicode-bidi`
@@ -296,6 +300,8 @@ impl Longhand {
         Longhand::ColorScheme,
         Longhand::FontKerning,
         Longhand::FontFeatureSettings,
+        Longhand::FontVariationSettings,
+        Longhand::FontOpticalSizing,
         Longhand::Direction,
         Longhand::UnicodeBidi,
         Longhand::Hyphens,
@@ -416,6 +422,8 @@ impl Longhand {
             Longhand::ColorScheme => "color-scheme",
             Longhand::FontKerning => "font-kerning",
             Longhand::FontFeatureSettings => "font-feature-settings",
+            Longhand::FontVariationSettings => "font-variation-settings",
+            Longhand::FontOpticalSizing => "font-optical-sizing",
             Longhand::Direction => "direction",
             Longhand::UnicodeBidi => "unicode-bidi",
             Longhand::Hyphens => "hyphens",
@@ -540,6 +548,8 @@ impl Longhand {
             | Longhand::ColorScheme
             | Longhand::FontKerning
             | Longhand::FontFeatureSettings
+            | Longhand::FontVariationSettings
+            | Longhand::FontOpticalSizing
             | Longhand::Direction
             | Longhand::Hyphens
             | Longhand::WhiteSpace
@@ -681,6 +691,8 @@ impl Property {
             Property::ColorScheme(..) => Longhand::ColorScheme,
             Property::FontKerning(..) => Longhand::FontKerning,
             Property::FontFeatureSettings(..) => Longhand::FontFeatureSettings,
+            Property::FontVariationSettings(..) => Longhand::FontVariationSettings,
+            Property::FontOpticalSizing(..) => Longhand::FontOpticalSizing,
             Property::Direction(..) => Longhand::Direction,
             Property::UnicodeBidi(..) => Longhand::UnicodeBidi,
             Property::Hyphens(..) => Longhand::Hyphens,

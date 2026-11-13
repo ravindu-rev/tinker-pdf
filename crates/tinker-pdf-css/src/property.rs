@@ -1018,6 +1018,33 @@ pub struct FeatureSetting {
     pub value: u32,
 }
 
+/// One `<opentype-tag> <number>` of `font-variation-settings`, `css-fonts-4`
+/// §8.2: a variation axis by its tag and the value asked of it, in that
+/// axis's own scale — `"wght" 650`.
+///
+/// A face that has no axis by the tag ignores it, as §8.2 says; which face a
+/// run is set in is decided below the cascade.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VariationSetting {
+    /// The axis tag, four bytes of printable ASCII (§6.12's
+    /// `<opentype-tag>`).
+    pub tag: [u8; 4],
+    /// The value, a finite number.
+    pub value: f64,
+}
+
+/// `font-optical-sizing`, `css-fonts-4` §8.1: whether a face with an optical
+/// size axis has it set from the font size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontOpticalSizing {
+    /// `auto`, the initial value: a face's `opsz` axis set to the used font
+    /// size.
+    Auto,
+    /// `none`: the axis left to the face's default, unless
+    /// `font-variation-settings` names it.
+    None,
+}
+
 /// `color-scheme`, `css-color-adjust-1` §2.1, as far as a printed page reads
 /// it.
 ///
@@ -1829,6 +1856,12 @@ pub enum Property {
     /// `font-feature-settings`, §6.12, in the order written; empty for
     /// `normal`.
     FontFeatureSettings(Vec<FeatureSetting>),
+    /// `font-variation-settings`, §8.2: each axis once, at the value of its
+    /// last appearance, in the order of those appearances; empty for
+    /// `normal`.
+    FontVariationSettings(Vec<VariationSetting>),
+    /// `font-optical-sizing`, §8.1.
+    FontOpticalSizing(FontOpticalSizing),
     /// `text-shadow`, `css-text-decor-3` §4: the list, first on top. Empty
     /// for `none`.
     TextShadow(Vec<SpecifiedShadow>),
@@ -2015,6 +2048,8 @@ impl Property {
             Property::UnicodeBidi(_) => "unicode-bidi",
             Property::Hyphens(_) => "hyphens",
             Property::FontFeatureSettings(_) => "font-feature-settings",
+            Property::FontVariationSettings(_) => "font-variation-settings",
+            Property::FontOpticalSizing(_) => "font-optical-sizing",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
             Property::ListStylePosition(_) => "list-style-position",
@@ -2157,6 +2192,10 @@ impl Property {
             // text in its `<em>`.
             | Property::FontKerning(_)
             | Property::FontFeatureSettings(_)
+            // §8.1 and §8.2: *inherited: yes* too, so a `<p>`'s instance is
+            // its `<em>`'s.
+            | Property::FontVariationSettings(_)
+            | Property::FontOpticalSizing(_)
             // `css-writing-modes-3` §2.1: *inherited: yes*. `unicode-bidi` is
             // not (§2.2): an embedding is opened by the box that declares it.
             | Property::Direction(_)
@@ -3401,9 +3440,11 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "font-family",
     "font-feature-settings",
     "font-kerning",
+    "font-optical-sizing",
     "font-size",
     "font-style",
     "font-variant",
+    "font-variation-settings",
     "font-weight",
     "gap",
     "height",
@@ -3880,6 +3921,14 @@ fn implemented(
             }))
         }),
         "font-feature-settings" => font_feature_settings(values, significant),
+        "font-variation-settings" => font_variation_settings(values, significant),
+        "font-optical-sizing" => keyword(one, single, |word| {
+            Some(Property::FontOpticalSizing(match word {
+                "auto" => FontOpticalSizing::Auto,
+                "none" => FontOpticalSizing::None,
+                _ => return None,
+            }))
+        }),
         "direction" => keyword(one, single, |word| {
             Some(Property::Direction(match word {
                 "ltr" => Direction::Ltr,
@@ -4540,6 +4589,58 @@ fn font_feature_settings(
         return Implemented::BadValue;
     }
     Implemented::Known(vec![Property::FontFeatureSettings(out)])
+}
+
+/// `font-variation-settings`, `css-fonts-4` §8.2:
+/// `normal | [ <opentype-tag> <number> ]#`.
+///
+/// A tag is a string of exactly four characters from U+20 to U+7E, as for
+/// `font-feature-settings`, and the number is any finite one; anything else
+/// makes the whole declaration invalid. An axis named twice is worth the
+/// value of its last appearance, which §8.2 makes observable in the computed
+/// value, so the list keeps each tag once, where it last appears. More
+/// distinct axes than [`crate::limits::MAX_CSS_FEATURE_SETTINGS`] are
+/// refused by value, since the list is copied into every element that
+/// inherits it; the list is read to its end all the same, so a malformed
+/// pair past the cap still makes the declaration invalid.
+fn font_variation_settings(
+    values: &[ComponentValue],
+    significant: &[&ComponentValue],
+) -> Implemented {
+    if let [one] = significant {
+        if one
+            .token()
+            .is_some_and(|t| matches!(t, Token::Ident(w) if w.eq_ignore_ascii_case("normal")))
+        {
+            return Implemented::Known(vec![Property::FontVariationSettings(Vec::new())]);
+        }
+    }
+    let mut out: Vec<VariationSetting> = Vec::new();
+    let mut past_cap = false;
+    for group in values.split(|v| matches!(v, ComponentValue::Token(Token::Comma))) {
+        let parts: Vec<&ComponentValue> = group.iter().filter(|v| !v.is_whitespace()).collect();
+        let [ComponentValue::Token(Token::Str(tag)), ComponentValue::Token(Token::Number { value, .. })] =
+            parts.as_slice()
+        else {
+            return Implemented::Malformed;
+        };
+        let Ok(tag) = <[u8; 4]>::try_from(tag.as_bytes()) else {
+            return Implemented::Malformed;
+        };
+        if !tag.iter().all(|b| (0x20..=0x7E).contains(b)) || !value.is_finite() {
+            return Implemented::Malformed;
+        }
+        if past_cap {
+            continue;
+        }
+        out.retain(|setting| setting.tag != tag);
+        out.push(VariationSetting { tag, value: *value });
+        past_cap = out.len() > crate::limits::MAX_CSS_FEATURE_SETTINGS;
+    }
+    if past_cap {
+        return Implemented::BadValue;
+    }
+    Implemented::Known(vec![Property::FontVariationSettings(out)])
 }
 
 /// One radius: a non-negative `<length-percentage>` (§5.1).

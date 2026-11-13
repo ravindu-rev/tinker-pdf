@@ -330,6 +330,12 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         // measured with them, and drawn with them, by one shaper.
         font_kerning,
         font_feature_settings,
+        // `css-fonts-4` §8.1 and §8.2 ask for an instance of a variable
+        // face. Every face a run is measured and drawn in is at its default
+        // instance, which is a static face's only one, so the two move no
+        // box here.
+        font_variation_settings: _,
+        font_optical_sizing: _,
         // `css-writing-modes-3` §2: a block container's base direction and an
         // inline box's embedding, carried to the runs for the painter's
         // UAX #9, and `start` and `end` resolved against the first here.

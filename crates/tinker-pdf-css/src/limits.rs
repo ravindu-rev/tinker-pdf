@@ -271,6 +271,13 @@ pub const MAX_CSS_SHADOWS: usize = 32;
 /// against the property by element, as a shadow list past
 /// [`MAX_CSS_SHADOWS`] is: the first thirty-two of a longer list would be
 /// settings nobody wrote on their own.
+///
+/// **`font-variation-settings` is held to it too**, by its distinct axes,
+/// for the same reason: it is inherited (`css-fonts-4` §8.2) and copied the
+/// same way, and `"abcd" 1,` is nine bytes. A face carries a handful of axes
+/// and no committed book declares the property, so thirty-two is as far past
+/// a real list there as here; an axis named twice is kept once, so a longer
+/// list naming fewer axes is within it.
 pub const MAX_CSS_FEATURE_SETTINGS: usize = 32;
 
 /// The most colour stops one `linear-gradient()` or `radial-gradient()` may

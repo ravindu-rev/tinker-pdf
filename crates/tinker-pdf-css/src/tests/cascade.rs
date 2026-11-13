@@ -914,6 +914,188 @@ fn hyphens_is_inherited_and_starts_manual() {
     assert_eq!(auto[2].hyphens, Hyphens::Manual);
 }
 
+/// **`font-variation-settings` parses, cascades and inherits** (`css-fonts-4`
+/// §8.2): each axis once, at the value of its last appearance and where that
+/// appearance stands; an element under one inherits its list; `normal`
+/// resets to none; and an invalid list is dropped as any invalid declaration
+/// is, so the one it would have replaced stands.
+#[test]
+fn font_variation_settings_parse_cascade_and_inherit() {
+    use crate::property::{Declaration, Property, VariationSetting};
+    let setting = |tag: &[u8; 4], value: f64| VariationSetting { tag: *tag, value };
+    let nodes = tree(&[
+        ("div", None),
+        ("em", Some(0)),
+        ("p", Some(0)),
+        ("span", Some(2)),
+        ("h1", None),
+        ("h2", None),
+        ("h3", None),
+    ]);
+    let styled = styles(
+        "div { font-variation-settings: \"wght\" 650, \"wdth\" 87.5, \"wght\" 300, 'XHGT' -0.25 }
+         p { font-variation-settings: normal }
+         h1 { font-variation-settings: \"opsz\" 12 }
+         h1 { font-variation-settings: \"opsz\" }
+         h2 { font-variation-settings: \"wght\" 400; font-variation-settings: \"wgh\" 1 }
+         h3 { font-variation-settings: \"slnt\" -12, \"GRAD\" 0 }
+         h3 { font-variation-settings: \"slnt\" 1em }",
+        &nodes,
+    );
+    assert_eq!(
+        styled[0].font_variation_settings,
+        vec![
+            setting(b"wdth", 87.5),
+            setting(b"wght", 300.0),
+            setting(b"XHGT", -0.25)
+        ],
+        "each axis once, the last value winning, where it last appears"
+    );
+    assert_eq!(
+        styled[1].font_variation_settings, styled[0].font_variation_settings,
+        "inherited"
+    );
+    assert!(styled[2].font_variation_settings.is_empty(), "normal");
+    assert!(
+        styled[3].font_variation_settings.is_empty(),
+        "normal, inherited"
+    );
+    assert_eq!(
+        styled[4].font_variation_settings,
+        vec![setting(b"opsz", 12.0)],
+        "a tag with no number is invalid, so the rule before it stands"
+    );
+    assert_eq!(
+        styled[5].font_variation_settings,
+        vec![setting(b"wght", 400.0)],
+        "a three-character tag is invalid"
+    );
+    assert_eq!(
+        styled[6].font_variation_settings,
+        vec![setting(b"slnt", -12.0), setting(b"GRAD", 0.0)],
+        "a dimension is not a number"
+    );
+    assert!(
+        styles("p { color: red }", &one("p"))[0]
+            .font_variation_settings
+            .is_empty(),
+        "the initial value is normal"
+    );
+
+    // Each shape outside §8.2's grammar is invalid, not this build's gap,
+    // and the declaration after it survives.
+    for value in [
+        "\"wght\"",
+        "\"wght\" 1, ",
+        ", \"wght\" 1",
+        "normal, \"wght\" 1",
+        "\"wght\" 1 2",
+        "wght 1",
+        "\"wght\" 50%",
+        "\"wght\" 1px",
+        "\"wght\" calc(1)",
+        "\"wghts\" 1",
+        "\"\u{e9}tir\" 1",
+        "1 \"wght\"",
+        "none",
+    ] {
+        let parsed = sheet(&format!(
+            "p {{ font-variation-settings: {value}; float: left }}"
+        ));
+        let declarations = &parsed.rules[0].declarations;
+        assert_eq!(declarations.len(), 1, "`{value}` is dropped");
+        assert!(
+            matches!(
+                declarations[0].declaration,
+                Declaration::Known(Property::Float(_))
+            ),
+            "`{value}`: {:?}",
+            declarations[0].declaration
+        );
+        assert!(
+            parsed.report.unsupported.is_empty(),
+            "`{value}` is not counted"
+        );
+    }
+    // Case does not matter to `normal`, and a tag is a string either way it
+    // is quoted.
+    let parsed =
+        sheet("p { font-variation-settings: NORMAL } q { font-variation-settings: 'wght' 1 }");
+    assert_eq!(
+        parsed.rules[0].declarations[0].declaration,
+        Declaration::Known(Property::FontVariationSettings(Vec::new()))
+    );
+    assert_eq!(
+        parsed.rules[1].declarations[0].declaration,
+        Declaration::Known(Property::FontVariationSettings(vec![setting(b"wght", 1.0)]))
+    );
+    // §7.1's keywords default it like any inherited property.
+    let nodes = tree(&[("div", None), ("p", Some(0))]);
+    let styled = styles(
+        "div { font-variation-settings: \"wght\" 700 } p { font-variation-settings: initial }",
+        &nodes,
+    );
+    assert!(styled[1].font_variation_settings.is_empty(), "initial");
+    let styled = styles(
+        "div { font-variation-settings: \"wght\" 700 } p { font-variation-settings: unset }",
+        &nodes,
+    );
+    assert_eq!(
+        styled[1].font_variation_settings,
+        vec![setting(b"wght", 700.0)],
+        "unset inherits an inherited property"
+    );
+}
+
+/// **`font-optical-sizing` is `auto` unless an element, or one it inherits
+/// from, says `none`** (`css-fonts-4` §8.1), and any other word is refused by
+/// value as keyword properties are.
+#[test]
+fn font_optical_sizing_is_auto_unless_none() {
+    use crate::property::FontOpticalSizing;
+    let nodes = tree(&[
+        ("div", None),
+        ("em", Some(0)),
+        ("p", None),
+        ("span", Some(2)),
+        ("h1", None),
+    ]);
+    let styled = styles(
+        "div { font-optical-sizing: none } span { font-optical-sizing: AUTO } \
+         h1 { font-optical-sizing: none; font-optical-sizing: sideways }",
+        &nodes,
+    );
+    assert_eq!(styled[0].font_optical_sizing, FontOpticalSizing::None);
+    assert_eq!(
+        styled[1].font_optical_sizing,
+        FontOpticalSizing::None,
+        "inherited"
+    );
+    assert_eq!(
+        styled[2].font_optical_sizing,
+        FontOpticalSizing::Auto,
+        "the initial value"
+    );
+    assert_eq!(styled[3].font_optical_sizing, FontOpticalSizing::Auto);
+    assert_eq!(
+        styled[4].font_optical_sizing,
+        FontOpticalSizing::None,
+        "a word outside the two is refused, and the declaration before it stands"
+    );
+    let parsed = sheet("p { font-optical-sizing: sideways }");
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let report = cascade(
+        &[(Origin::Author, &parsed)],
+        &one("p"),
+        &limits,
+        &mut budget,
+    )
+    .expect("under every cap")
+    .report;
+    assert_eq!(report.unsupported, vec![("font-optical-sizing", 1)]);
+}
+
 /// **A gradient's lengths are computed with its element's font size**: an
 /// `em` in a stop, a radius or a centre is pixels once cascaded, and a
 /// percentage stays for the box the painter is given.

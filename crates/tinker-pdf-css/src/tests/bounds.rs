@@ -455,6 +455,69 @@ fn a_feature_list_past_the_cap_is_refused_by_value() {
     assert_eq!(declarations.len(), 2, "the declaration after it survives");
 }
 
+/// `MAX_CSS_FEATURE_SETTINGS` holds `font-variation-settings` too: a list of
+/// the cap's distinct axes is read, one more is refused by value — counted,
+/// not truncated — and the declaration after it survives; a longer list
+/// naming fewer axes is within it, since an axis named twice is kept once.
+#[test]
+fn a_variation_list_past_the_cap_is_refused_by_value() {
+    use crate::property::{Declaration, Property};
+    let list = |count: usize, axes: usize| {
+        (0..count)
+            .map(|n| format!("\"a{:03}\" {n}", n % axes))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let declared = |source: String| {
+        parse_at_defaults(source.as_bytes())
+            .expect("the sheet is read")
+            .rules[0]
+            .declarations
+            .iter()
+            .map(|d| d.declaration.clone())
+            .collect::<Vec<_>>()
+    };
+    let at = declared(format!(
+        "p {{ font-variation-settings: {} }}",
+        list(MAX_CSS_FEATURE_SETTINGS, MAX_CSS_FEATURE_SETTINGS)
+    ));
+    match &at[0] {
+        Declaration::Known(Property::FontVariationSettings(settings)) => {
+            assert_eq!(settings.len(), MAX_CSS_FEATURE_SETTINGS);
+        }
+        other => panic!("a list at the cap was not read: {other:?}"),
+    }
+    let repeated = declared(format!(
+        "p {{ font-variation-settings: {} }}",
+        list(MAX_CSS_FEATURE_SETTINGS * 4, 3)
+    ));
+    match &repeated[0] {
+        Declaration::Known(Property::FontVariationSettings(settings)) => {
+            assert_eq!(settings.len(), 3, "three axes, each once");
+        }
+        other => panic!("a list of three axes was not read: {other:?}"),
+    }
+    let past = declared(format!(
+        "p {{ font-variation-settings: {}; float: left }}",
+        list(MAX_CSS_FEATURE_SETTINGS + 1, MAX_CSS_FEATURE_SETTINGS + 1)
+    ));
+    assert!(
+        matches!(
+            &past[0],
+            Declaration::Unsupported { property, .. } if *property == "font-variation-settings"
+        ),
+        "a list past the cap: {:?}",
+        past[0]
+    );
+    assert_eq!(past.len(), 2, "the declaration after it survives");
+    // A malformed pair past the cap still makes the declaration invalid.
+    let malformed = declared(format!(
+        "p {{ font-variation-settings: {}, \"bad\" 1; float: left }}",
+        list(MAX_CSS_FEATURE_SETTINGS + 1, MAX_CSS_FEATURE_SETTINGS + 1)
+    ));
+    assert_eq!(malformed.len(), 1, "dropped as invalid, not counted");
+}
+
 /// `MAX_CSS_GRADIENT_STOPS`: a gradient of exactly the cap's stops is read,
 /// one more is refused by value — counted, not cut to its first thirty-two —
 /// and the declaration after it survives.
