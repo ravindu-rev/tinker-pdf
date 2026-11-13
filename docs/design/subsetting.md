@@ -228,10 +228,10 @@ none. One is never added.
 
 ### The CFF reader's arithmetic
 
-Today the Type 2 machine clears its stack at every two-byte operator but
-`put`, `get` and the flex operators, so a charstring that computes an operand
-draws without it. It runs 5177 §4.4 to §4.6 instead, in CFF; CFF2 has none of
-them (CFF2 chapter, *CharString operators*) and keeps clearing.
+The Type 2 machine runs 5177 §4.4 to §4.6 in CFF, through one function,
+`cff::compute`, so a charstring that computes an operand draws with it. CFF2
+has none of these operators (CFF2 chapter, *CharString operators*) and clears
+its stack at them.
 
 | Operator | Code | Result | Where 5177 leaves it undefined |
 | --- | --- | --- | --- |
@@ -245,10 +245,10 @@ them (CFF2 chapter, *CharString operators*) and keeps clearing.
 | `random` | 12 23 | the next value of the sequence below | — |
 | `and`, `or`, `not`, `eq` | 12 3, 12 4, 12 5, 12 15 | 1 or 0 | — |
 | `ifelse` | 12 22 | `s1` if `v1 ≤ v2`, else `s2` | — |
-| `put`, `get` | 12 20, 12 21 | the transient array, 32 elements (appendix B) | as today: an index truncated toward zero, one outside the array ignored by `put` and read as 0 by `get`, and an element no `put` set reads 0 |
+| `put`, `get` | 12 20, 12 21 | the transient array, 32 elements (appendix B) | an index truncated toward zero and a negative one taken as element 0; one past the array ignored by `put` and read as 0 by `get`; an element no `put` set reads 0 |
 
 An operator that finds fewer operands than it takes leaves the stack as it
-is; `put` and `get` keep what they do today. Every result is the IEEE 754
+is; `put` and `get` pop what there is. Every result is the IEEE 754
 operation on doubles — exact for `add`, `sub`, `neg` and `abs` over the
 numbers a charstring writes, correctly rounded for `mul`, `div` and `sqrt` —
 and is then settled: one that is not finite, or smaller in magnitude than the
@@ -267,20 +267,20 @@ and a flattened charstring, which keeps every `random` in its order, draws
 the values the original drew.
 
 **Bounds.** The stack holds 48 operands (appendix B) and a push past them is
-dropped, as today; `roll` and `index` work within it; the transient array is
-32 elements; calls nest ten deep; and the glyph's machine reads at most
-64 000 operands and operators. The machine records the first of these it
-meets — `Stop::StackOverflow`, `TransientIndex`, `SubroutineDepth` and
-`Budget`, and `MissingSubroutine` for a call to a subroutine the INDEX does
-not hold — for both flavours; CFF draws on past it as it always has, CFF2
-refuses the glyph at the four it refuses today, and flattening refuses every
-one by name.
+dropped; `roll` and `index` work within it; the transient array is 32
+elements, and an index outside 0 to 31 is out of it; calls nest ten deep; and
+the glyph's machine reads at most 64 000 operands and operators. The machine
+records the first of these it meets — `Bound::StackOverflow`,
+`TransientIndex`, `SubroutineDepth` and `Budget`, and `MissingSubroutine` for
+a call to a subroutine the INDEX does not hold — in both flavours; CFF draws
+on past it, CFF2 refuses the glyph at the three it shares with `Stop`, and
+flattening refuses every one by name.
 
 **The renumbering walk reads the same depths.** `cff_subset.rs`'s token walk
 counts stem hints from the stack's depth, so it runs the same operators
 through the same function as the reader and agrees with it at every
-`hintmask`. Every subset written today keeps its bytes wherever its fonts
-compute nothing.
+`hintmask`; the transient array and `random`'s sequence it keeps per glyph,
+outside its memo, since no depth depends on a value they hold.
 
 ### Flattening
 

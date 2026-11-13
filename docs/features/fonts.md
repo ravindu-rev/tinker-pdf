@@ -41,10 +41,20 @@ once per INDEX when the face is parsed. A caller reading many glyphs keeps one
 `cff::Machine` and one `Outline` and runs each glyph through them
 (`Cff::outline_into`): the operand stack and the segment buffer are allocated
 once, while the stack is cleared and the operation budget, the subroutine
-depth cap and the transient array start afresh at every glyph, so a glyph
-draws the same segments whichever glyphs came before it; `Cff::outline` is
-that call with a fresh pair. `Cff::advance` runs a charstring only as far as
-the operator that settles its width and builds no outline. Glyph selection is
+depth cap, the transient array and `random`'s sequence start afresh at every
+glyph, so a glyph draws the same segments whichever glyphs came before it;
+`Cff::outline` is that call with a fresh pair. `Cff::advance` runs a
+charstring only as far as the operator that settles its width and builds no
+outline. A CFF charstring runs the Type 2 specification's arithmetic, storage
+and conditional operators (§4.4 to §4.6) — `abs` to `ifelse`, and `put` and
+`get` over a transient array of 32 elements — so an operand it computes, a
+subroutine number among them, is the one it draws with. Each result is the
+IEEE 754 operation, settled to 0 where it is not finite or not normal; a zero
+divisor and a negative square root give 0; and `random` draws a fixed
+xorshift sequence that restarts at every glyph
+([design](../design/subsetting.md) settles every case 5177 leaves undefined),
+so an outline is the same bits on every target and in any glyph order. CFF2
+has none of these operators and clears the stack at them. Glyph selection is
 the charset's job, never the character code's: all three written charset
 formats (0, 1, 2) plus the three predefined ones (ISOAdobe, Expert,
 ExpertSubset), names resolved through the 391 standard strings and the font's
@@ -1954,10 +1964,22 @@ corpora already vendored here. So every name stays on the list.
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it
   was given, bare and in an `OTTO` wrapper.
+- `crates/tinker-pdf-font/src/cff.rs` — the Type 2 specification's
+  arithmetic, storage and conditional operators, each against results worked
+  in the test: the cases 5177 leaves undefined as
+  [design](../design/subsetting.md) settles them, an operator short of its
+  operands leaving the stack as it is, and every other escaped code left to
+  the caller; `put` and `get` over the transient array, past it and below
+  it; a computed `callsubr` and `callgsubr` drawing the subroutine they
+  compute; `random`'s first two values, the same in every glyph through a
+  fresh machine and a reused one; the first bound a run meets, recorded by
+  name for each of the five; and a CFF2 charstring clearing the stack at
+  `add`.
 - `crates/tinker-pdf-font/src/cff_subset/tests.rs` — fonts built byte by
   byte: local and global subroutine renumbering, a global subroutine reached
-  from two Font DICTs, `hintmask` counting stems a subroutine declared, `seac`
-  components kept, and the four refusals. Two of them cross a **bias
+  from two Font DICTs, `hintmask` counting stems a subroutine declared and
+  stems the arithmetic computed, a `put` short of its operands read on as the
+  reader reads, `seac` components kept, and the four refusals. Two of them cross a **bias
   threshold**: 1 300 local subroutines cut to one (1 131 → 107), and 34 000 cut
   to 1 300 (32 768 → 1 131), the second keeping a non-prefix, non-contiguous
   range so the renumbering is the identity nowhere and every operand form

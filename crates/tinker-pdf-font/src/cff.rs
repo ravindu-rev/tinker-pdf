@@ -27,12 +27,26 @@
 //! allocates the operand stack and the segment buffer once rather than once a
 //! glyph; [`Cff::outline`] is that call with a fresh pair. Only the buffers
 //! are carried: the stack is cleared before each glyph, and the operation
-//! budget, the subroutine depth cap and the transient array are each glyph's
-//! own. The two subroutine biases (Type 2 charstring specification, 4.7) are
-//! a property of the INDEXes, so they are resolved when the face is parsed —
-//! the global one and each Private DICT's local one — and a `callsubr` reads
-//! the stored number. [`Cff::advance`] runs a charstring only as far as the
-//! operator that settles its width, and builds no outline.
+//! budget, the subroutine depth cap, the transient array and `random`'s
+//! sequence are each glyph's own. The two subroutine biases (Type 2
+//! charstring specification, 4.7) are a property of the INDEXes, so they are
+//! resolved when the face is parsed — the global one and each Private DICT's
+//! local one — and a `callsubr` reads the stored number. [`Cff::advance`]
+//! runs a charstring only as far as the operator that settles its width, and
+//! builds no outline.
+//!
+//! # Computed operands
+//!
+//! A CFF charstring runs 5177's arithmetic, storage and conditional
+//! operators (§4.4 to §4.6) through [`compute`], so an operand it computes —
+//! a `callsubr` number among them — is the one it draws with. `cff_subset.rs`
+//! walks charstrings through the same function, so the two agree on every
+//! stack depth a `hintmask` is measured from. Each result is the IEEE 754
+//! operation, settled to 0 where it is not finite or not normal, and
+//! `random` draws a fixed sequence that restarts at every glyph, so an
+//! outline is the same bits on every target and in any order (ruling 4).
+//! CFF2 has none of these operators and clears the stack at them. A run
+//! records the first [`Bound`] it meets.
 
 use crate::outline::{Outline, Segment};
 
@@ -626,6 +640,18 @@ impl<'a> Cff<'a> {
         let mut ctx = self.charstring_context(glyph, None, &mut machine.stack);
         ctx.run(charstring);
         Some(ctx.width.unwrap_or(ctx.private.default_width))
+    }
+
+    /// The first bound a glyph's run meets, or `None` for a run that meets
+    /// none and for a glyph the font does not have.
+    #[cfg(test)]
+    pub(crate) fn first_bound(&self, glyph: u16) -> Option<Bound> {
+        let charstring = self.charstrings.get(usize::from(glyph))?;
+        let mut outline = Outline::default();
+        let mut machine = Machine::new();
+        let mut ctx = self.charstring_context(glyph, Some(&mut outline), &mut machine.stack);
+        ctx.run(charstring);
+        ctx.met
     }
 
     /// The machine one glyph runs on: its Private DICT, where its segments
@@ -1849,6 +1875,229 @@ pub(crate) enum Stop {
     VsindexOperand,
 }
 
+/// A bound one charstring's run meets, recorded in either flavour
+/// (`docs/design/subsetting.md`, *Bounds*): CFF draws on past it, CFF2
+/// refuses the glyph at the three it shares with [`Stop`], and
+/// flattening refuses every one by name, since what a reader drew past it is
+/// that reader's and not the program's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Bound {
+    /// A push past the 48 operands the stack holds, dropped.
+    StackOverflow,
+    /// A `put` or `get` outside the transient array's 32 elements.
+    TransientIndex,
+    /// A call past ten levels deep, which does not run.
+    SubroutineDepth,
+    /// The operation budget ran out.
+    Budget,
+    /// A `callsubr` or `callgsubr` naming no subroutine the INDEX holds.
+    MissingSubroutine,
+}
+
+/// The transient array's elements (5177, appendix B).
+pub(crate) const TRANSIENT_ELEMENTS: usize = 32;
+
+/// `random`'s sequence (`docs/design/subsetting.md`, *The CFF reader's
+/// arithmetic*): a 32-bit state, started afresh at every glyph, stepped as
+/// xorshift with shifts 13, 17 and 5, each value `((s >> 16) + 1) / 65536`.
+///
+/// 5177 §4.4 asks only for a value in (0, 1]. This one reads no clock and no
+/// operating system, holds a 16.16 number exactly, and restarts each glyph,
+/// so the order glyphs are drawn in changes no outline (ruling 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Random(u32);
+
+impl Random {
+    /// The state every glyph's run starts at.
+    pub(crate) const SEED: u32 = 2_463_534_242;
+
+    pub(crate) fn new() -> Random {
+        Random(Self::SEED)
+    }
+
+    /// The next value of the sequence, in (0, 1].
+    pub(crate) fn next_value(&mut self) -> f64 {
+        let mut s = self.0;
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        self.0 = s;
+        f64::from((s >> 16) + 1) / 65_536.0
+    }
+}
+
+impl Default for Random {
+    fn default() -> Random {
+        Random::new()
+    }
+}
+
+/// A result settled as `docs/design/subsetting.md` decides 5177's undefined
+/// cases: one that is not finite, or smaller in magnitude than the least
+/// normal double, is 0 — *zero for underflow*, and this reader's answer to
+/// the overflow 5177 leaves undefined.
+fn settle(value: f64) -> f64 {
+    if !value.is_finite() || value.abs() < f64::MIN_POSITIVE {
+        0.0
+    } else {
+        value
+    }
+}
+
+/// Runs the two-byte operator `op` over `stack` where it is one of 5177's
+/// arithmetic (§4.4), storage (§4.5) or conditional (§4.6) operators: `None`
+/// where it is not one, and otherwise `Some` with the bound it met, if any.
+///
+/// The reader and `cff_subset.rs`'s token walk both run it, so the depth the
+/// walk counts stem hints from is the reader's. An operator that finds fewer
+/// operands than it takes leaves the stack as it is; `put` and `get` pop what
+/// there is. Every depth this leaves is a function of the operator and the
+/// depth it found, never of the values.
+pub(crate) fn compute(
+    op: u8,
+    stack: &mut Vec<f64>,
+    transient: &mut [f64; TRANSIENT_ELEMENTS],
+    random: &mut Random,
+    max: usize,
+) -> Option<Option<Bound>> {
+    let takes = match op {
+        // put and get, over the transient array.
+        20 | 21 => return Some(storage(op, stack, transient, max)),
+        // random
+        23 => 0,
+        // not, abs, neg, drop, sqrt, dup
+        5 | 9 | 14 | 18 | 26 | 27 => 1,
+        // and, or, add, sub, div, eq, mul, exch; index and roll, which take
+        // their count and at least what they count.
+        3 | 4 | 10 | 11 | 12 | 15 | 24 | 28 | 29 | 30 => 2,
+        // ifelse
+        22 => 4,
+        _ => return None,
+    };
+    if stack.len() < takes {
+        return Some(None);
+    }
+    let unary = |stack: &mut Vec<f64>, f: fn(f64) -> f64| {
+        if let Some(top) = stack.last_mut() {
+            *top = settle(f(*top));
+        }
+    };
+    let binary = |stack: &mut Vec<f64>, f: fn(f64, f64) -> f64| {
+        if let (Some(b), Some(a)) = (stack.pop(), stack.pop()) {
+            stack.push(settle(f(a, b)));
+        }
+    };
+    fn flag(truth: bool) -> f64 {
+        if truth {
+            1.0
+        } else {
+            0.0
+        }
+    }
+    let mut pushed: Option<f64> = None;
+    match op {
+        9 => unary(stack, f64::abs),
+        14 => unary(stack, |v| -v),
+        // A negative operand's root is undefined, and 0.
+        26 => unary(stack, |v| if v < 0.0 { 0.0 } else { v.sqrt() }),
+        5 => unary(stack, |v| if v == 0.0 { 1.0 } else { 0.0 }),
+        10 => binary(stack, |a, b| a + b),
+        11 => binary(stack, |a, b| a - b),
+        24 => binary(stack, |a, b| a * b),
+        // A zero divisor gives 0.
+        12 => binary(stack, |a, b| if b == 0.0 { 0.0 } else { a / b }),
+        3 => binary(stack, |a, b| flag(a != 0.0 && b != 0.0)),
+        4 => binary(stack, |a, b| flag(a != 0.0 || b != 0.0)),
+        15 => binary(stack, |a, b| flag(a == b)),
+        18 => {
+            stack.pop();
+        }
+        28 => {
+            let n = stack.len();
+            stack.swap(n - 1, n - 2);
+        }
+        27 => pushed = stack.last().copied(),
+        23 => pushed = Some(random.next_value()),
+        29 => {
+            // index: a negative `i` copies the top (5177), one past the
+            // bottom the bottom.
+            let i = stack.pop().unwrap_or(0.0).trunc();
+            let depth = stack.len();
+            let from_top = if i < 0.0 {
+                0
+            } else {
+                (i.min((depth - 1) as f64)) as usize
+            };
+            pushed = stack.get(depth - 1 - from_top).copied();
+        }
+        30 => {
+            // roll: the top N elements turned by J, positive J upward — the
+            // top moving down to the bottom of the N, 5177's picture.
+            let j = stack.pop().unwrap_or(0.0).trunc();
+            let n = stack.pop().unwrap_or(0.0).trunc();
+            let depth = stack.len();
+            if n > 0.0 && depth > 0 {
+                let n = (n.min(depth as f64)) as usize;
+                let turn = (j as i64).rem_euclid(n as i64) as usize;
+                stack[depth - n..].rotate_right(turn);
+            }
+        }
+        22 => {
+            // ifelse: s1 s2 v1 v2, s1 where v1 <= v2.
+            let v2 = stack.pop().unwrap_or(0.0);
+            let v1 = stack.pop().unwrap_or(0.0);
+            let s2 = stack.pop().unwrap_or(0.0);
+            let s1 = stack.pop().unwrap_or(0.0);
+            stack.push(if v1 <= v2 { s1 } else { s2 });
+        }
+        _ => {}
+    }
+    match pushed {
+        Some(value) if stack.len() < max => {
+            stack.push(value);
+            Some(None)
+        }
+        Some(_) => Some(Some(Bound::StackOverflow)),
+        None => Some(None),
+    }
+}
+
+/// `put` and `get` over the transient array: each pops what there is, an
+/// index is truncated toward zero and a negative one taken as element 0, and
+/// one past the array is ignored by `put` and read as 0 by `get`. An index
+/// outside 5177's 0 to 31 is a bound met.
+fn storage(
+    op: u8,
+    stack: &mut Vec<f64>,
+    transient: &mut [f64; TRANSIENT_ELEMENTS],
+    max: usize,
+) -> Option<Bound> {
+    let element = |index: f64| -> (usize, Option<Bound>) {
+        let inside = (0.0..TRANSIENT_ELEMENTS as f64).contains(&index.trunc());
+        (
+            index.max(0.0) as usize,
+            (!inside).then_some(Bound::TransientIndex),
+        )
+    };
+    if op == 20 {
+        let (Some(index), Some(value)) = (stack.pop(), stack.pop()) else {
+            return None;
+        };
+        let (at, met) = element(index);
+        if let Some(slot) = transient.get_mut(at) {
+            *slot = value;
+        }
+        return met;
+    }
+    let index = stack.pop()?;
+    let (at, met) = element(index);
+    // The index's own slot is free again, so the value always has room.
+    if stack.len() < max {
+        stack.push(transient.get(at).copied().unwrap_or(0.0));
+    }
+    met
+}
+
 /// What a CFF2 `blend` reads (CFF2 chapter, 'Variation operators'): each
 /// item variation data subtable's region count — the `k` a `blend` pops —
 /// and, at an instance, each subtable's region scalars in column order. At
@@ -2009,7 +2258,11 @@ pub(crate) struct Charstring<'a, 'b> {
     open: bool,
     depth: u32,
     budget: u32,
-    transient: [f64; 32],
+    transient: [f64; TRANSIENT_ELEMENTS],
+    /// `random`'s sequence, started afresh for this glyph.
+    random: Random,
+    /// The first bound the run met, in either flavour.
+    met: Option<Bound>,
     /// CFF2: what a `blend` reads. `None` in CFF.
     blend: Option<Blend<'b>>,
     /// CFF2: the item variation data the glyph's blends read.
@@ -2047,7 +2300,9 @@ impl<'a, 'b> Charstring<'a, 'b> {
             open: false,
             depth: 0,
             budget: CHARSTRING_BUDGET,
-            transient: [0.0; 32],
+            transient: [0.0; TRANSIENT_ELEMENTS],
+            random: Random::new(),
+            met: None,
             blend,
             vsindex: subroutines.private.vsindex,
             vsindex_set: false,
@@ -2078,11 +2333,22 @@ impl Charstring<'_, '_> {
     }
 
     /// Records the bound a CFF2 run stopped at; CFF's silent stops stay
-    /// silent.
+    /// silent, and are met.
     fn refuse(&mut self, stop: Stop) {
+        match stop {
+            Stop::Budget => self.meet(Bound::Budget),
+            Stop::SubroutineDepth => self.meet(Bound::SubroutineDepth),
+            Stop::StackOverflow => self.meet(Bound::StackOverflow),
+            _ => {}
+        }
         if self.flavour == Flavour::Cff2 && self.stop.is_none() {
             self.stop = Some(stop);
         }
+    }
+
+    /// Records the first bound the run meets, in either flavour.
+    fn meet(&mut self, bound: Bound) {
+        self.met.get_or_insert(bound);
     }
 
     /// CFF2's `vsindex`: one operand, the item variation data a later
@@ -2406,12 +2672,16 @@ impl Charstring<'_, '_> {
                         return;
                     };
                     let biased = index as i32 + self.private.local_bias;
-                    if let Ok(index) = usize::try_from(biased) {
-                        if let Some(code) = self.private.local_subrs.get(index) {
+                    let subroutine = usize::try_from(biased)
+                        .ok()
+                        .and_then(|index| self.private.local_subrs.get(index));
+                    match subroutine {
+                        Some(code) => {
                             self.depth += 1;
                             self.run(code);
                             self.depth -= 1;
                         }
+                        None => self.meet(Bound::MissingSubroutine),
                     }
                 }
                 // callgsubr, likewise for the global INDEX.
@@ -2420,12 +2690,16 @@ impl Charstring<'_, '_> {
                         return;
                     };
                     let biased = index as i32 + self.global_bias;
-                    if let Ok(index) = usize::try_from(biased) {
-                        if let Some(code) = self.global_subrs.get(index) {
+                    let subroutine = usize::try_from(biased)
+                        .ok()
+                        .and_then(|index| self.global_subrs.get(index));
+                    match subroutine {
+                        Some(code) => {
                             self.depth += 1;
                             self.run(code);
                             self.depth -= 1;
                         }
+                        None => self.meet(Bound::MissingSubroutine),
                     }
                 }
                 // return. CFF2 has none: a subroutine ends where its data
@@ -2460,7 +2734,9 @@ impl Charstring<'_, '_> {
         }
     }
 
-    /// The two-byte operators, of which only flex and the arithmetic matter.
+    /// The two-byte operators: the flex operators, and in CFF 5177's
+    /// arithmetic, storage and conditional operators (§4.4 to §4.6), which
+    /// CFF2 does not have.
     fn escaped(&mut self, op: u8) {
         match op {
             // flex, hflex, hflex1, flex1: two curves in one operator.
@@ -2498,25 +2774,15 @@ impl Charstring<'_, '_> {
                     }
                 }
             }),
-            // put/get, the transient array, which CFF2 does not have.
-            20 if self.flavour == Flavour::Cff => {
-                let (Some(index), Some(value)) = (self.stack.pop(), self.stack.pop()) else {
-                    return;
-                };
-                if let Some(slot) = self.transient.get_mut(index.max(0.0) as usize) {
-                    *slot = value;
+            // The arithmetic, `put` and `get` over the transient array, and the
+            // conditionals, which CFF2 does not have.
+            _ if self.flavour == Flavour::Cff => {
+                let max = self.max_operands();
+                match compute(op, self.stack, &mut self.transient, &mut self.random, max) {
+                    Some(Some(bound)) => self.meet(bound),
+                    Some(None) => {}
+                    None => self.stack.clear(),
                 }
-            }
-            21 if self.flavour == Flavour::Cff => {
-                let Some(index) = self.stack.pop() else {
-                    return;
-                };
-                let value = self
-                    .transient
-                    .get(index.max(0.0) as usize)
-                    .copied()
-                    .unwrap_or(0.0);
-                self.push(value);
             }
             _ => self.stack.clear(),
         }
@@ -4103,5 +4369,377 @@ mod tests {
             [Some(880), Some(861), Some(880), Some(880)],
             "VORG's record for glyph 1 and its default for the rest"
         );
+    }
+
+    /// A Type 2 operand in the three-byte form, which holds every value these
+    /// tests write.
+    fn short(value: i16) -> Vec<u8> {
+        let mut out = vec![28u8];
+        out.extend_from_slice(&value.to_be_bytes());
+        out
+    }
+
+    /// `12 op` run over `stack` with a fresh transient array and sequence:
+    /// the stack it leaves, having met no bound.
+    #[track_caller]
+    fn computed(op: u8, stack: &[f64]) -> Vec<f64> {
+        let mut stack = stack.to_vec();
+        let mut transient = [0.0; TRANSIENT_ELEMENTS];
+        let mut random = Random::new();
+        let ran = compute(op, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!(
+            ran,
+            Some(None),
+            "12 {op} is one of 5177's and meets no bound"
+        );
+        stack
+    }
+
+    /// 5177 §4.4 to §4.6: every operator against results worked here, the
+    /// cases 5177 leaves undefined as `docs/design/subsetting.md` settles
+    /// them, and the operands below the ones an operator takes left alone.
+    #[test]
+    fn each_arithmetic_operator_computes_what_the_specification_says() {
+        // abs and neg.
+        assert_eq!(computed(9, &[7.0, -3.5]), [7.0, 3.5]);
+        assert_eq!(computed(9, &[2.0]), [2.0]);
+        assert_eq!(computed(14, &[7.0, 3.5]), [7.0, -3.5]);
+        assert_eq!(computed(14, &[-2.0]), [2.0]);
+        // add, sub, mul and div, num1 the deeper of the two.
+        assert_eq!(computed(10, &[1.0, 7.0, 3.5]), [1.0, 10.5]);
+        assert_eq!(computed(11, &[7.0, 3.5]), [3.5]);
+        assert_eq!(computed(11, &[3.5, 7.0]), [-3.5]);
+        assert_eq!(computed(24, &[-6.0, 2.5]), [-15.0]);
+        assert_eq!(computed(12, &[7.0, 2.0]), [3.5]);
+        assert_eq!(computed(12, &[-1.0, 4.0]), [-0.25]);
+        // A zero divisor gives 0; an overflow is 0, and so is a result
+        // below the least normal double.
+        assert_eq!(computed(12, &[7.0, 0.0]), [0.0]);
+        assert_eq!(computed(24, &[1e200, 1e200]), [0.0]);
+        assert_eq!(computed(10, &[f64::MAX, f64::MAX]), [0.0]);
+        assert_eq!(computed(12, &[1e-300, 1e10]), [0.0]);
+        // sqrt: the root, and 0 for a negative operand.
+        assert_eq!(computed(26, &[6.25]), [2.5]);
+        assert_eq!(computed(26, &[0.0]), [0.0]);
+        assert_eq!(computed(26, &[-4.0]), [0.0]);
+        // drop, exch and dup.
+        assert_eq!(computed(18, &[1.0, 2.0]), [1.0]);
+        assert_eq!(computed(28, &[1.0, 2.0, 3.0]), [1.0, 3.0, 2.0]);
+        assert_eq!(computed(27, &[1.0, 2.0]), [1.0, 2.0, 2.0]);
+        // index: element i counted from the top below i; a negative i copies
+        // the top (5177), a fraction is truncated toward zero, and an i past
+        // the bottom copies the bottom.
+        let three = [10.0, 20.0, 30.0];
+        for (i, copied) in [
+            (0.0, 30.0),
+            (1.0, 20.0),
+            (2.0, 10.0),
+            (1.9, 20.0),
+            (-1.0, 30.0),
+            (-7.5, 30.0),
+            (9.0, 10.0),
+        ] {
+            assert_eq!(
+                computed(29, &[&three[..], &[i]].concat()),
+                [&three[..], &[copied]].concat(),
+                "{i} index"
+            );
+        }
+        // roll: `a b c 3 1 roll` is `c a b`, 5177's picture; J is taken
+        // modulo N, N and J are truncated toward zero, an N past the stack is
+        // the stack, and an N of zero or less turns nothing.
+        for (n, j, rolled) in [
+            (3.0, 1.0, [30.0, 10.0, 20.0]),
+            (3.0, -1.0, [20.0, 30.0, 10.0]),
+            (3.0, 4.0, [30.0, 10.0, 20.0]),
+            (3.0, 3.0, [10.0, 20.0, 30.0]),
+            (2.0, 1.0, [10.0, 30.0, 20.0]),
+            (7.0, 1.0, [30.0, 10.0, 20.0]),
+            (2.9, 1.5, [10.0, 30.0, 20.0]),
+            (0.0, 1.0, [10.0, 20.0, 30.0]),
+            (-2.0, 1.0, [10.0, 20.0, 30.0]),
+        ] {
+            assert_eq!(
+                computed(30, &[&three[..], &[n, j]].concat()),
+                rolled,
+                "{n} {j} roll"
+            );
+        }
+        // and, or, not and eq answer 1 or 0.
+        assert_eq!(computed(3, &[2.0, -1.0]), [1.0]);
+        assert_eq!(computed(3, &[2.0, 0.0]), [0.0]);
+        assert_eq!(computed(4, &[0.0, 0.0]), [0.0]);
+        assert_eq!(computed(4, &[0.0, 0.5]), [1.0]);
+        assert_eq!(computed(5, &[0.0]), [1.0]);
+        assert_eq!(computed(5, &[3.0]), [0.0]);
+        assert_eq!(computed(15, &[2.5, 2.5]), [1.0]);
+        assert_eq!(computed(15, &[2.5, 2.0]), [0.0]);
+        // ifelse: `s1 s2 v1 v2`, s1 where v1 is at most v2.
+        assert_eq!(computed(22, &[9.0, 10.0, 20.0, 1.0, 1.0]), [9.0, 10.0]);
+        assert_eq!(computed(22, &[10.0, 20.0, 1.0, 2.0]), [10.0]);
+        assert_eq!(computed(22, &[10.0, 20.0, 2.0, 1.0]), [20.0]);
+        // random: xorshift's first state from 2 463 534 242 is 723 471 715,
+        // 0x2B1F_4D63, so the first value is (0x2B1F + 1) / 65 536.
+        assert_eq!(computed(23, &[5.0]), [5.0, 11_040.0 / 65_536.0]);
+        // Short of its operands, an operator leaves the stack as it is.
+        for (op, few) in [
+            (9u8, &[][..]),
+            (14, &[][..]),
+            (10, &[1.0][..]),
+            (12, &[1.0][..]),
+            (27, &[][..]),
+            (29, &[1.0][..]),
+            (30, &[3.0][..]),
+            (22, &[1.0, 2.0, 3.0][..]),
+        ] {
+            assert_eq!(computed(op, few), few, "12 {op}");
+        }
+        // Every other escaped code is none of them, and is the caller's.
+        for op in [
+            0u8, 1, 2, 6, 7, 8, 13, 16, 17, 19, 25, 31, 34, 35, 36, 37, 38, 255,
+        ] {
+            let mut stack = vec![1.0, 2.0];
+            let mut transient = [0.0; TRANSIENT_ELEMENTS];
+            let ran = compute(
+                op,
+                &mut stack,
+                &mut transient,
+                &mut Random::new(),
+                MAX_OPERANDS,
+            );
+            assert_eq!(ran, None, "12 {op}");
+            assert_eq!(stack, [1.0, 2.0], "12 {op} leaves the stack");
+        }
+    }
+
+    /// `put` and `get` share one transient array across a run. An index is
+    /// truncated toward zero, a negative one is element 0, and one past the
+    /// array is ignored by `put` and read as 0 by `get`; either outside
+    /// 5177's 0 to 31 is a bound met.
+    #[test]
+    fn put_and_get_keep_the_transient_array() {
+        let mut transient = [0.0; TRANSIENT_ELEMENTS];
+        let mut random = Random::new();
+        let mut stack = vec![42.5, 31.0];
+        let ran = compute(20, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!(ran, Some(None));
+        assert!(stack.is_empty(), "put pops both");
+        assert_eq!(transient[31], 42.5);
+        let mut stack = vec![31.9];
+        let ran = compute(21, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!((ran, stack), (Some(None), vec![42.5]));
+        let mut stack = vec![7.0];
+        let ran = compute(21, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!(
+            (ran, stack),
+            (Some(None), vec![0.0]),
+            "an element no put set"
+        );
+
+        let before = transient;
+        let mut stack = vec![1.0, 32.0];
+        let ran = compute(20, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!(ran, Some(Some(Bound::TransientIndex)));
+        assert!(stack.is_empty());
+        assert_eq!(transient, before, "a put past the array writes nothing");
+        let mut stack = vec![32.0];
+        let ran = compute(21, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!((ran, stack), (Some(Some(Bound::TransientIndex)), vec![0.0]));
+
+        let mut stack = vec![5.0, -3.0];
+        let ran = compute(20, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!(ran, Some(Some(Bound::TransientIndex)));
+        assert_eq!(transient[0], 5.0, "a negative index is element 0");
+        let mut stack = vec![-0.5];
+        let ran = compute(21, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!(
+            (ran, stack),
+            (Some(None), vec![5.0]),
+            "-0.5 truncates to element 0, inside the array"
+        );
+
+        // Short of operands, each pops what there is.
+        let mut stack = vec![3.0];
+        let ran = compute(20, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!((ran, stack.len()), (Some(None), 0));
+        let mut stack = Vec::new();
+        let ran = compute(21, &mut stack, &mut transient, &mut random, MAX_OPERANDS);
+        assert_eq!((ran, stack.len()), (Some(None), 0));
+    }
+
+    /// A `callsubr` or `callgsubr` operand the charstring computes calls the
+    /// subroutine it computes. Every subroutine draws a line of its own
+    /// length, so the outline names the one that ran.
+    #[test]
+    fn a_computed_subroutine_number_calls_that_subroutine() {
+        let line = |dx: i16| [short(dx), short(0), vec![5, 11]].concat();
+        let start = [short(0), short(0), vec![21]].concat();
+        // `-100 3 add callsubr`: -97, which an INDEX of 200 biases by 107 to
+        // local subroutine 10.
+        let local = [start.clone(), short(-100), short(3), vec![12, 10, 10, 14]].concat();
+        // `-53 2 mul callgsubr`: -106, which an INDEX of four biases to
+        // global subroutine 1.
+        let global = [start, short(-53), short(2), vec![12, 24, 29, 14]].concat();
+        let fixture = Fixture {
+            charstrings: vec![vec![14], local, global],
+            private: private_dict(500, 400, true),
+            subrs: (0..200).map(|i| line(100 + i)).collect(),
+            gsubrs: (0..4).map(|i| line(-(50 + i))).collect(),
+            ..Fixture::default()
+        };
+        let program = fixture.build();
+        let cff = Cff::parse(&program).expect("a CFF font");
+        let drawn = |glyph: u16| cff.outline(glyph).expect("the glyph").segments;
+        assert_eq!(
+            drawn(1),
+            [
+                Segment::MoveTo { x: 0.0, y: 0.0 },
+                Segment::LineTo { x: 110.0, y: 0.0 },
+                Segment::Close,
+            ],
+            "local subroutine 10's line"
+        );
+        assert_eq!(
+            drawn(2),
+            [
+                Segment::MoveTo { x: 0.0, y: 0.0 },
+                Segment::LineTo { x: -51.0, y: 0.0 },
+                Segment::Close,
+            ],
+            "global subroutine 1's line"
+        );
+        assert_eq!((cff.first_bound(1), cff.first_bound(2)), (None, None));
+    }
+
+    /// `random` draws one fixed sequence, and each glyph's run starts it
+    /// afresh: a charstring draws the same lines whichever glyph ran before
+    /// it, through one machine or a fresh one.
+    #[test]
+    fn random_draws_one_sequence_that_each_glyph_restarts() {
+        // `0 0 rmoveto`, then twice `random 256 mul 256 mul 0 rlineto`: lines
+        // as long as the sequence's 16.16 numerators.
+        let mut code = [short(0), short(0), vec![21]].concat();
+        for _ in 0..2 {
+            code.extend([12, 23]);
+            code.extend(short(256));
+            code.extend([12, 24]);
+            code.extend(short(256));
+            code.extend([12, 24]);
+            code.extend(short(0));
+            code.push(5);
+        }
+        code.push(14);
+        let fixture = Fixture {
+            charstrings: vec![vec![14], code.clone(), code],
+            private: private_dict(500, 400, false),
+            ..Fixture::default()
+        };
+        let program = fixture.build();
+        let cff = Cff::parse(&program).expect("a CFF font");
+        // The first two states from 2 463 534 242 are 0x2B1F_4D63 and
+        // 0x94DA_CB7A: 11 040 and 38 107 over 65 536.
+        let expected = [
+            Segment::MoveTo { x: 0.0, y: 0.0 },
+            Segment::LineTo {
+                x: 11_040.0,
+                y: 0.0,
+            },
+            Segment::LineTo {
+                x: 49_147.0,
+                y: 0.0,
+            },
+            Segment::Close,
+        ];
+        let mut machine = Machine::new();
+        let mut outline = Outline::default();
+        for glyph in [1u16, 2, 1, 2] {
+            assert!(cff.outline_into(glyph, &mut outline, &mut machine));
+            assert_eq!(outline.segments, expected, "glyph {glyph}, reused");
+            assert_eq!(
+                cff.outline(glyph).expect("the glyph").segments,
+                expected,
+                "glyph {glyph}, fresh"
+            );
+        }
+    }
+
+    /// The first bound a glyph's run meets is recorded by name, and CFF
+    /// draws on past it.
+    #[test]
+    fn the_first_bound_a_run_meets_is_recorded() {
+        let fixture = Fixture {
+            charstrings: vec![
+                vec![14],
+                // 49 operands, one past the stack.
+                [vec![139; 49], vec![14]].concat(),
+                // 48 operands and `dup`, which has no room for the copy.
+                [vec![139; 48], vec![12, 27, 14]].concat(),
+                // `1 32 put`: past the transient array.
+                vec![140, 171, 12, 20, 14],
+                // `-1 get`: below it.
+                vec![138, 12, 21, 14],
+                // Subroutine 0 calls itself until the depth cap.
+                vec![32, 10, 14],
+                // `-106 callsubr`: subroutine 1, which an INDEX of one does
+                // not hold.
+                vec![33, 10, 14],
+                // 64 001 operators, past the budget.
+                [vec![5u8; 64_001], vec![14]].concat(),
+                // `50 50 add 0 rlineto`, within every bound.
+                vec![189, 189, 12, 10, 139, 5, 14],
+            ],
+            private: private_dict(500, 400, true),
+            subrs: vec![vec![32, 10, 11]],
+            ..Fixture::default()
+        };
+        let program = fixture.build();
+        let cff = Cff::parse(&program).expect("a CFF font");
+        let met: Vec<Option<Bound>> = (0..10).map(|glyph| cff.first_bound(glyph)).collect();
+        assert_eq!(
+            met,
+            [
+                None,
+                Some(Bound::StackOverflow),
+                Some(Bound::StackOverflow),
+                Some(Bound::TransientIndex),
+                Some(Bound::TransientIndex),
+                Some(Bound::SubroutineDepth),
+                Some(Bound::MissingSubroutine),
+                Some(Bound::Budget),
+                None,
+                None,
+            ]
+        );
+        assert_eq!(
+            cff.outline(8).expect("glyph 8").segments,
+            [Segment::LineTo { x: 100.0, y: 0.0 }]
+        );
+        assert!(cff.outline(1).is_some(), "a glyph past a bound still draws");
+    }
+
+    /// CFF2 has none of 5177's arithmetic (CFF2 chapter, 'CharString
+    /// operators'), and its machine clears the stack at each.
+    #[test]
+    fn a_cff2_charstring_does_not_compute() {
+        // `50 50 add 0 rlineto`: a line 100 long in CFF; in CFF2 `add`
+        // clears both operands and `rlineto` finds one.
+        let code = [189u8, 189, 12, 10, 139, 5];
+        let global = Index::default();
+        let private = Private::default();
+        let draw = |flavour: Flavour| {
+            let mut outline = Outline::default();
+            let mut stack = Vec::new();
+            let subroutines = Subroutines {
+                global: &global,
+                global_bias: EMPTY_INDEX_BIAS,
+                private: &private,
+            };
+            let stop = Charstring::new(flavour, subroutines, Some(&mut outline), &mut stack, None)
+                .run_glyph(&code);
+            assert_eq!(stop, None, "{flavour:?} runs to the end");
+            outline.segments
+        };
+        assert_eq!(draw(Flavour::Cff), [Segment::LineTo { x: 100.0, y: 0.0 }]);
+        assert!(draw(Flavour::Cff2).is_empty());
     }
 }

@@ -892,6 +892,79 @@ fn a_hintmask_counts_the_stems_a_subroutine_declared() {
     assert_eq!(local_subr_count(&subset), 2, "both subroutines are reached");
 }
 
+/// The walk counts stem hints from the depth the reader's arithmetic leaves:
+/// seventeen operands and `dup` make eighteen, so `hstemhm` declares nine
+/// and the `hintmask` after it takes two bytes. The second is `0x0A`,
+/// `callsubr`, to a walk that cleared the stack at `dup` and counted none.
+#[test]
+fn a_hintmask_after_computed_stems_is_counted_as_the_reader_counts() {
+    use crate::outline::Segment;
+
+    let mut drawn = Vec::new();
+    for _ in 0..17 {
+        drawn.extend(t2(1));
+    }
+    drawn.extend([12, 27]); // dup
+    drawn.push(18); // hstemhm
+    drawn.push(19); // hintmask
+    drawn.extend_from_slice(&[0xFF, 0x0A]);
+    drawn.extend(t2(0));
+    drawn.extend(t2(0));
+    drawn.push(21); // rmoveto
+    drawn.extend(call_local(0, 1));
+    drawn.push(14);
+
+    let program = Font {
+        charset: vec![34],
+        charstrings: vec![vec![14], drawn],
+        subrs: vec![line_subr(250, 40)],
+        ..Font::default()
+    }
+    .build();
+
+    let before = Cff::parse(&program).expect("it parses");
+    assert_eq!(
+        before.outline(1).expect("glyph 1").segments,
+        [
+            Segment::MoveTo { x: 0.0, y: 0.0 },
+            Segment::LineTo { x: 250.0, y: 40.0 },
+            Segment::Close,
+        ],
+        "the reader skips both mask bytes and draws the subroutine's line"
+    );
+
+    let subset = subset_cff(&program, &[1u16].into_iter().collect()).expect("it subsets");
+    outlines_agree(&program, &subset, &[1]);
+    assert_eq!(local_subr_count(&subset), 1, "the subroutine is reached");
+}
+
+/// A `put` short of its operands pops what there is and the reader reads on,
+/// so the walk reads on too and keeps the subroutine called after it.
+#[test]
+fn a_put_short_of_operands_reads_on_as_the_reader_reads() {
+    let mut drawn = t2(7);
+    drawn.extend([12, 20]); // put, with one operand
+    drawn.extend(t2(0));
+    drawn.extend(t2(0));
+    drawn.push(21); // rmoveto
+    drawn.extend(call_local(0, 1));
+    drawn.push(14);
+
+    let program = Font {
+        charset: vec![34],
+        charstrings: vec![vec![14], drawn],
+        subrs: vec![line_subr(90, 0)],
+        ..Font::default()
+    }
+    .build();
+    let before = Cff::parse(&program).expect("it parses");
+    assert_eq!(before.outline(1).expect("glyph 1").segments.len(), 3);
+
+    let subset = subset_cff(&program, &[1u16].into_iter().collect()).expect("it subsets");
+    outlines_agree(&program, &subset, &[1]);
+    assert_eq!(local_subr_count(&subset), 1);
+}
+
 /// The `seac` form of `endchar` builds an accented letter out of two glyphs
 /// named by StandardEncoding codes. Keeping the letter without them draws
 /// blank space in every reader that honours it.
@@ -1104,7 +1177,8 @@ fn a_charstring_number_reads_back_as_itself() {
         let bytes = charstring_int(value).expect("in range");
         let mut stems = 0usize;
         let mut stack = Vec::new();
-        let token = next_token(&bytes, 0, &mut stems, &mut stack).expect("a token");
+        let token = next_token(&bytes, 0, &mut stems, &mut stack, &mut Scratch::default())
+            .expect("a token");
         assert!(matches!(token.step, Step::Operand), "{value} is an operand");
         assert_eq!(token.end, bytes.len(), "{value} takes all of its bytes");
         assert_eq!(stack, vec![f64::from(value)], "{value} reads back");

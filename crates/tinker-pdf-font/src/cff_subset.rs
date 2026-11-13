@@ -61,7 +61,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cff::{bias, dict_get, parse_dict, read_fd_select, Cff, Index};
+use crate::cff::{
+    bias, compute, dict_get, parse_dict, read_fd_select, Cff, Index, Random, TRANSIENT_ELEMENTS,
+};
+
+/// The operands the Type 2 stack holds (5177, appendix B), as the reader's.
+const MAX_OPERANDS: usize = 48;
 
 /// How deep a `callsubr` chain is followed, which is the reader's own bound
 /// (`cff.rs`): a call at depth 11 does not run, so a subroutine only reachable
@@ -346,9 +351,21 @@ struct Token {
 /// reader will have — and the stack depth is what decides how many stem hints
 /// a `hintmask` has to skip past.
 fn push(stack: &mut Vec<f64>, value: f64) {
-    if stack.len() < 48 && value.is_finite() {
+    if stack.len() < MAX_OPERANDS && value.is_finite() {
         stack.push(value);
     }
+}
+
+/// What the arithmetic, storage and conditional operators read beside the
+/// stack: the transient array and `random`'s sequence, kept for one glyph's
+/// walk and started afresh at the next, as the reader starts them.
+///
+/// Not part of [`Machine`], so the memo stays one stack and a stem count an
+/// entry: no depth the walk counts from depends on a value these hold.
+#[derive(Clone, Default)]
+struct Scratch {
+    transient: [f64; TRANSIENT_ELEMENTS],
+    random: Random,
 }
 
 /// Reads one token, advancing `stems` and `stack` exactly as `cff.rs`'s
@@ -357,8 +374,16 @@ fn push(stack: &mut Vec<f64>, value: f64) {
 /// The agreement is the point. If this counted stem hints differently the
 /// `hintmask` byte count would differ, the token boundaries after it would
 /// differ, and a `callsubr` operand would be rewritten in the middle of some
-/// other operator — which produces a font that parses and draws nonsense.
-fn next_token(code: &[u8], at: usize, stems: &mut usize, stack: &mut Vec<f64>) -> Option<Token> {
+/// other operator — which produces a font that parses and draws nonsense. So
+/// the two-byte operators run through the reader's own [`compute`], and the
+/// stack is as deep after each as the reader's.
+fn next_token(
+    code: &[u8],
+    at: usize,
+    stems: &mut usize,
+    stack: &mut Vec<f64>,
+    scratch: &mut Scratch,
+) -> Option<Token> {
     let start = at;
     let cut = |end: usize| {
         Some(Token {
@@ -493,21 +518,17 @@ fn next_token(code: &[u8], at: usize, stems: &mut usize, stack: &mut Vec<f64>) -
             let Some(&second) = code.get(at + 1) else {
                 return cut(code.len());
             };
-            match second {
-                // put and get, the transient array. The value is not tracked;
-                // only the depth it leaves behind matters here.
-                20 => {
-                    if stack.pop().is_none() || stack.pop().is_none() {
-                        return cut(at + 2);
-                    }
-                }
-                21 => {
-                    if stack.pop().is_none() {
-                        return cut(at + 2);
-                    }
-                    push(stack, 0.0);
-                }
-                _ => stack.clear(),
+            // 5177 §4.4 to §4.6, as the reader runs them; every other
+            // two-byte operator clears the stack, as the reader's does.
+            let ran = compute(
+                second,
+                stack,
+                &mut scratch.transient,
+                &mut scratch.random,
+                MAX_OPERANDS,
+            );
+            if ran.is_none() {
+                stack.clear();
             }
             Some(Token {
                 step: Step::Plain,
@@ -592,6 +613,8 @@ struct Walk<'a, 'b> {
     /// The states currently on the stack, which is how a subroutine that
     /// calls itself is noticed rather than followed.
     active: BTreeSet<State>,
+    /// The transient array and `random`'s sequence of the glyph being walked.
+    scratch: Scratch,
     budget: u32,
     refused: bool,
 }
@@ -646,7 +669,13 @@ impl Walk<'_, '_> {
                 break;
             }
             self.budget -= 1;
-            let Some(token) = next_token(code, at, &mut machine.stems, &mut machine.stack) else {
+            let Some(token) = next_token(
+                code,
+                at,
+                &mut machine.stems,
+                &mut machine.stack,
+                &mut self.scratch,
+            ) else {
                 break;
             };
             // A token that consumed nothing would spin; the reader's own
@@ -875,6 +904,7 @@ pub fn subset_cff_with(
         plans: BTreeMap::new(),
         memo: BTreeMap::new(),
         active: BTreeSet::new(),
+        scratch: Scratch::default(),
         budget: WALK_BUDGET,
         refused: false,
     };
@@ -890,6 +920,9 @@ pub fn subset_cff_with(
         };
         let ctx = walk.context.get(usize::from(glyph)).copied().unwrap_or(0);
         let mut machine = Machine::default();
+        // Each glyph's run starts the transient array and `random` afresh,
+        // as the reader's does.
+        walk.scratch = Scratch::default();
         walk.body(
             ctx,
             Kind::Charstring,
