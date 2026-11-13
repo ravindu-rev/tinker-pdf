@@ -130,16 +130,17 @@ impl Page {
     /// this records and drops: a caller who also renders the page asks the
     /// list it renders from instead, and pays for one interpretation.
     ///
-    /// Seven of `options` are read, because a render reads them: `usage`,
-    /// whose optional-content states decide what is hidden; `content`,
-    /// `annotations`, `widgets` and `other_annotations`, which parts of the
-    /// page are part of what it draws; `magnification`, where an annotation
-    /// `/NoZoom` keeps its size draws; and `scale`, with the clamp
-    /// [`Page::pixel_size`] applies, for the box in pixels. The region, the
-    /// format and the rest change no answer.
+    /// Eight of `options` are read, because a render reads them: `usage` and
+    /// `layers`, whose optional-content states decide what is hidden;
+    /// `content`, `annotations`, `widgets` and `other_annotations`, which
+    /// parts of the page are part of what it draws; `magnification`, where an
+    /// annotation `/NoZoom` keeps its size draws and what a `/Zoom` auto-state
+    /// reads; and `scale`, with the clamp [`Page::pixel_size`] applies, for
+    /// the box in pixels. The region, the format and the rest change no
+    /// answer.
     #[must_use]
     pub fn analysis(&self, options: &RenderOptions) -> PageAnalysis {
-        self.display_list_with(options.usage, &options.layers)
+        self.display_list_at(options.usage, &options.layers, options.magnification)
             .analysis(options)
     }
 }
@@ -148,14 +149,18 @@ impl Page {
 /// [`Analyser`], or, for a list that is not retained, the page interpreted
 /// into it, its annotations drawn through it as a render draws them.
 ///
-/// A list carries the optional-content states of the usage it was recorded
-/// for, so another usage is answered by the page's list for that usage, as a
-/// render of another usage is drawn the direct way.
+/// A list carries the optional-content states of the usage, the layer
+/// options and the magnification it was recorded for, so options that could
+/// give other states are answered by the page's list for them, as a render of
+/// them is drawn the direct way.
 pub(crate) fn analyse(list: &DisplayList, options: &RenderOptions) -> PageAnalysis {
-    if options.usage != list.usage() || options.layers != *list.layers() {
+    if options.usage != list.usage()
+        || options.layers != *list.layers()
+        || list.magnification_moves(options)
+    {
         return list
             .page()
-            .display_list_with(options.usage, &options.layers)
+            .display_list_at(options.usage, &options.layers, options.magnification)
             .analysis(options);
     }
     let page = list.page();

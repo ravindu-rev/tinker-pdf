@@ -30,7 +30,7 @@ use tinker_pdf_content::Layer;
 use tinker_pdf_cos::{decode_text_string, CosDocument, Dict, ObjRef, Object};
 
 use crate::resources::{read_key, read_resolved};
-use crate::{LayerOptions, Usage};
+use crate::{LayerOptions, LayerUser, Usage};
 
 /// How deep a `/VE` visibility expression may nest before it is refused
 /// (8.11.2.3).
@@ -81,6 +81,10 @@ pub(crate) struct OptionalContent {
     /// the overrides met them: what the render reports, and no question of
     /// visibility.
     refused: Vec<String>,
+    /// Whether a `/Zoom` entry recommended a state: whether a render at
+    /// another magnification may bind other states, which a display list and
+    /// a form's kept drawing ask. No question of visibility either.
+    reads_magnification: bool,
 }
 
 impl PartialEq for OptionalContent {
@@ -108,21 +112,24 @@ impl OptionalContent {
     /// `/Event` is the usage's (ISO 32000-2 8.11.4.4,
     /// `docs/design/render-usage.md`). With no usage, the initial states.
     pub(crate) fn bind_for(doc: &CosDocument, usage: Option<Usage>) -> OptionalContent {
-        OptionalContent::bind_with(doc, usage, &LayerOptions::default())
+        OptionalContent::bind_with(doc, usage, &LayerOptions::default(), 1.0)
     }
 
     /// [`OptionalContent::bind_for`] under the layer options a render names
-    /// (`docs/design/optional-content-config.md`): its configuration — `None`
-    /// for `/D`, `Some(i)` for the `i`th entry of `/Configs`, an index past
-    /// them, or an entry that is no dictionary, binding `/D`'s — and its
-    /// overrides. The states are built in one order: `/D`'s initial states —
+    /// (`docs/design/optional-content-config.md`), at its magnification: its
+    /// configuration — `None` for `/D`, `Some(i)` for the `i`th entry of
+    /// `/Configs`, an index past them, or an entry that is no dictionary,
+    /// binding `/D`'s — its overrides, and its language and user, which with
+    /// the magnification are what the `/Zoom`, `/Language` and `/User`
+    /// categories read. The states are built in one order: `/D`'s initial
+    /// states —
     /// `/BaseState` over every group `/OCGs` lists, then its `/ON`, then its
     /// `/OFF` (8.11.4.5) — then the chosen configuration over them, its
     /// `/BaseState` `/ON` or `/OFF` setting every listed group and
     /// `/Unchanged` leaving each as `/D` set it, then its own `/ON` and `/OFF`
     /// (Table 99); then the chosen configuration's own `/AS` entries for
     /// `usage` — a configuration with none adjusts nothing, as Table 99 gives
-    /// `/AS` no default; then the render's overrides, in order, under the
+    /// `/AS` no default ([`recommendations`]); then the render's overrides, in order, under the
     /// configuration's `/RBGroups` and `/Locked` ([`apply_overrides`]); and
     /// last its `/Intent` decides which groups count at all (8.11.2.3): a
     /// group none of whose intents the configuration's set holds has no
@@ -132,6 +139,7 @@ impl OptionalContent {
         doc: &CosDocument,
         usage: Option<Usage>,
         layers: &LayerOptions,
+        magnification: f64,
     ) -> OptionalContent {
         #[cfg(test)]
         binds::counted();
@@ -206,8 +214,16 @@ impl OptionalContent {
         }
         let applied = chosen.as_ref().unwrap_or(&default);
 
+        let mut reads_magnification = false;
         if let Some(usage) = usage {
-            for (reference, on) in recommendations(doc, applied, usage) {
+            let inputs = Inputs {
+                magnification: self::magnification(magnification),
+                language: layers.language.as_deref().filter(|tag| !tag.is_empty()),
+                user: &layers.user,
+            };
+            let recommended = recommendations(doc, applied, usage, &inputs);
+            reads_magnification = recommended.zoomed;
+            for (reference, on) in recommended.states {
                 states.insert(reference, on);
             }
         }
@@ -249,7 +265,15 @@ impl OptionalContent {
             states,
             listed: all,
             refused,
+            reads_magnification,
         }
+    }
+
+    /// Whether a `/Zoom` entry recommended a group a state in this binding,
+    /// so that a render at another magnification may bind other states. A
+    /// binding that read none is the same at every magnification.
+    pub(crate) fn reads_magnification(&self) -> bool {
+        self.reads_magnification
     }
 
     /// The locked groups the render's overrides would have changed, each once
@@ -708,9 +732,42 @@ fn refs_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<ObjRef> {
 }
 
 /// How many of a usage application dictionary's `/Category` names are read.
-/// Table 100 defines nine usage entries, three of which carry a state this
+/// Table 100 defines nine usage entries, six of which carry a state this
 /// build reads.
 const MAX_CATEGORIES: usize = 16;
+
+/// What a render states for the categories whose recommendation is not a
+/// state written in the group (8.11.4.4): the magnification `/Zoom` reads,
+/// the language `/Language` reads and the identification `/User` reads.
+struct Inputs<'a> {
+    /// The render's magnification, read as 1 where it is not a finite number
+    /// above zero ([`magnification`]).
+    magnification: f64,
+    /// The application's language tag; `None` states none.
+    language: Option<&'a str>,
+    /// The user's identification, of each kind.
+    user: &'a LayerUser,
+}
+
+/// The recommendations a usage's `/AS` entries make ([`recommendations`]),
+/// and whether any of them came from a `/Zoom` entry, which another
+/// magnification may answer otherwise.
+#[derive(Default)]
+struct Recommended {
+    /// Each group something recommended a state for, and that state.
+    states: BTreeMap<ObjRef, bool>,
+    /// Whether a `/Zoom` entry recommended a state to any group.
+    zoomed: bool,
+}
+
+impl Recommended {
+    /// `on` recommended for `group`, where a group already recommended OFF
+    /// stays OFF.
+    fn add(&mut self, group: ObjRef, on: bool) {
+        let all_on = self.states.entry(group).or_insert(true);
+        *all_on = *all_on && on;
+    }
+}
 
 /// The state each group a usage's `/AS` entries name is set to (ISO 32000-2
 /// 8.11.4.4): `configuration`'s entries whose `/Event` is `usage`'s, each
@@ -736,8 +793,9 @@ fn recommendations(
     doc: &CosDocument,
     configuration: &Dict,
     usage: Usage,
-) -> BTreeMap<ObjRef, bool> {
-    let mut recommended = BTreeMap::new();
+    inputs: &Inputs<'_>,
+) -> Recommended {
+    let mut recommended = Recommended::default();
     read_key(doc, configuration, b"AS", |entries| {
         let Some(entries) = entries.as_array() else {
             return;
@@ -745,7 +803,7 @@ fn recommendations(
         for entry in entries.iter().take(MAX_OPERANDS) {
             read_resolved(doc, entry, |entry| {
                 if let Some(entry) = entry.as_dict() {
-                    recommend(doc, entry, usage, &mut recommended);
+                    recommend(doc, entry, usage, inputs, &mut recommended);
                 }
             });
         }
@@ -759,7 +817,8 @@ fn recommend(
     doc: &CosDocument,
     entry: &Dict,
     usage: Usage,
-    recommended: &mut BTreeMap<ObjRef, bool>,
+    inputs: &Inputs<'_>,
+    recommended: &mut Recommended,
 ) {
     let event = read_key(doc, entry, b"Event", |event| name_of(doc, event));
     if event.as_deref() != Some(usage.event()) {
@@ -778,7 +837,13 @@ fn recommend(
     };
     // Table 101: `/OCGs` defaults to "an empty array, indicating that no
     // groups shall be affected".
-    for group in refs_of(doc, entry, b"OCGs") {
+    let groups = refs_of(doc, entry, b"OCGs");
+    // The language category is decided over the entry's groups together.
+    let languages = inputs
+        .language
+        .filter(|_| categories.iter().any(|name| name.as_slice() == b"Language"))
+        .map(|wanted| Languages::of(doc, &groups, wanted));
+    for group in groups {
         let Ok(object) = doc.get(group) else {
             continue;
         };
@@ -790,27 +855,34 @@ fn recommend(
                 return;
             };
             for category in &categories {
-                if let Some(on) = category_state(doc, usage_dict, category) {
-                    let all_on = recommended.entry(group).or_insert(true);
-                    *all_on = *all_on && on;
+                let state = match category.as_slice() {
+                    b"Zoom" => {
+                        let state = zoom_state(doc, usage_dict, inputs.magnification);
+                        recommended.zoomed |= state.is_some();
+                        state
+                    }
+                    b"Language" => languages.as_ref().and_then(|found| found.state(group)),
+                    b"User" => user_state(doc, usage_dict, inputs.user),
+                    category => category_state(doc, usage_dict, category),
+                };
+                if let Some(on) = state {
+                    recommended.add(group, on);
                 }
             }
         });
     }
 }
 
-/// What one category of a group's usage dictionary recommends: `Some(true)`
-/// for ON and `Some(false)` for OFF, `None` where it recommends nothing.
-///
-/// The three categories whose state is an event's (8.11.4.4): "View: The
-/// state shall be the value of the ViewState entry", "Print: The state shall
-/// be the value of the PrintState entry. If PrintState is not present, the
-/// state of the optional content group shall be left unchanged", "Export:
-/// The state shall be the value of the ExportState entry". `/Zoom`,
-/// `/Language` and `/User` need a magnification, the caller's languages and
-/// the caller's identity, which RC-14 gives a render, and `/CreatorInfo` and
-/// `/PageElement` carry no state, so each recommends nothing here, as an
-/// absent entry does; so does a state that is neither `/ON` nor `/OFF`.
+/// What one of the three categories whose state is an event's recommends in
+/// a group's usage dictionary: `Some(true)` for ON and `Some(false)` for OFF,
+/// `None` where it recommends nothing (8.11.4.4): "View: The state shall be
+/// the value of the ViewState entry", "Print: The state shall be the value of
+/// the PrintState entry. If PrintState is not present, the state of the
+/// optional content group shall be left unchanged", "Export: The state shall
+/// be the value of the ExportState entry". `/CreatorInfo` and `/PageElement`
+/// carry no state and recommend nothing, as an absent entry does and as every
+/// name Table 100 does not define does; so does a state that is neither `/ON`
+/// nor `/OFF`.
 fn category_state(doc: &CosDocument, usage: &Dict, category: &[u8]) -> Option<bool> {
     let (entry, state): (&[u8], &[u8]) = match category {
         b"View" => (b"View", b"ViewState"),
@@ -820,14 +892,202 @@ fn category_state(doc: &CosDocument, usage: &Dict, category: &[u8]) -> Option<bo
     };
     read_key(doc, usage, entry, |entry| {
         let entry = entry.as_dict()?;
-        read_key(doc, entry, state, |value| {
-            match name_of(doc, value)?.as_slice() {
-                b"ON" => Some(true),
-                b"OFF" => Some(false),
-                _ => None,
-            }
-        })
+        read_key(doc, entry, state, |value| on_or_off(doc, value))
     })
+}
+
+/// `/ON` as `true` and `/OFF` as `false`; `None` for anything else.
+fn on_or_off(doc: &CosDocument, value: &Object) -> Option<bool> {
+    match name_of(doc, value)?.as_slice() {
+        b"ON" => Some(true),
+        b"OFF" => Some(false),
+        _ => None,
+    }
+}
+
+/// A magnification as a render reads it: 1 where it is not a finite number
+/// above zero, as a scale is (`crate::RenderOptions::magnification`).
+pub(crate) fn magnification(magnification: f64) -> f64 {
+    if magnification.is_finite() && magnification > 0.0 {
+        magnification
+    } else {
+        1.0
+    }
+}
+
+/// What a group's `/Usage /Zoom` recommends at `magnification` (8.11.4.4):
+/// "If the current magnification level of the document is greater than or
+/// equal to min and less than max, the ON state shall be used; otherwise, OFF
+/// shall be used", `/min` 0 and `/max` infinity where absent (Table 100).
+/// `None` where there is no `/Zoom`, where it is no dictionary, or where a
+/// bound is present and no number this build can compare — what this build
+/// cannot read leaves the group as configured.
+fn zoom_state(doc: &CosDocument, usage: &Dict, magnification: f64) -> Option<bool> {
+    read_key(doc, usage, b"Zoom", |zoom| {
+        let zoom = zoom.as_dict()?;
+        let bound = |key: &[u8], default: f64| {
+            read_key(doc, zoom, key, |value| match value {
+                // 7.3.9: a null value is an absent one.
+                Object::Null => Some(default),
+                value => value.as_number().filter(|bound| !bound.is_nan()),
+            })
+        };
+        let min = bound(b"min", 0.0)?;
+        let max = bound(b"max", f64::INFINITY)?;
+        Some(magnification >= min && magnification < max)
+    })
+}
+
+/// What a group's `/Usage /User` recommends for `user` (8.11.4.4): "The Name
+/// entry shall specify a name or names to match with the user's
+/// identification. The Type entry determines how the Name entry shall be
+/// interpreted (name, title, or organisation). If there is an exact match,
+/// the ON state shall be used; otherwise OFF shall be used." The
+/// identification compared is the one of the kind `/Type` names — `/Ind`,
+/// `/Ttl` or `/Org` — and a `/Name`, a text string or an array of them read
+/// [`MAX_OPERANDS`] in, matches where one of them, decoded, equals it.
+/// `None` — nothing recommended — where the render states no identification
+/// of that kind, and where there is no `/User`, it is no dictionary, its
+/// `/Type` is none of the three, or its `/Name` is neither a text string nor
+/// an array of them.
+fn user_state(doc: &CosDocument, usage: &Dict, user: &LayerUser) -> Option<bool> {
+    read_key(doc, usage, b"User", |entry| {
+        let entry = entry.as_dict()?;
+        let kind = read_key(doc, entry, b"Type", |kind| name_of(doc, kind))?;
+        let identification = match kind.as_slice() {
+            b"Ind" => user.name.as_deref(),
+            b"Ttl" => user.title.as_deref(),
+            b"Org" => user.organisation.as_deref(),
+            _ => None,
+        }?;
+        let names = read_key(doc, entry, b"Name", |names| text_strings(doc, names))?;
+        Some(names.iter().any(|name| name == identification))
+    })
+}
+
+/// A text string, or an array of text strings read [`MAX_OPERANDS`] in, each
+/// decoded (7.9.2.2); `None` for anything else, and for an array holding
+/// anything else.
+fn text_strings(doc: &CosDocument, value: &Object) -> Option<Vec<String>> {
+    if let Some(text) = value.as_string() {
+        return Some(vec![decode_text_string(&text.bytes)]);
+    }
+    value
+        .as_array()?
+        .iter()
+        .take(MAX_OPERANDS)
+        .map(|item| {
+            read_resolved(doc, item, |item| {
+                item.as_string().map(|text| decode_text_string(&text.bytes))
+            })
+        })
+        .collect()
+}
+
+/// How a group's `/Lang` stands to the application's language (8.11.4.4):
+/// "an exact match to the language and locale", or "a partial match (that
+/// is, the language matches but not the locale)", or neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Match {
+    /// The whole tag, ignoring ASCII case: 14.9.2's language identifiers are
+    /// language tags, whose case carries no meaning.
+    Exact,
+    /// The primary language subtag — what precedes the first hyphen — and
+    /// not the rest.
+    Partial,
+    /// Neither.
+    Neither,
+}
+
+impl Match {
+    /// How the tag `lang` stands to the tag `wanted`.
+    fn of(lang: &str, wanted: &str) -> Match {
+        if lang.eq_ignore_ascii_case(wanted) {
+            return Match::Exact;
+        }
+        let primary = |tag: &str| tag.split('-').next().unwrap_or_default().to_string();
+        let (lang, wanted) = (primary(lang), primary(wanted));
+        if !lang.is_empty() && lang.eq_ignore_ascii_case(&wanted) {
+            Match::Partial
+        } else {
+            Match::Neither
+        }
+    }
+}
+
+/// One usage application dictionary's `/Language` category, decided over the
+/// groups its `/OCGs` lists (8.11.4.4): "If an exact match to the language
+/// and locale is found among the Lang entries of the optional content groups
+/// in the usage application dictionary's OCGs list, all groups that have
+/// exact matches shall receive an ON recommendation. If no exact match is
+/// found, but a partial match is found …, all partially matching groups that
+/// have Preferred entries with a value of ON shall receive an ON
+/// recommendation. All other groups shall receive an OFF recommendation."
+/// The other groups are those with a `/Language` entry: a group without one
+/// has nothing for the category to examine, and one whose entry this build
+/// cannot read — no dictionary, a `/Lang` that is no text string, a
+/// `/Preferred` that is neither `/ON` nor `/OFF` — is recommended nothing and
+/// takes no part in the match.
+struct Languages {
+    /// Each group with a readable `/Language`: how its `/Lang` matches, and
+    /// whether its `/Preferred` is `/ON` (`/OFF` by default).
+    spoken: BTreeMap<ObjRef, (Match, bool)>,
+    /// Whether any group matches exactly.
+    exact: bool,
+    /// Whether any group matches in part.
+    partial: bool,
+}
+
+impl Languages {
+    /// The category over `groups` for the application's language `wanted`.
+    fn of(doc: &CosDocument, groups: &[ObjRef], wanted: &str) -> Languages {
+        let mut spoken = BTreeMap::new();
+        for &group in groups {
+            let Ok(object) = doc.get(group) else {
+                continue;
+            };
+            let Some(dict) = object.as_dict() else {
+                continue;
+            };
+            let entry = read_key(doc, dict, b"Usage", |usage| {
+                let usage = usage.as_dict()?;
+                read_key(doc, usage, b"Language", |entry| {
+                    let entry = entry.as_dict()?;
+                    let lang = read_key(doc, entry, b"Lang", |lang| {
+                        lang.as_string().map(|text| decode_text_string(&text.bytes))
+                    })?;
+                    let preferred = read_key(doc, entry, b"Preferred", |value| match value {
+                        Object::Null => Some(false),
+                        value => on_or_off(doc, value),
+                    })?;
+                    Some((Match::of(&lang, wanted), preferred))
+                })
+            });
+            if let Some(entry) = entry {
+                spoken.insert(group, entry);
+            }
+        }
+        let exact = spoken.values().any(|(found, _)| *found == Match::Exact);
+        let partial = spoken.values().any(|(found, _)| *found == Match::Partial);
+        Languages {
+            spoken,
+            exact,
+            partial,
+        }
+    }
+
+    /// What the category recommends `group`, `None` for a group without a
+    /// readable `/Language`.
+    fn state(&self, group: ObjRef) -> Option<bool> {
+        let (found, preferred) = *self.spoken.get(&group)?;
+        Some(if self.exact {
+            found == Match::Exact
+        } else if self.partial {
+            found == Match::Partial && preferred
+        } else {
+            false
+        })
+    }
 }
 
 /// Configurations bound, counted for the guard that a render binds one:
@@ -1259,7 +1519,9 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n"
 
     /// **A group is on only if every recommendation it has is**: across its
     /// entry's categories and across entries of the event; a category with no
-    /// entry, or no state, recommends nothing, and a group with no
+    /// entry, or no state, recommends nothing, and so do `/Language` and
+    /// `/User` where the render states no language and no user; a `/Zoom`
+    /// recommends by the magnification, 1 for `bind_for`; and a group with no
     /// recommendation keeps `/D`'s state.
     #[test]
     fn every_recommendation_must_be_on() {
@@ -1299,10 +1561,16 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n"
             ),
             (
                 "",
-                "[<< /Event /Print /Category [/Zoom /Language /User /CreatorInfo /PageElement] \
+                "[<< /Event /Print /Category [/Language /User /CreatorInfo /PageElement] \
                   /OCGs [13 0 R] >>]",
-                "/Zoom << /max 0.5 >> /Language << /Lang (xx) >> /User << /Type /Ind /Name (x) >>",
+                "/Language << /Lang (xx) >> /User << /Type /Ind /Name (x) >>",
                 Some(true),
+            ),
+            (
+                "",
+                "[<< /Event /Print /Category [/Zoom /CreatorInfo] /OCGs [13 0 R] >>]",
+                "/Zoom << /max 0.5 >>",
+                Some(false),
             ),
         ];
         for (index, (d, auto_state, usage, expected)) in cases.iter().enumerate() {
@@ -1522,12 +1790,12 @@ trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
             (Some(9), true, false),
             (Some(usize::MAX), true, false),
         ] {
-            let oc = OptionalContent::bind_with(&doc, None, &configured(configuration));
+            let oc = OptionalContent::bind_with(&doc, None, &configured(configuration), 1.0);
             assert_eq!(state(&oc, 10), Some(alpha), "{configuration:?}: Alpha");
             assert_eq!(state(&oc, 11), Some(beta), "{configuration:?}: Beta");
         }
         assert_eq!(
-            OptionalContent::bind_with(&doc, None, &configured(Some(3))),
+            OptionalContent::bind_with(&doc, None, &configured(Some(3)), 1.0),
             OptionalContent::bind(&doc),
             "an unreadable configuration binds /D's states"
         );
@@ -1597,6 +1865,7 @@ trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
                 .iter()
                 .map(|&(num, on)| (ObjRef { num, gen: 0 }, on))
                 .collect(),
+            ..crate::LayerOptions::default()
         }
     }
 
@@ -1619,7 +1888,7 @@ trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
             "12 0 obj\n<< /Type /OCG >>\nendobj\n",
         );
         let bound = |configuration, overrides: &[(u32, bool)]| {
-            OptionalContent::bind_with(&doc, None, &overriding(configuration, overrides))
+            OptionalContent::bind_with(&doc, None, &overriding(configuration, overrides), 1.0)
         };
         let states = |oc: &OptionalContent| (state(oc, 10), state(oc, 11), state(oc, 12));
 
@@ -1663,5 +1932,95 @@ trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
             (Some(true), Some(true)),
             "/D's own states show both members"
         );
+    }
+
+    /// **A language tag matches whole, or by its primary subtag** (RC-14.4,
+    /// 8.11.4.4): the whole tag ignoring ASCII case is an exact match; the
+    /// subtag before the first hyphen alike, the rest not, a partial one;
+    /// anything else, an empty tag's primary subtag among it, neither.
+    #[test]
+    fn a_language_tag_matches_whole_or_by_its_primary_subtag() {
+        use super::Match;
+        for (lang, wanted, found) in [
+            ("en-US", "en-US", Match::Exact),
+            ("en-us", "EN-US", Match::Exact),
+            ("en", "en", Match::Exact),
+            ("es-MX", "es-ES", Match::Partial),
+            ("en", "en-GB", Match::Partial),
+            ("en-GB", "en", Match::Partial),
+            ("zh-Hant-TW", "ZH-cn", Match::Partial),
+            ("fr", "de", Match::Neither),
+            ("en", "eng", Match::Neither),
+            ("", "en", Match::Neither),
+            ("-US", "-GB", Match::Neither),
+            ("", "", Match::Exact),
+        ] {
+            assert_eq!(Match::of(lang, wanted), found, "{lang} for {wanted}");
+        }
+    }
+
+    /// **The zoom, language and user categories read the render's inputs**
+    /// (RC-14.4, 8.11.4.4): a `/Zoom` recommends by the magnification, which
+    /// the binding says it read; a `/Language` decides over its entry's
+    /// groups together; a `/User` compares the identification of its
+    /// `/Type`'s kind; and a binding no `/Zoom` entry recommended for reads no
+    /// magnification, whatever else it read.
+    #[test]
+    fn the_zoom_language_and_user_categories_read_the_renders_inputs() {
+        let doc = document(
+            "/OCProperties << /OCGs [12 0 R 13 0 R 14 0 R 15 0 R] /D << /AS [\
+             << /Event /View /Category [/Zoom] /OCGs [12 0 R] >> \
+             << /Event /View /Category [/Language] /OCGs [13 0 R 14 0 R] >> \
+             << /Event /View /Category [/User] /OCGs [15 0 R] >>] >> >>",
+            "12 0 obj\n<< /Type /OCG /Usage << /Zoom << /min 2 >> >> >>\nendobj\n\
+             13 0 obj\n<< /Type /OCG /Usage << /Language << /Lang (pt-BR) >> >> >>\nendobj\n\
+             14 0 obj\n<< /Type /OCG /Usage << /Language << /Lang (pt-PT) /Preferred /ON >> >> >>\nendobj\n\
+             15 0 obj\n<< /Type /OCG /Usage << /User << /Type /Org /Name (Tinker) >> >> >>\nendobj\n",
+        );
+        let layers = |language: Option<&str>, organisation: Option<&str>| crate::LayerOptions {
+            language: language.map(str::to_string),
+            user: crate::LayerUser {
+                organisation: organisation.map(str::to_string),
+                ..crate::LayerUser::default()
+            },
+            ..crate::LayerOptions::default()
+        };
+        let view = Some(Usage::View);
+
+        let oc = OptionalContent::bind_with(&doc, view, &layers(None, None), 1.0);
+        assert_eq!(state(&oc, 12), Some(false), "below /min");
+        assert!(oc.reads_magnification());
+        assert_eq!(
+            (state(&oc, 13), state(&oc, 14), state(&oc, 15)),
+            (Some(true), Some(true), Some(true)),
+            "no language and no user stated"
+        );
+        let oc =
+            OptionalContent::bind_with(&doc, view, &layers(Some("pt-BR"), Some("Tinker")), 4.0);
+        assert_eq!(
+            (
+                state(&oc, 12),
+                state(&oc, 13),
+                state(&oc, 14),
+                state(&oc, 15)
+            ),
+            (Some(true), Some(true), Some(false), Some(true))
+        );
+        let oc = OptionalContent::bind_with(&doc, view, &layers(Some("pt-AO"), Some("Other")), 4.0);
+        assert_eq!(
+            (state(&oc, 13), state(&oc, 14), state(&oc, 15)),
+            (Some(false), Some(true), Some(false)),
+            "a partial match takes its preference"
+        );
+        assert_eq!(
+            OptionalContent::bind_with(&doc, view, &layers(None, None), f64::NAN),
+            OptionalContent::bind_with(&doc, view, &layers(None, None), 1.0),
+            "a magnification that is no number above zero is 1"
+        );
+        let oc =
+            OptionalContent::bind_with(&doc, Some(Usage::Print), &layers(Some("pt-BR"), None), 4.0);
+        assert!(!oc.reads_magnification(), "no print entry reads it");
+        assert_eq!(state(&oc, 12), Some(true), "/D's own state");
+        assert!(!OptionalContent::bind(&doc).reads_magnification());
     }
 }

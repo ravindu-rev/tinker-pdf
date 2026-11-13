@@ -105,10 +105,28 @@ fuzz_target!(|data: &[u8]| {
             layers: tinker_pdf::LayerOptions {
                 configuration,
                 overrides: overrides.clone(),
+                ..tinker_pdf::LayerOptions::default()
             },
             ..RenderOptions::at_dpi(12.0)
         });
     }
+    // A view at a magnification, for a language and a user: the `/Zoom`,
+    // `/Language` and `/User` categories of the `/AS` entries the input
+    // shapes, over the `/Usage` dictionaries and `/Lang` tags it writes.
+    let _ = page.render(&RenderOptions {
+        usage: Some(tinker_pdf::Usage::View),
+        magnification: 2.0,
+        layers: tinker_pdf::LayerOptions {
+            language: Some("en-US".to_string()),
+            user: tinker_pdf::LayerUser {
+                name: Some("Ada".to_string()),
+                title: Some("Editor".to_string()),
+                organisation: Some("Tinker".to_string()),
+            },
+            ..tinker_pdf::LayerOptions::default()
+        },
+        ..RenderOptions::at_dpi(12.0)
+    });
     // The SVG writer over the same page: a second device fed from a display
     // list, whose numbers and data URIs a hostile page shapes. Rasterised
     // paints at the lowest scale it takes, for the reason above.

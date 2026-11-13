@@ -9,7 +9,10 @@
 //! that hides content correctly for the wrong reason is exactly the failure
 //! this gap exists to prevent.
 
-use tinker_pdf::{Bitmap, Document, LayerOptions, ObjRef, RenderOptions, RenderWarning, Usage};
+use tinker_pdf::{
+    Bitmap, CacheLimits, Document, LayerOptions, LayerUser, ObjRef, Parallelism, RenderOptions,
+    RenderWarning, Usage,
+};
 
 /// A 40x40 page with one optional content group at 5 0 R, called
 /// "Construction lines".
@@ -751,8 +754,9 @@ fn each_usage_and_state_category_renders_as_its_d_twin() {
 /// the group as `/D` set it** (RC-13.2): a group is on only if every
 /// recommendation it has, across its entry's categories and across every
 /// entry of the event, is on; a category with no entry, or no state, in its
-/// usage dictionary recommends nothing, and so does one this build does not
-/// read; and each malformed shape — an `/AS` that is no array, an entry that
+/// usage dictionary recommends nothing, and so does one whose input the
+/// render does not state — a language or a user — while a `/Zoom` is read at
+/// the render's magnification, 1 here; and each malformed shape — an `/AS` that is no array, an entry that
 /// is no dictionary or names no event this build knows, a `/Category` that is
 /// absent or no array, a `/Usage` or a category that is no dictionary, a
 /// state that is neither name — is the `/D` twin, in a print render.
@@ -802,14 +806,14 @@ fn recommendations_combine_and_what_is_malformed_leaves_d() {
         ("no PrintState", false, format!("[{}]", entry("/Print")), "/Print << >>", false),
         ("no PrintState, on", true, format!("[{}]", entry("/Print")), "/Print << >>", true),
         (
-            "a zoom category this build does not read",
+            "a zoom category whose /min is above the magnification",
             true,
             format!("[{}]", entry("/Zoom")),
             "/Zoom << /min 4 >>",
-            true,
+            false,
         ),
         (
-            "categories that carry no state",
+            "categories that carry no state, and a language and a user the render does not state",
             false,
             format!("[{}]", entry("/CreatorInfo /PageElement /Language /User")),
             "/CreatorInfo << /Creator (x) /Subtype /Artwork >> /PageElement << /Subtype /HF >> \
@@ -1286,6 +1290,7 @@ fn overriding(
                 .iter()
                 .map(|&(num, on)| (ObjRef::new(num, 0), on))
                 .collect(),
+            ..LayerOptions::default()
         },
         ..RenderOptions::default()
     }
@@ -1729,6 +1734,383 @@ fn an_override_reaches_every_scope_a_render_opens() {
             &page.display_list().render(&options),
             &twin,
             &format!("every scope overridden {on}, from a list under /D"),
+        );
+    }
+}
+
+// ---- The zoom, language and user categories (RC-14.4) -------------------------
+
+/// The options rendering for `usage` at `magnification`, stating `language`
+/// and `user` and nothing else of the layers.
+fn stating(
+    usage: Option<Usage>,
+    magnification: f64,
+    language: Option<&str>,
+    user: &LayerUser,
+) -> RenderOptions {
+    RenderOptions {
+        usage,
+        magnification,
+        layers: LayerOptions {
+            language: language.map(str::to_string),
+            user: user.clone(),
+            ..LayerOptions::default()
+        },
+        ..RenderOptions::default()
+    }
+}
+
+/// A user stating each kind of identification given.
+fn user(name: Option<&str>, title: Option<&str>, organisation: Option<&str>) -> LayerUser {
+    LayerUser {
+        name: name.map(str::to_string),
+        title: title.map(str::to_string),
+        organisation: organisation.map(str::to_string),
+    }
+}
+
+/// Holds [`configured`]'s page `bytes`, rendered with `options`, to its twin,
+/// the page whose `/D` writes A, B and C as `states` and says nothing of
+/// usage: directly; from a list recorded for the usage at magnification 1
+/// under `/D`, and from one recorded under the render's own layer options,
+/// each replayed only where its states are the render's; in bands, from the
+/// list a render at its magnification records; and in its analysis.
+#[track_caller]
+fn renders_as_states(bytes: &[u8], options: &RenderOptions, states: [bool; 3], what: &str) {
+    let document = Document::open(bytes.to_vec()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let twin_bytes = configured(["", "", ""], &d_of(states), "");
+    let twin = render_for(&twin_bytes, None);
+    same_render(&page.render(options), &twin, &format!("{what}, directly"));
+    same_render(
+        &page.display_list_for(options.usage).render(options),
+        &twin,
+        &format!("{what}, from a list at magnification 1"),
+    );
+    same_render(
+        &page
+            .display_list_with(options.usage, &options.layers)
+            .render(options),
+        &twin,
+        &format!("{what}, from a list under its layer options"),
+    );
+    same_render(
+        &page.render(&RenderOptions {
+            parallelism: Parallelism::Threads(2),
+            ..options.clone()
+        }),
+        &twin,
+        &format!("{what}, in bands"),
+    );
+    let twin_document = Document::open(twin_bytes).expect("the twin opens");
+    assert_eq!(
+        page.analysis(options),
+        twin_document
+            .page(0)
+            .expect("a page")
+            .analysis(&RenderOptions::default()),
+        "{what}: its analysis"
+    );
+}
+
+/// **Each auto-state category renders as its `/D` twin** (RC-14.4, 8.11.4.4,
+/// `docs/design/optional-content-config.md`): for every event an `/AS` entry
+/// names and every usage a render names, groups A, B and C under an entry
+/// whose `/Category` is `/Zoom`, `/Language` or `/User` render as the page
+/// whose `/D` writes the states the clause gives — the entry's where its
+/// event is the render's usage, `/D`'s own, A and C on and B off, elsewhere
+/// and with no usage.
+///
+/// `/Zoom`: A for `/min 1 /max 2`, B for `/min 2`, C for `/max 1`, at
+/// magnifications below, at and above each bound, and at ones that are no
+/// finite number above zero, read as 1. `/Language`: A `en-US`, B `en-GB`
+/// preferred and C `fr`, for an exact tag in either case, two partial ones,
+/// a partial `fr-CA` that C does not prefer, an unmatched `de`, and an empty
+/// tag and none, which state nothing; and beside them a group with no
+/// `/Language`, which keeps its state. `/User`: an individual, a title from
+/// an array of two and an organisation, matched, unmatched, matched by case
+/// alone, and stated in part or not at all. Two categories in one entry are
+/// both read. And a usage dictionary this build cannot read leaves its group
+/// as configured whatever the render states.
+#[test]
+fn each_auto_state_category_renders_as_its_d_twin() {
+    let usages = [Usage::View, Usage::Print, Usage::Export];
+    let initially = [true, false, true];
+    let d = |event: Usage, categories: &str| {
+        format!(
+            "/OFF [6 0 R] /AS [<< /Event /{event:?} /Category [{categories}] \
+             /OCGs [5 0 R 6 0 R 7 0 R] >>]"
+        )
+    };
+    let nobody = LayerUser::default();
+    let mut cases = 0;
+    // Every usage and none, for one page and one set of inputs: the entry's
+    // states where its event is the usage, `/D`'s elsewhere.
+    let mut each_usage = |bytes: &[u8],
+                          event: Usage,
+                          magnification: f64,
+                          language: Option<&str>,
+                          who: &LayerUser,
+                          states: [bool; 3],
+                          what: &str| {
+        for usage in usages.map(Some).into_iter().chain([None]) {
+            let expected = if usage == Some(event) {
+                states
+            } else {
+                initially
+            };
+            renders_as_states(
+                bytes,
+                &stating(usage, magnification, language, who),
+                expected,
+                &format!("{what}, a {event:?} entry rendered for {usage:?}"),
+            );
+            cases += 1;
+        }
+    };
+
+    let zoom = [
+        "/Usage << /Zoom << /min 1 /max 2 >> >>",
+        "/Usage << /Zoom << /min 2 >> >>",
+        "/Usage << /Zoom << /max 1 >> >>",
+    ];
+    for event in usages {
+        let bytes = configured(zoom, &d(event, "/Zoom"), "");
+        for (magnification, states) in [
+            (0.5, [false, false, true]),
+            (1.0, [true, false, false]),
+            (1.5, [true, false, false]),
+            (2.0, [false, true, false]),
+            (3.0, [false, true, false]),
+            (0.0, [true, false, false]),
+            (-2.0, [true, false, false]),
+            (f64::NAN, [true, false, false]),
+            (f64::INFINITY, [true, false, false]),
+        ] {
+            each_usage(
+                &bytes,
+                event,
+                magnification,
+                None,
+                &nobody,
+                states,
+                &format!("zoom at {magnification}"),
+            );
+        }
+    }
+
+    let speaking = [
+        "/Usage << /Language << /Lang (en-US) >> >>",
+        "/Usage << /Language << /Lang (en-GB) /Preferred /ON >> >>",
+        "/Usage << /Language << /Lang (fr) >> >>",
+    ];
+    let beside = [
+        "/Usage << /Language << /Lang (en-US) >> >>",
+        "/Usage << /Language << /Lang (de) /Preferred /ON >> >>",
+        "",
+    ];
+    for event in usages {
+        let bytes = configured(speaking, &d(event, "/Language"), "");
+        for (language, states) in [
+            (Some("en-US"), [true, false, false]),
+            (Some("EN-us"), [true, false, false]),
+            (Some("en-AU"), [false, true, false]),
+            (Some("en"), [false, true, false]),
+            (Some("fr"), [false, false, true]),
+            (Some("fr-CA"), [false, false, false]),
+            (Some("de"), [false, false, false]),
+            (Some(""), initially),
+            (None, initially),
+        ] {
+            each_usage(
+                &bytes,
+                event,
+                1.0,
+                language,
+                &nobody,
+                states,
+                &format!("language {language:?}"),
+            );
+        }
+        let bytes = configured(beside, &d(event, "/Language"), "");
+        for (language, states) in [
+            (Some("en-US"), [true, false, true]),
+            (Some("de-AT"), [false, true, true]),
+            (Some("it"), [false, false, true]),
+        ] {
+            each_usage(
+                &bytes,
+                event,
+                1.0,
+                language,
+                &nobody,
+                states,
+                &format!("language {language:?} beside a group with none"),
+            );
+        }
+    }
+
+    let users = [
+        "/Usage << /User << /Type /Ind /Name (Ada) >> >>",
+        "/Usage << /User << /Type /Ttl /Name [(Editor) (Reviewer)] >> >>",
+        "/Usage << /User << /Type /Org /Name (Tinker) >> >>",
+    ];
+    for event in usages {
+        let bytes = configured(users, &d(event, "/User"), "");
+        for (who, states) in [
+            (
+                user(Some("Ada"), Some("Reviewer"), Some("Tinker")),
+                [true, true, true],
+            ),
+            (
+                user(Some("Bob"), Some("Author"), Some("Other")),
+                [false, false, false],
+            ),
+            (user(Some("ada"), None, None), [false, false, true]),
+            (user(None, Some("Editor"), None), [true, true, true]),
+            (user(None, None, Some("tinker")), [true, false, false]),
+            (LayerUser::default(), initially),
+        ] {
+            each_usage(&bytes, event, 1.0, None, &who, states, &format!("{who:?}"));
+        }
+    }
+
+    // Two categories in one entry: A on only where both recommend it.
+    let both = [
+        "/Usage << /Zoom << /min 1 /max 2 >> /Language << /Lang (en) >> >>",
+        "",
+        "",
+    ];
+    for event in usages {
+        let bytes = configured(both, &d(event, "/Zoom /Language"), "");
+        for (magnification, language, states) in [
+            (1.5, Some("en"), [true, false, true]),
+            (3.0, Some("en"), [false, false, true]),
+            (1.5, Some("fr"), [false, false, true]),
+            (1.5, None, [true, false, true]),
+        ] {
+            each_usage(
+                &bytes,
+                event,
+                magnification,
+                language,
+                &nobody,
+                states,
+                &format!("zoom at {magnification} and language {language:?}"),
+            );
+        }
+    }
+
+    // A usage dictionary this build cannot read leaves its group as
+    // configured, whatever the render states.
+    let everyone = user(Some("Ada"), Some("Editor"), Some("Tinker"));
+    for malformed in [
+        [
+            "/Usage << /Zoom << /min (x) >> >>",
+            "/Usage << /Zoom 5 >>",
+            "/Usage << /Zoom << /max /Infinity >> >>",
+        ],
+        [
+            "/Usage << /Language << /Lang 5 >> >>",
+            "/Usage << /Language << /Lang (en) /Preferred /Yes >> >>",
+            "/Usage << /Language (en) >>",
+        ],
+        [
+            "/Usage << /User << /Type /Person /Name (Ada) >> >>",
+            "/Usage << /User << /Type /Ttl /Name 5 >> >>",
+            "/Usage << /User << /Type /Org /Name [(Tinker) 5] >> >>",
+        ],
+        [
+            "/Usage << /User << /Name (Ada) >> >>",
+            "/Usage << /Language << /Preferred /ON >> >>",
+            "/Usage << /Zoom (wide) >>",
+        ],
+    ] {
+        for event in usages {
+            let bytes = configured(malformed, &d(event, "/Zoom /Language /User"), "");
+            each_usage(
+                &bytes,
+                event,
+                1.5,
+                Some("en"),
+                &everyone,
+                initially,
+                &format!("{malformed:?}"),
+            );
+        }
+    }
+    assert_eq!(
+        cases,
+        4 * 3 * (9 + 9 + 3 + 6 + 4 + 4),
+        "every case ran, for every usage and none"
+    );
+}
+
+/// **A form's kept drawing is keyed by the magnification its zoom reads**
+/// (RC-14.4): a document with a cache keeps a form's recorded drawing across
+/// renders, and a form whose content is marked by a group a view `/Zoom`
+/// entry decides is drawn at magnification 1, 3 and 1 again in turn, each as
+/// its `/D` twin draws it — never with the drawing another magnification
+/// kept — while a document whose states read no `/Zoom` keeps one drawing for
+/// every magnification.
+#[test]
+fn a_forms_kept_drawing_is_keyed_by_the_magnification_its_zoom_reads() {
+    let form_page = |d: &str| {
+        let marked = "/OC /A BDC 1 0 0 rg 0 0 10 40 re f EMC";
+        let content = "0 1 0 rg 0 0 10 40 re f q 1 0 0 1 20 0 cm /Fm Do Q";
+        format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << {d} >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /XObject << /Fm 6 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (A) /Usage << /Zoom << /max 2 >> >> >>\nendobj\n\
+6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 10 40] \
+/Resources << /Properties << /A 5 0 R >> >> /Length {} >>\nstream\n{marked}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+            content.len(),
+            marked.len()
+        )
+        .into_bytes()
+    };
+    let zooming = "/AS [<< /Event /View /Category [/Zoom] /OCGs [5 0 R] >>]";
+    let document = Document::open(form_page(zooming))
+        .expect("it opens")
+        .with_cache_limits(CacheLimits::new(1 << 20));
+    let page = document.page(0).expect("a page");
+    let shown = render_for(&form_page("/ON [5 0 R]"), None);
+    let hidden = render_for(&form_page("/OFF [5 0 R]"), None);
+    assert!(
+        shown.data != hidden.data,
+        "the form's band is the difference"
+    );
+    for (magnification, twin) in [(1.0, &shown), (3.0, &hidden), (1.0, &shown), (3.0, &hidden)] {
+        same_render(
+            &page.render(&stating(
+                Some(Usage::View),
+                magnification,
+                None,
+                &LayerUser::default(),
+            )),
+            twin,
+            &format!("the form at magnification {magnification}"),
+        );
+    }
+    let still = Document::open(form_page("/ON [5 0 R]"))
+        .expect("it opens")
+        .with_cache_limits(CacheLimits::new(1 << 20));
+    let page = still.page(0).expect("a page");
+    for magnification in [1.0, 3.0, 0.5] {
+        same_render(
+            &page.render(&stating(
+                Some(Usage::View),
+                magnification,
+                None,
+                &LayerUser::default(),
+            )),
+            &shown,
+            &format!("no zoom read, at magnification {magnification}"),
         );
     }
 }

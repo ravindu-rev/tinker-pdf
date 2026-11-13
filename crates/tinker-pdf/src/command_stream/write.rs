@@ -509,7 +509,7 @@ pub(crate) fn write_list(list: &DisplayList) -> (Vec<u8>, Tables) {
             &shown.doc,
             &shown.inner,
             shown.fonts.as_ref(),
-            shown.operation(None, list.usage(), list.layers()),
+            shown.operation(None, list.usage(), list.layers(), list.magnification()),
         );
         for annotation in list.annotation_layers() {
             match &annotation.kept {
@@ -543,7 +543,7 @@ pub(crate) fn write_list(list: &DisplayList) -> (Vec<u8>, Tables) {
         &shown.doc,
         &shown.inner,
         shown.fonts.as_ref(),
-        shown.operation(None, list.usage(), list.layers()),
+        shown.operation(None, list.usage(), list.layers(), list.magnification()),
     );
     let mut writer = Writer::new(Held::Borrowed(&resources), list.usage(), 0);
     {

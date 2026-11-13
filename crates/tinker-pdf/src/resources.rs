@@ -1155,6 +1155,11 @@ pub(crate) struct Operation {
     /// draws, and the groups it turns on or off. The default, `/D`'s states
     /// as they are, for every operation that is not a render.
     layers: LayerOptions,
+    /// The render's magnification (`crate::RenderOptions::magnification`),
+    /// read as 1 where it is not a finite number above zero, which the
+    /// auto-state's `/Zoom` category reads: 1 for every operation that is not
+    /// a render.
+    magnification: f64,
     /// The optional-content states every scope the operation opens reads,
     /// bound by the first that asks (ISO 32000-2 8.11.4.4): the chosen
     /// configuration's states over `/D`'s initial ones, its `/AS` entries
@@ -1193,9 +1198,19 @@ impl Operation {
             work,
             usage,
             layers: LayerOptions::default(),
+            magnification: 1.0,
             optional: Arc::default(),
             cache: None,
             parallelism: Parallelism::Serial,
+        }
+    }
+
+    /// This operation, for a render at `magnification`, which its `/Zoom`
+    /// recommendations read.
+    pub(crate) fn at_magnification(self, magnification: f64) -> Operation {
+        Operation {
+            magnification: crate::optional::magnification(magnification),
+            ..self
         }
     }
 
@@ -1224,6 +1239,7 @@ impl Operation {
             work: None,
             usage: None,
             layers: LayerOptions::default(),
+            magnification: 1.0,
             optional: Arc::default(),
             cache: None,
             parallelism: Parallelism::Serial,
@@ -1234,8 +1250,20 @@ impl Operation {
     /// `doc` the first time any of them asks, and the same binding every time
     /// after.
     pub(crate) fn optional(&self, doc: &CosDocument) -> &OptionalContent {
-        self.optional
-            .get_or_init(|| OptionalContent::bind_with(doc, self.usage, &self.layers))
+        self.optional.get_or_init(|| {
+            OptionalContent::bind_with(doc, self.usage, &self.layers, self.magnification)
+        })
+    }
+
+    /// The magnification a form's kept drawing is keyed by beside the usage
+    /// and the layer options, as its bits: the operation's where its states
+    /// read a `/Zoom` entry, which a render at another magnification may
+    /// answer otherwise, and `None` where they read none, so drawings kept at
+    /// one magnification serve every other.
+    pub(crate) fn magnification_key(&self, doc: &CosDocument) -> Option<u64> {
+        self.optional(doc)
+            .reads_magnification()
+            .then_some(self.magnification.to_bits())
     }
 
     /// The layer options the operation binds the states of: what a form's
@@ -5783,6 +5811,7 @@ impl PageResources {
             scope: (!owns).then(|| self.written().clone()),
             usage: self.op.usage(),
             layers: self.op.layers().clone(),
+            magnification: self.op.magnification_key(&self.doc),
         })
     }
 

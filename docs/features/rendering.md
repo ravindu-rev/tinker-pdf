@@ -1014,13 +1014,14 @@ it, the render every page has always drawn. Naming `Usage::View`,
 is that usage over the initial states: each group an entry's `/OCGs` lists is
 recommended a state by each of the entry's `/Category` names its `/Usage`
 answers — `/View`'s `/ViewState`, `/Print`'s `/PrintState` and `/Export`'s
-`/ExportState`, whichever event's entry names them — and a group with any
+`/ExportState`, whichever event's entry names them, and `/Zoom`, `/Language`
+and `/User` against the render's inputs (below) — and a group with any
 recommendation is on only if every one it has, across every entry of the
 event, is on. A category with no entry in a group's `/Usage`, or no state in
-it, recommends nothing, and so does every category this build does not read
-— `/Zoom`, `/Language` and `/User` need inputs a render does not have yet, and
-`/CreatorInfo` and `/PageElement` carry no state — so a group nothing
-recommended keeps `/D`'s state. A print render applies print's entries over
+it, recommends nothing, and so do `/Language` and `/User` where the render
+states no language or no user of the kind asked, and `/CreatorInfo` and
+`/PageElement`, which carry no state — so a group nothing recommended keeps
+`/D`'s state. A print render applies print's entries over
 the initial states, as a printing application's render of the document as
 opened, not view's first. What is malformed — an `/AS` or a `/Category` that
 is no array, an entry that is no dictionary or names no known `/Event`, a
@@ -1033,6 +1034,34 @@ nor `/OFF` — recommends nothing and leaves its group as `/D` set it
 `a_usages_states_reach_every_scope_a_render_opens`). Text and image
 extraction, `to_svg`, a save's passes and the validators name no usage and
 read the initial states, bound once an operation as a render binds them.
+
+**The zoom, language and user categories** (8.11.4.4,
+[design](../design/optional-content-config.md)) are read against what the
+render names, and nothing reads the host's zoom, locale or user. `/Zoom`
+recommends a group on where `RenderOptions::magnification` is at least its
+`/min` (0 by default) and below its `/max` (infinity by default), and off
+elsewhere; a magnification that is no finite number above zero is read as 1.
+`/Language` reads `LayerOptions::language`, one language tag, `None` or empty
+stating none, and decides over each entry's `/OCGs` together: where a group's
+`/Lang` matches the tag exactly — the whole tag, ignoring ASCII case — those
+groups are on and the entry's other groups with a `/Language` off; where
+none does but some match its primary subtag, before the first hyphen, those
+whose `/Preferred` is `/ON` are on and the others off; where none matches,
+all are off. `/User` reads `LayerOptions::user`, a `LayerUser` of an
+individual's name, a title and an organisation, each optional: a group's
+`/Type` (`/Ind`, `/Ttl` or `/Org`) picks which is compared, and its `/Name`, a
+text string or an array of them, recommends on where one equals it exactly
+and off where none does. A `/Zoom` or a `/Language` or `/User` entry this
+build cannot read — a bound that is no number, a `/Lang` that is no text
+string, a `/Preferred` neither `/ON` nor `/OFF`, a `/Type` none of the three,
+a `/Name` that is no text string or holds something else — recommends
+nothing and leaves its group as configured. A display list keeps the
+magnification its states were bound at, 1 for the lists a caller asks for,
+and a render at another replays it only where those states read no `/Zoom`
+entry or come to the render's own; a form's kept drawing is keyed by the
+magnification where its states read one, and by nothing more where they do
+not (`optional_content.rs`'s `each_auto_state_category_renders_as_its_d_twin`
+and `a_forms_kept_drawing_is_keyed_by_the_magnification_its_zoom_reads`).
 
 **A render chooses its configuration** (8.11.4.3,
 [design](../design/optional-content-config.md)). `RenderOptions::layers` is
@@ -1113,8 +1142,9 @@ list records what its own usage draws and replays only that usage.
 **`/NoZoom` and `/NoRotate` are placed at render time** (12.5.3).
 `RenderOptions::magnification` is the viewer's zoom beside the resolution
 `scale` is, 1 unless the caller states one, a value that is not a finite
-number above zero read as 1; nothing but these two flags reads it, so no page
-and no other annotation changes with it. About `P`, `/Rect`'s upper-left
+number above zero read as 1; these two flags and a `/Zoom` auto-state (above)
+read it and nothing else does, so no other annotation, and no page whose
+states read no `/Zoom`, changes with it. About `P`, `/Rect`'s upper-left
 corner in default user space, `(min x, max y)` — "the annotation pivots
 around that point" — a `/NoZoom` appearance, after 12.5.5's fit, is scaled by
 `1 / magnification`, so it keeps the size it has at magnification 1, and a
@@ -1799,11 +1829,13 @@ events, and `determinism.rs` pins every fingerprinted page's box.
 
 The facade is the whole public surface (ruling 11): `Page::render` takes a
 `RenderOptions` — `scale` (pixels per point, or `RenderOptions::at_dpi`),
-`magnification` (1; the viewer's zoom, which `/NoZoom` reads),
+`magnification` (1; the viewer's zoom, which `/NoZoom` and a `/Zoom`
+auto-state read),
 `content`, `widgets` and `other_annotations` (each on; the parts drawn, below
 `annotations`), `layers` (a `LayerOptions`; the optional-content
-configuration drawn, `/D` by default, and the groups the render turns on or
-off, none by default), `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
+configuration drawn, `/D` by default, the groups the render turns on or off,
+none by default, and the language and user its auto-state reads, none by
+default), `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
 checked between operations and scanline bands), `annotations` (on by
 default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than

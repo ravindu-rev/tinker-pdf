@@ -58,7 +58,12 @@
 //! [`Page::display_list`], the one it names for [`Page::display_list_for`].
 //! A render naming the list's usage replays it; one naming another draws the
 //! direct way, through [`Page::render`], so its pixels are the direct
-//! render's whatever the list holds.
+//! render's whatever the list holds. Within the usage, the states are also
+//! the layer options' and, where a `/Zoom` entry reads it, the
+//! magnification's (`docs/design/optional-content-config.md`): a render
+//! naming other layer options, or another magnification where the list's
+//! states read one, binds its own states once and replays the list only
+//! where they are the list's.
 //!
 //! # Why a replay's warnings are its own
 //!
@@ -164,6 +169,11 @@ pub struct DisplayList {
     /// configuration whose states are these replays the list, and any other
     /// draws the direct way (`docs/design/optional-content-config.md`).
     states: Arc<OnceLock<OptionalContent>>,
+    /// The magnification those states were bound at: 1 for the recordings a
+    /// caller asks for, the render's own for the one [`Page::render`] draws
+    /// in bands and the one [`Page::analysis`] reads. A render at another
+    /// magnification is held to the states where they read a `/Zoom` entry.
+    magnification: f64,
 }
 
 impl Page {
@@ -217,6 +227,18 @@ impl Page {
     /// interpreting the page again.
     #[must_use]
     pub fn display_list_with(&self, usage: Option<Usage>, layers: &LayerOptions) -> DisplayList {
+        self.display_list_at(usage, layers, 1.0)
+    }
+
+    /// [`Page::display_list_with`], its states bound at `magnification`, which
+    /// a `/Zoom` auto-state reads (8.11.4.4): the recording a render at that
+    /// magnification draws in bands, and the one its analysis reads.
+    pub(crate) fn display_list_at(
+        &self,
+        usage: Option<Usage>,
+        layers: &LayerOptions,
+        magnification: f64,
+    ) -> DisplayList {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         // The recording is an operation of its own, binding the usage's
         // states and keeping what it computes in the document's cache where
@@ -226,7 +248,7 @@ impl Page {
             &self.doc,
             &self.inner,
             self.fonts.as_ref(),
-            self.operation(None, usage, layers),
+            self.operation(None, usage, layers, magnification),
         );
         let mut recorder = DisplayRecorder::new();
         interpret(&content, Matrix::IDENTITY, &mut recorder, &resources);
@@ -266,6 +288,7 @@ impl Page {
                 budget_spent,
                 layers: layers.clone(),
                 states,
+                magnification: crate::optional::magnification(magnification),
             };
         }
         DisplayList {
@@ -280,6 +303,7 @@ impl Page {
             budget_spent,
             layers: layers.clone(),
             states,
+            magnification: crate::optional::magnification(magnification),
         }
     }
 }
@@ -303,7 +327,7 @@ pub(crate) fn not_retained(page: &Page) -> DisplayList {
         &page.doc,
         &page.inner,
         page.fonts.as_ref(),
-        page.operation(None, None, &layers),
+        page.operation(None, None, &layers, 1.0),
     );
     let states = resources.operation().states(&page.doc);
     DisplayList {
@@ -318,6 +342,7 @@ pub(crate) fn not_retained(page: &Page) -> DisplayList {
         budget_spent: false,
         layers,
         states,
+        magnification: 1.0,
     }
 }
 
@@ -357,9 +382,11 @@ impl DisplayList {
     /// a usage other than the one the list was recorded for
     /// ([`DisplayList::usage`]): its calls carry that usage's
     /// optional-content states. So does a render naming layer options whose
-    /// states are not the list's ([`DisplayList::layers`]) — another
-    /// configuration's states are bound once to be compared, and that binding
-    /// is the render's whichever way it draws. So does a render that leaves
+    /// states are not the list's ([`DisplayList::layers`]), or a
+    /// magnification at which they are not, where they read a `/Zoom` entry
+    /// ([`RenderOptions::magnification`]) — the render's states are bound once
+    /// to be compared, and that binding is the render's whichever way it
+    /// draws. So does a render that leaves
     /// out a part recorded before a part it draws, on a page whose recording
     /// spent its group budget: what the left-out part spent shaped the
     /// answers the later one was recorded with.
@@ -375,13 +402,15 @@ impl DisplayList {
             // states, draws it the direct way.
             return self.page.render(&serial);
         }
-        // Another configuration replays the list where its states are the
-        // list's: bound once here, and handed on to whatever draws.
-        let compared = (options.layers != self.layers).then(|| {
-            let op = self.page.render_operation(&serial, self.usage);
-            let alike = self.states.get() == Some(op.optional(&self.page.doc));
-            (op, alike)
-        });
+        // Another configuration, or another magnification where the list's
+        // states read a `/Zoom` entry, replays the list where its states are
+        // the list's: bound once here, and handed on to whatever draws.
+        let compared =
+            (options.layers != self.layers || self.magnification_moves(options)).then(|| {
+                let op = self.page.render_operation(&serial, self.usage);
+                let alike = self.states.get() == Some(op.optional(&self.page.doc));
+                (op, alike)
+            });
         let alike = compared.as_ref().is_none_or(|(_, alike)| *alike);
         if !alike || !self.parts_replay_alike(options) {
             return match compared {
@@ -479,6 +508,19 @@ impl DisplayList {
         self.annotations.iter().any(|annotation| {
             kinds.draws(annotation.widget) && matches!(annotation.kept, Kept::Placed(_))
         })
+    }
+
+    /// Whether a render at `options`' magnification may bind other states
+    /// than the list's: it names another magnification than the one they
+    /// were bound at, and they read a `/Zoom` entry (8.11.4.4), the one
+    /// category the magnification decides. States that read none are the
+    /// same at every magnification.
+    pub(crate) fn magnification_moves(&self, options: &RenderOptions) -> bool {
+        crate::optional::magnification(options.magnification) != self.magnification
+            && self
+                .states
+                .get()
+                .is_some_and(OptionalContent::reads_magnification)
     }
 
     /// Whether every part `options` draws was recorded with the answers a
@@ -590,9 +632,12 @@ impl DisplayList {
             }
             // Each band's operation keeps what it computes in the document's
             // cache, as the whole list's render does.
-            let mut op = self
-                .page
-                .operation(work.clone(), self.usage, &options.layers);
+            let mut op = self.page.operation(
+                work.clone(),
+                self.usage,
+                &options.layers,
+                options.magnification,
+            );
             if let Some(states) = shared {
                 op = op.sharing(Arc::clone(states));
             }
@@ -771,6 +816,12 @@ impl DisplayList {
     #[must_use]
     pub fn layers(&self) -> &LayerOptions {
         &self.layers
+    }
+
+    /// The magnification the list's states were bound at: 1 for the lists a
+    /// caller asks for, which a command stream is written at.
+    pub(crate) fn magnification(&self) -> f64 {
+        self.magnification
     }
 
     /// The resources a replay resolves names in.

@@ -614,16 +614,22 @@ pub struct RenderOptions {
     /// and two magnifications. A value that is not a finite number above
     /// zero is read as 1.
     ///
-    /// Read by 12.5.3's `/NoZoom`, and by nothing else: an annotation flagged
-    /// so keeps the size its appearance has at magnification 1, scaled by
-    /// `1 / magnification` about its `/Rect`'s upper-left corner in default
-    /// user space, "regardless of the page magnification". An annotation
-    /// flagged `/NoRotate` is placed by the page's `/Rotate` the same way,
-    /// turned about that corner so it stands upright on a turned page,
-    /// whatever the magnification. Both are placed in the page's frame, so a
-    /// tile draws the page's pixels (ruling 5), and every other annotation
-    /// and every page draws as it does at any magnification.
-    /// `docs/design/render-usage.md` reads the clause.
+    /// Read by 12.5.3's `/NoZoom`: an annotation flagged so keeps the size
+    /// its appearance has at magnification 1, scaled by `1 / magnification`
+    /// about its `/Rect`'s upper-left corner in default user space,
+    /// "regardless of the page magnification". An annotation flagged
+    /// `/NoRotate` is placed by the page's `/Rotate` the same way, turned
+    /// about that corner so it stands upright on a turned page, whatever the
+    /// magnification. Both are placed in the page's frame, so a tile draws
+    /// the page's pixels (ruling 5). `docs/design/render-usage.md` reads the
+    /// clause.
+    ///
+    /// And read by the optional-content auto-state's `/Zoom` category, in a
+    /// render naming a [`RenderOptions::usage`] whose `/AS` entries list it
+    /// (8.11.4.4): a group whose `/Usage /Zoom` holds `/min` and `/max` is
+    /// recommended on where the magnification is at least `/min` and below
+    /// `/max`, and off elsewhere. Nothing else reads it, so every other
+    /// annotation and every page draws as it does at any magnification.
     pub magnification: f64,
     /// How the bitmap stores its pixels.
     pub format: PixelFormat,
@@ -902,10 +908,13 @@ pub struct RenderOptions {
     /// its `/AS` entries for that event over the initial states it gives its
     /// groups (ISO 32000-2 8.11.4.4): a group whose `/Usage` says
     /// `/PrintState /OFF`, listed in a print entry, is off in a print render.
-    /// An entry's `/View`, `/Print` and `/Export` categories are read; a
-    /// category with no entry in a group's `/Usage`, and one this build does
-    /// not read, recommends nothing, and a group is on only if every
-    /// recommendation it has is. With none, every group is in the initial
+    /// An entry's `/View`, `/Print` and `/Export` categories are read, and
+    /// its `/Zoom`, `/Language` and `/User` against what the render names:
+    /// [`RenderOptions::magnification`], [`LayerOptions::language`] and
+    /// [`LayerOptions::user`]. A category with no entry in a group's
+    /// `/Usage`, one whose input the render does not state, and one this
+    /// build does not read, recommends nothing, and a group is on only if
+    /// every recommendation it has is. With none, every group is in the initial
     /// state the configuration gives it — the render every page has always
     /// drawn. Either way the states are bound once a render, and every scope
     /// it opens reads them: its forms, its tiling cells, its annotations'
@@ -1057,8 +1066,11 @@ pub struct LayerOptions {
     /// initial states, then its `/BaseState` — `/ON` or `/OFF` setting every
     /// group `/OCGs` lists, `/Unchanged` leaving each as `/D` set it, a
     /// missing one `/ON` — and its own `/ON` and `/OFF` (Table 99); then its
-    /// own `/AS` entries for [`RenderOptions::usage`], none where it has none;
-    /// and its `/Intent` decides which groups count at all (8.11.2.3), a group
+    /// own `/AS` entries for [`RenderOptions::usage`], none where it has none,
+    /// their `/Zoom`, `/Language` and `/User` categories read against
+    /// [`RenderOptions::magnification`], [`LayerOptions::language`] and
+    /// [`LayerOptions::user`]; and its `/Intent` decides which groups count at
+    /// all (8.11.2.3), a group
     /// none of whose intents it holds reading as visible. `/D`'s `/Intent`
     /// decides the same for a render of `/D`. Every state is bound once a
     /// render and read by every scope it opens.
@@ -1088,6 +1100,44 @@ pub struct LayerOptions {
     /// of a reference `/OCProperties /OCGs` does not list changes nothing, as
     /// it names no group of the document's (8.11.4.2).
     pub overrides: Vec<(ObjRef, bool)>,
+    /// The application's language, a language tag such as `es-MX` (14.9.2),
+    /// which the auto-state's `/Language` category reads (8.11.4.4); `None`,
+    /// the default, or an empty tag, states none, and the category then
+    /// recommends nothing. Nothing reads the host's locale.
+    ///
+    /// Within each usage application dictionary whose `/Category` names
+    /// `/Language`, over the groups its `/OCGs` lists that have a readable
+    /// `/Usage /Language`: where any group's `/Lang` matches the tag exactly —
+    /// the whole tag, ignoring ASCII case — those groups are recommended on
+    /// and the others off; where none does but some match its primary
+    /// language subtag, what precedes the first hyphen, those of them whose
+    /// `/Preferred` is `/ON` are recommended on and the others off; where none
+    /// matches either way, all are recommended off. A group without a
+    /// `/Language` entry, or with one this build cannot read, is recommended
+    /// nothing.
+    pub language: Option<String>,
+    /// Who the render is for, which the auto-state's `/User` category reads
+    /// (8.11.4.4): a group's `/Usage /User` is recommended on where one of its
+    /// `/Name` strings equals, exactly, the identification of the kind its
+    /// `/Type` names — `/Ind` an individual, `/Ttl` a title, `/Org` an
+    /// organisation — and off where none does. One the render does not
+    /// state recommends nothing; the default states none. Nothing reads the
+    /// host's user.
+    pub user: LayerUser,
+}
+
+/// The identification of the user a render is for, of each kind a group's
+/// `/Usage /User /Type` names (8.11.4.4 Table 100). See
+/// [`LayerOptions::user`]; the default states none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LayerUser {
+    /// An individual's name, compared with a group's `/Name` where its
+    /// `/Type` is `/Ind`.
+    pub name: Option<String>,
+    /// A title or position, compared where the `/Type` is `/Ttl`.
+    pub title: Option<String>,
+    /// An organisation, compared where the `/Type` is `/Org`.
+    pub organisation: Option<String>,
 }
 
 impl RenderOptions {
@@ -3168,7 +3218,7 @@ impl Page {
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
         if matches!(options.parallelism, Parallelism::Threads(threads) if threads >= 2) {
             return self
-                .display_list_with(options.usage, &options.layers)
+                .display_list_at(options.usage, &options.layers, options.magnification)
                 .render(options);
         }
         self.render_reaching(options).0
@@ -3231,31 +3281,39 @@ impl Page {
 
     /// The operation one render of this page is, as `options` asks, for a
     /// render naming `usage`: counting when it asks for stats, binding the
-    /// optional-content states `usage` gives once for every scope the render
-    /// opens, keeping what it computes in the document's cache where the
-    /// document has one, and handing its decodes' independent parts to the
-    /// threads `options.parallelism` names — which a band, drawn on a worker,
-    /// runs there.
+    /// optional-content states `usage`, the layer options and the
+    /// magnification give once for every scope the render opens, keeping what
+    /// it computes in the document's cache where the document has one, and
+    /// handing its decodes' independent parts to the threads
+    /// `options.parallelism` names — which a band, drawn on a worker, runs
+    /// there.
     pub(crate) fn render_operation(
         &self,
         options: &RenderOptions,
         usage: Option<Usage>,
     ) -> resources::Operation {
-        self.operation(stats::tally(options.stats), usage, &options.layers)
-            .on(options.parallelism)
+        self.operation(
+            stats::tally(options.stats),
+            usage,
+            &options.layers,
+            options.magnification,
+        )
+        .on(options.parallelism)
     }
 
     /// [`Page::render_operation`], counting into `work`: a tally the parts of
-    /// one render share, a band's among them, binding the states of the
-    /// configuration `layers` names.
+    /// one render share, a band's among them, binding the states `layers`
+    /// gives at `magnification`.
     pub(crate) fn operation(
         &self,
         work: Option<Arc<stats::Work>>,
         usage: Option<Usage>,
         layers: &LayerOptions,
+        magnification: f64,
     ) -> resources::Operation {
         resources::Operation::rendering(work, usage)
             .with_layers(layers.clone())
+            .at_magnification(magnification)
             .with_cache(self.cache.as_ref())
     }
 
