@@ -388,6 +388,12 @@ impl<'a> Description<'a> {
         })
     }
 
+    /// The major version of the `Silf` the description is in.
+    #[must_use]
+    pub const fn table_version(&self) -> u32 {
+        self.major
+    }
+
     /// How many code points the pseudo-glyph map pairs with a glyph.
     #[must_use]
     pub const fn pseudo_count(&self) -> u16 {
@@ -940,6 +946,19 @@ impl<'a> Pass<'a> {
     /// and by rule number among equal keys.
     #[must_use]
     pub fn candidates(&self, glyphs: &[u16], position: usize, limits: &Limits) -> Matched {
+        self.candidates_in(|at| glyphs.get(at).copied(), position, limits)
+    }
+
+    /// [`Pass::candidates`], each slot's glyph read through `glyph`, which
+    /// answers `None` past the stream's end: what a pass running over a
+    /// slot stream asks without copying its glyphs out.
+    #[must_use]
+    pub fn candidates_in(
+        &self,
+        glyph: impl Fn(usize) -> Option<u16>,
+        position: usize,
+        limits: &Limits,
+    ) -> Matched {
         let mut matched = Matched::default();
         if !self.has_machine() {
             return matched;
@@ -962,7 +981,7 @@ impl<'a> Pass<'a> {
         let mut found: Vec<Candidate> = Vec::new();
         let mut read = 0usize;
         while state < self.transitional {
-            let Some(glyph) = glyphs.get(at).copied() else {
+            let Some(glyph) = glyph(at) else {
                 break;
             };
             if read >= limits.max_context_length {

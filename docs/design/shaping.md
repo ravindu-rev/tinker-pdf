@@ -1416,7 +1416,7 @@ is refused by name at its instruction and ends there; what it did until then
 stands. A slot's position and a metric over an attachment cluster are
 positioning's to answer (*Positioning*).
 
-**The stack machine.** Code is checked before it ever runs, once a face:
+**The stack machine.** Code is checked before it ever runs:
 every opcode the GTF's table lists and none it marks unimplemented (`NextN`,
 `PushIGlyphAttr`, `PushProcState`, `PutSubs2`, `PutSubs3`), every operand
 inside the block, every `ContextItem` skip landing on an instruction boundary
@@ -1510,15 +1510,25 @@ the comparison the example makes is run through `bb.top`.
 
 **Passes running.** Passes run in the description's order over the whole
 run, each over the stream the last left; a reversed pass runs over the stream
-turned end to end, which is turned back after it. A pass constraint that is
-false skips the pass. At each scan position the first candidate whose
-constraint holds fires; its action leaves a slot pointer where its `Next`s
-put it, and the scan position becomes that pointer plus the returned offset.
-Where no rule fires the position advances by one. The GDL's safety net: once
-`maxRuleLoop` rules have fired without the position passing the furthest it
-has reached, it is advanced past it before another rule is tried; and a
-position may move back no further than `maxBackup` slots behind that
-furthest, past which it is left where it stands. A positioning pass may
+turned end to end, which is turned back after it. The substitution stage is
+the line-break and substitution passes, from the first to the first
+justification pass; the justification passes run when layout's justify call
+asks for them (*Justification*), and the positioning passes after. A pass
+constraint that is false skips the pass, and so does one refused, by its
+check or as it runs. A rule's blocks are checked the first time its pass asks
+for them in a run, and kept for the rest of the pass. At each scan position
+the first candidate whose constraint holds for every slot of its match fires;
+a candidate whose constraint or action fails its check never fires, and the
+next is tried. The fired action leaves a slot pointer where its `Next`s put
+it, and the scan position becomes that pointer plus the returned offset,
+held between the stream's start and end; an action refused as it runs is
+named, what it did stands, and the position advances by one. Where no rule
+fires the position advances by one. The GDL's safety net: once `maxRuleLoop`
+rules have fired without the position passing the furthest it has reached,
+it is advanced past it before another rule is tried; and a position may move
+back no further than `maxBackup` slots behind that furthest, past which it is
+left where it stood when the rule fired, the GDL's "the stream position will
+not be set before the consonant, but will be left before the vowel". A positioning pass may
 substitute one glyph for one (`PutGlyph`, `PutSubs`) and copy a slot onto
 itself (`CopyNext`, `PutCopy` of the current slot); an action of one that
 would insert, delete or reorder a slot is refused by name, the GDL's "only do
@@ -1532,7 +1542,11 @@ description has a bidi pass and a `Silf` of 4 or later, a slot of a run at an
 odd level takes its glyph's mirrored glyph from the mirroring attribute,
 whatever `mirror.isEncoded` says, because this crate's shaper mirrors no
 character itself; a description with no bidi pass mirrors nothing, the GDL's
-"when Bidi is off, the mirroring attributes are considered undefined".
+"when Bidi is off, the mirroring attributes are considered undefined". The
+mirroring is placed where the bidi pass is: before pass `iBidi` where that is
+a line-break or substitution pass, and at the substitution stage's end where
+it is a justification or positioning pass — `iBidi` is at most `iPos`, and
+the GDL puts the bidi pass "at end of the substitution table".
 
 **Positioning.** In the run's direction, as the GDL states it: an advance
 moves the slots after it; a shift moves a slot and what is attached to it

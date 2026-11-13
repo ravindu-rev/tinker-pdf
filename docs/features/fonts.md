@@ -1089,6 +1089,15 @@ What it does:
   subtables and feature entries a run reads, each refused by name. No run is
   shaped through any of it: the refused-by-name table below says what a run
   over such a face does.
+  out never going backwards. `graphite::pass` runs a description's
+  line-break and substitution passes over a stream in the description's order,
+  a reversed pass over the stream turned end to end, a pass constraint that is
+  false skipping its pass: at each scan position the first rule whose
+  constraint holds for every slot of its match fires, the position moving
+  where its action leaves it, under the pass's own `maxRuleLoop` and
+  `maxBackup`; the bidi pass mirrors a run at an odd level where the
+  description has one. No run is shaped through any of it yet: the
+  refused-by-name table below says what a run over such a face does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

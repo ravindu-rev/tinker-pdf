@@ -4693,3 +4693,801 @@ fn attribute_of(slots: &Slots<'_>, attribute: SlotAttribute) -> i32 {
         .slot_attribute(0, attribute, 0)
         .expect("the stream answers")
 }
+
+// --- passes running (FT-07d.9) -------------------------------------------
+//
+// `compile` turns rules as a test states them — each slot's glyphs, how
+// many slots come before the scan position, and the code — into the pass
+// the GTF lays out: a machine found by subset construction over the rules,
+// each padded at its front with `ANY` to the longest pre-context, as the
+// compiler documentation says the compiler pads them, its states in the
+// GTF's order (transitional ones that do not accept, transitional ones that
+// do, final ones), each glyph below the face's count its own column, and
+// each rule's sort key its length. The GDL examples are stated as such rules
+// beside the GDL they compile, and run through `pass::substitute` or
+// `pass::run_passes` on the stream the example names.
+
+use std::collections::VecDeque;
+
+use tinker_pdf_shape::graphite::pass;
+
+/// A rule as a test states it.
+#[derive(Clone, Debug, Default)]
+struct RuleSpec {
+    /// How many of its slots come before the scan position.
+    pre: u8,
+    /// Each slot's glyphs; an empty slot is `ANY`.
+    slots: Vec<Vec<u16>>,
+    /// Its constraint's code.
+    constraint: Vec<u8>,
+    /// Its action's code.
+    action: Vec<u8>,
+}
+
+/// A machine state: each rule a subset construction is part way through,
+/// and how many of its padded slots it has matched.
+type MachineState = Vec<(usize, usize)>;
+
+/// The pass `rules` compile to over glyphs `0..glyphs`, under the pass's
+/// own loop and back-up counts.
+fn compile(rules: &[RuleSpec], glyphs: u16, max_rule_loop: u8, max_backup: u8) -> PassSpec {
+    let max_pre = rules.iter().map(|rule| rule.pre).max().unwrap_or(0);
+    let min_pre = rules.iter().map(|rule| rule.pre).min().unwrap_or(0);
+    let padded: Vec<Vec<Vec<u16>>> = rules
+        .iter()
+        .map(|rule| {
+            let mut slots = vec![Vec::new(); usize::from(max_pre - rule.pre)];
+            slots.extend(rule.slots.iter().cloned());
+            slots
+        })
+        .collect();
+    let takes = |slot: &Vec<u16>, glyph: u16| slot.is_empty() || slot.contains(&glyph);
+    // The start state for each count of pre-context slots the stream lacks:
+    // every rule, that many of its slots passed over.
+    let starts: Vec<MachineState> = (0..=usize::from(max_pre - min_pre))
+        .map(|skipped| (0..rules.len()).map(|rule| (rule, skipped)).collect())
+        .collect();
+    let mut found: Vec<MachineState> = Vec::new();
+    let mut rows: BTreeMap<MachineState, Vec<Option<MachineState>>> = BTreeMap::new();
+    let mut queue: VecDeque<MachineState> = starts.iter().cloned().collect();
+    while let Some(state) = queue.pop_front() {
+        if rows.contains_key(&state) {
+            continue;
+        }
+        let row: Vec<Option<MachineState>> = (0..glyphs)
+            .map(|glyph| {
+                let next: MachineState = state
+                    .iter()
+                    .filter(|(rule, at)| {
+                        padded[*rule]
+                            .get(*at)
+                            .is_some_and(|slot| takes(slot, glyph))
+                    })
+                    .map(|(rule, at)| (*rule, at + 1))
+                    .collect();
+                (!next.is_empty()).then_some(next)
+            })
+            .collect();
+        for next in row.iter().flatten() {
+            queue.push_back(next.clone());
+        }
+        rows.insert(state.clone(), row);
+        found.push(state);
+    }
+    let accepts = |state: &MachineState| state.iter().any(|(rule, at)| *at == padded[*rule].len());
+    let moves = |state: &MachineState| rows[state].iter().any(Option::is_some);
+    // The GTF's order, the first start state first.
+    let mut order: Vec<MachineState> = vec![starts[0].clone()];
+    let groups = [
+        |accepting: bool, transitional: bool| !accepting && transitional,
+        |accepting: bool, transitional: bool| accepting && transitional,
+        |accepting: bool, transitional: bool| accepting && !transitional,
+    ];
+    for group in groups {
+        for state in &found {
+            if !order.contains(state) && group(accepts(state), moves(state)) {
+                order.push(state.clone());
+            }
+        }
+    }
+    // A state that neither accepts nor moves is a dead end: a row of zeros.
+    for state in &found {
+        if !order.contains(state) {
+            order.insert(1, state.clone());
+        }
+    }
+    let id = |state: &MachineState| -> u16 {
+        u16::try_from(order.iter().position(|s| s == state).expect("a state")).expect("a few")
+    };
+    let success: Vec<&MachineState> = order.iter().filter(|state| accepts(state)).collect();
+    let transitional =
+        u16::try_from(order.len() - success.iter().filter(|s| !moves(s)).count()).expect("a few");
+    PassSpec {
+        max_rule_loop,
+        max_backup,
+        ranges: (0..glyphs).map(|glyph| (glyph, glyph, glyph)).collect(),
+        columns: glyphs,
+        rows: u16::try_from(order.len()).expect("a few"),
+        transitional,
+        success: u16::try_from(success.len()).expect("a few"),
+        rule_lists: success
+            .iter()
+            .map(|state| {
+                let mut accepted: Vec<u16> = state
+                    .iter()
+                    .filter(|(rule, at)| *at == padded[*rule].len())
+                    .map(|(rule, _)| u16::try_from(*rule).expect("a few"))
+                    .collect();
+                accepted.sort_unstable();
+                accepted
+            })
+            .collect(),
+        min_pre,
+        max_pre,
+        start_states: starts.iter().map(id).collect(),
+        rules: rules
+            .iter()
+            .map(|rule| {
+                let key = u16::try_from(rule.slots.len()).expect("a short rule");
+                (key, rule.pre, rule.constraint.clone(), rule.action.clone())
+            })
+            .collect(),
+        transitions: order[..usize::from(transitional)]
+            .iter()
+            .map(|state| {
+                rows[state]
+                    .iter()
+                    .map(|next| next.as_ref().map_or(0, |next| id(next)))
+                    .collect()
+            })
+            .collect(),
+        ..PassSpec::default()
+    }
+}
+
+/// A face of `glyphs` glyphs, glyph `n` `500 + n` wide, whose `Silf` of
+/// version `major` holds `description`, with glyph attributes `maps` and a
+/// `Feat` where one is given.
+fn passing_face(
+    glyphs: u16,
+    major: u32,
+    description: DescriptionSpec,
+    maps: &[BTreeMap<u16, i16>],
+    feat: Option<Vec<u8>>,
+) -> Vec<u8> {
+    let silf = silf_table(major, &[description]);
+    let mut all = maps.to_vec();
+    all.resize(usize::from(glyphs), BTreeMap::new());
+    let index = Index {
+        long: false,
+        names: false,
+    };
+    let (glat, gloc) = glat_and_gloc(GlatVersion::Two, &all, &[], index, 8);
+    let mut face = Face::new(glyphs, &[])
+        .with(b"Silf", silf)
+        .with(b"Glat", glat)
+        .with(b"Gloc", gloc);
+    if let Some(feat) = feat {
+        face = face.with(b"Feat", feat);
+    }
+    face.build()
+}
+
+/// A description of `passes`, its classes `linear` then `lookups`, its
+/// positioning from pass 10, for a `Silf` of `major`.
+fn passing_description(
+    passes: Vec<PassSpec>,
+    linear: &[Vec<u16>],
+    lookups: &[Vec<(u16, u16)>],
+    major: u32,
+) -> DescriptionSpec {
+    DescriptionSpec {
+        class_map: class_map(linear, lookups, major >= 4),
+        passes,
+        order: [0, 10, 10, 255],
+        user_attributes: 2,
+        ..DescriptionSpec::default()
+    }
+}
+
+/// Runs `test` over a stream of `glyphs`, glyph `n` of it standing for
+/// character `n`, of the face `bytes`, its features `features` or, where
+/// none are given, their defaults.
+fn passing<R>(
+    bytes: &[u8],
+    glyphs: &[u16],
+    features: Option<&[i16]>,
+    test: impl FnOnce(&mut Slots<'_>) -> R,
+) -> R {
+    let limits = Limits::DEFAULT;
+    let sfnt = Sfnt::parse(bytes).expect("the face parses");
+    let tables = Tables::parse(&sfnt, &limits).expect("a description");
+    let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+    let description = silf.description(0).expect("its description");
+    let attributes = tables
+        .attributes(&limits)
+        .map(|read| read.expect("its attributes read"));
+    let feat = tables.features().map(|read| read.expect("its Feat reads"));
+    let values = match features {
+        Some(values) => values.to_vec(),
+        None => feat.as_ref().map_or_else(Vec::new, |feat| {
+            FeatureValues::defaults(feat).as_slice().to_vec()
+        }),
+    };
+    let source = Source {
+        sfnt: &sfnt,
+        attributes: attributes.as_ref(),
+        description: &description,
+        features: feat.as_ref(),
+    };
+    let stream: Vec<(u16, u32, u32)> = glyphs
+        .iter()
+        .enumerate()
+        .map(|(at, glyph)| {
+            let at = u32::try_from(at).expect("a short run");
+            (*glyph, at, at)
+        })
+        .collect();
+    let mut slots = Slots::new(source, &stream, &values);
+    test(&mut slots)
+}
+
+/// What the substitution stage of the face `bytes` makes of `glyphs`: its
+/// glyphs, its clusters and what it refused.
+fn substituted(
+    bytes: &[u8],
+    glyphs: &[u16],
+    right_to_left: bool,
+    features: Option<&[i16]>,
+) -> (Vec<u16>, Vec<u32>, Vec<Refusal>) {
+    passing(bytes, glyphs, features, |slots| {
+        let limits = Limits::DEFAULT;
+        let mut budget = Budget::new(&limits);
+        let refusals = pass::substitute(slots, right_to_left, &limits, &mut budget);
+        (slots.glyphs(), slots.clusters(), refusals)
+    })
+}
+
+/// A rule of slots `slots`, `pre` of them before the scan position, whose
+/// action puts class `class`'s glyph in its first modified slot and moves
+/// on: `X > Y / …`, the scan position moving to the slot after it.
+fn put_rule(pre: u8, slots: &[&[u16]], class: u8) -> RuleSpec {
+    RuleSpec {
+        pre,
+        slots: slots.iter().map(|slot| slot.to_vec()).collect(),
+        action: vec![0x1C, class, 0x19, 0x31],
+        ..RuleSpec::default()
+    }
+}
+
+/// `_ {user1 == value}` at `offset`: a `ContextItem` block reading user
+/// attribute 0.
+fn alt_is(offset: u8, value: u8) -> Vec<u8> {
+    vec![0x22, offset, 7, 0x2E, 55, 0, 0, 0x01, value, 0x13]
+}
+
+/// The GDL's substitution examples, each its rules compiled into a pass and
+/// run over the stream it names; the outputs are the GDL's own, counted.
+#[test]
+fn substitution_passes_reproduce_the_specifications_examples() {
+    let mut held = 0usize;
+    let one_pass = |rules: &[RuleSpec], glyphs: u16, linear: &[Vec<u16>], loops: u8, backup: u8| {
+        let pass = compile(rules, glyphs, loops, backup);
+        let description = passing_description(vec![pass], linear, &[], 4);
+        passing_face(glyphs, 4, description, &[], None)
+    };
+
+    // 4.1.1: `X > Y / A _ A` over `A X A X A X A` — "the output we might
+    // expect (A Y A Y A Y A)", the final A of each match rescanned. A 1, X
+    // 2, Y 3.
+    let face = one_pass(&[put_rule(1, &[&[1], &[2], &[1]], 0)], 8, &[vec![3]], 5, 0);
+    let (glyphs, ..) = substituted(&face, &[1, 2, 1, 2, 1, 2, 1], false, None);
+    assert_eq!(glyphs, vec![1, 3, 1, 3, 1, 3, 1]);
+    held += 1;
+
+    // 4.1.7.1: `B > Y / W A? _ C` — two rules, with the A and without — and
+    // `C > D / B _ E`: "WABC" gives "WAYC", and "WBCE" gives "WYCE", the
+    // shorter B rule as long as the C rule and earlier in the file. W 1, A
+    // 2, B 3, C 4, E 5; Y 6, D 7.
+    let rules = [
+        put_rule(2, &[&[1], &[2], &[3], &[4]], 0),
+        put_rule(1, &[&[1], &[3], &[4]], 0),
+        put_rule(1, &[&[3], &[4], &[5]], 1),
+    ];
+    let face = one_pass(&rules, 8, &[vec![6], vec![7]], 5, 0);
+    assert_eq!(
+        substituted(&face, &[1, 2, 3, 4], false, None).0,
+        vec![1, 2, 6, 4]
+    );
+    held += 1;
+    assert_eq!(
+        substituted(&face, &[1, 3, 4, 5], false, None).0,
+        vec![1, 6, 4, 5]
+    );
+    held += 1;
+
+    // 4.1.7.2: `A > B / W _` and `A > C / _ X Y` over "WAXY": "the output
+    // would be WCXY", the second rule's longer context winning. W 1, A 2, X
+    // 3, Y 4; B 5, C 6.
+    let rules = [
+        put_rule(1, &[&[1], &[2]], 0),
+        put_rule(0, &[&[2], &[3], &[4]], 1),
+    ];
+    let face = one_pass(&rules, 8, &[vec![5], vec![6]], 5, 0);
+    assert_eq!(
+        substituted(&face, &[1, 2, 3, 4], false, None).0,
+        vec![1, 6, 3, 4]
+    );
+    held += 1;
+
+    // 5.1, the example file's two substitution passes. Dotted i 10-12,
+    // dotless 13-15; tones 20-24 and upper modifiers 25-28, together the
+    // upper diacritics; level pitches 30-34 and contours 35-40; the digits
+    // 1-5 41-45, the hyphen 46, the raising pseudo-glyph 50; their raised
+    // forms 61-66. Linear classes: 0 dotless, 1 level numbers, 2 and 3 a
+    // contour's first and second numbers ("133551", "515133"), 4 the
+    // raise, 5 the hyphen, 6 the raised forms; lookup classes 7 dotted, 8
+    // level, 9 contour, 10 what can be raised.
+    let tones: Vec<u16> = (20..=24).collect();
+    let modifiers: Vec<u16> = (25..=28).collect();
+    let diacritics: Vec<u16> = (20..=28).collect();
+    let pitch_number = vec![0x2B, 0, 0, 0x01, 1, 0x13, 0x30];
+    let first = vec![
+        // clsDottedI > clsDotlessI / _ clsUDia;
+        RuleSpec {
+            slots: vec![vec![10, 11, 12], diacritics.clone()],
+            action: vec![0x1D, 0, 7, 0, 0x19, 0x31],
+            ..RuleSpec::default()
+        },
+        // clsTone clsUMod > @2 @1;
+        RuleSpec {
+            slots: vec![tones, modifiers],
+            action: vec![
+                0x1E, 1, 0x21, 1, 1, 0x19, 0x1E, 0xFF, 0x21, 1, 0xFF, 0x19, 0x31,
+            ],
+            ..RuleSpec::default()
+        },
+        // if (fPitchNum == numbers) cls1Pitch _ > cls1Num gRaise;
+        RuleSpec {
+            slots: vec![(30..=34).collect()],
+            constraint: pitch_number.clone(),
+            action: vec![0x1D, 0, 8, 1, 0x19, 0x1F, 0x1C, 4, 0x19, 0x31],
+            ..RuleSpec::default()
+        },
+        // cls2Pitch _ _ _ _ _ > cls2Num1 gRaise C("-") gRaise cls2Num2$1 gRaise;
+        RuleSpec {
+            slots: vec![(35..=40).collect()],
+            constraint: pitch_number,
+            action: vec![
+                0x1D, 0, 9, 2, 0x19, 0x1F, 0x1C, 4, 0x19, 0x1F, 0x1C, 5, 0x19, 0x1F, 0x1C, 4, 0x19,
+                0x1F, 0x1D, 0, 9, 3, 0x19, 0x1F, 0x1C, 4, 0x19, 0x31,
+            ],
+            ..RuleSpec::default()
+        },
+    ];
+    // clsRaise gRaise > clsRaised _;
+    let second = vec![RuleSpec {
+        slots: vec![(41..=46).collect(), vec![50]],
+        action: vec![0x1D, 0, 10, 6, 0x19, 0x20, 0x19, 0x31],
+        ..RuleSpec::default()
+    }];
+    let linear = [
+        vec![13, 14, 15],
+        vec![41, 42, 43, 44, 45],
+        vec![41, 43, 43, 45, 45, 41],
+        vec![45, 41, 45, 41, 43, 43],
+        vec![50],
+        vec![46],
+        vec![61, 62, 63, 64, 65, 66],
+    ];
+    let lookups = [
+        vec![(10, 0), (11, 1), (12, 2)],
+        (30..=34).zip(0..).collect::<Vec<(u16, u16)>>(),
+        (35..=40).zip(0..).collect::<Vec<(u16, u16)>>(),
+        (41..=46).zip(0..).collect::<Vec<(u16, u16)>>(),
+    ];
+    let description = passing_description(
+        vec![compile(&first, 70, 5, 0), compile(&second, 70, 5, 0)],
+        &linear,
+        &lookups,
+        4,
+    );
+    let feat = feat_table(&[(64_000, 0x8000, &[0, 1])]);
+    let face = passing_face(70, 4, description, &[], Some(feat));
+    let numbers: &[i16] = &[1];
+    let letters: &[i16] = &[0];
+    // The dotless i: before an upper diacritic, and not before anything else.
+    assert_eq!(substituted(&face, &[10, 20], false, None).0, vec![13, 20]);
+    assert_eq!(substituted(&face, &[11, 41], false, None).0, vec![11, 41]);
+    held += 1;
+    // A tone and a modifier exchanged, one cluster.
+    let (glyphs, clusters, _) = substituted(&face, &[21, 26], false, None);
+    assert_eq!((glyphs, clusters), (vec![26, 21], vec![0, 0]));
+    held += 1;
+    // Pitch letters as numbers, under the feature only: the first pass
+    // alone, a level pitch one number and a contour three, each marked.
+    let first_pass = |glyphs: &[u16], features: &[i16]| {
+        passing(&face, glyphs, Some(features), |slots| {
+            let limits = Limits::DEFAULT;
+            let mut budget = Budget::new(&limits);
+            let mut refusals = Vec::new();
+            pass::run_passes(slots, 0..1, &limits, &mut budget, &mut refusals);
+            assert!(refusals.is_empty(), "{refusals:?}");
+            slots.glyphs()
+        })
+    };
+    assert_eq!(first_pass(&[30], numbers), vec![41, 50]);
+    assert_eq!(first_pass(&[36], numbers), vec![43, 50, 46, 50, 41, 50]);
+    assert_eq!(first_pass(&[36], letters), vec![36]);
+    held += 1;
+    // Raised glyphs: the second pass makes each marked one its raised form,
+    // the mark gone, all of them the pitch letter's one character.
+    let (glyphs, clusters, refusals) = substituted(&face, &[36], false, Some(numbers));
+    assert_eq!(glyphs, vec![63, 66, 61]);
+    assert_eq!(clusters, vec![0, 0, 0]);
+    assert!(refusals.is_empty(), "{refusals:?}");
+    assert_eq!(substituted(&face, &[30], false, Some(numbers)).0, vec![61]);
+    held += 1;
+
+    // 6.4.1: the chain of A alternating A1 and A2, its last A2, found by
+    // running to the chain's end and backing up over it, `MaxRuleLoop = 20;
+    // MaxBackup = 10`, `Alt` user attribute 0. A 1, A1 2, A2 3; 9 any other.
+    let mark =
+        |value: u8, back: u8| vec![0x1E, 0, 0x01, value, 0x33, 55, 0, 0x19, 0x01, back, 0x30];
+    let both = |first: u8, second: u8| {
+        let mut code = alt_is(0, first);
+        code.extend(alt_is(1, second));
+        code.extend([0x10, 0x30]);
+        code
+    };
+    let single = |offset: u8, value: u8| {
+        let mut code = alt_is(offset, value);
+        code.push(0x30);
+        code
+    };
+    let chain = [
+        // gA > @ / _ gA {Alt == 0};
+        RuleSpec {
+            slots: vec![vec![1], vec![1]],
+            constraint: single(1, 0),
+            action: vec![0x1E, 0, 0x19, 0x31],
+            ..RuleSpec::default()
+        },
+        // gA > @ {Alt = 2} / ^ ANY _ {Alt == 0};
+        RuleSpec {
+            pre: 1,
+            slots: vec![vec![], vec![1]],
+            constraint: single(0, 0),
+            action: mark(2, 0xFE),
+            ..RuleSpec::default()
+        },
+        // gA > @ {Alt = 2} / ^ ANY _ {Alt == 0} gA {Alt == 1};
+        RuleSpec {
+            pre: 1,
+            slots: vec![vec![], vec![1], vec![1]],
+            constraint: both(0, 1),
+            action: mark(2, 0xFE),
+            ..RuleSpec::default()
+        },
+        // gA > @ {Alt = 1} / ^ ANY _ {Alt == 0} gA {Alt == 2};
+        RuleSpec {
+            pre: 1,
+            slots: vec![vec![], vec![1], vec![1]],
+            constraint: both(0, 2),
+            action: mark(1, 0xFE),
+            ..RuleSpec::default()
+        },
+        // gA > @ {Alt = 2} / ^ _ {Alt == 0} gA {Alt == 1};
+        RuleSpec {
+            slots: vec![vec![1], vec![1]],
+            constraint: both(0, 1),
+            action: mark(2, 0xFF),
+            ..RuleSpec::default()
+        },
+        // gA > @ {Alt = 1} / ^ _ {Alt == 0} gA {Alt == 2};
+        RuleSpec {
+            slots: vec![vec![1], vec![1]],
+            constraint: both(0, 2),
+            action: mark(1, 0xFF),
+            ..RuleSpec::default()
+        },
+        // gA > gA1 / _ {Alt == 1};
+        RuleSpec {
+            slots: vec![vec![1]],
+            constraint: single(0, 1),
+            action: vec![0x1C, 0, 0x19, 0x31],
+            ..RuleSpec::default()
+        },
+        // gA > gA2 / _ {Alt == 2};
+        RuleSpec {
+            slots: vec![vec![1]],
+            constraint: single(0, 2),
+            action: vec![0x1C, 1, 0x19, 0x31],
+            ..RuleSpec::default()
+        },
+    ];
+    let face = one_pass(&chain, 10, &[vec![2], vec![3]], 20, 10);
+    assert_eq!(
+        substituted(&face, &[9, 1, 1, 1, 1], false, None).0,
+        vec![9, 2, 3, 2, 3]
+    );
+    assert_eq!(
+        substituted(&face, &[9, 1, 1, 1], false, None).0,
+        vec![9, 3, 2, 3]
+    );
+    assert_eq!(
+        substituted(&face, &[1, 1, 1, 1], false, None).0,
+        vec![2, 3, 2, 3]
+    );
+    // Under `MaxBackup = 0` the chain cannot be backed over: the position
+    // is left where it stood, and only the last A changes.
+    let stuck = one_pass(&chain, 10, &[vec![2], vec![3]], 20, 0);
+    assert_eq!(
+        substituted(&stuck, &[1, 1, 1, 1], false, None).0,
+        vec![1, 1, 1, 3]
+    );
+    held += 1;
+
+    assert_eq!(held, 9, "the substitution examples the design counts");
+}
+
+/// A rule whose action leaves the pointer where it found it fires
+/// `maxRuleLoop` times at each position, and then the position is moved on;
+/// a `maxRuleLoop` of 0 lets it fire once; and a pass that would fire past
+/// the run's budget stops, named once.
+#[test]
+fn a_rule_that_never_moves_the_pointer_stops_at_the_loop_ceiling() {
+    // A user attribute counts the firings: `A {user1 += 1}`, returning 0
+    // with no `Next`.
+    let rule = RuleSpec {
+        slots: vec![vec![1]],
+        action: vec![0x01, 1, 0x34, 55, 0, 0x31],
+        ..RuleSpec::default()
+    };
+    let counts = |loops: u8, limits: &Limits| {
+        let pass = compile(std::slice::from_ref(&rule), 4, loops, 0);
+        let description = passing_description(vec![pass], &[vec![2]], &[], 4);
+        let face = passing_face(4, 4, description, &[], None);
+        passing(&face, &[1, 1, 1], None, |slots| {
+            let mut budget = Budget::new(limits);
+            let refusals = pass::substitute(slots, false, limits, &mut budget);
+            let fired: Vec<i32> = (0..slots.len())
+                .map(|at| {
+                    slots
+                        .slot_attribute(at, SlotAttribute::User, 0)
+                        .expect("answers")
+                })
+                .collect();
+            (fired, refusals)
+        })
+    };
+    assert_eq!(counts(3, &Limits::DEFAULT), (vec![3, 3, 3], vec![]));
+    assert_eq!(counts(0, &Limits::DEFAULT), (vec![1, 1, 1], vec![]));
+    assert_eq!(counts(255, &Limits::DEFAULT), (vec![255, 255, 255], vec![]));
+    // Three instructions a firing: a budget of thirty stops the pass part
+    // way through its first slot, and says so once.
+    let tight = Limits {
+        max_instructions: 30,
+        ..Limits::DEFAULT
+    };
+    let (fired, refusals) = counts(255, &tight);
+    assert_eq!(fired, vec![10, 0, 0]);
+    assert_eq!(refusals, vec![Refusal::TooManyInstructions]);
+}
+
+/// What decides whether a pass and its rules run: a pass constraint that is
+/// false skips the pass, and one refused is named and skips it; a rule
+/// whose constraint or action fails its check never fires, and the next
+/// candidate is tried; an action refused as it runs is named, what it did
+/// stands, and the position moves on.
+#[test]
+fn a_pass_runs_only_what_its_code_allows() {
+    let ligature = |action: Vec<u8>, constraint: Vec<u8>| RuleSpec {
+        slots: vec![vec![1], vec![2]],
+        constraint,
+        action,
+        ..RuleSpec::default()
+    };
+    let join = vec![0x1C, 0, 0x21, 2, 0, 1, 0x19, 0x20, 0x19, 0x31];
+    let face_of = |rules: &[RuleSpec], pass_constraint: Vec<u8>| {
+        let mut pass = compile(rules, 8, 5, 0);
+        pass.pass_constraint = pass_constraint;
+        let description = passing_description(vec![pass], &[vec![3], vec![4]], &[], 4);
+        passing_face(
+            8,
+            4,
+            description,
+            &[],
+            Some(feat_table(&[(7, 0x8000, &[0, 1])])),
+        )
+    };
+    let run = |face: &[u8], features: &[i16]| substituted(face, &[1, 2], false, Some(features));
+    // The pass constraint `feature 0 == 1`: false skips the pass.
+    let gated = face_of(
+        &[ligature(join.clone(), vec![])],
+        vec![0x2B, 0, 0, 0x01, 1, 0x13, 0x30],
+    );
+    assert_eq!(run(&gated, &[1]).0, vec![3]);
+    assert_eq!(run(&gated, &[0]).0, vec![1, 2]);
+    // A pass constraint that fails its check skips the pass, named.
+    let broken = face_of(&[ligature(join.clone(), vec![])], vec![0x43]);
+    let (glyphs, _, refusals) = run(&broken, &[1]);
+    assert_eq!(glyphs, vec![1, 2]);
+    assert_eq!(
+        refusals,
+        vec![Refusal::CodeRefused {
+            pass: 0,
+            block: Block::PassConstraint,
+            at: 0,
+            fault: Fault::IllegalOpcode(0x43),
+        }]
+    );
+    // The longer rule's constraint fails its check: it never fires, and the
+    // shorter rule after it does.
+    let mut rules = vec![ligature(join.clone(), vec![0x06, 0x30])];
+    rules.push(RuleSpec {
+        slots: vec![vec![1]],
+        action: vec![0x1C, 1, 0x19, 0x31],
+        ..RuleSpec::default()
+    });
+    let (glyphs, _, refusals) = run(&face_of(&rules, vec![]), &[0]);
+    assert_eq!(glyphs, vec![4, 2]);
+    assert!(matches!(
+        refusals.as_slice(),
+        [Refusal::CodeRefused {
+            block: Block::Constraint(0),
+            fault: Fault::StackUnderflow,
+            ..
+        }]
+    ));
+    // An action that fails its check, likewise.
+    rules[0] = ligature(vec![0x1A, 1], vec![]);
+    let (glyphs, _, refusals) = run(&face_of(&rules, vec![]), &[0]);
+    assert_eq!(glyphs, vec![4, 2]);
+    assert!(matches!(
+        refusals.as_slice(),
+        [Refusal::CodeRefused {
+            block: Block::Action(0),
+            fault: Fault::Unimplemented(0x1A),
+            ..
+        }]
+    ));
+    // An action refused as it runs: its `PutGlyph` stands, it is named, and
+    // the position moves on.
+    rules[0] = ligature(vec![0x1C, 0, 0x21, 1, 9, 0x31], vec![]);
+    let (glyphs, _, refusals) = run(&face_of(&rules, vec![]), &[0]);
+    assert_eq!(glyphs, vec![3, 2]);
+    assert!(matches!(
+        refusals.as_slice(),
+        [Refusal::CodeRefused {
+            block: Block::Action(0),
+            fault: Fault::SlotOutOfRange,
+            ..
+        }]
+    ));
+}
+
+/// A run at an odd level is passed in logical order, as every run is, so a
+/// rule matches the order the text is stored in; a reversed pass sees it
+/// turned end to end and turns it back; and a description with a bidi pass
+/// and a `Silf` of 4 or later mirrors each glyph of an odd-level run before
+/// the pass it names, one without either mirroring nothing. The GDL's
+/// examples, counted.
+#[test]
+fn a_right_to_left_run_is_passed_in_the_order_the_design_states() {
+    let mut held = 0usize;
+    // `A B > AB:(1 2) _`, a ligature a rule finds only in the order A, B.
+    let ligature = |first: u16, second: u16| RuleSpec {
+        slots: vec![vec![first], vec![second]],
+        action: vec![0x1C, 0, 0x21, 2, 0, 1, 0x19, 0x20, 0x19, 0x31],
+        ..RuleSpec::default()
+    };
+    let face_of = |rules: &[RuleSpec], flags: u8, joined: u16, bidi: u8, major: u32| {
+        let mut pass = compile(rules, 32, 5, 0);
+        pass.flags = flags;
+        let mut description = passing_description(vec![pass], &[vec![joined]], &[], major);
+        description.order[3] = bidi;
+        // Glyph attribute 3, the description's mirroring attribute: the
+        // parentheses 20 and 21 each other's mirror.
+        let maps = vec![BTreeMap::new(); 20]
+            .into_iter()
+            .chain([BTreeMap::from([(3, 21)]), BTreeMap::from([(3, 20)])])
+            .collect::<Vec<_>>();
+        passing_face(32, major, description, &maps, None)
+    };
+    // A 1, B 2; AB 3, BA 4.
+    let forward = face_of(&[ligature(1, 2)], 0, 3, 255, 4);
+    assert_eq!(substituted(&forward, &[1, 2], true, None).0, vec![3]);
+    assert_eq!(substituted(&forward, &[1, 2], false, None).0, vec![3]);
+    // A reversed pass sees B, A: the rule for A, B does not match, the rule
+    // for B, A does, and the stream is turned back after.
+    let reversed = face_of(&[ligature(1, 2)], 0x20, 3, 255, 4);
+    assert_eq!(substituted(&reversed, &[1, 2], true, None).0, vec![1, 2]);
+    let backwards = face_of(&[ligature(2, 1)], 0x20, 4, 255, 4);
+    let (glyphs, clusters, _) = substituted(&backwards, &[1, 2, 5], true, None);
+    assert_eq!((glyphs, clusters), (vec![4, 5], vec![0, 2]));
+
+    // GDL 4.1.4.2: "ABC 123 DEF" in a right-to-left system is three runs
+    // here, at levels 1, 2 and 1, each passed in logical order — so each
+    // run's rule over its stored order fires — and the consumer's per-line
+    // reorder draws "FED 123 CBA". A, B, C 1-3; 1, 2, 3 6-8; D, E, F 11-13;
+    // each run's ligature 30.
+    let triple = |a: u16, b: u16, c: u16| RuleSpec {
+        slots: vec![vec![a], vec![b], vec![c]],
+        action: vec![
+            0x1C, 0, 0x21, 3, 0, 1, 2, 0x19, 0x20, 0x19, 0x20, 0x19, 0x31,
+        ],
+        ..RuleSpec::default()
+    };
+    let runs = face_of(
+        &[triple(1, 2, 3), triple(6, 7, 8), triple(11, 12, 13)],
+        0,
+        30,
+        255,
+        4,
+    );
+    for (glyphs, odd) in [([1, 2, 3], true), ([6, 7, 8], false), ([11, 12, 13], true)] {
+        assert_eq!(
+            substituted(&runs, &glyphs, odd, None).0,
+            vec![30],
+            "{glyphs:?}"
+        );
+    }
+    held += 1;
+
+    // GDL 6.6: a parenthesis at an odd level takes its mirror, before the
+    // pass after the bidi pass; at an even level, without a bidi pass, and
+    // in a `Silf` before 4, it does not.
+    let mirrored = face_of(&[ligature(1, 2)], 0, 3, 0, 4);
+    assert_eq!(
+        substituted(&mirrored, &[20, 1, 2, 21], true, None).0,
+        vec![21, 3, 20]
+    );
+    assert_eq!(
+        substituted(&mirrored, &[20, 1, 2, 21], false, None).0,
+        vec![20, 3, 21]
+    );
+    let no_bidi = face_of(&[ligature(1, 2)], 0, 3, 255, 4);
+    assert_eq!(
+        substituted(&no_bidi, &[20, 1, 2, 21], true, None).0,
+        vec![20, 3, 21]
+    );
+    let early = face_of(&[ligature(1, 2)], 0, 3, 0, 3);
+    assert_eq!(
+        substituted(&early, &[20, 1, 2, 21], true, None).0,
+        vec![20, 3, 21]
+    );
+    // The bidi pass placed past the substitution passes mirrors at the
+    // stage's end.
+    let late = face_of(&[ligature(1, 2)], 0, 3, 10, 4);
+    assert_eq!(
+        substituted(&late, &[20, 1, 2, 21], true, None).0,
+        vec![21, 3, 20]
+    );
+    held += 1;
+
+    assert_eq!(held, 2, "the bidi examples the design counts");
+}
+
+/// The vendored Dai Banna SIL's two passes run whole: its line-break pass
+/// gives the consonant after a prevowel its break weight, and its
+/// substitution pass composes `e` and the acute's pseudo-glyph into `é`.
+#[test]
+fn the_vendored_faces_passes_run() {
+    let sfnt = Sfnt::parse(DAI_BANNA).expect("Dai Banna SIL parses");
+    let glyph = |c: char| sfnt.glyph_for_char(c).expect("a glyph");
+    let (e, composed) = (glyph('e'), glyph('\u{E9}'));
+    let (prevowel, consonant) = (glyph('\u{19B6}'), glyph('\u{1982}'));
+    passing(DAI_BANNA, &[e, 413, prevowel, consonant], None, |slots| {
+        let limits = Limits::DEFAULT;
+        let mut budget = Budget::new(&limits);
+        let refusals = pass::substitute(slots, false, &limits, &mut budget);
+        assert!(refusals.is_empty(), "{refusals:?}");
+        assert_eq!(slots.glyphs(), vec![composed, prevowel, consonant]);
+        assert_eq!(slots.clusters(), vec![0, 2, 3]);
+        assert_eq!(
+            slots.slot_attribute(2, SlotAttribute::BreakWeight, 0),
+            Ok(-30)
+        );
+    });
+}

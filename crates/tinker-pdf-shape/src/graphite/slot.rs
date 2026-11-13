@@ -223,6 +223,25 @@ impl<'f> Slots<'f> {
         self.slots.get(at)
     }
 
+    /// Slot `at`'s glyph.
+    #[must_use]
+    pub fn glyph_at(&self, at: usize) -> Option<u16> {
+        self.slots.get(at).map(|slot| slot.glyph)
+    }
+
+    /// Puts `glyph` in slot `at`, as a pass's mirroring does.
+    pub(crate) fn set_glyph(&mut self, at: usize, glyph: u16) {
+        if let Some(slot) = self.slots.get_mut(at) {
+            slot.glyph = glyph;
+        }
+    }
+
+    /// Turns the stream end to end, as a reversed pass runs over it.
+    pub(crate) fn reverse(&mut self) {
+        self.slots.reverse();
+        self.reindex();
+    }
+
     /// Every slot's glyph, in order.
     #[must_use]
     pub fn glyphs(&self) -> Vec<u16> {

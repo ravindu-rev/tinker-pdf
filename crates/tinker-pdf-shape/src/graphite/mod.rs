@@ -18,7 +18,11 @@
 //! before it runs, and a constraint's computing instructions run against a
 //! stream ([`Reads`]) to decide whether its rule fires; and the slot stream
 //! ([`Slots`]) a rule's action rewrites, putting glyphs, inserting,
-//! deleting, copying and associating slots and setting their attributes. A face whose only
+//! deleting, copying and associating slots and setting their attributes;
+//! and the passes that run them ([`pass`]): the line-break and substitution
+//! passes in the description's order and direction, each position's first
+//! rule whose constraint holds fired, under each pass's own loop ceiling,
+//! with the bidi pass's mirroring placed where the description names it. A face whose only
 //! layout tables are these is still shaped as though it carried none, and
 //! every run over it says so (`crate::Warning::TableNotRun`).
 //!
@@ -42,6 +46,7 @@ pub mod feat;
 pub mod glat;
 mod lz4;
 pub mod machine;
+pub mod pass;
 pub mod silf;
 pub mod slot;
 
