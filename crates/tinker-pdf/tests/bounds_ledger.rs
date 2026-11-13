@@ -677,6 +677,38 @@ const TABLES_TESTS: &str = include_str!("tables.rs");
 /// The review of tier 5's formats lane: HTML's two caps live with the XML
 /// reader's four, and its bounds suite fires them.
 const HTML_TESTS: &str = include_str!("../../tinker-pdf-xml/tests/html.rs");
+/// K-05's fuzz limits: the roster, the table the derivation writes, the
+/// targets whose ceilings a path stands on, the generators whose caps a
+/// structured target's path stands on, and the sources of the caps it reads
+/// that are not public constants.
+const FUZZ_MANIFEST: &str = include_str!("../../../fuzz/Cargo.toml");
+const FUZZ_LIMITS: &str = include_str!("../../../fuzz/limits.tsv");
+const FUZZ_ASCII_FILTERS: &str = include_str!("../../../fuzz/fuzz_targets/ascii_filters.rs");
+const FUZZ_BMP: &str = include_str!("../../../fuzz/fuzz_targets/bmp.rs");
+const FUZZ_BROTLI: &str = include_str!("../../../fuzz/fuzz_targets/brotli.rs");
+const FUZZ_BZIP2: &str = include_str!("../../../fuzz/fuzz_targets/bzip2.rs");
+const FUZZ_CCITT: &str = include_str!("../../../fuzz/fuzz_targets/ccitt.rs");
+const FUZZ_GIF: &str = include_str!("../../../fuzz/fuzz_targets/gif.rs");
+const FUZZ_INFLATE: &str = include_str!("../../../fuzz/fuzz_targets/inflate.rs");
+const FUZZ_JBIG2: &str = include_str!("../../../fuzz/fuzz_targets/jbig2.rs");
+const FUZZ_JPEG: &str = include_str!("../../../fuzz/fuzz_targets/jpeg.rs");
+const FUZZ_JPX: &str = include_str!("../../../fuzz/fuzz_targets/jpx.rs");
+const FUZZ_JXR: &str = include_str!("../../../fuzz/fuzz_targets/jxr.rs");
+const FUZZ_LZW: &str = include_str!("../../../fuzz/fuzz_targets/lzw.rs");
+const FUZZ_PNG: &str = include_str!("../../../fuzz/fuzz_targets/png.rs");
+const FUZZ_PPMD: &str = include_str!("../../../fuzz/fuzz_targets/ppmd.rs");
+const FUZZ_STANDALONE: &str = include_str!("../../../fuzz/fuzz_targets/standalone.rs");
+const FUZZ_TIFF: &str = include_str!("../../../fuzz/fuzz_targets/tiff.rs");
+const FUZZ_WEBP: &str = include_str!("../../../fuzz/fuzz_targets/webp.rs");
+const FUZZ_WOFF: &str = include_str!("../../../fuzz/fuzz_targets/woff.rs");
+const FUZZ_ZSTD: &str = include_str!("../../../fuzz/fuzz_targets/zstd.rs");
+const FUZZ_GEN_CFF: &str = include_str!("../../../fuzz/src/cff.rs");
+const FUZZ_GEN_CONTENT: &str = include_str!("../../../fuzz/src/content.rs");
+const FUZZ_GEN_COS: &str = include_str!("../../../fuzz/src/cos.rs");
+const FUZZ_GEN_GLYF: &str = include_str!("../../../fuzz/src/glyf.rs");
+const FONT_OUTLINE: &str = include_str!("../../tinker-pdf-font/src/outline.rs");
+const FONT_CFF_SUBSET: &str = include_str!("../../tinker-pdf-font/src/cff_subset.rs");
+const ARCHIVE_BZIP2: &str = include_str!("../../tinker-pdf-archive/src/bzip2.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -3253,4 +3285,1061 @@ fn every_bound_names_a_test_that_exists() {
             "a bound in this gap is being proved by a clock"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The fuzz limits: `docs/design/resource-exhaustion.md`, "The derivation".
+//
+// Every fuzz target's `-rss_limit_mb` and `-malloc_limit_mb` are derived here
+// from the bounds its path reaches, and `fuzz/limits.tsv` holds the result
+// for the local fuzz command and `cargo xtask fuzz` to read. A bound is a row
+// of the ledger above at its shipped value, a cap the ledger has no row for
+// read from its public constant, a ceiling written in a source the path names
+// (a target's own, or a crate's private constant), or the input. Nothing here
+// is edited to make a session pass: a session that fails under its limits has
+// found a buffer its row does not name, which the row then names with the
+// bound that admits it, or a parser with no bound, which is bounded.
+// ---------------------------------------------------------------------------
+
+/// A mebibyte: libFuzzer writes both memory limits in them.
+const MIB: u128 = 1 << 20;
+
+/// The longest input libFuzzer makes while the command names no `-max_len`:
+/// its own ceiling, whatever the corpus holds.
+const FUZZ_INPUT: u128 = 1 << 20;
+
+/// The fuzzer process before its first input, in MiB: the binary, libFuzzer's
+/// corpus and tables, and the sanitiser's bookkeeping. libFuzzer's `INITED`
+/// line reports the figure this stands for in every session.
+const FUZZ_BASE_MB: u128 = 256;
+
+/// The sanitiser's quarantine of freed blocks, in MiB, which the command pins
+/// with `ASAN_OPTIONS=quarantine_size_mb=64`.
+const FUZZ_QUARANTINE_MB: u128 = 64;
+
+/// The stack a session's inputs run on, in KiB: the 512 KiB macOS gives a
+/// thread created without a size, the least any supported host gives.
+const FUZZ_STACK_KIB: u128 = 512;
+
+/// What bounds one buffer a fuzz target's path holds.
+#[derive(Clone, Copy)]
+enum Held {
+    /// A row of [`ledger`], at its shipped value.
+    Row(&'static str),
+    /// A number read from the code: a public constant the ledger has no row
+    /// for, or a ceiling the path's `written` entries find in their sources.
+    Value(u128),
+    /// The input, at [`FUZZ_INPUT`].
+    Input,
+}
+
+/// One buffer: its bound, the bytes `unit` takes for every `per` units of
+/// the bound, and how many of it the path holds at once by its own structure.
+struct Buffer {
+    held: Held,
+    unit: u128,
+    per: u128,
+    copies: u128,
+    what: &'static str,
+}
+
+/// A buffer of `unit` bytes for each unit of `held`, `copies` of it at once.
+fn buffer(held: Held, unit: u128, copies: u128, what: &'static str) -> Buffer {
+    Buffer {
+        held,
+        unit,
+        per: 1,
+        copies,
+        what,
+    }
+}
+
+/// One fuzz target's path: its buffers, and every text a `Held::Value` stands
+/// on, with the source the text must still be in.
+struct FuzzPath {
+    target: &'static str,
+    buffers: Vec<Buffer>,
+    written: Vec<(&'static str, &'static str)>,
+}
+
+/// A path that stands on no text.
+fn path(target: &'static str, buffers: Vec<Buffer>) -> FuzzPath {
+    FuzzPath {
+        target,
+        buffers,
+        written: Vec::new(),
+    }
+}
+
+/// A path whose numbers stand on texts in sources this file reads.
+fn written(
+    target: &'static str,
+    buffers: Vec<Buffer>,
+    written: Vec<(&'static str, &'static str)>,
+) -> FuzzPath {
+    FuzzPath {
+        target,
+        buffers,
+        written,
+    }
+}
+
+/// The most bytes a parse builds from one byte of what it reads, where the
+/// parse keeps what it reads: one element of a parse — an object, a token, an
+/// event, a node with its vectors — takes a byte of input at least and 128
+/// bytes at most, the power of two over the widest of them, the XML reader's
+/// event. `the_fuzz_limits_are_derived_from_this_ledger` holds the elements a
+/// row can name to it.
+const PARSED: u128 = 128;
+
+/// One glyph's outline at `outline.rs`'s `MAX_SEGMENTS`.
+fn outline() -> Buffer {
+    buffer(
+        Held::Value(1 << 16),
+        std::mem::size_of::<tinker_pdf_font::Segment>() as u128,
+        1,
+        "one glyph's outline at the segment cap; glyphs are outlined one after another",
+    )
+}
+
+/// The text `outline` stands on.
+const OUTLINE_CAP: (&str, &str) = (FONT_OUTLINE, "const MAX_SEGMENTS: usize = 1 << 16;");
+
+/// Every target's path, one row a target.
+fn fuzz_paths() -> Vec<FuzzPath> {
+    use Held::{Input, Row, Value};
+    let usecmap = tinker_pdf_font::cmap::MAX_USECMAP_DEPTH as u128;
+    let slots = tinker_pdf_cos::limits::MAX_XREF_SLOTS as u128;
+    let slot = std::mem::size_of::<Option<tinker_pdf_cos::XrefEntry>>() as u128;
+    let unpacked = tinker_pdf_archive::sevenz::limits::MAX_7Z_UNPACKED as u128;
+    let segments = tinker_pdf_svg::Limits::DEFAULT.max_segments as u128;
+    let segment = std::mem::size_of::<tinker_pdf_font::Segment>() as u128;
+    // `content_stream`'s page: 72 points a side at a scale of 3, or a region
+    // four pixels past it.
+    let generated_page = (72 * 3 + 4) * (72 * 3 + 4);
+    vec![
+        path(
+            "annotation_appearance",
+            vec![
+                buffer(Input, PARSED, 1, "the dictionary parsed out of the input"),
+                buffer(
+                    Row("MAX_DECODED_STREAM"),
+                    1,
+                    1,
+                    "the appearance stream, whose free text layout stops at the cap",
+                ),
+            ],
+        ),
+        written(
+            "ascii_filters",
+            vec![buffer(
+                Value(1 << 20),
+                1,
+                1,
+                "each filter's output; the four decode one after another",
+            )],
+            vec![(FUZZ_ASCII_FILTERS, "Limits::new(1 << 20)")],
+        ),
+        written(
+            "bmp",
+            vec![buffer(
+                Value(1 << 22),
+                1,
+                2,
+                "the picture, and the roomier ceiling's decode of the same picture",
+            )],
+            vec![(FUZZ_BMP, "_ => 1 << 22")],
+        ),
+        written(
+            "brotli",
+            vec![buffer(
+                Value(1 << 22),
+                1,
+                2,
+                "the output, which is the window its copies read, and the roomier ceiling's copy",
+            )],
+            vec![(FUZZ_BROTLI, "_ => 1 << 22")],
+        ),
+        written(
+            "bzip2",
+            vec![
+                buffer(
+                    Value(1 << 22),
+                    1,
+                    2,
+                    "the output, and the roomier ceiling's copy",
+                ),
+                buffer(
+                    Value(900_000),
+                    5,
+                    1,
+                    "a block of at most 900 000 bytes, a byte an entry, and its inverse \
+                     transform's vector, four",
+                ),
+            ],
+            vec![(FUZZ_BZIP2, "_ => 1 << 22"), (ARCHIVE_BZIP2, "900_000")],
+        ),
+        written(
+            "ccitt",
+            vec![buffer(Value(1 << 20), 1, 1, "the packed page")],
+            vec![(FUZZ_CCITT, "ccitt_decode(body, &params, 1 << 20)")],
+        ),
+        written(
+            "cff",
+            vec![
+                buffer(Input, PARSED, 1, "the font's INDEXes and tables"),
+                outline(),
+            ],
+            vec![OUTLINE_CAP],
+        ),
+        written(
+            "cff_charstrings",
+            vec![
+                buffer(
+                    Value(1 << 20),
+                    1,
+                    1,
+                    "the generated program, under 1 MiB at its generator's caps: four \
+                     subroutine INDEXes of at most 33 900 entries, and twelve glyphs and six \
+                     subroutines an INDEX of at most 24 operators (estimate)",
+                ),
+                buffer(Value(1 << 20), PARSED, 1, "the program parsed"),
+                buffer(
+                    Value(1 << 20),
+                    2,
+                    1,
+                    "a subset, at most twice the program it is cut from",
+                ),
+                buffer(Value(1 << 20), 2 * PARSED, 1, "the subset parsed back"),
+                buffer(
+                    Value(1 << 20),
+                    512,
+                    1,
+                    "the subroutine walk's memo at its cap, each entry a Type 2 machine's \
+                     48-number stack and its hint state (estimate)",
+                ),
+                buffer(
+                    Value(1 << 16),
+                    segment,
+                    12 + 1,
+                    "every glyph's outline at the segment cap, held to compare a subset's \
+                     with, and the subset's glyph read",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_CFF, "pub const MAX_GLYPHS: usize = 12;"),
+                (FUZZ_GEN_CFF, "pub const MAX_OPERATORS: usize = 24;"),
+                (FUZZ_GEN_CFF, "pub const MAX_REAL: usize = 6;"),
+                (FUZZ_GEN_CFF, "33_900,"),
+                (
+                    FUZZ_GEN_CFF,
+                    "let fds = if cid { 1 + c.below(3) } else { 1 };",
+                ),
+                (FONT_CFF_SUBSET, "const MAX_STATES: usize = 1 << 20;"),
+                OUTLINE_CAP,
+            ],
+        ),
+        written(
+            "cff_subset",
+            vec![
+                buffer(
+                    Input,
+                    PARSED,
+                    2,
+                    "the font parsed, and each subset parsed back",
+                ),
+                buffer(
+                    Input,
+                    2,
+                    2,
+                    "a subset and its second writing, each at most twice the program it \
+                     is cut from",
+                ),
+                buffer(
+                    Value(1 << 20),
+                    512,
+                    1,
+                    "the subroutine walk's memo at its cap, each entry a Type 2 machine's \
+                     48-number stack and its hint state (estimate)",
+                ),
+                outline(),
+            ],
+            vec![
+                (FONT_CFF_SUBSET, "const MAX_STATES: usize = 1 << 20;"),
+                OUTLINE_CAP,
+            ],
+        ),
+        path(
+            "cmap",
+            vec![
+                buffer(
+                    Input,
+                    PARSED,
+                    usecmap + 1,
+                    "a CMap parsed out of the input, and each parent its usecmap chain \
+                     parses, to MAX_USECMAP_DEPTH",
+                ),
+                buffer(
+                    Input,
+                    1,
+                    usecmap,
+                    "the copy of the input each parent is handed",
+                ),
+                buffer(Input, 8, 1, "the codes the input splits into"),
+            ],
+        ),
+        written(
+            "content_stream",
+            vec![
+                buffer(
+                    Value(1 << 20),
+                    1,
+                    1,
+                    "the generated document, under 1 MiB at its generator's caps: 192 \
+                     operators in all, images of eight samples a side, and one page's \
+                     resources (estimate); its streams are unfiltered, so a stream decoded \
+                     is a part of it",
+                ),
+                buffer(
+                    Value(1 << 20),
+                    PARSED,
+                    2,
+                    "the objects parsed, and the display list recorded from the page",
+                ),
+                buffer(
+                    Value(generated_page),
+                    4,
+                    1 + 16,
+                    "the RGBA canvas, and a group buffer for each of the sixteen levels \
+                     MAX_GROUP_DEPTH lets groups nest",
+                ),
+                buffer(
+                    Value(generated_page),
+                    5,
+                    2,
+                    "the two bitmaps compared, at most five bytes a pixel",
+                ),
+                buffer(
+                    Value(1 << 24),
+                    4,
+                    4,
+                    "a tiling pattern's cell at MAX_TILE_AREA, for each of the four levels \
+                     MAX_PATTERN_DEPTH lets patterns nest",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_CONTENT, "pub const MAX_TOTAL_OPS: usize = 192;"),
+                (FUZZ_GEN_CONTENT, "pub const MAX_IMAGE: usize = 8;"),
+                (FUZZ_GEN_CONTENT, "pub const MAX_PAGE: i64 = 72;"),
+                (FUZZ_GEN_CONTENT, "[1.0, 0.5, 2.0, 1.5, 0.25, 3.0]"),
+                (FUZZ_GEN_CONTENT, ".ceil() as u32 + 4;"),
+                (RENDER, "const MAX_GROUP_DEPTH: usize = 16;"),
+                (RENDER, "const MAX_TILE_AREA: u64 = 1 << 24;"),
+                (RENDER, "const MAX_PATTERN_DEPTH: u32 = 4;"),
+            ],
+        ),
+        path(
+            "content_tokenizer",
+            vec![buffer(Input, 2, 1, "one token, a string at most the input")],
+        ),
+        path(
+            "cos_document",
+            vec![
+                buffer(Input, PARSED, 1, "the objects parsed out of the input"),
+                buffer(Value(slots), slot, 1, "the dense cross-reference table"),
+                buffer(
+                    Row("MAX_DECODED_STREAM"),
+                    1,
+                    2,
+                    "a stream decoded, and its filter chain's intermediate",
+                ),
+            ],
+        ),
+        path(
+            "cos_object",
+            vec![buffer(Input, PARSED, 1, "the objects parsed")],
+        ),
+        written(
+            "cos_syntax",
+            vec![
+                buffer(
+                    Input,
+                    8,
+                    2,
+                    "the written file, and the copy the document opens: no choice spells \
+                     more than four bytes of it for each byte it reads, `null` after the \
+                     widest gap, and the text around at most four sections of capped objects \
+                     is far less than the other four (estimate)",
+                ),
+                buffer(
+                    Input,
+                    PARSED,
+                    2,
+                    "the model the file is written from, and the objects the document \
+                     parses: either holds a value for at most every byte of the input the \
+                     model read",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_COS, "pub const MAX_SECTIONS: usize = 4;"),
+                (FUZZ_GEN_COS, "pub const MAX_NEW: usize = 6;"),
+                (FUZZ_GEN_COS, "pub const MAX_DATA: usize = 96;"),
+                (FUZZ_GEN_COS, "7 => out.extend_from_slice(b\"  \\n \"),"),
+            ],
+        ),
+        path(
+            "crypt",
+            vec![buffer(
+                Input,
+                4,
+                1,
+                "the body, its sealed copy, and the decryption of each",
+            )],
+        ),
+        path(
+            "crypt_ciphers",
+            vec![buffer(
+                Input,
+                4,
+                1,
+                "the key, the plaintext, the ciphertext and the round trip",
+            )],
+        ),
+        path(
+            "css",
+            vec![buffer(Input, PARSED, 2, "the stylesheet, parsed twice")],
+        ),
+        path(
+            "fb2",
+            vec![
+                buffer(
+                    Input,
+                    PARSED,
+                    2,
+                    "the XHTML translation's tree, for the check and for the document",
+                ),
+                buffer(
+                    Row("MAX_SYNTHESISED_PDF"),
+                    1,
+                    1,
+                    "the PDF the book is laid out into",
+                ),
+            ],
+        ),
+        path(
+            "form_data",
+            vec![
+                buffer(Input, PARSED, 1, "the FDF or XFDF parsed"),
+                buffer(
+                    Row("MAX_FORM_DATA_BYTES"),
+                    1,
+                    2,
+                    "what a reader copies out, and the round trip's copy",
+                ),
+            ],
+        ),
+        path(
+            "form_script",
+            vec![buffer(Input, PARSED, 1, "the script's tokens and tree")],
+        ),
+        written(
+            "gif",
+            vec![buffer(
+                Value(1 << 22),
+                1,
+                2,
+                "the picture, and the roomier ceiling's decode of the same picture",
+            )],
+            vec![(FUZZ_GIF, "_ => 1 << 22")],
+        ),
+        written(
+            "glyf_outlines",
+            vec![
+                buffer(
+                    Value(1 << 16),
+                    1,
+                    1,
+                    "the generated face, under 64 KiB at its generator's caps: sixteen \
+                     glyphs of at most four contours of eight points or three components \
+                     (estimate)",
+                ),
+                buffer(Value(1 << 16), PARSED, 1, "the face parsed"),
+                buffer(Value(1 << 16), 2, 1, "a subset, at most twice the face"),
+                buffer(Value(1 << 16), 2 * PARSED, 1, "the subset parsed back"),
+                buffer(
+                    Value(1 << 16),
+                    segment,
+                    16 + 1,
+                    "every glyph's outline at the segment cap, held to compare a subset's \
+                     with, and the subset's glyph read",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_GLYF, "pub const MAX_GLYPHS: usize = 16;"),
+                (FUZZ_GEN_GLYF, "pub const MAX_CONTOURS: usize = 4;"),
+                (FUZZ_GEN_GLYF, "pub const MAX_POINTS: usize = 8;"),
+                (FUZZ_GEN_GLYF, "pub const MAX_COMPONENTS: usize = 3;"),
+                OUTLINE_CAP,
+            ],
+        ),
+        path(
+            "html",
+            vec![
+                buffer(
+                    Input,
+                    PARSED,
+                    4,
+                    "the document, its second parse, the fragment and the XHTML tree",
+                ),
+                buffer(
+                    Row("MAX_HTML_CLONE_BYTES"),
+                    1,
+                    1,
+                    "the attribute bytes the formatting elements' clones copy",
+                ),
+            ],
+        ),
+        path(
+            "icc_profile",
+            vec![buffer(Input, PARSED, 1, "the profile's tags and tables")],
+        ),
+        written(
+            "inflate",
+            vec![buffer(
+                Value(1 << 20),
+                1,
+                2,
+                "the inflated bytes, and the predictor's rows beside them",
+            )],
+            vec![(FUZZ_INFLATE, "Limits::new(1 << 20)")],
+        ),
+        written(
+            "jbig2",
+            vec![
+                buffer(Value(1 << 16), 1, 1, "the page"),
+                Buffer {
+                    held: Row("MAX_JBIG2_SYMBOL_PIXELS"),
+                    unit: 1,
+                    per: 8,
+                    copies: 2,
+                    what: "a dictionary's symbols, packed a bit a pixel, and the copies a \
+                           text region gathers of them",
+                },
+                buffer(
+                    Row("MAX_JBIG2_SYMBOLS"),
+                    48,
+                    2,
+                    "each of those symbols' bitmap header (estimate)",
+                ),
+            ],
+            vec![(FUZZ_JBIG2, "let ceiling = 1 << 16;")],
+        ),
+        written(
+            "jpeg",
+            vec![buffer(
+                Value(1 << 22),
+                26,
+                1,
+                "the output, its component planes, and the coefficients: a frame one \
+                 pixel wide pads each row of blocks to its widest MCU, 32 samples, so its \
+                 coefficients reach 24 bytes a byte of output",
+            )],
+            vec![(FUZZ_JPEG, "jpeg_decode(data, 1 << 22)")],
+        ),
+        written(
+            "jpx",
+            vec![buffer(
+                Value(1 << 20),
+                6,
+                1,
+                "the output, the wavelet's 32-bit planes, and the code-blocks' state \
+                 (estimate); the bare and the boxed input decode one after another",
+            )],
+            vec![(FUZZ_JPX, "_ => 1 << 20")],
+        ),
+        written(
+            "jxr",
+            vec![buffer(
+                Value(1 << 20),
+                5,
+                1,
+                "the output, and the 32-bit planes it is reconstructed from",
+            )],
+            vec![(FUZZ_JXR, "_ => 1 << 20")],
+        ),
+        path(
+            "layout",
+            vec![
+                buffer(Input, PARSED, 1, "the tree the generator builds"),
+                buffer(
+                    Row("MAX_BOX_TREE_NODES"),
+                    256,
+                    1,
+                    "the boxes laid out at the shipped box cap, the target's roomiest \
+                     knob, and the runs they lay out into (estimate)",
+                ),
+            ],
+        ),
+        written(
+            "lzw",
+            vec![buffer(
+                Value(1 << 20),
+                1,
+                1,
+                "each decode's output, one after another",
+            )],
+            vec![(FUZZ_LZW, "Limits::new(1 << 20)")],
+        ),
+        path(
+            "markdown",
+            vec![
+                buffer(
+                    Input,
+                    72,
+                    2,
+                    "the HTML, written twice for the determinism check: the 64 bytes a \
+                     byte of text and 8 of reference text the target asserts",
+                ),
+                buffer(
+                    Row("MAX_MARKDOWN_REFERENCE_BYTES"),
+                    8,
+                    2,
+                    "the references' share of it",
+                ),
+                buffer(Input, PARSED, 1, "the XHTML's tree"),
+            ],
+        ),
+        path(
+            "pki_cms",
+            vec![buffer(
+                Input,
+                PARSED,
+                1,
+                "the DER read every way the target reads it",
+            )],
+        ),
+        path(
+            "pki_der",
+            vec![buffer(Input, PARSED, 1, "the DER walked and parsed")],
+        ),
+        written(
+            "png",
+            vec![buffer(
+                Value(1 << 22),
+                1,
+                4,
+                "the scan's decode and the bytes' decode, compared; the roomier \
+                 ceiling's copy; and the inflated rows they are unfiltered from",
+            )],
+            vec![(FUZZ_PNG, "_ => 1 << 22")],
+        ),
+        written(
+            "ppmd",
+            vec![
+                buffer(
+                    Value(1 << 24),
+                    1,
+                    1,
+                    "the model's arena at the roomier decode's ceiling",
+                ),
+                buffer(Value(1 << 20), 1, 2, "the output, and the roomier copy"),
+            ],
+            vec![
+                (FUZZ_PPMD, "max_memory: 1 << 24"),
+                (FUZZ_PPMD, "max_unpacked: 1 << 20"),
+            ],
+        ),
+        path(
+            "rar",
+            vec![buffer(
+                Input,
+                PARSED,
+                1,
+                "the headers listed; a stored entry is read in place",
+            )],
+        ),
+        written(
+            "render_page",
+            vec![
+                buffer(Input, 1, 1, "the copy the document is opened from"),
+                buffer(Input, PARSED, 1, "the objects parsed"),
+                buffer(
+                    Row("MAX_DECODED_STREAM"),
+                    1,
+                    2,
+                    "a stream decoded, and its filter chain's intermediate",
+                ),
+                buffer(
+                    Row("MAX_PAGE_PIXELS"),
+                    4,
+                    1 + 16,
+                    "the RGBA canvas, and a group buffer for each of the sixteen levels \
+                     MAX_GROUP_DEPTH lets groups nest",
+                ),
+                buffer(
+                    Value(1 << 24),
+                    4,
+                    4,
+                    "a tiling pattern's cell at MAX_TILE_AREA, for each of the four levels \
+                     MAX_PATTERN_DEPTH lets patterns nest",
+                ),
+                buffer(Row("MAX_SVG_BYTES"), 1, 1, "the SVG markup"),
+            ],
+            vec![
+                (RENDER, "const MAX_GROUP_DEPTH: usize = 16;"),
+                (RENDER, "const MAX_TILE_AREA: u64 = 1 << 24;"),
+                (RENDER, "const MAX_PATTERN_DEPTH: u32 = 4;"),
+            ],
+        ),
+        path(
+            "sevenz",
+            vec![buffer(
+                Value(unpacked),
+                1,
+                2,
+                "an entry unpacked under the shipped limits, and its coder's dictionary",
+            )],
+        ),
+        path(
+            "sfnt",
+            vec![
+                buffer(
+                    Input,
+                    PARSED,
+                    1,
+                    "the directory, and the tables the subset reads",
+                ),
+                buffer(Input, 2, 1, "the subset"),
+            ],
+        ),
+        path(
+            "shape",
+            vec![buffer(
+                Input,
+                PARSED,
+                1,
+                "the face's lookups and the glyph buffer",
+            )],
+        ),
+        path(
+            "shape_text",
+            vec![buffer(
+                Input,
+                PARSED,
+                1,
+                "the face's lookups, the runs and their glyphs",
+            )],
+        ),
+        path(
+            "signatures",
+            vec![
+                buffer(Input, 1, 1, "the copy the document is opened from"),
+                buffer(Input, PARSED, 1, "the objects parsed"),
+                buffer(Input, 4, 1, "the signed ranges a digest reads, and the DER"),
+            ],
+        ),
+        written(
+            "standalone",
+            vec![
+                buffer(Input, 1, 2, "the wrapped input, for each of the two opens"),
+                buffer(Input, PARSED, 2, "what each open parses"),
+                buffer(
+                    Row("MAX_SYNTHESISED_PDF"),
+                    1,
+                    2,
+                    "the PDF each open synthesises",
+                ),
+                buffer(
+                    Value(256 * 256),
+                    4,
+                    1,
+                    "the RGBA canvas, at most 256 pixels on its longer side",
+                ),
+            ],
+            vec![(FUZZ_STANDALONE, "(256.0 / side).min(0.1)")],
+        ),
+        path(
+            "svg",
+            vec![
+                buffer(Input, PARSED, 1, "the elements read and the scene's nodes"),
+                buffer(
+                    Value(segments),
+                    PARSED,
+                    1,
+                    "the path segments at the shipped cap",
+                ),
+            ],
+        ),
+        path(
+            "tar",
+            vec![
+                buffer(Input, PARSED, 1, "the headers listed"),
+                buffer(Input, 1, 1, "an entry read"),
+            ],
+        ),
+        written(
+            "tiff",
+            vec![buffer(
+                Value(1 << 22),
+                1,
+                4,
+                "the scan's decode and the bytes' decode, compared; the roomier \
+                 ceiling's copy; and the strips decoded",
+            )],
+            vec![(FUZZ_TIFF, "_ => 1 << 22")],
+        ),
+        written(
+            "truetype",
+            vec![buffer(Input, PARSED, 1, "the tables read"), outline()],
+            vec![OUTLINE_CAP],
+        ),
+        written(
+            "type1",
+            vec![
+                buffer(
+                    Input,
+                    4,
+                    1,
+                    "the decrypted eexec section and its decrypted charstrings",
+                ),
+                outline(),
+            ],
+            vec![OUTLINE_CAP],
+        ),
+        written(
+            "webp",
+            vec![buffer(
+                Value(1 << 22),
+                3,
+                2,
+                "the RGBA output, the decoder's 32-bit pixels and its prediction rows, \
+                 and the roomier ceiling's copy",
+            )],
+            vec![(FUZZ_WEBP, "_ => 1 << 22")],
+        ),
+        written(
+            "woff",
+            vec![buffer(
+                Value(1 << 20),
+                1,
+                3,
+                "the decoded font, the tables decompressed into it, and the second decode",
+            )],
+            vec![(FUZZ_WOFF, "const LIMIT: usize = 1 << 20;")],
+        ),
+        path(
+            "xml",
+            vec![buffer(
+                Input,
+                PARSED,
+                2,
+                "the events the walk collects, and the reader's own",
+            )],
+        ),
+        path(
+            "zip_archive",
+            vec![
+                buffer(
+                    Row("MAX_ZIP_ENTRY_BYTES"),
+                    1,
+                    1,
+                    "an entry read under the shipped limits",
+                ),
+                buffer(Input, PARSED, 2, "the entries listed by both routes"),
+            ],
+        ),
+        written(
+            "zstd",
+            vec![buffer(
+                Value(1 << 22),
+                1,
+                2,
+                "the output, which is the window its matches read, and the roomier copy",
+            )],
+            vec![(FUZZ_ZSTD, "_ => 1 << 22")],
+        ),
+    ]
+}
+
+/// One target's limits, as `fuzz/limits.tsv` writes them.
+#[derive(Debug, PartialEq, Eq)]
+struct FuzzLimits {
+    rss_limit_mb: u128,
+    malloc_limit_mb: u128,
+    stack_kib: u128,
+}
+
+/// The bytes one buffer holds at its bound, one copy.
+fn buffer_bytes(buffer: &Buffer, rows: &[Bound]) -> u128 {
+    let bound = match buffer.held {
+        Held::Row(name) => {
+            rows.iter()
+                .find(|row| row.name == name)
+                .unwrap_or_else(|| panic!("{name} is not a row of the ledger"))
+                .cap
+        }
+        Held::Value(value) => value,
+        Held::Input => FUZZ_INPUT,
+    };
+    (bound * buffer.unit).div_ceil(buffer.per)
+}
+
+/// The derivation: every target holds libFuzzer's copy of its input besides
+/// the buffers its row names.
+fn fuzz_limits(path: &FuzzPath, rows: &[Bound]) -> FuzzLimits {
+    let mut largest = FUZZ_INPUT;
+    let mut held = FUZZ_INPUT;
+    for buffer in &path.buffers {
+        let bytes = buffer_bytes(buffer, rows);
+        largest = largest.max(bytes);
+        held += bytes * buffer.copies;
+    }
+    FuzzLimits {
+        // A buffer grown by doubling asks for up to twice what it holds in one
+        // allocation, and libFuzzer fails an allocation of the limit or more.
+        malloc_limit_mb: 2 * largest / MIB + 1,
+        // Every buffer at the capacity its last doubling gave it, with the
+        // sanitiser's eighth of shadow beside it.
+        rss_limit_mb: FUZZ_BASE_MB + FUZZ_QUARANTINE_MB + (9 * 2 * held).div_ceil(8 * MIB),
+        stack_kib: FUZZ_STACK_KIB,
+    }
+}
+
+/// `fuzz/limits.tsv` as the derivation writes it.
+fn fuzz_table() -> String {
+    let rows = ledger();
+    let mut paths = fuzz_paths();
+    paths.sort_by(|left, right| left.target.cmp(right.target));
+    let mut out = String::from("target\trss_limit_mb\tmalloc_limit_mb\tstack_kib\n");
+    for path in &paths {
+        let limits = fuzz_limits(path, &rows);
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            path.target, limits.rss_limit_mb, limits.malloc_limit_mb, limits.stack_kib
+        ));
+    }
+    out
+}
+
+/// Every `[[bin]]` name in `fuzz/Cargo.toml`: the roster `cargo xtask fuzz`
+/// audits.
+fn fuzz_roster() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = FUZZ_MANIFEST
+        .split("[[bin]]")
+        .skip(1)
+        .filter_map(|section| {
+            let at = section.find("name = \"")? + "name = \"".len();
+            let end = section[at..].find('"')?;
+            Some(&section[at..at + end])
+        })
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// **K-05.2's exit.** The committed table is the derivation over the live
+/// bounds, so a cap that moves without the table, a table edited by hand and
+/// a target ceiling whose text has left its source each fail here.
+#[test]
+fn the_fuzz_limits_are_derived_from_this_ledger() {
+    // One path a target, and a target for every path.
+    let mut targets: Vec<&str> = fuzz_paths().iter().map(|path| path.target).collect();
+    targets.sort_unstable();
+    assert_eq!(
+        targets,
+        fuzz_roster(),
+        "every fuzz target in fuzz/Cargo.toml has one path here, and no other name does"
+    );
+
+    // Each number a path stands on is still where the path says it is.
+    for path in fuzz_paths() {
+        for (source, text) in &path.written {
+            assert!(
+                source.contains(text),
+                "{}: `{text}` is no longer in the source its path stands on",
+                path.target
+            );
+        }
+        for buffer in &path.buffers {
+            assert!(
+                buffer.unit > 0 && buffer.per > 0 && buffer.copies > 0,
+                "{}: an empty buffer, {}",
+                path.target,
+                buffer.what
+            );
+        }
+    }
+
+    // `PARSED` stands for an element of a parse; the ones a path can name are
+    // held to it, so a type that grows past it fails here rather than leaving
+    // the limits short.
+    for (what, size) in [
+        (
+            "tinker_pdf_cos::Object",
+            std::mem::size_of::<tinker_pdf_cos::Object>(),
+        ),
+        (
+            "tinker_pdf_content::Token",
+            std::mem::size_of::<tinker_pdf_content::Token>(),
+        ),
+        (
+            "tinker_pdf_xml::Event",
+            std::mem::size_of::<tinker_pdf_xml::Event<'static>>(),
+        ),
+        (
+            "tinker_pdf_font::Segment",
+            std::mem::size_of::<tinker_pdf_font::Segment>(),
+        ),
+    ] {
+        assert!(
+            size as u128 <= PARSED,
+            "{what} is {size} bytes, past the {PARSED} PARSED stands for"
+        );
+    }
+
+    let expected = fuzz_table();
+    let committed = FUZZ_LIMITS.replace("\r\n", "\n");
+    assert!(
+        committed == expected,
+        "fuzz/limits.tsv is not the derivation over the live bounds; \
+         `cargo test -p tinker-pdf --test bounds_ledger write_the_fuzz_limits -- --ignored` \
+         writes it. The derivation gives:\n{expected}"
+    );
+}
+
+/// Writes `fuzz/limits.tsv` from the derivation.
+#[test]
+#[ignore = "writes fuzz/limits.tsv; run it when a bound or a path moves"]
+fn write_the_fuzz_limits() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fuzz")
+        .join("limits.tsv");
+    std::fs::write(&path, fuzz_table()).unwrap_or_else(|e| panic!("writing {path:?}: {e}"));
+}
+
+/// The derivation's arithmetic, on a path whose figures are worked by hand: a
+/// 4 MiB ceiling held twice, beside libFuzzer's 1 MiB copy of the input.
+#[test]
+fn the_derivation_is_the_design_docs_arithmetic() {
+    let worked = path(
+        "worked",
+        vec![buffer(Held::Value(4 * MIB), 1, 2, "a picture and its copy")],
+    );
+    let limits = fuzz_limits(&worked, &ledger());
+    // The floor of twice 4 MiB in MiB, and one.
+    assert_eq!(limits.malloc_limit_mb, 9);
+    // 256 and 64, and the ceiling of 9 x 2 x 9 MiB over 8 MiB, 20.25.
+    assert_eq!(limits.rss_limit_mb, 341);
+    assert_eq!(limits.stack_kib, 512);
+    // A bit a unit rounds up to the byte.
+    let bits = Buffer {
+        held: Held::Value(9),
+        unit: 1,
+        per: 8,
+        copies: 1,
+        what: "nine bits",
+    };
+    assert_eq!(buffer_bytes(&bits, &ledger()), 2);
 }

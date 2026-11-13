@@ -104,6 +104,10 @@ A target's path holds **buffers**, and each buffer has a **bound**:
 - **a ceiling the target passes** in a cap's place, `Limits::new(1 << 20)` in
   `inflate`, written with the text that passes it, which the derivation finds
   in the target's source;
+- **a generator's caps**, for a structured target that writes its file from
+  its input's choices: the size the caps keep the generated file under, which
+  the row says is an estimate, standing on the texts of the caps it is
+  worked from, which the derivation finds in the generator's source;
 - **the input**, 1 MiB: libFuzzer makes no input past that while the command
   names no `-max_len`.
 

@@ -28,8 +28,15 @@
 //! # What a passing run does and does not mean
 //!
 //! It means every target has a non-empty corpus, every corpus has a target,
-//! `fuzz/Cargo.toml` agrees with both, and no corpus with a **declared
-//! signature** has that signature in the wrong place.
+//! `fuzz/Cargo.toml` agrees with both, every target has exactly one row of
+//! memory limits in `fuzz/limits.tsv` and no other name has one, and no corpus
+//! with a **declared signature** has that signature in the wrong place.
+//!
+//! The limits are read here and not derived: `bounds_ledger.rs`'s
+//! `the_fuzz_limits_are_derived_from_this_ledger` holds the table to the
+//! derivation (`docs/design/resource-exhaustion.md`), and this audit holds it
+//! to the roster, so a target added without its row fails `cargo xtask check`
+//! before a session runs it under libFuzzer's defaults.
 //!
 //! It does **not** mean the seeds are good. A signature this table does not
 //! declare is unchecked rather than passing, and [`UNSIGNED`] lists those by
@@ -240,10 +247,95 @@ const UNSIGNED: &[(&str, &str)] = &[
     ("xml", "XML is text"),
 ];
 
+/// The header `fuzz/limits.tsv` opens with, its columns in order.
+const LIMITS_HEADER: &str = "target\trss_limit_mb\tmalloc_limit_mb\tstack_kib";
+
+/// One target's row of `fuzz/limits.tsv`: what the local fuzz command passes
+/// it as `-rss_limit_mb` and `-malloc_limit_mb`, and the stack it runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub rss_limit_mb: u64,
+    pub malloc_limit_mb: u64,
+    pub stack_kib: u64,
+}
+
+/// Reads `fuzz/limits.tsv` against the roster.
+///
+/// Exactly one well-formed row for each target, and none for a name that is
+/// not one: a target with no row would run under libFuzzer's defaults, which
+/// is the state the table exists to end, and a row with no target is a limit
+/// nothing reads. Every figure must be a positive integer, because a zero
+/// turns libFuzzer's limit off.
+fn limit_rows(text: &str, names: &[String]) -> Result<BTreeMap<String, Limits>, Vec<String>> {
+    let mut problems = Vec::new();
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(header) if header.trim_end() == LIMITS_HEADER => {}
+        _ => problems.push(format!(
+            "fuzz/limits.tsv: the first line is not `{}`",
+            LIMITS_HEADER.replace('\t', "<tab>")
+        )),
+    }
+    let mut rows: BTreeMap<String, Limits> = BTreeMap::new();
+    for (index, line) in lines.enumerate() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let at = index + 2;
+        let fields: Vec<&str> = line.split('\t').collect();
+        let figures: Vec<Option<u64>> = fields
+            .iter()
+            .skip(1)
+            .map(|field| field.parse::<u64>().ok().filter(|n| *n > 0))
+            .collect();
+        let (Some(name), [Some(rss), Some(malloc), Some(stack)]) =
+            (fields.first(), figures.as_slice())
+        else {
+            problems.push(format!(
+                "fuzz/limits.tsv line {at}: not a target and three positive integers: `{line}`"
+            ));
+            continue;
+        };
+        if !names.iter().any(|known| known == name) {
+            problems.push(format!(
+                "fuzz/limits.tsv line {at}: `{name}` is not a fuzz target, so nothing reads its limits"
+            ));
+            continue;
+        }
+        let limits = Limits {
+            rss_limit_mb: *rss,
+            malloc_limit_mb: *malloc,
+            stack_kib: *stack,
+        };
+        if rows.insert((*name).to_string(), limits).is_some() {
+            problems.push(format!(
+                "fuzz/limits.tsv line {at}: a second row for `{name}`"
+            ));
+        }
+    }
+    for name in names {
+        if !rows.contains_key(name) {
+            problems.push(format!(
+                "fuzz/limits.tsv has no row for {name}, so a session would run it under \
+                 libFuzzer's default limits; `cargo test -p tinker-pdf --test bounds_ledger \
+                 write_the_fuzz_limits -- --ignored` writes the table from the derivation"
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(rows)
+    } else {
+        Err(problems)
+    }
+}
+
 /// What the audit found about one target.
 pub struct Target {
     pub name: String,
     pub seeds: usize,
+    /// Its row of `fuzz/limits.tsv`.
+    pub limits: Option<Limits>,
     /// Bytes the target takes off the front before decoding, parsed from its
     /// own `split_at(data.len().min(N))`.
     pub prefix: usize,
@@ -349,6 +441,22 @@ pub fn survey(root: &Path) -> Result<Vec<Target>, Vec<String>> {
 
     let names = roster(root).map_err(|e| vec![e])?;
 
+    // The fourth place the list is written down, and the one a session reads
+    // its memory limits from.
+    let limits = match std::fs::read_to_string(root.join("fuzz/limits.tsv")) {
+        Ok(text) => match limit_rows(&text, &names) {
+            Ok(rows) => rows,
+            Err(found) => {
+                problems.extend(found);
+                BTreeMap::new()
+            }
+        },
+        Err(e) => {
+            problems.push(format!("fuzz/limits.tsv is unreadable: {e}"));
+            BTreeMap::new()
+        }
+    };
+
     let unsigned: BTreeMap<&str, &str> = UNSIGNED.iter().copied().collect();
     let mut rows = Vec::new();
     for name in &names {
@@ -400,6 +508,7 @@ pub fn survey(root: &Path) -> Result<Vec<Target>, Vec<String>> {
         rows.push(Target {
             name: name.clone(),
             seeds: files.len(),
+            limits: limits.get(name).copied(),
             prefix,
             carried,
             eaten,
@@ -535,15 +644,21 @@ fn compiles(root: &Path) -> Result<(), Vec<String>> {
 pub fn run(root: &Path) -> Result<String, Vec<String>> {
     let rows = survey(root)?;
     println!(
-        "{:<18} {:>6} {:>7}  signature check",
-        "target", "seeds", "prefix"
+        "{:<22} {:>6} {:>7} {:>8} {:>10} {:>6}  signature check",
+        "target", "seeds", "prefix", "rss MiB", "malloc MiB", "stack"
     );
     for row in &rows {
+        let (rss, malloc, stack) = row.limits.map_or((0, 0, 0), |l| {
+            (l.rss_limit_mb, l.malloc_limit_mb, l.stack_kib)
+        });
         println!(
-            "{:<18} {:>6} {:>7}  {}",
+            "{:<22} {:>6} {:>7} {:>8} {:>10} {:>5}K  {}",
             row.name,
             row.seeds,
             row.prefix,
+            rss,
+            malloc,
+            stack,
             row.verdict()
         );
     }
@@ -584,6 +699,70 @@ mod tests {
         // Short input cannot match, rather than panicking on the slice.
         assert!(!matches(b"II", 0, &sigs));
         assert!(!matches(b"", 4, &sigs));
+    }
+
+    /// K-05.2's exit: a target with no row in `fuzz/limits.tsv` fails, and so
+    /// does a row for a name that is no target, a second row, a figure that
+    /// is not a positive integer and a header that is not the table's.
+    #[test]
+    fn a_target_without_a_limit_row_fails_the_audit() {
+        let names = vec!["inflate".to_string(), "png".to_string()];
+        let table = |rows: &str| format!("{LIMITS_HEADER}\n{rows}");
+
+        let whole = limit_rows(&table("inflate\t327\t3\t512\npng\t359\t9\t512\n"), &names)
+            .expect("one row a target passes");
+        assert_eq!(
+            whole.get("png"),
+            Some(&Limits {
+                rss_limit_mb: 359,
+                malloc_limit_mb: 9,
+                stack_kib: 512,
+            })
+        );
+
+        let missing =
+            limit_rows(&table("inflate\t327\t3\t512\n"), &names).expect_err("png has no row");
+        assert!(
+            missing.iter().any(|p| p.contains("no row for png")),
+            "{missing:?}"
+        );
+
+        for (rows, says) in [
+            (
+                "inflate\t327\t3\t512\npng\t359\t9\t512\nlzw\t325\t3\t512\n",
+                "`lzw` is not a fuzz target",
+            ),
+            (
+                "inflate\t327\t3\t512\npng\t359\t9\t512\npng\t359\t9\t512\n",
+                "a second row for `png`",
+            ),
+            (
+                "inflate\t327\t0\t512\npng\t359\t9\t512\n",
+                "three positive integers",
+            ),
+            (
+                "inflate\t327\t3\npng\t359\t9\t512\n",
+                "three positive integers",
+            ),
+            (
+                "inflate 327 3 512\npng\t359\t9\t512\n",
+                "three positive integers",
+            ),
+        ] {
+            let problems = limit_rows(&table(rows), &names).expect_err(says);
+            assert!(problems.iter().any(|p| p.contains(says)), "{problems:?}");
+        }
+
+        let headless =
+            limit_rows("inflate\t327\t3\t512\npng\t359\t9\t512\n", &names).expect_err("no header");
+        assert!(
+            headless.iter().any(|p| p.contains("first line")),
+            "{headless:?}"
+        );
+
+        // A checkout that ends its lines with `\r\n` reads as one that does not.
+        let crlf = table("inflate\t327\t3\t512\npng\t359\t9\t512\n").replace('\n', "\r\n");
+        assert_eq!(limit_rows(&crlf, &names).map(|rows| rows.len()), Ok(2));
     }
 
     #[test]

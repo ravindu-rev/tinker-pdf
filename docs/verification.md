@@ -76,10 +76,27 @@ bytes and writes them into a `/FontFile3`.
 ### The roster, and whether the seeds reach the code
 
 `cargo xtask fuzz` prints the roster — each target, its seed count, its
-control prefix and its signature check — derived from `fuzz/fuzz_targets/`,
-`fuzz/corpus/` and `fuzz/Cargo.toml`, and fails if the three disagree or a
-target has no seeds. The same audit runs inside `cargo xtask check`, so the
-three lists cannot drift apart without a gate going red.
+control prefix, its memory limits and stack, and its signature check —
+derived from `fuzz/fuzz_targets/`, `fuzz/corpus/`, `fuzz/Cargo.toml` and
+`fuzz/limits.tsv`, and fails if they disagree or a target has no seeds. The
+same audit runs inside `cargo xtask check`, so the four lists cannot drift
+apart without a gate going red.
+
+`fuzz/limits.tsv` gives every target the `-rss_limit_mb` and
+`-malloc_limit_mb` a session passes it and the stack it runs on, one row a
+target. The figures are derived, never written:
+`crates/tinker-pdf/tests/bounds_ledger.rs` names the buffers each target's
+path holds and the bound each one has — a ledger cap at its shipped value, a
+cap the ledger has no row for, a ceiling the target passes, or the input — and
+computes the limits from them as
+[design/resource-exhaustion.md](design/resource-exhaustion.md) states.
+`the_fuzz_limits_are_derived_from_this_ledger` fails when the table differs
+from the derivation over the live bounds, which is what a cap that moves
+without it, a hand edit and a target ceiling that left its source all look
+like, and `cargo test -p tinker-pdf --test bounds_ledger write_the_fuzz_limits
+-- --ignored` writes the table again. The audit fails a target with no row, a
+row for a name that is no target, a second row and a figure that is not a
+positive integer, since a zero turns libFuzzer's limit off.
 
 **The control prefix is the number of bytes a target takes off the front
 before decoding**, parsed out of its own `split_at(data.len().min(N))` rather
