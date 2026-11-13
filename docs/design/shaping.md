@@ -54,6 +54,11 @@ covers the producing half of the engine only.
   `vmtx` and `VORG`; a sideways run — Mongolian among them — shaped along a
   line and marked for rotation; `GPOS` down a column; and a form field's
   column moved onto that plan — *Vertical shaping* below.
+- **Graphite shaping** (FT-07d): a face whose only layout tables are a
+  Graphite description, shaped by its own passes — its glyph attributes,
+  features and languages, the rules its finite-state machines find, the stack
+  machine, positioning, collision avoidance and justification — *Graphite
+  shaping* below.
 
 ## Non-goals
 
@@ -62,9 +67,9 @@ covers the producing half of the engine only.
   shaping: ruling 14 puts an extracted right-to-left line into logical order
   with this crate's UAX #9 (`bidi::logical_order`), called from the facade,
   so `tinker-pdf-content` has no edge here and no glyph is re-shaped.
-- **AAT (`morx`) and Graphite tables.** OpenType Layout only; a face
-  carrying only `morx` shapes as if unshaped. [ROADMAP](../ROADMAP.md) rows
-  FT-07c, whose design is the *AAT shaping* section below, and FT-07d.
+- **AAT (`morx`) tables.** OpenType Layout only; a face carrying only
+  `morx` shapes as if unshaped. [ROADMAP](../ROADMAP.md) row FT-07c, whose
+  design is the *AAT shaping* section below.
 - **Variation-aware shaping.** `fvar`/`avar`/`HVAR` deltas are not applied
   to GPOS values. [ROADMAP](../ROADMAP.md) row FT-07a, with variable fonts
   themselves FT-05.
@@ -1060,3 +1065,505 @@ row here reads.
 | A face carrying both kinds of table is shaped otherwise than today | It is not: OpenType Layout wins wherever it is present, and a different precedence is the owner's to take |
 | A hostile chain loops or grows without bound | The transition ceiling, the glyph ceiling, the stacks' sizes and `read::Bytes`; the `shape` fuzz target drives every table (FT-07c.17) |
 | Four machines have no worked example, so nothing the manual states holds them | H-142's person-written expectations, counted beside the manual's by FT-07c.20 |
+
+## Graphite shaping
+
+A face whose layout is a Graphite description — the tables of SIL's Graphite
+Table Format: `Silf`, `Glat`, `Gloc`, `Feat` and `Sill` — is shaped by its own
+rules: the passes its finite-state machines find rules in, the stack-machine
+code each rule runs, and its positioning, collision avoidance and
+justification. [ROADMAP](../ROADMAP.md) row FT-07d; until its shaping step
+lands, such a face is refused by name (*Warnings*, below).
+
+### Graphite scope
+
+- **The tables, at the versions read.** `Silf` at major versions 1 to 5, any
+  minor, plain or compressed; `Glat` 1, 2 and 3, with or without octaboxes,
+  plain or compressed; `Gloc` with short or long offsets, with or without
+  attribute ids; `Feat` 1 and 2; `Sill` 1. Any other version, and any
+  compression scheme but 0 and 1, is refused by name with the table and the
+  number it states.
+- **The sources** (ruling 21; `THIRDPARTY.md` names each with its revision):
+  the Graphite Table Format (the *GTF*) in its two published editions — the
+  one in the Graphite project's documentation, which carries the version-5
+  notes, and the 2019 edition describing table format 5 — and the stack
+  machine's command list in both of its editions, the GTF's appendix and the
+  earlier standalone document; the *Graphite Description Language* manual,
+  version 4.000 (the *GDL*), for what a pass, a rule, a scan position and each
+  attribute mean; the project documentation's font and feature topics, for
+  guard space and a language's default feature values; the Graphite
+  compiler's documentation of its debug files, for its worked class map and
+  the jammed state; the TrueType Reference Manual's `feat` chapter, which the
+  GTF names as `Feat`'s basis; and the LZ4 Block Format Description, which the
+  GTF's compression scheme 1 names. No engine's code is read.
+- **The mechanisms.** The slot stream and its attributes; glyph attributes
+  and octaboxes; features and languages; pseudo-glyphs and class maps; the
+  finite-state machine and its rule order; the stack machine; line-break,
+  substitution, bidi, justification and positioning passes; attachment,
+  shifting, advances and kerning; collision avoidance and its kerning;
+  justification levels.
+- **Where it applies.** `Shaper::shape`, so a book on the EPUB path, a
+  `DocumentBuilder` run and a form field all reach it through the shaper they
+  already make.
+
+### Graphite non-goals
+
+- **`Sile` and `Sild`.** The GTF says `Sile`, a description kept apart from
+  its face, "is not currently being used", and that `Sild` "has not been
+  implemented". A face carrying either is read as though it did not.
+- **Line-break weights reaching layout.** Layout breaks a line by UAX #14,
+  and nothing in the `Shaper` seam carries a weight. A face's line-break
+  passes still run, and a later pass reads what they set.
+- **The line-break pseudo-glyph.** A run is shaped before the line it ends up
+  on is known, so no line-break glyph is put in the stream, and a rule with
+  `#` in its context never matches. Neither is cross-line contextualization
+  (`maxPreContext`, `maxPostContext`) applied.
+- **Header fields with no reader here.**
+  `extraAscent` and `extraDescent` are a line height's, which is layout's;
+  critical features are given no meaning by the GTF; `attrSkipPasses` marks
+  the glyphs without which a pass cannot match, so skipping such a pass is
+  speed and never output, and nothing here takes it up.
+- **Ligature components' boxes.** The GDL marks them unimplemented; a
+  component's slot reference is kept and read, and no caret inside a ligature
+  is answered.
+- **A Graphite column.** The GDL: "Vertical scripts are currently not
+  supported". An upright run of a Graphite face is shaped as an upright run of
+  a face with no layout tables is today (*Vertical shaping*), and a sideways
+  run through its passes, along a line.
+
+### Graphite design
+
+**Precedence.** A face's Graphite tables run only where it carries no
+readable `GSUB` or `GPOS` and no `morx`: wherever it carries either OpenType
+Layout table it shapes through it exactly as it does today, and a face
+carrying `morx` takes the path *AAT shaping* above sets for it. Every face
+that shapes today shapes the same way afterwards. The price is
+stated rather than chosen: of the three vendored faces, Awami Nastaliq
+carries a `GPOS` of one `kern` lookup for `deva` and nothing else, so it
+takes the OpenType path and is drawn unshaped, and a precedence that let
+Graphite run past such a table is the owner's to choose. The tests reach its
+Graphite tables through a view of the face with its OpenType tables left
+out.
+
+**What is decompressed.** From `Silf` 5 and `Glat` 3 a table may be
+compressed: its version, then a word whose top five bits are the scheme and
+whose low twenty-seven are the uncompressed size, then the scheme's data.
+Scheme 0 is the table as it stands. Scheme 1 is one LZ4 block — no frame and
+no checksum — decoding to the whole table again, its version included and its
+scheme 0. It is decoded once a face, into bytes the face's Graphite view
+owns, under `Limits::max_table_bytes` (16 MiB); a stated size past it, a
+block that decodes to more or fewer bytes than it states, a match offset of
+zero or reaching before the start, and a block that ends inside a sequence
+are each refused by name.
+
+**Glyph attributes.** `Gloc` is a version, flags — bit 0 long offsets, bit 1
+an attribute-id array at the end — the attribute count, and one offset into
+`Glat` per glyph and one more. The number of glyphs is read from `Gloc`'s
+own length: the offsets fill the table up to the id array, or to its end.
+`Silf`'s `maxGlyphID` does not bound it: the vendored Awami Nastaliq's
+`Silf` states a smaller maximum than its `Gloc` indexes and than its own
+pseudo-glyph map names, and a test holds the reader to that face. `Glat` 1
+writes each run as a byte attribute number and a byte count, `Glat` 2 and 3
+as two `USHORT`s, each followed by that many `SHORT` values; a glyph's block
+is its runs, and an attribute no run holds is 0, the compiler documentation's
+"any unlisted attribute can be assumed to have the value 0". `Glat` 3's
+header word carries the scheme in its top five bits and the octabox flag in
+its lowest: the GTF's table gives the word fields of 5, 28 and 1 bits, which
+cannot all fit, and the vendored face sets bit 0. Where the flag is set each
+block opens with an octabox — a `USHORT` bitmap of the 4 × 4 cells that have
+sub-boxes, bit (y × 4) + x, four diagonal bytes, and eight bytes a cell — and
+its runs follow. The four bytes are, in order, the least and greatest x + y
+and the least and greatest x − y over the glyph's outline, each scaled to
+0–255 across the bounding box's width plus its height: the order the project
+documentation's edition names them in (`diag_neg_min`, `diag_neg_max`,
+`diag_pos_min`, `diag_pos_max`), where the 2019 edition lists the pairs the
+other way round, and the vendored face's outlines decide it, in a test. A
+sub-box's eight bytes are its left, right, bottom and top and its four
+diagonals in the same order, read as stored; what they are scaled to is
+settled where collision avoidance first reads them, against the face's
+outlines as the four header bytes are. Answers are integers: a glyph and an
+attribute number give an `i16`, the first run that holds the attribute
+winning; a glyph past the offsets, a block that ends before it starts or past
+`Glat`'s end, or a run reaching past its block answers `None`, and so does a
+block of more than `Limits::max_attribute_runs` (256) runs, refused by name.
+
+**Features.** `Feat` 1 is the TrueType `feat` table's layout, a 16-bit
+feature type and twelve bytes a feature, which is what the vendored Dai Banna
+SIL carries; 2 widens the id to 32 bits and inserts a reserved `USHORT`,
+sixteen bytes a feature. A setting is a `SHORT` value and a name index. An id
+is four characters, or a number where its top byte is 0; this crate asks with
+an OpenType `Tag`, read as the id its four bytes spell. A feature's default
+is the TrueType chapter's: its setting at index 0, or, where the flags set
+both 0x8000 and 0x4000, the setting their low byte names. A feature with no
+settings is the GDL's boolean, default 0, values 0 and 1. Flag bit 0 marks
+an alias, the GDL's hidden id: it keeps a value of its own, because the GDL
+tests the public and the hidden feature separately.
+
+**Languages.** `Sill` is its header, one entry a language and one more — a
+four-byte code padded with NULs, a count and an offset from the table's start
+— and the settings they point at: a 32-bit feature id, a `SHORT` value and two
+bytes of padding. The first entry whose code matches is the language's; the
+last entry is the GTF's bogus one and is never matched.
+
+**Feature values, from the shaper's settings.** In this order, each over the
+last: every feature's default; the language's `Sill` settings, where
+`Shaper::with_language`'s tag names one of its codes — the tag's letters
+lowercased and its trailing spaces read as NULs, so `urd ` and `URD ` both
+select `urd`, while an OpenType language tag whose letters are not the ISO
+639 code (`TRK ` for `tur`) selects nothing; every feature whose id a tag of
+`Shaper::with_features` spells, set to 1, every other keeping its value,
+because a Graphite feature's 0 is one of the face's settings rather than an
+off and its passes run whatever the features; and `Shaper::with_settings`,
+each tag the id it spells, the last setting of one tag winning. A tag or a
+`Sill` setting naming no feature the face declares, and a value the feature
+does not declare, is ignored and named. The values are one `i16` a feature,
+in `Feat`'s order, and they travel on every slot; `SetFeat` changes one
+slot's, clipped to the largest value the feature declares. `PushFeat`'s
+operand is the feature's index in `Feat`'s order: the vendored Tagmukay's
+second pass tests its features 0 and 1, which are its `ss01` and `ss02`.
+
+**`Silf`.** A version; from 3 a word holding the compiler version (from 5,
+under the scheme's five bits); the description count, two reserved bytes and
+an offset a description. A description (*subtable*) is laid out as the GTF's
+table gives it, the version notes deciding which fields exist: from 3 the
+rule version, `passOffset` and `pseudosOffset`; from 2 the mirroring and
+skip-pass attributes, the justification levels, a third reserved byte, the
+critical features and the reserved byte after them; and before 4 a class
+offset is a `USHORT` where from 4 it is a `ULONG`. `passOffset` and
+`pseudosOffset` are read and not relied on: the reader walks the fields to
+where the layout puts them, and every vendored face's offsets agree with the
+walk — `pseudosOffset` naming `numPseudo`, the field before the mappings,
+where the GTF says the mappings themselves. A run takes the first description
+whose script tags hold its OpenType script tag, and the first description
+where none does.
+
+**Pseudo-glyphs and classes.** The pseudo-glyph map pairs a code point with a
+glyph, in code-point order; it is consulted before `cmap`, so a character
+`cmap` lacks still reaches its rules — the vendored Dai Banna SIL maps its
+combining accents only there — and a pseudo-glyph left in the stream becomes,
+at the end, the real glyph its `attrPseudo` attribute names. The class map is
+the class count, the count of linear classes and one offset a class and one
+more, from the class map's start. A linear class is its glyphs in order, so
+an index gives a glyph, and a glyph is found by reading them in order — the
+GTF's "very slow, but stored very simply". A lookup class is four header
+words and `(glyph, index)` pairs sorted by glyph, so a glyph gives its index
+by bisection, and an index is found by reading the pairs. A class past the
+count, an index past the class, and a glyph in neither answer `None`. A map
+or a pair array out of order is read as written, the first match winning.
+
+**Passes.** Indices from 0 to `iSubst` are line-break passes, from `iSubst`
+to `iJust` substitution, from `iJust` to `iPos` justification and from
+`iPos` on positioning; the bidi pass runs before pass `iBidi`, and 255 is
+none. A pass is its flags — bits 0 to 2 the collision runs, 3 and 4 the
+kerning, 5 a reversed pass — its rule-loop, context and backup limits, its
+rule count, the offsets of its pass constraint, rule constraints and actions
+from the description's start, and its machine: the state, transitional,
+success and column counts, the ranges that give each glyph a column, the
+rule lists of the success states, the shortest and longest pre-context and
+the start state for each, a sort key and a pre-context a rule, the collision
+threshold, the pass constraint's length, each rule's constraint and action
+offsets, and the transitions. A pass of no columns has no machine and runs
+only its collision fixing. Before 2 a pass has no `fsmOffset`, pass
+constraint offset, collision threshold, constraint length or the reserved
+byte, as the notes say. A pass whose counts disagree — more success or
+transitional states than states, or states that the order the GTF gives
+cannot hold — is refused by name and does not run; so is every pass past
+`Limits::max_passes` (64).
+
+**The machine that finds a rule.** A glyph's column is the range that holds
+it, the ranges bisected where they are sorted and disjoint and read in order,
+the first winning, where they are not; a glyph in no range jams the machine.
+At a scan position `p`, with `maxPre` and `minPre` the pass's longest and
+shortest pre-contexts: where `p ≥ maxPre` the machine reads from slot
+`p − maxPre` in `startStates[0]`; where `p < maxPre` it reads from slot 0 in
+`startStates[maxPre − p]`, the GTF's skipped transitions; where `p < minPre`
+no rule matches. Each slot read takes the transition its column gives. A
+transition to 0 jams, as the compiler documentation's "a value of zero means
+that no match occurred" puts it; one to a state past the table is refused by
+name and ends the walk; a state at or past `numRows − numSuccess` accepts,
+and its rules join the candidates; a state at or past the transitional count
+is final and ends the walk. No more than `Limits::max_context_length` (64)
+slots are read; the walk that would read more is refused by name. A rule
+whose own pre-context is longer than the slots before `p` is dropped: the
+skipped transitions stand for slots that do not exist, and only the rule's
+count can say it needed them. The candidates are tried by sort key, highest
+first, and by rule number among equal keys — the GTF's "primarily on the
+length of the rule and secondarily on its original position", and the
+compiled faces' keys are their rules' lengths — at most
+`Limits::max_rule_candidates` (1 024) at one position, refused by name past
+it; a rule number past the pass's count is refused by name. Each candidate's
+constraint decides whether it fires (*The stack machine*).
+
+**The slot stream.** One slot a glyph: its glyph and the real glyph a
+pseudo-glyph stands for; the first and last characters it is associated with;
+its attributes, initialised from its glyph — advance from the face's metrics,
+`breakweight` and `directionality` from the attributes the description names,
+collision and sequence attributes from the run starting at `attCollisions`,
+justification from each level's — and set by rules: shift, advance and
+attachment (to, at, with, level), insert, component references, the user
+attributes the description counts, justification width, the bidi level; and
+the feature values. A slot's cluster is the byte offset of the first
+character it is associated with. An `Assoc` gives the slot the span of the
+input slots it names; an inserted slot takes the characters of the slot after
+it, or of the slot before it at the stream's end, the GDL's cursor rule for an
+unassociated insertion; a deleted slot's characters join the slot before it,
+or the one after it at the start. At the end a span of slots whose clusters
+go backwards is merged to its least, as `Buffer::reorder` merges a reordered
+span, so clusters stay monotonic. Every insertion is charged against
+`Limits::max_glyphs`, and one past it is refused by name.
+
+**The stack machine.** Code is checked before it ever runs, once a face:
+every opcode the GTF's table lists and none it marks unimplemented (`NextN`,
+`PushIGlyphAttr`, `PushProcState`, `PutSubs2`, `PutSubs3`), every operand
+inside the block, every `ContextItem` skip landing on an instruction boundary
+inside it, and the stack's depth, computed from each opcode's pops and pushes
+along both ways past every `ContextItem`, never below empty and never above
+`Limits::max_stack_depth`. Code that fails is refused by name and never runs:
+a rule whose constraint or action fails its check never fires. Operands are
+the GTF appendix's, which gives `PushFeat` and `SetFeat` their slot offset and
+adds the 16-bit class and attribute forms and the bit operations that the
+earlier standalone document lacks; the opcode range the appendix's text states
+(0x00 to 0x3E) ends four opcodes before its table does (0x42), and the table
+is read. Values are `i32`; arithmetic wraps, as two's complement does on every
+target, and a division by zero, or of `i32::MIN` by −1, is refused by name and
+ends the code. Every instruction is charged against
+`Limits::max_instructions`, past which the run's remaining code is refused by
+name.
+
+**A rule's constraint** is run once for each slot of its match, from its
+first pre-context slot to the slot that brought the machine to the state that
+accepted it, with that slot the one `ContextItem` compares its offset to —
+the GTF's "the slot currently being tested" — and each run starts with true on
+the stack. The compiled faces show why the true is there: a test written
+before a `ContextItem` and one inside it are joined by `And` after it, which
+leaves a single operand where the second is skipped, and only a true beneath
+makes the run's answer the first test's. A run's answer is the value
+`PopRet` returns, or the top of the stack where the code ends without one;
+the rule fires where every run answers true. A pass constraint is run once,
+with nothing under test. An action starts with an empty stack and answers the
+scan offset (*Passes running*).
+
+**The numbering an instruction names.** The GTF and the GDL name the slot
+attributes and glyph metrics an instruction reads and sets but number
+neither. Their numbers are read off compiled code: the vendored faces'
+`Silf`, against the GDL sources the faces' authors publish beside them, each
+number recorded where the step that runs it lands, with the rule it was read
+from, and held by a test against the face's code. Read so far: a line-break
+pass sets slot attribute 14, `breakweight` (the vendored Dai Banna SIL); the
+indexed attribute a ligature's components are referenced by is 15 (Tagmukay);
+`AttrSetSlot`'s attribute in a positioning pass, `attach.to`, is 2, and the
+indexed attribute numbered by the user count is 55 (Awami Nastaliq). An
+attribute no vendored code reveals is refused by name.
+
+**Passes running.** Passes run in the description's order over the whole
+run, each over the stream the last left; a reversed pass runs over the stream
+turned end to end, which is turned back after it. A pass constraint that is
+false skips the pass. At each scan position the first candidate whose
+constraint holds fires; its action leaves a slot pointer where its `Next`s
+put it, and the scan position becomes that pointer plus the returned offset.
+Where no rule fires the position advances by one. The GDL's safety net: once
+`maxRuleLoop` rules have fired without the position passing the furthest it
+has reached, it is advanced past it before another rule is tried; and a
+position may move back no further than `maxBackup` slots behind that
+furthest, past which it is left where it stands. A positioning pass may
+substitute one glyph for one (`PutGlyph`, `PutSubs`) and copy a slot onto
+itself (`CopyNext`, `PutCopy` of the current slot); an action of one that
+would insert, delete or reorder a slot is refused by name, the GDL's "only do
+a one-to-one substitution".
+
+**Bidi.** This crate resolves UAX #9 over the paragraph before itemizing it,
+so every slot of a run is at the run's level and the bidi pass reorders
+nothing — the GDL's "ABC 123 DEF" is three runs here, each passed in logical
+order, and the consumer's per-line reorder draws "FED 123 CBA". Where a
+description has a bidi pass and a `Silf` of 4 or later, a slot of a run at an
+odd level takes its glyph's mirrored glyph from the mirroring attribute,
+whatever `mirror.isEncoded` says, because this crate's shaper mirrors no
+character itself; a description with no bidi pass mirrors nothing, the GDL's
+"when Bidi is off, the mirroring attributes are considered undefined".
+
+**Positioning.** In the run's direction, as the GDL states it: an advance
+moves the slots after it; a shift moves a slot and what is attached to it
+and nothing else; `kern` is a shift and an advance at once; an attached slot
+puts its `attach.with` point on its parent's `attach.at` point, its shift
+added after, and moves the pen not at all; a cluster grows by the guard space
+the project documentation's font topics describe, so a diacritic with an
+advance, or with its origin before its base's, widens its base's cluster; and
+a positive shift or advance moves "further along" the run, so in a
+right-to-left run it moves left. Attachment chains are resolved from the
+root, at most `Limits::max_attachment_depth` deep, and a cycle is refused by
+name with the slots left where their pens put them. A run comes out as the
+crate's convention has it: one `ShapedGlyph` a slot in logical order, an
+advance and an offset from the pen, x to the right.
+
+**Collision avoidance.** The GDL states what the search weighs and not how
+it searches: the distance moved, a weight of 1; intrusion into a
+neighbour's margin, weighted by `marginweight`; the sequence regions; each
+fixable slot kept inside its movement rectangle, whose x limits are right and
+left whatever the run's direction; a cluster bounded by the start and end
+flags; kerning that adds space after a kerned slot so the next cluster clears
+its margin, counting the width of an intervening space and ignoring the y
+limits. This design's search is its own and integer: for each slot flagged to
+move, the candidates are its own position and the positions inside its
+rectangle at which an edge of its octabox shape meets an edge of a
+neighbour's, widened by the neighbour's margin, along x and along y — the
+shapes sub-boxes where a glyph has them; the least-cost candidate wins, the
+nearest to its start breaking a tie, and a move smaller than the pass's
+collision threshold is not made; the cluster is run over as many times as the
+pass's flags give; and a kerned slot takes the least x that clears the
+following cluster by its margin, inside its x limits. The work per slot pair
+is bounded by `Limits::max_collision_work`, past which a slot keeps its place
+and is named.
+
+**Justification.** A description's levels name, for each, the glyph
+attributes of its stretch, shrink, step and weight; layout's justify call
+(FT-07e) hands a run the slack its line wants, which is spread over the
+slots of the first level that can take it, by weight, within each slot's
+stretch or shrink and in its steps, into each slot's `justify.width`; the
+justification passes then run, and the positioning passes after them. A
+description with no levels takes the GDL's level 0: white space stretched to
+100 times its width and shrunk to 75 %.
+
+**The output.** Each slot's glyph, a pseudo-glyph's real one, its cluster,
+advance and offset; the run's warnings, each once (ruling 10).
+
+**Ceilings.** Every count a hostile description can spend is bounded, and the
+work past each bound is refused by name.
+
+| Bound | Default | What it bounds |
+| --- | --- | --- |
+| `Limits::max_table_bytes` | 16 MiB | a compressed table's stated size |
+| `Limits::max_attribute_runs` | 256 | the runs one glyph's `Glat` block is read through |
+| `Limits::max_passes` | 64 | the passes a description runs |
+| `Limits::max_context_length` | 64 | the slots one rule's machine reads (the OpenType bound, shared) |
+| `Limits::max_rule_candidates` | 1 024 | the rules one position tries |
+| `Limits::max_stack_depth` | 256 | one block of code's stack |
+| `Limits::max_instructions` | scaled to the run, as `max_operations` | the instructions a run executes |
+| `Limits::max_glyphs` | as today | the slots insertions may grow the stream to |
+| `Limits::max_attachment_depth` | 64 | an attachment chain |
+| `Limits::max_collision_work` | scaled to the run | the slot pairs collision fixing compares |
+
+Rules, states and transitions are bounded by their tables' own sizes, which
+the walk reads no further than its context bound; a pass's own `maxRuleLoop`
+and `maxBackup` are the face's bounds on itself.
+
+**Warnings.** Until shaping lands, a run over a face whose only layout tables
+are Graphite's carries `Warning::TableNotRun { table: Silf }` once. The
+readers' refusals are a `graphite::Refusal` each, naming its table, glyph,
+pass, rule, state or feature as the case has it; once the passes run they
+reach a run's warnings as `Warning::Graphite`, each once.
+
+**The examples each mechanism is held to.** Every example is transcribed as
+table bytes the test assembles — the GDL rules hand-compiled into the
+tables, machines and code the GTF lays out — because no Graphite compiler is
+on this machine and no outside tool makes an input. Where the source's
+example is a rule, the test states the rule beside the bytes.
+
+| Mechanism | Examples | Count | Step |
+| --- | --- | ---: | --- |
+| Compression | The LZ4 Block Format's three literal lengths (48 as 15, 33; 280 as 15, 255, 10; 15 as 15, 0) and its offset of 1 repeating the last byte | 4 | FT-07d.4 |
+| `Glat` and `Gloc` | The GTF's sub-box bitmap: bit 3 the lower right cell, bit 12 the upper left | 1 | FT-07d.4 |
+| `Feat` | The `feat` chapter's flags 0xC001, the default setting index 1; the GDL's `ligatures` feature of four settings, default `std`; the GDL's `eng` with its hidden `Engs` | 3 | FT-07d.5 |
+| `Sill` | The GTF's `en` as the bytes 101, 110, 0, 0; the GDL's language table of `sindhi`, `kurdish` and `urdu` | 2 | FT-07d.5 |
+| Class maps | The compiler documentation's linear class 6 and indexed class 10 | 1 | FT-07d.6 |
+| Finding a rule | The GDL's `X > Y / A _ A` over `A X A X A X A` (4.1.1); `A B C > X Y Z` before `A > D / _ B` (4.1.7); `B > Y / W A? _ C` and `C > D / B _ E` over `WABC` and over `WBCE` (4.1.7.1); `A > B / W _` and `A > C / _ X Y` over `WAXY` (4.1.7.2) | 5 | FT-07d.6 |
+| Computing | The compiler documentation's 11509 pushed as 44 and −11; the GDL's `_ {ligatures == all}` (4.1.2), `_ {bb.height > 1000m}` (4.1.3) and the default test of a public and a hidden feature (6.9.2.1) | 4 | FT-07d.7 |
+| Acting on the stream | The compiler documentation's `PutSubs 0 10 6`; the GDL's selection from a class (4.4.1), reordering (4.4.2), association (4.4.3), the dependent I moved by insertion and deletion, the joiner deleted into its consonant and the Thai split vowel (4.4.4), the ligature of three (4.4.5) and a user attribute set in one table and read in another (6.3) | 9 | FT-07d.8 |
+| Substitution passes | The outputs of 4.1.1 (`A Y A Y A Y A`), 4.1.7.1 (`WAYC`, `WYCE`) and 4.1.7.2 (`WCXY`); the example file's dotless i, tone and modifier reordered, pitch letters as numbers, and raised glyphs (5.1); the alternating `A1 A2` chain backed up over (6.4.1) | 9 | FT-07d.9 |
+| Bidi | The GDL's `ABC 123 DEF` (4.1.4.2); a parenthesis mirrored at an odd level (6.6) | 2 | FT-07d.9 |
+| Positioning | Diacritics stacked through `^` (4.1.1); a shift (4.6.1); an advance (4.6.2); `kern.x` as a shift and an advance (4.6.2); composite metrics at levels 0, 1 and 2 (4.6.3); the lam-alef ligature's diacritics (4.6.8.1); the dotless i with its tilde (4.6.8.2); the four guard-space cases of the font topics | 11 | FT-07d.10 |
+| Collision | The GDL's Nastaliq example: nuqtas fixed inside spaces' starts and ends (its pass 2), diacritics fixed and finals kerned (its pass 4), each held to what its text states — the collision removed, every glyph inside its rectangle, kerning along x alone | 2 | FT-07d.11 |
+| Justification | The GDL's stretched and shrunk space (6.5.4); the five kashidas' stretch and step (6.5.4); the wide glyph substituted and the rest kerned (6.5.5); kashidas inserted while width remains (6.5.6.1); the ligature undone to stretch (6.5.6.2); level 0's white space (6.5.2) | 6 | FT-07d.13 |
+
+Fifty-nine in all. The specification gives no worked example for `Silf`'s
+header or a pass's layout; those are held to the vendored faces, whose
+readings the tests state.
+
+**The fixture faces.** Three faces under
+`crates/tinker-pdf-shape/data/graphite`, each whole and unmodified — the OFL
+reserves their names to the original versions, and cutting a table out would
+make a modified one — each with its upstream licence:
+
+| Face | What it carries | What H-64's person writes for |
+| --- | --- | --- |
+| Dai Banna SIL 4.000, Regular | `Silf` 4.0 with one line-break pass and one substitution pass, `Glat` 1, short `Gloc`, `Feat` 1 and an empty `Sill`; no OpenType Layout table, so it is the face the refusal and the Graphite path run on | the Latin letters its substitution pass composes with a combining accent from the pseudo-glyph map (`e` U+0301, `C` U+0327, `n` U+0303, `o` U+0308, `a` U+030A, `s` U+030C) and an accent after a letter it does not compose (`b` U+0301); New Tai Lue syllables with a prevowel, `ᦶᦂ` among them |
+| Tagmukay 2.000, Regular | `Silf` 2.0 with two substitution passes of ligatures and component references, `Glat` 1, `Feat` 2 with `ss01` and `ss02`, and a `GSUB`, so the whole face takes the OpenType path | Tifinagh with its consonant ligatures, with each of `ss01` and `ss02` on and off |
+| Awami Nastaliq 3.500, Regular | `Silf` 5.1 and `Glat` 3 compressed, octaboxes, long `Gloc` with 214 attributes, `Feat` 2, a `Sill` of five languages, twenty-one passes with pass constraints, a backed-up pass, a reversed pass, collision passes and kerning; and the one-lookup `GPOS` the precedence turns on | Urdu words through every pass, with the `ks` and `kas` languages' settings and the `hehk` and `lamv` features on and off |
+
+H-64's person writes the expected glyphs and positions in the case format
+FT-09.1 sets for every person-written expectation, the first of the formats
+the person-written rows land, and FT-07d.17 reads them through it.
+
+### Graphite milestones
+
+1. **The refusal** (FT-07d.2): `Warning::TableNotRun`. Exit,
+   `tests/graphite.rs`:
+   `a_face_carrying_only_graphite_tables_is_named_and_shaped_unshaped`.
+2. **The faces** (FT-07d.3). Exit: `cargo xtask vendor` green;
+   `the_fixture_faces_are_the_ones_vendored`.
+3. **Glyph attributes** (FT-07d.4): `graphite/mod.rs`, `graphite/lz4.rs`,
+   `graphite/glat.rs`. Exit:
+   `every_glat_version_answers_the_attributes_it_stores`,
+   `an_offset_past_the_glat_answers_none`, the compression and `Glat`
+   examples counted.
+4. **Features and languages** (FT-07d.5): `graphite/feat.rs`. Exit:
+   `a_feature_keeps_its_default_unless_a_setting_names_it`,
+   `a_language_takes_its_sill_settings`,
+   `a_setting_the_face_does_not_declare_is_ignored_and_named`, the `Feat`
+   and `Sill` examples counted.
+5. **`Silf` and its machines** (FT-07d.6): `graphite/silf.rs`. Exit:
+   `a_pass_finds_the_rule_its_machine_selects`,
+   `a_class_map_answers_both_kinds_of_class`,
+   `a_transition_past_its_table_is_refused_and_named`.
+6. **Computing** (FT-07d.7): `graphite/machine.rs`. Exit:
+   `each_computing_instruction_does_what_the_specification_states`,
+   `code_that_fails_its_check_never_runs`,
+   `a_program_past_its_budget_is_refused_and_named`.
+7. **Acting** (FT-07d.8): `graphite/slot.rs`. Exit:
+   `each_action_instruction_rewrites_the_stream_as_specified`,
+   `an_inserted_slot_takes_the_cluster_the_design_states`,
+   `an_insertion_past_the_glyph_ceiling_is_refused_and_named`.
+8. **Substitution passes** (FT-07d.9): `graphite/pass.rs`. Exit:
+   `substitution_passes_reproduce_the_specifications_examples`,
+   `a_rule_that_never_moves_the_pointer_stops_at_the_loop_ceiling`,
+   `a_right_to_left_run_is_passed_in_the_order_the_design_states`.
+9. **Positioning** (FT-07d.10): `graphite/position.rs`. Exit:
+   `positioning_passes_reproduce_the_specifications_examples`,
+   `an_attached_slot_is_placed_at_its_attachment_point`,
+   `an_attachment_cycle_is_refused_and_named`.
+10. **Collision** (FT-07d.11): `graphite/collision.rs`. Exit:
+    `collision_avoidance_reproduces_the_specifications_examples`,
+    `two_colliding_slots_are_moved_apart_within_their_limits`,
+    `a_slot_with_no_room_keeps_its_place_and_is_named`.
+11. **Shaping** (FT-07d.12): `Shaper::shape` runs the passes and the refusal
+    retires. Exit: `a_graphite_only_face_is_shaped_through_its_passes`,
+    `a_face_carrying_both_takes_the_path_the_design_states`;
+    `epub_shaped.rs`'s
+    `a_book_in_a_graphite_face_is_shaped_and_measured_as_drawn`, in the
+    default and `bundled-fonts` builds.
+12. **Justification** (FT-07d.13): `graphite/justify.rs`. Exit:
+    `a_line_is_justified_by_its_faces_levels`; `epub_shaped.rs`'s
+    `a_justified_line_in_a_graphite_face_takes_its_levels`.
+13. **The fuzzer** (FT-07d.14). Exit:
+    `every_graphite_fuzz_seed_shapes_without_panicking`; `cargo xtask check`.
+14. **The fingerprint** (FT-07d.15). Exit: `fingerprints.rs`'s
+    `graphite_shaping_is_stable_across_targets`, on Linux, Windows and
+    `wasm32-wasip1`.
+15. **The speed row** (FT-07d.16): `shape a Graphite paragraph` in MS-04's
+    fonts group, through Awami Nastaliq's Graphite tables. Exit:
+    `the_committed_baseline_agrees_with_the_tree`; `cargo bench -p tinker-pdf`.
+16. **Person-written expectations** (FT-07d.17, with H-64). Exit:
+    `every_person_written_graphite_fixture_is_reproduced`,
+    `every_specification_example_is_transcribed`.
+
+### Graphite risks
+
+| Risk | Mitigation |
+|---|---|
+| The specification numbers no slot attribute and no glyph metric, and a number read wrong moves the wrong thing silently | Each number is read off a vendored face's compiled code against its published source and held by a test against that code; an attribute no vendored code reveals is refused by name rather than guessed; H-64's fixtures run the faces whole |
+| The two GTF editions disagree (the octabox diagonals' order, a lookup class's search range, `PushFeat`'s operands, the stack machine's opcode range) and `pseudosOffset` names a field the text does not | Each disagreement is settled in *Graphite design* by the vendored faces' bytes, and a test holds the reading to them |
+| Collision avoidance's search is described by its costs, not by its steps, so a face tuned to another search can come out units apart | The search is integer and deterministic, inside every limit the GDL states; H-64's fixtures for Awami Nastaliq are what hold its positions |
+| A Graphite-first face carries a stub `GPOS`, as Awami Nastaliq does, and the precedence draws it unshaped | The price is the owner's, stated here; nothing that shapes today changes |
+| A hostile description: offsets anywhere, counts that lie, a machine that never jams, code that loops or divides by zero, attachment cycles | Every read through `read::Bytes`; every count bounded (*Ceilings*); code checked before it runs; the `shape` fuzz target drives each table directly and through the sfnt directory (FT-07d.14) |
+| A compressed table names a size it does not decode to, or a size meant to exhaust memory | The stated size is bounded before a byte is decoded, and the decoded length must equal it |
+| An inserted or reordered slot breaks cluster monotonicity | Clusters are merged as `Buffer::reorder` merges them, and the fuzz target's assertion that clusters never go backwards carries over |
+| The faces' licences | OFL-1.1, which `deny.toml` admits (ruling 18); each face vendored whole with its licence beside it |

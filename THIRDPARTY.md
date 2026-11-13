@@ -1140,6 +1140,42 @@ type. So the reader decodes each as the file it is — a PPM, and a PAM read
 where its tuple type is `CMYK` — and nothing in it claims more about either
 producer than the rows above say.
 
+### The Graphite tables' published definitions
+
+Transcribed into [docs/design/shaping.md](docs/design/shaping.md)'s *Graphite
+shaping*, which names each document by its role; the sources are named here
+(ruling 21). The Graphite Table Format and its stack machine are SIL's
+published specification of the tables. What a pass, a rule, a scan position
+or an attribute means it leaves to the Graphite Description Language, so the
+language's manual and its compiler's documentation of the files it writes are
+read as the published documentation of that tool's output, which ruling 21
+lets an implementer read and never the tool's code. Nothing of the compiler or
+of any engine was read but the documents below, and nothing is vendored: what
+was taken is the tables' layouts, the opcodes and their operands, and the
+meaning of the passes, rules and attributes, which the design records. Every
+source was read on 2026-11-13.
+
+| Document | What was read | Revision | SHA-256 |
+| --- | --- | --- | --- |
+| *Graphite Table Format*, the edition headed "version 4.0" with the version-5 notes, `doc/GTF.adoc` in [silnrsi/graphite](https://github.com/silnrsi/graphite) | every table: the compressed form, `Glat`, `Gloc`, `Feat`, `Silf` and its subtable, the justification level, the pseudo-glyph and class maps, the pass and its contents, `Sile`, `Sill` and `Sild` | `f9dad5a` (2022-10-25) | `fff485532f3845d32f5424121ce6e19d85d38cc6395eea4bbd2e89009e6b1673` |
+| *Stack Machine Commands*, the same edition's appendix, `doc/OpCodes.adoc` in the same repository | the opcodes 0x00 to 0x42 and their operands | `fe6d99f` (2022-10-25) | `3301a2a897ab021c1c709b82b2b8b67303b11e6973eba24defe3f842187b1797` |
+| *Graphite Table Format*, Version 6, revision 70 of 25 September 2019, describing table format 5.0, `doc/GTF_6_0.pdf` in [silnrsi/grcompiler](https://github.com/silnrsi/grcompiler), read with this repository's own `tpdf text` | the same tables | `92dd239` (2019-10-01) | `8e0e7d1ec35335b37f227986f07d23715577028275169b7fec4f9f798bd56b1e` |
+| *Stack Machine Commands*, the standalone document last modified on 20 October 2000, `doc/StackMachineCommands.pdf` in the same repository, read with `tpdf text` | the opcodes and their operands as first written | `d0ae8d0` (2012-06-28) | `ee331a2f6145c3dff4ddbaca6b8bba91596e1b6288d65e572469615882af3297` |
+| *Graphite Description Language*, version 4.000, revision 408 of 20 May 2020, `doc/GDL.pdf` in the same repository, read with `tpdf text` | passes, streams and slots; the scan position, rule order and optional items; features and the language table; substitution, associations, insertion, deletion and ligatures; directionality; positioning, attachment and composite metrics; pseudo-glyphs; user attributes; backing up; justification; mirroring; pass constraints and key slots; collision avoidance; backward-compatible feature ids; the attribute reference | `eb99771` (2020-05-20) | `2ba4297e535f501c533528f5ae10a7a3393f8fa06e5e5adc80a83860e2c28e9b` |
+| *Graphite Compiler Debug Files*, version 4 of 3 October 2011, `doc/CompilerDebugFiles.pdf` in the same repository, read with `tpdf text` | the jammed state's zero, rule precedence, and the worked substitution classes | `53eed7d` (2011-10-04) | `fdaa798362647454b6b01da663a8f05ae3e17f9bdc1f2ac071bdceb6f6c152ae` |
+| *Graphite Overview*, version 3 of 3 October 2011, `doc/GraphiteOverview.pdf` in the same repository, read with `tpdf text` | the five kinds of pass and their order; nothing of it is in the design that the manual does not also state | `53eed7d` (2011-10-04) | — |
+| The Graphite project's *Font Topics* and *Font Features*, `doc/font.adoc` and `doc/features.adoc` in [silnrsi/graphite](https://github.com/silnrsi/graphite) | guard space; a face's default feature values for each language it lists and for every other | as served on 2026-11-13 | — |
+| The TrueType Reference Manual's [`feat` table](https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6feat.html) | the table header, the feature name record, the setting name record and the default setting | as served | — |
+| *LZ4 Block Format Description*, `doc/lz4_Block_format.md` in [lz4/lz4](https://github.com/lz4/lz4) | the compressed block format, its three worked literal lengths, the overlapping match and the end-of-block conditions | `d60bbae` (2026-10-27) | `5055dcfa77c209ea3a9f692d5768f46e0e686631941eb0fb14e110b0b8b0a6d0` |
+
+**Where they disagree, the faces decide.** The two GTF editions list an
+octabox's four diagonal bytes in opposite orders, give a lookup class's search
+range with and without a factor of four, and give `PushFeat` one operand and
+two; the GTF says `pseudosOffset` names the pseudo-glyph mappings where the
+compiled faces point it at the count before them. Each is settled in the
+design by the bytes of the faces vendored under
+`crates/tinker-pdf-shape/data/graphite`, as a test there states.
+
 ### The symbolic standard fonts' encodings and their glyph lists
 
 Transcribed into `crates/tinker-pdf-font/src/encoding.rs` (`BuiltInEncoding`)
