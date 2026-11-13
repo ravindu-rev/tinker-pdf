@@ -74,7 +74,22 @@ fn drew(bitmap: &tinker_pdf::Bitmap, least: usize, what: &str) {
 
 // ---- shadings ---------------------------------------------------------------
 
-/// **Every pixel of an axial shading is the parametric equation** (8.7.4.5.3).
+/// Asserts a shaded pixel is within one level of 255 of the clause's
+/// expression in every channel: ruling 22's bound, which lets a row step its
+/// parameter rather than evaluate it at every pixel, the step's rounding
+/// landing a colour on the other side of a rounding boundary.
+#[track_caller]
+fn within_a_level(got: (u8, u8, u8), wanted: (u8, u8, u8), what: &str) {
+    assert!(
+        got.0.abs_diff(wanted.0) <= 1
+            && got.1.abs_diff(wanted.1) <= 1
+            && got.2.abs_diff(wanted.2) <= 1,
+        "{what}: {got:?} against the clause's {wanted:?}, more than a level apart"
+    );
+}
+
+/// **Every pixel of an axial shading is the parametric equation** (8.7.4.5.3),
+/// within ruling 22's level.
 ///
 /// The axis is diagonal on purpose. An axis along `x` makes `t` a function of
 /// one coordinate, so a build that projected onto the wrong axis, or that used
@@ -101,13 +116,17 @@ fn an_axial_shading_is_the_parametric_equation_at_every_pixel() {
                 byte(c0[1] + t * (c1[1] - c0[1])),
                 byte(c0[2] + t * (c1[2] - c0[2])),
             );
-            assert_eq!(pixel(&bitmap, x, y), wanted, "pixel ({x}, {y}), t = {t}");
+            within_a_level(
+                pixel(&bitmap, x, y),
+                wanted,
+                &format!("pixel ({x}, {y}), t = {t}"),
+            );
         }
     }
 }
 
 /// **Every pixel of a radial shading is its own parametric equation**
-/// (8.7.4.5.4), and it is a different equation.
+/// (8.7.4.5.4), within ruling 22's level, and it is a different equation.
 ///
 /// Concentric circles, so `t` is the distance from the centre scaled between
 /// the two radii — the case where a build that reused the axial projection
@@ -132,7 +151,11 @@ fn a_radial_shading_is_the_distance_between_its_two_circles() {
                 byte(c0[1] + t * (c1[1] - c0[1])),
                 byte(c0[2] + t * (c1[2] - c0[2])),
             );
-            assert_eq!(pixel(&bitmap, x, y), wanted, "pixel ({x}, {y}), t = {t}");
+            within_a_level(
+                pixel(&bitmap, x, y),
+                wanted,
+                &format!("pixel ({x}, {y}), t = {t}"),
+            );
         }
     }
 }

@@ -153,10 +153,24 @@ in a table of 4 096 slots that never answers one colour for another
 distinct colours costs a million evaluations, which is the clause's price, as
 is a calculator's 65 536 tokens a pixel.
 
-**Shadings** (8.7.4.5). Type 1 (function-based), type 2 (axial) and type 3
-(radial) are evaluated per pixel through `Shading::color_at`; the radial
-parameter is the largest circle in the family containing the point
-(8.7.4.5.4), which is what paints front-to-back correctly. Types 4–7 —
+**Shadings** (8.7.4.5). Type 1 (function-based) is evaluated at every
+pixel through `Shading::color_at`; the radial parameter is the largest circle
+in the family containing the point (8.7.4.5.4), which is what paints
+front-to-back correctly. Types 2 (axial) and 3 (radial) are read a device row
+at a time (`Shading::row`): an axial shading's `t` steps from column to column
+by one addition and a radial shading's quadratic terms by three, a radial
+pixel then taking its square root, restarting from the clause's expression at
+every 64th column of the page frame and never at a region's edge, so a tile
+steps exactly as the page does (ruling 5). A stepped pixel is within one level
+of 255 of the expression evaluated at it (ruling 22,
+`a_stepped_parameter_paints_within_a_level_of_the_clause`, and
+`render_analytic.rs`'s two shading pages); where the steps are too near a
+point the clause decides on — where a gradient that does not extend starts or
+stops, where a circle's radius reaches zero, where no circle reaches the
+point — or where their error bound is past 2^-24, the pixel takes the
+expression, so a shading paints the pixels the expression paints. A
+function-based shading, a radial family whose quadratic is linear, and an axis
+a pixel crosses more than eight thousand times are evaluated at every pixel. Types 4–7 —
 free-form and lattice-form triangle meshes, Coons and tensor patches
 (8.7.4.5.5–8.7.4.5.8) — are geometry, carried as a `Mesh`: a Coons patch is
 stored as the tensor patch 8.7.4.5.7's formula makes it, so there is one

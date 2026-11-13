@@ -11,10 +11,201 @@
 //! function's outputs, and a `/Separation` or `/DeviceN` space's tint — goes
 //! into a [`ShadingScratch`] the sweep keeps from one pixel to the next, and
 //! painting a shading allocates nothing per pixel.
+//!
+//! A sweep reads a device row at a time through [`Shading::row`]: an axial
+//! shading's `t` and a radial shading's quadratic terms step from column to
+//! column there instead of being evaluated afresh ([`ShadingRow`]).
 
 use tinker_pdf_color::{ColorSpace, Function};
+use tinker_pdf_content::Matrix;
 
 use crate::mesh::Mesh;
+
+/// A device row's inverse map, its row-invariant products taken once.
+///
+/// [`RowMap::at`] is `Matrix::apply` at `(x, y)` operation for operation —
+/// `a·x + c·y + e` and `b·x + d·y + f`, added left to right, with `c·y` and
+/// `d·y` the values this holds — so a pixel maps to the same bits whether its
+/// row's products were taken once or at every column (ruling 4).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowMap {
+    a: f64,
+    b: f64,
+    e: f64,
+    f: f64,
+    cy: f64,
+    dy: f64,
+}
+
+impl RowMap {
+    /// The map of the row at device `y`.
+    pub(crate) fn new(m: &Matrix, y: f64) -> RowMap {
+        RowMap {
+            a: m.a,
+            b: m.b,
+            e: m.e,
+            f: m.f,
+            cy: m.c * y,
+            dy: m.d * y,
+        }
+    }
+
+    /// The point device `x` of this row maps to.
+    pub(crate) fn at(&self, x: f64) -> (f64, f64) {
+        (self.a * x + self.cy + self.e, self.b * x + self.dy + self.f)
+    }
+}
+
+/// The page-frame columns at which a stepped parameter is evaluated afresh:
+/// every multiple of this, whatever part of the page is being drawn.
+pub const RESTART_COLUMNS: i64 = 64;
+
+/// What up to [`RESTART_COLUMNS`] steps can leave in a stepped term, as a
+/// fraction of the magnitudes it was stepped from: 2^-44, more than 64
+/// roundings of four units in the last place each.
+const STEP_ERROR: f64 = 1.0 / 17_592_186_044_416.0;
+
+/// How many times its error bound a stepped value must lie from a threshold
+/// 8.7.4.5.3 or 8.7.4.5.4 decides on — where a gradient starts or stops, a
+/// circle's radius reaches zero, or no circle reaches the point — for the
+/// stepped value to decide it; nearer, the pixel takes the clause's
+/// expression evaluated at it.
+const MARGIN: f64 = 1024.0;
+
+/// The most a stepped parameter may be off and still be used: 2^-24, under
+/// a ten-thousandth of a level of 255 in any colour it is mapped to.
+const PRECISION: f64 = 1.0 / 16_777_216.0;
+
+/// The largest step in `t` from one column to the next that is stepped: an
+/// axis a pixel crosses more than eight thousand times over is evaluated at
+/// each pixel, its steps too large to keep within [`PRECISION`].
+const MAX_AXIAL_STEP: f64 = 8_192.0;
+
+/// One device row of a shading, read left to right ([`Shading::row`]).
+///
+/// An axial shading's `t` is affine in the device column and a radial
+/// shading's quadratic terms (8.7.4.5.4's `b` and `c`) are affine and
+/// quadratic in it, so along a row they step by constant differences — `t`
+/// by one addition a column, `b` by one and `c` by two — and a pixel's
+/// parameter costs those additions, and for a radial shading its square
+/// root, in place of the inverse map and the clause's expression. The steps
+/// start afresh from the expression at every [`RESTART_COLUMNS`]th column of
+/// the page frame and never at the edge of what is being drawn: a tile's
+/// pixel is the page's pixel, stepped the same way from the same column
+/// (ruling 5).
+///
+/// A stepped parameter differs from the expression evaluated at the pixel
+/// by rounding alone, a few parts in 10^14 of the magnitudes it came from, so
+/// a colour that lands on a rounding boundary may land a level of 255 from
+/// the clause's — the bound ruling 22 sets. Where the step cannot be trusted
+/// to decide whether a pixel is painted at all — a stepped value within
+/// [`MARGIN`] times its error bound of where the gradient stops, of a zero
+/// radius or of no circle at all, or an error bound past [`PRECISION`] — the
+/// pixel takes the clause's expression, so the pixels painted are the ones
+/// the expression paints. A function-based shading, a degenerate radial
+/// one and an axis too short to step are evaluated at every pixel.
+pub struct ShadingRow<'a> {
+    shading: &'a Shading,
+    map: RowMap,
+    walk: Walk,
+}
+
+/// How a row's parameter is had.
+enum Walk {
+    /// From the clause's expression at every pixel.
+    Direct,
+    /// Type 2's `t`, stepped by `dt` a column.
+    Axial {
+        dt: f64,
+        /// The column the state describes, and `t` there.
+        at: Option<(i64, f64)>,
+    },
+    /// Type 3's `b` and `c`, stepped.
+    Radial(Box<Radial>),
+}
+
+/// What a radial shading's row steps (8.7.4.5.4).
+///
+/// For a point `p` in shading space, relative to the first circle's centre,
+/// the family's circles through it are the roots `s` of `a·s² − 2b·s + c`,
+/// with `a` fixed by the shading and `b` and `c` by the point. Along a row
+/// the point moves by the map's `(ma, mb)` a column, so `b` moves by `db` and
+/// `c` by `dc`, which itself moves by `ddc`.
+struct Radial {
+    a: f64,
+    inverse_a: f64,
+    db: f64,
+    ddc: f64,
+    ma: f64,
+    mb: f64,
+    /// The column the state describes, if any.
+    column: Option<i64>,
+    b: f64,
+    c: f64,
+    dc: f64,
+    /// Bounds on the magnitudes `b`'s and `c`'s terms reach over the block,
+    /// which their errors are fractions of.
+    b_scale: f64,
+    c_scale: f64,
+}
+
+impl Shading {
+    /// One device row of this shading, read through `inverse`, the map from
+    /// device space to shading space, at the row's centre `y` in device
+    /// space.
+    #[must_use]
+    pub fn row(&self, inverse: &Matrix, y: f64) -> ShadingRow<'_> {
+        let map = RowMap::new(inverse, y);
+        let walk = match self {
+            Shading::Axial { coords, .. } => {
+                let [ax, ay, bx, by] = *coords;
+                let (dx, dy) = (bx - ax, by - ay);
+                let denominator = dx * dx + dy * dy;
+                let dt = (map.a * dx + map.b * dy) / denominator;
+                if denominator > f64::EPSILON && dt.is_finite() && dt.abs() <= MAX_AXIAL_STEP {
+                    Walk::Axial { dt, at: None }
+                } else {
+                    Walk::Direct
+                }
+            }
+            Shading::Radial { coords, .. } => {
+                let [x0, y0, r0, x1, y1, r1] = *coords;
+                let (dx, dy, dr) = (x1 - x0, y1 - y0, r1 - r0);
+                let a = dx * dx + dy * dy - dr * dr;
+                let (ma, mb) = (map.a, map.b);
+                let db = ma * dx + mb * dy;
+                let ddc = 2.0 * (ma * ma + mb * mb);
+                let finite = [a, db, ddc, r0, dr].iter().all(|v| v.is_finite());
+                // `radial_parameter`'s own line between the quadratic and the
+                // linear family: the linear one is not stepped.
+                if finite && a.abs() >= 1e-9 {
+                    Walk::Radial(Box::new(Radial {
+                        a,
+                        inverse_a: 1.0 / a,
+                        db,
+                        ddc,
+                        ma,
+                        mb,
+                        column: None,
+                        b: 0.0,
+                        c: 0.0,
+                        dc: 0.0,
+                        b_scale: 0.0,
+                        c_scale: 0.0,
+                    }))
+                } else {
+                    Walk::Direct
+                }
+            }
+            _ => Walk::Direct,
+        };
+        ShadingRow {
+            shading: self,
+            map,
+            walk,
+        }
+    }
+}
 
 /// What evaluating a shading writes, kept by a sweep from one pixel to the
 /// next: a function's outputs and a colour space's tint transform's.
@@ -92,7 +283,8 @@ impl Shading {
     }
 
     /// The colour at a point in shading space, or `None` where the shading
-    /// paints nothing. `scratch` is the sweep's, the same one for every pixel.
+    /// paints nothing: the clause's expression evaluated at the point.
+    /// `scratch` is the sweep's, the same one for every pixel.
     ///
     /// Always `None` for a mesh: a mesh is not a function of position, and
     /// answering "what colour is here" would mean locating the containing
@@ -123,14 +315,7 @@ impl Shading {
                 coords,
                 extend,
             } => {
-                let [ax, ay, bx, by] = *coords;
-                let (dx, dy) = (bx - ax, by - ay);
-                let denominator = dx * dx + dy * dy;
-                if denominator <= f64::EPSILON {
-                    return None; // A zero-length axis paints nothing.
-                }
-                // The parameter is the projection onto the axis.
-                let t = ((x - ax) * dx + (y - ay) * dy) / denominator;
+                let t = axial_parameter(*coords, x, y)?;
                 let t = clamp_extend(t, *extend)?;
                 Some(scratch.color(space, function, &[t]))
             }
@@ -146,6 +331,214 @@ impl Shading {
             }
         }
     }
+}
+
+impl ShadingRow<'_> {
+    /// The colour at page-frame column `px` of the row, or `None` where the
+    /// shading paints nothing. Columns are asked for left to right, any of
+    /// them skipped; a column asked for out of order costs a restart and
+    /// gets the same colour. `scratch` is the sweep's.
+    pub fn color_at(&mut self, px: i64, scratch: &mut ShadingScratch) -> Option<(u8, u8, u8)> {
+        // The stepped parameter, `/Extend` applied, where the steps decide
+        // the pixel: `None` sends it to the clause's expression.
+        let stepped = match (self.shading, &mut self.walk) {
+            (
+                Shading::Axial {
+                    space,
+                    function,
+                    coords,
+                    extend,
+                },
+                Walk::Axial { dt, at },
+            ) => {
+                let t = axial_step(&self.map, *coords, *dt, at, px);
+                let e = STEP_ERROR * (1.0 + t.abs() + 64.0 * dt.abs());
+                // Negated, so an error no comparison can order is undecided.
+                let undecided = !(e <= PRECISION)
+                    || (!extend.0 && t.abs() <= MARGIN * e)
+                    || (!extend.1 && (t - 1.0).abs() <= MARGIN * e);
+                (!undecided).then(|| (space, function, clamp_extend(t, *extend)))
+            }
+            (
+                Shading::Radial {
+                    space,
+                    function,
+                    coords,
+                    extend,
+                },
+                Walk::Radial(radial),
+            ) => radial
+                .parameter(&self.map, *coords, *extend, px)
+                .ok()
+                .map(|t| (space, function, t)),
+            _ => None,
+        };
+        match stepped {
+            Some((space, function, t)) => Some(scratch.color(space, function, &[t?])),
+            None => {
+                count::evaluated();
+                let (x, y) = self.map.at(px as f64 + 0.5);
+                self.shading.color_at(x, y, scratch)
+            }
+        }
+    }
+}
+
+/// The column a page-frame column's steps start from: the last multiple of
+/// [`RESTART_COLUMNS`] at or before it.
+fn restart_of(px: i64) -> i64 {
+    px - px.rem_euclid(RESTART_COLUMNS)
+}
+
+/// An axial shading's `t` at column `px`, before `/Extend` is applied:
+/// `at`'s state stepped there, or the expression evaluated afresh at the
+/// column the steps restart from and stepped from it.
+fn axial_step(
+    map: &RowMap,
+    coords: [f64; 4],
+    dt: f64,
+    at: &mut Option<(i64, f64)>,
+    px: i64,
+) -> f64 {
+    let restart = restart_of(px);
+    let (mut column, mut t) = match *at {
+        Some((column, t)) if column >= restart && column <= px => (column, t),
+        _ => {
+            count::evaluated();
+            let (x, y) = map.at(restart as f64 + 0.5);
+            // The axis has a length, or the row would not step.
+            let [ax, ay, bx, by] = coords;
+            let (dx, dy) = (bx - ax, by - ay);
+            (
+                restart,
+                ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy),
+            )
+        }
+    };
+    while column < px {
+        t += dt;
+        column += 1;
+    }
+    *at = Some((column, t));
+    t
+}
+
+/// A stepped radial value too near a threshold, or too imprecise, to decide
+/// the pixel by.
+struct Undecided;
+
+impl Radial {
+    /// Brings the state to column `px`: afresh at the column its steps
+    /// restart from when the state is in another block or behind it, and
+    /// stepped from there.
+    fn reach(&mut self, map: &RowMap, coords: [f64; 6], px: i64) {
+        let restart = restart_of(px);
+        let mut column = match self.column {
+            Some(column) if column >= restart && column <= px => column,
+            _ => {
+                count::evaluated();
+                let [x0, y0, r0, x1, y1, r1] = coords;
+                let (dx, dy, dr) = (x1 - x0, y1 - y0, r1 - r0);
+                let (x, y) = map.at(restart as f64 + 0.5);
+                // `radial_parameter`'s terms, in its order, of the point
+                // relative to the first circle's centre.
+                let (ux, uy) = (x - x0, y - y0);
+                self.b = ux * dx + uy * dy + r0 * dr;
+                self.c = ux * ux + uy * uy - r0 * r0;
+                self.dc =
+                    2.0 * (ux * self.ma + uy * self.mb) + (self.ma * self.ma + self.mb * self.mb);
+                let span = RESTART_COLUMNS as f64;
+                self.b_scale = ux.abs() * dx.abs()
+                    + uy.abs() * dy.abs()
+                    + (r0 * dr).abs()
+                    + span * ((self.ma * dx).abs() + (self.mb * dy).abs());
+                let reach_x = ux.abs() + span * self.ma.abs();
+                let reach_y = uy.abs() + span * self.mb.abs();
+                self.c_scale = reach_x * reach_x + reach_y * reach_y + r0 * r0;
+                restart
+            }
+        };
+        while column < px {
+            self.b += self.db;
+            self.c += self.dc;
+            self.dc += self.ddc;
+            column += 1;
+        }
+        self.column = Some(column);
+    }
+
+    /// The parameter at column `px` (8.7.4.5.4), as `radial_parameter`
+    /// decides it but from the stepped terms, or [`Undecided`] where the
+    /// stepped terms cannot be trusted to decide it.
+    fn parameter(
+        &mut self,
+        map: &RowMap,
+        coords: [f64; 6],
+        extend: (bool, bool),
+        px: i64,
+    ) -> Result<Option<f64>, Undecided> {
+        self.reach(map, coords, px);
+        let [_, _, r0, _, _, r1] = coords;
+        let dr = r1 - r0;
+        let (a, b, c) = (self.a, self.b, self.c);
+        let e_b = STEP_ERROR * self.b_scale;
+        let e_c = 4.0 * STEP_ERROR * self.c_scale;
+        let discriminant = b * b - a * c;
+        let e_discriminant = 2.0 * b.abs() * e_b + e_b * e_b + a.abs() * e_c;
+        // Negated, so a value no comparison can order is undecided too.
+        if !(discriminant.abs() > MARGIN * e_discriminant) {
+            return Err(Undecided);
+        }
+        if discriminant < 0.0 {
+            return Ok(None); // No circle in the family reaches this point.
+        }
+        let root = discriminant.sqrt();
+        let e_root = e_discriminant / root;
+        let mut best: Option<f64> = None;
+        for candidate in [(b + root) * self.inverse_a, (b - root) * self.inverse_a] {
+            let e = (e_b + e_root) * self.inverse_a.abs() + STEP_ERROR * candidate.abs();
+            // A candidate past every number, or an error bound too wide to
+            // keep a colour within a level, is the clause's to decide.
+            if !candidate.is_finite() || !(e <= PRECISION) {
+                return Err(Undecided);
+            }
+            let radius = r0 + candidate * dr;
+            let e_radius = dr.abs() * e + STEP_ERROR * (r0.abs() + (candidate * dr).abs());
+            if radius.abs() <= MARGIN * e_radius {
+                return Err(Undecided);
+            }
+            if radius < 0.0 {
+                continue; // A circle with a negative radius does not exist.
+            }
+            if (!extend.0 && candidate.abs() <= MARGIN * e)
+                || (!extend.1 && (candidate - 1.0).abs() <= MARGIN * e)
+            {
+                return Err(Undecided);
+            }
+            let Some(clamped) = clamp_extend(candidate, extend) else {
+                continue;
+            };
+            best = Some(match best {
+                None => clamped,
+                Some(previous) => previous.max(clamped),
+            });
+        }
+        Ok(best)
+    }
+}
+
+/// An axial shading's parameter at a point (8.7.4.5.3): the projection onto
+/// the axis as a fraction of its length, before `/Extend`. `None` for an axis
+/// of no length, which paints nothing.
+fn axial_parameter(coords: [f64; 4], x: f64, y: f64) -> Option<f64> {
+    let [ax, ay, bx, by] = coords;
+    let (dx, dy) = (bx - ax, by - ay);
+    let denominator = dx * dx + dy * dy;
+    if denominator <= f64::EPSILON {
+        return None; // A zero-length axis paints nothing.
+    }
+    // The parameter is the projection onto the axis.
+    Some(((x - ax) * dx + (y - ay) * dy) / denominator)
 }
 
 /// Clamps a parameter to `0..=1`, or refuses it where the shading does not
@@ -213,6 +606,33 @@ fn radial_parameter(coords: [f64; 6], x: f64, y: f64, extend: (bool, bool)) -> O
         });
     }
     best
+}
+
+/// The parameter's evaluations from the clause's expression, counted for the
+/// tests: compiled only under `cfg(test)` and kept per thread.
+#[cfg(test)]
+mod count {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static EVALUATED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One parameter evaluated from the expression rather than stepped.
+    pub(super) fn evaluated() {
+        EVALUATED.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The evaluations on this thread since the last call.
+    pub(super) fn take() -> u64 {
+        EVALUATED.with(|count| count.replace(0))
+    }
+}
+
+/// The counter outside tests: nothing.
+#[cfg(not(test))]
+mod count {
+    pub(super) fn evaluated() {}
 }
 
 #[cfg(test)]
@@ -428,6 +848,404 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// **A row's map is the matrix's map to the bit.** The shading sweeps take
+    /// `c·y` and `d·y` once a row; every pixel must still map to the bits
+    /// `Matrix::apply` gives it, or hoisting them would move pixels. Matrices
+    /// whose products round, a rotation and a shear among them, at
+    /// pixel-centre coordinates far enough out for the sums to round too.
+    #[test]
+    fn a_row_map_is_the_matrix_s_map_to_the_bit() {
+        let matrices = [
+            Matrix {
+                a: 0.3,
+                b: 0.7,
+                c: -1.1,
+                d: 0.9,
+                e: 13.37,
+                f: -2.71,
+            },
+            Matrix {
+                a: 1.0 / 3.0,
+                b: 0.0,
+                c: 0.0,
+                d: -1.0 / 3.0,
+                e: 0.1,
+                f: 280.6,
+            },
+            Matrix {
+                a: 0.866_025_403_784_438_6,
+                b: 0.5,
+                c: -0.5,
+                d: 0.866_025_403_784_438_6,
+                e: -123.456,
+                f: 789.012,
+            },
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for m in &matrices {
+            for _ in 0..2_000 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let x = (seed % 9_000) as f64 + 0.5;
+                let y = ((seed >> 20) % 9_000) as f64 + 0.5;
+                let (ax, ay) = m.apply(x, y);
+                let (rx, ry) = RowMap::new(m, y).at(x);
+                assert_eq!(
+                    (ax.to_bits(), ay.to_bits()),
+                    (rx.to_bits(), ry.to_bits()),
+                    "({x}, {y}) under {m:?}"
+                );
+            }
+        }
+    }
+
+    /// A map from device space to shading space with every coefficient in
+    /// play, as a rotated and scaled page's inverse has.
+    fn tilted() -> Matrix {
+        Matrix {
+            a: 0.37,
+            b: 0.11,
+            c: -0.21,
+            d: 0.43,
+            e: 3.1,
+            f: -7.9,
+        }
+    }
+
+    /// Three outputs that move apart, so a parameter a little off shows in
+    /// every channel.
+    fn spread_ramp() -> Function {
+        Function::Exponential {
+            domain: (0.0, 1.0),
+            c0: vec![0.0, 0.2, 0.9],
+            c1: vec![1.0, 0.7, 0.1],
+            n: 1.0,
+        }
+    }
+
+    /// An axial shading along a slanted axis and a radial one between two
+    /// concentric circles, both extended: shadings whose every pixel the
+    /// steps decide, with no pixel near where either stops.
+    fn stepped_shadings() -> [Shading; 2] {
+        [
+            Shading::Axial {
+                space: ColorSpace::DeviceRgb,
+                function: spread_ramp(),
+                coords: [-5.0, 2.0, 60.0, 41.0],
+                extend: (true, true),
+            },
+            Shading::Radial {
+                space: ColorSpace::DeviceRgb,
+                function: spread_ramp(),
+                coords: [20.3, 14.9, 3.0, 20.3, 14.9, 90.0],
+                extend: (true, true),
+            },
+        ]
+    }
+
+    /// The clause's colour at page-frame column `px` of the row at `y`.
+    fn direct(shading: &Shading, inverse: &Matrix, y: f64, px: i64) -> Option<(u8, u8, u8)> {
+        let (x, y) = RowMap::new(inverse, y).at(px as f64 + 0.5);
+        at(shading, x, y)
+    }
+
+    /// **P-14.3's exit.** A row evaluates its parameter from the clause's
+    /// expression once per restart column it reaches and steps the rest:
+    /// walked whole, walked with gaps as a clip leaves them, and walked from
+    /// partway along as a tile is.
+    #[test]
+    fn a_row_evaluates_its_parameter_from_scratch_only_at_restart_columns() {
+        let inverse = tilted();
+        let mut scratch = ShadingScratch::default();
+        for shading in &stepped_shadings() {
+            for (first, last, every) in [
+                (5_i64, 300_i64, 1_usize),
+                (5, 300, 7),
+                (130, 300, 1),
+                (0, 63, 1),
+            ] {
+                let restarts = (restart_of(last) - restart_of(first)) / RESTART_COLUMNS + 1;
+                let mut walk = shading.row(&inverse, 23.5);
+                let _ = count::take();
+                for px in (first..=last).step_by(every) {
+                    let _ = walk.color_at(px, &mut scratch);
+                }
+                let evaluated = count::take();
+                assert!(
+                    evaluated >= 1 && evaluated <= restarts as u64,
+                    "{shading:?}, columns {first} to {last} every {every}: {evaluated} \
+                     evaluations for {restarts} restart columns"
+                );
+            }
+        }
+    }
+
+    /// **Ruling 5.** A pixel is stepped from its own restart column whatever
+    /// column the walk began at and whichever columns it skipped, so a tile
+    /// starting anywhere paints the page's colours to the bit.
+    #[test]
+    fn a_tile_steps_as_the_page_does() {
+        let inverse = tilted();
+        let mut scratch = ShadingScratch::default();
+        for shading in &stepped_shadings() {
+            let mut page = shading.row(&inverse, 41.5);
+            let whole: Vec<_> = (0..300).map(|px| page.color_at(px, &mut scratch)).collect();
+            for (first, every) in [(37_i64, 1_usize), (64, 1), (100, 3), (299, 1), (1, 64)] {
+                let mut tile = shading.row(&inverse, 41.5);
+                for px in (first..300).step_by(every) {
+                    assert_eq!(
+                        tile.color_at(px, &mut scratch),
+                        whole[px as usize],
+                        "{shading:?} at column {px}, the tile starting at {first}"
+                    );
+                }
+            }
+            // Out of order costs a restart and changes nothing.
+            let mut back = shading.row(&inverse, 41.5);
+            for px in [250_i64, 70, 71, 3, 299] {
+                assert_eq!(back.color_at(px, &mut scratch), whole[px as usize]);
+            }
+        }
+    }
+
+    /// **Ruling 22.** A stepped pixel is within one level of 255 of the
+    /// clause's expression evaluated at it, in every channel, and is painted
+    /// exactly where the expression paints: over axial and radial shadings
+    /// that extend and that stop, a radial pair one circle of which is outside
+    /// the other, so that some points no circle reaches, a cone whose smaller
+    /// circle has its radius reach zero, and maps that rotate, shear and
+    /// magnify.
+    #[test]
+    fn a_stepped_parameter_paints_within_a_level_of_the_clause() {
+        let maps = [
+            tilted(),
+            Matrix {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: -1.0,
+                e: 0.0,
+                f: 120.0,
+            },
+            Matrix {
+                a: 1.0 / 3.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0 / 3.0,
+                e: -0.25,
+                f: 0.75,
+            },
+            Matrix {
+                a: 0.866_025_403_784_438_6 / 7.0,
+                b: 0.5 / 7.0,
+                c: -0.5 / 7.0,
+                d: 0.866_025_403_784_438_6 / 7.0,
+                e: 11.0,
+                f: -3.0,
+            },
+        ];
+        let mut shadings = Vec::new();
+        for extend in [(true, true), (false, false), (true, false), (false, true)] {
+            shadings.push(Shading::Axial {
+                space: ColorSpace::DeviceRgb,
+                function: spread_ramp(),
+                coords: [12.5, 30.0, 92.5, 30.0],
+                extend,
+            });
+            shadings.push(Shading::Axial {
+                space: ColorSpace::DeviceRgb,
+                function: spread_ramp(),
+                coords: [-5.0, 2.0, 60.0, 41.0],
+                extend,
+            });
+            shadings.push(Shading::Radial {
+                space: ColorSpace::DeviceRgb,
+                function: spread_ramp(),
+                coords: [40.0, 40.0, 5.0, 40.0, 40.0, 35.0],
+                extend,
+            });
+            shadings.push(Shading::Radial {
+                space: ColorSpace::DeviceRgb,
+                function: spread_ramp(),
+                coords: [20.0, 30.0, 6.0, 70.0, 45.0, 12.0],
+                extend,
+            });
+            shadings.push(Shading::Radial {
+                space: ColorSpace::DeviceRgb,
+                function: spread_ramp(),
+                coords: [30.0, 20.0, 18.0, 60.0, 50.0, 2.0],
+                extend,
+            });
+        }
+        let mut scratch = ShadingScratch::default();
+        for inverse in &maps {
+            for shading in &shadings {
+                for row in (0..120).step_by(7) {
+                    let y = f64::from(row) + 0.5;
+                    let mut walk = shading.row(inverse, y);
+                    for px in 0..200 {
+                        let stepped = walk.color_at(px, &mut scratch);
+                        let clause = direct(shading, inverse, y, px);
+                        match (stepped, clause) {
+                            (None, None) => {}
+                            (Some(s), Some(c)) => assert!(
+                                [(s.0, c.0), (s.1, c.1), (s.2, c.2)]
+                                    .iter()
+                                    .all(|(s, c)| s.abs_diff(*c) <= 1),
+                                "{shading:?} under {inverse:?} at ({px}, {y}): {s:?} \
+                                 against {c:?}"
+                            ),
+                            _ => panic!(
+                                "{shading:?} under {inverse:?} at ({px}, {y}): stepped \
+                                 {stepped:?}, the clause {clause:?}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where a gradient that does not extend starts and stops on a pixel
+    /// centre, the clause paints that pixel and not its neighbour outside;
+    /// the steps, which carry rounding there, leave the decision to it, and
+    /// every pixel between is within a level of the clause's.
+    #[test]
+    fn where_a_gradient_stops_on_a_pixel_centre_the_clause_decides() {
+        let identity = Matrix {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        // An axis sixty long from 10.5: t is 0 at column 10 and 1 at 70,
+        // and a sixtieth is not a binary fraction.
+        let shading = Shading::Axial {
+            space: ColorSpace::DeviceRgb,
+            function: spread_ramp(),
+            coords: [10.5, 0.0, 70.5, 0.0],
+            extend: (false, false),
+        };
+        let mut scratch = ShadingScratch::default();
+        let mut walk = shading.row(&identity, 3.5);
+        let painted: Vec<i64> = (0..128)
+            .filter(|&px| walk.color_at(px, &mut scratch).is_some())
+            .collect();
+        assert_eq!(painted, (10..=70).collect::<Vec<_>>());
+        let mut walk = shading.row(&identity, 3.5);
+        for px in 0..128 {
+            let stepped = walk.color_at(px, &mut scratch);
+            let clause = direct(&shading, &identity, 3.5, px);
+            assert_eq!(stepped.is_some(), clause.is_some(), "column {px}");
+            if let (Some(s), Some(c)) = (stepped, clause) {
+                assert!(
+                    s.0.abs_diff(c.0) <= 1 && s.1.abs_diff(c.1) <= 1 && s.2.abs_diff(c.2) <= 1,
+                    "column {px}: {s:?} against {c:?}"
+                );
+            }
+        }
+    }
+
+    /// The shadings that are not stepped — a function-based one, a radial
+    /// family whose first circle touches the second from inside, which
+    /// 8.7.4.5.4's quadratic leaves linear, an axis of no length, and a map
+    /// no number can follow — are the clause's expression at every pixel,
+    /// one evaluation a pixel.
+    #[test]
+    fn a_shading_that_does_not_step_is_the_clause_at_every_pixel() {
+        // The centres five apart and the radii five apart: `a` is zero.
+        let linear = Shading::Radial {
+            space: ColorSpace::DeviceRgb,
+            function: spread_ramp(),
+            coords: [10.0, 10.0, 2.0, 13.0, 14.0, 7.0],
+            extend: (true, true),
+        };
+        let based = Shading::FunctionBased {
+            space: ColorSpace::DeviceGray,
+            function: Function::PostScript {
+                domain: vec![(0.0, 100.0); 2],
+                range: vec![(0.0, 1.0)],
+                program: tinker_pdf_color::function::parse_postscript(b"{ add 200 div }"),
+            },
+            domain: [0.0, 100.0, 0.0, 100.0],
+        };
+        let pointless = Shading::Axial {
+            space: ColorSpace::DeviceRgb,
+            function: spread_ramp(),
+            coords: [5.0, 5.0, 5.0, 5.0],
+            extend: (true, true),
+        };
+        let broken = Matrix {
+            a: f64::NAN,
+            b: 0.0,
+            c: 0.0,
+            d: f64::INFINITY,
+            e: 0.0,
+            f: 0.0,
+        };
+        let mut scratch = ShadingScratch::default();
+        for (shading, inverse) in [
+            (&linear, tilted()),
+            (&based, tilted()),
+            (&pointless, tilted()),
+            (&stepped_shadings()[0], broken),
+            (&stepped_shadings()[1], broken),
+        ] {
+            let mut walk = shading.row(&inverse, 9.5);
+            for px in 0..140 {
+                assert_eq!(
+                    walk.color_at(px, &mut scratch),
+                    direct(shading, &inverse, 9.5, px),
+                    "{shading:?} at column {px}"
+                );
+            }
+        }
+        // One evaluation a pixel where nothing steps.
+        let mut walk = based.row(&tilted(), 9.5);
+        let _ = count::take();
+        for px in 0..140 {
+            let _ = walk.color_at(px, &mut scratch);
+        }
+        assert_eq!(count::take(), 140);
+    }
+
+    /// Columns far out in the page frame, and negative ones, restart where
+    /// the frame says, and coordinates past any page step without panicking.
+    #[test]
+    fn columns_far_out_and_before_the_origin_step_as_the_frame_says() {
+        assert_eq!(restart_of(0), 0);
+        assert_eq!(restart_of(63), 0);
+        assert_eq!(restart_of(64), 64);
+        assert_eq!(restart_of(-1), -64);
+        assert_eq!(restart_of(-64), -64);
+        assert_eq!(restart_of(-65), -128);
+        let inverse = tilted();
+        let mut scratch = ShadingScratch::default();
+        for shading in &stepped_shadings() {
+            for first in [-200_i64, 1_000_000, i64::from(i32::MAX) - 300] {
+                let mut walk = shading.row(&inverse, 7.5);
+                for px in first..first + 200 {
+                    let stepped = walk.color_at(px, &mut scratch);
+                    let clause = direct(shading, &inverse, 7.5, px);
+                    assert_eq!(stepped.is_some(), clause.is_some(), "column {px}");
+                }
+            }
+        }
+        let huge = Shading::Radial {
+            space: ColorSpace::DeviceRgb,
+            function: spread_ramp(),
+            coords: [1e300, -1e300, 1e300, 0.0, 0.0, 1.0],
+            extend: (true, true),
+        };
+        let mut walk = huge.row(&inverse, 7.5);
+        for px in 0..130 {
+            let _ = walk.color_at(px, &mut scratch);
         }
     }
 }
