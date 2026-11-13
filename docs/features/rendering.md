@@ -1455,6 +1455,19 @@ becomes the region covering the whole page, whose corner is the origin, so a
 tile and a page take one code path and there is no un-tiled spelling for a
 defect to hide in.
 
+`Renderer::snapshot` hands back what a render has drawn so far, as `finish`
+would hand it back were the render to stop there, on copies, so a host
+pausing a render (`docs/design/progressive-render.md`) can show it without
+changing what it goes on to draw: the canvas copied, the run of abutting
+images held back composited onto the copy and never onto the canvas, each
+open transparency group closed onto a copy of what is under it innermost
+first — backdrop out, knockout restore, the group's alpha, blend and soft
+mask — and each open soft mask's group dropped, the page under it shown as
+it stood at its `gs`. It walks them in the order they opened, which each
+frame records as how many of the other kind were open when it opened — the
+order `finish` closes any still open in — and a group's buffer holds what is
+under it, so the copy holds every canvas the walk closes onto.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
@@ -1674,6 +1687,16 @@ defect to hide in.
   render crate's `forced_colour_tests` drive the device calls: each paint
   black whatever its state, fill-to-stroke as the thinnest stroke, a Type 3
   fill kept, and the questions answered as an ordinary render answers them.
+- Snapshots: the render crate's
+  `a_snapshot_changes_nothing_the_render_goes_on_to_draw` steps calls holding
+  an abutting image run, a knockout group with a group in it and a soft mask
+  being drawn with a group of its own one at a time, snapshots after every
+  call, and holds the finished canvas and warnings to the calls never
+  snapshotted and each snapshot taken with no bracket open to what the calls
+  up to it finish with; `a_snapshot_shows_a_run_and_an_open_group_and_not_a_mask_being_drawn`
+  holds what each shows, and
+  `a_render_ended_inside_brackets_closes_them_as_a_snapshot_shows` holds the
+  end of a render stopped after every call to the snapshot there.
 - SVG output: `crates/tinker-pdf/tests/svg_output.rs` reads every file the
   writer makes back through `tinker-pdf-svg` and compares the scene with what
   the page states, worked out from the content stream's own numbers — a

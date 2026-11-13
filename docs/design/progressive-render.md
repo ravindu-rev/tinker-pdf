@@ -121,9 +121,12 @@ copies so that nothing the render goes on to draw changes:
   group opened inside the mask's group is part of the mask and shows nothing
   either.
 
-The renderer keeps, beside its stack of groups and its stack of soft masks'
-groups, the order its brackets opened in, which is what a snapshot walks. A
-snapshot taken with no bracket open is the canvas with the run composited,
+Each group's frame and each soft mask's group's records how many of the
+other kind were open when it opened, which is the order the end of a render
+closes them in and the order a snapshot walks; a group's buffer holds the
+canvas under it, so a copy of the innermost holds every canvas the walk
+closes onto. A snapshot taken with no bracket open is the canvas with the run
+composited,
 which is exactly what `finish` returns for the same calls. The cost of a
 partial is a copy of the canvas and of every open group's buffer, paid only
 when a host asks for one.

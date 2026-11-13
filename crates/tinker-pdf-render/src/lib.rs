@@ -2214,6 +2214,98 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         (self.canvas, self.warnings)
     }
 
+    /// What the render has drawn so far, as [`Renderer::finish`] would hand
+    /// it back were the render to stop here, built on copies so that nothing
+    /// the render goes on to draw changes (`docs/design/progressive-render.md`):
+    ///
+    /// - the canvas this renderer was made with — the page, or a tile of it at
+    ///   its corner of the page frame — copied;
+    /// - the run of images held back so that abutting ones do not conflate,
+    ///   composited onto the copy under the clip and soft mask in force, as
+    ///   its end will composite it, the run itself left accumulating;
+    /// - each open transparency group closed onto a copy of what is under it,
+    ///   innermost first, as its end closes it: its backdrop taken out, a
+    ///   knockout group outside it restored where it painted, and the copy
+    ///   composited at the group's own alpha, blend mode and soft mask;
+    /// - each open soft mask's group dropped, a group opened inside it with
+    ///   it: what it drew is a mask in the making and no page content, so what
+    ///   is under it shows as it stood when its `gs` opened it.
+    ///
+    /// The brackets are walked in the order they opened, which each frame
+    /// records as the other kind's count when it opened, the order the end of
+    /// a render closes them in; a group's buffer holds what is under it, so
+    /// the copy holds every canvas the walk closes onto. With no bracket open
+    /// a snapshot is the canvas `finish` returns for the same calls. It counts
+    /// nothing and reports nothing; the warnings are `finish`'s.
+    #[must_use]
+    pub fn snapshot(&self) -> Canvas {
+        let mut canvas = self.canvas.clone();
+        if let Some(run) = &self.run {
+            let combined = self.combined_mask();
+            let clip = combined
+                .as_ref()
+                .or(self.clip.as_ref())
+                .or(self.soft.as_ref());
+            run.fragments.composite_region_inked(
+                &mut canvas,
+                run.covered,
+                run.alpha,
+                run.blend,
+                clip,
+                run.ink,
+                None,
+            );
+        }
+        let (mut groups, mut masks) = (self.groups.len(), self.mask_frames.len());
+        loop {
+            // The innermost bracket: the last group, where every soft mask's
+            // group open now was open when it opened, and the last soft
+            // mask's group otherwise.
+            let group = groups
+                .checked_sub(1)
+                .and_then(|at| self.groups.get(at))
+                .filter(|frame| frame.masks_open == masks);
+            if let Some(frame) = group {
+                groups -= 1;
+                let Some(mut parent) = canvas.release_parent() else {
+                    break;
+                };
+                let mut buffer = canvas;
+                buffer.remove_backdrop(&parent);
+                // 11.4.5, as `close_group` takes it: the group outside this
+                // one, where it knocks out, restored where this one painted.
+                let outer = groups.checked_sub(1).and_then(|at| self.groups.get(at));
+                if outer.is_some_and(|outer| outer.knockout) {
+                    let area = buffer.to_mask(frame.at, MaskKind::Alpha, None);
+                    parent.knock_out(&area);
+                }
+                // An RGB group's result reaches an ink parent through the
+                // black generation and undercolour removal at its `Do`.
+                let held = (frame.removal.is_some() && parent.format == PixelFormat::CmykA8)
+                    .then(|| parent.set_ink_tables(frame.removal.clone()));
+                parent.composite(
+                    &buffer,
+                    frame.at,
+                    frame.alpha,
+                    frame.blend,
+                    frame.soft.as_ref(),
+                    None,
+                );
+                if let Some(previous) = held {
+                    parent.set_ink_tables(previous);
+                }
+                canvas = parent;
+            } else if let Some(frame) = masks.checked_sub(1).and_then(|at| self.mask_frames.get(at))
+            {
+                masks -= 1;
+                canvas = frame.parent.clone();
+            } else {
+                break;
+            }
+        }
+        canvas
+    }
+
     /// Opens a transparency group: a buffer of its own, bounded to the
     /// clip in force (11.6.6).
     ///
@@ -9131,6 +9223,285 @@ mod forced_colour_tests {
         let ordinary = pixels(ordinary);
         let at = (SIZE as usize - 17) * SIZE as usize + 17;
         assert_eq!((forced[at], ordinary[at]), (0, 255));
+    }
+}
+
+/// `Renderer::snapshot` (`docs/design/progressive-render.md`), over calls a
+/// test writes out: snapshotted after every call, the render goes on to draw
+/// what it would have drawn, and with no bracket open a snapshot is what the
+/// same calls finish with.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use tinker_pdf_content::{
+        BlendMode as ContentBlend, Cursor, Event, Form, Group, ImageRef, MaskGroup, Rgb,
+    };
+
+    const SIZE: u32 = 32;
+
+    /// Two images, `A` and `B`, four samples each of a colour of their own.
+    struct Images;
+
+    impl GlyphSource for Images {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+        fn image(
+            &self,
+            name: &[u8],
+            _request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
+            let (r, g, b) = match name {
+                b"A" => (200, 40, 40),
+                b"B" => (40, 200, 40),
+                _ => return Ok(None),
+            };
+            Ok(Some(DecodedImage {
+                stencil: false,
+                family: ColorFamily::Rgb,
+                soft_masked: false,
+                interpolate: false,
+                width: 2,
+                height: 2,
+                rgb: [r, g, b].repeat(4),
+                alpha: Vec::new(),
+                two_colour: None,
+                reduced: None,
+            }))
+        }
+    }
+
+    static IMAGES: Images = Images;
+
+    fn renderer() -> Renderer<'static, Images> {
+        let canvas = Canvas::new(SIZE, SIZE, PixelFormat::Rgb8, Color::WHITE);
+        Renderer::new(canvas, page_transform(f64::from(SIZE), 1.0), &IMAGES)
+    }
+
+    /// A state filling in `(r, g, b)` at `alpha` under `ctm`.
+    fn state(ctm: Matrix, (r, g, b): (u8, u8, u8), alpha: f64) -> Option<Box<GraphicsState>> {
+        let mut state = GraphicsState::new(ctm);
+        state.fill_color = Rgb { r, g, b };
+        state.fill_alpha = alpha;
+        Some(Box::new(state))
+    }
+
+    /// A rectangle in user space, whose edges are not on whole pixels.
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Vec<PathSegment> {
+        vec![
+            PathSegment::MoveTo { x, y },
+            PathSegment::LineTo { x: x + w, y },
+            PathSegment::LineTo { x: x + w, y: y + h },
+            PathSegment::LineTo { x, y: y + h },
+            PathSegment::Close,
+        ]
+    }
+
+    fn fill(x: f64, y: f64, w: f64, h: f64, colour: (u8, u8, u8), alpha: f64) -> Event {
+        Event::FillPath {
+            path: rect(x, y, w, h),
+            even_odd: false,
+            state: state(Matrix::IDENTITY, colour, alpha),
+        }
+    }
+
+    fn image(name: &[u8], ctm: Matrix) -> Event {
+        Event::DrawImage {
+            image: ImageRef {
+                name: name.to_vec(),
+                inline: false,
+                inline_dict: Vec::new(),
+                inline_data: Vec::new(),
+            },
+            state: state(ctm, (0, 0, 0), 1.0),
+        }
+    }
+
+    fn group(isolated: bool, knockout: bool, alpha: f64) -> Event {
+        Event::BeginGroup {
+            group: Group {
+                isolated,
+                knockout,
+                space: None,
+            },
+            entered: true,
+            state: state(Matrix::IDENTITY, (0, 0, 0), alpha),
+        }
+    }
+
+    /// An abutting run of two images on the page and one inside a group, a
+    /// knockout group under a blend of its own with a group nested in it, a
+    /// luminosity soft mask whose group draws a fill and a group of its own,
+    /// fills and an image under the mask, and the mask cleared.
+    fn calls() -> Vec<Event> {
+        let at = |x: f64, y: f64| Matrix {
+            a: 10.3,
+            b: 0.0,
+            c: 0.0,
+            d: 6.0,
+            e: x,
+            f: y,
+        };
+        let mut knockout = group(false, true, 0.7);
+        if let Event::BeginGroup {
+            state: Some(state), ..
+        } = &mut knockout
+        {
+            state.blend = ContentBlend::Multiply;
+        }
+        let mask = MaskGroup {
+            form: Form {
+                content: Vec::new(),
+                matrix: Matrix::IDENTITY,
+                bbox: Some([0.0, 0.0, 32.0, 32.0]),
+                group: None,
+                stream: 0,
+            },
+            luminosity: true,
+            backdrop: None,
+            transfer: None,
+        };
+        vec![
+            fill(0.5, 0.5, 31.0, 31.0, (180, 180, 220), 1.0),
+            image(b"A", at(2.25, 2.0)),
+            image(b"B", at(2.25, 8.0)),
+            knockout,
+            fill(6.5, 4.5, 14.0, 9.0, (230, 30, 30), 0.8),
+            image(b"A", at(14.75, 10.0)),
+            group(true, false, 0.5),
+            fill(10.5, 6.5, 12.0, 12.0, (20, 20, 230), 1.0),
+            Event::EndGroup,
+            Event::EndGroup,
+            Event::BeginSoftMask {
+                mask: Box::new(mask),
+                bbox: rect(0.0, 0.0, 32.0, 32.0),
+                entered: true,
+                state: state(Matrix::IDENTITY, (0, 0, 0), 1.0),
+            },
+            fill(3.0, 3.0, 20.5, 26.0, (255, 255, 255), 1.0),
+            group(true, false, 1.0),
+            fill(16.0, 1.0, 10.0, 10.0, (128, 128, 128), 1.0),
+            Event::EndGroup,
+            Event::EndSoftMask,
+            fill(1.5, 18.5, 28.0, 9.0, (20, 120, 20), 1.0),
+            image(b"B", at(18.0, 20.0)),
+            Event::ClearSoftMask,
+            fill(24.5, 1.5, 6.0, 28.0, (90, 20, 90), 0.6),
+        ]
+    }
+
+    /// **The exit criterion: a snapshot changes nothing the render goes on
+    /// to draw.** The calls stepped one at a time and snapshotted after every
+    /// one — inside the image run, inside a knockout group and the group in
+    /// it, inside the soft mask's group and the group in that — finish
+    /// byte-identical, warnings included, to the same calls never
+    /// snapshotted; and each snapshot taken with no bracket open is what a
+    /// renderer fed the calls up to it finishes with.
+    #[test]
+    fn a_snapshot_changes_nothing_the_render_goes_on_to_draw() {
+        let events = calls();
+        let mut snapshotted = renderer();
+        let mut cursor = Cursor::new();
+        let mut taken = Vec::new();
+        let mut inside = 0;
+        while !cursor.is_finished(&events) {
+            let step = cursor.step(&events, &mut snapshotted, 1);
+            assert_eq!(step.delivered, 1);
+            let open = !(snapshotted.groups.is_empty() && snapshotted.mask_frames.is_empty());
+            inside += usize::from(open);
+            taken.push((cursor.position(), open, snapshotted.snapshot()));
+        }
+        assert!(inside >= 10, "most snapshots are taken inside a bracket");
+        assert!(taken.iter().any(|(_, open, _)| !open));
+
+        let mut plain = renderer();
+        assert_eq!(
+            tinker_pdf_content::replay(&events, &mut plain).delivered,
+            events.len()
+        );
+        let (drawn, warnings) = snapshotted.finish();
+        let (expected, expected_warnings) = plain.finish();
+        assert_eq!(
+            drawn.data, expected.data,
+            "the snapshots changed the render"
+        );
+        assert_eq!(warnings, expected_warnings);
+
+        for (position, open, snapshot) in &taken {
+            if *open {
+                continue;
+            }
+            let mut fed = renderer();
+            tinker_pdf_content::replay(&events[..*position], &mut fed);
+            let (finished, _) = fed.finish();
+            assert_eq!(
+                snapshot.data, finished.data,
+                "the snapshot after {position} calls is not what they finish with"
+            );
+        }
+        // The page's last snapshot is the page.
+        let (_, _, last) = taken.last().expect("a snapshot");
+        assert_eq!(last.data, expected.data);
+    }
+
+    /// Inside a bracket a snapshot shows the page as the design says: a run
+    /// held back is in it, an open group composited as if it closed now, and
+    /// an open soft mask's group not at all — the page under it as it stood.
+    #[test]
+    fn a_snapshot_shows_a_run_and_an_open_group_and_not_a_mask_being_drawn() {
+        let events = calls();
+        let mut renderer = renderer();
+        let mut cursor = Cursor::new();
+        // The background and the two abutting images, the run still held.
+        cursor.step(&events, &mut renderer, 3);
+        assert!(renderer.run.is_some(), "the images are held as a run");
+        let held = renderer.snapshot();
+        assert_ne!(
+            held.data, renderer.canvas.data,
+            "the run is in the snapshot"
+        );
+        // Into the knockout group and its first fill: the snapshot is the
+        // page with the group closed onto a copy of it.
+        cursor.step(&events, &mut renderer, 2);
+        assert_eq!((renderer.groups.len(), renderer.mask_frames.len()), (1, 0));
+        let in_group = renderer.snapshot();
+        assert_ne!(in_group.data, held.data, "the open group shows");
+        // Into the soft mask's group: the page shows as it stood at the `gs`.
+        cursor.step(&events, &mut renderer, 5);
+        assert_eq!((renderer.groups.len(), renderer.mask_frames.len()), (0, 0));
+        let before_mask = renderer.snapshot();
+        cursor.step(&events, &mut renderer, 3);
+        assert_eq!((renderer.groups.len(), renderer.mask_frames.len()), (1, 1));
+        assert_eq!(
+            renderer.groups[0].masks_open, 1,
+            "the group opened inside the mask's"
+        );
+        assert_eq!(
+            renderer.snapshot().data,
+            before_mask.data,
+            "a soft mask being drawn is no page content"
+        );
+    }
+
+    /// A render stopped with brackets open — a replay cancelled inside them —
+    /// ends with each closed innermost first, the open group composited and
+    /// what the soft mask's group drew kept off the page: the canvas the
+    /// page's, as a snapshot there shows it.
+    #[test]
+    fn a_render_ended_inside_brackets_closes_them_as_a_snapshot_shows() {
+        let events = calls();
+        for stop in 1..events.len() {
+            let mut renderer = renderer();
+            tinker_pdf_content::replay(&events[..stop], &mut renderer);
+            let snapshot = renderer.snapshot();
+            let (finished, _) = renderer.finish();
+            assert_eq!(
+                (finished.width, finished.height, finished.format),
+                (SIZE, SIZE, PixelFormat::Rgb8),
+                "stopped after {stop}: the page, not a buffer"
+            );
+            assert_eq!(finished.data, snapshot.data, "stopped after {stop}");
+        }
     }
 }
 
