@@ -167,6 +167,14 @@ fixtures' own faces, so one table serves both builds. Each page is held to
 write at least one drawing element, and to report neither an unreadable font
 nor a truncation, before it is hashed.
 
+**The page analysis's box** is pinned beside them:
+`the_mark_boxes_are_the_same_on_every_target` analyses every page of the
+table with the default options and holds the box of its marks, each number
+at its shortest and the box in pixels, to a committed value. The box is
+arithmetic a render does not show — a curve's extremes through a square root,
+a stroke's outline, the page's transform rounded outward — so a target that
+computes it differently fails here as one that draws differently fails above.
+
 Beside them, **document byte-hashes** pin the writer as well as the renderer:
 a synthesised PDF, a synthesised fixed-layout document and a synthesised book
 are each hashed as *bytes*, which is where object numbering, dictionary key

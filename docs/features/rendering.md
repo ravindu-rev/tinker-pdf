@@ -1159,6 +1159,38 @@ cropped, at 1x, 1.5x and 2x (`render_parts.rs`). Where a page skips an
 annotation silently, a caller who asked for that one is told why:
 `RenderPartError::AnnotationNotDrawn` with a `NotDrawn` reason.
 
+**Page analysis** ([design](../design/page-analysis.md)). `Page::analysis`
+and `DisplayList::analysis` take a `RenderOptions` and return a
+`PageAnalysis`, read from what the page draws rather than from its pixels: a
+page's analysis is its display list's, the list's events replayed into one
+analysis device (`analysis.rs`) that paints nothing and answers the
+interpreter's questions through the renderer's own `Admission`, and a list
+that is not retained interprets the page into the same device, its
+annotations drawn through it. Of the options, `annotations` decides whether
+the appearances are part of the page and `scale`, with the clamp
+`Page::pixel_size` applies, the box in pixels; nothing else is read.
+**`marks`** is the bounding box of every mark a render paints — a fill's path
+by its exact bounds, a stroke's outline as the renderer's stroker writes it
+under the pen, a glyph's outline from the face, an image's unit square, an
+`sh` its clip and a mesh its points — each met with the clip's box, the soft
+mask's box and the crop box; `None` for a page that paints nothing on itself.
+Hidden content, a mode 3 or mode 7 glyph, a glyph no face draws, a mask
+group's content, and a fill, an image or a shading of no area are no marks; a
+white fill or one at `ca 0` is, since geometry decides and never colour, and
+a stroke of no width is, at its path. `Marks` holds the box in points of
+default user space and as the `PixelRegion` of the bitmap `Page::render`
+returns for the options, rounded outward and at least a pixel a side.
+**`transparency`** is `pdfa/colour.rs`'s reading of ISO 19005-1 6.4 taken
+over what the page paints — its own `/Group` `/S /Transparency`, a form's
+group, a soft mask in force at a paint, an `/SMask` on an image or form it
+draws, a blend mode other than Normal or a constant alpha below one, less
+`pdfa/colour.rs`'s tolerance, at a paint of that kind — with nothing hidden,
+masked or never painted under counted. The two readings part at a `/BM` this
+engine does not recognise, which draws as Normal (11.3.5) and which PDF/A-1
+refuses as written. `page_analysis.rs` holds each answer to a fixture whose
+answer is known, `analysis.rs` holds the box to its own walk of the recorded
+events, and `determinism.rs` pins every fingerprinted page's box.
+
 ## API
 
 The facade is the whole public surface (ruling 11): `Page::render` takes a

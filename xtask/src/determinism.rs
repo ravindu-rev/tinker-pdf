@@ -52,6 +52,11 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "warm_and_starved_caches_render_the_fingerprints",
     },
+    // Every fingerprinted page's mark box, from the page analysis.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "the_mark_boxes_are_the_same_on_every_target",
+    },
     // Every fingerprinted page drawn in four bands, held to its fingerprint.
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",

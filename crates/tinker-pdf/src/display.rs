@@ -496,6 +496,20 @@ impl DisplayList {
         runs
     }
 
+    /// What the page draws, read from the list's events without drawing them
+    /// (`docs/design/page-analysis.md`): the bounding box of its marks and
+    /// whether it uses transparency, as [`Page::analysis`] answers — which is
+    /// this list's answer.
+    ///
+    /// The events are replayed into one analysis device that answers the
+    /// interpreter's questions as the renderer does, so it walks the brackets
+    /// a render walks. A list that is not retained ([`DisplayList::is_retained`])
+    /// interprets the page into the same device instead, and answers alike.
+    #[must_use]
+    pub fn analysis(&self, options: &RenderOptions) -> crate::PageAnalysis {
+        crate::analysis::analyse(self, options)
+    }
+
     /// The page the list was recorded from.
     pub(crate) fn page(&self) -> &Page {
         &self.page

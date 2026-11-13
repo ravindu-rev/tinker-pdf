@@ -2299,6 +2299,15 @@ impl PageResources {
         )
     }
 
+    /// Whether the XObject `name` selects in this scope carries an `/SMask`
+    /// key at all — `pdfa/colour.rs`'s reading of a mask on an XObject, the
+    /// key and not its value, since an XObject's has no `/None` spelling.
+    /// For page analysis (`crate::analysis`), which reads it at the `Do`.
+    pub(crate) fn xobject_has_soft_mask(&self, name: &[u8]) -> bool {
+        self.xobject(name)
+            .is_some_and(|(dict, _)| dict.contains_key(self.name(b"SMask")))
+    }
+
     pub(crate) fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
         let resources = self.resources.as_deref()?;
         let value = self.doc.resolve_key(resources, Name::XOBJECT);

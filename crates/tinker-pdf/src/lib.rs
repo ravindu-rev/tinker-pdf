@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod analysis;
 mod annotations;
 mod annots;
 mod associated_files;
@@ -220,6 +221,9 @@ pub use word_boxes::WordBoxOptions;
 /// also the window a PDF header is looked for in, which is what lets a streamed
 /// PDF skip [`standalone::sniff`]'s larger one.
 const CONTAINER_SNIFF: u64 = 1024;
+/// What a page draws, read from its drawing rather than its pixels:
+/// [`Page::analysis`] and [`DisplayList::analysis`].
+pub use analysis::{Marks, PageAnalysis};
 /// The per-family annotation payloads (12.5.6) behind [`Annotation::payload`],
 /// the types they are built from, and [`Page::annotation_list`]'s answer —
 /// every one of them a field type or a return type of the read surface, so a

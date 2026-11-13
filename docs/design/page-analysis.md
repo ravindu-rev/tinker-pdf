@@ -163,7 +163,8 @@ the drawing rather than off the file:
 
 Only what is painted counts: a paint in hidden content, a paint inside a mask
 group — whose mask is read at the paints it masks — and a `gs` nothing is
-painted under say nothing. A group's own `ca` and `/BM` are read at the group,
+painted under say nothing. A paint the clip leaves nothing of is still a
+paint, and is read as made, since a render makes it. A group's own `ca` and `/BM` are read at the group,
 since they apply to its result, and the alphas the interpreter resets inside
 an accepted group (11.6.6) are the paints'.
 

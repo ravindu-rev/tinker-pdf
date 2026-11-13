@@ -77,14 +77,16 @@ const RENDERING_INTENTS: &[&[u8]] = &[
     b"Saturation",
 ];
 
-/// How far from 1 a constant alpha may be and still mean opaque.
+/// How far from 1 a constant alpha may be and still mean opaque — here, in
+/// PDF/X's reading through [`transparency`], and in page analysis's
+/// (`crate::analysis`), which reads a paint's alpha against it.
 ///
 /// Not a nicety and not invented here: `6-4-t03-pass-b.pdf` writes `/CA
 /// 1.0000001` and `/ca 0.9999999` and is annotated `pass`, with a title that
 /// says in those words what it is testing. A producer that wrote a real number
 /// meaning "fully opaque" and landed one part in ten million away has not made
 /// the file transparent, and a rule with an exact comparison reports it.
-pub(super) const ALPHA_TOLERANCE: f64 = 1e-5;
+pub(crate) const ALPHA_TOLERANCE: f64 = 1e-5;
 
 /// The blend modes ISO 19005-1 6.4 leaves a part 1 file.
 ///
@@ -1758,7 +1760,11 @@ fn gather_blending_spaces(doc: &CosDocument, work: Option<&Arc<Work>>, used: &mu
 }
 
 /// Whether a page or form dictionary carries a transparency group (11.6.6).
-fn is_transparency_group(doc: &CosDocument, dict: &Dict) -> bool {
+///
+/// `pub(crate)` for page analysis (`crate::analysis`), whose "uses
+/// transparency" reads a page's own group by this predicate rather than by a
+/// second spelling of it.
+pub(crate) fn is_transparency_group(doc: &CosDocument, dict: &Dict) -> bool {
     let group = doc.resolve_key(dict, doc.intern(b"Group"));
     group
         .as_dict()

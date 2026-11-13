@@ -3465,6 +3465,93 @@ fn the_synthesised_fixed_document_is_the_same_bytes_on_every_target() {
     );
 }
 
+/// Every fingerprinted page's mark box (`docs/design/page-analysis.md`), as
+/// [`the_mark_boxes_are_the_same_on_every_target`] prints it: the box in
+/// points, each number at its shortest, and in pixels at 72 dpi as
+/// `(x, y, width, height)`, or `none` for a page that paints nothing.
+///
+/// Every value is a run's output and is recorded from one, the four targets
+/// agreeing, as a render fingerprint is.
+const MARK_BOXES: &[(&str, &str)] = &[
+    ("text", ""),
+    ("gs_text", ""),
+    ("curves", ""),
+    ("shading", ""),
+    ("blend", ""),
+    ("pattern", ""),
+    ("optional", ""),
+    ("image", ""),
+    ("transparency", ""),
+    ("tiling", ""),
+    ("jbig2", ""),
+    ("mesh", ""),
+    ("jpx", ""),
+    ("cbz", ""),
+    ("xps", ""),
+    ("epub", ""),
+    ("analytic_axial", ""),
+    ("analytic_radial", ""),
+    ("analytic_blend", ""),
+    ("analytic_image", ""),
+    ("default_spaces", ""),
+    ("strokes", ""),
+    ("bilevel", ""),
+    ("icc", ""),
+    ("jpeg_minified", ""),
+];
+
+/// **The page analysis's box is the same number on every target.** The box is
+/// arithmetic over every path, glyph outline, image square and clip a page
+/// draws — Bézier extremes found through a square root, a stroke's outline
+/// from the stroker, the page's view transform rounded outward — so a target
+/// whose arithmetic differs moves a box as it would move a pixel. Each
+/// fingerprinted page is analysed with the default options and its box held
+/// to [`MARK_BOXES`]; a mismatch prints the lines to paste, under the render
+/// fingerprints' rule: two targets that disagree are a determinism bug, never
+/// a table edit.
+#[test]
+fn the_mark_boxes_are_the_same_on_every_target() {
+    assert_eq!(
+        MARK_BOXES.len(),
+        GOLDEN.len(),
+        "every page has a box, or the test passes by not looking"
+    );
+    let mut wrong = Vec::new();
+    for fixture in GOLDEN {
+        let (document, at) = opened(fixture);
+        let page = document.page(at).expect("a page");
+        let actual = match page.analysis(&RenderOptions::default()).marks {
+            Some(marks) => format!(
+                "{:?} {:?}",
+                marks.points,
+                (
+                    marks.pixels.x,
+                    marks.pixels.y,
+                    marks.pixels.width,
+                    marks.pixels.height
+                )
+            ),
+            None => "none".to_string(),
+        };
+        let want = MARK_BOXES
+            .iter()
+            .find(|(n, _)| *n == fixture.name)
+            .map(|(_, b)| *b)
+            .unwrap_or_default();
+        if actual != want {
+            let name = fixture.name;
+            wrong.push(format!("    (\"{name}\", \"{actual}\"),"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the mark boxes do not match the committed table.\n\n\
+         If two targets disagree, this is a determinism bug: do not update the \
+         table. If the analysis changed on purpose, paste these in:\n\n{}\n",
+        wrong.join("\n")
+    );
+}
+
 /// The same document rendered twice in one process must agree, which is the
 /// weaker property but catches anything reading uninitialised memory or
 /// iterating a hash map.
