@@ -11,8 +11,8 @@ stems keep their weight. This document lays down the seam all four plug into —
 a per-size outline asked of the glyph source, placed on a whole pixel of the
 page frame, then darkened, then filled — and FT-04b's interpreter for
 TrueType bytecode. Stem darkening's section (FT-04a) follows, then CFF and
-Type 1 hint application's (FT-04c); FT-04d's section is added by its design
-step. Every treatment is off by
+Type 1 hint application's (FT-04c) and the autohinter's (FT-04d). Every
+treatment is off by
 default, and whether a page looks better with one is H-65's judgement: no
 other renderer's output is an expected answer here (ruling 13).
 
@@ -1162,3 +1162,229 @@ outline it moves (ruling 1).
 | An italic glyph's vertical stems are fitted as upright ranges | They are the ranges the font declares; italic fonts declare few, and `StemSnapV` "should be empty" for them (T1 5.9), so S6 snaps nothing |
 | Flex decided at the size makes a glyph's outline differ between sizes | That is flex's purpose (T1 8.3); `Cff::outline` and `Type1::outline`, the unhinted reads, keep drawing the curves |
 | A tile and the page fit a glyph differently | The fit is in glyph space at the 2×2's size, and FT-04b's placement puts the origin on the page frame's grid; `hinted_cff_and_type1_text_tiles_byte_equal` (ruling 5) |
+
+## An autohinter
+
+*For ROADMAP row FT-04d.* A face that carries no hints — a TrueType face
+built with no programs, a CFF or Type 1 font whose stems were stripped — draws
+its small text from the outline alone. The autohinter measures such a face
+once — where its baseline, x-height and capitals stand, how wide its stems
+are — from the face's own outlines, finds each glyph's stems and edges, and
+fits them to the pixel grid as FT-04c's fitter fits declared ones. No
+specification states an autohinter, so every rule and threshold below is this
+engine's choice; the row's two measurable properties — stems on the pixel
+grid, the x-height on a pixel boundary — are asserted in tests, and whether
+the page looks better is H-65's judgement.
+
+### Scope
+
+- **Which glyphs are unhinted** in each format, and so the autohinter's.
+- **Face analysis** (FT-04d.2): the writing systems, their reference
+  characters, and the zones and standard stem widths measured from them.
+- **Glyph analysis** (FT-04d.3): segments, the stems they pair into, and the
+  zones their edges fall in.
+- **Fitting** across the baseline (FT-04d.4) and along it (FT-04d.5): the
+  x-height on a whole pixel, the zones, the stems, the points between, and the
+  advance.
+- **Answering the request** (FT-04d.6) under `Hinting::FontOrAuto`, and the
+  proof: fuzzing, the fingerprint and the speed row (FT-04d.6 to FT-04d.8a).
+
+### Non-goals
+
+- **Hints a face carries**: TrueType programs (FT-04b) and CFF and Type 1
+  stems (FT-04c). A face that carries hints is never autohinted, whether or not
+  its hints ran at a size.
+- **Stem darkening** (FT-04a), which thickens what the autohinter gives it.
+- **Scripts beyond the three writing systems below.** A glyph of no listed
+  writing system has its stems fitted and meets no zone.
+- **Hinting by another engine's rules.** The rules are designed from the faces'
+  own outlines and the measurable properties the row names, and are held to
+  this document, never to another program's output (ruling 13).
+- **The picture.** H-65's.
+
+### Design
+
+#### Which glyphs are unhinted
+
+| Format | Unhinted, and so autohinted under `FontOrAuto` | Not autohinted |
+| --- | --- | --- |
+| TrueType (`glyf`) | A glyph with no instructions — a simple glyph whose `instructionLength` is 0, a composite without `WE_HAVE_INSTRUCTIONS` whose components have none — in a face with neither `fpgm` nor `prep` | Every glyph of a face carrying `fpgm` or `prep`, with or without a program of its own: the face hints (FT-04b), and a size or a program that fails draws unhinted (FT-04b's *Failure*) |
+| CFF, CFF2, Type 1 | A glyph that declares no stem and no edge hint | A glyph that declares any: FT-04c fits it, or draws it unhinted where its fit fails or its format is one FT-04c does not fit (CFF2) |
+| Type 3, bitmap glyphs | — | Never: a procedure or a bitmap has no outline to fit |
+
+The test is the glyph's and its face's, never the size's: `gasp` decides
+nothing here (*What FT-04c and FT-04d share*).
+
+#### Face analysis
+
+**Writing systems.** A glyph belongs to the writing system of the character
+the face maps to it: through the face's `cmap` for a TrueType face, and
+through its glyph names read as characters (`glyph_name_to_char`) for a CFF or
+Type 1 face; where several characters reach one glyph, the lowest. Three are
+measured, by Unicode block:
+
+| System | Characters | Zones from (flat; round) | Vertical stem from | Horizontal stem from |
+| --- | --- | --- | --- | --- |
+| Latin | U+0000–U+024F, U+1E00–U+1EFF | baseline: bottoms of `x` `z` `H` `E`; `o` `O`. x-height: tops of `x` `z`; `o`. Cap height: tops of `H` `E` `Z`; `O`. Ascender: tops of `b` `d` `h` `k` `l`. Descender: bottoms of `p` `q` | `l`, else `I` | `z`, else `Z` |
+| Greek | U+0370–U+03FF, U+1F00–U+1FFF | baseline: bottoms of `κ` `Η` `Ε`; `ο` `Ο`. x-height: tops of `κ` `π`; `ο`. Cap height: tops of `Η` `Ε` `Ζ`; `Ο`. Descender: bottoms of `ρ` `φ` | `ι`, else `Ι` | `π`, else `Ε` |
+| Cyrillic | U+0400–U+052F | baseline: bottoms of `х` `н` `Н` `Е`; `о` `О`. x-height: tops of `х` `н`; `о`. Cap height: tops of `Н` `Е`; `О`. Descender: bottom of `р` | `н`, else `Н` | `т`, else `Т` |
+
+A glyph no listed system's character reaches — another script, or a face
+whose glyphs no `cmap` or name reaches — has no writing system.
+
+**Zones.** A zone's flat position is the median of its flat characters'
+extremes (the lower of the two middle values where they are even in number),
+each the top (`yMax`) or bottom (`yMin`) of the character's outline in font
+units; its overshoot is the median of its round characters' extremes where
+any is in the face and lies outside the flat position (above it for a top
+zone, below for a bottom one), and the zone is flat otherwise. A zone none of
+whose flat characters the face has, or has with an empty outline, is not
+measured, and a writing system with no x-height zone has none of its zones
+fitted.
+
+**Standard stems.** A writing system's standard vertical stem is the
+narrowest vertical stem glyph analysis finds in its vertical stem character,
+and its standard horizontal stem the narrowest horizontal stem in its
+horizontal stem character; one the face lacks is not measured.
+
+The analysis reads a few dozen outlines, once a face, and is kept beside the
+face's outline cache for the resource scope (FT-04d.6).
+
+#### Glyph analysis
+
+All in font units, on the glyph's outline as the format states it — a
+composite glyph's assembled from its components.
+
+- **The polygon.** Each contour is read as the polygon through its points in
+  order, on and off the curve: a well-made outline puts points at its
+  extremes with their handles level, so a round's top is a level edge of the
+  polygon.
+- **Directions.** An edge of the polygon is horizontal where `14·|dy| ≤ |dx|`
+  and vertical where `14·|dx| ≤ |dy|` — within about four degrees, decided by
+  multiplication and no angle (ruling 4) — and neither otherwise.
+- **Segments.** A maximal run of consecutive horizontal edges travelling one
+  way (`+x` or `−x`), or of vertical edges travelling one way, is a segment
+  where its extent along its direction is at least `upem / 50`. Its position
+  is the length-weighted mean of its edges' midpoints across its direction.
+  A segment holding an edge to or from an off-curve point is **round**. At
+  most 256 segments a glyph; the rest are passed over (ruling 1).
+- **Which side the ink is on.** The glyph's total signed area gives its
+  winding: positive, ink lies left of travel. A horizontal segment with ink
+  above it is a bottom edge and one with ink below it a top edge; a vertical
+  segment with ink to its right is a left edge, to its left a right edge.
+- **Stems.** A bottom edge and the top edge above it — or a left edge and the
+  right edge right of it — pair into a stem where their extents overlap by at
+  least half the shorter's, the distance between them is above zero and at
+  most `upem / 4`, and each is the other's nearest such partner. An edge in
+  no pair stays a single edge.
+- **Zones.** A horizontal edge is linked to a zone of its glyph's writing
+  system — a top edge to a top zone, a bottom edge to a bottom zone — where
+  it lies within the zone or within `upem / 100` of it.
+
+#### Fitting across the baseline
+
+At a size of `s` pixels per font unit (`GlyphSize::ppem / 64 / upem`):
+
+1. **The x-height on a whole pixel.** Where the glyph has a writing system
+   with an x-height zone of flat position `xh`, the vertical scale is
+   `s_y = round(xh · s) / xh`, so the x-height lands on a pixel boundary; it
+   moves by at most half a pixel. Where `xh · s` rounds to 0, and for a
+   glyph with no x-height, `s_y = s`.
+2. **The zones.** Each zone's flat edge is placed at `round(flat · s_y)` —
+   the baseline, at 0, stays at 0 — and its overshoot kept, as
+   `max(1, round(d · s_y))` pixels beyond it for `d` the overshoot in font
+   units, where `d · s_y` is at least half a pixel, and suppressed otherwise.
+3. **Edges in zones** go to their zone's flat edge, or, for a round edge of a
+   zone whose overshoot is kept, to its overshoot.
+4. **Horizontal stems** are FT-04c's: a width snapped to the writing system's
+   standard horizontal stem where within half a pixel of it (S6), rounded and
+   at least one pixel (S7), placed by its zone-linked edge where it has one
+   (S10) and otherwise by its centre (S9), the edges kept in order (S12).
+5. **Points** move by FT-04c's interpolation between the fitted edges (I1,
+   I2); a single edge in no zone is no fitted edge.
+
+#### Fitting along the baseline
+
+No zone runs across. **Vertical stems** take a width snapped to the
+standard vertical stem within half a pixel, rounded and at least one pixel,
+placed by their centre, in order (S6, S7, S9, S12), at `s`. **The advance is
+not the autohinter's:** a PDF places each glyph by `/Widths`, so no advance is
+read or moved, and the origin stays at 0; points left of the first vertical
+edge and right of the last move as those edges move (I1), so a side bearing
+changes by under a pixel. A glyph with no vertical stem keeps its horizontal
+positions, scaled and unmoved.
+
+#### Answering the request
+
+Under `Hinting::FontOrAuto` — never under `Font` — the facade's
+`extract_outline` answers `GlyphSource::sized_outline` for a glyph the table
+above calls unhinted with the autohinter's outline at the request's `ppem`,
+when FT-04b's conditions hold. The face is analysed once a resource scope and
+the analysis kept beside `Caches::outlines`; a glyph is fitted once a size, as
+FT-04b's answers are kept. `SizedOutline::dropout` is `None`, the placement on
+a whole pixel of the page frame and the cache keys are FT-04b's, and a fit
+that cannot be made — no segment, `s` not a finite number above zero — draws
+the glyph unhinted.
+
+### Milestones
+
+1. **FT-04d.2, face analysis.** Exit, `autohint/tests.rs`, over faces built in
+   the test with stated metrics: `the_x_height_is_measured_from_the_faces_own_x`,
+   `each_zone_comes_from_its_reference_glyphs_with_its_overshoot`,
+   `the_standard_stems_are_the_reference_glyphs_stems`,
+   `a_face_missing_a_reference_character_gets_no_zone_from_it`, and one test a
+   writing system: `latin_zones_and_stems_are_measured`,
+   `greek_zones_and_stems_are_measured`,
+   `cyrillic_zones_and_stems_are_measured`.
+2. **FT-04d.3, glyph analysis.** Exit: `segments_are_found_where_the_test_drew_them`
+   (quadratic and cubic contours, both windings),
+   `overlapping_opposite_segments_pair_into_stems`,
+   `an_edge_inside_a_zone_is_linked_to_it`,
+   `a_diagonal_or_a_round_makes_no_stem`, `a_hostile_contour_is_bounded` (the
+   256-segment cap).
+3. **FT-04d.4, across the baseline.** Exit:
+   `the_x_height_lands_on_a_pixel_boundary_at_every_size` (8 to 16 pixels an
+   em and beyond, faces of 1 000 and 2 048 units an em) — **the row's second
+   property** — `horizontal_stems_land_on_the_grid_with_rounded_widths`,
+   `the_baseline_stays_on_the_grid`,
+   `untouched_points_are_interpolated_between_fitted_edges`; each position
+   computed in the test from the face's measured values. It reuses FT-04c.2's
+   interpolation, and so follows it.
+4. **FT-04d.5, along the baseline.** Exit:
+   `vertical_stems_land_on_the_grid_with_rounded_widths` (8 to 16 pixels an em
+   and beyond) — **the row's first property**, with FT-04d.4's horizontal
+   stems — `the_advance_is_treated_as_the_design_states` (no point right of
+   the last vertical edge moves by more than that edge, the origin unmoved),
+   `a_glyph_with_no_vertical_stem_keeps_its_horizontal_positions`.
+5. **FT-04d.6, the facade.** Exit, `autohinting.rs`, over a face built in the
+   test with no glyph programs: `an_unhinted_faces_stems_cover_whole_pixels`,
+   `its_x_height_ends_on_a_pixel_row` (8 to 16 pixels from an integral
+   origin), `a_hinted_face_is_not_autohinted`,
+   `the_face_is_analysed_once_per_page` (a `cfg(test)` count over 500
+   glyphs), `the_option_off_draws_what_it_drew_before`; `render_regions.rs`'s
+   `autohinted_text_tiles_byte_equal`; the `truetype`, `cff` and `type1` fuzz
+   targets autohint at three sizes.
+6. **FT-04d.7, every target.** Exit: `determinism.rs`'s
+   `autohinted_text_is_stable_across_targets`, an unhinted face's text at 8 to
+   16 pixels with an ink floor, on Linux, Windows and `wasm32-wasip1`.
+7. **FT-04d.8a, the speed row** (FT-04d.8b its figure, in the timing phase).
+   Exit: `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree`
+   with the operation that autohints every outline of each committed TrueType
+   face at 12 pixels an em, the face analysis inside the timed work, beside
+   its unhinted twin.
+
+H-65 judges the picture the examples draw; nothing above asserts one.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| Features between zones — the bar of `e`, the crossbar of `f` — round to the grid on their own and can crowd the x-height | They are fitted as stems, a whole number of pixels wide, and held in order with the zone edges (S12); the picture is H-65's |
+| A script with no x-height — Hebrew, Arabic, the CJK ideographs — gets no zone | Named: a glyph of no listed writing system has its stems fitted and its vertical scale unchanged, and a later writing system is a row of its own |
+| An accent placed by a composite lands between pixels or collides with its base | The assembled outline is fitted as one glyph, so the accent's own edges are found and fitted with the base's; one whose edges the analysis does not find moves by interpolation, never off the outline |
+| An edge fitted in glyph space lands on no pixel of the page | FT-04b's placement puts the glyph's origin on a whole pixel of the page frame (ruling 5), so a whole pixel about the origin is a whole pixel of the page; `autohinted_text_tiles_byte_equal` |
+| Rescaling the vertical axis to the x-height changes a glyph's proportions | By at most half a pixel at the x-height; the horizontal scale and every advance are unchanged |
+| A decorative or unusual face's reference glyphs give odd zones | The median of several characters rather than one; a zone whose characters the face lacks is not measured |
+| A face's subset or symbolic `cmap` reaches no reference character | No zone is measured and stems are fitted alone; nothing is guessed |
+| A round extreme or a serif is taken for a stem | The pairing asks for overlap, mutual nearness and at most a quarter of an em; a misread stem is still placed on the grid at its rounded width, never moved off the outline |
+| Analysis cost on a page of many faces | Once a face a resource scope, a few dozen outlines; FT-04d.8a measures it |
