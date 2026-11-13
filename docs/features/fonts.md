@@ -103,6 +103,24 @@ is then drawn as its outline — and a header that does not fit, or a version
 other than 0 or 1, is no table. Nothing here draws a colour glyph; a PDF's
 embedded program is drawn from its outlines (ISO 32000-2 9.9.1).
 
+Version 1's paint graph: `Colr::paint_graph` reads a glyph's
+`BaseGlyphPaintRecord` into a `PaintGraph`, an arena with one `Paint` node a
+paint table, however many parents reach it. All thirty-two formats read, each
+field as written — `F2DOT14`s and `Fixed`s as their integers, with `f2dot14`
+and `fixed` to divide them exactly, and a variable format's `varIndexBase` as
+`Some` — and each `ColorLine` or `VarColorLine` with its extend and stops;
+`Colr::clip_box` reads the `ClipList`'s format 1 and 2 boxes by glyph range.
+What the chapter calls not well formed reads as a `Paint::Refused` node with a
+typed `ColrRefusal`, the rest of the graph read: a table reached again on its
+own path (`Cycle`, through a `PaintColrLayers` slice, a `PaintColrGlyph` or an
+offset of zero), a path past `MAX_PAINT_DEPTH` (64) paints (`TooDeep`), a graph
+past `MAX_PAINT_NODES` (16 384) nodes (`TooLarge`), a format the chapter does
+not define, a table that runs past `COLR` or names no child, and a
+`PaintColrGlyph` naming a glyph with no record. A refused root answers `None`.
+An extend value or a composite mode the enumerations do not define reads as
+`EXTEND_PAD` or `COMPOSITE_CLEAR`, as the chapter says, each warned with its
+value; records out of order are scanned and warned, as version 0's are.
+
 **Type 1** (9.9, `/FontFile`). `Type1::parse` reads PFB, PFA and the bare
 bytes a PDF embeds: eexec decryption, the second decryption layer around each
 charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
@@ -1351,10 +1369,15 @@ corpora already vendored here. So every name stays on the list.
   records out of order scanned and named, the foreground index never a
   palette entry; CPAL version 1's types, labels and entry labels, each
   `PaletteChoice`; every index past its count and every array past the
-  table's end answering `None`; and every prefix and flipped byte of the
-  tables answering without a panic. The `sfnt` fuzz target's
-  `colr-v0.ttf` seed is written by the same builders, and read back through
-  its directory.
+  table's end answering `None`; COLR version 1's thirty-two paint formats
+  each to its node, field for field, every composite mode and an unknown one,
+  an unknown extend, clip boxes by range in order and out of it, a
+  `PaintColrGlyph` cycle and a self-naming slice refused by name, a shared
+  table one node, the depth and size limits met exactly, an overrunning
+  colour line, an unknown format, a missing glyph and a slice past the list;
+  and every prefix and flipped byte of the tables answering without a panic.
+  The `sfnt` fuzz target's `colr-v0.ttf` and `colr-v1.ttf` seeds are written
+  by the same builders, and read back through their directories.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

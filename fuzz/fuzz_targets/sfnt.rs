@@ -116,6 +116,18 @@ fuzz_target!(|data: &[u8]| {
     {
         let _ = colr.warnings();
         for glyph in 0..64u16 {
+            // Version 1's graph, every node and child id it hands back, and
+            // the clip box of the glyph's range.
+            if let Some(graph) = colr.paint_graph(glyph) {
+                for node in graph.nodes() {
+                    for child in node.children() {
+                        let _ = graph.paint(child);
+                    }
+                    let _ = node.format();
+                }
+                let _ = graph.warnings();
+            }
+            let _ = colr.clip_box(glyph);
             let _ = colr.layer_records(glyph);
             if let Some(cpal) = &cpal {
                 for choice in [
