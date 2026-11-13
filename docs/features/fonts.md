@@ -291,6 +291,10 @@ the encoding gives, as an embedded CFF is. A face with no `cmap` and no `ROS`
 — the synthetic face the corpus measures with, the test faces — has no
 characters to be read by and keeps the reading an embedded program gets.
 Subsetting asks about embedded programs only.
+`crates/tinker-pdf-font/tests/cjk_coverage.rs` counts, for H-116 and H-04,
+the CIDs of each collection and supplement that each candidate face the
+design names reaches by the first two routes, in either writing mode, and
+what each candidate costs to store and to make ready.
 
 **Writing** (9.9). `DocumentBuilder::add_embedded_font` and `add_cid_font`
 embed a TrueType, an `OpenType/CFF` face or a bare CFF program, with widths
@@ -1486,6 +1490,13 @@ corpora already vendored here. So every name stays on the list.
   tables in `tinker-pdf-font`'s `predefined.rs`, read from the vendored CMap
   text, inverted once (`the_collection_is_inverted_once`), and reached by
   nothing without `cmap-predefined`.
+- `crates/tinker-pdf-font/tests/cjk_coverage.rs` — the CJK census above,
+  `#[ignore]`d, printing `RAN`/`SKIPPED`. Its instruments run in every
+  `cargo test`: each collection's supplements against the `/CIDCount`s the
+  vendored CMap files state, the routes and their tallies over faces built in
+  the test, a collection file's faces read one by one, the storage forms over
+  the committed WOFF fixtures, the `name` reading, and the candidate list
+  against the design's table.
 - Fuzzing: the `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1` and
   `woff` targets exercise this feature (ruling 1).
 - Determinism: the `text` render fingerprint in

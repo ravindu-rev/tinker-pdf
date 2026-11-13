@@ -150,13 +150,15 @@ faces.
 **The candidates FT-01.4 measures.** Each is fetched once to be measured and
 never committed, and each carries a licence the allowlist admits (ruling 18):
 
-| Candidate | Regions | Upstream | SPDX |
-| --- | --- | --- | --- |
-| Source Han Sans, Regular: the language-specific OTFs and the Pan-CJK collection | all four | `github.com/adobe-fonts/source-han-sans` | `OFL-1.1` |
-| Noto Sans CJK, Regular: the language-specific OTFs and the collection | all four | `github.com/notofonts/noto-cjk` | `OFL-1.1` |
-| BIZ UDGothic, Regular | Japan | `github.com/googlefonts/morisawa-biz-ud-gothic` | `OFL-1.1` |
-| Nanum Gothic, Regular | Korea | `github.com/google/fonts`, `ofl/nanumgothic` | `OFL-1.1` |
-| Droid Sans Fallback | all four, one face | `android.googlesource.com/platform/frameworks/base`, `data/fonts` | `Apache-2.0` |
+| Candidate | Regions | Files | Upstream | SPDX |
+| --- | --- | --- | --- | --- |
+| Source Han Sans, Regular: the language-specific OTFs | one each, Hong Kong's beside Traditional Chinese's | `SourceHanSansJP-Regular.otf`, `SourceHanSansKR-Regular.otf`, `SourceHanSansCN-Regular.otf`, `SourceHanSansTW-Regular.otf`, `SourceHanSansHK-Regular.otf` | <https://github.com/adobe-fonts/source-han-sans>, release `2.005R`, `SubsetOTF/` | `OFL-1.1` |
+| Source Han Sans, Regular: the Pan-CJK collection | all four | `SourceHanSans-Regular.ttc` | the same release, `OTC/` | `OFL-1.1` |
+| Noto Sans CJK, Regular: the language-specific OTFs | one each, Hong Kong's beside Traditional Chinese's | `NotoSansJP-Regular.otf`, `NotoSansKR-Regular.otf`, `NotoSansSC-Regular.otf`, `NotoSansTC-Regular.otf`, `NotoSansHK-Regular.otf` | <https://github.com/notofonts/noto-cjk>, release `Sans2.004`, `Sans/SubsetOTF/` | `OFL-1.1` |
+| Noto Sans CJK, Regular: the collection | all four | `NotoSansCJK-Regular.ttc` | the same release, `Sans/OTC/` | `OFL-1.1` |
+| BIZ UDGothic, Regular | Japan | `BIZUDGothic-Regular.ttf` | <https://github.com/googlefonts/morisawa-biz-ud-gothic>, release `v1.051`, `fonts/ttf/` | `OFL-1.1` |
+| Nanum Gothic, Regular | Korea | `NanumGothic-Regular.ttf` | <https://github.com/google/fonts>, `ofl/nanumgothic/` | `OFL-1.1` |
+| Droid Sans Fallback, and its full build | all four, one face | `DroidSansFallback.ttf`, `DroidSansFallbackFull.ttf` | <https://android.googlesource.com/platform/frameworks/base>, `data/fonts/` | `Apache-2.0` |
 
 For each, FT-01.4 counts the CIDs of each collection and supplement the routes
 reach in it, which also says which route each candidate's glyphs take. FT-01.8
@@ -193,6 +195,64 @@ own figure and tolerance (ruling 19); the default profile carries no face.
 Because `bundled-fonts` turns `cjk-fonts` on, the `bundled-fonts` profile
 carries the faces too, and its figure grows by them.
 
+**The census** (FT-01.4) prices the choice and makes none.
+`crates/tinker-pdf-font/tests/cjk_coverage.rs`, `#[ignore]`d,
+`cjk_face_coverage_census`, reads each file of the candidate table from the
+directory `TINKER_CJK_FACES` names, and a candidate's WOFF2 form, made once
+by a compressor outside the engine, from the same directory under the file's
+stem with `.woff2`. It prints `RAN` and three tables, each row led by its
+table's name, or `SKIPPED` where the variable names no directory or the build
+holds no CID tables:
+
+- `inversion`: each collection's horizontal and vertical tables, the CIDs
+  each reaches and the time its first use takes to build it, taken before any
+  face asks for one;
+- `coverage`: a row for each face of each file — a collection file's faces in
+  turn — each collection and each supplement, then the collection's `all`
+  row: the CIDs the supplement adds, read from the registry's own
+  `Adobe-<ordering>-<n>` CMaps with CID 0 left out, and in each writing mode
+  the CIDs the face's own charset reaches, those its characters reach through
+  its `cmap`, those the index reading reaches in a face with neither, and
+  those nothing reaches. These are routes 1 and 2, in their order and through
+  the functions `resources.rs` draws with; route 3 is a document's, not a
+  face's;
+- `storage`: a row for each file: its bytes as published, deflated at
+  `tinker-pdf-filters`' ratio level and as WOFF2, the least of five times each
+  form takes to be made ready — unpacked to the program, parsed, and its first
+  character looked up — and the build's profile.
+
+It runs in release and in debug, whose counts agree and whose times are each
+its own:
+
+```text
+TINKER_CJK_FACES=<directory> cargo test -p tinker-pdf-font --release --test cjk_coverage -- --ignored --nocapture
+TINKER_CJK_FACES=<directory> cargo test -p tinker-pdf-font --test cjk_coverage -- --ignored --nocapture
+```
+
+Three sizes are measured beside it by building, each candidate in each storage
+form carried by a scratch feature that is never committed: `tinker-pdf-font`
+holds the form by `include_bytes!` and the facade's `BundledFonts` answers a
+request in one of the five collections with it, so no linker drops it.
+
+- The `tpdf` release binary: `cargo build --release -p tpdf --features
+  bundled-fonts`, against the same build without a candidate.
+- The packaged `tinker-pdf-font`, the form under
+  `crates/tinker-pdf-font/data/cjk`: the `.crate` that `cargo package -p
+  tinker-pdf-font --no-verify --allow-dirty` writes under `target/package/`,
+  against `CRATES_IO_CEILING`.
+- The CJK profile's wasm, built as `release.yml` builds the default one,
+  `wasm-pack build --release --target web --out-dir pkg bindings/js`, with the
+  feature forwarded, and gzipped as it gzips it, `gzip -9 -c
+  bindings/js/pkg/tinker_pdf_js_bg.wasm`, against the default profile's.
+
+**Where the figures go** (ruling 16): the release run's rows and the debug
+run's `inversion` and `storage` rows are committed, when the census runs, as
+`crates/tinker-pdf-font/tests/cjk_coverage.tsv` beside it, and the three
+sizes as `crates/tinker-pdf-font/tests/cjk_sizes.tsv`, with the columns
+`file`, `form`, `tpdf_release_bytes`, `crate_bytes` and `wasm_gzip_bytes`, a
+row for each candidate and form and one, `none`, for the builds without a
+candidate. The runs' revision, machine and day go in that commit's message.
+
 **The `cjk` capability.** `tpdf probe`'s object scan prints `cap cjk` for a
 file holding a composite font whose descendant's `/CIDSystemInfo` reads, as
 the seam reads it, registry `Adobe` and one of the five orderings, and whose
@@ -218,9 +278,17 @@ something reported, which is the figure FT-01's exit falls from.
    default, `bundled-fonts` and `--no-default-features` builds.
 3. **FT-01.4: the price.** Exit: `crates/tinker-pdf-font/tests/cjk_coverage.rs`
    `cjk_face_coverage_census` (ignored) reads each candidate from
-   `TINKER_CJK_FACES` and prints `RAN` with a row per face and collection, or
-   `SKIPPED`; its table is committed beside the binary, package and wasm
-   sizes.
+   `TINKER_CJK_FACES` and prints `RAN` with a row per face, collection and
+   supplement, or `SKIPPED`; its instruments are held by
+   `each_collections_supplements_are_the_registrys`,
+   `the_census_counts_each_cid_by_its_route`,
+   `a_face_is_tallied_supplement_by_supplement`,
+   `each_face_of_a_collection_is_read_as_its_own`,
+   `each_storage_form_is_measured_as_it_is_made_ready`,
+   `a_faces_name_is_read_windows_english_first` and
+   `every_candidate_is_the_designs`, and without the tables by
+   `without_the_tables_no_supplement_is_read`. Its rows are committed as
+   `cjk_coverage.tsv` and the three sizes as `cjk_sizes.tsv` when it runs.
 4. **FT-01.5: the capability.** Exit: `tools/tpdf/src/main.rs`
    `an_unembedded_cjk_font_is_the_cjk_capability`.
 5. **FT-01.6: counts per capability.** Exit: `xtask/src/report.rs`
