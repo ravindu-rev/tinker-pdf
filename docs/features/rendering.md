@@ -76,6 +76,10 @@ by the profile's media white (`wtpt`) over the PCS white, channel by channel
 grey on a tinted medium draws in its tint, and applied in XYZ to a table's
 value, a stage its grid's nodes evaluate. A media white of D50, or none,
 makes it relative colorimetric's transform itself.
+A scope compiles a profile stream once, the first time a space it names
+reads it, and keeps the transforms — or the profile's refusal — for every
+render over it; a document with a cache budget keeps them across its
+renders, below.
 
 A table that does not read is passed over to the next of those, and so is a
 model that contradicts its profile — a monitor profile whose data space is
@@ -786,9 +790,23 @@ larger than the whole budget is used by the render that made it and not kept,
 so a budget of zero keeps nothing and every draw decodes. The maps are looked
 up and never iterated, so on one thread which entries leave is a function of
 the requests, the same on every run and every target. An inline image has no
-object and stays the render's. `Page::render`, `Page::render_form`,
-`Page::render_annotation`, `DisplayList::render` and the page walk read
-through it; `Page::to_svg` keeps its pictures for the write alone.
+object and stays the render's. **Compiled ICC transforms** are kept beside the
+images under the profile stream's object, the key a scope's own cache keeps
+them under: a profile named on every page, in a form and by every render
+compiles once while it fits, and one that will not compile is refused once, its
+refusal kept. A set of transforms is charged the most it can come to hold
+whichever intents are compiled after it is kept and whatever they convert
+(`tinker_pdf_color::icc::Transforms::bytes_bound`): the profile's model, and
+its tables and `D2B*` pipelines as read — one not read yet at the most reading
+it can allocate — and each transform an intent compiles of its own with its
+grid's every node filled and its largest row tables built: relative
+colorimetric's, and one for each other intent at the most any of the
+profile's sources compiles, a model's curves or the largest grid a table or a
+pipeline is read through. So an intent compiled, a grid node filled or a row
+converted later never takes the cache past its budget. `Page::render`,
+`Page::render_form`, `Page::render_annotation`, `DisplayList::render` and the
+page walk read through it; `Page::to_svg` keeps its pictures for the write
+alone.
 
 **A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
 (`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
@@ -1003,7 +1021,8 @@ dictionary read;
 `images_decoded`, an image XObject's decode on a cache miss and every inline
 image's; and a `_hits` and a `_misses` for each of the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
-`form_scope`, an image the document's cache keeps counted as `image` too;
+`form_scope`, an image the document's cache keeps counted as `image` and a
+transform as `icc_transform` too;
 `cache_hits` and `cache_misses`, each lookup of the document's cache that
 found its entry kept and each that computed it, of every kind it keeps,
 `cache_evictions`, each entry it evicted to make room for one the operation
@@ -1462,6 +1481,17 @@ defect to hide in.
   image in two scopes' defaults kept twice and in a third with the first's
   defaults found; clones, pages, display lists and the four-thread page walk
   sharing one cache, a new budget or new fonts starting another.
+  `a_profile_named_on_every_page_compiles_once`, twenty pages naming an RGB and
+  a CMYK profile, and a form naming both again, rendered twice under a budget,
+  two transforms compiled where a document with no budget compiles four a
+  render; a profile that will not parse refused once a document; and a profile
+  and an image under a budget with room for the image alone, the bytes held
+  never past it. `tinker-pdf-color`'s `transforms_hold_no_more_than_their_bound`
+  holds a matrix/TRC, a grey, a three-intent, a v4 and a CMYK profile's
+  transforms, an RGB profile's whose perceptual table takes four inputs, and
+  one's carrying a matrix, three tables and four pipelines beside a media
+  white that is not D50, every intent compiled and converting a colour and a
+  row, within the bound charged for them.
   `determinism.rs`'s `warm_and_starved_caches_render_the_fingerprints` holds
   every fingerprinted page to its fingerprint and its warnings through a warm
   cache and a starved one ([determinism](determinism.md)). The

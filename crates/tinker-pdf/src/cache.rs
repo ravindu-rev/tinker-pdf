@@ -12,9 +12,10 @@
 //! its key and the document's immutable bytes: a decoded image of one image
 //! XObject at one reduction, in the default colour spaces its scope paints
 //! device spaces in (8.6.5.6), which are the one thing outside the object a
-//! decode reads; and a JPEG's frame, which a draw's size is read against for
-//! the reduction it is decoded at. So **a hit is the bytes a miss computes**,
-//! and a page draws the same pixels whatever was drawn before it.
+//! decode reads; a JPEG's frame, which a draw's size is read against for the
+//! reduction it is decoded at; and the compiled transforms of one ICC profile
+//! stream. So **a hit is the bytes a miss computes**, and a page draws the
+//! same pixels whatever was drawn before it.
 //!
 //! A refusal is kept as firmly as a success, in the words the decode used, and
 //! every entry carries what its computation reported, which every request
@@ -53,6 +54,8 @@ use std::thread::{self, ThreadId};
 
 use tinker_pdf_cos::{fill_open, limits, Counter, ObjRef, Object, OpenFill, Work};
 
+use tinker_pdf_color::icc::Transforms;
+
 use crate::resources::CachedImage;
 use crate::stats;
 
@@ -63,7 +66,8 @@ use crate::stats;
 /// [`crate::Document::with_cache_limits`]. **With none stated, a document
 /// keeps nothing past the render that made it**, as it always has: a render's
 /// own resources hold what they decode and go with it. With one stated, the
-/// document keeps what its renders compute — decoded images today — across
+/// document keeps what its renders compute — decoded images and compiled ICC
+/// transforms — across
 /// renders, pages and clones of it, while the bytes fit, evicting the least
 /// recently requested entry first. A budget of zero is stated and keeps
 /// nothing at all: every request computes again.
@@ -124,6 +128,8 @@ struct Table {
     images: HashMap<ImageKey, Slot<Arc<CachedImage>>>,
     /// The frames of the images a draw's size reduces.
     frames: HashMap<FrameKey, Slot<Option<(u32, u32)>>>,
+    /// Compiled ICC transforms, and the profiles that would not compile.
+    icc: HashMap<IccKey, Slot<Option<Arc<Transforms>>>>,
     /// A kind of plain values, for the tests of the machinery itself.
     #[cfg(test)]
     tests: HashMap<u32, Slot<Arc<Vec<u8>>>>,
@@ -142,6 +148,7 @@ impl Table {
         match key {
             Key::Image(key) => remove_ready(&mut self.images, key),
             Key::Frame(key) => remove_ready(&mut self.frames, key),
+            Key::Icc(key) => remove_ready(&mut self.icc, key),
             #[cfg(test)]
             Key::Test(key) => remove_ready(&mut self.tests, key),
         }
@@ -175,6 +182,7 @@ enum Slot<V> {
 enum Key {
     Image(ImageKey),
     Frame(FrameKey),
+    Icc(IccKey),
     #[cfg(test)]
     Test(u32),
 }
@@ -209,6 +217,18 @@ impl Kind for FrameKey {
 
     fn key(&self) -> Key {
         Key::Frame(self.clone())
+    }
+}
+
+impl Kind for IccKey {
+    type Value = Option<Arc<Transforms>>;
+
+    fn slots(table: &mut Table) -> &mut HashMap<Self, Slot<Self::Value>> {
+        &mut table.icc
+    }
+
+    fn key(&self) -> Key {
+        Key::Icc(*self)
     }
 }
 
@@ -277,6 +297,18 @@ impl DocumentCache {
         work: Option<&Work>,
         fill: impl FnOnce() -> Fill<Option<(u32, u32)>>,
     ) -> (Option<(u32, u32)>, bool) {
+        self.read(key, work, fill)
+    }
+
+    /// The compiled transforms of the ICC profile under `key`, or the
+    /// profile's refusal, and whether the request found it kept, filled as
+    /// [`DocumentCache::image`] fills an image.
+    pub(crate) fn icc(
+        &self,
+        key: IccKey,
+        work: Option<&Work>,
+        fill: impl FnOnce() -> Fill<Option<Arc<Transforms>>>,
+    ) -> (Option<Arc<Transforms>>, bool) {
         self.read(key, work, fill)
     }
 
@@ -495,6 +527,13 @@ pub(crate) struct FrameKey {
     /// The scope's defaults, as [`ImageKey::painted`].
     pub(crate) painted: Written,
 }
+
+/// What a compiled ICC transform is kept under: the profile stream's object,
+/// as a scope's own cache of transforms keys it, so a profile one object
+/// holds compiles once a document however many pages, forms and renders name
+/// it, and one that will not compile is refused once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct IccKey(pub(crate) ObjRef);
 
 /// Objects written out exactly, as a key holds them ([`write_exact`]), with
 /// a digest of the bytes standing in for them in the hash.

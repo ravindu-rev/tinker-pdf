@@ -28,7 +28,7 @@ use tinker_pdf_render::{
     Shading, TilingPattern, TwoColourSamples,
 };
 
-use crate::cache::{self, DocumentCache, Fill, FrameKey, ImageKey, Written};
+use crate::cache::{self, DocumentCache, Fill, FrameKey, IccKey, ImageKey, Written};
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
 use crate::stats::{self, Counter, Work};
@@ -1970,27 +1970,57 @@ impl PageResources {
     /// Relative colorimetric's transform is compiled here; another intent's
     /// is compiled the first time a conversion asks for it, and kept with the
     /// rest (`docs/design/icc.md`, "What compiling per intent costs").
+    ///
+    /// A document with a budget keeps the transforms in its cache under the
+    /// same key, charged the most bytes they can come to hold whichever
+    /// intents are compiled later (`Transforms::bytes_bound`), so a profile
+    /// named on many pages, forms and renders compiles once while it fits; a
+    /// refusal is kept as firmly, so a profile that will not parse is refused
+    /// once a document. Without one, each scope keeps its own, as it always
+    /// did.
     fn icc_transform(
         &self,
         reference: tinker_pdf_cos::ObjRef,
     ) -> Option<Arc<tinker_pdf_color::icc::Transforms>> {
+        if let Some(cache) = self.op.cache() {
+            let (compiled, hit) = cache.icc(IccKey(reference), self.op.work.as_deref(), || {
+                let compiled = self.compile_icc(reference);
+                let bytes = compiled
+                    .as_ref()
+                    .map_or(0, |transforms| transforms.bytes_bound());
+                Fill::Keep(compiled, u64::try_from(bytes).unwrap_or(u64::MAX))
+            });
+            self.count(if hit {
+                Counter::IccTransformHits
+            } else {
+                Counter::IccTransformMisses
+            });
+            return compiled;
+        }
         let key = (reference.num, reference.gen);
         let made = Cell::new(false);
         let compiled = self.caches.icc.read(key, || {
             made.set(true);
             self.count(Counter::IccTransformMisses);
-            Filled::Keep(
-                self.decoded(reference)
-                    .ok()
-                    .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
-                    .and_then(tinker_pdf_color::icc::Transforms::compile)
-                    .map(Arc::new),
-            )
+            Filled::Keep(self.compile_icc(reference))
         });
         if !made.get() {
             self.count(Counter::IccTransformHits);
         }
         compiled
+    }
+
+    /// The transforms of the ICC profile stream `reference`, compiled, or
+    /// `None` where the stream will not decode or the profile not parse.
+    fn compile_icc(
+        &self,
+        reference: tinker_pdf_cos::ObjRef,
+    ) -> Option<Arc<tinker_pdf_color::icc::Transforms>> {
+        self.decoded(reference)
+            .ok()
+            .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
+            .and_then(tinker_pdf_color::icc::Transforms::compile)
+            .map(Arc::new)
     }
 
     /// The page's own transparency group space (11.4.7), if it declares one.

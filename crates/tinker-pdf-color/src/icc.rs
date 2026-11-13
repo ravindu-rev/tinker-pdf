@@ -65,6 +65,7 @@
 //! reconstructed from the format's structure with some confidence, where a
 //! JBIG2 context template could not.
 
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -2763,6 +2764,282 @@ impl Transforms {
     #[must_use]
     pub fn profile(&self) -> &Profile {
         &self.profile
+    }
+
+    /// The most bytes these transforms can come to hold, whichever intents
+    /// conversions ask for later and whatever they convert: the profile's
+    /// model, and its tables and pipelines as read — one not read yet at the
+    /// most reading it can allocate ([`lut_bound`], [`mpe::bound`]) — and
+    /// every transform an intent compiles of its own at the most it holds
+    /// once its grid's every node is filled and its row tables built
+    /// ([`transform_bound`]). That is relative colorimetric's, and one more
+    /// for each of the other three intents, each at the most any of the
+    /// profile's sources compiles — a model's curves, or the largest grid a
+    /// table or a pipeline is read through ([`Tables::grid_bound`]) — since
+    /// each may convert through any of them, absolute colorimetric's scaled
+    /// over the same source as another's.
+    ///
+    /// What a cache that keeps a set charges for it, so that compiling an
+    /// intent after it is kept never takes it past what it was charged. It
+    /// only falls as tables and pipelines are read, each to what it holds.
+    #[must_use]
+    pub fn bytes_bound(&self) -> usize {
+        let model = self.profile.model.as_ref().map_or(0, Model::held_bytes);
+        let compiled = self
+            .profile
+            .model
+            .as_ref()
+            .map_or(0, Model::compiled_bytes)
+            .max(self.profile.tables.grid_bound());
+        size_of::<Transforms>()
+            .saturating_add(model)
+            .saturating_add(self.profile.tables.held_bound())
+            .saturating_add(self.relative.bytes_bound())
+            .saturating_add(transform_bound(0, compiled).saturating_mul(3))
+    }
+
+    /// The bytes these transforms hold now: [`Transforms::bytes_bound`]'s
+    /// parts as they stand, every table and pipeline read counted as what it
+    /// holds and every transform compiled so far once, however many intents
+    /// share it.
+    #[cfg(test)]
+    fn held_bytes(&self) -> usize {
+        let model = self.profile.model.as_ref().map_or(0, Model::held_bytes);
+        let mut counted = vec![Arc::as_ptr(&self.relative)];
+        let mut others = 0;
+        for other in self.others.iter().filter_map(OnceLock::get) {
+            if !counted.contains(&Arc::as_ptr(other)) {
+                counted.push(Arc::as_ptr(other));
+                others += other.held_bytes();
+            }
+        }
+        size_of::<Transforms>()
+            + model
+            + self.profile.tables.held()
+            + self.relative.held_bytes()
+            + others
+    }
+}
+
+impl Transform {
+    /// The most bytes this transform holds ([`transform_bound`]): its
+    /// compiled curves and its grid, whose input count is its table's or its
+    /// pipeline's. The table or pipeline is the profile's, and is counted
+    /// there.
+    fn bytes_bound(&self) -> usize {
+        let grid = self.grid.as_ref().map_or(0, |grid| grid_bytes(grid.inputs));
+        transform_bound(curve_bytes(&self.curves), grid)
+    }
+
+    /// The bytes this transform holds now: [`Transform::bytes_bound`]'s parts
+    /// as they stand, the grid's nodes where a read has allocated them and the
+    /// row tables where a row has built them.
+    #[cfg(test)]
+    fn held_bytes(&self) -> usize {
+        let grid = self
+            .grid
+            .as_ref()
+            .and_then(|grid| grid.nodes.get())
+            .map_or(0, |nodes| nodes.len() * size_of::<AtomicU64>());
+        let rows = match self.row.get() {
+            Some(RowTables::Grid(cells)) => cells.len() * size_of::<(usize, i64)>(),
+            Some(RowTables::Matrix(_)) => size_of::<[[i64; 256]; 3]>(),
+            Some(RowTables::Colours(colours)) => colours.len() * size_of::<[u8; 3]>(),
+            Some(RowTables::Pixels) | None => 0,
+        };
+        size_of::<Transform>() + curve_bytes(&self.curves) + grid + rows
+    }
+}
+
+/// The most bytes a transform holds: its own size, which takes in its grid's
+/// and its row tables' own fields, its compiled curves of `curves` bytes, a
+/// grid of `grid` bytes once every node is filled ([`grid_bytes`]), and the
+/// largest row tables [`Transform::convert_row`] builds — a cell and a
+/// fraction for each of 256 bytes, each channel's 256 curve entries, or the
+/// colour of each of 256 bytes. A transform has curves or a grid, never
+/// both, so either may be the larger of the two it could have.
+fn transform_bound(curves: usize, grid: usize) -> usize {
+    let rows = (256 * size_of::<(usize, i64)>())
+        .max(size_of::<[[i64; 256]; 3]>())
+        .max(256 * size_of::<[u8; 3]>());
+    size_of::<Transform>()
+        .saturating_add(curves)
+        .saturating_add(grid)
+        .saturating_add(rows)
+}
+
+/// The bytes the nodes of a grid over `inputs` take once a read has
+/// allocated them, or none for an input count no grid is built over.
+fn grid_bytes(inputs: usize) -> usize {
+    // At most 17^4 nodes, so the product cannot overflow.
+    grid_points(inputs).map_or(0, |points| {
+        points.pow(inputs as u32) * size_of::<AtomicU64>()
+    })
+}
+
+/// The bytes a run of sampled curves holds.
+fn curve_bytes(curves: &[Vec<u16>]) -> usize {
+    curves
+        .iter()
+        .map(|curve| curve.len().saturating_mul(size_of::<u16>()))
+        .fold(0, usize::saturating_add)
+}
+
+/// The most bytes reading a lookup table of `raw` bytes can allocate: every
+/// value of its grid and of `mft1`'s and `mft2`'s curves at sixteen bits,
+/// which at most doubles what an eight-bit table spells, and `mAB `'s curves,
+/// each sampled to [`V4_CURVE_ENTRIES`] whatever it spells — at most
+/// [`MAX_LUT_INPUTS`] A curves and three each of M and B — beside the table's
+/// own fields and its grid counts.
+fn lut_bound(raw: usize) -> usize {
+    let curves = (MAX_LUT_INPUTS + 6) * V4_CURVE_ENTRIES * size_of::<u16>();
+    raw.saturating_mul(2)
+        .saturating_add(curves)
+        .saturating_add(size_of::<Lut>())
+        .saturating_add(MAX_LUT_INPUTS * size_of::<usize>())
+}
+
+impl Curve {
+    /// The bytes a curve holds beside its own size: a sampled curve's
+    /// entries, and a parametric one's parameters.
+    fn held_bytes(&self) -> usize {
+        match self {
+            Curve::Sampled(entries) => entries.len().saturating_mul(size_of::<u16>()),
+            Curve::Parametric { params, .. } => params.len().saturating_mul(size_of::<f64>()),
+            Curve::Identity | Curve::Gamma(_) => 0,
+        }
+    }
+}
+
+impl Model {
+    /// The bytes the model's curves hold.
+    fn held_bytes(&self) -> usize {
+        match self {
+            Model::MatrixTrc { curves, .. } => curves
+                .iter()
+                .map(Curve::held_bytes)
+                .fold(0, usize::saturating_add),
+            Model::Grey { curve, .. } => curve.held_bytes(),
+        }
+    }
+
+    /// The bytes a transform of the model compiles: its curves, each sampled
+    /// to [`CURVE_ENTRIES`] ([`compile_curve`]).
+    fn compiled_bytes(&self) -> usize {
+        let curves = match self {
+            Model::MatrixTrc { .. } => 3,
+            Model::Grey { .. } => 1,
+        };
+        curves * CURVE_ENTRIES * size_of::<u16>()
+    }
+}
+
+impl Lut {
+    /// The bytes a table holds: its own fields, its grid counts, its curves
+    /// and its grid.
+    fn held_bytes(&self) -> usize {
+        size_of::<Lut>()
+            .saturating_add(self.grids.len().saturating_mul(size_of::<usize>()))
+            .saturating_add(curve_bytes(&self.input_tables))
+            .saturating_add(self.clut.len().saturating_mul(size_of::<u16>()))
+            .saturating_add(curve_bytes(&self.output_tables))
+            .saturating_add(self.m_tables.as_deref().map_or(0, curve_bytes))
+    }
+}
+
+impl<T> Element<T> {
+    /// The most bytes the element can come to hold, by `held` and `bound`:
+    /// its bytes, kept until the parser lets them go, and what reading them
+    /// gave or, not read yet, the most reading them can give. A refusal holds
+    /// nothing beside the element's bytes.
+    fn held_bound(&self, held: impl Fn(&T) -> usize, bound: impl Fn(&[u8]) -> usize) -> usize {
+        let raw = self.bytes.as_deref().unwrap_or_default();
+        let read = match self.read.get() {
+            Some(Ok(value)) => held(value),
+            Some(Err(_)) => 0,
+            None => bound(raw),
+        };
+        raw.len().saturating_add(read)
+    }
+
+    /// The bytes the element holds now: its bytes, and what reading them
+    /// gave, where it has been read.
+    #[cfg(test)]
+    fn held(&self, held: impl Fn(&T) -> usize) -> usize {
+        let read = match self.read.get() {
+            Some(Ok(value)) => held(value),
+            _ => 0,
+        };
+        self.bytes.as_ref().map_or(0, Vec::len) + read
+    }
+
+    /// The inputs a transform over the element takes, by `inputs` once it is
+    /// read and otherwise as its bytes spell them, by `spelt`; none for one
+    /// that will not read, which no transform is built over.
+    fn inputs(&self, inputs: impl Fn(&T) -> usize, spelt: impl Fn(&[u8]) -> usize) -> usize {
+        match self.read.get() {
+            Some(Ok(value)) => inputs(value),
+            Some(Err(_)) => 0,
+            None => self.bytes.as_deref().map_or(0, spelt),
+        }
+    }
+}
+
+impl Tables {
+    /// The most bytes the tables and pipelines can come to hold: their
+    /// lists, and each element's bytes kept until it is read and what reading
+    /// it gave or, for one not read yet, the most reading it can give.
+    fn held_bound(&self) -> usize {
+        let lists = self.tables.capacity() * size_of::<Element<Lut>>()
+            + self.pipelines.capacity() * size_of::<Element<mpe::Pipeline>>();
+        let tables = self
+            .tables
+            .iter()
+            .map(|table| table.held_bound(Lut::held_bytes, |raw| lut_bound(raw.len())));
+        let pipelines = self
+            .pipelines
+            .iter()
+            .map(|pipeline| pipeline.held_bound(mpe::Pipeline::held_bytes, mpe::bound));
+        tables.chain(pipelines).fold(lists, usize::saturating_add)
+    }
+
+    /// The most bytes a transform's grid over one of the tables or pipelines
+    /// can take ([`grid_bytes`]), the largest of theirs: an element's inputs
+    /// are its own, read or not — the byte at 8 that `mft1`, `mft2` and
+    /// `mAB ` spell them in, the sixteen bits there that `mpet` does — and
+    /// need not be another element's.
+    fn grid_bound(&self) -> usize {
+        let tables = self.tables.iter().map(|table| {
+            table.inputs(
+                |lut| lut.inputs,
+                |raw| raw.get(8).map_or(0, |&inputs| usize::from(inputs)),
+            )
+        });
+        let pipelines = self.pipelines.iter().map(|pipeline| {
+            pipeline.inputs(mpe::Pipeline::inputs, |raw| {
+                Reader { bytes: raw }.u16(8).map_or(0, usize::from)
+            })
+        });
+        tables.chain(pipelines).map(grid_bytes).max().unwrap_or(0)
+    }
+
+    /// The bytes the tables and pipelines hold now: their lists, and each
+    /// element's kept bytes and what reading it gave, where it has been read.
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        let lists = self.tables.capacity() * size_of::<Element<Lut>>()
+            + self.pipelines.capacity() * size_of::<Element<mpe::Pipeline>>();
+        let tables: usize = self
+            .tables
+            .iter()
+            .map(|table| table.held(Lut::held_bytes))
+            .sum();
+        let pipelines: usize = self
+            .pipelines
+            .iter()
+            .map(|pipeline| pipeline.held(mpe::Pipeline::held_bytes))
+            .sum();
+        lists + tables + pipelines
     }
 }
 
@@ -6655,6 +6932,85 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             copy.convert_row(&samples, &mut rgb);
             assert_eq!(builds(), 1, "{name}: a copy builds its own, once");
             let _ = applies();
+        }
+    }
+
+    /// **A set of transforms never holds more than its bound**: for a
+    /// matrix/TRC, a grey, a three-intent lookup-table and a v4 profile, a
+    /// CMYK table, an RGB profile whose perceptual table takes four inputs —
+    /// so perceptual's and saturation's grids are larger than relative
+    /// colorimetric's — and one carrying a matrix, three `A2B*` tables and
+    /// four `D2B*` pipelines beside a media white that is not D50, so every
+    /// intent compiles its own, the bound read as the set is compiled is at
+    /// least what the set holds once every intent has compiled and converted
+    /// a colour and a row, its grids' nodes allocated and its row tables
+    /// built, and the bound only falls as tables are read, staying a bound.
+    #[test]
+    fn transforms_hold_no_more_than_their_bound() {
+        let wider = build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"A2B0", mft2(4, 2, &[[4096, 8192, 12288]; 16])),
+                (*b"A2B1", mft2(3, 2, &[[8192, 4096, 2048]; 8])),
+            ],
+        );
+        let mut tags = matrix_tags();
+        tags.push((*b"wtpt", xyz(PAPER[0], PAPER[1], PAPER[2])));
+        for (t, signature) in [*b"D2B0", *b"D2B1", *b"D2B2", *b"D2B3"]
+            .into_iter()
+            .enumerate()
+        {
+            tags.push((signature, Chain { t: t as f64 }.tag()));
+        }
+        for (t, signature) in [*b"A2B0", *b"A2B1", *b"A2B2"].into_iter().enumerate() {
+            tags.push((signature, constant_table(3, fallback_value(t))));
+        }
+        let everything = build(b"RGB ", b"XYZ ", &tags);
+        let profiles: [(&str, Vec<u8>); 7] = [
+            ("matrix/TRC", matrix_trc(2.2)),
+            ("grey", grey(b"XYZ ", 1.8)),
+            ("three intents", three_intents_profile()),
+            (
+                "mAB RGB to XYZ",
+                lut_profile(b"RGB ", b"XYZ ", mab_every_stage()),
+            ),
+            ("mft2 CMYK to Lab", cmyk_table(true)),
+            ("a wider perceptual table", wider),
+            ("a model, tables and pipelines", everything),
+        ];
+        for (what, bytes) in &profiles {
+            let profile = Profile::parse(bytes).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            let transforms =
+                Transforms::compile(profile).unwrap_or_else(|| panic!("{what}: it compiles"));
+            let bound = transforms.bytes_bound();
+            assert!(
+                transforms.held_bytes() <= bound,
+                "{what}: {} held as compiled, bound {bound}",
+                transforms.held_bytes()
+            );
+            let inputs = transforms.inputs();
+            let samples: Vec<u8> = (0..inputs * 4).map(|i| (i * 61 % 256) as u8).collect();
+            for intent in [
+                Intent::RelativeColorimetric,
+                Intent::Perceptual,
+                Intent::Saturation,
+                Intent::AbsoluteColorimetric,
+            ] {
+                let transform = transforms.get(intent);
+                let _ = transform.apply(&vec![0.4; inputs]);
+                let mut rgb = Vec::new();
+                transform.convert_row(&samples, &mut rgb);
+            }
+            let held = transforms.held_bytes();
+            assert!(
+                held <= bound,
+                "{what}: {held} held once every intent compiled, its grid read and its \
+                 rows built, bound {bound}"
+            );
+            let after = transforms.bytes_bound();
+            assert!(after <= bound, "{what}: the bound only falls");
+            assert!(after >= held, "{what}: and stays a bound");
         }
     }
 }

@@ -30,6 +30,8 @@
 //! segment or sample count is checked against the bytes that would hold it
 //! before anything is read.
 
+use std::mem::size_of;
+
 use super::{IccError, Reader, CURVE_ENTRIES, MAX_CLUT_ENTRIES, MAX_LUT_INPUTS};
 
 /// The most processing elements one `multiProcessElementsType` tag may chain.
@@ -206,10 +208,79 @@ pub fn read(data: &[u8], lab: bool) -> Result<Pipeline, IccError> {
     })
 }
 
+/// The most bytes reading the `multiProcessElementsType` tag `data` can
+/// leave its pipeline holding ([`Pipeline::held_bytes`]), from the tag's
+/// element headers alone: a curve set's [`CURVE_SAMPLES`] entries a channel,
+/// a matrix's coefficients and offsets, and a grid's counts and values — the
+/// curves' and grids' entries together no more than [`MAX_CLUT_ENTRIES`], as
+/// the read holds them — beside a stage for each of at most
+/// [`MAX_MPE_ELEMENTS`] elements. A channel count is read as at most
+/// `MAX_LUT_INPUTS`, past which the read refuses the tag, and an element the
+/// tag does not hold allocates nothing, since the read refuses it too.
+pub(super) fn bound(data: &[u8]) -> usize {
+    let reader = Reader { bytes: data };
+    let count = reader
+        .u32(12)
+        .map_or(0, |count| count as usize)
+        .min(MAX_MPE_ELEMENTS);
+    let mut entries = 0usize;
+    let mut beside = size_of::<Pipeline>() + MAX_MPE_ELEMENTS * size_of::<Stage>();
+    for index in 0..count {
+        let at = 16 + 8 * index;
+        let element = reader
+            .u32(at)
+            .zip(reader.u32(at + 4))
+            .and_then(|(offset, size)| {
+                let offset = offset as usize;
+                data.get(offset..offset.checked_add(size as usize)?)
+            });
+        let Some(element) = element else {
+            continue;
+        };
+        let header = Reader { bytes: element };
+        let p = header.u16(8).map_or(0, usize::from).min(MAX_LUT_INPUTS);
+        let q = header.u16(10).map_or(0, usize::from).min(MAX_LUT_INPUTS);
+        match header.sig(0).as_ref() {
+            Some(b"cvst") => {
+                entries = entries.saturating_add(q * CURVE_SAMPLES);
+                beside = beside.saturating_add(q * size_of::<Sampled>());
+            }
+            Some(b"matf") => beside = beside.saturating_add((p * q + q) * size_of::<i32>()),
+            Some(b"clut") => {
+                let points = (0..p)
+                    .map(|axis| {
+                        element
+                            .get(12 + axis)
+                            .map_or(0, |&count| usize::from(count))
+                    })
+                    .fold(1usize, usize::saturating_mul);
+                entries = entries.saturating_add(points.saturating_mul(q));
+                beside = beside.saturating_add(p * size_of::<usize>());
+            }
+            _ => {}
+        }
+    }
+    entries
+        .min(MAX_CLUT_ENTRIES)
+        .saturating_mul(size_of::<i32>())
+        .saturating_add(beside)
+}
+
 impl Pipeline {
     /// How many channels the pipeline takes.
     pub fn inputs(&self) -> usize {
         self.inputs
+    }
+
+    /// The bytes the pipeline holds: its own fields, its stages, and each
+    /// stage's sampled curves, coefficients and offsets, or grid counts and
+    /// values.
+    pub(super) fn held_bytes(&self) -> usize {
+        let stages = size_of::<Pipeline>() + self.stages.capacity() * size_of::<Stage>();
+        self.stages
+            .iter()
+            .map(Stage::held_bytes)
+            .fold(stages, usize::saturating_add)
     }
 
     /// Whether the connection space it gives is `Lab` rather than `XYZ`.
@@ -238,6 +309,27 @@ impl Pipeline {
 }
 
 impl Stage {
+    /// The bytes a stage holds beside its own size.
+    fn held_bytes(&self) -> usize {
+        match self {
+            Stage::Curves(curves) => curves
+                .iter()
+                .map(|curve| curve.table.capacity() * size_of::<i32>())
+                .fold(
+                    curves.capacity() * size_of::<Sampled>(),
+                    usize::saturating_add,
+                ),
+            Stage::Matrix {
+                coefficients,
+                offsets,
+                ..
+            } => (coefficients.capacity() + offsets.capacity()) * size_of::<i32>(),
+            Stage::Grid { grids, values, .. } => {
+                grids.capacity() * size_of::<usize>() + values.capacity() * size_of::<i32>()
+            }
+        }
+    }
+
     /// The stage's outputs for `values`.
     fn apply(&self, values: &[i64]) -> Vec<i64> {
         match self {

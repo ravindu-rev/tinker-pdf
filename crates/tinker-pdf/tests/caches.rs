@@ -805,3 +805,261 @@ fn renders_on_four_threads_decode_a_shared_image_once() {
         same_render(bitmap, &alone, &format!("page {index}"));
     }
 }
+
+// ---- ICC transforms ---------------------------------------------------------
+
+/// An ICC profile of device class `class` over the data space `space` into
+/// XYZ, carrying `tags` (ICC.1 7.2 and 7.3): the 128-byte header with what a
+/// reader checks — the size, a version 2.4 number, the class, the two spaces
+/// and `acsp` — the tag table, and each tag's data on a four-byte boundary.
+fn icc_profile(class: &[u8; 4], space: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let start = 128 + 4 + 12 * tags.len();
+    let mut data = Vec::new();
+    let mut entries = Vec::new();
+    for (signature, body) in tags {
+        while (start + data.len()) % 4 != 0 {
+            data.push(0);
+        }
+        entries.push((*signature, start + data.len(), body.len()));
+        data.extend_from_slice(body);
+    }
+    while (start + data.len()) % 4 != 0 {
+        data.push(0);
+    }
+    let size = start + data.len();
+    let mut profile = vec![0u8; 128];
+    profile[0..4].copy_from_slice(&(size as u32).to_be_bytes());
+    profile[8..12].copy_from_slice(&0x0240_0000u32.to_be_bytes());
+    profile[12..16].copy_from_slice(class);
+    profile[16..20].copy_from_slice(space);
+    profile[20..24].copy_from_slice(b"XYZ ");
+    profile[36..40].copy_from_slice(b"acsp");
+    profile.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+    for (signature, offset, len) in entries {
+        profile.extend_from_slice(&signature);
+        profile.extend_from_slice(&(offset as u32).to_be_bytes());
+        profile.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+    profile.extend_from_slice(&data);
+    profile
+}
+
+/// An s15Fixed16Number (ICC.1 4.6).
+fn s15(value: f64) -> [u8; 4] {
+    (((value * 65536.0).round() as i32) as u32).to_be_bytes()
+}
+
+/// An `XYZ ` tag of one value.
+fn xyz_tag(x: f64, y: f64, z: f64) -> Vec<u8> {
+    let mut tag = b"XYZ \0\0\0\0".to_vec();
+    for value in [x, y, z] {
+        tag.extend_from_slice(&s15(value));
+    }
+    tag
+}
+
+/// A `curv` tag of one gamma, as a u8Fixed8Number.
+fn gamma_tag(gamma: f64) -> Vec<u8> {
+    let mut tag = b"curv\0\0\0\0".to_vec();
+    tag.extend_from_slice(&1u32.to_be_bytes());
+    tag.extend_from_slice(&((gamma * 256.0).round() as u16).to_be_bytes());
+    tag
+}
+
+/// A matrix/TRC RGB display profile: sRGB's primaries adapted to D50 under a
+/// gamma of 1.8 on each channel, so its colours come out other than
+/// DeviceRGB's.
+fn rgb_profile() -> Vec<u8> {
+    icc_profile(
+        b"mntr",
+        b"RGB ",
+        &[
+            (*b"rXYZ", xyz_tag(0.436_065, 0.222_488, 0.013_916)),
+            (*b"gXYZ", xyz_tag(0.385_147, 0.716_873, 0.097_076)),
+            (*b"bXYZ", xyz_tag(0.143_066, 0.060_607, 0.714_096)),
+            (*b"rTRC", gamma_tag(1.8)),
+            (*b"gTRC", gamma_tag(1.8)),
+            (*b"bTRC", gamma_tag(1.8)),
+            (*b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        ],
+    )
+}
+
+/// `determinism.rs`'s `/DefaultCMYK` profile: a version 2 printer profile
+/// whose one `mft2` table takes four inks to XYZ on a grid of two points an
+/// axis, each corner the light of its inks squeezed into a tenth to nine
+/// tenths.
+fn cmyk_profile() -> Vec<u8> {
+    let mut tag = b"mft2\0\0\0\0".to_vec();
+    tag.extend_from_slice(&[4, 3, 2, 0]);
+    for row in 0..3 {
+        for column in 0..3 {
+            tag.extend_from_slice(&s15(if row == column { 1.0 } else { 0.0 }));
+        }
+    }
+    tag.extend_from_slice(&2u16.to_be_bytes());
+    tag.extend_from_slice(&2u16.to_be_bytes());
+    for _ in 0..4 {
+        tag.extend_from_slice(&0u16.to_be_bytes());
+        tag.extend_from_slice(&u16::MAX.to_be_bytes());
+    }
+    let primaries = [
+        [0.436_065, 0.222_488, 0.013_916],
+        [0.385_147, 0.716_873, 0.097_076],
+        [0.143_066, 0.060_607, 0.714_096],
+    ];
+    for corner in 0..16u32 {
+        let ink = |bit: u32| f64::from((corner >> bit) & 1);
+        let (c, m, y, k) = (ink(3), ink(2), ink(1), ink(0));
+        let light = [
+            0.1 + 0.8 * (1.0 - c) * (1.0 - k),
+            0.1 + 0.8 * (1.0 - m) * (1.0 - k),
+            0.1 + 0.8 * (1.0 - y) * (1.0 - k) * 0.7,
+        ];
+        for axis in 0..3 {
+            let value: f64 = primaries
+                .iter()
+                .zip(light)
+                .map(|(primary, amount)| primary[axis] * amount)
+                .sum();
+            tag.extend_from_slice(&((value * 32768.0).round() as u16).to_be_bytes());
+        }
+    }
+    for _ in 0..3 {
+        tag.extend_from_slice(&0u16.to_be_bytes());
+        tag.extend_from_slice(&u16::MAX.to_be_bytes());
+    }
+    icc_profile(b"prtr", b"CMYK", &[(*b"A2B0", tag)])
+}
+
+/// Twenty pages, each naming an RGB profile (object 3) and a CMYK one
+/// (object 4) as `/CS0` and `/CS1` and filling a square in each, then
+/// drawing a form (object 5) whose own resources name the same two objects
+/// as `/FormRGB` and `/FormCMYK` and fill two more.
+fn profiles_page() -> Vec<u8> {
+    let form = "/FormRGB cs 0.2 0.4 0.6 sc 0 0 20 20 re f \
+                /FormCMYK cs 0.1 0.2 0.3 0.4 sc 20 0 20 20 re f";
+    let shared = [
+        stream("/N 3", &rgb_profile()),
+        stream("/N 4", &cmyk_profile()),
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 40 20] /Resources << /ColorSpace << \
+             /FormRGB [/ICCBased 3 0 R] /FormCMYK [/ICCBased 4 0 R] >> >>",
+            form.as_bytes(),
+        ),
+    ];
+    let resources = "<< /ColorSpace << /CS0 [/ICCBased 3 0 R] /CS1 [/ICCBased 4 0 R] >> \
+                     /XObject << /Fm 5 0 R >> >>";
+    let content = "/CS0 cs 0.9 0.1 0.1 sc 0 50 50 50 re f \
+                   /CS1 cs 0.1 0.6 0.3 0.2 sc 50 50 50 50 re f \
+                   q 1 0 0 1 10 10 cm /Fm Do Q";
+    let pages = vec![(resources, content); 20];
+    document(&shared, &pages)
+}
+
+/// **A profile named on every page and in a form compiles once**: twenty
+/// pages, each naming one RGB and one CMYK profile and drawing a form whose
+/// own resources name both again, rendered twice each under a budget,
+/// compile two transforms between them — each scope's first question about
+/// a name finds the profile's transforms kept from the first one's — and
+/// every page draws what a document with no budget draws, which compiles
+/// each profile once in every scope of every render: the page's and the
+/// form's.
+#[test]
+fn a_profile_named_on_every_page_compiles_once() {
+    let bytes = profiles_page();
+    let document = budgeted(bytes.clone(), 1 << 20);
+    let plain = Document::open(bytes).expect("it opens");
+    let (mut misses, mut hits, mut unbudgeted_misses) = (0, 0, 0);
+    for pass in 0..2 {
+        for index in 0..20 {
+            let (bitmap, stats) = counted(&document.page(index).expect("a page"), 72.0);
+            misses += stats.icc_transform_misses;
+            hits += stats.icc_transform_hits;
+            let (alone, alone_stats) = counted(&plain.page(index).expect("a page"), 72.0);
+            unbudgeted_misses += alone_stats.icc_transform_misses;
+            assert_eq!(
+                alone_stats.icc_transform_misses, 4,
+                "page {index}: each of the page's two names and the form's two"
+            );
+            same_render(&bitmap, &alone, &format!("pass {pass}, page {index}"));
+        }
+    }
+    assert_eq!(misses, 2, "two transforms compiled for forty renders");
+    assert_eq!(
+        hits,
+        4 * 40 - 2,
+        "every other question found the transforms kept"
+    );
+    assert_eq!(unbudgeted_misses, 4 * 40);
+}
+
+/// **A profile that will not parse is refused once a document**, its
+/// refusal kept as firmly as a transform: every later page reads the space
+/// by its alternate (8.6.5.5) without reading the profile again, and draws
+/// what a document with no budget draws.
+#[test]
+fn a_profile_that_will_not_parse_is_refused_once_a_document() {
+    let page = (
+        "<< /ColorSpace << /CS0 [/ICCBased 3 0 R] >> >>",
+        "/CS0 cs 0.9 0.1 0.1 sc 0 0 50 50 re f",
+    );
+    let bytes = document(
+        &[stream("/N 3", b"not an ICC profile")],
+        &[page, page, page],
+    );
+    let document = budgeted(bytes.clone(), 1 << 20);
+    let plain = Document::open(bytes).expect("it opens");
+    for index in 0..3 {
+        let (bitmap, stats) = counted(&document.page(index).expect("a page"), 72.0);
+        assert_eq!(
+            (stats.icc_transform_misses, stats.icc_transform_hits),
+            (u64::from(index == 0), u64::from(index > 0)),
+            "page {index}: {stats:?}"
+        );
+        let alone = plain
+            .page(index)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        same_render(&bitmap, &alone, &format!("page {index}"));
+    }
+}
+
+/// **Transforms and images share one budget and one order**: a page naming
+/// a profile and drawing an image under a budget with room for the image
+/// alone keeps the image and compiles the transforms at every render — the
+/// transforms, asked for first, are evicted for the image or never fit
+/// beside it — the bytes held never pass the budget, and every render draws
+/// what a document with no budget draws.
+#[test]
+fn transforms_and_images_share_one_budget() {
+    let bytes = document(
+        &[stream("/N 3", &rgb_profile()), rgb_image(10, 10, 6)],
+        &[(
+            "<< /ColorSpace << /CS0 [/ICCBased 3 0 R] >> /XObject << /I 4 0 R >> >>",
+            &format!(
+                "/CS0 cs 0.9 0.1 0.1 sc 0 0 50 50 re f {}",
+                draw("I", 50, 50, 50)
+            ),
+        )],
+    );
+    let budget = rgb_charge(10, 10);
+    let document = budgeted(bytes.clone(), budget);
+    let plain = Document::open(bytes)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    for render in 0..3 {
+        let (bitmap, stats) = counted(&document.page(0).expect("a page"), 72.0);
+        assert!(
+            stats.cache_bytes_held <= budget,
+            "render {render}: {stats:?}"
+        );
+        assert_eq!(
+            stats.icc_transform_misses, 1,
+            "render {render}: the transforms never stay beside the image"
+        );
+        same_render(&bitmap, &plain, &format!("render {render}"));
+    }
+}
