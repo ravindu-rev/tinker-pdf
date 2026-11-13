@@ -17,6 +17,7 @@ pub mod cmap;
 pub mod colr;
 pub mod cpal;
 pub mod encoding;
+pub mod facts;
 pub mod glyf;
 pub mod hint;
 pub mod outline;
@@ -43,6 +44,7 @@ pub use encoding::{
     base_char, base_glyph_name, glyph_name_for_char, glyph_name_to_char, BaseEncoding, BuiltInCode,
     BuiltInEncoding,
 };
+pub use facts::{face_facts, FaceFacts};
 pub use outline::{Outline, Segment};
 pub use sbix::{Graphic, Sbix, SbixGlyph, SbixRefusal, SbixStrike, StrikeChoice};
 pub use sfnt::{Sfnt, VerticalOrigins};

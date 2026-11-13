@@ -488,17 +488,25 @@ impl SubsetReport {
 /// cuts that the walk did not read.
 pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
     let work = editor.work().cloned();
-    apply_counting(editor, work.as_ref(), Parallelism::Serial)
+    apply_counting(editor, work.as_ref(), Parallelism::Serial, &BTreeSet::new())
 }
 
 /// [`apply`], counting into `work` when the operation is counting — the save
 /// door's tally, which is the editor's when it is counting and the save's own
 /// when it is not — and walking the pages on the threads `parallelism` names
 /// ([`collect`]).
+///
+/// `written` is the programs the save door's embedding pass wrote over this
+/// editor (`crate::embed`, `docs/design/font-embedding.md`): faces it has cut
+/// to the glyphs drawn already, which this passes over and does not report.
+/// Cut again they would come out no smaller, and be named
+/// [`UntouchedReason::SubsetNotSmaller`] in a report on the document's own
+/// programs. Every other caller hands an empty set.
 pub(crate) fn apply_counting(
     editor: &mut DocumentEditor,
     work: Option<&Arc<Work>>,
     parallelism: Parallelism,
+    written: &BTreeSet<ObjRef>,
 ) -> SubsetReport {
     let op = Operation::new(work.cloned());
     // Everything the walk reads, it reads from the view and nothing else: the
@@ -510,11 +518,11 @@ pub(crate) fn apply_counting(
     // shares with the editor by construction — and so are the streams the
     // walk decoded, which the view keys by the editor's numbers.
     let usage = match editor.view() {
-        Ok(view) => collect(&view, &op, parallelism),
+        Ok(view) => collect(&view, &op, parallelism, false),
         Err(_) => Usage::default(),
     };
     let doc = editor.shared_document();
-    rewrite(editor, &doc, &usage, &op)
+    rewrite(editor, &doc, &usage, &op, written)
 }
 
 /// A stream's bytes as the editor now has them, read once the pass: one the
@@ -535,15 +543,35 @@ fn bytes_of(editor: &DocumentEditor, r: ObjRef, op: &Operation) -> Option<Arc<Ve
 // The walk.
 // ---------------------------------------------------------------------------
 
+/// How many distinct codes the walk records for one font object
+/// ([`Usage::codes`]); a font shown more is in [`Usage::overflow`].
+pub(crate) const MAX_DRAWN_CODES: usize = 1 << 16;
+
 /// What the walk learned about one document.
 #[derive(Default)]
-struct Usage {
+pub(crate) struct Usage {
     /// The glyphs shown through each font object.
     glyphs: BTreeMap<ObjRef, BTreeSet<u16>>,
+    /// Whether the walk records [`Usage::codes`] and
+    /// [`Usage::direct_shown`], which only the embedding pass reads: a walk
+    /// for the font pass alone does no bookkeeping it does not use.
+    wants_codes: bool,
+    /// The codes shown through each font object, embedded or not: what the
+    /// save door's embedding pass reads a font with no program by
+    /// (`crate::embed`). At most [`MAX_DRAWN_CODES`] a font.
+    pub(crate) codes: BTreeMap<ObjRef, BTreeSet<u32>>,
+    /// The font objects shown more than [`MAX_DRAWN_CODES`] distinct codes,
+    /// whose [`Usage::codes`] is therefore not all of them.
+    pub(crate) overflow: BTreeSet<ObjRef>,
+    /// Fonts written **directly** into a resource dictionary that a walked
+    /// stream showed a code through, by `/BaseFont` as written, each with the
+    /// first dictionary met under that name. They have no object, so neither
+    /// pass can address them; the embedding pass names each it leaves.
+    pub(crate) direct_shown: BTreeMap<Vec<u8>, Dict>,
     /// Every font object a walked resource dictionary named.
     seen: BTreeSet<ObjRef>,
     /// Fonts this pass will not bound, and why.
-    unbounded: BTreeMap<ObjRef, UntouchedReason>,
+    pub(crate) unbounded: BTreeMap<ObjRef, UntouchedReason>,
     /// Programs embedded by a font written **directly** into a resource
     /// dictionary, against the `/BaseFont` of the first such font that named
     /// them.
@@ -574,6 +602,20 @@ impl Usage {
         self.unbounded.entry(font).or_insert(reason);
     }
 
+    /// Records a code shown through `font`, up to [`MAX_DRAWN_CODES`]
+    /// distinct ones; past that the font is in [`Usage::overflow`]. Whether a
+    /// font overflows is whether it was shown more distinct codes than the
+    /// bound, in whatever order the codes were met, so a walk folded from
+    /// pages on threads overflows exactly where the serial one does.
+    fn note_code(&mut self, font: ObjRef, code: u32) {
+        let codes = self.codes.entry(font).or_default();
+        if codes.len() < MAX_DRAWN_CODES || codes.contains(&code) {
+            codes.insert(code);
+        } else {
+            self.overflow.insert(font);
+        }
+    }
+
     /// Folds in what a later page's walk learned, as the serial walk would
     /// have met it after everything already here: every set is a union, and
     /// where the walk keeps the first value a key met — a refusal's reason
@@ -583,6 +625,15 @@ impl Usage {
     fn fold(&mut self, page: Usage) {
         for (font, glyphs) in page.glyphs {
             self.glyphs.entry(font).or_default().extend(glyphs);
+        }
+        for (font, codes) in page.codes {
+            for code in codes {
+                self.note_code(font, code);
+            }
+        }
+        self.overflow.extend(page.overflow);
+        for (base_font, dict) in page.direct_shown {
+            self.direct_shown.entry(base_font).or_insert(dict);
         }
         self.seen.extend(page.seen);
         for (font, reason) in page.unbounded {
@@ -638,9 +689,22 @@ impl Usage {
 /// still decoded once, and each page counts where it ran into the pass's
 /// tally (`Stats::pool_items_on_workers`). `Serial` walks the pages on the
 /// caller into one usage and counts no part.
-fn collect(doc: &Arc<CosDocument>, op: &Operation, parallelism: Parallelism) -> Usage {
+///
+/// `codes` asks the walk to record the codes shown through each font, and the
+/// fonts written into a resource dictionary it shows through, as well
+/// ([`Usage::codes`], [`Usage::direct_shown`]): what the embedding pass
+/// reads, and nothing the font pass does.
+pub(crate) fn collect(
+    doc: &Arc<CosDocument>,
+    op: &Operation,
+    parallelism: Parallelism,
+    codes: bool,
+) -> Usage {
     let pages = crate::stats::pages(doc, op.work());
-    let mut usage = Usage::default();
+    let mut usage = Usage {
+        wants_codes: codes,
+        ..Usage::default()
+    };
 
     if matches!(parallelism, Parallelism::Threads(threads) if threads > 0) {
         let walked = tinker_pdf_pool::map(&parallelism, pages.len(), |index| {
@@ -650,7 +714,10 @@ fn collect(doc: &Arc<CosDocument>, op: &Operation, parallelism: Parallelism) -> 
                 Counter::PoolItemsOnCaller
             };
             crate::stats::count(op.work().map(|work| &**work), here);
-            let mut page_usage = Usage::default();
+            let mut page_usage = Usage {
+                wants_codes: codes,
+                ..Usage::default()
+            };
             if let Some(page) = pages.get(index) {
                 walk_page(&mut page_usage, doc, page, op);
             }
@@ -800,7 +867,7 @@ fn walk_one(
                 let Some(scope) = stack.last() else {
                     continue;
                 };
-                show(usage, scope, glyph.font_id, glyph.code);
+                show(usage, doc, scope, glyph.font_id, glyph.code);
                 // A Type 3 glyph the interpreter *showed* is one whose
                 // procedure it did not run — no `/FontMatrix`, a code
                 // `/Differences` does not name, a procedure that does not
@@ -1187,8 +1254,9 @@ fn embedded_program(doc: &CosDocument, dict: &Dict) -> Option<ObjRef> {
     })
 }
 
-/// Records one glyph against the font that drew it.
-fn show(usage: &mut Usage, scope: &PageResources, font_id: u64, code: u32) {
+/// Records one glyph against the font that drew it, and the code it was
+/// shown by.
+fn show(usage: &mut Usage, doc: &CosDocument, scope: &PageResources, font_id: u64, code: u32) {
     let Some(object) = scope.font_object(font_id) else {
         // A font written directly into the resource dictionary. There is no
         // object to key a glyph against, and `sweep` — which walks objects —
@@ -1197,10 +1265,22 @@ fn show(usage: &mut Usage, scope: &PageResources, font_id: u64, code: u32) {
         // [`UntouchedReason::NotAnObject`], which is what makes that a
         // reported outcome rather than a silent one (ruling 10), and what
         // stops a program it *shares* with a font that does have an object
-        // from being cut to the other font's glyphs.
+        // from being cut to the other font's glyphs. The embedding pass
+        // cannot address one either, and names each it leaves from here.
+        if let Some(dict) = scope.font_dict(font_id).filter(|_| usage.wants_codes) {
+            let base_font = dict
+                .get_name(doc.intern(b"BaseFont"))
+                .and_then(|n| doc.name_bytes(n))
+                .map(|b| b.to_vec())
+                .unwrap_or_default();
+            usage.direct_shown.entry(base_font).or_insert(dict);
+        }
         return;
     };
     usage.seen.insert(object);
+    if usage.wants_codes {
+        usage.note_code(object, code);
+    }
 
     match scope.selection(font_id, code) {
         Some(chosen) if chosen.stated => {
@@ -1371,12 +1451,18 @@ fn rewrite(
     doc: &Arc<CosDocument>,
     usage: &Usage,
     op: &Operation,
+    written: &BTreeSet<ObjRef>,
 ) -> SubsetReport {
     let mut jobs: BTreeMap<ObjRef, Job> = BTreeMap::new();
     for site in sweep(editor, doc) {
         let Some(program) = program_of(editor, doc, &site) else {
             continue;
         };
+        // A face the embedding pass wrote is cut to what is drawn already
+        // ([`apply_counting`]).
+        if written.contains(&program) {
+            continue;
+        }
         let job = jobs.entry(program).or_insert_with(|| Job {
             sites: Vec::new(),
             glyphs: BTreeSet::new(),
@@ -1424,6 +1510,7 @@ fn rewrite(
     let covered: BTreeSet<u32> = jobs
         .keys()
         .chain(usage.direct.keys())
+        .chain(written.iter())
         .map(|program| program.num)
         .collect();
 
@@ -1974,7 +2061,7 @@ fn set_name(editor: &mut DocumentEditor, doc: &CosDocument, at: ObjRef, key: &[u
 ///
 /// The shape is exact — six upper-case letters then a plus — because anything
 /// looser eats a real name: `A+B` is a font called `A+B`.
-fn strip_tag(base_font: &[u8]) -> &[u8] {
+pub(crate) fn strip_tag(base_font: &[u8]) -> &[u8] {
     if base_font.len() > 7
         && base_font[6] == b'+'
         && base_font[..6].iter().all(|b| b.is_ascii_uppercase())
@@ -2092,6 +2179,62 @@ mod tests {
             "folded in another order, the report would change"
         );
         assert_eq!(backwards.direct[&program], b"DirectB".to_vec());
+    }
+
+    /// The codes the embedding pass reads are joined across pages and bounded
+    /// at [`MAX_DRAWN_CODES`] distinct ones a font, and whether a font passes
+    /// the bound is the same whatever order its codes were met in: a font
+    /// past it overflows on the serial walk and on a fold of pages that are
+    /// each under it.
+    #[test]
+    fn the_codes_a_walk_records_are_bounded_whatever_order_they_are_met_in() {
+        let font = ObjRef::new(5, 0);
+        let wanting = || Usage {
+            wants_codes: true,
+            ..Usage::default()
+        };
+        let bound = u32::try_from(MAX_DRAWN_CODES).expect("the bound is a code count");
+
+        let mut serial = wanting();
+        for code in 0..bound {
+            serial.note_code(font, code);
+        }
+        assert!(serial.overflow.is_empty(), "the bound itself is held");
+        serial.note_code(font, 7);
+        assert!(serial.overflow.is_empty(), "a code met again is no new one");
+        serial.note_code(font, bound);
+        assert!(serial.overflow.contains(&font), "one past it overflows");
+        assert_eq!(serial.codes[&font].len(), MAX_DRAWN_CODES);
+
+        let half = bound / 2 + 1;
+        let mut first = wanting();
+        for code in 0..half {
+            first.note_code(font, code);
+        }
+        let mut second = wanting();
+        for code in half..2 * half {
+            second.note_code(font, code);
+        }
+        assert!(first.overflow.is_empty() && second.overflow.is_empty());
+        let mut folded = wanting();
+        folded.fold(first);
+        folded.fold(second);
+        assert!(
+            folded.overflow.contains(&font),
+            "pages each under the bound are past it together"
+        );
+
+        let mut a = wanting();
+        a.note_code(font, 65);
+        a.note_code(font, 66);
+        let mut b = wanting();
+        b.note_code(font, 66);
+        b.note_code(font, 67);
+        let mut joined = wanting();
+        joined.fold(a);
+        joined.fold(b);
+        assert_eq!(joined.codes[&font], BTreeSet::from([65, 66, 67]));
+        assert!(joined.overflow.is_empty());
     }
 }
 

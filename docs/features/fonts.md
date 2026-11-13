@@ -470,6 +470,24 @@ flag there would be one the crate carrying it cannot act on.
 is what it buys — a redacted document's embedded face does not keep the
 removed letters' outlines unless somebody asked it to.
 
+**Missing fonts embedded, when asked** (`docs/design/font-embedding.md`). The
+same door embeds, under `SaveOptions::embed`, the face a provider drew a font
+with that embeds no program, so the rewritten document draws as that face drew
+it with no provider at all: a simple font — Type 1, the standard 14 included,
+or TrueType — whose descriptor names no `/FontFile*` stream, the face cut to
+the glyphs the pages drew through the renderer's own reading of it, a TrueType
+face as `/FontFile2` under `/TrueType` and a CFF one as `/FontFile3 /Type1C`
+under `/Type1`, named after the face behind a subset tag, its encoding and
+`/Widths` kept and checked by reading the font back before it is written. A
+code the face has no glyph for, a face whose `OS/2` `fsType` forbids embedding
+or a subset, and a composite font leave the font as it was, named;
+[writing](writing.md) has the report. `tinker_pdf_font::face_facts` reads what
+a face states of itself for the descriptor — its PostScript name (`name` ID 6,
+or a CFF's Name INDEX), `fsType`, `sFamilyClass`, box, ascent, descent, cap
+and x heights (`OS/2`'s, else the tops of the glyphs `H` and `x`), italic
+angle, pitch and a CFF's `StdVW` — in thousandths of an em, and nothing it
+does not state.
+
 **A collection is rebuilt as the face it was read as.** `Sfnt::parse` takes a
 `ttcf` by its first member, since a PDF embedding a collection has no way to
 say which member it means, and `subset` declares `Sfnt::version`, the

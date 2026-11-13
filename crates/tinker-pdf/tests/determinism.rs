@@ -5612,6 +5612,65 @@ fn a_patched_render_reproduces_the_edited_pages_fingerprint() {
     );
 }
 
+mod embed_support;
+
+/// The two rewrites `the_rewritten_document_with_embedded_faces_is_the_same_bytes_on_every_target`
+/// hashes, each document's SHA-256 in hex and the two joined, hashed again.
+const EMBEDDED_REWRITE: &str = "";
+
+/// **The bytes a save that embeds missing fonts writes** (FT-12.3,
+/// `docs/design/font-embedding.md`): a standard-14 page and an unembedded
+/// TrueType page, each drawn through the same synthetic provider face and
+/// saved with `SaveOptions::embed` asking for it.
+///
+/// The pass writes a program cut from a face, a descriptor computed from the
+/// face's tables, `/Widths` from the standard metrics and a subset tag hashed
+/// from the cut, none of which a render sees all of: a descriptor's numbers,
+/// an unreferenced object or the order objects are allocated in draw the same
+/// page. So the written bytes have a claim of their own, as the synthesised
+/// document's have. The provider is the host's in both builds, so the bytes
+/// are one value in a default build and a `bundled-fonts` one.
+#[test]
+fn the_rewritten_document_with_embedded_faces_is_the_same_bytes_on_every_target() {
+    use tinker_pdf::write::{save, SaveOptions};
+    use tinker_pdf::FontEmbedding;
+
+    let face = embed_support::sans();
+    let provider = embed_support::provider(face.truetype());
+    let mut joined = Vec::new();
+    for source in [
+        embed_support::standard_page("Hello World"),
+        embed_support::truetype_page(&face, "Hello World"),
+    ] {
+        let document = Document::open(source.clone())
+            .expect("it opens")
+            .with_fonts(Arc::clone(&provider));
+        let mut editor = document.editor();
+        let saved = save(
+            &mut editor,
+            &SaveOptions {
+                embed: FontEmbedding::Embed(Arc::clone(&provider)),
+                ..SaveOptions::default()
+            },
+        );
+        // The documents this hash is about, asserted rather than assumed: one
+        // face embedded in each, and nothing left.
+        let report = saved.embedded.clone().expect("the pass was asked for");
+        assert_eq!(report.embedded.len(), 1, "{report:?}");
+        assert!(report.left.is_empty(), "{report:?}");
+        written_support::rewritten("a rewrite with an embedded face", &source, &saved.bytes);
+        joined.extend_from_slice(sha(&saved.bytes).as_bytes());
+    }
+    let hash = sha(&joined);
+    assert_eq!(
+        hash, EMBEDDED_REWRITE,
+        "the rewrite with embedded faces is not the bytes it was. If two targets \
+         disagree, this is a determinism bug; if the pass changed on purpose, \
+         read the documents first, then paste:\n\n\
+         const EMBEDDED_REWRITE: &str = \"{hash}\";\n"
+    );
+}
+
 /// What `builder` writes, held to the validate-on-save helper as a document
 /// this engine wrote from nothing it did not write.
 #[track_caller]

@@ -257,7 +257,15 @@ are each hashed as *bytes*, which is where object numbering, dictionary key
 order and stream framing are pinned — none of which a rendered hash can see.
 `a_book_is_stable_at_each_page_box_and_the_two_boxes_differ` asserts the
 two-box claim above: the book is stable at 432 x 648 and at 600 x 800, and
-the two differ in bytes and in page count.
+the two differ in bytes and in page count. A fourth pins the save door's
+embedding pass (`docs/design/font-embedding.md`):
+`the_rewritten_document_with_embedded_faces_is_the_same_bytes_on_every_target`
+saves a standard-14 page and an unembedded TrueType page with
+`SaveOptions::embed` asking a synthetic face, built byte by byte in
+`tests/embed_support`, and holds the two documents' hashes, joined and hashed,
+to a committed value: the cut program, the descriptor computed from the
+face's tables, the widths written and the subset tag are bytes a render does
+not see all of.
 
 **The engine's own sRGB profile** is pinned as bytes too:
 `the_first_party_srgb_profile_is_one_byte_string_on_every_target` holds the
@@ -335,8 +343,9 @@ not green".
 **The determinism roster** (`xtask/src/determinism.rs`) names them:
 `determinism.rs`'s render fingerprints and the same pages drawn in bands, the
 patched page's, its SVG output's hashes, its three synthesised documents' byte
-hashes, the first-party sRGB profile's bytes, the ICC transforms' answers and
-the version 5 page, its display list's replay of
+hashes and its rewrite with embedded faces, the first-party sRGB profile's
+bytes, the ICC transforms' answers and the version 5 page, its display list's
+replay of
 every fingerprinted page and the same pages drawn through a warm and a
 starved document cache, and under a warm and a starved budget stated at open,
 and the `icc` and `tiling` pages twice through one document, the second

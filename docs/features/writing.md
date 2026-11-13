@@ -257,8 +257,8 @@ the facade's, and it runs `subset::apply` first **unless asked not to** —
 cutting every embedded program down to the glyphs the document still draws
 ([fonts](fonts.md), [editing](editing.md)). `SaveOptions` is `WriteOptions`
 verbatim plus `fonts: FontPolicy`, whose default is `FontPolicy::Subset` —
-`FontPolicy::Keep` is the other value and there is no third — `images`, below,
-`stats`, which counts the save's work, and `parallelism`, the threads the
+`FontPolicy::Keep` is the other value and there is no third — `images` and
+`embed`, below, `stats`, which counts the save's work, and `parallelism`, the threads the
 font pass's walk may spend, handed to the writer in place of
 `WriteOptions::parallelism` where it asks for any.
 
@@ -409,6 +409,46 @@ two tables as 128 bytes in natural order, because this door takes the
 caller's tables and the CLI chooses none (ruling 11); the report is printed an
 image a line.
 
+**Missing fonts, on the same door, off by default.** `SaveOptions::embed` is a
+`FontEmbedding`, `Leave` by default: the pass is not entered, and a save writes
+what it wrote before the pass existed. `Embed(provider)` embeds, for each font
+the pages draw whose dictionary — a composite font's descendant's — names no
+`/FontFile*` stream, the face that provider answers, chained with the bundled
+faces in a `bundled-fonts` build as a document opened with it draws, cut to
+the glyphs drawn (`docs/design/font-embedding.md`). It runs after the image
+pass and before the font pass, on the font pass's own walk, which records the
+codes shown through each font object; the provider is asked once a font with
+`FontRequest::read`'s request; and each drawn code's glyph is the renderer's
+own reading of the substituted face (`resources::substitute_choice`). A
+TrueType answer is embedded as `/FontFile2` under `/Subtype /TrueType`, a CFF
+one — bare, or an `OpenType/CFF` face's `CFF ` table — as `/FontFile3
+/Subtype /Type1C` under `/Subtype /Type1` (Table 124). The font gets a new
+descriptor — its own entries kept where it had one, `/FontName`, `/Flags` with
+the symbolic bit as the font had it, each metric key Table 120 requires that
+it lacks from the face's own tables (`tinker_pdf_font::face_facts`), and no
+`/FontFile*`, `/CharSet` or `/CIDSet` describing another program — the face's
+PostScript name behind a 9.9.2 subset tag, its `/Encoding` and `/ToUnicode`
+as they were, and its `/Widths` as they were; a font with none, the standard
+14, is given the widths it was laid out with over the drawn codes' range.
+Before a font's objects commit, the font is read back through the editor and
+each drawn code asked what a reader of the new file asks — its glyph, through
+the embedded program's mapping and the renderer's own functions, its width
+and its text — and a code that differs from what the document drew and read
+puts everything back. The new programs are cut by the pass whatever
+`SaveOptions::fonts` says, and the font pass passes over them, so its report
+is of the document's own programs. `Saved::embedded` is `None` for `Leave`,
+and otherwise an `EmbedReport`: `embedded`, each `EmbeddedFont` with its font,
+the `/BaseFont` written, its program, its `EmbeddedFormat` and the face's,
+the cut's and the glyphs' counts; and `left`, each `LeftFont` with its
+`LeftReason` — `Declined`, `Unreadable`, `EmbeddingForbidden` and
+`SubsettingForbidden` (the face's `OS/2` `fsType`, 9.9.1), `NotAnObject`,
+`FieldResource`, `Type3Resource`, `TooManyCodes`, `NoGlyph { code }`,
+`DrawsOtherwise { code }`, `NotSubsettable` and `Composite`. A font that
+embeds a program, and a Type 3 font, is no candidate and is not reported. An
+incremental save appends the new programs with the dictionaries that name
+them, and the original file, which embedded none, keeps nothing of the
+pass's.
+
 **Counted work, on the same door.** `SaveOptions::stats` (off) asks the save
 to count what it does, and `Saved::stats` hands it back: an `Option<Stats>`
 that is `None` unless asked ([rendering](rendering.md) names the counters). A
@@ -486,6 +526,10 @@ of the page before the edit, by the rectangle the edit changed
 | JPEG for four components or an image that is not eight bits | `UntouchedImageReason::Components { count }`, `Depth { bits }` | baseline T.81 as `jpeg_encode` writes it: one or three components, eight bits | [filters](filters.md) |
 | A recoding no smaller than what the file stored | `UntouchedImageReason::NotSmaller` | the stored stream is both smaller and the producer's own | — |
 | Recoding into an incremental save | `ImageOutcome::RecodedButTheOriginalsRemain` | 7.5.6: every stored image stays in the prefix, so the file grows; the pass still runs, because the recoded streams are what a reader draws | 7.5.6 |
+| Embedding a missing font whose face's licence forbids embedding it, or a subset of it | `LeftReason::EmbeddingForbidden`, `LeftReason::SubsettingForbidden` | a face's `OS/2` `fsType` is its licence, and the pass embeds a subset (`a_face_whose_licence_forbids_it_is_left`) | 9.9.1 |
+| Embedding a missing font whose face reaches a drawn code only as `.notdef`, or only by the code as a glyph number | `LeftReason::NoGlyph { code }` | embedding would make the missing glyph permanent, where a reader with a better face draws it (`a_code_the_face_has_no_glyph_for_leaves_the_font`) | 9.6.6.4 |
+| Embedding a missing font that is written directly into a resource dictionary, that a form field's `/DA` may draw with, or that a Type 3 font's own `/Resources` names | `LeftReason::NotAnObject`, `FieldResource`, `Type3Resource` | there is no object to address; a field may draw any character; the codes are credited to another font | 12.7.3.3, 9.6.5 |
+| Embedding a missing composite font | `LeftReason::Composite` | the pass embeds simple fonts; a composite font is [ROADMAP](../ROADMAP.md) FT-12 | 9.7 |
 
 ## Verified
 
@@ -621,6 +665,26 @@ decoder's truncation. `what_cannot_be_kept_is_left_whole_by_name` reaches
 every `UntouchedImageReason` a page can, and
 `a_hostile_document_never_panics_the_pass` saves mutated documents under three
 policies.
+
+The embedding pass is `crates/tinker-pdf/tests/embed_missing.rs`, over faces
+`tests/embed_support` builds byte by byte, each glyph a box of its own size so
+another glyph is other pixels.
+`a_rewritten_document_draws_as_its_provider_face_drew_it` renders a
+standard-14 page and an unembedded TrueType page through the provider, saves
+each asking for the pass, and renders and reads the output with no provider
+at all: the same fingerprint, the same text, a TrueType font that embeds a
+subset named after the face, and the output held to the strict validator.
+`the_embedded_face_is_cut_to_the_drawn_glyphs` reads the cut back glyph by
+glyph; `a_cff_answer_is_embedded_as_type1c` takes a bare CFF and an
+`OpenType/CFF` face; `the_new_faces_are_cut_whatever_the_font_policy` holds
+`FontPolicy::Keep` and `Subset` to one cut and the font pass's report to the
+document's own programs; and the rest reach every `LeftReason` a simple font
+can — a declined request, the three `fsType` refusals beside the permissions
+that embed, a code the face has no glyph for, a face with no `cmap`, a font
+written into the resources, one a field's `/DA` names, one a Type 3 font's
+`/Resources` names and a composite font — and
+`a_save_that_asks_for_nothing_embeds_nothing` holds a save of a document
+missing no program to the bytes of one that did not ask.
 
 `crates/tinker-pdf-cos/tests/encrypt_on_save.rs` round-trips encrypted
 output ([encryption](encryption.md)); `tests/page_operations.rs` and the

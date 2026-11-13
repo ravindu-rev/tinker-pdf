@@ -118,6 +118,23 @@
 //! the prefix, so a smaller file is not what it produces, and
 //! [`ImageOutcome::RecodedButTheOriginalsRemain`] says so.
 //!
+//! # Missing fonts, embedded when asked
+//!
+//! [`SaveOptions::embed`] is a [`FontEmbedding`], **off by default** as the
+//! image pass is: [`FontEmbedding::Leave`] never enters the pass, so a save
+//! writes what it wrote before the pass existed. Asked with a provider, the
+//! save embeds, for each font the pages draw whose dictionary embeds no
+//! program, the face that provider answers — the face the page was drawn
+//! with — cut to the glyphs drawn, and reports each font embedded or left,
+//! with its reason, on [`Saved::embedded`] (`docs/design/font-embedding.md`,
+//! `crate::embed`). It runs between the image pass and the font pass: it
+//! reads content streams, as the font pass does, and writes none, and the
+//! programs it writes are cut already, so the font pass is handed them and
+//! passes over them, whatever [`SaveOptions::fonts`] says of the document's
+//! own. An incremental save appends them with the dictionaries that name
+//! them; the original file embedded none, so nothing of the pass's is left
+//! in its prefix.
+//!
 //! # Appending, and reading what was appended
 //!
 //! [`append`] is the edit-and-reopen door (`docs/design/performance.md`,
@@ -145,10 +162,14 @@
 //! applies to all of it, and a caller who wants a signed document with subset
 //! fonts subsets, rewrites, reopens and signs that.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tinker_pdf_cos::{DocumentEditor, FullOpen, WriteMode, WriteOptions};
 
+pub use crate::embed::{
+    EmbedReport, EmbeddedFont, EmbeddedFormat, FontEmbedding, LeftFont, LeftReason,
+};
 pub use crate::recode::{
     BilevelCodec, ContinuousCodec, ImageCoding, ImagePolicy, ImageRecoding, ImageReport,
     JpegTables, Recoded, UntouchedImage, UntouchedImageReason,
@@ -199,6 +220,12 @@ pub struct SaveOptions {
     /// What happens to the image XObjects, before the fonts. [`ImagePolicy::Keep`]
     /// — the default — leaves every image stream as the file stored it.
     pub images: ImagePolicy,
+    /// What happens to the fonts the pages draw and the document embeds no
+    /// program for, after the images and before the font pass.
+    /// [`FontEmbedding::Leave`] — the default — embeds nothing;
+    /// [`FontEmbedding::Embed`] names the provider whose faces are embedded,
+    /// each cut to the glyphs drawn (`docs/design/font-embedding.md`).
+    pub embed: FontEmbedding,
     /// Count what the save does and hand it back as [`Saved::stats`]: the
     /// image and font passes' walks of the page tree, the font dictionaries
     /// and forms' scopes the font pass reads, and every stream the passes and
@@ -344,6 +371,11 @@ pub struct Saved {
     pub fonts: SubsetOutcome,
     /// What [`SaveOptions::images`] asked for, and what came of it.
     pub images: ImageOutcome,
+    /// What [`SaveOptions::embed`] asked for, and what came of it: `None`
+    /// for [`FontEmbedding::Leave`], which runs nothing, and otherwise every
+    /// font the pages draw that embeds no program, embedded or left, with its
+    /// reason — an empty report where there was none.
+    pub embedded: Option<EmbedReport>,
     /// What [`SaveOptions::stats`] asked to be counted: `None` unless it
     /// asked.
     pub stats: Option<Stats>,
@@ -405,10 +437,22 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
             }
         }
     };
+    // Missing fonts next, so the font pass's walk sees what this wrote: the
+    // programs it hands back are cut already, and the font pass passes over
+    // them whatever `options.fonts` says of the document's own.
+    let (embedded, written) = match &options.embed {
+        FontEmbedding::Leave => (None, BTreeSet::new()),
+        FontEmbedding::Embed(provider) => {
+            let (report, written) =
+                crate::embed::apply(editor, provider, work.as_ref(), options.parallelism);
+            (Some(report), written)
+        }
+    };
     let fonts = match options.fonts {
         FontPolicy::Keep => SubsetOutcome::Kept,
         FontPolicy::Subset => {
-            let report = subset::apply_counting(editor, work.as_ref(), options.parallelism);
+            let report =
+                subset::apply_counting(editor, work.as_ref(), options.parallelism, &written);
             match options.write.mode {
                 WriteMode::Rewrite => SubsetOutcome::Cut(report),
                 // 7.5.6: the original bytes are the output's prefix, the
@@ -432,6 +476,7 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
         bytes: editor.save_counted(&write, work.as_deref()),
         fonts,
         images,
+        embedded,
         stats: work.filter(|_| options.stats).map(|work| work.stats()),
     }
 }

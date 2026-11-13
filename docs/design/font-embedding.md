@@ -173,14 +173,18 @@ programs legally embeddable for universal rendering, which these are.
 ### What the face drew
 
 For each drawn code the pass asks which glyph the face drew for it: the
-renderer's own choice of glyph in a substituted face (`substituted_glyph` in
-`resources.rs`, `docs/design/fallback-faces.md` and
-`docs/design/symbol-faces.md`), as a function the renderer and this pass both
-call, never a second resolver. A code whose glyph is `.notdef` — no step of
-the substitute's reading reached one — leaves the font (`NoGlyph { code }`):
-embedding the face would make a missing glyph permanent in every reader,
-where a reader with a better face draws it today, and ISO 19005's `.notdef`
-clauses (6.2.11.8, 6.2.10.9) refuse such a reference whatever the face.
+renderer's own choice of glyph in a substituted face
+(`resources::substitute_choice`, which the renderer's `substituted_glyph`
+calls; `docs/design/fallback-faces.md` and `docs/design/symbol-faces.md`), as
+a function the renderer and this pass both call, never a second resolver. A
+code whose glyph is `.notdef` — no step of the substitute's reading reached
+one — leaves the font (`NoGlyph { code }`): embedding the face would make a
+missing glyph permanent in every reader, where a reader with a better face
+draws it today, and ISO 19005's `.notdef` clauses (6.2.11.8, 6.2.10.9) refuse
+such a reference whatever the face. So does a code a face with nothing to be
+read by — no `cmap`, no glyph names, no `ROS` — reaches only by the glyph
+number the code gives: that is 9.6.6.4's closing guess, which the face does
+not state.
 
 ### How the dictionary, descriptor and program change
 
@@ -224,7 +228,8 @@ key follows the outlines, and the `/Subtype` follows the key.
   the PostScript name of the font the subset was cut from, and that font is the
   face. The face's name ID 6 — or a CFF's Name INDEX entry — where it is one to
   sixty-three printable ASCII characters outside `[](){}<>/%`, else the
-  document's `/BaseFont` with any tag taken off. The tag is
+  document's `/BaseFont` with any tag taken off, else `Embedded`, so a tag
+  always stands before a name. The tag is
   `tinker_pdf_cos::subset_tag` of the cut program, the function every subset
   this engine writes is named by. `/BaseFont`, the descriptor's `/FontName`
   and a composite font's descendant's `/BaseFont` take the one name, as the
@@ -388,12 +393,12 @@ document's.
 pub enum FontEmbedding { Leave, Embed(Arc<dyn FontProvider>) }
 
 pub struct EmbedReport {
-    pub embedded: Vec<Embedded>,      // font-object order
-    pub left: Vec<Left>,              // font-object order, direct fonts last
+    pub embedded: Vec<EmbeddedFont>,  // font-object order
+    pub left: Vec<LeftFont>,          // font-object order, direct fonts last
     pub warnings: Vec<EmbedWarning>,  // font, then code
 }
 
-pub struct Embedded {
+pub struct EmbeddedFont {
     pub font: ObjRef,
     pub base_font: String,            // as now written, tag included
     pub program: ObjRef,
@@ -403,7 +408,7 @@ pub struct Embedded {
     pub glyphs: usize,                // glyphs asked for
 }
 
-pub struct Left { pub font: Option<ObjRef>, pub base_font: String, pub reason: LeftReason }
+pub struct LeftFont { pub font: Option<ObjRef>, pub base_font: String, pub reason: LeftReason }
 
 pub enum EmbedWarning {
     WidthMismatch { font: ObjRef, code: u32, dictionary: f64, program: f64 },

@@ -112,6 +112,11 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "a_v5_profiled_page_renders_the_same_on_every_target",
     },
+    // The bytes a save that embeds missing fonts writes (FT-12).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "the_rewritten_document_with_embedded_faces_is_the_same_bytes_on_every_target",
+    },
     // The archival packet's hash.
     Fingerprint {
         file: "crates/tinker-pdf/tests/pdfa_writer.rs",
