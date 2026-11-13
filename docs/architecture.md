@@ -17,8 +17,8 @@ These are given; this document states each boundary, not the argument.
   a user's artifact and never touches document bytes at runtime: `proptest`,
   `criterion`, `cargo-fuzz`, `PyO3`, `wasm-bindgen`, `maturin`, `csbindgen`,
   and cachegrind, the host instruction counter the benchmark set's count
-  mode runs under, admitted as H-16's default admits it: it executes the
-  bench and judges no document.
+  mode runs under, admitted on the bench machine by ruling 23's answer to
+  H-16: it executes the bench and judges no document.
   Anything else — including "just a small helper" like a hash or a
   bit-reader — is out, and `cargo deny check` fails on such crates by name
   (`deny.toml`). The policy lives in that check, run locally as a change's

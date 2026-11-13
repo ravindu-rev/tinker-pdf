@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
 use xtask::{
-    bench, corpus, determinism, diff, fetch, footprint, fuzzaudit, parity, peaks, release,
+    bench, corpus, count, determinism, diff, fetch, footprint, fuzzaudit, parity, peaks, release,
     repo_root, version,
 };
 
@@ -141,6 +141,21 @@ bindings-parity options:
                                          median beyond the bound by more than the
                                          band, eight rounds of ten beyond it, and
                                          tier P's reading beside it
+  cargo xtask bench-count --group NAME [--part K/N] [--base REV] [--head REV]
+                                         count the group's operations, or every
+                                         N-th of its list from the K-th, at the
+                                         base and at the head under valgrind's
+                                         cachegrind: each side checked out and
+                                         built under {work}, each
+                                         operation run in count mode at one
+                                         iteration and at two, the second less
+                                         the first its warm iteration. A head
+                                         whose call counts more than {rise} % above
+                                         its base's fails; a fall, and an
+                                         operation new at the head, are
+                                         reported. The head defaults to HEAD
+                                         and the base to the head's parent;
+                                         cachegrind runs on Linux
   cargo xtask footprint --profile NAME --gzipped BYTES [options]
                                          hold a profile's gzipped wasm to its
                                          figure in bindings/js/footprint.json
@@ -195,7 +210,10 @@ corpus-run options:
 /// [`USAGE`], its defaults filled in from the constants the tasks use, so
 /// the text cannot name one the code does not set.
 fn usage() -> String {
-    USAGE.replace("{timeout}", &corpus::DEFAULT_TIMEOUT_SECONDS.to_string())
+    USAGE
+        .replace("{timeout}", &corpus::DEFAULT_TIMEOUT_SECONDS.to_string())
+        .replace("{work}", count::WORK_DIR)
+        .replace("{rise}", &count::RISE_PERCENT.to_string())
 }
 
 fn main() -> ExitCode {
@@ -269,6 +287,7 @@ fn main() -> ExitCode {
         "corpus-peaks" => one("corpus-peaks", peaks::run(&repo_root(), rest)),
         "corpus-names" => one("corpus-names", corpus::names(&repo_root(), rest)),
         "bench-check" => one("bench-check", bench::run(&repo_root(), rest)),
+        "bench-count" => one("bench-count", count::run(&repo_root(), rest)),
         "synth-face" => one("synth-face", synth_face(rest)),
         "help" | "-h" | "--help" => {
             print!("{}", usage());
@@ -1128,6 +1147,17 @@ const SPAWNERS: &[(&str, &str)] = &[
          the answer only decides whether to refuse the run",
     ),
     (
+        "xtask/src/count.rs",
+        "PERMANENT: `git` checks the base and the head out as worktrees of \
+         this repository, `cargo` builds each one's release `tpdf` and bench \
+         binary, and `valgrind` runs that bench binary in count mode under \
+         cachegrind, the host instruction counter ruling 23 admits on the \
+         bench machine (H-16). Each builds or executes this repository's own \
+         code and adjudicates nothing about a document: a count is the \
+         counter's figure for what the bench executed, and holding the \
+         head's to the base's is this file's own",
+    ),
+    (
         "xtask/tests/corpus_diff.rs",
         "PERMANENT: runs this revision's own `xtask` binary, which cargo builds \
          for the test, over two reports the test wrote, to hold what its \
@@ -1672,6 +1702,23 @@ mod tests {
             !text.contains("{timeout}"),
             "a placeholder is left unfilled"
         );
+    }
+
+    /// `bench-count`'s usage text names the task, the directory it checks
+    /// the two sides out in and the rise it fails above, both read from the
+    /// constants the task uses, and no placeholder is left unfilled.
+    #[test]
+    fn the_usage_text_names_the_count_gate() {
+        let text = usage();
+        assert!(text.contains("cargo xtask bench-count --group NAME [--part K/N]"));
+        assert!(text.contains(&format!("built under {}, each", count::WORK_DIR)));
+        assert!(text.contains(&format!("more than {} % above", count::RISE_PERCENT)));
+        for placeholder in ["{work}", "{rise}"] {
+            assert!(
+                !text.contains(placeholder),
+                "{placeholder} is left unfilled"
+            );
+        }
     }
 
     /// `bench-check`'s usage text names every relation the committed

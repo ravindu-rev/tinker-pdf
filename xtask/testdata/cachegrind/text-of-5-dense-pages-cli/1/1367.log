@@ -1,0 +1,11 @@
+==1367== Cachegrind, a cache and branch-prediction profiler
+==1367== Copyright (C) 2002-2017, and GNU GPL'd, by Nicholas Nethercote et al.
+==1367== Using Valgrind-3.19.0 and LibVEX; rerun with -h for copyright info
+==1367== Command: /target/release/deps/text-2bc186b284ba082d
+==1367== Parent PID: 1
+==1367== 
+--1367-- warning: L3 cache found, using its data for the LL simulation.
+--1367-- warning: specified LL cache: line_size 64  assoc 1  total_size 201,326,592
+--1367-- warning: simulated LL cache: line_size 64  assoc 2  total_size 268,435,456
+==1367== 
+==1367== I   refs:      42,134,350

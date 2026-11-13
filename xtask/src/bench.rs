@@ -1728,7 +1728,7 @@ pub const GROUP_OPENED: &str = "Group::new(c, ";
 /// `benchmark_group` and `bench_function` and run under criterion alone.
 ///
 /// `calibration` is the one: its file is the same input and call as the text
-/// group's `text of 100 dense pages`, kept apart so that nothing a later row
+/// group's `text of 5 dense pages`, kept apart so that nothing a later row
 /// adds can move it, and a change to it re-states every calibrated target,
 /// which is the owner's (H-77, `docs/design/performance.md`). Count mode
 /// counts that input and call as the text group's operation.

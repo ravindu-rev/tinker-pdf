@@ -30,6 +30,7 @@ recorded in the roadmap row it closes:
 | The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner |
 | The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
 | The benches | `cargo bench -p tinker-pdf`, then `cargo xtask bench-check --machine NAME` |
+| Instruction counts, on Linux | `cargo xtask bench-count --group NAME`, a group or a part of one at a time, with valgrind installed |
 | Peak memory, on Linux | `cargo test --release -p tinker-pdf --test peak_memory -- --ignored`, in both builds |
 | The bindings | each surface built, then `cargo xtask bindings-parity --require-all` |
 | The wasm footprint | each profile built as `release.yml`'s npm job builds it, `RUSTFLAGS='-D warnings' wasm-pack build --release --target web --out-dir pkg bindings/js`, with `-- --features bundled-fonts` for that profile, then `cargo xtask footprint --profile NAME --gzipped BYTES --run REV@HOST --date DAY`, the bytes `gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm \| wc -c` |
@@ -961,18 +962,45 @@ a group file that reaches criterion's own `bench_function` or
 criterion alone; its input and call are the text group's
 `text of 5 dense pages`, which count mode runs.
 
-**A count run counts each operation's instructions.** The release bench
-binary and `tpdf` are built, and every operation of the set runs in count mode
-under cachegrind (`--cache-sim=no`, every child traced, so a CLI operation's
-`tpdf` counts with the bench), at one iteration and at two, twice over: the
-second count less the first is one warm iteration's instructions. A run that
-does not exit 0 and print its `RAN` line, or a process with no count, fails
-the run. Each operation's two figures, their spread — the larger less the
-smaller, over the smaller — and its seconds are kept as each is counted, so a
-run cut off keeps what it counted. cachegrind is in the dev-tooling exemption
-([architecture](architecture.md)): it executes the bench and judges no
-document. `calibration` has no count mode, and its input and call are the
-text group's `text of 5 dense pages`.
+**`cargo xtask bench-count` holds a head's instruction counts to its
+base's.** It counts one group, `--group NAME`, or a part of one,
+`--part K/N`: every N-th operation of the head's list from the K-th. The head
+is `--head REV`, `HEAD` unless named, and the base `--base REV`, the head's
+parent unless named, so a change is counted against its parent. Each side is
+checked out as a detached worktree of the repository under
+`target/bench-count/<commit>` and builds its release `tpdf` and the group's
+release bench binary there, into a target directory of its own, so a CLI
+operation runs its own side's `tpdf`. The checkouts and their builds stay, so
+the next part of one pair builds nothing again, and `git worktree remove`
+takes one out; a directory there that is not its commit's checkout is
+refused, and so is a checkout whose bench harness has no count mode, before
+anything is built.
+
+Every operation of the part runs in count mode under cachegrind — with
+`--cache-sim=no`, its own output file discarded, and every child traced so
+that a CLI operation's `tpdf` counts with the bench, each process writing a
+log of its own — at one iteration and at two, on each side. A run's count is
+the sum of its logs' `I refs`, and the second run less the first is one warm
+iteration's instructions, start-up and the inputs' construction cancelled;
+`TINKER_BENCH_FIXTURES` is cleared for the runs, so that both build the same
+inputs. A run that does not exit 0 and print its `RAN` line, a process whose
+log holds no count, and a warm iteration that counts nothing each fail the
+task by name.
+
+Each operation's line is printed as it is counted: the change in a call's
+instructions — each side's warm iteration over the `calls` its own list gives
+the operation, so a change to `calls` moves neither side — then the head's
+warm iteration and the base's. A head more than 1 % above its base fails, and
+a fall is printed and never failed, one-sided like every gate here. An
+operation the base's list does not hold is new at the head: counted, printed
+and not judged. One the head's list no longer holds is named and not counted.
+`calibration` has no count mode, and the task refuses it: its input and call
+are the text group's `text of 5 dense pages`. cachegrind runs on Linux, where
+the Linux leg's container needs it installed, and is in the dev-tooling
+exemption ([architecture](architecture.md)): it executes the bench and judges
+no document. The task is the one that starts it, with `git` and `cargo` to
+check out and build this repository's own code, so `xtask/src/count.rs` has
+its row in the `SPAWNERS` list `cargo xtask oracles` holds, with that reason.
 
 Run 41204196780 counted all 141 operations of the set, a share at a time,
 each share twice at one revision, which is what a base and a head cost, so a
