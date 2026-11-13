@@ -1,5 +1,16 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, the document search (FT-21.4).* **Three more rows, the caps a
+//! search reading attached PDFs stands on.** `MAX_ATTACHMENT_DEPTH` bounds how
+//! many levels of attached document a search opens, one inside the other;
+//! `MAX_ATTACHMENT_BYTES` how many decoded bytes an attachment may hold for it
+//! to be opened, under the stream decoder's own ceiling; and
+//! `MAX_SEARCHED_ATTACHMENTS` how many attachments one search reads at every
+//! level together. Past each the attachment is named in what the search did
+//! not read, never passed over in silence. Each `fixtures` is the cap — the
+//! firing test builds one more of each — and the three yardsticks are zeros,
+//! because none of the container paths attaches a file.
+//!
 //! *Amended, separations (RC-04).* **Two more rows, a pair over one render's
 //! plates.** `MAX_SPOT_PLATES` caps the spot plates a page's separations
 //! keep, and `MAX_PLATE_BYTES` the bytes of plates a render holds at once,
@@ -612,6 +623,7 @@ use tinker_pdf::xps::{
     MAX_XPS_SEGMENTS,
 };
 use tinker_pdf::{MAX_ANNOTATION_BYTES, MAX_ASSOCIATED_FILE_BYTES, MAX_OUTPUT_INTENT_BYTES};
+use tinker_pdf::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_DEPTH, MAX_SEARCHED_ATTACHMENTS};
 use tinker_pdf_color::icc::{
     MAX_CALC_DEPTH, MAX_CALC_OPERATIONS, MAX_CALC_STACK, MAX_CALC_TEMPORARIES, MAX_CALC_WORK,
     MAX_CLUT_ENTRIES, MAX_ICC_BYTES, MAX_ICC_TAGS, MAX_MPE_ELEMENTS, MAX_NAMED_COLOURS,
@@ -737,6 +749,10 @@ const SEPARATIONS_TESTS: &str = include_str!("separations.rs");
 /// targets whose ceilings a path stands on, the generators whose caps a
 /// structured target's path stands on, and the sources of the caps it reads
 /// that are not public constants.
+/// The document search's three caps on attached documents, declared beside
+/// the search that spends them and fired by its suite.
+const DOCUMENT_SEARCH: &str = include_str!("../src/document_search.rs");
+const DOCUMENT_SEARCH_TESTS: &str = include_str!("document_search.rs");
 const FUZZ_MANIFEST: &str = include_str!("../../../fuzz/Cargo.toml");
 const FUZZ_LIMITS: &str = include_str!("../../../fuzz/limits.tsv");
 const FUZZ_ASCII_FILTERS: &str = include_str!("../../../fuzz/fuzz_targets/ascii_filters.rs");
@@ -3091,6 +3107,65 @@ fn ledger() -> Vec<Bound> {
                 SEPARATIONS_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_ATTACHMENT_DEPTH",
+            cap: MAX_ATTACHMENT_DEPTH as u128,
+            published: "4",
+            // The firing test nests five attached PDFs and reads four.
+            fixtures: MAX_ATTACHMENT_DEPTH as u128,
+            // None of the three paths attaches a file.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // Each level is a PDF inside its parent's embedded file stream,
+            // and a PDF holding a page and an attachment is far more than 512
+            // bytes, so a 4 GiB file holds millions of levels.
+            reachable: (1u128 << 32) / 512,
+            reachable_because: "attached PDFs nested in a 4 GiB file, each level at least 512 bytes",
+            declared_in: DOCUMENT_SEARCH,
+            fires_in: (
+                "an_attachment_past_the_caps_is_reported_not_searched",
+                DOCUMENT_SEARCH_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_ATTACHMENT_BYTES",
+            cap: MAX_ATTACHMENT_BYTES as u128,
+            published: "32 MiB",
+            // The firing test attaches a byte more than the cap.
+            fixtures: MAX_ATTACHMENT_BYTES as u128,
+            comic: 0,
+            document: 0,
+            book: 0,
+            // An embedded file stream decodes to the stream decoder's own
+            // ceiling and no further.
+            reachable: tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128,
+            reachable_because: "an embedded file stream decoded to the decoder's 128 MiB ceiling",
+            declared_in: DOCUMENT_SEARCH,
+            fires_in: (
+                "an_attachment_past_the_caps_is_reported_not_searched",
+                DOCUMENT_SEARCH_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_SEARCHED_ATTACHMENTS",
+            cap: MAX_SEARCHED_ATTACHMENTS as u128,
+            published: "256",
+            // The firing test attaches one more than the cap.
+            fixtures: MAX_SEARCHED_ATTACHMENTS as u128,
+            comic: 0,
+            document: 0,
+            book: 0,
+            // One document's `/EmbeddedFiles` tree is read to
+            // `MAX_TREE_ENTRIES` entries, before any level below it.
+            reachable: tinker_pdf_cos::limits::MAX_TREE_ENTRIES as u128,
+            reachable_because: "one /EmbeddedFiles tree read to MAX_TREE_ENTRIES entries",
+            declared_in: DOCUMENT_SEARCH,
+            fires_in: (
+                "an_attachment_past_the_caps_is_reported_not_searched",
+                DOCUMENT_SEARCH_TESTS,
+            ),
+        },
     ]
 }
 
@@ -3159,8 +3234,10 @@ fn segment_size() -> u128 {
 /// its calculator `MAX_CALC_OPERATIONS`, `MAX_CALC_STACK`, `MAX_CALC_DEPTH`,
 /// `MAX_CALC_TEMPORARIES` and `MAX_CALC_WORK`, and its spectral connection
 /// space `MAX_SPECTRAL_STEPS`; and separations add the plate cap,
-/// `MAX_SPOT_PLATES`, and the plates' byte bound, `MAX_PLATE_BYTES`. All
-/// **seventy-nine** are here, and a bound added without a row fails this.
+/// `MAX_SPOT_PLATES`, and the plates' byte bound, `MAX_PLATE_BYTES`; and the
+/// document search's attached documents add `MAX_ATTACHMENT_DEPTH`,
+/// `MAX_ATTACHMENT_BYTES` and `MAX_SEARCHED_ATTACHMENTS`. All **eighty-two**
+/// are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -3246,6 +3323,9 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_SPECTRAL_STEPS",
             "MAX_SPOT_PLATES",
             "MAX_PLATE_BYTES",
+            "MAX_ATTACHMENT_DEPTH",
+            "MAX_ATTACHMENT_BYTES",
+            "MAX_SEARCHED_ATTACHMENTS",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -3351,7 +3431,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 79, "the ledger is seventy-nine rows");
+    assert_eq!(measured, 82, "the ledger is eighty-two rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -3383,7 +3463,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 79, "the ledger is seventy-nine rows");
+    assert_eq!(ledger().len(), 82, "the ledger is eighty-two rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -3699,6 +3779,7 @@ fn every_bound_names_a_test_that_exists() {
         ICC_CALC,
         ICC_SPECTRAL,
         SEPARATIONS_TESTS,
+        DOCUMENT_SEARCH_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),

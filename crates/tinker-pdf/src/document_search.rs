@@ -53,6 +53,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tinker_pdf_content::{
@@ -111,6 +112,10 @@ pub struct SearchSources {
     pub outline: bool,
     /// The attachments' names, file names and descriptions.
     pub attachments: bool,
+    /// The PDFs attached to the document, each searched with the same
+    /// options to [`MAX_ATTACHMENT_DEPTH`] levels, [`MAX_ATTACHMENT_BYTES`]
+    /// each and [`MAX_SEARCHED_ATTACHMENTS`] in one search.
+    pub attached_documents: bool,
 }
 
 impl SearchSources {
@@ -121,6 +126,7 @@ impl SearchSources {
         form_fields: true,
         outline: true,
         attachments: true,
+        attached_documents: true,
     };
 
     /// The page text alone.
@@ -130,8 +136,67 @@ impl SearchSources {
         form_fields: false,
         outline: false,
         attachments: false,
+        attached_documents: false,
     };
 }
+
+/// How many levels of attached document a search reads into: the document
+/// searched holds level 1's attachments, a PDF attached inside one of them
+/// is level 2, and an attached PDF past the last level is not opened and is
+/// named in [`DocumentSearch::unsearched`] with
+/// [`UnsearchedReason::TooDeep`].
+///
+/// A bound on recursion: each level opens a document inside the one above
+/// it, held while the search reads it.
+///
+/// | | Levels |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 4 |
+/// | Any other fixture here: `tests/document_search.rs`'s nested attachments | 2 |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **4** |
+///
+/// The three zeros are facts about what those paths write: none of them
+/// attaches a file.
+pub const MAX_ATTACHMENT_DEPTH: usize = 4;
+
+/// How many decoded bytes an attachment may hold for a search to open it: an
+/// attachment that decodes to more is not opened and is named in
+/// [`DocumentSearch::unsearched`] with [`UnsearchedReason::TooLarge`].
+///
+/// A bound on what a search holds: an attached document is held while the
+/// search reads it, one a level. The stream decoder's own ceiling,
+/// `MAX_DECODED_STREAM`, stands in front of it.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 32 MiB |
+/// | Any other fixture here: `tests/document_search.rs`'s attached PDFs | under 64 KiB (estimate, not summed) |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **32 MiB** |
+pub const MAX_ATTACHMENT_BYTES: usize = 32 << 20;
+
+/// How many attachments one search reads, at every level together: past it
+/// no further attachment's bytes are decoded, and each one the search
+/// reaches is named in [`DocumentSearch::unsearched`] with
+/// [`UnsearchedReason::TooMany`].
+///
+/// A bound on work: each attachment read is decoded, and an attached PDF
+/// opened and searched.
+///
+/// | | Attachments |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 256 |
+/// | Any other fixture here: `tests/document_search.rs`'s | under 8 |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **256** |
+pub const MAX_SEARCHED_ATTACHMENTS: usize = 256;
 
 impl Default for SearchSources {
     fn default() -> SearchSources {
@@ -249,6 +314,9 @@ pub struct SearchHit {
     /// Up to [`HIT_CONTEXT`] characters of its last line after it, as
     /// stated.
     pub after: String,
+    /// The attachments the document it was found in is filed under,
+    /// outermost first; empty in the document searched.
+    pub attachment_path: Vec<String>,
     /// Where it starts.
     start: SearchPosition,
     /// Where it ends.
@@ -322,10 +390,20 @@ pub struct Unsearched {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnsearchedReason {
-    /// It is encrypted and no password has opened it.
+    /// It is encrypted and no password has opened it: for an attached PDF,
+    /// the empty password, which the search tries.
     PasswordRequired,
     /// It is encrypted with a handler this build does not implement.
     UnsupportedEncryption,
+    /// An attached PDF past [`MAX_ATTACHMENT_DEPTH`] levels.
+    TooDeep,
+    /// An attachment that decodes to more than [`MAX_ATTACHMENT_BYTES`].
+    TooLarge,
+    /// An attachment past [`MAX_SEARCHED_ATTACHMENTS`] in one search.
+    TooMany,
+    /// An attachment with no stream, a stream that does not decode, or bytes
+    /// that begin as a PDF and that `Document::open` refuses.
+    Unreadable,
 }
 
 /// A search of a whole document: a cursor through its hits, in the order the
@@ -341,14 +419,26 @@ pub enum UnsearchedReason {
 /// the few pages it stands on.
 pub struct DocumentSearch {
     doc: Document,
+    /// The needle as the caller gave it, for the searches of attached
+    /// documents.
+    needle_text: String,
     options: DocumentSearchOptions,
     /// The folded needle; `None` finds nothing.
     needle: Option<Needle>,
+    /// How many levels of attached document this one is inside: 0 for the
+    /// document searched.
+    depth: usize,
+    /// The attachments this document is filed under, outermost first.
+    path: Vec<String>,
+    /// How many attachments the whole search has read, at every level.
+    read: Arc<AtomicUsize>,
     /// Each stretch's reader — the page text's, then each other source's —
     /// built when the cursor first reaches it; `None` for a stretch left out.
     readers: [Option<Reader>; STRETCHES],
     /// Whether each stretch's reader has been built.
     built: [bool; STRETCHES],
+    /// The attached documents, listed when the cursor first reaches them.
+    attached: Option<Attached>,
     /// The cursor's position.
     position: Spot,
     /// The scan `next` continues, and its stretch, while the position is
@@ -360,8 +450,9 @@ pub struct DocumentSearch {
     unsearched: Vec<Unsearched>,
 }
 
-/// How many stretches one document's text is read as: its pages, its
-/// annotations, its form fields, its outline and its attachments.
+/// How many stretches one document's text is read as before its attached
+/// documents: its pages, its annotations, its form fields, its outline and
+/// its attachments.
 const STRETCHES: usize = 5;
 
 impl Document {
@@ -374,43 +465,82 @@ impl Document {
     /// [`DocumentSearch::unsearched`].
     #[must_use]
     pub fn search(&self, needle: &str, options: &DocumentSearchOptions) -> DocumentSearch {
+        DocumentSearch::new(
+            self,
+            needle,
+            options,
+            0,
+            Vec::new(),
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
+}
+
+/// Why `doc` cannot be read, as a search names it; `None` when it can.
+fn unreadable(doc: &Document) -> Option<UnsearchedReason> {
+    match doc.readable() {
+        Ok(()) => None,
+        Err(DocumentError::PasswordRequired) => Some(UnsearchedReason::PasswordRequired),
+        Err(DocumentError::UnsupportedEncryption) => Some(UnsearchedReason::UnsupportedEncryption),
+    }
+}
+
+impl DocumentSearch {
+    /// A search of `doc`, `depth` levels of attached document down, filed
+    /// under `path`, counting the attachments it reads into `read`.
+    fn new(
+        doc: &Document,
+        needle: &str,
+        options: &DocumentSearchOptions,
+        depth: usize,
+        path: Vec<String>,
+        read: Arc<AtomicUsize>,
+    ) -> DocumentSearch {
         let mut unsearched = Vec::new();
-        let readable = match self.readable() {
-            Ok(()) => true,
-            Err(error) => {
-                unsearched.push(Unsearched {
-                    attachment_path: Vec::new(),
-                    reason: match error {
-                        DocumentError::PasswordRequired => UnsearchedReason::PasswordRequired,
-                        DocumentError::UnsupportedEncryption => {
-                            UnsearchedReason::UnsupportedEncryption
-                        }
-                    },
-                });
-                false
-            }
-        };
+        let reason = unreadable(doc);
+        if let Some(reason) = reason {
+            unsearched.push(Unsearched {
+                attachment_path: path.clone(),
+                reason,
+            });
+        }
         DocumentSearch {
-            doc: self.clone(),
+            doc: doc.clone(),
+            needle_text: needle.to_string(),
             options: options.clone(),
-            needle: Needle::new(needle, &options.search).filter(|_| readable),
+            needle: Needle::new(needle, &options.search).filter(|_| reason.is_none()),
+            depth,
+            path,
+            read,
             readers: Default::default(),
             built: [false; STRETCHES],
+            attached: None,
             position: Spot::START,
             stream: None,
             pending: VecDeque::new(),
             unsearched,
         }
     }
-}
 
-impl DocumentSearch {
     /// The last hit that ends at or before the cursor's position, the
     /// position moved to its start; `None`, the position moved to the
     /// document's start, where there is none.
     pub fn previous(&mut self) -> Option<SearchHit> {
         self.stream = None;
         self.pending.clear();
+        // The attached documents first, where the position is in or past
+        // them.
+        let attached = match &self.position {
+            Spot::Attached { index, inner } => Some(Some((*index as usize, (**inner).clone()))),
+            Spot::End => Some(None),
+            Spot::Text { .. } | Spot::Item { .. } => None,
+        };
+        if let Some(to) = attached {
+            if let Some(hit) = self.previous_attached(to) {
+                self.position = hit.start.0.clone();
+                return Some(hit);
+            }
+        }
         let (from, local) = split(&self.position).unwrap_or((STRETCHES - 1, Spot::End));
         for stretch in (0..=from).rev() {
             let to = if stretch == from {
@@ -418,11 +548,12 @@ impl DocumentSearch {
             } else {
                 Spot::End
             };
+            let path = self.path.clone();
             let Some(reader) = self.reader(stretch) else {
                 continue;
             };
             if let Some(raw) = reader.previous_before(&to) {
-                let hit = reader.hit(stretch, raw);
+                let hit = reader.hit(stretch, raw, path);
                 self.position = hit.start.0.clone();
                 return Some(hit);
             }
@@ -444,7 +575,10 @@ impl DocumentSearch {
         self.pending.clear();
     }
 
-    /// What the search reached and could not read.
+    /// What the search reached and could not read, each once however often
+    /// the cursor passed it: the document searched where no password has
+    /// opened it, and each attachment it reached and did not search, with
+    /// the attachment path it sits under.
     #[must_use]
     pub fn unsearched(&self) -> &[Unsearched] {
         &self.unsearched
@@ -513,6 +647,274 @@ impl DocumentSearch {
         }
         None
     }
+
+    /// The next hit of the stretches before the attached documents, from
+    /// `from`, the scan kept for the next call.
+    fn next_in_stretches(&mut self, from: &Spot) -> Option<SearchHit> {
+        if self.stream.is_none() {
+            self.pending.clear();
+            self.stream = match split(from) {
+                Some((stretch, local)) => self.stream_from(stretch, &local),
+                None => None,
+            };
+        }
+        loop {
+            while let Some(hit) = self.pending.pop_front() {
+                if hit.start.0 >= *from {
+                    return Some(hit);
+                }
+            }
+            let (stretch, mut stream) = self.stream.take()?;
+            let path = self.path.clone();
+            let reader = self.readers.get_mut(stretch).and_then(Option::as_mut)?;
+            let mut decided = VecDeque::new();
+            let more = stream.pump(reader, &mut decided);
+            for raw in decided {
+                self.pending
+                    .push_back(reader.hit(stretch, raw, path.clone()));
+            }
+            self.stream = if more {
+                Some((stretch, stream))
+            } else {
+                // The stretch is read: the next one's scan, from its start.
+                self.stream_from(stretch + 1, &Spot::START)
+            };
+        }
+    }
+
+    /// The attached documents, listed now where the cursor has not reached
+    /// them; `None` where the options leave them out or the document is not
+    /// read.
+    fn attached(&mut self) -> Option<&mut Attached> {
+        if !self.options.sources.attached_documents || self.needle.is_none() {
+            return None;
+        }
+        if self.attached.is_none() {
+            let attachments = self.doc.attachments();
+            self.attached = Some(Attached {
+                standing: vec![None; attachments.len()],
+                attachments,
+                open: None,
+            });
+        }
+        self.attached.as_mut()
+    }
+
+    /// Names `reason` for the attachment `name` of this document, once.
+    fn report(&mut self, name: &str, reason: UnsearchedReason) {
+        let mut attachment_path = self.path.clone();
+        attachment_path.push(name.to_string());
+        merge(
+            &mut self.unsearched,
+            [Unsearched {
+                attachment_path,
+                reason,
+            }],
+        );
+    }
+
+    /// Closes the attached document's search that is open, keeping what it
+    /// could not read.
+    fn close_attached(&mut self) {
+        if let Some((_, search)) = self.attached.as_mut().and_then(|a| a.open.take()) {
+            merge(&mut self.unsearched, search.unsearched);
+        }
+    }
+
+    /// The search of attachment `index`, opened now where another is open or
+    /// none is; `None` for an attachment that is no document, or that this
+    /// search could not read, which is named.
+    fn attached_search(&mut self, index: usize) -> Option<&mut DocumentSearch> {
+        let open_now = self
+            .attached
+            .as_ref()
+            .and_then(|attached| attached.open.as_ref())
+            .is_some_and(|(open, _)| *open == index);
+        if !open_now {
+            self.close_attached();
+            let attached = self.attached.as_ref()?;
+            let attachment = attached.attachments.get(index)?.clone();
+            let standing = attached.standing.get(index).copied().flatten();
+            let outcome = match standing {
+                Some(Standing::NotADocument | Standing::Unsearched) => return None,
+                Some(Standing::Document) => self.open_attachment(&attachment, false),
+                None => self.open_attachment(&attachment, true),
+            };
+            let (standing, search) = match outcome {
+                Ok(doc) => {
+                    let mut path = self.path.clone();
+                    path.push(attachment.name.clone());
+                    let search = DocumentSearch::new(
+                        &doc,
+                        &self.needle_text,
+                        &self.options,
+                        self.depth + 1,
+                        path,
+                        Arc::clone(&self.read),
+                    );
+                    (Standing::Document, Some(search))
+                }
+                Err(Some(reason)) => {
+                    self.report(&attachment.name, reason);
+                    (Standing::Unsearched, None)
+                }
+                Err(None) => (Standing::NotADocument, None),
+            };
+            let attached = self.attached.as_mut()?;
+            if let Some(slot) = attached.standing.get_mut(index) {
+                *slot = Some(standing);
+            }
+            attached.open = search.map(|search| (index, Box::new(search)));
+        }
+        self.attached
+            .as_mut()?
+            .open
+            .as_mut()
+            .map(|(_, search)| search.as_mut())
+    }
+
+    /// Attachment `attachment` opened as a document, read under the caps:
+    /// counted against [`MAX_SEARCHED_ATTACHMENTS`] where `first` is its first
+    /// read; `Err(None)` for bytes that are no PDF, and the reason a PDF, or
+    /// what may be one, is not searched otherwise.
+    fn open_attachment(
+        &self,
+        attachment: &tinker_pdf_cos::Attachment,
+        first: bool,
+    ) -> Result<Document, Option<UnsearchedReason>> {
+        if first {
+            let read = self.read.fetch_add(1, Ordering::Relaxed);
+            if read >= MAX_SEARCHED_ATTACHMENTS {
+                self.read.fetch_sub(1, Ordering::Relaxed);
+                return Err(Some(UnsearchedReason::TooMany));
+            }
+        }
+        let stream = attachment
+            .stream
+            .ok_or(Some(UnsearchedReason::Unreadable))?;
+        let bytes = self
+            .doc
+            .cos()
+            .stream_decoded(stream)
+            .map_err(|_| Some(UnsearchedReason::Unreadable))?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(Some(UnsearchedReason::TooLarge));
+        }
+        let head = bytes.get(..PDF_HEADER_WINDOW).unwrap_or(&bytes);
+        if !head.windows(5).any(|window| window == b"%PDF-") {
+            return Err(None);
+        }
+        if self.depth + 1 > MAX_ATTACHMENT_DEPTH {
+            return Err(Some(UnsearchedReason::TooDeep));
+        }
+        let doc = Document::open(bytes).map_err(|_| Some(UnsearchedReason::Unreadable))?;
+        if doc.is_encrypted() && doc.auth_level() == crate::AuthLevel::None {
+            // The search has no password for an attached document but the
+            // empty one, which a document encrypted only to restrict
+            // permissions opens with.
+            let _ = doc.authenticate("");
+        }
+        match unreadable(&doc) {
+            Some(reason) => Err(Some(reason)),
+            None => Ok(doc),
+        }
+    }
+
+    /// The first hit of the attached documents from attachment `index`'s
+    /// position `inner`, or from the first one's start.
+    fn next_attached(&mut self, from: Option<(usize, Spot)>) -> Option<SearchHit> {
+        let count = self.attached()?.attachments.len();
+        let (mut index, mut inner) = from.unwrap_or((0, Spot::START));
+        while index < count {
+            if let Some(search) = self.attached_search(index) {
+                if search.position != inner {
+                    search.seek(SearchPosition(inner.clone()));
+                }
+                let hit = search.next();
+                let found = search.unsearched.clone();
+                merge(&mut self.unsearched, found);
+                if let Some(hit) = hit {
+                    return Some(within_attachment(index, hit));
+                }
+            }
+            index += 1;
+            inner = Spot::START;
+        }
+        None
+    }
+
+    /// The last hit of the attached documents to attachment `index`'s
+    /// position `inner`, or to the last one's end.
+    fn previous_attached(&mut self, to: Option<(usize, Spot)>) -> Option<SearchHit> {
+        let count = self.attached()?.attachments.len();
+        let last = count.checked_sub(1)?;
+        let (mut index, mut inner) = match to {
+            Some((index, inner)) if index <= last => (index, inner),
+            _ => (last, Spot::End),
+        };
+        loop {
+            if let Some(search) = self.attached_search(index) {
+                search.seek(SearchPosition(inner.clone()));
+                let hit = search.previous();
+                let found = search.unsearched.clone();
+                merge(&mut self.unsearched, found);
+                if let Some(hit) = hit {
+                    return Some(within_attachment(index, hit));
+                }
+            }
+            index = index.checked_sub(1)?;
+            inner = Spot::End;
+        }
+    }
+}
+
+/// How far into an attachment's bytes the search looks for `%PDF-`, as
+/// `Document::open` looks for a header.
+const PDF_HEADER_WINDOW: usize = 1024;
+
+/// The attached documents a search reads, after the document's own stretches.
+struct Attached {
+    /// The document's attachments, in name order, as its listing gives them.
+    attachments: Vec<tinker_pdf_cos::Attachment>,
+    /// What each attachment turned out to be, once read.
+    standing: Vec<Option<Standing>>,
+    /// The attachment whose search is open, and its search: one at a time.
+    open: Option<(usize, Box<DocumentSearch>)>,
+}
+
+/// What an attachment turned out to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Standing {
+    /// A document the search reads.
+    Document,
+    /// Bytes that are no PDF, whose contents are no source.
+    NotADocument,
+    /// What the search could not read, which it named.
+    Unsearched,
+}
+
+/// `entries` added to `list`, each once.
+fn merge(list: &mut Vec<Unsearched>, entries: impl IntoIterator<Item = Unsearched>) {
+    for entry in entries {
+        if !list.contains(&entry) {
+            list.push(entry);
+        }
+    }
+}
+
+/// A hit an attached document's search found, its positions inside
+/// attachment `index` of the document.
+fn within_attachment(index: usize, mut hit: SearchHit) -> SearchHit {
+    let index = index_u32(index);
+    hit.start = SearchPosition(Spot::Attached {
+        index,
+        inner: Box::new(hit.start.0),
+    });
+    hit.end = SearchPosition(Spot::Attached {
+        index,
+        inner: Box::new(hit.end.0),
+    });
+    hit
 }
 
 impl Iterator for DocumentSearch {
@@ -523,40 +925,21 @@ impl Iterator for DocumentSearch {
     /// document's end, past the last.
     fn next(&mut self) -> Option<SearchHit> {
         let from = self.position.clone();
-        if self.stream.is_none() {
-            self.pending.clear();
-            self.stream = match split(&from) {
-                Some((stretch, local)) => self.stream_from(stretch, &local),
-                None => None,
-            };
-        }
-        loop {
-            while let Some(hit) = self.pending.pop_front() {
-                if hit.start.0 >= from {
-                    self.position = hit.end.0.clone();
-                    return Some(hit);
+        let hit = match &from {
+            Spot::Attached { index, inner } => {
+                self.next_attached(Some((*index as usize, (**inner).clone())))
+            }
+            Spot::End => None,
+            Spot::Text { .. } | Spot::Item { .. } => match self.next_in_stretches(&from) {
+                Some(hit) => Some(hit),
+                None => {
+                    self.stream = None;
+                    self.next_attached(None)
                 }
-            }
-            let Some((stretch, mut stream)) = self.stream.take() else {
-                self.position = Spot::End;
-                return None;
-            };
-            let Some(reader) = self.readers.get_mut(stretch).and_then(Option::as_mut) else {
-                self.position = Spot::End;
-                return None;
-            };
-            let mut decided = VecDeque::new();
-            let more = stream.pump(reader, &mut decided);
-            for raw in decided {
-                self.pending.push_back(reader.hit(stretch, raw));
-            }
-            self.stream = if more {
-                Some((stretch, stream))
-            } else {
-                // The stretch is read: the next one's scan, from its start.
-                self.stream_from(stretch + 1, &Spot::START)
-            };
-        }
+            },
+        };
+        self.position = hit.as_ref().map_or(Spot::End, |hit| hit.end.0.clone());
+        hit
     }
 }
 
@@ -581,7 +964,7 @@ fn split(spot: &Spot) -> Option<(usize, Spot)> {
                 within,
             },
         )),
-        Spot::End => None,
+        Spot::Attached { .. } | Spot::End => None,
     }
 }
 
@@ -629,6 +1012,9 @@ enum Spot {
         unit: u32,
         within: u32,
     },
+    /// In the attached documents: position `inner` of the search of
+    /// attachment `index`, in the document's listing order.
+    Attached { index: u32, inner: Box<Spot> },
     /// The end of the document's text.
     End,
 }
@@ -1214,7 +1600,7 @@ impl Reader {
     /// document's: its positions the document's, and its place a source's
     /// string and the bytes of it the hit covers where it is not the page
     /// text's.
-    fn hit(&self, stretch: usize, raw: RawHit) -> SearchHit {
+    fn hit(&self, stretch: usize, raw: RawHit, attachment_path: Vec<String>) -> SearchHit {
         let item = self
             .items
             .as_ref()
@@ -1228,6 +1614,7 @@ impl Reader {
             text: raw.text,
             before: raw.before,
             after: raw.after,
+            attachment_path,
             start: SearchPosition(joined(stretch, raw.start)),
             end: SearchPosition(joined(stretch, raw.end)),
         }
@@ -1331,7 +1718,7 @@ impl Reader {
     fn line_at_or_after(&mut self, spot: &Spot) -> Option<LineAt> {
         match *spot {
             Spot::Text { page, line, .. } => self.first_line_from(page, line),
-            Spot::Item { .. } | Spot::End => None,
+            Spot::Item { .. } | Spot::Attached { .. } | Spot::End => None,
         }
     }
 

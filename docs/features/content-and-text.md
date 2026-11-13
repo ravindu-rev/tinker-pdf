@@ -997,6 +997,23 @@ lines as they join a page's:
 for `/RC`, in its character data — and `AnnotationText` and `AttachmentText`
 name which string.
 
+**Attached documents.** With `SearchSources::attached_documents`, after the
+document's own sources, each attachment is read through the stream reference
+`Document::attachments` hands back and decoded under the stream decoder's
+ceiling; bytes that begin `%PDF-` within their first kilobyte are opened with
+`Document::open`, the empty password tried where they are encrypted, and
+searched by a search of their own with the same options, in name order and
+depth first, one held open at a time. Every hit found there carries the
+attachments it was found under in `SearchHit::attachment_path`, outermost
+first. Any other bytes are no document, and their contents are not searched.
+Three caps bound it: `MAX_ATTACHMENT_DEPTH` levels of attached document,
+`MAX_ATTACHMENT_BYTES` of decoded bytes each and `MAX_SEARCHED_ATTACHMENTS` read
+in one search at every level; each attachment a cap, a password or an
+unreadable stream stops is named in `unsearched()` with its path and its
+`UnsearchedReason` — `TooDeep`, `TooLarge`, `TooMany`, `PasswordRequired`,
+`UnsupportedEncryption` or `Unreadable` — once however often the cursor passes
+it (ruling 10).
+
 ```rust
 let options = DocumentSearchOptions { keep_paragraphs: true, ..Default::default() };
 for hit in doc.search("quarterly results", &options) {
@@ -1387,6 +1404,8 @@ crate has an API of its own; see [architecture](../architecture.md).
 | A command stream that would have its reader hold more than its budgets — 2^24 records, 2^30 bytes, cells nested 8 deep, functions 32 and colour spaces or halftones 8 | `CommandError::OverBudget { budget }`, naming which | a stream is a host's bytes, and every length, count and reference in it is hostile: refused whole rather than read in part, under budgets a caller can set (`Budgets`) | [design](../design/command-stream.md) |
 | A command stream of a newer major version, or of this minor or older carrying a kind it does not define | `CommandError::NewerMajor { found, read }`, `CommandError::UnknownRecord { kind }` | a newer minor only adds kinds and appends fields, which a reader steps over; a newer major may change what any record means, and an unknown kind of a minor this build reads is damage | [design](../design/command-stream.md) |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
+| A document search reading an attached PDF more than 4 levels down, an attachment decoding to more than 32 MiB, or more than 256 attachments in one search | `UnsearchedReason::TooDeep`, `TooLarge` and `TooMany` beside `MAX_ATTACHMENT_DEPTH`, `MAX_ATTACHMENT_BYTES` and `MAX_SEARCHED_ATTACHMENTS` | each attachment past a cap is named in `DocumentSearch::unsearched` with its path, never counted as having no hit (ruling 10) | [design](../design/document-search.md) |
+| A document search reaching a document no password opens: the document searched, or an attached PDF the empty password does not open | `UnsearchedReason::PasswordRequired`, `UnsupportedEncryption` | the search has no password of its own to try but the empty one; the document is named in `unsearched` and nothing in it is read | [design](../design/document-search.md) |
 | Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says, and `TextOptions::split_ligatures` divides its box among the letters that names, which shapes nothing. Bidi *reordering* is not refused: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
 | L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, on a page that declares no direction for it (a structure element's `/WritingMode`, above), a line of a right-to-left paragraph that holds nothing left to right and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an ellipsis, a straight or closing-form quotation mark used to open; `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's known limit, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark where `/ToUnicode` names the typed character (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`) — where it names the mirrored glyph, `»` for `«`, the line reads like a dash — nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו`. A mark of several characters reads reversed as well, in the order drawn: the line `<p dir="rtl">?! שלום</p>` draws reads `שלום !?` where nothing declares its direction. The EPUB writer's book declares it, and reads `?! שלום` as typed, the mark styled apart or not (`a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`) | ruling 14 |
 | Telling apart two texts UAX #9 draws alike | — | the algorithm is not one-to-one, so no reader can: `logical_order` returns the first order its search reaches that draws the line, and says which (`שלום now 2026`, not `שלום 2026 now`). Some of `BidiCharacterTest.txt`'s lines, each holding a bracket pair, read back as another text the same picture could be (N0 pairs brackets in logical order, and they are drawn mirrored). The paragraph's direction is such a choice where the line alone cannot make it: with no `dir`, a line with Arabic at both ends and a Latin run in brackets between, `… عوامل عدّة (HDAC). وقد …`, is a left-to-right paragraph's, its pair drawn facing inward — exactly the line a right-to-left paragraph whose `/ToUnicode` names the mirrored glyph draws for `وقد … (HDAC) … عوامل عدّة` — and on a page that declares no direction for it, it reads as that one, `(HDAC).` coming back `.)HDAC(`: both readings draw the line, and ruling 14's bracket tie-break counts only a pair facing outward. A page that declares the line's direction (a structure element's `/WritingMode`, above) reads it as typed, as the EPUB writer's book does. Pinned by `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin` | ruling 14 |
@@ -1606,9 +1625,14 @@ aside at a join, an encrypted document named in `unsearched`, each source
 found once where it is and not when it is left out (a built annotation's
 `/Contents`, a value set through `set_field_value`, `outline-3level.pdf`'s
 `Chapter 1` on none of its pages, an attachment's name and description), an
-annotation's rich text, subject and author with its pop-up passed over, and
-the sources read in order and backwards in reverse; the module's own tests
-count the pages a forward search extracts.
+annotation's rich text, subject and author with its pop-up passed over, the
+sources read in order and backwards in reverse, a hit inside an attached PDF
+and inside a PDF attached to that one named with its path, PDFs nested five
+deep with the fifth named `TooDeep`, an attachment a byte past the size cap
+and one past the count cap named, and the committed AES-256 fixture attached
+and named `PasswordRequired` beside one the empty password opens; the
+module's own tests count the pages a forward search extracts.
+`bounds_ledger.rs` holds the three caps to their rows.
 
 The `text` and `optional` determinism render fingerprints in
 `crates/tinker-pdf/tests/determinism.rs` exercise this path directly. The

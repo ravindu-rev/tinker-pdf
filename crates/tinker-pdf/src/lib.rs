@@ -299,6 +299,7 @@ pub use display::DisplayList;
 pub use document_search::{
     AnnotationText, AttachmentText, DocumentSearch, DocumentSearchOptions, HitPlace, PageQuads,
     SearchHit, SearchPosition, SearchSources, Unsearched, UnsearchedReason, HIT_CONTEXT,
+    MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_DEPTH, MAX_SEARCHED_ATTACHMENTS,
 };
 /// Images a page draws, with their samples before any colour conversion and
 /// the space they are in, behind [`Page::images`].

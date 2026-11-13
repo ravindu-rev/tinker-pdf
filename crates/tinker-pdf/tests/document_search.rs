@@ -1067,3 +1067,300 @@ fn the_sources_are_read_in_order_and_backwards_in_reverse() {
     );
     assert_eq!(SearchSources::default(), SearchSources::ALL);
 }
+
+// ---- attached documents (FT-21.4) --------------------------------------------
+
+use tinker_pdf::{
+    Encryption, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_DEPTH, MAX_SEARCHED_ATTACHMENTS,
+};
+
+/// `base` with `files` attached, each a name and its bytes, saved with its
+/// streams compressed and held to the validate-on-save helper.
+fn with_attachments(label: &str, base: &[u8], files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let doc = Document::open(base.to_vec()).expect("it opens");
+    let mut editor = doc.editor();
+    for (name, data) in files {
+        editor
+            .attach_file(&EmbeddedFile {
+                name: name.clone(),
+                filename: name.clone(),
+                description: None,
+                mime_type: None,
+                created: None,
+                modified: None,
+                data: data.clone(),
+            })
+            .expect("attachable");
+    }
+    let bytes = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        compress: true,
+        ..WriteOptions::default()
+    });
+    written_support::rewritten(label, base, &bytes);
+    bytes
+}
+
+/// Every hit forwards, and what the search could not read once it had read
+/// everything.
+fn searched(
+    doc: &Document,
+    needle: &str,
+    options: &DocumentSearchOptions,
+) -> (Vec<SearchHit>, Vec<tinker_pdf::Unsearched>) {
+    let mut search = doc.search(needle, options);
+    let hits: Vec<SearchHit> = search.by_ref().collect();
+    (hits, search.unsearched().to_vec())
+}
+
+fn path(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_string()).collect()
+}
+
+/// **A hit inside an attached PDF names its attachment** (FT-21.4): one
+/// level down, and a PDF attached inside an attached PDF two levels down,
+/// each hit carrying the attachments it was found under, read after the
+/// document's own sources; an attachment that is no PDF is neither searched
+/// nor named; backwards is forwards in reverse across them; and with the
+/// attached documents left out, only the document's own hit is found.
+#[test]
+fn a_hit_inside_an_attached_pdf_names_its_attachment() {
+    let inner = page_bytes("the innermost document", &["an inner needle here"]);
+    let middle_base = page_bytes("the middle document", &["the middle page"]);
+    let middle = with_attachments(
+        "the middle document, the inner attached",
+        &middle_base,
+        &[("inner.pdf".to_string(), inner)],
+    );
+    let outer_base = page_bytes("the outer document", &["the outer page, a needle too"]);
+    let outer = with_attachments(
+        "the outer document, the middle attached",
+        &outer_base,
+        &[
+            ("middle.pdf".to_string(), middle),
+            ("notes.txt".to_string(), b"a needle in a text file".to_vec()),
+        ],
+    );
+    let doc = Document::open(outer).expect("it opens");
+    let default = DocumentSearchOptions::default();
+
+    let (hits, unsearched) = searched(&doc, "needle", &default);
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert!(hits[0].attachment_path.is_empty(), "the outer page first");
+    assert_eq!(pages_of(&hits[0]), [0]);
+    assert_eq!(hits[1].attachment_path, path(&["middle.pdf", "inner.pdf"]));
+    assert_eq!(pages_of(&hits[1]), [0]);
+    assert_eq!(hits[1].text, "needle");
+    assert_eq!(hits[1].before, "an inner ");
+    assert_eq!(hits[1].after, " here");
+    assert!(
+        unsearched.is_empty(),
+        "a text file is no document: {unsearched:?}"
+    );
+    assert!(hits[0].end() <= hits[1].start());
+
+    let (one_level, _) = searched(&doc, "middle page", &default);
+    assert_eq!(one_level.len(), 1);
+    assert_eq!(one_level[0].attachment_path, path(&["middle.pdf"]));
+
+    let mut behind = backwards(&doc, "needle", &default);
+    behind.reverse();
+    assert_eq!(behind, hits);
+
+    // Seeking into an attached document and back.
+    let mut search = doc.search("needle", &default);
+    search.seek(hits[1].start().clone());
+    assert_eq!(search.next(), Some(hits[1].clone()));
+    assert_eq!(search.previous(), Some(hits[1].clone()));
+    assert_eq!(search.previous(), Some(hits[0].clone()));
+
+    let own = DocumentSearchOptions {
+        sources: SearchSources {
+            attached_documents: false,
+            ..SearchSources::ALL
+        },
+        ..DocumentSearchOptions::default()
+    };
+    let (alone, _) = searched(&doc, "needle", &own);
+    assert_eq!(alone, vec![hits[0].clone()]);
+}
+
+/// **An attachment past the caps is reported, not searched** (ruling 10):
+/// PDFs nested five deep, the fifth past `MAX_ATTACHMENT_DEPTH`, named with
+/// its path while the four above it are searched; an attachment that
+/// decodes to a byte more than `MAX_ATTACHMENT_BYTES`; and one more
+/// attachment than `MAX_SEARCHED_ATTACHMENTS`, the one past it named.
+#[test]
+fn an_attachment_past_the_caps_is_reported_not_searched() {
+    let default = DocumentSearchOptions::default();
+    assert_eq!(MAX_ATTACHMENT_DEPTH, 4);
+
+    // Five levels: each level's page says its number.
+    let mut nested = page_bytes("level 5", &["deep needle 5"]);
+    for level in (1..=4).rev() {
+        let base = page_bytes(
+            &format!("level {level}"),
+            &[&format!("deep needle {level}")],
+        );
+        nested = with_attachments(
+            &format!("level {level}, the next attached"),
+            &base,
+            &[(format!("level{}.pdf", level + 1), nested)],
+        );
+    }
+    let outer_base = page_bytes("five levels down", &["the top"]);
+    let outer = with_attachments(
+        "five levels down, the first attached",
+        &outer_base,
+        &[("level1.pdf".to_string(), nested)],
+    );
+    let doc = Document::open(outer).expect("it opens");
+    let (hits, unsearched) = searched(&doc, "deep needle", &default);
+    let paths: Vec<Vec<String>> = hits.iter().map(|hit| hit.attachment_path.clone()).collect();
+    assert_eq!(
+        paths,
+        [
+            path(&["level1.pdf"]),
+            path(&["level1.pdf", "level2.pdf"]),
+            path(&["level1.pdf", "level2.pdf", "level3.pdf"]),
+            path(&["level1.pdf", "level2.pdf", "level3.pdf", "level4.pdf"]),
+        ],
+        "four levels searched"
+    );
+    assert_eq!(
+        unsearched,
+        [tinker_pdf::Unsearched {
+            attachment_path: path(&[
+                "level1.pdf",
+                "level2.pdf",
+                "level3.pdf",
+                "level4.pdf",
+                "level5.pdf"
+            ]),
+            reason: UnsearchedReason::TooDeep,
+        }],
+        "the fifth named, not searched"
+    );
+    // Backwards, the same hits, and the same name once.
+    let mut search = doc.search("deep needle", &default);
+    search.seek(SearchPosition::end());
+    let mut behind = Vec::new();
+    while let Some(hit) = search.previous() {
+        behind.push(hit);
+    }
+    behind.reverse();
+    assert_eq!(behind, hits);
+    assert_eq!(search.unsearched(), unsearched.as_slice());
+
+    // A byte past the size cap.
+    let base = page_bytes("a page with a large attachment", &["a large attachment"]);
+    let large = with_attachments(
+        "a large attachment",
+        &base,
+        &[("huge.bin".to_string(), vec![b' '; MAX_ATTACHMENT_BYTES + 1])],
+    );
+    let doc = Document::open(large).expect("it opens");
+    let (hits, unsearched) = searched(&doc, "large", &default);
+    assert_eq!(hits.len(), 1, "the page's own text");
+    assert_eq!(
+        unsearched,
+        [tinker_pdf::Unsearched {
+            attachment_path: path(&["huge.bin"]),
+            reason: UnsearchedReason::TooLarge,
+        }]
+    );
+
+    // One attachment more than the count cap: every one is read in name
+    // order, and the last is named.
+    let files: Vec<(String, Vec<u8>)> = (0..=MAX_SEARCHED_ATTACHMENTS)
+        .map(|index| (format!("file-{index:03}"), b"plain".to_vec()))
+        .collect();
+    let base = page_bytes("a page with many attachments", &["many"]);
+    let many = with_attachments("many attachments", &base, &files);
+    let doc = Document::open(many).expect("it opens");
+    assert_eq!(doc.attachments().len(), MAX_SEARCHED_ATTACHMENTS + 1);
+    let (_, unsearched) = searched(&doc, "plain", &default);
+    assert_eq!(
+        unsearched,
+        [tinker_pdf::Unsearched {
+            attachment_path: path(&[&format!("file-{MAX_SEARCHED_ATTACHMENTS:03}")]),
+            reason: UnsearchedReason::TooMany,
+        }]
+    );
+}
+
+/// **An encrypted attachment is reported by name**: the committed AES-256
+/// fixture attached, which the empty password does not open, is named with
+/// `PasswordRequired` and nothing in it is found; one encrypted only to
+/// restrict permissions opens with the empty password and is searched; and
+/// an attachment with no stream is named `Unreadable`.
+#[test]
+fn an_encrypted_attachment_is_reported_by_name() {
+    let default = DocumentSearchOptions::default();
+    let base = page_bytes("a page with encrypted attachments", &["the cover page"]);
+
+    let plain = page_bytes("an attachment to encrypt", &["an open secret"]);
+    let doc = Document::open(plain.clone()).expect("it opens");
+    let encrypted = doc.editor().save(&WriteOptions {
+        encryption: Some(Encryption {
+            user_password: String::new(),
+            owner_password: "owner".to_string(),
+            permissions: -4,
+            entropy: [0x5A; 48],
+        }),
+        ..WriteOptions::default()
+    });
+    written_support::rewritten(
+        "an attachment encrypted to restrict permissions",
+        plain.as_slice(),
+        written_support::Locked {
+            bytes: encrypted.clone(),
+            key: written_support::Key::Password(""),
+        },
+    );
+
+    let outer = with_attachments(
+        "a page with encrypted attachments",
+        &base,
+        &[
+            ("locked.pdf".to_string(), testdata("encrypted-aes256.pdf")),
+            ("open.pdf".to_string(), encrypted),
+        ],
+    );
+    let doc = Document::open(outer).expect("it opens");
+    let (hits, unsearched) = searched(&doc, "AES-256", &default);
+    assert!(
+        hits.is_empty(),
+        "nothing read from the locked one: {hits:?}"
+    );
+    assert_eq!(
+        unsearched,
+        [tinker_pdf::Unsearched {
+            attachment_path: path(&["locked.pdf"]),
+            reason: UnsearchedReason::PasswordRequired,
+        }]
+    );
+    let (hits, _) = searched(&doc, "open secret", &default);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].attachment_path, path(&["open.pdf"]));
+
+    // A file specification with no embedded file stream.
+    let broken = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles 5 0 R >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n\
+4 0 obj\n<< /Type /Filespec /F (broken.pdf) >>\nendobj\n\
+5 0 obj\n<< /Names [(broken) 4 0 R] >>\nendobj\n\
+trailer\n<< /Root 1 0 R >>\n%%EOF\n";
+    let doc = Document::open(broken.to_vec()).expect("it opens");
+    assert_eq!(doc.attachments().len(), 1);
+    let (hits, unsearched) = searched(&doc, "anything", &default);
+    assert!(hits.is_empty());
+    assert_eq!(
+        unsearched,
+        [tinker_pdf::Unsearched {
+            attachment_path: path(&["broken"]),
+            reason: UnsearchedReason::Unreadable,
+        }]
+    );
+}
