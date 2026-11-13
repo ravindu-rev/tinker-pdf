@@ -595,7 +595,10 @@ descriptor's `/FontName` move, all three to the same 9.6.4 name, from the same
 named rather than numbered, is cut by `subset_type1` over the glyphs the
 Type 1 selection above reaches, its stream stating the subset's three
 lengths and a descriptor's `/CharSet` rewritten to the subset's names
-([editing](editing.md)). A Type 3 font, which has no program, has
+([editing](editing.md)) — or, where `SaveOptions::type1` asks, converted by
+`type1_to_cff` and cut as a CFF under `/FontFile3 /Subtype /Type1C`, where
+every code the pages show reaches the glyph it drew through a CFF program's
+route ([writing](writing.md)). A Type 3 font, which has no program, has
 the procedures nothing shown runs emptied in place instead, its dictionary
 untouched. It is an editing operation and lives with the rest of them: see
 [editing](editing.md).

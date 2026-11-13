@@ -377,7 +377,9 @@ not green".
 `determinism.rs`'s render fingerprints and the same pages drawn in bands, the
 patched page's, its SVG output's hashes, its three synthesised documents' byte
 hashes and its rewrite with embedded faces, the bytes the default save
-writes for a page over a Type 1 font it cuts down, the first-party sRGB
+writes for a page over a Type 1 font it cuts down and the bytes a save asked
+to convert Type 1 programs writes for the same page, its program a cut CFF,
+the first-party sRGB
 profile's bytes, the ICC transforms' answers and the version 5 page, its
 display list's replay of every fingerprinted page and the same pages drawn
 through a warm and a starved document cache, and under a warm and a starved

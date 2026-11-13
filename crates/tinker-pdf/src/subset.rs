@@ -120,6 +120,24 @@
 //! 120) has it rewritten to the subset's names, or dropped where a name
 //! cannot be written as one (`docs/design/subsetting.md`).
 //!
+//! # A Type 1 program converted, when asked
+//!
+//! [`crate::write::SaveOptions::type1`] set to
+//! [`crate::write::Type1Programs::Convert`] has the pass rewrite each Type 1
+//! program it cuts as a CFF (`docs/design/subsetting.md`, *When a save
+//! converts*): [`tinker_pdf_font::type1_to_cff`] converts it, every code the
+//! pages show through its fonts is read again through a CFF program's route
+//! ([`crate::resources::cff_glyph`]) and must reach the glyph the Type 1
+//! program drew, and [`tinker_pdf_font::subset_cff`] cuts it to the glyphs
+//! drawn. The stream is then `/FontFile3 /Subtype /Type1C`, its `/Length1` to
+//! `/Length3` dropped, each descriptor naming it under `/FontFile3`, its
+//! `/CharSet` kept — the CFF still names every glyph the program named — and
+//! [`Subsetted::converted`] says so. A program the converter refuses, one a
+//! code would draw otherwise through the CFF's route, and one whose cut comes
+//! out no smaller than the Type 1 program are cut as Type 1 programs instead,
+//! and named in [`SubsetReport::unconverted`] with the reason. Nothing is
+//! converted by default.
+//!
 //! # Type 3 fonts
 //!
 //! A Type 3 font has no program (9.6.5): each glyph is a content stream in
@@ -370,6 +388,67 @@ pub struct Subsetted {
     /// How many glyphs were asked for, before the subsetter's own closure over
     /// composite components and `.notdef`.
     pub glyphs: usize,
+    /// Whether the program was a Type 1 program the save rewrote as CFF,
+    /// `/FontFile3 /Subtype /Type1C` now (`SaveOptions::type1`), its sizes
+    /// the Type 1 program's and the cut CFF's.
+    pub converted: bool,
+}
+
+/// A Type 1 program [`crate::write::Type1Programs::Convert`] asked to convert
+/// that stays a Type 1 program, cut as one (`docs/design/subsetting.md`,
+/// *When a save converts*).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Unconverted {
+    /// The stream the program is in.
+    pub program: ObjRef,
+    /// The `/BaseFont` of the first font dictionary that names it, as
+    /// written.
+    pub base_font: String,
+    /// Why.
+    pub reason: UnconvertedReason,
+}
+
+/// Why a Type 1 program stayed one when the save was asked to convert it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UnconvertedReason {
+    /// [`tinker_pdf_font::type1_to_cff`] refused it, by name.
+    Refused(tinker_pdf_font::Type1CffRefusal),
+    /// A code a page shows through one of its fonts reaches another glyph
+    /// through a CFF program's route — the document's name, then the
+    /// program's built-in encoding, then the Standard encoding's name — than
+    /// the Type 1 program drew by its text, so the converted font would draw
+    /// another page.
+    DrawsAnotherGlyph,
+    /// One of its fonts was shown more distinct codes than the walk records,
+    /// or could not be read, so not every code could be read again.
+    CodesUnchecked,
+    /// The CFF subsetter declined the converted program, or its cut came out
+    /// no smaller than the Type 1 program.
+    NotSmaller,
+}
+
+impl core::fmt::Display for UnconvertedReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            UnconvertedReason::Refused(why) => write!(f, "the converter refused it: {why}"),
+            UnconvertedReason::DrawsAnotherGlyph => f.write_str(
+                "a code shown through it reaches another glyph through a CFF program's route",
+            ),
+            UnconvertedReason::CodesUnchecked => {
+                f.write_str("not every code shown through it could be read again")
+            }
+            UnconvertedReason::NotSmaller => {
+                f.write_str("the converted cut is no smaller than the Type 1 program")
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for Unconverted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "/{} kept Type 1: {}", self.base_font, self.reason)
+    }
 }
 
 /// One Type 3 font whose unused glyph procedures were emptied (9.6.5).
@@ -423,6 +502,11 @@ pub struct SubsetReport {
     /// same reason an untouched program does — its procedures are in the
     /// file.
     pub type3_untouched: Vec<Untouched>,
+    /// Every Type 1 program the save was asked to convert to CFF that it cut
+    /// as a Type 1 program instead, and why, in object order. Empty unless
+    /// [`crate::write::Type1Programs::Convert`] asked; a program left whole is
+    /// in [`SubsetReport::untouched`] and is not converted either.
+    pub unconverted: Vec<Unconverted>,
 }
 
 impl SubsetReport {
@@ -497,7 +581,13 @@ impl SubsetReport {
 /// cuts that the walk did not read.
 pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
     let work = editor.work().cloned();
-    apply_counting(editor, work.as_ref(), Parallelism::Serial, &BTreeSet::new())
+    apply_counting(
+        editor,
+        work.as_ref(),
+        Parallelism::Serial,
+        &BTreeSet::new(),
+        false,
+    )
 }
 
 /// [`apply`], counting into `work` when the operation is counting — the save
@@ -511,11 +601,17 @@ pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
 /// Cut again they would come out no smaller, and be named
 /// [`UntouchedReason::SubsetNotSmaller`] in a report on the document's own
 /// programs. Every other caller hands an empty set.
+///
+/// `convert` is [`crate::write::Type1Programs::Convert`]: each Type 1 program
+/// cut is rewritten as CFF where its every shown code reaches the same glyph
+/// that way (*A Type 1 program converted, when asked*), and the walk records
+/// the codes it reads them by.
 pub(crate) fn apply_counting(
     editor: &mut DocumentEditor,
     work: Option<&Arc<Work>>,
     parallelism: Parallelism,
     written: &BTreeSet<ObjRef>,
+    convert: bool,
 ) -> SubsetReport {
     let op = Operation::new(work.cloned());
     // Everything the walk reads, it reads from the view and nothing else: the
@@ -527,11 +623,11 @@ pub(crate) fn apply_counting(
     // shares with the editor by construction — and so are the streams the
     // walk decoded, which the view keys by the editor's numbers.
     let usage = match editor.view() {
-        Ok(view) => collect(&view, &op, parallelism, false),
+        Ok(view) => collect(&view, &op, parallelism, convert),
         Err(_) => Usage::default(),
     };
     let doc = editor.shared_document();
-    rewrite(editor, &doc, &usage, &op, written)
+    rewrite(editor, &doc, &usage, &op, written, convert)
 }
 
 /// A stream's bytes as the editor now has them, read once the pass: one the
@@ -1465,6 +1561,7 @@ fn rewrite(
     usage: &Usage,
     op: &Operation,
     written: &BTreeSet<ObjRef>,
+    convert: bool,
 ) -> SubsetReport {
     let mut jobs: BTreeMap<ObjRef, Job> = BTreeMap::new();
     for site in sweep(editor, doc) {
@@ -1550,7 +1647,21 @@ fn rewrite(
             leave(reason, &mut report);
             continue;
         }
-        let Some(reduced) = cut(&bytes, &job) else {
+        // Asked for, a Type 1 program is converted and cut as a CFF, and one
+        // that cannot be is cut as a Type 1 program and named.
+        let mut converted = None;
+        if convert && matches!(job.key(), Some(cos_font::ProgramKey::FontFile)) {
+            match convert_type1(editor, &bytes, &job, usage) {
+                Some(Ok(reduced)) => converted = Some(reduced),
+                Some(Err(reason)) => report.unconverted.push(Unconverted {
+                    program,
+                    base_font: base_font.clone(),
+                    reason,
+                }),
+                None => {}
+            }
+        }
+        let Some(reduced) = converted.or_else(|| cut(&bytes, &job)) else {
             leave(UntouchedReason::ProgramNotRebuildable, &mut report);
             continue;
         };
@@ -1562,10 +1673,14 @@ fn rewrite(
         let tag = subset_tag(&reduced.bytes);
         let after = reduced.bytes.len();
         let names = reduced.names.clone();
+        let is_converted = reduced.converted;
         write_program(editor, doc, program, &job, reduced);
         let named = rename(editor, doc, &job, &tag);
         if let Some(names) = names {
             charset(editor, &job, &names);
+        }
+        if is_converted {
+            rekey(editor, &job, program);
         }
 
         report.subsetted.push(Subsetted {
@@ -1574,6 +1689,7 @@ fn rewrite(
             before: bytes.len(),
             after,
             glyphs: job.glyphs.len(),
+            converted: is_converted,
         });
     }
     report.untouched.extend(orphans(editor, doc, &covered, op));
@@ -1586,6 +1702,7 @@ fn rewrite(
     report.subsetted.sort_by_key(|s| s.program.num);
     report.type3.sort_by_key(|t| t.font.num);
     report.type3_untouched.sort_by_key(|u| u.program.num);
+    report.unconverted.sort_by_key(|u| u.program.num);
     report
 }
 
@@ -1995,6 +2112,9 @@ struct Cut {
     lengths: Option<[usize; 3]>,
     /// The glyph names a Type 1 subset keeps, for `/CharSet`.
     names: Option<Vec<Vec<u8>>>,
+    /// Whether this is a Type 1 program converted to CFF, written as
+    /// `/FontFile3 /Subtype /Type1C`.
+    converted: bool,
 }
 
 /// Cuts one job's program down to its glyphs, or `None` where it cannot be
@@ -2013,6 +2133,7 @@ fn cut(bytes: &[u8], job: &Job) -> Option<Cut> {
                     bytes: subset.program,
                     lengths: Some(subset.lengths),
                     names: Some(subset.names),
+                    converted: false,
                 })
             }
             Err(_) if tinker_pdf_font::Type1::parse(bytes).is_some() => return None,
@@ -2023,7 +2144,91 @@ fn cut(bytes: &[u8], job: &Job) -> Option<Cut> {
         bytes,
         lengths: None,
         names: None,
+        converted: false,
     })
+}
+
+/// One Type 1 job converted to CFF and cut to its glyphs
+/// (`docs/design/subsetting.md`, *When a save converts*): `None` for bytes
+/// that are no Type 1 program, which are cut as what they are, and otherwise
+/// the cut, or why the program stays Type 1.
+///
+/// Before the cut is taken every code the walk saw shown through the job's
+/// fonts is read again, through a CFF program's route
+/// ([`crate::resources::cff_glyph`]), against the glyph the Type 1 program
+/// drew it by ([`crate::resources::type1_selection`]): the converter draws
+/// every glyph as the program does, and this is what says a page reaches the
+/// same glyphs.
+fn convert_type1(
+    editor: &DocumentEditor,
+    bytes: &[u8],
+    job: &Job,
+    usage: &Usage,
+) -> Option<Result<Cut, UnconvertedReason>> {
+    let type1 = tinker_pdf_font::Type1::parse(bytes)?;
+    let converted = match tinker_pdf_font::type1_to_cff(bytes) {
+        Ok(converted) => converted,
+        Err(why) => return Some(Err(UnconvertedReason::Refused(why))),
+    };
+    let Some(cff) = tinker_pdf_font::Cff::parse(&converted.program) else {
+        return Some(Err(UnconvertedReason::NotSmaller));
+    };
+    for site in &job.sites {
+        if usage.overflow.contains(&site.font) {
+            return Some(Err(UnconvertedReason::CodesUnchecked));
+        }
+        let Some(Object::Dict(dict)) = editor.get(site.font) else {
+            return Some(Err(UnconvertedReason::CodesUnchecked));
+        };
+        let font = cos_font::read_in(editor, &dict);
+        for &code in usage.codes.get(&site.font).into_iter().flatten() {
+            let drawn = crate::resources::type1_selection(&type1, &font, code)
+                .filter(|selection| selection.stated)
+                .and_then(|selection| converted.glyphs.get(usize::from(selection.glyph)).copied());
+            if drawn.is_none() || crate::resources::cff_glyph(&cff, &font, code) != drawn {
+                return Some(Err(UnconvertedReason::DrawsAnotherGlyph));
+            }
+        }
+    }
+    let glyphs: BTreeSet<u16> = job
+        .glyphs
+        .iter()
+        .filter_map(|glyph| converted.glyphs.get(usize::from(*glyph)).copied())
+        .collect();
+    match tinker_pdf_font::subset_cff(&converted.program, &glyphs) {
+        Some(cut) if cut.len() < bytes.len() => Some(Ok(Cut {
+            bytes: cut,
+            lengths: None,
+            names: None,
+            converted: true,
+        })),
+        _ => Some(Err(UnconvertedReason::NotSmaller)),
+    }
+}
+
+/// Names a converted program under `/FontFile3` in every descriptor of
+/// `job`, where `/FontFile` named it: Table 126 puts a CFF there, its
+/// `/Subtype /Type1C` saying what it is.
+fn rekey(editor: &mut DocumentEditor, job: &Job, program: ObjRef) {
+    let (from, to) = (editor.intern(b"FontFile"), editor.intern(b"FontFile3"));
+    let mut done: HashSet<u32> = HashSet::new();
+    for site in &job.sites {
+        if !done.insert(site.descriptor.num) {
+            continue;
+        }
+        let Some(Object::Dict(dict)) = editor.get(site.descriptor) else {
+            continue;
+        };
+        let mut rebuilt = Dict::with_capacity(dict.len());
+        for (name, value) in dict.iter() {
+            if *name == from {
+                rebuilt.insert(to, Object::Ref(program));
+            } else {
+                rebuilt.insert(*name, value.clone());
+            }
+        }
+        editor.put(site.descriptor, Object::Dict(rebuilt));
+    }
 }
 
 /// Replaces the program, keeping the stream's dictionary consistent with it.
@@ -2043,7 +2248,11 @@ fn write_program(
     let mut dict = Dict::new();
     // `/Subtype` is what a `/FontFile3` *is* (Table 126) — `/Type1C`,
     // `/CIDFontType0C`, `/OpenType` — and the subsetter does not change which.
-    if let Some(subtype) = existing.get_name(doc.intern(b"Subtype")) {
+    // A Type 1 program converted to CFF is `/Type1C` from here on.
+    if reduced.converted {
+        let type1c = editor.intern(b"Type1C");
+        dict.insert(editor.intern(b"Subtype"), Object::Name(type1c));
+    } else if let Some(subtype) = existing.get_name(doc.intern(b"Subtype")) {
         dict.insert(editor.intern(b"Subtype"), Object::Name(subtype));
     }
     // Table 126: `/Length1` is the decoded length of a `/FontFile2` program,

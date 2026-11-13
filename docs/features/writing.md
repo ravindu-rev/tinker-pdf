@@ -257,10 +257,10 @@ the facade's, and it runs `subset::apply` first **unless asked not to** —
 cutting every embedded program down to the glyphs the document still draws
 ([fonts](fonts.md), [editing](editing.md)). `SaveOptions` is `WriteOptions`
 verbatim plus `fonts: FontPolicy`, whose default is `FontPolicy::Subset` —
-`FontPolicy::Keep` is the other value and there is no third — `images` and
-`embed`, below, `stats`, which counts the save's work, and `parallelism`, the threads the
-font pass's walk may spend, handed to the writer in place of
-`WriteOptions::parallelism` where it asks for any.
+`FontPolicy::Keep` is the other value and there is no third — `type1`,
+`images` and `embed`, below, `stats`, which counts the save's work, and
+`parallelism`, the threads the font pass's walk may spend, handed to the
+writer in place of `WriteOptions::parallelism` where it asks for any.
 
 ```rust
 use tinker_pdf::write::{save, SaveOptions};
@@ -345,6 +345,32 @@ document of shared fonts, a redacted page, a tiling cell, an appearance and
 two fonts written directly into resource dictionaries to that, and
 `a_subset_walk_on_four_threads_walks_no_page_on_the_caller` reads where the
 pages ran from the save's stats.
+
+**Type 1 programs as CFF, on the same door, off by default.**
+`SaveOptions::type1` is a `Type1Programs`, `Keep` by default: a Type 1
+program stays one, cut as `SaveOptions::fonts` says. Asked to `Convert`, the
+font pass rewrites each Type 1 program it cuts as a CFF
+(`docs/design/subsetting.md`, *When a save converts*):
+`tinker_pdf_font::type1_to_cff` converts it, drawing every glyph as the
+program did ([fonts](fonts.md)); every code the pages show through its fonts
+is read again through a CFF program's route — the document's name, the
+built-in encoding, the Standard encoding's name — and must reach the glyph
+the Type 1 program drew; and the CFF subsetter cuts it to the glyphs drawn.
+The stream becomes `/FontFile3 /Subtype /Type1C` with `/Length1` to
+`/Length3` dropped, each descriptor names it under `/FontFile3`, its
+`/CharSet` is kept — the CFF names every glyph the program named — the subset
+tag goes on as for any cut, and `Subsetted::converted` is true. A program the
+converter refuses, one a shown code would draw otherwise through the CFF's
+route (a code this renderer draws by its text and the built-in encoding names
+another glyph for), one a font was shown more codes through than the walk
+records, and one whose cut comes out no smaller than the Type 1 program are
+cut as Type 1 programs instead, each named in `SubsetReport::unconverted`
+with its `UnconvertedReason`; a program the pass leaves whole is not
+converted either. `FontPolicy::Keep` runs no font pass, so it converts
+nothing, and an incremental save converts as a rewrite does and says the
+originals remain. Opt-in because a default that rewrote every Type 1
+program's format would change what other readers are handed without being
+asked.
 
 **Images, on the same door, off by default.** `SaveOptions::images` is an
 `ImagePolicy`, `Keep` by default — the pass is not entered and every image

@@ -10105,7 +10105,11 @@ pub(crate) fn cff_glyph(cff: &Cff<'_>, font: &cos_font::Font, code: u32) -> Opti
 /// code the document names nothing for, the built-in encoding's is
 /// [`Selection::also`], which a reader following 9.6.5.2 draws. `None` where
 /// no step reaches a glyph.
-fn type1_selection(type1: &Type1<'_>, font: &cos_font::Font, code: u32) -> Option<Selection> {
+pub(crate) fn type1_selection(
+    type1: &Type1<'_>,
+    font: &cos_font::Font,
+    code: u32,
+) -> Option<Selection> {
     let named = font.glyph_name(code);
     if let Some(glyph) = named.and_then(|name| type1.glyph_for_name(name.as_bytes())) {
         return Some(Selection::stated(glyph));

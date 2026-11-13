@@ -444,13 +444,37 @@ built-in code read back.
 
 Only when asked (FT-11.8): `SaveOptions::type1` takes `Type1Programs::Keep`,
 the default — a Type 1 program stays one, cut as `SaveOptions::fonts` says —
-or `Type1Programs::Convert`, under which the font pass rewrites a `/FontFile`
-program as `/FontFile3 /Subtype /Type1C` through `type1_to_cff`, cuts it with
-the CFF subsetter and drops `/Length1` to `/Length3`. A program the
-converter refuses is cut as a Type 1 program instead, and `FontPolicy::Keep`
-converts nothing, since it writes every program through as it arrived. Opt-in
-because a default that rewrote every Type 1 program's format would change
-what other readers are handed without being asked.
+or `Type1Programs::Convert`, under which the font pass rewrites each
+`/FontFile` program it cuts through `type1_to_cff`, cuts it with the CFF
+subsetter over the CFF glyphs the walk's Type 1 glyphs became, and writes it
+as `/FontFile3 /Subtype /Type1C`: `/Length1` to `/Length3` dropped, every
+descriptor of the job naming the stream under `/FontFile3` where `/FontFile`
+named it, the 9.6.4 tag on its names as for any cut, and `/CharSet` kept, since
+the CFF names every glyph the program named. `Subsetted::converted` says it
+was.
+
+**A page reaches the same glyphs.** The converter draws every glyph as the
+program does; what it cannot see is which glyph a code selects, and a CFF
+program is selected by another route than a Type 1 one (`cff_glyph`: the
+document's name, the built-in encoding, the Standard encoding's name, where
+`type1_selection` puts the code's text before the built-in encoding). So the
+walk records the codes each font shows, and every one is read again through
+the CFF's route against the glyph the Type 1 program drew it by. A code this
+renderer draws by its text where the built-in encoding names another glyph —
+the selection's third row above — reaches the other glyph through a CFF, and
+keeps its program Type 1.
+
+**What stays Type 1**, each cut as a Type 1 program instead and named in
+`SubsetReport::unconverted` with its `UnconvertedReason`: a program the
+converter refuses (`Refused`, with the converter's name); one a shown code
+would draw otherwise through the CFF's route (`DrawsAnotherGlyph`); one a font
+was shown more distinct codes through than the walk records, or whose font
+does not read, so not every code can be read again (`CodesUnchecked`); and one
+the CFF subsetter declines or whose cut is no smaller than the Type 1 program
+(`NotSmaller`). A program the pass leaves whole is not converted, and
+`FontPolicy::Keep`, which runs no font pass, converts nothing. Opt-in because
+a default that rewrote every Type 1 program's format would change what other
+readers are handed without being asked.
 
 ### Extension
 

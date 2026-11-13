@@ -1,8 +1,9 @@
 //! FT-11's subsets on save, through the facade (`docs/design/subsetting.md`):
-//! a Type 1 program cut down to the glyphs its pages draw, and a CFF whose
-//! subroutine calls renumbering cannot rewrite, flattened. Each saved
-//! document is re-read and drawn page by page against the original, held to
-//! the strict validator, and its report read.
+//! a Type 1 program cut down to the glyphs its pages draw, the same program
+//! converted to CFF and cut when the save asks, and a CFF whose subroutine
+//! calls renumbering cannot rewrite, flattened. Each saved document is re-read
+//! and drawn page by page against the original, held to the strict validator,
+//! and its report read.
 //!
 //! Every program is built byte by byte in the test — a Type 1 program
 //! through `tinker_pdf_font::type1`'s own cipher (`type1_support`) — so which
@@ -13,14 +14,14 @@ mod render_support;
 mod type1_support;
 mod written_support;
 
-use tinker_pdf::subset::{SubsetReport, UntouchedReason};
-use tinker_pdf::write::{save, SaveOptions, SubsetOutcome};
-use tinker_pdf::{Document, RenderOptions};
-use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object, XrefEntry};
-use tinker_pdf_font::{Cff, Type1};
+use tinker_pdf::subset::{SubsetReport, UnconvertedReason, UntouchedReason};
+use tinker_pdf::write::{save, FontPolicy, SaveOptions, SubsetOutcome, Type1Programs};
+use tinker_pdf::{Document, FindingKind, RenderOptions};
+use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object, WriteMode, WriteOptions, XrefEntry};
+use tinker_pdf_font::{Cff, Type1, Type1CffRefusal};
 
 use type1_support::{
-    n, rect, CALLOTHERSUBR, CALLSUBR, CLOSEPATH, ENDCHAR, HLINETO, HSBW, POP, RETURN, RMOVETO,
+    n, rect, CALLOTHERSUBR, CALLSUBR, CLOSEPATH, ENDCHAR, HLINETO, HSBW, POP, RETURN, RMOVETO, SBW,
     SEAC, VLINETO,
 };
 
@@ -158,13 +159,31 @@ fn document(
     charset: Option<&str>,
     to_unicode: Option<&str>,
 ) -> Vec<u8> {
+    document_claiming(program, fonts, pages, charset, to_unicode, None)
+}
+
+/// [`document`], its catalog carrying `metadata`, an XMP packet, where one is
+/// given.
+fn document_claiming(
+    program: &type1_support::Program,
+    fonts: &[Font],
+    pages: &[&[(&str, &str)]],
+    charset: Option<&str>,
+    to_unicode: Option<&str>,
+    metadata: Option<&str>,
+) -> Vec<u8> {
     // 1 catalog, 2 pages, 3 descriptor, 4 program, 5 ToUnicode, then the
-    // fonts, then each page and its content.
+    // fonts, then each page and its content, then the metadata.
     let font_at = 6u32;
     let page_at = font_at + fonts.len() as u32;
+    let metadata_at = page_at + 2 * pages.len() as u32;
     let widths = vec!["800"; 201 - 65 + 1].join(" ");
+    let catalog = match metadata {
+        Some(_) => format!("<< /Type /Catalog /Pages 2 0 R /Metadata {metadata_at} 0 R >>"),
+        None => "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+    };
     let mut objects: Vec<Vec<u8>> = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        catalog.into_bytes(),
         format!(
             "<< /Type /Pages /Count {} /Kids [{}] >>",
             pages.len(),
@@ -236,6 +255,12 @@ fn document(
         );
         objects.push(render_support::raw_stream("", content.as_bytes()));
     }
+    if let Some(packet) = metadata {
+        objects.push(render_support::raw_stream(
+            "/Type /Metadata /Subtype /XML",
+            packet.as_bytes(),
+        ));
+    }
     render_support::raw_pdf(&objects)
 }
 
@@ -266,12 +291,29 @@ fn two_pages() -> Vec<u8> {
 
 /// The document saved by the facade's default save: subset, rewritten.
 fn saved(bytes: &[u8]) -> (Vec<u8>, SubsetReport) {
+    saved_with(bytes, &SaveOptions::default())
+}
+
+/// The document saved with its Type 1 programs converted to CFF.
+fn converted(bytes: &[u8]) -> (Vec<u8>, SubsetReport) {
+    saved_with(
+        bytes,
+        &SaveOptions {
+            type1: Type1Programs::Convert,
+            ..SaveOptions::default()
+        },
+    )
+}
+
+/// The document saved by `options`, which rewrite and cut, held as a save of
+/// its input.
+fn saved_with(bytes: &[u8], options: &SaveOptions) -> (Vec<u8>, SubsetReport) {
     let doc = Document::open(bytes.to_vec()).expect("the fixture opens");
     let mut editor = doc.editor();
-    let saved = save(&mut editor, &SaveOptions::default());
+    let saved = save(&mut editor, options);
     let report = match saved.fonts {
         SubsetOutcome::Cut(report) => report,
-        other => panic!("a default save cuts: {other:?}"),
+        other => panic!("a rewriting save cuts: {other:?}"),
     };
     written_support::rewritten("a subset on save", bytes, &saved.bytes);
     (saved.bytes, report)
@@ -735,4 +777,339 @@ fn a_flattened_cff_subset_draws_the_used_glyphs_identically() {
 
     let doc = Document::open(bytes).expect("it opens");
     assert_eq!(doc.validate(), Vec::new());
+}
+
+// ---------------------------------------------------------------------------
+// FT-11.8: a Type 1 program converted to CFF on save, when asked.
+// ---------------------------------------------------------------------------
+
+/// The one `/FontFile3` program in a document: the stream's dictionary, its
+/// decoded bytes and the descriptor naming it.
+fn converted_program(bytes: &[u8]) -> (Dict, Vec<u8>, Dict, CosDocument) {
+    let doc = CosDocument::open(bytes.to_vec()).expect("it opens");
+    let mut found = Vec::new();
+    for (number, entry) in doc.xref().iter() {
+        if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
+            continue;
+        }
+        let Ok(object) = doc.get(ObjRef::new(number, 0)) else {
+            continue;
+        };
+        let Object::Dict(descriptor) = object.as_ref() else {
+            continue;
+        };
+        let Some(program) = descriptor.get_ref(doc.intern(b"FontFile3")) else {
+            continue;
+        };
+        let stream = doc.get(program).expect("the program");
+        let dict = stream.as_dict().expect("a stream").clone();
+        let decoded = doc.stream_decoded(program).expect("it decodes");
+        found.push((dict, decoded, descriptor.clone()));
+    }
+    assert_eq!(found.len(), 1, "one /FontFile3 program");
+    let (dict, decoded, descriptor) = found.remove(0);
+    (dict, decoded, descriptor, doc)
+}
+
+/// The `/Subtype` a stream's dictionary names.
+fn subtype(dict: &Dict, doc: &CosDocument) -> Option<Vec<u8>> {
+    dict.get_name(doc.intern(b"Subtype"))
+        .and_then(|name| doc.name_bytes(name))
+        .map(|bytes| bytes.to_vec())
+}
+
+/// **A converted Type 1 font draws as the original did**, pixel for pixel:
+/// the program is now a CFF under `/FontFile3 /Subtype /Type1C` with no
+/// `/Length1` to `/Length3`, cut to the glyphs drawn — each drawing as the
+/// Type 1 program drew it, the others empty — reported converted and smaller
+/// under a new subset tag, and the descriptor keeps its `/CharSet`, the CFF
+/// still naming every glyph the program named.
+#[test]
+fn a_converted_type1_font_draws_the_used_glyphs_identically() {
+    let original = two_pages();
+    let (bytes, report) = converted(&original);
+    assert_eq!(pages_drawn(&bytes), pages_drawn(&original));
+
+    assert_eq!(report.untouched, Vec::new(), "nothing is left whole");
+    assert_eq!(report.unconverted, Vec::new(), "nothing stays Type 1");
+    assert_eq!(report.subsetted.len(), 1);
+    let cut = &report.subsetted[0];
+    assert!(cut.converted);
+    assert!(cut.after < cut.before, "{} -> {}", cut.before, cut.after);
+    assert_eq!(cut.glyphs, 4, "A, B, C and Aacute were shown");
+    let (_, before, _, _) = only_program(&original);
+    assert_eq!(cut.before, before.len());
+    let (tag, face) = cut.base_font.split_at(7);
+    assert_eq!(face, "Fixture");
+    assert!(tag.ends_with('+') && tag[..6].bytes().all(|b| b.is_ascii_uppercase()));
+
+    assert!(programs(&bytes).is_empty(), "no /FontFile is left");
+    let (dict, program, descriptor, doc) = converted_program(&bytes);
+    assert_eq!(subtype(&dict, &doc), Some(b"Type1C".to_vec()));
+    for key in [b"Length1".as_slice(), b"Length2", b"Length3"] {
+        assert!(!dict.contains_key(doc.intern(key)));
+    }
+    assert_eq!(program.len(), cut.after);
+    assert_eq!(
+        descriptor
+            .get_string(doc.intern(b"CharSet"))
+            .map(|s| s.bytes.clone()),
+        Some(b"/A/B/C/D/E/F/acute/Aacute".to_vec())
+    );
+
+    let cff = Cff::parse(&program).expect("the program is a CFF");
+    let fixture = Type1::parse(&fixture_program().bytes).expect("the fixture parses");
+    for name in ["A", "B", "C", "Aacute"] {
+        let gid = cff.gid_for_name(name).expect("named in the charset");
+        let index = fixture
+            .glyph_for_name(name.as_bytes())
+            .expect("in the fixture");
+        assert_eq!(
+            cff.outline(gid).map(|outline| outline.segments),
+            fixture.outline(index).map(|outline| outline.segments),
+            "{name}"
+        );
+        assert_eq!(cff.advance(gid), fixture.advance(index), "{name}");
+    }
+    for name in ["D", "E", "F", "acute"] {
+        let gid = cff.gid_for_name(name).expect("still named");
+        assert!(
+            cff.outline(gid).expect("it answers").is_empty(),
+            "{name} is nobody's"
+        );
+    }
+}
+
+/// **The converted document passes the strict validator**, and the PDF/A
+/// pairing: claiming PDF/A-2b, the save is held to no more findings than its
+/// input, and no finding says a `/FontFile3` is wrong for a `/Type1` font,
+/// unreadable, or of other widths than the dictionary's.
+#[test]
+fn the_converted_font_passes_the_strict_validator_and_the_pdfa_pairing() {
+    let (bytes, _) = converted(&two_pages());
+    let doc = Document::open(bytes).expect("it opens");
+    assert_eq!(doc.validate(), Vec::new());
+
+    let packet = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
+ pdfaid:part="2" pdfaid:conformance="B"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
+    let claimed = document_claiming(
+        &fixture_program(),
+        &plain_font(),
+        &[&[("F0", "AB")], &[("F0", "C\\311")]],
+        Some("/A/B/C/D/E/F/acute/Aacute"),
+        None,
+        Some(packet),
+    );
+    let (bytes, report) = converted(&claimed);
+    assert_eq!(report.subsetted.len(), 1, "{report:?}");
+    assert!(report.subsetted[0].converted);
+    let findings: Vec<FindingKind> = Document::open(bytes)
+        .expect("it opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| finding.kind)
+        .collect();
+    assert!(
+        !findings.iter().any(|kind| matches!(
+            kind,
+            FindingKind::FontProgramSubtypeMismatch { .. }
+                | FindingKind::FontProgramUnreadable { .. }
+                | FindingKind::FontNotEmbedded { .. }
+                | FindingKind::GlyphWidthInconsistent { .. }
+        )),
+        "{findings:?}"
+    );
+}
+
+/// **A default save leaves every Type 1 program a Type 1 program**: cut,
+/// under `/FontFile`, and reported converted by nothing.
+#[test]
+fn a_default_save_leaves_the_program_type1() {
+    let (bytes, report) = saved(&two_pages());
+    assert_eq!(report.subsetted.len(), 1);
+    assert!(!report.subsetted[0].converted);
+    assert_eq!(report.unconverted, Vec::new());
+    let (_, program, descriptor, doc) = only_program(&bytes);
+    assert!(Type1::parse(&program).is_some());
+    assert!(!descriptor.contains_key(doc.intern(b"FontFile3")));
+}
+
+/// A program the converter refuses is cut as a Type 1 program and named:
+/// here `B` sets its side bearing with `sbw` and a vertical one, which Type 2
+/// has no place for.
+#[test]
+fn a_program_the_converter_refuses_is_cut_as_a_type1_program() {
+    let mut glyphs = glyphs();
+    glyphs[2].1 = [
+        n(&[50, 10, 800, 0]),
+        SBW.to_vec(),
+        n(&[0, 40]),
+        vec![RMOVETO],
+        n(&[6]),
+        vec![CALLSUBR, CLOSEPATH, ENDCHAR],
+    ]
+    .concat();
+    let program = type1_support::program(&glyphs, &subrs(), ENCODING);
+    let original = document(&program, &plain_font(), &[&[("F0", "AB")]], None, None);
+    let (bytes, report) = converted(&original);
+    assert_eq!(pages_drawn(&bytes), pages_drawn(&original));
+    assert_eq!(report.subsetted.len(), 1, "{report:?}");
+    assert!(!report.subsetted[0].converted);
+    assert_eq!(report.unconverted.len(), 1);
+    assert_eq!(
+        report.unconverted[0].reason,
+        UnconvertedReason::Refused(Type1CffRefusal::VerticalMetrics)
+    );
+    assert_eq!(report.unconverted[0].base_font, "Fixture");
+    let (_, program, _, _) = only_program(&bytes);
+    assert_eq!(names_in(&program), [".notdef", "A", "B"]);
+}
+
+/// A code this renderer draws by its text and a CFF program's route by the
+/// built-in encoding — the `/ToUnicode` says code 66 is the letter A, and the
+/// built-in encoding's 66 is B — keeps the program Type 1, cut keeping both.
+#[test]
+fn a_code_the_cff_route_draws_otherwise_keeps_the_program_type1() {
+    let fonts = vec![Font {
+        encoding: "",
+        to_unicode: Some(5),
+        descriptor: 3,
+    }];
+    let original = document(
+        &fixture_program(),
+        &fonts,
+        &[&[("F0", "B")]],
+        None,
+        Some("<42> <0041>"),
+    );
+    let (bytes, report) = converted(&original);
+    assert_eq!(pages_drawn(&bytes), pages_drawn(&original));
+    assert_eq!(report.subsetted.len(), 1, "{report:?}");
+    assert!(!report.subsetted[0].converted);
+    assert_eq!(report.unconverted.len(), 1);
+    assert_eq!(
+        report.unconverted[0].reason,
+        UnconvertedReason::DrawsAnotherGlyph
+    );
+    let (_, program, _, _) = only_program(&bytes);
+    let names = names_in(&program);
+    for name in ["A", "B"] {
+        assert!(names.iter().any(|n| n == name), "{name} kept: {names:?}");
+    }
+}
+
+/// Two font dictionaries over one program are one job, converted once: both
+/// fonts' codes reach their glyphs through the CFF, and the page draws as it
+/// did.
+#[test]
+fn a_program_two_fonts_share_is_converted_once() {
+    let fonts = vec![
+        Font {
+            encoding: "",
+            to_unicode: None,
+            descriptor: 3,
+        },
+        Font {
+            encoding: " /Encoding << /Differences [65 /E] >>",
+            to_unicode: None,
+            descriptor: 3,
+        },
+    ];
+    let original = document(
+        &fixture_program(),
+        &fonts,
+        &[&[("F0", "B"), ("F1", "A")]],
+        None,
+        None,
+    );
+    let (bytes, report) = converted(&original);
+    assert_eq!(pages_drawn(&bytes), pages_drawn(&original));
+    assert_eq!(report.subsetted.len(), 1, "one job: {report:?}");
+    assert!(report.subsetted[0].converted);
+    let (_, program, _, _) = converted_program(&bytes);
+    let cff = Cff::parse(&program).expect("a CFF");
+    for (name, drawn) in [("B", true), ("E", true), ("A", false)] {
+        let gid = cff.gid_for_name(name).expect("named");
+        assert_eq!(
+            !cff.outline(gid).expect("it answers").is_empty(),
+            drawn,
+            "{name}"
+        );
+    }
+}
+
+/// A font a guess reaches is left whole, and converted no more than cut.
+#[test]
+fn a_program_left_whole_is_not_converted() {
+    let original = document(
+        &fixture_program(),
+        &plain_font(),
+        &[&[("F0", "AF")]],
+        None,
+        None,
+    );
+    let (bytes, report) = converted(&original);
+    assert_eq!(report.subsetted, Vec::new());
+    assert_eq!(report.unconverted, Vec::new());
+    assert_eq!(report.untouched.len(), 1);
+    assert_eq!(report.untouched[0].reason, UntouchedReason::CodeNotMapped);
+    let (_, before, _, _) = only_program(&original);
+    let (_, after, _, _) = only_program(&bytes);
+    assert_eq!(after, before, "written through as it arrived");
+}
+
+/// `FontPolicy::Keep` runs no font pass, so the conversion asked for converts
+/// nothing.
+#[test]
+fn keeping_the_programs_converts_nothing() {
+    let original = two_pages();
+    let doc = Document::open(original.clone()).expect("it opens");
+    let mut editor = doc.editor();
+    let saved = save(
+        &mut editor,
+        &SaveOptions {
+            fonts: FontPolicy::Keep,
+            type1: Type1Programs::Convert,
+            ..SaveOptions::default()
+        },
+    );
+    assert_eq!(saved.fonts, SubsetOutcome::Kept);
+    written_support::rewritten("a kept save", &original, &saved.bytes);
+    let (_, before, _, _) = only_program(&original);
+    let (_, after, _, _) = only_program(&saved.bytes);
+    assert_eq!(after, before);
+}
+
+/// An incremental save converts as a rewrite does, and says the original
+/// program is still in the file's prefix.
+#[test]
+fn an_incremental_save_converts_and_says_the_original_remains() {
+    let original = two_pages();
+    let doc = Document::open(original.clone()).expect("it opens");
+    let mut editor = doc.editor();
+    let saved = save(
+        &mut editor,
+        &SaveOptions {
+            write: WriteOptions {
+                mode: WriteMode::Incremental,
+                ..WriteOptions::default()
+            },
+            type1: Type1Programs::Convert,
+            ..SaveOptions::default()
+        },
+    );
+    written_support::rewritten("an incremental conversion", &original, &saved.bytes);
+    match &saved.fonts {
+        SubsetOutcome::CutButTheOriginalsRemain(report) => {
+            assert_eq!(report.subsetted.len(), 1, "{report:?}");
+            assert!(report.subsetted[0].converted);
+        }
+        other => panic!("an appended save keeps the originals: {other:?}"),
+    }
+    assert!(saved.bytes.starts_with(&original));
+    assert_eq!(pages_drawn(&saved.bytes), pages_drawn(&original));
 }

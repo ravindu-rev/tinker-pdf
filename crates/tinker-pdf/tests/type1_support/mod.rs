@@ -379,6 +379,7 @@ pub const RMOVETO: u8 = 21;
 pub const SEAC: [u8; 2] = [12, 6];
 pub const CALLOTHERSUBR: [u8; 2] = [12, 16];
 pub const POP: [u8; 2] = [12, 17];
+pub const SBW: [u8; 2] = [12, 7];
 
 /// Type 1 numbers in their shortest forms (Type 1 Font Format, 6.2).
 pub fn n(values: &[i32]) -> Vec<u8> {

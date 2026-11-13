@@ -4738,6 +4738,58 @@ fn the_saved_type1_subset_is_the_same_bytes_on_every_target() {
     );
 }
 
+/// The bytes the facade's save writes for [`type1_subset_page`] when asked to
+/// convert Type 1 programs: its program rewritten as a CFF by
+/// `tinker_pdf_font::type1_to_cff`, cut by the CFF subsetter and written as
+/// `/FontFile3 /Subtype /Type1C` (FT-11.8, `docs/design/subsetting.md`).
+///
+/// A run's output, recorded from `cargo test` on the first target it runs
+/// on, which prints the value to paste, and held there on every other.
+const SAVED_TYPE1_CONVERTED: &str = "";
+
+/// **The converted Type 1 font's page is the same bytes on every target**
+/// (FT-11.8): the conversion's charstrings, its charset and encoding and the
+/// CFF subsetter's cut of them are bytes no render shows.
+#[test]
+fn the_converted_type1_font_is_the_same_bytes_on_every_target() {
+    use tinker_pdf::write::{save, SaveOptions, Type1Programs};
+
+    let original = type1_subset_page();
+    let doc = Document::open(original.clone()).expect("it opens");
+    let mut editor = doc.editor();
+    let saved = save(
+        &mut editor,
+        &SaveOptions {
+            type1: Type1Programs::Convert,
+            ..SaveOptions::default()
+        },
+    );
+
+    // The document this hash is about, asserted rather than assumed: one
+    // program converted and cut, none left whole and none kept Type 1.
+    let report = saved.fonts.report().expect("the font pass ran");
+    assert!(report.untouched.is_empty(), "{report:?}");
+    assert!(report.unconverted.is_empty(), "{report:?}");
+    assert_eq!(report.subsetted.len(), 1, "{report:?}");
+    assert!(report.subsetted[0].converted);
+    assert!(report.subsetted[0].after < report.subsetted[0].before);
+    let written = written_support::rewritten(
+        "the converted Type 1 font is the same bytes on every target",
+        &original,
+        &saved.bytes,
+    );
+    assert!(written.validate().is_empty());
+
+    let hash = sha(&saved.bytes);
+    println!("SAVED_TYPE1_CONVERTED: {hash}");
+    assert_eq!(
+        hash,
+        SAVED_TYPE1_CONVERTED,
+        "the converted Type 1 font's page is not the bytes it was. The document is {} bytes.",
+        saved.bytes.len()
+    );
+}
+
 /// Every fingerprinted page's mark box (`docs/design/page-analysis.md`), as
 /// [`the_mark_boxes_are_the_same_on_every_target`] prints it: the box in
 /// points, each number at its shortest, and in pixels at 72 dpi as

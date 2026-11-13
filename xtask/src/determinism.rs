@@ -48,6 +48,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "the_saved_type1_subset_is_the_same_bytes_on_every_target",
     },
+    // The same page saved with its Type 1 program converted to CFF and cut
+    // (FT-11.8).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "the_converted_type1_font_is_the_same_bytes_on_every_target",
+    },
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "a_display_list_replays_every_fingerprinted_page_byte_for_byte",

@@ -672,7 +672,12 @@ it rewritten to the subset's names, or dropped where a name cannot be
 written as one; one with none gains none. A program it refuses by name is
 left whole as `ProgramNotRebuildable`, a code only a guess reaches leaves the
 font whole as `CodeNotMapped`, and a `/FontFile` whose bytes are no Type 1
-program is cut as what they are.
+program is cut as what they are. Asked by `SaveOptions::type1`, the pass
+converts a Type 1 program it cuts to CFF instead — `/FontFile3 /Subtype
+/Type1C`, cut by the CFF subsetter, every shown code reaching the glyph it
+drew through a CFF program's route — and cuts one it cannot convert as a
+Type 1 program, naming it in `SubsetReport::unconverted`
+([writing](writing.md)).
 
 **The unit of work is the program, not the font dictionary.** Two font
 dictionaries may point at one `/FontFile2`, and subsetting it for one of them

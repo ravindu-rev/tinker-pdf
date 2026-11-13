@@ -135,6 +135,19 @@
 //! them; the original file embedded none, so nothing of the pass's is left
 //! in its prefix.
 //!
+//! # Type 1 programs as CFF, when asked
+//!
+//! [`SaveOptions::type1`] is a [`Type1Programs`], **`Keep` by default**: a
+//! Type 1 program stays one, cut as [`SaveOptions::fonts`] says. Asked to
+//! [`Type1Programs::Convert`], the font pass rewrites each Type 1 program it
+//! cuts as `/FontFile3 /Subtype /Type1C` and cuts that with the CFF
+//! subsetter, where the conversion draws every glyph as the program did and
+//! every code the pages show reaches the same glyph through a CFF program's
+//! route (`crate::subset`, *A Type 1 program converted, when asked*); one
+//! that cannot be is cut as a Type 1 program and named, with its reason, in
+//! [`SubsetReport::unconverted`]. [`FontPolicy::Keep`] runs no font pass, so
+//! it converts nothing.
+//!
 //! # Appending, and reading what was appended
 //!
 //! [`append`] is the edit-and-reopen door (`docs/design/performance.md`,
@@ -206,6 +219,28 @@ pub enum FontPolicy {
     Keep,
 }
 
+/// What the font pass does with the Type 1 programs it cuts
+/// (`docs/design/subsetting.md`, *When a save converts*).
+///
+/// Opt-in, because a save that rewrote every Type 1 program's format would
+/// change what other readers are handed without being asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Type1Programs {
+    /// A Type 1 program stays one, cut as [`SaveOptions::fonts`] says.
+    /// **The default.**
+    #[default]
+    Keep,
+    /// Each Type 1 program the font pass cuts is rewritten as a CFF —
+    /// `/FontFile3 /Subtype /Type1C`, `/Length1` to `/Length3` dropped — by
+    /// [`tinker_pdf_font::type1_to_cff`], and cut by the CFF subsetter, where
+    /// every code the pages show through its fonts reaches the glyph it drew
+    /// through a CFF program's route as well. One that cannot be converted so
+    /// is cut as a Type 1 program and named in
+    /// [`SubsetReport::unconverted`]; under [`FontPolicy::Keep`] nothing is
+    /// converted, since every program is written through as it arrived.
+    Convert,
+}
+
 /// Options for [`save`].
 ///
 /// [`WriteOptions`] verbatim, plus the two decisions it cannot make (see this
@@ -217,6 +252,10 @@ pub struct SaveOptions {
     pub write: WriteOptions,
     /// What happens to the embedded font programs before any of that.
     pub fonts: FontPolicy,
+    /// Whether the font pass rewrites the Type 1 programs it cuts as CFF.
+    /// [`Type1Programs::Keep`] — the default — keeps every Type 1 program a
+    /// Type 1 program.
+    pub type1: Type1Programs,
     /// What happens to the image XObjects, before the fonts. [`ImagePolicy::Keep`]
     /// — the default — leaves every image stream as the file stored it.
     pub images: ImagePolicy,
@@ -451,8 +490,13 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
     let fonts = match options.fonts {
         FontPolicy::Keep => SubsetOutcome::Kept,
         FontPolicy::Subset => {
-            let report =
-                subset::apply_counting(editor, work.as_ref(), options.parallelism, &written);
+            let report = subset::apply_counting(
+                editor,
+                work.as_ref(),
+                options.parallelism,
+                &written,
+                options.type1 == Type1Programs::Convert,
+            );
             match options.write.mode {
                 WriteMode::Rewrite => SubsetOutcome::Cut(report),
                 // 7.5.6: the original bytes are the output's prefix, the
