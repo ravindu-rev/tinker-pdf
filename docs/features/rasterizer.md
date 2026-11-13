@@ -348,7 +348,15 @@ The trade is written down in [design/image-edges.md](../design/image-edges.md).
 **Meshes.** `draw_mesh` rasterizes a whole Gouraud-shaded triangle mesh into
 one `MeshBuffer` — coverage from a single non-zero fill over every triangle,
 colour from a barycentric walk that interpolates the vertex inputs and only
-then asks the caller's closure what colour they are. One buffer rather than
+then asks the caller's closure what colour they are. Each row of a triangle
+walks the columns between its edges' crossings of the row and one more each
+side, not the triangle's whole box, through the same inside test and weights,
+so it paints the pixels a walk of the box paints in the colours it gives them;
+a row within 1/1024 of a pixel of a vertex, a triangle under a quarter of a
+pixel wide and one reaching past 65 536 pixels from the origin, where rounding
+could move the test's answer by a pixel, walk the whole box
+(`a_span_walk_paints_what_the_box_walk_paints`,
+`a_triangle_visits_its_span_not_its_box`). One buffer rather than
 one fill per triangle is what removes the lattice of pale seams that
 per-triangle compositing paints along every shared edge. A silhouette pixel no
 triangle's interior reaches takes its colour from a neighbour, spread two

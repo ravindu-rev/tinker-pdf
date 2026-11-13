@@ -50,8 +50,9 @@ use crate::geom::{FillRule, Path};
 /// Both passes are charged to it, because they run away for different reasons
 /// and a budget that only counted one of them would be no budget at all:
 ///
-/// - the colour pass costs a triangle's clamped bounding box, so a mesh of
-///   large overlapping triangles costs the page many times over;
+/// - the colour pass is charged a triangle's clamped bounding box, the most
+///   it can visit, so a mesh of large overlapping triangles costs the page
+///   many times over;
 /// - the coverage pass costs each triangle's three edges once per
 ///   sub-scanline it crosses, so a mesh of tall thin slivers costs almost
 ///   nothing in bounding boxes and a great deal in crossings. That is the
@@ -364,8 +365,116 @@ fn clamped_box(corners: &[(f64, f64); 3], region: &Region) -> Option<Bounds> {
     (x1 > x0 && y1 > y0).then_some(Bounds { x0, y0, x1, y1 })
 }
 
+/// How far from the origin a triangle's coordinates may lie, in pixels, for
+/// its rows to be walked by their spans ([`Spans`]).
+const SPAN_REACH: f64 = 65_536.0;
+
+/// How near a row's centre may come to a vertex, in pixels, and still be
+/// walked by its span ([`Spans`]).
+const SPAN_CLEARANCE: f64 = 1.0 / 1024.0;
+
+/// How narrow a triangle may be, as twice its area over its height, and still
+/// have its rows walked by their spans ([`Spans`]).
+const SPAN_WIDTH: f64 = 0.25;
+
+/// One edge of a triangle, for its crossings of a row.
+#[derive(Clone, Copy)]
+struct Crossing {
+    /// An end of the edge.
+    from: (f64, f64),
+    /// The edge's extent down the page: it crosses a row whose centre lies
+    /// strictly between the two.
+    top: f64,
+    bottom: f64,
+    /// Its run over its rise, `dx / dy`, where it rises at all.
+    slope: f64,
+}
+
+/// The columns of a triangle's rows that can hold a pixel its inside test
+/// accepts.
+///
+/// In real arithmetic a row meets a triangle between two crossings of its
+/// edges, and every pixel centre the triangle holds lies between them. The
+/// inside test is rounded, so a centre within rounding of an edge may come out
+/// on either side of it; the columns walked are the crossings widened by a
+/// pixel each side, which holds every such centre wherever rounding moves the
+/// test's answer, and the crossings themselves, by less than a pixel along the
+/// row. That is so for a triangle whose coordinates lie within [`SPAN_REACH`]
+/// of the origin and which is at least [`SPAN_WIDTH`] of a pixel wide, on a row
+/// at least [`SPAN_CLEARANCE`] from every vertex. There an edge the row crosses
+/// rises at least twice that clearance, a row the triangle misses passes at
+/// least that far from it, and the test's rounding on coordinates that size,
+/// under 10^-4 of a square pixel, moves its answer by well under a tenth of a
+/// pixel along the row and cannot accept a centre on a row it misses.
+/// Anywhere else — a row through a vertex, a sliver, a vertex far off the
+/// page — the row is walked across the whole clamped box, so the pixels
+/// painted are the box walk's in every case
+/// (`a_span_walk_paints_what_the_box_walk_paints`).
+struct Spans {
+    edges: [Crossing; 3],
+    /// The vertices' rows.
+    rows: [f64; 3],
+    /// Whether the triangle is one whose rows the crossings bound.
+    bounded: bool,
+}
+
+impl Spans {
+    fn new(corners: &[(f64, f64); 3], area: f64) -> Spans {
+        let [a, b, c] = *corners;
+        let edge = |from: (f64, f64), to: (f64, f64)| Crossing {
+            from,
+            top: from.1.min(to.1),
+            bottom: from.1.max(to.1),
+            slope: (to.0 - from.0) / (to.1 - from.1),
+        };
+        let near = corners
+            .iter()
+            .all(|&(x, y)| x.abs() <= SPAN_REACH && y.abs() <= SPAN_REACH);
+        let height = a.1.max(b.1).max(c.1) - a.1.min(b.1).min(c.1);
+        Spans {
+            edges: [edge(a, b), edge(b, c), edge(c, a)],
+            rows: [a.1, b.1, c.1],
+            bounded: near && area.abs() >= height * SPAN_WIDTH,
+        }
+    }
+
+    /// The columns of the row whose centre is `y` that can hold a pixel the
+    /// inside test accepts, half-open and not yet clamped to the region:
+    /// `None` where the row is walked across the whole clamped box.
+    fn columns(&self, y: f64) -> Option<(i64, i64)> {
+        if !self.bounded || self.rows.iter().any(|row| (y - row).abs() < SPAN_CLEARANCE) {
+            return None;
+        }
+        let mut low = f64::INFINITY;
+        let mut high = f64::NEG_INFINITY;
+        for edge in &self.edges {
+            // Strictly between, since the row clears both ends: an edge along
+            // the row has its ends on it and has already sent the row whole.
+            if y <= edge.top || y >= edge.bottom {
+                continue;
+            }
+            let x = edge.from.0 + (y - edge.from.1) * edge.slope;
+            low = low.min(x);
+            high = high.max(x);
+        }
+        if low > high {
+            return Some((0, 0)); // The row misses the triangle.
+        }
+        // The columns whose centres lie between the crossings, and a column
+        // more each side. Both crossings lie within the triangle's own
+        // coordinates, so the conversions are exact.
+        let from = (low - 0.5).ceil() as i64 - 1;
+        let to = (high - 0.5).floor() as i64 + 2;
+        Some((from, to))
+    }
+}
+
 /// The colour pass: one scanline walk per triangle, interpolating the vertex
 /// inputs and asking the caller what they paint.
+///
+/// Each row walks its [`Spans::columns`] rather than the whole clamped box,
+/// with the box walk's inside test and weights, so the pixels painted and the
+/// colours they take are the box walk's.
 fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut [[u8; 4]]) {
     let mut mixed = vec![0.0f64; draw.components];
     for triangle in draw.triangles {
@@ -389,6 +498,7 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
         ];
 
         let [a, b, c] = corners;
+        let spans = Spans::new(&corners, area);
         let mut painted = false;
         for py in bounds.y0..bounds.y1 {
             // Band granularity rather than row, for the reason `fill` gives:
@@ -397,8 +507,14 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
             if (py - bounds.y0) % 16 == 0 && draw.stop.is_some_and(|stop| stop()) {
                 return;
             }
+            count::row();
             let y = py as f64 + 0.5;
-            for px in bounds.x0..bounds.x1 {
+            let (from, to) = match spans.columns(y) {
+                Some((from, to)) => (from.max(bounds.x0), to.min(bounds.x1)),
+                None => (bounds.x0, bounds.x1),
+            };
+            for px in from..to {
+                count::visited();
                 let x = px as f64 + 0.5;
                 // The three barycentric weights, each an edge function over
                 // the same denominator, so their signs agree whichever way the
@@ -409,6 +525,7 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
                 if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                     continue;
                 }
+                count::inside();
                 for (component, slot) in mixed.iter_mut().enumerate() {
                     let at = |v: &[f64]| v.get(component).copied().unwrap_or(0.0);
                     *slot = w0 * at(inputs[0]) + w1 * at(inputs[1]) + w2 * at(inputs[2]);
@@ -436,6 +553,55 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
             }
         }
     }
+}
+
+/// Work the colour pass does, counted for its tests: compiled only under
+/// `cfg(test)` and kept per thread, so tests running side by side cannot add
+/// into each other's.
+#[cfg(test)]
+mod count {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static ROWS: Cell<u64> = const { Cell::new(0) };
+        static VISITED: Cell<u64> = const { Cell::new(0) };
+        static INSIDE: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One row of a triangle's clamped box, walked or not.
+    pub(super) fn row() {
+        ROWS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// One pixel whose inside test was taken.
+    pub(super) fn visited() {
+        VISITED.with(|count| count.set(count.get() + 1));
+    }
+
+    /// One pixel the inside test accepted.
+    pub(super) fn inside() {
+        INSIDE.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The counts on this thread since the last call: rows, pixels visited and
+    /// pixels inside.
+    pub(super) fn take() -> (u64, u64, u64) {
+        (
+            ROWS.with(|count| count.replace(0)),
+            VISITED.with(|count| count.replace(0)),
+            INSIDE.with(|count| count.replace(0)),
+        )
+    }
+}
+
+/// The counters outside tests: nothing.
+#[cfg(not(test))]
+mod count {
+    pub(super) fn row() {}
+
+    pub(super) fn visited() {}
+
+    pub(super) fn inside() {}
 }
 
 /// One vertex's colour inputs.
@@ -794,5 +960,394 @@ mod tests {
         let buffer = draw(&positions, &values, &[[0, 1, 2], [0, 3, 4], [9, 9, 9]], 8);
         assert!(buffer.coverage.data.iter().all(|&v| v == 0));
         assert!(buffer.color.iter().all(|p| p[3] == 0));
+    }
+
+    /// The colour pass as it was before a row walked its span: every column of
+    /// the clamped box, through the same inside test and weights. Kept, word
+    /// for word, as the reference `a_span_walk_paints_what_the_box_walk_paints`
+    /// holds the span walk to.
+    fn paint_triangles_by_box(
+        draw: &MeshDraw<'_>,
+        region: &Region,
+        width: u32,
+        color: &mut [[u8; 4]],
+    ) {
+        let mut mixed = vec![0.0f64; draw.components];
+        for triangle in draw.triangles {
+            if draw.stop.is_some_and(|stop| stop()) {
+                return;
+            }
+            let Some(corners) = corners(draw, triangle) else {
+                continue;
+            };
+            let area = signed_area(&corners);
+            if !area.is_finite() || area == 0.0 {
+                continue;
+            }
+            let Some(bounds) = clamped_box(&corners, region) else {
+                continue;
+            };
+            let inputs: [&[f64]; 3] = [
+                values_of(draw, triangle[0]),
+                values_of(draw, triangle[1]),
+                values_of(draw, triangle[2]),
+            ];
+
+            let [a, b, c] = corners;
+            let mut painted = false;
+            for py in bounds.y0..bounds.y1 {
+                // Band granularity rather than row, for the reason `fill` gives:
+                // a branch per row is a branch in the hottest loop, and sixteen
+                // rows is tens of microseconds between one answer and the next.
+                if (py - bounds.y0) % 16 == 0 && draw.stop.is_some_and(|stop| stop()) {
+                    return;
+                }
+                let y = py as f64 + 0.5;
+                for px in bounds.x0..bounds.x1 {
+                    let x = px as f64 + 0.5;
+                    // The three barycentric weights, each an edge function over
+                    // the same denominator, so their signs agree whichever way the
+                    // triangle is wound and the test is one comparison each.
+                    let w0 = ((b.0 - x) * (c.1 - y) - (c.0 - x) * (b.1 - y)) / area;
+                    let w1 = ((c.0 - x) * (a.1 - y) - (a.0 - x) * (c.1 - y)) / area;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+                    for (component, slot) in mixed.iter_mut().enumerate() {
+                        let at = |v: &[f64]| v.get(component).copied().unwrap_or(0.0);
+                        *slot = w0 * at(inputs[0]) + w1 * at(inputs[1]) + w2 * at(inputs[2]);
+                    }
+                    write(color, region, width, px, py, (draw.color)(&mixed));
+                    painted = true;
+                }
+            }
+
+            if !painted {
+                // A triangle thinner than a pixel contains no pixel centre at all,
+                // so the loop above wrote nothing while the coverage sweep still
+                // found spans for it. Its centroid colour goes in the one pixel
+                // its centroid falls in, which gives the fringe spread something
+                // to work from; the coverage mask still decides what composites.
+                let centroid = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
+                for (component, slot) in mixed.iter_mut().enumerate() {
+                    let at = |v: &[f64]| v.get(component).copied().unwrap_or(0.0);
+                    *slot = (at(inputs[0]) + at(inputs[1]) + at(inputs[2])) / 3.0;
+                }
+                let px = centroid.0.floor().clamp(-1.0e18, 1.0e18) as i64;
+                let py = centroid.1.floor().clamp(-1.0e18, 1.0e18) as i64;
+                if px >= bounds.x0 && px < bounds.x1 && py >= bounds.y0 && py < bounds.y1 {
+                    write(color, region, width, px, py, (draw.color)(&mixed));
+                }
+            }
+        }
+    }
+
+    /// A colour every input reaches, so two walks that painted different
+    /// pixels, or the same pixel from different weights, paint differently.
+    fn spread(inputs: &[f64]) -> Color {
+        let level =
+            |at: usize| (inputs.get(at).copied().unwrap_or(0.5) * 251.0).clamp(0.0, 255.0) as u8;
+        Color {
+            r: level(0),
+            g: level(1),
+            b: level(0) ^ level(1).rotate_left(3),
+            a: 0xFF,
+        }
+    }
+
+    /// A small deterministic generator for the cases below.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// A number in `low..high`.
+        fn within(&mut self, low: f64, high: f64) -> f64 {
+            low + (high - low) * ((self.next() >> 11) as f64 / (1u64 << 53) as f64)
+        }
+
+        /// One of `choices`.
+        fn pick<T: Copy>(&mut self, choices: &[T]) -> T {
+            choices[(self.next() % choices.len() as u64) as usize]
+        }
+    }
+
+    /// Runs both walks over one mesh in one region and holds them equal.
+    fn both_walks_agree(
+        positions: &[(f64, f64)],
+        values: &[f64],
+        triangles: &[[u32; 3]],
+        rect: (i32, i32, u32, u32),
+        case: &str,
+    ) {
+        let color = spread;
+        let draw = MeshDraw {
+            positions,
+            values,
+            components: 2,
+            triangles,
+            color: &color,
+            stop: None,
+            scale: 1.0,
+        };
+        let region = Region::of(rect);
+        let pixels = (rect.2 as usize) * (rect.3 as usize);
+        let mut spans = vec![[0u8; 4]; pixels];
+        let mut boxes = vec![[0u8; 4]; pixels];
+        paint_triangles(&draw, &region, rect.2, &mut spans);
+        paint_triangles_by_box(&draw, &region, rect.2, &mut boxes);
+        let _ = count::take();
+        if let Some(first) = (0..pixels).find(|&at| spans[at] != boxes[at]) {
+            panic!(
+                "{case}: the span walk painted {:?} and the box walk {:?} at pixel {first} of \
+                 {rect:?}, over {positions:?} as {triangles:?}",
+                spans[first], boxes[first]
+            );
+        }
+    }
+
+    /// **The pixels a span walk paints are the box walk's, and so are their
+    /// colours,** wherever rounding decides the inside test: over triangles
+    /// at random, vertices on and beside pixel centres and pixel edges, edges
+    /// a hair from level, slivers, specks, vertices far off the region and
+    /// past the span reach, and regions far from the origin.
+    #[test]
+    fn a_span_walk_paints_what_the_box_walk_paints() {
+        let mut rng = Xorshift(0x9e37_79b9_7f4a_7c15);
+        let hair = [
+            1e-14,
+            1e-12,
+            1e-9,
+            1e-6,
+            1.0 / 2048.0,
+            1.0 / 1024.0,
+            1.0 / 512.0,
+        ];
+        let far = [-1e300, -1e9, -70_000.0, 70_000.0, 1e6, 1e300];
+        for round in 0..400 {
+            // The region: at the origin, or far out where coordinates are
+            // large but within reach, or past it.
+            let (x0, y0) = rng.pick(&[(0, 0), (0, 0), (-40, 17), (30_000, -30_000), (65_500, 20)]);
+            let rect = (x0, y0, 48, 40);
+            let at = |along: f64, down: f64| (f64::from(x0) + along, f64::from(y0) + down);
+            let mut positions = Vec::new();
+            let kind = round % 8;
+            for _ in 0..9 {
+                let point = match kind {
+                    // At random, some outside the region.
+                    0 | 1 => {
+                        let (along, down) = (rng.within(-12.0, 60.0), rng.within(-12.0, 52.0));
+                        at(along, down)
+                    }
+                    // On a pixel centre or a pixel edge, either axis.
+                    2 => {
+                        let along = f64::from((rng.next() % 50) as u32) - 1.0;
+                        let down = f64::from((rng.next() % 42) as u32) - 1.0;
+                        let half = |rng: &mut Xorshift| rng.pick(&[0.0, 0.5]);
+                        let (a, b) = (half(&mut rng), half(&mut rng));
+                        at(along + a, down + b)
+                    }
+                    // A hair from a pixel centre's row.
+                    3 => {
+                        let along = rng.within(-4.0, 52.0);
+                        let row = f64::from((rng.next() % 40) as u32) + 0.5;
+                        let sign = rng.pick(&[-1.0, 1.0]);
+                        let offset = sign * rng.pick(&hair);
+                        at(along, row + offset)
+                    }
+                    // Specks: three points within a pixel.
+                    4 => {
+                        let (along, down) = (rng.within(0.0, 46.0), rng.within(0.0, 38.0));
+                        let (dx, dy) = (rng.within(0.0, 1.0), rng.within(0.0, 1.0));
+                        at(along + dx, down + dy)
+                    }
+                    // Vertices far off the region, past the span reach.
+                    5 => {
+                        if rng.next() % 3 == 0 {
+                            (rng.pick(&far), rng.within(-4.0, 44.0) + f64::from(y0))
+                        } else {
+                            let (along, down) = (rng.within(-4.0, 52.0), rng.within(-4.0, 44.0));
+                            at(along, down)
+                        }
+                    }
+                    _ => (0.0, 0.0), // Laid out below.
+                };
+                positions.push(point);
+            }
+            let mut triangles: Vec<[u32; 3]> =
+                (0..3).map(|t| [3 * t, 3 * t + 1, 3 * t + 2]).collect();
+            match kind {
+                // Edges a hair from level: two vertices far apart across the
+                // region, their rows a hair apart, one of them on or beside a
+                // pixel centre's row.
+                6 => {
+                    for t in 0..3 {
+                        let row = f64::from((rng.next() % 40) as u32) + rng.pick(&[0.5, 0.25]);
+                        let rise = rng.pick(&[0.0, 1e-15, 1e-13, 1e-10, 1e-7, 1.0 / 2048.0]);
+                        let apex = rng.within(-30.0, 30.0);
+                        let (left, right, top) = (
+                            rng.within(-8.0, 10.0),
+                            rng.within(38.0, 56.0),
+                            rng.within(0.0, 48.0),
+                        );
+                        positions[3 * t] = at(left, row);
+                        positions[3 * t + 1] = at(right, row + rise);
+                        positions[3 * t + 2] = at(top, row + apex);
+                    }
+                }
+                // Slivers: a third vertex a hair off the line through two.
+                7 => {
+                    for t in 0..3 {
+                        let (ax, ay) = (rng.within(-6.0, 54.0), rng.within(-6.0, 46.0));
+                        let (bx, by) = (rng.within(-6.0, 54.0), rng.within(-6.0, 46.0));
+                        let share = rng.within(0.0, 1.0);
+                        let (nx, ny) = (ay - by, bx - ax);
+                        let off = rng.pick(&[0.0, 1e-12, 1e-6, 1e-3, 0.05, 0.3]);
+                        positions[3 * t] = at(ax, ay);
+                        positions[3 * t + 1] = at(bx, by);
+                        positions[3 * t + 2] = at(
+                            ax + share * (bx - ax) + off * nx,
+                            ay + share * (by - ay) + off * ny,
+                        );
+                    }
+                }
+                _ => {}
+            }
+            // Shared vertices and overlaps as a mesh has them.
+            triangles.push([0, 4, 8]);
+            triangles.push([2, 3, 7]);
+            let values: Vec<f64> = (0..positions.len() * 2)
+                .map(|_| rng.within(0.0, 1.0))
+                .collect();
+            both_walks_agree(
+                &positions,
+                &values,
+                &triangles,
+                rect,
+                &format!("round {round}"),
+            );
+        }
+    }
+
+    /// **P-14.2's exit.** A row of a triangle visits the pixel centres inside
+    /// it and two columns more, not its clamped box: over three triangles
+    /// whose vertices stand clear of every row's centre, the pixels visited
+    /// are at most those inside plus two a row, and fewer than the box holds.
+    #[test]
+    fn a_triangle_visits_its_span_not_its_box() {
+        let color = grey;
+        let region = Region::of((0, 0, 64, 64));
+        for corners in [
+            [(2.3, 1.2), (61.7, 9.9), (30.1, 58.3)],
+            [(60.6, 3.7), (4.2, 33.4), (59.1, 62.8)],
+            [(10.2, 2.9), (13.8, 61.1), (52.4, 40.3)],
+        ] {
+            let values = [0.0, 0.5, 1.0];
+            let draw = MeshDraw {
+                positions: &corners,
+                values: &values,
+                components: 1,
+                triangles: &[[0, 1, 2]],
+                color: &color,
+                stop: None,
+                scale: 1.0,
+            };
+            let mut buffer = vec![[0u8; 4]; 64 * 64];
+            let _ = count::take();
+            paint_triangles(&draw, &region, 64, &mut buffer);
+            let (rows, visited, inside) = count::take();
+            let boxed = clamped_box(&corners, &region).expect("the triangle is in the region");
+            let box_pixels = ((boxed.x1 - boxed.x0) * (boxed.y1 - boxed.y0)) as u64;
+            assert_eq!(rows, (boxed.y1 - boxed.y0) as u64, "every row of the box");
+            assert!(inside > 0, "{corners:?} holds pixel centres");
+            assert!(
+                visited <= inside + 2 * rows,
+                "{corners:?}: {visited} visits for {inside} pixels inside over {rows} rows"
+            );
+            assert!(
+                visited < box_pixels,
+                "{corners:?}: {visited} visits, no fewer than the box's {box_pixels}"
+            );
+        }
+    }
+
+    /// The span of a row, and the rows walked whole: a row the crossings
+    /// bound walks the columns between them and one more each side; a row
+    /// the triangle misses walks none; a row within the clearance of a vertex,
+    /// any row of a sliver, and any row of a triangle reaching past the span
+    /// reach are walked across the whole box.
+    #[test]
+    fn a_row_walks_its_crossings_widened_or_the_whole_box() {
+        let spans = |corners: [(f64, f64); 3]| Spans::new(&corners, signed_area(&corners));
+
+        // Crossings at 10.25 and 20.371875 on the row at 20.5: centres from
+        // column 10 to 19, and the columns 9 and 20 beside them.
+        let right = spans([(10.25, 0.25), (30.75, 0.25), (10.25, 40.25)]);
+        assert_eq!(right.columns(20.5), Some((9, 21)));
+        assert_eq!(right.columns(41.5), Some((0, 0)), "below the triangle");
+
+        let ordinary = spans([(2.3, 1.2), (61.7, 9.9), (30.1, 58.3)]);
+        assert!(ordinary.columns(30.5).is_some());
+        assert_eq!(ordinary.columns(0.5), Some((0, 0)), "above it");
+
+        // A vertex on a row's centre, within the clearance of one, and just
+        // outside it.
+        let on = spans([(2.3, 10.5), (61.7, 1.9), (30.1, 58.3)]);
+        assert_eq!(on.columns(10.5), None);
+        assert!(on.columns(11.5).is_some());
+        let within = spans([(2.3, 20.5 + 1.0 / 2048.0), (61.7, 1.9), (30.1, 58.3)]);
+        assert_eq!(within.columns(20.5), None);
+        let clear = spans([(2.3, 20.5 + 1.0 / 512.0), (61.7, 1.9), (30.1, 58.3)]);
+        assert!(clear.columns(20.5).is_some());
+
+        // A sliver, a third of a pixel wide over sixty rows: twice its area
+        // is 2.95 against a height of 59.7.
+        let sliver = spans([(0.3, 0.2), (60.7, 59.9), (30.6, 30.1)]);
+        assert_eq!(sliver.columns(15.5), None);
+
+        // A vertex past the span reach, either axis.
+        let far = spans([(2.3, 1.2), (70_000.7, 9.9), (30.1, 58.3)]);
+        assert_eq!(far.columns(5.5), None);
+        let deep = spans([(2.3, -70_000.2), (61.7, 9.9), (30.1, 58.3)]);
+        assert_eq!(deep.columns(5.5), None);
+    }
+
+    /// A triangle with no pixel centre inside still puts its centroid's
+    /// colour in its centroid's pixel, as the box walk did: the span walk
+    /// paints nothing more and nothing less of it.
+    #[test]
+    fn a_triangle_holding_no_centre_still_paints_its_centroid() {
+        // Lying between two rows' centres.
+        let positions = [(3.1, 4.6), (19.7, 4.8), (11.2, 4.9)];
+        let values = [0.2, 0.2, 0.8, 0.8, 0.5, 0.5];
+        both_walks_agree(
+            &positions,
+            &values,
+            &[[0, 1, 2]],
+            (0, 0, 24, 12),
+            "a sliver",
+        );
+        let color = spread;
+        let draw = MeshDraw {
+            positions: &positions,
+            values: &values,
+            components: 2,
+            triangles: &[[0, 1, 2]],
+            color: &color,
+            stop: None,
+            scale: 1.0,
+        };
+        let mut buffer = vec![[0u8; 4]; 24 * 12];
+        paint_triangles(&draw, &Region::of((0, 0, 24, 12)), 24, &mut buffer);
+        let painted: Vec<usize> = (0..buffer.len()).filter(|&at| buffer[at][3] != 0).collect();
+        // The centroid is (11.33..., 4.766...): column 11 of row 4.
+        assert_eq!(painted, vec![4 * 24 + 11]);
+        let _ = count::take();
     }
 }
