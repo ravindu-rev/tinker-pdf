@@ -26,3 +26,12 @@ crate-type = ["cdylib"]
 [dependencies]
 tinker-pdf = { path = "../../crates/tinker-pdf" }
 pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
+
+# The root workspace's release profile, which cargo reads from the workspace
+# root alone, so this root declares it too: the wheel's library is built as
+# the C ABI is. `cargo xtask profiles` holds this table equal to the root's,
+# key for key, so a profile change is made in all three manifests or fails
+# `check`.
+[profile.release]
+lto = "thin"
+codegen-units = 1

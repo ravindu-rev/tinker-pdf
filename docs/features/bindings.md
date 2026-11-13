@@ -786,6 +786,16 @@ workspace is too much, because nothing is packaged when the first crate runs;
 pins the width. Under it nothing is unprovable, and the one step skipped is
 `dotnet nuget push`, which has no harmless form.
 
+**Every artefact is built under one release profile.** The C ABI builds in
+the root workspace, under its `[profile.release]`: thin LTO and one codegen
+unit. `bindings/js` and `bindings/python` are workspace roots of their own,
+and cargo reads a profile from the workspace root alone, so each declares the
+same table, and `cargo xtask profiles`, part of `cargo xtask check`, holds the
+three equal key for key — a binding whose table is missing, holds a key the
+root's does not or gives one another value is refused by its manifest and the
+key — so a profile change is made once, in all three, for the `.wasm`, the
+wheels and the native libraries alike.
+
 ## API
 
 ```python
