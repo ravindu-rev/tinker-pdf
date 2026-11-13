@@ -321,10 +321,21 @@ per object:
   an odd `W`, a pixel boundary for an even one. A thin line then covers whole
   pixels across its width, at any offset and between its copies; a curve moves
   by under half a pixel and keeps its shape.
+- **The grid, exactly.** A coordinate `v` goes to `floor(v) + 0.5` along an
+  axis whose width is odd and to `floor(v + 0.5)` along one whose width is
+  even (`tinker_pdf_raster::adjusted_to_pixels`, the width the stroke draws
+  at — the asked width raised to the thinnest line — made whole by
+  `whole_pixel_width`): both move a point by at most half a pixel, and both
+  commute with a move by whole pixels, so copies at offsets within one pixel's
+  reach land on one place.
 - **Where the pen is a device width** — a similarity, nearly every page
   (`user_space_pen`) — and in the page frame, never a tile's (ruling 5). Under
   any other map the coordinates are adjusted and the width is the user-space
-  pen's, uniform along the line already. Stroked glyphs take the same rule.
+  pen's, uniform along the line already: each axis takes the grid of the
+  pen's extent along it, raised to the thinnest line the outline is united
+  with, made whole, `width·√(a² + c²)` across `x` and `width·√(b² + d²)`
+  across `y` for the map `[a b c d e f]`, which are the similarity's one width
+  where the map is one. Stroked glyphs take the same rule.
 - **Off or unset**, strokes draw as today.
 
 ### The alpha source and knockout made exact (`/AIS`, 11.3.7, 11.4.6)

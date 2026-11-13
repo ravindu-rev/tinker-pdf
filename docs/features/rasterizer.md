@@ -194,6 +194,21 @@ where it was and costs the walk no step, so a pattern padded with dashes of
 no length writes what it writes without them, at the same cost
 (`a_dash_of_no_length_costs_no_step_of_the_walk`).
 
+**Stroke adjustment.** Two pieces of 10.7.5, without its vocabulary:
+`whole_pixel_width` makes a device line width whole — the nearest whole
+number of pixels, never under one, and one for a width that is not a finite
+number — and `adjusted_to_pixels` moves every point of a path, vertices and
+control points alike, to the grid that puts the edges of a stroke that many
+pixels across on pixel boundaries: along an axis on which it is odd, to the
+centre of the pixel the point is in (`floor(v) + 0.5`), along one on which it
+is even, to the nearest pixel boundary (`floor(v + 0.5)`). No point moves by
+more than half a pixel, and a path moved by whole pixels lands moved by the
+same, so copies of a line at offsets inside one pixel's reach land on one
+place and a thin line stroked at its whole width covers whole pixels across
+it (`an_adjusted_width_is_the_nearest_whole_pixel_and_never_under_one`,
+`every_point_goes_to_the_grid_its_axis_asks_for`,
+`an_adjusted_thin_line_covers_whole_pixels_across_its_width`).
+
 **Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
 empty at every pixel: at least half becomes 255, less becomes 0. It is what
 turning anti-aliasing off means one layer up ([rendering](rendering.md)). A
@@ -625,7 +640,8 @@ The crate root re-exports the working set: `Path`, `Verb`, `Point`,
 `FillRule`, `flatten`; `fill`, `fill_with`, `fill_outline`, `fill_hard`,
 `fill_hard_with`, `fill_outline_hard`, `HardEdge`, `FillScratch`, `Mask`;
 `stroke`, `stroke_mapped`, `stroke_with`, `stroke_mapped_with`,
-`stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`;
+`stretches`, `dash`, `whole_pixel_width`, `adjusted_to_pixels`,
+`StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`;
 `PlateInk`, `Spots`, `TooManySpots`, `MAX_SPOT_PLATES`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `TwoColour`, `Transform`, `Filter`,
 `Sampling`, `Pyramid`, `image_bounds_in`, `resample`; `draw_mesh`, `draw_mesh_over`,

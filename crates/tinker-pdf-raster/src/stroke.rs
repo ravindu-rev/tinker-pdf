@@ -15,7 +15,7 @@
 use tinker_pdf_math as math;
 
 use crate::fill::{FillScratch, Outline};
-use crate::geom::{flatten, flatten_mapped, Path, Point};
+use crate::geom::{flatten, flatten_mapped, Path, Point, Verb};
 use crate::image::Transform;
 
 /// How a stroke's ends are finished (8.4.3.3, Table 54).
@@ -381,6 +381,69 @@ pub fn stretches(map: &Transform) -> (f64, f64) {
     let q = (e * e + h * h).sqrt();
     let r = (f * f + g * g).sqrt();
     (q + r, (q - r).abs())
+}
+
+/// Stroke adjustment's width (10.7.5, without its vocabulary): a line width
+/// in device pixels made whole — the nearest whole number of pixels, "no more
+/// than half a pixel different" from the width asked for, and never under one,
+/// "the thinnest line that can be rendered at device resolution". A width
+/// that is not a finite number is one pixel, as [`stroke`] reads it.
+#[must_use]
+pub fn whole_pixel_width(width: f64) -> f64 {
+    if width.is_finite() {
+        width.round().max(1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Stroke adjustment's grid (10.7.5): `path` with every point — vertices and
+/// control points alike — moved to the grid that puts the edges of a stroke
+/// a whole number of pixels across on pixel boundaries.
+///
+/// `across` is the stroke's extent along each axis, `(x, y)`, in whole
+/// pixels ([`whole_pixel_width`]). Along an axis on which it is odd, a
+/// coordinate moves to the centre of the pixel it is in, `floor(v) + 0.5`;
+/// along one on which it is even, to the nearest pixel boundary,
+/// `floor(v + 0.5)`. No point moves by more than half a pixel, so a curve
+/// keeps its shape, and the grid is the device's: a path moved by whole pixels
+/// lands moved by the same pixels, and copies of a line at phases inside one
+/// pixel's reach land on one place.
+#[must_use]
+pub fn adjusted_to_pixels(path: &Path, across: (f64, f64)) -> Path {
+    let odd = |extent: f64| extent % 2.0 == 1.0;
+    let on = |v: f64, odd: bool| {
+        if odd {
+            v.floor() + 0.5
+        } else {
+            (v + 0.5).floor()
+        }
+    };
+    let (odd_x, odd_y) = (odd(across.0), odd(across.1));
+    let at = |p: Point| (on(p.x, odd_x), on(p.y, odd_y));
+    let mut out = Path::new();
+    for verb in path.verbs() {
+        match *verb {
+            Verb::MoveTo(p) => {
+                let (x, y) = at(p);
+                out.move_to(x, y);
+            }
+            Verb::LineTo(p) => {
+                let (x, y) = at(p);
+                out.line_to(x, y);
+            }
+            Verb::QuadTo(c, p) => {
+                let ((cx, cy), (x, y)) = (at(c), at(p));
+                out.quad_to(cx, cy, x, y);
+            }
+            Verb::CurveTo(a, b, c) => {
+                let ((ax, ay), (bx, by), (x, y)) = (at(a), at(b), at(c));
+                out.curve_to(ax, ay, bx, by, x, y);
+            }
+            Verb::Close => out.close(),
+        }
+    }
+    out
 }
 
 /// Cuts a polyline into the pieces a dash pattern leaves visible, handing
@@ -2405,5 +2468,156 @@ mod tests {
             (100, 100, 1, 0),
             "dash: a hundred pieces, one at a time"
         );
+    }
+
+    // ---- stroke adjustment (10.7.5) ------------------------------------------
+
+    /// **An adjusted width is the nearest whole pixel and never under one**:
+    /// within half a pixel of the width asked for, one pixel for anything
+    /// thinner than a pixel and a half — zero and a width under half a pixel
+    /// included — and one pixel for a width that is not a finite number.
+    #[test]
+    fn an_adjusted_width_is_the_nearest_whole_pixel_and_never_under_one() {
+        for (width, whole) in [
+            (0.0, 1.0),
+            (0.3, 1.0),
+            (0.5, 1.0),
+            (1.0, 1.0),
+            (1.49, 1.0),
+            (1.5, 2.0),
+            (2.4, 2.0),
+            (2.5, 3.0),
+            (2.9, 3.0),
+            (7.2, 7.0),
+            (-3.0, 1.0),
+            (f64::NAN, 1.0),
+            (f64::INFINITY, 1.0),
+        ] {
+            assert_eq!(whole_pixel_width(width), whole, "{width}");
+        }
+    }
+
+    /// **Every point goes to the grid its axis's width asks for**: vertices
+    /// and control points of each verb, on pixel centres along an odd axis and
+    /// pixel boundaries along an even one, none moved more than half a pixel;
+    /// and the path moved by whole pixels is the adjusted path moved by the same.
+    #[test]
+    fn every_point_goes_to_the_grid_its_axis_asks_for() {
+        let mut path = Path::new();
+        path.move_to(3.2, 7.8);
+        path.line_to(10.49, -2.51);
+        path.quad_to(4.5, 6.5, -1.3, 0.2);
+        path.curve_to(0.01, 0.99, 5.5, 2.75, 8.0, 9.0);
+        path.close();
+        let points = |path: &Path| -> Vec<Point> {
+            path.verbs()
+                .iter()
+                .flat_map(|verb| match *verb {
+                    Verb::MoveTo(p) | Verb::LineTo(p) => vec![p],
+                    Verb::QuadTo(c, p) => vec![c, p],
+                    Verb::CurveTo(a, b, c) => vec![a, b, c],
+                    Verb::Close => Vec::new(),
+                })
+                .collect()
+        };
+        for across in [(1.0, 1.0), (2.0, 2.0), (3.0, 2.0), (2.0, 5.0)] {
+            let adjusted = adjusted_to_pixels(&path, across);
+            assert_eq!(
+                adjusted.verbs().len(),
+                path.verbs().len(),
+                "{across:?}: a verb for every verb"
+            );
+            assert!(matches!(adjusted.verbs().last(), Some(Verb::Close)));
+            let odd = |extent: f64| extent % 2.0 == 1.0;
+            for (before, after) in points(&path).iter().zip(points(&adjusted)) {
+                for (v, w, odd) in [
+                    (before.x, after.x, odd(across.0)),
+                    (before.y, after.y, odd(across.1)),
+                ] {
+                    let fraction = w - w.floor();
+                    assert_eq!(
+                        fraction,
+                        if odd { 0.5 } else { 0.0 },
+                        "{across:?}: {v} went to {w}"
+                    );
+                    assert!((w - v).abs() <= 0.5, "{across:?}: {v} moved to {w}");
+                }
+            }
+            // Whole pixels in, the same whole pixels out.
+            let moved = path.mapped(&map(1.0, 0.0, 0.0, 1.0, 7.0, -4.0));
+            let adjusted_moved = adjusted_to_pixels(&moved, across);
+            for (a, b) in points(&adjusted).iter().zip(points(&adjusted_moved)) {
+                assert_eq!((a.x + 7.0, a.y - 4.0), (b.x, b.y), "{across:?}");
+            }
+        }
+        // Phases inside one pixel land on one place.
+        for phase in [0.05, 0.2, 0.45] {
+            let line = segment(4.0 + phase, 9.0 + phase, 30.0 + phase, 9.0 + phase);
+            let reference = segment(4.0, 9.0, 30.0, 9.0);
+            assert_eq!(
+                points(&adjusted_to_pixels(&line, (1.0, 1.0))),
+                points(&adjusted_to_pixels(&reference, (1.0, 1.0))),
+                "odd, phase {phase}"
+            );
+            assert_eq!(
+                points(&adjusted_to_pixels(&line, (2.0, 2.0))),
+                points(&adjusted_to_pixels(&reference, (2.0, 2.0))),
+                "even, phase {phase}"
+            );
+        }
+    }
+
+    /// **An adjusted thin line covers whole pixels across its width**: a
+    /// horizontal and a vertical line at fractional offsets, adjusted and
+    /// stroked at their whole widths of one, two and three pixels, fill the
+    /// rows or columns the rule gives fully and none beside them, along the
+    /// line's whole length between its ends.
+    #[test]
+    fn an_adjusted_thin_line_covers_whole_pixels_across_its_width() {
+        for width in [0.4, 1.3, 2.4, 2.6] {
+            let whole = whole_pixel_width(width);
+            let style = StrokeStyle {
+                width: whole,
+                ..StrokeStyle::default()
+            };
+            // The centre line the grid puts it on, and the rows it covers.
+            let centre = if whole % 2.0 == 1.0 { 10.5 } else { 11.0 };
+            let first = (centre - whole / 2.0) as usize;
+            let last = (centre + whole / 2.0) as usize;
+            for horizontal in [true, false] {
+                let line = if horizontal {
+                    segment(2.3, 10.7, 27.6, 10.7)
+                } else {
+                    segment(10.7, 2.3, 10.7, 27.6)
+                };
+                let outline = stroke(
+                    &adjusted_to_pixels(&line, (whole, whole)),
+                    &style,
+                    0.05,
+                    None,
+                );
+                let mask = fill(&outline, FillRule::NonZero, 0, 0, 32, 32, 0.05, None);
+                for along in 4..26usize {
+                    for across in 0..32usize {
+                        let (x, y) = if horizontal {
+                            (along, across)
+                        } else {
+                            (across, along)
+                        };
+                        let want = if (first..last).contains(&across) {
+                            255
+                        } else {
+                            0
+                        };
+                        assert_eq!(
+                            mask.data[y * 32 + x],
+                            want,
+                            "width {width} as {whole}, {}: pixel ({x}, {y})",
+                            if horizontal { "horizontal" } else { "vertical" }
+                        );
+                    }
+                }
+            }
+        }
     }
 }

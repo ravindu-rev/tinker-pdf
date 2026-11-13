@@ -1451,3 +1451,360 @@ fn a_smoothed_tile_is_the_page_under_it() {
         }
     }
 }
+
+// ---- stroke adjustment (10.7.5) -------------------------------------------------
+
+/// The stroke adjustment page, 64 points square: `body` after `/A gs 0 G`,
+/// `/A` setting `state`, black on white, so a pixel a stroke covers wholly is
+/// 0 and one it misses 255.
+fn adjusted_page(state: &str, body: &str) -> Vec<u8> {
+    page(
+        64,
+        64,
+        &format!("<< /ExtGState << /A << {state} >> >> >>"),
+        &format!("/A gs 0 G {body}"),
+        &[],
+    )
+}
+
+/// The whole pixels the design's rule makes of a stroke `width` pixels wide,
+/// computed here: the nearest whole number, never under one.
+fn whole_pixels(width: f64) -> u32 {
+    width.round().max(1.0) as u32
+}
+
+/// The device rows or columns a line the content centres on device
+/// coordinate `at` covers under the rule, `width` whole pixels across: centred
+/// on the middle of the pixel `at` is in for an odd width, on the pixel
+/// boundary nearest `at` for an even one.
+fn covered(at: f64, width: u32) -> core::ops::Range<u32> {
+    let centre = if width % 2 == 1 {
+        at.floor() + 0.5
+    } else {
+        (at + 0.5).floor()
+    };
+    let first = (centre - f64::from(width) / 2.0) as u32;
+    first..first + width
+}
+
+/// A bitmap's red byte at `(x, y)`: the stroke's ink on these pages.
+fn red(bitmap: &Bitmap, x: u32, y: u32) -> u8 {
+    bitmap.data[y as usize * bitmap.stride + x as usize * bitmap.components()]
+}
+
+/// **Stroke adjustment gives a thin line one width** (10.7.5): horizontal and
+/// vertical strokes narrower than three pixels, at three fractional offsets,
+/// under `/SA true` paint exactly the whole rows or columns the design's rule
+/// gives, computed here — the width rounded to whole pixels, never under one,
+/// the line centred where that width's edges fall on pixel boundaries — every
+/// covered pixel wholly black and every other wholly white along the line's
+/// length; each copy at another offset, a diagonal's and a line's under a map
+/// that stretches one axis too, paints the same; a stroked glyph's straight
+/// edges are as many whole pixels across as the rule gives, its copies at two
+/// offsets the same; without the key the offsets paint differently and a
+/// covered pixel is part-covered; and `/SA false` and no key move no byte.
+#[test]
+fn stroke_adjustment_gives_a_thin_line_one_width() {
+    let options = RenderOptions::default();
+    let shown = |state: &str, body: &str| render(adjusted_page(state, body), &options);
+    let phases = [0.1, 0.3, 0.45];
+
+    // Each width, and whether its page without the key is held to differing
+    // across offsets.
+    for (width, contrasted) in [
+        (0.0, false),
+        (0.3, false),
+        (1.3, true),
+        (1.6, false),
+        (2.4, false),
+        (2.9, false),
+    ] {
+        let whole = whole_pixels(width);
+        for horizontal in [true, false] {
+            let mut copies = Vec::new();
+            for phase in phases {
+                // A horizontal line at user y = 20 + phase, device y = 44 −
+                // phase; a vertical one at x = 20 + phase.
+                let (a, b) = (8.0 + phase, 56.0 + phase);
+                let at = 20.0 + phase;
+                let body = if horizontal {
+                    format!("{width} w {a} {at} m {b} {at} l S")
+                } else {
+                    format!("{width} w {at} {a} m {at} {b} l S")
+                };
+                let page = shown("/SA true", &body);
+                let lines = if horizontal {
+                    covered(64.0 - at, whole)
+                } else {
+                    covered(at, whole)
+                };
+                for along in 12..52 {
+                    for across in 0..64 {
+                        let (x, y) = if horizontal {
+                            (along, across)
+                        } else {
+                            (across, along)
+                        };
+                        let want = if lines.contains(&across) { 0 } else { 255 };
+                        assert_eq!(
+                            red(&page, x, y),
+                            want,
+                            "width {width} as {whole}, {}, phase {phase}: pixel ({x}, {y})",
+                            if horizontal { "horizontal" } else { "vertical" }
+                        );
+                    }
+                }
+                assert_eq!(
+                    shown("/SA false", &body).data,
+                    shown("", &body).data,
+                    "/SA false moved a byte: {body}"
+                );
+                copies.push((page, shown("", &body)));
+            }
+            for (page, _) in &copies[1..] {
+                assert_eq!(page.data, copies[0].0.data, "width {width}: a copy differs");
+            }
+            if contrasted {
+                assert_ne!(
+                    copies[0].1.data, copies[1].1.data,
+                    "without the key the offsets paint alike"
+                );
+                let line = &copies[1].1;
+                assert!(
+                    (12..52).any(|along| (0..64).any(|across| {
+                        let (x, y) = if horizontal {
+                            (along, across)
+                        } else {
+                            (across, along)
+                        };
+                        let value = red(line, x, y);
+                        value != 0 && value != 255
+                    })),
+                    "without the key the line covers whole pixels already"
+                );
+            }
+        }
+
+        // A diagonal, at a slope of a half, and a line under a map that
+        // stretches y three times: no whole width to count, so the copies
+        // paint alike.
+        let diagonal = |phase: f64| {
+            format!(
+                "{} {} m {} {} l S",
+                8.0 + phase,
+                8.0 + phase,
+                56.0 + phase,
+                32.0 + phase
+            )
+        };
+        let stretched = |phase: f64| {
+            let y = 5.0 + phase / 3.0;
+            format!("{} {y} m {} {y} l S", 8.0 + phase, 56.0 + phase)
+        };
+        let lines: [(&str, &dyn Fn(f64) -> String); 2] =
+            [("", &diagonal), ("1 0 0 3 0 0 cm ", &stretched)];
+        for (cm, body) in lines {
+            let draw = |state: &str, phase: f64| {
+                shown(state, &format!("{cm}{width} w {}", body(phase))).data
+            };
+            let first = draw("/SA true", phases[0]);
+            for phase in &phases[1..] {
+                assert_eq!(
+                    draw("/SA true", *phase),
+                    first,
+                    "{cm}width {width}, phase {phase}"
+                );
+            }
+            assert_eq!(draw("/SA false", 0.3), draw("", 0.3), "{cm}/SA false");
+            if contrasted {
+                assert_ne!(draw("", 0.1), draw("", 0.45), "{cm}the offsets paint alike");
+            }
+        }
+    }
+
+    // A stroked glyph: the wedge, `<0003>`, its left edge straight up from
+    // its corner at the text origin and its bottom edge along the baseline, at
+    // two offsets that round alike. At 20 points the corner is at device x
+    // 10 + phase and the baseline at device y 38 − phase on the 48-point page.
+    let glyph = |state: &str, width: f64, phase: f64| {
+        let origin = 10.0 + phase;
+        render(
+            page(
+                48,
+                48,
+                &format!("<< /ExtGState << /A << {state} >> >> /Font << /F0 6 0 R >> >>"),
+                &format!("/A gs 0 G {width} w BT /F0 20 Tf 1 Tr {origin} {origin} Td <0003> Tj ET"),
+                &curvy_type0(6),
+            ),
+            &options,
+        )
+    };
+    for width in [1.3, 2.4] {
+        let whole = whole_pixels(width);
+        let page = glyph("/SA true", width, 0.1);
+        assert!(
+            page.data.iter().any(|&byte| byte == 0),
+            "the glyph stroked nothing"
+        );
+        assert_eq!(
+            glyph("/SA true", width, 0.25).data,
+            page.data,
+            "width {width}: the glyph's copy differs"
+        );
+        assert_ne!(
+            glyph("", width, 0.1).data,
+            glyph("", width, 0.25).data,
+            "width {width}: without the key the glyph's copies paint alike"
+        );
+        assert_eq!(
+            glyph("/SA false", width, 0.1).data,
+            glyph("", width, 0.1).data,
+            "width {width}: /SA false moved the glyph"
+        );
+        // The left edge across rows 26 to 36, the bottom edge across columns
+        // 12 to 19: whole pixels, none beside them.
+        let columns = covered(10.1, whole);
+        for y in 26..37 {
+            for x in columns.start - 1..columns.end + 1 {
+                let want = if columns.contains(&x) { 0 } else { 255 };
+                assert_eq!(
+                    red(&page, x, y),
+                    want,
+                    "width {width}: left edge ({x}, {y})"
+                );
+            }
+        }
+        let rows = covered(37.9, whole);
+        for x in 12..20 {
+            for y in rows.start - 1..rows.end + 1 {
+                let want = if rows.contains(&y) { 0 } else { 255 };
+                assert_eq!(
+                    red(&page, x, y),
+                    want,
+                    "width {width}: bottom edge ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+/// **Stroke adjustment rounds the thinnest line** (10.7.5 over 8.4.3.2): the
+/// width made whole is the one the stroke would draw at, the asked width
+/// raised to `RenderOptions::thinnest_line`. Under `/SA true` a hairline and a
+/// 1.3-pixel line at floors of 2, 2.4, 3 and 3.6 pixels, at three fractional
+/// offsets, paint exactly the whole rows the rule gives the raised width,
+/// computed here, and a 2.9-pixel line at a floor of 2 its own three; a
+/// hairline under a map that stretches y three times, whose pen has no
+/// extent, takes the floor's grid, two whole rows at a floor of 2; and a floor
+/// of one pixel — under a pixel and a half, as every floor of the table is —
+/// paints every adjusted line as the default floor does.
+#[test]
+fn stroke_adjustment_rounds_the_thinnest_line() {
+    let at_floor = |floor: Option<f64>, body: &str| {
+        render(
+            adjusted_page("/SA true", body),
+            &RenderOptions {
+                thinnest_line: floor,
+                ..RenderOptions::default()
+            },
+        )
+    };
+    // Along columns 12 to 51, inside every line's ends: `lines` wholly black,
+    // every other row wholly white.
+    let rows_painted = |page: &Bitmap, lines: core::ops::Range<u32>, what: &str| {
+        for x in 12..52 {
+            for y in 0..64 {
+                let want = if lines.contains(&y) { 0 } else { 255 };
+                assert_eq!(red(page, x, y), want, "{what}: pixel ({x}, {y})");
+            }
+        }
+    };
+    let phases = [0.1, 0.3, 0.45];
+
+    for (width, floor) in [
+        (0.0, 2.0),
+        (0.0, 2.4),
+        (0.0, 3.0),
+        (0.0, 3.6),
+        (1.3, 2.4),
+        (1.3, 3.0),
+        (2.9, 2.0),
+    ] {
+        let whole = whole_pixels(f64::max(width, floor));
+        for phase in phases {
+            // A horizontal line at user y = 20 + phase, device y = 44 − phase.
+            let at = 20.0 + phase;
+            let body = format!("{width} w {} {at} m {} {at} l S", 8.0 + phase, 56.0 + phase);
+            rows_painted(
+                &at_floor(Some(floor), &body),
+                covered(64.0 - at, whole),
+                &format!("width {width} at floor {floor} as {whole}, phase {phase}"),
+            );
+        }
+    }
+
+    // Under `1 0 0 3 0 0 cm` a hairline at user y = 5 + phase / 3 is at
+    // device y = 49 − phase: the floor's two pixels are the stroke, on the
+    // pixel boundary nearest its line.
+    for phase in phases {
+        let y = 5.0 + phase / 3.0;
+        let body = format!(
+            "1 0 0 3 0 0 cm 0 w {} {y} m {} {y} l S",
+            8.0 + phase,
+            56.0 + phase
+        );
+        rows_painted(
+            &at_floor(Some(2.0), &body),
+            covered(49.0 - phase, 2),
+            &format!("a stretched hairline at floor 2, phase {phase}"),
+        );
+    }
+
+    // A floor of one pixel rounds as the table's 0.8 does.
+    for width in [0.0, 0.3, 1.3, 2.4] {
+        let body = format!("{width} w 8.3 20.3 m 56.3 20.3 l S 20.3 8.3 m 20.3 56.3 l S");
+        assert_eq!(
+            at_floor(Some(1.0), &body).data,
+            at_floor(None, &body).data,
+            "width {width}: a floor of one pixel moved an adjusted line"
+        );
+    }
+}
+
+/// **An adjusted tile is the page under it** (ruling 5): the grid is the
+/// page's device pixels, the frame a tile's canvas stands in, so a tile
+/// adjusts the page's strokes and is its rectangle of the page byte for byte.
+#[test]
+fn an_adjusted_tile_is_the_page_under_it() {
+    let body = "1.3 w 5.3 7.7 m 58.4 7.7 l S 2.4 w 20.2 10.1 m 20.2 60.6 l S \
+                0.7 w 10.3 20.6 m 50.1 55.9 l S \
+                1.6 w 30.2 30.4 m 55 30 55 50 30 50 c S";
+    let doc = Document::open(adjusted_page("/SA true", body)).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    for scale in [1.0, 2.0] {
+        let options = RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        };
+        let whole = page.render(&options);
+        let side = whole.width;
+        for (x, y, w, h) in [
+            (0, 0, 21, 13),
+            (21, 13, 17, 29),
+            (7, 37, side - 7, side - 37),
+        ] {
+            let tile = page.render(&RenderOptions {
+                region: Some(PixelRegion::new(x, y, w, h)),
+                ..options.clone()
+            });
+            for row in 0..h {
+                let from = (y + row) as usize * whole.stride + x as usize * 3;
+                assert_eq!(
+                    &tile.data[row as usize * tile.stride..][..w as usize * 3],
+                    &whole.data[from..from + w as usize * 3],
+                    "tile ({x}, {y}) row {row} at {scale}x"
+                );
+            }
+        }
+    }
+}

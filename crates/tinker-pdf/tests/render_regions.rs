@@ -379,6 +379,38 @@ fn flattened_tiles_are_the_flattened_page() {
     }
 }
 
+/// **A page under stroke adjustment tiles as the page does** (10.7.5): thin
+/// strokes at fractional offsets, horizontal, vertical, diagonal and curved,
+/// and a dashed one, under `/SA true` from a `gs`, at the three tile sizes and
+/// at 2x. The adjustment moves the page's device points to the page's pixel
+/// grid, the frame a tile's canvas stands in, so each tile is its rectangle of
+/// the page byte for byte.
+#[test]
+fn stroke_adjusted_tiles_are_the_adjusted_page() {
+    let content = "/A gs 0 0 1 RG 1.3 w 5.3 7.7 m 85.4 7.7 l S \
+                   2.4 w 20.2 10.1 m 20.2 120.6 l S \
+                   0.7 w 10.3 20.6 m 80.1 110.9 l S \
+                   1.6 w 45.2 60.4 m 85 60 85 100 45 100 c S \
+                   0 w [3.3 1.7] 0.4 d 3.1 125.6 m 88.7 125.6 l S";
+    let bytes = raw_page(content, "<< /ExtGState << /A << /SA true >> >> >>", &[]);
+    let document = Document::open(bytes).expect("the page opens");
+    let page = document.page(0).expect("a page");
+    for scale in [1.0f64, 2.0] {
+        let options = RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        };
+        for tile in [64u32, 37, 23] {
+            tiles_are_the_page(
+                &page,
+                &options,
+                tile,
+                &format!("stroke adjustment at {scale}x"),
+            );
+        }
+    }
+}
+
 /// **A blue-first page tiles as the page does**: every fixture, at the three
 /// tile sizes, in `Bgra8` and in `Bgr8`, each tile the page's rectangle in that
 /// order byte for byte. The order is made once, at the end, per pixel, from

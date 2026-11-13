@@ -44,7 +44,10 @@ use tinker_pdf_raster::{
         Pyramid, Transform, TwoColour,
     },
     mesh::{draw_mesh_over, MeshDraw},
-    stroke::{stretches, stroke_mapped_with, stroke_with, LineCap, LineJoin, StrokeStyle},
+    stroke::{
+        adjusted_to_pixels, stretches, stroke_mapped_with, stroke_with, whole_pixel_width, LineCap,
+        LineJoin, StrokeStyle,
+    },
 };
 
 /// How far apart a map's two stretches may be, as a fraction of the larger,
@@ -4343,6 +4346,20 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ///
     /// Which of the two is [`user_space_pen`]'s decision, shared with the
     /// SVG writer so the two state one pen.
+    ///
+    /// **Stroke adjustment** (`/SA`, 10.7.5), where the state turns it on:
+    /// under a similarity the device width is made whole, the nearest whole
+    /// number of pixels and never under one ([`whole_pixel_width`]), and
+    /// every point of the path — vertices and control points alike — goes to
+    /// the grid that puts the stroke's edges on pixel boundaries
+    /// ([`adjusted_to_pixels`]), so a thin line covers whole pixels across its
+    /// width at any offset and between its copies. Under any other map no one
+    /// device width is the pen: its width stays the user-space pen's, uniform
+    /// along the line already, and each axis's points go to the grid of the
+    /// pen's extent along it made whole — `width·√(a² + c²)` across `x` and
+    /// `width·√(b² + d²)` across `y`. The path is in device pixels of the
+    /// page, the frame every canvas stands in, so a tile adjusts the page's
+    /// stroke (ruling 5). Off or unset, strokes draw as before.
     fn pen(
         &mut self,
         path: &Path,
@@ -4352,10 +4369,19 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         stop: &dyn Fn() -> bool,
     ) -> Shape<'static> {
         let m = state.ctm.then(&self.base);
+        let adjust = state.stored_parameters().stroke_adjustment == Some(true);
         if user_space_pen(&m).is_some() {
             let map = transform(&m);
             if let Some(back) = pen_inverse(&map) {
-                let user = path.mapped(&back);
+                // Each axis's extent is the stroke's as drawn, the pen's
+                // raised to the floor the outline is united with.
+                let adjusted = adjust.then(|| {
+                    let across = |p: f64, q: f64| {
+                        whole_pixel_width((style.width * (p * p + q * q).sqrt()).max(floor))
+                    };
+                    adjusted_to_pixels(path, (across(map.a, map.c), across(map.b, map.d)))
+                });
+                let user = adjusted.as_ref().unwrap_or(path).mapped(&back);
                 stroke_mapped_with(
                     &mut self.scratch,
                     &user,
@@ -4369,13 +4395,28 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             }
         }
         let scale = m.expansion();
+        // Adjusted, the width made whole is the one the stroke would draw at,
+        // the asked width raised to the thinnest line. Every floor of the
+        // table is under a pixel and a half, so there it is the asked width's.
+        let (width, adjusted) = if adjust {
+            let whole = whole_pixel_width((style.width * scale).max(floor));
+            (whole, Some(adjusted_to_pixels(path, (whole, whole))))
+        } else {
+            ((style.width * scale).max(floor), None)
+        };
         let style = StrokeStyle {
-            width: (style.width * scale).max(floor),
+            width,
             dashes: style.dashes.iter().map(|d| d * scale).collect(),
             dash_phase: style.dash_phase * scale,
             ..style
         };
-        stroke_with(&mut self.scratch, path, &style, self.tolerance, Some(stop));
+        stroke_with(
+            &mut self.scratch,
+            adjusted.as_ref().unwrap_or(path),
+            &style,
+            self.tolerance,
+            Some(stop),
+        );
         Shape::Stroke
     }
 

@@ -1128,7 +1128,11 @@ narrowest width at which a zero-width line leaves no column it crosses (no
 row, past one in one) empty — the design argues each — so the default and
 `antialias: false` keep the floors they had. `RenderOptions::thinnest_line`
 replaces the table for every stroke; a width that is not a finite number above
-zero reads as none. A tiling cell's renderer takes the page's.
+zero reads as none. A tiling cell's renderer takes the page's. Under stroke
+adjustment the floor raises the width before it is made whole, so a floor
+under a pixel and a half — every floor of the table — adjusts a stroke as
+the asked width alone does, and a wider one draws as its nearest whole
+pixels.
 
 **A stroke under a transform that is not a similarity.** 8.4.3.2 measures
 the line width in user space — a stroke paints every point within half the
@@ -1501,7 +1505,8 @@ transfer functions, and the halftone and its origin — travel in the state as
 one shared `StoredParameters` value with the rendering intent, which flat
 colours apply, `None` while every one has its initial value, so a
 `q` copies one word more and a copy allocates nothing. The transfer functions,
-black generation and undercolour removal, flatness and smoothness are applied
+black generation and undercolour removal, flatness, smoothness and stroke
+adjustment are applied
 ([design/device-dependent-state.md](../design/device-dependent-state.md)); the
 rest move no pixel until their rows apply them.
 
@@ -1542,6 +1547,27 @@ tile cuts the page's mesh (`device_state.rs`'s
 `smoothness_bounds_a_patch_s_colour_error`,
 `smoothness_moves_no_shading_it_does_not_approximate`,
 `a_smoothed_tile_is_the_page_under_it`).
+
+**Stroke adjustment** (`/SA`, 10.7.5) turned on makes a stroke's device width
+whole and puts its edges on pixel boundaries, for strokes and stroked glyphs
+alike. Under a similarity — nearly every page — the width the stroke would
+draw at, the asked width raised to the thinnest line, becomes the nearest
+whole number of pixels, never under one, "no more than half a pixel
+different" and a line under half a pixel "a single-pixel line"; every point
+of the device path, vertices and control points alike, moves to the centre of
+its pixel along each axis for an odd width and to the nearest pixel boundary
+for an even one (`tinker_pdf_raster::whole_pixel_width` and
+`adjusted_to_pixels`). So a thin line covers whole pixels across its width at
+any offset, and copies of it at offsets within one pixel's reach paint the
+same. Under any other map no one device width is the pen, so its width stays
+the user-space pen's and each axis's points go to the grid of the stroke's
+extent along it, the pen's raised to the thinnest line, made whole. The grid
+is the page's device pixels, the frame a tile stands in (ruling 5); off,
+`false` and unset, strokes draw as before (`device_state.rs`'s
+`stroke_adjustment_gives_a_thin_line_one_width`,
+`stroke_adjustment_rounds_the_thinnest_line` and
+`an_adjusted_tile_is_the_page_under_it`, `render_regions.rs`'s
+`stroke_adjusted_tiles_are_the_adjusted_page`).
 
 **Transfer functions** (`/TR2` over `/TR`, 10.5) are kept per point, as
 11.7.5.2 has them: each elementary object writes, where its shape is not zero,

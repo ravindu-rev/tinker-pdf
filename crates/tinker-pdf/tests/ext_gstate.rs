@@ -8,8 +8,8 @@
 //! included, and each applied key's page also differs from the page without
 //! it, so a pair that agrees because neither applies anything fails. A key the
 //! engine stores for the row that applies it (`/OP`, `/AIS`, ...) moves no
-//! pixel yet, so its page draws as the page without it; the function keys
-//! and `/SM` draw as applied.
+//! pixel yet, so its page draws as the page without it; the function keys,
+//! `/SM` and `/SA` draw as applied.
 //!
 //! `/CA`, `/ca`, `/BM` and `/SMask` have no operator twin; their pages are held
 //! to pinned pixels.
@@ -204,7 +204,6 @@ fn every_scalar_key_set_by_gs_draws_as_its_twin() {
         ("/FL 5", "5 i", false),
     ];
     let stored = [
-        "/SA true",
         "/OP true",
         "/op false",
         "/OPM 1",
@@ -390,6 +389,30 @@ fn every_function_key_draws_as_applied() {
         "ext-gstate-functions: RAN {} keys and three mask transfers",
         keys.len()
     );
+}
+
+/// **`/SA` draws as applied** (RC-08.5,
+/// `docs/design/device-dependent-state.md`): a thin stroke at a fractional
+/// offset under `/SA true` moves to the pixel grid, so its page differs from
+/// the page without the key, and `/SA false` draws as no key.
+#[test]
+fn stroke_adjustment_draws_as_applied() {
+    let states = "/On << /SA true >> /Off << /SA false >>";
+    let line = "0 0 1 RG 1.3 w 5.3 20.7 m 34.6 20.7 l S";
+    let pages = [
+        format!("/On gs {line}"),
+        format!("/Off gs {line}"),
+        line.to_string(),
+    ];
+    let contents: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let bitmaps = render_all(document(states, &contents));
+    let [on, off, without] = [0, 1, 2].map(|at| &bitmaps[at]);
+    assert_ne!(
+        on.data, without.data,
+        "/SA true: the stroke draws as the page without it"
+    );
+    assert_eq!(off.data, without.data, "/SA false moved a pixel");
+    println!("ext-gstate-stroke-adjustment: RAN a stroke under /SA true and false");
 }
 
 /// Object 5 for [`document_in`]: a grey Coons patch over the square (10, 10)

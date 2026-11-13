@@ -34,6 +34,6 @@ pub use image::{
 pub use mesh::{draw_mesh, draw_mesh_over, MeshBuffer, MeshDraw};
 pub use stripes::{fill_stripes, fill_stripes_with, StripeMask, SubpixelOrder};
 pub use stroke::{
-    dash, stretches, stroke, stroke_mapped, stroke_mapped_with, stroke_with, LineCap, LineJoin,
-    StrokeStyle,
+    adjusted_to_pixels, dash, stretches, stroke, stroke_mapped, stroke_mapped_with, stroke_with,
+    whole_pixel_width, LineCap, LineJoin, StrokeStyle,
 };
