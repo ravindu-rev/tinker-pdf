@@ -1328,10 +1328,11 @@ size the set.
 | `decode/JPEG decode at quarter scale` | pixels · 2 × 1240×1754, the stream's | `baseline_jpeg_part(2)` decoded at 1/4 through `jpeg_decode_strips` and gathered into one image; the planning baseline runs `jpeg_decode` at full size in its place | not available → ≤ 5, rescaled from 2480×3508's 20; 22.3×, paired with the baseline's full-size decode, at floor 1 until P-09.11 | ×2 | built |
 | `decode/irreversible JPEG 2000 620x877` | pixels · 620×877 | `data/irreversible-620x877.jp2` | 160 → 62.5, rescaled from 2480×3508's 2 566 → 1 000; 2.56× | in | built |
 | `decode/reversible JPEG 2000 310x438` | pixels · 310×438 | `data/reversible-310x438.jp2` | 102 → 42.2, rescaled from 2480×3508's 6 516 → 2 700; 2.41× | in | built |
-| `decode/irreversible JPEG 2000 620x877, two levels discarded` | pixels · 4 × 155×220 | `data/irreversible-620x877.jp2`, `jpx_decode_request` at a discard of 2 (`crates/tinker-pdf-filters/src/jpx/mod.rs:579`); the planning baseline runs `jpx_decode` in its place | not available → 6.3, rescaled from 2480×3508's 100; 25.6×, paired with the baseline's full decode, at floor 1 until P-10.13 | untimed | built |
+| `decode/irreversible JPEG 2000 620x877, two levels discarded` | pixels · 4 × 155×220 | `data/irreversible-620x877.jp2`, `jpx_decode_request` at a discard of 2 (`crates/tinker-pdf-filters/src/jpx/mod.rs:618`); the planning baseline runs `jpx_decode` in its place | not available → 6.3, rescaled from 2480×3508's 100; 25.6×, paired with the baseline's full decode, at floor 1 until P-10.13 | untimed | built |
 | `decode/reversible JPEG 2000 310x438, two levels discarded` | pixels · 8 × 78×110 | `data/reversible-310x438.jp2`, the same | not available → 2.8, rescaled from 2480×3508's 180; 36.2×, paired likewise, at floor 1 until P-10.13 | untimed | built |
 | `decode/irreversible JPEG 2000 620x877, its 310x438 centre` | pixels · 310×438 | `data/irreversible-620x877.jp2`, `jpx_decode_request` for the window at (155, 219) at the full size, held to that rectangle of the full decode; the planning baseline runs `jpx_decode` in its place | not in tier P's table; floor 1, paired with the baseline's full decode; a target is the owner's (H-77) | untimed | built |
 | `decode/reversible JPEG 2000 310x438, its 155x219 centre` | pixels · 155×219 | `data/reversible-310x438.jp2`, the window at (77, 109), held to that rectangle of `photo(310, 438, 0)` | the same | untimed | built |
+| `decode/irreversible JPEG 2000 620x877 on 4 threads` | pixels · 620×877 | `data/irreversible-620x877.jp2`, `jpx_decode_on` on `Parallelism::Threads(4)`, held to the one-thread decode sample for sample; the planning baseline runs `jpx_decode` on one thread in its place | 160 → 21.9, rescaled from 2480×3508's 2 566 → 350; 7.33×, paired with the baseline's one-thread decode, at floor 1 until P-10.13 | untimed | built |
 | `decode/decode the JBIG2 generic page` | pixels · `scan()`'s | `jbig2_generic_encode(scan())` (`jbig2/encode.rs:251`) | 255 → 60; 4.25× | in | built |
 | `decode/decode the CCITT G4 page` | pixels · 2 × `scan()`'s | `ccitt_g4_encode(scan())` | 46 → 25; 1.84× | ×2 | built |
 | `decode/extract a Flate image with predictors` | pixels · 1240×1754 | `predicted_page(2)`: `photo(1240, 1754, 2)`, each row under PNG's five filters in turn, Flate-coded under predictor 15; the document opened and `Page::images` read, the samples held to the photo exactly | 276 → 280; held | in | built |
@@ -1340,9 +1341,12 @@ The JPEG 2000 decodes asked for less read the two codestreams the full
 decodes read: two levels discarded, in four and eight calls, which bring tier
 P's targets for them above 20 ms; and each image's centre quarter at the full
 size, the rectangle half its width and half its height a quarter of each
-dimension in from its top-left corner, in one call. No run has timed them, so
-the named machine's entry names the four unmeasured, and their window is
-*untimed*: MS-04.10's fifteen runs size them as they size the set.
+dimension in from its top-left corner, in one call. The four-thread decode
+reads the 9/7 codestream whole, in one call, on four threads of the engine's
+pool, which a wasm target cannot start, so `wasm.json` leaves it out. No run
+has timed these five, so the named machine's entry names them unmeasured, and
+their window is *untimed*: MS-04.10's fifteen runs size them as they size the
+set.
 
 **write** — a rewrite is the editor's save under `WriteMode::Rewrite`, as
 `write/rewrite a document`'s is (`benches/write.rs`); merge and subset-on-save go through
@@ -1733,7 +1737,6 @@ the set's are. Tier P's table and the Item name these:
 | FJ-16, FJ-16.1 | `scripts/a 500-field calculation cascade`, `scripts/500 field appearances regenerated` | scripts | calibrated, ≤ 20 and ≤ 25 ms |
 | OC-17, OC-17.2 | `ocr/OCR a 300-dpi Latin page on one thread`, `ocr/OCR a 300-dpi Chinese page on one thread` | OCR, creating `ocr.rs` | calibrated, ≤ 1.5 and ≤ 4 s: above the window at their targets |
 | SG-02, SG-02.7 | `sign/ECDSA P-256 signature`, `sign/ECDSA P-384 signature`, `sign/ECDSA P-521 signature`, `sign/ECDSA Brainpool P-256 signature` | sign | calibrated, ≤ 0.5, 1.2, 2.5 and 1 ms; `calls` 50, 21, 10 and 25 |
-| P-10, P-10.12 | `decode/irreversible JPEG 2000 620x877 on 4 threads` | decode | 7.33×, paired with the baseline's one-thread decode |
 | MS-08, MS-08.4 | `open/first page of the 60-page linearized fixture over a slow link` | open | counted; the time follows from MS-08.3's counts, never slept |
 
 Tier P's "Time to first page over a source with 50 ms latency at 10 Mbit/s,

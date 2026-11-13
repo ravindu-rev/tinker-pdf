@@ -12,9 +12,10 @@
 //! stream's pixels, as the full-size decode the planning baseline runs in its
 //! place does. The JPEG 2000 decodes with two levels discarded take four and
 //! eight calls, which bring tier P's targets for them above the window's
-//! 20 ms, and the decodes of each codestream's centre quarter one call each;
-//! no run has timed those four yet, so the design's decode table gives their
-//! window as untimed.
+//! 20 ms, the decodes of each codestream's centre quarter one call each, and
+//! the 9/7 codestream's decode on four threads one call; no run has timed
+//! those five yet, so the design's decode table gives their window as
+//! untimed.
 
 mod support;
 
@@ -125,6 +126,29 @@ fn jpx_window(
     limits: &Limits,
     _window: (u32, u32, u32, u32),
 ) -> Result<JpxImage, FilterError> {
+    jpx_decode(input, limits, &mut Vec::new())
+}
+
+/// `input` decoded whole on four threads of the engine's own pool: its
+/// code-blocks, tiles, components and wavelet levels shared out
+/// (`jpx_decode_on` with `Threads(4)`).
+#[cfg(not(tinker_planning_baseline))]
+fn jpx_on_four(input: &[u8], limits: &Limits) -> Result<JpxImage, FilterError> {
+    tinker_pdf_filters::jpx_decode_on(
+        input,
+        limits,
+        &tinker_pdf_filters::JpxRequest::default(),
+        &tinker_pdf::Parallelism::Threads(4),
+        &mut Vec::new(),
+    )
+    .map(|(image, _)| image)
+}
+
+/// The planning baseline has no pool: its arm runs the one-thread full
+/// decode, the operation the gate pairs this one with (`baseline.json`'s
+/// `paired_with`).
+#[cfg(tinker_planning_baseline)]
+fn jpx_on_four(input: &[u8], limits: &Limits) -> Result<JpxImage, FilterError> {
     jpx_decode(input, limits, &mut Vec::new())
 }
 
@@ -471,6 +495,23 @@ fn decode(c: &mut Criterion) {
         check_window(&checked, &inputs::photo(width, height, 0), width, window);
         op.per(Per::Pixels(area((window.2, window.3))));
         op.iter(move || black_box(jpx_window(reversible, limits, window)));
+    });
+    // The 9/7 codestream whole on four threads of the engine's pool, the
+    // image the one-thread decode's sample for sample. The planning baseline
+    // has no pool, so its arm runs the one-thread decode the gate pairs this
+    // one with.
+    group.operation("irreversible JPEG 2000 620x877 on 4 threads", |op| {
+        let irreversible: &[u8] = &irreversible;
+        let limits = &limits;
+        let whole = jpx_decode(irreversible, limits, &mut Vec::new()).expect("it decodes");
+        let pooled = jpx_on_four(irreversible, limits).expect("it decodes");
+        assert!(
+            (pooled.width, pooled.height) == (whole.width, whole.height)
+                && pooled.samples == whole.samples,
+            "the four-thread decode is the one-thread decode, sample for sample"
+        );
+        op.per(Per::Pixels(area(irreversible_size)));
+        op.iter(move || black_box(jpx_on_four(irreversible, limits)));
     });
 
     group.operation("decode the JBIG2 generic page", |op| {

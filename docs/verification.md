@@ -1779,8 +1779,9 @@ bench binary through the runner `CARGO_TARGET_WASM32_WASIP1_RUNNER` names, so
 no task here spawns it.
 
 A wasm target has no child process and no thread to start, so the operations
-that need one — every operation that times `tpdf`, and the render group's
-that run on threads they start — are named in `crates/tinker-pdf/benches/wasm.json`,
+that need one — every operation that times `tpdf`, and the render and decode
+groups' that run on threads they start — are named in
+`crates/tinker-pdf/benches/wasm.json`,
 each with which of the two it needs, and a wasm build of the harness leaves
 them out; count mode there refuses one by name. No other reason excludes an
 operation: one slow on wasm is what the legs measure. `cargo xtask baseline`

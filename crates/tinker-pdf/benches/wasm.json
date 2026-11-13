@@ -48,6 +48,7 @@
     { "id": "layout/render every page of pandoc-book-nocover.epub at 72 dpi, CLI", "why": "a child process" },
     { "id": "layout/render every page of pandoc-embedded-font.epub at 72 dpi, CLI", "why": "a child process" },
     { "id": "layout/render every page of pandoc-plates.epub at 72 dpi, CLI", "why": "a child process" },
+    { "id": "decode/irreversible JPEG 2000 620x877 on 4 threads", "why": "threads" },
     { "id": "threads/24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI", "why": "a child process" },
     { "id": "threads/24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI", "why": "a child process" },
     { "id": "threads/24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI", "why": "a child process" },
