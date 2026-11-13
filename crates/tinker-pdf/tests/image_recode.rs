@@ -18,6 +18,12 @@ use tinker_pdf::{
 };
 use tinker_pdf_cos::{CosDocument, ObjRef, WriteMode, WriteOptions};
 
+// Every save here rewrites a document the test assembled by hand, with no
+// cross-reference table, so each is held to the validate-on-save helper as a
+// rewrite of it (`docs/design/validate-on-save.md`).
+mod written_support;
+use written_support::rewritten;
+
 // ---------------------------------------------------------------------------
 // Fixtures.
 // ---------------------------------------------------------------------------
@@ -136,17 +142,21 @@ fn recode(continuous: ContinuousCodec, bilevel: BilevelCodec) -> SaveOptions {
     }
 }
 
-/// Saves `bytes` with `options` and hands back the saved document and the
-/// pass's report.
+/// Saves `bytes` with `options` and hands back the saved document, held to the
+/// validate-on-save helper as a rewrite of `bytes`, and the pass's report.
+#[track_caller]
 fn saved(bytes: Vec<u8>, options: &SaveOptions) -> (Document, ImageReport) {
-    let document = Document::open(bytes).expect("it opens");
+    let document = Document::open(bytes.clone()).expect("it opens");
     let mut editor = document.editor();
     let out = save(&mut editor, options);
     let report = match out.images {
         ImageOutcome::Recoded(report) => report,
         other => panic!("a rewrite reports `Recoded`, not {other:?}"),
     };
-    (Document::open(out.bytes).expect("the save reopens"), report)
+    (
+        rewritten("a page of images, recoded", &bytes, out.bytes),
+        report,
+    )
 }
 
 fn dict_of(doc: &CosDocument, number: u32) -> tinker_pdf_cos::Dict {
@@ -240,7 +250,7 @@ fn the_default_save_leaves_every_image_as_stored() {
         "and `Keep` named is the default"
     );
 
-    let reopened = Document::open(out.bytes).expect("reopens");
+    let reopened = rewritten("a page of images, saved by default", &bytes, out.bytes);
     for number in 5..=7 {
         assert_eq!(
             reopened
@@ -1064,7 +1074,7 @@ fn an_incremental_save_says_the_originals_remain() {
         out.bytes.starts_with(&bytes),
         "7.5.6: the original is the prefix"
     );
-    let reopened = Document::open(out.bytes.clone()).expect("reopens");
+    let reopened = rewritten("a page of images, recoded in an update", &bytes, &out.bytes);
     assert_eq!(
         reopened
             .cos()
@@ -1214,7 +1224,7 @@ fn a_hostile_document_never_panics_the_pass() {
                     bytes.push(b' ');
                 }
             }
-            let Ok(document) = Document::open(bytes) else {
+            let Ok(document) = Document::open(bytes.clone()) else {
                 continue;
             };
             let mut editor = document.editor();
@@ -1224,7 +1234,13 @@ fn a_hostile_document_never_panics_the_pass() {
             };
             let out = save(&mut editor, &options);
             ran += 1;
-            let _ = Document::open(out.bytes);
+            // A rewrite of somebody else's damaged file owns its structure and
+            // leaves the rest no worse than it was.
+            rewritten(
+                &format!("a damaged page of images, round {round}"),
+                &bytes,
+                out.bytes,
+            );
         }
     }
     assert!(ran > 30, "the campaign reached the pass {ran} times");

@@ -5233,7 +5233,7 @@ mod tests {
         builder.add_page(400.0, 100.0, |page| {
             page.text(b"F0", 12.0, 10.0, 50.0, text);
         });
-        Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+        Arc::new(CosDocument::open(super::tests_support::built(builder)).expect("it opens"))
     }
 
     /// Every stream in a document, decompressed. The acceptance test for a
@@ -5257,6 +5257,7 @@ mod tests {
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
+        super::tests_support::held(&editor, &bytes);
         (bytes, report)
     }
 
@@ -5451,7 +5452,7 @@ mod tests {
                 .as_bytes(),
             );
         });
-        Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+        Arc::new(CosDocument::open(super::tests_support::built(builder)).expect("it opens"))
     }
 
     /// Reading only `Tm`'s translation left every advance twelve times too
@@ -5487,7 +5488,8 @@ mod tests {
 ",
             );
         });
-        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        let doc =
+            Arc::new(CosDocument::open(super::tests_support::built(builder)).expect("it opens"));
         assert!(all_streams(&doc).contains("SECRET"));
 
         // In page space the text starts at x = 10 and is 12pt tall. `PUBLIC`
@@ -5521,7 +5523,8 @@ mod tests {
 ",
             );
         });
-        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        let doc =
+            Arc::new(CosDocument::open(super::tests_support::built(builder)).expect("it opens"));
 
         // A band over the lower line only, in page space.
         let band = Redaction {
@@ -5994,6 +5997,7 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
+        super::tests_support::held(&editor, &bytes);
         assert_eq!(
             super::tests_support::lines_of(bytes),
             vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())]
@@ -6018,6 +6022,7 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
+        super::tests_support::held(&editor, &bytes);
         assert_eq!(
             super::tests_support::lines_of(bytes),
             vec![(200.0, "PUBLIC SECRET".to_string())],
@@ -6039,6 +6044,7 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
+        super::tests_support::held(&editor, &bytes);
         let streams = all_streams(&CosDocument::open(bytes.clone()).expect("it reopens"));
         assert!(
             !streams.contains("PUBLIC") && !streams.contains("SECRET"),
@@ -6080,7 +6086,10 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
         });
         builder.add_page(400.0, 300.0, |p| p.raw(b"/Fm0 Do"));
 
-        let (bytes, report) = redact(open_arc(builder.finish()), &[area(56.0, 45.0, 400.0, 70.0)]);
+        let (bytes, report) = redact(
+            open_arc(super::tests_support::built(builder)),
+            &[area(56.0, 45.0, 400.0, 70.0)],
+        );
         assert_eq!(report.glyphs, 6);
         assert_eq!(
             super::tests_support::lines_of(bytes.clone()),
@@ -7080,6 +7089,7 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
                 compress,
                 ..WriteOptions::default()
             });
+            super::tests_support::held(&editor, &bytes);
 
             let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
             let defects = tinker_pdf_cos::validate(&reopened);
@@ -7223,6 +7233,7 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
+        super::tests_support::held(&editor, &bytes);
         let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
         let streams = all_streams(&reopened);
         assert_eq!(streams.matches("PUBLIC").count(), 2, "{streams}");
@@ -8677,6 +8688,29 @@ mod showing_operators {
 pub(crate) mod tests_support {
     use super::*;
 
+    use crate::subset::tests_support::written_support::{authored, rewritten};
+
+    /// What a builder finished, held to the validate-on-save helper as a
+    /// document this engine wrote from nothing it did not write.
+    #[track_caller]
+    pub fn built(builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+        let bytes = builder.finish();
+        authored("a built document", &bytes);
+        bytes
+    }
+
+    /// A save of `editor`, held to the validate-on-save helper as a rewrite of
+    /// the bytes the editor was opened over: no worse than they were, and with
+    /// a clean input, clean.
+    #[track_caller]
+    pub fn held(editor: &DocumentEditor, bytes: &[u8]) {
+        rewritten(
+            "a redacted document, saved",
+            editor.document().bytes(),
+            bytes,
+        );
+    }
+
     /// 9.6.5's conventional Type 3 glyph space, and the one every other font
     /// kind has implicitly.
     pub const DEFAULT_FONT_MATRIX: &str = "[0.001 0 0 0.001 0 0]";
@@ -8741,6 +8775,7 @@ pub(crate) mod tests_support {
             mode: tinker_pdf_cos::WriteMode::Rewrite,
             ..tinker_pdf_cos::WriteOptions::default()
         });
+        super::tests_support::held(&editor, &bytes);
         (bytes, report)
     }
 
@@ -9108,7 +9143,7 @@ pub(crate) mod tests_support {
             }
         ));
         builder.add_page(400.0, 300.0, |p| p.raw(page.as_bytes()));
-        builder.finish()
+        built(builder)
     }
 
     /// How many form XObjects a document holds.
@@ -9185,11 +9220,14 @@ mod editor_reads {
     use super::tests_support::*;
     use super::*;
 
+    #[track_caller]
     fn saved(editor: &DocumentEditor) -> Vec<u8> {
-        editor.save(&tinker_pdf_cos::WriteOptions {
+        let bytes = editor.save(&tinker_pdf_cos::WriteOptions {
             mode: tinker_pdf_cos::WriteMode::Rewrite,
             ..tinker_pdf_cos::WriteOptions::default()
-        })
+        });
+        super::tests_support::held(editor, &bytes);
+        bytes
     }
 
     fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
@@ -9418,6 +9456,7 @@ trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
             object_streams: false,
             ..tinker_pdf_cos::WriteOptions::default()
         });
+        super::tests_support::held(&editor, &saved);
         let text = String::from_utf8_lossy(&saved);
 
         assert!(
@@ -9457,6 +9496,7 @@ trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
             object_streams: false,
             ..tinker_pdf_cos::WriteOptions::default()
         });
+        super::tests_support::held(&editor, &saved);
         let text = String::from_utf8_lossy(&saved);
 
         assert!(!text.contains("PAGE"), "page zero's samples are gone");
@@ -9515,7 +9555,7 @@ mod appearance_streams {
             &crate::subset::tests_support::face()
         ));
         builder.add_page(400.0, 300.0, |p| p.text(b"F0", 12.0, 300.0, 280.0, "KEEP"));
-        let doc = open(builder.finish());
+        let doc = open(super::tests_support::built(builder));
         let font = crate::subset::tests_support::only_font(&doc);
         (doc, font)
     }
@@ -9615,11 +9655,14 @@ mod appearance_streams {
         editor.put(page, Object::Dict(dict));
     }
 
+    #[track_caller]
     fn saved(editor: &DocumentEditor) -> Vec<u8> {
-        editor.save(&tinker_pdf_cos::WriteOptions {
+        let bytes = editor.save(&tinker_pdf_cos::WriteOptions {
             mode: tinker_pdf_cos::WriteMode::Rewrite,
             ..tinker_pdf_cos::WriteOptions::default()
-        })
+        });
+        super::tests_support::held(editor, &bytes);
+        bytes
     }
 
     /// What the extractor reads once page zero's annotations are flattened
@@ -10070,7 +10113,7 @@ mod glyph_procedures {
             &crate::subset::tests_support::face()
         ));
         builder.add_page(400.0, 300.0, |p| p.text(b"F0", 12.0, 300.0, 280.0, "KEEP"));
-        let doc = open(builder.finish());
+        let doc = open(super::tests_support::built(builder));
         let font = crate::subset::tests_support::only_font(&doc);
         let mut editor = DocumentEditor::new(Arc::clone(&doc));
         let name = |editor: &DocumentEditor, n: &str| editor.intern(n.as_bytes());
@@ -10166,10 +10209,12 @@ mod glyph_procedures {
         page.insert(Name::RESOURCES, Object::Dict(resources));
         page.insert(Name::CONTENTS, Object::Ref(content));
         editor.put(page_ref, Object::Dict(page));
-        editor.save(&tinker_pdf_cos::WriteOptions {
+        let bytes = editor.save(&tinker_pdf_cos::WriteOptions {
             mode: tinker_pdf_cos::WriteMode::Rewrite,
             ..tinker_pdf_cos::WriteOptions::default()
-        })
+        });
+        super::tests_support::held(&editor, &bytes);
+        bytes
     }
 
     /// The decoded procedure `/CharProcs` names `glyph` by.
@@ -10391,6 +10436,7 @@ mod glyph_procedures {
             .expect("the page exists");
         assert_eq!(report.glyphs, 1);
         let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        super::tests_support::held(&editor, &saved.bytes);
         let subset = saved.fonts.report().expect("the pass ran");
         assert_eq!(
             subset.type3.iter().map(|t| t.kept).collect::<Vec<_>>(),
@@ -10448,6 +10494,7 @@ mod glyph_procedures {
             mode: tinker_pdf_cos::WriteMode::Rewrite,
             ..tinker_pdf_cos::WriteOptions::default()
         });
+        super::tests_support::held(&editor, &bytes);
         assert_eq!(
             lines_of(bytes.clone()),
             vec![(50.0, "SECRET".to_string()), (200.0, "SECRET".to_string())]
@@ -10523,7 +10570,7 @@ mod forms_elsewhere {
         }
         builder.add_page(400.0, 300.0, |p| p.raw(PAGE_ONE));
         builder.add_page(400.0, 300.0, |p| p.raw(page_two));
-        builder.finish()
+        super::tests_support::built(builder)
     }
 
     /// Page `index`, rendered with its annotations.
@@ -10549,11 +10596,14 @@ mod forms_elsewhere {
         }
     }
 
+    #[track_caller]
     fn saved(editor: &DocumentEditor) -> Vec<u8> {
-        editor.save(&tinker_pdf_cos::WriteOptions {
+        let bytes = editor.save(&tinker_pdf_cos::WriteOptions {
             mode: tinker_pdf_cos::WriteMode::Rewrite,
             ..tinker_pdf_cos::WriteOptions::default()
-        })
+        });
+        super::tests_support::held(editor, &bytes);
+        bytes
     }
 
     /// The row's exit: page two draws `/Fm0` itself, and still draws all of
@@ -10884,7 +10934,7 @@ mod forms_elsewhere {
         }
         builder.add_page(400.0, 300.0, |p| p.raw(PAGE_ONE));
         builder.add_page(400.0, 300.0, |p| p.raw(b"/C1 Do /Fm1 Do"));
-        let bytes = builder.finish();
+        let bytes = super::tests_support::built(builder);
         assert!(
             lines_on(bytes.clone(), 1)
                 .iter()
@@ -12062,9 +12112,12 @@ mod hostile {
         bytes
     }
 
-    fn exercise(bytes: Vec<u8>) {
-        let Ok(doc) = CosDocument::open(bytes) else {
-            return;
+    /// Redacts and saves a damaged document, and hands back what was read and
+    /// what was written, for the validate-on-save helper to hold outside the
+    /// `catch_unwind` that asks whether the pass panicked.
+    fn exercise(bytes: Vec<u8>) -> Option<(Vec<u8>, Vec<u8>)> {
+        let Ok(doc) = CosDocument::open(bytes.clone()) else {
+            return None;
         };
         let mut editor = DocumentEditor::new(Arc::new(doc));
         let areas = [
@@ -12093,6 +12146,7 @@ mod hostile {
         let _ = apply(&mut editor, 0, &areas[..1]);
         let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
         let _ = saved.fonts.removed();
+        Some((bytes, saved.bytes))
     }
 
     #[test]
@@ -12124,6 +12178,15 @@ mod hostile {
             let mutated = mutate(&original, &mut rng);
             let result = std::panic::catch_unwind(|| exercise(mutated));
             assert!(result.is_ok(), "case {case} panicked");
+            // A rewrite of somebody else's damaged file owns its structure and
+            // leaves the rest no worse than it was.
+            if let Ok(Some((input, output))) = result {
+                crate::subset::tests_support::written_support::rewritten(
+                    &format!("damaged case {case}, redacted and saved"),
+                    &input,
+                    &output,
+                );
+            }
         }
     }
 }
