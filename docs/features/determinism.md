@@ -117,6 +117,16 @@ adds no hash. `render_regions.rs` holds ruling 5's tiles to the whole page
 they come from; this holds the bands to the committed value itself, on every
 target the roster runs on, `wasm32-wasip1` among them.
 
+**A page drawn on threads is the page.**
+`parallel_and_banded_renders_are_the_fingerprints` draws every page of the
+table on 2, 3, 4 and 7 threads of the engine's pool — named that many times
+in one `Document::render_pages` walk, so that many workers draw it at once,
+and drawn in that many bands through `DisplayList::render` and
+`Page::render` ([rendering](rendering.md), "A page in bands") — and holds
+each to the page's committed fingerprint, so it adds no hash either. On
+`wasm32-wasip1` no thread starts, and the walk and the bands are drawn and
+stitched on the caller, which must come to the same bytes.
+
 **The SVG writer's output** is pinned beside the render fingerprints:
 `svg_output_is_stable_across_targets` writes every page of the table with the
 default `SvgOptions` and holds the SHA-256 of its markup to a committed value.

@@ -51,6 +51,13 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "banded_rendering_reproduces_every_fingerprint",
     },
+    // Every fingerprinted page walked and drawn in bands on 2, 3, 4 and 7
+    // threads of the engine's pool, held to its fingerprint: on the caller on
+    // `wasm32-wasip1`.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "parallel_and_banded_renders_are_the_fingerprints",
+    },
     // The SVG writer's output for every fingerprinted page.
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",

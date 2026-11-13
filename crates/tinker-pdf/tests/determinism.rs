@@ -2922,6 +2922,93 @@ fn banded_rendering_reproduces_every_fingerprint() {
     );
 }
 
+/// **The page walk and the bands are the fingerprints** (K-07's threaded
+/// path, P-15): every fingerprinted page drawn on 2, 3, 4 and 7 threads —
+/// named that many times in one `Document::render_pages` walk, so that many
+/// workers draw it at once, and drawn in that many bands through
+/// `DisplayList::render` and through `Page::render` — hashes to the page's
+/// committed fingerprint, as [`fingerprint`] hashes a page.
+///
+/// It adds no hash: a walked or banded page that disagrees with
+/// [`FINGERPRINTS`] is a finding about the pool, the bands or their merge,
+/// or, where only one target disagrees, a determinism bug — never a reason to
+/// edit the table. `banded_rendering_reproduces_every_fingerprint` is the
+/// serial half, a caller's regions one after another; this is the threaded
+/// one. On `wasm32-wasip1` no thread starts, and the walk and the bands are
+/// cut, drawn and stitched on the caller, which must come to the same bytes.
+#[test]
+fn parallel_and_banded_renders_are_the_fingerprints() {
+    use tinker_pdf::Parallelism;
+
+    let mut wrong = Vec::new();
+    let mut held = 0usize;
+    for fixture in GOLDEN {
+        let want = FINGERPRINTS
+            .iter()
+            .find(|(n, _)| *n == fixture.name)
+            .map(|(_, h)| *h)
+            .expect("every page has a fingerprint");
+        let (document, at) = opened(fixture);
+        let page = document.page(at).expect("a page");
+        let list = page.display_list();
+        for threads in [2usize, 3, 4, 7] {
+            let options = RenderOptions {
+                parallelism: Parallelism::Threads(threads),
+                ..RenderOptions::default()
+            };
+            let mut walked = Vec::new();
+            document.render_pages(vec![at; threads], &options, |index, bitmap| {
+                walked.push((index, bitmap));
+            });
+            assert_eq!(
+                walked.len(),
+                threads,
+                "{}: every page of the walk",
+                fixture.name
+            );
+            for (place, (index, bitmap)) in walked.iter().enumerate() {
+                assert_eq!(*index, at, "{}: the page named", fixture.name);
+                let bitmap = bitmap.as_ref().expect("the page renders");
+                let actual = hashed(fixture, bitmap);
+                if actual != want {
+                    wrong.push(format!(
+                        "{}: walked on {threads} threads, the walk's page {place}, {actual}",
+                        fixture.name
+                    ));
+                }
+                held += 1;
+            }
+            for (door, bitmap) in [
+                ("DisplayList::render", list.render(&options)),
+                ("Page::render", page.render(&options)),
+            ] {
+                let actual = hashed(fixture, &bitmap);
+                if actual != want {
+                    wrong.push(format!(
+                        "{}: {door} in {threads} bands, {actual}",
+                        fixture.name
+                    ));
+                }
+                held += 1;
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a page drawn on threads is not the page its fingerprint pins. The walk \
+         renders each page serially on its worker and the bands are the page's \
+         own regions in its one frame (ruling 5), so this is a finding about the \
+         pool, the bands or their merge, or, where only one target disagrees, a \
+         determinism bug -- never a reason to edit the table:\n{}",
+        wrong.join("\n")
+    );
+    println!(
+        "determinism-threads: RAN {held} walked and banded renders of {} fingerprinted \
+         pages, each its committed fingerprint",
+        GOLDEN.len()
+    );
+}
+
 /// One fingerprinted page written as SVG with the default [`SvgOptions`], its
 /// markup hashed.
 ///
