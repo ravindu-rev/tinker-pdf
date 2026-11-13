@@ -531,6 +531,17 @@ that meets a different answer from the one recorded counts it
 (`Replayed::disagreed`), skips a bracket the device declined and closes at
 once one the recording declined; the module header says which of those an
 interpreter would also have done and which lose something.
+A replay can pause between any two calls: `replay::Cursor` keeps the walk's
+place — the next event and the depth of a declined bracket it is skipping —
+and `Cursor::step(events, device, budget)` hands the device at most `budget`
+events from there and returns that step's `Replayed`, so a page drawn from
+its recording stops on a count of events and goes on where it stopped
+([progressive rendering](../design/progressive-render.md)). A skipped event
+does not count against the budget, a step stops right after its last
+delivery, and a device that says it is cancelled ends the walk with the rest
+counted skipped; the steps' `Replayed`s add up, with `+=`, to the whole
+replay's, and the device receives the same calls in the same order whatever
+the budgets were. `replay` is a cursor stepped to its end.
 The SVG writer (`Page::to_svg`) also consumes a replay and is not the
 renderer: it answers the three questions itself — every form, a group unless
 hidden content holds it, never a soft mask — and the replay's disagreement

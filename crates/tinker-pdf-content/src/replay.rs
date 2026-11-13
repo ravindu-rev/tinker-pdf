@@ -44,12 +44,25 @@
 //! [`GraphicsState`] — a recording made without states replays as what it
 //! captured, which is geometry and order and not appearance. A retained page
 //! captures everything.
+//!
+//! # A replay that pauses
+//!
+//! A [`Cursor`] is the walk with its place kept between calls
+//! (`docs/design/progressive-render.md`): the index of the next event and the
+//! depth of the declined bracket it is skipping. [`Cursor::step`] resumes the
+//! walk there and hands the device at most a budget of events, so a page drawn
+//! from its recording can pause between any two events and go on; the device
+//! receives the same events in the same order whatever the budgets were.
+//! [`replay`] is a cursor run to its end.
 
 use crate::device::Device;
 use crate::record::Event;
 use crate::state::GraphicsState;
 
-/// What a [`replay`] did.
+/// What a [`replay`], or one [`Cursor::step`], did.
+///
+/// The steps of one walk add up, with `+=`, to what one uninterrupted replay
+/// of the same events into the same device does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Replayed {
     /// Events handed to the device.
@@ -65,64 +78,166 @@ pub struct Replayed {
     pub cancelled: bool,
 }
 
+impl core::ops::AddAssign for Replayed {
+    /// Two parts of one walk: the counts summed, cancelled if either part
+    /// was.
+    fn add_assign(&mut self, other: Replayed) {
+        self.delivered += other.delivered;
+        self.skipped += other.skipped;
+        self.disagreed += other.disagreed;
+        self.cancelled |= other.cancelled;
+    }
+}
+
 /// Replays `events` into `device`, in order.
 ///
 /// See the module documentation for what happens when the device answers a
 /// question differently from the recording. The device is asked
 /// [`Device::is_cancelled`] before every event, as the interpreter asks it
 /// before every token; once it answers yes, nothing more is delivered.
+///
+/// A [`Cursor`] stepped to the end with a budget no list reaches.
 pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed {
-    let initial = GraphicsState::default();
-    let state = |recorded: &Option<Box<GraphicsState>>| -> GraphicsState {
-        recorded
-            .as_deref()
-            .cloned()
-            .unwrap_or_else(|| initial.clone())
-    };
-    let mut done = Replayed::default();
-    // How many brackets the *recording* has open inside the one the device
-    // declined, that one included. The recording balances every bracket it
-    // entered — an end arrives only for a question answered yes — so the
-    // matching end is the one that brings this back to zero, whichever of
-    // the three kinds it is.
-    let mut skipping = 0usize;
+    Cursor::new().step(events, device, usize::MAX)
+}
 
-    for (index, event) in events.iter().enumerate() {
-        if skipping > 0 {
-            match event {
-                Event::BeginForm { entered: true, .. }
-                | Event::BeginGroup { entered: true, .. }
-                | Event::BeginSoftMask { entered: true, .. } => skipping += 1,
-                Event::EndForm { .. } | Event::EndGroup | Event::EndSoftMask => skipping -= 1,
-                // Delivered from inside a bracket the device declined too:
-                // it is about the interpretation, not about what the bracket
-                // drew, and the budget usually runs out deep inside one.
-                Event::GroupBudgetSpent => {
-                    done.delivered += 1;
-                    device.group_budget_spent();
-                    continue;
+/// Where a replay stands between two steps
+/// (`docs/design/progressive-render.md`).
+///
+/// It holds the place and not the events, so it can be kept beside a list it
+/// does not borrow; every step is handed the same events. A cursor stepped
+/// over other events than the ones it began on walks those from its index,
+/// and stops at their end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cursor {
+    /// The index of the next event the walk comes to.
+    next: usize,
+    /// How many brackets the *recording* has open inside the one the device
+    /// declined, that one included; zero when nothing is being skipped.
+    skipping: usize,
+    /// Whether the device said it was cancelled, which ended the walk.
+    cancelled: bool,
+}
+
+impl Cursor {
+    /// A cursor before the first event.
+    #[must_use]
+    pub fn new() -> Cursor {
+        Cursor::default()
+    }
+
+    /// How many events the walk has passed, handed over or skipped: the index
+    /// of the next one.
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.next
+    }
+
+    /// Whether the walk has passed every one of `events`.
+    #[must_use]
+    pub fn is_finished(&self, events: &[Event]) -> bool {
+        self.next >= events.len()
+    }
+
+    /// Whether the device said it was cancelled, which ended the walk.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    /// Resumes the walk over `events` at its place and hands `device` at most
+    /// `budget` events, then stops, keeping its place.
+    ///
+    /// An event skipped inside a bracket the device declined is not handed
+    /// over and does not count against the budget, so a step stops right
+    /// after its last delivery: skipped events met before it are passed in
+    /// this step, and skipped events after it are the next step's. A budget of
+    /// zero hands nothing and passes nothing. The device is asked
+    /// [`Device::is_cancelled`] before every event it would be handed; once it
+    /// answers yes, every event left is counted skipped and the walk ends, and
+    /// later steps return at once.
+    ///
+    /// The `Replayed` is this step's alone; the steps of a walk sum to the
+    /// whole replay's.
+    pub fn step<D: Device + ?Sized>(
+        &mut self,
+        events: &[Event],
+        device: &mut D,
+        budget: usize,
+    ) -> Replayed {
+        let initial = GraphicsState::default();
+        let state = |recorded: &Option<Box<GraphicsState>>| -> GraphicsState {
+            recorded
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(|| initial.clone())
+        };
+        let mut done = Replayed::default();
+        // The recording balances every bracket it entered — an end arrives
+        // only for a question answered yes — so the matching end of the one
+        // being skipped is the one that brings `skipping` back to zero,
+        // whichever of the three kinds it is.
+        while done.delivered < budget {
+            let Some(event) = events.get(self.next) else {
+                break;
+            };
+            if self.skipping > 0 {
+                self.next += 1;
+                match event {
+                    Event::BeginForm { entered: true, .. }
+                    | Event::BeginGroup { entered: true, .. }
+                    | Event::BeginSoftMask { entered: true, .. } => self.skipping += 1,
+                    Event::EndForm { .. } | Event::EndGroup | Event::EndSoftMask => {
+                        self.skipping -= 1;
+                    }
+                    // Delivered from inside a bracket the device declined
+                    // too: it is about the interpretation, not about what the
+                    // bracket drew, and the budget usually runs out deep
+                    // inside one.
+                    Event::GroupBudgetSpent => {
+                        done.delivered += 1;
+                        device.group_budget_spent();
+                        continue;
+                    }
+                    Event::RecursionRefused => {
+                        done.delivered += 1;
+                        device.recursion_refused();
+                        continue;
+                    }
+                    Event::NestedBudgetSpent => {
+                        done.delivered += 1;
+                        device.nested_budget_spent();
+                        continue;
+                    }
+                    _ => {}
                 }
-                Event::RecursionRefused => {
-                    done.delivered += 1;
-                    device.recursion_refused();
-                    continue;
-                }
-                Event::NestedBudgetSpent => {
-                    done.delivered += 1;
-                    device.nested_budget_spent();
-                    continue;
-                }
-                _ => {}
+                done.skipped += 1;
+                continue;
             }
-            done.skipped += 1;
-            continue;
+            if device.is_cancelled() {
+                done.cancelled = true;
+                done.skipped += events.len() - self.next;
+                self.next = events.len();
+                self.cancelled = true;
+                break;
+            }
+            self.next += 1;
+            done.delivered += 1;
+            self.deliver(event, device, &state, &mut done);
         }
-        if device.is_cancelled() {
-            done.cancelled = true;
-            done.skipped += events.len() - index;
-            break;
-        }
-        done.delivered += 1;
+        done
+    }
+
+    /// Hands `device` one event outside any declined bracket, asking it the
+    /// recording's question again where the event is one, and starting to
+    /// skip where it declines what the recording entered.
+    fn deliver<D: Device + ?Sized>(
+        &mut self,
+        event: &Event,
+        device: &mut D,
+        state: &dyn Fn(&Option<Box<GraphicsState>>) -> GraphicsState,
+        done: &mut Replayed,
+    ) {
         match event {
             Event::BeginText => device.begin_text(),
             Event::ShowGlyph { glyph, state: s } => device.show_glyph(glyph, &state(s)),
@@ -154,7 +269,7 @@ pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed 
                 if now != *entered {
                     done.disagreed += 1;
                     if *entered {
-                        skipping = 1;
+                        self.skipping = 1;
                     } else {
                         device.end_form(*id);
                     }
@@ -170,7 +285,7 @@ pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed 
                 if now != *entered {
                     done.disagreed += 1;
                     if *entered {
-                        skipping = 1;
+                        self.skipping = 1;
                     } else {
                         device.end_group();
                     }
@@ -187,7 +302,7 @@ pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed 
                 if now != *entered {
                     done.disagreed += 1;
                     if *entered {
-                        skipping = 1;
+                        self.skipping = 1;
                     } else {
                         device.end_soft_mask();
                     }
@@ -200,7 +315,6 @@ pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed 
             Event::NestedBudgetSpent => device.nested_budget_spent(),
         }
     }
-    done
 }
 
 #[cfg(test)]
@@ -396,6 +510,371 @@ mod tests {
         assert_eq!(
             format!("{state:?}"),
             format!("{:?}", GraphicsState::default())
+        );
+    }
+
+    // ---- a replay that pauses ---------------------------------------------
+
+    /// A page whose forms and groups make long brackets, so a pause falls
+    /// inside each at some budget: two forms, text, two groups — one under a
+    /// clip — a hidden layer, and a form again.
+    const BRACKETS: &[u8] = b"q 1 0 0 rg 0 0 10 10 re f Q \
+        /Fm Do /Fm Do \
+        BT /F1 12 Tf 2 3 Td (abcd) Tj ET \
+        /Grp Do q 0 0 5 5 re W n /Grp Do Q \
+        /OC /Off BDC 0 0 2 2 re f 1 1 2 2 re f EMC \
+        /Fm Do";
+
+    /// A recorder that says it is cancelled once it has been handed `after`
+    /// calls, whichever they were: the same moment in any walk that hands it
+    /// the same calls in the same order.
+    struct CancelledAfter {
+        inner: RecordingDevice,
+        calls: usize,
+        after: usize,
+    }
+
+    impl CancelledAfter {
+        fn new(answers: Answers, after: usize) -> CancelledAfter {
+            CancelledAfter {
+                inner: RecordingDevice::new().answering(answers),
+                calls: 0,
+                after,
+            }
+        }
+        fn call(&mut self) -> &mut RecordingDevice {
+            self.calls += 1;
+            &mut self.inner
+        }
+    }
+
+    impl Device for CancelledAfter {
+        fn show_glyph(&mut self, glyph: &crate::device::Glyph, state: &GraphicsState) {
+            self.call().show_glyph(glyph, state);
+        }
+        fn begin_text(&mut self) {
+            self.call().begin_text();
+        }
+        fn end_text(&mut self) {
+            self.call().end_text();
+        }
+        fn fill_path(
+            &mut self,
+            path: &[crate::device::PathSegment],
+            state: &GraphicsState,
+            even_odd: bool,
+        ) {
+            self.call().fill_path(path, state, even_odd);
+        }
+        fn stroke_path(&mut self, path: &[crate::device::PathSegment], state: &GraphicsState) {
+            self.call().stroke_path(path, state);
+        }
+        fn clip_path(
+            &mut self,
+            path: &[crate::device::PathSegment],
+            state: &GraphicsState,
+            even_odd: bool,
+        ) {
+            self.call().clip_path(path, state, even_odd);
+        }
+        fn save_state(&mut self) {
+            self.call().save_state();
+        }
+        fn restore_state(&mut self) {
+            self.call().restore_state();
+        }
+        fn draw_image(&mut self, image: &crate::device::ImageRef, state: &GraphicsState) {
+            self.call().draw_image(image, state);
+        }
+        fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
+            self.call().draw_shading(name, state);
+        }
+        fn begin_marked_content(
+            &mut self,
+            tag: &[u8],
+            visible: bool,
+            hidden_layer: Option<&str>,
+            props: Option<&crate::device::MarkedProps>,
+        ) {
+            self.call()
+                .begin_marked_content(tag, visible, hidden_layer, props);
+        }
+        fn end_marked_content(&mut self) {
+            self.call().end_marked_content();
+        }
+        fn begin_form(&mut self, id: u64, name: &[u8]) -> bool {
+            self.call().begin_form(id, name)
+        }
+        fn end_form(&mut self, id: u64) {
+            self.call().end_form(id);
+        }
+        fn begin_group(&mut self, group: crate::interpret::Group, state: &GraphicsState) -> bool {
+            self.call().begin_group(group, state)
+        }
+        fn end_group(&mut self) {
+            self.call().end_group();
+        }
+        fn begin_soft_mask(
+            &mut self,
+            mask: &crate::interpret::MaskGroup,
+            bbox: &[crate::device::PathSegment],
+            state: &GraphicsState,
+        ) -> bool {
+            self.call().begin_soft_mask(mask, bbox, state)
+        }
+        fn end_soft_mask(&mut self) {
+            self.call().end_soft_mask();
+        }
+        fn clear_soft_mask(&mut self) {
+            self.call().clear_soft_mask();
+        }
+        fn group_budget_spent(&mut self) {
+            self.call().group_budget_spent();
+        }
+        fn recursion_refused(&mut self) {
+            self.call().recursion_refused();
+        }
+        fn nested_budget_spent(&mut self) {
+            self.call().nested_budget_spent();
+        }
+        fn is_cancelled(&self) -> bool {
+            self.calls >= self.after
+        }
+    }
+
+    /// Steps `events` into `device` `budget` at a time to the end, holding
+    /// each step to the budget, and returns the steps' sum.
+    fn stepped<D: Device>(events: &[Event], device: &mut D, budget: usize, what: &str) -> Replayed {
+        let mut cursor = Cursor::new();
+        let mut total = Replayed::default();
+        let mut steps = Vec::new();
+        while !cursor.is_finished(events) {
+            let before = cursor.position();
+            let step = cursor.step(events, device, budget);
+            assert!(
+                cursor.position() > before || step.delivered > 0,
+                "{what}: a step at {before} made no progress"
+            );
+            steps.push(step);
+            total += step;
+            assert!(steps.len() <= events.len() + 1, "{what}: the walk ends");
+        }
+        let (last, rest) = steps.split_last().expect("at least one step");
+        for (index, step) in rest.iter().enumerate() {
+            assert_eq!(
+                step.delivered,
+                budget,
+                "{what}: step {index} of {} delivers exactly its budget",
+                steps.len()
+            );
+        }
+        assert!(last.delivered <= budget, "{what}: the last step");
+        // A finished walk hands nothing more.
+        assert_eq!(cursor.step(events, device, budget), Replayed::default());
+        total
+    }
+
+    /// **The exit criterion: a replay resumed every k events is the whole
+    /// replay.** For k from one to eight, over recordings replayed into
+    /// devices that decline what they entered — brackets the walk skips, with
+    /// pauses falling inside them — and that enter what they declined, the
+    /// events a `RecordingDevice` receives and the summed `Replayed` are one
+    /// uninterrupted replay's, each step delivering exactly its budget until
+    /// the last.
+    #[test]
+    fn a_replay_resumed_every_k_events_is_the_whole_replay() {
+        let declining = Answers {
+            forms: false,
+            groups: false,
+            soft_masks: false,
+            cancelled: false,
+        };
+        let cases = [
+            ("entered, replayed declining", accept_all(), declining),
+            (
+                "declined, replayed entering",
+                Answers::default(),
+                accept_all(),
+            ),
+            ("entered, replayed alike", accept_all(), accept_all()),
+            (
+                "defaults, replayed alike",
+                Answers::default(),
+                Answers::default(),
+            ),
+        ];
+        for (name, recorded_with, replayed_with) in cases {
+            for page in [PAGE, BRACKETS] {
+                let recorded = record(page, recorded_with);
+                let mut whole = RecordingDevice::new().answering(replayed_with);
+                let all = replay(&recorded, &mut whole);
+                if recorded_with.groups && !replayed_with.groups {
+                    assert!(all.skipped > 0, "{name}: something is skipped");
+                }
+                for k in 1..=8 {
+                    let what = format!("{name}, k = {k}");
+                    let mut resumed = RecordingDevice::new().answering(replayed_with);
+                    let summed = stepped(&recorded, &mut resumed, k, &what);
+                    assert_eq!(summed, all, "{what}: the summed steps");
+                    same(whole.events(), resumed.events());
+                }
+            }
+        }
+    }
+
+    /// A device cancelled between two steps, and one cancelled in the middle
+    /// of one: the rest is skipped, the walk ends, and both are what one
+    /// uninterrupted replay into a device cancelled at the same call is.
+    #[test]
+    fn a_device_cancelled_between_steps_ends_the_walk_as_a_replay_does() {
+        let recorded = record(BRACKETS, accept_all());
+        for k in 1..=8 {
+            // Two steps, then the device says it is cancelled.
+            let mut device = RecordingDevice::new().answering(accept_all());
+            let mut cursor = Cursor::new();
+            let mut summed = cursor.step(&recorded, &mut device, k);
+            summed += cursor.step(&recorded, &mut device, k);
+            let calls = device.events().len();
+            device.set_answers(Answers {
+                cancelled: true,
+                ..accept_all()
+            });
+            while !cursor.is_finished(&recorded) {
+                summed += cursor.step(&recorded, &mut device, k);
+            }
+            assert!(cursor.is_cancelled() && summed.cancelled, "k = {k}");
+            assert_eq!(summed.delivered + summed.skipped, recorded.len());
+            assert_eq!(cursor.step(&recorded, &mut device, k), Replayed::default());
+
+            let mut whole = CancelledAfter::new(accept_all(), calls);
+            let all = replay(&recorded, &mut whole);
+            assert_eq!(summed, all, "k = {k}");
+            same(whole.inner.events(), device.events());
+
+            // Cancelled partway through a step: the same calls either way.
+            for after in [1, 5, 13] {
+                let mut resumed = CancelledAfter::new(accept_all(), after);
+                let mut cursor = Cursor::new();
+                let mut summed = Replayed::default();
+                while !cursor.is_finished(&recorded) {
+                    summed += cursor.step(&recorded, &mut resumed, k);
+                }
+                let mut whole = CancelledAfter::new(accept_all(), after);
+                assert_eq!(
+                    summed,
+                    replay(&recorded, &mut whole),
+                    "k = {k}, after {after}"
+                );
+                same(whole.inner.events(), resumed.inner.events());
+            }
+        }
+    }
+
+    /// An empty bracket of a recording entered and declined, with a notice
+    /// about the interpretation inside it — `events` built by hand.
+    fn skipped_bracket() -> Vec<Event> {
+        let fill = || Event::FillPath {
+            path: vec![crate::device::PathSegment::MoveTo { x: 0.0, y: 0.0 }],
+            even_odd: false,
+            state: None,
+        };
+        let group = crate::interpret::Group {
+            isolated: true,
+            knockout: false,
+            space: None,
+        };
+        vec![
+            fill(),
+            Event::BeginGroup {
+                group,
+                entered: true,
+                state: None,
+            },
+            fill(),
+            Event::GroupBudgetSpent,
+            fill(),
+            Event::EndGroup,
+            fill(),
+        ]
+    }
+
+    /// A step stops right after its last delivery: skipped events before it
+    /// are passed in the step and skipped events after it are the next
+    /// step's; a notice inside a skipped bracket is handed over and counts
+    /// against the budget; and a budget of zero does nothing.
+    #[test]
+    fn a_step_stops_after_its_last_delivery_and_skips_only_before_it() {
+        let events = skipped_bracket();
+        let declining = Answers {
+            groups: false,
+            ..Answers::default()
+        };
+        let mut device = RecordingDevice::new().answering(declining);
+        let mut cursor = Cursor::new();
+        assert_eq!(cursor.step(&events, &mut device, 0), Replayed::default());
+        assert_eq!(cursor.position(), 0, "a budget of zero passes nothing");
+        // The fill, then the group the device declines: two deliveries, and
+        // the step stops there, before the bracket's content.
+        let first = cursor.step(&events, &mut device, 2);
+        assert_eq!((first.delivered, first.skipped, first.disagreed), (2, 0, 1));
+        assert_eq!(cursor.position(), 2);
+        // The skipped fill is passed, the notice delivered, and the step
+        // stops there with its budget of one spent.
+        let second = cursor.step(&events, &mut device, 1);
+        assert_eq!((second.delivered, second.skipped), (1, 1));
+        assert_eq!(cursor.position(), 4);
+        // The rest of the bracket is passed and the last fill delivered.
+        let third = cursor.step(&events, &mut device, 5);
+        assert_eq!((third.delivered, third.skipped), (1, 2));
+        assert!(cursor.is_finished(&events));
+        assert_eq!(
+            device.kinds(),
+            [
+                EventKind::FillPath,
+                EventKind::BeginGroup,
+                EventKind::GroupBudgetSpent,
+                EventKind::FillPath
+            ]
+        );
+        let mut whole = RecordingDevice::new().answering(declining);
+        let mut summed = first;
+        summed += second;
+        summed += third;
+        assert_eq!(summed, replay(&events, &mut whole));
+    }
+
+    /// A cursor holds a place and not the events: stepped over a shorter
+    /// list than the one it walked, it stops at that list's end, and the sum
+    /// of two walks' parts is their counts added and either's cancellation.
+    #[test]
+    fn a_cursor_over_other_events_stops_at_their_end_and_parts_add_up() {
+        let events = skipped_bracket();
+        let mut device = RecordingDevice::new();
+        let mut cursor = Cursor::new();
+        cursor.step(&events, &mut device, 5);
+        let shorter = &events[..2];
+        assert!(cursor.is_finished(shorter));
+        assert_eq!(cursor.step(shorter, &mut device, 3), Replayed::default());
+        let mut sum = Replayed {
+            delivered: 2,
+            skipped: 1,
+            disagreed: 0,
+            cancelled: false,
+        };
+        sum += Replayed {
+            delivered: 3,
+            skipped: 0,
+            disagreed: 2,
+            cancelled: true,
+        };
+        assert_eq!(
+            sum,
+            Replayed {
+                delivered: 5,
+                skipped: 1,
+                disagreed: 2,
+                cancelled: true
+            }
         );
     }
 }

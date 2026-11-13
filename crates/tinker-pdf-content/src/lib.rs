@@ -27,7 +27,7 @@ pub use interpret::{
 };
 pub use plain::{HyphenCounts, PlainText, PlainTextOptions};
 pub use record::{Answers, Capture, Event, EventKind, MarkedScope, RecordingDevice};
-pub use replay::{replay, Replayed};
+pub use replay::{replay, Cursor, Replayed};
 pub use search::{fold_diacritics, SearchOptions};
 pub use serialize::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
 pub use state::{
