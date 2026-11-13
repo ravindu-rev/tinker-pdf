@@ -31,10 +31,10 @@ pub use interpret::{
     FormRecording, Group, GroupSpace, Layer, MaskGroup, SoftMask, StateParameters, Type3Glyph,
     MAX_GROUP_RUNS, NESTED_RUN_COST, NESTED_WORK_FLOOR, NESTED_WORK_RATE,
 };
-pub use plain::{HyphenCounts, PlainText, PlainTextOptions};
+pub use plain::{hyphen_join, HyphenCounts, HyphenJoin, PlainText, PlainTextOptions};
 pub use record::{Answers, Capture, Event, EventKind, MarkedScope, RecordingDevice};
 pub use replay::{replay, Cursor, Replayed};
-pub use search::{fold_diacritics, SearchOptions};
+pub use search::{fold_diacritics, FoldedLine, Needle, SearchOptions};
 pub use serialize::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
 pub use state::{
     BlackPointCompensation, BlendMode, ColorFamily, ColorSource, ColorantKind, ColorantTint,

@@ -76,6 +76,18 @@ pub struct SearchOptions {
     pub diacritic_insensitive: bool,
 }
 
+impl SearchOptions {
+    /// `text` folded as these options fold a page's text and a needle:
+    /// lower-cased by `str::to_lowercase` unless case is significant, then
+    /// its diacritics removed where they are not. A page is folded a glyph at
+    /// a time, so a caller folding text to compare with a page's folds it a
+    /// character or a glyph at a time too.
+    #[must_use]
+    pub fn fold(&self, text: &str) -> String {
+        Fold::of(self).text(text)
+    }
+}
+
 include!(concat!(env!("OUT_DIR"), "/fold.rs"));
 
 /// `text` with its diacritics removed, the way
@@ -210,6 +222,42 @@ impl Form {
     }
 }
 
+/// One line of a page's text in a search's fold, as the page keeps it
+/// ([`TextPage::folded_lines`]): every glyph's text folded a glyph at a time
+/// and joined, and where each glyph's piece of it starts — what a page's
+/// search reads, for a caller that searches across lines and pages
+/// (`docs/design/document-search.md`).
+#[derive(Clone, Copy, Debug)]
+pub struct FoldedLine<'p> {
+    text: &'p str,
+    offsets: &'p [u32],
+}
+
+impl<'p> FoldedLine<'p> {
+    /// The line's folded text.
+    #[must_use]
+    pub fn text(&self) -> &'p str {
+        self.text
+    }
+
+    /// How many glyphs the line has, one piece each.
+    #[must_use]
+    pub fn glyphs(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    /// Glyph `glyph`'s folded piece: empty where folding empties it — a
+    /// combining mark searched without diacritics — and past the line's end.
+    #[must_use]
+    pub fn piece(&self, glyph: usize) -> &'p str {
+        let at = |index: usize| self.offsets.get(index).map(|&at| at as usize);
+        match (at(glyph), at(glyph + 1)) {
+            (Some(start), Some(end)) => self.text.get(start..end).unwrap_or(""),
+            _ => "",
+        }
+    }
+}
+
 impl FormLine {
     /// `line`'s text in `fold`, a glyph at a time.
     fn folded(line: &TextLine, fold: Fold) -> FormLine {
@@ -224,25 +272,46 @@ impl FormLine {
     }
 }
 
-/// A search's needle as a Knuth–Morris–Pratt automaton over its bytes, which
-/// scans a line's text once for every occurrence, overlapping ones included
+/// A search's needle, folded as its options fold it, and the
+/// Knuth–Morris–Pratt automaton over its bytes, which scans a line's text once
+/// for every occurrence, overlapping ones included
 /// (`docs/design/performance.md`, P-24, "The matcher").
+///
+/// The page search's one matcher, owned, so that a caller reading text a
+/// piece at a time — a document search, which carries the automaton's state
+/// from one line or page to the next (`docs/design/document-search.md`) —
+/// steps it a byte at a time with [`Needle::step`].
 ///
 /// A byte match of a UTF-8 needle in UTF-8 text starts and ends on character
 /// boundaries, since a needle starts with a leading byte and the encoding
 /// marks every other byte as one that is not, so its occurrences are the
 /// ones `str::find` finds.
-struct Matcher<'n> {
-    needle: &'n [u8],
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Needle {
+    /// The folded needle, never empty.
+    text: String,
     /// For each prefix of the needle, the length of its longest proper
     /// prefix that is also its suffix.
     failure: Vec<usize>,
 }
 
-impl<'n> Matcher<'n> {
-    /// The automaton of `needle`, which is not empty, its building counted
-    /// into `steps`.
-    fn new(needle: &'n [u8], steps: &mut u64) -> Matcher<'n> {
+impl Needle {
+    /// `needle` folded as `options` fold a page's text, and its automaton;
+    /// `None` where the needle is empty or folding empties it — a needle of
+    /// nothing but accents, searched without them — which a search finds
+    /// nothing for.
+    #[must_use]
+    pub fn new(needle: &str, options: &SearchOptions) -> Option<Needle> {
+        Needle::folded(Fold::of(options).text(needle), &mut 0)
+    }
+
+    /// The automaton of the folded `text`, its building counted into
+    /// `steps`; `None` where `text` is empty.
+    fn folded(text: String, steps: &mut u64) -> Option<Needle> {
+        if text.is_empty() {
+            return None;
+        }
+        let needle = text.as_bytes();
         let mut failure = vec![0usize; needle.len()];
         let mut border = 0usize;
         for (at, &byte) in needle.iter().enumerate().skip(1) {
@@ -260,29 +329,66 @@ impl<'n> Matcher<'n> {
             }
             *steps += 1;
         }
-        Matcher { needle, failure }
+        Some(Needle { text, failure })
+    }
+
+    /// The needle as the search folded it.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The folded needle's length in bytes, the length of every occurrence.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Whether the folded needle is empty, which a [`Needle`] never is.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// The automaton stepped over `byte`: `matched` is how much of the needle
+    /// the bytes before it matched — 0 at the start of a text — and is left
+    /// as the bytes up to and including this one match; whether an occurrence
+    /// of the needle ends with this byte.
+    pub fn step(&self, matched: &mut usize, byte: u8) -> bool {
+        self.advance(matched, byte, &mut 0)
+    }
+
+    /// [`Needle::step`], the falls back taken counted into `steps`.
+    fn advance(&self, matched: &mut usize, byte: u8, steps: &mut u64) -> bool {
+        let needle = self.text.as_bytes();
+        let length = needle.len();
+        // `matched` stays below the needle's length: it is reset from the
+        // failure table the moment it reaches it.
+        while *matched > 0 && needle.get(*matched) != Some(&byte) {
+            *matched = self.failure.get(*matched - 1).copied().unwrap_or(0);
+            *steps += 1;
+        }
+        if needle.get(*matched) == Some(&byte) {
+            *matched += 1;
+        }
+        if *matched == length {
+            *matched = self.failure.get(length - 1).copied().unwrap_or(0);
+            true
+        } else {
+            false
+        }
     }
 
     /// Every occurrence of the needle in `text`, by the byte it starts at, in
     /// increasing order, each handed to `each`; the bytes read and the falls
     /// back taken counted into `steps`.
     fn occurrences(&self, text: &[u8], steps: &mut u64, mut each: impl FnMut(usize, &mut u64)) {
-        let length = self.needle.len();
+        let length = self.len();
         let mut matched = 0usize;
         for (at, &byte) in text.iter().enumerate() {
             *steps += 1;
-            // `matched` stays below the needle's length: it is reset from the
-            // failure table the moment it reaches it.
-            while matched > 0 && self.needle.get(matched) != Some(&byte) {
-                matched = self.failure.get(matched - 1).copied().unwrap_or(0);
-                *steps += 1;
-            }
-            if self.needle.get(matched) == Some(&byte) {
-                matched += 1;
-            }
-            if matched == length {
+            if self.advance(&mut matched, byte, steps) {
                 each(at + 1 - length, steps);
-                matched = self.failure.get(length - 1).copied().unwrap_or(0);
             }
         }
     }
@@ -412,6 +518,22 @@ impl TextPage {
         (quads, work.stats())
     }
 
+    /// Every line's text in the fold `options` search in, in the order
+    /// [`TextPage::lines`] gives them, as the page keeps it for its searches:
+    /// folded now where no search has read the page in that fold, and kept for
+    /// every search after, as [`TextPage::search_with`] keeps it.
+    #[must_use]
+    pub fn folded_lines(&self, options: &SearchOptions) -> Vec<FoldedLine<'_>> {
+        self.form(Fold::of(options), None)
+            .lines
+            .iter()
+            .map(|line| FoldedLine {
+                text: &line.text,
+                offsets: &line.offsets,
+            })
+            .collect()
+    }
+
     /// The page's text in `fold`, folded now if no search has read it in
     /// that fold, the build counted into `work` where there is one.
     fn form(&self, fold: Fold, work: Option<&Work>) -> &Form {
@@ -448,8 +570,10 @@ impl TextPage {
             &[]
         };
         let mut steps = 0u64;
-        let matcher = Matcher::new(needle.as_bytes(), &mut steps);
-        let length = needle.len();
+        let Some(matcher) = Needle::folded(needle, &mut steps) else {
+            return Vec::new();
+        };
+        let length = matcher.len();
         let mut hits = Vec::new();
 
         let lines = self.blocks().iter().flat_map(|block| &block.lines);
@@ -1089,5 +1213,115 @@ mod tests {
             "x^2 \u{b4}",
             "spacing marks stay"
         );
+    }
+
+    /// Every occurrence `Needle::step` reports, by the byte it ends after,
+    /// stepping `text` a byte at a time from a fresh state.
+    fn stepped(needle: &Needle, text: &str) -> Vec<usize> {
+        let mut matched = 0;
+        text.bytes()
+            .enumerate()
+            .filter_map(|(at, byte)| needle.step(&mut matched, byte).then_some(at + 1))
+            .collect()
+    }
+
+    /// **The owned needle is the page search's matcher**: stepped a byte at a
+    /// time it reports every occurrence, overlapping ones included, ending
+    /// where `str::match_indices` over every start says they do; its state
+    /// carries across pieces, so a text fed in two halves reports what it
+    /// reports whole; and it folds as the options fold a page.
+    #[test]
+    fn a_needle_stepped_a_byte_at_a_time_finds_every_occurrence() {
+        let cases = [
+            ("aa", "aaaa"),
+            ("abab", "abababab"),
+            ("aab", "aaab aab"),
+            ("r\u{e9}sum\u{e9}", "un r\u{e9}sum\u{e9}, r\u{e9}sum\u{e9}s"),
+            ("x", ""),
+            (
+                "\u{5e9}\u{5dc}",
+                "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e9}\u{5dc}",
+            ),
+        ];
+        for (needle, text) in cases {
+            let automaton = Needle::new(needle, &CASE).expect("a needle");
+            assert_eq!(automaton.text(), needle);
+            assert_eq!(automaton.len(), needle.len());
+            assert!(!automaton.is_empty());
+            // Every start, overlapping ones included.
+            let expected: Vec<usize> = (0..=text.len().saturating_sub(needle.len()))
+                .filter(|&at| text.get(at..at + needle.len()) == Some(needle))
+                .map(|at| at + needle.len())
+                .collect();
+            assert_eq!(
+                stepped(&automaton, text),
+                expected,
+                "{needle:?} in {text:?}"
+            );
+
+            // Fed in two halves, the state carried, at every split.
+            for split in 0..=text.len() {
+                let mut matched = 0;
+                let mut ends = Vec::new();
+                for (at, byte) in text.as_bytes()[..split].iter().enumerate() {
+                    if automaton.step(&mut matched, *byte) {
+                        ends.push(at + 1);
+                    }
+                }
+                for (at, byte) in text.as_bytes()[split..].iter().enumerate() {
+                    if automaton.step(&mut matched, *byte) {
+                        ends.push(split + at + 1);
+                    }
+                }
+                assert_eq!(ends, expected, "{needle:?} in {text:?} split at {split}");
+            }
+        }
+
+        // Folded as the options fold: lower-cased by default, accents
+        // removed on request, and nothing left of a needle of accents.
+        let lower = Needle::new("R\u{c9}SUM\u{c9}", &SearchOptions::default()).expect("a needle");
+        assert_eq!(lower.text(), "r\u{e9}sum\u{e9}");
+        let unaccented = SearchOptions {
+            diacritic_insensitive: true,
+            ..SearchOptions::default()
+        };
+        assert_eq!(
+            Needle::new("R\u{c9}sum\u{e9}", &unaccented).map(|n| n.text().to_string()),
+            Some("resume".to_string())
+        );
+        assert_eq!(Needle::new("", &SearchOptions::default()), None);
+        assert_eq!(Needle::new("\u{301}\u{308}", &unaccented), None);
+        assert_eq!(SearchOptions::default().fold("A\u{c9}"), "a\u{e9}");
+        assert_eq!(unaccented.fold("A\u{c9}"), "ae");
+        assert_eq!(CASE.fold("A\u{c9}"), "A\u{c9}");
+    }
+
+    /// **A page's folded lines are the forms its search reads**: one a line,
+    /// in `lines` order, each glyph's piece folded alone — a ligature's whole,
+    /// a combining mark's emptied without diacritics — joined into the line's
+    /// text; asking again reads the kept form rather than folding again.
+    #[test]
+    fn folded_lines_are_the_kept_forms_a_glyph_at_a_time() {
+        let p = page(&["Caf|e\u{301}| |\u{fb01}x", "Tw\u{c9}"]);
+        let unaccented = SearchOptions {
+            diacritic_insensitive: true,
+            ..SearchOptions::default()
+        };
+        let lines = p.folded_lines(&unaccented);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].glyphs(), 4);
+        assert_eq!(lines[0].piece(0), "caf");
+        assert_eq!(lines[0].piece(1), "e", "the combining acute removed");
+        assert_eq!(lines[0].piece(2), " ");
+        assert_eq!(lines[0].piece(3), "\u{fb01}x", "no compatibility mapping");
+        assert_eq!(lines[0].piece(4), "", "past the end");
+        assert_eq!(lines[0].text(), "cafe \u{fb01}x");
+        assert_eq!(lines[1].text(), "twe");
+        assert_eq!(lines[1].glyphs(), 3);
+
+        // The kept form: a search in that fold after it builds none.
+        let (_, stats) = p.search_counted("twe", &unaccented);
+        assert_eq!(stats.text_forms_built, 0, "the form the lines read is kept");
+        assert_eq!(p.folded_lines(&CASE)[1].text(), "Tw\u{c9}");
     }
 }

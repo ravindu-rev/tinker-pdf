@@ -289,6 +289,16 @@ to a committed value: the cut program, the descriptor computed from the
 face's tables, the widths written and the subset tag are bytes a render does
 not see all of.
 
+**A document search is pinned by its hits.**
+`document_search_is_stable_across_targets` searches a built three-page
+document for a dozen needles under each keep- option and the page search's
+options (`docs/design/document-search.md`), and hashes every hit forwards —
+its pages, each quad's corners by their bits, its text and the text around
+it — to a committed value (`DOCUMENT_SEARCH`). Before it hashes, it holds each
+search's hits backwards to be its hits forwards in reverse, and the searches
+together to find hits across a page break and inside one line, so a search
+that stops finding fails rather than becoming the pin.
+
 **The engine's own sRGB profile** is pinned as bytes too:
 `the_first_party_srgb_profile_is_one_byte_string_on_every_target` holds the
 SHA-256 of `tinker_pdf::SRGB_PROFILE` to a committed value. The profile is

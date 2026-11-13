@@ -349,6 +349,17 @@ impl TextPage {
     }
 }
 
+impl TextLine {
+    /// The quad covering glyphs `first..=last` of the line, the one a page's
+    /// search reports for a hit over them, so a search across lines and
+    /// pages (`docs/design/document-search.md`) boxes what it finds as one
+    /// page's search does; `None` where either is not a glyph of the line.
+    #[must_use]
+    pub fn span_quad(&self, first: usize, last: usize) -> Option<Quad> {
+        span_quad(self, first, last)
+    }
+}
+
 /// The quad covering glyphs `a..=b` of a line.
 ///
 /// The left edge is taken from whichever of the two ends starts first along

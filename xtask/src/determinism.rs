@@ -135,6 +135,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "font_measurements_are_stable_across_targets",
     },
+    // A document search's hits, their quads and texts, under every option
+    // (FT-21.2).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "document_search_is_stable_across_targets",
+    },
     // The archival packet's hash.
     Fingerprint {
         file: "crates/tinker-pdf/tests/pdfa_writer.rs",

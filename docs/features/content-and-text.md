@@ -926,6 +926,66 @@ for quad in page.text().search_with("resume", &options) { /* … */ }
 The decomposition and `Diacritic` tables are compiled from the same vendored
 UCD tree as the word-break table below.
 
+### Document search
+
+`Document::search(needle, &DocumentSearchOptions)` searches the whole
+document's text and hands back a `DocumentSearch`, a cursor through its hits
+([design](../design/document-search.md)). The page text is each page's
+`Page::text()`, every line in logical order (ruling 14), so a right-to-left
+phrase is found as it is read, a line continued on the next page included.
+Each glyph reads as its piece of the page's kept form in the fold its
+`SearchOptions` name, so case, whole word and diacritics behave as on one
+page. Between two lines stands one of three joins: a **boundary** no hit
+crosses; a **hyphen join**, where `tinker_pdf_content::plain::hyphen_join` —
+the rule `PlainTextOptions::rejoin_hyphens` rejoins by — joins them, the
+hyphen removed; or **one space**, which belongs to no glyph. White space at a
+line's ends is set aside wherever the options join lines there, so a phrase
+broken across lines reads with one space in it. Three switches, each off by
+default:
+
+- **`keep_lines`** — every line's end is a boundary, and each line is read as
+  drawn; with `keep_hyphens` beside it, the hits on a page are `search_with`'s
+  there, quad for quad.
+- **`keep_paragraphs`** — every block's end is a boundary, and so every
+  page's.
+- **`keep_hyphens`** — no line is rejoined at a hyphen, and a soft hyphen is
+  a character like any other; without it every U+00AD is removed from what is
+  read.
+
+A run's hits are chosen as a line's are on one page — the page search's own
+matcher, `tinker_pdf_content::Needle`, stepped across lines and pages, and the
+same two overlap rules — and whole word reads UAX #29 boundaries of the joined
+text. `next` (the cursor is an `Iterator`) returns the first hit that starts
+at or after the cursor's position and moves it to the hit's end; `previous`
+returns the last hit that ends at or before it and moves it to the hit's
+start; `seek` moves it to a `SearchPosition` — the document's start or end, a
+page's start, or a hit's start or end. So `next` after `previous` returns the
+hit again, and the hits backwards from the end are the hits forwards in
+reverse. A scan starts only at a chunk start no qualifying occurrence crosses,
+or a run's start, and a page is extracted only when the scan reaches it: a
+forward search reads the pages up to its hit, and the cursor keeps the few
+pages it stands on.
+
+A `SearchHit` carries its place — for page text, `HitPlace::Pages`, each page
+it covers with a quad for each line, `TextLine::span_quad` over the glyphs it
+covers, the page search's own quad — the text it covers as stated, up to
+`HIT_CONTEXT` characters before and after it on its first and last lines, and
+its start and end positions. A needle that is empty, or that folding
+empties, finds nothing. A document no password has opened is not read: the
+search finds nothing in it and `unsearched()` names it, with
+`UnsearchedReason::PasswordRequired` or `UnsupportedEncryption` (ruling 10).
+
+```rust
+let options = DocumentSearchOptions { keep_paragraphs: true, ..Default::default() };
+for hit in doc.search("quarterly results", &options) {
+    if let HitPlace::Pages(pages) = &hit.place { /* each page, its quads */ }
+}
+```
+
+The content crate's doors it reads are each usable alone:
+`SearchOptions::fold`, `TextPage::folded_lines`, `Needle`,
+`TextLine::span_quad` and `plain::hyphen_join`.
+
 ### Words and word boxes (UAX #29)
 
 `TextLine::words()` returns the line's words as `TextWord`s — the word's
@@ -1511,7 +1571,17 @@ JPEG; `/Decode` inversion; a zlib bomb stops at the shared ceiling),
 `optional_content.rs` — which pins the asymmetry both ways: hidden text is
 still extracted and still not drawn, and a hidden form's text still
 extracts. `tinker_parity.rs` ports Tinker's own `text_and_search.rs`
-assertions verbatim (ruling 12).
+assertions verbatim (ruling 12). `document_search.rs` holds the document
+search on built documents: a phrase across a page break found forwards and
+backwards with each page's quad the page search's own, backwards the forward
+hits in reverse under every option over overlapping chains across a line and
+a page break, each keep- option against its default, the hits of
+`keep_lines` with `keep_hyphens` equal to `search_with`'s page by page, a
+right-to-left line continued across a page break found as read, a soft hyphen
+ending a page, the page search's options across a break, seeking and
+alternating as a list iterator, empty needles and pages, white space set
+aside at a join, and an encrypted document named in `unsearched`; the module's
+own tests count the pages a forward search extracts.
 
 The `text` and `optional` determinism render fingerprints in
 `crates/tinker-pdf/tests/determinism.rs` exercise this path directly. The

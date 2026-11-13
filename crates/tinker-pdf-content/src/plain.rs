@@ -7,7 +7,9 @@
 //! lives here is the **opt-in** sibling, [`crate::TextPage::plain_text_with`],
 //! and the structured view's twin of it in the facade, which both hand their
 //! lines to [`assemble`] so the two cannot come to disagree about what a
-//! hyphen is.
+//! hyphen is — and [`hyphen_join`], the rule `assemble` joins by on its own,
+//! which the facade's document search joins lines by
+//! (`docs/design/document-search.md`).
 //!
 //! # What is joined
 //!
@@ -96,11 +98,42 @@ fn is_hard_hyphen(c: char) -> bool {
     matches!(c, '-' | '\u{2010}')
 }
 
-/// Which kind of join ends a line.
-#[derive(Clone, Copy)]
-enum Join {
+/// Which hyphen joins a line to the next: the kind [`hyphen_join`] finds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HyphenJoin {
+    /// U+00AD SOFT HYPHEN ends the line and a line follows. Certain.
     Soft,
+    /// U+002D or U+2010 ends the line after a letter, and the next line
+    /// starts lower-case. Inferred, and sometimes wrong — a compound broken
+    /// at its own hyphen is joined too.
     Hard,
+}
+
+/// Whether `line` is joined to `next` at a hyphen, by the module's rule: the
+/// one rule [`assemble`] rejoins by and a document search joins by
+/// (`docs/design/document-search.md`), so the two cannot come to disagree
+/// about what a hyphen is.
+///
+/// `line`'s trailing white space is set aside before its last character is
+/// read, and `next`'s leading white space before its first; `next` is `None`
+/// at the last line, where nothing is joined. The hyphen that joins is the
+/// last character of `line` with its trailing white space set aside.
+#[must_use]
+pub fn hyphen_join(line: &str, next: Option<&str>) -> Option<HyphenJoin> {
+    let end = line.trim_end();
+    match end.chars().next_back() {
+        Some(SOFT_HYPHEN) if next.is_some() => Some(HyphenJoin::Soft),
+        Some(c) if is_hard_hyphen(c) => {
+            let before = end
+                .get(..end.len() - c.len_utf8())
+                .and_then(|head| head.chars().rev().find(|&b| b != SOFT_HYPHEN));
+            let lower_start = next
+                .and_then(|n| n.trim_start().chars().next())
+                .is_some_and(char::is_lowercase);
+            (before.is_some_and(char::is_alphabetic) && lower_start).then_some(HyphenJoin::Hard)
+        }
+        _ => None,
+    }
 }
 
 /// Assembles lines into plain text: each line followed by `\n`, with hyphens
@@ -135,19 +168,7 @@ where
         let next = lines.get(index + 1).copied();
         let end = line.trim_end();
         let last = end.chars().next_back();
-        let join = match last {
-            Some(SOFT_HYPHEN) if next.is_some() => Some(Join::Soft),
-            Some(c) if is_hard_hyphen(c) => {
-                let before = end
-                    .get(..end.len() - c.len_utf8())
-                    .and_then(|head| head.chars().rev().find(|&b| b != SOFT_HYPHEN));
-                let lower_start = next
-                    .and_then(|n| n.trim_start().chars().next())
-                    .is_some_and(char::is_lowercase);
-                (before.is_some_and(char::is_alphabetic) && lower_start).then_some(Join::Hard)
-            }
-            _ => None,
-        };
+        let join = hyphen_join(line, next);
 
         // What is kept of this line: all of it, or everything before the
         // hyphen that joins it — trailing space included in what goes, since
@@ -164,11 +185,11 @@ where
             }
         }
         match join {
-            Some(Join::Soft) => {
+            Some(HyphenJoin::Soft) => {
                 out.hyphens.soft_removed += 1;
                 out.hyphens.soft_joins += 1;
             }
-            Some(Join::Hard) => out.hyphens.hard_joins += 1,
+            Some(HyphenJoin::Hard) => out.hyphens.hard_joins += 1,
             None => out.text.push('\n'),
         }
         continuing = join.is_some();
@@ -302,5 +323,47 @@ mod tests {
     #[test]
     fn nothing_in_nothing_out() {
         assert_eq!(rejoin(&[]), PlainText::default());
+    }
+
+    /// The rule on its own, the one a document search joins lines by: each
+    /// case `assemble` joins or keeps above, asked of `hyphen_join` directly.
+    #[test]
+    fn hyphen_join_is_the_rule_assemble_rejoins_by() {
+        use HyphenJoin::{Hard, Soft};
+        let cases: [(&str, Option<&str>, Option<HyphenJoin>); 18] = [
+            ("Donau\u{AD}", Some("Dampfschiff"), Some(Soft)),
+            ("ISBN\u{AD}  ", Some("   978"), Some(Soft)),
+            ("continued\u{AD}", None, None),
+            ("the hyphen-", Some("ation of words"), Some(Hard)),
+            ("hyphen\u{2010}", Some("ation"), Some(Hard)),
+            ("Stra\u{DF}en-", Some("\u{FC}bergang"), Some(Hard)),
+            ("hyphen-  ", Some("   ation"), Some(Hard)),
+            ("soft\u{AD}-", Some("ware"), Some(Hard)),
+            ("1-", Some("ab"), None),
+            ("Jean-", Some("Paul"), None),
+            ("pages 10-", Some("12"), None),
+            ("Mid-", Some("1990s"), None),
+            ("the result -", Some("surprisingly"), None),
+            ("-", Some("item"), None),
+            ("word\u{2011}", Some("next"), None),
+            ("word\u{2014}", Some("next"), None),
+            ("hyphen-", None, None),
+            ("a well-known mid-line hyphen", Some("and more"), None),
+        ];
+        for (line, next, join) in cases {
+            assert_eq!(hyphen_join(line, next), join, "{line:?} then {next:?}");
+        }
+        // A letter before the hyphen behind soft hyphens still counts, as
+        // `assemble`'s own rule skips them.
+        assert_eq!(hyphen_join("ab\u{AD}\u{AD}-", Some("cd")), Some(Hard));
+        // The rule `assemble` applies is this one, case for case.
+        for (line, next, join) in [
+            ("the hyphen-", "ation", Some(Hard)),
+            ("Jean-", "Paul", None),
+            ("Donau\u{AD}", "Dampfschiff", Some(Soft)),
+        ] {
+            let out = rejoin(&[line, next]);
+            assert_eq!(out.hyphens.joins() == 1, join.is_some(), "{line:?}");
+        }
     }
 }

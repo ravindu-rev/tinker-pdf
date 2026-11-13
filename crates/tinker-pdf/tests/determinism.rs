@@ -6042,3 +6042,158 @@ fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Documen
         document
     }
 }
+
+// ---- document search (FT-21.2) ---------------------------------------------
+
+/// What `document_search_is_stable_across_targets` hashes: every hit of its
+/// searches, recorded from the first target it runs on, which prints the
+/// line to paste, and held on every other.
+const DOCUMENT_SEARCH: &str = "";
+
+/// The document the search fingerprint reads: Helvetica lines over three
+/// pages, a phrase and a hyphenated word broken across a page break, two
+/// blocks on a page, overlapping occurrences and accented words.
+fn searched_document() -> Document {
+    let pages: [&[&[&str]]; 3] = [
+        &[
+            &["The quick brown fox jumps", "over the lazy dog, and a"],
+            &["second paragraph runs on to the page-"],
+        ],
+        &[
+            &[
+                r"break, where R\351sum\351 and resume",
+                "meet a a a a and abab abab",
+            ],
+            &["concat cat category, then the end"],
+        ],
+        &[&["of the text, and a hyphen-", "ation to close"]],
+    ];
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F0", b"Helvetica");
+    for blocks in pages {
+        let mut content = String::from("BT /F0 11 Tf ");
+        let mut y = 760.0;
+        for block in blocks {
+            for line in *block {
+                content.push_str(&format!("1 0 0 1 36 {y} Tm ({line}) Tj "));
+                y -= 13.0;
+            }
+            y -= 50.0;
+        }
+        content.push_str("ET");
+        builder.add_page(612.0, 792.0, |page| page.raw(content.as_bytes()));
+    }
+    Document::open(built("the document search fingerprint", builder)).expect("it opens")
+}
+
+/// **A document search finds the same hits on every target** (FT-21.2,
+/// `docs/design/document-search.md`): every hit of a dozen needles under
+/// each keep- option and the page search's options, forwards — its pages,
+/// each quad's corners by their bits, its text and the text around it —
+/// hashed. Each search's hits backwards are asserted to be its hits forwards
+/// in reverse before anything is hashed, and the searches together are held
+/// to find hits across a page break and inside one line, so a search that
+/// stops finding fails here rather than becoming the new pin.
+#[test]
+fn document_search_is_stable_across_targets() {
+    use tinker_pdf::{DocumentSearchOptions, HitPlace, SearchOptions, SearchPosition};
+
+    let doc = searched_document();
+    let base = DocumentSearchOptions::default();
+    let every = [
+        base.clone(),
+        DocumentSearchOptions {
+            keep_lines: true,
+            ..base.clone()
+        },
+        DocumentSearchOptions {
+            keep_paragraphs: true,
+            ..base.clone()
+        },
+        DocumentSearchOptions {
+            keep_hyphens: true,
+            ..base.clone()
+        },
+        DocumentSearchOptions {
+            search: SearchOptions {
+                whole_word: true,
+                diacritic_insensitive: true,
+                ..SearchOptions::default()
+            },
+            ..base.clone()
+        },
+        DocumentSearchOptions {
+            search: SearchOptions {
+                case_sensitive: true,
+                ..SearchOptions::default()
+            },
+            ..base.clone()
+        },
+    ];
+    let needles = [
+        "the",
+        "a a",
+        "abab",
+        "cat",
+        "resume",
+        "r\u{e9}sum\u{e9}",
+        "page break",
+        "pagebreak",
+        "hyphenation",
+        "and a second",
+        "end of the",
+        "dog, and",
+    ];
+    let mut answers = Vec::new();
+    let (mut across, mut within) = (0usize, 0usize);
+    for options in &every {
+        for needle in needles {
+            let forwards: Vec<_> = doc.search(needle, options).collect();
+            let mut search = doc.search(needle, options);
+            search.seek(SearchPosition::end());
+            let mut backwards = Vec::new();
+            while let Some(hit) = search.previous() {
+                backwards.push(hit);
+            }
+            backwards.reverse();
+            assert_eq!(backwards, forwards, "{needle:?} under {options:?}");
+
+            answers.extend_from_slice(needle.as_bytes());
+            answers.push(0);
+            answers.extend_from_slice(&(forwards.len() as u64).to_be_bytes());
+            for hit in &forwards {
+                let HitPlace::Pages(pages) = &hit.place else {
+                    panic!("a page hit");
+                };
+                if pages.len() > 1 {
+                    across += 1;
+                } else {
+                    within += 1;
+                }
+                for page in pages {
+                    answers.extend_from_slice(&page.page.to_be_bytes());
+                    for quad in &page.quads {
+                        for (x, y) in [quad.ul, quad.ur, quad.ll, quad.lr] {
+                            answers.extend_from_slice(&x.to_bits().to_be_bytes());
+                            answers.extend_from_slice(&y.to_bits().to_be_bytes());
+                        }
+                    }
+                }
+                for text in [&hit.text, &hit.before, &hit.after] {
+                    answers.extend_from_slice(text.as_bytes());
+                    answers.push(0);
+                }
+            }
+        }
+    }
+    assert!(across >= 6, "hits across a page break: {across}");
+    assert!(within >= 40, "hits inside a page: {within}");
+    let hash = sha(&answers);
+    assert_eq!(
+        hash, DOCUMENT_SEARCH,
+        "the document search's hits are not the ones they were. If two targets \
+         disagree, this is a determinism bug; if the search changed on purpose, \
+         read its hits first, then paste:\n\n\
+         const DOCUMENT_SEARCH: &str = \"{hash}\";\n"
+    );
+}

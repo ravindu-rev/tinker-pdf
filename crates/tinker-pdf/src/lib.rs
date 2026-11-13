@@ -32,6 +32,7 @@ pub mod colour_glyphs;
 mod command_stream;
 mod copies;
 mod display;
+mod document_search;
 mod embed;
 pub mod epub;
 pub mod fb2;
@@ -175,6 +176,9 @@ pub use text_order::TextOptions;
 /// Which box a character of [`Page::text_with`] is reported with
 /// ([`TextOptions::boxes`]).
 pub use tinker_pdf_content::CharBoxes;
+/// A page's text in a search's fold, as [`TextPage::folded_lines`] hands it
+/// over: re-exported so a caller can name what it is handed (ruling 11).
+pub use tinker_pdf_content::FoldedLine;
 pub use tinker_pdf_content::{
     HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, SearchOptions, TextBlock,
     TextChar, TextLine, TextPage, TextWarning, TextWord, Unmapped, WritingMode,
@@ -289,6 +293,13 @@ pub use command_stream::{
     COMMAND_STREAM_MAJOR, COMMAND_STREAM_MINOR,
 };
 pub use display::DisplayList;
+/// A whole document searched — its page text joined across lines, blocks and
+/// pages — through a cursor that finds the next or previous hit:
+/// [`Document::search`] (`docs/design/document-search.md`).
+pub use document_search::{
+    DocumentSearch, DocumentSearchOptions, HitPlace, PageQuads, SearchHit, SearchPosition,
+    Unsearched, UnsearchedReason, HIT_CONTEXT,
+};
 /// Images a page draws, with their samples before any colour conversion and
 /// the space they are in, behind [`Page::images`].
 pub use images::{ImageMask, ImageSpace, PageImage, SampleCodec};
