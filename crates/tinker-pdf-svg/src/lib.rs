@@ -57,10 +57,46 @@ mod tests;
 /// no size of its own falls back to; `None` is [`scene::DEFAULT_VIEWPORT`].
 ///
 /// # Errors
-/// [`Refusal`], whose six variants are the whole of what produces no picture
-/// at all. Everything else is a [`Scene`] with [`Scene::warnings`] on it.
+/// [`Refusal`], whose variants are the whole of what produces no picture at
+/// all. Everything else is a [`Scene`] with [`Scene::warnings`] on it.
 pub fn read(bytes: &[u8], viewport: Option<(f64, f64)>, limits: &Limits) -> Result<Scene, Refusal> {
     read_with(bytes, viewport, limits, &Context::NONE)
+}
+
+/// Reads one element of a document by its `id`: the element, with what it
+/// references — `<defs>`, paint servers, clips, masks and other `<use>`s,
+/// wherever they are written — drawn in the root's viewport as a `<use>` of
+/// it placed in the root would draw it, and nothing else
+/// ([`scene::build_element`]).
+///
+/// So one picture is read out of a document that holds many, as a colour
+/// font's `SVG ` table has one document describe several glyphs.
+///
+/// # Errors
+/// [`read`]'s, and [`Refusal::IdUnresolved`] where no element has the id.
+pub fn read_element(
+    bytes: &[u8],
+    id: &str,
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+) -> Result<Scene, Refusal> {
+    read_element_with(bytes, id, viewport, limits, &Context::NONE)
+}
+
+/// [`read_element`], with the document's references reaching what `context`
+/// names.
+///
+/// # Errors
+/// [`read_element`]'s.
+pub fn read_element_with(
+    bytes: &[u8],
+    id: &str,
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+    context: &Context<'_>,
+) -> Result<Scene, Refusal> {
+    let tree = document::read(bytes, limits)?;
+    scene::build_element_with(&tree, id, viewport, limits, context)
 }
 
 /// [`read`], with the document's references reaching what `context` names —
@@ -239,6 +275,10 @@ pub enum Refusal {
     /// selector matches is this. `tinker_pdf::epub::SpineDefect` draws the same
     /// line between `NotStyled` and `NotFragmented`, for the same reason.
     TooMuchStyle,
+    /// [`read_element`] was asked for an `id` no element of the document has:
+    /// there is no picture to read, as distinct from an element that drew
+    /// nothing.
+    IdUnresolved,
 }
 
 /// Something the picture asked for that this build did not draw.

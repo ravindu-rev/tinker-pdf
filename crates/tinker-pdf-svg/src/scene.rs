@@ -1566,6 +1566,13 @@ impl Walk<'_> {
         let x = self.length_of(node, "x", Some(frame.viewport.0), 0.0);
         let y = self.length_of(node, "y", Some(frame.viewport.1), 0.0);
         let matrix = transform::concat([1.0, 0.0, 0.0, 1.0, x, y], matrix);
+        // §5.6's override of a `<symbol>`'s or an `<svg>`'s own size.
+        let size = (
+            node.attr("width")
+                .and_then(|text| document::length(text, Some(frame.viewport.0))),
+            node.attr("height")
+                .and_then(|text| document::length(text, Some(frame.viewport.1))),
+        );
 
         let inner = Frame {
             matrix,
@@ -1584,7 +1591,7 @@ impl Walk<'_> {
         let style = frame.style.clone();
         self.expanding.push(target);
         let drawn = self.group(&style, matrix, frame, |walk| {
-            walk.instance(target, node, &inner)
+            walk.instance(target, size, &inner)
         });
         self.expanding.pop();
         drawn
@@ -1593,21 +1600,71 @@ impl Walk<'_> {
     /// One instance of a `<use>`'s target.
     ///
     /// §5.6 gives `<symbol>` and `<svg>` their own rule: the `<use>`'s `width`
-    /// and `height` **override** the referenced element's, and a `<symbol>`
-    /// becomes an `<svg>`. Every other element is drawn as itself.
-    fn instance(&mut self, target: usize, node: &Node, frame: &Frame) -> Result<(), Refusal> {
+    /// and `height`, `size` here, **override** the referenced element's, and a
+    /// `<symbol>` becomes an `<svg>`. Every other element is drawn as itself.
+    fn instance(
+        &mut self,
+        target: usize,
+        size: (Option<f64>, Option<f64>),
+        frame: &Frame,
+    ) -> Result<(), Refusal> {
         let referenced = &self.tree.nodes[target];
         if referenced.is_svg() && matches!(referenced.name.as_str(), "symbol" | "svg") {
-            let width = node
-                .attr("width")
-                .and_then(|text| document::length(text, Some(frame.viewport.0)));
-            let height = node
-                .attr("height")
-                .and_then(|text| document::length(text, Some(frame.viewport.1)));
             let referenced = referenced.clone();
-            return self.viewport_element(target, &referenced, frame, (width, height));
+            return self.viewport_element(target, &referenced, frame, size);
         }
         self.element(target, frame)
+    }
+
+    /// The document read for one element, `target`: the root's viewport and
+    /// style as the whole document's walk gives them, and `target` drawn in
+    /// that viewport as a `<use>` of it with no attributes of its own would
+    /// draw it there — the OpenType SVG chapter's *Glyph Identifiers* rule,
+    /// "as though the given element and its content were specified in a
+    /// `<defs>` tag and then referenced".
+    ///
+    /// So what `target` references — gradients, clips, masks, markers, other
+    /// `<use>`s, wherever in the document they are written — is reached as
+    /// the whole walk reaches it, the elements between the root and `target`
+    /// add nothing, and nothing else of the document is drawn. `target` is on
+    /// the expansion stack for the whole of its walk, so a `<use>` inside it
+    /// that reaches it again is [`Refusal::TooManyUses`], the bomb by name. The
+    /// reference itself is no `<use>` the document wrote, so it spends none of
+    /// [`Limits::max_uses`].
+    fn element_by_id(&mut self, target: usize, outer: &Frame) -> Result<(), Refusal> {
+        let root = self.tree.root;
+        let Some(node) = self.tree.nodes.get(root) else {
+            return Ok(());
+        };
+        // The root's own `display: none` removes everything inside it, the
+        // reference among them — `element`'s rule for it.
+        if self.display_none(node) {
+            return Ok(());
+        }
+        let resolved = style::resolve(self.tree, root, &self.sheet, &outer.style, &mut self.css)
+            .map_err(|_| Refusal::TooMuchStyle)?;
+        for name in resolved.unreadable {
+            self.warn(Warning::ValueUnreadable { attribute: name });
+        }
+        let frame = Frame {
+            style: resolved.style,
+            ..outer.clone()
+        };
+        self.expanding.push(target);
+        let drawn = if target == root {
+            // The root read by its own id is the whole document.
+            self.viewport_element(root, node, &frame, (None, None))
+        } else {
+            self.viewport(node, &frame, (None, None), |walk, inner| {
+                let inner = Frame {
+                    depth: inner.depth + 1,
+                    ..inner.clone()
+                };
+                walk.instance(target, (None, None), &inner)
+            })
+        };
+        self.expanding.pop();
+        drawn
     }
 
     /// §10.4's `<text>`, as one or more runs.
@@ -2062,6 +2119,21 @@ impl Walk<'_> {
         frame: &Frame,
         override_size: (Option<f64>, Option<f64>),
     ) -> Result<(), Refusal> {
+        self.viewport(node, frame, override_size, |walk, inner| {
+            walk.children(index, inner)
+        })
+    }
+
+    /// §7.9's viewport `node` establishes, and `content` drawn in it: the
+    /// element's own children, or — for a document read by an element's id —
+    /// the root's viewport with that element in it ([`Walk::element_by_id`]).
+    fn viewport(
+        &mut self,
+        node: &Node,
+        frame: &Frame,
+        override_size: (Option<f64>, Option<f64>),
+        content: impl FnOnce(&mut Self, &Frame) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
         let (outer_width, outer_height) = frame.viewport;
         // A nested `<svg>`'s `x` and `y` place its viewport inside its
         // parent's; the root's are ignored by §7.2 and are zero on every file
@@ -2101,9 +2173,7 @@ impl Walk<'_> {
         // A nested `<svg>`'s own `opacity` and `clip-path` are of its whole
         // rendering, in the space its parent placed it in.
         let style = frame.style.clone();
-        self.group(&style, frame.matrix, frame, |walk| {
-            walk.children(index, &inner)
-        })
+        self.group(&style, frame.matrix, frame, |walk| content(walk, &inner))
     }
 
     /// Every child element of `index`, in document order.
@@ -2697,6 +2767,56 @@ pub fn build_with(
     limits: &Limits,
     context: &crate::Context<'_>,
 ) -> Result<Scene, Refusal> {
+    build_from(tree, None, viewport, limits, context)
+}
+
+/// A scene of one element of a tree: the element whose `id` is `id`, with what
+/// it references, in the root's viewport, as a `<use>` of it placed in the
+/// root would draw it, and nothing else of the document.
+///
+/// The OpenType SVG chapter's *Glyph Identifiers* rule, which draws a glyph
+/// "as though the given element and its content were specified in a `<defs>`
+/// tag and then referenced", without a word about glyphs here (ruling 8): the
+/// root's `width`, `height` and `viewBox` map its user space onto `viewport`
+/// as the whole document's walk maps it, unclipped; the elements between the
+/// root and the one read add nothing; and [`Scene::size`] is the root's.
+///
+/// # Errors
+/// [`Refusal::IdUnresolved`] where no element has the id, and [`build`]'s;
+/// [`Refusal::TooManyUses`] for a `<use>` inside the element that reaches it.
+pub fn build_element(
+    tree: &Tree,
+    id: &str,
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+) -> Result<Scene, Refusal> {
+    build_element_with(tree, id, viewport, limits, &crate::Context::NONE)
+}
+
+/// [`build_element`], with the document's references reaching what `context`
+/// names.
+///
+/// # Errors
+/// [`build_element`]'s.
+pub fn build_element_with(
+    tree: &Tree,
+    id: &str,
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+    context: &crate::Context<'_>,
+) -> Result<Scene, Refusal> {
+    let target = tree.by_id(id).ok_or(Refusal::IdUnresolved)?;
+    build_from(tree, Some(target), viewport, limits, context)
+}
+
+/// The walk over the whole tree, or over the element `target` names.
+fn build_from(
+    tree: &Tree,
+    target: Option<usize>,
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+    context: &crate::Context<'_>,
+) -> Result<Scene, Refusal> {
     let viewport = match viewport {
         Some((width, height))
             if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
@@ -2751,15 +2871,16 @@ pub fn build_with(
     // because a caller needs it whether or not anything drew.
     let width = walk.length_of(node, "width", Some(viewport.0), viewport.0);
     let height = walk.length_of(node, "height", Some(viewport.1), viewport.1);
-    walk.element(
-        root,
-        &Frame {
-            matrix: IDENTITY,
-            viewport,
-            style: Style::default(),
-            depth: 0,
-        },
-    )?;
+    let frame = Frame {
+        matrix: IDENTITY,
+        viewport,
+        style: Style::default(),
+        depth: 0,
+    };
+    match target {
+        None => walk.element(root, &frame)?,
+        Some(target) => walk.element_by_id(target, &frame)?,
+    }
     let mut scene = walk.scene;
     scene.font_faces = font_faces;
     // The size the root stated, not the size the walk happened to leave

@@ -64,6 +64,12 @@
 //!   infinity there is a content stream a reader refuses outright — which is a
 //!   worse failure than a page that looks wrong, not a better one.
 //!
+//! The document is read again for **one element**, the first one with an id,
+//! through [`tinker_pdf_svg::read_element`] — how a colour font's `SVG `
+//! table has a glyph read out of a document holding many — and its scene is
+//! held to the same invariants, the tree's door and the bytes' door to one
+//! answer.
+//!
 //! # A `<style>` element's imports, from the same bytes
 //!
 //! The document is read a second time through [`tinker_pdf_svg::read_with`]
@@ -450,6 +456,23 @@ fuzz_target!(|data: &[u8]| {
         let again = tinker_pdf_svg::read(body, viewport, &limits)
             .expect("the same bytes refused on a second run");
         assert!(again == *scene, "reading a document is not deterministic");
+    }
+
+    // ---- one element, by the first id the document has -----------------------
+    if let Ok(tree) = tinker_pdf_svg::document::read(body, &limits) {
+        if let Some(id) = tree.nodes.iter().find_map(|node| node.id.clone()) {
+            let by_id = tinker_pdf_svg::read_element(body, &id, viewport, &limits);
+            if let Ok(scene) = &by_id {
+                check(scene, &limits);
+                colours_are_colours(&scene.nodes);
+            }
+            // The tree's door and the bytes' door are one read, and it is
+            // deterministic.
+            assert!(
+                tinker_pdf_svg::scene::build_element(&tree, &id, viewport, &limits) == by_id,
+                "reading an element by its id is not deterministic"
+            );
+        }
     }
 
     // ---- the runs measured ---------------------------------------------------

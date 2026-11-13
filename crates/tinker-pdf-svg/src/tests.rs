@@ -415,6 +415,7 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
         .expect("the seed corpus is committed beside the target");
     let mut seen = 0usize;
     let mut boxes = 0usize;
+    let mut elements = 0usize;
     for entry in std::fs::read_dir(&dir).expect("the seed corpus reads") {
         let file = entry.expect("a seed").path();
         if !file.is_file() {
@@ -543,6 +544,32 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
                 boxes += 1;
             }
         }
+        // One element, by the first id the document has, as the target reads
+        // it: the same invariants, and the tree's door and the bytes' door one
+        // answer.
+        if let Ok(tree) = crate::document::read(body, &limits) {
+            if let Some(id) = tree.nodes.iter().find_map(|node| node.id.clone()) {
+                let by_id = crate::read_element(body, &id, Some((100.0, 50.0)), &limits);
+                if let Ok(scene) = &by_id {
+                    let mut numbers = Vec::new();
+                    sweep_nodes(&scene.nodes, &mut numbers);
+                    assert!(
+                        numbers.iter().all(|n| n.is_finite()),
+                        "{name}: an element read by its id carries something that is not a number"
+                    );
+                    assert!(
+                        colours_in_range(&scene.nodes),
+                        "{name}: a colour no document states reached the caller"
+                    );
+                    elements += 1;
+                }
+                assert_eq!(
+                    crate::scene::build_element(&tree, &id, Some((100.0, 50.0)), &limits),
+                    by_id,
+                    "{name}: reading an element by its id is not deterministic"
+                );
+            }
+        }
         seen += 1;
     }
     // A corpus that emptied itself would pass every assertion above.
@@ -555,6 +582,7 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
         boxes >= 1,
         "no seed reaches a box that only a measurer gives"
     );
+    assert!(elements >= 1, "no seed reads an element by its id");
 }
 
 /// Every character `.0` ems wide, eight tenths of one above the baseline and
@@ -703,4 +731,271 @@ fn a_coordinate_too_large_for_a_double_does_not_escape() {
         "the lineto is dropped rather than carried as an infinity"
     );
     assert!(transform::numbers("1e999").is_none());
+}
+
+// ---- one element read by its id -------------------------------------------
+
+/// Two glyph elements in one document, sharing a gradient and a path in
+/// `<defs>`: `glyph1` is a `<use>` of the path, moved ten units right, and
+/// `glyph2` a rectangle under a `scale(9)` it does not inherit when it is read
+/// by its id. The root's view box puts user `y = -1000` at the top of the
+/// 1000-unit viewport, so a user point `(x, y)` is the scene's `(x, y + 1000)`;
+/// and a green circle stands outside both glyphs.
+const GLYPHS: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg"
+    xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 -1000 1000 1000">
+  <defs>
+    <linearGradient id="grad"><stop offset="0" stop-color="#ff0000"/>
+      <stop offset="1" stop-color="#0000ff"/></linearGradient>
+    <path id="base" d="M100 -100H300V-500H100Z"/>
+  </defs>
+  <g id="glyph1" transform="translate(10,0)"><use xlink:href="#base" fill="url(#grad)"/></g>
+  <g transform="scale(9)">
+    <rect id="glyph2" x="500" y="-800" width="200" height="300" fill="url(#grad)"/>
+  </g>
+  <circle cx="0" cy="0" r="50" fill="green"/>
+</svg>"##;
+
+/// The bounds of every point an outline carries, `[min_x, min_y, max_x,
+/// max_y]`.
+fn bounds(outline: &path::Outline) -> [f64; 4] {
+    let mut out = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for segment in &outline.segments {
+        let points = match *segment {
+            Segment::Move(p) | Segment::Line(p) => vec![p],
+            Segment::Cubic(a, b, c) => vec![a, b, c],
+            Segment::Close => Vec::new(),
+        };
+        for [x, y] in points {
+            out = [out[0].min(x), out[1].min(y), out[2].max(x), out[3].max(y)];
+        }
+    }
+    out
+}
+
+/// The one path a scene read by an id draws: its bounds and its fill.
+fn only_path(scene: &crate::Scene) -> ([f64; 4], &crate::Paint) {
+    assert_eq!(scene.nodes.len(), 1, "{:?}", scene.nodes);
+    match &scene.nodes[0] {
+        crate::Node::Path { outline, fill, .. } => (bounds(outline), fill),
+        other => panic!("a path, not {other:?}"),
+    }
+}
+
+/// A fill that is `#grad`, red to blue, its gradient space the unit square
+/// mapped onto `box_` — §13.2.3's `objectBoundingBox` — in the scene's space.
+fn assert_the_gradient(fill: &crate::Paint, box_: [f64; 4], what: &str) {
+    let crate::Paint::Linear { matrix, stops, .. } = fill else {
+        panic!("{what}: the gradient, not {fill:?}");
+    };
+    assert_eq!(stops.len(), 2, "{what}");
+    assert_eq!(stops[0].colour.rgb, [1.0, 0.0, 0.0], "{what}");
+    assert_eq!(stops[1].colour.rgb, [0.0, 0.0, 1.0], "{what}");
+    point(
+        transform::apply(*matrix, [0.0, 0.0]),
+        [box_[0], box_[1]],
+        what,
+    );
+    point(
+        transform::apply(*matrix, [1.0, 1.0]),
+        [box_[2], box_[3]],
+        what,
+    );
+}
+
+/// **FT-06.9's exit, the first half.** Each glyph read by its id is its own
+/// paths with the gradient they share resolved for each — `glyph1` through the
+/// `<use>` it holds, `glyph2` without the `scale(9)` written above it — under
+/// the root's view box, and nothing else of the document: not the other
+/// glyph, and not the circle.
+#[test]
+fn an_element_is_read_by_id_with_what_it_references() {
+    let limits = crate::Limits::DEFAULT;
+    let viewport = Some((1000.0, 1000.0));
+
+    let one = crate::read_element(GLYPHS, "glyph1", viewport, &limits).expect("glyph1 reads");
+    let (box_, fill) = only_path(&one);
+    // The path's user box, moved ten right by its `<g>` and down 1000 by the
+    // view box.
+    let expected = [110.0, 500.0, 310.0, 900.0];
+    for (got, want) in box_.iter().zip(expected) {
+        near(*got, want, "glyph1's path");
+    }
+    assert_the_gradient(fill, expected, "glyph1");
+    assert_eq!(one.size, (1000.0, 1000.0));
+    assert!(one.warnings.is_empty(), "{:?}", one.warnings);
+
+    let two = crate::read_element(GLYPHS, "glyph2", viewport, &limits).expect("glyph2 reads");
+    let (box_, fill) = only_path(&two);
+    let expected = [500.0, 200.0, 700.0, 500.0];
+    for (got, want) in box_.iter().zip(expected) {
+        near(*got, want, "glyph2's rectangle, unscaled");
+    }
+    assert_the_gradient(fill, expected, "glyph2");
+
+    // The whole document draws the three, the rectangle under its scale.
+    let whole = crate::read(GLYPHS, viewport, &limits).expect("the document reads");
+    assert_eq!(whole.nodes.len(), 3, "{:?}", whole.nodes);
+
+    // An element inside `<defs>` reads as a `<use>` of it draws it: the path,
+    // painted as its own attributes say — black, there being no fill.
+    let base = crate::read_element(GLYPHS, "base", viewport, &limits).expect("base reads");
+    let (box_, fill) = only_path(&base);
+    for (got, want) in box_.iter().zip([100.0, 500.0, 300.0, 900.0]) {
+        near(*got, want, "the defined path");
+    }
+    assert_eq!(fill, &crate::Paint::Solid(crate::Colour { rgb: [0.0; 3] }));
+    // A paint server read by its id draws nothing where it stands, as a
+    // `<use>` of one draws nothing.
+    let grad = crate::read_element(GLYPHS, "grad", viewport, &limits).expect("grad reads");
+    assert!(grad.nodes.is_empty(), "{:?}", grad.nodes);
+
+    // The tree's door agrees with the bytes' door, so a caller reading many
+    // glyphs from one document parses it once.
+    let tree = crate::document::read(GLYPHS, &limits).expect("the tree reads");
+    assert_eq!(
+        crate::scene::build_element(&tree, "glyph1", viewport, &limits),
+        Ok(one)
+    );
+}
+
+#[test]
+fn an_id_naming_nothing_is_a_refusal() {
+    let limits = crate::Limits::DEFAULT;
+    for id in ["glyph3", "Glyph1", "glyph01", " glyph1", ""] {
+        assert_eq!(
+            crate::read_element(GLYPHS, id, Some((1000.0, 1000.0)), &limits),
+            Err(crate::Refusal::IdUnresolved),
+            "{id:?}"
+        );
+    }
+    // A document that does not read is refused for that first, whatever the
+    // id.
+    assert_eq!(
+        crate::read_element(b"<svg", "glyph1", None, &limits),
+        Err(crate::Refusal::Unreadable)
+    );
+    assert_eq!(
+        crate::read_element(b"<html id=\"glyph1\"/>", "glyph1", None, &limits),
+        Err(crate::Refusal::NotAnSvg)
+    );
+}
+
+#[test]
+fn a_use_cycle_through_an_id_is_refused() {
+    let limits = crate::Limits::DEFAULT;
+    // An element that uses itself, and two that use each other.
+    let direct = br##"<svg xmlns="http://www.w3.org/2000/svg">
+        <g id="glyph1"><rect width="1" height="1"/><use href="#glyph1"/></g></svg>"##;
+    assert_eq!(
+        crate::read_element(direct, "glyph1", None, &limits),
+        Err(crate::Refusal::TooManyUses)
+    );
+    let indirect = br##"<svg xmlns="http://www.w3.org/2000/svg">
+        <g id="glyph2"><use href="#a"/></g><g id="a"><use href="#glyph2"/></g></svg>"##;
+    assert_eq!(
+        crate::read_element(indirect, "glyph2", None, &limits),
+        Err(crate::Refusal::TooManyUses)
+    );
+    // The root read by its own id, and used from inside itself.
+    let rooted = br##"<svg xmlns="http://www.w3.org/2000/svg" id="glyph3">
+        <use href="#glyph3"/></svg>"##;
+    assert_eq!(
+        crate::read_element(rooted, "glyph3", None, &limits),
+        Err(crate::Refusal::TooManyUses)
+    );
+    // A `<use>` of the element from outside it is no cycle, and is not drawn.
+    let outside = br##"<svg xmlns="http://www.w3.org/2000/svg">
+        <g id="glyph4"><rect width="1" height="1"/></g><use href="#glyph4" x="5"/></svg>"##;
+    let scene = crate::read_element(outside, "glyph4", None, &limits).expect("no cycle");
+    assert_eq!(scene.nodes.len(), 1, "{:?}", scene.nodes);
+    // The reference is no `<use>` the document wrote, so it spends none of
+    // the cap; one inside the element still spends its own.
+    let mut no_uses = limits;
+    no_uses.max_uses = 0;
+    assert!(crate::read_element(outside, "glyph4", None, &no_uses).is_ok());
+    assert_eq!(
+        crate::read_element(GLYPHS, "glyph1", None, &no_uses),
+        Err(crate::Refusal::TooManyUses)
+    );
+}
+
+/// The root's viewport is the read's — its view box mapped onto the caller's
+/// viewport — and the transforms and nested viewports between the root and
+/// the element are not; the element's own transform is.
+#[test]
+fn an_element_read_by_id_takes_the_roots_viewport_and_not_its_ancestors() {
+    let limits = crate::Limits::DEFAULT;
+    // A view box of 500 onto a viewport of 1000 doubles every user unit.
+    let document = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+        <svg x="100" y="100" viewBox="0 0 10 10" width="20" height="20">
+          <g transform="rotate(30)">
+            <rect id="glyph1" x="1" y="2" width="3" height="4" transform="translate(5,0)"/>
+          </g>
+        </svg></svg>"##;
+    let scene = crate::read_element(document, "glyph1", Some((1000.0, 1000.0)), &limits)
+        .expect("glyph1 reads");
+    let (box_, _) = only_path(&scene);
+    // (1 + 5, 2) to (4 + 5, 6), doubled.
+    for (got, want) in box_.iter().zip([12.0, 4.0, 18.0, 12.0]) {
+        near(*got, want, "the rectangle in the root's viewport");
+    }
+    assert_eq!(scene.size, (1000.0, 1000.0));
+
+    // The root read by its id is the document read whole.
+    let named =
+        br##"<svg xmlns="http://www.w3.org/2000/svg" id="glyph7" viewBox="0 1000 1000 1000">
+        <rect x="100" y="570" width="200" height="430" fill="#00aab3"/>
+        <rect x="100" y="365" width="200" height="135" fill="darkblue"/></svg>"##;
+    let viewport = Some((1000.0, 1000.0));
+    assert_eq!(
+        crate::read_element(named, "glyph7", viewport, &limits),
+        crate::read(named, viewport, &limits)
+    );
+
+    // A `<symbol>` read by its id is the viewport a `<use>` of it makes, its
+    // view box mapped onto the whole of the root's.
+    let symbol = br##"<svg xmlns="http://www.w3.org/2000/svg">
+        <symbol id="glyph5" viewBox="0 0 10 10"><rect width="5" height="5"/></symbol></svg>"##;
+    let scene = crate::read_element(symbol, "glyph5", Some((100.0, 100.0)), &limits)
+        .expect("the symbol reads");
+    let (box_, _) = only_path(&scene);
+    for (got, want) in box_.iter().zip([0.0, 0.0, 50.0, 50.0]) {
+        near(*got, want, "the symbol's square");
+    }
+}
+
+/// The element inherits what a `<use>` of it placed in the root inherits —
+/// the root's own style — and not the style of the elements between them;
+/// a `display: none` on the root or on the element draws nothing.
+#[test]
+fn an_element_read_by_id_inherits_from_the_root_and_not_from_its_ancestors() {
+    let limits = crate::Limits::DEFAULT;
+    let document = br##"<svg xmlns="http://www.w3.org/2000/svg" fill="#ff0000">
+        <g fill="#0000ff"><rect id="glyph1" width="4" height="4"/></g>
+        <rect id="glyph2" width="4" height="4" display="none"/></svg>"##;
+    let red = crate::Paint::Solid(crate::Colour {
+        rgb: [1.0, 0.0, 0.0],
+    });
+    let blue = crate::Paint::Solid(crate::Colour {
+        rgb: [0.0, 0.0, 1.0],
+    });
+    let scene = crate::read_element(document, "glyph1", None, &limits).expect("glyph1 reads");
+    let (_, fill) = only_path(&scene);
+    assert_eq!(fill, &red, "the root's red, not the group's blue");
+    // Read whole, the rectangle is the group's blue.
+    let whole = crate::read(document, None, &limits).expect("the document reads");
+    let (_, fill) = only_path(&whole);
+    assert_eq!(fill, &blue);
+
+    let hidden = crate::read_element(document, "glyph2", None, &limits).expect("glyph2 reads");
+    assert!(hidden.nodes.is_empty(), "{:?}", hidden.nodes);
+    let hidden_root = br##"<svg xmlns="http://www.w3.org/2000/svg" display="none">
+        <rect id="glyph3" width="4" height="4"/></svg>"##;
+    let scene = crate::read_element(hidden_root, "glyph3", None, &limits).expect("reads");
+    assert!(scene.nodes.is_empty(), "{:?}", scene.nodes);
 }

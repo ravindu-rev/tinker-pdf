@@ -1175,6 +1175,23 @@ are among them, so one whose text needed a box is read a second time once
 they are, with `BookMetrics` measuring each run as its page will place it, and
 the report follows that read.
 
+**One element by its id.** `tinker_pdf_svg::read_element` (and
+`scene::build_element` over a tree already read) reads one element of a
+document as a `<use>` of it placed in the root would draw it — the OpenType
+SVG chapter's rule for a glyph, "as though the given element and its content
+were specified in a `<defs>` tag and then referenced": the root's `width`,
+`height` and `viewBox` map its user space onto the caller's viewport, unclipped,
+as the whole document's read maps it; the element inherits the root's style;
+what it references — `<defs>`, gradients, patterns, clips, masks, markers and
+other `<use>`s — resolves wherever it is written; and the elements between the
+root and it, and everything else in the document, add nothing. A `<symbol>` or
+`<svg>` read so is the viewport a `<use>` of it makes, and the root read by its
+own id is the whole document. An id no element has is
+`Refusal::IdUnresolved`, a `<use>` inside the element that reaches it again is
+`Refusal::TooManyUses`, and the reference itself spends nothing of
+`Limits::max_uses` (`crates/tinker-pdf-svg/src/tests.rs`). The `svg` fuzz
+target reads every input again by the first id it holds.
+
 **Resources are registered before a page begins.**
 `DocumentBuilder::begin_page` snapshots the document's resource set, so a
 pattern, an `/ExtGState` or an image registered while *drawing* is invisible
