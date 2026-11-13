@@ -659,10 +659,27 @@ fn srgb_encode16(v: f64) -> u16 {
     held16(encoded, byte(encoded))
 }
 
+/// IEC 61966-2-1's inverse transfer function: one encoded channel, clamped to
+/// `0..=1`, as its linear-light value in `0..=1` — linear near zero, as the
+/// forward one is, and [`srgb_transfer`]'s inverse.
+///
+/// What a colour is interpolated in where a format asks for linear light: the
+/// CPAL chapter's *Interpolation of colors* for a `COLR` gradient.
+#[must_use]
+pub fn srgb_decode(v: f64) -> f64 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.040_45 {
+        v / 12.92
+    } else {
+        math::pow((v + 0.055) / 1.055, 2.4)
+    }
+}
+
 /// IEC 61966-2-1's transfer function: one linear-light channel, clamped to
 /// `0..=1`, as its encoded value in `0..=1`, before it is rounded to any
 /// width.
-pub(crate) fn srgb_transfer(v: f64) -> f64 {
+#[must_use]
+pub fn srgb_transfer(v: f64) -> f64 {
     let v = v.clamp(0.0, 1.0);
     // Linear near zero, so the gradient stays finite where a plain power
     // would flatten.
@@ -706,15 +723,11 @@ pub fn srgb_to_lab16(r: u16, g: u16, b: u16) -> (f64, f64, f64) {
 /// evaluate.
 fn encoded_srgb_to_lab(encoded: [f64; 3]) -> (f64, f64, f64) {
     const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
-    let linear = |v: f64| -> f64 {
-        // The inverse of the sRGB transfer function, linear near zero.
-        if v <= 0.040_45 {
-            v / 12.92
-        } else {
-            math::pow((v + 0.055) / 1.055, 2.4)
-        }
-    };
-    let (lr, lg, lb) = (linear(encoded[0]), linear(encoded[1]), linear(encoded[2]));
+    let (lr, lg, lb) = (
+        srgb_decode(encoded[0]),
+        srgb_decode(encoded[1]),
+        srgb_decode(encoded[2]),
+    );
     let row = |i: usize| {
         SRGB_TO_XYZ_D50[i][0] * lr + SRGB_TO_XYZ_D50[i][1] * lg + SRGB_TO_XYZ_D50[i][2] * lb
     };
@@ -804,6 +817,27 @@ pub(crate) fn lab_to_xyz(l: f64, a: f64, b: f64) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// IEC 61966-2-1's two transfer functions: the ends and the knee where
+    /// each is stated, the inverse undoing the forward at every byte, and a
+    /// value past either end clamped.
+    #[test]
+    fn the_srgb_transfer_and_its_inverse_undo_each_other() {
+        assert_eq!(srgb_decode(0.0), 0.0);
+        assert!((srgb_decode(1.0) - 1.0).abs() < 1e-12);
+        // Linear below the knee: 0.04045 / 12.92.
+        assert!((srgb_decode(0.040_45) - 0.040_45 / 12.92).abs() < 1e-15);
+        // The middle grey of an encoded ramp is about a fifth of the light.
+        let middle = srgb_decode(0.5);
+        assert!((middle - 0.214_041).abs() < 1e-5, "{middle}");
+        for byte in 0..=255u8 {
+            let encoded = f64::from(byte) / 255.0;
+            let back = srgb_transfer(srgb_decode(encoded));
+            assert!((back - encoded).abs() < 1e-9, "{byte}: {back}");
+        }
+        assert_eq!(srgb_decode(-1.0), 0.0);
+        assert!((srgb_decode(2.0) - 1.0).abs() < 1e-12);
+    }
 
     #[test]
     fn device_spaces_convert_as_the_specification_says() {

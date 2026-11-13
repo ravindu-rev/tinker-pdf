@@ -1170,26 +1170,8 @@ fn spread_function(stops: &[Stop], spread: Spread, low: f64, high: f64) -> Optio
         Number(low),
         Operator("add"),
     ];
-    match spread {
-        // u = s − ⌊s⌋, in [0, 1).
-        Spread::Repeat => program.extend([Operator("dup"), Operator("floor"), Operator("sub")]),
-        // u = s − 2⌊s/2⌋, in [0, 2), and then 2 − u past one: the ramp
-        // forwards on even periods and backwards on odd ones.
-        Spread::Reflect => program.extend([
-            Operator("dup"),
-            Number(2.0),
-            Operator("div"),
-            Operator("floor"),
-            Number(2.0),
-            Operator("mul"),
-            Operator("sub"),
-            Operator("dup"),
-            Number(1.0),
-            Operator("gt"),
-            CalculatorOp::If(vec![Number(2.0), Operator("exch"), Operator("sub")]),
-        ]),
-        Spread::Pad => {}
-    }
+    // §13.2.3's period is the gradient vector, `[0, 1]`.
+    program.extend(fold(spread, 0.0, 1.0));
     // Before the first stop's offset the first stop's colour, after the last
     // the last's: §13.2.4's own rule inside one period.
     program.extend([
@@ -1210,64 +1192,147 @@ fn spread_function(stops: &[Stop], spread: Spread, low: f64, high: f64) -> Optio
     })
 }
 
-/// The stops' piecewise-linear ramp over segments `[lo, hi)`, as a binary
-/// search: one comparison per halving, so a ramp of a thousand stops nests ten
-/// deep rather than a thousand — 7.10.5 has no `min`, no `max` and no table,
-/// and a chain of `ifelse`s one per stop would pass this writer's nesting
-/// limit at seventeen.
+/// A calculator fragment folding the value on the stack, a position along a
+/// ramp whose period is `[start, start + period]`, back into that period:
+/// `repeat` starts the ramp again at every period and `reflect` runs it
+/// backwards on every other one; `pad` folds nothing.
 ///
-/// Enters with `u` on the stack and leaves `r g b`.
-fn ramp(stops: &[Stop], lo: usize, hi: usize) -> Vec<CalculatorOp> {
-    use CalculatorOp::{IfElse, Number, Operator};
-    if hi <= lo + 1 {
-        let (Some(a), Some(b)) = (stops.get(lo), stops.get(lo + 1)) else {
-            return Vec::new();
-        };
-        let width = b.offset - a.offset;
-        // A hard stop — two stops at one offset — is a segment of no width,
-        // which the search above never lands inside; it is the second
-        // stop's colour should it ever be reached.
-        let (base, slope): ([f64; 3], [f64; 3]) = if width > 0.0 {
-            let mut slope = [0.0; 3];
-            for (channel, value) in slope.iter_mut().enumerate() {
-                *value = (b.colour.rgb[channel] - a.colour.rgb[channel]) / width;
-            }
-            (a.colour.rgb, slope)
-        } else {
-            (b.colour.rgb, [0.0; 3])
-        };
-        // d = u − offset, kept three times: d d d → d d r → r d d → r d g →
-        // r g d → r g b.
-        return vec![
-            Number(a.offset),
+/// The one fold a CSS gradient's spread (`[0, 1]`) and a `COLR` colour line's
+/// extend (its first stop to its last, *Color lines*) are both written with —
+/// `colour_glyphs` takes it from here. A period of `[0, 1]` writes no
+/// operator that would leave the value as it is, so a ramp over the gradient
+/// vector folds in three operators.
+pub(crate) fn fold(spread: Spread, start: f64, period: f64) -> Vec<CalculatorOp> {
+    use CalculatorOp::{Number, Operator};
+    let mut program = Vec::new();
+    if spread == Spread::Pad {
+        return program;
+    }
+    // x = (s − start) / period, in periods from the ramp's start.
+    if start != 0.0 {
+        program.extend([Number(start), Operator("sub")]);
+    }
+    if period != 1.0 {
+        program.extend([Number(period), Operator("div")]);
+    }
+    match spread {
+        // u = x − ⌊x⌋, in [0, 1).
+        Spread::Repeat => program.extend([Operator("dup"), Operator("floor"), Operator("sub")]),
+        // u = x − 2⌊x/2⌋, in [0, 2), and then 2 − u past one: the ramp
+        // forwards on even periods and backwards on odd ones.
+        Spread::Reflect => program.extend([
+            Operator("dup"),
+            Number(2.0),
+            Operator("div"),
+            Operator("floor"),
+            Number(2.0),
+            Operator("mul"),
             Operator("sub"),
             Operator("dup"),
-            Operator("dup"),
-            Number(slope[0]),
-            Operator("mul"),
-            Number(base[0]),
-            Operator("add"),
-            Number(3.0),
             Number(1.0),
-            Operator("roll"),
-            Number(slope[1]),
-            Operator("mul"),
-            Number(base[1]),
-            Operator("add"),
-            Operator("exch"),
-            Number(slope[2]),
-            Operator("mul"),
-            Number(base[2]),
-            Operator("add"),
-        ];
+            Operator("gt"),
+            CalculatorOp::If(vec![Number(2.0), Operator("exch"), Operator("sub")]),
+        ]),
+        Spread::Pad => {}
+    }
+    // And back from periods to the ramp's own positions.
+    if period != 1.0 {
+        program.extend([Number(period), Operator("mul")]);
+    }
+    if start != 0.0 {
+        program.extend([Number(start), Operator("add")]);
+    }
+    program
+}
+
+/// A ramp's search over segments `[lo, hi)` of the stops at `offsets`, as a
+/// binary search: one comparison per halving, so a ramp of a thousand stops
+/// nests ten deep rather than a thousand — 7.10.5 has no `min`, no `max` and
+/// no table, and a chain of `ifelse`s one per stop would pass this writer's
+/// nesting limit at seventeen. A value below a segment's start goes left and
+/// one at or above it right, so a value at two stops of one offset reaches the
+/// segment after them, and a segment of no width is never reached.
+///
+/// Enters with the position on the stack; `segment(i)` is the program of
+/// segment `i`, from stop `i` to stop `i + 1`, which takes the position and
+/// leaves the ramp's outputs there. The search CSS ramps and `COLR` colour
+/// lines share — each with its own segments.
+pub(crate) fn bisect(
+    offsets: &[f64],
+    lo: usize,
+    hi: usize,
+    segment: &dyn Fn(usize) -> Vec<CalculatorOp>,
+) -> Vec<CalculatorOp> {
+    use CalculatorOp::{IfElse, Number, Operator};
+    if hi <= lo + 1 {
+        return segment(lo);
     }
     let middle = lo + (hi - lo) / 2;
-    let split = stops.get(middle).map_or(0.0, |stop| stop.offset);
+    let split = offsets.get(middle).copied().unwrap_or(0.0);
     vec![
         Operator("dup"),
         Number(split),
         Operator("lt"),
-        IfElse(ramp(stops, lo, middle), ramp(stops, middle, hi)),
+        IfElse(
+            bisect(offsets, lo, middle, segment),
+            bisect(offsets, middle, hi, segment),
+        ),
+    ]
+}
+
+/// The stops' piecewise-linear ramp over segments `[lo, hi)`, through
+/// [`bisect`], each segment interpolating the stops' own components:
+/// `color-interpolation`'s initial `sRGB`.
+///
+/// Enters with `u` on the stack and leaves `r g b`.
+fn ramp(stops: &[Stop], lo: usize, hi: usize) -> Vec<CalculatorOp> {
+    let offsets: Vec<f64> = stops.iter().map(|stop| stop.offset).collect();
+    bisect(&offsets, lo, hi, &|at| segment(stops, at))
+}
+
+/// One segment of [`ramp`]: from stop `lo` to stop `lo + 1`, linear in each
+/// component.
+fn segment(stops: &[Stop], lo: usize) -> Vec<CalculatorOp> {
+    use CalculatorOp::{Number, Operator};
+    let (Some(a), Some(b)) = (stops.get(lo), stops.get(lo + 1)) else {
+        return Vec::new();
+    };
+    let width = b.offset - a.offset;
+    // A hard stop — two stops at one offset — is a segment of no width, which
+    // the search never lands inside; it is the second stop's colour should it
+    // ever be reached.
+    let (base, slope): ([f64; 3], [f64; 3]) = if width > 0.0 {
+        let mut slope = [0.0; 3];
+        for (channel, value) in slope.iter_mut().enumerate() {
+            *value = (b.colour.rgb[channel] - a.colour.rgb[channel]) / width;
+        }
+        (a.colour.rgb, slope)
+    } else {
+        (b.colour.rgb, [0.0; 3])
+    };
+    // d = u − offset, kept three times: d d d → d d r → r d d → r d g →
+    // r g d → r g b.
+    vec![
+        Number(a.offset),
+        Operator("sub"),
+        Operator("dup"),
+        Operator("dup"),
+        Number(slope[0]),
+        Operator("mul"),
+        Number(base[0]),
+        Operator("add"),
+        Number(3.0),
+        Number(1.0),
+        Operator("roll"),
+        Number(slope[1]),
+        Operator("mul"),
+        Number(base[1]),
+        Operator("add"),
+        Operator("exch"),
+        Number(slope[2]),
+        Operator("mul"),
+        Number(base[2]),
+        Operator("add"),
     ]
 }
 

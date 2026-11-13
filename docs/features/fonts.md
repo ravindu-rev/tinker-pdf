@@ -1544,7 +1544,30 @@ What it does:
   rotation `[cos θ, sin θ, −sin θ, cos θ]` and a skew `[1, tan ψ, −tan φ, 1]`
   through `tinker_pdf_svg::transform`'s `rotation` and `tangent`, each
   around-centre form carried to its centre and back — and the glyph's clip
-  box as `W n` around the whole and its form's box. A node several parents
+  box as `W n` around the whole and its form's box. A gradient is `sh` over
+  the clip region: a linear one an axial shading from `p0` along the normal
+  of `p0p2`, a radial one a radial shading of the two circles' family, a
+  sweep a function-based shading over the region's box whose calculator
+  takes the angle with `atan`, each reaching across the whole region so that
+  the colour line, not `/Extend`, decides every point. The function is the
+  colour line itself, a calculator: the stops resolved against the palette
+  and sorted, stops of one offset in the font's order; `EXTEND_PAD` the
+  first stop's colour below the first offset and the last's at and past the
+  last, `EXTEND_REPEAT` and `EXTEND_REFLECT` folded into the line's interval
+  by `epub/svg.rs`'s `fold`; the stops searched by its `bisect`; and each
+  segment interpolating linear-light components with their alphas
+  premultiplied, un-premultiplied and re-encoded through IEC 61966-2-1's
+  transfer function (`tinker_pdf_color::srgb_decode` and `srgb_transfer`),
+  as the CPAL chapter's *Interpolation of colors* has it. A line with a
+  translucent stop paints under a luminosity soft mask whose `DeviceGray`
+  group paints the same geometry with the line's alphas, against `/BC [0]`.
+  A line of one stop is that stop's fill and a line of none paints nothing;
+  a gradient the chapter calls ill-formed — `p0p1` or `p0p2` of no length or
+  the two parallel, two equal circles or two of no radius, a repeating or
+  reflecting line or sweep over no interval — paints nothing and is named
+  (`GradientIllFormed`), the rest of the graph drawn; and a padded sweep
+  over no angle is the first stop short of the angle and the last from it
+  on. A node several parents
   name that paints only inside its own outlines is one form each parent draws,
   so a fan-out writes its tables and not its paths. COLR version 0's layers
   come next, bottom first, each layer's outline filled under `q`/`Q` in its
@@ -1553,11 +1576,14 @@ What it does:
   text's colour. Every number is rounded once to a ten-thousandth of a unit,
   so the procedures are the same bytes on every target. What a glyph cannot
   be drawn as is named on `ColourFace::warnings` and drawn as its next table:
-  a graph holding a gradient (`ColourWarning::GradientNotDrawn`), one with no
-  clip box that a fill leaves unbounded (`Unbounded`), one whose walk passes
-  `MAX_DRAWN_PAINTS` paints (`GraphTooLarge`), one naming a palette entry the
-  palette lacks (`PaletteEntryMissing`), and, under a profile that forbids
-  transparency, one needing an alpha (`TransparencyForbidden`, the builder
+  a graph with no clip box that a fill leaves unbounded
+  (`ColourWarning::Unbounded`), one whose walk passes `MAX_DRAWN_PAINTS`
+  paints or holds a colour line past what one calculator holds
+  (`GraphTooLarge`), one naming a palette entry the palette lacks
+  (`PaletteEntryMissing`), one whose gradient stop names the text's own
+  colour, which a procedure every run shares cannot state
+  (`ForegroundStop`), and, under a profile that forbids transparency, one
+  needing an alpha or a soft mask (`TransparencyForbidden`, the builder
   refusing nothing). A composite is drawn source-over, the backdrop then the
   source, and named with its mode (`CompositeDrawnSourceOver`); a transform
   that is no number or flattens the plane draws nothing of what it holds
@@ -1980,7 +2006,7 @@ corpora already vendored here. So every name stays on the list.
 | An `sbix` graphic of type `mask` or `pdf `, or of any type but `png `, `jpg ` and `tiff` | `SbixRefusal::GraphicType` | The sbix chapter's *Glyph data* names `mask` and `pdf ` as not supported in OpenType, and defines no other | [design](../design/colour-fonts.md) |
 | CBDT's uncompressed and component glyph data, the EBDT formats 1 to 9 it inherits | `CbdtRefusal::DataFormat(n)` | Read and drawn by their own step; the PNG formats 17 to 19 are what colour fonts carry | [ROADMAP](../ROADMAP.md) FT-06.21 |
 | A gzip-encoded `SVG ` document that inflates past `MAX_SVG_DOCUMENT` (16 MiB), or that RFC 1952's reader refuses | `SvgRefusal::TooLarge`, `SvgRefusal::Gzip` | A few kilobytes of deflate inflate to gigabytes (ruling 1), and a document cut short or read past a failed check is a different picture, so the glyph is left to the next table that describes it | [design](../design/colour-fonts.md) |
-| A COLR version 1 gradient, written into a document | `ColourWarning::GradientNotDrawn` | Drawn as shadings by its own step; until then the glyph is drawn as its next table, a glyph with a fill missing being a different picture | [ROADMAP](../ROADMAP.md) FT-06.13 |
+| A COLR version 1 gradient whose colour line names the text's own colour, written into a document | `ColourWarning::ForegroundStop` | A glyph's procedure is shared by every run that shows it, so it cannot state the colour a run is shown in, and the CPAL chapter's interpolation of that colour in linear light has no construct that leaves it unstated; the glyph is drawn as its next table, a glyph with a fill missing being a different picture | [design](../design/colour-fonts.md) |
 | A COLR version 1 composite whose mode is not source-over, written into a document | `ColourWarning::CompositeDrawnSourceOver` | Drawn source-over, the backdrop then the source, until its own step writes each mode ISO 32000-2's transparency expresses | [ROADMAP](../ROADMAP.md) FT-06.14 |
 | A COLR version 1 graph with no clip box that a fill leaves unbounded, or whose walk passes `MAX_DRAWN_PAINTS` | `ColourWarning::Unbounded`, `GraphTooLarge` | The chapter forbids drawing an unbounded glyph; a graph of 2^64 paths is a few hundred bytes (ruling 1); the glyph is drawn as its next table | [design](../design/colour-fonts.md) |
 | TrueType and Type 2 hinting | none — outlines are unhinted, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree. Stem darkening, the bytecode interpreter, CFF hints and an autohinter are roadmap rows, the small-text judgement a person's | [ROADMAP](../ROADMAP.md) FT-04a…FT-04d |
@@ -2340,9 +2366,17 @@ corpora already vendored here. So every name stays on the list.
   solid at its default, layers, a glyph as clip, a `PaintColrGlyph`, every
   transform with and without a centre, a clip box and the foreground — at
   points inside and outside its transformed clip, each place computed from
-  the graph's own affine arithmetic; a composite drawn source-over and named
-  with its mode; a gradient, an unbounded graph and a missing palette entry
-  falling to the outline, named; a cycle named and the rest drawn; a
+  the graph's own affine arithmetic; every gradient in every extend mode,
+  each variable format at its default, a cone, a clockwise sweep, a hard
+  stop written out of order and translucent stops, over a grid of the em
+  along and past the colour line, against the colour the test computes from
+  the chapter's formula for the gradient and the CPAL chapter's linear-light
+  interpolation; the ill-formed gradients painting nothing and named, and
+  lines of one stop, of none and of one offset; a translucent gradient under
+  a part 1 profile drawn as the outline; a composite drawn source-over and
+  named with its mode; a gradient stop in the text's colour, an unbounded
+  graph and a missing palette entry falling to the outline, named; a cycle
+  named and the rest drawn; a
   million-path fan-out of one shared table written in kilobytes, and one no
   outline of its own bounds named past the walk budget.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over

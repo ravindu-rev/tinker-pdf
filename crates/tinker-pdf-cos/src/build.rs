@@ -1070,14 +1070,33 @@ fn calculator_text(program: &[CalculatorOp], out: &mut Vec<u8>) {
     out.extend_from_slice(b" }");
 }
 
-/// A shading (8.7.4.5), in the two gradient types.
+/// A shading (8.7.4.5), in the two gradient types and the function-based one.
 ///
-/// **`#[non_exhaustive]`**: 8.7.4.5 defines seven and this writer emits two.
-/// Function-based (type 1) and the four mesh types have readers in this
-/// repository already, so each is an addition rather than a redesign.
+/// **`#[non_exhaustive]`**: 8.7.4.5 defines seven and this writer emits three.
+/// The four mesh types have readers in this repository already, so each is an
+/// addition rather than a redesign.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Shading {
+    /// Type 1, function-based (8.7.4.5.2): a colour at every point of a
+    /// rectangle, the function's two inputs the point's own coordinates.
+    ///
+    /// What a colour that is no function of one parameter is made of — a
+    /// sweep around a centre, whose colour is a function of the angle.
+    /// **No `/Matrix`**: the domain is in the shading's own space, which is
+    /// the space the shading is painted in, 8.7.4.5.2's default, so a caller
+    /// that wants it elsewhere paints it under a `cm`. Outside the domain the
+    /// shading paints nothing.
+    FunctionBased {
+        /// `/ColorSpace`.
+        color_space: DeviceSpace,
+        /// `/Domain`, as Table 79 orders it: `[x0 x1 y0 y1]`.
+        domain: [f64; 4],
+        /// `/Function`: two inputs, `x` then `y`, and one output per colour
+        /// component — so a calculator or a sampled table, the two types that
+        /// take more than one input.
+        function: Function,
+    },
     /// Type 2, axial (8.7.4.5.3).
     Axial {
         /// `/ColorSpace`.
@@ -6738,8 +6757,11 @@ impl DocumentBuilder {
 
     /// Registers a shading under a resource name (8.7.4.5).
     ///
-    /// Returns false for a degenerate geometry, a negative radius, or a
-    /// `/Function` that does not produce one number per colour component.
+    /// Returns false for a degenerate geometry — an axis of no length, a
+    /// negative radius, a function-based domain with no area — or a
+    /// `/Function` that does not produce one number per colour component from
+    /// the inputs its type hands it: one for the gradients, two for a
+    /// function-based shading.
     pub fn add_shading(&mut self, resource: &[u8], shading: &Shading) -> bool {
         let Some(reference) = self.write_shading(shading) else {
             return false;
@@ -6796,7 +6818,13 @@ impl DocumentBuilder {
     /// two copies of the geometry checks would be two places for a degenerate
     /// axis to stop being refused.
     fn write_shading(&mut self, shading: &Shading) -> Option<ObjRef> {
-        let (kind, space, coords, function, extend) = match shading {
+        // The geometry: `/Coords` and `/Extend` for the two gradients, or the
+        // function-based type's `/Domain`, with the inputs its function takes.
+        enum Geometry {
+            Gradient(Vec<f64>, (bool, bool)),
+            Domain([f64; 4]),
+        }
+        let (kind, space, geometry, function) = match shading {
             Shading::Axial {
                 color_space,
                 coords,
@@ -6809,7 +6837,12 @@ impl DocumentBuilder {
                 if !all_finite(coords) || (coords[0] == coords[2] && coords[1] == coords[3]) {
                     return None;
                 }
-                (2i64, *color_space, coords.to_vec(), function, *extend)
+                (
+                    2i64,
+                    *color_space,
+                    Geometry::Gradient(coords.to_vec(), *extend),
+                    function,
+                )
             }
             Shading::Radial {
                 color_space,
@@ -6825,11 +6858,33 @@ impl DocumentBuilder {
                 if coords[2] == 0.0 && coords[5] == 0.0 {
                     return None;
                 }
-                (3i64, *color_space, coords.to_vec(), function, *extend)
+                (
+                    3i64,
+                    *color_space,
+                    Geometry::Gradient(coords.to_vec(), *extend),
+                    function,
+                )
+            }
+            Shading::FunctionBased {
+                color_space,
+                domain,
+                function,
+            } => {
+                // 8.7.4.5.2: `[x0 x1 y0 y1]`, the rectangle the function is
+                // painted over. One with no area paints nothing, so it is
+                // refused rather than written.
+                if !all_finite(domain) || domain[1] <= domain[0] || domain[3] <= domain[2] {
+                    return None;
+                }
+                (1i64, *color_space, Geometry::Domain(*domain), function)
             }
         };
 
-        if !function.is_valid(1, space.components() as usize) {
+        let inputs = match geometry {
+            Geometry::Gradient(..) => 1,
+            Geometry::Domain(_) => 2,
+        };
+        if !function.is_valid(inputs, space.components() as usize) {
             return None;
         }
 
@@ -6840,14 +6895,24 @@ impl DocumentBuilder {
             self.names.intern(b"ColorSpace"),
             Object::Name(self.names.intern(space.pdf_name())),
         );
-        dict.insert(
-            self.names.intern(b"Coords"),
-            Object::Array(coords.iter().map(|v| Object::Real(*v)).collect()),
-        );
-        dict.insert(
-            self.names.intern(b"Extend"),
-            Object::Array(vec![Object::Bool(extend.0), Object::Bool(extend.1)]),
-        );
+        match geometry {
+            Geometry::Gradient(coords, extend) => {
+                dict.insert(
+                    self.names.intern(b"Coords"),
+                    Object::Array(coords.iter().map(|v| Object::Real(*v)).collect()),
+                );
+                dict.insert(
+                    self.names.intern(b"Extend"),
+                    Object::Array(vec![Object::Bool(extend.0), Object::Bool(extend.1)]),
+                );
+            }
+            Geometry::Domain(domain) => {
+                dict.insert(
+                    self.names.intern(b"Domain"),
+                    Object::Array(domain.iter().map(|v| Object::Real(*v)).collect()),
+                );
+            }
+        }
         dict.insert(self.names.intern(b"Function"), Object::Ref(function_ref));
 
         let reference = self.allocate();
@@ -12626,6 +12691,165 @@ mod graphics_tests {
             table.as_dict().map(Dict::len),
             Some(1),
             "one accepted shading and nothing else"
+        );
+    }
+
+    /// A calculator of two inputs, `x` and `y`, that paints red along `x` and
+    /// green along `y` over `[0, 10]` each.
+    fn two_input_calculator() -> Function {
+        use CalculatorOp::{Number, Operator};
+        Function::Calculator {
+            domain: vec![[0.0, 10.0], [0.0, 10.0]],
+            range: vec![[0.0, 1.0]; 3],
+            // x y → x/10 y/10 0
+            program: vec![
+                Number(10.0),
+                Operator("div"),
+                Operator("exch"),
+                Number(10.0),
+                Operator("div"),
+                Operator("exch"),
+                Number(0.0),
+            ],
+        }
+    }
+
+    /// A type 1 shading is its `/Domain` and its function of two inputs, and
+    /// no `/Coords` or `/Extend`, which are the gradients' (8.7.4.5.2): the
+    /// domain in Table 79's `[x0 x1 y0 y1]` order, as given.
+    #[test]
+    fn a_function_based_shading_is_type_one_over_its_domain() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_shading(
+            b"Sh0",
+            &Shading::FunctionBased {
+                color_space: DeviceSpace::Rgb,
+                domain: [0.0, 10.0, 2.0, 8.0],
+                function: two_input_calculator(),
+            }
+        ));
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(page.shading(b"Sh0"));
+        });
+        let doc = opened(builder);
+        let shading = resource(&doc, b"Shading", b"Sh0");
+        assert_eq!(
+            doc.resolve_key(&shading, doc.intern(b"ShadingType"))
+                .as_int(),
+            Some(1)
+        );
+        assert_eq!(
+            numbers(&doc, &shading, b"Domain"),
+            vec![0.0, 10.0, 2.0, 8.0]
+        );
+        assert!(shading.get(doc.intern(b"Coords")).is_none());
+        assert!(shading.get(doc.intern(b"Extend")).is_none());
+        assert!(shading.get(doc.intern(b"Matrix")).is_none());
+        let function = doc.resolve_key(&shading, doc.intern(b"Function"));
+        let function = function.as_dict().expect("a function");
+        assert_eq!(
+            doc.resolve_key(function, doc.intern(b"FunctionType"))
+                .as_int(),
+            Some(4)
+        );
+        assert_eq!(
+            numbers(&doc, function, b"Domain"),
+            vec![0.0, 10.0, 0.0, 10.0],
+            "two inputs, each its own pair"
+        );
+        assert!(content(&doc).contains("/Sh0 sh"));
+    }
+
+    /// Every way a function-based shading can fail to describe a colour over
+    /// a rectangle: a domain with no area or that is no number, and a
+    /// function that does not take two inputs or does not give the space's
+    /// components. A stitch and an exponential take one input (7.10.3,
+    /// 7.10.4), so they are refused here though a gradient takes either.
+    #[test]
+    fn a_function_based_shading_that_paints_no_rectangle_is_refused() {
+        let ramp = Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 0.0, 0.0],
+            c1: vec![0.0, 0.0, 1.0],
+            n: 1.0,
+        };
+        let one_input = Function::Calculator {
+            domain: vec![[0.0, 1.0]],
+            range: vec![[0.0, 1.0]; 3],
+            program: vec![CalculatorOp::Operator("dup"), CalculatorOp::Operator("dup")],
+        };
+        let cases: Vec<(&str, Shading)> = vec![
+            (
+                "a domain of no width",
+                Shading::FunctionBased {
+                    color_space: DeviceSpace::Rgb,
+                    domain: [5.0, 5.0, 0.0, 10.0],
+                    function: two_input_calculator(),
+                },
+            ),
+            (
+                "a domain of no height",
+                Shading::FunctionBased {
+                    color_space: DeviceSpace::Rgb,
+                    domain: [0.0, 10.0, 3.0, 3.0],
+                    function: two_input_calculator(),
+                },
+            ),
+            (
+                "a domain that runs backwards",
+                Shading::FunctionBased {
+                    color_space: DeviceSpace::Rgb,
+                    domain: [10.0, 0.0, 0.0, 10.0],
+                    function: two_input_calculator(),
+                },
+            ),
+            (
+                "a domain that is not numbers",
+                Shading::FunctionBased {
+                    color_space: DeviceSpace::Rgb,
+                    domain: [0.0, f64::INFINITY, 0.0, 10.0],
+                    function: two_input_calculator(),
+                },
+            ),
+            (
+                "a function of one input",
+                Shading::FunctionBased {
+                    color_space: DeviceSpace::Rgb,
+                    domain: [0.0, 10.0, 0.0, 10.0],
+                    function: ramp,
+                },
+            ),
+            (
+                "a calculator of one input",
+                Shading::FunctionBased {
+                    color_space: DeviceSpace::Rgb,
+                    domain: [0.0, 10.0, 0.0, 10.0],
+                    function: one_input,
+                },
+            ),
+            (
+                "a function giving three components to a grey space",
+                Shading::FunctionBased {
+                    color_space: DeviceSpace::Gray,
+                    domain: [0.0, 10.0, 0.0, 10.0],
+                    function: two_input_calculator(),
+                },
+            ),
+        ];
+        let mut builder = DocumentBuilder::new();
+        for (what, shading) in cases {
+            assert!(!builder.add_shading(b"Sh", &shading), "{what} was accepted");
+        }
+        assert!(
+            builder.add_shading(
+                b"Ok",
+                &Shading::FunctionBased {
+                    color_space: DeviceSpace::Rgb,
+                    domain: [0.0, 10.0, 0.0, 10.0],
+                    function: two_input_calculator(),
+                }
+            ),
+            "the control is accepted"
         );
     }
 

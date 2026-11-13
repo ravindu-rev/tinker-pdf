@@ -232,7 +232,8 @@ to guess about, and the guesses differ.
 **Graphics.** `add_ext_gstate` (`ExtGState`: blend mode, alphas, soft mask
 with `MaskKind` and `StateMask`), `add_form` (`FormXObject`, optionally a
 `TransparencyGroup`), `add_shading` (`Shading`: axial and radial with a
-`Function`), `add_tiling_pattern` (`TilingPattern`, all three `TilingType`
+`Function` of one input, and function-based, type 1, over a `/Domain` with
+a calculator or sampled `Function` of two), `add_tiling_pattern` (`TilingPattern`, all three `TilingType`
 values of Table 75), `add_shading_pattern` (`ShadingPattern`, `/PatternType 2`);
 the page side applies them with `set_ext_gstate`, `form`,
 `shading`, `set_fill_pattern` / `set_stroke_pattern`, plus `fill_rect`,

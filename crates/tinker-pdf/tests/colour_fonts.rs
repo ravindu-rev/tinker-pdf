@@ -1137,6 +1137,7 @@ fn a_face_without_a_palette_has_no_colour_glyph() {
 /// A `COLR` version 1 paint to write (*Paint tables*): a tree, each node one
 /// table, a subtree written twice two tables — but for
 /// [`V1::LayersOfOne`], whose layer slots all name one table.
+#[derive(Clone, Debug)]
 enum V1 {
     /// Format 1: a slice of the `LayerList`, bottom first.
     Layers(Vec<V1>),
@@ -1147,9 +1148,27 @@ enum V1 {
     Solid(u16, f64),
     /// Format 3, at the default instance.
     VarSolid(u16, f64),
-    /// Format 4: a linear gradient of palette entries 0 to 1, which this
-    /// build does not draw yet.
-    Linear,
+    /// Formats 4 and 5, the second at the default instance: `p0`, `p1` and
+    /// `p2`, and the colour line.
+    Linear {
+        line: Line,
+        points: [[i16; 2]; 3],
+        variable: bool,
+    },
+    /// Formats 6 and 7: two circles, centre and radius each.
+    Radial {
+        line: Line,
+        circles: [([i16; 2], u16); 2],
+        variable: bool,
+    },
+    /// Formats 8 and 9: the centre, and the start and end angles in degrees,
+    /// counter-clockwise, written biased as the formats store them.
+    Sweep {
+        line: Line,
+        centre: [i16; 2],
+        angles: [f64; 2],
+        variable: bool,
+    },
     /// Format 10: a glyph's outline as the child's clip.
     Glyph(u16, Box<V1>),
     /// Format 11: another base glyph's graph.
@@ -1168,6 +1187,28 @@ enum V1 {
     Skew(f64, f64, Option<[i16; 2]>, Box<V1>),
     /// Format 32: source, `compositeMode`, backdrop.
     Composite(Box<V1>, u8, Box<V1>),
+}
+
+/// A colour line to write (*Color references, ColorStop and ColorLine*): its
+/// `extend` byte, and its stops in the order the table gives them, each an
+/// offset, a palette entry and an alpha.
+#[derive(Clone, Debug)]
+struct Line {
+    extend: u8,
+    stops: Vec<(f64, u16, f64)>,
+}
+
+/// `EXTEND_PAD`, `EXTEND_REPEAT` and `EXTEND_REFLECT`.
+const PAD: u8 = 0;
+const REPEAT: u8 = 1;
+const REFLECT: u8 = 2;
+
+/// A line of opaque stops.
+fn line(extend: u8, stops: &[(f64, u16)]) -> Line {
+    Line {
+        extend,
+        stops: stops.iter().map(|&(at, entry)| (at, entry, 1.0)).collect(),
+    }
 }
 
 /// An `F2DOT14`.
@@ -1209,6 +1250,35 @@ impl V1Writer {
         }
     }
 
+    /// A variable format's `varIndexBase`: no delta set, so the table draws
+    /// at its default.
+    fn var_index(&mut self, variable: bool) {
+        if variable {
+            self.area.extend_from_slice(&u32::MAX.to_be_bytes());
+        }
+    }
+
+    /// The colour line of the gradient table at `table`, written now, after
+    /// it, its offset patched into the table's `Offset24` at one: a
+    /// `ColorLine`, or a `VarColorLine` whose stops each carry a
+    /// `varIndexBase`.
+    fn line(&mut self, table: usize, line: &Line, variable: bool) {
+        let here = self.area.len();
+        self.patch(table + 1, here - table);
+        self.area.push(line.extend);
+        self.area.extend_from_slice(
+            &u16::try_from(line.stops.len())
+                .expect("few stops")
+                .to_be_bytes(),
+        );
+        for &(offset, entry, alpha) in &line.stops {
+            self.area.extend_from_slice(&f2dot14(offset));
+            self.area.extend_from_slice(&entry.to_be_bytes());
+            self.area.extend_from_slice(&f2dot14(alpha));
+            self.var_index(variable);
+        }
+    }
+
     /// Writes `paint` at the area's end, its children after it, each offset
     /// from the table that names it as *Paint tables* has it; returns where it
     /// starts.
@@ -1244,21 +1314,56 @@ impl V1Writer {
                     self.area.extend_from_slice(&0u32.to_be_bytes());
                 }
             }
-            V1::Linear => {
-                self.area.extend_from_slice(&[4, 0, 0, 0]);
-                for value in [0i16, 0, 1000, 0, 0, 1000] {
+            V1::Linear {
+                line,
+                points,
+                variable,
+            } => {
+                // *Formats 4 and 5*: the format, an `Offset24` to the colour
+                // line, `x0 y0 x1 y1 x2 y2`, and for 5 a `varIndexBase`.
+                self.area
+                    .extend_from_slice(&[if *variable { 5 } else { 4 }, 0, 0, 0]);
+                for [x, y] in points {
+                    self.area.extend_from_slice(&x.to_be_bytes());
+                    self.area.extend_from_slice(&y.to_be_bytes());
+                }
+                self.var_index(*variable);
+                self.line(at, line, *variable);
+            }
+            V1::Radial {
+                line,
+                circles,
+                variable,
+            } => {
+                // *Formats 6 and 7*: `x0 y0 radius0 x1 y1 radius1`.
+                self.area
+                    .extend_from_slice(&[if *variable { 7 } else { 6 }, 0, 0, 0]);
+                for ([x, y], radius) in circles {
+                    self.area.extend_from_slice(&x.to_be_bytes());
+                    self.area.extend_from_slice(&y.to_be_bytes());
+                    self.area.extend_from_slice(&radius.to_be_bytes());
+                }
+                self.var_index(*variable);
+                self.line(at, line, *variable);
+            }
+            V1::Sweep {
+                line,
+                centre,
+                angles,
+                variable,
+            } => {
+                // *Formats 8 and 9*: the centre, and `startAngle` and
+                // `endAngle` as `F2DOT14`s biased by one, 180° a unit.
+                self.area
+                    .extend_from_slice(&[if *variable { 9 } else { 8 }, 0, 0, 0]);
+                for value in centre {
                     self.area.extend_from_slice(&value.to_be_bytes());
                 }
-                let line = self.area.len();
-                self.patch(at + 1, line - at);
-                // *ColorLine*: EXTEND_PAD, two stops.
-                self.area.push(0);
-                self.area.extend_from_slice(&2u16.to_be_bytes());
-                for (offset, entry) in [(0.0, 0u16), (1.0, 1)] {
-                    self.area.extend_from_slice(&f2dot14(offset));
-                    self.area.extend_from_slice(&entry.to_be_bytes());
-                    self.area.extend_from_slice(&f2dot14(1.0));
+                for degrees in angles {
+                    self.area.extend_from_slice(&f2dot14(degrees / 180.0 - 1.0));
                 }
+                self.var_index(*variable);
+                self.line(at, line, *variable);
             }
             V1::Glyph(glyph, child) => {
                 self.area.extend_from_slice(&[10, 0, 0, 0]);
@@ -1402,14 +1507,26 @@ const V1_RECTS: [[i16; 4]; 5] = [
     [400, 100, 600, 400],
 ];
 
-/// Palette 0's entries: red, blue, green.
+/// Palette 0's entries: red, blue, green, and four colours no two of which
+/// differ by more than three quarters of a channel, which the gradients ramp
+/// between so that a ramp moves a few levels a pixel and a seam many.
 const RED: [u8; 3] = [255, 0, 0];
 const BLUE: [u8; 3] = [0, 0, 255];
 const GREEN: [u8; 3] = [0, 255, 0];
 const WHITE: [u8; 3] = [255, 255, 255];
+const ORANGE: [u8; 3] = [230, 120, 40];
+const AZURE: [u8; 3] = [40, 110, 210];
+const LEAF: [u8; 3] = [60, 200, 90];
+const PLUM: [u8; 3] = [200, 60, 170];
+
+/// Palette 0, entry by entry.
+const V1_ENTRIES: [[u8; 3]; 7] = [RED, BLUE, GREEN, ORANGE, AZURE, LEAF, PLUM];
 
 fn v1_palette() -> Vec<u8> {
-    cpal(&[vec![[255, 0, 0, 255], [0, 0, 255, 255], [0, 255, 0, 255]]])
+    cpal(&[V1_ENTRIES
+        .iter()
+        .map(|[r, g, b]| [*r, *g, *b, 255])
+        .collect()])
 }
 
 /// `source` at `alpha` over `backdrop`, unrounded alpha: simple alpha
@@ -1657,8 +1774,666 @@ fn a_composite_is_named_until_it_is_drawn() {
     }
 }
 
-/// What version 1 cannot draw yet falls to the glyph's next table, named:
-/// a gradient (until FT-06.13), a graph that is not bounded and has no clip
+// ---- COLR version 1 gradients ---------------------------------------------
+
+/// What an `F2DOT14` the test wrote reads back as: the font holds the value
+/// to a 16 384th, and the formulas are evaluated on what it holds.
+fn stored(value: f64) -> f64 {
+    f64::from(i16::from_be_bytes(f2dot14(value))) / 16384.0
+}
+
+/// IEC 61966-2-1's inverse transfer function, as the CPAL chapter's
+/// *Interpolation of colors* has a `COLR` gradient apply it.
+fn to_linear(encoded: f64) -> f64 {
+    if encoded <= 0.040_45 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// IEC 61966-2-1's transfer function.
+fn to_encoded(linear: f64) -> f64 {
+    let linear = linear.clamp(0.0, 1.0);
+    if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// The colour line `line` at position `s` over palette 0, as *Color lines*
+/// and the CPAL chapter's *Interpolation of colors* state it: its encoded
+/// colour and its alpha, and whether `s` lies beyond the line's stops.
+///
+/// The stops in offset order, those of one offset in the font's; the extend
+/// applied past the first offset and the last; and between two stops the
+/// alpha linear and each linear-light component with the alpha
+/// premultiplied linear, divided by the alpha and re-encoded.
+fn line_at(line: &Line, s: f64) -> ([f64; 3], f64, bool) {
+    let mut stops: Vec<(f64, [f64; 3], f64)> = line
+        .stops
+        .iter()
+        .map(|&(at, entry, alpha)| {
+            let rgb = V1_ENTRIES[usize::from(entry)].map(|c| f64::from(c) / 255.0);
+            (stored(at), rgb, stored(alpha).clamp(0.0, 1.0))
+        })
+        .collect();
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (first, last) = (stops[0], stops[stops.len() - 1]);
+    let beyond = s < first.0 || s > last.0;
+    let period = last.0 - first.0;
+    let u = match line.extend {
+        PAD if s < first.0 => return (first.1, first.2, beyond),
+        PAD if s >= last.0 => return (last.1, last.2, beyond),
+        PAD => s,
+        REPEAT => first.0 + (s - first.0).rem_euclid(period),
+        _ => {
+            let x = ((s - first.0) / period).rem_euclid(2.0);
+            first.0 + if x > 1.0 { 2.0 - x } else { x } * period
+        }
+    };
+    for pair in stops.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if a.0 < b.0 && a.0 <= u && u < b.0 {
+            let t = (u - a.0) / (b.0 - a.0);
+            let alpha = a.2 + t * (b.2 - a.2);
+            let colour = [0, 1, 2].map(|c| {
+                let from = to_linear(a.1[c]) * a.2;
+                let to = to_linear(b.1[c]) * b.2;
+                let premultiplied = from + t * (to - from);
+                if alpha > 0.0 {
+                    to_encoded(premultiplied / alpha)
+                } else {
+                    0.0
+                }
+            });
+            return (colour, alpha, beyond);
+        }
+    }
+    (last.1, last.2, beyond)
+}
+
+/// A colour and its alpha over the white page, in eight bits.
+fn over_white(colour: [f64; 3], alpha: f64) -> [u8; 3] {
+    colour.map(|c| ((alpha * c + (1.0 - alpha)) * 255.0).round() as u8)
+}
+
+/// One gradient's geometry, as the test writes it and evaluates it.
+#[derive(Clone, Debug)]
+enum Gradient {
+    /// `p0`, `p1`, `p2`.
+    Linear([[i16; 2]; 3]),
+    /// Two circles.
+    Radial([([i16; 2], u16); 2]),
+    /// A centre, and the start and end angles in degrees.
+    Sweep([i16; 2], [f64; 2]),
+}
+
+impl Gradient {
+    /// The position on the colour line at `p`, by the chapter's own
+    /// definition of each gradient, or `None` where it paints nothing.
+    ///
+    /// *Linear gradients*: the colour is constant along lines parallel to
+    /// `p0p2`, offset 0 at `p0` and 1 at `p1`. *Radial gradients*: the
+    /// circles `c(ω) = c0 + ω·(c1 − c0)`, `r(ω) = r0 + ω·(r1 − r0)`, drawn
+    /// from the ω nearest +∞ down for every ω whose radius is positive, so a
+    /// point takes the largest ω whose circle passes through it. *Sweep
+    /// gradients*: the angle in `[0°, 360°)` counter-clockwise from the
+    /// positive x axis, offset 0 at the start angle and 1 at the end.
+    fn position(&self, p: [f64; 2]) -> Option<f64> {
+        let point = |q: [i16; 2]| [f64::from(q[0]), f64::from(q[1])];
+        match self {
+            Gradient::Linear(points) => {
+                let [p0, p1, p2] = points.map(point);
+                let normal = [p0[1] - p2[1], p2[0] - p0[0]];
+                let along = (p[0] - p0[0]) * normal[0] + (p[1] - p0[1]) * normal[1];
+                let unit = (p1[0] - p0[0]) * normal[0] + (p1[1] - p0[1]) * normal[1];
+                Some(along / unit)
+            }
+            Gradient::Radial([(c0, r0), (c1, r1)]) => {
+                let (c0, c1) = (point(*c0), point(*c1));
+                let (r0, r1) = (f64::from(*r0), f64::from(*r1));
+                let (dx, dy, dr) = (c1[0] - c0[0], c1[1] - c0[1], r1 - r0);
+                let (px, py) = (p[0] - c0[0], p[1] - c0[1]);
+                // |p − c(ω)|² = r(ω)²: a ω² − 2 b ω + c = 0.
+                let a = dx * dx + dy * dy - dr * dr;
+                let b = px * dx + py * dy + r0 * dr;
+                let c = px * px + py * py - r0 * r0;
+                let roots: Vec<f64> = if a.abs() < 1e-9 {
+                    if b == 0.0 {
+                        Vec::new()
+                    } else {
+                        vec![c / (2.0 * b)]
+                    }
+                } else {
+                    let discriminant = b * b - a * c;
+                    if discriminant < 0.0 {
+                        Vec::new()
+                    } else {
+                        let root = discriminant.sqrt();
+                        vec![(b + root) / a, (b - root) / a]
+                    }
+                };
+                roots
+                    .into_iter()
+                    .filter(|omega| r0 + omega * dr > 0.0)
+                    .fold(None, |best: Option<f64>, omega| {
+                        Some(best.map_or(omega, |b| b.max(omega)))
+                    })
+            }
+            Gradient::Sweep(centre, [start, end]) => {
+                let centre = point(*centre);
+                let mut angle = (p[1] - centre[1]).atan2(p[0] - centre[0]).to_degrees();
+                if angle < 0.0 {
+                    angle += 360.0;
+                }
+                // The angles as the format holds them: biased by one, 180° a
+                // unit, to a 16 384th.
+                let held = |degrees: f64| (stored(degrees / 180.0 - 1.0) + 1.0) * 180.0;
+                Some((angle - held(*start)) / (held(*end) - held(*start)))
+            }
+        }
+    }
+}
+
+/// One glyph of a gradient fixture: its letter, its gradient over the em, its
+/// colour line, and whether it is written in the variable format.
+#[derive(Clone, Debug)]
+struct Case {
+    letter: char,
+    gradient: Gradient,
+    line: Line,
+    variable: bool,
+}
+
+impl Case {
+    fn paint(&self) -> V1 {
+        let (line, variable) = (self.line.clone(), self.variable);
+        match self.gradient.clone() {
+            Gradient::Linear(points) => V1::Linear {
+                line,
+                points,
+                variable,
+            },
+            Gradient::Radial(circles) => V1::Radial {
+                line,
+                circles,
+                variable,
+            },
+            Gradient::Sweep(centre, angles) => V1::Sweep {
+                line,
+                centre,
+                angles,
+                variable,
+            },
+        }
+    }
+
+    /// The colour the formulas give the glyph at `unit` over the white page,
+    /// and whether the position there lies beyond the colour line's stops.
+    fn expected(&self, unit: [f64; 2]) -> ([u8; 3], bool) {
+        match self.gradient.position(unit) {
+            None => (WHITE, false),
+            Some(s) => {
+                let (colour, alpha, beyond) = line_at(&self.line, s);
+                (over_white(colour, alpha), beyond)
+            }
+        }
+    }
+}
+
+/// The font-unit point at the centre of device pixel `(x, y)`, in the glyph
+/// `pen` ems along [`colour_document`]'s run: where the renderer evaluates a
+/// shading for that pixel.
+fn unit_at(pen: f64, x: usize, y: usize) -> [f64; 2] {
+    let page = ((x as f64 + 0.5) / SCALE, 100.0 - (y as f64 + 0.5) / SCALE);
+    [
+        ((page.0 - RUN_ORIGIN.0) / RUN_SIZE - pen) * 1000.0,
+        (page.1 - RUN_ORIGIN.1) / RUN_SIZE * 1000.0,
+    ]
+}
+
+/// The pixel at `(x, y)`.
+fn pixel_at(bitmap: &Bitmap, x: usize, y: usize) -> [u8; 3] {
+    let at = y * bitmap.stride + x * bitmap.components();
+    let p = &bitmap.data[at..at + 3];
+    [p[0], p[1], p[2]]
+}
+
+/// Holds each glyph of `cases`, rendered in `bitmap` as [`colour_document`]
+/// draws `letters`, to its formulas over a grid of the em's inside, each
+/// sample at the centre of a device pixel and compared with the colour the
+/// formulas give that centre, within `tolerance`.
+///
+/// A sample is kept only where the formulas give every pixel within two of
+/// it a colour within 40 levels of its own: a seam, a cone's edge or a hard
+/// stop there would make the pixel's colour a matter of which side of an edge
+/// its centre fell, so it is passed over (`docs/design/colour-fonts.md`, *How
+/// tests compare pixels*). Each glyph keeps at least half its samples, and at
+/// least `beyond` of them lie past its colour line's stops, where the extend
+/// decides.
+fn hold_gradients(bitmap: &Bitmap, letters: &str, cases: &[Case], tolerance: u8, beyond: usize) {
+    for case in cases {
+        let pen = letters.find(case.letter).expect("a letter") as f64;
+        let (mut kept, mut past) = (0usize, 0usize);
+        let grid = 18usize;
+        for gx in 0..grid {
+            for gy in 0..grid {
+                let unit = [75.0 + 50.0 * gx as f64, 75.0 + 50.0 * gy as f64];
+                let point = at_units(pen, unit);
+                let (x, y) = (
+                    (point.0 * SCALE) as usize,
+                    ((100.0 - point.1) * SCALE) as usize,
+                );
+                let (want, is_beyond) = case.expected(unit_at(pen, x, y));
+                let smooth = (-2i64..=2).all(|dx| {
+                    (-2i64..=2).all(|dy| {
+                        let near = unit_at(pen, (x as i64 + dx) as usize, (y as i64 + dy) as usize);
+                        let (there, _) = case.expected(near);
+                        close(there, want, 40)
+                    })
+                });
+                if !smooth {
+                    continue;
+                }
+                kept += 1;
+                past += usize::from(is_beyond);
+                let got = pixel_at(bitmap, x, y);
+                assert!(
+                    close(got, want, tolerance),
+                    "{case:?} at {unit:?}, pixel ({x}, {y}): {got:?}, not {want:?}"
+                );
+            }
+        }
+        assert!(
+            kept * 2 >= grid * grid,
+            "{}: only {kept} samples are away from an edge",
+            case.letter
+        );
+        assert!(
+            past >= beyond,
+            "{}: only {past} samples lie past the colour line",
+            case.letter
+        );
+    }
+}
+
+/// The em, as the outline every gradient below fills.
+const EM_RECT: usize = 2;
+
+/// **FT-06.13's exit.** One letter a gradient and an extend mode — linear,
+/// radial and sweep, each padded, repeated and reflected — and four more:
+/// each variable format at its default instance, a cone whose outside paints
+/// nothing, a sweep running clockwise, a line written out of order with a
+/// hard stop, and two lines with a translucent stop. Each glyph fills the em
+/// with its gradient, written through `shaping::write_run` and rendered, and
+/// a grid of samples inside the em, along the colour line and beyond it,
+/// carries the colour the test computes from the chapter's formula for that
+/// gradient, the CPAL chapter's linear-light interpolation and simple alpha
+/// compositing over the page, within FT-06.1's three levels.
+#[test]
+fn colr_v1_gradients_match_the_specification_formulas() {
+    let cases = vec![
+        Case {
+            letter: 'A',
+            gradient: Gradient::Linear([[300, 300], [700, 300], [400, 900]]),
+            line: line(PAD, &[(0.0, 3), (1.0, 4)]),
+            variable: false,
+        },
+        Case {
+            letter: 'B',
+            gradient: Gradient::Linear([[200, 500], [650, 500], [200, 900]]),
+            line: line(REPEAT, &[(0.0, 3), (1.0, 5)]),
+            variable: false,
+        },
+        Case {
+            letter: 'C',
+            gradient: Gradient::Linear([[500, 200], [500, 600], [900, 200]]),
+            line: line(REFLECT, &[(0.0, 6), (1.0, 4)]),
+            variable: false,
+        },
+        Case {
+            letter: 'D',
+            gradient: Gradient::Radial([([500, 500], 100), ([500, 500], 450)]),
+            line: line(PAD, &[(0.0, 5), (1.0, 3)]),
+            variable: false,
+        },
+        Case {
+            letter: 'E',
+            gradient: Gradient::Radial([([420, 500], 0), ([520, 500], 400)]),
+            line: line(REPEAT, &[(0.0, 4), (1.0, 6)]),
+            variable: false,
+        },
+        Case {
+            letter: 'F',
+            gradient: Gradient::Radial([([500, 500], 150), ([500, 500], 450)]),
+            line: line(REFLECT, &[(0.0, 3), (1.0, 5)]),
+            variable: false,
+        },
+        Case {
+            letter: 'G',
+            gradient: Gradient::Sweep([500, 500], [45.0, 225.0]),
+            line: line(PAD, &[(0.0, 3), (1.0, 4)]),
+            variable: false,
+        },
+        Case {
+            letter: 'H',
+            gradient: Gradient::Sweep([500, 500], [0.0, 135.0]),
+            line: line(REPEAT, &[(0.0, 4), (1.0, 5)]),
+            variable: false,
+        },
+        Case {
+            letter: 'I',
+            gradient: Gradient::Sweep([450, 550], [90.0, 270.0]),
+            line: line(REFLECT, &[(0.0, 6), (1.0, 3)]),
+            variable: false,
+        },
+        // Format 5, its second stop at half an alpha: a soft mask.
+        Case {
+            letter: 'J',
+            gradient: Gradient::Linear([[150, 500], [850, 500], [150, 900]]),
+            line: Line {
+                extend: PAD,
+                stops: vec![(0.0, 3, 1.0), (1.0, 4, 0.5)],
+            },
+            variable: true,
+        },
+        // Format 7: a cone, neither circle holding the other, open to the
+        // right; behind its tip and outside its sides nothing is painted.
+        Case {
+            letter: 'K',
+            gradient: Gradient::Radial([([300, 500], 60), ([650, 500], 200)]),
+            line: line(PAD, &[(0.0, 5), (1.0, 6)]),
+            variable: true,
+        },
+        // Format 9: the start past the end, so the line runs clockwise.
+        Case {
+            letter: 'L',
+            gradient: Gradient::Sweep([500, 500], [270.0, 90.0]),
+            line: line(PAD, &[(0.0, 3), (1.0, 6)]),
+            variable: true,
+        },
+        // Stops written out of offset order, two at one offset: below it the
+        // first of the two, at and past it the second.
+        Case {
+            letter: 'M',
+            gradient: Gradient::Linear([[100, 500], [900, 500], [100, 900]]),
+            line: line(REPEAT, &[(1.0, 3), (0.0, 4), (0.5, 5), (0.5, 6)]),
+            variable: false,
+        },
+        // A radial line whose first stop is a quarter opaque, reflected.
+        Case {
+            letter: 'N',
+            gradient: Gradient::Radial([([500, 500], 100), ([500, 500], 400)]),
+            line: Line {
+                extend: REFLECT,
+                stops: vec![(0.0, 3, 0.25), (1.0, 6, 1.0)],
+            },
+            variable: false,
+        },
+    ];
+    let letters: String = cases.iter().map(|case| case.letter).collect();
+    let face = v1_face(
+        &letters,
+        |rect, _| {
+            cases
+                .iter()
+                .map(|case| {
+                    (
+                        case.letter,
+                        V1::Glyph(rect(EM_RECT), Box::new(case.paint())),
+                    )
+                })
+                .collect()
+        },
+        &[],
+    );
+    let (bytes, warnings) = colour_document(
+        &face,
+        &letters,
+        PaletteChoice::Default,
+        DocumentBuilder::new(),
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let document = Document::open(bytes.clone()).expect("opens");
+    assert!(document.validate().is_empty(), "{:?}", document.validate());
+    let (bitmap, text) = rendered(bytes);
+    assert_eq!(text, letters);
+    hold_gradients(&bitmap, &letters, &cases, 3, 10);
+}
+
+/// What the chapter makes of a colour line or a geometry that does not
+/// describe a gradation: an ill-formed linear gradient — `p2` on `p0`, `p0p2`
+/// along `p0p1` — and an ill-formed radial one — two equal circles, two of
+/// no radius — paint nothing and are named; so do a repeating line whose
+/// stops share one offset and a repeating sweep over no angle. A padded line
+/// whose stops share an offset is the first stop below it and the last at
+/// and past it; a padded sweep over no angle is the first stop short of it
+/// and the last from it on; a line of one stop is that stop's colour, alpha
+/// and all, everywhere; and a line of none is transparent black.
+#[test]
+fn colour_lines_and_geometries_that_describe_no_gradation_paint_as_the_chapter_says() {
+    let ill: Vec<(char, V1)> = vec![
+        (
+            'A',
+            V1::Linear {
+                line: line(PAD, &[(0.0, 3), (1.0, 4)]),
+                points: [[200, 200], [800, 200], [200, 200]],
+                variable: false,
+            },
+        ),
+        (
+            'B',
+            V1::Linear {
+                line: line(PAD, &[(0.0, 3), (1.0, 4)]),
+                points: [[200, 200], [800, 200], [500, 200]],
+                variable: false,
+            },
+        ),
+        (
+            'C',
+            V1::Radial {
+                line: line(PAD, &[(0.0, 3), (1.0, 4)]),
+                circles: [([500, 500], 200), ([500, 500], 200)],
+                variable: false,
+            },
+        ),
+        (
+            'D',
+            V1::Radial {
+                line: line(PAD, &[(0.0, 3), (1.0, 4)]),
+                circles: [([300, 500], 0), ([700, 500], 0)],
+                variable: false,
+            },
+        ),
+        (
+            'E',
+            V1::Sweep {
+                line: line(REPEAT, &[(0.0, 3), (1.0, 4)]),
+                centre: [500, 500],
+                angles: [90.0, 90.0],
+                variable: false,
+            },
+        ),
+        (
+            'F',
+            V1::Linear {
+                line: line(REPEAT, &[(0.5, 3), (0.5, 4)]),
+                points: [[200, 500], [800, 500], [200, 900]],
+                variable: false,
+            },
+        ),
+    ];
+    let padded_hard = Case {
+        letter: 'G',
+        gradient: Gradient::Linear([[200, 500], [800, 500], [200, 900]]),
+        line: line(PAD, &[(0.5, 3), (0.5, 4)]),
+        variable: false,
+    };
+    let padded_sweep = Case {
+        letter: 'H',
+        gradient: Gradient::Sweep([500, 500], [90.0, 90.0]),
+        line: line(PAD, &[(0.0, 5), (1.0, 6)]),
+        variable: false,
+    };
+    let one_stop = V1::Linear {
+        line: Line {
+            extend: REPEAT,
+            stops: vec![(0.3, 5, 0.5)],
+        },
+        points: [[200, 500], [800, 500], [200, 900]],
+        variable: false,
+    };
+    let no_stop = V1::Radial {
+        line: Line {
+            extend: PAD,
+            stops: Vec::new(),
+        },
+        circles: [([500, 500], 0), ([500, 500], 400)],
+        variable: false,
+    };
+    let letters = "ABCDEFGHIJ";
+    let face = v1_face(
+        letters,
+        |rect, _| {
+            let mut graphs: Vec<(char, V1)> = ill
+                .iter()
+                .cloned()
+                .map(|(letter, paint)| (letter, V1::Glyph(rect(EM_RECT), Box::new(paint))))
+                .collect();
+            for case in [&padded_hard, &padded_sweep] {
+                graphs.push((
+                    case.letter,
+                    V1::Glyph(rect(EM_RECT), Box::new(case.paint())),
+                ));
+            }
+            graphs.push(('I', V1::Glyph(rect(EM_RECT), Box::new(one_stop.clone()))));
+            graphs.push(('J', V1::Glyph(rect(EM_RECT), Box::new(no_stop.clone()))));
+            graphs
+        },
+        &[],
+    );
+    let (bytes, warnings) = colour_document(
+        &face,
+        letters,
+        PaletteChoice::Default,
+        DocumentBuilder::new(),
+    );
+    let glyph = |c| face.glyph_of(c).expect("covered");
+    for (letter, format) in [('A', 4), ('B', 4), ('C', 6), ('D', 6), ('E', 8), ('F', 4)] {
+        assert!(
+            warnings.contains(&ColourWarning::GradientIllFormed {
+                glyph: glyph(letter),
+                format,
+            }),
+            "{letter}: {warnings:?}"
+        );
+    }
+    assert_eq!(warnings.len(), 6, "{warnings:?}");
+    let (bitmap, text) = rendered(bytes);
+    assert_eq!(text, letters);
+    // The ill-formed six and the line of no stop paint nothing at all: not
+    // their outline, which the box from 0 to 700 would show, either.
+    for letter in ['A', 'B', 'C', 'D', 'E', 'F', 'J'] {
+        let pen = letters.find(letter).expect("a letter") as f64;
+        for unit in [
+            [350.0, 350.0],
+            [150.0, 850.0],
+            [850.0, 150.0],
+            [600.0, 600.0],
+        ] {
+            let got = pixel(&bitmap, at_units(pen, unit), 100.0);
+            assert!(close(got, WHITE, 2), "{letter} at {unit:?}: {got:?}");
+        }
+    }
+    hold_gradients(&bitmap, letters, &[padded_hard, padded_sweep], 3, 10);
+    // One stop: its colour at half an alpha over the page, wherever it is.
+    let pen = letters.find('I').expect("a letter") as f64;
+    let want = over_white(LEAF.map(|c| f64::from(c) / 255.0), stored(0.5));
+    for unit in [[150.0, 150.0], [500.0, 500.0], [850.0, 850.0]] {
+        let got = pixel(&bitmap, at_units(pen, unit), 100.0);
+        assert!(close(got, want, 2), "I at {unit:?}: {got:?}, not {want:?}");
+    }
+}
+
+/// Under a profile that admits no transparency (ISO 19005-1 6.4), an opaque
+/// gradient is drawn — a shading needs no group — through a form with no
+/// `/Group`, and one with a translucent stop, which needs a soft mask, is
+/// drawn as its outline in the text's colour and named; the builder refuses
+/// nothing.
+#[test]
+fn a_translucent_gradient_under_a_profile_without_transparency_is_drawn_as_the_outline() {
+    let opaque = Case {
+        letter: 'A',
+        gradient: Gradient::Linear([[200, 500], [800, 500], [200, 900]]),
+        line: line(PAD, &[(0.0, 3), (1.0, 4)]),
+        variable: false,
+    };
+    let translucent = Line {
+        extend: PAD,
+        stops: vec![(0.0, 3, 1.0), (1.0, 4, 0.5)],
+    };
+    let face = v1_face(
+        "AB",
+        |rect, _| {
+            vec![
+                ('A', V1::Glyph(rect(EM_RECT), Box::new(opaque.paint()))),
+                (
+                    'B',
+                    V1::Glyph(
+                        rect(EM_RECT),
+                        Box::new(V1::Linear {
+                            line: translucent.clone(),
+                            points: [[200, 500], [800, 500], [200, 900]],
+                            variable: false,
+                        }),
+                    ),
+                ),
+            ]
+        },
+        &[],
+    );
+    let builder = DocumentBuilder::archival(tinker_pdf_cos::ArchivalProfile {
+        part: tinker_pdf_cos::ArchivalPart::One,
+        level: Some(tinker_pdf_cos::ArchivalLevel::B),
+        destination_profile: pdfa_support::srgb_like(),
+        destination_space: tinker_pdf_cos::DeviceSpace::Rgb,
+        output_condition: "Custom".to_string(),
+        language: None,
+    });
+    let (bytes, warnings) = colour_document(&face, "AB", PaletteChoice::Default, builder);
+    let b = face.glyph_of('B').expect("covered");
+    assert_eq!(
+        warnings,
+        [ColourWarning::TransparencyForbidden { glyph: b }]
+    );
+    let fonts = type3_fonts(&bytes);
+    let cos = CosDocument::open(bytes.clone()).expect("opens");
+    let font = written_font(&cos, fonts[0].1);
+    for (glyph, form) in &font.forms {
+        assert!(
+            form.get(cos.intern(b"Group")).is_none(),
+            "{glyph:?} has no group"
+        );
+    }
+    let (bitmap, _) = rendered(bytes);
+    hold_gradients(&bitmap, "AB", &[opaque], 3, 10);
+    assert!(close(
+        pixel(&bitmap, at_units(1.0, [350.0, 350.0]), 100.0),
+        TEXT_GREEN,
+        2
+    ));
+    assert!(close(
+        pixel(&bitmap, at_units(1.0, [850.0, 850.0]), 100.0),
+        WHITE,
+        2
+    ));
+}
+
+/// What version 1 cannot draw falls to the glyph's next table, named: a
+/// gradient whose colour line names the text's own colour, which a procedure
+/// every run shares cannot state, a graph that is not bounded and has no clip
 /// box, and a palette entry the palette lacks; a graph bounded only by its
 /// clip box draws inside it; and a table refused for a cycle is named, the
 /// rest of the graph drawn.
@@ -1667,8 +2442,13 @@ fn version_1_graphs_it_cannot_draw_fall_to_the_next_table_and_are_named() {
     let face = v1_face(
         "ABCDE",
         |rect, letter| {
+            let foreground = V1::Linear {
+                line: line(PAD, &[(0.0, 0), (1.0, FOREGROUND)]),
+                points: [[0, 0], [1000, 0], [0, 1000]],
+                variable: false,
+            };
             vec![
-                ('A', V1::Glyph(rect(0), Box::new(V1::Linear))),
+                ('A', V1::Glyph(rect(0), Box::new(foreground))),
                 ('B', V1::Solid(0, 1.0)),
                 ('C', V1::Solid(0, 1.0)),
                 ('D', filled(rect(0), 9)),
@@ -1687,10 +2467,7 @@ fn version_1_graphs_it_cannot_draw_fall_to_the_next_table_and_are_named() {
         DocumentBuilder::new(),
     );
     let glyph = |c| face.glyph_of(c).expect("covered");
-    assert!(warnings.contains(&ColourWarning::GradientNotDrawn {
-        glyph: glyph('A'),
-        format: 4,
-    }));
+    assert!(warnings.contains(&ColourWarning::ForegroundStop { glyph: glyph('A') }));
     assert!(warnings.contains(&ColourWarning::Unbounded { glyph: glyph('B') }));
     assert!(warnings.contains(&ColourWarning::PaletteEntryMissing {
         glyph: glyph('D'),
