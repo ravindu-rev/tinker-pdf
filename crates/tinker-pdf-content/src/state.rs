@@ -637,6 +637,28 @@ pub struct GraphicsState {
     /// one has its initial value. One pointer wide, so a `q` copies one word
     /// more, and shared, so a copy allocates nothing.
     pub stored: Option<Arc<StoredParameters>>,
+    /// What the non-stroking colour was resolved from through the resource
+    /// seam, where it was: the colour a rendering intent changing resolves
+    /// again (11.7.5.3). `None` for a colour a device operator converted in
+    /// place, which no intent changes. Shared, so a `q` copies one word.
+    pub fill_source: Option<Arc<ColorSource>>,
+    /// The same for the stroking colour.
+    pub stroke_source: Option<Arc<ColorSource>>,
+}
+
+/// The components a colour was set with and the space they were read in, kept
+/// beside the colour so that a rendering intent changing after the colour was
+/// set paints it in the intent in force at the paint (11.7.5.3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorSource {
+    /// The device space the components were read in by its name, where a
+    /// device operator or a component count selected it in a scope that
+    /// remaps it to a default (8.6.5.6); `None` where the space is the one
+    /// the slot names, [`GraphicsState::fill_space`] or
+    /// [`GraphicsState::stroke_space`].
+    pub family: Option<&'static [u8]>,
+    /// The components, as the operator gave them.
+    pub components: Vec<f64>,
 }
 
 impl GraphicsState {
@@ -667,6 +689,8 @@ impl GraphicsState {
             blend: BlendMode::Normal,
             stroke_pattern: None,
             stored: None,
+            fill_source: None,
+            stroke_source: None,
         }
     }
 

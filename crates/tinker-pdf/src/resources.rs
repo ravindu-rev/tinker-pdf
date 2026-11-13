@@ -482,6 +482,27 @@ type FunctionCache = HashMap<(ObjRef, Option<u32>), Option<Arc<Function>>>;
 /// not parse must be refused once rather than re-read at every `cs`.
 type IccCache = Flights<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transforms>>>;
 
+/// How the colour crate converts an ICC colour in `intent`, the rendering
+/// intent the graphics state holds (8.6.5.8): Table 69's four by their ICC.1
+/// names, and a name the reader does not recognise as relative colorimetric,
+/// as 8.6.5.8 has it read — so the leaf crate keeps no PDF name for an intent
+/// (`docs/design/icc.md`, "The one conversion parameter").
+pub(crate) fn conversion(
+    intent: tinker_pdf_content::RenderingIntent,
+) -> tinker_pdf_color::icc::Conversion {
+    use tinker_pdf_color::icc::Intent;
+    use tinker_pdf_content::RenderingIntent;
+    let intent = match intent {
+        RenderingIntent::Perceptual => Intent::Perceptual,
+        RenderingIntent::Saturation => Intent::Saturation,
+        RenderingIntent::AbsoluteColorimetric => Intent::AbsoluteColorimetric,
+        RenderingIntent::RelativeColorimetric | RenderingIntent::Unrecognised => {
+            Intent::RelativeColorimetric
+        }
+    };
+    tinker_pdf_color::icc::Conversion { intent }
+}
+
 /// Which glyph of an embedded program a code selects, and on whose authority.
 ///
 /// The second half is what [`crate::subset`] rests on, and it is the whole
@@ -2867,11 +2888,19 @@ impl FontSource for PageResources {
         self.form_from(&dict, reference, name, Contents::OwnScope)
     }
 
-    fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
+    fn resolve_color(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: tinker_pdf_content::RenderingIntent,
+    ) -> Option<Rgb> {
         // 8.6.5.6: the light is the space as painted. A device space named
         // directly — `g`, `rg` and `k` in a scope that remaps them, and
         // `/DeviceRGB cs … sc` — converts through the default where it lies,
-        // so the most frequent colour operators copy nothing.
+        // so the most frequent colour operators copy nothing. An ICC space,
+        // or one holding one, converts in the intent in force, its transform
+        // for that intent compiled once a profile and kept with the rest.
+        let conversion = conversion(intent);
         let device = match space {
             b"DeviceGray" => Some(ColorSpace::DeviceGray),
             b"DeviceRGB" => Some(ColorSpace::DeviceRgb),
@@ -2880,10 +2909,12 @@ impl FontSource for PageResources {
         };
         let (r, g, b) = match device {
             Some(device) => match self.defaults().for_device(&device) {
-                Some(default) => default.to_rgb(components),
+                Some(default) => default.to_rgb_in(components, conversion),
                 None => device.to_rgb(components),
             },
-            None => self.named_space(space, Answer::Painted, |space| space.to_rgb(components))?,
+            None => self.named_space(space, Answer::Painted, |space| {
+                space.to_rgb_in(components, conversion)
+            })?,
         };
         Some(Rgb { r, g, b })
     }
@@ -7370,6 +7401,7 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
     /// second.
     #[test]
     fn an_uncoloured_pattern_space_resolves_through_its_underlying_space() {
+        use tinker_pdf_content::RenderingIntent::RelativeColorimetric;
         let res = resources_of(
             "/Prgb [ /Pattern /DeviceRGB ] \
              /Pcmyk [ /Pattern /DeviceCMYK ] \
@@ -7378,13 +7410,13 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
 
         assert_eq!(res.color_components(b"Prgb"), Some(3));
         assert_eq!(
-            res.resolve_color(b"Prgb", &[1.0, 0.0, 0.0]),
+            res.resolve_color(b"Prgb", &[1.0, 0.0, 0.0], RelativeColorimetric),
             Some(tinker_pdf_content::Rgb { r: 255, g: 0, b: 0 }),
         );
 
         assert_eq!(res.color_components(b"Pcmyk"), Some(4));
         assert_eq!(
-            res.resolve_color(b"Pcmyk", &[1.0, 0.0, 0.0, 0.0]),
+            res.resolve_color(b"Pcmyk", &[1.0, 0.0, 0.0, 0.0], RelativeColorimetric),
             Some(tinker_pdf_content::Rgb {
                 r: 0,
                 g: 255,
@@ -7396,7 +7428,7 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         // 8.7.3.1: a *coloured* pattern space has no underlying space and no
         // colour of its own, which is the black every pattern used to paint.
         assert_eq!(
-            res.resolve_color(b"Pbare", &[1.0, 0.0, 0.0]),
+            res.resolve_color(b"Pbare", &[1.0, 0.0, 0.0], RelativeColorimetric),
             Some(tinker_pdf_content::Rgb { r: 0, g: 0, b: 0 }),
         );
     }

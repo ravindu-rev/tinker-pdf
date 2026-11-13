@@ -828,6 +828,246 @@ pub fn jpeg_minified_page() -> Vec<u8> {
     out.into_bytes()
 }
 
+// ---- the rendering-intent pages ----------------------------------------------
+//
+// RC-01's pages: ICC colours painted under each rendering intent, through a
+// profile carrying a table for each intent and through a matrix/TRC one, both
+// on a media white other than D50. Here rather than in `rendering_intents.rs`
+// because `determinism.rs` is to fingerprint these same bytes.
+
+/// The media white the intent profiles carry: a warm paper, darker than D50,
+/// every channel its own ratio to it, so absolute colorimetric is a transform
+/// of its own.
+pub const INTENT_PAPER: [f64; 3] = [0.88, 0.91, 0.72];
+
+/// sRGB's primaries adapted to D50, as an sRGB ICC profile stores them.
+pub const SRGB_COLUMNS: [[f64; 3]; 3] = [
+    [0.436_065_674, 0.222_488_403, 0.013_916_015],
+    [0.385_147_095, 0.716_873_169, 0.097_076_416],
+    [0.143_066_406, 0.060_607_910, 0.714_096_069],
+];
+
+/// The intent pages' components: a fill, a stroke and a glyph, each a
+/// quarter, a half or three quarters, which a two-point grid reads at whole
+/// fractions of 256, and each a node of the 33-point grid a three-input
+/// table converts through (`docs/design/icc.md`, P-22), so a conversion is
+/// the table's pipeline exactly.
+pub const INTENT_PAINTS: [[f64; 3]; 3] = [[0.25, 0.5, 0.75], [0.75, 0.25, 0.5], [0.5, 0.75, 0.25]];
+
+/// An `XYZType` tag.
+fn xyz_tag(value: [f64; 3]) -> Vec<u8> {
+    let mut out = b"XYZ ".to_vec();
+    out.extend_from_slice(&[0; 4]);
+    for v in value {
+        out.extend_from_slice(&(((v * 65536.0).round() as i32) as u32).to_be_bytes());
+    }
+    out
+}
+
+/// A `curv` tag holding one gamma.
+fn gamma_tag(gamma: f64) -> Vec<u8> {
+    let mut out = b"curv".to_vec();
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&1u32.to_be_bytes());
+    out.extend_from_slice(&((gamma * 256.0).round() as u16).to_be_bytes());
+    out
+}
+
+/// A version 2 display profile in `space` and `pcs` carrying `tags`.
+fn icc_profile(space: &[u8; 4], pcs: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut out = vec![0u8; 128];
+    out[8..12].copy_from_slice(&0x0200_0000u32.to_be_bytes());
+    out[12..16].copy_from_slice(b"mntr");
+    out[16..20].copy_from_slice(space);
+    out[20..24].copy_from_slice(pcs);
+    out[36..40].copy_from_slice(b"acsp");
+    out.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+    let mut body = Vec::new();
+    let start = 132 + tags.len() * 12;
+    for (signature, data) in tags {
+        out.extend_from_slice(signature);
+        out.extend_from_slice(&((start + body.len()) as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        body.extend_from_slice(data);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+    }
+    out.extend_from_slice(&body);
+    let size = out.len() as u32;
+    out[0..4].copy_from_slice(&size.to_be_bytes());
+    out
+}
+
+/// Node `node` of [`intent_lut_profile`]'s table `table`, the first input's
+/// axis slowest, as CIE L*a*b*: each table its own colours.
+pub fn intent_lut_lab(table: usize, node: usize) -> [f64; 3] {
+    let bit = |shift: usize| ((node >> shift) & 1) as f64;
+    let (i, j, k, t) = (bit(2), bit(1), bit(0), table as f64);
+    [
+        18.0 + 30.0 * i + 25.0 * j + 15.0 * k + 4.0 * t,
+        -40.0 + 70.0 * j + 10.0 * k - 30.0 * t,
+        -10.0 + 50.0 * k - 30.0 * i + 35.0 * t,
+    ]
+}
+
+/// [`intent_lut_lab`] in v2's legacy 16-bit Lab, the encoding an `mft2`
+/// holds: `L*` of a hundred and `a*`, `b*` of 127 at `0xFF00`.
+pub fn intent_lut_encoded(table: usize, node: usize) -> [u16; 3] {
+    let [l, a, b] = intent_lut_lab(table, node);
+    let encode = |v: f64| (v * 65280.0).round().clamp(0.0, 65535.0) as u16;
+    [
+        encode(l / 100.0),
+        encode((a + 128.0) / 255.0),
+        encode((b + 128.0) / 255.0),
+    ]
+}
+
+/// An `mft2` tag over three inputs on a two-point grid holding table
+/// `table`'s nodes, its input and output curves the identity.
+fn intent_table(table: usize) -> Vec<u8> {
+    let mut out = b"mft2".to_vec();
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[3, 3, 2, 0]);
+    for row in 0..3 {
+        for column in 0..3 {
+            let value: i32 = if row == column { 65536 } else { 0 };
+            out.extend_from_slice(&(value as u32).to_be_bytes());
+        }
+    }
+    out.extend_from_slice(&2u16.to_be_bytes());
+    out.extend_from_slice(&2u16.to_be_bytes());
+    for _ in 0..3 {
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&u16::MAX.to_be_bytes());
+    }
+    for node in 0..8 {
+        for value in intent_lut_encoded(table, node) {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    for _ in 0..3 {
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&u16::MAX.to_be_bytes());
+    }
+    out
+}
+
+/// An RGB profile into Lab carrying a table for each intent — `A2B0`,
+/// `A2B1` and `A2B2`, three different grids — and [`INTENT_PAPER`] for its
+/// media white.
+pub fn intent_lut_profile() -> Vec<u8> {
+    icc_profile(
+        b"RGB ",
+        b"Lab ",
+        &[
+            (*b"A2B0", intent_table(0)),
+            (*b"A2B1", intent_table(1)),
+            (*b"A2B2", intent_table(2)),
+            (*b"wtpt", xyz_tag(INTENT_PAPER)),
+        ],
+    )
+}
+
+/// A matrix/TRC profile on sRGB's primaries under gamma 2 curves, its media
+/// white [`INTENT_PAPER`].
+pub fn intent_matrix_profile() -> Vec<u8> {
+    icc_profile(
+        b"RGB ",
+        b"XYZ ",
+        &[
+            (*b"rXYZ", xyz_tag(SRGB_COLUMNS[0])),
+            (*b"gXYZ", xyz_tag(SRGB_COLUMNS[1])),
+            (*b"bXYZ", xyz_tag(SRGB_COLUMNS[2])),
+            (*b"rTRC", gamma_tag(2.0)),
+            (*b"gTRC", gamma_tag(2.0)),
+            (*b"bTRC", gamma_tag(2.0)),
+            (*b"wtpt", xyz_tag(INTENT_PAPER)),
+        ],
+    )
+}
+
+/// The intent page's height, and its width, in points and in pixels alike at
+/// the default 72 dpi.
+pub const INTENT_SIZE: f64 = 240.0;
+
+/// Where [`intent_page`] paints `paint` — 0 the fill, 1 the stroke, 2 the
+/// glyph — in row `row`, 0 the table profile's and 1 the matrix's: a point
+/// well inside it, in the page's own space.
+pub fn intent_spot(row: usize, paint: usize) -> (f64, f64) {
+    let base = 10.0 + 120.0 * row as f64;
+    match paint {
+        0 => (35.5, base + 35.5),
+        1 => (110.5, base + 35.5),
+        _ => (175.5, base + 25.5),
+    }
+}
+
+/// The page painting each of [`INTENT_PAINTS`] — a filled square, a stroked
+/// bar and a glyph of [`curvy_font`], its wedge — in the table profile's
+/// space `/L` along the bottom and the matrix profile's `/M` above it, under
+/// the rendering intent `ri` names, `intent`, set before every colour.
+pub fn intent_page(intent: &str) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.set_subset_fonts(false);
+    assert!(
+        builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()),
+        "the synthetic face parses"
+    );
+    assert!(builder.add_icc_color_space(b"L", &intent_lut_profile(), 3));
+    assert!(builder.add_icc_color_space(b"M", &intent_matrix_profile(), 3));
+    builder.add_page(INTENT_SIZE, INTENT_SIZE, |page| {
+        page.raw(format!("/{intent} ri").as_bytes());
+        for (row, space) in ["L", "M"].iter().enumerate() {
+            let base = 10.0 + 120.0 * row as f64;
+            let [fill, stroke, glyph] =
+                INTENT_PAINTS.map(|c| format!("{} {} {}", c[0], c[1], c[2]));
+            page.raw(
+                format!(
+                    "/{space} cs {fill} scn 10 {} 50 50 re f\n\
+                     /{space} CS {stroke} SCN 20 w 80 {} m 140 {} l S\n\
+                     /{space} cs {glyph} scn",
+                    base + 10.0,
+                    base + 35.5,
+                    base + 35.5,
+                )
+                .as_bytes(),
+            );
+            // The wedge's lower left, well inside its outline, is the spot.
+            page.text(b"F0", 100.0, 160.0, base + 10.0, "#");
+        }
+    });
+    builder.finish()
+}
+
+/// A page painting through [`intent_lut_profile`]'s space `/L` with
+/// `content`, and graphics states `/GSp`, `/GSs`, `/GSa` and `/GSx` naming
+/// perceptual, saturation, absolute colorimetric and an intent 8.6.5.8 does
+/// not list by `/RI`: the twin of a page that names its intents by `ri`.
+pub fn intent_states_page(content: &str) -> Vec<u8> {
+    let profile = intent_lut_profile();
+    let mut bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 40]\n\
+   /Resources << /ColorSpace << /L [/ICCBased 5 0 R] >>\n\
+     /ExtGState << /GSp << /Type /ExtGState /RI /Perceptual >>\n\
+       /GSs << /Type /ExtGState /RI /Saturation >>\n\
+       /GSa << /Type /ExtGState /RI /AbsoluteColorimetric >>\n\
+       /GSx << /Type /ExtGState /RI /Ultraviolet >> >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /N 3 /Length {} >>\nstream\n",
+        content.len(),
+        profile.len()
+    )
+    .into_bytes();
+    bytes.extend_from_slice(&profile);
+    bytes.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+    bytes
+}
+
 // ---- the face this repository writes for itself -----------------------------
 //
 // Moved here from `determinism.rs` when the goldens arrived: the text family's

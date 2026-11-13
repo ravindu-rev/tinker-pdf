@@ -1086,8 +1086,13 @@ impl FontSource for Recorded {
         Some(procedure)
     }
 
-    fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<tinker_pdf_content::Rgb> {
-        self.inner.resolve_color(space, components)
+    fn resolve_color(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: tinker_pdf_content::RenderingIntent,
+    ) -> Option<tinker_pdf_content::Rgb> {
+        self.inner.resolve_color(space, components, intent)
     }
 
     fn ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {

@@ -42,8 +42,10 @@ the mask last; and `/RI` `/FL` `/SM` `/SA` `/OP` `/op` `/OPM` `/AIS` `/TK`
 (the second spelling winning when a dictionary writes both), and the halftone
 `/HT` with its origin `/HTO`, are kept in the
 state's `StoredParameters`, with `ri` and
-`i` setting the intent and the flatness, for the rows that apply them —
-none moves a pixel yet. An absent `/op` takes `/OP`'s value (Table 58), and a
+`i` setting the intent and the flatness. The intent converts every flat
+colour in an ICC space ([rendering](rendering.md)); the rest are for the rows
+that apply them, and none of those moves a pixel yet. An absent `/op` takes
+`/OP`'s value (Table 58), and a
 value of a type the table does not give is read as absent. The complete text
 state — `Tf` `Tc` `Tw` `Tz` `TL` `Ts`
 `Tr` (9.3) — positioning `Td` `TD` `Tm` `T*` (9.4.2) and showing `Tj` `TJ`

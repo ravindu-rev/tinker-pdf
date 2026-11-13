@@ -295,10 +295,13 @@ with the rest of the state, and a name 8.6.5.8 does not list is kept as
 `RenderingIntent::Unrecognised`. The colour crate converts in any intent:
 `Profile::parse` keeps each `A2B*` table a profile carries beside its
 matrix/TRC or grey model, and `ColorSpace::to_rgb_in` converts through the
-one an `icc::Conversion`'s intent selects, by the table below. No conversion
-the facade makes passes an intent yet, so every ICC colour converts in
-relative colorimetric — through the first of `A2B1`, `A2B0`, the model and
-`A2B2` the profile carries — and an image's `/Intent` is not read. How often
+one an `icc::Conversion`'s intent selects, by the table below. A flat colour
+converts in the intent in force at its painting operator: the interpreter
+passes the state's intent through `FontSource::resolve_color`, and the
+facade maps it to an `icc::Conversion` (`resources::conversion`). An image
+and a shading convert in relative colorimetric — through the first of
+`D2B1`, `A2B1`, `A2B0`, the model and `A2B2` the profile carries — and an
+image's `/Intent` is not read. How often
 the corpus names an intent is not measured; an ExtGState names one by
 `/RI`, the graphics state parameter dictionary having no `/RenderingIntent`
 key. This section is the design RC-01's steps build, read
@@ -499,10 +502,13 @@ the intent is the source's scaling. With `s = (Xmw / Xi, Ymw / Yi, Zmw / Zi)`:
 - **A colour set before the intent changed paints in the intent at the
   paint** (11.7.5.3). The interpreter resolves a colour to light when it is
   set (`sc`, `scn`, `g`, …), so it keeps beside the fill and the stroke
-  colour the space each was set in and its components, and an intent that
-  changes — by `ri` or by a `gs` with `/RI` — re-resolves both through
-  `FontSource::resolve_color` in the new intent. `Q` restores a colour with
-  the intent it was resolved in; setting the intent in force again resolves
+  colour the space each was set in and its components
+  (`GraphicsState::fill_source` and `stroke_source`, a shared
+  `ColorSource`), and an intent that changes — by `ri` or by a `gs` with
+  `/RI` — re-resolves both through `FontSource::resolve_color` in the new
+  intent. A colour a device operator converts in place keeps its light, and
+  an uncoloured pattern's keeps its pattern. `Q` restores a colour with the
+  intent it was resolved in; setting the intent in force again resolves
   nothing.
 - **An unrecognised name is `RelativeColorimetric`** wherever it is read: the
   state keeps `RenderingIntent::Unrecognised` (K-01), and the conversion

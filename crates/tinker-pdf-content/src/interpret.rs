@@ -7,8 +7,8 @@
 
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::state::{
-    BlackPointCompensation, BlendMode, GraphicsState, Halftone, LineCap, LineJoin, Matrix,
-    RenderingIntent, Rgb, TextRenderMode, Transfer,
+    BlackPointCompensation, BlendMode, ColorSource, GraphicsState, Halftone, LineCap, LineJoin,
+    Matrix, RenderingIntent, Rgb, TextRenderMode, Transfer,
 };
 use crate::tokenizer::{Token, Tokenizer};
 use core::mem;
@@ -442,14 +442,27 @@ pub trait FontSource {
         None
     }
 
-    /// The RGB a named colour space gives these components.
+    /// The RGB a named colour space gives these components, converted in
+    /// `intent`, the rendering intent in force (8.6.5.8).
     ///
     /// The interpreter cannot know what `/CS0 0.2 0.9 0.1 scn` means — RGB, a
     /// separation, an indexed palette — because only the resource dictionary
     /// says. `None` leaves the colour unchanged, which is what a viewer does
     /// with a space it cannot resolve.
-    fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
-        let _ = (space, components);
+    ///
+    /// Asked again with the components the colour was set with whenever the
+    /// intent changes after it was set — by `ri`, or by a `gs` whose `/RI`
+    /// names another — so a colour paints in the intent in force at the
+    /// painting operator (11.7.5.3). A space no intent changes, which is
+    /// every space but one converted through an ICC profile, answers alike in
+    /// each.
+    fn resolve_color(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: RenderingIntent,
+    ) -> Option<Rgb> {
+        let _ = (space, components, intent);
         None
     }
 
@@ -1066,6 +1079,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             self.gs.blend = blend;
         }
         let finite = |v: Option<f64>| v.filter(|v| v.is_finite());
+        let before = self.intent();
         self.gs.set_stored(|s| {
             if let Some(intent) = set.rendering_intent {
                 s.rendering_intent = intent;
@@ -1115,6 +1129,8 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
             }
         });
+        // An `/RI` naming another intent paints the colours already set in it.
+        self.intent_changed(before);
         // 11.6.5.1. The group is rendered *here*, at this CTM, rather than
         // recorded for the paint that will use it.
         match &set.soft_mask {
@@ -1423,8 +1439,10 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             // and `/FL` are.
             b"ri" => {
                 if let Some(Token::Name(name)) = self.stack.last() {
+                    let before = self.intent();
                     let intent = RenderingIntent::from_name(name);
                     self.gs.set_stored(|s| s.rendering_intent = intent);
+                    self.intent_changed(before);
                 }
             }
             b"i" => {
@@ -1439,38 +1457,38 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             b"g" | b"G" => {
                 if let Some(v) = self.num(0) {
                     let remapped = if self.defaults.gray {
-                        self.remapped(b"DeviceGray", &[v])
+                        self.remapped(b"DeviceGray", vec![v])
                     } else {
                         None
                     };
-                    let (color, ink) = remapped.unwrap_or_else(|| {
+                    let (color, ink, source) = remapped.unwrap_or_else(|| {
                         let value = to_byte(v);
                         let color = Rgb {
                             r: value,
                             g: value,
                             b: value,
                         };
-                        (color, None)
+                        (color, None, None)
                     });
-                    self.set_device_color(op == b"g", color, ink);
+                    self.set_device_color(op == b"g", color, ink, source);
                 }
             }
             b"rg" | b"RG" => {
                 if let (Some(r), Some(g), Some(b)) = (self.num(2), self.num(1), self.num(0)) {
                     let remapped = if self.defaults.rgb {
-                        self.remapped(b"DeviceRGB", &[r, g, b])
+                        self.remapped(b"DeviceRGB", vec![r, g, b])
                     } else {
                         None
                     };
-                    let (color, ink) = remapped.unwrap_or_else(|| {
+                    let (color, ink, source) = remapped.unwrap_or_else(|| {
                         let color = Rgb {
                             r: to_byte(r),
                             g: to_byte(g),
                             b: to_byte(b),
                         };
-                        (color, None)
+                        (color, None, None)
                     });
-                    self.set_device_color(op == b"rg", color, ink);
+                    self.set_device_color(op == b"rg", color, ink, source);
                 }
             }
             b"k" | b"K" => {
@@ -1478,15 +1496,15 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     (self.num(3), self.num(2), self.num(1), self.num(0))
                 {
                     let remapped = if self.defaults.cmyk {
-                        self.remapped(b"DeviceCMYK", &[c, m, y, k])
+                        self.remapped(b"DeviceCMYK", vec![c, m, y, k])
                     } else {
                         None
                     };
-                    let (color, ink) = remapped.unwrap_or_else(|| {
+                    let (color, ink, source) = remapped.unwrap_or_else(|| {
                         let ink = [to_byte(c), to_byte(m), to_byte(y), to_byte(k)];
-                        (cmyk_to_rgb(c, m, y, k), Some(ink))
+                        (cmyk_to_rgb(c, m, y, k), Some(ink), None)
                     });
-                    self.set_device_color(op == b"k", color, ink);
+                    self.set_device_color(op == b"k", color, ink, source);
                 }
             }
             b"cs" | b"CS" => {
@@ -1500,14 +1518,23 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 // made white — and the whole colorant, a tint of 1.0, in a
                 // `/Separation` or `/DeviceN` one, which it made none.
                 let components = self.fonts.initial_color(&space);
-                let initial = components
+                let intent = self.intent();
+                let resolved = components
                     .as_ref()
-                    .and_then(|c| self.fonts.resolve_color(&space, c))
-                    .unwrap_or(Rgb::BLACK);
+                    .and_then(|c| self.fonts.resolve_color(&space, c, intent));
                 let ink = components
                     .as_ref()
                     .and_then(|c| self.fonts.resolve_ink(&space, c));
-                self.set_color(fill, initial, Some(space), ink);
+                // The colour is the seam's, so an intent changing later asks
+                // it again; a colour the seam could not resolve stays black.
+                let source = resolved.and(components).map(|components| {
+                    Arc::new(ColorSource {
+                        family: None,
+                        components,
+                    })
+                });
+                let initial = resolved.unwrap_or(Rgb::BLACK);
+                self.set_color(fill, initial, Some(space), ink, source);
             }
             b"sc" | b"SC" | b"scn" | b"SCN" => {
                 let fill = op == b"sc" || op == b"scn";
@@ -1537,11 +1564,16 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     // `cs` had reset it to and the pattern with no colour to
                     // take.
                     if !components.is_empty() {
+                        let intent = self.intent();
                         if let Some(color) = space
                             .as_ref()
-                            .and_then(|s| self.fonts.resolve_color(s, &components))
+                            .and_then(|s| self.fonts.resolve_color(s, &components, intent))
                         {
-                            self.set_color(fill, color, None, None);
+                            let source = Arc::new(ColorSource {
+                                family: None,
+                                components,
+                            });
+                            self.set_color(fill, color, None, None, Some(source));
                         }
                     }
                     self.set_pattern(fill, name);
@@ -1551,22 +1583,28 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     return;
                 }
 
-                let (resolved, ink) = match &space {
-                    Some(space) => (
-                        self.fonts.resolve_color(space, &components),
-                        self.fonts.resolve_ink(space, &components),
-                    ),
+                let (resolved, ink, source) = match &space {
+                    Some(space) => {
+                        let intent = self.intent();
+                        let color = self.fonts.resolve_color(space, &components, intent);
+                        let ink = self.fonts.resolve_ink(space, &components);
+                        let source = Arc::new(ColorSource {
+                            family: None,
+                            components,
+                        });
+                        (color, ink, Some(source))
+                    }
                     // Without a named space the component count is the only
                     // clue, and it is a reliable one: four is DeviceCMYK. A
                     // scope that remaps the family the count reads in is
                     // asked by that device space's name (8.6.5.6).
                     None => {
                         let remapped = match self.defaults.remapped_by_count(components.len()) {
-                            Some(family) => self.remapped(family, &components),
+                            Some(family) => self.remapped(family, components.clone()),
                             None => None,
                         };
                         match remapped {
-                            Some((color, ink)) => (Some(color), ink),
+                            Some((color, ink, source)) => (Some(color), ink, source),
                             None => (
                                 Some(components_to_rgb(&components)),
                                 match components[..] {
@@ -1575,12 +1613,13 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                                     }
                                     _ => None,
                                 },
+                                None,
                             ),
                         }
                     }
                 };
                 if let Some(color) = resolved {
-                    self.set_color(fill, color, space, ink);
+                    self.set_color(fill, color, space, ink, source);
                 }
             }
 
@@ -1909,11 +1948,68 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     /// Out of line and cold, because it is asked only in a scope that names a
     /// default, so the seam's two answers stay out of the operator arms that
     /// every page runs.
+    ///
+    /// The colour comes back with what it was resolved from, so an intent
+    /// changing later resolves it again in the default.
     #[cold]
     #[inline(never)]
-    fn remapped(&self, space: &[u8], components: &[f64]) -> Option<(Rgb, Option<[u8; 4]>)> {
-        let color = self.fonts.resolve_color(space, components)?;
-        Some((color, self.fonts.resolve_ink(space, components)))
+    fn remapped(
+        &self,
+        space: &'static [u8],
+        components: Vec<f64>,
+    ) -> Option<(Rgb, Option<[u8; 4]>, Option<Arc<ColorSource>>)> {
+        let color = self
+            .fonts
+            .resolve_color(space, &components, self.intent())?;
+        let ink = self.fonts.resolve_ink(space, &components);
+        let source = Arc::new(ColorSource {
+            family: Some(space),
+            components,
+        });
+        Some((color, ink, Some(source)))
+    }
+
+    /// The rendering intent in force (8.6.5.8).
+    fn intent(&self) -> RenderingIntent {
+        self.gs.stored_parameters().rendering_intent
+    }
+
+    /// Resolves the fill and stroke colours again where the rendering intent
+    /// in force is no longer `before` (11.7.5.3): a colour is converted when
+    /// it is set, and an intent that changes after it was set — by `ri`, or by
+    /// a `gs` whose `/RI` names another — paints it in the new one. A colour
+    /// a device operator converted in place keeps it, since no intent changes
+    /// it, and so does one the seam cannot resolve again; the ink and the
+    /// pattern a slot holds are the space's and stay as they are. Setting the
+    /// intent in force again resolves nothing.
+    fn intent_changed(&mut self, before: RenderingIntent) {
+        let intent = self.intent();
+        if intent == before {
+            return;
+        }
+        for fill in [true, false] {
+            let (source, named) = if fill {
+                (self.gs.fill_source.clone(), &self.gs.fill_space)
+            } else {
+                (self.gs.stroke_source.clone(), &self.gs.stroke_space)
+            };
+            let Some(source) = source else {
+                continue;
+            };
+            let space: &[u8] = match (source.family, named) {
+                (Some(family), _) => family,
+                (None, Some(named)) => named,
+                (None, None) => continue,
+            };
+            let Some(color) = self.fonts.resolve_color(space, &source.components, intent) else {
+                continue;
+            };
+            if fill {
+                self.gs.fill_color = color;
+            } else {
+                self.gs.stroke_color = color;
+            }
+        }
     }
 
     /// Applies the colour a device operator sets, and selects the operator's
@@ -1925,8 +2021,14 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     /// until October 2026. It holds no name instead, which is the reading by
     /// component count: the operands `sc` gives next are read in the family
     /// the operator selected, and allocate nothing.
-    fn set_device_color(&mut self, fill: bool, color: Rgb, ink: Option<[u8; 4]>) {
-        self.set_color(fill, color, None, ink);
+    fn set_device_color(
+        &mut self,
+        fill: bool,
+        color: Rgb,
+        ink: Option<[u8; 4]>,
+        source: Option<Arc<ColorSource>>,
+    ) {
+        self.set_color(fill, color, None, ink, source);
         if fill {
             self.gs.fill_space = None;
         } else {
@@ -1935,12 +2037,21 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     }
 
     /// Applies a colour to the fill or stroke slot, with its DeviceCMYK
-    /// components when it has them.
-    fn set_color(&mut self, fill: bool, color: Rgb, space: Option<Vec<u8>>, ink: Option<[u8; 4]>) {
+    /// components when it has them, and what it was resolved from where the
+    /// seam resolved it.
+    fn set_color(
+        &mut self,
+        fill: bool,
+        color: Rgb,
+        space: Option<Vec<u8>>,
+        ink: Option<[u8; 4]>,
+        source: Option<Arc<ColorSource>>,
+    ) {
         if fill {
             self.gs.fill_color = color;
             self.gs.fill_ink = ink;
             self.gs.fill_pattern = None;
+            self.gs.fill_source = source;
             if let Some(space) = space {
                 self.gs.fill_space = Some(space);
             }
@@ -1948,6 +2059,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             self.gs.stroke_color = color;
             self.gs.stroke_ink = ink;
             self.gs.stroke_pattern = None;
+            self.gs.stroke_source = source;
             if let Some(space) = space {
                 self.gs.stroke_space = Some(space);
             }
@@ -3555,7 +3667,12 @@ mod tests {
                 _ => None,
             }
         }
-        fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
+        fn resolve_color(
+            &self,
+            space: &[u8],
+            components: &[f64],
+            _intent: RenderingIntent,
+        ) -> Option<Rgb> {
             let byte = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             match (space, components) {
                 (b"Prgb", [r, g, b]) => Some(Rgb {
@@ -3655,6 +3772,224 @@ mod tests {
         assert_eq!(state.stroke_color, Rgb { r: 0, g: 0, b: 255 });
     }
 
+    /// Resources whose spaces answer each rendering intent with a colour of
+    /// its own, and which count what they are asked: `/ICC` and the
+    /// uncoloured pattern space `/PICC` over it, one component each, and a
+    /// `/DefaultGray` remapping `g`. `/GSp`, `/GSs` and `/GSr` are graphics
+    /// states naming an intent by `/RI`.
+    struct IntentSpaces {
+        asked: std::cell::Cell<u32>,
+    }
+
+    impl IntentSpaces {
+        fn new() -> IntentSpaces {
+            IntentSpaces {
+                asked: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    /// The colour [`IntentSpaces`] gives grey `v` in `intent`: a channel an
+    /// intent, and an intent it does not recognise read as relative
+    /// colorimetric, as 8.6.5.8 has it and the facade reads it.
+    fn intent_colour(intent: RenderingIntent, v: u8) -> Rgb {
+        match intent {
+            RenderingIntent::Perceptual => Rgb { r: v, g: 0, b: 0 },
+            RenderingIntent::Saturation => Rgb { r: 0, g: v, b: 0 },
+            RenderingIntent::AbsoluteColorimetric => Rgb { r: 0, g: 0, b: v },
+            RenderingIntent::RelativeColorimetric | RenderingIntent::Unrecognised => {
+                Rgb { r: v, g: v, b: v }
+            }
+        }
+    }
+
+    impl FontSource for IntentSpaces {
+        fn decode(&self, _font: &[u8], _bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            Vec::new()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn color_components(&self, space: &[u8]) -> Option<usize> {
+            matches!(space, b"ICC" | b"PICC").then_some(1)
+        }
+        /// `/ICC` starts at a grey every intent paints its own way, so the
+        /// colour `cs` sets shows whether an intent changing reaches it.
+        fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+            match space {
+                b"ICC" => Some(vec![0.75]),
+                b"PICC" => Some(vec![0.0]),
+                _ => None,
+            }
+        }
+        fn resolve_color(
+            &self,
+            space: &[u8],
+            components: &[f64],
+            intent: RenderingIntent,
+        ) -> Option<Rgb> {
+            self.asked.set(self.asked.get() + 1);
+            if !matches!(space, b"ICC" | b"PICC" | b"DeviceGray") {
+                return None;
+            }
+            Some(intent_colour(
+                intent,
+                to_byte(components.first().copied().unwrap_or(0.0)),
+            ))
+        }
+        fn device_defaults(&self) -> DeviceDefaults {
+            DeviceDefaults {
+                gray: true,
+                rgb: false,
+                cmyk: false,
+            }
+        }
+        fn ext_g_state(&self, name: &[u8]) -> Option<Arc<StateParameters>> {
+            let intent = match name {
+                b"GSp" => RenderingIntent::Perceptual,
+                b"GSs" => RenderingIntent::Saturation,
+                b"GSr" => RenderingIntent::RelativeColorimetric,
+                _ => return None,
+            };
+            Some(Arc::new(StateParameters {
+                rendering_intent: Some(intent),
+                ..StateParameters::default()
+            }))
+        }
+    }
+
+    /// The fill and stroke colours of every painting operator's state, in
+    /// order, with the fill's pattern.
+    fn painted_colours(src: &[u8], fonts: &IntentSpaces) -> Vec<(Rgb, Rgb, Option<Vec<u8>>)> {
+        let mut device = RecordingDevice::new();
+        interpret(src, Matrix::IDENTITY, &mut device, fonts);
+        device
+            .events()
+            .iter()
+            .filter(|event| matches!(event.kind(), EventKind::FillPath | EventKind::StrokePath))
+            .filter_map(Event::state)
+            .map(|state| {
+                (
+                    state.fill_color,
+                    state.stroke_color,
+                    state.fill_pattern.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// **A colour set before the rendering intent changed paints in the
+    /// intent at the paint** (11.7.5.3): `ri` and a `gs` naming an `/RI` each
+    /// resolve the fill and the stroke colour again, from the space and
+    /// components they were set with — a named space's, the initial colour
+    /// `cs` set, a `g` a `/DefaultGray` remaps, an uncoloured pattern's,
+    /// whose pattern stays selected — while a colour a device operator
+    /// converted in place keeps its light. `Q` restores a colour with the
+    /// intent it was resolved in; a name 8.6.5.8 does not list reads as
+    /// relative colorimetric; and setting the intent in force again resolves
+    /// nothing.
+    #[test]
+    fn a_colour_set_before_the_intent_changed_paints_in_the_new_intent() {
+        use RenderingIntent::{Perceptual, RelativeColorimetric, Saturation};
+        let grey = |v: f64| to_byte(v);
+        let fonts = IntentSpaces::new();
+        let fill = |src: &[u8]| {
+            painted_colours(src, &fonts)
+                .into_iter()
+                .map(|(fill, _, _)| fill)
+                .collect::<Vec<Rgb>>()
+        };
+
+        // A named space, by `ri` and by `gs`, fill and stroke alike.
+        for set in [&b"/Perceptual ri"[..], b"/GSp gs"] {
+            let mut src = b"/ICC cs 0.5 sc /ICC CS 0.25 SC ".to_vec();
+            src.extend_from_slice(set);
+            src.extend_from_slice(b" 0 0 1 1 re f 0 0 m 1 1 l S");
+            let painted = painted_colours(&src, &fonts);
+            for (fill, stroke, _) in &painted {
+                assert_eq!(
+                    *fill,
+                    intent_colour(Perceptual, grey(0.5)),
+                    "{set:?}: the fill"
+                );
+                assert_eq!(
+                    *stroke,
+                    intent_colour(Perceptual, grey(0.25)),
+                    "{set:?}: the stroke"
+                );
+            }
+            assert_eq!(painted.len(), 2, "{set:?}: a fill and a stroke");
+        }
+
+        // `cs`'s initial colour, and `Q` restoring the intent a colour was
+        // resolved in.
+        assert_eq!(
+            fill(b"/ICC cs /Saturation ri 0 0 1 1 re f"),
+            [intent_colour(Saturation, grey(0.75))]
+        );
+        assert_eq!(
+            fill(b"/ICC cs 0.5 sc q /Saturation ri 0 0 1 1 re f Q 0 0 1 1 re f"),
+            [
+                intent_colour(Saturation, grey(0.5)),
+                intent_colour(RelativeColorimetric, grey(0.5)),
+            ]
+        );
+
+        // A device colour converted in place keeps its light; one a default
+        // remaps is the default's, in the new intent.
+        assert_eq!(
+            fill(b"0.5 0 0 rg /Perceptual ri 0 0 1 1 re f"),
+            [Rgb {
+                r: grey(0.5),
+                g: 0,
+                b: 0
+            }]
+        );
+        assert_eq!(
+            fill(b"0.5 g /Perceptual ri 0 0 1 1 re f"),
+            [intent_colour(Perceptual, grey(0.5))]
+        );
+
+        // An uncoloured pattern's colour, its pattern still selected.
+        let painted = painted_colours(b"/PICC cs 0.5 /P0 scn /Saturation ri 0 0 1 1 re f", &fonts);
+        assert_eq!(
+            painted,
+            [(
+                intent_colour(Saturation, grey(0.5)),
+                Rgb::BLACK,
+                Some(b"P0".to_vec())
+            )]
+        );
+
+        // An unrecognised name, and an intent changed back by `gs`.
+        assert_eq!(
+            fill(b"/ICC cs 0.5 sc /Saturation ri /Bogus ri 0 0 1 1 re f"),
+            [intent_colour(RelativeColorimetric, grey(0.5))]
+        );
+        assert_eq!(
+            fill(b"/ICC cs 0.5 sc /GSs gs 0 0 1 1 re f /GSr gs 0 0 1 1 re f"),
+            [
+                intent_colour(Saturation, grey(0.5)),
+                intent_colour(RelativeColorimetric, grey(0.5)),
+            ]
+        );
+
+        // The intent in force set again asks the seam nothing.
+        let counted = IntentSpaces::new();
+        painted_colours(b"/ICC cs 0.5 sc /Saturation ri", &counted);
+        let after_change = counted.asked.get();
+        let again = IntentSpaces::new();
+        painted_colours(
+            b"/ICC cs 0.5 sc /Saturation ri /Saturation ri /GSs gs",
+            &again,
+        );
+        assert_eq!(again.asked.get(), after_change, "the same intent again");
+        // And a page that sets no intent asks once a colour.
+        let none = IntentSpaces::new();
+        painted_colours(b"/ICC cs 0.5 sc 0 0 1 1 re f", &none);
+        assert_eq!(none.asked.get(), 2, "the initial colour, then the set one");
+    }
+
     /// Resources that know DeviceCMYK by name, as the facade's do.
     struct CmykSpaces;
 
@@ -3668,7 +4003,7 @@ mod tests {
         fn color_components(&self, space: &[u8]) -> Option<usize> {
             (space == b"DeviceCMYK").then_some(4)
         }
-        fn resolve_color(&self, space: &[u8], c: &[f64]) -> Option<Rgb> {
+        fn resolve_color(&self, space: &[u8], c: &[f64], _intent: RenderingIntent) -> Option<Rgb> {
             match (space, c) {
                 (b"DeviceCMYK", [c, m, y, k]) => Some(cmyk_to_rgb(*c, *m, *y, *k)),
                 _ => None,

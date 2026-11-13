@@ -57,9 +57,17 @@ keeps each, and compiles one the first time an intent selects it, by ICC.1
 8.10.2's precedence (`docs/design/icc.md`). A profile may carry tables and a
 matrix/TRC or grey model both, and 8.10.2 puts the tables first: an intent
 converts through the model only where the profile carries neither the
-`A2B*` tag designated for it nor `A2B0`. Every conversion the renderer makes
-takes relative colorimetric, 8.6.5.8's initial intent, through the first of
-`D2B1`, `A2B1`, `A2B0`, the model and `A2B2` the profile carries. Absolute
+`A2B*` tag designated for it nor `A2B0`. A flat colour — a fill, a stroke,
+a glyph, a stencil mask, an uncoloured pattern's colour — converts in the
+intent in force at its painting operator, `ri`'s or a graphics state's
+`/RI`, a name 8.6.5.8 does not list read as relative colorimetric: the
+interpreter keeps beside each colour the space and components it was set
+with (`GraphicsState::fill_source`, `ColorSource`) and resolves it again
+when the intent changes, so a colour set before `ri` paints in the intent at
+the paint (11.7.5.3) and `Q` restores it with the intent it was resolved
+in. An image and a shading convert in relative colorimetric, 8.6.5.8's
+initial intent. Relative colorimetric converts through the first of `D2B1`,
+`A2B1`, `A2B0`, the model and `A2B2` the profile carries. Absolute
 colorimetric converts through `D2B3` as it stands where the profile carries
 one, that tag being ICC-absolute already, and otherwise is relative
 colorimetric's `A2B*` table or model with the connection-space value scaled
@@ -1032,11 +1040,12 @@ group form's resource name, `Truncated { limit }` and
 the blend mode, whose `ExtGState` no device is told: the interpreter hands
 every device the state a `gs` made, never the `gs`.
 
-The parameters a `gs` stores rather than applies — the rendering intent,
-black-point compensation, overprint, flatness, smoothness, stroke adjustment,
-alpha source, text knockout, the black generation, undercolour removal and
-transfer functions, and the halftone and its origin — travel in the state as one shared
-`StoredParameters` value, `None` while every one has its initial value, so a
+The parameters a `gs` stores rather than applies — black-point
+compensation, overprint, flatness, smoothness, stroke adjustment, alpha
+source, text knockout, the black generation, undercolour removal and
+transfer functions, and the halftone and its origin — travel in the state as
+one shared `StoredParameters` value with the rendering intent, which flat
+colours apply, `None` while every one has its initial value, so a
 `q` copies one word more and a copy allocates nothing. The display list's
 budget counts that value once per change rather than once per event: the
 recorder remembers the value it last counted and counts again when an event
