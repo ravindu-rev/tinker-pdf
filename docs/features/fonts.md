@@ -1361,6 +1361,22 @@ What it does:
   carries beside it. text-rendering-tests' forty-one `MORX` sections run
   through it and pass whole (`tests/text_rendering.rs`); the refused-by-name
   table below says what a run over a face whose AAT table is not run does.
+  A face shaped through its AAT tables — a `morx` or a `kerx` this crate can
+  read, and no readable `GSUB` or `GPOS` — is kerned by its `kerx` where
+  `GPOS` would run: `aat::Kerx` reads a table of version 2, 3 or 4 and runs
+  its subtables in order over the run in layout order, the pair formats 0
+  (ordered pairs, bisected), 2 (class offsets added to the kerning array's
+  address, an uncovered glyph's zero landing on row or column 0) and 6 (row
+  and column indices into the array, two-byte values or four) adding a pair's
+  value to its left glyph's advance, or, across the line, to its right
+  glyph's `y_offset`; unless `kern` is set to 0, `font-kerning: none`, or a
+  caller naming its own features names no `kern`. A version-4 subtable of
+  variation tuples (`Warning::VariationKerningNotRun`), a vertical subtable
+  in an upright run (`Warning::VerticalKerningNotRun`) and a format not run
+  (`Warning::SubtableTypeNotRun`) are refused by name, a cell a subtable
+  points past is named as malformed, and `Limits::max_subtables` bounds the
+  subtables read. A face carrying `GSUB` or `GPOS` is not kerned by its
+  `kerx`.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so
@@ -1824,7 +1840,7 @@ corpora already vendored here. So every name stays on the list.
 |---|---|---|---|
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent; shaping to *produce* a document is `tinker-pdf-shape`, above | [shaping](../design/shaping.md) |
 | A face whose only layout tables are a **Graphite** description: a `Silf`, with no readable `GSUB` or `GPOS` and no `morx` beside it | `tinker_pdf_shape::Warning::TableNotRun { table: Silf }`, once a run; the run is shaped by the face's `cmap` and `hmtx` alone, as a face with no layout tables is | Graphite shaping is a capability not yet built, and refuses by name until its row closes (ruling 3); a face carrying `GSUB` or `GPOS` as well shapes through them as before | [shaping](../design/shaping.md), *Graphite shaping*; [ROADMAP](../ROADMAP.md) FT-07d |
-| A face whose only AAT table is one this crate does not run, with no readable `GSUB` or `GPOS` beside it: a `mort` with no `morx` or `Silf`, or a `morx` it cannot read — a version other than 2 or 3, or a header cut short | `tinker_pdf_shape::Warning::TableNotRun { table: mort }`, or `{ table: morx }`, once a run; the run is shaped by the face's `cmap` and `hmtx` alone, as a face with no layout tables is | `mort`, the table `morx` extends, is a stated non-goal and stays refused, and a face carrying both is shaped through its `morx`, the manual having it ignore the `mort`; a `morx` that cannot be read names no chain to run; a face carrying `GSUB` or `GPOS` as well shapes through them as before | [shaping](../design/shaping.md), *AAT shaping*; [ROADMAP](../ROADMAP.md) FT-07c |
+| An AAT table this crate does not run, on a face with no readable `GSUB` or `GPOS`: a `mort` with no `morx` or `Silf`, a `morx` it cannot read — a version other than 2 or 3, or a header cut short — or a `kerx` it cannot read — a version other than 2, 3 or 4, or a header cut short | `tinker_pdf_shape::Warning::TableNotRun { table: mort }`, `{ table: morx }` or `{ table: kerx }`, each once a run; the run is not substituted, or not kerned, by that table — shaped by the face's `cmap` and `hmtx` alone where it was the face's only one | `mort`, the table `morx` extends, is a stated non-goal and stays refused, and a face carrying both is shaped through its `morx`, the manual having it ignore the `mort`; a `morx` or `kerx` that cannot be read names nothing to run; a face carrying `GSUB` or `GPOS` as well shapes through them as before | [shaping](../design/shaping.md), *AAT shaping*; [ROADMAP](../ROADMAP.md) FT-07c |
 | A CFF that calls a subroutine it does not carry, whose subroutine calls itself, or that declares `CharstringType 1`; or one whose flattening a kept glyph refuses — a run that meets the reader's stack, transient-array, depth or operation bound, that does not end in `endchar` or reads past it or past the end of a body, a flattened charstring past 65 535 bytes, or flattened charstrings past the program's own length | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
 | A **CID-keyed** CFF under `add_cid_font` whose charset is not one-to-one | `add_cid_font` returns false | 9.7.4.2 reads a CID through the charset, which answers with the first glyph claiming it, so a glyph whose CID another also claims is one no code reaches. A one-to-one charset is accepted and each glyph written as its CID | this page |

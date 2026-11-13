@@ -19,10 +19,11 @@ use std::collections::BTreeMap;
 use tinker_pdf_font::Sfnt;
 
 use tinker_pdf_shape::aat::{
-    aat_setting, AatSetting, Cursor, Entry, Feat, FeatureEntry, Lookup, LookupError, LookupFormat,
-    Morx, Selection, Site, StateError, StateTable, Traversal, ANY_ORIENTATION, COMPONENT_STACK,
-    CONTEXTUAL, DELETED, DELETED_GLYPH, DESCENDING, END_OF_TEXT, INSERTION, LIGATURE, LOGICAL,
-    NONCONTEXTUAL, OUT_OF_BOUNDS, REARRANGEMENT, VERTICAL,
+    aat_setting, AatSetting, Cursor, Entry, Feat, FeatureEntry, Kerx, Lookup, LookupError,
+    LookupFormat, Morx, Selection, Site, StateError, StateTable, Traversal, ANY_ORIENTATION,
+    COMPONENT_STACK, CONTEXTUAL, CROSS_STREAM, DELETED, DELETED_GLYPH, DESCENDING, END_OF_TEXT,
+    INSERTION, KERX_VARIATION, KERX_VERTICAL, LIGATURE, LOGICAL, NONCONTEXTUAL, OUT_OF_BOUNDS,
+    REARRANGEMENT, VERTICAL,
 };
 use tinker_pdf_shape::bidi::{BaseDirection, Level};
 use tinker_pdf_shape::shape::Run;
@@ -4626,4 +4627,616 @@ fn an_insertion_subtable_that_cannot_be_read_is_named() {
     let (out, warnings) = through(at_the_end, &[7, 2], &Limits::DEFAULT);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(out, vec![(7, 0), (2, 1), (30, 1)]);
+}
+
+// --- kerx: the pair formats (FT-07c.11) ------------------------------------
+//
+// The extended kerning table's header and subtable coverage, and the three
+// pair formats, run in the positioning stage of a face shaped through its AAT
+// tables: along the line into the left glyph's advance, across it into the
+// right glyph's `y_offset`.
+
+/// The kerning face's glyphs: `A`, `V`, `T`, `o` and `x`, then alef and bet.
+const KA: u16 = 1;
+/// See [`KA`].
+const KV: u16 = 2;
+/// See [`KA`].
+const KT: u16 = 3;
+/// See [`KA`].
+const KO: u16 = 4;
+/// See [`KA`].
+const KX: u16 = 5;
+/// See [`KA`].
+const KALEF: u16 = 6;
+/// See [`KA`].
+const KBET: u16 = 7;
+
+/// A face of eight glyphs — `.notdef`, `A`, `V`, `T`, `o`, `x`, alef and bet
+/// — carrying no table but those given.
+fn kerning_face() -> Face {
+    Face::new(
+        8,
+        &[
+            ('A', KA),
+            ('V', KV),
+            ('T', KT),
+            ('o', KO),
+            ('x', KX),
+            ('\u{5D0}', KALEF),
+            ('\u{5D1}', KBET),
+            ('\u{6F22}', KX),
+        ],
+    )
+}
+
+/// A `kerx` table of `version` holding `subtables`.
+fn kerx_table(version: u16, subtables: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = u16s(&[version, 0]);
+    out.extend(count32(subtables.len()).to_be_bytes());
+    for subtable in subtables {
+        out.extend_from_slice(subtable);
+    }
+    out
+}
+
+/// One `kerx` subtable: its coverage, whose low byte is its format, its
+/// `tupleCount` and its body, padded to four bytes.
+fn kerx_subtable(coverage: u32, tuple_count: u32, body: &[u8]) -> Vec<u8> {
+    let mut padded = body.to_vec();
+    while padded.len() % 4 != 0 {
+        padded.push(0);
+    }
+    let mut out = u32s(&[count32(12 + padded.len()), coverage, tuple_count]);
+    out.extend(padded);
+    out
+}
+
+/// A format 0 subtable's body: `nPairs` and the three search fields, then
+/// the pairs, sorted by the key their two glyphs make.
+fn kerx_pairs(pairs: &[(u16, u16, i16)]) -> Vec<u8> {
+    let mut sorted = pairs.to_vec();
+    sorted.sort_by_key(|(left, right, _)| (*left, *right));
+    let units = count16(sorted.len());
+    let [range, selector, shift] = search_fields(6, units);
+    let mut out = u32s(&[
+        u32::from(units),
+        u32::from(range),
+        u32::from(selector),
+        u32::from(shift),
+    ]);
+    for (left, right, value) in &sorted {
+        out.extend(u16s(&[*left, *right]));
+        out.extend(value.to_be_bytes());
+    }
+    out
+}
+
+/// A format 2 subtable's body: `left` and `right` give glyphs their row and
+/// column, and `rows` the kerning array, two-byte values a cell. The class
+/// tables hold each class as the byte offset of its row or column — a row
+/// pre-multiplied by the row's width — and every offset is from the start of
+/// the subtable, twelve bytes before the body.
+fn kerx_class_array(left: &[(u16, u16)], right: &[(u16, u16)], rows: &[&[i16]]) -> Vec<u8> {
+    let width = count16(rows.first().map_or(0, |row| row.len()) * 2);
+    let left_table = lookup_single(
+        &left
+            .iter()
+            .map(|(glyph, row)| (*glyph, row * width))
+            .collect::<Vec<_>>(),
+    );
+    let right_table = lookup_single(
+        &right
+            .iter()
+            .map(|(glyph, column)| (*glyph, column * 2))
+            .collect::<Vec<_>>(),
+    );
+    let left_at = 12 + 16;
+    let right_at = left_at + left_table.len();
+    let array_at = right_at + right_table.len();
+    let mut out = u32s(&[
+        u32::from(width),
+        count32(left_at),
+        count32(right_at),
+        count32(array_at),
+    ]);
+    out.extend(left_table);
+    out.extend(right_table);
+    for row in rows {
+        for value in *row {
+            out.extend(value.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// A format 6 subtable's body: `rows` and `columns` give glyphs their row
+/// and column index, the row's pre-multiplied by the column count, and
+/// `cells` the kerning array, a row at a time; two-byte values, or four
+/// where `long` sets `valuesAreLong`, in the index tables and the array.
+fn kerx_index_array(
+    rows: &[(u16, u64)],
+    columns: &[(u16, u64)],
+    cells: &[&[i32]],
+    long: bool,
+) -> Vec<u8> {
+    let size: u16 = if long { 4 } else { 2 };
+    let column_count = count16(cells.first().map_or(0, |row| row.len()));
+    let premultiplied: Vec<(u16, u64)> = rows
+        .iter()
+        .map(|(glyph, row)| (*glyph, row * u64::from(column_count)))
+        .collect();
+    let row_table = lookup_pairs(size, &premultiplied);
+    let column_table = lookup_pairs(size, columns);
+    let rows_at = 12 + 20;
+    let columns_at = rows_at + row_table.len();
+    let array_at = columns_at + column_table.len();
+    let mut out = u32s(&[u32::from(long)]);
+    out.extend(u16s(&[count16(cells.len()), column_count]));
+    out.extend(u32s(&[
+        count32(rows_at),
+        count32(columns_at),
+        count32(array_at),
+    ]));
+    out.extend(row_table);
+    out.extend(column_table);
+    for row in cells {
+        for value in *row {
+            if long {
+                out.extend(value.to_be_bytes());
+            } else {
+                out.extend(i16::try_from(*value).expect("short").to_be_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// `kerx` subtable `subtable`'s site.
+fn kerx_site(subtable: u32) -> Site {
+    Site {
+        table: Tag::new(b"kerx"),
+        chain: 0,
+        subtable,
+    }
+}
+
+/// What `text` shapes to along a line through a face carrying `kerx`, and
+/// what the runs said.
+fn kerned(face: &Face, text: &str) -> (Vec<ShapedGlyph>, Vec<Warning>) {
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let runs = line_runs(&Shaper::new(&sfnt), text);
+    let warnings = runs
+        .iter()
+        .flat_map(|run| run.warnings().iter().copied())
+        .collect();
+    (glyphs(&runs), warnings)
+}
+
+/// The kerning face's glyphs of `text`, each with its own advance moved by
+/// the change `moved` gives its position.
+fn moved_by(face: &Face, text: &str, moved: &[i32]) -> Vec<ShapedGlyph> {
+    text.chars()
+        .zip(clusters(text))
+        .zip(moved)
+        .map(|((c, cluster), by)| {
+            let mut glyph = face.plain(face.glyph(c), cluster);
+            glyph.x_advance += by;
+            glyph
+        })
+        .collect()
+}
+
+/// Each pair format kerns the pairs it holds — `AV` by −80 and `To` by −50 —
+/// each pair's first advance moved by its value, along a line, and leaves
+/// every other pair as it was; two subtables kerning one pair add.
+#[test]
+fn each_kerx_pair_format_kerns_its_pairs() {
+    let pairs = kerx_subtable(0, 0, &kerx_pairs(&[(KA, KV, -80), (KT, KO, -50)]));
+    let classes = kerx_subtable(
+        2,
+        0,
+        &kerx_class_array(
+            &[(KA, 1), (KT, 2)],
+            &[(KV, 1), (KO, 2)],
+            &[&[0, 0, 0], &[0, -80, 0], &[0, 0, -50]],
+        ),
+    );
+    let indices = |long: bool| {
+        kerx_subtable(
+            6,
+            0,
+            &kerx_index_array(
+                &[(KA, 1), (KT, 2)],
+                &[(KV, 1), (KO, 2)],
+                &[&[0, 0, 0], &[0, -80, 0], &[0, 0, -50]],
+                long,
+            ),
+        )
+    };
+    let text = "AVTox";
+    for (name, subtable) in [
+        ("format 0", pairs.clone()),
+        ("format 2", classes.clone()),
+        ("format 6", indices(false)),
+        ("format 6, long values", indices(true)),
+    ] {
+        let face = kerning_face().with(b"kerx", kerx_table(2, &[subtable]));
+        let (out, warnings) = kerned(&face, text);
+        assert!(warnings.is_empty(), "{name}: {warnings:?}");
+        assert_eq!(out, moved_by(&face, text, &[-80, 0, -50, 0, 0]), "{name}");
+        // `VA`, `oT` and `xA`: pairs the tables do not hold.
+        let (out, _) = kerned(&face, "VAoTxA");
+        assert_eq!(out, moved_by(&face, "VAoTxA", &[0; 6]), "{name}");
+    }
+    // Two subtables, additive; versions 3 and 4 alike.
+    for version in [2u16, 3, 4] {
+        let face = kerning_face().with(
+            b"kerx",
+            kerx_table(version, &[pairs.clone(), classes.clone()]),
+        );
+        let (out, warnings) = kerned(&face, "AV");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(out, moved_by(&face, "AV", &[-160, 0]), "version {version}");
+    }
+}
+
+/// A cross-stream subtable moves the right glyph of each pair up by its
+/// value, that glyph alone, and changes no advance.
+#[test]
+fn a_cross_stream_subtable_moves_glyphs_off_the_baseline() {
+    let face = kerning_face().with(
+        b"kerx",
+        kerx_table(
+            2,
+            &[kerx_subtable(
+                CROSS_STREAM,
+                0,
+                &kerx_pairs(&[(KA, KV, 30), (KV, KT, -12)]),
+            )],
+        ),
+    );
+    let (out, warnings) = kerned(&face, "AVTo");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut expected = moved_by(&face, "AVTo", &[0, 0, 0, 0]);
+    expected[1].y_offset = 30;
+    expected[2].y_offset = -12;
+    assert_eq!(out, expected);
+}
+
+/// `kern` set to 0 is `font-kerning: none`, and turns `kerx` off; a caller
+/// naming its own features kerns only where it names `kern`, and a setting
+/// above 0 turns it back on.
+#[test]
+fn kern_set_to_zero_turns_kerx_off() {
+    let face = kerning_face().with(
+        b"kerx",
+        kerx_table(2, &[kerx_subtable(0, 0, &kerx_pairs(&[(KA, KV, -80)]))]),
+    );
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let kern = Tag::new(b"kern");
+    let none: [Tag; 0] = [];
+    let named = [kern];
+    let off = [(kern, 0u32)];
+    let on = [(kern, 1u32)];
+    let later = [(kern, 0u32), (kern, 3)];
+    let advance = |shaper: &Shaper<'_>| {
+        let runs = line_runs(shaper, "AV");
+        assert!(runs.iter().all(|run| run.warnings().is_empty()));
+        glyphs(&runs)[0].x_advance
+    };
+    let plain = i32::from(face.advances[usize::from(KA)]);
+    assert_eq!(advance(&Shaper::new(&sfnt)), plain - 80);
+    assert_eq!(advance(&Shaper::new(&sfnt).with_settings(&off)), plain);
+    assert_eq!(
+        advance(&Shaper::new(&sfnt).with_settings(&later)),
+        plain - 80
+    );
+    assert_eq!(
+        advance(&Shaper::new(&sfnt).with_features(&none, &none)),
+        plain
+    );
+    assert_eq!(
+        advance(&Shaper::new(&sfnt).with_features(&none, &named)),
+        plain - 80
+    );
+    assert_eq!(
+        advance(&Shaper::new(&sfnt).with_features(&named, &none)),
+        plain - 80
+    );
+    assert_eq!(
+        advance(
+            &Shaper::new(&sfnt)
+                .with_features(&none, &none)
+                .with_settings(&on)
+        ),
+        plain - 80
+    );
+    assert_eq!(
+        advance(
+            &Shaper::new(&sfnt)
+                .with_features(&none, &named)
+                .with_settings(&off)
+        ),
+        plain
+    );
+}
+
+/// A subtable of a version-4 table whose `tupleCount` is above 0 holds
+/// vectors for a variable face, and is refused by name, kerning nothing; the
+/// count means nothing in a table of version 2 or 3.
+#[test]
+fn a_variation_tuple_is_refused_by_name() {
+    let body = kerx_pairs(&[(KA, KV, -80)]);
+    let face = kerning_face().with(
+        b"kerx",
+        kerx_table(
+            4,
+            &[
+                kerx_subtable(KERX_VARIATION, 2, &body),
+                kerx_subtable(0, 0, &kerx_pairs(&[(KT, KO, -50)])),
+            ],
+        ),
+    );
+    let (out, warnings) = kerned(&face, "AVTo");
+    assert_eq!(
+        warnings,
+        vec![Warning::VariationKerningNotRun { site: kerx_site(0) }]
+    );
+    assert_eq!(out, moved_by(&face, "AVTo", &[0, 0, -50, 0]));
+    for version in [2u16, 3] {
+        let face = kerning_face().with(b"kerx", kerx_table(version, &[kerx_subtable(0, 2, &body)]));
+        let (out, warnings) = kerned(&face, "AV");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(out, moved_by(&face, "AV", &[-80, 0]), "version {version}");
+    }
+}
+
+/// A subtable of vertical kerning values runs in no line and names nothing
+/// there; in an upright run it is refused by name, and a horizontal subtable
+/// is not for the run.
+#[test]
+fn a_vertical_subtable_runs_in_no_line_and_is_refused_in_a_column() {
+    let face = kerning_face().with(
+        b"kerx",
+        kerx_table(
+            2,
+            &[
+                kerx_subtable(
+                    KERX_VERTICAL,
+                    0,
+                    &kerx_pairs(&[(KA, KV, -80), (KX, KX, -9)]),
+                ),
+                kerx_subtable(0, 0, &kerx_pairs(&[(KT, KO, -50), (KX, KX, -7)])),
+            ],
+        ),
+    );
+    let (out, warnings) = kerned(&face, "AVTo");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, moved_by(&face, "AVTo", &[0, 0, -50, 0]));
+
+    // The face maps U+6F22 to its `x`, so the column's upright run holds two
+    // of them.
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let runs = Shaper::new(&sfnt)
+        .shape_text_vertical("\u{6F22}\u{6F22}", BaseDirection::Auto)
+        .1;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].orientation(), Orientation::Upright);
+    assert_eq!(
+        runs[0].warnings(),
+        &[
+            Warning::VerticalMetricsSynthesized,
+            Warning::VerticalKerningNotRun { site: kerx_site(0) },
+        ]
+    );
+    let upright: Vec<i32> = runs[0].glyphs().iter().map(|g| g.x_advance).collect();
+    assert_eq!(upright, vec![0, 0], "nothing kerned down the column");
+}
+
+/// A right-to-left run is kerned in layout order: its pair is the bet and
+/// the alef after it on the line, the bet's advance moved, and a pair the
+/// table holds in the text's order is no pair of the line.
+#[test]
+fn a_right_to_left_run_is_kerned_in_layout_order() {
+    let face = kerning_face().with(
+        b"kerx",
+        kerx_table(
+            2,
+            &[kerx_subtable(
+                0,
+                0,
+                &kerx_pairs(&[(KBET, KALEF, -60), (KALEF, KBET, -5)]),
+            )],
+        ),
+    );
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let (_, runs) = Shaper::new(&sfnt).shape_text("\u{5D0}\u{5D1}", BaseDirection::Auto);
+    assert!(!runs[0].direction().is_forward());
+    assert_eq!(
+        glyphs(&runs),
+        moved_by(&face, "\u{5D0}\u{5D1}", &[0, -60]),
+        "the bet, left of the alef on the line, moved"
+    );
+}
+
+/// The precedence: `kerx` kerns a face shaped through its AAT tables — with
+/// a `morx` or with none — and no face carrying `GSUB` or `GPOS`.
+#[test]
+fn kerx_runs_under_the_precedence_the_design_states() {
+    let kerx = || kerx_table(2, &[kerx_subtable(0, 0, &kerx_pairs(&[(KA, KV, -80)]))]);
+    let gpos = || {
+        layout_table(
+            &[(*b"kern", vec![0])],
+            &[lookup(2, &[pair_kern(KA, KV, -40)])],
+        )
+    };
+    let gsub = || {
+        layout_table(
+            &[(*b"liga", vec![0])],
+            &[lookup(4, &[ligature_subst(KT, &[KO], KX)])],
+        )
+    };
+    // `kerx` alone, and beside a `morx` that maps `x` to itself.
+    let alone = kerning_face().with(b"kerx", kerx());
+    assert_eq!(kerned(&alone, "AV").0, moved_by(&alone, "AV", &[-80, 0]));
+    let chained_face = alone.clone().with(
+        b"morx",
+        morx_table(2, &[chain(1, &[], &[noncontextual(1, &[(KX, KX)])])]),
+    );
+    let (out, warnings) = kerned(&chained_face, "AV");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, moved_by(&chained_face, "AV", &[-80, 0]));
+    // `GPOS` beside it: the `GPOS` kerning alone.
+    let with_gpos = alone.clone().with(b"GPOS", gpos());
+    assert_eq!(
+        kerned(&with_gpos, "AV").0,
+        moved_by(&with_gpos, "AV", &[-40, 0])
+    );
+    // `GSUB` and no `GPOS`: the OpenType path, which kerns nothing.
+    let with_gsub = alone.with(b"GSUB", gsub());
+    let (out, warnings) = kerned(&with_gsub, "AV");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, moved_by(&with_gsub, "AV", &[0, 0]));
+}
+
+/// A `kerx` this crate cannot read is named on every run, which is not
+/// kerned; a subtable the table cannot hold ends the walk, named, the ones
+/// before it run; a format the chapter does not define, or a state-machine
+/// format not run, is skipped and named; and past `Limits::max_subtables`
+/// nothing more is read.
+#[test]
+fn a_kerx_table_or_subtable_that_cannot_be_read_is_named() {
+    let good = || kerx_subtable(0, 0, &kerx_pairs(&[(KA, KV, -80)]));
+    for unreadable in [u16s(&[1, 0, 0, 0]), u16s(&[5, 0, 0, 0]), u16s(&[2, 0])] {
+        let face = kerning_face().with(b"kerx", unreadable);
+        let (out, warnings) = kerned(&face, "AV");
+        assert_eq!(out, moved_by(&face, "AV", &[0, 0]));
+        assert_eq!(
+            warnings,
+            vec![Warning::TableNotRun {
+                table: Tag::new(b"kerx")
+            }]
+        );
+    }
+
+    // A subtable claiming more than the table holds, and one shorter than
+    // its header.
+    for length in [4_000u32, 8] {
+        let mut bad = kerx_subtable(0, 0, &kerx_pairs(&[(KT, KO, -50)]));
+        bad[0..4].copy_from_slice(&length.to_be_bytes());
+        let face = kerning_face().with(b"kerx", kerx_table(2, &[good(), bad, good()]));
+        let (out, warnings) = kerned(&face, "AVTo");
+        assert_eq!(
+            out,
+            moved_by(&face, "AVTo", &[-80, 0, 0, 0]),
+            "length {length}"
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::MalformedAatSubtable { site: kerx_site(1) }]
+        );
+    }
+
+    // Formats 3, 5 and 7, undefined, and 1 and 4, state machines not run.
+    for format in [3u8, 5, 7, 255, 1, 4] {
+        let face = kerning_face().with(
+            b"kerx",
+            kerx_table(2, &[kerx_subtable(u32::from(format), 0, &[0; 32]), good()]),
+        );
+        let (out, warnings) = kerned(&face, "AV");
+        assert_eq!(out, moved_by(&face, "AV", &[-80, 0]), "format {format}");
+        assert_eq!(
+            warnings,
+            vec![Warning::SubtableTypeNotRun {
+                site: kerx_site(0),
+                kind: format
+            }],
+            "format {format}"
+        );
+    }
+
+    // The subtable ceiling, read through the table directly.
+    let table = kerx_table(2, &[good(), good(), good()]);
+    let kerx = Kerx::parse(&table).expect("readable");
+    assert_eq!((kerx.version(), kerx.subtable_count()), (2, 3));
+    let limits = Limits {
+        max_subtables: 2,
+        ..Limits::DEFAULT
+    };
+    let (subtables, warnings) = kerx.subtables(&limits);
+    assert_eq!(subtables.len(), 2);
+    assert_eq!(
+        warnings,
+        vec![Warning::SubtableBudgetExceeded {
+            table: Tag::new(b"kerx")
+        }]
+    );
+    let mut buffer = Buffer::from_glyphs(&[KA, KV]);
+    let warnings = kerx.run(&mut buffer, &limits);
+    assert_eq!(buffer.glyphs()[0].x_advance, -160, "two subtables of three");
+    assert_eq!(
+        warnings,
+        vec![Warning::SubtableBudgetExceeded {
+            table: Tag::new(b"kerx")
+        }]
+    );
+    let first = subtables[0];
+    assert_eq!(
+        (
+            first.index(),
+            first.format(),
+            first.coverage,
+            first.tuple_count
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(first.bytes().len(), good().len());
+}
+
+/// A cell the subtable's values point past, and a class table of a format
+/// the manual does not define, are named, and kern nothing.
+#[test]
+fn a_pair_table_pointing_past_itself_is_named() {
+    let malformed = Warning::MalformedAatSubtable { site: kerx_site(0) };
+    // Format 2 whose `V` column is offset 400 bytes into a three-cell row.
+    let mut classes = kerx_class_array(&[(KA, 1)], &[(KO, 1)], &[&[0, 0], &[0, -30]]);
+    let right_at = usize::try_from(u32::from_be_bytes(
+        classes[8..12].try_into().expect("four bytes"),
+    ))
+    .expect("small")
+        - 12;
+    // The right table is a format 6 lookup: its one unit's value sits 14
+    // bytes in.
+    classes[right_at + 14..right_at + 16].copy_from_slice(&400u16.to_be_bytes());
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[kerx_subtable(2, 0, &classes)]));
+    let (out, warnings) = kerned(&face, "Ao");
+    assert_eq!(out, moved_by(&face, "Ao", &[0, 0]));
+    assert_eq!(warnings, vec![malformed]);
+    // Format 6 whose `o` column index runs past the two cells of a row.
+    let indices = kerx_index_array(&[(KA, 1)], &[(KO, 9)], &[&[0, 0], &[0, -30]], false);
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[kerx_subtable(6, 0, &indices)]));
+    let (out, warnings) = kerned(&face, "Ao");
+    assert_eq!(out, moved_by(&face, "Ao", &[0, 0]));
+    assert_eq!(warnings, vec![malformed]);
+    // A class table of format 3.
+    let mut odd = kerx_class_array(&[(KA, 1)], &[(KO, 1)], &[&[0, 0], &[0, -30]]);
+    let left_at = usize::try_from(u32::from_be_bytes(
+        odd[4..8].try_into().expect("four bytes"),
+    ))
+    .expect("small")
+        - 12;
+    odd[left_at..left_at + 2].copy_from_slice(&3u16.to_be_bytes());
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[kerx_subtable(2, 0, &odd)]));
+    let (_, warnings) = kerned(&face, "Ao");
+    assert_eq!(
+        warnings,
+        vec![Warning::UnknownLookupFormat {
+            site: kerx_site(0),
+            format: 3
+        }]
+    );
 }

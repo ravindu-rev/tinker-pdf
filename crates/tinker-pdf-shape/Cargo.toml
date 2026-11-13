@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Text shaping in integer font design units, hand-rolled: OpenType Layout (ISO/IEC 14496-22) GDEF, GSUB and GPOS, and Apple Advanced Typography's morx chain, parsed and executed. No PDF types"
+description = "Text shaping in integer font design units, hand-rolled: OpenType Layout (ISO/IEC 14496-22) GDEF, GSUB and GPOS, and Apple Advanced Typography's morx and kerx, parsed and executed. No PDF types"
 # `data/aots` **ships**, and `exclude = ["data/"]` was here until the release
 # pipeline refused it. The reasoning for excluding it was that the Adobe
 # fixture corpus is read by `tests/aots.rs` alone, and a published crate

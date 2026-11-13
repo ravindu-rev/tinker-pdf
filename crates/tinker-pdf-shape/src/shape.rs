@@ -66,7 +66,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tinker_pdf_font::{Sfnt, VerticalOrigins};
 
-use crate::aat::{Feat, Morx, Selection};
+use crate::aat::{Feat, Kerx, Morx, Selection};
 use crate::apply::LookupIndex;
 use crate::arabic;
 use crate::bidi::{BaseDirection, Level, Paragraph};
@@ -682,18 +682,21 @@ pub struct Shaper<'a> {
     /// The AAT tables the face's runs are shaped through, where it carries
     /// no OpenType Layout table to shape them through. See [`aat_tables`].
     aat: Option<AatTables<'a>>,
-    /// The AAT table the face's runs are shaped without, where it carries no
-    /// OpenType Layout table either: a `morx` this crate cannot read, or a
-    /// `mort` where it has no `morx`. See [`aat_not_run`].
-    aat_not_run: Option<Tag>,
+    /// The AAT tables the face's runs are shaped without, where it carries no
+    /// OpenType Layout table either: for substitution, a `morx` this crate
+    /// cannot read, or a `mort` where it has no `morx`; for kerning, a `kerx`
+    /// it cannot read. See [`aat_not_run`].
+    aat_not_run: [Option<Tag>; 2],
 }
 
 /// The AAT tables a face's runs are shaped through (`docs/design/shaping.md`,
-/// *AAT shaping*, *Precedence*): its `morx`, and its `feat`, which says which
-/// features' settings exclude one another.
+/// *AAT shaping*, *Precedence*): its `morx` for substitution and its `kerx`
+/// for kerning, each where it has one this crate can read, and its `feat`,
+/// which says which features' settings exclude one another.
 #[derive(Clone, Copy, Debug)]
 struct AatTables<'a> {
-    morx: Morx<'a>,
+    morx: Option<Morx<'a>>,
+    kerx: Option<Kerx<'a>>,
     feat: Option<Feat<'a>>,
 }
 
@@ -705,6 +708,10 @@ const MORX: u32 = u32::from_be_bytes(*b"morx");
 const MORT: u32 = u32::from_be_bytes(*b"mort");
 /// `feat`, the AAT feature name table.
 const FEAT: u32 = u32::from_be_bytes(*b"feat");
+/// `kerx`, the AAT table a face's kerning lives in.
+const KERX: u32 = u32::from_be_bytes(*b"kerx");
+/// `kern`, the feature tag whose setting of 0 is `font-kerning: none`.
+const KERN: Tag = Tag::new(b"kern");
 
 /// The table a face's runs go without, where its only layout tables are a
 /// Graphite description's: a `Silf`, and no readable `GSUB` or `GPOS` and no
@@ -721,27 +728,34 @@ fn table_not_run(face: &Sfnt<'_>, layout: &Layout<'_>) -> Option<Tag> {
 
 /// The AAT tables a face's runs are shaped through (`docs/design/shaping.md`,
 /// *AAT shaping*, *Precedence*): where the face carries no readable `GSUB` or
-/// `GPOS`, its `morx`, where this crate can read it, and its `feat` beside
-/// it. A face carrying either OpenType Layout table shapes through it as it
-/// always has, whatever AAT tables it carries beside it.
+/// `GPOS`, its `morx` and its `kerx`, each where this crate can read it, and
+/// its `feat` beside them; `None` where it can read neither. A face carrying
+/// either OpenType Layout table shapes through it as it always has, whatever
+/// AAT tables it carries beside it — a face with `GSUB` and `kerx` and no
+/// `GPOS` is not kerned by its `kerx`, which would change a face that
+/// carries OpenType Layout.
 fn aat_tables<'a>(face: &Sfnt<'a>, layout: &Layout<'a>) -> Option<AatTables<'a>> {
     if layout.gsub().is_some() || layout.gpos().is_some() {
         return None;
     }
-    let morx = face.table(MORX).and_then(Morx::parse)?;
-    Some(AatTables {
+    let morx = face.table(MORX).and_then(Morx::parse);
+    let kerx = face.table(KERX).and_then(Kerx::parse);
+    (morx.is_some() || kerx.is_some()).then(|| AatTables {
         morx,
+        kerx,
         feat: face.table(FEAT).and_then(Feat::parse),
     })
 }
 
-/// The AAT table a face's runs go without (`docs/design/shaping.md`, *AAT
-/// shaping*, *Precedence*): where the face carries no readable `GSUB` or
-/// `GPOS`, a `morx` this crate cannot read — a version other than 2 or 3, or
-/// a header cut short — or, where it carries no `morx` and no Graphite
-/// description, its `mort`, the predecessor table the design names a
-/// non-goal. A face carrying either OpenType Layout table shapes through it
-/// as it always has, and is named for neither.
+/// The AAT tables a face's runs go without (`docs/design/shaping.md`, *AAT
+/// shaping*, *Precedence*), where the face carries no readable `GSUB` or
+/// `GPOS`: for substitution, a `morx` this crate cannot read — a version
+/// other than 2 or 3, or a header cut short — or, where it carries no `morx`
+/// and no Graphite description, its `mort`, the predecessor table the design
+/// names a non-goal; and for kerning, a `kerx` it cannot read — a version
+/// other than 2, 3 or 4, or a header cut short. A face carrying either
+/// OpenType Layout table shapes through it as it always has, and is named
+/// for none of them.
 ///
 /// The manual has a face carrying both tables ignore its `mort` (*The 'mort'
 /// table*, *Platform-specific Information*: "If a font has both a 'mort'
@@ -749,14 +763,21 @@ fn aat_tables<'a>(face: &Sfnt<'a>, layout: &Layout<'a>) -> Option<AatTables<'a>>
 /// ignored"), so such a face is shaped through its `morx` and named for
 /// neither; and a `Silf` beside a `mort` is the Graphite description
 /// [`table_not_run`] names.
-fn aat_not_run(face: &Sfnt<'_>, layout: &Layout<'_>) -> Option<Tag> {
+fn aat_not_run(face: &Sfnt<'_>, layout: &Layout<'_>) -> [Option<Tag>; 2] {
     if layout.gsub().is_some() || layout.gpos().is_some() {
-        return None;
+        return [None, None];
     }
-    if let Some(bytes) = face.table(MORX) {
-        return Morx::parse(bytes).is_none().then(|| Tag::new(b"morx"));
-    }
-    (face.table(MORT).is_some() && face.table(SILF).is_none()).then(|| Tag::new(b"mort"))
+    let substitution = match face.table(MORX) {
+        Some(bytes) => Morx::parse(bytes).is_none().then(|| Tag::new(b"morx")),
+        None => {
+            (face.table(MORT).is_some() && face.table(SILF).is_none()).then(|| Tag::new(b"mort"))
+        }
+    };
+    let kerning = face
+        .table(KERX)
+        .is_some_and(|bytes| Kerx::parse(bytes).is_none())
+        .then(|| Tag::new(b"kerx"));
+    [substitution, kerning]
 }
 
 impl<'a> Shaper<'a> {
@@ -814,7 +835,9 @@ impl<'a> Shaper<'a> {
     /// `defaultFlags`, and each tag named asks for its AAT feature's
     /// on-setting by `docs/design/shaping.md`'s table, so naming nothing runs
     /// no subtable, and a tag no AAT feature answers is named
-    /// ([`Warning::FeatureNotInAat`]).
+    /// ([`Warning::FeatureNotInAat`]). Such a face is kerned by its `kerx`
+    /// only where `kern` is among the tags named, as a `GPOS` plan runs `kern`
+    /// only where it is named.
     #[must_use]
     pub const fn with_features(mut self, gsub: &'a [Tag], gpos: &'a [Tag]) -> Self {
         self.gsub_features = Some(gsub);
@@ -865,8 +888,10 @@ impl<'a> Shaper<'a> {
     /// ([`Selection::from_opentype`]): a tag set above 0 its feature's
     /// on-setting, a tag set to 0 a non-exclusive feature's off-setting and
     /// nothing of an exclusive one, the chain's defaults standing where
-    /// nothing asks otherwise. `kern` asks nothing of the chain, and a tag no
-    /// AAT feature answers is named ([`Warning::FeatureNotInAat`]).
+    /// nothing asks otherwise. `kern` asks nothing of the chain: set to 0 it
+    /// turns the face's `kerx` off, `css-fonts-4` §6.4's `font-kerning:
+    /// none`, as it takes `kern` out of a `GPOS` plan. A tag no AAT feature
+    /// answers is named ([`Warning::FeatureNotInAat`]).
     #[must_use]
     pub const fn with_settings(mut self, settings: &'a [(Tag, u32)]) -> Self {
         self.settings = settings;
@@ -1214,7 +1239,9 @@ impl<'a> Shaper<'a> {
     /// through its chain (`docs/design/shaping.md`, *AAT shaping*): the run's
     /// text mapped as typed, the chain run in the run's direction and asked
     /// for what [`Shaper::with_features`] and [`Shaper::with_settings`] say,
-    /// the glyphs it deletes removed and the advances filled after it.
+    /// the glyphs it deletes removed and the advances filled after it. Such a
+    /// face, or one whose AAT table is a `kerx` alone, is kerned by its `kerx`
+    /// where `GPOS` would run, unless `kern` is turned off.
     ///
     /// A face whose only layout tables are a Graphite description is shaped
     /// as though it carried none, and every run over it says so, once:
@@ -1234,11 +1261,16 @@ impl<'a> Shaper<'a> {
         // staging below is the *default* plan for a joining script and not a
         // property of the script itself.
         let plan = self.plan(slice, orientation);
-        // A face shaped through its AAT tables takes its text as typed: the
+        // A face shaped through its AAT chain takes its text as typed: the
         // decomposition, the joining forms and the syllables prepare the
         // OpenType plans, and the face's chain is its whole statement of how
-        // its glyphs are formed.
-        let opentype = self.aat.is_none();
+        // its glyphs are formed. A face whose only AAT table is its `kerx`
+        // has no chain, and maps its text as a face with no layout tables
+        // does.
+        let chain = self
+            .aat
+            .and_then(|aat| aat.morx.map(|morx| (morx, aat.feat)));
+        let opentype = chain.is_none();
         let characters =
             self.characters(slice, run.text.start, opentype && plan == Plan::Universal);
         let from = self.map(&characters, &mut buffer);
@@ -1259,11 +1291,11 @@ impl<'a> Shaper<'a> {
         if let Some(table) = self.not_run {
             warnings.push(Warning::TableNotRun { table });
         }
-        if let Some(table) = self.aat_not_run {
+        for table in self.aat_not_run.into_iter().flatten() {
             warnings.push(Warning::TableNotRun { table });
         }
-        if let Some(aat) = self.aat {
-            self.run_chain(&aat, &mut buffer, &limits, &mut warnings);
+        if let Some((morx, feat)) = chain {
+            self.run_chain(&morx, feat.as_ref(), &mut buffer, &limits, &mut warnings);
         } else if let Some(gsub) = self.layout.gsub() {
             let script = self.script_tag(gsub, run.script);
             let stages = self.gsub_plan(
@@ -1349,16 +1381,28 @@ impl<'a> Shaper<'a> {
                 limits,
                 plan.mark_widths(),
             ));
-        } else if plan.mark_widths() == MarkWidths::ZeroByGdef {
-            // A face with no `GPOS` still has marks in it, and a combining
-            // accent drawn with the advance `hmtx` gave it pushes the pen
-            // along and takes the word apart. `Layout::position` does this at
-            // the end of positioning; without a `GPOS` nothing would.
-            //
-            // Conditioned for the same reason the `GPOS` branch is: a Brahmic
-            // face with no `GPOS` at all would otherwise keep the behaviour
-            // this commit is removing, and its syllables would stack.
-            self.layout.zero_marks(&mut buffer);
+        } else {
+            // A face shaped through its AAT tables is kerned by its `kerx`,
+            // in the positioning stage where `GPOS` would run, unless the
+            // caller turned kerning off (`css-fonts-4` §6.4's
+            // `font-kerning: none`, `kern` set to 0).
+            if let Some(kerx) = self.aat.and_then(|aat| aat.kerx) {
+                if self.kerning_on() {
+                    warnings.extend(kerx.run(&mut buffer, &limits));
+                }
+            }
+            if plan.mark_widths() == MarkWidths::ZeroByGdef {
+                // A face with no `GPOS` still has marks in it, and a combining
+                // accent drawn with the advance `hmtx` gave it pushes the pen
+                // along and takes the word apart. `Layout::position` does this
+                // at the end of positioning; without a `GPOS` nothing would.
+                //
+                // Conditioned for the same reason the `GPOS` branch is: a
+                // Brahmic face with no `GPOS` at all would otherwise keep the
+                // behaviour this commit is removing, and its syllables would
+                // stack.
+                self.layout.zero_marks(&mut buffer);
+            }
         }
 
         ShapedRun {
@@ -1380,16 +1424,30 @@ impl<'a> Shaper<'a> {
     /// `warnings`.
     fn run_chain(
         &self,
-        aat: &AatTables<'a>,
+        morx: &Morx<'a>,
+        feat: Option<&Feat<'a>>,
         buffer: &mut Buffer,
         limits: &Limits,
         warnings: &mut Vec<Warning>,
     ) {
         let named = self.named_features();
-        let (selection, refused) =
-            Selection::from_opentype(named.as_deref(), self.settings, aat.feat.as_ref());
+        let (selection, refused) = Selection::from_opentype(named.as_deref(), self.settings, feat);
         warnings.extend(refused);
-        warnings.extend(aat.morx.run(buffer, &selection, limits));
+        warnings.extend(morx.run(buffer, &selection, limits));
+    }
+
+    /// Whether a face shaped through its AAT tables is kerned by its `kerx`:
+    /// unless [`Shaper::with_settings`] sets `kern` to 0 — `css-fonts-4`
+    /// §6.4's `font-kerning: none` — or a caller who named its own features
+    /// with [`Shaper::with_features`] named no `kern`, a setting above 0
+    /// turning it back on.
+    fn kerning_on(&self) -> bool {
+        match self.setting(KERN) {
+            Some(value) => value > 0,
+            None => self
+                .named_features()
+                .is_none_or(|named| named.contains(&KERN)),
+        }
     }
 
     /// The tags [`Shaper::with_features`] named — both of its lists, each tag
@@ -2707,11 +2765,12 @@ mod tests {
     }
 
     /// A face is shaped through its AAT tables where it has no OpenType
-    /// Layout table to take instead and its `morx` can be read; a readable
-    /// `GSUB` or `GPOS` beside it takes the path it always took. The `feat`
-    /// beside the `morx` is read with it.
+    /// Layout table to take instead and its `morx` or its `kerx` can be read,
+    /// each read where it can be; a readable `GSUB` or `GPOS` beside them
+    /// takes the path it always took. The `feat` beside them is read with
+    /// them.
     #[test]
-    fn only_a_face_whose_layout_is_aat_alone_takes_its_chain() {
+    fn only_a_face_whose_layout_is_aat_alone_takes_its_aat_tables() {
         let morx: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0];
         let three: &[u8] = &[0, 3, 0, 0, 0, 0, 0, 0];
         let old: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0];
@@ -2721,31 +2780,83 @@ mod tests {
         let unreadable: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0, 0, 0];
         let gdef: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let feat: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        // (tables, takes the chain, has a feat)
-        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, bool, bool)> = vec![
-            (vec![(b"morx", morx)], true, false),
-            (vec![(b"morx", three)], true, false),
-            (vec![(b"feat", feat), (b"morx", morx)], true, true),
-            (vec![(b"GDEF", gdef), (b"morx", morx)], true, false),
-            (vec![(b"GSUB", unreadable), (b"morx", morx)], true, false),
-            (vec![(b"GPOS", unreadable), (b"morx", morx)], true, false),
-            (vec![(b"morx", morx), (b"mort", mort)], true, false),
-            (vec![(b"Silf", silf), (b"morx", morx)], true, false),
-            (vec![(b"morx", old)], false, false),
-            (vec![(b"morx", &morx[..3])], false, false),
-            (vec![(b"mort", mort)], false, false),
-            (vec![(b"GSUB", layout), (b"morx", morx)], false, false),
-            (vec![(b"GPOS", layout), (b"morx", morx)], false, false),
-            (vec![(b"feat", feat)], false, false),
-            (vec![], false, false),
+        let kerx: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0];
+        let kerx_four: &[u8] = &[0, 4, 0, 0, 0, 0, 0, 0];
+        let kerx_old: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0];
+        // (tables, a morx read, a kerx read, a feat read); a face reading
+        // neither takes no AAT tables.
+        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, bool, bool, bool)> = vec![
+            (vec![(b"morx", morx)], true, false, false),
+            (vec![(b"morx", three)], true, false, false),
+            (vec![(b"feat", feat), (b"morx", morx)], true, false, true),
+            (vec![(b"GDEF", gdef), (b"morx", morx)], true, false, false),
+            (
+                vec![(b"GSUB", unreadable), (b"morx", morx)],
+                true,
+                false,
+                false,
+            ),
+            (
+                vec![(b"GPOS", unreadable), (b"morx", morx)],
+                true,
+                false,
+                false,
+            ),
+            (vec![(b"morx", morx), (b"mort", mort)], true, false, false),
+            (vec![(b"Silf", silf), (b"morx", morx)], true, false, false),
+            (vec![(b"kerx", kerx), (b"morx", morx)], true, true, false),
+            (vec![(b"kerx", kerx)], false, true, false),
+            (vec![(b"kerx", kerx_four)], false, true, false),
+            (vec![(b"feat", feat), (b"kerx", kerx)], false, true, true),
+            (
+                vec![(b"kerx", kerx_old), (b"morx", morx)],
+                true,
+                false,
+                false,
+            ),
+            (vec![(b"kerx", kerx), (b"morx", old)], false, true, false),
+            (vec![(b"morx", old)], false, false, false),
+            (vec![(b"morx", &morx[..3])], false, false, false),
+            (vec![(b"kerx", kerx_old)], false, false, false),
+            (vec![(b"mort", mort)], false, false, false),
+            (
+                vec![(b"GSUB", layout), (b"morx", morx)],
+                false,
+                false,
+                false,
+            ),
+            (
+                vec![(b"GPOS", layout), (b"morx", morx)],
+                false,
+                false,
+                false,
+            ),
+            (
+                vec![(b"GSUB", layout), (b"kerx", kerx)],
+                false,
+                false,
+                false,
+            ),
+            (vec![(b"feat", feat)], false, false, false),
+            (vec![], false, false, false),
         ];
-        for (tables, takes, has_feat) in cases {
+        for (tables, has_morx, has_kerx, has_feat) in cases {
             let bytes = directory(&tables);
             let face = Sfnt::parse(&bytes).expect("a directory parses");
             let layout = crate::Layout::parse(&face);
             let names: Vec<&[u8; 4]> = tables.iter().map(|(tag, _)| *tag).collect();
             let aat = super::aat_tables(&face, &layout);
-            assert_eq!(aat.is_some(), takes, "{names:?}");
+            assert_eq!(aat.is_some(), has_morx || has_kerx, "{names:?}");
+            assert_eq!(
+                aat.is_some_and(|aat| aat.morx.is_some()),
+                has_morx,
+                "{names:?}"
+            );
+            assert_eq!(
+                aat.is_some_and(|aat| aat.kerx.is_some()),
+                has_kerx,
+                "{names:?}"
+            );
             assert_eq!(
                 aat.is_some_and(|aat| aat.feat.is_some()),
                 has_feat,
@@ -2754,13 +2865,14 @@ mod tests {
         }
     }
 
-    /// A face goes without its AAT tables, named, only where it has no
-    /// OpenType Layout table to take instead and its AAT table is one this
-    /// crate does not run: a `morx` it cannot read, or a `mort` where it
-    /// carries no `morx` and no Graphite description. A readable `morx` is
-    /// run and named for nothing, a `mort` beside it ignored as the manual
-    /// says; a readable `GSUB` or `GPOS` takes the path it always took and
-    /// names neither table.
+    /// A face goes without an AAT table, named, only where it has no
+    /// OpenType Layout table to take instead and the table is one this crate
+    /// does not run: for substitution, a `morx` it cannot read, or a `mort`
+    /// where it carries no `morx` and no Graphite description; for kerning,
+    /// a `kerx` it cannot read. A readable `morx` or `kerx` is run and named
+    /// for nothing, a `mort` beside a `morx` ignored as the manual says; a
+    /// readable `GSUB` or `GPOS` takes the path it always took and names
+    /// none of them.
     #[test]
     fn only_an_aat_table_this_crate_does_not_run_goes_without_it() {
         let morx: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0];
@@ -2771,29 +2883,51 @@ mod tests {
         let unreadable: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0, 0, 0];
         let gdef: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let kerx: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0];
+        let kerx_old: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0];
+        let kerx_five: &[u8] = &[0, 5, 0, 0, 0, 0, 0, 0];
         let named_morx = Some(Tag::new(b"morx"));
         let named_mort = Some(Tag::new(b"mort"));
-        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, Option<Tag>)> = vec![
-            (vec![(b"morx", old)], named_morx),
-            (vec![(b"morx", &morx[..5])], named_morx),
-            (vec![(b"GDEF", gdef), (b"morx", old)], named_morx),
-            (vec![(b"GSUB", unreadable), (b"morx", old)], named_morx),
-            (vec![(b"morx", old), (b"mort", mort)], named_morx),
-            (vec![(b"Silf", silf), (b"morx", old)], named_morx),
-            (vec![(b"mort", mort)], named_mort),
-            (vec![(b"GDEF", gdef), (b"mort", mort)], named_mort),
-            (vec![(b"morx", morx)], None),
-            (vec![(b"morx", morx), (b"mort", mort)], None),
-            (vec![(b"GSUB", unreadable), (b"morx", morx)], None),
-            (vec![(b"kerx", kerx), (b"morx", morx)], None),
-            (vec![(b"GSUB", layout), (b"morx", old)], None),
-            (vec![(b"GPOS", layout), (b"morx", morx)], None),
-            (vec![(b"GSUB", layout), (b"mort", mort)], None),
-            (vec![(b"GPOS", layout), (b"mort", mort)], None),
-            (vec![(b"Silf", silf), (b"mort", mort)], None),
-            (vec![(b"kerx", kerx)], None),
-            (vec![(b"Silf", silf)], None),
-            (vec![], None),
+        let named_kerx = Some(Tag::new(b"kerx"));
+        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, [Option<Tag>; 2])> = vec![
+            (vec![(b"morx", old)], [named_morx, None]),
+            (vec![(b"morx", &morx[..5])], [named_morx, None]),
+            (vec![(b"GDEF", gdef), (b"morx", old)], [named_morx, None]),
+            (
+                vec![(b"GSUB", unreadable), (b"morx", old)],
+                [named_morx, None],
+            ),
+            (vec![(b"morx", old), (b"mort", mort)], [named_morx, None]),
+            (vec![(b"Silf", silf), (b"morx", old)], [named_morx, None]),
+            (vec![(b"mort", mort)], [named_mort, None]),
+            (vec![(b"GDEF", gdef), (b"mort", mort)], [named_mort, None]),
+            (vec![(b"kerx", kerx_old)], [None, named_kerx]),
+            (vec![(b"kerx", kerx_five)], [None, named_kerx]),
+            (vec![(b"kerx", &kerx[..5])], [None, named_kerx]),
+            (
+                vec![(b"kerx", kerx_old), (b"morx", morx)],
+                [None, named_kerx],
+            ),
+            (
+                vec![(b"kerx", kerx_old), (b"morx", old)],
+                [named_morx, named_kerx],
+            ),
+            (
+                vec![(b"kerx", kerx_old), (b"mort", mort)],
+                [named_mort, named_kerx],
+            ),
+            (vec![(b"morx", morx)], [None, None]),
+            (vec![(b"morx", morx), (b"mort", mort)], [None, None]),
+            (vec![(b"GSUB", unreadable), (b"morx", morx)], [None, None]),
+            (vec![(b"kerx", kerx), (b"morx", morx)], [None, None]),
+            (vec![(b"GSUB", layout), (b"morx", old)], [None, None]),
+            (vec![(b"GPOS", layout), (b"morx", morx)], [None, None]),
+            (vec![(b"GSUB", layout), (b"mort", mort)], [None, None]),
+            (vec![(b"GPOS", layout), (b"mort", mort)], [None, None]),
+            (vec![(b"GSUB", layout), (b"kerx", kerx_old)], [None, None]),
+            (vec![(b"Silf", silf), (b"mort", mort)], [None, None]),
+            (vec![(b"kerx", kerx)], [None, None]),
+            (vec![(b"Silf", silf)], [None, None]),
+            (vec![], [None, None]),
         ];
         for (tables, expected) in cases {
             let bytes = directory(&tables);
@@ -2801,16 +2935,21 @@ mod tests {
             let layout = crate::Layout::parse(&face);
             let names: Vec<&[u8; 4]> = tables.iter().map(|(tag, _)| *tag).collect();
             assert_eq!(super::aat_not_run(&face, &layout), expected, "{names:?}");
-            // A face named for its AAT table is not shaped through one.
-            if expected.is_some() {
-                assert!(super::aat_tables(&face, &layout).is_none(), "{names:?}");
+            // A face named for an AAT table is not shaped through it.
+            let aat = super::aat_tables(&face, &layout);
+            if expected[0].is_some() {
+                assert!(aat.is_none_or(|aat| aat.morx.is_none()), "{names:?}");
+            }
+            if expected[1].is_some() {
+                assert!(aat.is_none_or(|aat| aat.kerx.is_none()), "{names:?}");
             }
         }
     }
 
-    /// The two refusals never name one face twice: a face is a Graphite
-    /// description, or AAT's, or neither, so a run carries at most one
-    /// [`Warning::TableNotRun`].
+    /// The refusals never name one face twice for its substitution: a face
+    /// is a Graphite description, or AAT's, or neither, so a run carries at
+    /// most one [`Warning::TableNotRun`] for it, and a face with no `kerx`
+    /// is named for none.
     #[test]
     fn a_face_is_named_for_one_table_at_most() {
         let silf: &[u8] = &[0, 4, 0, 0, 0, 4, 0, 2, 0, 0, 0, 0];
@@ -2834,9 +2973,11 @@ mod tests {
             let bytes = directory(&chosen);
             let face = Sfnt::parse(&bytes).expect("a directory parses");
             let layout = crate::Layout::parse(&face);
+            let [substitution, kerning] = super::aat_not_run(&face, &layout);
             let named = usize::from(super::table_not_run(&face, &layout).is_some())
-                + usize::from(super::aat_not_run(&face, &layout).is_some());
+                + usize::from(substitution.is_some());
             assert!(named <= 1, "mask {mask:04b} named {named} tables");
+            assert!(kerning.is_none(), "mask {mask:04b}");
         }
     }
 }

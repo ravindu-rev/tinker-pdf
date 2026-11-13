@@ -918,11 +918,16 @@ does not say whether a shift carries to the glyphs after it.
 - **Format 0**, ordered pairs, binary-searched by the 32-bit key the two
   glyphs make, a final `0xFFFF 0xFFFF 0` entry a sentinel.
 - **Format 2**, a class array: the left glyph's value from the left lookup
-  table and the right glyph's from the right one, both defaulting to 0; the
-  value is read at the subtable's start plus the two, the left values holding
-  their row "offset by the offset of the array" as the `kern` chapter's format
-  2 states the same layout — the `kerx` chapter's last sentence, which adds
-  them to the array's address instead, is read as the subtable's (*Risks*).
+  table and the right glyph's from the right one, both of which "default to
+  zero for glyphs not covered"; the value is read at the kerning array's
+  address plus the two — "adding the class values to the address of the
+  kerning array" — the left values holding their row pre-multiplied by the
+  row's width, so that row and column 0, where an uncovered glyph's zero
+  lands, hold no kerning. The `kern` chapter's format 2 adds its class values
+  to the subtable's address instead, its left values "offset by the offset of
+  the array", and gives an uncovered left glyph the array's offset where
+  `kerx` gives it zero: a sum from the subtable's start would read an
+  uncovered glyph's kerning out of the subtable's own header (*Risks*).
 - **Format 6**, an index array: row and column indices from two lookup
   tables, the row's pre-multiplied by `columnCount`, summed into the kerning
   array, two-byte values or four where `valuesAreLong` (bit 0) is set.
@@ -1134,7 +1139,7 @@ row here reads.
 | The manual's worked examples carry misprints, and a transcription that copies one tests the misprint | Each correction is named here and in its test: the contextual example's class count, substitution-table offset and unit offsets, the ligature example's third segment, the `trak` example's offset, the `feat` example's count, the noncontextual example's comment |
 | A behaviour the manual leaves open is read one way where a face expects another | The default mark, the end-of-text entry and an insertion's advance are pinned by named test sections; the rest are stated here as this engine's readings |
 | A rearrangement under a reverse traversal reads its span the other way | Spans are layout positions whatever the traversal; no test section rearranges in reverse, so `MORX-37` to `MORX-40` hold the traversal and FT-07c.6's verb test the spans |
-| `kerx` format 2's two sentences on where a value lies disagree | The `kern` chapter's statement of the same layout decides; a face built the other way kerns by the wrong cell, never out of bounds |
+| `kerx` format 2's sentences on where a value lies disagree, its first saying the left values are "offset by the offset of the array" | The chapter's last sentence and its zero for an uncovered glyph decide: the array's address plus the two class values, the `kern` chapter's subtable-relative layout being the one an uncovered zero breaks; a face built the other way kerns by the wrong cell, never out of bounds |
 | A cross-stream shift is cumulative in some faces' intent | Read per glyph, the reading the `kerx` chapter's text supports; the `kern` example that steps the baseline is that table's convention |
 | The OpenType-to-AAT mapping is by meaning, not stated | Only `ss01` to `ss20` and `hojo` are stated by the registry; the rest follow its descriptions, and a tag with no row is recorded, never guessed |
 | A face carrying both kinds of table is shaped otherwise than today | It is not: OpenType Layout wins wherever it is present, and a different precedence is the owner's to take |

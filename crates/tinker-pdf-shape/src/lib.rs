@@ -8,8 +8,9 @@
 //! fifth are built on it: the default, Arabic and USE shapers ([`Shaper`]),
 //! which map text to glyphs and decide which features run, and UAX #9
 //! ([`bidi`]). [`aat`] reads Apple Advanced Typography's tables from Apple's
-//! *TrueType Reference Manual*, and a face carrying a `morx` and no `GSUB` or
-//! `GPOS` is shaped through its chain (*AAT shaping*); [`graphite`] reads a
+//! *TrueType Reference Manual*, and a face carrying a `morx` or a `kerx` and
+//! no `GSUB` or `GPOS` is shaped through its chain and kerned by its `kerx`
+//! (*AAT shaping*); [`graphite`] reads a
 //! Graphite description's tables, which no run is shaped through yet
 //! (*Graphite shaping*); and the standard's `JSTF`, a face's justification
 //! suggestions, is read by [`jstf`].
@@ -235,19 +236,22 @@ pub enum Warning {
     /// saying is that the column was set on a synthesis, and the face is the
     /// object it touched.
     VerticalMetricsSynthesized,
-    /// The face's only layout tables are a kind this crate does not run, so
-    /// the run was shaped as if the face had none: `cmap` and `hmtx` alone.
+    /// A layout table of the face's that this crate does not run, so the run
+    /// was shaped without it: where it is the face's only one, by `cmap` and
+    /// `hmtx` alone.
     ///
     /// `table` names the table that was not run. A face whose layout is a
     /// Graphite description — a `Silf`, with no `GSUB`, `GPOS` or `morx`
     /// beside it — is named by `Silf` (`docs/design/shaping.md`, *Graphite
-    /// shaping*; ROADMAP row FT-07d, ruling 3). A face whose only AAT table
-    /// is one this crate does not run (*AAT shaping*), with no readable
-    /// `GSUB` or `GPOS` beside it, is named by it: `mort`, the predecessor
-    /// table the design names a non-goal, where the face carries no `morx` or
-    /// `Silf`, and a `morx` this crate cannot read — a version other than 2
-    /// or 3, or a header cut short. Recorded once per run, whatever the run
-    /// holds, because the fact is the face's and the run is what it touched.
+    /// shaping*; ROADMAP row FT-07d, ruling 3). A face with no readable
+    /// `GSUB` or `GPOS` is named by each AAT table it carries that this crate
+    /// does not run (*AAT shaping*): `mort`, the predecessor table the design
+    /// names a non-goal, where the face carries no `morx` or `Silf`; a `morx`
+    /// this crate cannot read — a version other than 2 or 3, or a header cut
+    /// short — whose run is not substituted; and a `kerx` it cannot read — a
+    /// version other than 2, 3 or 4, or a header cut short — whose run is not
+    /// kerned. Recorded once per run, whatever the run holds, because the
+    /// fact is the face's and the run is what it touched.
     TableNotRun {
         /// The table, as the face's table directory spells it.
         table: Tag,
@@ -279,9 +283,12 @@ pub enum Warning {
         /// The format it claimed.
         format: u16,
     },
-    /// A `morx` subtable of a type the chapter does not define, so it was
-    /// skipped and the chain went on: 3 is reserved, and a type above 5 is
-    /// unknown.
+    /// An AAT subtable of a type or format this crate does not run, so it was
+    /// skipped and the table went on: a `morx` subtable of type 3, reserved,
+    /// or above 5, unknown; and a `kerx` subtable of a format the chapter does
+    /// not define — 3, 5, 7 and above — or of a state-machine format not run
+    /// yet, refused by name until it is (ruling 3). `kind` is the coverage's
+    /// low byte either way.
     SubtableTypeNotRun {
         /// The subtable.
         site: aat::Site,
@@ -347,6 +354,22 @@ pub enum Warning {
     /// grown, as [`Warning::GlyphBudgetExceeded`] refuses a `GSUB` multiple
     /// substitution — and the machine went on.
     InsertionBudgetExceeded {
+        /// The subtable.
+        site: aat::Site,
+    },
+    /// A `kerx` subtable of a version-4 table whose `tupleCount` is above 0,
+    /// its values vectors for a variable face's instances, so it was not
+    /// run: variable kerning is ROADMAP row FT-07a's, and refused by name
+    /// until it is (ruling 3).
+    VariationKerningNotRun {
+        /// The subtable.
+        site: aat::Site,
+    },
+    /// A `kerx` subtable of vertical kerning values met in an upright run,
+    /// so it was not run: vertical `kerx` is ROADMAP row FT-07b's, and
+    /// refused by name until it is (ruling 3). Along a line such a subtable
+    /// is not for the run, and names nothing.
+    VerticalKerningNotRun {
         /// The subtable.
         site: aat::Site,
     },

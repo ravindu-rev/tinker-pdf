@@ -24,10 +24,12 @@
 //! to the first word in each one", and a unit whose glyph is `0xFFFF` is the
 //! search's guard — "The value that indicates binary search termination is
 //! 0xFFFF" — and answers nothing. A value's size is the unit's share past its
-//! glyphs in formats 2 and 6, `unitSize` in format 10, and two bytes in
-//! formats 0, 4 and 8, which state no size: the tables this crate reads them
-//! for (`morx`'s classes and substitutions, `ankr`'s offsets) keep two-byte
-//! values. Every read is a bounds check (`read::Bytes`), so a unit count past
+//! glyphs in formats 2 and 6, `unitSize` in format 10, and in formats 0, 4
+//! and 8, which state no size, the size the table that holds the lookup
+//! gives: two bytes for `morx`'s classes and substitutions, `kerx`'s class
+//! tables and `ankr`'s offsets ([`Lookup::parse`]), and four for a `kerx`
+//! format 6 subtable's long values ([`Lookup::parse_sized`]). Every read is a
+//! bounds check (`read::Bytes`), so a unit count past
 //! the table, an offset past its end or a truncated header answers nothing
 //! and never panics (ruling 1).
 
@@ -110,6 +112,23 @@ impl<'a> Lookup<'a> {
     /// bytes or a pair of fewer than four, or a value of any size but 1, 2, 4
     /// or 8.
     pub fn parse(bytes: &'a [u8]) -> Result<Lookup<'a>, LookupError> {
+        Lookup::parse_sized(bytes, 2)
+    }
+
+    /// Reads the lookup table at the start of `bytes`, the formats that state
+    /// no value size — 0, 4 and 8 — holding values of `value_size` bytes: two
+    /// in every table but one, and four in a `kerx` format 6 subtable whose
+    /// `valuesAreLong` is set ("values in the two class tables and the kerning
+    /// array are four bytes in size").
+    ///
+    /// # Errors
+    ///
+    /// [`Lookup::parse`]'s, and [`LookupError::Malformed`] for a
+    /// `value_size` other than 1, 2, 4 or 8.
+    pub fn parse_sized(bytes: &'a [u8], value_size: usize) -> Result<Lookup<'a>, LookupError> {
+        if !VALUE_SIZES.contains(&value_size) {
+            return Err(LookupError::Malformed);
+        }
         let data = Bytes::new(bytes);
         let number = data.u16(0).ok_or(LookupError::Malformed)?;
         let format = match number {
@@ -124,7 +143,7 @@ impl<'a> Lookup<'a> {
         let mut lookup = Lookup {
             data,
             format,
-            value_size: 2,
+            value_size,
             unit_size: 0,
             units: 0,
             first: 0,
@@ -147,7 +166,7 @@ impl<'a> Lookup<'a> {
                     4
                 };
                 lookup.value_size = match format {
-                    LookupFormat::SegmentArray => 2,
+                    LookupFormat::SegmentArray => value_size,
                     _ => unit_size
                         .checked_sub(glyphs)
                         .ok_or(LookupError::Malformed)?,
@@ -199,8 +218,8 @@ impl<'a> Lookup<'a> {
     pub fn value(&self, glyph: u16) -> Option<u64> {
         match self.format {
             LookupFormat::SimpleArray => {
-                let at = 2usize.checked_add(usize::from(glyph).checked_mul(2)?)?;
-                read_value(self.data, at, 2)
+                let at = 2usize.checked_add(usize::from(glyph).checked_mul(self.value_size)?)?;
+                read_value(self.data, at, self.value_size)
             }
             LookupFormat::SegmentSingle => {
                 let unit = self.segment(glyph)?;
@@ -211,7 +230,8 @@ impl<'a> Lookup<'a> {
                 let first = self.data.u16(unit.checked_add(2)?)?;
                 let offset = usize::from(self.data.u16(unit.checked_add(4)?)?);
                 let index = usize::from(glyph.checked_sub(first)?);
-                read_value(self.data, offset.checked_add(index.checked_mul(2)?)?, 2)
+                let at = offset.checked_add(index.checked_mul(self.value_size)?)?;
+                read_value(self.data, at, self.value_size)
             }
             LookupFormat::SingleTable => {
                 let unit = self.pair(glyph)?;
@@ -222,7 +242,8 @@ impl<'a> Lookup<'a> {
                 if index >= self.units {
                     return None;
                 }
-                read_value(self.data, 6usize.checked_add(index.checked_mul(2)?)?, 2)
+                let at = 6usize.checked_add(index.checked_mul(self.value_size)?)?;
+                read_value(self.data, at, self.value_size)
             }
             LookupFormat::ExtendedTrimmedArray => {
                 let index = usize::from(glyph.checked_sub(self.first)?);
@@ -376,6 +397,53 @@ mod tests {
             Lookup::parse(&u16s(&[6, 4, 1])).err(),
             Some(LookupError::Malformed)
         );
+    }
+
+    /// The formats that state no value size read values of the size their
+    /// table asks for, four bytes for `kerx`'s long values; the formats that
+    /// state one keep it; and a size no format lists is refused.
+    #[test]
+    fn the_formats_that_state_no_size_read_values_of_the_size_asked() {
+        let quads =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        // Format 0, glyphs 0 to 2.
+        let mut simple = u16s(&[0]);
+        simple.extend(quads(&[7, 0x0001_0000, 9]));
+        let lookup = Lookup::parse_sized(&simple, 4).expect("readable");
+        assert_eq!(lookup.value_size(), 4);
+        assert_eq!(
+            (0..4).map(|g| lookup.value(g)).collect::<Vec<_>>(),
+            vec![Some(7), Some(0x0001_0000), Some(9), None]
+        );
+        // Format 8, glyphs 5 and 6.
+        let mut trimmed = u16s(&[8, 5, 2]);
+        trimmed.extend(quads(&[50, 60]));
+        let lookup = Lookup::parse_sized(&trimmed, 4).expect("readable");
+        assert_eq!(lookup.value(5), Some(50));
+        assert_eq!(lookup.value(6), Some(60));
+        assert_eq!(lookup.value(7), None);
+        // Format 4, one segment of glyphs 3 and 4, its array after the guard
+        // at offset 24.
+        let mut segments = u16s(&[4, 6, 1, 6, 0, 0, 4, 3, 24, 0xFFFF, 0xFFFF, 0]);
+        segments.extend(quads(&[30, 40]));
+        let lookup = Lookup::parse_sized(&segments, 4).expect("readable");
+        assert_eq!(lookup.value(3), Some(30));
+        assert_eq!(lookup.value(4), Some(40));
+        // Read with two-byte values, the same bytes answer their halves.
+        let lookup = Lookup::parse(&segments).expect("readable");
+        assert_eq!(lookup.value(3), Some(0));
+        assert_eq!(lookup.value(4), Some(30));
+        // Format 6 states its size in its unit, whatever is asked.
+        let pairs = u16s(&[6, 4, 1, 4, 0, 0, 9, 90, 0xFFFF, 0]);
+        let lookup = Lookup::parse_sized(&pairs, 4).expect("readable");
+        assert_eq!(lookup.value_size(), 2);
+        assert_eq!(lookup.value(9), Some(90));
+        for size in [0usize, 3, 16] {
+            assert_eq!(
+                Lookup::parse_sized(&simple, size).err(),
+                Some(LookupError::Malformed)
+            );
+        }
     }
 
     /// A unit count past the table is read as far as the table goes, and a
