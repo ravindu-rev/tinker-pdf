@@ -3,9 +3,12 @@
 //! The core is a resumable state machine: every state either completes or
 //! reports `NeedInput` without discarding the bits it already read, so the
 //! one-shot wrapper below and the streamed read in [`zlib_reads_clean`] share
-//! the same decoder. Back-references read the output `Vec` directly: the
-//! one-shot read decodes to memory, so its output doubles as the 32 KB window,
-//! and the streamed one keeps that window and lets the rest go.
+//! the same decoder. Inside a block, while the input and the output have room
+//! for any symbol, [`Inflate::fast`] decodes symbols in a loop of its own and
+//! hands the state machine back exactly where it stopped, wherever the input
+//! was cut. Back-references read the output `Vec` directly: the one-shot read
+//! decodes to memory, so its output doubles as the 32 KB window, and the
+//! streamed one keeps that window and lets the rest go.
 
 use crate::{Limits, Tail, Warning, Warnings};
 
@@ -366,6 +369,48 @@ impl BitState {
         }
     }
 
+    /// Tops the accumulator up to at least 56 bits with one read of the next
+    /// eight input bytes, where [`BitState::fill`] takes a byte a turn. Only
+    /// with eight bytes left.
+    ///
+    /// Only the bytes that fit whole are counted in, so the bits past the
+    /// count are the input's own next bits rather than zeros, and reading the
+    /// same bytes again ORs the same bits into them. [`Inflate::fast`] clears
+    /// them on its way out, because every other reader of the accumulator
+    /// wants zeros there: a stored block takes its bytes past the count
+    /// straight from the input.
+    fn refill(&mut self, src: &mut Bits<'_>) {
+        if self.cnt >= 56 {
+            return;
+        }
+        let Some(&word) = src
+            .input
+            .get(src.pos..)
+            .and_then(|rest| rest.first_chunk::<8>())
+        else {
+            return;
+        };
+        self.buf |= u64::from_le_bytes(word) << self.cnt;
+        let whole = (63 - self.cnt) / 8;
+        src.pos += whole as usize;
+        self.cnt += whole * 8;
+    }
+
+    /// The code at the head of the accumulator through `t`, and its length,
+    /// without taking it; `None` for a hole. Needs fifteen bits in hand.
+    fn peek(&self, t: &Huffman) -> Option<(Code, u32)> {
+        #[cfg(test)]
+        tests::DECODES.with(|decodes| decodes.set(decodes.get() + 1));
+        let mut e = entry(&t.primary, (self.buf as usize) & (PRIMARY_SIZE - 1))?;
+        if e & ENTRY_SUB != 0 {
+            let bits = (e >> SUB_BITS_SHIFT) & 0xf;
+            let off = (e & OFFSET_MASK) as usize;
+            let j = ((self.buf >> PRIMARY_BITS) & ((1u64 << bits) - 1)) as usize;
+            e = entry(&t.sub, off + j)?;
+        }
+        (e != 0).then(|| (Code::of(e), (e >> LEN_SHIFT) & LEN_MASK))
+    }
+
     fn need(&mut self, n: u32, src: &mut Bits<'_>) -> bool {
         if self.cnt < n {
             self.fill(src);
@@ -476,7 +521,8 @@ struct Inflate {
     rep_kind: u8,
     stored_left: u32,
     /// Turns of the state machine: a header field, a code length or a symbol
-    /// read each.
+    /// read each. [`Inflate::fast`] counts the turns it saves the state
+    /// machine, so the count is the state machine's alone.
     steps: u64,
 }
 
@@ -501,10 +547,84 @@ impl Inflate {
         }
     }
 
+    /// **The fast path**: literals, lengths, distances and copies decoded in
+    /// one loop, while at least eight input bytes and 258 bytes of output
+    /// room remain — enough for any symbol whatever it turns out to be, a
+    /// match's 48 bits of codes and extra bits and its 258 bytes — with the
+    /// accumulator refilled eight bytes at a time and no state dispatch a
+    /// symbol. Ruling 1's bound on the output is the margin, one check a
+    /// symbol rather than one a byte.
+    ///
+    /// It stops at the first symbol it would not finish: end-of-block, a hole
+    /// or an unused code, a distance before the output's start, or a margin
+    /// run out. A code not yet taken is left for [`Inflate::run`]'s symbol
+    /// state and a match is left in the state it reached, so the state
+    /// machine reads what it would have read itself, and the stream's tail,
+    /// `NeedInput` and the output cap stay its own — the same bytes out, the
+    /// same outcome and the same `end`.
+    ///
+    /// It counts the turns the state machine would have taken for what it
+    /// decodes, a literal one and a match five, so [`Inflate::steps`] is the
+    /// same with it as without it. The turn that runs it counts the symbol
+    /// the state machine reads after it, or the match it stops inside.
+    fn fast(&mut self, src: &mut Bits<'_>, out: &mut Vec<u8>, max_output: usize) {
+        while src.input.len().saturating_sub(src.pos) >= 8
+            && max_output.saturating_sub(out.len()) >= 258
+        {
+            self.bits.refill(src);
+            let Some((code, length)) = self.bits.peek(&self.lit) else {
+                break;
+            };
+            match code {
+                Code::Literal(byte) => {
+                    self.bits.take(length);
+                    out.push(byte);
+                    self.turned(1);
+                }
+                Code::Length(base, extra) => {
+                    self.bits.take(length);
+                    let len = u32::from(base) + self.bits.take(extra);
+                    let Some((Code::Distance(base, extra), length)) = self.bits.peek(&self.dist)
+                    else {
+                        // The length's extra bits were the state machine's
+                        // turn; the turn that reads the distance is its own.
+                        self.turned(1);
+                        self.state = State::DistSym(len as u16);
+                        break;
+                    };
+                    self.bits.take(length);
+                    let distance = u32::from(base) + self.bits.take(extra);
+                    if distance == 0 || distance as usize > out.len() {
+                        // The length's extra bits, the distance and its extra
+                        // bits; the copy's turn refuses it.
+                        self.turned(3);
+                        self.state = State::Copy(len as u16, distance as u16);
+                        break;
+                    }
+                    copy_back(out, out.len() - distance as usize, len as usize);
+                    // The length, its extra bits, the distance, its extra
+                    // bits and the copy.
+                    self.turned(5);
+                }
+                _ => break,
+            }
+        }
+        if self.bits.cnt < 64 {
+            self.bits.buf &= (1u64 << self.bits.cnt) - 1;
+        }
+    }
+
+    /// `turns` of the state machine taken without it.
+    fn turned(&mut self, turns: u64) {
+        self.steps = self.steps.saturating_add(turns);
+    }
+
     #[allow(clippy::too_many_lines)]
     fn run(&mut self, src: &mut Bits<'_>, out: &mut Vec<u8>, max_output: usize) -> Progress {
         loop {
             self.steps = self.steps.saturating_add(1);
+            #[cfg(test)]
+            tests::DISPATCHES.with(|dispatches| dispatches.set(dispatches.get() + 1));
             match self.state {
                 State::Done => return Progress::Finished,
 
@@ -691,6 +811,14 @@ impl Inflate {
                 }
 
                 State::Symbol => {
+                    if fast_path() {
+                        self.fast(src, out, max_output);
+                        if self.state != State::Symbol {
+                            // It stopped inside a match, which the state
+                            // machine refuses from where it stopped.
+                            continue;
+                        }
+                    }
                     match self.bits.decode(&self.lit, src) {
                         Sym::Val(Code::Literal(byte)) => {
                             if out.len() >= max_output {
@@ -748,12 +876,7 @@ impl Inflate {
                     let room = max_output.saturating_sub(out.len());
                     let want = len as usize;
                     let n = want.min(room);
-                    for k in 0..n {
-                        match out.get(start + k) {
-                            Some(&b) => out.push(b),
-                            None => return Progress::Corrupt,
-                        }
-                    }
+                    copy_back(out, start, n);
                     if n < want {
                         return Progress::OutputCap;
                     }
@@ -761,6 +884,31 @@ impl Inflate {
                 }
             }
         }
+    }
+}
+
+/// Appends the `n` bytes of `out` from `start` on, a byte at a time, so a
+/// byte the copy itself wrote is copied again where the distance is shorter
+/// than the length (3.2.3). `start` is inside `out`, which only grows, so
+/// every byte read is there.
+fn copy_back(out: &mut Vec<u8>, start: usize, n: usize) {
+    for k in 0..n {
+        if let Some(&byte) = out.get(start + k) {
+            out.push(byte);
+        }
+    }
+}
+
+/// Whether [`Inflate::fast`] runs. Always, but under the test that turns it
+/// off to hold it to the state machine alone.
+fn fast_path() -> bool {
+    #[cfg(test)]
+    {
+        !tests::STATE_MACHINE_ONLY.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
     }
 }
 
@@ -1055,6 +1203,12 @@ mod tests {
         pub(super) static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         /// Every code this thread has decoded, likewise.
         pub(super) static DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Every turn of [`Inflate::run`]'s state dispatch, likewise.
+        pub(super) static DISPATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Set, [`Inflate::fast`] does not run and every symbol goes through
+        /// the state machine.
+        pub(super) static STATE_MACHINE_ONLY: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
     }
 
     const CAP: Limits = Limits::new(1 << 20);
@@ -1412,6 +1566,222 @@ mod tests {
             "{decodes} symbols for {} bytes: the stream coded no match",
             data.len()
         );
+    }
+
+    /// `stream` decoded by one state machine, its first `split` bytes in one
+    /// call and the rest in a second as a streaming caller would hand them
+    /// on, under the output ceiling `cap`, with [`Inflate::fast`] on or off:
+    /// what came out, how it ended, `end` as [`raw_bytes`] counts it, and the
+    /// steps it counted.
+    fn decode_split(
+        stream: &[u8],
+        split: usize,
+        cap: usize,
+        fast: bool,
+    ) -> (Vec<u8>, Progress, usize, u64) {
+        STATE_MACHINE_ONLY.with(|only| only.set(!fast));
+        let mut inf = Inflate::new();
+        let mut out = Vec::new();
+        let mut src = Bits {
+            input: &stream[..split.min(stream.len())],
+            pos: 0,
+        };
+        let mut progress = inf.run(&mut src, &mut out, cap);
+        if progress == Progress::NeedInput && split < stream.len() {
+            src = Bits {
+                input: stream,
+                pos: src.pos,
+            };
+            progress = inf.run(&mut src, &mut out, cap);
+        }
+        STATE_MACHINE_ONLY.with(|only| only.set(false));
+        let end = src.pos.saturating_sub(inf.bits.cnt as usize / 8);
+        (out, progress, end, inf.steps)
+    }
+
+    /// Page-like bytes: text-like runs and repeats at every distance range,
+    /// so a coded stream has literals, short and long matches and far ones.
+    fn text_with_repeats(len: usize, seed: u64) -> Vec<u8> {
+        let mut draw = draws(seed);
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            if out.len() > 40 && draw(3) == 0 {
+                let back = 1 + draw(out.len().min(30_000));
+                let start = out.len() - back;
+                for k in 0..(3 + draw(60)).min(len - out.len()) {
+                    out.push(out[start + k]);
+                }
+            } else {
+                out.push(b"etaoin shrdlu"[draw(13)]);
+            }
+        }
+        out
+    }
+
+    /// Streams of every shape the two paths could part on: a block of fixed
+    /// codes, the encoder's at the ratio and the fast level, a stored block,
+    /// a stored block before a fixed one, each damaged by a bit flipped
+    /// anywhere in its body, cut short, and followed by bytes that are not
+    /// its own.
+    fn streams() -> Vec<Vec<u8>> {
+        let text = text_with_repeats(1_500, 3);
+        let noise: Vec<u8> = {
+            let mut draw = draws(9);
+            (0..400).map(|_| draw(256) as u8).collect()
+        };
+        // 3.2.4's stored block: a byte holding BFINAL and BTYPE 00, then LEN
+        // and NLEN.
+        let stored = |data: &[u8], last: bool| {
+            let len = data.len() as u16;
+            let mut out = vec![u8::from(last)];
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&(!len).to_le_bytes());
+            out.extend_from_slice(data);
+            out
+        };
+        let mut mixed = stored(&noise[..100], false);
+        mixed.extend_from_slice(&fixed_block(&tokens(600, 8)).0);
+        let mut streams = vec![
+            fixed_block(&tokens(1_500, 3)).0,
+            crate::deflate_at(&text, crate::DeflateLevel::Ratio),
+            crate::deflate_at(&text, crate::DeflateLevel::Fast),
+            stored(&noise, true),
+            mixed,
+            crate::deflate_at(&text_with_repeats(300, 4), crate::DeflateLevel::Ratio),
+        ];
+        let whole = streams.clone();
+        for (index, stream) in whole.iter().enumerate() {
+            let mut draw = draws(index as u64 + 50);
+            for _ in 0..3 {
+                let mut damaged = stream.clone();
+                let bit = draw(damaged.len() * 8);
+                damaged[bit / 8] ^= 1 << (bit % 8);
+                streams.push(damaged);
+            }
+            streams.push(stream[..stream.len() * 2 / 3].to_vec());
+            let mut followed = stream.clone();
+            followed.extend_from_slice(b"\x00\xffnot this stream's");
+            streams.push(followed);
+        }
+        streams
+    }
+
+    /// **The fast loop and the state machine agree at every split.**
+    ///
+    /// Each stream of [`streams`] decoded with the fast loop, whole and
+    /// resumed after every one of its bytes, and with the state machine
+    /// alone, under a ceiling that never binds and under one that cuts the
+    /// output short: the same bytes out, the same outcome — and so the same
+    /// warnings, which [`raw_bytes`] reads off the outcome alone — and the
+    /// same `end`, which a ZIP entry's data descriptor is found by. Split at
+    /// the same byte, the two count the same steps too, since the fast loop
+    /// counts the turns it saves; a split itself costs the turns that
+    /// returned for more input, so steps are compared split for split.
+    #[test]
+    fn the_fast_loop_and_the_state_machine_agree_at_every_split() {
+        for (index, stream) in streams().iter().enumerate() {
+            for cap in [1usize << 20, 700] {
+                let alone = decode_split(stream, stream.len(), cap, false);
+                for split in 0..=stream.len() {
+                    let case = format!("stream {index}, ceiling {cap}, split at {split}");
+                    let fast = decode_split(stream, split, cap, true);
+                    assert_eq!(
+                        fast,
+                        decode_split(stream, split, cap, false),
+                        "{case}: the fast loop and the state machine alone"
+                    );
+                    assert_eq!(
+                        (&fast.0, fast.1, fast.2),
+                        (&alone.0, alone.1, alone.2),
+                        "{case}: resumed and whole"
+                    );
+                }
+                let limits = Limits::new(cap);
+                let mut w = Warnings::default();
+                let whole = raw_bytes(stream, &limits, &mut w);
+                assert_eq!(
+                    (whole.data, whole.end),
+                    (alone.0.clone(), alone.2),
+                    "stream {index}, ceiling {cap}, through raw_bytes"
+                );
+                assert_eq!(
+                    w.steps(),
+                    alone.3,
+                    "stream {index}, ceiling {cap}: raw_bytes counts the state machine's steps"
+                );
+            }
+        }
+    }
+
+    /// **The streamed read takes the fast loop and reads what the whole read
+    /// does.** [`zlib_reads_clean`] hands the decoder its input a piece at a
+    /// time and lets its output go behind the window, so the fast loop stops
+    /// short of every piece's end and carries on in the next. Each stream of
+    /// [`streams`], wrapped in zlib with the checksum of what it decodes to,
+    /// gives the same pieces and the same verdict with the fast loop as with
+    /// the state machine alone, and the pieces joined are the bytes the
+    /// one-shot read decodes, whether the stream ends, is cut short or is
+    /// damaged.
+    #[test]
+    fn the_streamed_read_takes_the_fast_loop_and_reads_what_the_whole_read_does() {
+        for (index, stream) in streams().iter().enumerate() {
+            let whole = decode_split(stream, stream.len(), usize::MAX, false);
+            let mut wrapped = vec![0x78, 0x01];
+            wrapped.extend_from_slice(stream);
+            wrapped.extend_from_slice(&adler32(&whole.0).to_be_bytes());
+            STATE_MACHINE_ONLY.with(|only| only.set(true));
+            let alone = streamed(&wrapped, Tail::WhiteSpace);
+            STATE_MACHINE_ONLY.with(|only| only.set(false));
+            let fast = streamed(&wrapped, Tail::WhiteSpace);
+            assert_eq!(
+                fast, alone,
+                "stream {index}: the fast loop and the state machine alone"
+            );
+            assert_eq!(
+                fast.0, whole.0,
+                "stream {index}: the pieces and the one-shot read"
+            );
+        }
+    }
+
+    /// **A symbol on the fast path costs no state dispatch.**
+    ///
+    /// One fixed-code block of page-like data, followed by sixteen bytes so
+    /// that every symbol has eight input bytes ahead of the furthest the
+    /// accumulator can have read, which is eight past the symbol, takes the
+    /// same three turns of the dispatch — the header, the symbols, done —
+    /// whether it holds a kilobyte or sixty-four, counted through
+    /// [`DISPATCHES`]; the state machine alone takes a turn a symbol and
+    /// more.
+    #[test]
+    fn a_symbol_on_the_fast_path_costs_no_state_dispatch() {
+        let mut turns = Vec::new();
+        for len in [1_000usize, 64_000] {
+            let (mut stream, data) = fixed_block(&tokens(len, 11));
+            assert_eq!(
+                stream.first().map(|b| b & 0b111),
+                Some(0b011),
+                "one final fixed block"
+            );
+            stream.extend_from_slice(&[0; 16]);
+            for fast in [true, false] {
+                DISPATCHES.with(|dispatches| dispatches.set(0));
+                DECODES.with(|decodes| decodes.set(0));
+                let (out, progress, _, _) = decode_split(&stream, stream.len(), 1 << 20, fast);
+                assert_eq!((progress, out == data), (Progress::Finished, true));
+                let dispatches = DISPATCHES.with(std::cell::Cell::get);
+                let symbols = DECODES.with(std::cell::Cell::get);
+                if fast {
+                    turns.push(dispatches);
+                } else {
+                    assert!(
+                        dispatches >= symbols,
+                        "{dispatches} turns for {symbols} symbols"
+                    );
+                }
+            }
+        }
+        assert_eq!(turns, [3, 3], "the turns grew with the symbols");
     }
 
     #[test]

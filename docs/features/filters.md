@@ -19,7 +19,12 @@ fixed-Huffman and dynamic-Huffman blocks (RFC 1951), the zlib wrapper
 is absent. A block's code tables hold each code's meaning in its entry — the
 literal, end-of-block, or a length's or a distance's base and extra bits
 (3.2.5) — so a code resolves in the one read of the nine-bit table that finds
-it, and a longer code in one more read, of its subtable. The encoder exists
+it, and a longer code in one more read, of its subtable. While at least eight
+input bytes and 258 bytes of output room remain, literals, lengths, distances
+and copies decode in one loop that refills the bit accumulator eight bytes at
+a time and passes through no state between symbols; the resumable state
+machine keeps a stream's tail, a stream that needs more input and the output
+ceiling, and either way the decode stops on the same bit. The encoder exists
 too: `deflate.rs` is a hash-chain LZ77 match finder whose chains live in two
 tables of one window's entries, a bucket's
 newest position and a ring of each position's predecessor, so what it holds
