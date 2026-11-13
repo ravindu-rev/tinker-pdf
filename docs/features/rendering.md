@@ -978,10 +978,16 @@ rectangles the renderer keeps in the page's frame (`Bounds`), so a tile takes
 the page's decision. **One is not, a known gap:** whether an image *joins*
 the run held back so abutting images do not conflate is decided by overlap
 with what the run holds over the canvas only, so two images that overlap
-outside a tile and abut inside it are one run in the tile and two on the page
+outside a tile and abut inside it are one run in the tile and two on the page.
+The gap is a class of eleven shapes, which
+[design/image-edges.md](../design/image-edges.md) names: the overlap outside
+the tile in either direction, a draw wholly outside the tile that overlaps a
+member, soft-masked and stencil images, a run in a group's canvas and in a
+soft mask's, a turned, a cropped and a turned and cropped page, and a run in
+an annotation's appearance, each drawn from a display list as directly
 (`render_regions.rs`'s
-`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`;
-ROADMAP RC-21). A renderer reports what its canvas could not see of the runs
+`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`
+and `every_shape_of_the_image_run_exception_is_pinned`; ROADMAP RC-21). A renderer reports what its canvas could not see of the runs
 (`Renderer::run_reach`, `RunReach`): where an image that could join a run
 meets the run's bounds in the page's frame outside the canvas, and every
 image a run could hold that the canvas does not hold whole — nothing, for a
@@ -2397,7 +2403,10 @@ under it, so the copy holds every canvas the walk closes onto.
   **byte-equal** to its rectangle of the whole render with no tolerance at any
   scale; a stroked rectangle whose miter corners sit on a sub-scanline, at 1×;
   ruling 5's one named exception — an image run whose overlap falls outside
-  the tile — pinned exactly, so a change in either direction fails;
+  the tile — pinned exactly, so a change in either direction fails, its first
+  page over one tile and its class of eleven pages at the guard's lattices and
+  scales, with each class page's tiles drawn from a display list held to its
+  direct tiles;
   plus the trim at the page edge and its warning, a region wholly off the page, and — because tile equality alone is
   satisfied by a *consistent* mistake — two fixtures that assert which quadrant
   of the displayed picture one mark lands in, on a rotated page and on a

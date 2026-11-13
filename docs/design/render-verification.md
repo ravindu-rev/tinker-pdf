@@ -107,8 +107,8 @@ same file, which needs no ground truth at all:
   in-tree, on fixtures and at tile sizes that do not divide the page:
   `crates/tinker-pdf/tests/render_regions.rs`. The two are worth keeping
   apart — this one is breadth over documents nobody here wrote and no known
-  answer, that one is a byte-equality assertion with one named exception
-  ([rulings](../rulings.md)).
+  answer, that one is a byte-equality assertion with one named exception, a
+  class of eleven pinned pages ([rulings](../rulings.md)).
 - **Resolution coherence.** A render at twice the scale, box-filtered down
   by two, must agree with the direct render within a budget measured and
   ratcheted rather than guessed. Sampling-grid and rounding bugs move this;

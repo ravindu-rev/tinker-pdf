@@ -84,8 +84,10 @@
 //! geometric rather than a scale: two images that overlap outside a tile and
 //! abut inside it are one image run in the tile and two on the page.
 //! [`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`]
-//! pins it as measured — 40 pixels, 63 levels, at 1x — and ruling 5 and a
-//! ROADMAP row carry it until it is gone.
+//! pins it as measured — 40 pixels, 63 levels, at 1x — and
+//! [`every_shape_of_the_image_run_exception_is_pinned`] pins its class, the
+//! eleven pages `docs/design/image-edges.md` names, at the guard's lattices
+//! and scales; ruling 5 and a ROADMAP row carry it until it is gone.
 //!
 //! # Bands on threads
 //!
@@ -159,8 +161,8 @@ use tinker_pdf::{
 mod region_support;
 mod render_support;
 use region_support::{
-    annotated_page, fixtures, framed_page, image_run_page, raw_page, shaped, strokes_page, Fixture,
-    Shape, PAGE_H, PAGE_W,
+    annotated_page, fixtures, framed_page, image_run_page, raw_page, run_shapes, shaped,
+    strokes_page, Fixture, Shape, PAGE_H, PAGE_W,
 };
 use render_support::ink;
 
@@ -602,6 +604,334 @@ fn an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception()
         ),
         (40, 63, (40, 0), vec![40]),
         "the run decided in the canvas is the named seam and nothing else"
+    );
+}
+
+// ---- the named exception's class (RC-21) ------------------------------------
+
+/// The scales and lattices the image-run class is tiled at: the guard's own,
+/// 64, 37 and 23 pixels at 1x, 53 at the six other scales, and one pixel at
+/// 0.22x.
+const RUN_LATTICES: &[(f64, &[u32])] = &[
+    (1.0, &[64, 37, 23]),
+    (0.5, &[53]),
+    (2.0, &[53]),
+    (4.0, &[53]),
+    (0.75, &[53]),
+    (1.5, &[53]),
+    (3.0, &[53]),
+    (0.22, &[1]),
+];
+
+/// **What each shape of the class measures at each scale**, a lattice at a
+/// time ([`run_lattice`]): `equal` where every tile is the page under it, and
+/// otherwise the pixels that differ across the lattice, the worst component,
+/// the first differing pixel of the page in raster order, and the page's
+/// columns or rows they lie in.
+///
+/// Pinned exactly rather than bounded, as the exception's first page is, so
+/// the day one moves in either direction the test says so. When the run is
+/// decided in the page's frame (RC-21.4) every value is `equal`, the shapes
+/// join `fixtures()`, and this table goes. A value is a run's reading, never
+/// a guess: an empty one is a pin not yet taken, which fails and prints the
+/// line to paste. At 0.5x the 53-pixel tile holds the whole page, which is
+/// the page by construction.
+const RUN_PINS: &[(&str, &str)] = &[
+    ("overlap outside the tile in y at 1x", ""),
+    ("overlap outside the tile in y at 0.5x", "53: equal"),
+    ("overlap outside the tile in y at 2x", ""),
+    ("overlap outside the tile in y at 4x", ""),
+    ("overlap outside the tile in y at 0.75x", ""),
+    ("overlap outside the tile in y at 1.5x", ""),
+    ("overlap outside the tile in y at 3x", ""),
+    ("overlap outside the tile in y at 0.22x", ""),
+    ("overlap outside the tile in x at 1x", ""),
+    ("overlap outside the tile in x at 0.5x", "53: equal"),
+    ("overlap outside the tile in x at 2x", ""),
+    ("overlap outside the tile in x at 4x", ""),
+    ("overlap outside the tile in x at 0.75x", ""),
+    ("overlap outside the tile in x at 1.5x", ""),
+    ("overlap outside the tile in x at 3x", ""),
+    ("overlap outside the tile in x at 0.22x", ""),
+    ("a draw wholly outside the tile overlaps a member at 1x", ""),
+    (
+        "a draw wholly outside the tile overlaps a member at 0.5x",
+        "53: equal",
+    ),
+    ("a draw wholly outside the tile overlaps a member at 2x", ""),
+    ("a draw wholly outside the tile overlaps a member at 4x", ""),
+    (
+        "a draw wholly outside the tile overlaps a member at 0.75x",
+        "",
+    ),
+    (
+        "a draw wholly outside the tile overlaps a member at 1.5x",
+        "",
+    ),
+    ("a draw wholly outside the tile overlaps a member at 3x", ""),
+    (
+        "a draw wholly outside the tile overlaps a member at 0.22x",
+        "",
+    ),
+    ("soft-masked images at 1x", ""),
+    ("soft-masked images at 0.5x", "53: equal"),
+    ("soft-masked images at 2x", ""),
+    ("soft-masked images at 4x", ""),
+    ("soft-masked images at 0.75x", ""),
+    ("soft-masked images at 1.5x", ""),
+    ("soft-masked images at 3x", ""),
+    ("soft-masked images at 0.22x", ""),
+    ("stencil images at 1x", ""),
+    ("stencil images at 0.5x", "53: equal"),
+    ("stencil images at 2x", ""),
+    ("stencil images at 4x", ""),
+    ("stencil images at 0.75x", ""),
+    ("stencil images at 1.5x", ""),
+    ("stencil images at 3x", ""),
+    ("stencil images at 0.22x", ""),
+    ("in a group's canvas at 1x", ""),
+    ("in a group's canvas at 0.5x", "53: equal"),
+    ("in a group's canvas at 2x", ""),
+    ("in a group's canvas at 4x", ""),
+    ("in a group's canvas at 0.75x", ""),
+    ("in a group's canvas at 1.5x", ""),
+    ("in a group's canvas at 3x", ""),
+    ("in a group's canvas at 0.22x", ""),
+    ("in a soft mask's canvas at 1x", ""),
+    ("in a soft mask's canvas at 0.5x", "53: equal"),
+    ("in a soft mask's canvas at 2x", ""),
+    ("in a soft mask's canvas at 4x", ""),
+    ("in a soft mask's canvas at 0.75x", ""),
+    ("in a soft mask's canvas at 1.5x", ""),
+    ("in a soft mask's canvas at 3x", ""),
+    ("in a soft mask's canvas at 0.22x", ""),
+    ("turned a quarter at 1x", ""),
+    ("turned a quarter at 0.5x", "53: equal"),
+    ("turned a quarter at 2x", ""),
+    ("turned a quarter at 4x", ""),
+    ("turned a quarter at 0.75x", ""),
+    ("turned a quarter at 1.5x", ""),
+    ("turned a quarter at 3x", ""),
+    ("turned a quarter at 0.22x", ""),
+    ("cropped at 1x", ""),
+    ("cropped at 0.5x", "53: equal"),
+    ("cropped at 2x", ""),
+    ("cropped at 4x", ""),
+    ("cropped at 0.75x", ""),
+    ("cropped at 1.5x", ""),
+    ("cropped at 3x", ""),
+    ("cropped at 0.22x", ""),
+    ("cropped and turned three quarters at 1x", ""),
+    ("cropped and turned three quarters at 0.5x", "53: equal"),
+    ("cropped and turned three quarters at 2x", ""),
+    ("cropped and turned three quarters at 4x", ""),
+    ("cropped and turned three quarters at 0.75x", ""),
+    ("cropped and turned three quarters at 1.5x", ""),
+    ("cropped and turned three quarters at 3x", ""),
+    ("cropped and turned three quarters at 0.22x", ""),
+    ("in an annotation's appearance at 1x", ""),
+    ("in an annotation's appearance at 0.5x", "53: equal"),
+    ("in an annotation's appearance at 2x", ""),
+    ("in an annotation's appearance at 4x", ""),
+    ("in an annotation's appearance at 0.75x", ""),
+    ("in an annotation's appearance at 1.5x", ""),
+    ("in an annotation's appearance at 3x", ""),
+    ("in an annotation's appearance at 0.22x", ""),
+];
+
+/// `40`, `40-42`, `7 40-42 81`: a set of a page's columns or rows as its
+/// runs.
+fn spans(lines: &std::collections::BTreeSet<u32>) -> String {
+    let span = |first: u32, last: u32| {
+        if first == last {
+            first.to_string()
+        } else {
+            format!("{first}-{last}")
+        }
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut run: Option<(u32, u32)> = None;
+    for &line in lines {
+        run = match run {
+            Some((first, last)) if line == last + 1 => Some((first, line)),
+            Some((first, last)) => {
+                out.push(span(first, last));
+                Some((line, line))
+            }
+            None => Some((line, line)),
+        };
+    }
+    if let Some((first, last)) = run {
+        out.push(span(first, last));
+    }
+    out.join(" ")
+}
+
+/// One lattice of `tile` pixels over `page` at `options`, read against the
+/// page drawn whole, as [`RUN_PINS`] states it: `"{tile}: equal"`, or the
+/// differing pixels across every tile, the worst component, the first of
+/// them in the page's raster order and the page's columns or rows they lie
+/// in, whichever are fewer.
+fn run_lattice(page: &Page, options: &RenderOptions, tile: u32) -> String {
+    let full = page.render(options);
+    let (width, height) = (full.width, full.height);
+    let components = full.components();
+    let mut pixels = 0u64;
+    let mut worst = 0u8;
+    let mut first: Option<(u32, u32)> = None;
+    let mut columns = std::collections::BTreeSet::new();
+    let mut rows = std::collections::BTreeSet::new();
+    for top in (0..height).step_by(tile as usize) {
+        for left in (0..width).step_by(tile as usize) {
+            let asked = PixelRegion::new(left, top, tile, tile);
+            let bitmap = page.render(&RenderOptions {
+                region: Some(asked),
+                ..options.clone()
+            });
+            let at = asked.clamped_to(width, height);
+            assert_eq!(
+                (bitmap.width, bitmap.height),
+                (at.width, at.height),
+                "a {tile}px tile at ({left}, {top}) came back the wrong size"
+            );
+            for y in 0..bitmap.height {
+                for x in 0..bitmap.width {
+                    let mine = (y as usize) * bitmap.stride + (x as usize) * components;
+                    let theirs =
+                        ((at.y + y) as usize) * full.stride + ((at.x + x) as usize) * components;
+                    let (Some(mine), Some(theirs)) = (
+                        bitmap.data.get(mine..mine + components),
+                        full.data.get(theirs..theirs + components),
+                    ) else {
+                        continue;
+                    };
+                    if mine == theirs {
+                        continue;
+                    }
+                    pixels += 1;
+                    for (m, t) in mine.iter().zip(theirs) {
+                        worst = worst.max(m.abs_diff(*t));
+                    }
+                    let (px, py) = (at.x + x, at.y + y);
+                    if first.is_none_or(|(fx, fy)| (py, px) < (fy, fx)) {
+                        first = Some((px, py));
+                    }
+                    columns.insert(px);
+                    rows.insert(py);
+                }
+            }
+        }
+    }
+    match first {
+        None => format!("{tile}: equal"),
+        Some((x, y)) => {
+            let (label, lines) = if columns.len() <= rows.len() {
+                ("columns", &columns)
+            } else {
+                ("rows", &rows)
+            };
+            format!(
+                "{tile}: {pixels} px, worst {worst}, first ({x}, {y}), {label} {}",
+                spans(lines)
+            )
+        }
+    }
+}
+
+/// Every tile of `page` drawn from its display list is the tile drawn
+/// directly, byte for byte, on the guard's three lattices at 1x and on 53
+/// at 1.5x: a replay delivers the calls the interpretation made, so it
+/// keeps the exception exactly where a direct tile keeps it.
+#[track_caller]
+fn replayed_tiles_are_direct_tiles(page: &Page, name: &str) {
+    let list = page.display_list();
+    for (scale, tiles) in [(1.0f64, &[64u32, 37, 23][..]), (1.5, &[53][..])] {
+        let options = RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        };
+        let (width, height) = page.pixel_size(&options);
+        for &tile in tiles {
+            for top in (0..height).step_by(tile as usize) {
+                for left in (0..width).step_by(tile as usize) {
+                    let asked = RenderOptions {
+                        region: Some(PixelRegion::new(left, top, tile, tile)),
+                        ..options.clone()
+                    };
+                    let direct = page.render(&asked);
+                    let replayed = list.render(&asked);
+                    assert!(
+                        (direct.width, direct.height) == (replayed.width, replayed.height)
+                            && direct.format == replayed.format
+                            && direct.data == replayed.data,
+                        "{name}: the {tile}px tile at ({left}, {top}) at {scale}x drawn from \
+                         the display list is not the tile drawn directly"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// **Ruling 5's named exception, shape by shape** (`docs/design/image-edges.md`,
+/// RC-21).
+///
+/// Each of the eleven pages of the class (`region_support::run_shapes`) puts
+/// the page's overlap outside some tile: below it and beside it, through a
+/// draw wholly outside it that overlaps a member, with soft-masked and
+/// stencil images, in a group's canvas and a soft mask's, turned, cropped and
+/// both, and in an annotation's appearance. Each is held to its ink floor,
+/// tiled at the guard's lattices and scales ([`RUN_LATTICES`]), and read
+/// against the page drawn whole: every reading is its pin in [`RUN_PINS`],
+/// the differing tiles exactly as measured and the others byte-equal. And
+/// each shape's tiles drawn from its display list are its direct tiles,
+/// exception and all.
+#[test]
+fn every_shape_of_the_image_run_exception_is_pinned() {
+    let mut measured: Vec<(String, String)> = Vec::new();
+    for shape in run_shapes() {
+        with_page(&shape, |page| {
+            for (scale, lattices) in RUN_LATTICES {
+                let options = RenderOptions {
+                    scale: *scale,
+                    ..RenderOptions::default()
+                };
+                let reading = lattices
+                    .iter()
+                    .map(|tile| run_lattice(page, &options, *tile))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                measured.push((format!("{} at {scale}x", shape.name), reading));
+            }
+            replayed_tiles_are_direct_tiles(page, shape.name);
+        });
+    }
+    let stale: Vec<&str> = RUN_PINS
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| !measured.iter().any(|(drawn, _)| drawn == key))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "pins for no shape and scale this test draws: {stale:?}"
+    );
+    let wrong: Vec<String> = measured
+        .iter()
+        .filter(|(key, reading)| {
+            !RUN_PINS
+                .iter()
+                .any(|(pinned, value)| pinned == key && value == reading)
+        })
+        .map(|(key, reading)| format!("    (\"{key}\", \"{reading}\"),"))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{} of the class's {} readings are not their pins: a moved pin is a \
+         finding about the renderer, never an edit, and an empty one is a pin \
+         not yet taken. The readings:\n{}",
+        wrong.len(),
+        measured.len(),
+        wrong.join("\n")
     );
 }
 

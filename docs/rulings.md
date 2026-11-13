@@ -116,9 +116,17 @@ instead of living in one feature's head.
    the run already holds, and the run holds fragments only over the canvas.
    Two images that overlap outside a tile and abut inside it are one run in
    the tile and two on the page, and the abutting edge then conflates on the
-   page and not in the tile. `render_regions.rs`'s
+   page and not in the tile. The exception is a class of eleven shapes
+   ([image edges](design/image-edges.md), RC-21): the overlap outside the
+   tile in `y` and in `x`, a draw wholly outside the tile that overlaps a
+   member, soft-masked and stencil images, a run in a group's canvas and in
+   a soft mask's, the page turned, cropped and both, and a run in an
+   annotation's appearance; a tile drawn from a display list keeps it where
+   a direct tile does. `render_regions.rs`'s
    `an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`
-   pins exactly that, and the roadmap holds the gap (RC-21).
+   pins its first page, `every_shape_of_the_image_run_exception_is_pinned`
+   pins every shape at the guard's lattices and scales, and the roadmap
+   holds the gap (RC-21).
 
 6. **Destinations are an enum, everywhere.** Binds
    [document-model](features/document-model.md),

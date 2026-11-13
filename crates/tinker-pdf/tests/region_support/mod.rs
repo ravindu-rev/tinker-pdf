@@ -7,7 +7,8 @@
 //! page; the stroker's whole pen, one-bit images, and JPEGs and JPEG 2000
 //! codestreams decoded at the size they are drawn; and beside them the stroked frame whose corners sit on a
 //! sub-scanline, the three-image page of ruling 5's named exception and the
-//! page whose only ink is two annotations.
+//! eleven pages of its class (`run_shapes`), and the page whose only ink is
+//! two annotations.
 //!
 //! # Why the allow
 //!
@@ -476,6 +477,234 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
         content.len()
     )
     .into_bytes()
+}
+
+/// The draws of [`image_run_page`] by the names `a`, `b` and `c`: `a` and
+/// `c` abut along `x = 40.5` across the top forty rows, `c` overlaps `b` in
+/// rows 60 to 69.
+fn three_images(a: &str, b: &str, c: &str) -> String {
+    format!(
+        "q 40.5 0 0 40 0 60 cm /{a} Do Q q 40 0 0 40 40.5 0 cm /{b} Do Q \
+         q 40 0 0 70 40.5 30 cm /{c} Do Q"
+    )
+}
+
+/// A one-page document on a 100 x 100 media box: `content`, `resources`,
+/// `extra` entries in the page dictionary, and `objects` numbered from 5.
+fn run_document(content: &str, resources: &str, extra: &str, objects: &[String]) -> Vec<u8> {
+    let mut out = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
+   /Resources {resources}{extra} /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+        content.len()
+    );
+    for (index, object) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 5));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        objects.len() + 5
+    ));
+    out.into_bytes()
+}
+
+/// A one-sample DeviceGray image of `sample` (two hex digits), `extra`
+/// entries in its dictionary.
+fn grey_sample(sample: &str, extra: &str) -> String {
+    stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+             /BitsPerComponent 8 /Filter /ASCIIHexDecode{extra}"
+        ),
+        &format!("{sample}>"),
+    )
+}
+
+/// A one-bit `/ImageMask` one sample wide and `rows` tall, its rows `data`
+/// in hex: a 0 bit paints the fill colour, under the default `/Decode`
+/// (8.9.6.2).
+fn stencil(rows: u32, data: &str) -> String {
+    stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width 1 /Height {rows} /ImageMask true \
+             /BitsPerComponent 1 /Filter /ASCIIHexDecode"
+        ),
+        &format!("{data}>"),
+    )
+}
+
+/// The crop box of the image-run class's cropped pages: offset from the 100
+/// x 100 media box on both axes, holding the seam and the overlap.
+pub const RUN_CROP: (f64, f64, f64, f64) = (7.0, 3.0, 93.0, 97.0);
+
+/// **The class of ruling 5's named exception** (`docs/design/image-edges.md`,
+/// RC-21): each way a page can put the page's overlap outside a tile, one
+/// page each, every one of them [`image_run_page`]'s seam at a half pixel so
+/// that conflation shows wherever a tile and the page hold the seam in
+/// different runs.
+///
+/// Out of [`fixtures`], whose tests assert equality, until the run is decided
+/// in the page's frame (RC-21.4); `render_regions.rs`'s
+/// `every_shape_of_the_image_run_exception_is_pinned` pins each as it stands.
+/// The ink floors are about seven tenths of what each page's squares cover.
+pub fn run_shapes() -> Vec<Fixture> {
+    let black = || grey_sample("00", "");
+    let mut out = Vec::new();
+    let mut add = |name: &'static str, bytes: Vec<u8>, least_ink: usize| {
+        out.push(Fixture {
+            name,
+            bytes,
+            least_ink,
+        });
+    };
+
+    // `c` overlaps `b` in rows 60 to 69, below a tile over the seam's rows.
+    add("overlap outside the tile in y", image_run_page(), 4_000);
+    // The same page transposed: the seam along row 40, the overlap in
+    // columns 60 to 69, beside a tile over the seam's columns.
+    add(
+        "overlap outside the tile in x",
+        run_document(
+            "q 40 0 0 40.5 0 59.5 cm /I Do Q q 40 0 0 40 60 19.5 cm /I Do Q \
+             q 70 0 0 40 0 19.5 cm /I Do Q",
+            "<< /XObject << /I 5 0 R >> >>",
+            "",
+            &[black()],
+        ),
+        4_000,
+    );
+    // `b` overlaps `a` in rows 70 to 99 and nothing else: on the page it
+    // ends `a`'s run and `c` joins its own; in a tile above row 70 `b` has no
+    // rectangle, joins, and `c` joins `a`.
+    add(
+        "a draw wholly outside the tile overlaps a member",
+        run_document(
+            "q 40.5 0 0 100 0 0 cm /I Do Q q 40 0 0 30 20 0 cm /I Do Q \
+             q 40 0 0 40 40.5 60 cm /I Do Q",
+            "<< /XObject << /I 5 0 R >> >>",
+            "",
+            &[black()],
+        ),
+        4_500,
+    );
+    // Each image under a one-sample soft mask of 0.8 (11.6.5.3): the band
+    // holds coverage times an alpha its samples set.
+    add(
+        "soft-masked images",
+        run_document(
+            &three_images("S", "S", "S"),
+            "<< /XObject << /S 5 0 R >> >>",
+            "",
+            &[grey_sample("00", " /SMask 6 0 R"), grey_sample("CC", "")],
+        ),
+        4_000,
+    );
+    // Stencils in one fill colour; `b` is two samples tall and only its upper
+    // one, rows 60 to 79, paints, so the overlap is in its painted half.
+    add(
+        "stencil images",
+        run_document(
+            &format!("0.1 0.3 0.8 rg {}", three_images("K", "H", "K")),
+            "<< /XObject << /K 5 0 R /H 6 0 R >> >>",
+            "",
+            &[stencil(1, "00"), stencil(2, "0080")],
+        ),
+        3_500,
+    );
+    // The three inside a non-isolated transparency group (11.6.6), whose
+    // buffer stands inside the page and, in a tile, inside the tile.
+    add(
+        "in a group's canvas",
+        run_document(
+            "/G Do",
+            "<< /XObject << /G 5 0 R >> >>",
+            "",
+            &[
+                stream(
+                    "/Type /XObject /Subtype /Form /BBox [5 5 95 95] \
+                     /Group << /S /Transparency /I false /K false >> \
+                     /Resources << /XObject << /I 6 0 R >> >>",
+                    &three_images("I", "I", "I"),
+                ),
+                black(),
+            ],
+        ),
+        3_500,
+    );
+    // The three drawn white in a luminosity soft mask's group over its black
+    // backdrop (11.6.5.2), and the page filled through the mask: the seam is
+    // in the mask and shows in the fill.
+    add(
+        "in a soft mask's canvas",
+        run_document(
+            "q /GM gs 0.9 0.2 0.1 rg 0 0 100 100 re f Q",
+            "<< /ExtGState << /GM << /SMask << /S /Luminosity /G 5 0 R >> >> >> >>",
+            "",
+            &[
+                stream(
+                    "/Type /XObject /Subtype /Form /BBox [0 0 100 100] \
+                     /Group << /S /Transparency /CS /DeviceGray >> \
+                     /Resources << /XObject << /W 6 0 R >> >>",
+                    &three_images("W", "W", "W"),
+                ),
+                grey_sample("FF", ""),
+            ],
+        ),
+        4_000,
+    );
+    add(
+        "turned a quarter",
+        shaped(image_run_page(), Shape::turned(90)),
+        4_000,
+    );
+    add(
+        "cropped",
+        shaped(
+            image_run_page(),
+            Shape {
+                rotation: 0,
+                crop: Some(RUN_CROP),
+            },
+        ),
+        3_500,
+    );
+    add(
+        "cropped and turned three quarters",
+        shaped(
+            image_run_page(),
+            Shape {
+                rotation: 270,
+                crop: Some(RUN_CROP),
+            },
+        ),
+        3_500,
+    );
+    // The three drawn by an annotation's appearance over an empty content
+    // stream (12.5.5), its `/BBox` the `/Rect`, so the appearance's own
+    // transform is the identity and the page's run is the appearance's.
+    add(
+        "in an annotation's appearance",
+        run_document(
+            "",
+            "<< >>",
+            " /Annots [5 0 R]",
+            &[
+                "<< /Type /Annot /Subtype /Square /Rect [0 0 100 100] /AP << /N 6 0 R >> >>"
+                    .to_string(),
+                stream(
+                    "/Type /XObject /Subtype /Form /BBox [0 0 100 100] \
+                     /Resources << /XObject << /I 7 0 R >> >>",
+                    &three_images("I", "I", "I"),
+                ),
+                black(),
+            ],
+        ),
+        4_000,
+    );
+    out
 }
 
 /// A page whose only ink comes from an annotation appearance stream (12.5.5).
