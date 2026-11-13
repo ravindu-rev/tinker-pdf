@@ -117,7 +117,7 @@ use super::read::PX_TO_PT;
 use super::tagging::{
     ancestry, draw_figure, figure_orders, table_cells, tag_runs, writing_modes, Tagging,
 };
-use super::typeface::{EmbeddedFace, FaceSet};
+use super::typeface::{EmbeddedFace, FaceSet, Wanted};
 use super::xhtml::Dom;
 // `Placed` and not `tinker_pdf_layout::metrics::PlacedGlyph`, which is
 // imported above under that name and is a different thing: layout's is a
@@ -169,8 +169,9 @@ pub struct Face {
 /// Which face one character is drawn in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chosen {
-    /// One of the book's own `@font-face` faces, by index into
-    /// [`FaceSet::faces`].
+    /// One of the book's own `@font-face` faces, by the index
+    /// [`FaceSet::face`] answers for: one of [`FaceSet::faces`], or past them
+    /// the instance of a variable one the run asked for.
     Embedded(usize),
     /// One of the standard 14.
     Standard(Face),
@@ -262,6 +263,12 @@ pub struct FamilyPlan<'f> {
     italic: bool,
     /// Each face's program, parsed the first time the plan asks about it.
     programs: Vec<OnceCell<Option<Sfnt<'f>>>>,
+    /// What the run asks of a variable face.
+    wanted: Wanted,
+    /// Each face's index as the run draws it — the instance [`Wanted`]
+    /// lands on, or the face itself — resolved the first time the plan
+    /// chooses the face.
+    drawn: Vec<OnceCell<usize>>,
 }
 
 impl<'f> FamilyPlan<'f> {
@@ -304,6 +311,18 @@ impl<'f> FamilyPlan<'f> {
             bold: font.weight >= 600,
             italic: font.style != FontStyle::Normal,
             programs: (0..faces.faces().len()).map(|_| OnceCell::new()).collect(),
+            wanted: Wanted::of(font),
+            drawn: (0..faces.faces().len()).map(|_| OnceCell::new()).collect(),
+        }
+    }
+
+    /// The index face `index` is drawn in for this plan's run: the instance
+    /// of it the run asks for where the face varies
+    /// ([`FaceSet::instance_for`]), the face itself otherwise.
+    fn drawn(&self, index: usize) -> usize {
+        match self.drawn.get(index) {
+            Some(slot) => *slot.get_or_init(|| self.faces.instance_for(index, &self.wanted)),
+            None => index,
         }
     }
 
@@ -366,13 +385,14 @@ impl<'f> FamilyPlan<'f> {
         .is_some_and(|id| id != 0)
     }
 
-    /// Which face `ch` is drawn in: [`choose`]'s answer.
+    /// Which face `ch` is drawn in: [`choose`]'s answer, a variable face at
+    /// the instance the run asks of it.
     #[must_use]
     pub fn choose(&self, ch: Option<char>) -> Chosen {
         for family in &self.families {
             for &index in &family.embedded {
                 if ch.is_none_or(|ch| self.covers(index, ch)) {
-                    return Chosen::Embedded(index);
+                    return Chosen::Embedded(self.drawn(index));
                 }
             }
             if let Some(generic) = family.standard {
@@ -391,7 +411,7 @@ impl<'f> FamilyPlan<'f> {
         // its `body` rule never mentions still gets its Japanese line drawn.
         if let Some(ch) = ch {
             if let Some(index) = (0..self.programs.len()).find(|&index| self.covers(index, ch)) {
-                return Chosen::Embedded(index);
+                return Chosen::Embedded(self.drawn(index));
             }
         }
         Chosen::Standard(Face {
@@ -775,7 +795,7 @@ impl Metrics for BookMetrics<'_> {
             // The file's own `hmtx`, which is the only number that can agree
             // with the glyphs a viewer will draw from the program this
             // document embeds.
-            Chosen::Embedded(index) => match self.faces().faces().get(index) {
+            Chosen::Embedded(index) => match self.faces().face(index) {
                 Some(face) => face.advance_em(ch) * font.size,
                 None => font.size * 0.5,
             },
@@ -794,8 +814,7 @@ impl Metrics for BookMetrics<'_> {
         let (ascent, descent) = match choose(self.faces(), font, None) {
             Chosen::Embedded(index) => self
                 .faces()
-                .faces()
-                .get(index)
+                .face(index)
                 .and_then(super::typeface::EmbeddedFace::vertical_fractions)
                 .unwrap_or_else(|| Face::of(font).vertical_fractions()),
             Chosen::Standard(face) => face.vertical_fractions(),
@@ -939,12 +958,10 @@ impl Shaper for BookMetrics<'_> {
                 },
             );
             let shaped = match chosen {
-                Chosen::Embedded(index) => {
-                    self.faces().faces().get(index).and_then(|face| match near {
-                        ("", "") => shape_with(face, slice, font, rtl),
-                        _ => shape_in_context(face, slice, font, rtl, near),
-                    })
-                }
+                Chosen::Embedded(index) => self.faces().face(index).and_then(|face| match near {
+                    ("", "") => shape_with(face, slice, font, rtl),
+                    _ => shape_in_context(face, slice, font, rtl, near),
+                }),
                 Chosen::Standard(_) => None,
             };
             let mut shaped = shaped.unwrap_or_else(|| self.unshaped(slice, font, rtl));
@@ -1215,7 +1232,7 @@ impl<'a> Fonts<'a> {
             overflow: vec![Vec::new(); 12],
             used: vec![false; 12],
             fallback: vec![false; 12],
-            used_embedded: vec![false; faces.faces().len()],
+            used_embedded: vec![false; faces.face_count()],
             unrepresented: 0,
             uncovered: 0,
             contexts: RefCell::new(BTreeMap::new()),
@@ -2179,7 +2196,7 @@ impl<'a> Fonts<'a> {
                 &widths,
             );
         }
-        for (index, face) in self.faces.faces().iter().enumerate() {
+        for (index, face) in self.faces.drawn() {
             if !self.used_embedded.get(index).copied().unwrap_or(false) {
                 continue;
             }
@@ -2189,7 +2206,9 @@ impl<'a> Fonts<'a> {
             // a code for. `add_cid_font` writes `/W` from the program's own
             // `hmtx` and `/ToUnicode` from the characters each glyph was drawn
             // with, so the widths cannot disagree with the outlines and the
-            // text still extracts.
+            // text still extracts. An instance of a variable face is a face
+            // of its own here: its program is the static instance runs were
+            // measured in, embedded under its own resource.
             builder.add_cid_font(&face.resource, &base_font_name(&face.family), &face.program);
         }
     }
@@ -2202,7 +2221,7 @@ impl<'a> Fonts<'a> {
     pub fn encode(&self, chosen: Chosen, ch: char) -> Option<Coded> {
         match chosen {
             Chosen::Embedded(index) => {
-                let face = self.faces.faces().get(index)?;
+                let face = self.faces.face(index)?;
                 Some(Coded::Composite {
                     resource: face.resource.clone(),
                     id: face.glyph(ch)?,
@@ -2260,6 +2279,8 @@ pub fn request(run: &TextRun) -> FontRequest<'_> {
         size: run.font_size,
         kerning: run.kerning,
         features: &run.features,
+        variations: &run.variations,
+        optical_sizing: run.optical_sizing,
     }
 }
 
@@ -7297,7 +7318,7 @@ fn draw_shaped(
     baseline: f64,
     mut x: f64,
 ) -> (f64, usize) {
-    let Some(face) = fonts.faces().faces().get(index) else {
+    let Some(face) = fonts.faces().face(index) else {
         return (x, 0);
     };
     let settings = settings_of(run.kerning, &run.features);

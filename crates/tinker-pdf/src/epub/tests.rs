@@ -1535,6 +1535,8 @@ fn a_family_this_build_does_not_have_falls_through_to_the_next() {
             size: 16.0,
             kerning: FontKerning::Auto,
             features: &[],
+            variations: &[],
+            optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
         })
     };
 
@@ -1623,6 +1625,8 @@ fn an_unencodable_character_gets_one_stable_code() {
         variant: FontVariant::Normal,
         kerning: FontKerning::Auto,
         features: Vec::new(),
+        variations: Vec::new(),
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
         paragraph_rtl: Some(false),
         paragraph: 0,
         embeddings: Default::default(),
@@ -1748,6 +1752,8 @@ fn characters_past_the_overflow_font_are_counted() {
         variant: FontVariant::Normal,
         kerning: FontKerning::Auto,
         features: Vec::new(),
+        variations: Vec::new(),
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
         paragraph_rtl: Some(false),
         paragraph: 0,
         embeddings: Default::default(),
@@ -1789,6 +1795,8 @@ fn an_east_asian_character_is_one_em_wide() {
         size: 20.0,
         kerning: FontKerning::Auto,
         features: &[],
+        variations: &[],
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
     };
     let metrics = BookMetrics::STANDARD;
     assert!((metrics.advance('\u{65e5}', &font) - 20.0).abs() < 1e-9);
@@ -1852,6 +1860,8 @@ fn a_run_cut_in_a_piece_per_character_finds_each_glyphs_piece_by_search() {
         variant: FontVariant::Normal,
         kerning: FontKerning::Auto,
         features: Vec::new(),
+        variations: Vec::new(),
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
         paragraph_rtl: Some(false),
         paragraph: 1,
         embeddings: Default::default(),
@@ -2428,6 +2438,8 @@ fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
         variant: FontVariant::Normal,
         kerning: FontKerning::Auto,
         features: Vec::new(),
+        variations: Vec::new(),
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
         paragraph_rtl: Some(false),
         paragraph: 0,
         embeddings: Default::default(),
@@ -2525,6 +2537,8 @@ fn a_run_is_drawn_from_its_plan_by_its_place_in_the_page() {
         variant: FontVariant::Normal,
         kerning: FontKerning::Auto,
         features: Vec::new(),
+        variations: Vec::new(),
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
         paragraph_rtl: Some(true),
         paragraph: 1,
         embeddings: Default::default(),
@@ -3248,6 +3262,7 @@ fn matching_faces() -> super::typeface::FaceSet {
             family: family.to_owned(),
             weight,
             style,
+            variations: Vec::new(),
             path: format!("fonts/{family}.otf"),
             program: coverage_program(ranges),
             resource: Vec::new(),
@@ -3325,6 +3340,8 @@ fn a_run_folds_each_family_once_whatever_its_length() {
         size: 12.0,
         kerning: FontKerning::Auto,
         features: &[],
+        variations: &[],
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
     };
     for length in [1usize, 10, 1000] {
         let text: String = "body text \u{3042}7 \u{e9}"
@@ -3398,6 +3415,8 @@ fn the_plan_chooses_what_choose_chose() {
                     size: 12.0,
                     kerning: FontKerning::Auto,
                     features: &[],
+                    variations: &[],
+                    optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
                 };
                 let plan = FamilyPlan::new(&faces, &font);
                 for ch in characters {
@@ -3419,5 +3438,424 @@ fn the_plan_chooses_what_choose_chose() {
     assert!(
         embedded > asked / 10 && embedded < asked,
         "the lists reach the book's faces and the standard ones both: {embedded} of {asked}"
+    );
+}
+
+// ---- Variable faces at the instance each run asks for -----------------------
+
+/// The committed variable `glyf` face (`tinker-pdf-font`'s `tests/variable/`):
+/// `wght` 100 to 900 about 400, `wdth`, `slnt`, and `opsz` 8 to 72 about 12.
+const VARIABLE_GLYF: &[u8] =
+    include_bytes!("../../../tinker-pdf-font/tests/variable/variable-glyf.ttf");
+
+/// A set of one face, `program`, declared as the family `var` at weights 100
+/// to 900, as a book declaring it so would load it.
+fn variable_set(program: Vec<u8>) -> super::typeface::FaceSet {
+    use super::typeface::{EmbeddedFace, FaceSet};
+    FaceSet::of(vec![EmbeddedFace {
+        family: "var".to_owned(),
+        weight: (100, 900),
+        style: tinker_pdf_css::property::FontStyle::Normal,
+        variations: Vec::new(),
+        path: "fonts/var.ttf".to_owned(),
+        program,
+        resource: b"Bf0".to_vec(),
+        plans: tinker_pdf_shape::Plans::new(),
+    }])
+}
+
+/// A run's request for `Var` at a weight and a size in points.
+fn variable_request(
+    families: &[tinker_pdf_css::property::FontFamily],
+    weight: u16,
+    size: f64,
+    optical_sizing: tinker_pdf_css::property::FontOpticalSizing,
+) -> tinker_pdf_layout::metrics::FontRequest<'_> {
+    tinker_pdf_layout::metrics::FontRequest {
+        families,
+        weight,
+        style: tinker_pdf_css::property::FontStyle::Normal,
+        size,
+        kerning: tinker_pdf_css::property::FontKerning::Auto,
+        features: &[],
+        variations: &[],
+        optical_sizing,
+    }
+}
+
+/// The instances written on this thread since the count was last cleared.
+fn instances_written() -> u64 {
+    super::typeface::INSTANCES_WRITTEN.with(std::cell::Cell::get)
+}
+
+/// A copy of a face with one table's bytes edited in place.
+fn with_table(face: &[u8], tag: &[u8; 4], edit: impl Fn(&mut [u8])) -> Vec<u8> {
+    let mut out = face.to_vec();
+    let count = usize::from(u16::from_be_bytes([face[4], face[5]]));
+    for i in 0..count {
+        let record = 12 + i * 16;
+        if &face[record..record + 4] == tag {
+            let field = |at: usize| {
+                usize::try_from(u32::from_be_bytes([
+                    face[at],
+                    face[at + 1],
+                    face[at + 2],
+                    face[at + 3],
+                ]))
+                .expect("a field")
+            };
+            let (offset, length) = (field(record + 8), field(record + 12));
+            edit(&mut out[offset..offset + length]);
+            return out;
+        }
+    }
+    panic!("the face has no {}", String::from_utf8_lossy(tag));
+}
+
+/// A copy of a face with one more table, `zpad`, of `bytes` bytes: the face
+/// made as large as a test needs, the instancer copying a table it does not
+/// know as it is.
+fn padded(face: &[u8], bytes: usize) -> Vec<u8> {
+    let count = usize::from(u16::from_be_bytes([face[4], face[5]]));
+    let field = |at: usize| {
+        usize::try_from(u32::from_be_bytes([
+            face[at],
+            face[at + 1],
+            face[at + 2],
+            face[at + 3],
+        ]))
+        .expect("a field")
+    };
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = (0..count)
+        .map(|i| {
+            let record = 12 + i * 16;
+            let mut tag = [0u8; 4];
+            tag.copy_from_slice(&face[record..record + 4]);
+            let (offset, length) = (field(record + 8), field(record + 12));
+            (tag, face[offset..offset + length].to_vec())
+        })
+        .collect();
+    // `zpad` sorts after every tag the face has, so the directory stays in
+    // order.
+    tables.push((*b"zpad", vec![0x5A; bytes]));
+    let tables_count = u16::try_from(tables.len()).expect("few");
+    let selector = 15 - tables_count.leading_zeros();
+    let search = 16u16 << selector;
+    let mut out = face[..4].to_vec();
+    out.extend_from_slice(&tables_count.to_be_bytes());
+    out.extend_from_slice(&search.to_be_bytes());
+    out.extend_from_slice(&u16::try_from(selector).expect("small").to_be_bytes());
+    out.extend_from_slice(&(tables_count * 16 - search).to_be_bytes());
+    let mut offset = 12 + tables.len() * 16;
+    let mut data = Vec::new();
+    for (tag, bytes) in &tables {
+        let mut sum = 0u32;
+        for word in bytes.chunks(4) {
+            let mut padded = [0u8; 4];
+            padded[..word.len()].copy_from_slice(word);
+            sum = sum.wrapping_add(u32::from_be_bytes(padded));
+        }
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&sum.to_be_bytes());
+        out.extend_from_slice(&u32::try_from(offset).expect("small").to_be_bytes());
+        out.extend_from_slice(&u32::try_from(bytes.len()).expect("small").to_be_bytes());
+        data.extend_from_slice(bytes);
+        while data.len() % 4 != 0 {
+            data.push(0);
+        }
+        offset = 12 + tables.len() * 16 + data.len();
+    }
+    out.extend_from_slice(&data);
+    out
+}
+
+/// **A book instances each face once per coordinates** (FT-05.15, a
+/// `cfg(test)` count): a hundred runs at two weights, each measured, its
+/// line height read, shaped and chosen through as a book's runs are, write
+/// two instances — each the font crate's at its weight and the optical size
+/// of 15 points, 20 CSS pixels — and every run at a weight draws in that
+/// weight's one, past the declared face, under a resource of its own. The
+/// face's default location is the face itself and writes nothing, and a
+/// second size under `auto` optical sizing is a third location.
+#[test]
+fn a_book_instances_each_face_once_per_coordinates() {
+    use super::paint::{choose, BookMetrics, Chosen};
+    use tinker_pdf_css::property::{FontFamily, FontOpticalSizing};
+    use tinker_pdf_font::instance::instantiate;
+    use tinker_pdf_font::variation::{Instance, UserCoordinate};
+    use tinker_pdf_layout::metrics::{Metrics, Shaper};
+
+    let faces = variable_set(VARIABLE_GLYF.to_vec());
+    let families = vec![FontFamily::Named("Var".to_owned())];
+    super::typeface::INSTANCES_WRITTEN.with(|n| n.set(0));
+    let metrics = BookMetrics::with(&faces);
+    let mut chosen = Vec::new();
+    for _ in 0..50 {
+        for weight in [400u16, 700] {
+            let font = variable_request(&families, weight, 15.0, FontOpticalSizing::Auto);
+            let _ = metrics.advance('H', &font);
+            let _ = metrics.vertical(&font);
+            let _ = Shaper::shape(&metrics, "HIO", &font, false);
+            chosen.push(choose(&faces, &font, Some('H')));
+        }
+    }
+    assert_eq!(
+        instances_written(),
+        2,
+        "two locations, two instances, however many runs ask"
+    );
+    let (regular, bold) = (chosen[0], chosen[1]);
+    assert_ne!(regular, bold, "two weights draw in two faces");
+    assert!(
+        chosen.chunks(2).all(|pair| pair == [regular, bold]),
+        "every run at a weight draws in that weight's one instance"
+    );
+    for (picked, weight) in [(regular, 400.0), (bold, 700.0)] {
+        let Chosen::Embedded(index) = picked else {
+            panic!("{weight}: an embedded face, not {picked:?}");
+        };
+        assert!(
+            index >= faces.faces().len(),
+            "{weight}: past the declared face, an instance"
+        );
+        let face = faces.face(index).expect("the instance");
+        let expected = instantiate(
+            VARIABLE_GLYF,
+            &Instance::User(vec![
+                UserCoordinate::new(*b"wght", weight),
+                UserCoordinate::new(*b"opsz", 20.0),
+            ]),
+        )
+        .expect("the font crate's instance");
+        assert!(
+            face.program == expected,
+            "{weight}: the static instance at its weight and an optical size of 20"
+        );
+        assert_eq!(
+            face.resource,
+            format!("Bf{index}").into_bytes(),
+            "{weight}: a resource of its own"
+        );
+        assert_eq!(face.family, "var", "{weight}: the family it varies");
+    }
+    assert_eq!(
+        choose(
+            &faces,
+            &variable_request(&families, 400, 15.0, FontOpticalSizing::None),
+            Some('H')
+        ),
+        Chosen::Embedded(0),
+        "400 with no optical size is the face's default, the face itself"
+    );
+    assert_eq!(instances_written(), 2, "and writes nothing");
+    let large = choose(
+        &faces,
+        &variable_request(&families, 400, 30.0, FontOpticalSizing::Auto),
+        Some('H'),
+    );
+    assert!(
+        large != regular && large != Chosen::Embedded(0),
+        "another size, another location"
+    );
+    assert_eq!(instances_written(), 3);
+    assert!(faces.instance_defects().is_empty(), "nothing refused");
+    assert_eq!(faces.face_count(), 1 + 64, "the face and every slot");
+    assert!(faces.face(faces.face_count()).is_none(), "past every slot");
+    let drawn: Vec<usize> = faces.drawn().map(|(index, _)| index).collect();
+    assert_eq!(
+        drawn.len(),
+        4,
+        "the face and its three instances: {drawn:?}"
+    );
+}
+
+/// A face that does not vary is never instanced, whatever its runs ask: the
+/// matching tests' faces carry no `fvar`, and every weight, size and optical
+/// sizing draws in the declared faces and writes nothing.
+#[test]
+fn a_face_that_does_not_vary_is_never_instanced() {
+    use super::paint::{choose, Chosen};
+    use tinker_pdf_css::property::{FontFamily, FontOpticalSizing};
+
+    let faces = matching_faces();
+    let families = vec![FontFamily::Named("Body".to_owned())];
+    super::typeface::INSTANCES_WRITTEN.with(|n| n.set(0));
+    for weight in [100u16, 400, 700, 900] {
+        for size in [8.0, 15.0, 40.0] {
+            for sizing in [FontOpticalSizing::Auto, FontOpticalSizing::None] {
+                let font = variable_request(&families, weight, size, sizing);
+                let picked = choose(&faces, &font, Some('a'));
+                assert!(
+                    matches!(picked, Chosen::Embedded(index) if index < faces.faces().len()),
+                    "{weight} at {size}: a declared face, {picked:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(instances_written(), 0);
+    assert!(faces.instance_defects().is_empty());
+}
+
+/// **A run past the instance count is drawn at the face's default, and the
+/// book says so once**: sixty-five sizes under `auto` optical sizing are
+/// sixty-five locations of the face's `opsz` axis; the first sixty-four are
+/// written, the sixty-fifth draws in the face itself, and asked again a
+/// location the set has is still its instance.
+#[test]
+fn instances_past_the_count_are_drawn_at_the_default_and_named() {
+    use super::paint::{choose, Chosen};
+    use super::typeface::FaceDefect;
+    use tinker_pdf_css::property::{FontFamily, FontOpticalSizing};
+
+    let faces = variable_set(VARIABLE_GLYF.to_vec());
+    let families = vec![FontFamily::Named("Var".to_owned())];
+    super::typeface::INSTANCES_WRITTEN.with(|n| n.set(0));
+    // Half a point apart from 10 points: 13⅓ to 56 CSS pixels, inside the
+    // axis's 8 to 72, so no two land on one location.
+    let size = |step: u32| 10.0 + f64::from(step) * 0.5;
+    let chosen: Vec<Chosen> = (0..=64u32)
+        .map(|step| {
+            choose(
+                &faces,
+                &variable_request(&families, 400, size(step), FontOpticalSizing::Auto),
+                Some('H'),
+            )
+        })
+        .collect();
+    assert_eq!(instances_written(), 64, "the count's own instances");
+    let mut indices: Vec<usize> = chosen[..64]
+        .iter()
+        .map(|picked| match picked {
+            Chosen::Embedded(index) if *index >= 1 => *index,
+            other => panic!("an instance, not {other:?}"),
+        })
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    assert_eq!(
+        indices.len(),
+        64,
+        "sixty-four locations, sixty-four instances"
+    );
+    assert_eq!(
+        chosen[64],
+        Chosen::Embedded(0),
+        "the run past the count is drawn at the face's default"
+    );
+    assert_eq!(
+        faces.instance_defects(),
+        vec![("var".to_owned(), FaceDefect::InstancesSpent)],
+        "said once"
+    );
+    assert_eq!(
+        choose(
+            &faces,
+            &variable_request(&families, 400, size(0), FontOpticalSizing::Auto),
+            Some('H')
+        ),
+        chosen[0],
+        "a location the set has is still drawn in its instance"
+    );
+    assert_eq!(instances_written(), 64, "and nothing more is written");
+}
+
+/// **A run past the instance bytes is drawn at the face's default, and
+/// named**: a face of 22 MiB — the committed face with a table of padding,
+/// which the instancer copies as it is — has room for two instances in the
+/// 64 MiB a book's hold, since the third would be charged its face's size on
+/// top of the two; the third location asked for is drawn in the face itself,
+/// is never written, and is named as the bound it met, while the two written
+/// still draw.
+#[test]
+fn instances_past_the_bytes_are_drawn_at_the_default_and_named() {
+    use super::paint::{choose, Chosen};
+    use super::typeface::FaceDefect;
+    use tinker_pdf_css::property::{FontFamily, FontOpticalSizing};
+
+    let face = padded(VARIABLE_GLYF, 22 << 20);
+    let length = face.len();
+    let faces = variable_set(face);
+    let families = vec![FontFamily::Named("Var".to_owned())];
+    super::typeface::INSTANCES_WRITTEN.with(|n| n.set(0));
+    let chosen: Vec<Chosen> = [300u16, 500, 700]
+        .iter()
+        .map(|&weight| {
+            choose(
+                &faces,
+                &variable_request(&families, weight, 15.0, FontOpticalSizing::None),
+                Some('H'),
+            )
+        })
+        .collect();
+    assert_eq!(instances_written(), 2, "two instances fit");
+    let held: usize = chosen[..2]
+        .iter()
+        .map(|picked| match picked {
+            Chosen::Embedded(index) if *index >= 1 => {
+                faces.face(*index).expect("an instance").program.len()
+            }
+            other => panic!("an instance, not {other:?}"),
+        })
+        .sum();
+    assert!(
+        held + length > 64 << 20,
+        "a third would pass the bytes: {held} held and {length} to charge"
+    );
+    assert_eq!(
+        chosen[2],
+        Chosen::Embedded(0),
+        "the third is drawn at the face's default"
+    );
+    assert_eq!(
+        faces.instance_defects(),
+        vec![("var".to_owned(), FaceDefect::InstancesSpent)]
+    );
+}
+
+/// **An instance the instancer refuses is drawn at the face's default, and
+/// named, once for its location**: the committed face with its `gvar` given
+/// a version no reader knows, asked at 700 twice, is written once and refused
+/// once; and with its `fvar` given one, its design space is refused, nothing
+/// is written, and the face is named once however many runs ask.
+#[test]
+fn an_instance_or_a_design_space_refused_is_drawn_at_the_default_and_named() {
+    use super::paint::{choose, Chosen};
+    use super::typeface::{FaceDefect, InstanceError};
+    use tinker_pdf_css::property::{FontFamily, FontOpticalSizing};
+
+    let families = vec![FontFamily::Named("Var".to_owned())];
+    let bold = variable_request(&families, 700, 15.0, FontOpticalSizing::None);
+
+    let no_gvar = variable_set(with_table(VARIABLE_GLYF, b"gvar", |gvar| gvar[1] = 9));
+    super::typeface::INSTANCES_WRITTEN.with(|n| n.set(0));
+    for _ in 0..2 {
+        assert_eq!(choose(&no_gvar, &bold, Some('H')), Chosen::Embedded(0));
+    }
+    assert_eq!(instances_written(), 1, "tried once for its location");
+    let defects = no_gvar.instance_defects();
+    assert_eq!(defects.len(), 1, "{defects:?}");
+    assert!(
+        matches!(
+            &defects[0],
+            (family, FaceDefect::InstanceRefused(InstanceError::Variation(_))) if family == "var"
+        ),
+        "{defects:?}"
+    );
+
+    let no_fvar = variable_set(with_table(VARIABLE_GLYF, b"fvar", |fvar| fvar[1] = 9));
+    super::typeface::INSTANCES_WRITTEN.with(|n| n.set(0));
+    for weight in [300u16, 700] {
+        let font = variable_request(&families, weight, 15.0, FontOpticalSizing::Auto);
+        assert_eq!(choose(&no_fvar, &font, Some('H')), Chosen::Embedded(0));
+    }
+    assert_eq!(instances_written(), 0, "nothing to write from");
+    let defects = no_fvar.instance_defects();
+    assert_eq!(defects.len(), 1, "named once for the face: {defects:?}");
+    assert!(
+        matches!(
+            &defects[0],
+            (family, FaceDefect::InstanceRefused(InstanceError::Variation(_))) if family == "var"
+        ),
+        "{defects:?}"
     );
 }

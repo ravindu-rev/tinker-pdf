@@ -53,17 +53,51 @@
 //! the reason the decoder gave rather than only the format (ruling 10) — a
 //! producer told "the glyf table's checksum disagrees" can fix a file, where
 //! one told "the file is a woff container" can only be told again.
+//!
+//! # A variable face is drawn at the instance each run asks for
+//!
+//! A face whose `fvar` names an axis is a family of faces, and a run picks
+//! one: `FaceSet::instance_for` turns what it asks for (`Wanted`) into
+//! user coordinates by `css-fonts-4` §7.2's precedence, lowest first —
+//! `font-weight` as `wght`, held to the `@font-face` weight descriptor's
+//! range; `font-style: italic` as `ital` 1 and `oblique` as `slnt` at §2.4's
+//! fourteen degrees, negated, since CSS measures an angle clockwise and
+//! `slnt` counter-clockwise; the rule's `font-variation-settings`
+//! descriptor; `font-optical-sizing: auto` as `opsz` at the used size in CSS
+//! pixels; and the run's `font-variation-settings` last — and normalises
+//! them, which holds each to its axis. Where they land on the face's default
+//! the face is drawn as it is. Anywhere else the set writes the static
+//! instance there (`tinker_pdf_font::instantiate`) the first time a run asks
+//! for it, and every run asking for the same location is measured, shaped,
+//! drawn and embedded in that one instance, under a resource of its own.
+//! `wdth` stays at the face's default, since this build reads no
+//! `font-stretch`.
+//!
+//! The instances are bounded twice: `MAX_INSTANCES` of them a book and
+//! `MAX_INSTANCE_BYTES` between them. A run asking past either, or for an
+//! instance the instancer refuses, is drawn at the face's default and the
+//! book says so ([`FaceSet::instance_defects`]).
+
+use std::sync::OnceLock;
 
 use tinker_pdf_css::font_face::{FontFace, FontFormat, FontSource};
-use tinker_pdf_css::property::FontStyle;
+use tinker_pdf_css::property::{FontOpticalSizing, FontStyle, VariationSetting};
+use tinker_pdf_font::instance::instantiate;
+use tinker_pdf_font::variation::{DesignSpace, Instance, Location, UserCoordinate, VariationError};
 use tinker_pdf_font::woff;
 use tinker_pdf_font::Sfnt;
+use tinker_pdf_layout::metrics::FontRequest;
 use tinker_pdf_shape::Plans;
 
 /// Why a WOFF container did not unpack, re-exported so that a caller matching
 /// on [`FaceDefect::PackedContainer`] does not have to name
 /// `tinker-pdf-font` to do it (ruling 11).
 pub use tinker_pdf_font::woff::WoffError;
+
+/// Why the instancer refused an instance, re-exported for
+/// [`FaceDefect::InstanceRefused`] as [`WoffError`] is for
+/// [`FaceDefect::PackedContainer`] (ruling 11).
+pub use tinker_pdf_font::instance::InstanceError;
 
 use super::obfuscation::{deobfuscate, KeyDefect};
 use super::ocf::Encryption;
@@ -86,6 +120,34 @@ const HHEA: u32 = 0x6868_6561;
 /// committed books carries. A book that wanted more gets the row and the
 /// family it fell back to, which is ruling 2 working as intended.
 const MAX_UNPACKED_FACE: usize = 16 << 20;
+
+/// The most static instances one book makes of its variable faces.
+///
+/// A run's instance follows its weight, its slope and — with
+/// `font-optical-sizing` at its initial `auto` — its size, so a book can ask
+/// for as many as it has distinct runs. Sixty-four is four weights in two
+/// slopes at eight sizes of one family, which is more than a book sets its
+/// headings and text in. A run asking for one more is drawn at its face's
+/// default (ruling 2).
+const MAX_INSTANCES: usize = 64;
+
+/// The most bytes a book's instances hold between them.
+///
+/// Each is a whole face, so the count alone would let sixty-four copies of a
+/// sixteen-megabyte face stand; this is four such faces' worth. An instance
+/// is charged its face's size before it is written, which it does not pass:
+/// the instance drops the variation tables and keeps the rest.
+const MAX_INSTANCE_BYTES: usize = 4 * MAX_UNPACKED_FACE;
+
+/// `oblique`'s angle where the run states none, `css-fonts-4` §2.4's
+/// fourteen degrees.
+const OBLIQUE_DEGREES: f64 = 14.0;
+
+#[cfg(test)]
+thread_local! {
+    /// Static instances `FaceSet::instance_for` wrote, on this thread.
+    pub(crate) static INSTANCES_WRITTEN: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
 
 /// Why one `@font-face` did not become a face.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +187,18 @@ pub enum FaceDefect {
     /// nothing, and a book whose first `src` entry failed and whose second
     /// worked produces the first and not this.
     NoUsableSource,
+    /// The face varies and the instance a run asked of it is one the instancer
+    /// refuses, by name; that run is drawn at the face's default.
+    ///
+    /// An `fvar` or `avar` the variation reader refuses is
+    /// [`InstanceError::Variation`] here, for every run the face is asked for:
+    /// a face whose design space cannot be read has no instance but its
+    /// default.
+    InstanceRefused(InstanceError),
+    /// The book asked its variable faces for more instances, or more bytes of
+    /// them, than one book is given; each run asking for one past the bound
+    /// is drawn at its face's default.
+    InstancesSpent,
 }
 
 impl FaceDefect {
@@ -144,6 +218,13 @@ impl FaceDefect {
             FaceDefect::KeyUnavailable(_) => "the obfuscation key cannot be derived".to_owned(),
             FaceDefect::NotAFont => "the bytes are not a font this build reads".to_owned(),
             FaceDefect::NoUsableSource => "no src entry produced a face".to_owned(),
+            FaceDefect::InstanceRefused(why) => {
+                format!("an instance of the variable face was refused: {why}")
+            }
+            FaceDefect::InstancesSpent => {
+                "the book asked for more instances of its variable faces than it is given"
+                    .to_owned()
+            }
         }
     }
 }
@@ -158,9 +239,14 @@ pub struct EmbeddedFace {
     pub weight: (u16, u16),
     /// The `font-style` descriptor.
     pub style: FontStyle,
+    /// The `font-variation-settings` descriptor: what a variable face is
+    /// drawn at before a run's own optical size and variation settings.
+    /// Empty where the rule wrote none.
+    pub variations: Vec<VariationSetting>,
     /// The container path the program came from, which is what a report names.
     pub path: String,
-    /// The font program, **de-obfuscated**, exactly as it will be embedded.
+    /// The font program, **de-obfuscated**, exactly as it is handed to the
+    /// writer: for an instance of a variable face, the static instance.
     pub program: Vec<u8>,
     /// The PDF resource name this face is registered under.
     pub resource: Vec<u8>,
@@ -251,6 +337,153 @@ impl EmbeddedFace {
 pub struct FaceSet {
     faces: Vec<EmbeddedFace>,
     defects: Vec<(String, FaceDefect)>,
+    /// The instances runs ask of the faces that vary, written as they are
+    /// asked for; none for a set with no faces. Behind a box so that
+    /// [`FaceSet::EMPTY`] holds no cell a `const` may not point at.
+    instances: Option<Box<Instances>>,
+}
+
+/// What a run asks of a variable face: the inputs `css-fonts-4` §7.2 turns
+/// into coordinates, kept by a plan that may choose the face for any of its
+/// characters.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Wanted {
+    weight: u16,
+    style: FontStyle,
+    /// `opsz` at the used size in CSS pixels, where `font-optical-sizing` is
+    /// `auto`.
+    optical_size: Option<f64>,
+    variations: Vec<VariationSetting>,
+}
+
+impl Wanted {
+    /// What `font` asks of a variable face.
+    pub(crate) fn of(font: &FontRequest<'_>) -> Wanted {
+        Wanted {
+            weight: font.weight,
+            style: font.style,
+            optical_size: (font.optical_sizing == FontOpticalSizing::Auto)
+                .then(|| font.size / super::read::PX_TO_PT),
+            variations: font.variations.to_vec(),
+        }
+    }
+
+    /// The user coordinates this asks of `face`, lowest precedence first, so
+    /// that the instancer, which takes a tag's last value, gives each axis
+    /// the one §7.2 lets stand: the weight held to the rule's descriptor,
+    /// the slope, the rule's own settings, the optical size, then the run's
+    /// settings.
+    fn coordinates(&self, face: &EmbeddedFace) -> Vec<UserCoordinate> {
+        let mut out = Vec::with_capacity(3 + face.variations.len() + self.variations.len());
+        let (low, high) = face.weight;
+        let weight = self.weight.max(low).min(high);
+        out.push(UserCoordinate::new(*b"wght", f64::from(weight)));
+        match self.style {
+            FontStyle::Italic => out.push(UserCoordinate::new(*b"ital", 1.0)),
+            FontStyle::Oblique => out.push(UserCoordinate::new(*b"slnt", -OBLIQUE_DEGREES)),
+            FontStyle::Normal => {}
+        }
+        out.extend(
+            face.variations
+                .iter()
+                .map(|setting| UserCoordinate::new(setting.tag, setting.value)),
+        );
+        if let Some(size) = self.optical_size {
+            out.push(UserCoordinate::new(*b"opsz", size));
+        }
+        out.extend(
+            self.variations
+                .iter()
+                .map(|setting| UserCoordinate::new(setting.tag, setting.value)),
+        );
+        out
+    }
+}
+
+/// A face's design space, as the first run asking for an instance of it read
+/// it.
+#[derive(Clone, Debug)]
+enum Space {
+    /// No `fvar`, or one of no axes: the face is its only instance.
+    Static,
+    /// The axes, instances and segment maps.
+    Varies(DesignSpace),
+    /// An `fvar` or `avar` the reader refuses: the face is drawn at its
+    /// default.
+    Refused(VariationError),
+}
+
+/// One instance a run asked for.
+#[derive(Clone, Debug)]
+struct Instanced {
+    /// The face it is an instance of, by index into [`FaceSet::faces`].
+    base: usize,
+    /// Where in that face's design space, normalised: what two runs share an
+    /// instance by.
+    location: Location,
+    /// The instance, or why there is none.
+    face: Result<EmbeddedFace, FaceDefect>,
+}
+
+/// The instances of a book's variable faces.
+#[derive(Clone, Debug)]
+struct Instances {
+    /// Each face's design space, by its index, read once.
+    spaces: Vec<OnceLock<Space>>,
+    /// The instances, in the order runs first asked for them, each slot
+    /// written once: [`MAX_INSTANCES`] of them.
+    slots: Vec<OnceLock<Instanced>>,
+    /// The family of the first face a run asked for an instance of with every
+    /// slot written.
+    spent: OnceLock<String>,
+}
+
+impl Instances {
+    /// The store for a book's faces, or none for a book with none.
+    fn over(faces: &[EmbeddedFace]) -> Option<Box<Instances>> {
+        (!faces.is_empty()).then(|| {
+            Box::new(Instances {
+                spaces: faces.iter().map(|_| OnceLock::new()).collect(),
+                slots: (0..MAX_INSTANCES).map(|_| OnceLock::new()).collect(),
+                spent: OnceLock::new(),
+            })
+        })
+    }
+}
+
+/// The static instance of `face` at `instance`, registered under `resource`:
+/// the face it varies from in every descriptor, with the instance's program
+/// and plans of its own.
+fn write_instance(
+    face: &EmbeddedFace,
+    instance: &Instance,
+    resource: Vec<u8>,
+) -> Result<EmbeddedFace, FaceDefect> {
+    #[cfg(test)]
+    INSTANCES_WRITTEN.with(|n| n.set(n.get() + 1));
+    let program = instantiate(&face.program, instance).map_err(FaceDefect::InstanceRefused)?;
+    Ok(EmbeddedFace {
+        family: face.family.clone(),
+        weight: face.weight,
+        style: face.style,
+        variations: face.variations.clone(),
+        path: face.path.clone(),
+        program,
+        resource,
+        plans: Plans::new(),
+    })
+}
+
+/// A face's design space, for [`Instances::spaces`].
+fn space_of(program: &[u8]) -> Space {
+    let Some(sfnt) = Sfnt::parse(program) else {
+        return Space::Static;
+    };
+    match DesignSpace::read(&sfnt) {
+        Ok(space) if space.is_variable() => Space::Varies(space),
+        Ok(_) => Space::Static,
+        Err(error) => Space::Refused(error),
+    }
 }
 
 impl FaceSet {
@@ -263,6 +496,7 @@ impl FaceSet {
     pub const EMPTY: &'static FaceSet = &FaceSet {
         faces: Vec::new(),
         defects: Vec::new(),
+        instances: None,
     };
 
     /// A book with no `@font-face` at all.
@@ -275,9 +509,11 @@ impl FaceSet {
     /// faces of their own.
     #[cfg(test)]
     pub(crate) fn of(faces: Vec<EmbeddedFace>) -> FaceSet {
+        let instances = Instances::over(&faces);
         FaceSet {
             faces,
             defects: Vec::new(),
+            instances,
         }
     }
 
@@ -285,6 +521,139 @@ impl FaceSet {
     #[must_use]
     pub fn faces(&self) -> &[EmbeddedFace] {
         &self.faces
+    }
+
+    /// The face a [`super::paint::Chosen::Embedded`] index names: one of
+    /// [`FaceSet::faces`], or past them an instance of one a run asked for.
+    /// `None` for an index that names neither.
+    #[must_use]
+    pub fn face(&self, index: usize) -> Option<&EmbeddedFace> {
+        if let Some(face) = self.faces.get(index) {
+            return Some(face);
+        }
+        let slot = index.checked_sub(self.faces.len())?;
+        self.instances
+            .as_deref()?
+            .slots
+            .get(slot)?
+            .get()?
+            .face
+            .as_ref()
+            .ok()
+    }
+
+    /// How many indices [`FaceSet::face`] may answer for: the declared faces
+    /// and a slot for every instance the set may write.
+    #[must_use]
+    pub fn face_count(&self) -> usize {
+        self.faces.len()
+            + self
+                .instances
+                .as_deref()
+                .map_or(0, |instances| instances.slots.len())
+    }
+
+    /// Every face a page may draw in, by its index: the declared faces, then
+    /// each instance written so far.
+    pub fn drawn(&self) -> impl Iterator<Item = (usize, &EmbeddedFace)> {
+        (0..self.face_count()).filter_map(|index| self.face(index).map(|face| (index, face)))
+    }
+
+    /// The face `index` is drawn in for a run asking `wanted`: the instance of
+    /// it there where it varies and `wanted` lands off its default, written
+    /// the first time a run asks for it and shared by every run after;
+    /// `index` itself for a face that does not vary, at its default, past the
+    /// bounds, or whose instance is refused.
+    pub(crate) fn instance_for(&self, index: usize, wanted: &Wanted) -> usize {
+        let (Some(face), Some(instances)) = (self.faces.get(index), self.instances.as_deref())
+        else {
+            return index;
+        };
+        let Some(space) = instances
+            .spaces
+            .get(index)
+            .map(|slot| slot.get_or_init(|| space_of(&face.program)))
+        else {
+            return index;
+        };
+        let Space::Varies(space) = space else {
+            return index;
+        };
+        let instance = Instance::User(wanted.coordinates(face));
+        let Ok(location) = space.location(&instance) else {
+            return index;
+        };
+        if location == space.default_location() {
+            return index;
+        }
+        let mut held = 0usize;
+        for (slot, cell) in instances.slots.iter().enumerate() {
+            let entry = cell.get_or_init(|| {
+                let made = if held.saturating_add(face.program.len()) > MAX_INSTANCE_BYTES {
+                    Err(FaceDefect::InstancesSpent)
+                } else {
+                    let resource = format!("Bf{}", self.faces.len() + slot).into_bytes();
+                    write_instance(face, &instance, resource)
+                };
+                Instanced {
+                    base: index,
+                    location: location.clone(),
+                    face: made,
+                }
+            });
+            if entry.base == index && entry.location == location {
+                return match entry.face {
+                    Ok(_) => self.faces.len() + slot,
+                    Err(_) => index,
+                };
+            }
+            if let Ok(made) = &entry.face {
+                held = held.saturating_add(made.program.len());
+            }
+        }
+        let _ = instances.spent.set(face.family.clone());
+        index
+    }
+
+    /// What drawing the variable faces at the instances runs asked for could
+    /// not do, as `(family, defect)` pairs: an instance refused or past the
+    /// bytes, once for each location asked for, in the order runs asked; a
+    /// design space refused, once for its face; and the instance count spent,
+    /// once.
+    #[must_use]
+    pub fn instance_defects(&self) -> Vec<(String, FaceDefect)> {
+        let Some(instances) = self.instances.as_deref() else {
+            return Vec::new();
+        };
+        let family = |base: usize| {
+            self.faces
+                .get(base)
+                .map(|face| face.family.clone())
+                .unwrap_or_default()
+        };
+        let mut out = Vec::new();
+        for (base, space) in instances.spaces.iter().enumerate() {
+            if let Some(Space::Refused(error)) = space.get() {
+                out.push((
+                    family(base),
+                    FaceDefect::InstanceRefused(InstanceError::Variation(*error)),
+                ));
+            }
+        }
+        for cell in &instances.slots {
+            if let Some(Instanced {
+                base,
+                face: Err(defect),
+                ..
+            }) = cell.get()
+            {
+                out.push((family(*base), defect.clone()));
+            }
+        }
+        if let Some(spent) = instances.spent.get() {
+            out.push((spent.clone(), FaceDefect::InstancesSpent));
+        }
+        out
     }
 
     /// What could not be loaded, as `(family, defect)` pairs in the order the
@@ -452,6 +821,7 @@ pub fn load<R: Resources + ?Sized>(
                         && face.family == rule.family
                         && face.weight == rule.weight
                         && face.style == rule.style
+                        && face.variations == rule.variations
                 }) {
                     continue;
                 }
@@ -460,6 +830,7 @@ pub fn load<R: Resources + ?Sized>(
                     family: rule.family.clone(),
                     weight: rule.weight,
                     style: rule.style,
+                    variations: rule.variations.clone(),
                     path,
                     program,
                     resource,
@@ -471,6 +842,7 @@ pub fn load<R: Resources + ?Sized>(
                 .push((rule.family.clone(), FaceDefect::NoUsableSource)),
         }
     }
+    out.instances = Instances::over(&out.faces);
     out
 }
 

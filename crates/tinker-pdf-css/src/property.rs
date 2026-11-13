@@ -4685,6 +4685,26 @@ fn font_variation_settings(
     Implemented::Known(vec![Property::FontVariationSettings(out)])
 }
 
+/// The `@font-face` `font-variation-settings` descriptor, which `css-fonts-4`
+/// gives the property's grammar: read by the property's own parser, `normal`
+/// the empty list. `None` where the value is invalid or names more axes than
+/// the cap, which leaves the descriptor at what it was.
+pub(crate) fn variation_settings_descriptor(
+    values: &[ComponentValue],
+) -> Option<Vec<VariationSetting>> {
+    let significant: Vec<&ComponentValue> = values.iter().filter(|v| !v.is_whitespace()).collect();
+    if significant.is_empty() {
+        return None;
+    }
+    match font_variation_settings(values, &significant) {
+        Implemented::Known(mut properties) => match properties.pop() {
+            Some(Property::FontVariationSettings(settings)) => Some(settings),
+            _ => None,
+        },
+        Implemented::BadValue | Implemented::Malformed => None,
+    }
+}
+
 /// One radius: a non-negative `<length-percentage>` (§5.1).
 fn radius_length(value: &ComponentValue) -> LenOutcome {
     match length_outcome(value) {

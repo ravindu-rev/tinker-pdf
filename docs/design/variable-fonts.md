@@ -429,15 +429,22 @@ refused by name.
   four-character tag of U+0020 to U+007E and a number; a tag given twice
   keeps its last value; css-fonts-4 §8.2) and `font-optical-sizing` (`auto` or
   `none`, §8.1), both inherited. A run's instance follows §7.2's precedence,
-  lowest first: `font-weight` sets `wght`, `font-style: italic` sets `ital`
-  to 1 and an oblique angle sets `slnt` to its negation — CSS measures
-  clockwise and `slnt` counter-clockwise (§2.4) — each clamped to the range
-  the `@font-face` descriptor declares (§4.4); the `@font-face`
-  `font-variation-settings` descriptor; `font-optical-sizing: auto` setting
-  `opsz` to the used font size in CSS pixels; then the property. Values
-  outside the face's axes are clamped by the normalisation. `wdth` follows
-  `font-stretch` once CD-01 lands the property, and stays at the face's
-  default until then. The face set instances each face once per `Location`.
+  lowest first: `font-weight` sets `wght`, held to the range the
+  `@font-face` weight descriptor declares (§4.4); `font-style: italic` sets
+  `ital` to 1 and `oblique` sets `slnt` to the negation of §2.4's fourteen
+  degrees — CSS measures clockwise and `slnt` counter-clockwise — since the
+  cascade and the descriptor both read past an angle; the `@font-face`
+  `font-variation-settings` descriptor, read by the property's grammar;
+  `font-optical-sizing: auto` setting `opsz` to the used font size in CSS
+  pixels; then the property. Values outside the face's axes are clamped by
+  the normalisation. `wdth` follows `font-stretch` once CD-01 lands the
+  property, and stays at the face's default until then. The face set
+  (`epub::typeface::FaceSet`) instances each face once per `Location`, the
+  first time a run asks for it, and a run whose location is the face's
+  default draws in the face itself; the instances are bounded at 64 a book
+  and 64 MiB between them, and a run past either, or whose instance or
+  design space a reader refuses, draws at the face's default and is named
+  (`FaceDefect::InstancesSpent`, `FaceDefect::InstanceRefused`).
 - **A PDF being drawn**: never. Its embedded variable face is drawn at the
   default (FT-05.13 for CFF2; a `glyf` face already is).
 

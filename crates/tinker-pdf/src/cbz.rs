@@ -991,7 +991,10 @@ pub enum ArchiveWarning {
         characters: usize,
     },
     /// An `@font-face` did not become a usable face, with the family it named
-    /// and why (gap 31, milestone 9).
+    /// and why (gap 31, milestone 9); or a variable face was drawn at its
+    /// default where a run asked for an instance of it
+    /// ([`crate::epub::typeface::FaceDefect::InstanceRefused`],
+    /// [`crate::epub::typeface::FaceDefect::InstancesSpent`]).
     ///
     /// **Deduplicated per family and defect**, for
     /// [`ArchiveWarning::UnimplementedFeature`]'s reason: a book that declares
@@ -1003,7 +1006,8 @@ pub enum ArchiveWarning {
         family: String,
         /// Why no face came of it.
         defect: crate::epub::typeface::FaceDefect,
-        /// How many rules met this.
+        /// How many rules met this; for an instance, how many of the
+        /// locations runs asked for.
         rules: usize,
     },
     /// A spine item is EPUB 3.3 §8.2's `pre-paginated` and states no

@@ -39,11 +39,12 @@ use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BackgroundPosition, BackgroundRepeat, BackgroundSize,
     BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
     ColumnSpan, ColumnWidth, Direction, Display, FeatureSetting, FlexDirection, FlexWrap, Float,
-    FontFamily, FontKerning, FontStyle, FontVariant, Gap, Hyphens, Image, Inset, JustifyContent,
-    LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
-    OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow,
-    Side, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextJustify, TextTransform,
-    UnicodeBidi, VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    FontFamily, FontKerning, FontOpticalSizing, FontStyle, FontVariant, Gap, Hyphens, Image, Inset,
+    JustifyContent, LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue,
+    MaxSize, MinSize, OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position,
+    Radius, Shadow, Side, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration,
+    TextJustify, TextTransform, UnicodeBidi, VariationSetting, VerticalAlign, Visibility,
+    WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -76,6 +77,11 @@ pub struct Consumed {
     pub font_kerning: FontKerning,
     /// `font-feature-settings`, for the shaper; empty for `normal`.
     pub font_features: Vec<FeatureSetting>,
+    /// `font-variation-settings`, for the provider's instance of a variable
+    /// face; empty for `normal`.
+    pub font_variations: Vec<VariationSetting>,
+    /// `font-optical-sizing`, for the same instance.
+    pub font_optical_sizing: FontOpticalSizing,
     /// `direction`: a block container's paragraphs' base direction, which
     /// side `start` aligns to and where an outside marker stands; an inline
     /// box's embedding direction.
@@ -336,11 +342,10 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         font_kerning,
         font_feature_settings,
         // `css-fonts-4` §8.1 and §8.2 ask for an instance of a variable
-        // face. Every face a run is measured and drawn in is at its default
-        // instance, which is a static face's only one, so the two move no
-        // box here.
-        font_variation_settings: _,
-        font_optical_sizing: _,
+        // face, so they reach the provider in the run's `FontRequest` too: a
+        // run is measured, and drawn, at the instance they ask for.
+        font_variation_settings,
+        font_optical_sizing,
         // `css-writing-modes-3` §2: a block container's base direction and an
         // inline box's embedding, carried to the runs for the painter's
         // UAX #9, and `start` and `end` resolved against the first here.
@@ -463,6 +468,8 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         font_variant: *font_variant,
         font_kerning: *font_kerning,
         font_features: font_feature_settings.clone(),
+        font_variations: font_variation_settings.clone(),
+        font_optical_sizing: *font_optical_sizing,
         direction: *direction,
         unicode_bidi: *unicode_bidi,
         hyphens: *hyphens,
@@ -573,6 +580,8 @@ impl Consumed {
             size: self.font_size,
             kerning: self.font_kerning,
             features: &self.font_features,
+            variations: &self.font_variations,
+            optical_sizing: self.font_optical_sizing,
         }
     }
 

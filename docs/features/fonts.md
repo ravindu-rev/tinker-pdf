@@ -910,7 +910,10 @@ instance at a `FontInstance` — a named instance's index, or
 then the program subset and measured ([creation](creation.md), *Variable
 faces*). The registrations without an instance embed a `glyf` face as it is
 and a face whose outlines are only in `CFF2` as its default instance, a
-`CFF ` face, since no `/FontFile` stream carries a `CFF2` table.
+`CFF ` face, since no `/FontFile` stream carries a `CFF2` table. A book's or
+an HTML document's variable `@font-face` is measured, drawn and embedded at
+the instance each run asks for, by `css-fonts-4` §7.2's precedence
+([epub](epub.md)).
 
 `tinker-pdf-font`'s parsers each have a counted sibling that returns its
 uncounted sibling's answer and the steps it took

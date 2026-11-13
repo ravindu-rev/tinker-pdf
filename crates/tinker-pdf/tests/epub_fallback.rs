@@ -185,6 +185,8 @@ fn a_fallback_character_is_measured_in_the_face_it_is_drawn_in() {
         size: 10.0,
         kerning: tinker_pdf_css::property::FontKerning::Auto,
         features: &[],
+        variations: &[],
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
     };
     let sfnt = Sfnt::parse(face(Family::Serif, false, false)).expect("the bundled face parses");
     for ch in ['\u{416}', '\u{3A9}', '\u{11F}'] {
@@ -225,6 +227,8 @@ fn a_standard_14_mark_is_measured_at_no_advance() {
         size: 10.0,
         kerning: tinker_pdf_css::property::FontKerning::Auto,
         features: &[],
+        variations: &[],
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
     };
     assert!(
         tinker_pdf_layout::unicode::is_east_asian('\u{3099}'),

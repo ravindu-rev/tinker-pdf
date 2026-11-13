@@ -744,6 +744,7 @@ fn a_face_declared_in_every_chapter_is_loaded_once_and_every_rule_is_counted() {
         }],
         weight: (400, 400),
         style: tinker_pdf_css::property::FontStyle::Normal,
+        variations: Vec::new(),
         base: Some(base.to_owned()),
     };
     let rules = vec![rule("EPUB/ch1.xhtml"), rule("EPUB/ch2.xhtml")];
@@ -1114,6 +1115,7 @@ fn what_reaches_the_pdf_is_the_unpacked_sfnt_byte_for_byte() {
         }],
         weight: (400, 400),
         style: tinker_pdf_css::property::FontStyle::Normal,
+        variations: Vec::new(),
         base: Some("EPUB/ch1.xhtml".to_owned()),
     }];
     let set = load(&mut ocf, &rules, Some(IDENTIFIER), &encryption, &limits);
@@ -1363,6 +1365,7 @@ fn loaded_program(
         }],
         weight: (400, 400),
         style: tinker_pdf_css::property::FontStyle::Normal,
+        variations: Vec::new(),
         base: Some("EPUB/ch1.xhtml".to_owned()),
     }];
     let set = load(&mut ocf, &rules, Some(identifier), &encryption, &limits);
@@ -1718,6 +1721,8 @@ fn the_three_generic_families_measure_at_their_own_published_advances() {
             size: 1000.0,
             kerning: tinker_pdf_css::property::FontKerning::Auto,
             features: &[],
+            variations: &[],
+            optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
         };
         BookMetrics::STANDARD.advance('a', &font)
     };
@@ -1737,6 +1742,8 @@ fn the_three_generic_families_measure_at_their_own_published_advances() {
             size: 1000.0,
             kerning: tinker_pdf_css::property::FontKerning::Auto,
             features: &[],
+            variations: &[],
+            optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
         };
         let v = BookMetrics::STANDARD.vertical(&font);
         (v.ascent, v.descent)
@@ -2282,4 +2289,568 @@ fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Documen
     } else {
         document
     }
+}
+
+// ---- variable faces, at the instance each run asks for -----------------------
+
+/// The committed variable `glyf` face (`tinker-pdf-font`'s `tests/variable/`):
+/// `wght` 100 to 900 about 400, `wdth` 75 to 125 about 100, `slnt` −12 to 0
+/// about 0, and `opsz` 8 to 72 about 12, every axis moving `I` and `O`.
+const VARIABLE_GLYF: &[u8] =
+    include_bytes!("../../tinker-pdf-font/tests/variable/variable-glyf.ttf");
+
+/// The committed variable CFF2 face: `wght` 200 to 900 about 400 and `wdth`
+/// 75 to 125 about 100.
+const VARIABLE_CFF2: &[u8] =
+    include_bytes!("../../tinker-pdf-font/tests/variable/variable-cff2.otf");
+
+/// What every variable book draws: three letters both faces vary.
+const VARIABLE_TEXT: &str = "HIO";
+
+/// A book over `program`, declared as the family `Var` with `descriptors`
+/// beside its `src`, its one paragraph `body` set by `style` at 20 CSS
+/// pixels — 15 points — so an optical size under `auto` is 20.
+fn variable_book(program: &[u8], descriptors: &str, style: &str, body: &str) -> Vec<u8> {
+    let style = format!(
+        "@font-face {{ font-family: \"Var\"; src: url(fonts/var.otf); {descriptors} }}\
+         p {{ font-family: \"Var\"; font-size: 20px; }}\
+         .heavy {{ font-weight: 700; }}\
+         {style}"
+    );
+    book(
+        &package(
+            IDENTIFIER,
+            r#"<item id="f1" href="fonts/var.otf" media-type="font/otf"/>"#,
+        ),
+        &chapter(&style, body),
+        &[("EPUB/fonts/var.otf", program.to_vec())],
+    )
+}
+
+/// The static instance of `face` at user coordinates, as the font crate
+/// writes it.
+fn instance_of(face: &[u8], coordinates: &[(&[u8; 4], f64)]) -> Vec<u8> {
+    let coordinates = coordinates
+        .iter()
+        .map(|(tag, value)| tinker_pdf_font::variation::UserCoordinate::new(**tag, *value))
+        .collect();
+    tinker_pdf_font::instance::instantiate(
+        face,
+        &tinker_pdf_font::variation::Instance::User(coordinates),
+    )
+    .expect("the font crate's instance")
+}
+
+/// One font program a synthesised document embeds under a composite font:
+/// the descendant's `/FontFile2` or `/FontFile3`, its key, and `/W` by code.
+struct Embedded {
+    bytes: Vec<u8>,
+    key: &'static str,
+    widths: std::collections::BTreeMap<u16, f64>,
+}
+
+/// Every program the document's pages embed under a composite font, each
+/// once however many pages name it.
+fn embedded_programs(doc: &Document) -> Vec<Embedded> {
+    let cos = doc.cos();
+    let mut seen = Vec::new();
+    let mut out = Vec::new();
+    for page in tinker_pdf_cos::pages::collect(cos) {
+        let Some(resources) = page.resources.as_ref() else {
+            continue;
+        };
+        let fonts = cos.resolve_key(resources, cos.intern(b"Font"));
+        let Some(fonts) = fonts.as_dict() else {
+            continue;
+        };
+        for (_, font) in fonts.iter() {
+            let font = cos.resolve(font);
+            let Some(font) = font.as_dict() else {
+                continue;
+            };
+            let descendants = cos.resolve_key(font, cos.intern(b"DescendantFonts"));
+            let Some(first) = descendants.as_array().and_then(|list| list.first()) else {
+                continue;
+            };
+            let descendant = cos.resolve(first);
+            let Some(descendant) = descendant.as_dict() else {
+                continue;
+            };
+            let descriptor = cos.resolve_key(descendant, cos.intern(b"FontDescriptor"));
+            let Some(descriptor) = descriptor.as_dict() else {
+                continue;
+            };
+            for key in ["FontFile2", "FontFile3"] {
+                let Some(file) = descriptor.get_ref(cos.intern(key.as_bytes())) else {
+                    continue;
+                };
+                if seen.contains(&file) {
+                    continue;
+                }
+                seen.push(file);
+                out.push(Embedded {
+                    bytes: cos.stream_decoded(file).expect("the program decodes"),
+                    key,
+                    widths: cid_widths(cos, descendant),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A CIDFont's `/W`, by code, in either of 9.7.4.3's forms.
+fn cid_widths(
+    cos: &tinker_pdf_cos::CosDocument,
+    cid: &tinker_pdf_cos::Dict,
+) -> std::collections::BTreeMap<u16, f64> {
+    let w = cos.resolve_key(cid, cos.intern(b"W"));
+    let mut out = std::collections::BTreeMap::new();
+    let Some(items) = w.as_array() else {
+        return out;
+    };
+    let mut at = 0;
+    while at + 1 < items.len() {
+        let first = cos.resolve(&items[at]).as_int().expect("a first code");
+        let next = cos.resolve(&items[at + 1]);
+        if let Some(widths) = next.as_array() {
+            for (i, value) in widths.iter().enumerate() {
+                let code = first + i64::try_from(i).expect("few");
+                out.insert(
+                    u16::try_from(code).expect("a code"),
+                    cos.resolve(value).as_number().expect("a width"),
+                );
+            }
+            at += 2;
+        } else {
+            let last = next.as_int().expect("a last code");
+            let value = cos.resolve(&items[at + 2]).as_number().expect("a width");
+            for code in first..=last {
+                out.insert(u16::try_from(code).expect("a code"), value);
+            }
+            at += 3;
+        }
+    }
+    out
+}
+
+/// What a program draws for one glyph: its `CFF ` table's outline where it
+/// has one, its `glyf` outline otherwise.
+fn drawn_outline(program: &[u8], glyph: u16) -> Vec<tinker_pdf_font::Segment> {
+    let sfnt = tinker_pdf_font::Sfnt::parse(program).expect("an sfnt");
+    match sfnt.table(u32::from_be_bytes(*b"CFF ")) {
+        Some(cff) => {
+            tinker_pdf_font::Cff::parse(cff)
+                .expect("its CFF parses")
+                .outline(glyph)
+                .expect("an outline")
+                .segments
+        }
+        None => {
+            tinker_pdf_font::glyf::outline(&sfnt, glyph)
+                .expect("an outline")
+                .segments
+        }
+    }
+}
+
+/// A glyph's advance in thousandths of the em, as `/W` states it.
+fn drawn_width(program: &[u8], glyph: u16) -> f64 {
+    let sfnt = tinker_pdf_font::Sfnt::parse(program).expect("an sfnt");
+    let advance = sfnt.advance(glyph).expect("an advance");
+    (f64::from(advance) * 1000.0 / f64::from(sfnt.units_per_em.max(1))).round()
+}
+
+/// The glyphs [`VARIABLE_TEXT`] draws in `face`.
+fn variable_glyphs(face: &[u8]) -> Vec<u16> {
+    let sfnt = tinker_pdf_font::Sfnt::parse(face).expect("the face parses");
+    VARIABLE_TEXT
+        .chars()
+        .map(|c| sfnt.glyph_for_char(c).expect("the face maps it"))
+        .collect()
+}
+
+/// Whether an embedded program is `expected` at every glyph drawn: the same
+/// outline, and `/W` its advance.
+fn draws_as(program: &Embedded, expected: &[u8], glyphs: &[u16]) -> bool {
+    glyphs.iter().all(|&glyph| {
+        drawn_outline(&program.bytes, glyph) == drawn_outline(expected, glyph)
+            && program.widths.get(&glyph).copied() == Some(drawn_width(expected, glyph))
+    })
+}
+
+/// Whether two programs draw a glyph of `glyphs` apart, by its outline or its
+/// advance: what lets a test that tells one instance from another fail.
+fn draw_apart(one: &[u8], other: &[u8], glyphs: &[u16]) -> bool {
+    glyphs.iter().any(|&glyph| {
+        drawn_outline(one, glyph) != drawn_outline(other, glyph)
+            || drawn_width(one, glyph) != drawn_width(other, glyph)
+    })
+}
+
+/// The one program a book over a variable face embeds, held to `expected`.
+#[track_caller]
+fn the_one_program_is(label: &str, doc: &Document, face: &[u8], expected: &[u8]) {
+    assert_eq!(face_warnings(doc), Vec::new(), "{label}: nothing refused");
+    let programs = embedded_programs(doc);
+    assert_eq!(programs.len(), 1, "{label}: one program");
+    assert!(
+        draws_as(&programs[0], expected, &variable_glyphs(face)),
+        "{label}: the program draws as the expected instance"
+    );
+}
+
+/// **A variable face draws each weight at its own instance**: a book over the
+/// committed `glyf` face declared at weights 100 to 900, its text at 400 and
+/// at 700, embeds two programs, one the static instance the font crate writes
+/// at each weight and the optical size of 20 CSS pixels, and neither the face
+/// itself.
+#[test]
+fn a_variable_face_draws_each_weight_at_its_own_instance() {
+    let label = "a variable face draws each weight at its own instance";
+    let bytes = variable_book(
+        VARIABLE_GLYF,
+        "font-weight: 100 900;",
+        "",
+        &format!("{VARIABLE_TEXT} <span class=\"heavy\">{VARIABLE_TEXT}</span>"),
+    );
+    let doc = converted(label, Document::open(bytes).expect("a book"));
+    assert_eq!(face_warnings(&doc), Vec::new(), "nothing refused");
+
+    let glyphs = variable_glyphs(VARIABLE_GLYF);
+    let regular = instance_of(VARIABLE_GLYF, &[(b"wght", 400.0), (b"opsz", 20.0)]);
+    let bold = instance_of(VARIABLE_GLYF, &[(b"wght", 700.0), (b"opsz", 20.0)]);
+    assert!(
+        draw_apart(&regular, &bold, &glyphs),
+        "the two instances draw apart, so the match below can fail"
+    );
+    assert!(
+        draw_apart(&regular, VARIABLE_GLYF, &glyphs),
+        "and the regular one apart from the face's default"
+    );
+
+    let programs = embedded_programs(&doc);
+    assert_eq!(programs.len(), 2, "two programs, one a weight");
+    let mut matched: Vec<usize> = programs
+        .iter()
+        .map(|program| {
+            assert_eq!(program.key, "FontFile2", "glyf outlines");
+            [&regular, &bold]
+                .iter()
+                .position(|expected| draws_as(program, expected, &glyphs))
+                .expect("each program is one of the two instances")
+        })
+        .collect();
+    matched.sort_unstable();
+    assert_eq!(matched, vec![0, 1], "one program a weight");
+    let face_prep = tinker_pdf_font::Sfnt::parse(VARIABLE_GLYF)
+        .expect("the face")
+        .table(u32::from_be_bytes(*b"prep"))
+        .map(<[u8]>::to_vec);
+    for program in &programs {
+        let sfnt = tinker_pdf_font::Sfnt::parse(&program.bytes).expect("an sfnt");
+        assert_ne!(
+            sfnt.table(u32::from_be_bytes(*b"prep")).map(<[u8]>::to_vec),
+            face_prep,
+            "an instance's prep carries its GETVARIATION IDEF; the face's does not"
+        );
+    }
+}
+
+/// **`font-variation-settings` reaches the instance**, last of everything
+/// that asks: the property's `wght` outranks the runs' `font-weight` at 400
+/// and at 700, so both runs ask for one location and the book embeds one
+/// program, the instance at the property's weight and width with
+/// `font-optical-sizing: none` leaving `opsz` at its default.
+#[test]
+fn font_variation_settings_reach_the_instance() {
+    let label = "font-variation-settings reach the instance";
+    let bytes = variable_book(
+        VARIABLE_GLYF,
+        "font-weight: 100 900;",
+        "p { font-variation-settings: \"wght\" 250, \"wdth\" 80; font-optical-sizing: none; }",
+        &format!("{VARIABLE_TEXT} <span class=\"heavy\">{VARIABLE_TEXT}</span>"),
+    );
+    let doc = converted(label, Document::open(bytes).expect("a book"));
+    let expected = instance_of(VARIABLE_GLYF, &[(b"wght", 250.0), (b"wdth", 80.0)]);
+    let glyphs = variable_glyphs(VARIABLE_GLYF);
+    assert!(draw_apart(
+        &expected,
+        &instance_of(VARIABLE_GLYF, &[(b"wght", 700.0), (b"wdth", 80.0)]),
+        &glyphs
+    ));
+    assert!(draw_apart(
+        &expected,
+        &instance_of(VARIABLE_GLYF, &[(b"wght", 250.0)]),
+        &glyphs
+    ));
+    the_one_program_is(label, &doc, VARIABLE_GLYF, &expected);
+}
+
+/// **The instance follows `css-fonts-4` §7.2's precedence**, lowest first:
+/// the weight held to the rule's range, the slope, the rule's own
+/// `font-variation-settings`, the optical size, then the run's. Each case is
+/// a book of one run, the instance it must embed, and the instance it would
+/// embed were the precedence another, which draws apart from the first.
+#[test]
+fn the_instance_follows_css_fonts_4s_precedence() {
+    let heavy = format!("<span class=\"heavy\">{VARIABLE_TEXT}</span>");
+    let none = "p { font-optical-sizing: none; }";
+    let cases: Vec<(
+        &str,
+        &str,
+        &str,
+        String,
+        Vec<(&[u8; 4], f64)>,
+        Vec<(&[u8; 4], f64)>,
+    )> = vec![
+        (
+            "the weight is held to the rule's range",
+            "font-weight: 300 600;",
+            none,
+            heavy.clone(),
+            vec![(b"wght", 600.0)],
+            vec![(b"wght", 700.0)],
+        ),
+        (
+            "the rule's settings reach the instance",
+            "font-weight: 100 900; font-variation-settings: \"wdth\" 90;",
+            none,
+            VARIABLE_TEXT.to_owned(),
+            vec![(b"wght", 400.0), (b"wdth", 90.0)],
+            vec![(b"wght", 400.0)],
+        ),
+        (
+            "the run's settings outrank the rule's",
+            "font-weight: 100 900; font-variation-settings: \"wdth\" 90;",
+            "p { font-optical-sizing: none; font-variation-settings: \"wdth\" 110; }",
+            VARIABLE_TEXT.to_owned(),
+            vec![(b"wght", 400.0), (b"wdth", 110.0)],
+            vec![(b"wght", 400.0), (b"wdth", 90.0)],
+        ),
+        (
+            "the optical size outranks the rule's settings",
+            "font-weight: 100 900; font-variation-settings: \"opsz\" 30;",
+            "",
+            VARIABLE_TEXT.to_owned(),
+            vec![(b"wght", 400.0), (b"opsz", 20.0)],
+            vec![(b"wght", 400.0), (b"opsz", 30.0)],
+        ),
+        (
+            "the run's settings outrank the optical size",
+            "font-weight: 100 900;",
+            "p { font-variation-settings: \"opsz\" 40; }",
+            VARIABLE_TEXT.to_owned(),
+            vec![(b"wght", 400.0), (b"opsz", 40.0)],
+            vec![(b"wght", 400.0), (b"opsz", 20.0)],
+        ),
+        (
+            "an oblique run asks for fourteen degrees, held to the axis",
+            "font-weight: 100 900;",
+            "p { font-optical-sizing: none; font-style: oblique; }",
+            VARIABLE_TEXT.to_owned(),
+            vec![(b"wght", 400.0), (b"slnt", -12.0)],
+            vec![(b"wght", 400.0)],
+        ),
+    ];
+    let glyphs = variable_glyphs(VARIABLE_GLYF);
+    for (label, descriptors, style, body, wins, loses) in cases {
+        let expected = instance_of(VARIABLE_GLYF, &wins);
+        assert!(
+            draw_apart(&expected, &instance_of(VARIABLE_GLYF, &loses), &glyphs),
+            "{label}: the two orders draw apart, so the case can fail"
+        );
+        let bytes = variable_book(VARIABLE_GLYF, descriptors, style, &body);
+        let doc = converted(label, Document::open(bytes).expect("a book"));
+        the_one_program_is(label, &doc, VARIABLE_GLYF, &expected);
+    }
+}
+
+/// **A variable face at its default is drawn as it is**: a run at 400, the
+/// face's default weight, with no optical size and nothing else asked, and
+/// an italic one, which asks for an `ital` axis the face does not have, land
+/// on the face's default, so the book embeds the face as a static face is
+/// embedded — its own `prep`, which an instance would have added a
+/// `GETVARIATION` IDEF to — and writes no instance.
+#[test]
+fn a_variable_face_at_its_default_is_drawn_as_it_is() {
+    let face = tinker_pdf_font::Sfnt::parse(VARIABLE_GLYF).expect("the face");
+    let prep = u32::from_be_bytes(*b"prep");
+    for (label, style) in [
+        ("at its default", "p { font-optical-sizing: none; }"),
+        (
+            "italic, with no ital axis",
+            "p { font-optical-sizing: none; font-style: italic; }",
+        ),
+    ] {
+        let bytes = variable_book(VARIABLE_GLYF, "font-weight: 100 900;", style, VARIABLE_TEXT);
+        let doc = converted(label, Document::open(bytes).expect("a book"));
+        the_one_program_is(label, &doc, VARIABLE_GLYF, VARIABLE_GLYF);
+        let programs = embedded_programs(&doc);
+        let sfnt = tinker_pdf_font::Sfnt::parse(&programs[0].bytes).expect("an sfnt");
+        assert_eq!(
+            sfnt.table(prep),
+            face.table(prep),
+            "{label}: the face's own prep"
+        );
+    }
+}
+
+/// **A variable CFF2 face draws at its instance too**, as the CFF the
+/// instancer writes: a book over the committed CFF2 face, its text at 700,
+/// embeds one `/FontFile3` that draws as the font crate's instance at that
+/// weight, and its text at the face's default embeds the default instance as
+/// a CFF, since no `/FontFile` stream carries a `CFF2` table.
+#[test]
+fn a_variable_cff2_face_draws_at_its_instance() {
+    let glyphs = variable_glyphs(VARIABLE_CFF2);
+    let bold = instance_of(VARIABLE_CFF2, &[(b"wght", 700.0)]);
+    let default = instance_of(VARIABLE_CFF2, &[]);
+    assert!(draw_apart(&bold, &default, &glyphs));
+    for (label, body, expected) in [
+        (
+            "a CFF2 face at 700",
+            format!("<span class=\"heavy\">{VARIABLE_TEXT}</span>"),
+            &bold,
+        ),
+        (
+            "a CFF2 face at its default",
+            VARIABLE_TEXT.to_owned(),
+            &default,
+        ),
+    ] {
+        let bytes = variable_book(
+            VARIABLE_CFF2,
+            "font-weight: 200 900;",
+            "p { font-optical-sizing: none; }",
+            &body,
+        );
+        let doc = converted(label, Document::open(bytes).expect("a book"));
+        the_one_program_is(label, &doc, VARIABLE_CFF2, expected);
+        let programs = embedded_programs(&doc);
+        assert_eq!(programs[0].key, "FontFile3", "{label}: CFF outlines");
+        let tags = tinker_pdf_font::Sfnt::parse(&programs[0].bytes)
+            .expect("an sfnt")
+            .tags();
+        assert!(
+            tags.contains(b"CFF ") && !tags.contains(b"CFF2"),
+            "{label}: a CFF table and no CFF2"
+        );
+    }
+}
+
+/// **HTML draws a variable face at its instance**, through the same face
+/// set a book's text is drawn through: a document made from markup whose
+/// `@font-face` names the committed face by a `data:` URL, its text at 700,
+/// embeds the instance at that weight.
+#[test]
+fn an_html_document_draws_a_variable_face_at_its_instance() {
+    use tinker_pdf::FromHtml;
+
+    let markup = format!(
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Var</title><style>\
+         @font-face {{ font-family: \"Var\"; font-weight: 100 900; \
+         src: url(data:font/ttf;base64,{}) format(\"truetype\"); }}\
+         p {{ font-family: \"Var\"; font-size: 20px; font-weight: 700; \
+         font-optical-sizing: none; }}\
+         </style></head><body><p>{VARIABLE_TEXT}</p></body></html>",
+        base64(VARIABLE_GLYF)
+    );
+    let (builder, report) =
+        tinker_pdf::DocumentBuilder::from_html(&markup, "", tinker_pdf::PageBox::new(400.0, 300.0))
+            .expect("it lays out");
+    assert!(
+        !report
+            .warnings()
+            .iter()
+            .any(|warning| matches!(warning, ArchiveWarning::FontFace { .. })),
+        "the face loads and its instance is written: {:?}",
+        report.warnings()
+    );
+    let doc = written_support::authored("html over a variable face", builder.finish());
+    let programs = embedded_programs(&doc);
+    assert_eq!(programs.len(), 1, "one program");
+    assert!(draws_as(
+        &programs[0],
+        &instance_of(VARIABLE_GLYF, &[(b"wght", 700.0)]),
+        &variable_glyphs(VARIABLE_GLYF)
+    ));
+}
+
+/// **An instance the instancer refuses is drawn at the face's default, and
+/// named**: the committed face with its `gvar` given a version no reader
+/// knows still has a design space, so a run at 700 asks for an instance;
+/// the instancer refuses it by name, the run is drawn in the face as a
+/// static face is, and the book's report says which family and why.
+#[test]
+fn an_instance_refused_is_drawn_at_the_default_and_named() {
+    let face = with_table_byte(VARIABLE_GLYF, b"gvar", 1, 9);
+    let bytes = variable_book(
+        &face,
+        "font-weight: 100 900;",
+        "p { font-optical-sizing: none; }",
+        &format!("<span class=\"heavy\">{VARIABLE_TEXT}</span>"),
+    );
+    let doc = converted(
+        "an instance refused",
+        Document::open(bytes).expect("a book"),
+    );
+    let warnings = face_warnings(&doc);
+    assert_eq!(warnings.len(), 1, "one warning: {warnings:?}");
+    let (family, defect, rules) = &warnings[0];
+    assert_eq!(family, "var");
+    assert!(
+        matches!(
+            defect,
+            FaceDefect::InstanceRefused(tinker_pdf::epub::typeface::InstanceError::Variation(_))
+        ),
+        "the instancer's refusal, by name: {defect:?}"
+    );
+    assert_eq!(*rules, 1, "one location asked for");
+    let programs = embedded_programs(&doc);
+    assert_eq!(programs.len(), 1);
+    assert!(
+        draws_as(&programs[0], &face, &variable_glyphs(&face)),
+        "the face, drawn at its default"
+    );
+}
+
+/// A copy of a face with one byte of one table set to `value`.
+fn with_table_byte(face: &[u8], tag: &[u8; 4], at: usize, value: u8) -> Vec<u8> {
+    let mut out = face.to_vec();
+    let count = usize::from(u16::from_be_bytes([face[4], face[5]]));
+    for i in 0..count {
+        let record = 12 + i * 16;
+        if &face[record..record + 4] == tag {
+            let offset = usize::try_from(u32::from_be_bytes([
+                face[record + 8],
+                face[record + 9],
+                face[record + 10],
+                face[record + 11],
+            ]))
+            .expect("an offset");
+            out[offset + at] = value;
+            return out;
+        }
+    }
+    panic!("the face has no {}", String::from_utf8_lossy(tag));
+}
+
+/// RFC 4648's base64, for a `data:` URL.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let byte = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
+        let triple = (byte(0) << 16) | (byte(1) << 8) | byte(2);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                let sextet = usize::try_from((triple >> (18 - 6 * i)) & 63).expect("six bits");
+                out.push(char::from(ALPHABET[sextet]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }

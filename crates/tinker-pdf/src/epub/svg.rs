@@ -62,7 +62,7 @@ use tinker_pdf_cos::build::{
     TransparencyGroup,
 };
 use tinker_pdf_css::property::{
-    Color, FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    Color, FontFamily, FontKerning, FontOpticalSizing, FontStyle, FontVariant, TextDecoration,
 };
 use tinker_pdf_filters::Limits as FilterLimits;
 use tinker_pdf_font::Sfnt;
@@ -110,6 +110,11 @@ fn request_of<'a>(font: &tinker_pdf_svg::TextStyle, families: &'a [FontFamily]) 
         size: font.size,
         kerning: FontKerning::Auto,
         features: &[],
+        // An SVG's text states no variation of its own; its weight, slope
+        // and size still choose a variable face's instance, `opsz` following
+        // the size as `font-optical-sizing`'s initial value asks.
+        variations: &[],
+        optical_sizing: FontOpticalSizing::Auto,
     }
 }
 
@@ -1616,7 +1621,7 @@ fn draw_text(
         let slice = text.get(range).unwrap_or("");
         match chosen {
             Chosen::Embedded(index) => {
-                let Some(face) = fonts.faces().faces().get(index) else {
+                let Some(face) = fonts.faces().face(index) else {
                     refused += 1;
                     continue;
                 };
@@ -1848,6 +1853,9 @@ fn note_nodes(nodes: &[Node], fonts: &mut Fonts<'_>) {
             variant: FontVariant::Normal,
             kerning: FontKerning::Auto,
             features: Vec::new(),
+            // As [`request_of`] asks, so the instance noted is the one drawn.
+            variations: Vec::new(),
+            optical_sizing: FontOpticalSizing::Auto,
             paragraph_rtl: Some(false),
             paragraph: 0,
             embeddings: Default::default(),

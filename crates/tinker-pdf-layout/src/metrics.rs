@@ -24,7 +24,9 @@
 //! request and answers; *which* face that is came from `css-fonts-4` §5's
 //! matching, which is milestone 9's and lives above this crate.
 
-use tinker_pdf_css::property::{FeatureSetting, FontFamily, FontKerning, FontStyle};
+use tinker_pdf_css::property::{
+    FeatureSetting, FontFamily, FontKerning, FontOpticalSizing, FontStyle, VariationSetting,
+};
 
 /// Which face a run wants, and at what size.
 ///
@@ -47,6 +49,13 @@ pub struct FontRequest<'a> {
     /// The computed `font-feature-settings`, in the order written: the
     /// features a shaper switches on or off over its own plan.
     pub features: &'a [FeatureSetting],
+    /// The computed `font-variation-settings`, each axis once: what a
+    /// variable face is asked for last (`css-fonts-4` §7.2). Empty for
+    /// `normal`.
+    pub variations: &'a [VariationSetting],
+    /// The computed `font-optical-sizing`: whether a variable face's `opsz`
+    /// follows [`FontRequest::size`].
+    pub optical_sizing: FontOpticalSizing,
 }
 
 /// How tall a line of one face is.

@@ -36,7 +36,7 @@
 //! and a build that trusted either one alone would be wrong about it.
 
 use crate::parser::{BlockKind, ComponentValue};
-use crate::property::FontStyle;
+use crate::property::{variation_settings_descriptor, FontStyle, VariationSetting};
 use crate::tokenizer::Token;
 
 /// A `format()` hint on one `src` entry, §4.3's own keyword list.
@@ -130,7 +130,7 @@ pub enum FontSource {
     Local(String),
 }
 
-/// One `@font-face` rule (§4.1), reduced to the four descriptors this build
+/// One `@font-face` rule (§4.1), reduced to the five descriptors this build
 /// reads.
 ///
 /// `unicode-range`, `font-stretch`, `font-feature-settings`, `font-display`
@@ -139,7 +139,7 @@ pub enum FontSource {
 /// `unicode-range` in particular would change which face covers a character
 /// and this build's per-character fallback asks the font program itself, so
 /// reading the descriptor and ignoring it would be worse than not reading it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FontFace {
     /// The `font-family` descriptor: the name a `font-family` property has to
     /// mention for this face to be a candidate. Lower-cased, because §5's
@@ -157,6 +157,12 @@ pub struct FontFace {
     /// discarded: this build has one oblique per family and no way to set a
     /// second at a different slant.
     pub style: FontStyle,
+    /// The `font-variation-settings` descriptor: the axes a variable face is
+    /// drawn at before a run's own `font-optical-sizing` and
+    /// `font-variation-settings` (§7.2), each tag once at its last value, as
+    /// the property keeps them. Empty for `normal` and where the sheet wrote
+    /// none.
+    pub variations: Vec<VariationSetting>,
     /// The address of the sheet this rule was written in, so a relative `url()`
     /// can be resolved against it.
     ///
@@ -240,6 +246,7 @@ pub fn parse_rule(block: &[ComponentValue], base: Option<&str>) -> Option<FontFa
     let mut sources: Option<Vec<FontSource>> = None;
     let mut weight = (400u16, 400u16);
     let mut style = FontStyle::Normal;
+    let mut variations: Vec<VariationSetting> = Vec::new();
 
     for chunk in block.split(|v| matches!(v, ComponentValue::Token(Token::Semicolon))) {
         let mut values = chunk.iter().skip_while(|v| v.is_whitespace());
@@ -269,6 +276,11 @@ pub fn parse_rule(block: &[ComponentValue], base: Option<&str>) -> Option<FontFa
             }
             "font-weight" => weight = descriptor_weight(&rest).unwrap_or(weight),
             "font-style" => style = descriptor_style(&rest).unwrap_or(style),
+            "font-variation-settings" => {
+                if let Some(settings) = variation_settings_descriptor(&rest) {
+                    variations = settings;
+                }
+            }
             _ => {}
         }
     }
@@ -278,6 +290,7 @@ pub fn parse_rule(block: &[ComponentValue], base: Option<&str>) -> Option<FontFa
         sources: sources?,
         weight,
         style,
+        variations,
         base: base.map(str::to_owned),
     })
 }

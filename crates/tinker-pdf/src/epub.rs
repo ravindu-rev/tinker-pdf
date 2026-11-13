@@ -133,9 +133,9 @@ use typeface::{FaceDefect, FaceSet};
 /// one that cost the most faces. Sorting also makes the warning list a function
 /// of the book rather than of the order the reader met its stylesheets in,
 /// which a determinism fingerprint depends on.
-fn ranked_face_defects(faces: &FaceSet) -> Vec<(String, FaceDefect, usize)> {
+fn ranked_face_defects(defects: &[(String, FaceDefect)]) -> Vec<(String, FaceDefect, usize)> {
     let mut out: Vec<(String, FaceDefect, usize)> = Vec::new();
-    for (family, defect) in faces.defects() {
+    for (family, defect) in defects {
         match out.iter_mut().find(|(f, d, _)| f == family && d == defect) {
             Some(slot) => slot.2 += 1,
             None => out.push((family.clone(), defect.clone(), 1)),
@@ -454,7 +454,8 @@ pub struct BookCost {
     /// Shaping plans the book's embedded faces built: one for each distinct
     /// `(table, script, language, features)` a stage of its text asked for,
     /// each built once per face however many runs, lines and pages ask
-    /// again (`tinker_pdf_shape::Plans::plans_built`). Bounded per face by
+    /// again (`tinker_pdf_shape::Plans::plans_built`), an instance of a
+    /// variable face counting as a face. Bounded per face by
     /// `tinker_pdf_shape::Limits::max_index_bytes`.
     pub shaping_plans: usize,
     /// Lookup coverage indexes the book's embedded faces built: once per
@@ -462,13 +463,13 @@ pub struct BookCost {
     pub shaping_indexes: usize,
 }
 
-/// What a book's embedded faces built of their shaping plans and indexes,
-/// summed: [`BookCost::shaping_plans`] and [`BookCost::shaping_indexes`].
+/// What a book's embedded faces, and the instances of its variable ones,
+/// built of their shaping plans and indexes, summed:
+/// [`BookCost::shaping_plans`] and [`BookCost::shaping_indexes`].
 fn shaping_built(faces: &FaceSet) -> (usize, usize) {
     let (plans, indexes) = faces
-        .faces()
-        .iter()
-        .fold((0u64, 0u64), |(plans, indexes), face| {
+        .drawn()
+        .fold((0u64, 0u64), |(plans, indexes), (_, face)| {
             (
                 plans.saturating_add(face.plans.plans_built()),
                 indexes.saturating_add(face.plans.indexes_built()),
@@ -996,7 +997,7 @@ pub fn synthesise(
         &encryption,
         limits,
     );
-    for (family, defect, rules) in ranked_face_defects(&faces) {
+    for (family, defect, rules) in ranked_face_defects(faces.defects()) {
         warnings.push(ArchiveWarning::FontFace {
             family,
             defect,
@@ -1528,7 +1529,7 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
         &ocf::Encryption::default(),
         limits,
     );
-    for (family, defect, rules) in ranked_face_defects(&faces) {
+    for (family, defect, rules) in ranked_face_defects(faces.defects()) {
         warnings.push(ArchiveWarning::FontFace {
             family,
             defect,
@@ -1866,6 +1867,16 @@ fn write_chapters<R: read::Resources + ?Sized>(
     // ---- write it ----------------------------------------------------------
     let (width, height) = page;
     fonts.register(builder);
+    // Every run has been measured and noted by now, so every instance a page
+    // draws in has been asked for, and what drawing a variable face at one
+    // could not do is known.
+    for (family, defect, rules) in ranked_face_defects(&faces.instance_defects()) {
+        warnings.push(ArchiveWarning::FontFace {
+            family,
+            defect,
+            rules,
+        });
+    }
     let pictures = register_pictures(builder, chapters, warnings);
     let backgrounds = register_backgrounds(resources, builder, chapters, limits, warnings);
     let mut patterns = 0usize;

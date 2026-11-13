@@ -4,7 +4,7 @@
 
 use super::sheet;
 use crate::font_face::{FontFormat, FontSource};
-use crate::property::{Declaration, FontStyle, Property};
+use crate::property::{Declaration, FontStyle, Property, VariationSetting};
 use crate::{parse, Budget, ImportResolver, Limits, Warning};
 
 /// `@font-face` is read, and the name no longer appears in the unsupported
@@ -161,6 +161,55 @@ fn the_style_descriptor_reads_past_an_oblique_angle() {
 
     let angled = sheet("@font-face { font-family: A; src: url(a.otf); font-style: oblique 14deg }");
     assert_eq!(angled.font_faces[0].style, FontStyle::Oblique);
+}
+
+/// The `font-variation-settings` descriptor is read by the property's own
+/// grammar: each axis once at the value of its last appearance, `normal` and
+/// an absent descriptor the empty list, and a value the grammar refuses — a
+/// tag of three characters, a tag with no number, more distinct axes than
+/// the cap — the descriptor not written, so the last valid one stands.
+#[test]
+fn the_variation_settings_descriptor_is_read_as_the_property_is() {
+    let rule = |descriptors: &str| {
+        let parsed = sheet(&format!(
+            "@font-face {{ font-family: A; src: url(a.otf); {descriptors} }}"
+        ));
+        assert_eq!(parsed.font_faces.len(), 1, "{descriptors}: the rule stands");
+        parsed.font_faces[0].variations.clone()
+    };
+    let setting = |tag: &[u8; 4], value: f64| VariationSetting { tag: *tag, value };
+    assert_eq!(
+        rule(r#"font-variation-settings: "wght" 650, "wdth" 75, "wght" 300"#),
+        vec![setting(b"wdth", 75.0), setting(b"wght", 300.0)]
+    );
+    assert_eq!(rule("font-variation-settings: normal"), Vec::new());
+    assert_eq!(rule("font-weight: 100 900"), Vec::new(), "none written");
+    for refused in [r#""wgh" 400"#, r#""wght""#, r#"wght 400"#, "inherit 4"] {
+        assert_eq!(
+            rule(&format!(
+                r#"font-variation-settings: "opsz" 12; font-variation-settings: {refused}"#
+            )),
+            vec![setting(b"opsz", 12.0)],
+            "{refused} leaves the descriptor before it"
+        );
+    }
+    let cap = crate::limits::MAX_CSS_FEATURE_SETTINGS;
+    let list = |count: usize| {
+        (0..count)
+            .map(|i| format!("\"x{i:03}\" 1"))
+            .collect::<Vec<String>>()
+            .join(", ")
+    };
+    assert_eq!(
+        rule(&format!("font-variation-settings: {}", list(cap))).len(),
+        cap,
+        "the cap's own count is read"
+    );
+    assert_eq!(
+        rule(&format!("font-variation-settings: {}", list(cap + 1))),
+        Vec::new(),
+        "one axis past the cap is refused"
+    );
 }
 
 /// §5.2's weight distance, at the two facts a single-number test cannot

@@ -133,8 +133,8 @@ use std::sync::Arc;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, Color, FeatureSetting, FontFamily, FontKerning, FontStyle, FontVariant, Sides,
-    TextDecoration,
+    BorderStyle, Color, FeatureSetting, FontFamily, FontKerning, FontOpticalSizing, FontStyle,
+    FontVariant, Sides, TextDecoration, VariationSetting,
 };
 
 /// One node of the tree layout is given.
@@ -671,6 +671,11 @@ pub struct TextRun {
     pub kerning: FontKerning,
     /// `font-feature-settings`, likewise; empty for `normal`.
     pub features: Vec<FeatureSetting>,
+    /// `font-variation-settings`, for the instance of a variable face the
+    /// painter draws the run at, as layout measured it; empty for `normal`.
+    pub variations: Vec<VariationSetting>,
+    /// `font-optical-sizing`, for the same instance.
+    pub optical_sizing: FontOpticalSizing,
     /// The base direction of the paragraph this run is set in: its block
     /// container's `direction` (`css-writing-modes-3` §2.1), or `None` where
     /// the container's `unicode-bidi: plaintext` asks for UAX #9's P2 and P3.
