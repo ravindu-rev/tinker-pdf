@@ -792,12 +792,12 @@ fn unsupported_is_this_builds_gap_and_unknown_is_somebody_elses() {
             -ah-margin-start: 1em;
             --brand: #333;
             colour: red;
-            hyphens: auto;
+            unicode-bidi: bidi-override;
          }",
     );
     assert_eq!(
         parsed.report.unsupported,
-        vec![("box-shadow", 1), ("hyphens", 1)]
+        vec![("box-shadow", 1), ("unicode-bidi", 1)]
     );
     let unknown: Vec<&str> = parsed
         .report
@@ -2580,13 +2580,18 @@ fn direction_and_unicode_bidi_read_their_keywords_and_refuse_the_overrides() {
     }
 }
 
-/// **`hyphens` at `none` and `manual`, and `auto` refused by value**
-/// (`css-text-3` §5.4): `auto` asks for a hyphenation dictionary this build
-/// does not have, so it is counted rather than read as `manual`.
+/// **`hyphens` at its three keywords** (`css-text-3` §5.3): `auto` is read
+/// as itself, and whether a table covers the element's language is layout's
+/// question and the facade's count, not the parser's. Anything else is
+/// refused by value.
 #[test]
-fn hyphens_reads_none_and_manual_and_refuses_auto() {
+fn hyphens_reads_its_three_keywords() {
     use crate::property::Hyphens;
-    for (value, expected) in [("none", Hyphens::None), ("Manual", Hyphens::Manual)] {
+    for (value, expected) in [
+        ("none", Hyphens::None),
+        ("Manual", Hyphens::Manual),
+        ("AUTO", Hyphens::Auto),
+    ] {
         assert_eq!(
             known(&format!("code {{ hyphens: {value} }}")),
             vec![Property::Hyphens(expected)],
@@ -2594,10 +2599,10 @@ fn hyphens_reads_none_and_manual_and_refuses_auto() {
         );
     }
     assert_eq!(
-        declarations("p { hyphens: auto }")[0].declaration,
+        declarations("p { hyphens: all }")[0].declaration,
         Declaration::Unsupported {
             property: "hyphens",
-            value: "auto".to_owned(),
+            value: "all".to_owned(),
         }
     );
 }

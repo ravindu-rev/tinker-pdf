@@ -1395,6 +1395,19 @@ pub(crate) struct Laid {
 /// [`read::Context::author`]); `margin` is the margin inside `layout.page` for
 /// a reflowable document, and ignored for an SVG, which is its own page.
 #[allow(clippy::too_many_arguments)]
+/// Whether an element's text asks `hyphens: auto` of a language this build has
+/// no hyphenation table for — none declared, one with no dictionary, or every
+/// language in a build without the `hyphenation` feature — and so was set as
+/// `manual` and is counted (`docs/design/hyphenation.md`).
+fn hyphenated_without_a_table(style: &ComputedStyle) -> bool {
+    style.hyphens == tinker_pdf_css::property::Hyphens::Auto
+        && style
+            .language
+            .as_ref()
+            .and_then(|language| tinker_pdf_layout::hyphenate::dictionary(language.as_str()))
+            .is_none()
+}
+
 pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
     resources: &mut R,
     builder: &mut DocumentBuilder,
@@ -1725,8 +1738,18 @@ fn write_chapters<R: read::Resources + ?Sized>(
     // could not count, since which face a character is set in is decided
     // here (`Fonts::unshaped_settings`).
     let mut unshaped: [usize; 2] = [0, 0];
+    // `hyphens: auto` asked of text whose language this build has no table
+    // for (`css-text-3` §5.3), by element, on the same terms: no language,
+    // one with no dictionary, or a build without the `hyphenation` feature.
+    // Layout set that text as `manual`.
+    let mut unhyphenated = 0usize;
     for chapter in chapters.iter() {
         let mut asked: [std::collections::BTreeSet<u32>; 2] = Default::default();
+        let mut untabled: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let styles = chapter
+            .reading
+            .as_ref()
+            .map(|reading| reading.styles.styles.as_slice());
         for page in &chapter.pages {
             for run in &page.runs {
                 if run.painted {
@@ -1739,12 +1762,19 @@ fn write_chapters<R: read::Resources + ?Sized>(
                         if features {
                             asked[1].insert(anchor);
                         }
+                        if styles
+                            .and_then(|styles| styles.get(anchor as usize))
+                            .is_some_and(hyphenated_without_a_table)
+                        {
+                            untabled.insert(anchor);
+                        }
                     }
                 }
             }
         }
         unshaped[0] += asked[0].len();
         unshaped[1] += asked[1].len();
+        unhyphenated += untabled.len();
         // An SVG's characters need codes on the same terms and in the same
         // pass: a PDF's font resources belong to the document rather than to a
         // page, and a character outside `WinAnsiEncoding` needs a code chosen
@@ -1760,6 +1790,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
     let counted: Vec<(&'static str, usize)> = [
         ("font-kerning", unshaped[0]),
         ("font-feature-settings", unshaped[1]),
+        ("hyphens", unhyphenated),
     ]
     .into_iter()
     .filter(|(_, elements)| *elements > 0)

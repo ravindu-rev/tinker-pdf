@@ -2091,6 +2091,48 @@ fn an_emergency_break_after_a_soft_hyphen_under_none_draws_no_hyphen() {
     assert_eq!(text.trim_end(), "aaaa\nbbbb\nbbbb");
 }
 
+/// **`hyphens: auto` asked of a language this build has no table for is
+/// counted, by element, and the page is drawn as `manual` draws it**
+/// (`css-text-3` §5.3: the UA hyphenates only text *"for which it has an
+/// appropriate hyphenation resource"*).
+///
+/// An element counts where it draws text set in `auto` whose language finds
+/// no table: none declared — the chapter's `<html>` declares nothing, so the
+/// `<p>`, the `<em>` inheriting `auto` from it and the second `<p>` are three
+/// — a language with no dictionary, and American English, whose patterns are
+/// not vendored. British English has a table where the `hyphenation`
+/// feature is on and none where it is off. `manual` and `none` ask for no
+/// table. In every build.
+#[test]
+fn hyphens_auto_without_a_table_is_counted_by_element() {
+    let body = "<p>one <em>two</em></p><p>three</p>";
+    let unspoken = open("p { hyphens: auto }", body);
+    assert_eq!(counted(&unspoken, "hyphens"), Some(3));
+    assert_eq!(
+        tokens(&unspoken),
+        tokens(&open("p { hyphens: manual }", body)),
+        "a page with no table is the manual page"
+    );
+    let untabled = open(
+        "p { hyphens: auto }",
+        r#"<p lang="und">one</p><p lang="en-US">two</p>"#,
+    );
+    assert_eq!(counted(&untabled, "hyphens"), Some(2));
+    let british = open("p { hyphens: auto }", r#"<p lang="en-GB">one</p>"#);
+    assert_eq!(
+        counted(&british, "hyphens"),
+        if cfg!(feature = "hyphenation") {
+            None
+        } else {
+            Some(1)
+        }
+    );
+    for setting in ["manual", "none"] {
+        let asked = open(&format!("p {{ hyphens: {setting} }}"), body);
+        assert_eq!(counted(&asked, "hyphens"), None, "{setting}");
+    }
+}
+
 // ---- the forced line break ------------------------------------------------------
 
 /// Every `Tj` on the first page that a `Td` placed, as `(x, y, string)`: the

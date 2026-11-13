@@ -946,13 +946,12 @@ pub enum UnicodeBidi {
     Plaintext,
 }
 
-/// `hyphens`, `css-text-3` §5.3.
+/// `hyphens`, `css-text-3` §5.3, at its three values.
 ///
-/// All three values are layout's (`tinker_pdf_layout`'s `hyphens: auto`
-/// breaks a word at its dictionary's points), and the parser still refuses
-/// `auto` by value: a book that asks is counted rather than set, and the
-/// declaration does not apply, so the element keeps the `manual` it inherits
-/// or starts with. A caller of the layout API sets `Auto` on a style itself.
+/// `auto` is read, and laid out where a hyphenation table covers the
+/// element's content language (`tinker_pdf_layout::hyphenate`); where none
+/// does, layout sets it as `manual`, and the facade counts the element
+/// against `hyphens` rather than calling it honoured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hyphens {
     /// `none`: a word breaks nowhere inside itself, a soft hyphen included,
@@ -1823,7 +1822,7 @@ pub enum Property {
     FontKerning(FontKerning),
     /// `direction`, `css-writing-modes-3` §2.1.
     Direction(Direction),
-    /// `hyphens`, `css-text-3` §5.4.
+    /// `hyphens`, `css-text-3` §5.3.
     Hyphens(Hyphens),
     /// `unicode-bidi`, §2.2.
     UnicodeBidi(UnicodeBidi),
@@ -3888,11 +3887,11 @@ fn implemented(
                 _ => return None,
             }))
         }),
-        // `auto` is inside the grammar and refused by value; see [`Hyphens`].
         "hyphens" => keyword(one, single, |word| {
             Some(Property::Hyphens(match word {
                 "none" => Hyphens::None,
                 "manual" => Hyphens::Manual,
+                "auto" => Hyphens::Auto,
                 _ => return None,
             }))
         }),

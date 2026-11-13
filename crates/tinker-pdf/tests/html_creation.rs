@@ -448,6 +448,52 @@ fn a_margin_shorthand_is_its_four_longhands() {
     );
 }
 
+/// **`hyphens: auto` is honoured in HTML** (`css-text-3` §5.3): a British
+/// English `university` in a seventy-pixel paragraph is `univer-` over
+/// `sity`, read back out of the finished PDF, as the same word written with a
+/// soft hyphen at each of its dictionary's published points is under
+/// `manual`; without them the word does not break.
+#[cfg(feature = "hyphenation")]
+#[test]
+fn hyphens_auto_is_honoured_in_html() {
+    let body = |word: &str| format!(r#"<p lang="en-GB">{word}</p>"#);
+    let auto = lay("p { width: 70px; hyphens: auto }", &body("university"));
+    assert_eq!(
+        auto.iter()
+            .map(|(text, _, _)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["univer-", "sity"]
+    );
+    same(
+        "hyphens: auto",
+        auto,
+        lay(
+            "p { width: 70px; hyphens: manual }",
+            &body("uni\u{AD}ver\u{AD}sity"),
+        ),
+        lay("p { width: 70px; hyphens: manual }", &body("university")),
+    );
+}
+
+/// **A document in a language with no table reports `hyphens` by element**,
+/// and its paragraphs are laid out as `manual` lays them out: here two
+/// paragraphs with no language and one in a language no dictionary covers.
+/// In every build.
+#[test]
+fn hyphens_auto_without_a_table_is_counted_in_html() {
+    let markup = document(r#"<p>one</p><p>two</p><p lang="und">three</p>"#);
+    let (_, report) =
+        DocumentBuilder::from_html(markup.as_str(), "p { hyphens: auto }", column_page())
+            .expect("the markup lays out");
+    let counted = report.warnings().iter().find_map(|warning| match warning {
+        ArchiveWarning::UnimplementedProperty { property, elements } if *property == "hyphens" => {
+            Some(*elements)
+        }
+        _ => None,
+    });
+    assert_eq!(counted, Some(3));
+}
+
 #[test]
 fn a_padding_shorthand_is_its_four_longhands() {
     let body = "<p>one</p><p>two</p>";

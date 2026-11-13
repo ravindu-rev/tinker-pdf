@@ -1380,6 +1380,67 @@ fn a_soft_hyphen_inside_a_line_is_not_there() {
     same("a soft hyphen inside a line", soft, written, broken);
 }
 
+/// `hyphens: auto` in `language` against `manual` with a soft hyphen at each
+/// of `published`'s points: the same lines, places and widths. The mismatch
+/// is `manual` without them, under which the word has no break and overflows
+/// its line whole.
+#[cfg(feature = "hyphenation")]
+#[track_caller]
+fn auto_is_its_points_written_as_soft_hyphens(language: &str, published: &str, measure: f64) {
+    let word: String = published.chars().filter(|&c| c != '-').collect();
+    let soft = published.replace('-', "\u{AD}");
+    let body = |text: &str| format!(r#"<p lang="{language}">{text}</p>"#);
+    let auto = drawn_at("p { hyphens: auto }", &body(&word), measure);
+    let written = drawn_at("p { hyphens: manual }", &body(&soft), measure);
+    let broken = drawn_at("p { hyphens: manual }", &body(&word), measure);
+    assert!(
+        auto.len() > 1,
+        "{language}: {published} did not break at {measure}px"
+    );
+    same(language, auto, written, broken);
+}
+
+/// **`hyphens: auto` breaks a word where its dictionary says it may, as the
+/// same word with a soft hyphen at each of those points breaks under
+/// `manual`** (`css-text-3` §5.3) — one pair for each vendored language,
+/// each word one its dictionary publishes with its points, so every point the
+/// pair rests on is the dictionary author's.
+///
+/// Courier at sixteen pixels is 9.6 pixels a character and a combining mark
+/// none, so each measure is chosen to hold the word up to a point and its
+/// hyphen and not the whole word: British English's `univer-` over `sity` at
+/// seventy pixels, Dutch's `aandachts-` over `trekker` at a hundred.
+#[cfg(feature = "hyphenation")]
+#[test]
+fn hyphens_auto_is_each_vendored_dictionarys_points_as_soft_hyphens() {
+    auto_is_its_points_written_as_soft_hyphens("af", "aan-sit-riem", 70.0);
+    auto_is_its_points_written_as_soft_hyphens(
+        "cu",
+        "\u{43a}\u{43b}\u{435}-\u{43e}-\u{43f}\u{430}\u{301}-\u{442}\u{440}\u{430}",
+        60.0,
+    );
+    auto_is_its_points_written_as_soft_hyphens("en-GB", "uni-ver-sity", 70.0);
+    auto_is_its_points_written_as_soft_hyphens("ga", "dtiom-\u{e1}int\u{ed}", 60.0);
+    auto_is_its_points_written_as_soft_hyphens("nl", "aan-dachts-trek-ker", 100.0);
+    auto_is_its_points_written_as_soft_hyphens("pl", "by-naj-mniej", 60.0);
+    auto_is_its_points_written_as_soft_hyphens("pt-BR", "hard-ware", 50.0);
+    auto_is_its_points_written_as_soft_hyphens("sk", "sep-tem-bra", 70.0);
+}
+
+/// **`hyphens: auto` with no table for its language is `manual`**, drawn the
+/// same to the width: a language with no dictionary, American English, whose
+/// patterns are not vendored, and no language at all. In every build.
+#[test]
+fn hyphens_auto_without_a_table_is_manual() {
+    for language in [r#" lang="und""#, r#" lang="en-US""#, ""] {
+        let body = format!("<p{language}>aaaa\u{AD}bbbbbbbb university</p>");
+        let auto = drawn_at("p { hyphens: auto }", &body, 100.0);
+        let manual = drawn_at("p { hyphens: manual }", &body, 100.0);
+        let broken = drawn_at("p { hyphens: none }", &body, 100.0);
+        same(&format!("no table:{language}"), auto, manual, broken);
+    }
+}
+
 // ---- positioned boxes written inside a line -------------------------------------
 
 /// [`lay`], its lines in the order they sit on the page rather than the order

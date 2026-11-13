@@ -266,8 +266,9 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // **`hyphens` used to be here and left in October 2026's eighth
             // wave**: pandoc's `code { hyphens: manual }`, once in each of
             // its default sheets, is read now — `manual` breaks a word only
-            // at a soft hyphen and draws a hyphen there — and `auto`, which
-            // would need a hyphenation dictionary, is still refused by value.
+            // at a soft hyphen and draws a hyphen there — and so is `auto`,
+            // counted at paint time only where no table covers an element's
+            // language; no committed book declares it.
             // **`list-style` used to be here and left on 3 October 2026**,
             // when `css-lists-3`'s shorthand was implemented with its two
             // longhands. Its whole count was pandoc's `ul.task-list {

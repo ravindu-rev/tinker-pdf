@@ -213,37 +213,45 @@ inside it — `abc (de` in a right-to-left paragraph draws `(de` on its second
 line, as it does unwrapped. A line whose runs are not all of one paragraph
 is resolved by itself.
 
-**`hyphens`** (`css-text-3` §5.3) is read at `none` and `manual`, its initial
-value: a soft hyphen (U+00AD) stays in a run's text, since the text is the
-book's, measures nothing and is not drawn where no line breaks at it; a line
-that breaks at one is measured with room for a hyphen and draws one there
-(`TextRun::hyphenated`, `paint::hyphenate`); and `none` takes the break
-away, and shows no hyphen where `overflow-wrap` breaks a word just after
-one. `auto` is refused by value. The hyphenator it asks for is
-`tinker_pdf_layout::hyphenate`: Liang's patterns and exception list compiled
-into one trie, each gap taking the highest level any matching pattern gives
-it and its odd levels the word's points, none inside the dictionary's
-minimums and none before a combining mark, a word with a letter the
-dictionary does not know, or longer than
-`tinker_pdf_layout::limits::MAX_HYPHENATED_WORD`, getting none
-([design/hyphenation.md](../design/hyphenation.md)). The `hyphenation`
-feature, off by default, compiles eight vendored dictionaries into it —
-Afrikaans, Church Slavonic, British English, Irish, Dutch, Polish,
+**`hyphens`** (`css-text-3` §5.3) is read at all three values. Under
+`manual`, the initial value, a soft hyphen (U+00AD) stays in a run's text,
+since the text is the book's, measures nothing and is not drawn where no line
+breaks at it; a line that breaks at one is measured with room for a hyphen
+and draws one there (`TextRun::hyphenated`, `paint::hyphenate`); and `none`
+takes the break away, and shows no hyphen where `overflow-wrap` breaks a word
+just after one.
+
+**`hyphens: auto`** adds the points of a hyphenation dictionary for the
+element's content language ([design/hyphenation.md](../design/hyphenation.md)).
+The hyphenator is `tinker_pdf_layout::hyphenate`: Liang's patterns and
+exception list compiled into one trie, each gap taking the highest level any
+matching pattern gives it and its odd levels the word's points, none inside
+the dictionary's minimums and none before a combining mark, a word with a
+letter the dictionary does not know, or longer than
+`tinker_pdf_layout::limits::MAX_HYPHENATED_WORD`, getting none. The
+`hyphenation` feature, off by default, compiles eight vendored dictionaries
+into it — Afrikaans, Church Slavonic, British English, Irish, Dutch, Polish,
 Portuguese and Slovak, every one of the published collection whose licence
-the allowlist admits and which publishes hyphenated words
-(`THIRDPARTY.md`) — each found by a content language through RFC 4647's
-lookup (`hyphenate::dictionary`), so `en-GB-oxendict` finds British English
-and `en-US` nothing. The layout API sets `Hyphens::Auto` on a style itself,
-and layout honours it: the words of the pieces of an inline formatting
-context set in `auto` whose language has a table — found across inline
-boxes, each looked up once for the context and its letters charged to the
-break budget — gain their points as break opportunities, a word holding a
-soft hyphen excepted (§5.3), and a point is kept where the character before it
-is in a piece of the word's own table and UAX #14 has no break of its own. A
-line that breaks at one is measured with its hyphen and flagged
-`TextRun::hyphenated`, by the one test that decides a soft hyphen's
-(`flow::ends_in_hyphen`), so `paint::hyphenate` draws both alike. Without a
-table `auto` breaks as `manual`.
+the allowlist admits and which publishes hyphenated words (`THIRDPARTY.md`) —
+each found by a content language through RFC 4647's lookup
+(`hyphenate::dictionary`), so `en-GB-oxendict` finds British English and
+`en-US` nothing. Layout finds the words of the pieces of an inline formatting
+context set in `auto` whose language has a table — across inline boxes, each
+looked up once for the context and its letters charged to the break budget —
+and gives them their points as break opportunities, a word holding a soft
+hyphen excepted, which breaks at its soft hyphens alone (§5.3); a point is
+kept where the character before it is in a piece of the word's own table and
+UAX #14 has no break of its own. A line that breaks at one is measured with
+its hyphen and flagged `TextRun::hyphenated` by the one test that decides a
+soft hyphen's (`flow::ends_in_hyphen`), so `paint::hyphenate` draws both
+alike, and the drawn hyphen reads back as U+002D at the line's end, as a soft
+hyphen's does. Text set in `auto` whose language has no table — none
+declared, one with no dictionary, or any in a build without the feature — is
+set as `manual`, and each element that draws such text is counted against
+`hyphens`, at paint time, where `font-kerning` is
+(`epub_reftest.rs`'s pair for each vendored language,
+`html_creation.rs`'s `hyphens_auto_is_honoured_in_html`, `epub_paint.rs`'s
+`hyphens_auto_without_a_table_is_counted_by_element`).
 
 **`direction` and `unicode-bidi`** (`css-writing-modes-3` §2) decide the
 line, not each line's first letter: every run carries its block's direction
@@ -1072,6 +1080,7 @@ inside its `Link` element, with no `/Contents` and no `/Alt`, on a page with no
 | A refused `<img>` — **not a refusal, a stated answer** | — | HTML §4.8.4.4 makes an element *"expected to be treated as a replaced element"* **only when the image is available**, so an unavailable one is an ordinary empty inline and generates **no box**. §10.3.2's 300 by 150 default would put a blank postcard into a paragraph for a reference that was merely misspelled, and carrying `alt` into it would put characters on the page the spine's markup does not contain — one per refused image, with no source character to answer it. Asserted as a byte-for-byte identity against the same book with an empty `<span>` in the `<img>`'s place | [design/epub-layout.md](../design/epub-layout.md) |
 | `text-transform` in Lithuanian, Turkish or Azeri, and its `full-width` and `full-size-kana` values | `ArchiveWarning::UnimplementedProperty { property: "text-transform", .. }` | §2.1 requires `SpecialCasing.txt`'s language-conditional mappings when the element's language is known, and the layout crate that applies the transform is told each run's language (`ComputedStyle::language`) and does not apply them — so the cascade counts every element in one of the three languages (by `xml:lang`/`lang`, inherited) that has a casing transform, rather than letting a Turkish heading set with an English `I` read as honoured. `full-width` and `full-size-kana` map to *other characters*, not cases, and are refused by value alone or beside a casing keyword | `crates/tinker-pdf-layout/src/case.rs` |
 | `font-kerning: normal`, or a feature switched on by `font-feature-settings`, for text set in one of the standard 14; an alternate index above one; a `font-feature-settings` list longer than `tinker_pdf_css::limits::MAX_CSS_FEATURE_SETTINGS` (32) | `ArchiveWarning::UnimplementedProperty { property: "font-kerning" \| "font-feature-settings", .. }` | an embedded face's run is shaped, and both properties reach its shaper (`font-kerning: none` as `kern` off, `font-feature-settings` switching features off out of the plan and on into it, `css-fonts-4` §7.2's precedence putting the low-level property last), measured and drawn alike. The standard 14 are drawn a character at a time from their widths — no `GSUB`, no `GPOS`, and none of their AFM kerning pairs, which this build does not carry — so a request switched **on** for such text cannot be met and its element is counted, at paint time, where the face a character is set in is known; a feature switched off is met there already, and `auto` kerning is the user agent's to decide. An alternate index is a parameter the shaper's alternate substitution does not take (it takes the first), and a list past the cap would be copied into every element that inherits it, so both are refused by value | `crates/tinker-pdf/tests/epub_paint.rs`, `crates/tinker-pdf/tests/epub_shaped.rs` |
+| `hyphens: auto` on text whose content language this build has no hyphenation table for — none declared, a language with no vendored dictionary (American English among them), or any language in a build without the `hyphenation` feature | `ArchiveWarning::UnimplementedProperty { property: "hyphens", .. }` | §5.3 hyphenates only text *"for which the content language is known and for which it has an appropriate hyphenation resource"*, so such text is set as `manual` — its soft hyphens still break — and every element that draws it is counted, at paint time, rather than read as hyphenated. A dictionary is vendored only under a licence the allowlist admits and only where it publishes hyphenated words its patterns can be held to ([design/hyphenation.md](../design/hyphenation.md) lists every language and why) | `crates/tinker-pdf/tests/epub_paint.rs` |
 | `unicode-bidi: bidi-override` and `isolate-override` — every `<bdo>` — and `direction: rtl` on a table, a flex container or a multi-column container, or on the containing block of an over-constrained block, table, flex container or block-level picture, of a relatively positioned box with both `left` and `right`, or of an absolutely positioned box | `ArchiveWarning::UnimplementedProperty { property: "unicode-bidi" \| "direction", .. }` | an override makes every character inside it strong in one direction, so a Latin word under `rtl` is drawn letter by letter backwards — a glyph order the painter's shaper never produces, since it shapes a slice in that slice's own direction — and it is refused by value rather than drawn as an isolate. `direction` is met where it decides a paragraph; CSS 2.2 §9.10 gives it three more jobs this layout does not do — a table's columns (§17.5), a flex row's main axis (`css-flexbox-1` §2) and a multi-column container's columns (`css-multicol-1` §3) run from the right, and a block-level box over-constrained in a right-to-left containing block — a block, a list item, a table or a flex container with a definite width and neither margin `auto` — gives up its `margin-left` rather than its `margin-right` (§10.3.3), a relatively positioned box there with both `left` and `right` is offset by `right` (§9.4.3), and an absolutely positioned box in one is placed by `right` and from its static position's right edge (§10.3.7) — so each such element is counted rather than read mirror-wise. A width is definite when `width` states it, when §10.4 runs §10.3.3 again with a `max-width` that narrows the box or a `min-width` that widens it as its `width`, and when the box is a block-level `<img>`, whose used width §10.3.4 takes from the picture and never leaves `auto`; whether a `max-width` or `min-width` clamps is the containing block's width to say, which the cascade does not know, so every one that may is counted — a `max-width` of 100% or more over margins that are not negative never clamps and is not — and an `<img>` whose picture did not resolve is counted with the ones that did. A box with an `auto` margin whose width and other margin are wider than its containing block is over-constrained as well, the `auto` taken as zero, and is not counted: counting every `auto` margin beside a width would count every centred block, and `ContentOverflowedPage` names the box where it is itself wider than its containing block. Which margin or inset gives way is the **containing block's** direction to decide, not the box's own: a right-to-left block with a width in a left-to-right body is laid out as §10.3.3 says and is not counted. A flex container without a `width`, or a `min-width` or `max-width` that may clamp one, fills its line, as a table does in this layout, and gives up no margin; an inline box is not offset by `position: relative` at all here, so it is not counted against `direction`. An `inside` list marker in a right-to-left item is drawn at the right, its item's text to its left, an inline block on its line too (`an_inside_marker_is_on_its_items_start_side`, `an_inside_marker_is_ordered_at_its_paragraphs_level`, `an_inside_marker_is_on_its_items_start_side_beside_an_inline_block`). A standard-14 piece holding a right-to-left character is drawn in L2's order (see *The standard 14* above), with a known limit: L4's mirroring is not applied, so a bracket pair at a right-to-left level faces outward and extracts as written | `crates/tinker-pdf/tests/epub_paint.rs`, `crates/tinker-pdf/tests/epub_images.rs`, `crates/tinker-pdf/tests/epub_shaped.rs`, `crates/tinker-pdf/tests/epub_fallback.rs` |
 | `color-scheme` naming `dark` and not `light` | `ArchiveWarning::UnimplementedProperty { property: "color-scheme", .. }` | a page is printed in the **light** scheme — paper is the light canvas, and print media's `prefers-color-scheme` is `light` — so `normal` and every list that names `light` (pandoc's `:root { color-scheme: light dark }`) is the scheme this build draws, and the property is the no-op it is on paper. A list asking for the dark scheme asks for a canvas and system colours this build does not have, and is refused by value rather than drawn light and called honoured | `crates/tinker-pdf/tests/epub_paint.rs` |
 | `opacity` on an element whose subtree holds a box that paints a background or border **and** has content over it | `ArchiveWarning::UnimplementedProperty { property: "opacity", .. }` | §15.1 composites the element as one group and then fades it; this painter fades each fragment, which is the same picture until something inside the element paints over something else inside it — text over its own box's background, each at half alpha, shows the background through the text. The group is a transparency-group form XObject, and the element's glyphs are tagged marked content the structure writer puts in the page stream rather than in a form, so the group is owed to that writer; the elements where the two differ are counted by element, and the rest are exact. An archival profile that forbids transparency refuses the alpha outright, and those elements are drawn opaque and counted the same way | `crates/tinker-pdf/tests/epub_paint.rs` |

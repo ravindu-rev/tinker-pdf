@@ -898,9 +898,10 @@ fn direction_inherits_and_is_counted_where_layout_does_not_turn() {
     assert_eq!(styled.report.unsupported, vec![("direction", 2)]);
 }
 
-/// **`hyphens` is inherited** (`css-text-3` §5.4), so a `<code>` inside a
-/// paragraph that says `none` breaks at no soft hyphen either, and its initial
-/// value is `manual`.
+/// **`hyphens` is inherited** (`css-text-3` §5.3), so a `<code>` inside a
+/// paragraph that says `none` breaks at no soft hyphen either, one inside a
+/// paragraph that says `auto` is hyphenated as it is, and its initial value
+/// is `manual`.
 #[test]
 fn hyphens_is_inherited_and_starts_manual() {
     use crate::property::Hyphens;
@@ -908,6 +909,9 @@ fn hyphens_is_inherited_and_starts_manual() {
     let styled = styles("div { hyphens: none }", &nodes);
     assert_eq!(styled[1].hyphens, Hyphens::None, "inherited");
     assert_eq!(styled[2].hyphens, Hyphens::Manual, "the initial value");
+    let auto = styles("div { hyphens: auto }", &nodes);
+    assert_eq!(auto[1].hyphens, Hyphens::Auto, "inherited");
+    assert_eq!(auto[2].hyphens, Hyphens::Manual);
 }
 
 /// **A gradient's lengths are computed with its element's font size**: an
