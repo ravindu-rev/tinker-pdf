@@ -203,8 +203,8 @@ already carries it.
 | --- | --- | --- | --- |
 | `glyphs_shown` | a glyph the interpreter showed the renderer (`Device::show_glyph`, `crates/tinker-pdf-render/src/lib.rs:2847`) | the renderer | built |
 | `outlines_filled` | a glyph outline the renderer built into a path and painted: on the path route, and for a glyph mask the render's cache did not hold | the renderer | built |
-| `glyph_masks_rasterised` | a filled glyph's mask rasterised: a key the render's cache did not hold, or a font with no identity (P-06) | the renderer | built |
-| `glyph_mask_hits` | a filled glyph drawn from a mask the render's cache held (P-06) | the renderer | built |
+| `glyph_masks_rasterised` | a filled glyph's mask rasterised: a key the render's cache did not hold — or the document's, under a stated budget — or a font with no identity (P-06, P-16.7) | the renderer | built |
+| `glyph_mask_hits` | a filled glyph drawn from a mask the render's cache held, or the document's under a stated budget (P-06, P-16.7) | the renderer | built |
 | `font_dictionaries_resolved` | a font dictionary a scope reads: once for each name its content selects a font by — the `/Font` entry, or a reserved name's object, when it is a dictionary — at the first question about the name or about the id another scope over the same dictionary handed out (P-02, "The font table") | the facade's scopes (`PageResources::scope_font`) | built |
 | `images_decoded` | an image decoder run: an image XObject's cache miss, and every inline image, which is never cached (`resources.rs:222-224`); in an image extraction, each entry it lists and every inline image | the facade's scopes | built |
 | a `_hits` and a `_misses` for each of the five caches `Caches` holds — font programs, images, ICC transforms, glyph outlines, form scopes (`resources.rs:63-101`) | a lookup that found an entry, a cached `None` included, or one that did not | the facade's scopes | built |
@@ -3139,9 +3139,9 @@ A4's counts; and how P-16's budgets later take the bound over.
 
 ### Non-goals
 
-- **A cache across renders or pages**: P-16's. A mask lives as long as the
-  render that rasterised it, and P-16.7 moves the masks under the document's
-  budget.
+- **A cache across renders or pages**: P-16's. Under a stated budget the
+  document keeps the masks (P-16.7); without one a mask lives as long as the
+  render that rasterised it.
 - **Threads**: P-15's. One render's cache is one thread's.
 - **Strokes, pattern fills, the clipping modes and Type 3 glyphs.** A stroked
   glyph's pen is the graphics state's and a pattern fill reads pattern space,
@@ -3348,10 +3348,11 @@ with its reason.
 #### How P-16 takes the bound over
 
 P-16.7 makes the masks a kind of the document cache. The key stays — font
-identity, code, quantised 2x2, phase and flattening tolerance, a `Scoped` font
-keyed by the
-document's scope rather than a render's serial — and only who holds the bytes
-changes: a mask is charged what it is charged here and evicted in P-16.1's
+identity, code, quantised 2x2, phase and flattening tolerance, a `Scoped`
+font keyed by its id and the document's scope written exactly rather than a
+render's serial, with the render's anti-aliasing beside them, which one render
+holds fixed and two need not — and only who holds the bytes changes: a mask
+is charged what it is charged here and evicted in P-16.1's
 order with the document's images, transforms and recordings under
 `CacheLimits { bytes }`, and a mask evicted and drawn again is the same bytes,
 which P-16.3's starved render holds. With no budget stated each render keeps
@@ -3462,7 +3463,7 @@ a typed key:
 | a JPEG's frame | the image's object and its scope's defaults, as its decodes: the width and height every draw of a JPEG with no mask reads its reduction against, learnt by its first decode | its key's defaults | P-16.2 |
 | a compiled ICC transform | today's key, the profile stream's object; P-22.7 re-keys it by the profile's bytes, intent and black-point compensation | the most it can come to hold whichever intents compile after it is kept and whatever they convert (`Transforms::bytes_bound`): the profile's model, and its `A2B*` tables and `D2B*` pipelines at the most reading each can allocate, beside relative colorimetric's transform and one for each other intent at the most any of the profile's sources compiles — three 4 096-entry curves for an RGB matrix model, or the largest grid a table or pipeline is read through with its every node filled — each with its largest row tables | P-16.4, P-22.7 |
 | a form recording | the form's object, the scope its names resolve in where it brings no resources of its own, the usage the render names (its optional-content states), and `tinker_pdf_content::FormInvocation`: everything the interpreter carries into a form and does not reset, written exactly — the graphics state, a waiting clip, the operands before `Do`, the depth, the streams around it, the scope's remapped device spaces. The text and line matrices, the current point and the subpath's start are not in it: a recording notes each its drawing read before setting its own and replays only where they are what they were | the recorded calls, as a display list counts its own (`Event::kept_bytes`), with its budget operations | P-16.5, P-16.6 |
-| a glyph mask | P-06.3's key: font identity, code, quantised 2x2, phase and flattening tolerance | P-06.3's charge, its pixels and 64 bytes | P-16.7 |
+| a glyph mask | P-06.3's key — the font as the document names it, its object or a scoped font's id and its scope's resources written exactly, the code, the quantised 2x2, the phase and the flattening tolerance — and the render's anti-aliasing | P-06.3's charge, its pixels and 64 bytes, and its key's resources | P-16.7 |
 | a tiling cell | P-23.2's | its pixels | P-23.2 |
 
 Each kind is a map from its key to its value, so a lookup is one hash of the

@@ -23,6 +23,7 @@ use tinker_pdf_filters::{
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_raster::canvas::{Canvas, Color};
+use tinker_pdf_raster::fill::Mask;
 use tinker_pdf_render::{
     DecodedImage, FontIdentity, GlyphSource, ImageRequest, Mesh, MeshParams, PatternPaint, Reduced,
     Shading, TilingPattern, TwoColourSamples,
@@ -3843,6 +3844,32 @@ impl GlyphSource for PageResources {
         })
     }
 
+    /// A document with a budget keeps its glyph masks with everything else
+    /// it keeps, under P-06's key with the font as the document names it
+    /// ([`cache::MaskKey`]); without one the render keeps its own.
+    fn kept_mask(&self, key: &tinker_pdf_render::MaskKey) -> Option<Result<Arc<Mask>, u64>> {
+        let cache = self.op.cache()?;
+        let kept = cache::MaskKey::of(key, self.mask_font(key.font_id)?);
+        Some(cache.mask(&kept, self.op.work.as_deref()))
+    }
+
+    /// Charged the mask's pixels and its key's resources beside the cache's
+    /// 64 bytes, as P-06 charges a mask its pixels and 64.
+    fn keep_mask(&self, key: &tinker_pdf_render::MaskKey, mask: &Arc<Mask>, asked: u64) {
+        let (Some(cache), Some(font)) = (self.op.cache(), self.mask_font(key.font_id)) else {
+            return;
+        };
+        let kept = cache::MaskKey::of(key, font);
+        let bytes = (u64::from(mask.width) * u64::from(mask.height)).saturating_add(kept.held());
+        cache.offer_mask(
+            kept,
+            Arc::clone(mask),
+            bytes,
+            asked,
+            self.op.work.as_deref(),
+        );
+    }
+
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline> {
         let made = Cell::new(false);
         let (outline, unresolved) = self.caches.outlines.read((font_id, code), || {
@@ -4307,6 +4334,20 @@ impl PageResources {
             invocation: invocation.clone(),
             scope: (!owns).then(|| self.written().clone()),
             usage: self.op.usage(),
+        })
+    }
+
+    /// The font `font_id` selects here as the document's cache keys a glyph
+    /// mask's font: its object, or, for a font written into this scope's own
+    /// dictionary, its id in this scope's resources written exactly. `None`
+    /// where it selects none, whose masks are not kept.
+    fn mask_font(&self, font_id: u64) -> Option<cache::MaskFont> {
+        Some(match GlyphSource::font_identity(self, font_id)? {
+            FontIdentity::Object(object) => cache::MaskFont::Object(object),
+            FontIdentity::Scoped => cache::MaskFont::Scoped {
+                font_id,
+                scope: self.written().clone(),
+            },
         })
     }
 

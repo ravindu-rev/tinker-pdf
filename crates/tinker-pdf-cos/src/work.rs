@@ -74,16 +74,19 @@ pub struct Stats {
     /// (a space) and one only clipped with are not.
     ///
     /// Counted by the renderer, as `glyphs_shown` is. A filled glyph drawn
-    /// from a mask the render's glyph-mask cache held builds no path and is
-    /// not one; its mask's miss was.
+    /// from a mask the render's glyph-mask cache held — or the document's,
+    /// which holds them under a stated budget — builds no path and is not
+    /// one; its mask's miss was.
     pub outlines_filled: u64,
     /// Glyph masks the renderer rasterised: each filled glyph drawn from a
-    /// mask its render's cache did not hold, or whose font the scope gave no
-    /// identity for (`docs/design/performance.md`, P-06).
+    /// mask its render's cache did not hold — or the document's, under a
+    /// stated budget — or whose font the scope gave no identity for
+    /// (`docs/design/performance.md`, P-06, P-16).
     ///
     /// Counted by the renderer, as `glyphs_shown` is.
     pub glyph_masks_rasterised: u64,
-    /// Filled glyphs the renderer drew from a mask its render's cache held.
+    /// Filled glyphs the renderer drew from a mask its render's cache held,
+    /// or the document's under a stated budget.
     ///
     /// Counted by the renderer, as `glyphs_shown` is.
     pub glyph_mask_hits: u64,

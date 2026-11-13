@@ -15,8 +15,9 @@
 //! decode reads; a JPEG's frame, which a draw's size is read against for the
 //! reduction it is decoded at; the compiled transforms of one ICC profile
 //! stream; the recorded drawing of one form under everything its drawing
-//! reads. So **a hit is the bytes a miss computes**, and a page draws the
-//! same pixels whatever was drawn before it.
+//! reads; a glyph's mask under P-06's key and the anti-aliasing a render
+//! rasterises it with. So **a hit is the bytes a miss computes**, and a page
+//! draws the same pixels whatever was drawn before it.
 //!
 //! A refusal is kept as firmly as a success, in the words the decode used, and
 //! every entry carries what its computation reported, which every request
@@ -57,6 +58,7 @@ use tinker_pdf_cos::{fill_open, limits, Counter, Dict, ObjRef, Object, OpenFill,
 
 use tinker_pdf_color::icc::Transforms;
 use tinker_pdf_content::{FormInvocation, FormRecording};
+use tinker_pdf_raster::fill::Mask;
 
 use crate::resources::CachedImage;
 use crate::stats;
@@ -134,6 +136,8 @@ struct Table {
     icc: HashMap<IccKey, Slot<Option<Arc<Transforms>>>>,
     /// Forms' drawings, recorded.
     forms: HashMap<FormKey, Slot<Arc<KeptForm>>>,
+    /// Glyph masks.
+    masks: HashMap<MaskKey, Slot<Arc<Mask>>>,
     /// A kind of plain values, for the tests of the machinery itself.
     #[cfg(test)]
     tests: HashMap<u32, Slot<Arc<Vec<u8>>>>,
@@ -154,6 +158,7 @@ impl Table {
             Key::Frame(key) => remove_ready(&mut self.frames, key),
             Key::Icc(key) => remove_ready(&mut self.icc, key),
             Key::Form(key) => remove_ready(&mut self.forms, &**key),
+            Key::Mask(key) => remove_ready(&mut self.masks, key),
             #[cfg(test)]
             Key::Test(key) => remove_ready(&mut self.tests, key),
         }
@@ -189,6 +194,7 @@ enum Key {
     Frame(FrameKey),
     Icc(IccKey),
     Form(Box<FormKey>),
+    Mask(MaskKey),
     #[cfg(test)]
     Test(u32),
 }
@@ -247,6 +253,18 @@ impl Kind for FormKey {
 
     fn key(&self) -> Key {
         Key::Form(Box::new(self.clone()))
+    }
+}
+
+impl Kind for MaskKey {
+    type Value = Arc<Mask>;
+
+    fn slots(table: &mut Table) -> &mut HashMap<Self, Slot<Self::Value>> {
+        &mut table.masks
+    }
+
+    fn key(&self) -> Key {
+        Key::Mask(self.clone())
     }
 }
 
@@ -354,6 +372,28 @@ impl DocumentCache {
         work: Option<&Work>,
     ) {
         self.offer(key, value, bytes, asked, work);
+    }
+
+    /// The glyph mask kept under `key`, or the number of the request that
+    /// missed it, for [`DocumentCache::offer_mask`]; filled as a form's
+    /// drawing is, not single-flight, since a mask is rasterised by the render
+    /// that draws the glyph, as it draws it.
+    pub(crate) fn mask(&self, key: &MaskKey, work: Option<&Work>) -> Result<Arc<Mask>, u64> {
+        self.get(key, work)
+    }
+
+    /// Keeps `mask` under `key` for the request numbered `asked` that missed
+    /// it, charged `bytes` beside [`ENTRY_BYTES`], where nothing is kept
+    /// under the key already.
+    pub(crate) fn offer_mask(
+        &self,
+        key: MaskKey,
+        mask: Arc<Mask>,
+        bytes: u64,
+        asked: u64,
+        work: Option<&Work>,
+    ) {
+        self.offer(key, mask, bytes, asked, work);
     }
 
     /// The value published under `key`, the request counted and the entry
@@ -671,6 +711,70 @@ pub(crate) struct FormKey {
 pub(crate) struct KeptForm {
     pub(crate) recording: Arc<FormRecording>,
     pub(crate) missing_fonts: Vec<String>,
+}
+
+/// What a glyph mask is kept under: P-06's key — the font, the code, the
+/// quantised 2x2, the phase and the flattening tolerance
+/// (`tinker_pdf_render::MaskKey`) — with the font as the document names it
+/// across renders ([`MaskFont`]), and the anti-aliasing a render rasterises a
+/// mask with, so that a hit is the mask a miss rasterises whichever render
+/// asks.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct MaskKey {
+    /// The font.
+    pub(crate) font: MaskFont,
+    /// The code the glyph was shown by.
+    pub(crate) code: u32,
+    /// The quantised em-to-device 2x2.
+    pub(crate) matrix: [i32; 4],
+    /// The origin's phase on each axis.
+    pub(crate) phase: [u8; 2],
+    /// Whether the render anti-aliases.
+    pub(crate) antialias: bool,
+    /// The bits of the tolerance the glyph's outline is flattened to.
+    pub(crate) tolerance: u64,
+}
+
+impl MaskKey {
+    /// The key a render asks for by `asked`, its font named `font`.
+    pub(crate) fn of(asked: &tinker_pdf_render::MaskKey, font: MaskFont) -> MaskKey {
+        MaskKey {
+            font,
+            code: asked.code,
+            matrix: asked.matrix,
+            phase: asked.phase,
+            antialias: asked.antialias,
+            tolerance: asked.tolerance,
+        }
+    }
+
+    /// The bytes the key holds beside its own fields: a scoped font's
+    /// resources, written.
+    pub(crate) fn held(&self) -> u64 {
+        match &self.font {
+            MaskFont::Object(_) => 0,
+            MaskFont::Scoped { scope, .. } => u64::try_from(scope.len()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
+/// A glyph mask's font, as the document's cache keys it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum MaskFont {
+    /// A font with an object of its own, `num << 16 | gen`: one font wherever
+    /// a scope names it.
+    Object(u64),
+    /// A font written into a scope's own resource dictionary, which has no
+    /// object: the name its glyphs carry there, as the document interns it,
+    /// and the scope's resources written exactly ([`Written`]), so two scopes
+    /// holding the same resources share its masks and two that do not keep
+    /// their own.
+    Scoped {
+        /// The id the glyph's font carries in the scope.
+        font_id: u64,
+        /// The scope's resources.
+        scope: Written,
+    },
 }
 
 /// Objects written out exactly, as a key holds them ([`write_exact`]), with

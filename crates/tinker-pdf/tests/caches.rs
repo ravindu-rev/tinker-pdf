@@ -24,10 +24,14 @@
 //!   fill that would pass the budget evicts the entries whose last lookup is
 //!   oldest until it fits.
 
+use std::sync::Arc;
+
 use tinker_pdf::{
     Bitmap, CacheLimits, Document, OpenOptions, Page, Parallelism, PixelRegion, RenderOptions,
-    RenderWarning, Stats, Usage,
+    RenderWarning, SimpleFontProvider, Stats, Usage,
 };
+
+mod render_support;
 
 /// What the cache charges an entry beside its payload.
 const ENTRY_BYTES: u64 = 64;
@@ -1351,5 +1355,119 @@ fn a_budget_of_zero_or_a_cancelled_render_keeps_no_drawing() {
         (after.forms_interpreted, after.forms_replayed),
         (1, 0),
         "nothing the cancelled render drew was kept"
+    );
+}
+
+/// `bytes` opened with every font it does not embed read as
+/// `render_support`'s curvy face, under `budget` where one is stated.
+fn curvy(bytes: Vec<u8>, budget: Option<u64>) -> Document {
+    let mut options = OpenOptions::default().with_fonts(Arc::new(SimpleFontProvider::new(
+        render_support::curvy_font(),
+    )));
+    if let Some(budget) = budget {
+        options = options.with_cache_limits(CacheLimits::new(budget));
+    }
+    Document::open_with(bytes, &options).expect("the fixture opens")
+}
+
+/// A page of an image and text: `/A`, a raw 8 by 8 RGB image, drawn first,
+/// then `ABC` in `/F` twice, the second line 20 points above the first, so
+/// each glyph's second draw stands at its first's phase. `/F` embeds nothing
+/// and is read through [`curvy`], whose face takes `A`, `B` and `C` to three
+/// shapes of its six.
+fn glyphs_page() -> Vec<u8> {
+    document(
+        &[
+            rgb_image(8, 8, 3),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        ],
+        &[(
+            "<< /XObject << /A 3 0 R >> /Font << /F 4 0 R >> >>",
+            "q 40 0 0 40 50 50 cm /A Do Q\n\
+             BT /F 12 Tf 5 20 Td (ABC) Tj ET\n\
+             BT /F 12 Tf 5 40 Td (ABC) Tj ET\n",
+        )],
+    )
+}
+
+/// **Glyph masks share the document's budget**: the page's three masks, each
+/// drawn twice, are a render's own with no budget, and under a stated one the
+/// document's — kept beside the image, found by the second line and by a
+/// second render, and looked up with every other entry. Under a budget with
+/// room for the image and nothing beside it, the image and the masks take
+/// turns: every render decodes the image again, since the first mask kept
+/// evicts it, and rasterises as the first render did, since the image kept
+/// again evicts every mask; the bytes held never pass the budget, and every
+/// render draws what a document with no budget draws, byte for byte.
+#[test]
+fn glyph_masks_share_the_documents_budget() {
+    let bytes = glyphs_page();
+    let plain = curvy(bytes.clone(), None);
+    let (alone, stats) = counted(&plain.page(0).expect("a page"), 72.0);
+    assert_eq!(
+        (stats.glyph_masks_rasterised, stats.glyph_mask_hits),
+        (3, 3),
+        "the fixture is what it says, three masks each drawn twice: {stats:?}"
+    );
+    assert_eq!((stats.cache_misses, stats.cache_hits), (0, 0), "no budget");
+
+    let roomy = curvy(bytes.clone(), Some(1 << 20));
+    let page = roomy.page(0).expect("a page");
+    let (first, stats) = counted(&page, 72.0);
+    assert_eq!(
+        (stats.glyph_masks_rasterised, stats.glyph_mask_hits),
+        (3, 3),
+        "{stats:?}"
+    );
+    // The image and three masks missed, the second line's masks found.
+    assert_eq!((stats.cache_misses, stats.cache_hits), (4, 3));
+    assert_eq!(stats.cache_evictions, 0);
+    assert!(
+        stats.cache_bytes_held > rgb_charge(8, 8) + 3 * ENTRY_BYTES,
+        "the masks are charged their pixels beside the image: {stats:?}"
+    );
+    same_render(&first, &alone, "the first render under a roomy budget");
+    let (second, stats) = counted(&page, 72.0);
+    assert_eq!(
+        (
+            stats.images_decoded,
+            stats.glyph_masks_rasterised,
+            stats.glyph_mask_hits
+        ),
+        (0, 0, 6),
+        "everything found: {stats:?}"
+    );
+    assert_eq!((stats.cache_misses, stats.cache_hits), (0, 7));
+    same_render(&second, &alone, "the second render under a roomy budget");
+
+    let budget = rgb_charge(8, 8) + ENTRY_BYTES;
+    let tight = curvy(bytes, Some(budget));
+    let page = tight.page(0).expect("a page");
+    let mut rasterised = Vec::new();
+    for render in 0..3 {
+        let (bitmap, stats) = counted(&page, 72.0);
+        assert!(
+            stats.cache_bytes_held <= budget,
+            "render {render}: {stats:?}"
+        );
+        assert!(stats.cache_evictions > 0, "render {render}: {stats:?}");
+        assert_eq!(
+            stats.images_decoded, 1,
+            "render {render}: the image evicted by a mask and decoded again"
+        );
+        rasterised.push(stats.glyph_masks_rasterised);
+        same_render(
+            &bitmap,
+            &alone,
+            &format!("render {render} under {budget} bytes"),
+        );
+    }
+    assert!(
+        rasterised[0] >= 3,
+        "every mask at least once: {rasterised:?}"
+    );
+    assert!(
+        rasterised.iter().all(|&count| count == rasterised[0]),
+        "each render evicted and rasterised again as the first: {rasterised:?}"
     );
 }

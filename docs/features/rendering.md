@@ -555,7 +555,13 @@ pixels and 64 bytes beside them, against 16 MiB a render, and evicts the masks
 least recently asked for, by a counter every request takes a number of, so
 which it evicts is the same on every run and every target. A tiling cell is
 drawn by a renderer of its own, with a cache of its own. Path-route glyphs and
-Type 3 procedures bypass it.
+Type 3 procedures bypass it. Where the glyph source keeps masks beyond the
+render — `GlyphSource::kept_mask`, which a document with a cache budget
+answers (below) — the source holds them and the render's cache none: it is
+asked by `MaskKey`, the render's key with the font as the id its glyphs carry
+in the scope asked and the render's anti-aliasing beside it, and handed each
+mask a render that is not cancelled rasterised to the end
+(`GlyphSource::keep_mask`).
 
 **Optional content** (8.11). The catalog's `/OCProperties` `/D`
 configuration is resolved once a render, by the render's operation, and every
@@ -823,10 +829,19 @@ renderer says, in an order a recording cannot keep. A drawing is charged its
 recording as `Event::kept_bytes` counts it, its key's bytes and the words it
 says again, and is never filled single-flight: it is made by the render that
 draws the form, as it draws it, so two renders that miss one at once each
-interpret it and the first to offer it keeps it. `Page::render`,
-`Page::render_form`, `Page::render_annotation`, `Page::display_list`'s
-recording, `DisplayList::render` and the page walk read through it;
-`Page::to_svg` keeps what it computes for the write alone.
+interpret it and the first to offer it keeps it. **Glyph masks** are kept
+too, in place of each render's own cache of them (above): under P-06's key,
+the font named as the document knows it across renders — its object, or a
+font written into a scope's own dictionary by its id there and the scope's
+resources written exactly — beside the code, the quantised 2x2, the phase,
+the flattening tolerance and the render's anti-aliasing, so a hit is the mask
+a miss rasterises whichever render asks. A mask is charged its pixels, its
+key's resources and 64 bytes, is evicted with every other entry in the one
+order, and, made by the render that draws the glyph, is never filled
+single-flight; one evicted and drawn again is rasterised again to the same
+bytes. `Page::render`, `Page::render_form`, `Page::render_annotation`,
+`Page::display_list`'s recording, `DisplayList::render` and the page walk
+read through it; `Page::to_svg` keeps what it computes for the write alone.
 
 **A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
 (`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
@@ -1022,10 +1037,11 @@ interpreter showed the renderer, `outlines_filled`, every glyph outline it
 built into a path and painted — on the path route, and for a mask its cache
 did not hold — `glyph_masks_rasterised` and `glyph_mask_hits`, each filled
 glyph drawn from a mask rasterised for it and each drawn from a mask the
-render's cache held, and `shading_functions_evaluated`, every evaluation of a
-shading's function for a colour — once a table entry where a sweep reads the
-function through a `ColorTable`, once a colour asked of it otherwise — all
-counted by the renderer, a tiling pattern's cell included, as are four
+render's cache held, or the document's under a stated budget, and
+`shading_functions_evaluated`, every evaluation of a shading's function for a
+colour — once a table entry where a sweep reads the function through a
+`ColorTable`, once a colour asked of it otherwise — all counted by the
+renderer, a tiling pattern's cell included, as are four
 quantities: `group_buffer_pixels`, the pixels of every buffer a transparency
 group or a soft mask's group allocated for its own pixels while it was open —
 its canvas, and nothing else — and `group_bound_pixels`, the pixels of the
@@ -1525,6 +1541,16 @@ defect to hide in.
   marked content a print render hides kept once for each usage, each render
   byte-equal to a document's with no budget; and no drawing kept with no
   budget, a budget of zero or a cancelled render.
+  `glyph_masks_share_the_documents_budget`, a page of an image and two lines
+  of three glyphs: under a roomy budget the masks kept beside the image and
+  found by the second line and the second render; under a budget with room
+  for the image alone, the image and the masks taking turns, the bytes held
+  never past it, each render rasterising as the first and byte-equal to a
+  document's with no budget. `tinker-pdf-render`'s
+  `a_source_that_keeps_masks_holds_them_across_renders` holds the seam: a
+  source that keeps masks is asked for every glyph and the render keeps none,
+  a second render rasterises nothing, and a render that does not anti-alias
+  asks by keys of its own.
   `determinism.rs`'s `warm_and_starved_caches_render_the_fingerprints` holds
   every fingerprinted page to its fingerprint and its warnings through a warm
   cache and a starved one ([determinism](determinism.md)). The

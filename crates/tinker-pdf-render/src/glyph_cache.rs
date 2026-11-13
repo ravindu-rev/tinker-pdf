@@ -1,6 +1,12 @@
 //! The glyph coverage cache (`docs/design/performance.md`, P-06): one
 //! render's glyph masks, kept under the key a mask is a function of.
 //!
+//! A source that keeps masks beyond one render — a document under a stated
+//! budget (P-16) — holds them instead, asked by the same key with the font as
+//! its id and the render's two rasterising settings beside it
+//! (`GlyphSource::kept_mask`); this cache then holds none, and one budget
+//! bounds the document's masks with everything else it keeps.
+//!
 //! A mask is the coverage of one glyph's outline under its quantised 2x2 and
 //! its origin's phase (`glyph.rs`), flattened at the flatness in force
 //! (10.7.2), so it is a function of five things — the font, the code, the
@@ -182,7 +188,8 @@ impl GlyphCache {
 mod tests {
     use super::*;
     use crate::{
-        page_transform, Canvas, Color, Device, FontIdentity, GlyphSource, PixelFormat, Renderer,
+        page_transform, Canvas, Color, Device, FontIdentity, GlyphSource, MaskKey, PixelFormat,
+        Renderer,
     };
     use tinker_pdf_content::{GraphicsState, Matrix};
     use tinker_pdf_font::{Outline, Segment};
@@ -319,11 +326,21 @@ mod tests {
 
     /// A glyph source of one glyph shape for every code, which names its
     /// fonts by `identity`, and whose form `Fm` brings a scope of its own
-    /// drawing `form_shape` under the same font ids.
+    /// drawing `form_shape` under the same font ids. Where it has a `store`
+    /// it keeps the render's masks itself, as a document under a budget does.
     struct Source {
         shape: Outline,
         identity: Option<FontIdentity>,
         form: Option<Arc<Source>>,
+        store: Option<Store>,
+    }
+
+    /// Masks a source keeps beyond one render: each kept under its key, the
+    /// requests it was asked counted, and every key it was asked recorded.
+    #[derive(Default)]
+    struct Store {
+        masks: std::sync::Mutex<HashMap<MaskKey, Arc<Mask>>>,
+        asked: std::sync::Mutex<Vec<MaskKey>>,
     }
 
     impl GlyphSource for Source {
@@ -337,6 +354,25 @@ mod tests {
 
         fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>> {
             (name == b"Fm").then(|| self.form.clone()).flatten()
+        }
+
+        fn kept_mask(&self, key: &MaskKey) -> Option<Result<Arc<Mask>, u64>> {
+            let store = self.store.as_ref()?;
+            let mut asked = store.asked.lock().expect("unpoisoned");
+            asked.push(*key);
+            let request = asked.len() as u64;
+            let masks = store.masks.lock().expect("unpoisoned");
+            Some(masks.get(key).cloned().ok_or(request))
+        }
+
+        fn keep_mask(&self, key: &MaskKey, mask: &Arc<Mask>, _asked: u64) {
+            if let Some(store) = &self.store {
+                store
+                    .masks
+                    .lock()
+                    .expect("unpoisoned")
+                    .insert(*key, Arc::clone(mask));
+            }
         }
     }
 
@@ -384,11 +420,13 @@ mod tests {
             shape: square(0.3),
             identity,
             form: None,
+            store: None,
         });
         let page = Source {
             shape: square(0.0),
             identity,
             form: Some(form),
+            store: None,
         };
         let canvas = Canvas::new(100, 40, PixelFormat::Rgb8, Color::WHITE);
         let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &page);
@@ -456,11 +494,13 @@ mod tests {
             shape: square(0.3),
             identity: Some(FontIdentity::Scoped),
             form: None,
+            store: None,
         });
         let page = Source {
             shape: square(0.0),
             identity: Some(FontIdentity::Scoped),
             form: None,
+            store: None,
         };
         let canvas = Canvas::new(100, 40, PixelFormat::Rgb8, Color::WHITE);
         let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &page);
@@ -478,5 +518,79 @@ mod tests {
             "the page's scope's mask, found again"
         );
         assert!(black(&canvas, 50, 100) < black(&canvas, 0, 25));
+    }
+
+    /// Three glyphs of font 7, code 65: at `(10, 10)` and `(30, 10)`, one
+    /// phase, and at `(50.5, 10)`, half a pixel over; rendered through
+    /// `source`, anti-aliased as `antialias` says.
+    fn three_glyphs(source: &Source, antialias: bool) -> (Canvas, crate::RenderCounts) {
+        let canvas = Canvas::new(100, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer =
+            Renderer::new(canvas, page_transform(40.0, 1.0), source).with_antialias(antialias);
+        let state = GraphicsState::default();
+        for x in [10.0, 30.0, 50.5] {
+            renderer.show_glyph(&glyph(x, 10.0), &state);
+        }
+        assert_eq!(renderer.glyph_cache.len(), 0, "the source holds the masks");
+        let (canvas, _, counts) = renderer.finish_counted();
+        (canvas, counts)
+    }
+
+    /// **A source that keeps masks beyond the render holds them, and the
+    /// render none**: three glyphs, two at one phase, ask the source three
+    /// times and rasterise twice, and draw what a render that keeps its own
+    /// draws; a second render through the same source rasterises nothing and
+    /// draws the same pixels; and one that does not anti-alias is asked by
+    /// keys of its own, so it never draws another setting's mask.
+    #[test]
+    fn a_source_that_keeps_masks_holds_them_across_renders() {
+        let source = Source {
+            shape: square(0.1),
+            identity: Some(FontIdentity::Object(9 << 16)),
+            form: None,
+            store: Some(Store::default()),
+        };
+        let own = Source {
+            shape: square(0.1),
+            identity: Some(FontIdentity::Object(9 << 16)),
+            form: None,
+            store: None,
+        };
+        let (first, counts) = three_glyphs(&source, true);
+        assert_eq!(
+            (counts.glyph_masks_rasterised, counts.glyph_mask_hits),
+            (2, 1),
+            "the second glyph's phase is the first's"
+        );
+        let store = source.store.as_ref().expect("a store");
+        assert_eq!(store.asked.lock().expect("unpoisoned").len(), 3);
+        assert_eq!(store.masks.lock().expect("unpoisoned").len(), 2);
+        let (alone, _) = three_glyphs(&own, true);
+        assert!(
+            first.data == alone.data,
+            "the same pixels as a render's own"
+        );
+
+        let (second, counts) = three_glyphs(&source, true);
+        assert_eq!(
+            (counts.glyph_masks_rasterised, counts.glyph_mask_hits),
+            (0, 3),
+            "every mask found where the first render kept it"
+        );
+        assert!(second.data == first.data);
+
+        let (hard, counts) = three_glyphs(&source, false);
+        assert_eq!(
+            counts.glyph_masks_rasterised, 2,
+            "another setting is another key"
+        );
+        let (hard_alone, _) = three_glyphs(&own, false);
+        assert!(hard.data == hard_alone.data);
+        let asked = store.asked.lock().expect("unpoisoned");
+        assert!(asked[..6]
+            .iter()
+            .all(|key| key.antialias && key.font_id == 7));
+        assert!(asked[6..].iter().all(|key| !key.antialias));
+        assert_eq!(asked[0].tolerance, asked[6].tolerance);
     }
 }

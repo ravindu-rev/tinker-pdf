@@ -669,6 +669,51 @@ pub trait GlyphSource {
         let _ = font_id;
         None
     }
+
+    /// The glyph mask this source keeps beyond one render under `key`, for a
+    /// source that holds its masks itself — a document under a stated budget
+    /// (`docs/design/performance.md`, P-16): `Ok` with the mask kept, or `Err`
+    /// with the number of the request that missed it, for
+    /// [`GlyphSource::keep_mask`] to keep the mask the miss rasterises under.
+    ///
+    /// `None`, the default, keeps no masks here: the render keeps its own for
+    /// itself (`glyph_cache`), as it does without one. The renderer asks only
+    /// for a glyph whose font has an identity ([`GlyphSource::font_identity`]),
+    /// and asks the scope it reads that identity in.
+    fn kept_mask(&self, key: &MaskKey) -> Option<Result<Arc<Mask>, u64>> {
+        let _ = key;
+        None
+    }
+
+    /// Keeps `mask`, rasterised to the end for `key` by a render that is not
+    /// cancelled, after [`GlyphSource::kept_mask`] missed it at request
+    /// `asked`. A hit is therefore the mask a miss rasterises.
+    fn keep_mask(&self, key: &MaskKey, mask: &Arc<Mask>, asked: u64) {
+        let _ = (key, mask, asked);
+    }
+}
+
+/// What a glyph's mask is a function of, as a source that keeps masks beyond
+/// one render is asked for it ([`GlyphSource::kept_mask`]): P-06's key — the
+/// font, the code, the quantised 2x2, the phase and the flattening tolerance —
+/// with the font as the id its glyphs carry in the scope asked, which reads
+/// the font's identity, and the render's anti-aliasing beside them, which one
+/// render holds fixed and two renders need not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MaskKey {
+    /// The id the glyph's font carries in the scope asked.
+    pub font_id: u64,
+    /// The code the glyph was shown by.
+    pub code: u32,
+    /// The quantised em-to-device 2x2.
+    pub matrix: [i32; 4],
+    /// The origin's phase on each axis, in sixteenths of a pixel.
+    pub phase: [u8; 2],
+    /// Whether the render anti-aliases ([`Renderer::with_antialias`]).
+    pub antialias: bool,
+    /// The bits of the tolerance the glyph's outline is flattened to: the
+    /// flatness in force when it is shown (10.7.2).
+    pub tolerance: u64,
 }
 
 /// What a glyph-mask cache keys a font by: one font wherever a scope names
@@ -682,6 +727,17 @@ pub enum FontIdentity {
     /// object: one font only within the scope the renderer holds it in, so
     /// its masks serve that scope's turn alone.
     Scoped,
+}
+
+/// Where a glyph's mask that missed is kept once it is rasterised.
+enum MaskMiss {
+    /// Nowhere: its font has no identity in the scope.
+    Unkept,
+    /// In the render's own cache, under its key, for the request that missed.
+    Own(glyph_cache::Key, u64),
+    /// By the source, for the request that missed
+    /// ([`GlyphSource::keep_mask`]).
+    Source(u64),
 }
 
 /// A `GlyphSource` that has nothing, for callers that only want geometry.
@@ -1685,6 +1741,19 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     fn next_scope(&mut self) -> u64 {
         self.scopes = self.scopes.saturating_add(1);
         mem::replace(&mut self.scope, self.scopes)
+    }
+
+    /// What a glyph's mask is asked for by in a source that keeps masks
+    /// beyond this render ([`GlyphSource::kept_mask`]).
+    fn mask_key(&self, glyph: &Glyph, placement: &glyph::Placement) -> MaskKey {
+        MaskKey {
+            font_id: glyph.font_id,
+            code: glyph.code,
+            matrix: placement.matrix,
+            phase: placement.phase,
+            antialias: self.antialias,
+            tolerance: self.tolerance.to_bits(),
+        }
     }
 
     /// The key a glyph's mask is kept under, or `None` when its font has no
@@ -4359,20 +4428,28 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // 9.3.6 mode 0 in a solid colour: drawn from a mask rasterised in the
         // glyph's own frame and placed at the whole pixel its origin falls in
         // (`glyph`), kept for the rest of the render under the key it is a
-        // function of (`glyph_cache`). Strokes, pattern fills and the clipping
-        // modes keep the path route below, and so does a glyph whose mask
-        // would be too large to be worth one or will not place.
+        // function of (`glyph_cache`) — or, where the source keeps masks
+        // beyond the render (`GlyphSource::kept_mask`), kept by the source and
+        // not here. Strokes, pattern fills and the clipping modes keep the
+        // path route below, and so does a glyph whose mask would be too large
+        // to be worth one or will not place.
         if matches!(mode, tinker_pdf_content::TextRenderMode::Fill) && state.fill_pattern.is_none()
         {
             if let Some(placement) = glyph::Placement::of(&combined) {
                 if self.stopping() {
                     return;
                 }
-                let key = self.glyph_key(glyph, &placement);
-                let asked = match key.as_ref().map(|key| self.glyph_cache.get(key)) {
-                    Some(Ok(kept)) => Ok(kept),
-                    Some(Err(request)) => Err(key.map(|key| (key, request))),
-                    None => Err(None),
+                let shared = self.mask_key(glyph, &placement);
+                let asked = match self.glyph_key(glyph, &placement) {
+                    None => Err(MaskMiss::Unkept),
+                    Some(key) => match self.glyphs.kept_mask(&shared) {
+                        Some(Ok(kept)) => Ok(kept),
+                        Some(Err(request)) => Err(MaskMiss::Source(request)),
+                        None => match self.glyph_cache.get(&key) {
+                            Ok(kept) => Ok(kept),
+                            Err(request) => Err(MaskMiss::Own(key, request)),
+                        },
+                    },
                 };
                 let local = match asked {
                     Ok(kept) => {
@@ -4403,9 +4480,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                             // A mask a cancelled render stopped short is drawn
                             // and never kept, so a hit is always the mask a
                             // miss would rasterise.
-                            if let Some((key, request)) = miss {
-                                if !self.stopping() {
-                                    self.glyph_cache.insert(key, Arc::clone(made), request);
+                            if !self.stopping() {
+                                match miss {
+                                    MaskMiss::Own(key, request) => {
+                                        self.glyph_cache.insert(key, Arc::clone(made), request);
+                                    }
+                                    MaskMiss::Source(request) => {
+                                        self.glyphs.keep_mask(&shared, made, request);
+                                    }
+                                    MaskMiss::Unkept => {}
                                 }
                             }
                         }
