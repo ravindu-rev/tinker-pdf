@@ -9094,6 +9094,7 @@ mod tests {
                     vertical: false,
                     font_id: 1,
                     font_name: None,
+                    glyph_id: None,
                 },
                 state: state(),
             },

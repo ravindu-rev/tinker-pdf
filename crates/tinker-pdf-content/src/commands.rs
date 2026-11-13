@@ -3026,6 +3026,9 @@ impl EventReader {
                     vertical,
                     font_id,
                     font_name: font_name.clone(),
+                    // A command stream is a drawing's, and a drawing asks no
+                    // glyph its index (`Device::glyph_queries`).
+                    glyph_id: None,
                 },
                 state: state.clone(),
             };
@@ -3457,6 +3460,7 @@ mod tests {
             vertical: font == 2,
             font_id: font,
             font_name: (font != 0).then(|| Arc::from("ABCDEF+Liberation Serif")),
+            glyph_id: None,
         }
     }
 

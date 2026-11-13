@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::device::{Device, Glyph, MarkedProps};
+use crate::device::{Device, Glyph, GlyphQueries, MarkedProps};
 use crate::plain::{PlainText, PlainTextOptions};
 use crate::state::GraphicsState;
 use crate::words::{reads_right_to_left, word_break, WordBreak};
@@ -366,12 +366,77 @@ pub(crate) fn span_quad(line: &TextLine, a: usize, b: usize) -> Option<Quad> {
     })
 }
 
+/// What a glyph whose code maps to no text becomes
+/// (`docs/design/extraction-options.md`, "5. Code or glyph-id fallback").
+///
+/// Whatever the mode, the code is reported ([`TextWarning::UnmappedCode`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Unmapped {
+    /// Dropped: the page's text is what its codes name, and nothing else.
+    #[default]
+    Drop,
+    /// Kept as one character standing for its code ([`Glyph::code`]): U+F0000
+    /// plus the code, in Supplementary Private Use Area-A, for a code up to
+    /// 0xFFFD, and U+FFFD for a larger one.
+    Code,
+    /// Kept as one character standing for the glyph its font program selects
+    /// for the code ([`Glyph::glyph_id`]): U+100000 plus the glyph index, in
+    /// Supplementary Private Use Area-B, for an index up to 0xFFFD, and U+FFFD
+    /// for a larger one and for a glyph whose font cannot say.
+    Glyph,
+}
+
+/// The first code point of the area [`Unmapped::Code`] writes a code in.
+pub const UNMAPPED_CODE_AREA: u32 = 0xF_0000;
+
+/// The first code point of the area [`Unmapped::Glyph`] writes a glyph index
+/// in.
+pub const UNMAPPED_GLYPH_AREA: u32 = 0x10_0000;
+
+/// The largest code or glyph index a private-use area holds: each area ends
+/// at its plane's U+xFFFD, the planes' last two code points being
+/// noncharacters.
+const LARGEST_IN_AN_AREA: u32 = 0xFFFD;
+
+impl Unmapped {
+    /// The text a glyph of `code`, selecting `glyph_id`, stands for under
+    /// this mode, where its code maps to none: `None` for [`Unmapped::Drop`].
+    #[must_use]
+    pub fn text(self, code: u32, glyph_id: Option<u16>) -> Option<char> {
+        let in_area = |area: u32, value: u32| {
+            (value <= LARGEST_IN_AN_AREA)
+                .then(|| char::from_u32(area + value))
+                .flatten()
+                .unwrap_or('\u{FFFD}')
+        };
+        match self {
+            Unmapped::Drop => None,
+            Unmapped::Code => Some(in_area(UNMAPPED_CODE_AREA, code)),
+            Unmapped::Glyph => Some(glyph_id.map_or('\u{FFFD}', |glyph| {
+                in_area(UNMAPPED_GLYPH_AREA, u32::from(glyph))
+            })),
+        }
+    }
+}
+
+/// How [`TextDevice`] reads a page (`docs/design/extraction-options.md`):
+/// the extraction options the facade's `TextOptions` carries for this crate.
+///
+/// [`ExtractionOptions::default`] reads every page as it has always been read.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ExtractionOptions {
+    /// What a glyph whose code maps to no text becomes.
+    pub unmapped: Unmapped,
+}
+
 /// Collects glyphs into a [`TextPage`].
 #[derive(Default)]
 pub struct TextDevice {
     lines: Vec<PendingLine>,
     current: Option<PendingLine>,
     warnings: Vec<TextWarning>,
+    /// How the page is read.
+    options: ExtractionOptions,
     /// How many `/Artifact` scopes are open (14.8.2.2).
     ///
     /// A **counter and not a flag**, because marked content nests and an
@@ -515,10 +580,20 @@ struct PendingLine {
 }
 
 impl TextDevice {
-    /// A device with nothing collected yet.
+    /// A device with nothing collected yet, reading as
+    /// [`ExtractionOptions::default`] reads.
     #[must_use]
     pub fn new() -> TextDevice {
         TextDevice::default()
+    }
+
+    /// A device with nothing collected yet, reading as `options` asks.
+    #[must_use]
+    pub fn with_options(options: &ExtractionOptions) -> TextDevice {
+        TextDevice {
+            options: *options,
+            ..TextDevice::default()
+        }
     }
 
     /// A device that reads `/Artifact` scopes (14.8.2.2) as content, as an
@@ -1121,11 +1196,20 @@ impl Device for TextDevice {
         // 9.10.2: a code no `/ToUnicode` entry and no encoding names stands
         // for no text this build can read. It is said, once a code, before
         // the glyph is dropped: a page with text that could not be decoded
-        // must not read as a page with less text (ruling 2).
-        if glyph.text.is_empty() {
+        // must not read as a page with less text (ruling 2). A caller who
+        // asked for a fallback has the glyph kept, standing for its code or
+        // its glyph ([`Unmapped`]).
+        let fallback: String;
+        let text: &str = if glyph.text.is_empty() {
             self.warn(TextWarning::UnmappedCode { code: glyph.code });
-            return;
-        }
+            let Some(stands_for) = self.options.unmapped.text(glyph.code, glyph.glyph_id) else {
+                return;
+            };
+            fallback = stands_for.to_string();
+            &fallback
+        } else {
+            &glyph.text
+        };
         if !glyph.transform.is_finite() {
             return;
         }
@@ -1218,9 +1302,9 @@ impl Device for TextDevice {
                 let slack = size.max(1.0) * 0.5;
                 let along = frame.along(origin);
                 let carried = wmode == WritingMode::Horizontal
-                    && line.stretched.is_some_and(|stretch| {
-                        stretch.carries(line, strong(&glyph.text), along, size)
-                    });
+                    && line
+                        .stretched
+                        .is_some_and(|stretch| stretch.carries(line, strong(text), along, size));
                 let disjoint = line.closed
                     && !carried
                     && match wmode {
@@ -1297,13 +1381,13 @@ impl Device for TextDevice {
                 WritingMode::Horizontal => furthest,
                 WritingMode::Vertical => bounds.1.min(bounds.3),
             };
-            let blank = glyph.text.chars().all(char::is_whitespace);
+            let blank = text.chars().all(char::is_whitespace);
             // The word this glyph is in, taken whole: `(HDAC).` holds a
             // left-to-right letter whatever its last glyph. A space ends it; a
             // mark or a joiner belongs to the word before it.
             if blank {
                 line.in_word = false;
-            } else if let Some(own) = strong(&glyph.text) {
+            } else if let Some(own) = strong(text) {
                 let rtl = own == Strong::RightToLeft;
                 (line.word, line.word_rtl) = match line.word {
                     Some(word) if line.in_word => (Some(word.with(own)), line.word_rtl || rtl),
@@ -1348,7 +1432,7 @@ impl Device for TextDevice {
                 _ => None,
             };
             line.chars.push(TextChar {
-                text: glyph.text.clone(),
+                text: text.to_owned(),
                 quad,
                 size,
                 origin,
@@ -1358,6 +1442,15 @@ impl Device for TextDevice {
                 stated: self.stated.first().copied(),
                 artifact: self.artifacts > 0,
             });
+        }
+    }
+
+    /// The glyph a code with no text selects, where a fallback stands for
+    /// it ([`Unmapped::Glyph`]); nothing otherwise, so the default reading
+    /// parses no font program.
+    fn glyph_queries(&self) -> GlyphQueries {
+        GlyphQueries {
+            unmapped_glyph_ids: self.options.unmapped == Unmapped::Glyph,
         }
     }
 
@@ -1406,6 +1499,7 @@ mod tests {
             vertical: false,
             font_id: 1,
             font_name: None,
+            glyph_id: None,
         }
     }
 
@@ -2606,6 +2700,201 @@ mod tests {
             p.warnings.last(),
             Some(&TextWarning::UnmappedCode { code: 9 })
         );
+    }
+
+    /// A device reading as `unmapped` asks of its glyphs.
+    fn falling_back(unmapped: Unmapped) -> TextDevice {
+        TextDevice::with_options(&ExtractionOptions { unmapped })
+    }
+
+    /// **An unmapped glyph falls back as its options ask**
+    /// (`docs/design/extraction-options.md`, option 5): dropped by default;
+    /// kept as U+F0000 plus its code, or U+100000 plus its glyph index, with
+    /// the box a mapped glyph there would have; U+FFFD past an area's end and
+    /// for a glyph whose font cannot say; and reported in every mode.
+    #[test]
+    fn an_unmapped_code_falls_back_as_its_options_ask() {
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        let unmapped_at = |code: u32, glyph_id: Option<u16>, x: f64| Glyph {
+            glyph_id,
+            ..unmapped(code, x)
+        };
+        let read = |mode: Unmapped| {
+            let mut d = falling_back(mode);
+            d.show_glyph(&glyph("a", 0.0, 700.0, 10.0), &state);
+            d.show_glyph(&unmapped_at(0x41, Some(7), 5.0), &state);
+            d.show_glyph(&unmapped_at(0x1_0000, Some(0xFFFE), 10.0), &state);
+            d.show_glyph(&unmapped_at(0xFFFD, None, 15.0), &state);
+            d.show_glyph(&glyph("b", 20.0, 700.0, 10.0), &state);
+            d.finish()
+        };
+        let reported = vec![
+            TextWarning::UnmappedCode { code: 0x41 },
+            TextWarning::UnmappedCode { code: 0x1_0000 },
+            TextWarning::UnmappedCode { code: 0xFFFD },
+        ];
+
+        let dropped = read(Unmapped::Drop);
+        assert_eq!(dropped.plain_text(), "ab\n");
+        assert_eq!(dropped.warnings, reported);
+
+        let code = read(Unmapped::Code);
+        assert_eq!(code.plain_text(), "a\u{F0041}\u{FFFD}\u{FFFFD}b\n");
+        assert_eq!(code.warnings, reported);
+
+        let glyphs = read(Unmapped::Glyph);
+        assert_eq!(glyphs.plain_text(), "a\u{100007}\u{FFFD}\u{FFFD}b\n");
+        assert_eq!(glyphs.warnings, reported);
+
+        // Each kept glyph has the box a glyph mapped to text there has.
+        let mapped = page(&[
+            glyph("a", 0.0, 700.0, 10.0),
+            glyph("x", 5.0, 700.0, 10.0),
+            glyph("y", 10.0, 700.0, 10.0),
+            glyph("z", 15.0, 700.0, 10.0),
+            glyph("b", 20.0, 700.0, 10.0),
+        ]);
+        let quads = |page: &TextPage| -> Vec<Quad> {
+            drawn_chars(page)
+                .into_iter()
+                .map(|(_, quad)| quad)
+                .collect()
+        };
+        assert_eq!(quads(&code), quads(&mapped));
+        assert_eq!(quads(&glyphs), quads(&mapped));
+        assert_eq!(code.lines().len(), 1);
+    }
+
+    /// The areas end where their planes' noncharacters begin, and the
+    /// value is the character less its area's first code point.
+    #[test]
+    fn an_unmapped_codes_character_is_its_area_plus_its_value() {
+        assert_eq!(Unmapped::Drop.text(5, Some(5)), None);
+        assert_eq!(Unmapped::Code.text(0, None), Some('\u{F0000}'));
+        assert_eq!(Unmapped::Code.text(0xFFFD, None), Some('\u{FFFFD}'));
+        assert_eq!(Unmapped::Code.text(0xFFFE, None), Some('\u{FFFD}'));
+        assert_eq!(Unmapped::Code.text(u32::MAX, None), Some('\u{FFFD}'));
+        assert_eq!(Unmapped::Glyph.text(9, Some(0)), Some('\u{100000}'));
+        assert_eq!(Unmapped::Glyph.text(9, Some(0xFFFD)), Some('\u{10FFFD}'));
+        assert_eq!(Unmapped::Glyph.text(9, Some(0xFFFF)), Some('\u{FFFD}'));
+        assert_eq!(Unmapped::Glyph.text(9, None), Some('\u{FFFD}'));
+        for value in [0u32, 0x41, 0x1234, 0xFFFD] {
+            let code = Unmapped::Code.text(value, None).expect("kept");
+            assert_eq!(u32::from(code) - UNMAPPED_CODE_AREA, value);
+            let glyph = Unmapped::Glyph
+                .text(0, u16::try_from(value).ok())
+                .expect("kept");
+            assert_eq!(u32::from(glyph) - UNMAPPED_GLYPH_AREA, value);
+        }
+    }
+
+    /// The device asks for glyph indices only where its mode stands a glyph
+    /// for its index: the default reading asks nothing of a font program.
+    #[test]
+    fn the_device_asks_for_glyph_ids_only_for_the_glyph_fallback() {
+        assert_eq!(TextDevice::new().glyph_queries(), GlyphQueries::default());
+        assert_eq!(
+            falling_back(Unmapped::Code).glyph_queries(),
+            GlyphQueries::default()
+        );
+        assert!(
+            falling_back(Unmapped::Glyph)
+                .glyph_queries()
+                .unmapped_glyph_ids
+        );
+        assert!(
+            !TextDevice::keeping_artifacts()
+                .glyph_queries()
+                .unmapped_glyph_ids
+        );
+    }
+
+    /// A source that stands each byte for itself but `0x01` and `0x02`,
+    /// which stand for nothing, selects glyph `3 * code` for every code, and
+    /// counts how often it is asked.
+    struct Selecting {
+        asked: std::cell::Cell<usize>,
+    }
+
+    impl crate::interpret::FontSource for Selecting {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| {
+                    let text = if b <= 2 {
+                        String::new()
+                    } else {
+                        char::from(b).to_string()
+                    };
+                    (u32::from(b), text, 500.0)
+                })
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn glyph_id(&self, _font: &[u8], code: u32) -> Option<u16> {
+            self.asked.set(self.asked.get() + 1);
+            u16::try_from(code * 3).ok()
+        }
+    }
+
+    /// **The interpreter asks for a glyph index only where the device wants
+    /// one, and only for a code with no text**: a default device's reading
+    /// asks the source nothing, and one standing glyphs for their indices
+    /// asks once for each glyph whose code maps to nothing, and stands each
+    /// for the index the source selects.
+    #[test]
+    fn the_interpreter_asks_for_a_glyph_id_only_where_the_device_wants_one() {
+        let content = b"BT /F 10 Tf 100 700 Td (a\\001b\\002\\001) Tj ET";
+        let source = Selecting {
+            asked: std::cell::Cell::new(0),
+        };
+        let mut plain = TextDevice::new();
+        crate::interpret::interpret(content, Matrix::IDENTITY, &mut plain, &source);
+        assert_eq!(plain.finish().plain_text(), "ab\n");
+        assert_eq!(source.asked.get(), 0, "the default asks nothing");
+
+        let mut code = falling_back(Unmapped::Code);
+        crate::interpret::interpret(content, Matrix::IDENTITY, &mut code, &source);
+        assert_eq!(
+            code.finish().plain_text(),
+            "a\u{F0001}b\u{F0002}\u{F0001}\n"
+        );
+        assert_eq!(source.asked.get(), 0, "standing for its code asks nothing");
+
+        let mut glyphs = falling_back(Unmapped::Glyph);
+        crate::interpret::interpret(content, Matrix::IDENTITY, &mut glyphs, &source);
+        let read = glyphs.finish();
+        assert_eq!(read.plain_text(), "a\u{100003}b\u{100006}\u{100003}\n");
+        assert_eq!(source.asked.get(), 3, "once for each glyph with no text");
+        assert_eq!(
+            read.warnings,
+            vec![
+                TextWarning::UnmappedCode { code: 1 },
+                TextWarning::UnmappedCode { code: 2 },
+            ]
+        );
+    }
+
+    /// A Type 3 glyph is a procedure, with no program glyph: under the glyph
+    /// fallback one whose code maps to nothing stands as U+FFFD, and the
+    /// fallback for its code is its code's.
+    #[test]
+    fn a_type3_glyph_has_no_glyph_id_to_fall_back_to() {
+        let read = |mode: Unmapped| {
+            let mut device = falling_back(mode);
+            crate::interpret::interpret(
+                b"BT /T3 10 Tf 100 700 Td (azb) Tj ET",
+                Matrix::IDENTITY,
+                &mut device,
+                &Threes,
+            );
+            device.finish().plain_text()
+        };
+        assert_eq!(read(Unmapped::Drop), "Hi\n");
+        assert_eq!(read(Unmapped::Glyph), "H\u{FFFD}i\n");
+        assert_eq!(read(Unmapped::Code), "H\u{F007A}i\n");
     }
 
     /// What an artifact scope draws is not the page's text (14.8.2.2), so a

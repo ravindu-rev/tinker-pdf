@@ -1206,6 +1206,13 @@ pub(crate) struct Operation {
     /// `Serial` for every other operation. A decode made on one of the
     /// pool's workers runs its parts there, whatever this says.
     parallelism: Parallelism,
+    /// Whether a glyph the operation selects that its font does not carry is
+    /// reported nowhere: true for a text extraction, whose glyph lookups
+    /// (`FontSource::glyph_id`) are asked for what a code stands for and not
+    /// to draw it, so that they add no unresolved font to what the page's
+    /// text says (`docs/design/extraction-options.md`). False for every
+    /// other operation, a render reporting what it cannot draw.
+    quiet_glyphs: bool,
 }
 
 impl Operation {
@@ -1227,6 +1234,17 @@ impl Operation {
             optional: Arc::default(),
             cache: None,
             parallelism: Parallelism::Serial,
+            quiet_glyphs: false,
+        }
+    }
+
+    /// This operation, reporting no glyph its font does not carry: a text
+    /// extraction's, whose glyph lookups say what a code stands for and draw
+    /// nothing.
+    pub(crate) fn reporting_no_glyphs(self) -> Operation {
+        Operation {
+            quiet_glyphs: true,
+            ..self
         }
     }
 
@@ -1268,6 +1286,7 @@ impl Operation {
             optional: Arc::default(),
             cache: None,
             parallelism: Parallelism::Serial,
+            quiet_glyphs: false,
         }
     }
 
@@ -4358,6 +4377,17 @@ impl FontSource for PageResources {
         (!name.is_empty()).then(|| Arc::from(name))
     }
 
+    /// The glyph a render draws for `code` in the font `font` names here:
+    /// [`PageResources::selection`]'s, the embedded program's `cmap` through
+    /// the code's character or the code, a `/CIDToGIDMap` through the CID, a
+    /// CFF charset through a name, or 9.6.6.4's closing guess. `None` where
+    /// that selects no glyph index: no embedded program, a program neither
+    /// parser reads, a Type 1 program, a Type 3 font.
+    fn glyph_id(&self, font: &[u8], code: u32) -> Option<u16> {
+        let id = FontSource::font_id(self, font);
+        self.selection(id, code).map(|selected| selected.glyph)
+    }
+
     fn type3_glyph(&self, font: &[u8], code: u32) -> Option<tinker_pdf_content::Type3Glyph> {
         // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
         // returns None here, which leaves the ordinary outline path untouched,
@@ -6395,11 +6425,16 @@ impl PageResources {
     ///
     /// Step 4 of the fallback order in gap 01 (CFF glyph selection): the
     /// glyph drawn is `.notdef`, and the page says so rather than
-    /// silently drawing something else. Only rendering reaches this — text
-    /// extraction never asks for an outline — so the same list stays exactly
-    /// what its name says for the extraction path, which turns it into
+    /// silently drawing something else. Only an operation that draws reports
+    /// it: a text extraction's operation reports no glyph
+    /// (`Operation::reporting_no_glyphs`), since what its glyph lookups ask is
+    /// what a code stands for, so the same list stays exactly what its name
+    /// says for the extraction path, which turns it into
     /// `TextWarning::UnknownFont`.
     fn report_unresolved_glyph(&self, font: &[u8]) {
+        if self.op.quiet_glyphs {
+            return;
+        }
         let name = String::from_utf8_lossy(&fonts::shown(font)).into_owned();
         if let Ok(mut marker) = self.unresolved.lock() {
             *marker = Some(name.clone());

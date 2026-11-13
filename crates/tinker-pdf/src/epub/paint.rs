@@ -1956,6 +1956,7 @@ impl<'a> Fonts<'a> {
                             vertical: false,
                             font_id,
                             font_name: None,
+                            glyph_id: None,
                         };
                         tinker_pdf_content::Device::show_glyph(&mut device, &glyph, &state);
                         pen += advance

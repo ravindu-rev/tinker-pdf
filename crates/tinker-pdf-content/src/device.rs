@@ -149,6 +149,28 @@ pub struct Glyph {
     /// scope a glyph was shown in. Shared, so a page of glyphs in one font holds
     /// one copy of the name.
     pub font_name: Option<std::sync::Arc<str>>,
+    /// The index of the glyph the font program selects for [`Glyph::code`]
+    /// (9.6.6.4, 9.7.4.2), where the device asked for it
+    /// ([`GlyphQueries::unmapped_glyph_ids`]) and the code maps to no text;
+    /// `None` everywhere else, and wherever the font has no program whose
+    /// glyphs the source selects (a Type 1 program, which names its glyphs, a
+    /// Type 3 font, a font with nothing embedded).
+    ///
+    /// Asked of [`crate::FontSource::glyph_id`] only where it is wanted,
+    /// because answering reads the font program, which nothing else the text
+    /// device does needs.
+    pub glyph_id: Option<u16>,
+}
+
+/// What a device asks the interpreter to find out about each glyph beyond
+/// what every device is told: [`Device::glyph_queries`]'s answer, asked once
+/// as an interpretation starts. The default asks nothing, and is what every
+/// drawing device answers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GlyphQueries {
+    /// The glyph index the font program selects for each glyph whose code
+    /// maps to no text ([`Glyph::glyph_id`]).
+    pub unmapped_glyph_ids: bool,
 }
 
 /// What a content stream asks to be drawn.
@@ -428,6 +450,18 @@ pub trait Device {
     /// [`GraphicsState::fill_colorants`]: crate::GraphicsState::fill_colorants
     fn composites_colorants(&self) -> bool {
         false
+    }
+
+    /// What this device wants to be told about each glyph beyond its code,
+    /// text, placement and advance ([`GlyphQueries`]). Asked once, when an
+    /// interpretation starts.
+    ///
+    /// The default asks nothing, so the interpreter asks the source nothing
+    /// of the kind: a render and every recording pay nothing for it. A device
+    /// that asks is never handed a recorded drawing in place of interpreting
+    /// a form, since a recording carries what was asked when it was made.
+    fn glyph_queries(&self) -> GlyphQueries {
+        GlyphQueries::default()
     }
 }
 

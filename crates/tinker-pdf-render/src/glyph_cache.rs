@@ -430,6 +430,7 @@ mod tests {
             size: 20.0,
             vertical: false,
             font_name: None,
+            glyph_id: None,
         }
     }
 

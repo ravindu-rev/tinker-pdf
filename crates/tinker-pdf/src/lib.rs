@@ -163,12 +163,13 @@ pub use tables::{
     HeaderEvidence, InferredCell, InferredTable, InferredTables, PageTables, StatedCell,
     StatedTable, TableEvidence, TableOptions, TableRule, TableRules, TableSource, TableWarning,
 };
-/// How [`Page::text_with`] orders a line: logical by default, or the content
-/// stream's own order (ruling 14).
+/// How [`Page::text_with`] reads a page: a line in logical order by default,
+/// or the content stream's own order (ruling 14), and the extraction options
+/// (`docs/design/extraction-options.md`).
 pub use text_order::TextOptions;
 pub use tinker_pdf_content::{
     HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, SearchOptions, TextBlock,
-    TextChar, TextLine, TextPage, TextWarning, TextWord, WritingMode,
+    TextChar, TextLine, TextPage, TextWarning, TextWord, Unmapped, WritingMode,
 };
 /// Word boxes — a page's words in the frame of a render, and the formats
 /// that write them — behind [`Page::word_boxes`] and [`Document::word_boxes`].
@@ -3591,13 +3592,17 @@ impl Page {
         self.text_with(&TextOptions::default())
     }
 
-    /// The page's text, ordered as `options` asks.
+    /// The page's text, read as `options` asks.
     ///
     /// With [`TextOptions::default`] this is [`Page::text`]. With
     /// [`TextOptions::content_order`] every line's characters are in the order
     /// the content stream showed them, which is what [`Page::text`] returned
     /// before ruling 14. Either way an `/ActualText` on a marked-content
-    /// property list stands where the glyphs it encloses do (14.9.4).
+    /// property list stands where the glyphs it encloses do (14.9.4). The
+    /// extraction options each change what is read only where they ask
+    /// (`docs/design/extraction-options.md`): [`TextOptions::unmapped`] keeps a
+    /// glyph whose code maps to no text as a character standing for its code
+    /// or its glyph.
     #[must_use]
     pub fn text_with(&self, options: &TextOptions) -> TextPage {
         self.text_ordered(options, None)
@@ -3622,7 +3627,7 @@ impl Page {
     /// The page's text, ordered as `options` asks, counting into `work` when
     /// the operation is counting.
     fn text_ordered(&self, options: &TextOptions, work: Option<&Arc<stats::Work>>) -> TextPage {
-        let mut page = self.text_in_content_order(work);
+        let mut page = self.text_in_content_order(options, work);
         if options.content_order {
             text_order::state_in_content_order(&mut page);
         } else {
@@ -3641,21 +3646,30 @@ impl Page {
         text_order::into_logical_order(page, Some(text_order::Declared::BySequence(&declared)));
     }
 
-    /// What the content stream showed, in the order it showed it.
-    fn text_in_content_order(&self, work: Option<&Arc<stats::Work>>) -> TextPage {
+    /// What the content stream showed, in the order it showed it, read as
+    /// `options` asks.
+    fn text_in_content_order(
+        &self,
+        options: &TextOptions,
+        work: Option<&Arc<stats::Work>>,
+    ) -> TextPage {
         let content = stats::content(&self.doc, &self.inner, work);
         // Text extraction needs no glyph outlines — the widths come from the
-        // font dictionary — so no provider is consulted here. One operation,
-        // so a form drawn three times, a Type 3 glyph shown fifty and a font
-        // the page and its forms both read are each decoded once.
+        // font dictionary — so no provider is consulted here, and by default
+        // no font program is parsed. The glyph-id fallback asks the embedded
+        // program which glyph a code selects (`Device::glyph_queries`), and
+        // its lookups report no unresolved glyph: they read what a code
+        // stands for and draw nothing. One operation, so a form drawn three
+        // times, a Type 3 glyph shown fifty and a font the page and its forms
+        // both read are each decoded once.
         let resources = resources::PageResources::new_in(
             &self.doc,
             &self.inner,
             None,
-            resources::Operation::new(work.cloned()),
+            resources::Operation::new(work.cloned()).reporting_no_glyphs(),
         );
 
-        let mut device = TextDevice::new();
+        let mut device = TextDevice::with_options(&options.extraction());
         // Text is reported in PDF user space, y upward, which is the space the
         // page's own boxes are in; a device transform is the renderer's job.
         interpret(&content, Matrix::IDENTITY, &mut device, &resources);

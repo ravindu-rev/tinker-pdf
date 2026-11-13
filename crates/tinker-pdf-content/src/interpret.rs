@@ -5,7 +5,7 @@
 //! which is what keeps one malformed instruction from desynchronizing the rest
 //! of the page.
 
-use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
+use crate::device::{Device, Glyph, GlyphQueries, ImageRef, MarkedProps, PathSegment};
 use crate::record::{Answers, Event, RecordingDevice};
 use crate::replay::replay;
 use crate::state::{
@@ -406,6 +406,18 @@ pub trait FontSource {
     /// give, which is also the honest answer for a font that has none.
     fn font_name(&self, font: &[u8]) -> Option<Arc<str>> {
         let _ = font;
+        None
+    }
+
+    /// The index of the glyph the named font's program selects for `code`
+    /// (9.6.6.4, 9.7.4.2), for [`Glyph::glyph_id`]: `None` — the default —
+    /// where the source selects no glyph of a program for the font.
+    ///
+    /// Asked only where the device wants it
+    /// ([`crate::GlyphQueries::unmapped_glyph_ids`]), and then only for a
+    /// glyph whose code maps to no text, in the scope the glyph is shown in.
+    fn glyph_id(&self, font: &[u8], code: u32) -> Option<u16> {
+        let _ = (font, code);
         None
     }
 
@@ -1785,6 +1797,10 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     /// set with what it paints by colorant, and on any other device the
     /// resources are asked nothing of the kind.
     colorants: bool,
+    /// What the device wants to be told about each glyph
+    /// ([`Device::glyph_queries`]), asked once: on any device that asks
+    /// nothing the source is asked nothing of the kind.
+    queries: GlyphQueries,
     stack: Vec<Token>,
     gs: GraphicsState,
     saved: Vec<GraphicsState>,
@@ -1847,6 +1863,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
     /// `fonts`, from the initial state under `initial`.
     fn new(device: &'d mut D, fonts: &'d F, initial: Matrix, len: usize) -> Self {
         let colorants = device.composites_colorants();
+        let queries = device.glyph_queries();
         Interpreter {
             device: Out {
                 device,
@@ -1855,6 +1872,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             fonts: Scope::Borrowed(fonts),
             defaults: fonts.device_defaults(),
             colorants,
+            queries,
             stack: Vec::new(),
             gs: GraphicsState::new(initial),
             saved: Vec::new(),
@@ -3500,6 +3518,12 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
     /// device would give every answer it records, and what it spent of the
     /// budgets for nested content fits what is left of them now.
     fn replays(&self, kept: &FormRecording) -> bool {
+        // A recording carries what its glyphs were asked when it was made,
+        // and nothing says what that was: a device that asks anything of a
+        // glyph has the form interpreted, so it is told what it asked.
+        if self.queries != GlyphQueries::default() {
+            return false;
+        }
         let point = |point: (f64, f64)| (point.0.to_bits(), point.1.to_bits());
         let matrix = |m: &Matrix| [m.a, m.b, m.c, m.d, m.e, m.f].map(f64::to_bits);
         let needs = &kept.needs;
@@ -3973,6 +3997,8 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 // handed it over already, and reporting the glyph's as well
                 // would read it twice.
                 if self.texts_handed == texts_before {
+                    // A Type 3 glyph is a procedure, with no program glyph
+                    // to be asked for.
                     let reported = Glyph {
                         code,
                         text,
@@ -3983,6 +4009,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                         vertical: false,
                         font_id,
                         font_name: font_label.clone(),
+                        glyph_id: None,
                     };
                     if !reported.text.is_empty() {
                         self.texts_handed = self.texts_handed.saturating_add(1);
@@ -4000,6 +4027,13 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 continue;
             }
 
+            // Only a device that asks is told which glyph a code with no text
+            // selects, since answering reads the font program.
+            let glyph_id = if self.queries.unmapped_glyph_ids && text.is_empty() {
+                self.fonts.glyph_id(&font_name, code)
+            } else {
+                None
+            };
             let glyph = Glyph {
                 code,
                 text: text.clone(),
@@ -4010,6 +4044,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 vertical,
                 font_id,
                 font_name: font_label.clone(),
+                glyph_id,
             };
             if !glyph.text.is_empty() {
                 self.texts_handed = self.texts_handed.saturating_add(1);
@@ -7256,6 +7291,47 @@ mod tests {
         interpret(b"/Grp Do", Matrix::IDENTITY, &mut plain, &keeping);
         assert_eq!(plain.0, b"f", "the group's fill, interpreted");
         assert_eq!(keeping.heard(b"Grp", Heard::Interpreted), 2);
+    }
+
+    /// **A device that asks anything of its glyphs is handed an
+    /// interpretation**: a recording carries what its glyphs were asked when
+    /// it was made, so a device that would answer every recorded question
+    /// alike but asks for glyph indices has a kept text form interpreted, and
+    /// is handed the calls an interpretation hands it.
+    #[test]
+    fn a_device_that_asks_of_its_glyphs_is_handed_an_interpretation() {
+        struct Asking(RecordingDevice);
+        impl Device for Asking {
+            fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+                self.0.show_glyph(glyph, state);
+            }
+            fn answers_alike(&self, events: &[Event]) -> bool {
+                self.0.answers_alike(events)
+            }
+            fn glyph_queries(&self) -> GlyphQueries {
+                GlyphQueries {
+                    unmapped_glyph_ids: true,
+                }
+            }
+        }
+        let keeping = Keeping::new(1 << 20);
+        let page = b"BT /F1 12 Tf 5 5 Td ET /Text Do /Text Do";
+        kept_drawing(page, &keeping, Answers::default());
+        assert!(keeping.heard(b"Text", Heard::Recorded) >= 1);
+        let interpreted = keeping.heard(b"Text", Heard::Interpreted);
+        let replayed = keeping.heard(b"Text", Heard::Replayed);
+        let mut asking = Asking(RecordingDevice::new());
+        interpret(page, Matrix::IDENTITY, &mut asking, &keeping);
+        assert_eq!(
+            keeping.heard(b"Text", Heard::Interpreted),
+            interpreted + 2,
+            "both invocations interpreted: {:?}",
+            keeping.hows()
+        );
+        assert_eq!(keeping.heard(b"Text", Heard::Replayed), replayed);
+        let mut fresh = Asking(RecordingDevice::new());
+        interpret(page, Matrix::IDENTITY, &mut fresh, &Keeping::new(0));
+        same_calls(asking.0.events(), fresh.0.events(), "asking of its glyphs");
     }
 
     /// A device that is cancelled while a form draws spoils its recording:

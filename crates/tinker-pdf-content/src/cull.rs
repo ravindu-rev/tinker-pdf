@@ -20,8 +20,8 @@
 //! it — a renderer neither paints it, nor ends an image run for it, nor warns
 //! about it. The questions — [`Device::begin_form`], [`Device::begin_group`],
 //! [`Device::begin_soft_mask`], [`Device::is_cancelled`],
-//! [`Device::answers_alike`] and [`Device::composites_colorants`] — are the
-//! inner device's to answer, so the interpreter runs exactly what it would
+//! [`Device::answers_alike`], [`Device::composites_colorants`] and
+//! [`Device::glyph_queries`] — are the inner device's to answer, so the interpreter runs exactly what it would
 //! run with the device unwrapped, and every other call that brackets or
 //! notices something is forwarded as it came. A form's drawing the
 //! interpreter keeps is of the calls this filter is handed, before it drops
@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
+use crate::device::{Device, Glyph, GlyphQueries, ImageRef, MarkedProps, PathSegment};
 use crate::interpret::{Group, MaskGroup};
 use crate::state::{ColorFamily, ColorantTints, GraphicsState, Rgb, Rgb16};
 
@@ -462,6 +462,10 @@ impl<D: Device + ?Sized> Device for Culled<'_, D> {
 
     fn composites_colorants(&self) -> bool {
         self.inner.composites_colorants()
+    }
+
+    fn glyph_queries(&self) -> GlyphQueries {
+        self.inner.glyph_queries()
     }
 }
 
@@ -1050,6 +1054,21 @@ mod tests {
                 );
             }
         }
+
+        // And what the device asks of its glyphs: nothing for a recorder, and
+        // a glyph index for a text device standing glyphs for theirs.
+        for unmapped in [crate::text::Unmapped::Drop, crate::text::Unmapped::Glyph] {
+            let mut text =
+                crate::text::TextDevice::with_options(&crate::text::ExtractionOptions { unmapped });
+            let asks = text.glyph_queries();
+            for (what, cull) in culls() {
+                let culled = Culled::new(&mut text, cull, Black::NONE);
+                assert_eq!(culled.glyph_queries(), asks, "{what} culled, {unmapped:?}");
+            }
+        }
+        let mut recorder = RecordingDevice::new();
+        let culled = Culled::new(&mut recorder, Cull::NO_TEXT, Black::NONE);
+        assert_eq!(culled.glyph_queries(), GlyphQueries::default());
     }
 
     /// **Forced black paints black by colorant where the device composites

@@ -117,7 +117,9 @@
 //! `TextDevice` collected them.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
+use tinker_pdf_content::{
+    ExtractionOptions, Quad, TextBlock, TextChar, TextLine, TextPage, Unmapped, WritingMode,
+};
 use tinker_pdf_shape::bidi::{
     drawn_reading, faces_outward, logical_order, BaseDirection, DrawnReading,
 };
@@ -125,9 +127,14 @@ use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 
 use crate::Parallelism;
 
-/// How [`crate::Page::text_with`] orders a page's lines.
+/// How [`crate::Page::text_with`] reads a page: the order of its lines, the
+/// threads a walk of pages spends, and the extraction options
+/// (`docs/design/extraction-options.md`).
 ///
-/// `Default` is [`crate::Page::text`]'s behaviour, to the byte.
+/// `Default` is [`crate::Page::text`]'s behaviour, to the byte. Every field is
+/// a `bool` or an enum whose default is that behaviour, so the type stays
+/// `Copy` and `Eq`, and a caller names a base for the fields it does not set
+/// (`..TextOptions::default()`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TextOptions {
     /// Report every line's characters in the order the content stream showed
@@ -147,6 +154,20 @@ pub struct TextOptions {
     /// read by [`crate::Page::text_with`] is read on the calling thread
     /// whatever this says.
     pub parallelism: Parallelism,
+    /// What a glyph whose code maps to no text becomes: dropped
+    /// ([`Unmapped::Drop`], the default), or kept as a character standing for
+    /// its code or for the glyph its font program selects. Every such code
+    /// is reported as a `TextWarning::UnmappedCode` whatever this says.
+    pub unmapped: Unmapped,
+}
+
+impl TextOptions {
+    /// What `tinker-pdf-content`'s text device reads of these options.
+    pub(crate) fn extraction(&self) -> ExtractionOptions {
+        ExtractionOptions {
+            unmapped: self.unmapped,
+        }
+    }
 }
 
 /// What a page says of the direction its lines are read in (ISO 32000-2

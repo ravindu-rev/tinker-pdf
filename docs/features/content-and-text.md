@@ -268,6 +268,30 @@ and is not said. At most 64 codes are kept, bounded apart from the 64
 font it could not resolve. The text, the lines and the quads are what they
 are without the report.
 
+**The glyph-id fallback** (`TextOptions::unmapped`,
+[design](../design/extraction-options.md)'s option 5). By default such a glyph
+is dropped (`Unmapped::Drop`). `Unmapped::Code` keeps it as one character
+standing for its code — the byte of a simple font, the CMap code of a
+composite one — U+F0000 plus the code, in Supplementary Private Use Area-A,
+and `Unmapped::Glyph` as one standing for the glyph its font program selects
+for the code, U+100000 plus the glyph's index, in Supplementary Private Use
+Area-B; a code or an index past 0xFFFD, and a glyph whose font cannot say (no
+embedded program, a Type 1 program, which names its glyphs, a Type 3 font),
+stand as U+FFFD. Private use, so a fallback is never read as a letter a
+producer meant, and the value is the character less its area's first code
+point. A kept glyph is a character like any other, in lines, words and
+search, with the em box its glyph is drawn in, and the code is reported
+whatever the mode. The glyph's index is the one a render draws, read through
+the same selection (the `cmap` through the code's character or the code, a
+`/CIDToGIDMap` through the CID, a CFF charset through a name, and 9.6.6.4's
+closing guess) and asked only in the glyph mode (`Device::glyph_queries`,
+`FontSource::glyph_id`), only for a glyph whose code maps to nothing: the
+default extraction parses no font program. A text extraction's resources
+report no glyph a font does not carry (`Operation::reporting_no_glyphs`), so
+the lookup adds no `UnknownFont` warning a render would add; and a device that
+asks anything of its glyphs is never handed a kept recording of a form's
+drawing in place of interpreting it.
+
 A horizontal line is measured along its own baseline (`text.rs`'s `Frame`):
 along its first glyph's direction, and across it at a quarter turn from it.
 Where the pen stands after a glyph is the furthest of its box's corners along
@@ -699,7 +723,12 @@ presets.
 Everything is on the facade (ruling 11): `Page::text()` returns a
 `TextPage` of blocks → `lines` → `chars`, plus `warnings`, every line in
 logical order (ruling 14); `Page::text_with(&TextOptions)` is the same with
-`content_order` as the opt-out to the content stream's order. A page's blocks
+`content_order` as the opt-out to the content stream's order, and with the
+extraction options ([design](../design/extraction-options.md)), each a field
+whose default is `Page::text()`'s reading, so `TextOptions` stays `Copy` and
+`Eq` and a caller names a base for the fields it leaves: `unmapped` keeps a
+glyph whose code maps to no text as a character standing for its code or its
+glyph (above). A page's blocks
 are read through `TextPage::blocks()` and changed only through
 `blocks_mut()`, because a search keeps what it folded them into (below):
 `blocks_mut` drops every kept form before it hands the blocks out, so a
@@ -749,7 +778,8 @@ procedure however often it is shown, a font's CMaps whichever scope reads the
 font first, since every scope of one extraction reads through the decoded
 streams the extraction keeps until it returns (as a render's do,
 [rendering](rendering.md)) — over a scope with no font provider, so a build's
-bundled faces change nothing.
+bundled faces change nothing; under the glyph-id fallback the embedded
+programs its glyph lookups decode are counted as a render's are.
 `Page::images_counted()` returns `Page::images()`'s list with the same:
 `images_decoded` is one decoder run for each entry listed, an image's masks
 part of its decode, and one for each inline image, whose data is the
@@ -1210,7 +1240,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | What | Typed name | Why (one line) | See |
 | --- | --- | --- | --- |
 | A font resource the page names but the build cannot resolve | `TextWarning::UnknownFont { name }` | emitted by `Page::text()`, deduplicated, naming which resource — absence stays distinguishable from emptiness | ruling 2, [rulings](../rulings.md) |
-| A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | emitted by `Page::text()` once for each such code a page shows, at most 64, before its glyph is dropped: a glyph that decodes to no text is reported rather than invented, so a page with text this build could not decode is told from a page with less text | 9.10.2, ruling 2 |
+| A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | emitted by `Page::text()` once for each such code a page shows, at most 64, before its glyph is dropped: a glyph that decodes to no text is reported rather than invented, so a page with text this build could not decode is told from a page with less text; `TextOptions::unmapped` keeps it instead as a private-use character standing for its code or its glyph, reported all the same | 9.10.2, ruling 2 |
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
 | A form, a soft mask's group or a Type 3 glyph procedure run again inside itself, directly or through the others | `Device::recursion_refused` | a cycle has no last run: refused at its first repeat, by the stream's identity, it draws once, where the depth cap ended it only after two or more runs to the sixteenth | 8.10 |
 | Nested runs past 4 MiB and 4 096 bytes for every byte of content reached, each run its stream's length and 256 bytes | `NESTED_WORK_FLOOR`, `NESTED_WORK_RATE`, `NESTED_RUN_COST`, said to the device as `Device::nested_budget_spent` | a tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group, and only a budget bounds it; scaled to what the file holds, it lets a page run its content four thousand times over, and a stream's first run always fits, so only further runs of content already drawn are passed over | 8.10, 9.6.5 |

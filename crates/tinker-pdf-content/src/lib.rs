@@ -25,7 +25,7 @@ pub mod word_boxes;
 pub mod words;
 
 pub use cull::{Black, Cull, Culled};
-pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
+pub use device::{Device, Glyph, GlyphQueries, ImageRef, MarkedProps, PathSegment};
 pub use interpret::{
     interpret, interpret_counted, DeviceDefaults, FontSource, Form, FormDrawn, FormInvocation,
     FormRecording, Group, GroupSpace, Layer, MaskGroup, SoftMask, StateParameters, Type3Glyph,
@@ -42,7 +42,8 @@ pub use state::{
     SpotFunction, StoredParameters, TextRenderMode, TextState, Transfer,
 };
 pub use text::{
-    Quad, TextBlock, TextChar, TextDevice, TextLine, TextPage, TextWarning, WritingMode,
+    ExtractionOptions, Quad, TextBlock, TextChar, TextDevice, TextLine, TextPage, TextWarning,
+    Unmapped, WritingMode,
 };
 pub use tokenizer::{Token, Tokenizer};
 pub use word_boxes::{
