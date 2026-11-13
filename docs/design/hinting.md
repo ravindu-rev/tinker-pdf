@@ -10,8 +10,9 @@ autohinter; and a renderer can thicken a glyph a little at small sizes so its
 stems keep their weight. This document lays down the seam all four plug into —
 a per-size outline asked of the glyph source, placed on a whole pixel of the
 page frame, then darkened, then filled — and FT-04b's interpreter for
-TrueType bytecode. Stem darkening's section (FT-04a) follows; FT-04c's and
-FT-04d's sections are added by their design steps. Every treatment is off by
+TrueType bytecode. Stem darkening's section (FT-04a) follows, then CFF and
+Type 1 hint application's (FT-04c); FT-04d's section is added by its design
+step. Every treatment is off by
 default, and whether a page looks better with one is H-65's judgement: no
 other renderer's output is an expected answer here (ruling 13).
 
@@ -841,3 +842,323 @@ pixels.
 | Text turned to an angle darkens less than upright text | Stated: such a glyph takes `down` on both axes, the lighter amount, so no direction grows more than upright text's |
 | The offset moves a pixel with the option off | `darkening_off_changes_no_pixel`; nothing calls `Path::offset` unless the option is on |
 | A tile and the page darken a glyph differently | The amount comes from the 2×2 and the offset from the path in a frame a tile shares; `a_darkened_page_tiles_byte_equal_to_itself` |
+
+## CFF and Type 1 hint application
+
+*For ROADMAP row FT-04c.* A CFF or Type 1 glyph carries no program: it
+declares its stems — the ranges its horizontal and vertical strokes occupy —
+and its font declares alignment zones and standard widths, and the
+specifications leave the moving of the outline to the rasterizer ("A
+declarative hint system depends on an intelligent rasterizing algorithm",
+*Adobe Type 1 Font Format* 5.1). This section transcribes what the
+specifications state about those hints at a device size, marks every rule it
+adds where they leave the choice to the rasterizer, and settles one fitter in
+`tinker-pdf-font` that the CFF reader and the Type 1 reader both feed and
+FT-04b's per-size request reaches.
+
+### Scope
+
+- **The specifications' statements**, clause by clause: the Private
+  dictionary's hint entries, stem and edge hints, hint replacement and hint
+  masks, counter control, alignment zones and their overshoot, and flex at a
+  device size.
+- **The fitter** (FT-04c.2 to FT-04c.4): `stem_hints`, format-independent —
+  a glyph's stems, edge hints, regions and counter groups and its font's
+  zones and standard widths in, a fitted outline out — by one rule table.
+- **The readers feeding it** (FT-04c.5, FT-04c.6): what the CFF reader and
+  its Type 2 interpreter, and the Type 1 reader and its charstring
+  interpreter, record for it, and flex decided at the size.
+- **Answering the request** (FT-04c.7): `Hinting::Font` and
+  `Hinting::FontOrAuto` reaching a CFF or Type 1 glyph through
+  `GlyphSource::sized_outline`.
+- **Proof** (FT-04c.8, FT-04c.9a): the fingerprint on every target and the
+  speed row.
+
+### Non-goals
+
+- **Hinting a glyph that carries no hints.** A CFF or Type 1 glyph with no
+  stem and no edge hint is FT-04d's, under `FontOrAuto`, and unhinted under
+  `Font`.
+- **Multiple-master blends** (FT-10): a Type 1 multiple-master font's
+  blended hints, and the supplement's section 3, are read by no step here; a
+  multiple-master glyph draws unhinted.
+- **A CFF2 glyph's hints.** A CFF2 face is a variable face, drawn at its
+  default (`docs/design/variable-fonts.md`); its Private DICT's entries may
+  blend, and no step here reads them, so a CFF2 glyph draws unhinted under
+  `Font`, as a glyph that carries no hints draws.
+- **Stem darkening** (FT-04a), which thickens what the fitter gives it.
+- **Hints in any output but the raster**, as for every hinter (*What stays
+  unhinted*).
+- **Matching another rasterizer.** The specifications state what the hints
+  mean and leave how a stem is moved to the rasterizer; every rule this
+  section adds is this engine's, held by a test to this document and never to
+  another program's output (ruling 13).
+
+### Design
+
+#### The specifications
+
+The rules are read from four documents, and from nothing else (ruling 21):
+*Adobe Type 1 Font Format* (version 1.1), chapters 5 (*Private Dictionary*),
+6 (*CharStrings Dictionary*, 6.4's hint commands and 6.5's *Character Level
+Hints*) and 8 (*Using Subroutines*, 8.1 to 8.4); *Type 1 Font Format
+Supplement* (Technical Note #5015, 15 May 1994), section 2 (*Counter Control
+Hints*); *The Compact Font Format Specification* (Technical Note #5176,
+version 1.0), section 15 and its Table 23; and *The Type 2 Charstring
+Format* (Technical Note #5177, 16 March 2000), sections 2.1 (*Hints*), 2.2
+(*The Flex Mechanism*), 4.1's flex operators, 4.3 (*Hint Operators*) and
+Appendix B. In the rule table a rule is **Stated**, with its clause, where
+the specifications say it, and **Engine** where they leave it to the
+rasterizer and this document chooses; a test holds an Engine rule as this
+document's.
+
+Throughout, `s` is the size in pixels per character-space unit: the request's
+pixels per em (`GlyphSize::ppem / 64`) times the glyph's `FontMatrix` scale —
+the Type 1 font's, the CFF Top DICT's, and for a CID-keyed CFF glyph its Font
+DICT's after the Top DICT's. BlueScale is stated in the same unit ("the number
+of pixels tall that one character space unit will be", T1 5.6): its default
+`0.039625` is one unit at 9.51 points and 300 dots per inch.
+
+#### The fitter
+
+`tinker-pdf-font`'s `stem_hints` module is a leaf like the rest of the crate
+(ruling 8): numbers in, an outline out.
+
+```rust
+pub struct FontHints {                 // a Private dictionary's hint entries
+    pub blue_values: Vec<f64>,         // pairs, as read (rule Z1)
+    pub other_blues: Vec<f64>,
+    pub family_blues: Vec<f64>,
+    pub family_other_blues: Vec<f64>,
+    pub blue_scale: f64,               // 0.039625 where absent
+    pub blue_shift: f64,               // 7
+    pub blue_fuzz: f64,                // 1
+    pub std_hw: Option<f64>,
+    pub std_vw: Option<f64>,
+    pub stem_snap_h: Vec<f64>,
+    pub stem_snap_v: Vec<f64>,
+    pub force_bold: bool,              // false
+    pub language_group: u8,            // 0 or 1 (rule C1)
+    pub expansion_factor: f64,         // 0.06
+}
+
+pub enum StemKind { Stem, TopEdge, BottomEdge }   // top/right, bottom/left
+
+pub struct Stem {
+    pub vertical: bool,                // a vstem: an x range
+    pub low: f64,                      // absolute, in character space
+    pub high: f64,
+    pub kind: StemKind,
+}
+
+pub struct GlyphHints {
+    pub stems: Vec<Stem>,              // declaration order, at most 96
+    pub regions: Vec<Region>,          // each: the stems active, the first point it holds
+    pub counters: Vec<CounterGroup>,   // priority order: one axis, its stems ascending
+}
+
+pub fn fit(points: &[(f64, f64, usize)], hints: &GlyphHints, font: &FontHints,
+           s: f64) -> Option<Vec<(i32, i32)>>
+```
+
+The reader hands the fitter every point of the glyph's outline — on and off
+the curve, in the order its interpreter emitted them, each with the region
+in force when it was emitted — and puts the fitted points back into the
+outline's segments, in pixels about the glyph's origin, each on 1/64 pixel
+(26.6). The arithmetic is `f64`'s four operations and `floor`, and
+`hint::fixed`'s rounding where a value becomes 26.6 (FT-04b's section): no
+transcendental (ruling 4). `None` is the answer for a glyph the fitter cannot
+fit — `s` not a finite number above zero, a `FontMatrix` that is not one
+uniform scale, no stem left after the bounds — and the glyph then draws
+unhinted (*Failure*).
+
+#### The rule table
+
+**Zones.**
+
+| Rule | What | Source |
+| --- | --- | --- |
+| Z1 | `BlueValues` is pairs; its first pair is a bottom zone, *baseline overshoot position and baseline*, and every later pair a top zone, *flat position and overshoot position*; `OtherBlues` is bottom zones only; `FamilyBlues` and `FamilyOtherBlues` are read alike. Up to seven pairs in `BlueValues` and `FamilyBlues`, five in the others. A CFF Private DICT gives each as a delta array, read as the running sums | Stated: T1 5.3 to 5.5; 5176 Table 23 and section 4 |
+| Z2 | The flat edge of a bottom zone is its upper value and of a top zone its lower. A pair whose first value exceeds its second is dropped, an odd last value and the pairs past seven or five are ignored, and a value that is not finite drops its pair | Engine, the specifications requiring well-formed arrays |
+| Z3 | Only a horizontal stem's edges are aligned: its top edge by a top zone, its bottom edge by a bottom zone — "that character must have an `hstem` hint specified at or in an alignment zone"; a vertical stem meets no zone | Stated: T1 5.2, 6.5 |
+| Z4 | A zone captures an edge within it, or within `BlueFuzz` units outside it on either side ("act as if the stem top were actually within the zone"); `BlueFuzz` defaults to 1. Where two zones would capture one edge, the first in reading order (`BlueValues`, then `OtherBlues`) does | Stated: T1 5.8; 5176 Table 23. The tie: Engine |
+| Z5 | Where `s` is below `BlueScale`, overshoot is suppressed: "All features falling in an alignment zone are rendered at the same pixel height" — every captured edge is placed at the zone's flat position, `round(flat · s)` | Stated: T1 5.6. The rounding: Engine |
+| Z6 | A font whose `BlueScale` times its tallest zone's height is 1 or more breaks 5.6's restriction, "ensures that overshoot suppression will turn off before the overshoot reaches a full device pixel": suppression holds only where `s` is also below one over that height | Engine, keeping the restriction's purpose |
+| Z7 | Where `s` is at or above `BlueScale`, an edge beyond its zone's flat position — above it for a top zone, below for a bottom zone — by at least `BlueShift` units (7 by default) overshoots, and one closer overshoots "only if their device space distance is at least one-half pixel" | Stated: T1 5.7; 5176 Table 23 |
+| Z8 | An edge that overshoots is placed at the zone's rounded flat position moved outward by `round(d · s)` pixels and at least one, for `d` its distance from the flat position; one that does not, and one captured on the zone's flat side, at the rounded flat position | Engine |
+| Z9 | A family zone replaces the font's own where "the difference between a font's alignment and its family's standard alignment is less than 1 pixel": the zone of `FamilyBlues` (`FamilyOtherBlues`) at the index of a zone of `BlueValues` (`OtherBlues`), its flat position less than one pixel from the font's at `s`, is used in its place at that size | Stated: T1 5.5. Pairing by index and comparing flat positions: Engine |
+
+**Stems and edges.**
+
+| Rule | What | Source |
+| --- | --- | --- |
+| S1 | Type 1: `y dy hstem` declares `y` to `y + dy` and `x dx vstem` `x` to `x + dx`, relative to the left side bearing point (`hsbw`, `sbw`). Type 2: `hstem`, `vstem`, `hstemhm`, `vstemhm` take pairs, the first value of the first pair relative to 0 and every later value relative to the edge before it; the stems are in ascending order of their first edge | Stated: T1 6.4; 5177 4.3 |
+| S2 | Type 2 edge hints: a width of −20 is a top (right) edge, −21 a bottom (left) edge, "used to locate an edge rather than a stem that has two edges"; the edge is the pair's position for −20 and that position less 21 for −21 (5177's figure 4, `121 –21 400 –20 hstem` hinting the edges at 100 and 500). Another negative width "has undefined meaning": such a stem is dropped | Stated: 5177 2.1, 4.3. Dropping: Engine |
+| S3 | Type 1 ghost stems "must be created with a stem height of 20 or 21 — either is acceptable" and lie inside the glyph's range: an `hstem` 20 or 21 units high whose top a top zone captures is a top edge hint, else one whose bottom a bottom zone captures a bottom edge hint, and any other is a stem | Stated: T1 6.5. Reading the edge off its zone: Engine |
+| S4 | At most 96 stem hints a glyph, horizontal and vertical together; a stem past the 96th is dropped. Type 1 is held to the same number | Stated: 5177 Appendix B. Type 1: Engine |
+| S5 | Stems of one direction must not overlap; a stem overlapping one declared before it in the same region is dropped from that region | Stated, as a constraint: T1 6.4; 5177 4.3 ("the results are undefined"). Dropping: Engine |
+| S6 | A stem's width snaps to a standard width "when the difference between a standard stem width and a particular stem width is small": the nearest of `StdHW` and `StemSnapH` (horizontal stems) or of `StdVW` and `StemSnapV` (vertical ones), the smaller on a tie, is taken where it is less than half a pixel from the stem's width at `s` | Stated: T1 5.9. The half pixel and the tie: Engine |
+| S7 | A stem is drawn a whole number of pixels wide, `floor(w · s + 1/2)` for its width `w` after S6, and at least one pixel | Engine |
+| S8 | With `ForceBold` true, a stem S7 makes one pixel wide whose width at `s` is more than one pixel is drawn two: "in situations where character stems would normally be rendered at 1-pixel thick, a Type 1 font interpreter may thicken the stem"; false, or absent, nothing is thickened | Stated: T1 5.10; 5176 Table 23 (`false` by default). The rule: Engine |
+| S9 | A stem with no captured edge keeps its centre as nearly as the grid allows: its lower edge at `round(c − w/2)` for its centre `c` in pixels and its fitted width `w`, its upper edge `w` above | Engine |
+| S10 | A captured edge is placed by Z5 to Z8 and the stem's other edge at its fitted width from it; a stem both of whose edges are captured has each placed by its zone, and is held to at least one pixel by moving its bottom edge down | Engine |
+| S11 | An edge hint is one edge: placed by its zone where one captures it, at the nearest whole pixel otherwise; the other number of its pair is no edge | Engine |
+| S12 | Fitted edges keep their order on each axis: an edge that would pass the next one in design order is held at it | Engine |
+
+**Regions.**
+
+| Rule | What | Source |
+| --- | --- | --- |
+| R1 | Type 1 hint replacement, `subr# 1 3 callothersubr pop callsubr`, discards the stems in force and declares the ones subroutine `subr#` holds, for the outline that follows; othersubr 3 answers its argument, so the subroutine is called. `Subrs` 0 to 3 are the fixed flex and replacement entries | Stated: T1 8.1, 8.4 |
+| R2 | Type 2 `hintmask` makes active the declared stems its bits name, the most significant bit of the first byte the first stem, for the outline that follows; "the number of data bytes is exactly the number needed" for the stems declared, and bits past them are ignored. `hstem` and `vstem` before a `hintmask` with no `vstem` operator between are its implied `vstem` | Stated: 5177 2.1, 4.3 |
+| R3 | Before a glyph's first `hintmask` every declared stem is active; in Type 1, every stem declared so far | Engine, the specifications implying it where no mask is given |
+| R4 | A point is fitted by the region in force when the operator that emitted it ran; the regions of one glyph are fitted apart | Engine |
+| R5 | `dotsection` brackets a dot "for compatibility with the oldest PostScript interpreters", which hint replacement handles today; it changes nothing | Stated as obsolete: T1 8.2. Ignoring it: Engine |
+
+**Counters.**
+
+| Rule | What | Source |
+| --- | --- | --- |
+| C1 | `LanguageGroup` is 0 (Latin, Greek, Cyrillic and the like) or 1 (Chinese, Japanese, Korean); absent, or any other value, it is 0 | Stated: T1 5.11; 5176 Table 23 |
+| C2 | Counter groups come from three places: `hstem3` and `vstem3`, three stems whose outer two are equally wide and whose centres are equally spaced, "these stems and the counters between them will all be controlled"; Type 2 `cntrmask`, each command one group of the stems its bits name, a group of each direction where it names both, earlier commands first; and the supplement's othersubrs 12 and 13 after `hsbw`, read in its data format — `#H HG1 … HGn #V VG1 … VGn`, each group's stems as the distance from the previous stem and a width, the last stem's distance to its far edge and its width negative, the groups in priority order | Stated: T1 6.4; 5015 2.2 to 2.4; 5177 2.1 |
+| C3 | Under `LanguageGroup` 0 only stem-three groups are fitted: `hstem3`, `vstem3`, and a `cntrmask` naming exactly three stems of one direction, which "can be used in place of" them; any other group is read and not fitted. Under 1 every group is fitted | Stated: 5015 2 (counter control needs `LanguageGroup` 1); 5177 2.1 |
+| C4 | Counters of one design width come out one number of pixels "providing there are a sufficient number of pixels available", and their proportions are kept "based on the constraints of the glyph's width" | Stated: 5015 2 |
+| C5 | Groups are fitted in priority order, the first group's counters "the last to collapse" | Stated: 5015 2.4; 5177 2.1 |
+| C6 | `ExpansionFactor`, 0.06 by default, bounds how far a group may change the glyph's extent, "a ± 6% change in the character bounding box", under `LanguageGroup` 1 | Stated: T1 5.14; 5015 2.5; 5176 Table 23 |
+| C7 | A group is fitted after its stems' widths, in each region whose active stems hold all of its stems. Its span, from its first stem's lower edge to its last stem's upper edge, starts at `round(D · s)` pixels for its design span `D`; the white left after its stems is shared among its counters in proportion to their design widths, each taking the floor of its share and the pixels over going one at a time to the largest remainders. Where that gives counters of one design width different numbers, the span grows or shrinks by the fewest pixels that make them equal — within `ExpansionFactor` of `D · s` under `LanguageGroup` 1, by at most one pixel under 0 — and where no such span exists the remainders go leftmost first. Where the white is fewer pixels than the counters, the narrowest counters close first, and a later group's before an earlier one's (C5). The group's first stem is placed by S9 or S10 and the others follow at their counters; a stem a higher group has placed keeps its place and splits a later group there. A group whose stems overlap or are out of order is passed over | Engine |
+
+**Flex and accents.**
+
+| Rule | What | Source |
+| --- | --- | --- |
+| F1 | Type 2 `flex` draws its two curves as one straight line from the start to the end where the flex depth is less than `fd`/100 device pixels, and as curves otherwise; `hflex`, `hflex1` and `flex1` take `fd` 50 | Stated: 5177 2.2, 4.1 |
+| F2 | Type 1 flex — `Subrs` 1, seven `rmoveto`s each followed by `Subrs` 2, then the height control, the end point and `Subrs` 0 — draws the curves "if the Flex height renders to" the control parameter's hundredths of a pixel "or more", and a straight line otherwise | Stated: T1 8.3, 8.4 |
+| F3 | The depth is measured at `s`: for a flex more horizontal than vertical (its start-to-end `dx` larger than `dy`, 5177's `flex1` test) as the vertical distance from the joining point to the line through the start and end points at the joining point's `x`, and for one more vertical as the horizontal distance at its `y` | Stated: the comparison, 5177 4.1 and figure 3. The distance: Engine |
+| F4 | An accented glyph (`seac`, or `endchar` with four arguments in Type 2) fits each component with its own hints at the size and places the accent at its offset rounded to whole pixels, so its fitted edges stay on the grid | Engine |
+
+**Interpolation.**
+
+| Rule | What | Source |
+| --- | --- | --- |
+| I1 | On each axis a region's fitted edges map its points: a point at an edge's design position goes where the edge went, one between two edges moves linearly by its design position between theirs, and one beyond the outermost edge moves as that edge moved; an off-curve point is mapped as an on-curve one is. An axis with no edge in a region is scaled and not moved | Engine |
+| I2 | Each fitted point is rounded to 1/64 pixel, half away from zero, as `hint::fixed` rounds | Engine |
+
+#### Feeding the fitter
+
+**CFF** (FT-04c.5). `read_private` keeps every operator of Table 23 with the
+defaults the table gives, per Font DICT for a CID-keyed font: `BlueValues` to
+`FamilyOtherBlues` decoded from their deltas, `BlueScale`, `BlueShift`,
+`BlueFuzz`, `StdHW`, `StdVW`, `StemSnapH`, `StemSnapV`, `ForceBold`,
+`LanguageGroup` and `ExpansionFactor`. The Type 2 interpreter records each
+stem where it now counts and discards them (`cff.rs`), with the count
+unchanged so that it keeps agreeing with `cff_subset.rs`'s; each `hintmask`
+starts a region, each `cntrmask` adds a group, and each emitted point carries
+its region. `Cff::hinted_outline` interprets the glyph at the request's size,
+so flex is decided there (F1, F3), and returns the fitted outline.
+
+**Type 1** (FT-04c.6). The Private dictionary's keys are read with the same
+defaults. `hstem` and `vstem` record stems relative to the side bearing point,
+`hstem3` and `vstem3` record three stems and a group, othersubr 3 starts a
+region with the stems its subroutine declares, othersubrs 12 and 13 pass
+their groups, flex keeps its control parameter and is decided at the size
+(F2, F3), and `dotsection` stays the no-op it is (R5). `Type1::hinted_outline`
+returns the fitted outline; `Type1::outline` and `seac` composition keep
+their output.
+
+#### Answering the request
+
+Under `Hinting::Font` and `Hinting::FontOrAuto` the facade's `extract_outline`
+answers `GlyphSource::sized_outline` for a CFF glyph — bare, `OTTO` or
+CID-keyed through its Font DICT — and a Type 1 glyph with the reader's
+`hinted_outline` at the request's `ppem`, when FT-04b's conditions hold (*When
+a glyph is hinted*): text render mode 0, an axis-aligned unstretched 2×2,
+1 to 1 024 pixels an em. A glyph with no stem and no edge hint answers `None`
+under `Font` and is FT-04d's under `FontOrAuto`. `GlyphSize::points` asks
+nothing of these hints, and `monochrome` changes no fit: `SizedOutline::dropout`
+is `None`, so a monochrome glyph keeps today's hardening. The placement on a
+whole pixel of the page frame, the cache keys and the darkening after are
+FT-04b's and FT-04a's, unchanged.
+
+#### Failure
+
+A fitter that cannot fit a glyph answers `None`, and the glyph draws from its
+em outline as it does today, reported as FT-04b's *Failure* reports one.
+Stems, groups and regions are bounded — 96 stems (S4), 96 groups, and one
+region a `hintmask` or replacement — and a value that is not finite drops
+the stem or zone holding it, so no hint set loops or allocates past the
+outline it moves (ruling 1).
+
+### Milestones
+
+1. **FT-04c.2, the fitter.** `stem_hints` with S1 to S12, R3, R4 and I1, I2.
+   Exit, `stem_hints/tests.rs`:
+   `a_stems_edges_land_on_whole_pixels_at_its_rounded_width` (8 to 48 pixels
+   an em, the one-pixel floor included),
+   `a_width_near_a_standard_width_snaps_to_it` (inside and just outside S6's
+   half pixel), `an_edge_hint_moves_only_its_edge`,
+   `points_between_fitted_edges_are_interpolated`,
+   `each_mask_region_is_fitted_with_its_own_stems`; every expected position
+   computed in the test from this table.
+2. **FT-04c.3, zones.** Z1 to Z9. Exit, `stem_hints/tests.rs`:
+   `an_edge_in_a_zone_aligns_to_its_flat_edge`,
+   `blue_fuzz_widens_a_zone_and_no_further`,
+   `overshoot_is_suppressed_below_the_blue_scale_size_and_kept_above_it`,
+   `blue_shift_decides_an_overshoot_above_that_size`,
+   `a_family_zone_close_to_the_fonts_replaces_it`,
+   `an_edge_in_no_zone_is_fitted_as_a_stem_edge`; each threshold size and
+   aligned position computed in the test from Z5 to Z9.
+3. **FT-04c.4, counters.** C1 to C7. Exit, `stem_hints/tests.rs`:
+   `a_groups_counters_come_out_as_the_rule_states` (three vertical stems
+   whose counters round apart, 8 to 24 pixels an em),
+   `a_stem3_group_keeps_its_counters_equal`,
+   `a_stem_in_no_group_is_fitted_alone`, and C1 and C3's three cases:
+   `language_group_0_fits_only_stem3_groups`,
+   `language_group_1_fits_every_group_within_its_expansion_factor`,
+   `an_unrecognised_language_group_is_read_as_0`; each counter width computed
+   in the test.
+4. **FT-04c.5, the CFF reader.** Exit, `cff.rs`:
+   `the_private_dict_hint_operators_are_read_with_their_defaults` (each
+   operator, the delta arrays, a CID-keyed font's two Font DICTs),
+   `stem_operators_record_absolute_edges`,
+   `a_hintmask_starts_a_region_with_the_stems_its_bits_name`,
+   `cntrmask_bits_make_counter_groups`,
+   `a_flex_shallower_than_its_depth_is_a_line_at_that_size`,
+   `a_hinted_cff_glyph_has_its_stems_and_zones_on_the_grid` (8 to 24 pixels
+   an em); `cff.rs`'s existing tests and `cff_subset.rs`'s `hintmask` tests
+   unchanged.
+5. **FT-04c.6, the Type 1 reader.** Exit, `type1.rs`:
+   `the_private_hint_keys_are_read`, `stems_are_relative_to_the_side_bearing`,
+   `hint_replacement_starts_a_region_with_the_new_stems`,
+   `a_stem3_hint_makes_a_counter_group`,
+   `counter_control_othersubrs_make_groups` (the supplement's 2.6 example,
+   its two calls),
+   `a_flex_below_its_height_is_a_line_at_that_size`,
+   `a_hinted_type1_glyph_has_its_stems_and_zones_on_the_grid`;
+   `Type1::outline` and `seac` unchanged.
+6. **FT-04c.7, the facade.** Exit, `cff_type1_hinting.rs`:
+   `a_hinted_cff_stem_covers_whole_pixel_columns`,
+   `a_hinted_type1_stem_covers_whole_pixel_columns` (9 to 16 pixels from an
+   integral origin), `the_option_off_draws_what_it_drew_before`;
+   `render_regions.rs`'s `hinted_cff_and_type1_text_tiles_byte_equal` at 0.5×
+   to 4×; the default and `bundled-fonts` builds.
+7. **FT-04c.8, every target.** Exit: `determinism.rs`'s
+   `postscript_hinting_is_stable_across_targets`, a page of CFF and Type 1
+   lines at 9 to 16 pixels with an ink floor, on Linux, Windows and
+   `wasm32-wasip1`.
+8. **FT-04c.9a, the speed row** (FT-04c.9b its figure, in the timing phase).
+   Exit: `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree`
+   with the operation that hints every outline of each committed CFF and
+   Type 1 program at 12 pixels an em, beside its unhinted twin.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A rule of this section's is read as the specifications' | The table marks every rule Stated or Engine; a test of an Engine rule names this document, and the row's exit holds only the Stated ones as the specifications' |
+| A real stem 20 or 21 units high at an alignment zone is taken for a Type 1 ghost (S3) and has one edge fitted | Its captured edge aligns as a ghost's would and its other edge is interpolated; Type 2 fonts state edge hints by their width and never meet the rule |
+| A font breaking 5.6's restriction suppresses an overshoot of a pixel or more | Z6 ends suppression before an overshoot reaches a pixel, whatever `BlueScale` says |
+| Snapping (S6) makes a stem drawn deliberately heavier draw at the standard width | Only within half a pixel, so the snap moves a stem at most to the next whole pixel, and only at sizes where half a pixel is a small part of the stem |
+| Counter control widens a glyph past its advance (C7) | `ExpansionFactor` bounds it under `LanguageGroup` 1; under 0 only a stem-three group, by one pixel; the advance itself never moves (PDF places glyphs by `/Widths`) |
+| An italic glyph's vertical stems are fitted as upright ranges | They are the ranges the font declares; italic fonts declare few, and `StemSnapV` "should be empty" for them (T1 5.9), so S6 snaps nothing |
+| Flex decided at the size makes a glyph's outline differ between sizes | That is flex's purpose (T1 8.3); `Cff::outline` and `Type1::outline`, the unhinted reads, keep drawing the curves |
+| A tile and the page fit a glyph differently | The fit is in glyph space at the 2×2's size, and FT-04b's placement puts the origin on the page frame's grid; `hinted_cff_and_type1_text_tiles_byte_equal` (ruling 5) |
