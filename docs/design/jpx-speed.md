@@ -186,8 +186,13 @@ executor P-10.10 adds is a parameter beside it, not a field of it.
 tile-component. The applied discard is the request's, clamped to the fewest
 levels any tile-component of the codestream has, so a discard past a
 tile-component's own levels is clamped, never a panic, and every plane
-comes out at one scale. `JpxImage` gains `discard`, the applied figure, so a
-caller knows the scale it got. Tier-1 skips every code-block of a dropped
+comes out at one scale — and clamped to none where a `pclr` palette maps a
+component (I.5.3.4): its samples are indices, and a lower resolution of
+indices is their average, which selects an entry neither sample chose, so
+such a codestream at a smaller size is not the same picture. `JpxImage`
+gains `discard`, the applied figure, so a caller knows the scale it got, and
+`levels`, the most it could have been, which a caller's cache reads its
+next draw's discard against. Tier-1 skips every code-block of a dropped
 resolution; `wavelet::ladder` stops at resolution `N_L − d` of each
 tile-component and hands back that resolution's plane, whose rectangle is
 B.5's `trx0 = ceil(tcx0 / 2^d)` to `trx1 = ceil(tcx1 / 2^d)` (B-14) — which
@@ -234,8 +239,16 @@ of the image's own axes, from its transform in the page frame, never a
 tile's. The facade's JPX path turns it into a discard: the most levels `d`
 for which `W >> d` by `H >> d` — the fewest samples a reduced image of the
 codestream's `W` by `H` can have, whatever its origin — is still at least the
-drawn pixels on both axes.
-The image cache keys on the request, so a hit returns exactly what a miss
+drawn pixels on both axes, and at least one, `W` and `H` read from the
+codestream's own header, and the decoder clamping it to `JpxImage::levels`.
+An image with a soft mask or a `/Mask`, which are sampled against the grid
+they were drawn for, and one under an `/Indexed` space, whose samples are
+indices, are decoded whole. The reduced samples stand for `2^d` of the
+image's own each way (`Reduced`), placed from where the first reduced cell
+starts: `ceil(XOsiz / 2^d) · 2^d − XOsiz` columns into the image, none for
+an image at the grid's origin (`Reduced::skip`).
+The image cache keys on the reduction, read on a hit from the size and the
+levels the name's first decode found, so a hit returns exactly what a miss
 computes. `Page::images`, `to_svg` and every extraction path ask for the
 full size. Because the drawn size is the page frame's, a tile and the page
 pick the same levels (ruling 5).

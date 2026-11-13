@@ -388,6 +388,35 @@ through `Stats::jpeg_samples_transformed`),
 fingerprint ([determinism](determinism.md)) and `render_regions.rs` hold the
 reduced draws on every target and tile by tile.
 
+A JPEG 2000 codestream is decoded with the most resolution levels dropped
+whose image still covers the draw: the most `d` for which its own width and
+height, as its header gives them, shifted right by `d` — the fewest samples
+its image reduced by `2^d` has, whatever its origin on the reference grid —
+are still at least the drawn pixels on both axes, and at least one, never
+more than the decoder can drop (`JpxImage::levels`, which is none for a
+codestream a `pclr` palette reads), and none when the drawn size is not
+finite or the image has a soft mask or a `/Mask`. The same rule keeps an
+image under an `/Indexed` space whole, a JPEG's and a codestream's alike:
+its samples are indices, and a smaller scale averages two indices into a
+third. The reduced samples stand for `2^d` of the image's own each way,
+placed from where the first reduced cell starts — `ceil(XOsiz / 2^d)` cells
+of `2^d` from the grid's origin, none into an image that starts there —
+and cut where the image ends (`Reduced::skip`). The cache keeps each
+discard's decode apart, read on a hit from the size and the levels the
+name's first decode found. `jpx_images.rs` holds it:
+`a_jpx_image_drawn_at_a_quarter_decodes_two_levels_fewer` (A7's JPX half,
+through `Stats::jpx_levels_synthesised`),
+`a_jpx_image_is_decoded_with_the_most_levels_dropped_that_cover_its_drawn_size`,
+`a_masked_jpx_image_is_decoded_whole`,
+`a_jpx_image_whose_samples_are_indices_is_decoded_whole`,
+`a_reduced_jpx_image_covers_what_the_image_covers`,
+`each_discard_of_a_jpx_image_is_cached_apart`,
+`an_inline_jpx_image_is_decoded_at_its_drawn_size` and
+`the_svg_writer_and_the_image_list_take_a_jpx_image_whole`; `images.rs`'s
+`an_indexed_jpeg_is_decoded_at_full_size`; the `jpx_minified` fingerprint and
+`render_regions.rs` hold the reduced draws on every target and tile by
+tile.
+
 **Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
 pasted in from another document resolves its names in the dictionary it brought
 rather than in the page's. Both seams change scope together — the interpreter
@@ -1365,7 +1394,11 @@ of several that tie), and `bytes_decoded`, the bytes the runs returned
 ([filters](filters.md)); `jpeg_held`, the most bytes a JPEG decode held
 at once beside the image it decoded into — its coefficients, its planes and
 its strip; `jpeg_samples_transformed`, the samples the JPEG decodes' inverse
-transforms output, `N × N` for each block a decode at `N/8` transformed; from
+transforms output, `N × N` for each block a decode at `N/8` transformed;
+`jpx_levels_synthesised`, `jpx_code_blocks_decoded` and
+`jpx_levels_discarded`, the inverse-wavelet levels the JPEG 2000 decodes
+synthesised, every tile-component summed, the code-blocks their tier-1
+decoded and the resolution levels each dropped; from
 `Bitmap::to_png_counted`, `png_image_scratch` and
 `png_peak`, maxima of the bytes a PNG write held, as `cache_bytes_held` is a
 maximum; `stream_seal_passes`, each

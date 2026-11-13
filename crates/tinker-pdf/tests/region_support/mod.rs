@@ -4,8 +4,8 @@
 //!
 //! `render_regions.rs`'s header says why these pages: text, a shading, an
 //! image and strokes, turned and cropped; canvases that stand somewhere in the
-//! page; the stroker's whole pen, one-bit images and JPEGs decoded at the size
-//! they are drawn; and beside them the stroked frame whose corners sit on a
+//! page; the stroker's whole pen, one-bit images, and JPEGs and JPEG 2000
+//! codestreams decoded at the size they are drawn; and beside them the stroked frame whose corners sit on a
 //! sub-scanline, the three-image page of ruling 5's named exception and the
 //! page whose only ink is two annotations.
 //!
@@ -30,7 +30,9 @@ use tinker_pdf::{
     DeviceSpace, Document, DocumentBuilder, Function, ImageData, Shading, WriteOptions,
 };
 
-use super::render_support::{bilevel_page, curvy_font, jpeg_minified_page, pen_page};
+use super::render_support::{
+    bilevel_page, curvy_font, jpeg_minified_page, jpx_minified_page, pen_page,
+};
 
 /// The fixture page, in points. Not round, and coprime with every tile size
 /// below, so no lattice in this file ever divides it evenly.
@@ -425,6 +427,10 @@ pub fn fixtures() -> Vec<Fixture> {
     // fingerprints as `jpeg_minified`, 119 by 157, which no tile size here
     // divides.
     add("jpeg minified", jpeg_minified_page(), 2_000);
+    // JPEG 2000 codestreams drawn with one level dropped and two: the page
+    // `determinism.rs` fingerprints as `jpx_minified`, 96 by 80, which no tile
+    // size here divides.
+    add("jpx minified", jpx_minified_page(), 550);
     out
 }
 

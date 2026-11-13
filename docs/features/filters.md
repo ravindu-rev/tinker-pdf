@@ -377,8 +377,13 @@ stops at resolution `N_L - discard`, and the image comes back on the
 reference grid reduced by `2^discard` as T.800 B.5 gives it — every
 coordinate `ceil(x / 2^discard)`, the image area's and each tile's, a
 subsampled component replicated on the reduced grid as on the full one. A
-discard past the fewest levels any tile-component has is clamped to them,
-and `JpxImage::discard` says what was applied. Beside the image comes a
+discard past the levels the codestream can drop is clamped to them, and
+`JpxImage::discard` says what was applied, `JpxImage::levels` how many
+could have been: the fewest any tile-component has, and none where a `pclr`
+palette maps a component (I.5.3.4) — its samples are indices, which a lower
+resolution would average into indices neither sample chose, so such a
+codestream is the same picture only whole and is decoded whole at every
+discard, though a window of it is still a window. Beside the image comes a
 `JpxCounts`, the levels synthesised and the code-blocks decoded, which a
 caller adds to its own tally (guard A7's leaf half). `jpx_decode` is the
 request at its default, the full image, and every committed codestream's
@@ -964,7 +969,9 @@ which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `JpxRequest`, returning the image and a `JpxCounts` — with `jpx_header`
 beside it: every stage of that decode before
 tier-2 and none after, returning a `JpxHeader` — the geometry, output channel
-count, precision, stated colour and opacity a decode would produce. The comic
+count, precision, stated colour and opacity a decode would produce, and the
+image area's origin on the reference grid, from which a caller placing a
+reduced decode over the full image reads where its first cell starts. The comic
 path places a `.jp2` page's own bytes as `/JPXDecode` on the strength of it,
 and `jpx_reference.rs`, the seed replay and the `jpx` fuzz target each hold it
 to agree with the decode it stands in for. The encoder half is `deflate`,

@@ -153,19 +153,56 @@ impl CachedImage {
 
 /// One image name's decodes in [`Caches::images`].
 ///
-/// The first decode of a name reads what its frame is, and every later draw
-/// of the name reads the size it is decoded at from that: the frame's own
-/// width and height for a JPEG drawn with no mask (`jpeg_scale`), and `None`
-/// for every other image, which is decoded at full size whatever a draw asks.
-/// Each size's decode is kept under the reduction it was made at
-/// ([`reduction`]): 1 for full size, 2, 4 and 8 for a half, a quarter and an
-/// eighth. The name's first decode is its first size's, so the render that
-/// makes it decodes the image once; each other size fills once too.
+/// The first decode of a name reads what its frame is ([`Frame`]), and every
+/// later draw of the name reads the size it is decoded at from that; an image
+/// with no frame is decoded at full size whatever a draw asks. Each size's
+/// decode is kept under the reduction it was made at ([`Frame::reduction`]):
+/// 1 for full size, and otherwise how many of the image's own samples each
+/// way one decoded sample stands for. The name's first decode is its first
+/// size's, so the render that makes it decodes the image once; each other
+/// size fills once too.
 struct ImageEntry {
     /// The frame a request can reduce, or `None` where none can.
-    frame: Option<(u32, u32)>,
+    frame: Option<Frame>,
     /// The decodes made, by reduction.
     decoded: Flights<u32, CachedImage>,
+}
+
+/// What an image's decode found it to be, which every later draw of it reads
+/// the size it is decoded at against ([`ImageEntry::frame`]).
+///
+/// Only an image whose codec can answer a drawn size with fewer samples has
+/// one, and only one nothing else samples against its whole grid: a mask
+/// (11.6.5.3, 8.9.6.3, 8.9.6.4) is drawn for the grid it was made for, and a
+/// palette's indices (8.6.6.3) are no colours a smaller scale may average.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// A JPEG of its frame's own `width` by `height` samples, decoded at the
+    /// smallest of an eighth, a quarter and a half that covers the draw
+    /// ([`jpeg_scale`]).
+    Jpeg { width: u32, height: u32 },
+    /// A JPEG 2000 codestream of `width` by `height` samples that can drop
+    /// `levels` resolution levels, decoded with the most dropped that covers
+    /// the draw ([`jpx_discard`]).
+    Jpx { width: u32, height: u32, levels: u8 },
+}
+
+impl Frame {
+    /// How many of the image's own samples each way one decoded sample stands
+    /// for, decoded for a draw that asks as `request` does: 1 at full size, 2,
+    /// 4 and 8 for a JPEG at a half, a quarter and an eighth, and `2^d` for a
+    /// codestream with `d` levels dropped — what [`ImageEntry`] keys a decode
+    /// by, and [`Reduced::factor`].
+    fn reduction(self, request: &ImageRequest) -> u32 {
+        match self {
+            Frame::Jpeg { width, height } => reduction(jpeg_scale((width, height), request)),
+            Frame::Jpx {
+                width,
+                height,
+                levels,
+            } => 1 << jpx_discard((width, height), levels, request),
+        }
+    }
 }
 
 /// An image XObject decoded for one draw ([`PageResources::decode_image`]),
@@ -173,7 +210,7 @@ struct ImageEntry {
 /// ([`ImageEntry::frame`]).
 struct Decoded {
     image: Result<DecodedImage, String>,
-    frame: Option<(u32, u32)>,
+    frame: Option<Frame>,
 }
 
 /// The scale a JPEG of `frame` samples, its own width and height, is decoded
@@ -205,6 +242,50 @@ fn jpeg_scale(frame: (u32, u32), request: &ImageRequest) -> JpegScale {
 /// — what [`ImageEntry`] keys a decode by, and [`Reduced::factor`].
 fn reduction(scale: JpegScale) -> u32 {
     8 / scale.block_samples()
+}
+
+/// The resolution levels a JPEG 2000 codestream of `size` samples, which can
+/// drop `levels` of them, is decoded with dropped for a draw that asks as
+/// `request` does (`docs/design/jpx-speed.md`, "The page's request"): the most
+/// levels `d` for which `W >> d` by `H >> d` — the fewest samples the image
+/// reduced by `2^d` has, whatever its origin on the reference grid (T.800
+/// B.5) — is still at least as many samples as the draw has pixels along both
+/// axes, and at least one, so the reduced grid is never drawn magnified; none
+/// where the drawn size is not finite; and never more than `levels`, so the
+/// figure is the discard the decoder applies. A shift past 31 would leave no
+/// sample of a `u32` side, so none is asked for.
+///
+/// `W >> d` is compared as it stands: an integer under `2^32`, which `f64`
+/// holds exactly, so the comparison is the same on every target.
+fn jpx_discard((width, height): (u32, u32), levels: u8, request: &ImageRequest) -> u8 {
+    let (across, down) = request.drawn;
+    if !(across.is_finite() && down.is_finite()) {
+        return 0;
+    }
+    let holds = |samples: u32, d: u8, drawn: f64| f64::from(samples >> d) >= drawn.max(1.0);
+    let mut d = 0u8;
+    while d < levels.min(31) && holds(width, d + 1, across) && holds(height, d + 1, down) {
+        d += 1;
+    }
+    d
+}
+
+/// How many of a JPEG 2000 image's own columns, or rows, stand before its
+/// first decoded sample's cell once `d` levels are dropped
+/// ([`Reduced::skip`]): the grid reduced by `2^d` puts that sample at
+/// `ceil(origin / 2^d)`, whose cell covers the full grid from `2^d` times it
+/// (T.800 B.5), and the image starts at `origin`. Less than a cell, so it
+/// fits.
+fn jpx_skip(origin: u32, d: u8) -> u32 {
+    let cell = 1u64 << d.min(31);
+    let start = u64::from(origin).div_ceil(cell) * cell;
+    u32::try_from(start - u64::from(origin)).unwrap_or(0)
+}
+
+/// The ceiling every JPEG 2000 decode and header read here is held to: a
+/// decoded stream's.
+fn jpx_limits() -> tinker_pdf_filters::Limits {
+    tinker_pdf_filters::Limits::new(limits::MAX_DECODED_STREAM)
 }
 
 /// What a page's resources work out once and every render of the page can
@@ -249,7 +330,8 @@ struct Caches {
     /// Decoded images, kept because a page may draw one many times: by the
     /// resource name, each name's decodes by the reduction they were made at
     /// (`ImageEntry`), so a hit hands back exactly what that size's miss
-    /// computes (`docs/design/jpeg-speed.md`, "The scale rule").
+    /// computes (`docs/design/jpeg-speed.md`, "The scale rule";
+    /// `docs/design/jpx-speed.md`, "The page's request").
     images: Flights<Vec<u8>, Arc<ImageEntry>>,
     /// Compiled ICC transforms, by the profile stream's object number.
     ///
@@ -4240,16 +4322,15 @@ impl GlyphSource for PageResources {
             let at = decoded.at;
             entry.decoded.read(at, || Filled::Keep(decoded.cached));
             // Bounded by names, as a hostile page could name thousands; a
-            // name has at most four sizes.
+            // name has at most four sizes as a JPEG and thirty-two as a JPEG
+            // 2000 codestream, one for each level it can drop and none.
             if self.caches.images.len() <= MAX_CACHED_IMAGES {
                 Filled::Keep(entry)
             } else {
                 Filled::Once(entry)
             }
         });
-        let at = entry
-            .frame
-            .map_or(1, |frame| reduction(jpeg_scale(frame, request)));
+        let at = entry.frame.map_or(1, |frame| frame.reduction(request));
         let cached = entry.decoded.read(at, || {
             made.set(true);
             Filled::Keep(self.decode_cached(name, request).0.cached)
@@ -4275,7 +4356,7 @@ impl PageResources {
     /// Decodes image XObject `name` for a draw that asks as `request` does —
     /// the decoder run of a miss, counted as one — and hands it back as the
     /// cache keeps it, with the frame later draws read their size against.
-    fn decode_cached(&self, name: &[u8], request: &ImageRequest) -> (Kept, Option<(u32, u32)>) {
+    fn decode_cached(&self, name: &[u8], request: &ImageRequest) -> (Kept, Option<Frame>) {
         self.count(Counter::ImageMisses);
         self.count(Counter::ImagesDecoded);
         let label = String::from_utf8_lossy(name).into_owned();
@@ -4378,7 +4459,7 @@ impl PageResources {
                 learnt.set(Some(entry));
                 Fill::Keep(frame, key_bytes)
             });
-            frame.map_or(1, |frame| reduction(jpeg_scale(frame, request)))
+            frame.map_or(1, |frame| frame.reduction(request))
         } else {
             1
         };
@@ -4404,18 +4485,19 @@ impl PageResources {
         Some(kept.handed())
     }
 
-    /// Whether a draw's size can reduce the decode of image `dict`: a JPEG
-    /// with no soft mask (11.6.5.3) and no `/Mask` of either form (8.9.6.3,
-    /// 8.9.6.4), which are sampled against the grid they were drawn for
-    /// ([`PageResources::decode_image`]).
+    /// Whether a draw's size can reduce the decode of image `dict`: a JPEG or
+    /// a JPEG 2000 codestream with no soft mask (11.6.5.3) and no `/Mask` of
+    /// either form (8.9.6.3, 8.9.6.4), which are sampled against the grid they
+    /// were drawn for ([`PageResources::decode_image`]). Each codec's own path
+    /// decodes an image of palette indices whole too ([`Frame`]).
     fn reducible(&self, dict: &Dict) -> bool {
         let masked =
             dict.get_ref(self.name(b"SMask")).is_some() || dict.get(self.name(b"Mask")).is_some();
-        let jpeg = matches!(
+        let codec = matches!(
             self.last_filter(dict).as_deref(),
-            Some(b"DCTDecode") | Some(b"DCT")
+            Some(b"DCTDecode") | Some(b"DCT") | Some(b"JPXDecode")
         );
-        jpeg && !masked
+        codec && !masked
     }
 }
 
@@ -5381,10 +5463,12 @@ impl PageResources {
     /// Decodes one image XObject to RGB (8.9) for a draw that asks as
     /// `request` does, and says what the draws after it read their size from.
     ///
-    /// Only a JPEG is decoded smaller than it is, and only one with no mask:
-    /// a soft mask (11.6.5.3) or a `/Mask` of either form (8.9.6.3, 8.9.6.4)
-    /// is sampled against the grid it was drawn for, so an image with one is
-    /// decoded at full size whatever the draw asks.
+    /// Only a JPEG and a JPEG 2000 codestream are decoded smaller than they
+    /// are, and only one with no mask: a soft mask (11.6.5.3) or a `/Mask` of
+    /// either form (8.9.6.3, 8.9.6.4) is sampled against the grid it was drawn
+    /// for, so an image with one is decoded at full size whatever the draw
+    /// asks. Each codec's own path decodes an image of palette indices whole
+    /// too ([`Frame`]).
     fn decode_image(&self, name: &[u8], request: &ImageRequest) -> Decoded {
         let Some((dict, reference)) = self.xobject(name) else {
             return Decoded {
@@ -5408,9 +5492,9 @@ impl PageResources {
         } else {
             &ImageRequest::FULL
         };
-        let image = self
+        let decoded = self
             .decode_image_at(&dict, reference, &label, form, request)
-            .map(|mut image| {
+            .map(|(mut image, frame)| {
                 // 11.6.5.3: /SMask is a greyscale image whose samples are this
                 // one's opacity. Without it every soft-masked image — a drop
                 // shadow, a feathered edge, anything composited in a design
@@ -5419,19 +5503,21 @@ impl PageResources {
                     apply_soft_mask(&mut image, &mask);
                     image.soft_masked = true;
                 }
-                image
+                (image, frame)
             });
-        // The frame a later draw's size is read against: the JPEG's own, which
-        // a reduced decode says it stands for and a full one is.
-        let frame = match &image {
-            Ok(image) if reducible => {
-                Some(image.reduced.map_or((image.width, image.height), |grid| {
-                    (grid.full_width, grid.full_height)
-                }))
-            }
-            _ => None,
-        };
-        Decoded { image, frame }
+        // The frame a later draw's size is read against: the codec's own,
+        // which a reduced decode says it stands for and a full one is — none
+        // for an image a mask keeps whole.
+        match decoded {
+            Ok((image, frame)) => Decoded {
+                image: Ok(image),
+                frame: frame.filter(|_| reducible),
+            },
+            Err(codec) => Decoded {
+                image: Err(codec),
+                frame: None,
+            },
+        }
     }
 
     /// Records that an image decoded with something tolerated (ruling 10).
@@ -5676,6 +5762,11 @@ impl PageResources {
     /// the image's RGB, so the decode holds a strip and its coefficients
     /// beside the image and no more; what it held is counted into
     /// [`crate::Stats::jpeg_held`].
+    ///
+    /// The frame it hands back beside the image is the JPEG's own size, which
+    /// a later draw's scale is read against; none under an `/Indexed` space,
+    /// whose samples are indices (8.6.6.3) — a smaller scale averages them
+    /// into indices no sample chose — so such a JPEG is decoded whole.
     fn jpeg_image(
         &self,
         raw: &[u8],
@@ -5684,7 +5775,13 @@ impl PageResources {
         named: Option<ColorSpace>,
         name: &[u8],
         request: &ImageRequest,
-    ) -> Result<DecodedImage, String> {
+    ) -> Result<(DecodedImage, Option<Frame>), String> {
+        let indexed = matches!(named, Some(ColorSpace::Indexed { .. }));
+        let request = if indexed {
+            &ImageRequest::FULL
+        } else {
+            request
+        };
         let mut into = JpegInto {
             resources: self,
             named,
@@ -5722,8 +5819,13 @@ impl PageResources {
             full_width: layout.full_width,
             full_height: layout.full_height,
             factor: reduction(layout.scale),
+            skip: (0, 0),
         });
-        Ok(DecodedImage {
+        let frame = (!indexed).then_some(Frame::Jpeg {
+            width: layout.full_width,
+            height: layout.full_height,
+        });
+        let image = DecodedImage {
             width: layout.width,
             height: layout.height,
             rgb,
@@ -5734,7 +5836,8 @@ impl PageResources {
             interpolate,
             two_colour: None,
             reduced,
-        })
+        };
+        Ok((image, frame))
     }
 
     /// A JPEG 2000 image's pixels, ready to blit (8.9.5.4), in `named`, the
@@ -5767,6 +5870,23 @@ impl PageResources {
     ///   does is refused by name rather than rendered as a stencil of something.
     /// - **`/SMaskInData`** decides what happens to the codestream's *own*
     ///   opacity channel, which the filters crate has already separated out.
+    ///
+    /// # The levels it decodes
+    ///
+    /// A draw that asks for less than the codestream's size is decoded with
+    /// the most resolution levels dropped whose image still covers it
+    /// ([`jpx_discard`], `docs/design/jpx-speed.md`, "The page's request"),
+    /// held to the codestream's own size as its header gives it rather than
+    /// to the dictionary's, and its samples placed over the image they stand
+    /// for ([`Reduced`]). The frame it hands back beside the image is that
+    /// size and the levels the codestream can drop, which a later draw's
+    /// discard is read against; none under an `/Indexed` space, whose samples
+    /// are indices (8.6.6.3) a lower resolution would average, so such an
+    /// image is decoded whole — as the decoder decodes one a `pclr` palette
+    /// reads ([`tinker_pdf_filters::JpxImage::levels`]). What the decode did
+    /// is counted into [`crate::Stats::jpx_levels_synthesised`],
+    /// [`crate::Stats::jpx_code_blocks_decoded`] and
+    /// [`crate::Stats::jpx_levels_discarded`].
     fn jpx_image(
         &self,
         raw: &[u8],
@@ -5774,7 +5894,8 @@ impl PageResources {
         interpolate: bool,
         named: Option<ColorSpace>,
         name: &[u8],
-    ) -> Result<DecodedImage, String> {
+        request: &ImageRequest,
+    ) -> Result<(DecodedImage, Option<Frame>), String> {
         let smask_in_data = dict.get_int(self.name(b"SMaskInData")).unwrap_or(0);
         let image_mask = dict.get_bool(self.name(b"ImageMask")).unwrap_or(false);
         if image_mask {
@@ -5784,12 +5905,51 @@ impl PageResources {
             return Err("JPXDecode with /ImageMask".to_string());
         }
 
+        // The codestream's own size and origin, read before a sample is
+        // decoded. A header the read refuses is a codestream the decode
+        // refuses at the same stage, so it is asked for whole and refused
+        // with its reason.
+        let header = tinker_pdf_filters::jpx_header(raw, &jpx_limits()).ok();
+        let indexed = matches!(named, Some(ColorSpace::Indexed { .. }));
+        let discard = match header {
+            Some(header) if !indexed => {
+                jpx_discard((header.width, header.height), u8::MAX, request)
+            }
+            _ => 0,
+        };
         let mut warnings = Vec::new();
-        let decoded = Self::jpx_samples(raw, &mut warnings);
+        let decoded = Self::jpx_samples(
+            raw,
+            &tinker_pdf_filters::JpxRequest {
+                discard,
+                window: None,
+            },
+            &mut warnings,
+        );
         for warning in &warnings {
             self.report_damaged_image(name, *warning);
         }
-        let image = decoded?;
+        let (image, counts) = decoded?;
+        stats::jpx_decoded(
+            self.op.work.as_deref(),
+            counts.levels_synthesised,
+            counts.code_blocks_decoded,
+            image.discard,
+        );
+        let reduced = header.filter(|_| image.discard > 0).map(|header| Reduced {
+            full_width: header.width,
+            full_height: header.height,
+            factor: 1 << image.discard.min(31),
+            skip: (
+                jpx_skip(header.origin.0, image.discard),
+                jpx_skip(header.origin.1, image.discard),
+            ),
+        });
+        let frame = header.filter(|_| !indexed).map(|header| Frame::Jpx {
+            width: header.width,
+            height: header.height,
+            levels: image.levels,
+        });
 
         let count = (image.width as usize) * (image.height as usize);
         let drawn = self.codec_space(named, usize::from(image.components), name);
@@ -5852,7 +6012,7 @@ impl PageResources {
 
         // `/SMaskInData`'s opacity is the only alpha a codestream brings.
         let soft_masked = !alpha.is_empty();
-        Ok(DecodedImage {
+        let decoded = DecodedImage {
             width: image.width,
             height: image.height,
             rgb,
@@ -5862,8 +6022,9 @@ impl PageResources {
             soft_masked,
             interpolate,
             two_colour: None,
-            reduced: None,
-        })
+            reduced,
+        };
+        Ok((decoded, frame))
     }
 
     /// A JPEG 2000 image's samples in the codestream's own colour, by how
@@ -6004,21 +6165,22 @@ impl PageResources {
     /// past eight bits, with any opacity channel carried apart (8.9.5.4).
     ///
     /// The one decode both [`Self::jpx_image`] and [`crate::Page::images`]
-    /// make, under the one ceiling.
+    /// make, under the one ceiling: asked for what `request` names — the
+    /// whole image for `Page::images` — with what the decode did counted
+    /// beside it.
     fn jpx_samples(
         raw: &[u8],
+        request: &tinker_pdf_filters::JpxRequest,
         warnings: &mut Vec<tinker_pdf_filters::Warning>,
-    ) -> Result<tinker_pdf_filters::JpxImage, String> {
-        tinker_pdf_filters::jpx_decode(
-            raw,
-            &tinker_pdf_filters::Limits::new(limits::MAX_DECODED_STREAM),
-            warnings,
-        )
-        .map_err(|e| format!("{e:?}"))
+    ) -> Result<(tinker_pdf_filters::JpxImage, tinker_pdf_filters::JpxCounts), String> {
+        tinker_pdf_filters::jpx_decode_request(raw, &jpx_limits(), request, warnings)
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// Decodes an image from its dictionary, wherever that came from, a
-    /// one-bit image of one component held as `form` asks.
+    /// one-bit image of one component held as `form` asks, for a draw that
+    /// asks as `request` does; and, beside it, the frame a codec that can
+    /// answer a drawn size found the image to be ([`Frame`]).
     fn decode_image_at(
         &self,
         dict: &Dict,
@@ -6026,7 +6188,7 @@ impl PageResources {
         name: &str,
         form: SampleForm,
         request: &ImageRequest,
-    ) -> Result<DecodedImage, String> {
+    ) -> Result<(DecodedImage, Option<Frame>), String> {
         let dict = dict.clone();
         let name = name.as_bytes();
 
@@ -6105,7 +6267,7 @@ impl PageResources {
                 .image_input(reference)
                 .map_err(|_| "JPXDecode".to_string())?;
             let named = self.image_space(&dict, name);
-            return self.jpx_image(&raw, &dict, interpolate, named, name);
+            return self.jpx_image(&raw, &dict, interpolate, named, name, request);
         }
 
         let (data, bpc) = self.stream_samples(
@@ -6149,7 +6311,7 @@ impl PageResources {
             form,
         );
 
-        Ok(DecodedImage {
+        let image = DecodedImage {
             width,
             height,
             rgb,
@@ -6166,7 +6328,8 @@ impl PageResources {
                 tinker_pdf_render::color_family(&space)
             },
             soft_masked: false,
-        })
+        };
+        Ok((image, None))
     }
 
     /// 8.9.6.4's colour-key mask: one inclusive range of **raw** sample values
@@ -6406,14 +6569,16 @@ impl PageResources {
                 // An inline image carries no mask (Table 93), so its JPEG is
                 // decoded at the size the draw asks.
                 let named = self.inline_space(dict);
-                return self.jpeg_image(
-                    &data,
-                    &decode,
-                    interpolate,
-                    named,
-                    INLINE_NAME.as_bytes(),
-                    request,
-                );
+                return self
+                    .jpeg_image(
+                        &data,
+                        &decode,
+                        interpolate,
+                        named,
+                        INLINE_NAME.as_bytes(),
+                        request,
+                    )
+                    .map(|(image, _)| image);
             }
             InlineSamples::Jpx(data) => {
                 // The same entry point the XObject path takes, for the same
@@ -6421,9 +6586,20 @@ impl PageResources {
                 // behind it: a second call site here would not change any
                 // signature, so nothing in the build could notice it drifting
                 // from 8.9.5.4's rules about which of the dictionary's claims
-                // survive a codestream that describes itself.
+                // survive a codestream that describes itself. No mask either,
+                // so it too is decoded at the size the draw asks; an inline
+                // image is never cached, so its frame is read by no later draw.
                 let named = self.inline_space(dict);
-                return self.jpx_image(&data, dict, interpolate, named, INLINE_NAME.as_bytes());
+                return self
+                    .jpx_image(
+                        &data,
+                        dict,
+                        interpolate,
+                        named,
+                        INLINE_NAME.as_bytes(),
+                        request,
+                    )
+                    .map(|(image, _)| image);
             }
         };
         // 7.4.6: fax output is one bit per pixel whatever the dictionary
@@ -6506,6 +6682,7 @@ impl PageResources {
             &ImageRequest::FULL,
         )
         .ok()
+        .map(|(image, _)| image)
     }
 }
 
@@ -6606,7 +6783,14 @@ impl PageResources {
                 let decoded = self
                     .image_input(reference)
                     .map_err(|_| "JPXDecode".to_string())
-                    .and_then(|raw| Self::jpx_samples(&raw, &mut warnings));
+                    .and_then(|raw| {
+                        Self::jpx_samples(
+                            &raw,
+                            &tinker_pdf_filters::JpxRequest::default(),
+                            &mut warnings,
+                        )
+                    })
+                    .map(|(jpx, _)| jpx);
                 for warning in &warnings {
                     self.report_damaged_image(name, *warning);
                 }
@@ -6731,8 +6915,12 @@ impl PageResources {
                 Ok(InlineSamples::Jpx(bytes)) => {
                     image.codec = crate::SampleCodec::Jpx;
                     let mut warnings = Vec::new();
-                    match Self::jpx_samples(&bytes, &mut warnings) {
-                        Ok(jpx) => take_jpx(&mut image, jpx),
+                    match Self::jpx_samples(
+                        &bytes,
+                        &tinker_pdf_filters::JpxRequest::default(),
+                        &mut warnings,
+                    ) {
+                        Ok((jpx, _)) => take_jpx(&mut image, jpx),
                         Err(why) => image.refused = Some(why),
                     }
                     for warning in &warnings {
@@ -7779,10 +7967,128 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_inline_abbreviations, Answer, Contents, PageResources, Remembered};
+    use super::{
+        expand_inline_abbreviations, jpx_discard, jpx_skip, Answer, Contents, Frame, PageResources,
+        Remembered,
+    };
     use tinker_pdf_color::{ColorSpace, Colorant};
     use tinker_pdf_content::{ColorantKind, FontSource};
     use tinker_pdf_cos::{Name, ObjRef, Object};
+    use tinker_pdf_render::ImageRequest;
+
+    /// A draw of `across` by `down` pixels.
+    fn drawn(across: f64, down: f64) -> ImageRequest {
+        ImageRequest {
+            drawn: (across, down),
+        }
+    }
+
+    /// **The discard is the most levels whose image covers the draw**
+    /// (`docs/design/jpx-speed.md`, "The page's request"): `W >> d` by
+    /// `H >> d` at least the drawn pixels both ways, the floor whatever the
+    /// codestream's origin, so a quarter of an odd side drops one level fewer
+    /// than a quarter of an even one; never more than the codestream can
+    /// drop; at least one sample left however small the draw; and none for a
+    /// size that is not finite or a draw larger than the image.
+    #[test]
+    fn a_jpx_discard_is_the_most_levels_whose_image_covers_the_draw() {
+        let size = (620, 877);
+        for (request, levels, want, what) in [
+            (drawn(620.0, 877.0), 5, 0, "its own size"),
+            (drawn(621.0, 877.0), 5, 0, "magnified"),
+            (drawn(310.0, 438.0), 5, 1, "a half, the floor of each side"),
+            (drawn(310.0, 438.5), 5, 0, "a hair past half its height"),
+            (drawn(155.0, 219.0), 5, 2, "a quarter, floored"),
+            (
+                drawn(155.0, 219.25),
+                5,
+                1,
+                "an exact quarter of an odd side",
+            ),
+            (drawn(19.0, 27.0), 5, 5, "a thirty-second"),
+            (drawn(1.0, 1.0), 5, 5, "a pixel, clamped to the levels"),
+            (drawn(1.0, 1.0), 2, 2, "a pixel of a codestream of two"),
+            (drawn(1.0, 1.0), 0, 0, "a codestream that can drop none"),
+            (
+                drawn(155.0, 877.0),
+                5,
+                0,
+                "a quarter of its width and all its height",
+            ),
+            (
+                drawn(0.0, 0.0),
+                40,
+                9,
+                "nothing drawn: at least a sample left",
+            ),
+            (drawn(f64::INFINITY, 1.0), 5, 0, "an unbounded size"),
+            (drawn(f64::NAN, 1.0), 5, 0, "a size that is no number"),
+            (ImageRequest::FULL, 5, 0, "the whole image"),
+        ] {
+            assert_eq!(jpx_discard(size, levels, &request), want, "{what}");
+        }
+        // Thirty-one is the most a shift leaves a sample of, whatever the
+        // levels say.
+        assert_eq!(
+            jpx_discard((u32::MAX, u32::MAX), u8::MAX, &drawn(1.0, 1.0)),
+            31
+        );
+        assert_eq!(jpx_discard((1, 1), u8::MAX, &drawn(0.5, 0.5)), 0);
+    }
+
+    /// **The skip is how far into the image the first reduced cell starts**
+    /// (T.800 B.5): none at the grid's origin or at any multiple of the cell,
+    /// and the rest of the cell otherwise.
+    #[test]
+    fn a_jpx_skip_is_where_the_first_reduced_cell_starts() {
+        for (origin, d, want) in [
+            (0, 0, 0),
+            (0, 5, 0),
+            (3, 0, 0),
+            (3, 1, 1),
+            (3, 2, 1),
+            (5, 2, 3),
+            (8, 3, 0),
+            (9, 3, 7),
+            (u32::MAX, 31, 1),
+            (u32::MAX, 40, 1),
+        ] {
+            assert_eq!(jpx_skip(origin, d), want, "{origin} at {d} dropped");
+        }
+    }
+
+    /// **A frame's reduction is the key its draws are cached under**: a
+    /// JPEG's the denominator of its scale, a codestream's two to the levels
+    /// it drops, and either one at the image's own size.
+    #[test]
+    fn a_frames_reduction_is_its_scale() {
+        let jpeg = Frame::Jpeg {
+            width: 512,
+            height: 384,
+        };
+        let jpx = Frame::Jpx {
+            width: 620,
+            height: 877,
+            levels: 5,
+        };
+        for (frame, request, want) in [
+            (jpeg, drawn(512.0, 384.0), 1),
+            (jpeg, drawn(256.0, 192.0), 2),
+            (jpeg, drawn(128.0, 96.0), 4),
+            (jpeg, drawn(1.0, 1.0), 8),
+            (jpx, drawn(620.0, 877.0), 1),
+            (jpx, drawn(155.0, 219.0), 4),
+            (jpx, drawn(1.0, 1.0), 32),
+            (jpx, ImageRequest::FULL, 1),
+        ] {
+            assert_eq!(
+                frame.reduction(&request),
+                want,
+                "{frame:?} drawn {:?}",
+                request.drawn
+            );
+        }
+    }
 
     /// An image's colour is converted once however many pixels repeat it, and
     /// two colours whose samples share a slot each get their own answer — the

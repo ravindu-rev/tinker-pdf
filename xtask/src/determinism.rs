@@ -249,6 +249,13 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/images.rs",
         test: "a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel",
     },
+    // MS-01's A7 guard, its JPX half: a JPEG 2000 image drawn at a quarter of
+    // its size each way synthesises two levels fewer a tile-component, on
+    // every target.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/jpx_images.rs",
+        test: "a_jpx_image_drawn_at_a_quarter_decodes_two_levels_fewer",
+    },
     // MS-01's A8 guard: the PNG path's whole-image scratch, none, and its
     // peak with the file at most 1.2 x the image.
     Fingerprint {

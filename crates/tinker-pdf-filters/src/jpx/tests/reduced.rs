@@ -18,10 +18,10 @@
 //! dequantises to the same coefficients whether it sits under `N` levels or
 //! `N - d`: a derived step depends on the level count.
 
-use super::writer::{coded, At, Spec};
+use super::writer::{boxed, coded, At, Spec, SIGNATURE};
 use crate::jpx::codestream::parse;
 use crate::jpx::tier2::{layout_for_test, Orientation};
-use crate::jpx::{jpx_decode, jpx_decode_request, JpxImage, JpxRequest};
+use crate::jpx::{jpx_decode, jpx_decode_request, jpx_header, JpxImage, JpxRequest};
 use crate::{Capability, FilterError, Limits};
 
 /// Which of Annex F's filters a codestream is coded with.
@@ -174,10 +174,12 @@ fn a_reduced_decode_is_the_full_decode_of_its_own_low_bands() {
                     whole.samples.iter().any(|&s| s != whole.samples[0]),
                     "{filter:?}, {shape}, {levels} levels: the picture is not flat"
                 );
+                assert_eq!(whole.levels, levels, "every level can be dropped");
                 for d in 0..=levels {
                     let case = format!("{filter:?}, {shape}, {levels} levels, {d} dropped");
                     let got = decode_dropping(&bytes, d);
                     assert_eq!(got.discard, d, "{case}");
+                    assert_eq!(got.levels, levels, "{case}: what can be dropped");
                     let want = decode_whole(&coded(&reduced(&full, d), &noise));
                     same_picture(&got, &want, &case);
                     if d == 0 {
@@ -319,11 +321,16 @@ fn a_damaged_codestream_decodes_or_refuses_by_name_at_every_discard() {
 
 /// B.5's grid, on its own: the reduced image is the full one's area divided
 /// by `2^d` and rounded up at both ends, so an odd origin can make it a
-/// sample wider or narrower than half the full width.
+/// sample wider or narrower than half the full width. The header read says
+/// where that origin is, which is what a caller placing the reduced image
+/// over the full one reads its first cell's start from.
 #[test]
 fn a_reduced_image_lies_on_the_reference_grid_divided_by_two_to_the_d() {
     let full = spec(Filter::Reversible, 3, &[(8, false, 1, 1)], false);
     let bytes = coded(&full, &noise);
+    let header = jpx_header(&bytes, &limits()).expect("the header reads");
+    assert_eq!(header.origin, (3, 5), "XOsiz and YOsiz");
+    assert_eq!((header.width, header.height), (37, 29), "the image area");
     for d in 0..=3u8 {
         let image = decode_dropping(&bytes, d);
         let r = |v: u32| v.div_ceil(1 << d);
@@ -343,11 +350,100 @@ fn a_discard_past_the_levels_is_clamped_to_them() {
     let full = spec(Filter::Irreversible, 2, &[(8, false, 1, 1)], false);
     let bytes = coded(&full, &noise);
     let deepest = decode_dropping(&bytes, 2);
+    assert_eq!(deepest.levels, 2, "the most it can drop");
     for asked in [3u8, 7, 32, u8::MAX] {
         let image = decode_dropping(&bytes, asked);
         assert_eq!(image.discard, 2, "asked for {asked}");
         assert_eq!(image, deepest, "asked for {asked}");
     }
+}
+
+/// `codestream`, one component of `width` by `height` eight-bit samples,
+/// wrapped in JP2 boxes whose `pclr` maps the component through a palette of
+/// 256 entries in three columns (T.800 I.5.3.4, I.5.3.5): entry `i` is
+/// `(i, 255 - i, i / 2)`, so no two entries share a colour.
+fn through_a_palette(codestream: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut pclr = vec![0x01, 0x00, 3, 7, 7, 7]; // NE = 256, NPC = 3, 8-bit unsigned
+    for i in 0..=255u8 {
+        pclr.extend_from_slice(&[i, 255 - i, i / 2]);
+    }
+    let cmap: Vec<u8> = (0..3u8).flat_map(|column| [0, 0, 1, column]).collect();
+    let mut ihdr = height.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&[0, 1, 7, 7, 0, 0]);
+    let mut header = boxed(*b"ihdr", &ihdr);
+    header.extend(boxed(*b"colr", &[1, 0, 0, 0, 0, 0, 16])); // EnumCS 16, sRGB
+    header.extend(boxed(*b"pclr", &pclr));
+    header.extend(boxed(*b"cmap", &cmap));
+    let mut file = SIGNATURE.to_vec();
+    file.extend(boxed(*b"ftyp", b"jp2 \0\0\0\0jp2 "));
+    file.extend(boxed(*b"jp2h", &header));
+    file.extend(boxed(*b"jp2c", codestream));
+    file
+}
+
+/// **A codestream a palette reads drops no level** (`JpxImage::levels`): its
+/// component's samples are indices, and a lower resolution averages two
+/// indices into a third that selects a colour neither sample has. So asked
+/// for any discard it decodes whole and says it dropped none and can drop
+/// none, sample for sample the decode that asked for none — while the same
+/// codestream bare, its samples grey levels, drops what it is asked to. A
+/// window of it is still a window: a crop averages nothing.
+#[test]
+fn a_codestream_a_palette_reads_is_decoded_whole_at_every_discard() {
+    let full = Spec {
+        xosiz: 0,
+        yosiz: 0,
+        ..spec(Filter::Reversible, 3, &[(8, false, 1, 1)], false)
+    };
+    let bare = coded(&full, &noise);
+    let indexed = through_a_palette(&bare, 40, 34);
+    let whole = decode_whole(&indexed);
+    assert_eq!((whole.width, whole.height, whole.components), (40, 34, 3));
+    assert_eq!(
+        (whole.discard, whole.levels),
+        (0, 0),
+        "nothing can be dropped"
+    );
+    for asked in [1u8, 2, 3, 9, u8::MAX] {
+        let image = decode_dropping(&indexed, asked);
+        assert_eq!(image.discard, 0, "asked for {asked}");
+        assert_eq!(image, whole, "asked for {asked}: the whole decode");
+        let grey = decode_dropping(&bare, asked);
+        assert_eq!(grey.levels, 3, "asked for {asked}");
+        assert_eq!(
+            grey.discard,
+            asked.min(3),
+            "asked for {asked}: the bare one drops"
+        );
+    }
+    let mut warnings = Vec::new();
+    let (cropped, _) = jpx_decode_request(
+        &indexed,
+        &limits(),
+        &JpxRequest {
+            discard: 2,
+            window: Some(crate::jpx::JpxWindow {
+                x: 5,
+                y: 7,
+                width: 11,
+                height: 9,
+            }),
+        },
+        &mut warnings,
+    )
+    .expect("a window of it decodes");
+    assert_eq!((cropped.width, cropped.height, cropped.discard), (11, 9, 0));
+    let crop: Vec<u8> = (7..16usize)
+        .flat_map(|y| {
+            let start = (y * 40 + 5) * 3;
+            whole.samples[start..start + 11 * 3].iter().copied()
+        })
+        .collect();
+    assert!(
+        cropped.samples == crop,
+        "the window is the whole decode's crop"
+    );
 }
 
 /// Guard A7's leaf half (`docs/design/jpx-speed.md`, "Guard A7's JPX

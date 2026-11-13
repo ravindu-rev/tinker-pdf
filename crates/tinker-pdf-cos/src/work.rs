@@ -383,6 +383,30 @@ pub struct Stats {
     /// Counted by `tinker-pdf-filters`' strip decode, which hands it back as a
     /// value (`JpegFrame::transformed`), and added by the facade's image path.
     pub jpeg_samples_transformed: u64,
+    /// Inverse-wavelet levels the JPEG 2000 decodes synthesised, every
+    /// tile-component of every decode summed: a tile-component of `N` levels
+    /// decoded with `d` dropped synthesises `N − d`
+    /// (`docs/design/jpx-speed.md`, "Guard A7's JPX half"). A quantity of
+    /// the decode that grows with its tiles and components rather than a
+    /// step over the document, so [`Stats::work`] leaves it out.
+    ///
+    /// Counted by `tinker-pdf-filters`' decode, which hands it back as a
+    /// value (`JpxCounts::levels_synthesised`), and added by the facade's
+    /// image path.
+    pub jpx_levels_synthesised: u64,
+    /// Code-blocks the JPEG 2000 decodes' tier-1 decoded, every decode
+    /// summed: a dropped resolution's are none of them. Left out of
+    /// [`Stats::work`] as `jpx_levels_synthesised` is.
+    ///
+    /// Counted with `jpx_levels_synthesised` (`JpxCounts::code_blocks_decoded`).
+    pub jpx_code_blocks_decoded: u64,
+    /// Resolution levels the JPEG 2000 decodes dropped from the top, each
+    /// decode's applied discard summed (`JpxImage::discard`): which
+    /// reduction a decode chose, read back with T.800 B.5's size rule.
+    /// Left out of [`Stats::work`] as `jpx_levels_synthesised` is.
+    ///
+    /// Counted with `jpx_levels_synthesised`.
+    pub jpx_levels_discarded: u64,
     /// Parts of a pooled operation that ran on one of the pool's worker
     /// threads (`tinker_pdf_pool::on_worker`): a page of a page walk, counted
     /// into that page's own operation, whose bitmap or text it is; and a page
@@ -616,15 +640,16 @@ impl Stats {
     ///
     /// The maxima and the quantities are left out —
     /// `most_decodes_of_one_stream`, `bytes_decoded`, `png_image_scratch`,
-    /// `png_peak`, `jpeg_held`, `jpeg_samples_transformed`, the four pixel
-    /// counts of group buffers and soft masks, `pixels_rendered` and
-    /// `cache_bytes_held` — because a byte, sample or pixel total grows with
-    /// the page and would hide a step count that grows with the document.
-    /// `bytes_scanned` is in: each of its bytes is a step the repair scan
-    /// took, not output. The two pool counts are out too: they say on which
-    /// thread a part ran, and the part's own steps are counted where they
-    /// were taken, so a page walked on a pool totals what the same page
-    /// rendered alone does.
+    /// `png_peak`, `jpeg_held`, `jpeg_samples_transformed`, the three JPEG
+    /// 2000 figures `jpx_levels_synthesised`, `jpx_code_blocks_decoded` and
+    /// `jpx_levels_discarded`, the four pixel counts of group buffers and soft
+    /// masks, `pixels_rendered` and `cache_bytes_held` — because a byte,
+    /// sample, pixel or decode total grows with the page and its images and
+    /// would hide a step count that grows with the document. `bytes_scanned`
+    /// is in: each of its bytes is a step the repair scan took, not output.
+    /// The two pool counts are out too: they say on which thread a part ran,
+    /// and the part's own steps are counted where they were taken, so a page
+    /// walked on a pool totals what the same page rendered alone does.
     /// And so are the per-render statistics, `drawn_glyphs` to
     /// `decoded_image_samples`: they classify calls whose steps are counted
     /// where they were taken.
@@ -844,6 +869,15 @@ impl Add for Stats {
             jpeg_samples_transformed: self
                 .jpeg_samples_transformed
                 .saturating_add(other.jpeg_samples_transformed),
+            jpx_levels_synthesised: self
+                .jpx_levels_synthesised
+                .saturating_add(other.jpx_levels_synthesised),
+            jpx_code_blocks_decoded: self
+                .jpx_code_blocks_decoded
+                .saturating_add(other.jpx_code_blocks_decoded),
+            jpx_levels_discarded: self
+                .jpx_levels_discarded
+                .saturating_add(other.jpx_levels_discarded),
             pool_items_on_workers: self
                 .pool_items_on_workers
                 .saturating_add(other.pool_items_on_workers),
@@ -994,6 +1028,24 @@ impl Work {
         if let Ok(mut tally) = self.counts.lock() {
             let stats = &mut tally.stats;
             stats.cache_bytes_held = stats.cache_bytes_held.max(bytes);
+        }
+    }
+
+    /// Adds what one JPEG 2000 decode did: the inverse-wavelet levels it
+    /// synthesised, the code-blocks its tier-1 decoded and the resolution
+    /// levels it dropped ([`Stats::jpx_levels_synthesised`],
+    /// [`Stats::jpx_code_blocks_decoded`], [`Stats::jpx_levels_discarded`]),
+    /// each saturating.
+    pub fn jpx_decoded(&self, levels_synthesised: u64, code_blocks: u64, levels_discarded: u64) {
+        if let Ok(mut tally) = self.counts.lock() {
+            let stats = &mut tally.stats;
+            stats.jpx_levels_synthesised = stats
+                .jpx_levels_synthesised
+                .saturating_add(levels_synthesised);
+            stats.jpx_code_blocks_decoded =
+                stats.jpx_code_blocks_decoded.saturating_add(code_blocks);
+            stats.jpx_levels_discarded =
+                stats.jpx_levels_discarded.saturating_add(levels_discarded);
         }
     }
 
@@ -1400,6 +1452,59 @@ mod tests {
         let sum = stats + other.stats();
         assert_eq!(sum.cache_bytes_held, 90_000);
         assert_eq!(other.stats() + stats, sum, "in either order");
+    }
+
+    /// A JPEG 2000 decode's three figures are quantities: each decode's are
+    /// added into its own field, saturating, in a tally and across `+`, and
+    /// none is a step `work()` totals.
+    #[test]
+    fn a_jpx_decodes_figures_sum_into_their_own_fields_and_count_no_work() {
+        let work = Work::new();
+        work.jpx_decoded(9, 40, 2);
+        work.jpx_decoded(15, 120, 0);
+        let stats = work.stats();
+        assert_eq!(
+            (
+                stats.jpx_levels_synthesised,
+                stats.jpx_code_blocks_decoded,
+                stats.jpx_levels_discarded
+            ),
+            (24, 160, 2)
+        );
+        assert_eq!(stats.work(), 0, "a decode's figures are no step");
+        assert_eq!(
+            Stats {
+                jpx_levels_synthesised: 0,
+                jpx_code_blocks_decoded: 0,
+                jpx_levels_discarded: 0,
+                ..stats
+            },
+            Stats::default(),
+            "nothing else counted"
+        );
+        let other = Work::new();
+        other.jpx_decoded(3, 5, 1);
+        let sum = stats + other.stats();
+        assert_eq!(
+            (
+                sum.jpx_levels_synthesised,
+                sum.jpx_code_blocks_decoded,
+                sum.jpx_levels_discarded
+            ),
+            (27, 165, 3)
+        );
+        assert_eq!(other.stats() + stats, sum, "in either order");
+        work.jpx_decoded(u64::MAX, u64::MAX, u64::MAX);
+        let saturated = work.stats();
+        assert_eq!(
+            (
+                saturated.jpx_levels_synthesised,
+                saturated.jpx_code_blocks_decoded,
+                saturated.jpx_levels_discarded
+            ),
+            (u64::MAX, u64::MAX, u64::MAX),
+            "saturating"
+        );
     }
 
     #[test]

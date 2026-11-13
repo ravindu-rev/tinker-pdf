@@ -506,11 +506,11 @@ lands in the step named, in
 | A5 | image extraction, the decode door | `a5_image_extraction_decodes_each_stream_at_most_once` | P-03, P-03.2, landed |
 | A5 | a merge | `a5_a_merge_decodes_each_stream_at_most_once` | P-03, P-03.4, landed |
 | A6 | merge deduplication decodes no byte-identical copy, and each differing encoding under one dictionary once a save (ruling 23) | `a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once` | P-03, P-03.6, landed |
-| A7 | IDCT output ≤ 4 × drawn pixels for a quarter-scale draw | `a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel`, in `crates/tinker-pdf/tests/images.rs` | P-09, P-09.8 |
-| A7 | JPX levels decoded ≤ levels needed | `a_jpx_image_drawn_at_a_quarter_decodes_two_levels_fewer`, in `crates/tinker-pdf/tests/jpx_images.rs` | P-10, P-10.8 |
+| A7 | IDCT output ≤ 4 × drawn pixels for a quarter-scale draw | `a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel`, in `crates/tinker-pdf/tests/images.rs` | P-09, P-09.8, landed |
+| A7 | JPX levels decoded ≤ levels needed | `a_jpx_image_drawn_at_a_quarter_decodes_two_levels_fewer`, in `crates/tinker-pdf/tests/jpx_images.rs` | P-10, P-10.8, landed |
 | A8 | whole-image scratch on the PNG path ≤ 1 × the image | `a8_the_png_path_holds_at_most_one_image_of_scratch` | P-04, P-04.5, landed |
-| A9 | page-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads | `a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads` | P-15, P-15.3 |
-| A9 | band-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads | `a9_band_renders_are_the_serial_page_at_2_3_4_and_7_threads` | P-15, P-15.7 |
+| A9 | page-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads | `a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads` | P-15, P-15.3, landed |
+| A9 | band-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads | `a9_band_renders_are_the_serial_page_at_2_3_4_and_7_threads` | P-15, P-15.7, landed |
 | A10 | allocations O(1) per page: page lookup | `a10_page_lookup_allocates_a_flat_amount_per_page`, in `crates/tinker-pdf/tests/guard_allocations.rs` | P-01, P-01.3, landed |
 | A10 | text | `a10_text_allocates_a_flat_amount_per_page`, in `guard_allocations.rs` | P-01, P-01.3, landed |
 | A10 | render-all at 36 dpi | `a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page`, in `guard_allocations.rs` | P-01, P-01.3, landed |

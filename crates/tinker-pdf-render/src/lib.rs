@@ -474,7 +474,8 @@ pub struct DecodedImage {
     /// Where the decode made the image smaller than it is, the image it
     /// stands for (`docs/design/jpeg-speed.md`, "Placing the reduced grid");
     /// `None` for an image decoded at its full size, which is every image but
-    /// a JPEG a draw asked for at a fraction of its size.
+    /// a JPEG or a JPEG 2000 codestream a draw asked for at a fraction of its
+    /// size.
     pub reduced: Option<Reduced>,
     /// The device space family the samples are in ([`ColorFamily`]): what
     /// black generation and undercolour removal (11.7.5.3) and the grey
@@ -491,14 +492,16 @@ pub struct DecodedImage {
 /// A reduced decode's grid: [`DecodedImage::width`] by
 /// [`DecodedImage::height`] samples standing for an image of
 /// `full_width` by `full_height`, each sample for `factor` of the image's own
-/// samples each way.
+/// samples each way, the first from `skip` of them in.
 ///
-/// Sample `X` covers the image's columns `factor·X` up to `factor·(X + 1)`,
-/// the last cut where the image ends, and rows alike. So the draw maps the
-/// unit square onto `full_width / factor` by `full_height / factor` samples
-/// — the last column and row cut at the square's edge rather than stretched
-/// to it — and the resampler draws that, so the reduced image covers what the
-/// image covers.
+/// Sample `X` covers the image's columns `skip + factor·X` up to
+/// `skip + factor·(X + 1)`, the last cut where the image ends, and rows
+/// alike. So the draw maps the unit square onto `full_width / factor` by
+/// `full_height / factor` samples — the last column and row cut at the
+/// square's edge rather than stretched to it — and the resampler draws that,
+/// so the reduced image covers what the image covers. A column the first
+/// sample's cell starts after takes that sample, as an image's own edge
+/// does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Reduced {
     /// The image's own width, which the unit square spans.
@@ -506,8 +509,17 @@ pub struct Reduced {
     /// The image's own height.
     pub full_height: u32,
     /// How many of the image's samples each way one decoded sample stands
-    /// for: 2, 4 or 8 for a JPEG decoded at a half, a quarter or an eighth.
+    /// for: 2, 4 or 8 for a JPEG decoded at a half, a quarter or an eighth,
+    /// and `2^d` for a JPEG 2000 codestream with `d` levels dropped.
     pub factor: u32,
+    /// How many of the image's own columns and rows stand before the first
+    /// decoded sample's cell, less than `factor`: none for a JPEG, whose
+    /// blocks start at its corner, and none for a JPEG 2000 image whose
+    /// origin on the reference grid is a multiple of `factor` — the reduced
+    /// grid's cells are `factor` of the full grid's from the grid's own
+    /// origin (T.800 B.5), and an image that starts inside one starts that
+    /// far from the next.
+    pub skip: (u32, u32),
 }
 
 /// What a draw asks of an image's decode (`docs/design/jpeg-speed.md`, "The
@@ -551,10 +563,16 @@ impl ImageRequest {
 /// reduced grid"), or `None` where the grid says nothing that can be drawn.
 ///
 /// The `width` samples, each `factor` of the image's own, span
-/// `width · factor / full_width` of the unit square across — at least one —
-/// from its left edge, and `height · factor / full_height` down from its top
-/// edge, the image's first row (8.9.5.2). Each ratio is one division of two
-/// integers `f64` holds exactly, so it is correctly rounded on every target.
+/// `width · factor / full_width` of the unit square across from
+/// `skip / full_width` in from its left edge, and `height · factor /
+/// full_height` down from `skip / full_height` below its top edge, the
+/// image's first row (8.9.5.2). Each ratio is one division of two integers
+/// `f64` holds exactly, so it is correctly rounded on every target. With no
+/// skip the samples reach at least the square's far edges; a skip of a
+/// JPEG 2000 image whose origin is inside a reduced cell can leave them a
+/// part of a sample short of it, and the draw's clamp to its samples' edge
+/// paints that part from the last sample, as it paints the skip from the
+/// first.
 fn reduced_square(unit: &Transform, width: u32, height: u32, grid: Reduced) -> Option<Transform> {
     if grid.full_width == 0 || grid.full_height == 0 || grid.factor == 0 {
         return None;
@@ -562,16 +580,29 @@ fn reduced_square(unit: &Transform, width: u32, height: u32, grid: Reduced) -> O
     let span =
         |samples: u32, full: u32| (f64::from(samples) * f64::from(grid.factor)) / f64::from(full);
     let (across, down) = (span(width, grid.full_width), span(height, grid.full_height));
+    let lead = |skip: u32, full: u32| f64::from(skip) / f64::from(full);
+    let (left, top) = (
+        lead(grid.skip.0, grid.full_width),
+        lead(grid.skip.1, grid.full_height),
+    );
     // The samples' square, `(s, t)` with `t` upward as the unit square's is,
-    // is the unit square's `(across · s, 1 − down · (1 − t))`: anchored at the
-    // image's top-left corner, where its first sample is.
+    // is the unit square's `(left + across · s, (1 − top) − down · (1 − t))`:
+    // anchored where its first sample is, at the image's top-left corner but
+    // for the skip. With none, `1 − 0 − down` is `1 − down` exactly and the
+    // `left` term is not added, so a JPEG's square is the one it always was.
+    let bottom = (1.0 - top) - down;
+    let (mut e, mut f) = (unit.c * bottom + unit.e, unit.d * bottom + unit.f);
+    if grid.skip.0 > 0 {
+        e += unit.a * left;
+        f += unit.b * left;
+    }
     Some(Transform {
         a: unit.a * across,
         b: unit.b * across,
         c: unit.c * down,
         d: unit.d * down,
-        e: unit.c * (1.0 - down) + unit.e,
-        f: unit.d * (1.0 - down) + unit.f,
+        e,
+        f,
     })
 }
 
@@ -7489,19 +7520,40 @@ mod tests {
             name: &[u8],
             _request: &ImageRequest,
         ) -> Result<Option<DecodedImage>, String> {
-            let reduced = match name {
-                b"Im0" => Some(Reduced {
-                    full_width: 5,
-                    full_height: 3,
-                    factor: 2,
-                }),
-                b"Im1" => None,
+            let (reduced, width, height) = match name {
+                b"Im0" => (
+                    Some(Reduced {
+                        full_width: 5,
+                        full_height: 3,
+                        factor: 2,
+                        skip: (0, 0),
+                    }),
+                    3,
+                    2,
+                ),
+                b"Im1" => (None, 3, 2),
+                // Two by one samples, a quarter each, standing for an image
+                // of eight by four whose first cell starts two columns and
+                // two rows in: a JPEG 2000 image at an origin inside a cell.
+                b"Im2" => (
+                    Some(Reduced {
+                        full_width: 8,
+                        full_height: 4,
+                        factor: 4,
+                        skip: (2, 2),
+                    }),
+                    2,
+                    1,
+                ),
+                b"Im3" => (None, 2, 1),
                 _ => return Ok(None),
             };
             Ok(Some(DecodedImage {
-                width: 3,
-                height: 2,
-                rgb: (0..18u32).map(|i| (i * 37 % 256) as u8).collect(),
+                width,
+                height,
+                rgb: (0..width * height * 3)
+                    .map(|i| (i * 37 % 256) as u8)
+                    .collect(),
                 alpha: Vec::new(),
                 two_colour: None,
                 stencil: false,
@@ -7562,6 +7614,7 @@ mod tests {
             full_width: 5,
             full_height: 3,
             factor: 2,
+            skip: (0, 0),
         };
         assert_eq!(
             reduced_square(&unit, 3, 2, grid),
@@ -7574,6 +7627,32 @@ mod tests {
                 f: 46.0,
             }),
             "six of five columns across from the left, four of three rows down from the top"
+        );
+        // Two samples standing for eight columns, a quarter each, the first
+        // cell two columns and two rows in: the square moved right two of the
+        // eight columns, a quarter of fifty pixels, and down two of the four
+        // rows, half of thirty, its size the samples' own.
+        assert_eq!(
+            reduced_square(
+                &unit,
+                2,
+                1,
+                Reduced {
+                    full_width: 8,
+                    full_height: 4,
+                    factor: 4,
+                    skip: (2, 2),
+                }
+            ),
+            Some(Transform {
+                a: 50.0,
+                b: 0.0,
+                c: 0.0,
+                d: -30.0,
+                e: 16.5,
+                f: 51.0,
+            }),
+            "the skip moves the square and stretches nothing"
         );
         for broken in [
             Reduced {
@@ -7588,6 +7667,54 @@ mod tests {
         ] {
             assert_eq!(reduced_square(&unit, 3, 2, broken), None, "{broken:?}");
         }
+    }
+
+    /// **A reduced grid whose first cell starts inside the image is drawn from
+    /// there** (`Reduced::skip`): two samples standing for eight columns, the
+    /// first cell two columns and two rows in, drawn over a 40 by 30 pixel
+    /// square, are their own image drawn over 40 by 30 pixels from a quarter
+    /// of the square's width right of its top-left corner and half its height
+    /// below it, wherever the two overlap; the columns and rows of the image
+    /// before the first cell take the first column's and the first row's
+    /// colours, as an image's own edge does; and the draw paints the unit
+    /// square and nothing past it. Every figure is a whole pixel, so the two
+    /// squares are one transform.
+    #[test]
+    fn a_reduced_grid_that_starts_inside_the_image_is_drawn_from_there() {
+        let draw = |content: &[u8]| {
+            let canvas = Canvas::new(80, 60, PixelFormat::Rgb8, Color::WHITE);
+            let mut renderer = Renderer::new(canvas, page_transform(60.0, 1.0), &Halved);
+            interpret(content, Matrix::IDENTITY, &mut renderer, &NoFonts);
+            let (canvas, warnings) = renderer.finish();
+            assert!(warnings.is_empty(), "{warnings:?}");
+            canvas
+        };
+        let skipped = draw(b"q 40 0 0 30 4 24 cm /Im2 Do Q");
+        let twin = draw(b"q 4 24 40 30 re W n 40 0 0 30 14 9 cm /Im3 Do Q");
+        let at = |canvas: &Canvas, x: usize, y: usize| {
+            let at = (y * 80 + x) * 3;
+            [canvas.data[at], canvas.data[at + 1], canvas.data[at + 2]]
+        };
+        let mut compared = 0;
+        for y in 0..60usize {
+            for x in 0..80usize {
+                let inside = (4..44).contains(&x) && (6..36).contains(&y);
+                assert_eq!(
+                    at(&skipped, x, y) != [255, 255, 255],
+                    inside,
+                    "({x}, {y}): painted exactly where the image is"
+                );
+                if !inside {
+                    continue;
+                }
+                // Where the samples' own square is, the twin; before it, the
+                // twin's first column or row.
+                let want = at(&twin, x.max(14), y.max(21));
+                assert_eq!(at(&skipped, x, y), want, "({x}, {y})");
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 40 * 30);
     }
 
     /// Every kind of recorded call, so a test of each holds them all.

@@ -150,6 +150,22 @@ pub(crate) enum Draws {
     Elsewhere,
 }
 
+/// Adds what a JPEG 2000 decode did — the inverse-wavelet levels it
+/// synthesised, the code-blocks its tier-1 decoded and the levels it dropped
+/// — when the operation is counting. The decoder keeps no tally of its own
+/// (ruling 8) and hands the first two back as a value (`JpxCounts`), and the
+/// third with its image (`JpxImage::discard`).
+pub(crate) fn jpx_decoded(
+    work: Option<&Work>,
+    levels_synthesised: u64,
+    code_blocks: u64,
+    levels_discarded: u8,
+) {
+    if let Some(work) = work {
+        work.jpx_decoded(levels_synthesised, code_blocks, u64::from(levels_discarded));
+    }
+}
+
 /// Adds what a renderer counted — its glyphs shown, its outlines painted,
 /// its glyph masks rasterised and found in its cache, its shading functions
 /// evaluated, the pixels its group buffers and soft masks held beside the

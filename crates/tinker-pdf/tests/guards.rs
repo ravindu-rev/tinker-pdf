@@ -306,6 +306,7 @@ const ROSTER: &[Guard] = &[
     },
     Guard {
         file: "jpx_images.rs",
+        state: State::Landed,
         ..owed(
             "A7",
             "JPX levels decoded at most the levels needed",

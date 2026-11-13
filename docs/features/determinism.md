@@ -56,7 +56,8 @@ each page of its table — `text`, `curves`, `shading`, `pattern`, `optional`,
 `image`, `jbig2`, `jpx`, `blend`, `transparency`, `tiling`, `mesh`, `cbz`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
 `analytic_image`, `default_spaces`, `gs_text`, `strokes`, `bilevel`, `icc`,
-`jpeg_minified` — each a hash of rendered pixels plus the page dimensions and
+`jpeg_minified`, `jpx_minified` — each a hash of rendered pixels plus the page
+dimensions and
 ink counts it is computed from. `strokes` is the stroker's whole pen: the
 three caps and the three joins
 (8.4.3.3, 8.4.3.4), a corner a miter limit bevels beside one it lets through
@@ -73,7 +74,14 @@ exactly a half, a quarter and an eighth of its size — flipped, quarter-turned
 and clipped among them — so each is decoded at the scale it is drawn at
 ([rendering](rendering.md), "Images drawn smaller than they are"): the
 reduced inverse transforms, the reduced grid's placement and its cut at the
-image's edge, on every target; `render_regions.rs` tiles it too. `gs_text` is the
+image's edge, on every target; `render_regions.rs` tiles it too.
+`jpx_minified` is six JPEG 2000 codestreams of both wavelets — two odd-sized,
+one of components sampled every second column and row — each drawn at the
+sizes that drop one resolution level and two, flipped, quarter-turned,
+sheared and clipped among them, and once at a size that would drop a level
+its codestream does not have: the low bands, the reduced grid's placement
+and its cut at the image's edge, on every target; `render_regions.rs` tiles
+it too. `gs_text` is the
 `text` page with its font selected by graphics states (8.4.5's `/Font`) and
 its `/Font` taken away, so it holds the `text` page's own fingerprint: a font a
 state selects draws as its `Tf` twin on every target. `default_spaces` is the

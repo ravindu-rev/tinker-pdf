@@ -12,8 +12,9 @@
 //! its key and the document's immutable bytes: a decoded image of one image
 //! XObject at one reduction, in the default colour spaces its scope paints
 //! device spaces in (8.6.5.6), which are the one thing outside the object a
-//! decode reads; a JPEG's frame, which a draw's size is read against for the
-//! reduction it is decoded at; the compiled transforms of one ICC profile
+//! decode reads; a JPEG's or a JPEG 2000 codestream's frame, which a draw's
+//! size is read against for the reduction it is decoded at; the compiled
+//! transforms of one ICC profile
 //! stream; the recorded drawing of one form under everything its drawing
 //! reads; a glyph's mask under P-06's key and the anti-aliasing a render
 //! rasterises it with. So **a hit is the bytes a miss computes**, and a page
@@ -68,7 +69,7 @@ use tinker_pdf_color::icc::Transforms;
 use tinker_pdf_content::{FormInvocation, FormRecording};
 use tinker_pdf_raster::fill::Mask;
 
-use crate::resources::CachedImage;
+use crate::resources::{CachedImage, Frame};
 use crate::stats;
 
 /// A document's cache budget: the most bytes what it keeps across its renders
@@ -140,7 +141,7 @@ pub(crate) struct Table {
     /// Decoded images.
     images: HashMap<ImageKey, Slot<Arc<CachedImage>>>,
     /// The frames of the images a draw's size reduces.
-    frames: HashMap<FrameKey, Slot<Option<(u32, u32)>>>,
+    frames: HashMap<FrameKey, Slot<Option<Frame>>>,
     /// Compiled ICC transforms, and the profiles that would not compile.
     icc: HashMap<IccKey, Slot<Option<Arc<Transforms>>>>,
     /// Forms' drawings, recorded.
@@ -230,7 +231,7 @@ impl Kind for ImageKey {
 }
 
 impl Kind for FrameKey {
-    type Value = Option<(u32, u32)>;
+    type Value = Option<Frame>;
 
     fn slots(table: &mut Table) -> &mut HashMap<Self, Slot<Self::Value>> {
         &mut table.frames
@@ -340,15 +341,17 @@ impl DocumentCache {
         self.read(key, work, fill)
     }
 
-    /// The frame under `key` — the width and height of a JPEG's own samples,
-    /// or `None` where its decode was refused — and whether the request found
-    /// it kept, filled as [`DocumentCache::image`] fills.
+    /// The frame under `key` — what the image's first decode found it to be
+    /// (`resources::Frame`): a JPEG's own size, or a JPEG 2000 codestream's
+    /// and the levels it can drop; `None` where the decode was refused or the
+    /// image is one no draw reduces — and whether the request found it kept,
+    /// filled as [`DocumentCache::image`] fills.
     pub(crate) fn frame(
         &self,
         key: FrameKey,
         work: Option<&Work>,
-        fill: impl FnOnce() -> Fill<Option<(u32, u32)>>,
-    ) -> (Option<(u32, u32)>, bool) {
+        fill: impl FnOnce() -> Fill<Option<Frame>>,
+    ) -> (Option<Frame>, bool) {
         self.read(key, work, fill)
     }
 
@@ -659,8 +662,9 @@ pub(crate) struct ImageKey {
     /// The image XObject.
     pub(crate) object: ObjRef,
     /// How many of the image's own samples each way one decoded sample stands
-    /// for: 1 at full size, and 2, 4 or 8 for a JPEG decoded at a half, a
-    /// quarter or an eighth (`tinker_pdf_render::Reduced::factor`).
+    /// for: 1 at full size, 2, 4 or 8 for a JPEG decoded at a half, a quarter
+    /// or an eighth, and `2^d` for a JPEG 2000 codestream decoded with `d`
+    /// levels dropped (`tinker_pdf_render::Reduced::factor`).
     pub(crate) reduction: u32,
     /// The scope's `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK` that it
     /// puts in, each as written ([`Written`]); empty for a scope that paints
@@ -668,7 +672,8 @@ pub(crate) struct ImageKey {
     pub(crate) painted: Written,
 }
 
-/// What the frame of an image a draw's size reduces — a JPEG with no mask —
+/// What the frame of an image a draw's size reduces — a JPEG or a JPEG 2000
+/// codestream with no mask, under no `/Indexed` space —
 /// is kept under: the image XObject and its scope's defaults, as its decodes
 /// are. The frame is what every draw of the image reads its reduction from,
 /// learnt by the image's first decode.

@@ -221,6 +221,7 @@ fn annex_j10_s_header_reads_as_j10_1_describes_it() {
         "a bare codestream has no colr"
     );
     assert!(!header.opacity);
+    assert_eq!(header.origin, (0, 0), "J.10.1's XOsiz and YOsiz");
 
     // The header read refuses what the decode refuses at the same stage: the
     // codestream cut inside its main header, and an output past the ceiling.

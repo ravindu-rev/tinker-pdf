@@ -49,6 +49,13 @@
 //!   for its size in the page frame, so a tile asks what the page asks and is
 //!   decoded at the same scale, and the reduced grid is cut where the image
 //!   ends in a tile as on the page.
+//! - **JPEG 2000 codestreams decoded with the levels their size drops**
+//!   (`render_support::jpx_minified_page`, the page `determinism.rs`
+//!   fingerprints as `jpx_minified`): both wavelets, odd sizes and subsampled
+//!   components, with one level dropped and two, flipped, turned, sheared and
+//!   clipped. A tile asks for the page frame's size, so it drops the levels
+//!   the page drops, and the reduced grid is cut where the image ends in a
+//!   tile as on the page.
 //! - **Canvases that stand somewhere in the page**: a non-isolated group under
 //!   a blend mode, a knockout group and a luminosity soft mask; a tiling
 //!   pattern's cell; a Gouraud mesh's own buffer. Each is a buffer the size of

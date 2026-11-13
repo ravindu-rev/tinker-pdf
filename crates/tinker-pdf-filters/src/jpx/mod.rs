@@ -466,10 +466,20 @@ pub struct JpxImage {
     /// lives beside `/ColorSpace` (ruling 8).
     pub opacity: Option<JpxOpacity>,
     /// The resolution levels the decode dropped from the top: the request's
-    /// [`JpxRequest::discard`], clamped to the fewest levels any
-    /// tile-component of the codestream has. The image lies on the reference
-    /// grid reduced by `2^discard` (T.800 B.5), so `0` is the full size.
+    /// [`JpxRequest::discard`], clamped to [`JpxImage::levels`]. The image
+    /// lies on the reference grid reduced by `2^discard` (T.800 B.5), so `0`
+    /// is the full size.
     pub discard: u8,
+    /// The most resolution levels a request can drop from this codestream:
+    /// the fewest decomposition levels any of its tile-components has — and
+    /// none where a `pclr` palette maps a component (T.800 I.5.3.4), whose
+    /// samples are indices. A lower resolution of indices is their average,
+    /// and an average of two indices selects an entry of the palette neither
+    /// sample chose, so such a codestream at a smaller size is not the same
+    /// picture and is decoded whole whatever is asked. What
+    /// [`JpxRequest::discard`] is clamped to, and what a caller choosing a
+    /// discard for its next decode of the codestream reads.
+    pub levels: u8,
 }
 
 /// What a decode is asked for (`docs/design/jpx-speed.md`, "The decode
@@ -482,8 +492,10 @@ pub struct JpxRequest {
     /// Resolution levels to drop from the top. `0` decodes the full size;
     /// `d` decodes the image on the reference grid reduced by `2^d`, every
     /// dimension `ceil(x / 2^d)` (T.800 B.5), from the codestream's lower
-    /// resolutions alone. A figure past the fewest levels a tile-component
-    /// has is clamped to it, and [`JpxImage::discard`] says what was applied.
+    /// resolutions alone. A figure past the levels the codestream can drop
+    /// ([`JpxImage::levels`]: the fewest a tile-component has, and none under
+    /// a palette) is clamped to them, and [`JpxImage::discard`] says what was
+    /// applied.
     pub discard: u8,
     /// The part of the image wanted, or `None` for all of it: a rectangle of
     /// the image a decode at [`JpxRequest::discard`] returns, in its own
@@ -687,6 +699,14 @@ pub struct JpxHeader {
     pub colour: JpxColour,
     /// Whether a `cdef` box typed a channel as opacity.
     pub opacity: bool,
+    /// Where the image area starts on the reference grid, `XOsiz` and
+    /// `YOsiz` (T.800 A.5.1). A decode dropping `d` levels puts its first
+    /// sample at `ceil(XOsiz / 2^d)` of the grid reduced by `2^d` (B.5),
+    /// whose cell covers the full grid from `2^d` times that: a caller
+    /// placing the reduced image over the full one reads here how far into
+    /// the image that first cell starts — nowhere, when the origin is a
+    /// multiple of `2^d`, as it is for every image at the grid's origin.
+    pub origin: (u32, u32),
 }
 
 /// Reads a [`JpxHeader`]: every stage of [`jpx_decode`] that runs before
@@ -737,6 +757,7 @@ pub fn jpx_header(input: &[u8], limits: &Limits) -> Result<JpxHeader, Refusal> {
         precision,
         colour: header.map_or(JpxColour::Unstated, |h| h.colour),
         opacity: plan.opacity.is_some(),
+        origin: (stream.siz.xosiz, stream.siz.yosiz),
     })
 }
 
@@ -770,9 +791,21 @@ fn decode_inner(
         .map(|component| component.resolutions.len().saturating_sub(1))
         .min()
         .unwrap_or(0);
-    let discard = request
-        .discard
-        .min(u8::try_from(fewest).unwrap_or(MAX_JPX_LEVELS));
+    // I.5.3.4: a palette maps a component of indices to colours, and a lower
+    // resolution of indices averages them into indices neither sample chose,
+    // so a codestream a palette reads is decoded whole (`JpxImage::levels`).
+    // A `pclr` box with no `cmap` to apply it is refused by the colour plan
+    // below, at whatever discard.
+    let indexed = container
+        .header
+        .as_ref()
+        .is_some_and(|header| header.palette.is_some());
+    let levels = if indexed {
+        0
+    } else {
+        u8::try_from(fewest).unwrap_or(MAX_JPX_LEVELS)
+    };
+    let discard = request.discard.min(levels);
     // Tier-1 runs here for the same reason tier-2 does: it is where the
     // second integrity check lives. A stream that signalled segmentation
     // symbols has told the decoder what every cleanup pass must end with, so
@@ -935,6 +968,7 @@ fn decode_inner(
             samples,
         }),
         discard,
+        levels,
     })
 }
 

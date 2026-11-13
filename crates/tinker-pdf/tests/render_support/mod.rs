@@ -9,8 +9,8 @@
 //!
 //! It also builds the pages two files must agree on byte for byte: the analytic
 //! pages `determinism.rs` fingerprints and `render_analytic.rs` evaluates, and
-//! the pen, bilevel and minified JPEG pages `determinism.rs` fingerprints and
-//! `render_regions.rs` tiles.
+//! the pen, bilevel, minified JPEG and minified JPEG 2000 pages
+//! `determinism.rs` fingerprints and `render_regions.rs` tiles.
 //!
 //! Only the helpers those four need live here. The twenty-odd other test
 //! binaries that open a document and look at a pixel keep their own copies
@@ -1066,6 +1066,112 @@ pub fn intent_states_page(content: &str) -> Vec<u8> {
     bytes.extend_from_slice(&profile);
     bytes.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
     bytes
+}
+
+// ---- the minified JPEG 2000 page ---------------------------------------------
+//
+// JPEG 2000 codestreams drawn at a half, a quarter and less of their size,
+// which a render decodes with that many resolution levels dropped
+// (`docs/design/jpx-speed.md`, "The page's request"): the page
+// `determinism.rs` fingerprints as `jpx_minified` and `render_regions.rs`
+// tiles.
+
+/// One of the JPEG 2000 decoder's own fixtures
+/// (`crates/tinker-pdf-filters/tests/jpx/`), by its file name.
+fn jpx_fixture(name: &str) -> Vec<u8> {
+    std::fs::read(
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tinker-pdf-filters/tests/jpx"
+        ))
+        .join(name),
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+/// The codestreams [`jpx_minified_page`] draws, by resource name: the file,
+/// and its width and height.
+///
+/// - `/A`, `c1-3.jp2`: 32 by 24 RGB, the reversible 5/3 and the RCT, two
+///   levels.
+/// - `/B`, `r1-i3.jp2`: 32 by 24 grey, the irreversible 9/7, two levels.
+/// - `/C`, `c2-3.jp2`: 17 by 13 RGB, the 5/3 and the RCT, two levels, odd
+///   both ways, so its reduced grid's last sample stands for less than a
+///   whole one at either discard.
+/// - `/D`, `r2-i3.jp2`: 17 by 13 grey, the 9/7, two levels, odd both ways.
+/// - `/E`, `c1-i2.jp2`: 32 by 24 RGB, the 9/7 and the ICT, one level.
+/// - `/S`, `s1.jp2`: 63 by 47 RGB whose three components are each sampled
+///   every second column and row, the 5/3, one level, so a reduced grid
+///   replicates subsampled components as the full one does.
+pub const MINIFIED_JPX: [(&str, &str, u32, u32); 6] = [
+    ("A", "c1-3.jp2", 32, 24),
+    ("B", "r1-i3.jp2", 32, 24),
+    ("C", "c2-3.jp2", 17, 13),
+    ("D", "r2-i3.jp2", 17, 13),
+    ("E", "c1-i2.jp2", 32, 24),
+    ("S", "s1.jp2", 63, 47),
+];
+
+/// The minified JPEG 2000 page, 96 by 80 points, which no tile size of
+/// `render_regions.rs` divides: [`MINIFIED_JPX`]'s codestreams each drawn at
+/// the sizes that drop each number of levels it has — `/A` at a half, at a
+/// quarter flipped left to right and at a tenth, whose size would drop a
+/// third level the codestream does not have;
+/// `/B` at a half quarter-turned and at a quarter; `/C` at the floor of a
+/// half and at the floor of a quarter, the second partly clipped; `/D` at
+/// the floor of a half and sheared; `/E` at a half; and `/S` at the floor of
+/// a half, a third of it clipped away — every draw at fractional offsets.
+/// Drawn at 72 dpi each is decoded with the levels its size drops; at another
+/// scale, with the levels that scale's size drops.
+pub fn jpx_minified_page() -> Vec<u8> {
+    let content = "q 16 0 0 12 3.3 64.1 cm /A Do Q\n\
+         q -8 0 0 6 32.6 66.2 cm /A Do Q\n\
+         q 0 16 -12 0 50.4 58.7 cm /B Do Q\n\
+         q 8 0 0 6 56.8 67.3 cm /B Do Q\n\
+         q 16 0 0 12 70.2 63.5 cm /E Do Q\n\
+         q 4.7 31.9 20.3 23 re W n 31 0 0 23 4.7 31.9 cm /S Do Q\n\
+         q 8 0 0 6 41.3 45.6 cm /C Do Q\n\
+         q 8 0 1 5 54.1 44.2 cm /D Do Q\n\
+         q 67.4 44.9 2.6 2.1 re W n 4 0 0 3 66.1 44.3 cm /C Do Q\n\
+         q 3.2 0 0 2.4 12.2 12.8 cm /A Do Q\n";
+    let images: Vec<String> = MINIFIED_JPX
+        .iter()
+        .map(|(_, file, width, height)| {
+            let data = ascii_hex(&jpx_fixture(file));
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} \
+                 /Filter [/ASCIIHexDecode /JPXDecode] /Length {} >>\nstream\n{data}\nendstream",
+                data.len()
+            )
+        })
+        .collect();
+    let names: String = MINIFIED_JPX
+        .iter()
+        .enumerate()
+        .map(|(index, (name, ..))| format!("/{name} {} 0 R ", index + 5))
+        .collect();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 80]\n   \
+             /Resources << /XObject << {names}>> >> /Contents 4 0 R >>"
+        ),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ),
+    ];
+    objects.extend(images);
+    let mut out = String::from("%PDF-1.7\n");
+    for (index, object) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        objects.len() + 1
+    ));
+    out.into_bytes()
 }
 
 // ---- the face this repository writes for itself -----------------------------

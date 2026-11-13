@@ -1037,6 +1037,64 @@ fn a_masked_jpeg_is_decoded_at_full_size() {
     }
 }
 
+/// **An index is no colour**: a grey JPEG drawn at an eighth of its size is
+/// decoded at an eighth, and the same JPEG under an `/Indexed` space
+/// (8.6.6.3), whose samples select a palette's entries, is decoded whole — a
+/// smaller scale averages two indices into a third neither sample chose — and
+/// a later draw of it at its own size meets that decode.
+#[test]
+fn an_indexed_jpeg_is_decoded_at_full_size() {
+    use tinker_pdf_filters::{JpegOptions, JpegSource, JpegSourceColour};
+
+    // Checks of 64 by 48 samples, 0 and 200: the palette's red and its blue.
+    let samples: Vec<u8> = (0..384u32)
+        .flat_map(|y| (0..512u32).map(move |x| ((x / 64 + y / 48) % 2 * 200) as u8))
+        .collect();
+    let jpeg = tinker_pdf_filters::jpeg_encode(
+        &JpegSource {
+            width: 512,
+            height: 384,
+            colour: JpegSourceColour::Gray,
+            stride: 512,
+            data: &samples,
+        },
+        &JpegOptions::default(),
+    )
+    .expect("the raster encodes");
+    // 64 by 48 blocks of one component.
+    let blocks = 64 * 48;
+    let content = "q 64 0 0 48 0 0 cm /Im0 Do Q";
+    let grey = "/Width 512 /Height 384 /ColorSpace /DeviceGray /BitsPerComponent 8 \
+                /Filter /DCTDecode";
+    let (_, stats) = counted_at(jpeg_page((64.0, 48.0), content, grey, &jpeg), 1.0);
+    assert_eq!(
+        stats.jpeg_samples_transformed, blocks,
+        "grey, at an eighth: one sample a block"
+    );
+    let indexed = format!(
+        "/Width 512 /Height 384 /ColorSpace {} /BitsPerComponent 8 /Filter /DCTDecode",
+        palette()
+    );
+    let (bitmap, stats) = counted_at(jpeg_page((64.0, 48.0), content, &indexed, &jpeg), 1.0);
+    assert!(bitmap.warnings.is_empty(), "{:?}", bitmap.warnings);
+    assert_eq!(
+        stats.jpeg_samples_transformed,
+        blocks * 64,
+        "indices, whole: sixty-four samples a block"
+    );
+    let both = "q 64 0 0 48 0 0 cm /Im0 Do Q q 512 0 0 384 64 48 cm /Im0 Do Q";
+    let (_, stats) = counted_at(jpeg_page((576.0, 432.0), both, &indexed, &jpeg), 1.0);
+    assert_eq!(
+        (
+            stats.image_misses,
+            stats.image_hits,
+            stats.jpeg_samples_transformed
+        ),
+        (1, 1, blocks * 64),
+        "the eighth's decode is the whole one's"
+    );
+}
+
 /// **A reduced JPEG covers what the image covers.** An odd-sized JPEG, 333 by
 /// 217, drawn at a quarter at a fractional offset is decoded at a quarter, 84
 /// by 55 samples whose last column and row stand for less than four of the

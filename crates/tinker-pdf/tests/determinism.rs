@@ -68,7 +68,7 @@ use tinker_pdf::{
 mod render_support;
 use render_support::{
     axial_page, bilevel_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink,
-    jpeg_minified_page, pen_page, radial_page,
+    jpeg_minified_page, jpx_minified_page, pen_page, radial_page,
 };
 
 /// How a fixture's document is opened, and which of its pages is hashed.
@@ -2543,6 +2543,20 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 2_000,
     },
+    // Six JPEG 2000 codestreams of both wavelets, two of them odd-sized and
+    // one of subsampled components, each drawn at the sizes that drop one
+    // level and two — one flipped, one quarter-turned, one sheared, two
+    // clipped, one past the levels it has
+    // (`render_support::jpx_minified_page`) — so each is decoded with the
+    // levels its size drops. The ten draws cover about 1 200 of the page's
+    // 7 680 pixels; the floor is under half of that, and a draw that stops
+    // decoding takes the page under it.
+    Fixture {
+        name: "jpx_minified",
+        build: jpx_minified_page,
+        open: Open::Closed,
+        least_ink: 550,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2780,6 +2794,12 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // whose last block column and row are partly past the image, and the
     // reduced grid placed flipped, turned and clipped.
     ("jpeg_minified", ""),
+    // The reduced JPEG 2000 decodes: one level dropped and two, of the 5/3
+    // and the 9/7, over images whose reduced grid's last sample stands for
+    // less than a whole one and over subsampled components, placed flipped,
+    // turned, sheared and clipped, and a draw whose size would drop a level
+    // its codestream does not have.
+    ("jpx_minified", ""),
 ];
 
 #[test]
@@ -3164,6 +3184,7 @@ fn svg_output_is_stable_across_targets() {
         ),
         ("icc", ""),
         ("jpeg_minified", ""),
+        ("jpx_minified", ""),
     ];
     assert_eq!(
         expected.len(),
