@@ -653,10 +653,20 @@ never at extraction, so a caller that never searches pays nothing; every
 search after it in that fold folds its needle alone. `whole_word` reads the
 form of its case and accents. A clone keeps the forms built, and two threads
 searching one page in one fold build its form once
-([performance](../design/performance.md), P-24).
+([performance](../design/performance.md), P-24). A form keeps its lines'
+UAX #29 word boundaries too, computed at the first whole-word search in its
+fold. A search scans each line's kept text once, with a Knuth–Morris–Pratt
+automaton over the folded needle's bytes, for every occurrence, and the two
+overlap rules above choose the hits: an occurrence that begins inside a hit
+is passed over, and a rejected whole-word candidate holds nothing back.
+Whether a candidate's ends are boundaries, and which glyphs a hit covers, are
+read by cursors that only move forward along the line, so a search costs at
+most a constant times its text and its hits.
 `search_counted(needle, &SearchOptions)` returns `search_with`'s quads, to the
-bit, with a `Stats` whose `text_forms_built` says how many forms the search
-built: one for a page's first search in a fold, none after.
+bit, with a `Stats` of what the search did: `text_forms_built`, the forms it
+built — one for a page's first search in a fold, none after —
+`word_boundaries_computed`, the forms whose boundaries it computed, and
+`search_steps`, its matcher's and its mapping's steps.
 
 Regular expressions are not an option: the tree has no regex engine and
 links none, and a hand-rolled linear-time one is [roadmap](../ROADMAP.md) row

@@ -842,9 +842,11 @@ through — which only `CosDocument::open_counted` and
 took and each operator it ran, nested content included, which only
 `tinker_pdf_content::interpret_counted` counts
 ([content and text](content-and-text.md)); `text_forms_built`, each page's
-text a search folded in one of its four folds, which only
-`TextPage::search_counted` counts ([content and text](content-and-text.md));
-and
+text a search folded in one of its four folds, `word_boundaries_computed`,
+each such form's word boundaries computed for a whole-word search, and
+`search_steps`, each step of a search's matcher and of its mapping back to
+glyphs, which only `TextPage::search_counted` counts
+([content and text](content-and-text.md)); and
 `streams_decoded`, each run of a stream's filter chain — the page's content;
 once a render, each stream its scopes read: a form's, a Type 3 glyph's
 procedure, a tiling pattern's cell, an appearance, a font's program and its

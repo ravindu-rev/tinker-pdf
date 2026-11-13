@@ -1,6 +1,8 @@
 //! Search over prebuilt text, counted (`docs/design/performance.md`, P-24):
-//! a page's text is folded once a fold however many searches read it, and
-//! what a search finds is what a page that has kept nothing finds.
+//! a page's text is folded once a fold however many searches read it, its
+//! word boundaries computed once a fold, a search's matcher and mapping are
+//! linear in its text and its hits, and what a search finds is what a page
+//! that has kept nothing finds.
 //!
 //! Every type is named from `tinker_pdf` (ruling 11), and every document here
 //! is built in the test and held through the validate-on-save helper.
@@ -9,7 +11,9 @@ mod written_support;
 
 use std::collections::BTreeMap;
 
-use tinker_pdf::{Document, Quad, SearchOptions, TextPage};
+use tinker_pdf::{
+    Document, Quad, SearchOptions, TextBlock, TextChar, TextLine, TextPage, WritingMode,
+};
 use tinker_pdf_cos::DocumentBuilder;
 
 /// The words a generated page draws, WinAnsi-coded as a content stream
@@ -261,6 +265,144 @@ fn a_form_does_not_outlive_a_change_to_its_blocks() {
             assert!(
                 folded.values().all(|&n| n == 1),
                 "{what}, page {at}: each fold folded again once: {folded:?}"
+            );
+        }
+    }
+}
+
+/// A page of one line, `text`, a glyph a character, each five units wide.
+fn line_page(text: &str) -> TextPage {
+    let quad = |x: f64, width: f64| Quad {
+        ul: (x, 710.0),
+        ur: (x + width, 710.0),
+        ll: (x, 700.0),
+        lr: (x + width, 700.0),
+    };
+    let chars: Vec<TextChar> = text
+        .chars()
+        .enumerate()
+        .map(|(at, c)| TextChar {
+            text: c.to_string(),
+            quad: quad(at as f64 * 5.0, 5.0),
+            size: 10.0,
+            origin: (at as f64 * 5.0, 700.0),
+            mcid: None,
+            stream: 0,
+            font: None,
+            stated: None,
+            artifact: false,
+        })
+        .collect();
+    let bounds = quad(0.0, chars.len() as f64 * 5.0);
+    TextPage::new(
+        vec![TextBlock {
+            quad: bounds,
+            lines: vec![TextLine {
+                chars,
+                text: text.to_string(),
+                quad: bounds,
+                wmode: WritingMode::Horizontal,
+                rtl: false,
+                size: 10.0,
+            }],
+        }],
+        BTreeMap::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+/// **A search is linear in its text and its hits.** On a 4 000-character
+/// line of `a a a …`, searched for `a`, which every word is, and for `a a`,
+/// which every other pair is, plain and whole-word, the matcher's and the
+/// mapping's steps (`search_steps`) are at most four times the folded length
+/// plus the hits, and a line a tenth as long takes about a tenth of them; the
+/// hits are what restarting the search after each would find.
+#[test]
+fn a_search_is_linear_in_its_text_and_its_hits() {
+    let line = |words: usize| vec!["a"; words].join(" ");
+    let (long, short) = (line(2_000), line(200));
+    assert_eq!(long.len(), 3_999);
+    let (long_page, short_page) = (line_page(&long), line_page(&short));
+    let whole = SearchOptions {
+        whole_word: true,
+        ..SearchOptions::default()
+    };
+    for options in [SearchOptions::default(), whole] {
+        for (needle, hits) in [("a", 2_000), ("a a", 1_000)] {
+            let (quads, stats) = long_page.search_counted(needle, &options);
+            assert_eq!(quads.len(), hits, "{needle:?}, {options:?}");
+            let bound = 4 * (long.len() + quads.len()) as u64;
+            assert!(
+                stats.search_steps <= bound,
+                "{needle:?}, {options:?}: {} steps, past {bound}",
+                stats.search_steps
+            );
+            assert!(
+                stats.search_steps >= long.len() as u64,
+                "every byte is read"
+            );
+            let (few, at_short) = short_page.search_counted(needle, &options);
+            assert_eq!(few.len() * 10, quads.len(), "{needle:?}, {options:?}");
+            assert!(
+                stats.search_steps <= 11 * at_short.search_steps,
+                "{needle:?}, {options:?}: {} steps against {} at a tenth the length",
+                stats.search_steps,
+                at_short.search_steps
+            );
+            // Each hit a word on from the last, its own glyphs.
+            let step = if needle == "a" { 10.0 } else { 20.0 };
+            for (index, quad) in quads.iter().enumerate() {
+                let (x0, _, x1, _) = quad.bounds();
+                let at = index as f64 * step;
+                assert!((x0 - at).abs() < 1e-9, "{needle:?}: hit {index} at {x0}");
+                let width = if needle == "a" { 5.0 } else { 15.0 };
+                assert!((x1 - x0 - width).abs() < 1e-9, "{needle:?}: hit {index}");
+            }
+        }
+    }
+}
+
+/// **Word boundaries are computed once a page and fold**, across any number
+/// of whole-word searches, by `word_boundaries_computed`; a search that is not
+/// whole-word computes none.
+#[test]
+fn boundaries_are_computed_once_per_page() {
+    const PAGES: usize = 20;
+    let document = document(PAGES);
+    let pages: Vec<TextPage> = (0..PAGES).map(|at| text_of(&document, at)).collect();
+    let mut computed: BTreeMap<(usize, usize), u64> = BTreeMap::new();
+    for options in &OPTIONS {
+        for needle in NEEDLES {
+            for (at, page) in pages.iter().enumerate() {
+                let (_, stats) = page.search_counted(needle, options);
+                if !options.whole_word {
+                    assert_eq!(stats.word_boundaries_computed, 0, "{needle:?}, {options:?}");
+                }
+                *computed.entry((at, fold(options))).or_insert(0) += stats.word_boundaries_computed;
+            }
+        }
+    }
+    for at in 0..PAGES {
+        for options in OPTIONS.iter().filter(|o| o.whole_word) {
+            assert_eq!(
+                computed.get(&(at, fold(options))).copied(),
+                Some(1),
+                "page {at}, {options:?}: computed once"
+            );
+        }
+    }
+    let plain_only: Vec<usize> = OPTIONS
+        .iter()
+        .filter(|o| !OPTIONS.iter().any(|w| w.whole_word && fold(w) == fold(o)))
+        .map(fold)
+        .collect();
+    for at in 0..PAGES {
+        for &f in &plain_only {
+            assert_eq!(
+                computed.get(&(at, f)).copied(),
+                Some(0),
+                "page {at}, fold {f}"
             );
         }
     }

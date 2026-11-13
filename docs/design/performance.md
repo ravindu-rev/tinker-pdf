@@ -230,6 +230,8 @@ already carries it.
 | `shading_functions_evaluated` | a shading's function evaluated for a colour: once a table entry where a sweep reads it through a colour table, once a colour asked of it otherwise | the renderer | built |
 | `jpeg_held` | a byte a JPEG decode held beside the image it decoded into — coefficients, planes and the strip it handed on — the most at once, a maximum | `tinker-pdf-filters`' strip decode, handed back as a value (`JpegHeld`), and the facade's image path, which writes each strip into the image | built |
 | `text_forms_built` | a page's text folded and joined in one of a search's four folds, its offset table with it (P-24) | `tinker-pdf-content`'s search, through `TextPage::search_counted` | built |
+| `word_boundaries_computed` | a form's lines' UAX #29 boundaries computed, for a whole-word search (P-24) | the same | built |
+| `search_steps` | a step of a search's matcher or mapping: a byte of a line's kept text read, a fall back of its automaton, an entry of its needle's failure table, a word boundary or a glyph a cursor moved past (P-24) | the same | built |
 
 `work()` sums every counter that counts a step taken, and leaves out maxima and
 quantities — `most_decodes_of_one_stream`, `bytes_decoded`, and every byte or

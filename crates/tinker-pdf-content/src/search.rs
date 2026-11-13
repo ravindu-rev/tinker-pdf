@@ -41,8 +41,18 @@
 //! where each glyph's folded piece starts. A form is built at the first
 //! search that asks for its fold, never at extraction, and kept until the
 //! blocks change ([`TextPage::blocks_mut`] drops it); every later search in
-//! that fold folds its needle alone (`docs/design/performance.md`, P-24).
-//! [`TextPage::search_counted`] says how many forms a search built.
+//! that fold folds its needle alone (`docs/design/performance.md`, P-24). A
+//! form keeps its lines' word boundaries as well, from the first whole-word
+//! search in its fold.
+//!
+//! A search scans each line's kept text once, with a Knuth–Morris–Pratt
+//! automaton over the needle's bytes, and its two overlap rules choose the
+//! hits among the occurrences: an occurrence that begins inside a hit is
+//! passed over, and a whole-word candidate that is rejected holds nothing
+//! back. Cursors that only move forward read whether a candidate's ends are
+//! boundaries and which glyphs a hit covers, so a search costs at most a
+//! constant times its text and its hits. [`TextPage::search_counted`] counts
+//! the forms a search built, the boundaries it computed and its steps.
 
 use std::sync::OnceLock;
 
@@ -151,6 +161,10 @@ impl Fold {
 #[derive(Clone, Debug)]
 pub(crate) struct Form {
     lines: Vec<FormLine>,
+    /// Each line's UAX #29 word boundaries in its folded text, computed at
+    /// the first whole-word search in this fold and kept: a function of the
+    /// text, so of the form.
+    boundaries: OnceLock<Vec<Vec<usize>>>,
 }
 
 /// One line of a [`Form`].
@@ -177,7 +191,22 @@ impl Form {
                 .flat_map(|block| &block.lines)
                 .map(|line| FormLine::folded(line, fold))
                 .collect(),
+            boundaries: OnceLock::new(),
         }
+    }
+
+    /// Each line's word boundaries, computed now if no whole-word search has
+    /// read them, the computation counted into `work` where there is one.
+    fn boundaries(&self, work: Option<&Work>) -> &[Vec<usize>] {
+        self.boundaries.get_or_init(|| {
+            if let Some(work) = work {
+                work.add(Counter::WordBoundariesComputed, 1);
+            }
+            self.lines
+                .iter()
+                .map(|line| word_boundaries(&line.text))
+                .collect()
+        })
     }
 }
 
@@ -193,23 +222,133 @@ impl FormLine {
         offsets.push(offset(text.len()));
         FormLine { text, offsets }
     }
+}
 
-    /// The glyphs the bytes `start..end` of the line's text cover: the first
-    /// whose piece ends past `start` and the last whose piece starts before
-    /// `end`.
-    fn glyphs(&self, start: usize, end: usize) -> Option<(usize, usize)> {
-        let mut first = None;
-        let mut last = None;
-        for (index, pair) in self.offsets.windows(2).enumerate() {
-            let (at, next) = (pair[0] as usize, pair[1] as usize);
-            if first.is_none() && next > start {
-                first = Some(index);
+/// A search's needle as a Knuth–Morris–Pratt automaton over its bytes, which
+/// scans a line's text once for every occurrence, overlapping ones included
+/// (`docs/design/performance.md`, P-24, "The matcher").
+///
+/// A byte match of a UTF-8 needle in UTF-8 text starts and ends on character
+/// boundaries, since a needle starts with a leading byte and the encoding
+/// marks every other byte as one that is not, so its occurrences are the
+/// ones `str::find` finds.
+struct Matcher<'n> {
+    needle: &'n [u8],
+    /// For each prefix of the needle, the length of its longest proper
+    /// prefix that is also its suffix.
+    failure: Vec<usize>,
+}
+
+impl<'n> Matcher<'n> {
+    /// The automaton of `needle`, which is not empty, its building counted
+    /// into `steps`.
+    fn new(needle: &'n [u8], steps: &mut u64) -> Matcher<'n> {
+        let mut failure = vec![0usize; needle.len()];
+        let mut border = 0usize;
+        for (at, &byte) in needle.iter().enumerate().skip(1) {
+            // `border` is below `at`, so below the needle's length, and a
+            // border of a border is shorter again.
+            while border > 0 && needle.get(border) != Some(&byte) {
+                border = failure.get(border - 1).copied().unwrap_or(0);
+                *steps += 1;
             }
-            if at < end {
-                last = Some(index);
+            if needle.get(border) == Some(&byte) {
+                border += 1;
+            }
+            if let Some(slot) = failure.get_mut(at) {
+                *slot = border;
+            }
+            *steps += 1;
+        }
+        Matcher { needle, failure }
+    }
+
+    /// Every occurrence of the needle in `text`, by the byte it starts at, in
+    /// increasing order, each handed to `each`; the bytes read and the falls
+    /// back taken counted into `steps`.
+    fn occurrences(&self, text: &[u8], steps: &mut u64, mut each: impl FnMut(usize, &mut u64)) {
+        let length = self.needle.len();
+        let mut matched = 0usize;
+        for (at, &byte) in text.iter().enumerate() {
+            *steps += 1;
+            // `matched` stays below the needle's length: it is reset from the
+            // failure table the moment it reaches it.
+            while matched > 0 && self.needle.get(matched) != Some(&byte) {
+                matched = self.failure.get(matched - 1).copied().unwrap_or(0);
+                *steps += 1;
+            }
+            if self.needle.get(matched) == Some(&byte) {
+                matched += 1;
+            }
+            if matched == length {
+                each(at + 1 - length, steps);
+                matched = self.failure.get(length - 1).copied().unwrap_or(0);
             }
         }
-        Some((first?, last?))
+    }
+}
+
+/// A cursor over a line's sorted word boundaries, asked about offsets that
+/// only rise: whether each is a boundary, moving forward past the ones below
+/// it (`docs/design/performance.md`, P-24, "The matcher").
+struct BoundaryCursor<'b> {
+    boundaries: &'b [usize],
+    next: usize,
+}
+
+impl BoundaryCursor<'_> {
+    /// Whether `offset`, no lower than the one asked before it, is a
+    /// boundary; the boundaries passed counted into `steps`.
+    fn holds(&mut self, offset: usize, steps: &mut u64) -> bool {
+        while self
+            .boundaries
+            .get(self.next)
+            .is_some_and(|&boundary| boundary < offset)
+        {
+            self.next += 1;
+            *steps += 1;
+        }
+        self.boundaries.get(self.next) == Some(&offset)
+    }
+}
+
+/// A cursor along a line's glyphs, mapping hits that only move forward back
+/// to the glyphs they cover (`docs/design/performance.md`, P-24, "The
+/// mapping").
+struct GlyphCursor<'o> {
+    /// The line's [`FormLine::offsets`].
+    offsets: &'o [u32],
+    /// The first glyph the last hit covered.
+    at: usize,
+}
+
+impl GlyphCursor<'_> {
+    /// The glyph `index`'s piece starts at in the line's text.
+    fn start(&self, index: usize) -> usize {
+        self.offsets
+            .get(index)
+            .map_or(usize::MAX, |&at| at as usize)
+    }
+
+    /// The glyphs the bytes `start..end` cover, no earlier than the last hit
+    /// mapped: the first whose piece ends past `start`, and the last whose
+    /// piece starts before `end`; the glyphs moved past counted into `steps`.
+    fn span(&mut self, start: usize, end: usize, steps: &mut u64) -> Option<(usize, usize)> {
+        let glyphs = self.offsets.len().checked_sub(1)?;
+        while self.at < glyphs && self.start(self.at + 1) <= start {
+            self.at += 1;
+            *steps += 1;
+        }
+        if self.at >= glyphs {
+            return None;
+        }
+        let first = self.at;
+        let mut last = first;
+        while last + 1 < glyphs && self.start(last + 1) < end {
+            last += 1;
+            *steps += 1;
+        }
+        Some((first, last))
     }
 }
 
@@ -258,7 +397,10 @@ impl TextPage {
     /// quads are `search_with`'s for the same arguments, to the bit, and its
     /// [`Stats`] counts `text_forms_built`, the forms this search folded the
     /// page into, which is one for the first search of a page in a fold and
-    /// none for every search after it.
+    /// none for every search after it; `word_boundaries_computed`, likewise
+    /// for a form's word boundaries and a whole-word search; and
+    /// `search_steps`, the steps of its matcher and of its mapping back to
+    /// glyphs.
     ///
     /// A counted sibling, as `Page::text_counted` is, because `search` takes
     /// no options to carry a switch and the answer is a list
@@ -300,46 +442,56 @@ impl TextPage {
             return Vec::new();
         }
         let form = self.form(fold, work);
+        let boundaries = if options.whole_word {
+            form.boundaries(work)
+        } else {
+            &[]
+        };
+        let mut steps = 0u64;
+        let matcher = Matcher::new(needle.as_bytes(), &mut steps);
+        let length = needle.len();
         let mut hits = Vec::new();
 
         let lines = self.blocks().iter().flat_map(|block| &block.lines);
-        for (line, kept) in lines.zip(&form.lines) {
-            let joined = kept.text.as_str();
-            let boundaries = if options.whole_word {
-                word_boundaries(joined)
-            } else {
-                Vec::new()
+        for (index, (line, kept)) in lines.zip(&form.lines).enumerate() {
+            let line_boundaries = boundaries.get(index).map_or(&[][..], Vec::as_slice);
+            let mut starts = BoundaryCursor {
+                boundaries: line_boundaries,
+                next: 0,
             };
-
-            let mut from = 0usize;
-            while let Some(found) = joined.get(from..).and_then(|s| s.find(&needle)) {
-                let start = from + found;
-                let end = start + needle.len();
-                let whole = !options.whole_word
-                    || (boundaries.binary_search(&start).is_ok()
-                        && boundaries.binary_search(&end).is_ok());
-
-                if whole {
-                    if let Some((a, b)) = kept.glyphs(start, end) {
-                        if let Some(quad) = span_quad(line, a, b) {
-                            hits.push(quad);
-                        }
+            let mut ends = BoundaryCursor {
+                boundaries: line_boundaries,
+                next: 0,
+            };
+            let mut glyphs = GlyphCursor {
+                offsets: &kept.offsets,
+                at: 0,
+            };
+            // The first byte the next hit may start at: a hit's end, so an
+            // occurrence that begins inside a hit is passed over, as a search
+            // resuming past the hit passes over it.
+            let mut allowed = 0usize;
+            matcher.occurrences(kept.text.as_bytes(), &mut steps, |start, steps| {
+                if start < allowed {
+                    return;
+                }
+                let end = start + length;
+                // A candidate that is not a whole word is no hit and holds
+                // nothing back, so the next occurrence may overlap it — `x x`
+                // in `xx x x`.
+                if options.whole_word && !(starts.holds(start, steps) && ends.holds(end, steps)) {
+                    return;
+                }
+                if let Some((a, b)) = glyphs.span(start, end, steps) {
+                    if let Some(quad) = span_quad(line, a, b) {
+                        hits.push(quad);
                     }
-                    from = end;
-                } else {
-                    // A candidate that is not a whole word may overlap one
-                    // that is — `x x` in `xx x x` — so the search resumes one
-                    // character on rather than past the candidate.
-                    from = start
-                        + joined
-                            .get(start..)
-                            .and_then(|s| s.chars().next())
-                            .map_or(1, char::len_utf8);
                 }
-                if from >= joined.len() {
-                    break;
-                }
-            }
+                allowed = end;
+            });
+        }
+        if let Some(work) = work {
+            work.add(Counter::SearchSteps, steps);
         }
 
         hits
@@ -712,6 +864,213 @@ mod tests {
                         "{what}, {needle:?}, {options:?}: folded again once"
                     );
                 }
+            }
+        }
+    }
+
+    /// The search as it was before the linear matcher, kept as the reference
+    /// the matcher is held to: each line's glyphs folded and joined,
+    /// `str::find` from each restart, a whole-word candidate checked by
+    /// binary search in the line's boundaries and a rejected one resumed one
+    /// character on, and each hit mapped back by walking the line's pieces
+    /// from its start.
+    fn by_restarts(page: &TextPage, needle: &str, options: &SearchOptions) -> Vec<Quad> {
+        let fold = Fold::of(options);
+        let needle = fold.text(needle);
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        for line in page.lines() {
+            let pieces: Vec<String> = line.chars.iter().map(|c| fold.text(&c.text)).collect();
+            let joined: String = pieces.concat();
+            let boundaries = if options.whole_word {
+                word_boundaries(&joined)
+            } else {
+                Vec::new()
+            };
+            let mut from = 0usize;
+            while let Some(found) = joined.get(from..).and_then(|s| s.find(&needle)) {
+                let start = from + found;
+                let end = start + needle.len();
+                let whole = !options.whole_word
+                    || (boundaries.binary_search(&start).is_ok()
+                        && boundaries.binary_search(&end).is_ok());
+                if whole {
+                    let mut at = 0usize;
+                    let mut first = None;
+                    let mut last = None;
+                    for (i, piece) in pieces.iter().enumerate() {
+                        let next = at + piece.len();
+                        if first.is_none() && next > start {
+                            first = Some(i);
+                        }
+                        if at < end {
+                            last = Some(i);
+                        }
+                        at = next;
+                    }
+                    if let (Some(a), Some(b)) = (first, last) {
+                        if let Some(quad) = span_quad(line, a, b) {
+                            hits.push(quad);
+                        }
+                    }
+                    from = end;
+                } else {
+                    from = start
+                        + joined
+                            .get(start..)
+                            .and_then(|s| s.chars().next())
+                            .map_or(1, char::len_utf8);
+                }
+                if from >= joined.len() {
+                    break;
+                }
+            }
+        }
+        hits
+    }
+
+    /// Every combination of the three switches.
+    fn every_option_set() -> Vec<SearchOptions> {
+        (0..8u8)
+            .map(|bits| SearchOptions {
+                case_sensitive: bits & 1 != 0,
+                whole_word: bits & 2 != 0,
+                diacritic_insensitive: bits & 4 != 0,
+            })
+            .collect()
+    }
+
+    /// **The linear matcher finds what restarting `find` found.** Over pages
+    /// of lines drawn from glyphs that part the folds — letters in both
+    /// cases, a precomposed and a combining accent, a ligature, a capital
+    /// whose lower case is two characters, spaces and a stop — and needles
+    /// drawn from the same glyphs, every option set finds, quad for quad and
+    /// to the bit, what [`by_restarts`] finds, overlapping repeats included.
+    #[test]
+    fn the_linear_matcher_finds_what_restarting_find_finds() {
+        const GLYPHS: [&str; 12] = [
+            "a", "a", "b", " ", " ", "A", "\u{e9}", "e", "\u{301}", "ffi", "\u{130}", ".",
+        ];
+        let mut state = 0x1234_5678u32;
+        let mut next = |below: usize| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as usize % below
+        };
+        for _ in 0..300 {
+            let lines: Vec<String> = (0..1 + next(3))
+                .map(|_| {
+                    (0..2 + next(30))
+                        .map(|_| GLYPHS[next(GLYPHS.len())])
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .collect();
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let p = page(&lines);
+            for _ in 0..4 {
+                let needle: String = (0..1 + next(4))
+                    .map(|_| GLYPHS[next(GLYPHS.len())])
+                    .collect();
+                for options in every_option_set() {
+                    assert_eq!(
+                        bits(&p.search_with(&needle, &options)),
+                        bits(&by_restarts(&p, &needle, &options)),
+                        "{needle:?} in {lines:?}, {options:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The overlap rules, pinned: a plain hit resumes past itself, so `aa`
+    /// is found twice in `aaaa` and not three times; and a rejected
+    /// whole-word candidate holds nothing back, so `x x` is found in
+    /// `xx x x` starting inside the rejected one, and only once.
+    #[test]
+    fn a_hit_resumes_past_itself_and_a_rejected_candidate_holds_nothing_back() {
+        let p = page(&["aaaa"]);
+        assert_eq!(count(&p, "aa", SearchOptions::default()), 2);
+        assert_eq!(count(&p, "aaa", SearchOptions::default()), 1);
+        assert_eq!(count(&p, "aa", WORD), 0);
+        let p = page(&["xx x x"]);
+        let hits = p.search_with("x x", &WORD);
+        assert_eq!(hits.len(), 1);
+        let (x0, ..) = hits.first().expect("a hit").bounds();
+        assert!(
+            (x0 - 15.0).abs() < 1e-9,
+            "it starts at the third glyph: {x0}"
+        );
+        let plain = p.search_with("x x", &SearchOptions::default());
+        assert_eq!(plain.len(), 1, "plain, it starts inside the first word");
+        let (x0, ..) = plain.first().expect("a hit").bounds();
+        assert!((x0 - 5.0).abs() < 1e-9, "at the second glyph: {x0}");
+    }
+
+    /// **Word boundaries are computed once a page and fold**: the first
+    /// whole-word search in a fold computes every line's, every later one in
+    /// that fold reads them, a search that is not whole-word computes none,
+    /// and a change to the blocks drops them with the form.
+    #[test]
+    fn word_boundaries_are_computed_once_a_page_and_fold() {
+        let mut p = folding_page();
+        let (_, stats) = p.search_counted("resume", &SearchOptions::default());
+        assert_eq!(stats.word_boundaries_computed, 0, "not whole-word");
+        for (round, needle) in ["resume", "aa", "office", "zz"].iter().enumerate() {
+            let (_, stats) = p.search_counted(needle, &WORD);
+            assert_eq!(
+                stats.word_boundaries_computed,
+                u64::from(round == 0),
+                "{needle:?}"
+            );
+            assert_eq!(stats.text_forms_built, 0, "{needle:?}: the default's form");
+        }
+        let both = SearchOptions {
+            whole_word: true,
+            ..ACCENTS
+        };
+        let (_, stats) = p.search_counted("resume", &both);
+        assert_eq!(
+            (stats.text_forms_built, stats.word_boundaries_computed),
+            (1, 1),
+            "another fold, its own form and boundaries"
+        );
+        p.blocks_mut().reverse();
+        let (_, stats) = p.search_counted("resume", &WORD);
+        assert_eq!(
+            (stats.text_forms_built, stats.word_boundaries_computed),
+            (1, 1)
+        );
+    }
+
+    /// **A search's steps are linear in its text and its hits**: one line of
+    /// `a a a …` ten times as long takes at most eleven times the steps,
+    /// plain and whole-word, for a needle every word matches and one every
+    /// other pair does.
+    #[test]
+    fn a_search_steps_linearly_in_its_text_and_its_hits() {
+        let line = |words: usize| vec!["a"; words].join(" ");
+        let (short, long) = (line(200), line(2_000));
+        let short_page = page(&[short.as_str()]);
+        let long_page = page(&[long.as_str()]);
+        for options in [SearchOptions::default(), WORD] {
+            for needle in ["a", "a a"] {
+                let (few, at_short) = short_page.search_counted(needle, &options);
+                let (many, at_long) = long_page.search_counted(needle, &options);
+                assert_eq!(many.len(), few.len() * 10, "{needle:?}, {options:?}");
+                assert!(
+                    at_long.search_steps <= 11 * at_short.search_steps,
+                    "{needle:?}, {options:?}: {} steps against {}",
+                    at_long.search_steps,
+                    at_short.search_steps
+                );
+                let bound = 4 * (long.len() as u64 + many.len() as u64);
+                assert!(
+                    at_long.search_steps <= bound,
+                    "{needle:?}, {options:?}: {} steps, past {bound}",
+                    at_long.search_steps
+                );
             }
         }
     }

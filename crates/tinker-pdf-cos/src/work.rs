@@ -301,6 +301,20 @@ pub struct Stats {
     /// Counted by `tinker-pdf-content`'s search, through
     /// `TextPage::search_counted`.
     pub text_forms_built: u64,
+    /// A form's lines' UAX #29 word boundaries computed: once a page and
+    /// fold, at the first whole-word search in the fold, which every later
+    /// one reads.
+    ///
+    /// Counted with `text_forms_built`.
+    pub word_boundaries_computed: u64,
+    /// A step of a search's matcher or of its mapping back to glyphs: a byte
+    /// of a line's kept text the matcher read, a fall back its automaton made,
+    /// an entry of its needle's failure table built, a word boundary its
+    /// cursors moved past, or a glyph the mapping's cursor moved past — so a
+    /// search is at most a constant times its text and its hits.
+    ///
+    /// Counted with `text_forms_built`.
+    pub search_steps: u64,
     /// The most bytes a JPEG decode held at once beside the image it decoded
     /// into: its coefficients, its component planes and the strip it handed
     /// on, every buffer sized from the image. A maximum, as
@@ -405,6 +419,10 @@ pub enum Counter {
     PoolItemsOnCaller,
     /// [`Stats::text_forms_built`].
     TextFormsBuilt,
+    /// [`Stats::word_boundaries_computed`].
+    WordBoundariesComputed,
+    /// [`Stats::search_steps`].
+    SearchSteps,
 }
 
 impl Stats {
@@ -455,6 +473,8 @@ impl Stats {
             self.operators_run,
             self.shading_functions_evaluated,
             self.text_forms_built,
+            self.word_boundaries_computed,
+            self.search_steps,
         ]
         .into_iter()
         .fold(0u64, u64::saturating_add)
@@ -497,6 +517,8 @@ impl Stats {
             Counter::PoolItemsOnWorkers => &mut self.pool_items_on_workers,
             Counter::PoolItemsOnCaller => &mut self.pool_items_on_caller,
             Counter::TextFormsBuilt => &mut self.text_forms_built,
+            Counter::WordBoundariesComputed => &mut self.word_boundaries_computed,
+            Counter::SearchSteps => &mut self.search_steps,
         }
     }
 }
@@ -596,6 +618,10 @@ impl Add for Stats {
                 .pool_items_on_caller
                 .saturating_add(other.pool_items_on_caller),
             text_forms_built: self.text_forms_built.saturating_add(other.text_forms_built),
+            word_boundaries_computed: self
+                .word_boundaries_computed
+                .saturating_add(other.word_boundaries_computed),
+            search_steps: self.search_steps.saturating_add(other.search_steps),
         }
     }
 }
@@ -710,7 +736,7 @@ mod tests {
 
     /// Every counter of a step, so a test of one property covers them all;
     /// [`PLACES`] holds the two that count where a part ran.
-    const ALL: [Counter; 32] = [
+    const ALL: [Counter; 34] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::GlyphMasksRasterised,
@@ -743,6 +769,8 @@ mod tests {
         Counter::OperatorsRun,
         Counter::ShadingFunctionsEvaluated,
         Counter::TextFormsBuilt,
+        Counter::WordBoundariesComputed,
+        Counter::SearchSteps,
     ];
 
     /// The counters of where a pooled operation's parts ran.
