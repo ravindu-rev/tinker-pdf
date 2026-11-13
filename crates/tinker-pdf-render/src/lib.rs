@@ -14,6 +14,7 @@ use core::mem;
 use tinker_pdf_raster::blend::BlendMode as RasterBlend;
 
 pub mod display;
+mod glyph;
 pub mod mesh;
 pub mod shading;
 
@@ -2345,6 +2346,75 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
     }
 
+    /// Composites a glyph's mask, rasterised in its own frame
+    /// (`glyph::rasterise`), with its pixel (0, 0) at the page-frame pixel
+    /// `origin` — through the clip, the soft mask and a knockout group's
+    /// restore, as [`Renderer::paint_inked`] composites a path's coverage.
+    ///
+    /// The mask is placed by an integer offset, which cannot round, and is
+    /// windowed to the pixels the canvas, the clip and the soft mask can show
+    /// before either multiplies into it: the region `coverage` would have
+    /// asked `fill` for. So a tile composites exactly the page's pixels under
+    /// it (ruling 5), and the clip multiplies into a mask already hardened
+    /// when anti-aliasing is off, as it does on the path route.
+    fn paint_glyph_mask(
+        &mut self,
+        local: &Mask,
+        origin: [i32; 2],
+        color: Color,
+        ink: Option<[u8; 4]>,
+        alpha: f64,
+        mode: RasterBlend,
+    ) {
+        let left = i64::from(origin[0]) + i64::from(local.x0);
+        let top = i64::from(origin[1]) + i64::from(local.y0);
+        let placed = Bounds {
+            left,
+            top,
+            right: left + i64::from(local.width),
+            bottom: top + i64::from(local.height),
+        };
+        let mut region = placed.meet(Bounds::of_rect(self.device()));
+        for limit in [self.clip.as_ref(), self.soft.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            region = region.meet(Bounds::of_mask(limit));
+        }
+        let (x0, y0, width, height) = region.rect();
+        let mut mask = Mask::empty(x0, y0, width, height);
+        if width > 0 {
+            // `region` lies inside `placed`, so every row and column below is
+            // one of the local mask's.
+            let column = usize::try_from(i64::from(x0) - left).unwrap_or(0);
+            let stride = local.width as usize;
+            let span = width as usize;
+            for row in 0..height as usize {
+                let Ok(source) = usize::try_from(i64::from(y0) + row as i64 - top) else {
+                    continue;
+                };
+                let from = source * stride + column;
+                let (Some(source), Some(target)) = (
+                    local.data.get(from..from + span),
+                    mask.data.get_mut(row * span..(row + 1) * span),
+                ) else {
+                    continue;
+                };
+                target.copy_from_slice(source);
+            }
+        }
+        if let Some(clip) = &self.clip {
+            mask.intersect_in_place(clip);
+        }
+        if let Some(soft) = &self.soft {
+            mask.intersect_in_place(soft);
+        }
+        if self.in_knockout() {
+            self.knockout_restore(&mask);
+        }
+        self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
+    }
+
     /// The question the rasterizer asks while it is working.
     ///
     /// Both handles are **cloned** rather than borrowed, because every
@@ -3152,6 +3222,45 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         let combined = glyph.transform.then(&self.base);
         if !combined.is_finite() {
             return;
+        }
+
+        // 9.3.6 mode 0 in a solid colour: drawn from a mask rasterised in the
+        // glyph's own frame and placed at the whole pixel its origin falls in
+        // (`glyph`). Strokes, pattern fills and the clipping modes keep the
+        // path route below, and so does a glyph whose mask would be too large
+        // to be worth one or will not place.
+        if matches!(mode, tinker_pdf_content::TextRenderMode::Fill) && state.fill_pattern.is_none()
+        {
+            if let Some(placement) = glyph::Placement::of(&combined) {
+                if self.stopping() {
+                    return;
+                }
+                let stop = self.stop_predicate();
+                if let Some(local) = glyph::rasterise(
+                    &outline,
+                    &placement,
+                    self.tolerance,
+                    self.antialias,
+                    Some(&stop),
+                ) {
+                    #[cfg(test)]
+                    {
+                        self.mask_pixels = self
+                            .mask_pixels
+                            .saturating_add(u64::from(local.width) * u64::from(local.height));
+                    }
+                    self.counts.outlines_filled = self.counts.outlines_filled.saturating_add(1);
+                    self.paint_glyph_mask(
+                        &local,
+                        placement.origin,
+                        fill_color(state),
+                        state.fill_ink,
+                        state.fill_alpha,
+                        blend_mode(state.blend),
+                    );
+                    return;
+                }
+            }
         }
 
         let mut path = Path::new();
@@ -5900,6 +6009,127 @@ mod tests {
         assert_eq!(
             differing, 0,
             "{differing} of 1600 pixels differ, the worst by {worst} levels"
+        );
+    }
+
+    /// A ring of two cubic contours wound opposite ways, centred in its em:
+    /// curved edges on every side, so its coverage depends on where it falls
+    /// inside a pixel.
+    struct Ring;
+
+    impl GlyphSource for Ring {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            use tinker_pdf_font::Segment;
+            // A quarter of a circle as a cubic: the control points sit this
+            // fraction of the radius out along each tangent.
+            const K: f64 = 0.552_284_749_830_793_4;
+            let circle = |r: f64, forward: bool| {
+                let (cx, cy) = (0.5, 0.45);
+                // The points a quarter turn apart, and the unit tangent at
+                // each in the direction the contour runs.
+                let at = |quarter: usize| {
+                    let (cos, sin) = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)][quarter];
+                    let tangent = if forward { (-sin, cos) } else { (sin, -cos) };
+                    ((cx + r * cos, cy + r * sin), tangent)
+                };
+                let order = if forward {
+                    [0, 1, 2, 3, 0]
+                } else {
+                    [0, 3, 2, 1, 0]
+                };
+                let mut segments = vec![Segment::MoveTo { x: cx + r, y: cy }];
+                for pair in order.windows(2) {
+                    let ((p, tp), (q, tq)) = (at(pair[0]), at(pair[1]));
+                    segments.push(Segment::CurveTo {
+                        c1x: p.0 + K * r * tp.0,
+                        c1y: p.1 + K * r * tp.1,
+                        c2x: q.0 - K * r * tq.0,
+                        c2y: q.1 - K * r * tq.1,
+                        x: q.0,
+                        y: q.1,
+                    });
+                }
+                segments.push(Segment::Close);
+                segments
+            };
+            let mut segments = circle(0.4, true);
+            segments.extend(circle(0.25, false));
+            Some(Outline { segments })
+        }
+    }
+
+    /// The pixels a canvas holds that are not white, each keyed from the whole
+    /// pixel `origin`.
+    fn ink_from(canvas: &Canvas, side: u32, origin: (i64, i64)) -> Vec<(i64, i64, Color)> {
+        let mut ink = Vec::new();
+        for y in 0..side {
+            for x in 0..side {
+                let Some(colour) = canvas.pixel(x, y) else {
+                    continue;
+                };
+                if colour != Color::WHITE {
+                    ink.push((i64::from(x) - origin.0, i64::from(y) - origin.1, colour));
+                }
+            }
+        }
+        ink
+    }
+
+    /// **A glyph moved by whole pixels draws the same mask** (P-06.2).
+    ///
+    /// A filled glyph is rasterised in its own frame, under its 2x2 and its
+    /// origin's phase quantised to a sixteenth of a pixel, and placed at the
+    /// whole pixel its origin falls in. So the same glyph is the same pixels
+    /// wherever it stands at one phase — moved by whole pixels in any
+    /// direction, and moved inside one sixteenth of a pixel, which the path
+    /// route would have drawn differently — and a move to another sixteenth
+    /// draws another mask.
+    #[test]
+    fn a_glyph_moved_by_whole_pixels_draws_the_same_mask() {
+        const SIDE: u32 = 160;
+        // The glyph at user (x, y) on a 160-point page at 72 dpi: its device
+        // origin is (x, 160 - y), and its ink keyed from that origin's whole
+        // pixel.
+        let ink = |x: f64, y: f64| {
+            let content = format!("BT /F0 30 Tf {x} {y} Td (o) Tj ET");
+            let canvas = Canvas::new(SIDE, SIDE, PixelFormat::Rgb8, Color::WHITE);
+            let mut renderer = Renderer::new(canvas, page_transform(f64::from(SIDE), 1.0), &Ring);
+            interpret(
+                content.as_bytes(),
+                Matrix::IDENTITY,
+                &mut renderer,
+                &OneChar,
+            );
+            let canvas = renderer.finish().0;
+            let origin = (x.floor() as i64, (f64::from(SIDE) - y).floor() as i64);
+            ink_from(&canvas, SIDE, origin)
+        };
+
+        let here = ink(40.3, 70.6);
+        assert!(here.len() > 100, "the ring draws: {} pixels", here.len());
+        assert!(
+            here.iter().any(|(_, _, c)| *c != Color::BLACK),
+            "and its edges are anti-aliased, so its phase reaches the pixels"
+        );
+        for (dx, dy) in [(37.0, 11.0), (-29.0, 23.0), (61.0, -40.0)] {
+            assert_eq!(
+                ink(40.3 + dx, 70.6 + dy),
+                here,
+                "moved by ({dx}, {dy}) whole pixels, the same mask"
+            );
+        }
+        // 0.3 and 0.33 are one sixteenth, the fifth, as are the device
+        // fractions 0.4 and 0.38 the two heights give, the sixth.
+        assert_eq!(
+            ink(40.33, 70.62),
+            here,
+            "moved inside one sixteenth, the same mask"
+        );
+        // 0.37 is the sixth sixteenth across, one past 0.3's.
+        assert_ne!(
+            ink(40.37, 70.6),
+            here,
+            "moved to the next sixteenth, another mask"
         );
     }
 

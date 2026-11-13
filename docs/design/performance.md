@@ -3123,9 +3123,10 @@ stands:
 - **the 2x2**, `a`, `b`, `c` and `d`, each rounded to the nearest 1/256 of a
   pixel an em (`MATRIX_STEPS`);
 - **the phase**, the fraction of a pixel the origin `(e, f)` stands past the
-  whole pixel `(floor(e), floor(f))`, rounded to the nearest quarter on each
-  axis (`PHASES`); a fraction that rounds to four quarters is the next pixel's
-  phase 0, so there are four phases an axis and no fifth;
+  whole pixel `(floor(e), floor(f))`, rounded to the nearest sixteenth on each
+  axis (`PHASES`); a fraction that rounds to sixteen sixteenths is the next
+  pixel's phase 0, so there are sixteen phases an axis and no seventeenth, and
+  up to 16 × 16 = 256 phases a shape;
 - **the origin**, that whole pixel, in the page's frame.
 
 `floor` and `round` are correctly rounded by IEEE 754 and `e - floor(e)` is
@@ -3170,7 +3171,13 @@ the mask, so one mask serves a glyph wherever it is clipped.
 #### The key, and the font in it
 
 A mask is a function of four things, and they are its key: **the font**, **the
-code**, **the quantised 2x2** and **the phase**. The origin is not in it.
+code**, **the quantised 2x2** and **the phase**, a sixteenth on each axis and
+so one of 256. The origin is not in it. One shape at one size is therefore up
+to 256 masks rather than one, and a page asks for as many of them as the
+phases its glyphs of that shape fall at — a line's origins spread across the
+sixteen phases of its axis, and a page's lines across the sixteen of the
+other unless their leading is a whole number of pixels — never more than it
+draws glyphs of that shape.
 
 The font id a glyph carries cannot be the font: it is the interned id of the
 resource name a content stream selects the font by (`ScopeFont::id`), and a
@@ -3220,8 +3227,14 @@ building the path and filling it.
 
 **Bounded by bytes.** Each entry is charged its mask's pixels and 64 bytes
 beside them (`ENTRY_BYTES`), so a page of empty masks is bounded too, against
-4 MiB a render (`MAX_GLYPH_CACHE_BYTES`). A mask is at most 64 KiB, so the
-cache keeps sixty-three of the largest at once.
+16 MiB a render (`MAX_GLYPH_CACHE_BYTES`). A mask is at most 64 KiB, so the
+cache keeps 255 of the largest at once. The bound is sized for the phases: a
+page's distinct masks are at most its glyphs, so a page of 3 000 glyphs at
+300 dpi, whose masks are some fifty pixels a side, asks for at most 3 000 of
+some 2 600 bytes each, under 8 MiB, and keeps every one with room; at 72 dpi
+the same page's masks are some 200 bytes each and the bound holds eighty
+thousand. A page that asks for more evicts, and a glyph it evicted is the same
+pixels when it is rasterised again.
 
 **Evicted by the sequence of requests alone.** Every request, hit or miss,
 takes the next number of a counter, and an entry records the number of the
@@ -3254,9 +3267,9 @@ A kept mask is the mask a miss computes for its key, so only the quantisation
 moves pixels, and it moves them once, in P-06.2, under H-76's and H-133's
 review:
 
-- **The phase step.** A glyph stands at most an eighth of a pixel from where
-  its outline says on each axis, so only a pixel an edge passes through
-  changes, by at most a quarter of its area; with anti-aliasing off, where
+- **The phase step.** A glyph stands at most a thirty-second of a pixel from
+  where its outline says on each axis, so only a pixel an edge passes through
+  changes, by at most a sixteenth of its area; with anti-aliasing off, where
   every pixel is whole or empty, such a pixel may turn from one to the
   other.
 - **The 2x2 step.** A point within an em of the origin moves at most 1/256 of a
@@ -3277,6 +3290,7 @@ a colour, in both builds alike, since every face they draw is embedded:
 | `epub_shaped.rs`'s `the_shaped_page_renders_to_the_bytes_it_always_did` | the Arabic page's shaped runs |
 | `render_options.rs`'s `ink_output_is_pinned`, `transparent_and_premultiplied_output_is_pinned`, `hard_edged_output_is_pinned` and `the_default_is_unchanged` | the ink, layer and hard-edge pages' lines |
 | `render_goldens.rs`'s `text` golden | its line of text |
+| `surface_goldens.rs`'s `annotation-appearances` and `visible-signature` goldens | the text the annotations' appearances and the signature's appearance draw |
 
 The other pins draw no glyph, or draw one only through a stroke, a pattern, a
 clip or a Type 3 procedure — the `type3-glyph` golden among them — and do not

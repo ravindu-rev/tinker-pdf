@@ -405,6 +405,28 @@ glyph outlines into a clip applied at `ET`. A text object that selects a
 clipping mode and produces no glyphs clips everything away — spec-correct,
 and reported, because it usually means the glyphs could not be resolved.
 
+**A filled glyph is drawn from a mask of its own** (`glyph.rs`,
+[design/performance.md](../design/performance.md), P-06). In mode 0, in a
+colour, a glyph's em-to-device transform is split into its 2x2, each entry
+rounded to the nearest 1/256 of a pixel an em, its origin's phase, the
+fraction of a pixel past the whole pixel it falls in rounded to the nearest
+sixteenth on each axis, and that whole pixel, in the page's frame. The outline
+is filled under the 2x2 and the phase alone into a mask in the glyph's own
+frame, and the mask is placed at the whole pixel, windowed to what the
+canvas, the clip and the soft mask can show, multiplied by the clip and the
+soft mask, restored under in a knockout group and composited by
+`fill_mask_inked`, as a path's coverage is. So the same glyph at the same
+phase is the same pixels wherever it stands, and a tile, which takes the
+phase from the page's frame and subtracts its corner only to index the
+mask, draws the page's pixels (ruling 5;
+`a_glyph_moved_by_whole_pixels_draws_the_same_mask`). A glyph stands at
+most a thirty-second of a pixel from where its outline says on each axis.
+Strokes
+(modes 1 and 2, whose fill keeps its stroke's position), pattern fills, the
+clipping modes and a glyph whose mask would hold more than 65 536 pixels
+are drawn as paths in the page's frame, so a glyph far larger than its
+canvas is rasterised only where it can show.
+
 **Optional content** (8.11). The catalog's `/OCProperties` `/D`
 configuration is resolved once at bind: `/BaseState` sets every group in
 `/OCGs` and `/ON`/`/OFF` name the exceptions (8.11.4.3 Table 101), OCMDs
@@ -618,9 +640,10 @@ placement.
 **Anti-aliasing off.** `RenderOptions::antialias` is on by default; off, every
 pixel of every shape is wholly covered or not covered at all. It is one
 threshold — `Mask::harden`, half a pixel's coverage — applied wherever a
-coverage value is produced, and there are four such places rather than one:
-`Renderer::coverage`, through which every fill, stroke, glyph, clip, text clip
-and pattern shape passes; an image's unit square, hardened inside the
+coverage value is produced, and there are five such places rather than one:
+`Renderer::coverage`, through which every fill, stroke, clip, text clip,
+pattern shape and glyph drawn as a path passes; a filled glyph's own mask,
+before the clip multiplies into it; an image's unit square, hardened inside the
 rasterizer through `ImageDraw::antialias`; a mesh shading's silhouette after
 `draw_mesh`; and a tiling pattern's cell, drawn by a renderer of its own and
 handed the same answer on `TileRequest::antialias`. `sh` and a shading pattern
