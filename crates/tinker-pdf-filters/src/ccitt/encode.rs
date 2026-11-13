@@ -115,9 +115,7 @@
 //! a decision about *when* to choose a fax coding over deflate that belongs to
 //! whoever writes them, not here.
 
-use super::{
-    next_change, row_bytes, RunCode, BLACK_MAKEUP, BLACK_TERM, EXT_MAKEUP, WHITE_MAKEUP, WHITE_TERM,
-};
+use super::{row_bytes, RunCode, BLACK_MAKEUP, BLACK_TERM, EXT_MAKEUP, WHITE_MAKEUP, WHITE_TERM};
 
 /// A packed bilevel raster to be coded, in the layout [`super::decode`] emits.
 ///
@@ -326,26 +324,25 @@ fn after(changes: &[usize], at: isize, columns: usize) -> usize {
 /// One coding line against its reference line — T.6 §2.2.4's flow diagram,
 /// step for step.
 ///
-/// `b1` and `b2` come from [`super::next_change`] and [`super::following`],
-/// which are the decoder's own. That sharing is deliberate and is the same
-/// trade `png/encode.rs` records for the Paeth predictor: the two directions
-/// must agree on where b1 sits or nothing round-trips, and a second copy is a
-/// second thing to get wrong. What it costs is that a defect in `next_change`
-/// cancels between the two — which is exactly why the guard that matters here
-/// is T.88 Annex H.1's published bitstream and not a round trip.
+/// `b1` and `b2` come from the decoder's own cursor, [`super::Walk`], which
+/// the tests hold to the scans from the line's start at every query. That
+/// sharing is deliberate and is the same trade `png/encode.rs` records for
+/// the Paeth predictor: the two directions must agree on where b1 sits or
+/// nothing round-trips, and a second copy is a second thing to get wrong.
+/// What it costs is that a defect in the cursor moves both — which is exactly
+/// why the guard that matters here is T.88 Annex H.1's published bitstream
+/// and not a round trip.
 fn encode_row(bits: &mut BitWriter, current: &[usize], reference: &[usize], columns: usize) {
     let mut a0: isize = -1;
     let mut white = true;
     // The decoder's own cursor over the reference line, so the two searches
-    // agree and neither restarts from the line's start at every code.
-    let mut passed = super::Passed::default();
-    let steps = &mut 0u64;
+    // agree and neither restarts from the line's start at every code. The
+    // encoder counts no steps.
+    let mut walk = super::Walk::new(reference, columns);
 
     loop {
         let a1 = after(current, a0, columns);
-        passed.reach(reference, a0, steps);
-        let b1 = next_change(reference, a0, white, columns, passed.start, steps);
-        let b2 = super::following(reference, b1, columns, passed.start, steps);
+        let (b1, b2) = walk.find(a0, white, &mut 0);
 
         if b2 < a1 {
             // Pass. a0 moves to the element under b2 and the colour does not

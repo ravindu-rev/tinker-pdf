@@ -609,17 +609,40 @@ fn row_bytes(columns: usize) -> usize {
     columns.div_ceil(8)
 }
 
-/// Sets `from..to` to the black bit value.
+/// Sets `from..to` to the black bit value, a byte at a time: the bytes at
+/// either end through a mask, every byte between them whole. Pixels past the
+/// end of `row` are not there to paint.
 fn paint(row: &mut [u8], from: usize, to: usize, black_is_1: bool) {
-    for index in from..to {
-        if let Some(byte) = row.get_mut(index / 8) {
-            let mask = 0x80u8 >> (index % 8);
-            if black_is_1 {
-                *byte |= mask;
-            } else {
-                *byte &= !mask;
-            }
+    let to = to.min(row.len().saturating_mul(8));
+    if from >= to {
+        return;
+    }
+    let (first, last) = (from / 8, (to - 1) / 8);
+    // The pixels of the first byte from `from` on, and of the last up to
+    // `to - 1`.
+    let head = 0xFFu8 >> (from % 8);
+    let tail = 0xFFu8 << (7 - (to - 1) % 8);
+    let ink = |byte: &mut u8, mask: u8| {
+        if black_is_1 {
+            *byte |= mask;
+        } else {
+            *byte &= !mask;
         }
+    };
+    if first == last {
+        if let Some(byte) = row.get_mut(first) {
+            ink(byte, head & tail);
+        }
+        return;
+    }
+    if let Some(byte) = row.get_mut(first) {
+        ink(byte, head);
+    }
+    if let Some(whole) = row.get_mut(first + 1..last) {
+        whole.fill(if black_is_1 { 0xFF } else { 0x00 });
+    }
+    if let Some(byte) = row.get_mut(last) {
+        ink(byte, tail);
     }
 }
 
@@ -689,8 +712,10 @@ fn decode_with(
     let mut bits = Bits::new(data);
 
     // The row above, as the positions where colour changes. A first row is
-    // decoded against an imaginary all-white one.
+    // decoded against an imaginary all-white one. The row being decoded is
+    // `coding`, and the two lists change places once it is done.
     let mut reference: Vec<usize> = vec![columns, columns];
+    let mut coding: Vec<usize> = Vec::new();
     let mut rows_done = 0u32;
 
     // 7.4.6: `/K` decides the coding. Negative is pure two-dimensional and
@@ -763,8 +788,14 @@ fn decode_with(
         }
 
         *steps = steps.saturating_add(1);
-        let Some(changes) = decode_row(&mut bits, &reference, columns, two_dimensional, steps)
-        else {
+        if !decode_row(
+            &mut bits,
+            &reference,
+            columns,
+            two_dimensional,
+            &mut coding,
+            steps,
+        ) {
             // A row that will not decode is one row, not the rest of the page.
             // Repeating the row above is what every fax decoder does with a
             // damaged line: it keeps the image legible and localises the loss.
@@ -776,13 +807,13 @@ fn decode_with(
                 // Nothing else can be decoded from a broken bit position.
             }
             break;
-        };
+        }
 
-        pack_row(&changes, columns, params.black_is_1, &mut row);
+        pack_row(&coding, columns, params.black_is_1, &mut row);
         out.extend_from_slice(&row);
         rows_done += 1;
 
-        reference = changes;
+        std::mem::swap(&mut reference, &mut coding);
         reference.push(columns);
         reference.push(columns);
 
@@ -827,7 +858,11 @@ fn decode_with(
 /// the mode codes have one implementation and one set of tests.
 pub struct T6Rows<'a> {
     bits: Bits<'a>,
+    /// The row above's changes, and the two `columns` sentinels after them.
     reference: Vec<usize>,
+    /// The row being decoded's changes, which change places with
+    /// `reference` once the row is done.
+    coding: Vec<usize>,
     columns: usize,
 }
 
@@ -843,6 +878,7 @@ impl<'a> T6Rows<'a> {
                 at: bit_offset,
             },
             reference: vec![columns, columns],
+            coding: Vec::new(),
             columns,
         }
     }
@@ -871,47 +907,59 @@ impl<'a> T6Rows<'a> {
         if row.len() < self.row_bytes() || self.bits.exhausted() {
             return false;
         }
-        let Some(changes) = decode_row(&mut self.bits, &self.reference, self.columns, true, &mut 0)
-        else {
+        if !decode_row(
+            &mut self.bits,
+            &self.reference,
+            self.columns,
+            true,
+            &mut self.coding,
+            &mut 0,
+        ) {
             return false;
-        };
-        pack_row(&changes, self.columns, true, row);
-        self.reference = changes;
+        }
+        pack_row(&self.coding, self.columns, true, row);
+        std::mem::swap(&mut self.reference, &mut self.coding);
         self.reference.push(self.columns);
         self.reference.push(self.columns);
         true
     }
 }
 
-/// Decodes one row, returning the positions where its colour changes, and
-/// counting each code read and each reference change examined into `steps`.
+/// Decodes one row into `changes`, the positions where its colour changes,
+/// against `reference`, the row above's and the two `columns` sentinels,
+/// counting each code read and each step taken along the reference line into
+/// `steps`.
+///
+/// False means the row did not decode: no change was read before the data
+/// ran out or the bits stopped being a code, or a run's code was not one.
+/// `changes` is the caller's, emptied first, so a decode reuses two lists
+/// for all its rows rather than allocating one a row.
 fn decode_row(
     bits: &mut Bits,
     reference: &[usize],
     columns: usize,
     two_dimensional: bool,
+    changes: &mut Vec<usize>,
     steps: &mut u64,
-) -> Option<Vec<usize>> {
-    let mut changes: Vec<usize> = Vec::new();
+) -> bool {
+    changes.clear();
+    let mut walk = Walk::new(reference, columns);
     let mut a0: isize = -1;
     let mut white = true;
-    let mut passed = Passed::default();
 
     while (a0 as usize) < columns || a0 < 0 {
         *steps = steps.saturating_add(1);
         if bits.exhausted() {
-            return (!changes.is_empty()).then_some(changes);
+            return !changes.is_empty();
         }
 
         if two_dimensional {
-            passed.reach(reference, a0, steps);
-            let b1 = next_change(reference, a0, white, columns, passed.start, steps);
-            let b2 = following(reference, b1, columns, passed.start, steps);
+            let (b1, b2) = walk.find(a0, white, steps);
 
             // T.6 Table 1, one probe of the next seven bits. An end-of-line
             // or an unrecognized code ends the row.
             let Some((mode, length)) = lookup_mode(bits.peek(MODE_BITS)) else {
-                return (!changes.is_empty()).then_some(changes);
+                return !changes.is_empty();
             };
             bits.skip(length);
             match mode {
@@ -920,9 +968,14 @@ fn decode_row(
                     a0 = b2 as isize;
                 }
                 Mode::Horizontal => {
-                    // Two explicit runs follow.
-                    let first = read_run(bits, white)?;
-                    let second = read_run(bits, !white)?;
+                    // Two explicit runs follow, the second read only once the
+                    // first has, so a failure leaves the bits at its code.
+                    let Some(first) = read_run(bits, white) else {
+                        return false;
+                    };
+                    let Some(second) = read_run(bits, !white) else {
+                        return false;
+                    };
                     let start = if a0 < 0 { 0 } else { a0 as usize };
                     let one = (start + first as usize).min(columns);
                     let two = (one + second as usize).min(columns);
@@ -939,7 +992,9 @@ fn decode_row(
                 }
             }
         } else {
-            let run = read_run(bits, white)?;
+            let Some(run) = read_run(bits, white) else {
+                return false;
+            };
             let start = if a0 < 0 { 0 } else { a0 as usize };
             let next = (start + run as usize).min(columns);
             changes.push(next);
@@ -951,50 +1006,120 @@ fn decode_row(
         }
     }
 
-    Some(changes)
+    true
 }
 
-/// The reference changes a row's codes have passed: every change before
-/// `start` is at or left of the `a0` it was measured at, so it is at or left
-/// of every `a0` after it while `a0` does not move back — and neither search
-/// below can return one. A code that moves `a0` back, which only a damaged
-/// stream writes, starts the count again, so every answer is the one a search
-/// from the line's start gives.
-#[derive(Clone, Copy, Default)]
-struct Passed {
-    start: usize,
-    a0: Option<isize>,
+/// **b1 and b2 (T.4 Figure 1) found by a cursor along the reference line.**
+///
+/// A row that decoded cleanly changes colour at positions that never
+/// decrease, and along a row a0 only moves right, so the first change right
+/// of a0 is never left of where the last search found it: the cursor carries
+/// on from there, and a row costs steps in proportion to its changes, where a
+/// scan from the line's start for every mode code cost their square. b2 is
+/// the change after b1 unless changes coincide, and at the line's end it is
+/// the end.
+///
+/// The scans stay the answer where the cursor's premise does not hold. A
+/// damaged code can move a0 left, and the cursor steps back to meet it; a
+/// row above that decoded from damaged codes may change colour at positions
+/// that decrease, and against such a line b1 and b2 are [`next_change`]'s
+/// and [`following`]'s, the scans from its start.
+struct Walk<'r> {
+    reference: &'r [usize],
+    columns: usize,
+    /// Whether `reference` never decreases.
+    ordered: bool,
+    /// The first index of `reference` whose change lies right of a0, as of
+    /// the last search.
+    next: usize,
 }
 
-impl Passed {
-    /// Moves past the changes at or left of `a0`.
-    fn reach(&mut self, reference: &[usize], a0: isize, steps: &mut u64) {
-        if self.a0.is_some_and(|before| a0 < before) {
-            self.start = 0;
+impl<'r> Walk<'r> {
+    fn new(reference: &'r [usize], columns: usize) -> Walk<'r> {
+        Walk {
+            reference,
+            columns,
+            ordered: reference.windows(2).all(|pair| pair[0] <= pair[1]),
+            next: 0,
         }
-        self.a0 = Some(a0);
-        while let Some(&position) = reference.get(self.start) {
-            if position as isize > a0 {
-                break;
-            }
-            *steps = steps.saturating_add(1);
-            self.start += 1;
+    }
+
+    /// b1 and b2 for a0 and its colour, each step along the line counted
+    /// into `steps`.
+    fn find(&mut self, a0: isize, white: bool, steps: &mut u64) -> (usize, usize) {
+        if !self.ordered {
+            let b1 = next_change(self.reference, a0, white, self.columns, steps);
+            return (b1, following(self.reference, b1, self.columns, steps));
         }
+        while self
+            .reference
+            .get(self.next)
+            .is_some_and(|&position| position as isize <= a0)
+        {
+            self.next += 1;
+            step(steps);
+        }
+        while self.next > 0
+            && self
+                .reference
+                .get(self.next - 1)
+                .is_some_and(|&position| position as isize > a0)
+        {
+            self.next -= 1;
+            step(steps);
+        }
+        // Changes alternate colour starting from white, so the parity of an
+        // index says which colour its change begins: b1 is the first change
+        // right of a0 whose index has a0's colour's parity.
+        let index = if (self.next % 2 == 0) == white {
+            self.next
+        } else {
+            self.next + 1
+        };
+        let Some(&b1) = self.reference.get(index) else {
+            return (self.columns, self.columns);
+        };
+        let b1 = b1.min(self.columns);
+        if b1 >= self.columns {
+            return (b1, self.columns);
+        }
+        let mut after = index + 1;
+        while self
+            .reference
+            .get(after)
+            .is_some_and(|&position| position <= b1)
+        {
+            after += 1;
+            step(steps);
+        }
+        let b2 = self
+            .reference
+            .get(after)
+            .map_or(self.columns, |&position| position.min(self.columns));
+        (b1, b2)
     }
 }
 
+/// One step of [`Walk`]'s cursors along the reference line, counted into
+/// `steps`, and under test into [`tests::STEPS`] as well.
+fn step(steps: &mut u64) {
+    *steps = steps.saturating_add(1);
+    #[cfg(test)]
+    tests::STEPS.with(|counted| counted.set(counted.get() + 1));
+}
+
 /// b1: the first change on the reference line right of `a0` with the opposite
-/// colour of `a0` (T.4 figure 1), searched from `from`, before which no change
-/// is right of `a0` ([`Passed`]).
+/// colour of `a0` (T.4 figure 1), scanned for from the line's start — what
+/// [`Walk`] answers against a line that decreases and what the tests hold
+/// [`Walk`] to — counting each change it examines into `steps`.
 fn next_change(
     reference: &[usize],
     a0: isize,
     white: bool,
     columns: usize,
-    from: usize,
     steps: &mut u64,
 ) -> usize {
-    let mut index = from;
+    let mut index = 0usize;
     // Changes alternate colour starting from white, so the parity of the
     // index says which colour a change begins.
     while let Some(&position) = reference.get(index) {
@@ -1007,16 +1132,10 @@ fn next_change(
     columns
 }
 
-/// b2: the first change on the reference line right of `b1`, searched from
-/// `from`: `b1` is right of `a0`, and no change before `from` is.
-fn following(
-    reference: &[usize],
-    b1: usize,
-    columns: usize,
-    from: usize,
-    steps: &mut u64,
-) -> usize {
-    let mut index = from;
+/// b2: the first change on the reference line right of `b1`, scanned for
+/// from the line's start, as [`next_change`] is.
+fn following(reference: &[usize], b1: usize, columns: usize, steps: &mut u64) -> usize {
+    let mut index = 0usize;
     while let Some(&position) = reference.get(index) {
         *steps = steps.saturating_add(1);
         if position > b1 {
@@ -1036,6 +1155,9 @@ mod tests {
         /// can say what a code costs to decode — a property of the code rather
         /// than of the machine.
         pub(super) static PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Every step [`Walk`]'s cursors have taken along a reference line,
+        /// likewise.
+        pub(super) static STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     /// Builds a bit string from a pattern of '0' and '1', padded with zeros.
@@ -1851,6 +1973,190 @@ mod tests {
                 "mode code {code}"
             );
             assert_eq!(PROBES.with(std::cell::Cell::get), 1, "mode code {code}");
+        }
+    }
+
+    /// `count` values below `bound` from a linear congruential generator's
+    /// top bits: pictures and lines with no structure to lean on.
+    fn sequence(seed: u64, count: usize, bound: u64) -> Vec<u64> {
+        let mut state = seed;
+        (0..count)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 33) % bound
+            })
+            .collect()
+    }
+
+    /// Pictures of each shape a row's changes take, `#` for black: noise,
+    /// runs of random lengths, white and black rows, pixels alternating, and
+    /// a band whose edges drift a few pixels a row — so pass, horizontal and
+    /// the vertical modes are all coded.
+    fn pictures(columns: usize, rows: usize, seed: u64) -> Vec<Vec<String>> {
+        let noise = sequence(seed, columns * rows, 2);
+        let lengths = sequence(seed + 1, columns * rows, 12);
+        let cell = |black: bool| if black { '#' } else { '.' };
+        let runs = (0..rows)
+            .map(|y| {
+                let mut row = String::new();
+                let (mut black, mut at) = (y % 2 == 0, y * columns);
+                while row.len() < columns {
+                    let length = 1 + lengths[at % lengths.len()] as usize;
+                    row.extend(std::iter::repeat_n(
+                        cell(black),
+                        length.min(columns - row.len()),
+                    ));
+                    black = !black;
+                    at += 1;
+                }
+                row
+            })
+            .collect();
+        let band = (0..rows)
+            .map(|y| {
+                let left = columns / 4 + (y * 3) % 7;
+                let right = (columns * 3 / 4 + 7).saturating_sub((y * 5) % 7);
+                (0..columns).map(|x| cell(x >= left && x < right)).collect()
+            })
+            .collect();
+        vec![
+            (0..rows)
+                .map(|y| {
+                    (0..columns)
+                        .map(|x| cell(noise[y * columns + x] == 1))
+                        .collect()
+                })
+                .collect(),
+            runs,
+            vec![".".repeat(columns); rows],
+            vec!["#".repeat(columns); rows],
+            (0..rows)
+                .map(|y| (0..columns).map(|x| cell((x + y) % 2 == 0)).collect())
+                .collect(),
+            band,
+        ]
+    }
+
+    /// **A row costs steps linear in its changes.**
+    ///
+    /// Every row of pictures of each shape, at widths either side of a byte
+    /// and a word and at the standard fax width, coded and decoded a row at a
+    /// time through [`T6Rows`]: the steps [`Walk`]'s cursors take along the
+    /// reference line, counted through [`STEPS`], are at most the changes on
+    /// the reference line and on the row decoded, plus two for the line's
+    /// sentinels. The scan from the line's start this replaced took steps in
+    /// the square of them. Each row decodes to its picture.
+    #[test]
+    fn a_row_costs_steps_linear_in_its_changes() {
+        for columns in [1usize, 7, 8, 9, 31, 33, 64, 200, 1728] {
+            for (index, picture) in pictures(columns, 16, columns as u64).iter().enumerate() {
+                let rows: Vec<&str> = picture.iter().map(String::as_str).collect();
+                let coded = encode_rows(&rows, false);
+                let mut reader = T6Rows::new(&coded, 0, columns as u32);
+                let mut row = vec![0u8; reader.row_bytes()];
+                for (y, expected) in rows.iter().enumerate() {
+                    let case = format!("picture {index}, {columns} columns, row {y}");
+                    let above = reader.reference.len() - 2;
+                    STEPS.with(|steps| steps.set(0));
+                    assert!(reader.next_row(&mut row), "{case}: the row decodes");
+                    let steps = STEPS.with(std::cell::Cell::get);
+                    let here = reader.reference.len() - 2;
+                    assert!(
+                        steps <= (above + here + 2) as u64,
+                        "{case}: {steps} steps for {above} changes above and {here} here"
+                    );
+                    let decoded: String = (0..columns)
+                        .map(|x| {
+                            if (row[x >> 3] >> (7 - (x & 7))) & 1 == 1 {
+                                '#'
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect();
+                    assert_eq!(&decoded, expected, "{case}");
+                }
+            }
+        }
+    }
+
+    /// **The cursor finds b1 and b2 where the scan from the line's start
+    /// does**, at every query: over reference lines that never decrease,
+    /// coincident changes and the sentinels included, and over lines that
+    /// do; for a0 moving right along a row from before the line's start to
+    /// past its end, and moving left, as a damaged code moves it.
+    #[test]
+    fn the_cursor_finds_b1_and_b2_where_the_scan_from_the_line_start_does() {
+        let columns = 40usize;
+        for seed in 0..300u64 {
+            let count = (seed % 12) as usize;
+            let mut line: Vec<usize> = sequence(seed, count, columns as u64 + 1)
+                .into_iter()
+                .map(|position| position as usize)
+                .collect();
+            // Two lines in three never decrease; the rest are as drawn.
+            if seed % 3 != 0 {
+                line.sort_unstable();
+            }
+            line.extend([columns, columns]);
+            let moves = sequence(seed + 1_000, 40, columns as u64 + 6);
+            let colours = sequence(seed + 2_000, 40, 2);
+            let mut walk = Walk::new(&line, columns);
+            let mut a0: isize = -1;
+            for (query, (&step, &colour)) in moves.iter().zip(&colours).enumerate() {
+                // Mostly rightward, as a row moves; every seventh anywhere.
+                a0 = if query % 7 == 6 {
+                    step as isize - 1
+                } else {
+                    (a0 + (step % 6) as isize).min(columns as isize + 4)
+                };
+                let white = colour == 0;
+                let b1 = next_change(&line, a0, white, columns, &mut 0);
+                assert_eq!(
+                    walk.find(a0, white, &mut 0),
+                    (b1, following(&line, b1, columns, &mut 0)),
+                    "line {line:?}, a0 {a0}, white {white}"
+                );
+            }
+        }
+    }
+
+    /// **A run painted a byte at a time is its pixels painted one at a
+    /// time**: every span from every pixel to every other of rows one to four
+    /// bytes long, spans past their end included, in both polarities, over
+    /// rows that already hold noise.
+    #[test]
+    fn a_run_painted_a_byte_at_a_time_is_its_pixels_painted_one_at_a_time() {
+        for bytes in 1..=4usize {
+            let start: Vec<u8> = sequence(bytes as u64, bytes, 256)
+                .into_iter()
+                .map(|byte| byte as u8)
+                .collect();
+            for from in 0..bytes * 8 + 3 {
+                for to in 0..bytes * 8 + 3 {
+                    for black_is_1 in [false, true] {
+                        let mut ours = start.clone();
+                        paint(&mut ours, from, to, black_is_1);
+                        let mut theirs = start.clone();
+                        for index in from..to {
+                            if let Some(byte) = theirs.get_mut(index / 8) {
+                                let mask = 0x80u8 >> (index % 8);
+                                if black_is_1 {
+                                    *byte |= mask;
+                                } else {
+                                    *byte &= !mask;
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            ours, theirs,
+                            "{bytes} bytes, pixels {from}..{to}, black is 1: {black_is_1}"
+                        );
+                    }
+                }
+            }
         }
     }
 

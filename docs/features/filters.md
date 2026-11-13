@@ -142,15 +142,17 @@ which is the standard fax recovery. Codes are read by table lookup on a word
 read at the cursor: a run's next thirteen bits index its colour's run table,
 built at compile time from T.4's Tables 2, 3a and 3b, in one probe for a code
 of up to nine bits and two through a second-level table for a longer one, and
-a mode's next seven bits index a table of T.6's Table 1. A two-dimensional
-code finds b1 and b2 on the reference line from the changes its row has not
-yet passed rather than from the line's start: every change before that point
-is at or left of an `a0` that has not moved back since, so it can be neither,
-and a damaged code that moves `a0` back starts the search again from the
-line's start. Every answer is the one a search from the start gives, and a
-row costs work in proportion to its changes rather than to their square; the
-G4 encoder shares both searches and the cursor. Output is packed one bit per
-pixel, MSB-first, rows byte-padded — exactly the shape `/BitsPerComponent 1`
+a mode's next seven bits index a table of T.6's Table 1. Along a row, b1 and
+b2 (T.4 Figure 1) are found by a cursor that carries on along the reference
+line from where it last stopped, rather than by a search from the line's
+start for every code, so a row costs steps in proportion to its changes
+rather than to their square. It steps back only where a damaged code moves
+`a0` left, and a reference line that decoded from damage into changes that
+decrease is searched from its start, so every answer is the one a search
+from the start gives; the G4 encoder finds b1 and b2 through the same
+cursor. Runs are painted a byte at a time, and a decode keeps two change
+lists for all its rows. Output is packed one bit per pixel, MSB-first, rows
+byte-padded — exactly the shape `/BitsPerComponent 1`
 describes, so `/ImageMask`, `/Decode` and `/ColorSpace` compose with a fax
 the way they do with any other image.
 
