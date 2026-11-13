@@ -1226,7 +1226,8 @@ What it does:
 
 **What no shaping engine here adjudicates.** Ruling 13 rules out running
 another shaper and diffing, so the claim for a script is exactly as strong as
-the fixture behind it, and the scripts divide in five:
+the fixture behind it, and the scripts divide in five, beside a sixth bar that
+holds none yet:
 
 | Script | What is behind it |
 |---|---|
@@ -1235,6 +1236,7 @@ the fixture behind it, and the scripts divide in five:
 | Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
 | Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number reproduced per section and is a ratchet — it may rise and may not fall — and its `TRIAGE` says of each remaining failure whether the glyph *set*, their *order* or only a *position* is wrong |
 | Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them, and none in their upstreams or in HarfBuzz's suite is one ruling 13 admits (below). What that produces is deterministic and plausible; nothing in this repository says it is right |
+| None yet | **Person-written expectations** (H-64): `crates/tinker-pdf-shape/tests/person_written.rs` reads every case a reader of a script wrote under `data/person-written`, in the format [design/shaping.md](../design/shaping.md)'s *Person-written expectations* fixes, refuses one without its provenance, shapes it through `Shaper::shape_text` and holds it glyph by glyph — each glyph, its cluster and where it is drawn, exactly. `PERSON_WRITTEN` is its per-script ratchet and is empty: no case is delivered, so no script has left the row above |
 
 How the cluster model orders a syllable, each rule held by the sections
 above:
@@ -1497,6 +1499,17 @@ corpora already vendored here. So every name stays on the list.
   truncation and single-byte change read without a panic; and the `shape`
   fuzz target's `JSTF` seed, `fuzz/corpus/shape/jstf-every-structure`,
   replayed through both of its paths and held to the writer's bytes.
+- `crates/tinker-pdf-shape/tests/person_written.rs` — the person-written
+  bar, with no case delivered: its `RAN` line says so and `PERSON_WRITTEN`
+  is empty. Its comparison is held by `SHARAN-1/1` written into the format
+  from text-rendering-tests' fixture, which passes and fails with one glyph,
+  one offset, one rise, two glyphs exchanged, a glyph more or fewer, and its
+  em left out; each provenance field missing refuses the case by name, as
+  every other malformed statement, a glyph the face does not name, an index
+  past its glyphs, a missing face and a file that is no face do; and on
+  lines built in the test, a cluster and the line's end are read where a case
+  states them, and another split of pen and offset that draws the same place
+  passes.
 - `crates/tinker-pdf/src/fontlist.rs` — unit tests beside the listing:
   9.6.4's subset-tag shape in both directions (seven strings that are not a
   tag, each for its own reason), a descriptor deciding embedding, a
