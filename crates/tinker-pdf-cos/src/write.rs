@@ -232,7 +232,17 @@ fn write_real(out: &mut Vec<u8>, value: f64) {
     let text = format!("{value:.6}");
     let trimmed = text.trim_end_matches('0').trim_end_matches('.');
     out.extend_from_slice(if trimmed.is_empty() { "0" } else { trimmed }.as_bytes());
+    // 7.3.3: digits with no decimal point are an integer, and one past what an
+    // integer holds is a token a reader clamps. Such a value keeps its point,
+    // which still makes it a real ("4." is one).
+    if value.abs() >= INTEGER_TOKEN_LIMIT && !trimmed.contains('.') {
+        out.push(b'.');
+    }
 }
+
+/// 2^63: the first magnitude whose digits an `i64` cannot hold, which is
+/// where an integer token stops reading back as the value written.
+const INTEGER_TOKEN_LIMIT: f64 = 9_223_372_036_854_775_808.0;
 
 /// The number a reader takes from what [`write_real`] writes for `value`:
 /// `value` to six decimal places, or 0 where it is not finite.
@@ -1545,9 +1555,35 @@ mod tests {
         assert_eq!(rendered(&Object::Real(-0.25)), "-0.25");
         assert!(!rendered(&Object::Real(1e-7)).contains('e'));
         assert!(!rendered(&Object::Real(1e20)).contains('e'));
+        // Past 2^63 the digits would read back as an integer the reader
+        // clamps, so the point stays; below it nothing changes.
+        assert_eq!(rendered(&Object::Real(1e20)), "100000000000000000000.");
+        assert_eq!(rendered(&Object::Real(-1e20)), "-100000000000000000000.");
+        assert_eq!(rendered(&Object::Real(1e18)), "1000000000000000000");
         // Non-finite values cannot be written at all, so they become zero.
         assert_eq!(rendered(&Object::Real(f64::NAN)), "0");
         assert_eq!(rendered(&Object::Real(f64::INFINITY)), "0");
+    }
+
+    /// What is written for a real reads back as that real with no repair, at
+    /// every magnitude: a hostile file's huge coordinate, rewritten, must not
+    /// read back as an integer clamped to `i64::MAX`.
+    #[test]
+    fn a_real_past_an_integers_reach_reads_back_as_itself() {
+        for value in [1e20, -1e20, 1e308, 2f64.powi(63), 1e18] {
+            let text = rendered(&Object::Real(value));
+            let mut sink = crate::warn::WarningSink::new();
+            let parsed = crate::parse::parse_object_at(text.as_bytes(), 0, &names(), &mut sink);
+            assert!(sink.take().is_empty(), "{text} needed a repair");
+            let read = match parsed.object {
+                Object::Real(read) => read,
+                Object::Int(read) => read as f64,
+                other => panic!("{text} read back as {other:?}"),
+            };
+            // Within an ulp, which is what the lexer promises past 10^22, and
+            // not `i64::MAX`, which is what a clamped integer would be.
+            assert!(((read - value) / value).abs() <= 1e-15, "{text}: {read}");
+        }
     }
 
     #[test]
