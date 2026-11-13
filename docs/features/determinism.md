@@ -134,7 +134,11 @@ knockout ink group and a soft mask — in forced colours with and without
 fill-to-stroke, black on white at 1x and in two hues at 1.7x, to
 `FORCED_COLOUR_OUTPUT` the same way, each render's black-on-white coverage
 floored by ink first; the page embeds its face, so one table serves both
-builds. The local `wasm32-wasip1` run takes that file as well.
+builds. `placed_annotation_output_is_pinned` holds a page turned a quarter
+whose annotation is flagged `/NoZoom` and `/NoRotate`, at magnification 2,
+where 12.5.3 places the appearance at half its size and upright about its
+fixed corner, to `PLACED_ANNOTATION_OUTPUT`. The local `wasm32-wasip1` run
+takes that file as well.
 
 **The bitmap toolbox's output** is pinned the same way, over a committed
 render rather than a page: `crates/tinker-pdf/tests/bitmap_toolbox.rs`'s
@@ -271,8 +275,9 @@ hashes, the first-party sRGB profile's bytes, its display list's replay of
 every fingerprinted page and the same pages drawn through a warm and a
 starved document cache, and under a warm and a starved budget stated at open;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
-`render_options.rs`'s pinned ink, transparent and premultiplied, hard-edged
-and forced-colour output and levels, rules and widths; `bitmap_toolbox.rs`'s
+`render_options.rs`'s pinned ink, transparent and premultiplied, hard-edged,
+forced-colour and placed-annotation output and levels, rules and widths;
+`bitmap_toolbox.rs`'s
 toolbox outputs; the shaper's two fingerprints; and the guard suite's
 roster of guards and the work counts it pins (`guards.rs`), which CI's tests
 run in each build they test and the local `wasm32-wasip1` run under wasmtime,

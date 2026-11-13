@@ -150,7 +150,7 @@ use tinker_pdf_render::{
     DecodedImage, GlyphSource, ImageRequest, PatternPaint, PixelRegion, Renderer, Shading,
 };
 
-use crate::annots::{self, AppearanceDevice};
+use crate::annots::{self, AppearanceDevice, Recorded};
 use crate::resources::PageResources;
 use crate::{DisplayList, Page, PixelFormat, RenderWarning};
 
@@ -372,6 +372,7 @@ impl DisplayList {
                     page.fonts.as_ref(),
                     &mut writer,
                     resources.operation(),
+                    self.placement(1.0),
                 );
             }
             return writer.finish_with(&resources, width, height);
@@ -385,10 +386,25 @@ impl DisplayList {
         let mut writer = Writer::new(&resources, base, page, options);
         replay(self.content(), &mut writer);
         if options.annotations {
-            for (scope, events) in self.annotation_layers() {
-                writer.push_resources(resources.bind(scope));
-                replay(events, &mut writer);
-                writer.pop_resources();
+            for annotation in self.annotation_layers() {
+                match annotation {
+                    Recorded::Calls { scope, events } => {
+                        writer.push_resources(resources.bind(scope));
+                        replay(events, &mut writer);
+                        writer.pop_resources();
+                    }
+                    // An SVG is the page at magnification 1, its `/Rotate`
+                    // applied: `/NoRotate` places an annotation, `/NoZoom`
+                    // does not move one.
+                    Recorded::Placed(appearance) => annots::draw_prepared(
+                        &page.doc,
+                        appearance,
+                        page.fonts.as_ref(),
+                        &mut writer,
+                        resources.operation(),
+                        self.placement(1.0),
+                    ),
+                }
             }
         }
         writer.finish_with(&resources, width, height)

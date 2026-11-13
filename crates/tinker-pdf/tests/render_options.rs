@@ -2033,6 +2033,51 @@ fn forced_colour_output_is_pinned() {
     );
 }
 
+// ---- the magnification (RC-13.4) ----------------------------------------------
+
+/// The pinned render of [`placed_annotation_output_is_pinned`]: its name and
+/// its committed hash. A run's output, recorded from the first target's run
+/// and held on every target after it; one two targets disagree on is a
+/// determinism bug, never an edit of this table.
+const PLACED_ANNOTATION_OUTPUT: [(&str, &str); 1] = [(
+    "a /NoZoom and /NoRotate annotation on a page turned a quarter, at magnification 2",
+    "",
+)];
+
+/// **A placed annotation's fingerprint** (RC-13.4): the page `render_support`
+/// builds for 12.5.3's `/NoZoom` and `/NoRotate`, turned a quarter, its
+/// annotation flagged with both, rendered at magnification 2 — where the
+/// appearance is drawn at half its size about its fixed corner and upright —
+/// hashed as `determinism.rs` hashes a page, to its committed value. The page
+/// draws no text, so one value serves both builds.
+#[test]
+fn placed_annotation_output_is_pinned() {
+    let bitmap = render(
+        render_support::placed_page(90, 4 | 8 | 16, render_support::PLACED_RECT, None),
+        &RenderOptions {
+            magnification: 2.0,
+            ..RenderOptions::default()
+        },
+    );
+    let [(name, want)] = PLACED_ANNOTATION_OUTPUT;
+    // 800 pixels of grey bar and the annotation's 100; the floor is under
+    // half.
+    let drawn = painted(&bitmap);
+    assert!(
+        drawn >= 400,
+        "{name}: painted {drawn} pixels, fewer than 400: it is measuring less than it claims"
+    );
+    let actual = fingerprint(&bitmap);
+    assert_eq!(
+        actual, want,
+        "the `{name}` render moved.\n\n\
+         If two targets disagree, this is a determinism bug: find the arithmetic that \
+         is not target-stable and do not update the value.\n\
+         If the table was committed empty, or this is a deliberate rendering change \
+         said in its commit, paste:\n\n    (\"{name}\", \"{actual}\"),"
+    );
+}
+
 // ---- levels and rules (RC-11.5) ---------------------------------------------
 
 /// **`antialias` keeps its meaning** (RC-11.5): off, both levels read as 0

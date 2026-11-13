@@ -38,7 +38,12 @@
 //! after the content, as `Page::render` draws them. What is recorded is what
 //! the list's usage draws (12.5.3, `annots::prepare`): an annotation its flags
 //! or its `/OC` keep off that usage is not, but for the two calls that report
-//! the layer an `/OC` hid it by, which every replay reports again.
+//! the layer an `/OC` hid it by, which every replay reports again. An
+//! annotation `/NoZoom` or `/NoRotate` places is kept prepared rather than
+//! recorded, and interpreted at each replay where the render's magnification
+//! and the page's `/Rotate` put it, as a direct render interprets it; a page
+//! drawing one is drawn whole rather than in bands, since its calls are only
+//! the render's to make.
 //!
 //! # A list draws its own usage
 //!
@@ -107,7 +112,7 @@ use tinker_pdf_pool::{on_worker, Executor, MAX_THREADS};
 use tinker_pdf_raster::image::{image_bounds_in, Transform};
 use tinker_pdf_render::{DisplayRecorder, Renderer};
 
-use crate::annots::{self, Recorded};
+use crate::annots::{self, AppearanceDevice, Placement, Recorded};
 use crate::resources::PageResources;
 use crate::stats::Counter;
 use crate::{
@@ -291,7 +296,7 @@ impl DisplayList {
     fn replay_onto(
         &self,
         options: &RenderOptions,
-        target: &mut impl Target,
+        target: &mut (impl Target + AppearanceDevice),
         resources: &PageResources,
     ) {
         let replayed = replay(&self.content, target);
@@ -301,19 +306,49 @@ impl DisplayList {
         }
         target.settle();
         if options.annotations {
+            let placement = self.placement(options.magnification);
             for annotation in &self.annotations {
-                target.push(resources.bind(&annotation.scope));
-                replay(&annotation.events, target);
-                target.pop();
+                match annotation {
+                    Recorded::Calls { scope, events } => {
+                        target.push(resources.bind(scope));
+                        replay(events, target);
+                        target.pop();
+                    }
+                    // 12.5.3: placed for this render's magnification and the
+                    // page's turn, as the direct render places it.
+                    Recorded::Placed(appearance) => annots::draw_prepared(
+                        &self.page.doc,
+                        appearance,
+                        self.page.fonts.as_ref(),
+                        target,
+                        resources.operation(),
+                        placement,
+                    ),
+                }
             }
         }
+    }
+
+    /// Where 12.5.3's `/NoZoom` and `/NoRotate` place an annotation in a
+    /// render of the list at `magnification`: the page's frame alone.
+    pub(crate) fn placement(&self, magnification: f64) -> Placement {
+        Placement::new(magnification, self.page.inner.rotation)
+    }
+
+    /// Whether the list keeps an annotation `/NoZoom` or `/NoRotate` places
+    /// at render time, whose calls only a render makes.
+    fn places_an_annotation(&self) -> bool {
+        self.annotations
+            .iter()
+            .any(|annotation| matches!(annotation, Recorded::Placed(_)))
     }
 
     /// The list drawn in horizontal bands on the threads
     /// `options.parallelism` names (`docs/design/parallelism.md`, "Bands of
     /// one page"), or `None` where it is drawn whole: asked for no threads, or
-    /// for one, a view of fewer than two rows, or a page whose runs of images
-    /// leave no row to cut at.
+    /// for one, a view of fewer than two rows, a page whose runs of images
+    /// leave no row to cut at, or one drawing an annotation `/NoZoom` or
+    /// `/NoRotate` places at render time.
     ///
     /// Each band is the view's own rows drawn as a region of the page in its
     /// one frame (ruling 5), so it is byte-equal to those rows of the page
@@ -333,6 +368,12 @@ impl DisplayList {
             Parallelism::Threads(threads) if threads >= 2 => threads.min(MAX_THREADS),
             _ => return None,
         };
+        // An annotation placed at render time has no calls a cut could be
+        // planned around — its image runs are the render's to make — so the
+        // page is drawn whole: the same bitmap, on the caller.
+        if options.annotations && self.places_an_annotation() {
+            return None;
+        }
         let page = &self.page;
         let View {
             scale,
@@ -482,7 +523,11 @@ impl DisplayList {
             .annotations
             .iter()
             .filter(|_| options.annotations)
-            .flat_map(|annotation| annotation.events.iter());
+            .flat_map(|annotation| match annotation {
+                Recorded::Calls { events, .. } => events.as_slice(),
+                // Refused bands by `render_in_bands`, so never reached there.
+                Recorded::Placed(_) => &[],
+            });
         let mut runs = Vec::new();
         // The open sequence's first row, its row past the last, and its draws.
         let mut open: Option<(u32, u32, usize)> = None;
@@ -567,13 +612,10 @@ impl DisplayList {
         &self.content
     }
 
-    /// Each annotation's resource scope and calls, in `/Annots` order.
-    pub(crate) fn annotation_layers(
-        &self,
-    ) -> impl Iterator<Item = (&Arc<PageResources>, &[Event])> {
-        self.annotations
-            .iter()
-            .map(|annotation| (&annotation.scope, annotation.events.as_slice()))
+    /// Each annotation as the list keeps it, in `/Annots` order: its resource
+    /// scope and calls, or its appearance prepared for each render to place.
+    pub(crate) fn annotation_layers(&self) -> &[Recorded] {
+        &self.annotations
     }
 
     /// Which page of its document this is.
@@ -881,6 +923,18 @@ impl Target for Stamping<'_, '_> {
 
     fn settle(&mut self) {
         self.after();
+    }
+}
+
+/// An appearance placed at render time is interpreted onto the stamping
+/// renderer as a direct render interprets it onto its own.
+impl AppearanceDevice for Stamping<'_, '_> {
+    fn push_scope(&mut self, scope: Arc<PageResources>) {
+        self.renderer.push_resources(scope);
+    }
+
+    fn pop_scope(&mut self) {
+        self.renderer.pop_resources();
     }
 }
 

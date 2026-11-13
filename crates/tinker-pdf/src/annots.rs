@@ -50,20 +50,23 @@ impl AppearanceDevice for Renderer<'_, PageResources> {
 
 /// Draws every annotation of a page that `op`, the render's operation, draws
 /// — by its flags and its `/OC` under the operation's usage and states
-/// ([`prepare`]) — each appearance's scopes read through its decoded streams,
-/// so an appearance two annotations share and a font two appearances draw are
-/// decoded once, and count into its tally when the render is counting. One
-/// whose `/OC` hides it is reported as content in that layer is
-/// ([`note_hidden`]).
+/// ([`prepare`]) — each placed where `placement` puts it, each appearance's
+/// scopes read through its decoded streams, so an appearance two annotations
+/// share and a font two appearances draw are decoded once, and count into its
+/// tally when the render is counting. One whose `/OC` hides it is reported as
+/// content in that layer is ([`note_hidden`]).
 pub(crate) fn draw(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     provider: Option<&Arc<dyn FontProvider>>,
     device: &mut impl AppearanceDevice,
     op: &Operation,
+    placement: Placement,
 ) {
     each_appearance(doc, page, op, |entry| match entry {
-        Entry::Draws(appearance) => draw_prepared(doc, appearance, provider, device, op),
+        Entry::Draws(appearance) => {
+            draw_prepared(doc, &appearance, provider, device, op, placement);
+        }
         Entry::Hidden(layer) => note_hidden(device, layer),
     });
 }
@@ -78,11 +81,19 @@ fn note_hidden(device: &mut impl Device, layer: &str) {
     device.end_marked_content();
 }
 
-/// One annotation's appearance as a retained page keeps it: the scope the
-/// renderer resolves its names in, and the calls its content makes.
-pub(crate) struct Recorded {
-    pub(crate) scope: Arc<PageResources>,
-    pub(crate) events: Vec<Event>,
+/// One annotation's appearance as a retained page keeps it.
+pub(crate) enum Recorded {
+    /// The calls its content makes, and the scope the renderer resolves its
+    /// names in.
+    Calls {
+        scope: Arc<PageResources>,
+        events: Vec<Event>,
+    },
+    /// An appearance `/NoZoom` or `/NoRotate` places at render time, kept
+    /// prepared and interpreted at each replay under the replay's
+    /// [`Placement`] (`docs/design/render-usage.md`), since where it draws
+    /// is the render's magnification's to say.
+    Placed(Appearance),
 }
 
 /// Every annotation of a page that `op` draws, recorded rather than drawn.
@@ -95,6 +106,13 @@ pub(crate) struct Recorded {
 /// the operation the page's content was recorded in, so what its usage and
 /// states hide is not recorded; one its `/OC` hides is recorded as the two
 /// calls that report its layer ([`note_hidden`]) and nothing else.
+///
+/// One that `/NoZoom` or `/NoRotate` places is kept prepared
+/// ([`Recorded::Placed`]): where it draws is each render's magnification's to
+/// say. It is interpreted into the recorder all the same and its calls
+/// dropped, so the answers the recorder gives the annotations after it are
+/// the ones a renderer gives them once it has drawn it — the answers depend on
+/// the content and not on where it is placed.
 pub(crate) fn record(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
@@ -108,7 +126,7 @@ pub(crate) fn record(
             Entry::Draws(appearance) => appearance,
             Entry::Hidden(layer) => {
                 note_hidden(recorder, layer);
-                out.push(Recorded {
+                out.push(Recorded::Calls {
                     scope: Arc::new(PageResources::from_dict_in(
                         doc,
                         Dict::new(),
@@ -120,6 +138,23 @@ pub(crate) fn record(
                 return;
             }
         };
+        if appearance.is_placed() {
+            let resources = PageResources::from_dict_in(
+                doc,
+                appearance.resources.clone(),
+                provider,
+                op.clone(),
+            );
+            interpret(
+                &appearance.content,
+                appearance.transform,
+                recorder,
+                &resources,
+            );
+            drop(recorder.take());
+            out.push(Recorded::Placed(appearance));
+            return;
+        }
         // Two resource objects over one dictionary, as `draw_prepared` makes
         // them: the interpreter's, used up here in the recording, and the
         // renderer's, kept past it and handed to each replay bound to the
@@ -138,7 +173,7 @@ pub(crate) fn record(
             recorder,
             &resources,
         );
-        out.push(Recorded {
+        out.push(Recorded::Calls {
             scope,
             events: recorder.take(),
         });
@@ -149,7 +184,7 @@ pub(crate) fn record(
 /// One annotation of a page, as [`each_appearance`] hands it on.
 enum Entry<'a> {
     /// It draws: its appearance, prepared.
-    Draws(&'a Appearance),
+    Draws(Appearance),
     /// Its `/OC` hides it under the operation's states: the layer's label,
     /// reported as content in the layer is ([`note_hidden`]).
     Hidden(&'a str),
@@ -188,7 +223,7 @@ fn each_appearance(
             continue;
         };
         match prepare(doc, &annotation, op) {
-            Ok(appearance) => each(Entry::Draws(&appearance)),
+            Ok(appearance) => each(Entry::Draws(appearance)),
             // Content in a layer that is off is reported, and so is an
             // annotation its layer hides (ruling 10).
             Err(NotDrawn::OptionalContentOff) => {
@@ -221,7 +256,7 @@ fn each_appearance(
 /// - every other render — a view, an export, and one naming no usage — hides
 ///   one whose `NoView` is set, and draws one whose `Print` is clear.
 fn flag_refusal(doc: &CosDocument, annotation: &Dict, usage: Option<Usage>) -> Option<NotDrawn> {
-    let flags = AnnotationFlags::from_raw(annotation.get_int(doc.intern(b"F")).unwrap_or(0));
+    let flags = flags_of(doc, annotation);
     if flags.hidden() {
         return Some(NotDrawn::Hidden);
     }
@@ -261,9 +296,98 @@ fn hidden_by(doc: &CosDocument, annotation: &Dict, op: &Operation) -> Option<Str
     (!layer.visible).then_some(layer.label)
 }
 
+/// Where 12.5.3's two placement flags put an appearance in one render: the
+/// magnification `/NoZoom` reads (`crate::RenderOptions::magnification`) and
+/// the page's `/Rotate`, which `/NoRotate` reads — the page's frame alone,
+/// never a region, so a tile draws the page's pixels (ruling 5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Placement {
+    /// The render's magnification, 1 where it was not a finite number above
+    /// zero.
+    magnification: f64,
+    /// The page's `/Rotate`: 0, 90, 180 or 270.
+    rotation: u16,
+}
+
+impl Placement {
+    /// A render at `magnification` — read as 1 where it is not a finite
+    /// number above zero, as a scale is — of a page whose `/Rotate` is
+    /// `rotation`, normalised to a quarter turn.
+    pub(crate) fn new(magnification: f64, rotation: u16) -> Placement {
+        let magnification = if magnification.is_finite() && magnification > 0.0 {
+            magnification
+        } else {
+            1.0
+        };
+        Placement {
+            magnification,
+            rotation: (rotation / 90 % 4) * 90,
+        }
+    }
+
+    /// What moves an appearance fitted onto `rect`, flagged `no_zoom` and
+    /// `no_rotate`, in default user space, or `None` where nothing does (12.5.3,
+    /// `docs/design/render-usage.md`): about `P`, `/Rect`'s upper-left corner
+    /// in default user space, `(min x, max y)` — "The upper-left corner of the
+    /// annotation remains at the same point in default user space; the
+    /// annotation pivots around that point" — `/NoZoom` scales by
+    /// `1 / magnification`, so the appearance keeps the size it has at
+    /// magnification 1, and `/NoRotate` turns counter-clockwise by the page's
+    /// `/Rotate`, which the view's clockwise turn of the page undoes, so it
+    /// stands as on an unturned page. A quarter turn's cosine and sine are
+    /// exact, and so is the reciprocal of the magnification: nothing here is
+    /// a transcendental (ruling 4).
+    fn matrix(self, rect: Rect, no_zoom: bool, no_rotate: bool) -> Option<Matrix> {
+        let zooms = no_zoom && self.magnification != 1.0;
+        let turns = no_rotate && self.rotation != 0;
+        if !zooms && !turns {
+            return None;
+        }
+        let s = if zooms { 1.0 / self.magnification } else { 1.0 };
+        let (cos, sin) = match (turns, self.rotation) {
+            (true, 90) => (0.0, 1.0),
+            (true, 180) => (-1.0, 0.0),
+            (true, 270) => (0.0, -1.0),
+            _ => (1.0, 0.0),
+        };
+        let (px, py) = (rect.x0, rect.y1);
+        let (a, b, c, d) = (s * cos, s * sin, -s * sin, s * cos);
+        // `x' = a x + c y + e` and `y' = b x + d y + f` leave `P` where it is.
+        Some(Matrix {
+            a,
+            b,
+            c,
+            d,
+            e: px - (a * px + c * py),
+            f: py - (b * px + d * py),
+        })
+    }
+}
+
+/// The axis-aligned box, as `(x0, y0, x1, y1)`, of `rect`'s four corners
+/// through `matrix`.
+fn bounds_through(matrix: &Matrix, rect: Rect) -> (f64, f64, f64, f64) {
+    let corners = [
+        matrix.apply(rect.x0, rect.y0),
+        matrix.apply(rect.x1, rect.y0),
+        matrix.apply(rect.x1, rect.y1),
+        matrix.apply(rect.x0, rect.y1),
+    ];
+    corners.iter().fold(
+        (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ),
+        |(x0, y0, x1, y1), &(x, y)| (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+    )
+}
+
 /// An annotation's normal appearance, ready to draw: the content with its
 /// `/BBox` clip in front, where 12.5.5's fit puts it, the resources it resolves
-/// names in, and the `/Rect` it was fitted onto.
+/// names in, the `/Rect` it was fitted onto, and whether 12.5.3's `/NoZoom`
+/// and `/NoRotate` place it at render time ([`Placement`]).
 ///
 /// Split out of `draw_one` so that the page and `Page::render_annotation`
 /// draw an annotation with one piece of code: the page ignores why a
@@ -273,6 +397,8 @@ pub(crate) struct Appearance {
     content: Vec<u8>,
     transform: Matrix,
     resources: Dict,
+    no_zoom: bool,
+    no_rotate: bool,
 }
 
 impl Appearance {
@@ -280,6 +406,32 @@ impl Appearance {
     /// in order: the rectangle the appearance is fitted onto and drawn within.
     pub(crate) fn rect(&self) -> (f64, f64, f64, f64) {
         (self.rect.x0, self.rect.y0, self.rect.x1, self.rect.y1)
+    }
+
+    /// The rectangle the appearance is drawn within under `placement`:
+    /// `/Rect` as [`Placement`] moves it, its axis-aligned box in default user
+    /// space, which is `/Rect` itself where nothing moves it.
+    pub(crate) fn placed_rect(&self, placement: Placement) -> (f64, f64, f64, f64) {
+        match placement.matrix(self.rect, self.no_zoom, self.no_rotate) {
+            Some(moved) => bounds_through(&moved, self.rect),
+            None => self.rect(),
+        }
+    }
+
+    /// Whether `/NoZoom` or `/NoRotate` places it at render time, so that a
+    /// retained page keeps it prepared and interprets it at each replay
+    /// rather than recording its calls once.
+    pub(crate) fn is_placed(&self) -> bool {
+        self.no_zoom || self.no_rotate
+    }
+
+    /// The transform the appearance is drawn through under `placement`:
+    /// 12.5.5's fit, and then whatever [`Placement`] moves it by.
+    fn transform_at(&self, placement: Placement) -> Matrix {
+        match placement.matrix(self.rect, self.no_zoom, self.no_rotate) {
+            Some(moved) => self.transform.then(&moved),
+            None => self.transform,
+        }
     }
 }
 
@@ -367,12 +519,20 @@ pub(crate) fn prepare(
         .cloned()
         .unwrap_or_default();
 
+    let flags = flags_of(doc, annotation);
     Ok(Appearance {
         rect,
         content,
         transform,
         resources,
+        no_zoom: flags.no_zoom(),
+        no_rotate: flags.no_rotate(),
     })
+}
+
+/// `annotation`'s `/F`, every bit clear where it has none.
+fn flags_of(doc: &CosDocument, annotation: &Dict) -> AnnotationFlags {
+    AnnotationFlags::from_raw(annotation.get_int(doc.intern(b"F")).unwrap_or(0))
 }
 
 /// Where an annotation draws on its page, as [`draw`] would draw it, read
@@ -394,13 +554,20 @@ pub(crate) enum Drawn {
     Unbounded,
 }
 
-/// [`Drawn`] for `annotation` in a render naming `usage`: the decisions
-/// [`prepare`] takes, but for the decode, which a bounded appearance does not
-/// need — one whose content does not decode draws nothing, inside its
-/// rectangle as well — and for an `/OC`, which is not read: under states that
-/// hide the annotation, its rectangle is drawn again with nothing new in it,
-/// which costs pixels and changes none.
-pub(crate) fn drawn(doc: &CosDocument, annotation: &Dict, usage: Option<Usage>) -> Drawn {
+/// [`Drawn`] for `annotation` in a render naming `usage` and placed as
+/// `placement` says: the decisions [`prepare`] takes, but for the decode,
+/// which a bounded appearance does not need — one whose content does not
+/// decode draws nothing, inside its rectangle as well — and for an `/OC`,
+/// which is not read: under states that hide the annotation, its rectangle is
+/// drawn again with nothing new in it, which costs pixels and changes none.
+/// The rectangle is `/Rect` where `/NoZoom` and `/NoRotate` move it
+/// ([`Appearance::placed_rect`]).
+pub(crate) fn drawn(
+    doc: &CosDocument,
+    annotation: &Dict,
+    usage: Option<Usage>,
+    placement: Placement,
+) -> Drawn {
     if flag_refusal(doc, annotation, usage).is_some() {
         return Drawn::Nothing;
     }
@@ -434,21 +601,32 @@ pub(crate) fn drawn(doc: &CosDocument, annotation: &Dict, usage: Option<Usage>) 
         // `fit` places a box it can scale onto the rectangle, and then the box
         // is non-empty and finite, which is when `prepare` clips to it.
         Some(bbox) => match fit(Some(bbox), matrix, rect) {
-            Some(_) => Drawn::Within(rect),
+            Some(_) => {
+                let flags = flags_of(doc, annotation);
+                match placement.matrix(rect, flags.no_zoom(), flags.no_rotate()) {
+                    Some(moved) => {
+                        let (x0, y0, x1, y1) = bounds_through(&moved, rect);
+                        Drawn::Within(Rect { x0, y0, x1, y1 })
+                    }
+                    None => Drawn::Within(rect),
+                }
+            }
             None => Drawn::Nothing,
         },
     }
 }
 
-/// Draws a prepared appearance through `device`, its two scopes serving `op`,
-/// the render's operation: one decode between them of each stream they read,
-/// counted into its tally when the render is counting.
+/// Draws a prepared appearance through `device`, placed where `placement`
+/// puts it, its two scopes serving `op`, the render's operation: one decode
+/// between them of each stream they read, counted into its tally when the
+/// render is counting.
 pub(crate) fn draw_prepared(
     doc: &Arc<CosDocument>,
     appearance: &Appearance,
     provider: Option<&Arc<dyn FontProvider>>,
     device: &mut impl AppearanceDevice,
     op: &Operation,
+    placement: Placement,
 ) {
     let resources =
         PageResources::from_dict_in(doc, appearance.resources.clone(), provider, op.clone());
@@ -466,7 +644,7 @@ pub(crate) fn draw_prepared(
     )));
     interpret(
         &appearance.content,
-        appearance.transform,
+        appearance.transform_at(placement),
         device,
         &resources,
     );
@@ -656,7 +834,11 @@ trailer\n<< /Root 1 0 R >>\n%%EOF\n";
                     let what = format!("{subtype:?}, /F {f}, {usage:?}");
                     assert_eq!(flag_refusal(&doc, &dict, usage), want, "{what}");
                     if want.is_some() {
-                        assert_eq!(drawn(&doc, &dict, usage), Drawn::Nothing, "{what}");
+                        assert_eq!(
+                            drawn(&doc, &dict, usage, Placement::new(1.0, 0)),
+                            Drawn::Nothing,
+                            "{what}"
+                        );
                     }
                 }
             }
@@ -750,6 +932,61 @@ trailer\n<< /Root 1 0 R >>\n%%EOF\n";
         crate::optional::binds::take();
         let _ = hidden_by(&doc, &with_oc(None), &Operation::none());
         assert_eq!(crate::optional::binds::take(), 0, "no /OC, no states bound");
+    }
+
+    /// **The placement keeps `/Rect`'s upper-left corner fixed** (12.5.3):
+    /// `/NoZoom` scales about it by the magnification's reciprocal and
+    /// `/NoRotate` turns about it counter-clockwise by the page's `/Rotate`,
+    /// worked by hand; where the flags move nothing — no flag, magnification
+    /// 1, an unturned page — nothing is placed; a magnification that is not a
+    /// finite number above zero is read as 1, and a turn is a quarter turn.
+    #[test]
+    fn the_placement_keeps_the_upper_left_corner_fixed() {
+        let r = rect(10.0, 20.0, 50.0, 40.0);
+        for rotation in [0u16, 90, 180, 270] {
+            // Powers of two, whose reciprocals are exact, so `P` is exactly
+            // itself after the round trip through the matrix.
+            for magnification in [0.5, 1.0, 2.0, 4.0] {
+                let placement = Placement::new(magnification, rotation);
+                for (zoom, turn) in [(true, false), (false, true), (true, true)] {
+                    let moves = (zoom && magnification != 1.0) || (turn && rotation != 0);
+                    let matrix = placement.matrix(r, zoom, turn);
+                    assert_eq!(matrix.is_some(), moves, "{rotation}, {magnification}");
+                    if let Some(matrix) = matrix {
+                        assert_eq!(matrix.apply(10.0, 40.0), (10.0, 40.0), "P stays");
+                    }
+                }
+                assert_eq!(placement.matrix(r, false, false), None, "no flag");
+            }
+        }
+        // /NoZoom at 2: the far corner (50, 20) comes half the way to P.
+        let zoom = Placement::new(2.0, 0)
+            .matrix(r, true, false)
+            .expect("it moves");
+        assert_eq!(zoom.apply(50.0, 20.0), (30.0, 30.0));
+        // /NoRotate on a page turned 90: (50, 40), 40 right of P, goes 40 up.
+        let turn = Placement::new(1.0, 90)
+            .matrix(r, false, true)
+            .expect("it moves");
+        assert_eq!(turn.apply(50.0, 40.0), (10.0, 80.0));
+        assert_eq!(bounds_through(&turn, r), (10.0, 40.0, 30.0, 80.0));
+        let half_turn = Placement::new(1.0, 180)
+            .matrix(r, false, true)
+            .expect("it moves");
+        assert_eq!(half_turn.apply(50.0, 20.0), (-30.0, 60.0));
+        // Both at once: turned and halved about P.
+        let both = Placement::new(2.0, 270)
+            .matrix(r, true, true)
+            .expect("it moves");
+        assert_eq!(both.apply(50.0, 40.0), (10.0, 20.0));
+        for unreadable in [0.0, -2.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                Placement::new(unreadable, 0).matrix(r, true, false),
+                None,
+                "{unreadable} reads as 1"
+            );
+        }
+        assert_eq!(Placement::new(1.0, 450), Placement::new(1.0, 90));
     }
 
     /// The ordinary case: a form whose box already matches its rectangle is
@@ -903,53 +1140,96 @@ trailer\n<< /Root 1 0 R >>\n%%EOF\n";
             dict
         };
         let within = Drawn::Within(rect(20.0, 30.0, 60.0, 50.0));
-        assert_eq!(drawn(&doc, &annotation(Some(5), &|_| {}), None), within);
         assert_eq!(
-            drawn(&doc, &annotation(Some(6), &|_| {}), None),
+            drawn(
+                &doc,
+                &annotation(Some(5), &|_| {}),
+                None,
+                Placement::new(1.0, 0)
+            ),
+            within
+        );
+        assert_eq!(
+            drawn(
+                &doc,
+                &annotation(Some(6), &|_| {}),
+                None,
+                Placement::new(1.0, 0)
+            ),
             Drawn::Unbounded,
             "no /BBox, so nothing clips it"
         );
         assert_eq!(
-            drawn(&doc, &annotation(Some(7), &|_| {}), None),
+            drawn(
+                &doc,
+                &annotation(Some(7), &|_| {}),
+                None,
+                Placement::new(1.0, 0)
+            ),
             Drawn::Nothing,
             "a box with no area is never placed"
         );
         assert_eq!(
-            drawn(&doc, &annotation(None, &|_| {}), None),
+            drawn(
+                &doc,
+                &annotation(None, &|_| {}),
+                None,
+                Placement::new(1.0, 0)
+            ),
             Drawn::Nothing
         );
         for (what, flags) in [("hidden", HIDDEN), ("NoView", NO_VIEW)] {
             let hidden = annotation(Some(5), &|dict| {
                 dict.insert(doc.intern(b"F"), Object::Int(flags | 4));
             });
-            assert_eq!(drawn(&doc, &hidden, None), Drawn::Nothing, "{what}");
+            assert_eq!(
+                drawn(&doc, &hidden, None, Placement::new(1.0, 0)),
+                Drawn::Nothing,
+                "{what}"
+            );
         }
         // In print, NoView with Print set draws; Print clear does not.
         let printed = annotation(Some(5), &|dict| {
             dict.insert(doc.intern(b"F"), Object::Int(NO_VIEW | PRINT));
         });
-        assert_eq!(drawn(&doc, &printed, Some(Usage::Print)), within);
         assert_eq!(
-            drawn(&doc, &annotation(Some(5), &|_| {}), Some(Usage::Print)),
+            drawn(&doc, &printed, Some(Usage::Print), Placement::new(1.0, 0)),
+            within
+        );
+        assert_eq!(
+            drawn(
+                &doc,
+                &annotation(Some(5), &|_| {}),
+                Some(Usage::Print),
+                Placement::new(1.0, 0)
+            ),
             Drawn::Nothing,
             "no Print flag"
         );
         let popup = annotation(Some(5), &|dict| {
             dict.insert(Name::SUBTYPE, Object::Name(doc.intern(b"Popup")));
         });
-        assert_eq!(drawn(&doc, &popup, None), Drawn::Nothing, "a pop-up");
+        assert_eq!(
+            drawn(&doc, &popup, None, Placement::new(1.0, 0)),
+            Drawn::Nothing,
+            "a pop-up"
+        );
         let flat = annotation(Some(5), &|dict| {
             dict.insert(doc.intern(b"Rect"), Object::Array(vec![Object::Int(5); 4]));
         });
         assert_eq!(
-            drawn(&doc, &flat, None),
+            drawn(&doc, &flat, None, Placement::new(1.0, 0)),
             Drawn::Nothing,
             "a rectangle of no area"
         );
         let unplaced = annotation(Some(5), &|dict| {
             dict.insert(doc.intern(b"Rect"), Object::Null);
         });
-        assert_eq!(drawn(&doc, &unplaced, None), Drawn::Nothing, "no rectangle");
+        assert_eq!(
+            drawn(&doc, &unplaced, None, Placement::new(1.0, 0)),
+            Drawn::Nothing,
+            "no rectangle"
+        );
         let stateless = annotation(None, &|dict| {
             let mut states = Dict::new();
             states.insert(doc.intern(b"On"), Object::Ref(ObjRef::new(5, 0)));
@@ -959,7 +1239,7 @@ trailer\n<< /Root 1 0 R >>\n%%EOF\n";
             dict.insert(doc.intern(b"AS"), Object::Name(doc.intern(b"Off")));
         });
         assert_eq!(
-            drawn(&doc, &stateless, None),
+            drawn(&doc, &stateless, None, Placement::new(1.0, 0)),
             Drawn::Nothing,
             "/AS names no state"
         );

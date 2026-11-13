@@ -15,6 +15,9 @@
 
 use tinker_pdf::{Document, RenderOptions, RenderWarning, Usage};
 
+mod render_support;
+use render_support::{placed_page, PLACED_FIT, PLACED_RECT};
+
 fn render(bytes: Vec<u8>) -> tinker_pdf::Bitmap {
     Document::open(bytes)
         .expect("it opens")
@@ -284,6 +287,135 @@ fn each_flag_draws_as_its_usage_says() {
                 "{what}, {usage:?}: only the hidden layer is reported: {:?}",
                 direct.warnings
             );
+        }
+    }
+}
+
+// ---- `/NoZoom` and `/NoRotate` (RC-13.4) --------------------------------------
+
+/// `m` and then `n`, as matrices compose in PDF's row-vector order.
+fn then(m: [f64; 6], n: [f64; 6]) -> [f64; 6] {
+    [
+        m[0] * n[0] + m[1] * n[2],
+        m[0] * n[1] + m[1] * n[3],
+        m[2] * n[0] + m[3] * n[2],
+        m[2] * n[1] + m[3] * n[3],
+        m[4] * n[0] + m[5] * n[2] + n[4],
+        m[4] * n[1] + m[5] * n[3] + n[5],
+    ]
+}
+
+/// What 12.5.3 places an appearance on `rect` by, from the clause: about
+/// `P`, `rect`'s upper-left corner in default user space, `/NoZoom` scaled by
+/// `1 / magnification` and `/NoRotate` turned counter-clockwise by the page's
+/// `/Rotate` — `P` moved to the origin, scaled and turned there, and moved
+/// back. A quarter turn's cosine and sine are written out, not computed.
+fn placement(
+    rect: [f64; 4],
+    magnification: f64,
+    rotation: u16,
+    zoom: bool,
+    turn: bool,
+) -> [f64; 6] {
+    let s = if zoom { 1.0 / magnification } else { 1.0 };
+    let (cos, sin) = match (turn, rotation) {
+        (true, 90) => (0.0, 1.0),
+        (true, 180) => (-1.0, 0.0),
+        (true, 270) => (0.0, -1.0),
+        _ => (1.0, 0.0),
+    };
+    let (px, py) = (rect[0], rect[3]);
+    let there = [1.0, 0.0, 0.0, 1.0, -px, -py];
+    let turned = [s * cos, s * sin, -s * sin, s * cos, 0.0, 0.0];
+    let back = [1.0, 0.0, 0.0, 1.0, px, py];
+    then(then(there, turned), back)
+}
+
+/// The axis-aligned box `[x0, y0, x1, y1]` of `[0 0 40 40]` through `m`.
+fn bounds(m: [f64; 6]) -> [f64; 4] {
+    let corners = [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)]
+        .map(|(x, y)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]));
+    corners.iter().fold(
+        [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ],
+        |[x0, y0, x1, y1], &(x, y)| [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
+    )
+}
+
+/// **`/NoZoom` and `/NoRotate` keep their fixed corner** (12.5.3, RC-13.4):
+/// at magnifications 0.5, 1 and 2, on a page whose `/Rotate` is 0, 90, 180
+/// and 270, an annotation flagged `/NoZoom`, `/NoRotate` or both equals its
+/// twin — an unflagged one whose `/Matrix` is the fit composed with the
+/// placement the clause gives there and whose `/Rect` is that placement's box
+/// — byte for byte, directly, from a display list, and alone through
+/// `render_annotation`, whose viewport is the placed box. Where the flags
+/// move nothing — magnification 1 for `/NoZoom`, an unturned page for
+/// `/NoRotate` — the flagged page is the unflagged one, and so is every page
+/// at every magnification where nothing is flagged.
+#[test]
+fn no_zoom_and_no_rotate_keep_their_fixed_corner() {
+    let open = |bytes: Vec<u8>| Document::open(bytes).expect("it opens");
+    for rotation in [0u16, 90, 180, 270] {
+        let unflagged = open(placed_page(rotation, 4, PLACED_RECT, None));
+        let unflagged = unflagged.page(0).expect("a page");
+        let plain = unflagged.render(&RenderOptions::default());
+        for magnification in [0.5, 1.0, 2.0] {
+            let options = RenderOptions {
+                magnification,
+                ..RenderOptions::default()
+            };
+            assert!(
+                unflagged.render(&options).data == plain.data,
+                "/Rotate {rotation}: an unflagged page at magnification {magnification}"
+            );
+            for (what, flags, zoom, turn) in [
+                ("NoZoom", 8, true, false),
+                ("NoRotate", 16, false, true),
+                ("NoZoom and NoRotate", 24, true, true),
+            ] {
+                let case = format!("{what}, /Rotate {rotation}, magnification {magnification}");
+                let placed = then(
+                    PLACED_FIT,
+                    placement(PLACED_RECT, magnification, rotation, zoom, turn),
+                );
+                let flagged = open(placed_page(rotation, 4 | flags, PLACED_RECT, None));
+                let flagged = flagged.page(0).expect("a page");
+                let twin = open(placed_page(rotation, 4, bounds(placed), Some(placed)));
+                let twin = twin.page(0).expect("a page");
+                let want = twin.render(&options);
+                let direct = flagged.render(&options);
+                assert!(direct.data == want.data, "{case}: the page is not its twin");
+                let listed = flagged.display_list().render(&options);
+                assert!(
+                    listed.data == want.data,
+                    "{case}: the display list is not the twin"
+                );
+                let alone = flagged
+                    .render_annotation(0, &options)
+                    .unwrap_or_else(|why| panic!("{case}: {why}"));
+                let twin_alone = twin
+                    .render_annotation(0, &options)
+                    .unwrap_or_else(|why| panic!("{case}: the twin, {why}"));
+                assert_eq!(
+                    (alone.width, alone.height),
+                    (twin_alone.width, twin_alone.height),
+                    "{case}: the part's viewport is the placed box"
+                );
+                assert!(
+                    alone.data == twin_alone.data,
+                    "{case}: the part is not its twin's"
+                );
+                let moves = (zoom && magnification != 1.0) || (turn && rotation != 0);
+                assert_eq!(
+                    direct.data != plain.data,
+                    moves,
+                    "{case}: the flags move the annotation exactly where the clause moves it"
+                );
+            }
         }
     }
 }

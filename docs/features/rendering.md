@@ -871,6 +871,24 @@ is not drawn and is reported as `RenderWarning::HiddenOptionalContent` by its
 layer's `/Name`, or its reference where it has none, as content in that layer
 is. `to_svg` writes the annotations a render naming no usage draws. A display
 list records what its own usage draws and replays only that usage.
+
+**`/NoZoom` and `/NoRotate` are placed at render time** (12.5.3).
+`RenderOptions::magnification` is the viewer's zoom beside the resolution
+`scale` is, 1 unless the caller states one, a value that is not a finite
+number above zero read as 1; nothing but these two flags reads it, so no page
+and no other annotation changes with it. About `P`, `/Rect`'s upper-left
+corner in default user space, `(min x, max y)` — "the annotation pivots
+around that point" — a `/NoZoom` appearance, after 12.5.5's fit, is scaled by
+`1 / magnification`, so it keeps the size it has at magnification 1, and a
+`/NoRotate` one is turned counter-clockwise by the page's `/Rotate`, which
+the view's clockwise turn undoes, so it stands upright on a turned page. Both
+are computed in the page's frame from the magnification and `/Rotate` alone,
+in exact quarter turns and an exact reciprocal, never from a region, so a tile
+draws the page's pixels (ruling 5). `Page::render_annotation`'s viewport is
+the placed `/Rect`; a display list keeps such an annotation prepared and
+interprets it at each replay where that render places it, and a page drawing
+one is drawn whole rather than in bands; `to_svg`, at magnification 1, places
+`/NoRotate`; a patch's rectangle is the placed one.
 **Page geometry.** `page_view_transform` applies `/Rotate` (7.7.3.3,
 normalised to quarter turns) and the `/CropBox` origin, so the bitmap is the
 page's displayed size. Pixel dimensions round *outward* — a page never loses
@@ -1346,7 +1364,8 @@ it exactly as the page's content does (`/Matrix`, the `/BBox` clip, a group,
 through `/Matrix` and the page's view transform, rounded outward and trimmed to
 the page. An annotation is painted by the code the page draws every annotation
 with (`annots.rs`, split into `prepare` and `draw_prepared` so that one
-piece of code does both), and its viewport is its `/Rect`. `options.region`, if
+piece of code does both), and its viewport is its `/Rect`, placed where
+`/NoZoom` and `/NoRotate` place it. `options.region`, if
 set, wins over either. A form is named by its resource name — the only name
 that means "as this page places it"; a form reachable only inside another
 form's resources has no placement to render at — and an annotation by its index
@@ -1415,6 +1434,7 @@ events, and `determinism.rs` pins every fingerprinted page's box.
 
 The facade is the whole public surface (ruling 11): `Page::render` takes a
 `RenderOptions` — `scale` (pixels per point, or `RenderOptions::at_dpi`),
+`magnification` (1; the viewer's zoom, which `/NoZoom` reads),
 `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
 checked between operations and scanline bands), `annotations` (on by
 default), `region` (an optional `PixelRegion`, `None` for the whole page) and
@@ -2131,8 +2151,25 @@ under it, so the copy holds every canvas the walk closes onto.
   text, a fill cut by its `/BBox` and a curve, one with a `/Matrix` and a name
   that needs escaping — and an annotation drawn at its own `/Rect` and one
   fitted onto another size, each byte-equal to the page's own render of its
-  rectangle at three scales; every refusal by name; and a fixed-seed campaign
-  of mutated documents that must never panic either entry point.
+  rectangle at three scales; every refusal by name, each reason a usage
+  gives (`a_part_the_usage_hides_is_refused_by_name`) among them; and a
+  fixed-seed campaign of mutated documents that must never panic either entry
+  point.
+- Usage and flags: `annotation_appearances.rs`'s
+  `each_flag_draws_as_its_usage_says` holds `/Hidden`, `/Print`, `/NoView`,
+  both, `/Print` clear, `/Invisible` on a known, an unknown and no subtype and
+  an `/OC` on and off, in every usage, to the page with the annotation
+  dropped or drawn plainly, directly and from a display list, the hidden layer
+  reported; `no_zoom_and_no_rotate_keep_their_fixed_corner` holds `/NoZoom`,
+  `/NoRotate` and both at magnifications 0.5, 1 and 2 on pages turned 0, 90,
+  180 and 270 to an unflagged twin whose `/Matrix` and `/Rect` are the
+  placement the clause gives, directly, from a display list and alone;
+  `render_regions.rs`'s `a_no_zoom_page_tiles_as_the_page_does` tiles such a
+  page at four sizes; `render_options.rs`'s
+  `placed_annotation_output_is_pinned` pins one; `svg_output.rs`'s
+  `to_svg_writes_the_annotations_the_screen_draws` holds the SVG writer's
+  annotations to a twin; and `annots.rs`'s unit tests work the flag table and
+  the placement by hand.
 - Output options: `crates/tinker-pdf/tests/render_options.rs` pins each
   `RenderOptions` field that changes what a page's bytes are with its own
   SHA-256, computed as `determinism.rs` computes one and floored by ink the same

@@ -599,6 +599,23 @@ pub fn build_info() -> BuildInfo {
 pub struct RenderOptions {
     /// Pixels per PDF point. 1.0 renders at 72 dpi.
     pub scale: f64,
+    /// The viewer's zoom, beside the resolution [`RenderOptions::scale`] is:
+    /// 1, the default, unless the caller states one — a render at 300 dpi of
+    /// a page at 100 % and one at 72 dpi of a page at 417 % have one scale
+    /// and two magnifications. A value that is not a finite number above
+    /// zero is read as 1.
+    ///
+    /// Read by 12.5.3's `/NoZoom`, and by nothing else: an annotation flagged
+    /// so keeps the size its appearance has at magnification 1, scaled by
+    /// `1 / magnification` about its `/Rect`'s upper-left corner in default
+    /// user space, "regardless of the page magnification". An annotation
+    /// flagged `/NoRotate` is placed by the page's `/Rotate` the same way,
+    /// turned about that corner so it stands upright on a turned page,
+    /// whatever the magnification. Both are placed in the page's frame, so a
+    /// tile draws the page's pixels (ruling 5), and every other annotation
+    /// and every page draws as it does at any magnification.
+    /// `docs/design/render-usage.md` reads the clause.
+    pub magnification: f64,
     /// How the bitmap stores its pixels.
     pub format: PixelFormat,
     /// Lets a caller stop a long render.
@@ -937,6 +954,7 @@ impl Default for RenderOptions {
     fn default() -> Self {
         RenderOptions {
             scale: 1.0,
+            magnification: 1.0,
             format: PixelFormat::Rgb8,
             cancel: None,
             annotations: true,
@@ -3038,6 +3056,7 @@ impl Page {
                     self.fonts.as_ref(),
                     renderer,
                     resources.operation(),
+                    annots::Placement::new(options.magnification, self.inner.rotation),
                 );
             }
             reach = renderer.run_reach();

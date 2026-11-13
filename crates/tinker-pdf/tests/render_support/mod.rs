@@ -1210,6 +1210,57 @@ pub fn raw_pdf(objects: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
+/// The `/Rect` [`placed_page`]'s annotation stands on unless a twin moves it,
+/// in default user space, as `[x0, y0, x1, y1]`.
+pub const PLACED_RECT: [f64; 4] = [50.0, 50.0, 70.0, 70.0];
+
+/// The fit 12.5.5 gives [`placed_page`]'s appearance, `/BBox [0 0 40 40]`
+/// with no `/Matrix`, onto [`PLACED_RECT`]: halved and moved to its corner.
+pub const PLACED_FIT: [f64; 6] = [0.5, 0.0, 0.0, 0.5, 50.0, 50.0];
+
+/// A 120 x 100 page turned by `rotation` (`/Rotate`) with a grey bar of its
+/// own, and one annotation whose `/F` is `flags`, whose `/Rect` is `rect`,
+/// and whose appearance — a red square and a blue triangle in its lower left
+/// corner, in a `/BBox [0 0 40 40]`, so that a turn or a mirror of it shows —
+/// carries `matrix` as its `/Matrix` where that is some. What
+/// `annotation_appearances.rs` places at each magnification and turn and
+/// holds to its twin, `render_regions.rs` tiles and `render_options.rs`
+/// fingerprints (`docs/design/render-usage.md`, 12.5.3's `/NoZoom` and
+/// `/NoRotate`). Every number is written as Rust prints it, the shortest
+/// decimal that reads back as the same `f64`.
+pub fn placed_page(rotation: u16, flags: i64, rect: [f64; 4], matrix: Option<[f64; 6]>) -> Vec<u8> {
+    let appearance = "1 0 0 rg 0 0 40 40 re f 0 0 1 rg 0 0 m 30 0 l 0 12 l h f";
+    let content = "0.5 g 10 10 40 20 re f";
+    let numbers = |values: &[f64]| {
+        values
+            .iter()
+            .map(|v| format!("{v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let matrix = matrix.map_or_else(String::new, |m| format!("/Matrix [{}]", numbers(&m)));
+    let objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 100] /Rotate {rotation} \
+             /Annots [5 0 R] /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        raw_stream("", content.as_bytes()),
+        format!(
+            "<< /Type /Annot /Subtype /Square /F {flags} /Rect [{}] /AP << /N 6 0 R >> >>",
+            numbers(&rect)
+        )
+        .into_bytes(),
+        raw_stream(
+            &format!("/Type /XObject /Subtype /Form /BBox [0 0 40 40] {matrix}"),
+            appearance.as_bytes(),
+        ),
+    ];
+    raw_pdf(&objects)
+}
+
 /// The four intents Table 69 names, in [`intents_page`]'s column order.
 pub const INTENT_NAMES: [&str; 4] = [
     "Perceptual",

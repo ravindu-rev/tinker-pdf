@@ -247,9 +247,11 @@ impl Page {
     /// [`Page::annotations`]. It is drawn by the code [`Page::render`] draws
     /// every annotation with — its flags and `/OC` read for `options.usage`
     /// (12.5.3), 12.5.5's fit of the normal appearance onto `/Rect`, the
-    /// `/BBox` clip, the appearance's own resources — and the bitmap is
-    /// `/Rect` in the page's pixels, rounded outward and trimmed to the page,
-    /// unless `options.region` names a rectangle. `options.annotations` is not
+    /// `/BBox` clip, the appearance's own resources, and `/NoZoom` and
+    /// `/NoRotate` placed for `options.magnification` and the page's `/Rotate`
+    /// — and the bitmap is `/Rect`, placed as the appearance is, in the
+    /// page's pixels, rounded outward and trimmed to the page, unless
+    /// `options.region` names a rectangle. `options.annotations` is not
     /// consulted: asking for one annotation is asking for it drawn, where the
     /// usage draws it.
     ///
@@ -285,7 +287,9 @@ impl Page {
         // decode counts too.
         let op = self.render_operation(options, options.usage);
         let appearance = annots::prepare(&self.doc, &dict, &op).map_err(not_drawn)?;
-        let rect = appearance.rect();
+        // 12.5.3's `/NoZoom` and `/NoRotate` move the box with the appearance.
+        let placement = annots::Placement::new(options.magnification, self.inner.rotation);
+        let rect = appearance.placed_rect(placement);
         Ok(
             self.render_layer(options, Some(rect), op, |renderer, resources| {
                 annots::draw_prepared(
@@ -294,6 +298,7 @@ impl Page {
                     self.fonts.as_ref(),
                     renderer,
                     resources.operation(),
+                    placement,
                 );
             }),
         )

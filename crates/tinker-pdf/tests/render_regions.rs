@@ -994,6 +994,51 @@ fn annotations_are_tiled_with_the_page() {
     tiles_are_the_page(&page, &options, 29, "annotations");
 }
 
+/// **A `/NoZoom` page tiles as the page does** (RC-13.4): an annotation
+/// flagged `/NoZoom` and `/NoRotate` on a page turned a quarter, at
+/// magnifications 2 and 0.5, where it is drawn at half and at twice its size
+/// about its fixed corner and upright, is placed in the page's frame from the
+/// magnification and `/Rotate` alone — never from a tile — so at four tile
+/// sizes, none of which divides the page, each tile is the page under it,
+/// directly and from a display list.
+#[test]
+fn a_no_zoom_page_tiles_as_the_page_does() {
+    let document = Document::open(render_support::placed_page(
+        90,
+        4 | 8 | 16,
+        render_support::PLACED_RECT,
+        None,
+    ))
+    .expect("it opens");
+    let page = document.page(0).expect("a page");
+    let list = page.display_list();
+    for magnification in [2.0, 0.5] {
+        let options = RenderOptions {
+            magnification,
+            ..RenderOptions::default()
+        };
+        let drawn = ink(&page.render(&options));
+        assert!(
+            drawn > 700,
+            "the placed page painted {drawn} pixels at magnification {magnification}"
+        );
+        for tile in [64, 37, 23, 9] {
+            tiles_are_the_page(
+                &page,
+                &options,
+                tile,
+                &format!("a /NoZoom page at magnification {magnification}"),
+            );
+        }
+        let what = format!("a /NoZoom page replayed at magnification {magnification}");
+        if let Some(message) =
+            tile_divergence_through(&page, &options, 37, &what, &|asked| list.render(asked))
+        {
+            panic!("{message}: a tile of the recording is not the page under it");
+        }
+    }
+}
+
 /// **A retained page tiles as the page does.** Every fixture here and the
 /// annotated page, recorded once with [`Page::display_list`], then drawn a
 /// tile at a time *from the recording* at two scales, each tile byte-equal to

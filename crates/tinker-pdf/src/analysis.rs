@@ -49,7 +49,7 @@ use tinker_pdf_raster::image::Transform;
 use tinker_pdf_raster::stroke::{stroke_mapped_with, stroke_with, LineCap, LineJoin, StrokeStyle};
 use tinker_pdf_render::{user_space_pen, Admission, GlyphSource};
 
-use crate::annots::{self, AppearanceDevice};
+use crate::annots::{self, AppearanceDevice, Recorded};
 use crate::pdfa::colour::{is_transparency_group, ALPHA_TOLERANCE};
 use crate::resources::PageResources;
 use crate::{Bitmap, DisplayList, Page, PixelRegion, RenderOptions};
@@ -130,9 +130,10 @@ impl Page {
     /// this records and drops: a caller who also renders the page asks the
     /// list it renders from instead, and pays for one interpretation.
     ///
-    /// Three of `options` are read, because a render reads them: `usage`,
+    /// Four of `options` are read, because a render reads them: `usage`,
     /// whose optional-content states decide what is hidden; `annotations`,
     /// whether the page's annotation appearances are part of what it draws;
+    /// `magnification`, where an annotation `/NoZoom` keeps its size draws;
     /// and `scale`, with the clamp [`Page::pixel_size`] applies, for the box
     /// in pixels. The region, the format and the rest change no answer.
     #[must_use]
@@ -158,13 +159,26 @@ pub(crate) fn analyse(list: &DisplayList, options: &RenderOptions) -> PageAnalys
     let page = list.page();
     let resources = list.resources();
     let mut analyser = Analyser::new(resources, page.crop_box());
+    let placement = list.placement(options.magnification);
     if list.is_retained() {
         replay(list.content(), &mut analyser);
         if options.annotations {
-            for (scope, events) in list.annotation_layers() {
-                analyser.push_scope(resources.bind(scope));
-                replay(events, &mut analyser);
-                analyser.pop_scope();
+            for annotation in list.annotation_layers() {
+                match annotation {
+                    Recorded::Calls { scope, events } => {
+                        analyser.push_scope(resources.bind(scope));
+                        replay(events, &mut analyser);
+                        analyser.pop_scope();
+                    }
+                    Recorded::Placed(appearance) => annots::draw_prepared(
+                        &page.doc,
+                        appearance,
+                        page.fonts.as_ref(),
+                        &mut analyser,
+                        resources.operation(),
+                        placement,
+                    ),
+                }
             }
         }
     } else {
@@ -177,6 +191,7 @@ pub(crate) fn analyse(list: &DisplayList, options: &RenderOptions) -> PageAnalys
                 page.fonts.as_ref(),
                 &mut analyser,
                 resources.operation(),
+                placement,
             );
         }
     }
