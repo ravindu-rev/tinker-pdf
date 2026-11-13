@@ -1322,7 +1322,15 @@ corpora already vendored here. So every name stays on the list.
   isolated upright, `vkrn` down a column, `vhal`, `vpal` and `valt` with
   their interactions, a mark on its base and a cursive join down a column,
   each anchor pair drawn at one point. The `shape_text` fuzz target shapes
-  every paragraph as a column too.
+  every paragraph as a column too. Its face assembler,
+  `tests/column_face`, is shared with `fingerprints.rs`, whose
+  `vertical_shaping_is_stable_across_targets` hashes columns of mixed
+  orientation through faces built there — ideographs and kana upright with
+  their `vert` and `vrt2` forms, a cursive join, `vkrn` and a mark; Latin,
+  digits, a Hebrew word and Mongolian sideways; the comma's heights under
+  each setting that moves them; a `VORG` face and a synthesized one — on
+  every target, after checking the glyphs and the upright and sideways runs
+  it shaped.
 - `crates/tinker-pdf/src/fontlist.rs` — unit tests beside the listing:
   9.6.4's subset-tag shape in both directions (seven strings that are not a
   tag, each for its own reason), a descriptor deciding embedding, a

@@ -31,21 +31,34 @@
 //!
 //! # What the corpora are
 //!
-//! Two, because there are two things to pin. The shaping one drives the
+//! Three, because there are three things to pin. The shaping one drives the
 //! committed text-rendering-tests faces through [`Shaper::shape_text`], the
 //! entry point a consumer calls, and folds in every field of every glyph. The
 //! bidi one drives paragraphs of mixed direction through
-//! [`Paragraph::new`] and folds in the levels and the visual order.
+//! [`Paragraph::new`] and folds in the levels and the visual order. The
+//! vertical one drives paragraphs of mixed orientation through
+//! [`Shaper::shape_text_vertical`] over faces with vertical metrics and
+//! features, and folds in each run's direction, how it stands and every
+//! field of every glyph (FT-07b.8).
 //!
-//! Both are `include_str!`/`include_bytes!` rather than read from disk,
-//! because the fourth target is `wasm32-wasip1` under wasmtime and it has no
-//! filesystem unless somebody remembers to grant one.
+//! The first two are `include_str!`/`include_bytes!` rather than read from
+//! disk, and the third's faces are built here byte by byte (`column_face`,
+//! which `vertical.rs` shares), because the fourth target is `wasm32-wasip1`
+//! under wasmtime and it has no filesystem unless somebody remembers to grant
+//! one.
 
 use std::collections::BTreeMap;
 
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::bidi::{BaseDirection, Paragraph};
-use tinker_pdf_shape::{Plans, Shaper};
+use tinker_pdf_shape::{Orientation, Plans, Shaper, Tag};
+
+// The face assembler `vertical.rs` writes its columns' faces with.
+mod column_face;
+use column_face::{
+    cursive_pos, gdef, layout_table, ligature_subst, lookup, mark_pos, pair_pos, single_pos,
+    single_subst, Face,
+};
 
 /// FNV-1a, 64 bits. Integer, associative over a byte stream, and identical on
 /// every target because it is `u64` multiplication and exclusive-or.
@@ -247,6 +260,346 @@ fn bidi() -> (String, usize) {
     (digest.finish(), characters)
 }
 
+// --- the vertical corpus ---------------------------------------------------
+
+/// Ideographs upright: 漢, 字, 一 and 二, the ideographic comma and full stop,
+/// each with a `vmtx` entry and a `glyf` top of its own; the comma and stop
+/// take `vert` forms (glyphs 7, 8) and `vrt2` ones (9, 10), and 一 joins 二
+/// down the column under `curs`.
+fn vertical_ideographs() -> Face {
+    let cmap = [
+        ('\u{6F22}', 1),
+        ('\u{5B57}', 2),
+        ('\u{4E00}', 3),
+        ('\u{4E8C}', 4),
+        ('\u{3001}', 5),
+        ('\u{3002}', 6),
+    ];
+    let mut face = Face::new(11, &cmap).with_vertical(
+        &[
+            (1000, 100),
+            (1000, 90),
+            (980, 120),
+            (1000, 110),
+            (1100, 60),
+            (1000, 700),
+            (1000, 650),
+            (1000, 120),
+            (1000, 130),
+            (990, 140),
+            (1010, 150),
+        ],
+        &[0, 820, 830, 760, 840, 150, 160, 790, 800, 770, 780],
+    );
+    face.advances = vec![
+        500, 1000, 1000, 1000, 900, 1000, 1000, 1000, 1000, 1000, 1000,
+    ];
+    face.gsub = Some(layout_table(
+        &[*b"DFLT", *b"hani"],
+        &[(*b"vert", vec![0]), (*b"vrt2", vec![1])],
+        &[
+            lookup(1, 0, &[single_subst(&[(5, 7), (6, 8)])]),
+            lookup(1, 0, &[single_subst(&[(5, 9), (6, 10)])]),
+        ],
+    ));
+    face.gpos = Some(layout_table(
+        &[*b"DFLT", *b"hani"],
+        &[(*b"curs", vec![0])],
+        &[lookup(3, 0, &[cursive_pos(3, (520, -100), 4, (450, 900))])],
+    ));
+    face
+}
+
+/// Katakana ス and ト kerned down the column under `vkrn` — a `YAdvance` on
+/// the first, a `YPlacement` on the second, and an `XAdvance` a column does
+/// not take — and か with the combining voiced sound mark attached under
+/// `mark`, `GDEF` naming the mark.
+fn vertical_kana() -> Face {
+    let cmap = [
+        ('\u{30B9}', 1),
+        ('\u{30C8}', 2),
+        ('\u{304B}', 3),
+        ('\u{3099}', 4),
+    ];
+    let mut face = Face::new(5, &cmap).with_vertical(
+        &[
+            (1000, 120),
+            (1000, 120),
+            (1000, 110),
+            (1000, 120),
+            (1000, 0),
+        ],
+        &[760, 760, 750, 770, 900],
+    );
+    face.advances[4] = 600;
+    face.gdef = Some(gdef(&[(1, 1), (2, 1), (3, 1), (4, 3)]));
+    face.gpos = Some(layout_table(
+        &[*b"DFLT", *b"kana"],
+        &[(*b"vkrn", vec![0]), (*b"mark", vec![1])],
+        &[
+            lookup(
+                2,
+                0,
+                &[pair_pos(1, 2, 0x000C, &[-300, -200], 0x0002, &[-40])],
+            ),
+            lookup(4, 0, &[mark_pos(4, (300, 900), 3, (900, 800))]),
+        ],
+    ));
+    face
+}
+
+/// A paragraph's other orientations: an ideograph and a full-width digit
+/// upright, kerned under `vkrn`; Latin and digits sideways along a line,
+/// under `liga` (`fi`, glyph 16), `kern` (`a` then `b`) and `vrtr` (`v`,
+/// glyph 18), with a `vert` form for `v` (glyph 17) a sideways run must not
+/// take; and a Hebrew word sideways at its right-to-left level.
+fn vertical_mixed() -> Face {
+    let cmap = [
+        ('\u{6F22}', 1),
+        ('a', 2),
+        ('b', 3),
+        ('v', 4),
+        (' ', 5),
+        ('f', 6),
+        ('i', 7),
+        ('2', 8),
+        ('0', 9),
+        ('6', 10),
+        ('\u{FF12}', 11),
+        ('\u{05E9}', 12),
+        ('\u{05DC}', 13),
+        ('\u{05D5}', 14),
+        ('\u{05DD}', 15),
+        ('\u{5B57}', 19),
+    ];
+    let mut face = Face::new(20, &cmap);
+    face.advances = (0..20u16).map(|glyph| 400 + glyph * 13).collect();
+    let metrics: Vec<(u16, i16)> = (0..20u16)
+        .map(|glyph| (1000 - glyph * 3, 100 + glyph as i16))
+        .collect();
+    let tops: Vec<i16> = (0..20i16).map(|glyph| 700 + glyph).collect();
+    face = face.with_vertical(&metrics, &tops);
+    face.gsub = Some(layout_table(
+        &[*b"DFLT", *b"latn", *b"hani"],
+        &[
+            (*b"liga", vec![0]),
+            (*b"vert", vec![1]),
+            (*b"vrtr", vec![2]),
+        ],
+        &[
+            lookup(4, 0, &[ligature_subst(6, &[7], 16)]),
+            lookup(1, 0, &[single_subst(&[(4, 17)])]),
+            lookup(1, 0, &[single_subst(&[(4, 18)])]),
+        ],
+    ));
+    face.gpos = Some(layout_table(
+        &[*b"DFLT", *b"latn", *b"hani"],
+        &[(*b"kern", vec![0]), (*b"vkrn", vec![1])],
+        &[
+            lookup(2, 0, &[pair_pos(2, 3, 0x0004, &[-50], 0, &[])]),
+            lookup(2, 0, &[pair_pos(1, 11, 0x0008, &[-90], 0, &[])]),
+        ],
+    ));
+    face
+}
+
+/// Mongolian letters with an initial, a medial and a final form each, under
+/// `mong`'s `init`, `medi` and `fina`, set sideways and joined in a column,
+/// and an ideograph upright before them.
+fn vertical_mongolian() -> Face {
+    let cmap = [
+        ('\u{182E}', 1),
+        ('\u{1823}', 2),
+        ('\u{1829}', 3),
+        ('\u{6F22}', 13),
+    ];
+    let mut face = Face::new(14, &cmap);
+    face.advances = (0..14u16).map(|glyph| 400 + glyph * 10).collect();
+    face = face.with_vertical(&[(1000, 100); 14], &[700; 14]);
+    let forms = |block: u16| -> Vec<(u16, u16)> { (1..=3).map(|g| (g, g + block)).collect() };
+    face.gsub = Some(layout_table(
+        &[*b"mong"],
+        &[
+            (*b"init", vec![0]),
+            (*b"medi", vec![1]),
+            (*b"fina", vec![2]),
+        ],
+        &[
+            lookup(1, 0, &[single_subst(&forms(3))]),
+            lookup(1, 0, &[single_subst(&forms(6))]),
+            lookup(1, 0, &[single_subst(&forms(9))]),
+        ],
+    ));
+    face
+}
+
+/// The ideographic comma's heights: `vhal`, `vpal` and `valt` as single
+/// adjustments of its placement and height, and `vkrn` kerning 漢 before it,
+/// each of which a setting below switches on or off.
+fn vertical_heights() -> Face {
+    let mut face = Face::new(3, &[('\u{3001}', 1), ('\u{6F22}', 2)])
+        .with_vertical(&[(1000, 120), (1000, 690), (1000, 110)], &[760, 140, 770]);
+    face.gpos = Some(layout_table(
+        &[*b"DFLT", *b"hani"],
+        &[
+            (*b"vhal", vec![0]),
+            (*b"vpal", vec![1]),
+            (*b"vkrn", vec![2]),
+            (*b"valt", vec![3]),
+        ],
+        &[
+            lookup(1, 0, &[single_pos(&[1], 0x000A, &[240, -510])]),
+            lookup(1, 0, &[single_pos(&[1], 0x000A, &[110, -290])]),
+            lookup(2, 0, &[pair_pos(2, 1, 0x0008, &[-115], 0, &[])]),
+            lookup(1, 0, &[single_pos(&[1], 0x0002, &[-65])]),
+        ],
+    ));
+    face
+}
+
+/// A face with no `glyf` whose vertical origins are its `VORG`'s: a default
+/// and two glyphs' own.
+fn vertical_origins() -> Face {
+    let mut face = Face::new(4, &[('\u{6F22}', 1), ('\u{5B57}', 2), ('\u{3002}', 3)]);
+    face.vertical = Some(vec![(1000, 0), (1100, 0), (900, 0), (1000, 0)]);
+    face.vorg = Some((880, vec![(2, 950), (3, 300)]));
+    face
+}
+
+/// A face with no vertical metrics at all, set on the synthesis a column
+/// makes, and saying so.
+fn vertical_synthesized() -> Face {
+    let mut face = Face::new(3, &[('\u{6F22}', 1), ('\u{5B57}', 2)]);
+    face.em = 2048;
+    face.advances = vec![1024, 2048, 1900];
+    face
+}
+
+/// The vertical corpus: each face by name, and the paragraphs shaped through
+/// it as a column, each under the feature settings beside it.
+///
+/// Mixed orientation throughout: upright ideographs and kana, their `vert`
+/// and `vrt2` forms, a cursive join, `vkrn`, a mark on its base; Latin,
+/// digits, a Hebrew word and Mongolian sideways beside them, along a line's
+/// plan; the comma's heights under each setting that changes them; a `VORG`
+/// face; and a face whose metrics are synthesized.
+#[allow(clippy::type_complexity, reason = "a table of cases, read once")]
+fn vertical_cases() -> Vec<(&'static str, Face, Vec<(&'static str, Vec<(Tag, u32)>)>)> {
+    let on = |name: &[u8; 4], value: u32| (Tag::new(name), value);
+    vec![
+        (
+            "ideographs",
+            vertical_ideographs(),
+            vec![
+                ("\u{6F22}\u{3001}\u{5B57}\u{3002}", vec![]),
+                ("\u{6F22}\u{3001}\u{5B57}\u{3002}", vec![on(b"vrt2", 1)]),
+                ("\u{4E00}\u{4E8C}", vec![]),
+            ],
+        ),
+        (
+            "kana",
+            vertical_kana(),
+            vec![("\u{30B9}\u{30C8}\u{304B}\u{3099}\u{30B9}", vec![])],
+        ),
+        (
+            "mixed",
+            vertical_mixed(),
+            vec![
+                (
+                    "\u{6F22}abv fi\u{5B57}2026\u{FF12}\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
+                    vec![],
+                ),
+                ("\u{6F22}\u{FF12}", vec![on(b"vkrn", 0)]),
+            ],
+        ),
+        (
+            "mongolian",
+            vertical_mongolian(),
+            vec![("\u{6F22}\u{182E}\u{1823}\u{1829}", vec![])],
+        ),
+        (
+            "heights",
+            vertical_heights(),
+            vec![
+                ("\u{6F22}\u{3001}", vec![]),
+                ("\u{6F22}\u{3001}", vec![on(b"vhal", 1)]),
+                ("\u{6F22}\u{3001}", vec![on(b"vpal", 1)]),
+                ("\u{6F22}\u{3001}", vec![on(b"valt", 0)]),
+                ("\u{6F22}\u{3001}", vec![on(b"vhal", 1), on(b"vkrn", 1)]),
+            ],
+        ),
+        (
+            "origins",
+            vertical_origins(),
+            vec![("\u{6F22}\u{5B57}\u{3002}", vec![])],
+        ),
+        (
+            "synthesized",
+            vertical_synthesized(),
+            vec![("\u{6F22}\u{5B57}", vec![])],
+        ),
+    ]
+}
+
+/// The vertical fingerprint, how many glyphs went into it, and how many runs
+/// stood upright and sideways: every run of every paragraph of
+/// [`vertical_cases`], shaped as a column — its direction, how it stands, the
+/// text it covers and how many warnings it carries, and every field of every
+/// glyph.
+fn vertical() -> (String, usize, usize, usize) {
+    let mut digest = Digest::new();
+    let (mut glyphs, mut upright, mut sideways) = (0usize, 0usize, 0usize);
+    for (name, face, paragraphs) in vertical_cases() {
+        let bytes = face.build();
+        let sfnt = Sfnt::parse(&bytes).expect("a face built here is a valid sfnt");
+        for (text, settings) in &paragraphs {
+            let shaper = Shaper::new(&sfnt).with_settings(settings);
+            // The case goes into the digest as well, so that a corpus that
+            // lost one is a different fingerprint rather than a shorter one
+            // that happens to collide.
+            digest.bytes(name.as_bytes());
+            digest.bytes(text.as_bytes());
+            for (tag, value) in settings {
+                digest.bytes(&tag.to_bytes());
+                digest.bytes(&value.to_be_bytes());
+            }
+            digest.bytes(&sfnt.units_per_em.to_be_bytes());
+            let (paragraph, runs) = shaper.shape_text_vertical(text, BaseDirection::Auto);
+            digest.byte(paragraph.base_level().number());
+            for run in &runs {
+                let direction = run.direction();
+                digest.byte(u8::from(direction.is_vertical()));
+                digest.byte(u8::from(direction.is_forward()));
+                digest.byte(match run.orientation() {
+                    Orientation::Horizontal => 0,
+                    Orientation::Upright => {
+                        upright += 1;
+                        1
+                    }
+                    Orientation::Sideways => {
+                        sideways += 1;
+                        2
+                    }
+                });
+                let span = run.text();
+                for at in [span.start, span.end, run.warnings().len()] {
+                    digest.bytes(&u32::try_from(at).unwrap_or(u32::MAX).to_be_bytes());
+                }
+                for glyph in run.glyphs() {
+                    digest.bytes(&glyph.glyph.to_be_bytes());
+                    digest.bytes(&glyph.cluster.to_be_bytes());
+                    digest.i32(glyph.x_advance);
+                    digest.i32(glyph.y_advance);
+                    digest.i32(glyph.x_offset);
+                    digest.i32(glyph.y_offset);
+                    glyphs += 1;
+                }
+            }
+        }
+    }
+    (digest.finish(), glyphs, upright, sideways)
+}
+
 /// Every `(font, text)` a fixture names.
 fn cases(fixture: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -342,12 +695,26 @@ fn unescape(text: &str) -> String {
 const SHAPING: &str = "d07a70e4ccd9c31c";
 const BIDI: &str = "d77c9e938eb9c996";
 
+/// The vertical fingerprint (FT-07b.8): [`vertical_cases`]' columns. A run's
+/// output, recorded where Linux, Windows and `wasm32-wasip1` agree on it;
+/// until it is, `vertical_shaping_is_stable_across_targets` fails on it alone
+/// and prints the value it computed.
+const VERTICAL: &str = "";
+
 /// The least each corpus may produce before its fingerprint means anything.
 ///
 /// `determinism.rs`'s `least_ink`, transposed: a corpus that shaped nothing
 /// hashes perfectly stably on every target and proves nothing at all.
 const LEAST_GLYPHS: usize = 480;
 const LEAST_CHARACTERS: usize = 240;
+/// The vertical corpus's floors: the glyphs its paragraphs shape to, and the
+/// runs standing upright and sideways that their orientations cut them
+/// into, each paragraph's cut counted once however its scripts split it.
+const LEAST_VERTICAL_GLYPHS: usize = 48;
+/// See [`LEAST_VERTICAL_GLYPHS`].
+const LEAST_UPRIGHT_RUNS: usize = 16;
+/// See [`LEAST_VERTICAL_GLYPHS`].
+const LEAST_SIDEWAYS_RUNS: usize = 4;
 
 #[test]
 fn shaping_is_stable_across_targets() {
@@ -380,6 +747,36 @@ fn bidi_is_stable_across_targets() {
         "level resolution moved. If that was deliberate, update this constant \
          in the same commit; if two targets disagree, it is a determinism bug"
     );
+}
+
+/// **Vertical shaping is stable across targets** (FT-07b.8): columns of mixed
+/// orientation shaped through the faces [`vertical_cases`] builds hash to
+/// [`VERTICAL`], after checking that they shaped what they claim — the glyphs
+/// and the upright and sideways runs — since a column that stopped shaping
+/// hashes as stably as one that shapes. [`SHAPING`] and [`BIDI`] are not
+/// moved by it: a move in either is a finding.
+#[test]
+fn vertical_shaping_is_stable_across_targets() {
+    let (fingerprint, glyphs, upright, sideways) = vertical();
+    assert!(
+        glyphs >= LEAST_VERTICAL_GLYPHS,
+        "the vertical corpus produced {glyphs} glyphs, fewer than the \n         {LEAST_VERTICAL_GLYPHS} it is supposed to: it is measuring less than it \n         claims, and its fingerprint is not evidence about anything until that is \n         fixed"
+    );
+    assert!(
+        upright >= LEAST_UPRIGHT_RUNS && sideways >= LEAST_SIDEWAYS_RUNS,
+        "the vertical corpus stood {upright} runs upright and {sideways} sideways, \n         fewer than the {LEAST_UPRIGHT_RUNS} and {LEAST_SIDEWAYS_RUNS} its paragraphs' \n         orientations cut them into"
+    );
+    assert_eq!(
+        fingerprint, VERTICAL,
+        "vertical shaping moved. If that was deliberate, update this constant in \n         the same commit and say what changed; if two targets disagree, the \n         constant is not the thing to change"
+    );
+}
+
+/// The vertical corpus shaped twice in one process gives the answer it gave
+/// once: nothing a column leaves behind reaches the next.
+#[test]
+fn vertical_shaping_twice_gives_the_same_answer() {
+    assert_eq!(vertical(), vertical());
 }
 
 /// Nothing in the shaped output depends on how many times it was shaped.

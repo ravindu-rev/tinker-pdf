@@ -362,6 +362,11 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf-shape/tests/fingerprints.rs",
         test: "bidi_is_stable_across_targets",
     },
+    // FT-07b.8: columns of mixed orientation through faces built in the test.
+    Fingerprint {
+        file: "crates/tinker-pdf-shape/tests/fingerprints.rs",
+        test: "vertical_shaping_is_stable_across_targets",
+    },
 ];
 
 /// `cargo xtask determinism`: the roster against its files.

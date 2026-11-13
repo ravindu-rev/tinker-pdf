@@ -551,10 +551,11 @@ column whose face has no `GPOS` writes no number.
     `vertical.rs`'s `a_variable_column_takes_its_instances_advances`; at the
     default instance it shapes as milestones 13 and 14 left it.
 17. The fingerprint (FT-07b.8): vertical paragraphs of mixed orientation
-    through synthetic faces, `fingerprints.rs`'s
-    `vertical_shaping_is_stable_across_targets`, on Linux, Windows and
-    `wasm32-wasip1`, after checking how much it shaped; `SHAPING` and `BIDI`
-    unchanged.
+    through synthetic faces built by `tests/column_face`, which `vertical.rs`
+    shares, `fingerprints.rs`'s `vertical_shaping_is_stable_across_targets`,
+    on Linux, Windows and `wasm32-wasip1`, after checking how much it shaped,
+    its `VERTICAL` a run's value; `SHAPING` and `BIDI` unchanged, and
+    `xtask/src/determinism.rs`'s roster names the test.
 18. The speed row (FT-07b.9a, FT-07b.9b): `shape a vertical paragraph` in
     MS-04's fonts group, held to one list with `baseline.json` by
     `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree`, its

@@ -295,7 +295,10 @@ render of each compiling no transform and rasterising no cell;
 `render_options.rs`'s pinned ink, transparent and premultiplied, hard-edged,
 forced-colour and placed-annotation output and levels, rules and widths;
 `bitmap_toolbox.rs`'s
-toolbox outputs; the shaper's two fingerprints; and the guard suite's
+toolbox outputs; the shaper's three fingerprints — its shaping, its bidi
+levels and its columns of mixed orientation, the last shaped through faces
+`crates/tinker-pdf-shape/tests/column_face` builds byte by byte; and the
+guard suite's
 roster of guards and the work counts it pins (`guards.rs`), which CI's tests
 run in each build they test and the local `wasm32-wasip1` run under wasmtime,
 beside `guard_allocations.rs`; the colours an image's converter asks of its
