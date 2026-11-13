@@ -403,6 +403,16 @@ point, that point is marked as touched", *Instructing TrueType Glyphs*), and
 
 ### The pipeline
 
+The entry points are three handles the caller keeps (`hint/glyph.rs`):
+`hint::Face::new` reads a face and runs its `fpgm`, `Face::at_size` sets up a
+size and runs its `prep`, and `AtSize::glyph` hints one glyph, answering a
+`Hinted` — the outline, the four phantom points in 26.6, the dropout state
+the programs left, whether a program ran and its steps — or why the glyph is
+`Unhinted`: no TrueType profile (no version 1.0 `maxp`), a size the face does
+not hint at, a glyph whose data does not read, or a program that failed,
+named with its error and its steps for the caller to report. A `cfg(test)`
+count of each program's runs holds each handle to running its program once.
+
 **A face** is read once: `maxp`'s limits, `head`'s units per em and flags,
 `cvt `, `fpgm`, `prep` and `gasp`. `fpgm` runs once, defining the functions
 and instruction definitions every later program may call; a face whose `fpgm`
@@ -421,10 +431,17 @@ unhinted.
 **A glyph** starts from the size's kept state — a copy of its CVT, storage
 area and twilight zone, so no glyph's program can change another's and a glyph
 hints the same whichever glyphs were hinted before it, which is what lets the
-facade cache by glyph. Its points are scaled to 26.6 as the CVT is, its
-phantom points added, and its program run; the hinted points become an
-`Outline` through `glyf.rs`'s own contour reading, the implied on-curve
-midpoints included, in pixels. A glyph with no program is its scaled points.
+facade cache by glyph. Its points are read once, in the raw-point form
+(`glyf::simple_glyph`) the unhinted outline is drawn from, scaled to 26.6 as
+the CVT is, its phantom points added, and its program run; the hinted points
+become an `Outline` through `glyf.rs`'s own contour reading
+(`glyf::outline_of`), by the on-curve flags as the program left them, the
+implied on-curve midpoints included, in pixels. A glyph with no program is its
+scaled points. Of the graphics state `prep` leaves, a glyph starts from the
+settings — auto flip, the two cut-ins, the single width, the delta base and
+shift, `INSTCTRL`'s flags, the minimum distance, the round state, `SCANCTRL`,
+`SCANTYPE` and `SANGW`'s weight — and from the summary's defaults for the
+rest.
 
 `INSTCTRL`'s first selector, set in `prep`, makes every glyph of the size its
 scaled points with no program run; its second makes glyph programs start from
@@ -456,7 +473,10 @@ the nearest pixel), and the glyph is hinted where that range's
 `GASP_GRIDFIT` (bit 0) is set. `GASP_DOGRAY` and the two ClearType bits are
 not read: the page's text coverage decides grey or monochrome. A face with no
 `gasp` is hinted at every size; a size past the last range, which a table cut
-short leaves, is not.
+short leaves, is not. A table of a later version, or too short for its
+header, says nothing a size can be held to and is read as none. Whatever the
+face says, the hinter declines a size below one pixel an em or above 1 024,
+the bounds *When a glyph is hinted* sets, before `prep` runs.
 
 **`head`**'s flags bit 3 asks for integer pixels per em in all scaler
 arithmetic: with it set, the size the points and the CVT are scaled to is
@@ -518,8 +538,9 @@ to the render's work.
 
 An error in a glyph's program leaves that glyph drawn from its em outline, as
 it is drawn today; one in `prep` leaves its size so, and one in `fpgm` the
-whole face. The font crate returns the error as a `hint::Error` naming which
-bound or rule it broke, and the facade reports a `RenderWarning` naming the
+whole face. The font crate returns it as `hint::Unhinted::Failed`, the
+program that broke it, the `hint::Error` naming which bound or rule, and the
+steps the run took, and the facade reports a `RenderWarning` naming the
 font, once a render, so a page drawn partly unhinted says so (ruling 10).
 Nothing is retried leniently: a program that breaks a rule another engine
 forgives is drawn as its font states, which is never wrong, only unhinted.

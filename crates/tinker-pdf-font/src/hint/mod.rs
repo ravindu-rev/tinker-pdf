@@ -25,9 +25,13 @@
 //! - `moves`: measuring points and moving them along the vectors.
 //! - `shift`: shifting, aligning, interpolating and flipping points.
 //! - `iup`: interpolating the untouched points, and the delta exceptions.
+//! - `glyph`: the face, size and glyph entry points — [`Face`], whose `fpgm`
+//!   runs once, [`AtSize`], whose `prep` runs once a size, and the glyph
+//!   [`AtSize::glyph`] hints, [`Hinted`] or [`Unhinted`].
 
 pub mod fixed;
 mod flow;
+mod glyph;
 mod iup;
 mod moves;
 mod shift;
@@ -35,6 +39,7 @@ pub mod state;
 pub mod storage;
 pub mod vm;
 
+pub use glyph::{AtSize, Face, Hinted, Unhinted};
 pub use state::{Dropout, GraphicsState, Point, Round, Vector, Zone};
 pub use storage::Size;
 pub use vm::{Error, Limits, MaxProfile, Program, Vm};

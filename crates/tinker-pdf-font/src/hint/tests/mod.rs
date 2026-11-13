@@ -6,6 +6,7 @@
 //! back from the interpreter.
 
 mod flow;
+mod glyph;
 mod iup;
 mod moves;
 mod shift;

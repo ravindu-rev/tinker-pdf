@@ -787,6 +787,21 @@ fn simple(
     Ok(())
 }
 
+/// The outline of points already placed — the hinter's, in pixels
+/// (`docs/design/hinting.md`, "The pipeline") — read by the contour reading
+/// [`outline`] reads a glyph's own points with, its implied midpoints
+/// included: each contour `ends` closes, over the first `on_curve.len()`
+/// points, each on the curve or off it as `on_curve` says and at its place in
+/// `positions`. A contour past the points, or whose end does not follow the
+/// one before, ends the reading, as it ends [`outline`]'s.
+pub(crate) fn outline_of(ends: &[usize], on_curve: &[bool], positions: &[(f64, f64)]) -> Outline {
+    let flags: Vec<u8> = on_curve.iter().map(|&on| u8::from(on)).collect();
+    let position = |i: usize| positions.get(i).copied();
+    let mut out = Outline::default();
+    emit_contours(ends, &flags, &position, &|x, y| (x, y), &mut out, &mut 0);
+    out
+}
+
 /// Emits each contour in order, stopping at the first end that does not
 /// follow the one before it or that passes the points.
 fn emit_contours<P: Fn(usize) -> Option<(f64, f64)>>(
@@ -1426,6 +1441,105 @@ mod tests {
             ("composite-nested.ttf", composite_nested_seed()),
         ] {
             std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
+        }
+    }
+
+    /// The twelve committed Liberation faces, by name.
+    const LIBERATION: [(&str, &[u8]); 12] = [
+        (
+            "LiberationMono-Bold",
+            include_bytes!("../data/liberation/LiberationMono-Bold.ttf"),
+        ),
+        (
+            "LiberationMono-BoldItalic",
+            include_bytes!("../data/liberation/LiberationMono-BoldItalic.ttf"),
+        ),
+        (
+            "LiberationMono-Italic",
+            include_bytes!("../data/liberation/LiberationMono-Italic.ttf"),
+        ),
+        (
+            "LiberationMono-Regular",
+            include_bytes!("../data/liberation/LiberationMono-Regular.ttf"),
+        ),
+        (
+            "LiberationSans-Bold",
+            include_bytes!("../data/liberation/LiberationSans-Bold.ttf"),
+        ),
+        (
+            "LiberationSans-BoldItalic",
+            include_bytes!("../data/liberation/LiberationSans-BoldItalic.ttf"),
+        ),
+        (
+            "LiberationSans-Italic",
+            include_bytes!("../data/liberation/LiberationSans-Italic.ttf"),
+        ),
+        (
+            "LiberationSans-Regular",
+            include_bytes!("../data/liberation/LiberationSans-Regular.ttf"),
+        ),
+        (
+            "LiberationSerif-Bold",
+            include_bytes!("../data/liberation/LiberationSerif-Bold.ttf"),
+        ),
+        (
+            "LiberationSerif-BoldItalic",
+            include_bytes!("../data/liberation/LiberationSerif-BoldItalic.ttf"),
+        ),
+        (
+            "LiberationSerif-Italic",
+            include_bytes!("../data/liberation/LiberationSerif-Italic.ttf"),
+        ),
+        (
+            "LiberationSerif-Regular",
+            include_bytes!("../data/liberation/LiberationSerif-Regular.ttf"),
+        ),
+    ];
+
+    /// **The unhinted outlines are unchanged** (FT-04b.9): every simple glyph
+    /// of the committed faces, read once into the raw-point form the hinter
+    /// reads ([`simple_glyph`]) and those points handed to the contour
+    /// reading the hinter's answer goes through ([`outline_of`]), draws
+    /// exactly the segments [`outline`] draws. One parse serves both
+    /// readings, so the hinter's points are the points the unhinted outline
+    /// is drawn from.
+    #[test]
+    fn the_raw_point_form_reads_every_committed_glyph_as_outline_does() {
+        for (name, bytes) in LIBERATION {
+            let sfnt = Sfnt::parse(bytes).expect("a committed face");
+            let count = sfnt.glyph_count().expect("a glyph count");
+            let (mut simple, mut composite) = (0usize, 0usize);
+            for glyph in 0..count {
+                let drawn = outline(&sfnt, glyph).expect("an outline");
+                let Some(raw) = simple_glyph(&sfnt, glyph) else {
+                    assert!(
+                        components(&sfnt, glyph).is_some(),
+                        "{name} glyph {glyph} is neither simple nor a composite"
+                    );
+                    composite += 1;
+                    continue;
+                };
+                simple += 1;
+                let points = raw.contour_points();
+                assert_eq!(
+                    raw.points.len(),
+                    points + 4,
+                    "{name} glyph {glyph}'s phantoms"
+                );
+                let ends: Vec<usize> = raw.contours().iter().map(|&(_, end)| end).collect();
+                let on_curve: Vec<bool> = raw.flags.iter().map(|flag| flag & 1 != 0).collect();
+                let positions: Vec<(f64, f64)> = raw.points[..points]
+                    .iter()
+                    .map(|&[x, y]| (f64::from(x), f64::from(y)))
+                    .collect();
+                assert_eq!(
+                    outline_of(&ends, &on_curve, &positions).segments,
+                    drawn.segments,
+                    "{name} glyph {glyph}"
+                );
+            }
+            assert!(simple > 0, "{name}: no simple glyph read");
+            println!("RAN {name}: {simple} simple glyphs read alike, {composite} composites");
         }
     }
 
