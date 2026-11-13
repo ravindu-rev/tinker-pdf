@@ -62,6 +62,8 @@
 //! excludes, what adjudicates it, and what does not, are that module's header.
 
 mod arith;
+#[cfg(test)]
+mod direct;
 mod encode;
 
 pub use encode::{
@@ -205,6 +207,26 @@ impl Component {
     }
 }
 
+/// Bits the first level of a Huffman lookup is indexed by.
+const LOOKUP_BITS: u32 = 9;
+
+/// Bits a second level is indexed by: the rest of the sixteen a code may run
+/// to (T.81 C.1).
+const SECOND_BITS: u32 = 16 - LOOKUP_BITS;
+
+/// A lookup entry that points at a second level, whose 128 entries start at
+/// the offset in its low bits.
+const LONG: u32 = 1 << 31;
+
+/// A lookup entry that names a symbol, held in its low byte. An entry without
+/// it is a search that ends in nothing, reading the length it carries.
+const HAS_SYMBOL: u32 = 1 << 16;
+
+/// A lookup entry: a search that reads `length` bits and ends in `symbol`.
+fn lookup_entry(length: u32, symbol: Option<u8>) -> u32 {
+    (length << 8) | symbol.map_or(0, |symbol| HAS_SYMBOL | u32::from(symbol))
+}
+
 #[derive(Clone, Default)]
 struct HuffmanTable {
     /// Maximum code of each length, or -1 when the length is unused.
@@ -214,6 +236,14 @@ struct HuffmanTable {
     /// Index into `values` where each length's codes begin.
     value_offset: [i32; 17],
     values: Vec<u8>,
+    /// The first level of the lookup, indexed by the next [`LOOKUP_BITS`]
+    /// bits: what [`HuffmanTable::search`] answers over them, or a pointer
+    /// into `second`. Empty for a table no `DHT` defined, whose every search
+    /// the bit-at-a-time path makes.
+    first: Vec<u32>,
+    /// The second levels, [`SECOND_BITS`] wide, one for each first-level
+    /// prefix that begins a longer code.
+    second: Vec<u32>,
 }
 
 impl HuffmanTable {
@@ -248,21 +278,102 @@ impl HuffmanTable {
             }
             code <<= 1;
         }
+        table.build_lookup();
         table
+    }
+
+    /// The search the bit-at-a-time path makes, over the `bits` most
+    /// significant bits of `window`: the first length whose largest code the
+    /// bits so far do not pass, and the value it names. `None` when no length
+    /// up to `bits` matched.
+    ///
+    /// A matched code whose value the table does not hold names nothing, as
+    /// [`BitReader::huffman_bitwise`] answers it.
+    fn search(&self, window: u32, bits: u32) -> Option<(u32, Option<u8>)> {
+        for length in 1..=bits {
+            let code = (window >> (bits - length)) as i32;
+            let max = self.max_code.get(length as usize).copied().unwrap_or(-1);
+            if max >= 0 && code <= max {
+                let offset = self.value_offset.get(length as usize).copied().unwrap_or(0);
+                let value = usize::try_from(offset + code)
+                    .ok()
+                    .and_then(|index| self.values.get(index).copied());
+                return Some((length, value));
+            }
+        }
+        None
+    }
+
+    /// Whether a code longer than the first level begins with `prefix`: the
+    /// smallest code of some longer length that starts with it is within
+    /// that length's largest. A prefix no code begins with reads sixteen bits
+    /// and names nothing, and needs no second level to say so.
+    fn reaches_past(&self, prefix: u32) -> bool {
+        (LOOKUP_BITS + 1..=16).any(|length| {
+            let max = self.max_code.get(length as usize).copied().unwrap_or(-1);
+            max >= 0 && i64::from(prefix << (length - LOOKUP_BITS)) <= i64::from(max)
+        })
+    }
+
+    /// Both levels of the lookup, each entry the answer [`Self::search`]
+    /// gives over the bits it is indexed by, so the lookup answers what the
+    /// search does for any table: complete, incomplete or oversubscribed.
+    fn build_lookup(&mut self) {
+        let mut first = Vec::with_capacity(1 << LOOKUP_BITS);
+        let mut second = Vec::new();
+        for prefix in 0..(1u32 << LOOKUP_BITS) {
+            let entry = match self.search(prefix, LOOKUP_BITS) {
+                Some((length, symbol)) => lookup_entry(length, symbol),
+                None if self.reaches_past(prefix) => {
+                    let at = second.len() as u32;
+                    for suffix in 0..(1u32 << SECOND_BITS) {
+                        let window = (prefix << SECOND_BITS) | suffix;
+                        second.push(match self.search(window, 16) {
+                            Some((length, symbol)) => lookup_entry(length, symbol),
+                            None => lookup_entry(16, None),
+                        });
+                    }
+                    LONG | at
+                }
+                None => lookup_entry(16, None),
+            };
+            first.push(entry);
+        }
+        self.first = first;
+        self.second = second;
     }
 }
 
-/// Reads bits from the entropy-coded segment, unstuffing as it goes.
+/// Reads bits from the entropy-coded segment, unstuffing as it goes, through
+/// a word of bits read ahead (`docs/design/jpeg-speed.md`, "The look-ahead
+/// Huffman reader").
+///
+/// **The word holds data bytes and nothing else.** The refill stops at any
+/// `X'FF'` not followed by a stuffed zero, and at the end, without reading
+/// it; every such event — a restart marker stepped over, a marker, the end —
+/// is met by [`BitReader::fill`] when the word is empty and a bit is asked
+/// for, which is where a reader of one byte at a time meets it. So `exhausted`
+/// and `crossed_restart` are set when that reader would set them, and
+/// [`BitReader::position`] says where it would be.
 struct BitReader<'a> {
     data: &'a [u8],
+    /// The next byte the word is filled from.
     at: usize,
-    bits: u32,
+    /// The bits read ahead, the next one the most significant.
+    word: u64,
+    /// How many of `word`'s top bits are read ahead.
     count: u32,
     /// True once the reader has run past the end.
     exhausted: bool,
     /// Set when `bit` walked over a restart marker by itself, so `restart`
     /// knows not to skip a second one and lose a whole interval.
     crossed_restart: bool,
+    /// Lookup entries read, for the probe count's test.
+    #[cfg(test)]
+    probes: u64,
+    /// Symbols the bit-at-a-time search decoded, for the same test.
+    #[cfg(test)]
+    searched: u64,
 }
 
 impl<'a> BitReader<'a> {
@@ -270,57 +381,157 @@ impl<'a> BitReader<'a> {
         BitReader {
             data,
             at: 0,
-            bits: 0,
+            word: 0,
             count: 0,
             exhausted: false,
             crossed_restart: false,
+            #[cfg(test)]
+            probes: 0,
+            #[cfg(test)]
+            searched: 0,
         }
     }
 
-    /// One bit, MSB first. Past the end this returns zeros, which lets a
-    /// truncated image decode to something rather than nothing.
-    fn bit(&mut self) -> u32 {
-        if self.count == 0 {
+    /// Reads data bytes into the word while it has room for one.
+    ///
+    /// T.81 F.1.2.3: a `X'FF'` in entropy-coded data is followed by a stuffed
+    /// zero, which is consumed here; an `X'FF'` followed by anything else, or
+    /// by nothing, is not data, and the refill stops in front of it.
+    fn refill(&mut self) {
+        while self.count <= 56 {
             let Some(&byte) = self.data.get(self.at) else {
-                self.exhausted = true;
-                return 0;
+                return;
             };
-            self.at += 1;
-
-            // T.81 F.1.2.3: a 0xFF in entropy-coded data is followed by a
-            // stuffed zero; anything else is a marker and ends the segment.
             if byte == 0xFF {
-                match self.data.get(self.at) {
-                    Some(0x00) => self.at += 1,
-                    Some(&m) if (0xD0..=0xD7).contains(&m) => {
-                        // A restart marker: skip it and carry on.
-                        self.at += 1;
-                        self.crossed_restart = true;
-                        return self.bit();
-                    }
-                    _ => {
-                        self.exhausted = true;
-                        return 0;
-                    }
+                if self.data.get(self.at + 1) != Some(&0x00) {
+                    return;
+                }
+                self.at += 2;
+            } else {
+                self.at += 1;
+            }
+            self.word |= u64::from(byte) << (56 - self.count);
+            self.count += 8;
+        }
+    }
+
+    /// Makes a bit available, as a reader of one byte at a time does when it
+    /// has none: data read into the word, a restart marker stepped over, or a
+    /// marker or the end met, `exhausted` set and false returned.
+    ///
+    /// Past a marker the reader's position is the marker's code, which the
+    /// next fill reads as data, and past the end every fill fails again — the
+    /// zeros that let a truncated image decode to something rather than
+    /// nothing.
+    fn fill(&mut self) -> bool {
+        loop {
+            self.refill();
+            if self.count > 0 {
+                return true;
+            }
+            // The refill stopped in front of an event: the end, or an X'FF'
+            // that is not data.
+            if self.data.get(self.at).is_none() {
+                self.exhausted = true;
+                return false;
+            }
+            self.at += 1;
+            match self.data.get(self.at) {
+                Some(&m) if (0xD0..=0xD7).contains(&m) => {
+                    // A restart marker: skip it and carry on.
+                    self.at += 1;
+                    self.crossed_restart = true;
+                }
+                _ => {
+                    self.exhausted = true;
+                    return false;
                 }
             }
-            self.bits = u32::from(byte);
-            self.count = 8;
         }
-        self.count -= 1;
-        (self.bits >> self.count) & 1
     }
 
+    /// One bit, MSB first. Past the end this returns zeros.
+    fn bit(&mut self) -> u32 {
+        if self.count == 0 && !self.fill() {
+            return 0;
+        }
+        let bit = (self.word >> 63) as u32;
+        self.word <<= 1;
+        self.count -= 1;
+        bit
+    }
+
+    /// `n` bits, MSB first, at most 31: from the word when it holds them, and
+    /// a bit at a time when it does not.
     fn bits(&mut self, n: u32) -> i32 {
+        let n = n.min(31);
+        if n == 0 {
+            return 0;
+        }
+        if self.count < n {
+            self.refill();
+        }
+        if self.count >= n {
+            let value = (self.word >> (64 - n)) as i32;
+            self.word <<= n;
+            self.count -= n;
+            return value;
+        }
         let mut value = 0i32;
-        for _ in 0..n.min(31) {
+        for _ in 0..n {
             value = (value << 1) | self.bit() as i32;
         }
         value
     }
 
     /// Decodes one Huffman-coded symbol.
+    ///
+    /// The lookup answers when every bit the search could read is a data bit
+    /// in the word: with sixteen read ahead and `exhausted` clear, in one
+    /// probe, or two for a code longer than [`LOOKUP_BITS`]; with fewer, when
+    /// the first level's entry fits in what is read ahead. Otherwise the
+    /// search runs a bit at a time, which is also the only path once
+    /// `exhausted` is set, because that search stops at the first length that
+    /// fails past the end.
     fn huffman(&mut self, table: &HuffmanTable) -> Option<u8> {
+        if self.count < 16 {
+            self.refill();
+        }
+        if !self.exhausted && self.count >= LOOKUP_BITS {
+            let index = (self.word >> (64 - LOOKUP_BITS)) as usize;
+            if let Some(&first) = table.first.get(index) {
+                let entry = if first & LONG == 0 {
+                    Some(first)
+                } else if self.count >= 16 {
+                    let suffix = (self.word >> (64 - 16)) as usize & ((1 << SECOND_BITS) - 1);
+                    table.second.get((first & !LONG) as usize + suffix).copied()
+                } else {
+                    None
+                };
+                if let Some(entry) = entry {
+                    let length = (entry >> 8) & 0x1F;
+                    if length <= self.count {
+                        #[cfg(test)]
+                        {
+                            self.probes += if first & LONG == 0 { 1 } else { 2 };
+                        }
+                        self.word <<= length;
+                        self.count -= length;
+                        return (entry & HAS_SYMBOL != 0).then_some(entry as u8);
+                    }
+                }
+            }
+        }
+        #[cfg(test)]
+        {
+            self.searched += 1;
+        }
+        self.huffman_bitwise(table)
+    }
+
+    /// The search a bit at a time: each length in turn against its largest
+    /// code (T.81 F.2.2.3).
+    fn huffman_bitwise(&mut self, table: &HuffmanTable) -> Option<u8> {
         let mut code = 0i32;
         for length in 1..=16usize {
             code = (code << 1) | self.bit() as i32;
@@ -337,8 +548,28 @@ impl<'a> BitReader<'a> {
         None
     }
 
+    /// Where a reader of one byte at a time would be: past the byte the next
+    /// bit is in, or past the last byte read when no part of one is left.
+    /// The word's whole bytes are ones it had not read, and each is given
+    /// back, two for an `X'FF'` and its stuffed zero.
+    fn position(&self) -> usize {
+        let partial = self.count % 8;
+        let mut at = self.at;
+        for k in 0..self.count / 8 {
+            let byte = (self.word >> (64 - partial - 8 * (k + 1))) as u8;
+            at = at.saturating_sub(if byte == 0xFF { 2 } else { 1 });
+        }
+        at
+    }
+
     /// Resets at a restart marker (T.81 F.2.1.3.1).
     fn restart(&mut self) {
+        // What is left of the current byte is dropped, and the bytes read
+        // ahead of it go back, so the search below starts where it always
+        // did: it stops one byte short of the end, so where it starts decides
+        // what a stream that ends without its marker reads next.
+        self.at = self.position();
+        self.word = 0;
         self.count = 0;
         if self.crossed_restart {
             // The bit reader already stepped over it while filling its
@@ -363,7 +594,7 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// Zig-zag order (T.81 figure A.6).
+// Zig-zag order (T.81 figure A.6).
 const ZIGZAG: [usize; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
     13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
@@ -3411,5 +3642,241 @@ mod tests {
 
         let image = decode(&data, 1 << 20).expect("what decoded is kept");
         assert!(image.warnings.contains(&Warning::TruncatedInput));
+    }
+
+    // ---- The look-ahead reader ------------------------------------------
+    //
+    // `BitReader` against `direct::BitwiseReader`, the reader a byte at a
+    // time, over tables and streams no encoder would write as well as ones it
+    // would (`docs/design/jpeg-speed.md`, "The look-ahead Huffman reader").
+
+    /// A xorshift generator: the same numbers on every target.
+    struct Noise(u64);
+
+    impl Noise {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// A number below `n`, which is not zero.
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// What kind of Huffman table a case draws.
+    #[derive(Clone, Copy, Debug)]
+    enum Shape {
+        /// Every code of the longest length used: C.2's tables as an encoder
+        /// writes them.
+        Complete,
+        /// Codes left unassigned, which no lookup entry may invent a symbol
+        /// for.
+        Incomplete,
+        /// More codes of some length than the lengths before leave room for,
+        /// which C.2 does not allow and a damaged `DHT` carries.
+        Oversubscribed,
+        /// No `DHT` at all for the slot a scan names.
+        Undefined,
+    }
+
+    /// A table of `shape` whose codes run to `longest` bits, from `noise`.
+    fn random_table(noise: &mut Noise, shape: Shape, longest: usize) -> HuffmanTable {
+        if let Shape::Undefined = shape {
+            return HuffmanTable::default();
+        }
+        let mut counts = [0u8; 16];
+        // The codes free at each length, kept below 256 so that the longest
+        // length can take them all.
+        let mut free = 2u64;
+        for length in 1..=longest {
+            let count = if length == longest {
+                match shape {
+                    Shape::Incomplete => noise.below(free),
+                    _ => free,
+                }
+            } else {
+                let least = free.saturating_sub(127);
+                least + noise.below(free - least)
+            };
+            counts[length - 1] = count as u8;
+            free = 2 * (free - count.min(free));
+        }
+        if let Shape::Oversubscribed = shape {
+            let at = noise.below(longest as u64) as usize;
+            counts[at] = counts[at].saturating_add(1 + noise.below(3) as u8);
+        }
+        let total: usize = counts.iter().map(|&c| usize::from(c)).sum();
+        let values = (0..total).map(|_| noise.next() as u8).collect();
+        HuffmanTable::build(&counts, values)
+    }
+
+    /// Entropy-coded bytes with the events a scan meets: stuffed `X'FF00'`,
+    /// RSTn, markers inside a code, fill bytes, a raw `X'FF'` with whatever
+    /// follows it, and an end anywhere, an `X'FF'` last included.
+    fn random_stream(noise: &mut Noise) -> Vec<u8> {
+        let length = noise.below(160) as usize;
+        let mut out = Vec::with_capacity(length + 2);
+        while out.len() < length {
+            match noise.below(48) {
+                0 => out.extend_from_slice(&[0xFF, 0x00]),
+                1 => out.extend_from_slice(&[0xFF, 0xD0 + noise.below(8) as u8]),
+                2 => {
+                    let marker = [0xD9, 0xC4, 0xDA, 0xDD, 0x01][noise.below(5) as usize];
+                    out.extend_from_slice(&[0xFF, marker]);
+                }
+                3 => out.extend_from_slice(&[0xFF, 0xFF]),
+                4 => out.push(0xFF),
+                _ => out.push(noise.next() as u8),
+            }
+        }
+        if noise.below(4) == 0 {
+            out.push(0xFF);
+        }
+        out
+    }
+
+    /// **The look-ahead reader answers every question the reader of a byte
+    /// at a time answers, and is left where that reader is left.**
+    ///
+    /// Each case draws three tables — complete, incomplete, oversubscribed or
+    /// never defined, codes to sixteen bits — and a stream with stuffing,
+    /// restart markers mid-symbol and on a byte boundary, markers inside a
+    /// code and an end anywhere, and runs a random sequence of symbols,
+    /// extra-bits reads, single bits and restarts through both readers. After
+    /// every operation the answer, `exhausted`, `crossed_restart`, the
+    /// position and the bits left of the current byte must agree, which is
+    /// the whole state a scan reads.
+    #[test]
+    fn the_lookahead_reader_decodes_what_the_bitwise_reader_did() {
+        let mut noise = Noise(0x9E37_79B9_7F4A_7C15);
+        let shapes = [
+            Shape::Complete,
+            Shape::Complete,
+            Shape::Incomplete,
+            Shape::Oversubscribed,
+            Shape::Undefined,
+        ];
+        let mut symbols = 0usize;
+        for case in 0..1500 {
+            let tables: Vec<HuffmanTable> = (0..3)
+                .map(|_| {
+                    let shape = shapes[noise.below(shapes.len() as u64) as usize];
+                    let longest = 1 + noise.below(16) as usize;
+                    random_table(&mut noise, shape, longest)
+                })
+                .collect();
+            let stream = random_stream(&mut noise);
+            let mut fast = BitReader::new(&stream);
+            let mut slow = direct::BitwiseReader::new(&stream);
+            for step in 0..200 {
+                let what = match noise.below(12) {
+                    0..=6 => {
+                        let table = &tables[noise.below(3) as usize];
+                        let (got, want) = (fast.huffman(table), slow.huffman(table));
+                        assert_eq!(got, want, "case {case} step {step}: the symbol");
+                        symbols += 1;
+                        "a symbol"
+                    }
+                    7 | 8 => {
+                        let n = if noise.below(8) == 0 {
+                            17 + noise.below(15) as u32
+                        } else {
+                            noise.below(17) as u32
+                        };
+                        assert_eq!(
+                            fast.bits(n),
+                            slow.bits(n),
+                            "case {case} step {step}: {n} bits"
+                        );
+                        "extra bits"
+                    }
+                    9 | 10 => {
+                        assert_eq!(fast.bit(), slow.bit(), "case {case} step {step}: a bit");
+                        "a bit"
+                    }
+                    _ => {
+                        fast.restart();
+                        slow.restart();
+                        "a restart"
+                    }
+                };
+                assert_eq!(
+                    (
+                        fast.exhausted,
+                        fast.crossed_restart,
+                        fast.position(),
+                        fast.count % 8
+                    ),
+                    (slow.exhausted, slow.crossed_restart, slow.at, slow.count),
+                    "case {case} step {step}: the state after {what}"
+                );
+            }
+        }
+        assert!(symbols > 100_000, "the sweep decoded {symbols} symbols");
+    }
+
+    /// **A symbol costs one table probe, or two for a code longer than the
+    /// first level** — counted over streams of every table shape an encoder
+    /// writes, codes to sixteen bits, with the bytes after the last symbol
+    /// that let every symbol be read from the word.
+    #[test]
+    fn a_symbol_costs_at_most_two_table_probes() {
+        let mut noise = Noise(0x2545_F491_4F6C_DD1D);
+        let mut long_codes = 0u64;
+        for case in 0..96 {
+            let longest = if case % 2 == 0 {
+                10 + noise.below(7) as usize
+            } else {
+                1 + noise.below(16) as usize
+            };
+            let table = random_table(&mut noise, Shape::Complete, longest);
+            // C.2's canonical codes, read back off the table: each length's
+            // run from its smallest code to its largest.
+            let mut codes = Vec::new();
+            for length in 1..=16usize {
+                if table.max_code[length] < 0 {
+                    continue;
+                }
+                for code in table.min_code[length]..=table.max_code[length] {
+                    let value = table.values[(table.value_offset[length] + code) as usize];
+                    codes.push((code as u32, length as u32, value));
+                }
+            }
+            let mut bits = Bits::default();
+            let mut expected = Vec::new();
+            for _ in 0..400 {
+                let (code, length, value) = codes[noise.below(codes.len() as u64) as usize];
+                bits.push(code, length);
+                expected.push((value, length));
+            }
+            let mut data = bits.finish();
+            data.extend_from_slice(&[0; 8]);
+
+            let mut reader = BitReader::new(&data);
+            let mut probes = 0u64;
+            for (index, &(value, length)) in expected.iter().enumerate() {
+                assert_eq!(
+                    reader.huffman(&table),
+                    Some(value),
+                    "case {case} symbol {index}"
+                );
+                probes += if length > LOOKUP_BITS { 2 } else { 1 };
+                long_codes += u64::from(length > LOOKUP_BITS);
+            }
+            assert_eq!(reader.probes, probes, "case {case}: the probes");
+            assert!(reader.probes <= 2 * expected.len() as u64);
+            assert_eq!(
+                reader.searched, 0,
+                "case {case}: no symbol was searched for"
+            );
+        }
+        assert!(
+            long_codes > 1_000,
+            "the second level was reached {long_codes} times"
+        );
     }
 }
