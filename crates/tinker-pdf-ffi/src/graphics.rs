@@ -487,6 +487,7 @@ pub unsafe extern "C" fn tpdf_builder_add_ext_gstate(
                 kind,
                 form,
                 backdrop,
+                transfer: None,
             })
         }
     };

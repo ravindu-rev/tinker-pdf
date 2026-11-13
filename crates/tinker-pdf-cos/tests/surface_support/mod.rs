@@ -160,6 +160,7 @@ pub fn whole_surface_document() -> Vec<u8> {
                 kind: MaskKind::Luminosity,
                 form: b"FmMask",
                 backdrop: Some(&[0.0]),
+                transfer: None,
             }),
             ..ExtGState::default()
         }

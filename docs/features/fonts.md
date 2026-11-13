@@ -1583,9 +1583,19 @@ What it does:
   (`PaletteEntryMissing`), one whose gradient stop names the text's own
   colour, which a procedure every run shares cannot state
   (`ForegroundStop`), and, under a profile that forbids transparency, one
-  needing an alpha or a soft mask (`TransparencyForbidden`, the builder
-  refusing nothing). A composite is drawn source-over, the backdrop then the
-  source, and named with its mode (`CompositeDrawnSourceOver`); a transform
+  needing an alpha, a soft mask, a group or a blend mode
+  (`TransparencyForbidden`, the builder refusing nothing). A composite is
+  its mode's construct, over the region it paints inside: `CLEAR` nothing,
+  `SRC` and `DEST` the one paint, `SRC_OVER` and `DEST_OVER` the two one
+  over the other; the `IN` and `OUT` modes the paint they keep, in an
+  isolated group of its own, under an `/S /Alpha` soft mask of the other's
+  group, through a `/TR` of `1 − x` for `OUT`; and the fifteen blend modes
+  an isolated group holding the backdrop and then the source's own group
+  under the `/BM` of the same name, registered once a face. Each composites
+  in the page's encoded components. The four sums ISO 32000-2's
+  transparency has no construct for — `SRC_ATOP`, `DEST_ATOP`, `XOR` and
+  `PLUS` — are drawn source-over, the backdrop then the source, and named
+  with their mode (`CompositeDrawnSourceOver`); a transform
   that is no number or flattens the plane draws nothing of what it holds
   (`TransformUnusable`); and what the graph's reader tolerated or refused is
   passed on (`Read`), a refused table drawing nothing and the rest drawn.
@@ -2007,7 +2017,7 @@ corpora already vendored here. So every name stays on the list.
 | CBDT's uncompressed and component glyph data, the EBDT formats 1 to 9 it inherits | `CbdtRefusal::DataFormat(n)` | Read and drawn by their own step; the PNG formats 17 to 19 are what colour fonts carry | [ROADMAP](../ROADMAP.md) FT-06.21 |
 | A gzip-encoded `SVG ` document that inflates past `MAX_SVG_DOCUMENT` (16 MiB), or that RFC 1952's reader refuses | `SvgRefusal::TooLarge`, `SvgRefusal::Gzip` | A few kilobytes of deflate inflate to gigabytes (ruling 1), and a document cut short or read past a failed check is a different picture, so the glyph is left to the next table that describes it | [design](../design/colour-fonts.md) |
 | A COLR version 1 gradient whose colour line names the text's own colour, written into a document | `ColourWarning::ForegroundStop` | A glyph's procedure is shared by every run that shows it, so it cannot state the colour a run is shown in, and the CPAL chapter's interpolation of that colour in linear light has no construct that leaves it unstated; the glyph is drawn as its next table, a glyph with a fill missing being a different picture | [design](../design/colour-fonts.md) |
-| A COLR version 1 composite whose mode is not source-over, written into a document | `ColourWarning::CompositeDrawnSourceOver` | Drawn source-over, the backdrop then the source, until its own step writes each mode ISO 32000-2's transparency expresses | [ROADMAP](../ROADMAP.md) FT-06.14 |
+| A COLR version 1 composite in `SRC_ATOP`, `DEST_ATOP`, `XOR` or `PLUS`, written into a document | `ColourWarning::CompositeDrawnSourceOver` | Each sums two terms, and ISO 32000-2's transparency composites one over the other; drawn source-over, the backdrop then the source, until the owner rules how (H-141 (c)) and its own step writes it | [ROADMAP](../ROADMAP.md) FT-06.18 |
 | A COLR version 1 graph with no clip box that a fill leaves unbounded, or whose walk passes `MAX_DRAWN_PAINTS` | `ColourWarning::Unbounded`, `GraphTooLarge` | The chapter forbids drawing an unbounded glyph; a graph of 2^64 paths is a few hundred bytes (ruling 1); the glyph is drawn as its next table | [design](../design/colour-fonts.md) |
 | TrueType and Type 2 hinting | none — outlines are unhinted, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree. Stem darkening, the bytecode interpreter, CFF hints and an autohinter are roadmap rows, the small-text judgement a person's | [ROADMAP](../ROADMAP.md) FT-04a…FT-04d |
 
@@ -2373,8 +2383,12 @@ corpora already vendored here. So every name stays on the list.
   the chapter's formula for the gradient and the CPAL chapter's linear-light
   interpolation; the ill-formed gradients painting nothing and named, and
   lines of one stop, of none and of one offset; a translucent gradient under
-  a part 1 profile drawn as the outline; a composite drawn source-over and
-  named with its mode; a gradient stop in the text's colour, an unbounded
+  a part 1 profile drawn as the outline; every composite mode over two
+  overlapping translucent squares, at a point of each, of both and of
+  neither, against W3C Compositing Level 1's Porter-Duff and blend formulas
+  the test evaluates, the four no construct expresses drawn source-over and
+  named with their mode, and the modes needing transparency drawn as the
+  outline under a part 1 profile; a gradient stop in the text's colour, an unbounded
   graph and a missing palette entry falling to the outline, named; a cycle
   named and the rest drawn; a
   million-path fan-out of one shared table written in kilobytes, and one no

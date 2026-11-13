@@ -90,6 +90,7 @@ pub fn soft_mask<'a>(
             kind,
             form,
             backdrop,
+            transfer: None,
         })),
         None => Err(PyValueError::new_err(
             "a group soft mask names its form: pass mask_form",

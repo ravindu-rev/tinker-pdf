@@ -1440,6 +1440,7 @@ fn forced_page(dark: bool) -> Vec<u8> {
                 kind: MaskKind::Luminosity,
                 form: b"Left",
                 backdrop: None,
+                transfer: None,
             }),
             ..ExtGState::default()
         }

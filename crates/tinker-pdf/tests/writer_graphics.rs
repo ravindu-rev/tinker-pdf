@@ -230,6 +230,7 @@ fn a_luminosity_soft_mask_from_the_builder_draws_what_a_hand_written_one_draws()
                 kind: MaskKind::Luminosity,
                 form: b"Mask",
                 backdrop: None,
+                transfer: None,
             }),
             ..ExtGState::default()
         }
@@ -293,6 +294,7 @@ fn a_soft_mask_of_none_turns_an_inherited_mask_off() {
                     kind: MaskKind::Luminosity,
                     form: b"Mask",
                     backdrop: None,
+                    transfer: None,
                 }),
                 ..ExtGState::default()
             }

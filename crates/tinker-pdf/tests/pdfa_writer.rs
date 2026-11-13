@@ -688,6 +688,7 @@ fn transparency_is_refused_under_part_one_and_written_under_part_two() {
                 kind: MaskKind::Alpha,
                 form: b"Fm",
                 backdrop: None,
+                transfer: None,
             }),
             ..ExtGState::default()
         }

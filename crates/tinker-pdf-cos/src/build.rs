@@ -658,6 +658,12 @@ pub enum StateMask<'a> {
         /// luminosity mask composites its group against a backdrop and that
         /// this entry names it, defaulting to black.
         backdrop: Option<&'a [f64]>,
+        /// `/TR`, the transfer function 11.6.5.2 maps each value the group
+        /// gives through before it is the mask's — one input and one output
+        /// — or `None` for `/Identity`, its default, which is then not
+        /// written. `1 − x` is what turns a shape's alpha into the mask of
+        /// everything outside it.
+        transfer: Option<&'a Function>,
     },
 }
 
@@ -6528,8 +6534,9 @@ impl DocumentBuilder {
     /// a form that is not a transparency group is one 11.6.5.2 forbids.
     ///
     /// Returns false for an alpha outside 11.6.4.4's range, a non-finite
-    /// backdrop component, or an `/SMask` naming a form that is not
-    /// registered or carries no `/Group`.
+    /// backdrop component, an `/SMask` naming a form that is not registered
+    /// or carries no `/Group`, or a `/TR` that is no function of one value
+    /// giving one.
     pub fn add_ext_gstate(&mut self, resource: &[u8], state: &ExtGState<'_>) -> bool {
         if state.fill_alpha.is_some_and(|v| !is_alpha(v))
             || state.stroke_alpha.is_some_and(|v| !is_alpha(v))
@@ -6561,7 +6568,13 @@ impl DocumentBuilder {
         }
 
         let mut mask_ref = None;
-        if let Some(StateMask::Group { form, backdrop, .. }) = &state.soft_mask {
+        if let Some(StateMask::Group {
+            form,
+            backdrop,
+            transfer,
+            ..
+        }) = &state.soft_mask
+        {
             if !self.groups.contains(*form) {
                 return false;
             }
@@ -6577,6 +6590,11 @@ impl DocumentBuilder {
                 if values.is_empty() || !all_finite(values) {
                     return false;
                 }
+            }
+            // 11.6.5.2: a function of the one value the group gives, giving
+            // one back.
+            if transfer.is_some_and(|function| !function.is_valid(1, 1)) {
+                return false;
             }
             mask_ref = Some(*reference);
         }
@@ -6602,7 +6620,15 @@ impl DocumentBuilder {
                     Object::Name(self.names.intern(b"None")),
                 );
             }
-            (Some(StateMask::Group { kind, backdrop, .. }), Some(reference)) => {
+            (
+                Some(StateMask::Group {
+                    kind,
+                    backdrop,
+                    transfer,
+                    ..
+                }),
+                Some(reference),
+            ) => {
                 let mut mask = Dict::new();
                 mask.insert(Name::TYPE, Object::Name(self.names.intern(b"Mask")));
                 mask.insert(
@@ -6615,6 +6641,10 @@ impl DocumentBuilder {
                         self.names.intern(b"BC"),
                         Object::Array(values.iter().map(|v| Object::Real(*v)).collect()),
                     );
+                }
+                if let Some(function) = transfer {
+                    let function_ref = self.write_function(function);
+                    mask.insert(self.names.intern(b"TR"), Object::Ref(function_ref));
                 }
                 dict.insert(self.names.intern(b"SMask"), Object::Dict(mask));
             }
@@ -11894,6 +11924,7 @@ mod graphics_tests {
                     kind: MaskKind::Luminosity,
                     form: b"Fm0",
                     backdrop: Some(&[0.0]),
+                    transfer: None,
                 }),
                 ..ExtGState::default()
             }
@@ -11905,6 +11936,7 @@ mod graphics_tests {
                     kind: MaskKind::Alpha,
                     form: b"Fm0",
                     backdrop: None,
+                    transfer: None,
                 }),
                 ..ExtGState::default()
             }
@@ -11964,6 +11996,91 @@ mod graphics_tests {
             !silent.contains_key(doc.intern(b"SMask")),
             "and a state that said nothing about the mask carries no key at all"
         );
+        assert!(
+            !mask.contains_key(doc.intern(b"TR")) && !alpha.contains_key(doc.intern(b"TR")),
+            "a mask given no transfer function states the identity by saying nothing"
+        );
+    }
+
+    /// A soft mask's `/TR` (11.6.5.2) is the function it is given, written as
+    /// a function object the mask dictionary names; one that is no function
+    /// of one value giving one is refused, and registers nothing.
+    #[test]
+    fn a_soft_mask_carries_its_transfer_function() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_form(
+            b"Fm0",
+            &FormXObject {
+                bbox: [0.0, 0.0, 10.0, 10.0],
+                matrix: None,
+                group: Some(TransparencyGroup {
+                    color_space: DeviceSpace::Rgb,
+                    isolated: true,
+                    knockout: false,
+                }),
+                content: b"0 0 1 rg 0 0 5 10 re f",
+            }
+        ));
+        let complement = Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0],
+            c1: vec![0.0],
+            n: 1.0,
+        };
+        assert!(builder.add_ext_gstate(
+            b"GOut",
+            &ExtGState {
+                soft_mask: Some(StateMask::Group {
+                    kind: MaskKind::Alpha,
+                    form: b"Fm0",
+                    backdrop: None,
+                    transfer: Some(&complement),
+                }),
+                ..ExtGState::default()
+            }
+        ));
+        let two_outputs = Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 1.0],
+            c1: vec![0.0, 0.0],
+            n: 1.0,
+        };
+        assert!(
+            !builder.add_ext_gstate(
+                b"GBad",
+                &ExtGState {
+                    soft_mask: Some(StateMask::Group {
+                        kind: MaskKind::Alpha,
+                        form: b"Fm0",
+                        backdrop: None,
+                        transfer: Some(&two_outputs),
+                    }),
+                    ..ExtGState::default()
+                }
+            ),
+            "a transfer giving two values is no mask's"
+        );
+        builder.add_page(10.0, 10.0, |_| {});
+        let doc = opened(builder);
+        let mask = doc.resolve_key(&resource(&doc, b"ExtGState", b"GOut"), doc.intern(b"SMask"));
+        let mask = mask.as_dict().expect("a mask dictionary");
+        let transfer = doc.resolve_key(mask, doc.intern(b"TR"));
+        let transfer = transfer.as_dict().expect("a function object");
+        assert_eq!(
+            doc.resolve_key(transfer, doc.intern(b"FunctionType"))
+                .as_int(),
+            Some(2)
+        );
+        assert_eq!(numbers(&doc, transfer, b"C0"), vec![1.0]);
+        assert_eq!(numbers(&doc, transfer, b"C1"), vec![0.0]);
+        let pages = crate::pages::collect(&doc);
+        let resources = pages[0].resources.as_ref().expect("resources");
+        let states = doc.resolve_key(resources, doc.intern(b"ExtGState"));
+        assert_eq!(
+            states.as_dict().map(Dict::len),
+            Some(1),
+            "the refused state registered nothing"
+        );
     }
 
     /// Every way a graphics state can fail to be one, refused rather than
@@ -12008,6 +12125,7 @@ mod graphics_tests {
                         kind: MaskKind::Luminosity,
                         form: b"Group",
                         backdrop: Some(&[0.0, 0.0, 0.0]),
+                        transfer: None,
                     }),
                 }
             ),
@@ -12053,6 +12171,7 @@ mod graphics_tests {
                         kind: MaskKind::Luminosity,
                         form: b"Plain",
                         backdrop: None,
+                        transfer: None,
                     }),
                     ..ExtGState::default()
                 },
@@ -12064,6 +12183,7 @@ mod graphics_tests {
                         kind: MaskKind::Alpha,
                         form: b"Missing",
                         backdrop: None,
+                        transfer: None,
                     }),
                     ..ExtGState::default()
                 },
@@ -12075,6 +12195,7 @@ mod graphics_tests {
                         kind: MaskKind::Luminosity,
                         form: b"Group",
                         backdrop: Some(&[]),
+                        transfer: None,
                     }),
                     ..ExtGState::default()
                 },
@@ -12086,6 +12207,7 @@ mod graphics_tests {
                         kind: MaskKind::Luminosity,
                         form: b"Group",
                         backdrop: Some(&[f64::INFINITY]),
+                        transfer: None,
                     }),
                     ..ExtGState::default()
                 },

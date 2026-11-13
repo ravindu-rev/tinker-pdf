@@ -1494,7 +1494,7 @@ fn colr_v1(bases: &[(u16, V1)], clips: &[(u16, u16, [i16; 4])]) -> Vec<u8> {
 
 /// The rectangles a version 1 face's graphs clip to, at
 /// `Face::colour_glyph(n)`.
-const V1_RECTS: [[i16; 4]; 5] = [
+const V1_RECTS: [[i16; 4]; 7] = [
     // 0: the square every glyph below uses.
     [100, 100, 500, 500],
     // 1: a larger square around the em's middle.
@@ -1505,6 +1505,10 @@ const V1_RECTS: [[i16; 4]; 5] = [
     [300, -50, 700, 50],
     // 4: a bar below the em's middle.
     [400, 100, 600, 400],
+    // 5 and 6: a composite's backdrop, lower left, and its source, upper
+    // right, overlapping in the em's middle.
+    [100, 100, 600, 600],
+    [400, 400, 900, 900],
 ];
 
 /// Palette 0's entries: red, blue, green, and four colours no two of which
@@ -1730,9 +1734,11 @@ fn colr_v1_solids_glyphs_and_transforms_draw_by_the_formulas() {
     }
 }
 
-/// **FT-06.12's exit.** A composite whose mode is not source-over is drawn
-/// source-over — the backdrop, then the source over it — and named with its
-/// mode (ruling 10); a source-over composite is that, and named not at all.
+/// **FT-06.12's exit**, as FT-06.14 leaves it: a composite whose mode no
+/// construct of ISO 32000-2's transparency expresses is drawn source-over —
+/// the backdrop, then the source over it — and named with its mode (ruling
+/// 10) until its own step draws it; a source-over composite is that, and
+/// named not at all.
 #[test]
 fn a_composite_is_named_until_it_is_drawn() {
     let face = v1_face(
@@ -1745,8 +1751,8 @@ fn a_composite_is_named_until_it_is_drawn() {
                     Box::new(filled(rect(1), 0)),
                 )
             };
-            // 23, COMPOSITE_MULTIPLY; 3, COMPOSITE_SRC_OVER.
-            vec![('A', composite(23)), ('B', composite(3))]
+            // 9, COMPOSITE_SRC_ATOP; 3, COMPOSITE_SRC_OVER.
+            vec![('A', composite(9)), ('B', composite(3))]
         },
         &[],
     );
@@ -1757,7 +1763,7 @@ fn a_composite_is_named_until_it_is_drawn() {
         warnings,
         [ColourWarning::CompositeDrawnSourceOver {
             glyph: a,
-            mode: tinker_pdf_font::colr::CompositeMode::Multiply,
+            mode: tinker_pdf_font::colr::CompositeMode::SrcAtop,
         }]
     );
     let (bitmap, _) = rendered(bytes);
@@ -2429,6 +2435,306 @@ fn a_translucent_gradient_under_a_profile_without_transparency_is_drawn_as_the_o
         WHITE,
         2
     ));
+}
+
+// ---- COLR version 1 composites --------------------------------------------
+
+/// W3C Compositing and Blending Level 1, section 9.1: the two fractions of
+/// the Porter-Duff operator composite mode `mode` names — of the source and
+/// of the backdrop — given their alphas; `None` for a blend mode.
+fn porter_duff(mode: u8, source: f64, backdrop: f64) -> Option<(f64, f64)> {
+    Some(match mode {
+        // clear, copy, destination
+        0 => (0.0, 0.0),
+        1 => (1.0, 0.0),
+        2 => (0.0, 1.0),
+        // source-over, destination-over
+        3 => (1.0, 1.0 - source),
+        4 => (1.0 - backdrop, 1.0),
+        // source-in, destination-in, source-out, destination-out
+        5 => (backdrop, 0.0),
+        6 => (0.0, source),
+        7 => (1.0 - backdrop, 0.0),
+        8 => (0.0, 1.0 - source),
+        // source-atop, destination-atop, xor
+        9 => (backdrop, 1.0 - source),
+        10 => (1.0 - backdrop, source),
+        11 => (1.0 - backdrop, 1.0 - source),
+        // lighter: both whole, the sum clamped.
+        12 => (1.0, 1.0),
+        _ => return None,
+    })
+}
+
+/// Section 10.2's luminosity of a colour.
+fn lum(c: [f64; 3]) -> f64 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+/// Section 10.2's `ClipColor`.
+fn clip_colour(c: [f64; 3]) -> [f64; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    let mut out = c;
+    if n < 0.0 {
+        out = out.map(|v| l + (v - l) * l / (l - n));
+    }
+    if x > 1.0 {
+        out = out.map(|v| l + (v - l) * (1.0 - l) / (x - l));
+    }
+    out
+}
+
+/// Section 10.2's `SetLum`.
+fn set_lum(c: [f64; 3], l: f64) -> [f64; 3] {
+    let d = l - lum(c);
+    clip_colour(c.map(|v| v + d))
+}
+
+/// Section 10.2's `Sat`.
+fn sat(c: [f64; 3]) -> f64 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+/// Section 10.2's `SetSat`.
+fn set_sat(c: [f64; 3], s: f64) -> [f64; 3] {
+    let mut order = [0usize, 1, 2];
+    order.sort_by(|a, b| c[*a].total_cmp(&c[*b]));
+    let [min, mid, max] = order;
+    let mut out = [0.0; 3];
+    if c[max] > c[min] {
+        out[mid] = (c[mid] - c[min]) * s / (c[max] - c[min]);
+        out[max] = s;
+    }
+    out
+}
+
+/// The blend function `B(Cb, Cs)` of composite mode `mode`, sections 10.1
+/// and 10.2, each channel in `[0, 1]`; `None` for a Porter-Duff mode.
+fn blend(mode: u8, cb: [f64; 3], cs: [f64; 3]) -> Option<[f64; 3]> {
+    let multiply = |b: f64, s: f64| b * s;
+    let screen = |b: f64, s: f64| b + s - b * s;
+    let hard_light = |b: f64, s: f64| {
+        if s <= 0.5 {
+            multiply(b, 2.0 * s)
+        } else {
+            screen(b, 2.0 * s - 1.0)
+        }
+    };
+    let separable = |f: &dyn Fn(f64, f64) -> f64| [0, 1, 2].map(|i| f(cb[i], cs[i]));
+    Some(match mode {
+        13 => separable(&screen),
+        14 => separable(&|b, s| hard_light(s, b)),
+        15 => separable(&|b: f64, s: f64| b.min(s)),
+        16 => separable(&|b: f64, s: f64| b.max(s)),
+        17 => separable(&|b, s| {
+            if b == 0.0 {
+                0.0
+            } else if s >= 1.0 {
+                1.0
+            } else {
+                (b / (1.0 - s)).min(1.0)
+            }
+        }),
+        18 => separable(&|b, s| {
+            if b >= 1.0 {
+                1.0
+            } else if s <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - b) / s).min(1.0)
+            }
+        }),
+        19 => separable(&hard_light),
+        20 => separable(&|b, s| {
+            if s <= 0.5 {
+                b - (1.0 - 2.0 * s) * b * (1.0 - b)
+            } else {
+                let d = if b <= 0.25 {
+                    ((16.0 * b - 12.0) * b + 4.0) * b
+                } else {
+                    b.sqrt()
+                };
+                b + (2.0 * s - 1.0) * (d - b)
+            }
+        }),
+        21 => separable(&|b: f64, s: f64| (b - s).abs()),
+        22 => separable(&|b, s| b + s - 2.0 * b * s),
+        23 => separable(&multiply),
+        24 => set_lum(set_sat(cs, sat(cb)), lum(cb)),
+        25 => set_lum(set_sat(cb, sat(cs)), lum(cb)),
+        26 => set_lum(cs, lum(cb)),
+        27 => set_lum(cb, lum(cs)),
+        _ => return None,
+    })
+}
+
+/// The source `(cs, αs)` composited onto the backdrop `(cb, αb)` by `mode`,
+/// W3C Compositing Level 1 transcribed: premultiplied, `co` and `αo`.
+fn composited(mode: u8, cs: [f64; 3], alpha_s: f64, cb: [f64; 3], alpha_b: f64) -> ([f64; 3], f64) {
+    if let Some((fa, fb)) = porter_duff(mode, alpha_s, alpha_b) {
+        let colour = [0, 1, 2].map(|i| (alpha_s * fa * cs[i] + alpha_b * fb * cb[i]).min(1.0));
+        return (colour, (alpha_s * fa + alpha_b * fb).min(1.0));
+    }
+    let blended = blend(mode, cb, cs).expect("a blend mode");
+    // Section 5.8: the source, blended with the backdrop where it lies on
+    // it, composited source-over.
+    let colour = [0, 1, 2].map(|i| {
+        alpha_s * (1.0 - alpha_b) * cs[i]
+            + alpha_b * (1.0 - alpha_s) * cb[i]
+            + alpha_s * alpha_b * blended[i]
+    });
+    (colour, alpha_s + alpha_b * (1.0 - alpha_s))
+}
+
+/// Composite modes 9 to 12, which no construct of ISO 32000-2's transparency
+/// expresses (`docs/design/colour-fonts.md`, (c)).
+const INEXPRESSIBLE: [u8; 4] = [9, 10, 11, 12];
+
+/// **FT-06.14's exit.** Every composite mode COLR version 1 defines, each
+/// one glyph: a blue square at half an alpha, the source, over an orange one
+/// at three quarters, the backdrop, overlapping in the em's middle. At a
+/// point of each, of both and of neither, each mode the transparency model
+/// expresses draws what W3C Compositing Level 1's Porter-Duff or blend
+/// formula gives, evaluated here over the page's encoded components, which
+/// is where the design writes a composite until H-141 (d) rules; each of the
+/// four it does not express is drawn source-over and named with its mode.
+#[test]
+fn colr_v1_composites_match_their_formulas() {
+    // The source's and the backdrop's alphas, eight bits each as the writer
+    // states them.
+    let alpha = |paint: f64| (stored(paint) * 255.0).round() / 255.0;
+    let (alpha_s, alpha_b) = (alpha(0.5), alpha(0.75));
+    let encoded = |c: [u8; 3]| c.map(|v| f64::from(v) / 255.0);
+    let (cs, cb) = (encoded(BLUE), encoded(ORANGE));
+    let letters = "ABCDEFGHIJKLMN";
+    for half in [0u8, 14] {
+        let modes: Vec<u8> = (half..half + 14).collect();
+        let face = v1_face(
+            letters,
+            |rect, _| {
+                letters
+                    .chars()
+                    .zip(&modes)
+                    .map(|(letter, &mode)| {
+                        let source = V1::Glyph(rect(6), Box::new(V1::Solid(1, 0.5)));
+                        let backdrop = V1::Glyph(rect(5), Box::new(V1::Solid(3, 0.75)));
+                        (
+                            letter,
+                            V1::Composite(Box::new(source), mode, Box::new(backdrop)),
+                        )
+                    })
+                    .collect()
+            },
+            &[],
+        );
+        let (bytes, warnings) = colour_document(
+            &face,
+            letters,
+            PaletteChoice::Default,
+            DocumentBuilder::new(),
+        );
+        let named: Vec<ColourWarning> = letters
+            .chars()
+            .zip(&modes)
+            .filter(|(_, mode)| INEXPRESSIBLE.contains(mode))
+            .map(|(letter, &mode)| ColourWarning::CompositeDrawnSourceOver {
+                glyph: face.glyph_of(letter).expect("covered"),
+                mode: tinker_pdf_font::colr::CompositeMode::from_raw(mode).expect("a mode"),
+            })
+            .collect();
+        assert_eq!(warnings, named, "modes {half} to {}", half + 13);
+        let (bitmap, text) = rendered(bytes);
+        assert_eq!(text, letters);
+        for (pen, &mode) in modes.iter().enumerate() {
+            // Drawn source-over where no construct expresses the mode.
+            let drawn = if INEXPRESSIBLE.contains(&mode) {
+                3
+            } else {
+                mode
+            };
+            for (unit, (s, b)) in [
+                ([250.0, 250.0], (0.0, alpha_b)),
+                ([750.0, 750.0], (alpha_s, 0.0)),
+                ([500.0, 500.0], (alpha_s, alpha_b)),
+                ([250.0, 750.0], (0.0, 0.0)),
+                ([750.0, 250.0], (0.0, 0.0)),
+            ] {
+                let (colour, coverage) = composited(drawn, cs, s, cb, b);
+                // The result over the white page, premultiplied.
+                let want = colour.map(|c| ((c + (1.0 - coverage)) * 255.0).round() as u8);
+                let got = pixel(&bitmap, at_units(pen as f64, unit), 100.0);
+                assert!(
+                    close(got, want, 2),
+                    "mode {mode} at {unit:?}: {got:?}, not {want:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A composite whose construct needs a group, a soft mask or a blend mode —
+/// the `IN` and `OUT` modes and the blends — is, under a profile that admits
+/// no transparency, drawn as the glyph's outline and named; one whose
+/// construct needs none — clear, one paint, one over the other — is drawn as
+/// it is, its paints opaque.
+#[test]
+fn a_composite_needing_transparency_under_a_profile_without_it_is_drawn_as_the_outline() {
+    let face = v1_face(
+        "ABCD",
+        |rect, _| {
+            let composite = |mode| {
+                V1::Composite(
+                    Box::new(V1::Glyph(rect(6), Box::new(V1::Solid(1, 1.0)))),
+                    mode,
+                    Box::new(V1::Glyph(rect(5), Box::new(V1::Solid(3, 1.0)))),
+                )
+            };
+            // DEST_OVER, SRC, SRC_IN, MULTIPLY.
+            vec![
+                ('A', composite(4)),
+                ('B', composite(1)),
+                ('C', composite(5)),
+                ('D', composite(23)),
+            ]
+        },
+        &[],
+    );
+    let builder = DocumentBuilder::archival(tinker_pdf_cos::ArchivalProfile {
+        part: tinker_pdf_cos::ArchivalPart::One,
+        level: Some(tinker_pdf_cos::ArchivalLevel::B),
+        destination_profile: pdfa_support::srgb_like(),
+        destination_space: tinker_pdf_cos::DeviceSpace::Rgb,
+        output_condition: "Custom".to_string(),
+        language: None,
+    });
+    let (bytes, warnings) = colour_document(&face, "ABCD", PaletteChoice::Default, builder);
+    let glyph = |c| face.glyph_of(c).expect("covered");
+    assert_eq!(
+        warnings,
+        [
+            ColourWarning::TransparencyForbidden { glyph: glyph('C') },
+            ColourWarning::TransparencyForbidden { glyph: glyph('D') },
+        ]
+    );
+    let (bitmap, _) = rendered(bytes);
+    let samples = [
+        // DEST_OVER: the backdrop over the source where both are.
+        (0.0, [500.0, 500.0], ORANGE),
+        (0.0, [750.0, 750.0], BLUE),
+        // SRC: the source alone, the backdrop nowhere.
+        (1.0, [500.0, 500.0], BLUE),
+        (1.0, [250.0, 250.0], WHITE),
+        // SRC_IN and MULTIPLY: the outline, the box from 0 to 700.
+        (2.0, [350.0, 350.0], TEXT_GREEN),
+        (2.0, [850.0, 850.0], WHITE),
+        (3.0, [350.0, 350.0], TEXT_GREEN),
+    ];
+    for (pen, unit, want) in samples {
+        let got = pixel(&bitmap, at_units(pen, unit), 100.0);
+        assert!(close(got, want, 2), "{pen} {unit:?}: {got:?}, not {want:?}");
+    }
 }
 
 /// What version 1 cannot draw falls to the glyph's next table, named: a

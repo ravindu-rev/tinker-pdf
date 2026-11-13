@@ -269,6 +269,7 @@ fn against_the_facade() -> Vec<u8> {
                 kind: MaskKind::Luminosity,
                 form: b"Fm0",
                 backdrop: Some(&BACKDROP),
+                transfer: None,
             }),
         }
     ));

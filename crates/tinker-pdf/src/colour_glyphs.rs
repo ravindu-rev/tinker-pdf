@@ -17,8 +17,13 @@
 //!    colour line — the extend's fold, then the stops interpolated in linear
 //!    light with their alphas premultiplied, as the CPAL chapter's
 //!    *Interpolation of colors* has it — under a luminosity soft mask of its
-//!    alphas where a stop is translucent. A composite is drawn source-over
-//!    and named with its mode.
+//!    alphas where a stop is translucent. A composite is its mode's
+//!    construct: nothing, one paint, one over the other, a paint in a group
+//!    of its own under an alpha soft mask of the other's (through `1 − x`
+//!    for the `OUT` modes), or the backdrop and the source's group under the
+//!    `/BM` of the same name in a group of their own; the four sums the
+//!    transparency model has no spelling for are drawn source-over and
+//!    named with their mode.
 //! 2. `COLR` version 0's layers, each layer's outline filled in turn with its
 //!    palette colour and alpha.
 //! 3. Its outline, unfilled by any colour of its own, so it paints in the
@@ -50,8 +55,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use tinker_pdf_cos::build::{
-    CalculatorOp, ColourGlyph, DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Function,
-    MaskKind, Shading, StateMask, TransparencyGroup,
+    BlendMode, CalculatorOp, ColourGlyph, DeviceSpace, DocumentBuilder, ExtGState, FormXObject,
+    Function, MaskKind, Shading, StateMask, TransparencyGroup,
 };
 use tinker_pdf_cos::ArchivalPart;
 use tinker_pdf_font::colr::{
@@ -90,9 +95,10 @@ pub const MAX_DRAWN_PAINTS: usize = 1 << 16;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ColourWarning {
-    /// The glyph's description needs transparency — an alpha below one —
-    /// and the document's profile forbids it (ISO 19005-1 6.4): drawn as its
-    /// next table, or its outline in the text's colour.
+    /// The glyph's description needs transparency — an alpha below one, a
+    /// gradient's soft mask, or a composite's group, soft mask or blend mode
+    /// — and the document's profile forbids it (ISO 19005-1 6.4): drawn as
+    /// its next table, or its outline in the text's colour.
     TransparencyForbidden {
         /// The glyph.
         glyph: u16,
@@ -120,8 +126,9 @@ pub enum ColourWarning {
         glyph: u16,
     },
     /// A `COLR` version 1 composite drawn source-over — the backdrop, then the
-    /// source over it — in place of the mode it names, which this build does
-    /// not draw yet.
+    /// source over it — in place of the mode it names: `COMPOSITE_SRC_ATOP`,
+    /// `COMPOSITE_DEST_ATOP`, `COMPOSITE_XOR` or `COMPOSITE_PLUS`, each a sum
+    /// of two terms ISO 32000-2's transparency model has no construct for.
     CompositeDrawnSourceOver {
         /// The glyph.
         glyph: u16,
@@ -186,6 +193,9 @@ pub struct ColourFace<'a> {
     palette: u16,
     /// The paint alphas whose `/ExtGState` this face has registered.
     alphas: RefCell<BTreeSet<u8>>,
+    /// The composite modes whose blend mode's `/ExtGState` this face has
+    /// registered, by `compositeMode`.
+    blends: RefCell<BTreeSet<u8>>,
     /// What drawing its glyphs met, each once, in the order met.
     warnings: RefCell<Vec<ColourWarning>>,
 }
@@ -224,6 +234,7 @@ impl<'a> ColourFace<'a> {
             cpal,
             palette,
             alphas: RefCell::new(BTreeSet::new()),
+            blends: RefCell::new(BTreeSet::new()),
             warnings: RefCell::new(Vec::new()),
         }
     }
@@ -459,6 +470,37 @@ impl<'a> ColourFace<'a> {
             return None;
         }
         self.alphas.borrow_mut().insert(alpha);
+        Some(name)
+    }
+
+    /// The `/ExtGState` setting the blend mode `blend`, which composite mode
+    /// `mode` is written with, registered once per mode; `None` where the
+    /// builder refuses it. The caller has asked whether the profile admits
+    /// transparency.
+    fn blend_state(
+        &self,
+        builder: &mut DocumentBuilder,
+        resource: &[u8],
+        mode: CompositeMode,
+        blend: BlendMode,
+    ) -> Option<Vec<u8>> {
+        let key = CompositeMode::ALL
+            .iter()
+            .position(|m| *m == mode)
+            .and_then(|at| u8::try_from(at).ok())?;
+        let mut name = resource.to_vec();
+        name.extend_from_slice(format!(".bm{key}").as_bytes());
+        if self.blends.borrow().contains(&key) {
+            return Some(name);
+        }
+        let state = ExtGState {
+            blend_mode: Some(blend),
+            ..ExtGState::default()
+        };
+        if !builder.add_ext_gstate(&name, &state) {
+            return None;
+        }
+        self.blends.borrow_mut().insert(key);
         Some(name)
     }
 }
@@ -708,15 +750,8 @@ impl Walk<'_, '_> {
                 mode,
                 backdrop,
             } => {
-                if *mode != CompositeMode::SrcOver {
-                    self.face.warn(ColourWarning::CompositeDrawnSourceOver {
-                        glyph: self.glyph,
-                        mode: *mode,
-                    });
-                }
-                let (source, backdrop) = (*source, *backdrop);
-                self.paint(out, backdrop, clip);
-                self.paint(out, source, clip);
+                let (source, mode, backdrop) = (*source, *mode, *backdrop);
+                self.composite(out, id, [source, backdrop], mode, clip);
             }
             // Named by the reader's warning; the rest of the graph is drawn.
             Paint::Refused(_) => {}
@@ -1025,11 +1060,209 @@ impl Walk<'_, '_> {
                         kind: MaskKind::Luminosity,
                         form: &form,
                         backdrop: Some(&[0.0]),
+                        transfer: None,
                     }),
                     ..ExtGState::default()
                 },
             )
             .then_some(state)
+    }
+
+    /// *Format 32: PaintComposite*: `[source, backdrop]` composited by
+    /// `mode` over the region `clip` boxes — or, inside a shared form, the
+    /// composite's own extent — as the design's construct for the mode
+    /// ([`construct`]).
+    ///
+    /// The result is painted onto what is below it source-over, as every
+    /// paint is, so a mode that keeps one paint or puts one over the other
+    /// draws them where it stands; one that masks a paint by the other's
+    /// alpha draws the paint, in an isolated group of its own, under an
+    /// `/S /Alpha` soft mask of the other's group, through `1 − x` for the
+    /// `OUT` modes; and one that blends draws an isolated group of its own
+    /// holding the backdrop and then the source's group under the `/BM`. A
+    /// mode the transparency model cannot express is drawn source-over and
+    /// named.
+    fn composite(
+        &mut self,
+        out: &mut Vec<u8>,
+        id: PaintId,
+        [source, backdrop]: [PaintId; 2],
+        mode: CompositeMode,
+        clip: Option<[f64; 4]>,
+    ) {
+        let pick = |side: Side| match side {
+            Side::Source => source,
+            Side::Backdrop => backdrop,
+        };
+        let construct = construct(mode);
+        match construct {
+            Construct::Nothing => {}
+            Construct::One(side) => self.paint(out, pick(side), clip),
+            Construct::Over { below } => {
+                let above = match below {
+                    Side::Source => backdrop,
+                    Side::Backdrop => source,
+                };
+                self.paint(out, pick(below), clip);
+                self.paint(out, above, clip);
+            }
+            Construct::SourceOver => {
+                self.face.warn(ColourWarning::CompositeDrawnSourceOver {
+                    glyph: self.glyph,
+                    mode,
+                });
+                self.paint(out, backdrop, clip);
+                self.paint(out, source, clip);
+            }
+            Construct::Masked { .. } | Construct::Blend(_) => {
+                if forbids_transparency(self.builder) {
+                    self.fail(ColourWarning::TransparencyForbidden { glyph: self.glyph });
+                    return;
+                }
+                // Nothing to group inside: a composite of fills no outline
+                // bounds paints nothing, as such a fill does.
+                let Some(region) = clip.or_else(|| self.survey.extent(id)).filter(is_area) else {
+                    return;
+                };
+                match construct {
+                    Construct::Masked { kept, inverted } => {
+                        let mask = match kept {
+                            Side::Source => backdrop,
+                            Side::Backdrop => source,
+                        };
+                        self.masked(out, pick(kept), mask, inverted, region);
+                    }
+                    Construct::Blend(blend) => {
+                        self.blended(out, [source, backdrop], mode, blend, region);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// `kept` drawn in a group of its own under an `/S /Alpha` soft mask of
+    /// `mask`'s group — through 11.6.5.2's `/TR` of `1 − x` where `inverted`
+    /// — over `region`.
+    fn masked(
+        &mut self,
+        out: &mut Vec<u8>,
+        kept: PaintId,
+        mask: PaintId,
+        inverted: bool,
+        region: [f64; 4],
+    ) {
+        let Some(mask_form) = self.group_form(mask, region) else {
+            return;
+        };
+        let Some(kept_form) = self.group_form(kept, region) else {
+            return;
+        };
+        // 7.10.3: `C0 + x^1 (C1 − C0)` from 1 to 0, which is `1 − x`.
+        let complement = Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0],
+            c1: vec![0.0],
+            n: 1.0,
+        };
+        let state = self.fresh("k");
+        let registered = self.builder.add_ext_gstate(
+            &state,
+            &ExtGState {
+                soft_mask: Some(StateMask::Group {
+                    kind: MaskKind::Alpha,
+                    form: &mask_form,
+                    backdrop: None,
+                    transfer: inverted.then_some(&complement),
+                }),
+                ..ExtGState::default()
+            },
+        );
+        if !registered {
+            self.fail(ColourWarning::GraphTooLarge { glyph: self.glyph });
+            return;
+        }
+        out.extend_from_slice(b"q\n");
+        crate::form_data::write_name(out, &state);
+        out.extend_from_slice(b" gs\n");
+        crate::form_data::write_name(out, &kept_form);
+        out.extend_from_slice(b" Do\nQ\n");
+    }
+
+    /// `[source, backdrop]` blended by `blend`, the blend mode composite mode
+    /// `mode` names, in an isolated group of their own over `region`: the
+    /// backdrop drawn, then the source's own group drawn under the `/BM`,
+    /// which 11.3.5 applies to the group as one object.
+    fn blended(
+        &mut self,
+        out: &mut Vec<u8>,
+        [source, backdrop]: [PaintId; 2],
+        mode: CompositeMode,
+        blend: BlendMode,
+        region: [f64; 4],
+    ) {
+        let Some(source_form) = self.group_form(source, region) else {
+            return;
+        };
+        let Some(state) = self
+            .face
+            .blend_state(self.builder, self.resource, mode, blend)
+        else {
+            self.fail(ColourWarning::GraphTooLarge { glyph: self.glyph });
+            return;
+        };
+        let mut content = Vec::new();
+        self.paint(&mut content, backdrop, Some(region));
+        if self.failed.is_some() {
+            return;
+        }
+        content.extend_from_slice(b"q\n");
+        crate::form_data::write_name(&mut content, &state);
+        content.extend_from_slice(b" gs\n");
+        crate::form_data::write_name(&mut content, &source_form);
+        content.extend_from_slice(b" Do\nQ\n");
+        let Some(group) = self.form_of(&content, region) else {
+            return;
+        };
+        crate::form_data::write_name(out, &group);
+        out.extend_from_slice(b" Do\n");
+    }
+
+    /// Node `id` drawn over `region` in an isolated transparency group of its
+    /// own, registered as a form: its name, or `None` where drawing it failed
+    /// the glyph or the builder refused the form.
+    fn group_form(&mut self, id: PaintId, region: [f64; 4]) -> Option<Vec<u8>> {
+        let mut content = Vec::new();
+        self.paint(&mut content, id, Some(region));
+        if self.failed.is_some() {
+            return None;
+        }
+        self.form_of(&content, region)
+    }
+
+    /// `content` registered as a form that is an isolated, non-knockout
+    /// transparency group in the page's colour space (11.6.6), over `region`;
+    /// `None`, failing the glyph, where the builder refuses it.
+    fn form_of(&mut self, content: &[u8], region: [f64; 4]) -> Option<Vec<u8>> {
+        let name = self.fresh("f");
+        let registered = self.builder.add_form(
+            &name,
+            &FormXObject {
+                bbox: region,
+                matrix: None,
+                group: Some(TransparencyGroup {
+                    color_space: DeviceSpace::Rgb,
+                    isolated: true,
+                    knockout: false,
+                }),
+                content,
+            },
+        );
+        if !registered {
+            self.fail(ColourWarning::GraphTooLarge { glyph: self.glyph });
+            return None;
+        }
+        Some(name)
     }
 
     /// The name of shared node `id`'s form, written and registered with the
@@ -1065,6 +1298,85 @@ impl Walk<'_, '_> {
         }
         self.forms.insert(id, name.clone());
         Some(name)
+    }
+}
+
+/// One of a composite's two paints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Source,
+    Backdrop,
+}
+
+/// How a composite mode is written (`docs/design/colour-fonts.md`, *Each
+/// paint's construct*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Construct {
+    /// `COMPOSITE_CLEAR`: nothing.
+    Nothing,
+    /// `COMPOSITE_SRC` and `COMPOSITE_DEST`: the one paint the mode keeps.
+    One(Side),
+    /// `COMPOSITE_SRC_OVER` and `COMPOSITE_DEST_OVER`: both, `below` first.
+    Over { below: Side },
+    /// The `IN` and `OUT` modes: `kept` under an alpha soft mask of the
+    /// other, `inverted` for `OUT`.
+    Masked { kept: Side, inverted: bool },
+    /// The fifteen blend modes, each ISO 32000-2's `/BM` of the same name.
+    Blend(BlendMode),
+    /// `COMPOSITE_SRC_ATOP`, `COMPOSITE_DEST_ATOP`, `COMPOSITE_XOR` and
+    /// `COMPOSITE_PLUS`, each a sum of two terms 11.3.3's formula has no
+    /// spelling for: drawn source-over and named.
+    SourceOver,
+}
+
+/// The construct `mode` is written as: W3C Compositing Level 1's
+/// Porter-Duff operators (section 9) by their two fractions, and its blend
+/// modes (section 10), which ISO 32000-2's Tables 134 and 135 define alike.
+fn construct(mode: CompositeMode) -> Construct {
+    use CompositeMode as M;
+    let blend = Construct::Blend;
+    match mode {
+        M::Clear => Construct::Nothing,
+        M::Src => Construct::One(Side::Source),
+        M::Dest => Construct::One(Side::Backdrop),
+        M::SrcOver => Construct::Over {
+            below: Side::Backdrop,
+        },
+        M::DestOver => Construct::Over {
+            below: Side::Source,
+        },
+        M::SrcIn => Construct::Masked {
+            kept: Side::Source,
+            inverted: false,
+        },
+        M::DestIn => Construct::Masked {
+            kept: Side::Backdrop,
+            inverted: false,
+        },
+        M::SrcOut => Construct::Masked {
+            kept: Side::Source,
+            inverted: true,
+        },
+        M::DestOut => Construct::Masked {
+            kept: Side::Backdrop,
+            inverted: true,
+        },
+        M::SrcAtop | M::DestAtop | M::Xor | M::Plus => Construct::SourceOver,
+        M::Screen => blend(BlendMode::Screen),
+        M::Overlay => blend(BlendMode::Overlay),
+        M::Darken => blend(BlendMode::Darken),
+        M::Lighten => blend(BlendMode::Lighten),
+        M::ColorDodge => blend(BlendMode::ColorDodge),
+        M::ColorBurn => blend(BlendMode::ColorBurn),
+        M::HardLight => blend(BlendMode::HardLight),
+        M::SoftLight => blend(BlendMode::SoftLight),
+        M::Difference => blend(BlendMode::Difference),
+        M::Exclusion => blend(BlendMode::Exclusion),
+        M::Multiply => blend(BlendMode::Multiply),
+        M::HslHue => blend(BlendMode::Hue),
+        M::HslSaturation => blend(BlendMode::Saturation),
+        M::HslColor => blend(BlendMode::Color),
+        M::HslLuminosity => blend(BlendMode::Luminosity),
     }
 }
 

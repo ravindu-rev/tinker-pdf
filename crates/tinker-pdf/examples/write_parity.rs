@@ -1062,6 +1062,7 @@ fn graphics() -> Vec<u8> {
                 kind: MaskKind::Luminosity,
                 form: b"Fm0",
                 backdrop: Some(&[0.5]),
+                transfer: None,
             }),
         }
     ));

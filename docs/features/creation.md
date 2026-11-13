@@ -230,7 +230,8 @@ content stream whose arity disagrees with its own space is one every reader has
 to guess about, and the guesses differ.
 
 **Graphics.** `add_ext_gstate` (`ExtGState`: blend mode, alphas, soft mask
-with `MaskKind` and `StateMask`), `add_form` (`FormXObject`, optionally a
+with `MaskKind` and `StateMask`, a group's mask carrying its backdrop and its
+`/TR` transfer function), `add_form` (`FormXObject`, optionally a
 `TransparencyGroup`), `add_shading` (`Shading`: axial and radial with a
 `Function` of one input, and function-based, type 1, over a `/Domain` with
 a calculator or sampled `Function` of two), `add_tiling_pattern` (`TilingPattern`, all three `TilingType`

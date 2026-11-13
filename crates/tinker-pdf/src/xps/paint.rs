@@ -2170,6 +2170,7 @@ impl State<'_> {
                     // is hidden. That is 14.3's own answer and writing the
                     // default out would say it twice.
                     backdrop: None,
+                    transfer: None,
                 }),
                 ..ExtGState::default()
             },

@@ -232,6 +232,7 @@ impl PdfBuilder {
                 kind: *kind,
                 form,
                 backdrop: backdrop.as_deref(),
+                transfer: None,
             }),
         };
         let facade = ExtGState {

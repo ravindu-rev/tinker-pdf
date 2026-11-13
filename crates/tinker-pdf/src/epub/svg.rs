@@ -641,6 +641,7 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                         kind: MaskKind::Luminosity,
                         form: &form,
                         backdrop: None,
+                        transfer: None,
                     }),
                     ..ExtGState::default()
                 },
