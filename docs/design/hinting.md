@@ -519,3 +519,208 @@ crate calls none today, so it joins clean and stays so.
 | A font's ClearType paths assume stripes this hinting does not draw | `GETINFO` answers version 35 and no ClearType, so a font takes its greyscale and monochrome paths |
 | A tile and the page hint a glyph differently | The size comes from the 2×2 and the origin from the page frame's translation, neither of which a tile changes; `hinted_tiles_are_byte_equal_to_the_page` |
 | Hinting is slow on a page of many sizes | One glyph at one size is hinted once a scope, and FT-04b.15 measures it |
+
+## Stem darkening
+
+*For ROADMAP row FT-04a.* A stem a pixel wide whose edges fall between
+pixels draws as two half-grey columns, and an anti-aliased page of small text
+reads lighter than the same text printed. Darkening thickens every filled
+glyph a little at small sizes, more across than down, fading to nothing as
+the size grows: each contour of the glyph's device-space outline is moved
+outward by a stated amount, so its stems gain that amount on each side and its
+counters lose it.
+
+### Scope
+
+- **The amount** in device pixels, horizontal and vertical, as a function of
+  a glyph's pixels per em, over 8 to 16 pixels and to where it fades to none.
+- **The outline offset** that applies it (FT-04a.2), on `tinker-pdf-raster`'s
+  device-space `Path`.
+- **Its place in the seam** above, and the option that turns it on
+  (FT-04a.3).
+- **The tolerance** a stem-width measurement has on the rasterizer's grid.
+- **Its proof**: the stem-width test, the fingerprint on every target and the
+  speed row (FT-04a.3 to FT-04a.5).
+
+### Non-goals
+
+- **Darkening by a gamma or a contrast curve.** That is RC-10's text contrast,
+  which maps coverage after the fill; darkening changes the shape before it.
+- **Hinting.** Darkening thickens what hinting, or nothing, gives it; FT-04b,
+  FT-04c and FT-04d fit the outline first.
+- **Strokes, clips and Type 3 glyphs**, and every output that is not a raster:
+  `to_svg`, text extraction and the display list's recorded geometry.
+- **Matching another renderer's curve.** The amount is this design's
+  statement, and the test holds the rasterizer to it, never to another
+  program's output (ruling 13).
+
+### Design
+
+#### The amount
+
+A glyph's pixels per em `p` is the square root of the absolute determinant of
+its em-to-device 2×2 — the glyph's transform in the page frame, never a
+tile's — which a rotation does not change. Its horizontal and vertical amounts,
+each per side, in device pixels:
+
+```text
+across(p) = clamp(24 − p, 0, 16) / 64
+down(p)   = clamp(24 − p, 0, 16) / 128
+```
+
+| Pixels per em | `across`, per side | `down`, per side | A vertical stem gains | A horizontal stem gains |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 and below | 16/64 | 8/64 | 1/2 | 1/4 |
+| 9 | 15/64 | 15/128 | 15/32 | 15/64 |
+| 10 | 14/64 | 7/64 | 7/16 | 7/32 |
+| 11 | 13/64 | 13/128 | 13/32 | 13/64 |
+| 12 | 12/64 | 6/64 | 3/8 | 3/16 |
+| 13 | 11/64 | 11/128 | 11/32 | 11/64 |
+| 14 | 10/64 | 5/64 | 5/16 | 5/32 |
+| 15 | 9/64 | 9/128 | 9/32 | 9/64 |
+| 16 | 8/64 | 4/64 | 1/4 | 1/8 |
+| 20 | 4/64 | 2/64 | 1/8 | 1/16 |
+| 24 and above | 0 | 0 | 0 | 0 |
+
+The amount is linear in `p` between 8 and 24, so a size between two rows lies
+between them; every entry is a dyadic fraction, which `f64` holds exactly.
+**Across is twice down**: a horizontal gain is taken from a glyph's side
+bearings, where it changes no metric the page shows, while a vertical one
+raises the x-height and the cap height by twice the amount, and a stem's
+weight is read across the line far more than down it.
+
+**Which axis is which.** For a glyph whose 2×2 is axis-aligned (`b` and `c`
+zero) across is the page frame's `x` and down its `y`; for one turned a
+quarter turn (`a` and `d` zero) the two swap, so the glyph's own vertical
+stems still take `across`. A glyph at any other angle, or skewed, takes
+`down` on both axes: the one offset that does not depend on the angle, and the
+lighter of the two.
+
+#### The offset
+
+`Path::offset(&self, horizontal: f64, vertical: f64) -> Path`
+(`crates/tinker-pdf-raster/src/geom.rs`) moves every point of every closed
+contour, on and off the curve alike, so that each edge of the contour's
+control polygon moves outward by `horizontal` along `x` and `vertical` along
+`y` in proportion to its normal:
+
+- **The outward side** is taken from the contour's signed area against the
+  path's: a contour whose area has the sign of the path's total is an outer
+  contour and grows; one of the other sign is a counter and shrinks, its points
+  moving into it. Both are one handedness of normal: for a path of positive
+  total area, the normal on the right of each edge's direction, `(ey, −ex)`
+  normalised. A glyph drawn with either winding grows; a path whose total area
+  is zero, or not finite, is returned as it came.
+- **Each point moves along the bisector of its two edges' outward normals**,
+  `n_in` and `n_out`, by the miter vector `m = (n_in + n_out) / (1 + n_in ·
+  n_out)`, scaled per axis: the point moves by `(horizontal · m.x,
+  vertical · m.y)`. On a straight run `m` is the edge's normal, and at an
+  axis-aligned corner `m` is `(±1, ±1)`, so a rectangle grows by exactly
+  twice each amount, one on each axis.
+- **Bounded at a spike.** `m`'s length is `sqrt(2 / (1 + n_in · n_out))`; past
+  4 — a turn sharper than about 151° — it is held at 4 along the bisector, and
+  a turn back on itself, where the bisector vanishes, keeps its point.
+- **A degenerate edge keeps its point.** A point's neighbours are the nearest
+  points of its contour that differ from it, read once around the contour, so
+  a zero-length edge between two equal points gives them both the move the
+  edges either side of them give; a contour all of one point keeps it.
+- **Finite in, finite out.** Every length is taken by scaling the difference
+  by its largest component before the square root, so no square overflows; a
+  point whose move is not finite keeps its place.
+- **What a fill closes, this closes.** A subpath the path leaves open is
+  offset as the closed contour the fill makes of it (8.5.3.1), and one that
+  begins after a `Close` without a `MoveTo` gains one at its first point, so
+  the offset path fills what the offset of the filled shape is.
+
+Only `sqrt`, correctly rounded by IEEE 754, and the four operations are used,
+so the offset is the same on every target, and nothing on the path calls the
+platform's libm (`cargo xtask libm`, ruling 4).
+
+#### Its place in the seam
+
+`show_glyph` darkens a glyph after any hinting and before filling it: the
+outline the seam above chooses — the hinted one at its rounded origin, or the
+em outline at its placement — is offset by the amounts for the glyph's pixels
+per em, in the frame it is filled in. That is the page frame's device pixels
+on the path route, and the mask's own frame on the mask route, which differs
+from the page frame by a whole pixel and a phase and is the same in a tile as
+on the page; so a tile's glyph is the page's (ruling 5), and the tile's
+origin enters neither the amount nor the offset.
+
+It applies to a glyph whose render mode is 0 and nothing else, in any paint,
+solid or pattern, as hinting does; a stroked or clipping glyph, a Type 3 glyph,
+`to_svg`, text extraction and the display list's recorded geometry are
+untouched, and `DisplayList::render` darkens as `Page::render` does, drawing
+through the renderer. Both glyph mask keys gain whether the glyph is darkened;
+the amount is a function of the 2×2 they already hold.
+
+#### The option
+
+```rust
+// tinker_pdf::RenderOptions
+pub stem_darkening: bool,   // false by default
+```
+
+handed through `render_layer_with` to the `Renderer` as `antialias` is. **Off
+by default**, so no fingerprint or golden moves when it lands; whether it
+turns on is H-65's judgement.
+
+#### The tolerance of a stem-width measurement
+
+FT-04a.3's test measures a stem's width from the bytes of a rendered row or
+column, as the sum of the coverage it crosses divided by 255, and holds it to
+the stem plus twice the amount. The rasterizer's grid
+(`docs/features/rasterizer.md`, *Filling*) bounds how far that sum can be from
+the geometry:
+
+- **A vertical stem, across a row it fully covers: within 1/64 pixel.** Each
+  edge is taken to the nearest 1/256 pixel, at most 1/256 for the two edges
+  together, and a partly covered pixel's byte is its overlap in 1/256 units,
+  read against 255 rather than 256, at most 255/65 280 of a pixel for each of
+  the two edge pixels; the whole is under 0.012.
+- **A horizontal stem, down a column it fully covers: within 9/128 pixel.**
+  The sixteen sub-scanlines a pixel row samples at its sixteenths count an
+  edge's position to a sixteenth, so the two edges' count differs from the
+  stem's height by less than one sub-scanline, 1/16 pixel; a partly covered
+  pixel's byte is sixteen a sub-scanline, read against 255, at most 15/4 080 of
+  a pixel for each of the two; the whole is under 0.070.
+
+Each bound is the grid's own, stated in advance, and the test takes the row
+or column in the middle of the stem, where the other axis covers whole
+pixels.
+
+### Milestones
+
+1. **FT-04a.2, the offset.** `Path::offset` in `geom.rs`. Exit: `geom.rs`'s
+   `an_axis_aligned_square_grows_by_twice_the_amount_per_axis`,
+   `a_counter_shrinks_as_its_outer_contour_grows`,
+   `either_winding_grows_outward`,
+   `a_zero_length_edge_or_collinear_point_gives_no_nan`, and a sweep of
+   generated paths and amounts whose every point stays finite.
+2. **FT-04a.3, darkened glyphs.** `RenderOptions::stem_darkening` to the
+   renderer, the amounts above and the offset in `show_glyph` on both routes,
+   and the keys. Exit: `stem_darkening.rs`'s
+   `stem_width_at_8_to_16_px_is_the_designed_amount` — a face built in the
+   test with one vertical and one horizontal stem of known width, rendered at
+   each whole size from 8 to 16 pixels an em, each stem's width the stem plus
+   twice the table's amount within the tolerances above —
+   `darkening_off_changes_no_pixel` and
+   `a_darkened_page_tiles_byte_equal_to_itself`, in the default and
+   `bundled-fonts` builds.
+3. **FT-04a.4, every target.** Exit: the stem-width test in K-07's roster, and
+   `determinism.rs`'s darkened text page as a fingerprint, passing on Linux,
+   Windows and `wasm32-wasip1`.
+4. **FT-04a.5, the speed row.** Exit: `xtask/src/bench.rs`'s
+   `the_committed_baseline_agrees_with_the_tree` with the operation that
+   renders the text page with an embedded face at 150 dpi with
+   `stem_darkening` on, beside the same page off.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A sharp corner throws a spike past the glyph | The miter is held at four times the amount, and a reversal keeps its point; at 8 pixels an em that is a pixel at most |
+| A glyph whose separate outer contours wind opposite ways, which the non-zero rule fills alike, has those that wind against the total shrink | The signed areas decide, as every well-formed glyph's outer contours share a winding against its counters'; off by default, and the stem-width test draws the convention fonts keep |
+| Text turned to an angle darkens less than upright text | Stated: such a glyph takes `down` on both axes, the lighter amount, so no direction grows more than upright text's |
+| The offset moves a pixel with the option off | `darkening_off_changes_no_pixel`; nothing calls `Path::offset` unless the option is on |
+| A tile and the page darken a glyph differently | The amount comes from the 2×2 and the offset from the path in a frame a tile shares; `a_darkened_page_tiles_byte_equal_to_itself` |
