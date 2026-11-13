@@ -25,6 +25,12 @@ use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
 use tinker_pdf::{Document, WriteMode, WriteOptions};
 use tinker_pdf_cos::ObjRef;
 
+/// The tests' embedding faces, for the provider face the embedding pass
+/// embeds (`docs/design/font-embedding.md`).
+#[cfg(not(tinker_planning_baseline))]
+#[path = "../tests/embed_support/mod.rs"]
+mod embed_support;
+
 /// A rewrite, as `tpdf` writes one.
 fn rewrite() -> WriteOptions {
     WriteOptions {
@@ -123,6 +129,39 @@ fn converting() -> SaveOptions {
         write: rewrite(),
         ..SaveOptions::default()
     }
+}
+
+/// The pages the embedding pass embeds fonts for, opened with the host
+/// provider whose face draws them, and the rewrite that asks the pass to
+/// embed that face: the face the tests' embedding pass is held with,
+/// synthesised byte by byte (`tests/embed_support`).
+#[cfg(not(tinker_planning_baseline))]
+fn embedding() -> (Document, SaveOptions) {
+    let provider = embed_support::provider(embed_support::sans().truetype());
+    let bytes = inputs::store().bytes("embed-4.pdf", || inputs::embed_pages(4, 0));
+    let doc = Document::open(bytes)
+        .expect("the pages open")
+        .with_fonts(Arc::clone(&provider));
+    assert_eq!(doc.page_count(), 4);
+    let options = SaveOptions {
+        write: rewrite(),
+        embed: write::FontEmbedding::Embed(provider),
+        ..SaveOptions::default()
+    };
+    (doc, options)
+}
+
+/// The planning baseline embeds nothing: its arm cuts the dense pages
+/// through the default door in the pass's place, subset-on-save of 4 pages,
+/// the operation the gate pairs this one with.
+#[cfg(tinker_planning_baseline)]
+fn embedding() -> (Document, SaveOptions) {
+    let doc = Document::open(dense_bytes(4, 0)).expect("the dense pages open");
+    let options = SaveOptions {
+        write: rewrite(),
+        ..SaveOptions::default()
+    };
+    (doc, options)
 }
 
 /// The four Type 1 pages subset-on-save cuts and converts.
@@ -285,6 +324,31 @@ fn write(c: &mut Criterion) {
                 assert_eq!(report.subsetted.len(), 1, "{report:?}");
                 assert!(report.subsetted[0].converted, "the program is a CFF now");
                 assert!(saved.bytes.len() < bytes.len(), "the cut file is smaller");
+            }
+            op.per(Per::Pages(4));
+            op.iter(move || black_box(write::save(&mut doc.editor(), &options)));
+        },
+    );
+
+    // The embedding pass on the same door (FT-12.7): the fonts the pages
+    // draw and no program embeds, the provider's face embedded for each and
+    // cut to what it drew, timed with the font pass after it.
+    group.operation(
+        "embed-on-save of 4 pages over a standard-14 and a TrueType font",
+        |op| {
+            let (doc, options) = embedding();
+            #[cfg(not(tinker_planning_baseline))]
+            {
+                let saved = write::save(&mut doc.editor(), &options);
+                let report = saved.embedded.expect("the pass was asked for");
+                assert_eq!(report.embedded.len(), 2, "both fonts embedded: {report:?}");
+                assert!(report.left.is_empty(), "nothing left: {report:?}");
+                assert_eq!(
+                    Document::open(saved.bytes)
+                        .expect("it reopens")
+                        .page_count(),
+                    4
+                );
             }
             op.per(Per::Pages(4));
             op.iter(move || black_box(write::save(&mut doc.editor(), &options)));

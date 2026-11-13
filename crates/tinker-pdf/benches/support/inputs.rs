@@ -3786,3 +3786,53 @@ pub fn type1_pages(pages: usize, seed: u64) -> Vec<u8> {
     objects.extend(page_objects);
     raw_document(&objects)
 }
+
+/// `pages` A4 pages whose lines alternate between standard-14 Helvetica and
+/// `/Arial`, an unembedded non-symbolic TrueType font under
+/// `WinAnsiEncoding` whose every width is 600: the fonts no program embeds,
+/// which the save door's embedding pass asks a provider for. Each line is
+/// [`dense`]'s seeded words that are letters alone.
+pub fn embed_pages(pages: usize, seed: u64) -> Vec<u8> {
+    let contents: Vec<Vec<u8>> = dense_text(pages, seed)
+        .iter()
+        .map(|lines| {
+            let mut content = b"BT 9 TL 36 806 Td\n".to_vec();
+            for (at, line) in lines.iter().enumerate() {
+                let words: Vec<&str> = line
+                    .split(' ')
+                    .filter(|word| {
+                        !word.is_empty() && word.chars().all(|c| c.is_ascii_alphabetic())
+                    })
+                    .collect();
+                let font = if at % 2 == 0 { "F0" } else { "F1" };
+                content.extend_from_slice(
+                    format!(
+                        "/{font} 9 Tf {} Tj T*\n",
+                        hex_string(words.join(" ").as_bytes())
+                    )
+                    .as_bytes(),
+                );
+            }
+            content.extend_from_slice(b"ET\n");
+            content
+        })
+        .collect();
+    let (kids, page_objects) = raw_pages(6, "/Font << /F0 3 0 R /F1 4 0 R >>", &contents);
+    let widths = vec!["600"; 122 - 32 + 1].join(" ");
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!("<< /Type /Pages /Count {pages} /Kids [{kids}] >>").into_bytes(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+            .to_vec(),
+        format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Arial /Encoding /WinAnsiEncoding \
+             /FirstChar 32 /LastChar 122 /Widths [{widths}] /FontDescriptor 5 0 R >>"
+        )
+        .into_bytes(),
+        b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 /FontBBox [0 -200 1000 800] \
+          /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>"
+            .to_vec(),
+    ];
+    objects.extend(page_objects);
+    raw_document(&objects)
+}

@@ -303,18 +303,6 @@ list, each held to first-party evidence.
 | --- | --- | --- | --- | --- | --- |
 | FT-11.10 | measure | Byte savings recorded: `cff_subset_census.rs` also cuts every Type 1 program, every CFF that renumbering refused and flattening now takes, and every Type 1 program converted, counting programs, refusals by reason and bytes before and after; its first corpus figures, from a local run of the census over the fetched corpora read to the end, are pinned in the census and quoted in `features/fonts.md` beside the committed fixtures' savings. | `crates/tinker-pdf/tests/cff_subset_census.rs`, `docs/features/fonts.md` | A local run of the census over the fetched corpora prints the new counts, recorded here, the commit after pins them as floors and quotes them in `features/fonts.md` beside `subset_breadth.rs`'s fixture savings, and the next run holds them; the census holds every glyph it keeps to the original's outline, as it does for CFF today. | FT-11.4, FT-11.6, FT-11.8, MS-11 |
 
-## FT-12 — Embedding missing fonts on write
-
-**Embedding missing fonts on write**: for each non-embedded font, embed and subset a host-supplied face matched by name, flags and PANOSE, keep `/Widths`, report a metric mismatch
-
-**Exit criterion.** the rewritten document draws as the provider face drew it (fingerprints), passes PDF/A's font rules (SD-01), and reports each width mismatch as a typed warning
-
-**Doc:** [design/font-embedding.md](../design/font-embedding.md) · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| FT-12.7 | measure | The pass's speed row in MS-04's write group: rewrite a generated document whose pages name the standard 14 and an unembedded TrueType font, with the embedding switch on and a synthesised provider face, so embedding and the cutting of the new programs are timed together, sized into MS-04's window, with its baseline entry. *Note:* MS-04 splits `benches/` by group; the operation goes in the write group's file beside subset-on-save. No target is set here; one is the owner's (H-77). | `crates/tinker-pdf/benches/write.rs`, `crates/tinker-pdf/benches/baseline.json` | `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree` holds the bench file and `baseline.json` to one list with the operation in it, and `cargo bench -p tinker-pdf` reports its time. | FT-12.3, MS-04 |
-
 ## FT-13 — A native system-font provider for the CLI and bindings
 
 **A native system-font provider for the CLI and bindings**, with a mapping-policy helper: name normalisation (subset prefixes, `,Bold`, `-BoldMT`), PANOSE and `sFamilyClass` matching, charset-based CJK defaults, per-script and emoji chains
