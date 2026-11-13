@@ -805,6 +805,58 @@ impl Codestream<'_> {
         &self.cod.style
     }
 
+    /// The fewest decomposition levels any tile-component of the codestream
+    /// has, by A.6.2's precedence as [`Self::style_for`] reads it: the most
+    /// levels a decode can drop, before a palette has its say
+    /// (`JpxImage::levels`).
+    ///
+    /// Each tile's first part is found once, in stream order as
+    /// [`Self::first_part`] finds it, so the walk costs the parts and the
+    /// first parts times the components rather than the tiles times the
+    /// parts; every tile no first part covers takes the main header's
+    /// styles, as `style_for` gives them it.
+    pub(crate) fn fewest_levels(&self) -> u8 {
+        let components = self.siz.components.len();
+        let main = |c: usize| match self.coc.get(c) {
+            Some(Some(style)) => style.levels,
+            _ => self.cod.style.levels,
+        };
+        let tiles = u64::from(self.siz.tiles_x) * u64::from(self.siz.tiles_y);
+        let mut covered = vec![false; usize::try_from(tiles.min(MAX_JPX_TILES)).unwrap_or(0)];
+        let mut firsts = 0u64;
+        let mut fewest = u8::MAX;
+        for part in self.tile_parts.iter().filter(|part| part.index == 0) {
+            let Some(seen) = covered.get_mut(usize::from(part.tile)) else {
+                continue;
+            };
+            if *seen {
+                continue;
+            }
+            *seen = true;
+            firsts += 1;
+            for c in 0..components {
+                let levels = part
+                    .coc
+                    .iter()
+                    .find(|(i, _)| usize::from(*i) == c)
+                    .map(|(_, style)| style.levels)
+                    .or_else(|| part.cod.as_ref().map(|cod| cod.style.levels))
+                    .unwrap_or_else(|| main(c));
+                fewest = fewest.min(levels);
+            }
+        }
+        if firsts < tiles {
+            for c in 0..components {
+                fewest = fewest.min(main(c));
+            }
+        }
+        if components == 0 {
+            0
+        } else {
+            fewest
+        }
+    }
+
     /// The COD in force for tile `t` — the progression, layer count and
     /// transform, which are per-tile but not per-component.
     pub(crate) fn cod_for(&self, tile: u16) -> &Cod {

@@ -2208,6 +2208,7 @@ mod tests {
                             tinker_pdf_content::ColorFamily::Rgb
                         },
                         soft_masked: false,
+                        window: None,
                     };
                     let expanded = DecodedImage {
                         width,
@@ -2224,6 +2225,7 @@ mod tests {
                             tinker_pdf_content::ColorFamily::Rgb
                         },
                         soft_masked: false,
+                        window: None,
                     };
                     let written = write(&two, &state);
                     assert!(
@@ -2254,6 +2256,7 @@ mod tests {
             reduced: None,
             family: tinker_pdf_content::ColorFamily::Rgb,
             soft_masked: false,
+            window: None,
         };
         assert_eq!(
             write(&short, &state),

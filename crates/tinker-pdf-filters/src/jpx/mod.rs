@@ -707,6 +707,12 @@ pub struct JpxHeader {
     /// the image that first cell starts — nowhere, when the origin is a
     /// multiple of `2^d`, as it is for every image at the grid's origin.
     pub origin: (u32, u32),
+    /// The most resolution levels a decode of the file can drop: the fewest
+    /// decomposition levels any of its tile-components has, and none where a
+    /// `pclr` palette maps a component — what a decode reports as
+    /// [`JpxImage::levels`], read before one, so a caller can work out a
+    /// request in the image the decode will return.
+    pub levels: u8,
 }
 
 /// Reads a [`JpxHeader`]: every stage of [`jpx_decode`] that runs before
@@ -758,6 +764,12 @@ pub fn jpx_header(input: &[u8], limits: &Limits) -> Result<JpxHeader, Refusal> {
         colour: header.map_or(JpxColour::Unstated, |h| h.colour),
         opacity: plan.opacity.is_some(),
         origin: (stream.siz.xosiz, stream.siz.yosiz),
+        // `decode_inner`'s clamp, read off the headers rather than the tiles.
+        levels: if header.is_some_and(|h| h.palette.is_some()) {
+            0
+        } else {
+            stream.fewest_levels()
+        },
     })
 }
 
@@ -870,10 +882,12 @@ fn decode_inner(
     // palette is exactly the thing that makes that earlier figure wrong: it
     // was computed from the codestream's component count, and one component
     // of indices can generate four channels. A `pclr` box is a few hundred
-    // bytes and it quadruples the output (ruling 1).
+    // bytes and it quadruples the output (ruling 1). Charged at the image a
+    // decode at this discard returns whole, whatever the window: a window
+    // holds less, and refuses where the decode of the whole image does.
     let channels = stride + usize::from(plan.opacity.is_some());
-    let bytes = u64::from(width)
-        .checked_mul(u64::from(height))
+    let bytes = u64::from(grid.width)
+        .checked_mul(u64::from(grid.height))
         .and_then(|n| n.checked_mul(channels as u64))
         .and_then(|n| n.checked_mul(wide as u64))
         .ok_or(Refusal::Budget("output samples"))?;
@@ -886,6 +900,12 @@ fn decode_inner(
     let mut opacity = plan.opacity.map(|_| vec![0u8; pixels * wide]);
 
     for (t, tile) in tiles.iter().enumerate() {
+        // Under a window, what reconstructing the whole tile would refuse is
+        // refused first, in the tile's place: a window reconstructs only what
+        // it reads, and refuses where the decode of the whole image does.
+        if needs.is_some() {
+            wavelet::check_tile(&stream, tile, discard)?;
+        }
         // A tile the window misses is neither synthesised nor written.
         let need: Option<&Vec<wavelet::Needs>> = match &needs {
             None => None,

@@ -404,7 +404,16 @@ lifts only the rows and columns read, and G.2's transform, G.1's level
 shift and the copy into the image run over the window alone. A tile the
 window misses is neither decoded nor synthesised; tier-2 still reads every
 packet header, since a packet's place is known only from the headers before
-it. Without a window every sample is decoded as before.
+it. Without a window every sample is decoded as before. **A window refuses
+whatever the whole decode refuses**, for the same reason: a code-block it
+leaves out is accounted for as decoded — its pass count checked and its whole
+cost charged, in its place — a tile-component that signals segmentation
+symbols decodes every block whatever the window, since D.5's check is made
+only by decoding, every tile's structure is checked as reconstructing it
+would check it, and the output is charged at the image a decode at the
+discard returns whole. So a window of a damaged codestream draws exactly
+where the whole decode draws, the crop of it, and refuses where it refuses;
+E.1's clamp is reported by a decode that reads the coefficient it clamps.
 
 **`BYPASS` and `TERMALL` are two capabilities over one mechanism.** What
 they share is B.10.7.2's *multiple codeword segments*: with either set, a

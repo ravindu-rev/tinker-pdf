@@ -934,3 +934,163 @@ fn the_svg_writer_and_the_image_list_take_a_jpx_image_whole() {
     assert_eq!((image.width, image.height), (32, 24));
     assert_eq!(image.samples.len(), 32 * 24 * 3, "every sample");
 }
+
+// ---- The window a page asks for (P-10.9) -------------------------------------
+//
+// A JPEG 2000 codestream is decoded over the part of it a draw can show: the
+// canvas a tile or a band stands for, and the clip, widened by the sampler's
+// reach (`docs/design/jpx-speed.md`, "The visible window"), so a region's
+// render decodes the code-blocks its window reaches and no others.
+
+/// The code-blocks tier-1 decodes for the 620 by 877 codestream with two
+/// levels dropped, over `window` of the 155 by 220 image that leaves, or all
+/// of it.
+fn blocks_for(jpx: &[u8], window: Option<(u32, u32, u32, u32)>) -> u64 {
+    let (_, counts) = tinker_pdf_filters::jpx_decode_request(
+        jpx,
+        &tinker_pdf_filters::Limits::new(1 << 28),
+        &tinker_pdf_filters::JpxRequest {
+            discard: 2,
+            window: window.map(|(x, y, width, height)| tinker_pdf_filters::JpxWindow {
+                x,
+                y,
+                width,
+                height,
+            }),
+        },
+        &mut Vec::new(),
+    )
+    .expect("the codestream decodes");
+    counts.code_blocks_decoded
+}
+
+/// **A region's render decodes only the code-blocks its window reaches**:
+/// the 620 by 877 codestream drawn at a quarter over its 155 by 219 page, two
+/// levels dropped, decodes every block of the four resolutions it keeps for
+/// the whole page — exactly the decoder's count with no window — and for the
+/// page's top-left corner of 40 by 40 pixels at least the blocks the bare
+/// corner reaches, 40 by 41 samples, no more than a corner of 64 by 64
+/// reaches — the sampler's reach is a few samples — and fewer than the whole.
+#[test]
+fn a_region_render_decodes_only_the_code_blocks_its_window_reaches() {
+    let jpx = committed("irreversible-620x877.jp2");
+    let keys = jpx_keys(620, 877);
+    let bytes = jpx_page(
+        (155.0, 219.0),
+        "q 155 0 0 219 0 0 cm /Im0 Do Q",
+        &keys,
+        &jpx,
+    );
+    let doc = Document::open(bytes).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let counted = |region: Option<tinker_pdf::PixelRegion>| {
+        let bitmap = page.render(&RenderOptions {
+            region,
+            stats: true,
+            ..RenderOptions::default()
+        });
+        assert!(bitmap.warnings.is_empty(), "{:?}", bitmap.warnings);
+        bitmap.stats.expect("counted").jpx_code_blocks_decoded
+    };
+    let whole = counted(None);
+    assert_eq!(whole, blocks_for(&jpx, None), "the page holds all of it");
+    let corner = counted(Some(tinker_pdf::PixelRegion::new(0, 0, 40, 40)));
+    let (least, most) = (
+        blocks_for(&jpx, Some((0, 0, 40, 41))),
+        blocks_for(&jpx, Some((0, 0, 64, 64))),
+    );
+    assert!(
+        (least..=most).contains(&corner),
+        "the corner decodes {corner} code-blocks, between {least} and {most}"
+    );
+    assert!(corner < whole, "{corner} of the page's {whole}");
+}
+
+/// **A clip is shown from the samples under it**: the same codestream drawn
+/// under a clip that shows its top-left 40 by 40 pixels decodes fewer
+/// code-blocks than drawn whole, and every pixel the clip shows is the pixel
+/// the whole decode draws there — the window is widened by the sampler's
+/// reach, so no pixel it shows reads a sample it left out — while the rest of
+/// the page is left alone.
+#[test]
+fn a_clipped_jpx_image_is_shown_from_the_samples_under_its_clip() {
+    let jpx = committed("irreversible-620x877.jp2");
+    let keys = jpx_keys(620, 877);
+    let draw = "q 155 0 0 219 0 0 cm /Im0 Do Q";
+    let (whole, all) = counted_at(jpx_page((155.0, 219.0), draw, &keys, &jpx), 1.0);
+    let clipped = format!("q 0 179 40 40 re W n {draw} Q");
+    let (shown, part) = counted_at(jpx_page((155.0, 219.0), &clipped, &keys, &jpx), 1.0);
+    assert_eq!(levels(&part).0, 2, "the clip changes no level");
+    assert!(
+        part.jpx_code_blocks_decoded < all.jpx_code_blocks_decoded,
+        "{} code-blocks under the clip, {} whole",
+        part.jpx_code_blocks_decoded,
+        all.jpx_code_blocks_decoded
+    );
+    for y in 0..219usize {
+        for x in 0..155usize {
+            let at = y * whole.stride + x * 3;
+            let pixel = |bitmap: &tinker_pdf::Bitmap| {
+                (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+            };
+            if x < 40 && y < 40 {
+                assert_eq!(
+                    pixel(&shown),
+                    pixel(&whole),
+                    "({x}, {y}): shown as drawn whole"
+                );
+            } else {
+                assert_eq!(pixel(&shown), (255, 255, 255), "({x}, {y}): the page");
+            }
+        }
+    }
+}
+
+/// **Each window's decode is kept apart.** A retained page's renders of two
+/// regions decode two windows; the first region again meets its own in the
+/// cache, decodes nothing and draws the same bytes; and the whole page is a
+/// decode of its own, kept as well.
+#[test]
+fn each_window_of_a_jpx_image_is_cached_apart() {
+    let jpx = committed("irreversible-620x877.jp2");
+    let keys = jpx_keys(620, 877);
+    let bytes = jpx_page(
+        (155.0, 219.0),
+        "q 155 0 0 219 0 0 cm /Im0 Do Q",
+        &keys,
+        &jpx,
+    );
+    let doc = Document::open(bytes).expect("it opens");
+    let list = doc.page(0).expect("a page").display_list();
+    let at = |region: Option<tinker_pdf::PixelRegion>| {
+        let bitmap = list.render(&RenderOptions {
+            region,
+            stats: true,
+            ..RenderOptions::default()
+        });
+        let stats = bitmap.stats.clone().expect("counted");
+        (bitmap, stats)
+    };
+    let left = Some(tinker_pdf::PixelRegion::new(0, 0, 40, 40));
+    let right = Some(tinker_pdf::PixelRegion::new(110, 170, 45, 49));
+    let (first, stats) = at(left);
+    assert_eq!((stats.image_misses, stats.image_hits), (1, 0), "a window");
+    assert!(stats.jpx_code_blocks_decoded > 0);
+    let (_, stats) = at(right);
+    assert_eq!((stats.image_misses, stats.image_hits), (1, 0), "another");
+    let (again, stats) = at(left);
+    assert_eq!(
+        (
+            stats.image_misses,
+            stats.image_hits,
+            stats.jpx_code_blocks_decoded
+        ),
+        (0, 1, 0),
+        "the first, found"
+    );
+    assert!(again.data == first.data, "a hit is what the miss drew");
+    let (_, stats) = at(None);
+    assert_eq!((stats.image_misses, stats.image_hits), (1, 0), "the whole");
+    let (_, stats) = at(None);
+    assert_eq!((stats.image_misses, stats.image_hits), (0, 1), "found");
+}

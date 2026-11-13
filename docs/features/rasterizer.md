@@ -517,6 +517,20 @@ not linear in coverage, so a two-colour image that reduces builds its first
 level from the colour each sample chooses and is sampled through RGB levels,
 as its expansion is.
 
+*Part of an image.* An image whose buffers hold a rectangle of it rather
+than all of it (`ImageSource::window`, a `SourceWindow`) is still sampled as
+the whole image: the policy, the plans and every tap are worked out over its
+full width and height in its own sample coordinates, and only the read of a
+sample subtracts the window's corner, an integer subtraction that cannot
+round. A sample outside the window reads the nearest one inside it, so every
+pixel of the image's square is covered as it would be, and the pyramid halves
+the window alone, pairing samples `2x` and `2x + 1` as the whole image's
+levels pair them. A caller that widens the window by the sampler's reach
+around every pixel it shows, its edges on the pyramid's pairs, gets those
+pixels exactly as the whole image draws them
+(`a_window_draws_the_whole_image_wherever_it_holds_the_samples_a_pixel_reads`,
+`a_window_halves_to_the_whole_images_level_over_it`).
+
 *Compositing, and the artefact anti-aliasing creates.* Two images that share an
 edge each cover the pixels along it partly, and compositing them one after the
 other lets the page through in between — a half-and-half boundary keeps a
@@ -643,8 +657,8 @@ The crate root re-exports the working set: `Path`, `Verb`, `Point`,
 `stretches`, `dash`, `whole_pixel_width`, `adjusted_to_pixels`,
 `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`;
 `PlateInk`, `Spots`, `TooManySpots`, `MAX_SPOT_PLATES`; `BlendMode` (in
-`blend`); `draw_image`, `ImageDraw`, `ImageSource`, `TwoColour`, `Transform`, `Filter`,
-`Sampling`, `Pyramid`, `image_bounds_in`, `resample`; `draw_mesh`, `draw_mesh_over`,
+`blend`); `draw_image`, `ImageDraw`, `ImageSource`, `SourceWindow`, `TwoColour`, `Transform`,
+`Filter`, `Sampling`, `Pyramid`, `image_bounds_in`, `resample`; `draw_mesh`, `draw_mesh_over`,
 `MeshDraw`, `MeshBuffer`; `fill_stripes`, `fill_stripes_with`, `StripeMask`,
 `SubpixelOrder`. The bridge
 from PDF vocabulary — `/BM` names to `BlendMode`, content-stream operators

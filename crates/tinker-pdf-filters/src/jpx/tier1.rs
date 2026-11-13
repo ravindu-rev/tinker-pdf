@@ -1243,14 +1243,9 @@ pub(crate) fn decode_code_block_observed(
     if width == 0 || height == 0 || passes == 0 {
         return Ok(Decoded::default());
     }
-    if passes > MAX_PASSES {
-        // T.800's own arithmetic, not an invented cap: a code-block carries
-        // at most 31 magnitude bit-planes that fit an `i32` beside a sign,
-        // and the first plane carries one pass where the rest carry three.
-        return Err(Refusal::Structure(
-            "more coding passes than any legal bit-plane count allows",
-        ));
-    }
+    // The pass count and the whole block's cost, before its first decision
+    // ([`account`], below, says why it is charged whole).
+    account(width, height, passes, work)?;
     // The first pass is a cleanup on the most significant plane and every
     // plane below it carries three, so `passes = 1 + 3(planes - 1)` and this
     // is that inverted — rounding **up**, because a truncated stream stops
@@ -1268,23 +1263,6 @@ pub(crate) fn decode_code_block_observed(
     // three-component stream from `opj_compress` to produce a code-block that
     // stops on a significance or refinement pass.
     let planes = (passes - 1).div_ceil(3) + 1;
-    let area = u64::from(width) * u64::from(height);
-
-    // The whole block's cost, charged before its first decision is decoded.
-    //
-    // Every one of the `passes` passes below visits every one of the `area`
-    // coefficients, so this is exactly what the block is about to spend and
-    // not an estimate of it. Charging it here rather than inside the loop is
-    // what makes the budget a check on what the codestream *declared*: the
-    // pass count came out of the packet header, so it is known before any
-    // work is done, and a per-pass charge would refuse the ninety-first pass
-    // having already run ninety — which is to say, having already spent the
-    // time the budget exists to prevent. That is `5adf502`'s method, whose
-    // whole point was that the refusal be assertable by the warning rather
-    // than by a clock. `the_work_charge_is_the_whole_block_before_any_of_it`
-    // pins the boundary at `area * passes` exactly, which is the assertion
-    // the two designs disagree on.
-    charge(work, area.saturating_mul(u64::from(passes)))?;
 
     // D.2: the contexts are reset at the start of every code-block. `reset`
     // returns to Table D.7's states rather than to T.88's zero, which is the
@@ -1395,6 +1373,44 @@ pub(crate) struct Decoded {
     pub(crate) planes: u32,
 }
 
+/// What a code-block of `width` by `height` coefficients and `passes` coding
+/// passes is refused for, and charged, before its first decision: nothing
+/// for a block of no area or no passes; more passes than any legal bit-plane
+/// count allows; and its whole cost, `area * passes`, from the budget.
+///
+/// T.800's own arithmetic bounds the passes, not an invented cap: a
+/// code-block carries at most 31 magnitude bit-planes that fit an `i32`
+/// beside a sign, and the first plane carries one pass where the rest carry
+/// three. And every one of the passes visits every one of the coefficients,
+/// so the charge is exactly what the block is about to spend and not an
+/// estimate of it. Charging it whole rather than inside the pass loop is
+/// what makes the budget a check on what the codestream *declared*: the pass
+/// count came out of the packet header, so it is known before any work is
+/// done, and a per-pass charge would refuse the ninety-first pass having
+/// already run ninety — which is to say, having already spent the time the
+/// budget exists to prevent. That is `5adf502`'s method, whose whole point
+/// was that the refusal be assertable by the warning rather than by a clock.
+/// `the_work_charge_is_the_whole_block_before_any_of_it` pins the boundary at
+/// `area * passes` exactly, which is the assertion the two designs disagree
+/// on.
+///
+/// Both are read off the packet headers alone, so a decode charges every
+/// block of a kept resolution this way whether or not it decodes it
+/// ([`decode_tiles_counted`]): a window then refuses for its budget and its
+/// pass counts exactly where a decode of every block does.
+fn account(width: u32, height: u32, passes: u32, work: &mut u64) -> Result<(), Refusal> {
+    if width == 0 || height == 0 || passes == 0 {
+        return Ok(());
+    }
+    if passes > MAX_PASSES {
+        return Err(Refusal::Structure(
+            "more coding passes than any legal bit-plane count allows",
+        ));
+    }
+    let area = u64::from(width) * u64::from(height);
+    charge(work, area.saturating_mul(u64::from(passes)))
+}
+
 /// Spends `n` from [`MAX_JPX_WORK`]. Spent and never refunded — see [`super`].
 fn charge(work: &mut u64, n: u64) -> Result<(), Refusal> {
     *work = work
@@ -1412,10 +1428,18 @@ fn charge(work: &mut u64, n: u64) -> Result<(), Refusal> {
 /// whose blocks are all skipped, and each component's [`Needs`] for the rest,
 /// whose blocks are decoded where they hold a coefficient the window's
 /// synthesis reads. `None` for `needs` is no window: every block of a kept
-/// resolution. A block skipped is never decoded, so it spends nothing: the
-/// budget is charged for the work the decode does. `discard` is already
-/// clamped to the fewest levels any tile-component has, so every
-/// tile-component keeps at least its resolution 0.
+/// resolution. `discard` is already clamped to the fewest levels any
+/// tile-component has, so every tile-component keeps at least its
+/// resolution 0.
+///
+/// **A window refuses where a decode of every block does.** A block skipped
+/// is not decoded, but it is accounted for as it would be decoded
+/// ([`account`]): its pass count checked and its whole cost charged, in its
+/// place in index order, so the budget and the pass counts refuse the same
+/// block whatever the window. And a tile-component that signals
+/// segmentation symbols (Table A.19) decodes every block whatever the
+/// window: D.5's symbol is checked only by decoding, and a window that left
+/// a drifted block out would draw what the whole image's decode refuses.
 ///
 /// The budget is one total across the whole codestream, because the shape
 /// this guards is a *branching* one: tiles times components times resolutions
@@ -1470,15 +1494,13 @@ fn decode_within(
 
     for (t, tile) in tiles.iter_mut().enumerate() {
         let index = tile.index;
-        let wanted: Option<&Vec<Needs>> = match needs {
-            None => None,
-            Some(needs) => match needs.get(t) {
-                Some(Some(wanted)) => Some(wanted),
-                _ => continue,
-            },
-        };
+        // `None` reads every block; `Some(None)` a tile the window misses,
+        // none of its blocks; `Some(Some(_))` the blocks its needs reach.
+        let wanted: Option<Option<&Vec<Needs>>> =
+            needs.map(|needs| needs.get(t).and_then(Option::as_ref));
         for (c, component) in tile.components.iter_mut().enumerate() {
-            let need = wanted.map(|wanted| wanted.get(c));
+            let need: Option<Option<&Needs>> =
+                wanted.map(|wanted| wanted.and_then(|wanted| wanted.get(c)));
             let coding = stream.style_for(index, c);
             let style = CodingStyle {
                 segmentation_symbols: coding.segmentation_symbols(),
@@ -1496,11 +1518,13 @@ fn decode_within(
                     let orientation = band.orientation;
                     for precinct in &mut band.precincts {
                         for block in &mut precinct.blocks {
-                            let read = match need {
-                                None => true,
-                                Some(need) => need.is_some_and(|need| need.wants(r, b, block)),
-                            };
+                            let read = style.segmentation_symbols
+                                || match need {
+                                    None => true,
+                                    Some(need) => need.is_some_and(|need| need.wants(r, b, block)),
+                                };
                             if !read {
+                                account(block.width(), block.height(), block.passes, work)?;
                                 continue;
                             }
                             decode_one(block, orientation, style, &mut contexts, work)?;

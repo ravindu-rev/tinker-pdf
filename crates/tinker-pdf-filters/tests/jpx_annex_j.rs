@@ -222,6 +222,7 @@ fn annex_j10_s_header_reads_as_j10_1_describes_it() {
     );
     assert!(!header.opacity);
     assert_eq!(header.origin, (0, 0), "J.10.1's XOsiz and YOsiz");
+    assert_eq!(header.levels, 1, "J.10.1's one decomposition level");
 
     // The header read refuses what the decode refuses at the same stage: the
     // codestream cut inside its main header, and an output past the ceiling.
@@ -278,6 +279,11 @@ fn a_palette_is_charged_at_what_it_expands_to_in_the_header_read_too() {
     );
     let read = jpx_header(&file, &fits).expect("and the header read agrees");
     assert_eq!(read.components, 3, "three channels out of one component");
+    assert_eq!(
+        (read.levels, image.levels),
+        (0, 0),
+        "indices drop no level: a lower resolution would average them"
+    );
 
     let short = Limits::new(26);
     assert!(jpx_decode(&file, &short, &mut Vec::new()).is_err());

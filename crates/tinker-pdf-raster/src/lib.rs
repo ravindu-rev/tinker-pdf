@@ -29,7 +29,7 @@ pub use fragments::Fragments;
 pub use geom::{flatten, FillRule, Path, Point, Verb};
 pub use image::{
     accumulate_image, draw_image, image_bounds, image_bounds_in, image_coverage, resample, Filter,
-    ImageDraw, ImageSource, Pyramid, Sampling, Transform, TwoColour,
+    ImageDraw, ImageSource, Pyramid, Sampling, SourceWindow, Transform, TwoColour,
 };
 pub use mesh::{draw_mesh, draw_mesh_over, MeshBuffer, MeshDraw};
 pub use stripes::{fill_stripes, fill_stripes_with, StripeMask, SubpixelOrder};

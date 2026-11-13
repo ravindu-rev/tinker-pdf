@@ -507,3 +507,180 @@ fn a_window_refuses_only_what_the_whole_decode_refuses() {
         }
     }
 }
+
+/// What a decode came to, for holding a window's to the whole image's: the
+/// image, or the warnings its refusal left — E.1's clamp left out, since a
+/// window clamps only the coefficients it reads.
+fn outcome(
+    input: &[u8],
+    discard: u8,
+    window: Option<JpxWindow>,
+) -> Result<JpxImage, Vec<crate::Warning>> {
+    let mut warnings = Vec::new();
+    jpx_decode_request(
+        input,
+        &limits(),
+        &JpxRequest { discard, window },
+        &mut warnings,
+    )
+    .map(|(image, _)| image)
+    .map_err(|error| {
+        assert_eq!(error, FilterError::Unsupported(Capability::Jpx));
+        warnings.retain(|warning| *warning != crate::Warning::JpxCoefficientClamped);
+        warnings
+    })
+}
+
+/// **A window refuses whatever the whole decode refuses, and for the same
+/// reason**: the converse of the test above. Damaged codestreams of many
+/// tiles — cut short and overwritten, one of them with D.5's segmentation
+/// symbols at the end of every cleanup pass — decoded over windows at every
+/// discard: wherever the whole image's decode refuses, every window's does,
+/// with the same warning, though the damage lies in a code-block or a tile
+/// the window does not read — its pass counts and its cost are accounted
+/// for, a block under segmentation symbols is decoded, and a tile's
+/// structure checked, all as the whole decode does them — and wherever the
+/// whole decode draws, the window is its crop.
+#[test]
+fn a_window_refuses_whatever_the_whole_decode_refuses() {
+    let codestreams = [
+        coded(&tiled(false, &[(8, false, 1, 1); 3], true), &noise),
+        coded(
+            &Spec {
+                cb_style: 0x20,
+                ..tiled(true, &[(8, false, 1, 1)], false)
+            },
+            &noise,
+        ),
+    ];
+    let picks = [
+        JpxWindow {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        JpxWindow {
+            x: 5,
+            y: 3,
+            width: 9,
+            height: 7,
+        },
+        JpxWindow {
+            x: 20,
+            y: 10,
+            width: u32::MAX,
+            height: 2,
+        },
+    ];
+    let (mut refused, mut drawn) = (0, 0);
+    for bytes in &codestreams {
+        let mut damaged: Vec<Vec<u8>> = (1..bytes.len())
+            .step_by(11)
+            .map(|n| bytes[..n].to_vec())
+            .collect();
+        for at in (0..bytes.len()).step_by(7) {
+            let mut flipped = bytes.clone();
+            flipped[at] ^= 0x5A;
+            damaged.push(flipped);
+        }
+        for input in &damaged {
+            for discard in [0u8, 1, 3] {
+                let whole = outcome(input, discard, None);
+                for window in picks {
+                    let case = format!("dropping {discard}, {window:?}");
+                    match (&whole, outcome(input, discard, Some(window))) {
+                        (Err(want), Err(got)) => {
+                            assert_eq!(&got, want, "{case}: refused for another reason");
+                            refused += 1;
+                        }
+                        (Ok(whole), Ok(got)) => {
+                            let (width, height, samples, opacity) = crop(whole, window);
+                            assert_eq!((got.width, got.height), (width, height), "{case}");
+                            assert!(got.samples == samples, "{case}: the samples");
+                            assert_eq!(
+                                got.opacity.map(|opacity| opacity.samples),
+                                opacity,
+                                "{case}"
+                            );
+                            drawn += 1;
+                        }
+                        (Err(want), Ok(_)) => {
+                            panic!("{case}: a window drew what the whole decode refuses: {want:?}")
+                        }
+                        (Ok(_), Err(got)) => {
+                            panic!("{case}: a window refused what the whole decode draws: {got:?}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(refused > 0 && drawn > 0, "{refused} refused, {drawn} drawn");
+}
+
+/// **A tile a window misses is still the codestream's**: four tiles, the
+/// last of which a tile-part COD gives the 9/7 under the main header's
+/// quantisation for the 5/3, which Table A.28 does not pair. The whole
+/// decode refuses it as a structure, and so does a window over the first
+/// tile alone, which reconstructs nothing of the last; with the last tile
+/// left as the main header has it, both draw.
+#[test]
+fn a_window_refuses_a_tile_it_misses_for_its_structure() {
+    use super::writer::tile_part;
+    use crate::jpx::codestream::marker::EOC;
+
+    let spec = Spec {
+        xsiz: 32,
+        ysiz: 32,
+        xosiz: 0,
+        yosiz: 0,
+        ..tiled(true, &[(8, false, 1, 1)], false)
+    };
+    let bytes = coded(&spec, &noise);
+    // The tile-parts `coded` wrote, each SOT, no header, SOD and its data.
+    let main = spec.main_header();
+    let mut parts = Vec::new();
+    let mut at = main.len();
+    while bytes.get(at..at + 2) == Some(&[0xFF, 0x90][..]) {
+        let psot = u32::from_be_bytes([bytes[at + 6], bytes[at + 7], bytes[at + 8], bytes[at + 9]]);
+        let end = at + psot as usize;
+        parts.push(bytes[at + 14..end].to_vec());
+        at = end;
+    }
+    assert_eq!(parts.len(), 4, "four tiles of sixteen");
+    let rewritten = |last: &[u8]| {
+        let mut out = main.clone();
+        for (t, data) in parts.iter().enumerate() {
+            let header: &[u8] = if t == 3 { last } else { &[] };
+            out.extend(tile_part(t as u16, 0, 1, header, data));
+        }
+        out.extend_from_slice(&EOC.to_be_bytes());
+        out
+    };
+    let first = Some(JpxWindow {
+        x: 0,
+        y: 0,
+        width: 4,
+        height: 4,
+    });
+    let plain = rewritten(&[]);
+    assert!(
+        outcome(&plain, 0, None).is_ok(),
+        "the tiles as written draw"
+    );
+    assert!(outcome(&plain, 0, first).is_ok());
+    let unpaired = rewritten(
+        &Spec {
+            transform: 0,
+            ..spec.clone()
+        }
+        .cod(),
+    );
+    let whole = outcome(&unpaired, 0, None).expect_err("the whole decode refuses");
+    assert_eq!(whole, vec![crate::Warning::JpxStructureInvalid]);
+    assert_eq!(
+        outcome(&unpaired, 0, first).expect_err("so does the first tile's window"),
+        whole
+    );
+}

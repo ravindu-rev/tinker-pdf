@@ -1275,6 +1275,126 @@ fn bands_drawn_on_two_three_four_and_seven_threads_are_the_page() {
     }
 }
 
+// ---- JPEG 2000 windows (P-10.9) ---------------------------------------------
+
+/// One codestream, read from `dir` under the crate: the JPEG 2000 decoder's
+/// own fixtures, or the benchmark set's committed ones.
+fn codestream_in(dir: &str, name: &str) -> Vec<u8> {
+    std::fs::read(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(dir)
+            .join(name),
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+/// A page whose JPEG 2000 images each tile and the page decode in part
+/// (`docs/design/jpx-speed.md`, "The visible window"), 171 by 233 points,
+/// which no tile size here divides: the benchmark set's 620 by 877
+/// codestream drawn at a quarter over most of the page, two levels dropped;
+/// under a clip, the decoder's 32 by 24 colour fixture drawn magnified twice
+/// side by side, so the two abut in one run and the clip shows a part of
+/// each; and the 620 by 877 one again at an eighth under a clip that shows a
+/// corner of it, three levels dropped. Every placement is at a fractional
+/// offset.
+fn jpx_window_page() -> Vec<u8> {
+    let big = codestream_in("benches/data", "irreversible-620x877.jp2");
+    let small = codestream_in("../tinker-pdf-filters/tests/jpx", "c1-3.jp2");
+    let content = "q 155 0 0 219 7.3 5.1 cm /Big Do Q\n\
+         q 45.1 70.3 65.1 19.8 re W n\n\
+         q 48 0 0 36 31.5 60.2 cm /A Do Q q 48 0 0 36 79.5 60.2 cm /A Do Q Q\n\
+         q 120.3 150.6 40.1 50.2 re W n 77 0 0 109 100.1 130.4 cm /Big Do Q\n";
+    let image = |width: u32, height: u32, data: &[u8]| {
+        let mut out = format!(
+            "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} \
+             /Filter /JPXDecode /Length {} >>\nstream\n",
+            data.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\nendstream");
+        out
+    };
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 171 233]\n   \
+          /Resources << /XObject << /Big 5 0 R /A 6 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .into_bytes(),
+        image(620, 877, &big),
+        image(32, 24, &small),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    for (index, object) in objects.iter().enumerate() {
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// **A region of a JPEG 2000 page is the crop of the whole page** (ruling
+/// 5), though each tile decodes only the part of each image it reaches and
+/// the page the parts the clips show: the window is widened by the sampler's
+/// reach, the pyramid's pairs and the sampling policy are the whole reduced
+/// image's, and a sample a window leaves out is read as its nearest held one,
+/// so every pixel a tile shows reads the samples the page's reads and a run
+/// covers what it would over the whole image. At 1x over lattices of 64, 37
+/// and 23 pixels, none of which divides the page, and at 0.5x and 2x, where
+/// the page drops other levels; and a tile's render decodes fewer
+/// code-blocks than the page's.
+#[test]
+fn a_region_of_a_jpx_page_is_the_crop_of_the_whole_page() {
+    let document = Document::open(jpx_window_page()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let options = RenderOptions::default();
+    let full = page.render(&RenderOptions {
+        stats: true,
+        ..options.clone()
+    });
+    assert!(full.warnings.is_empty(), "{:?}", full.warnings);
+    assert!(ink(&full) > 25_000, "the images cover most of the page");
+    for tile in [64u32, 37, 23] {
+        tiles_are_the_page(&page, &options, tile, "the JPEG 2000 page at 1x");
+    }
+    for scale in [0.5f64, 2.0] {
+        let options = RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        };
+        tiles_are_the_page(
+            &page,
+            &options,
+            41,
+            &format!("the JPEG 2000 page at {scale}x"),
+        );
+    }
+
+    let blocks = |stats: Option<tinker_pdf::Stats>| stats.expect("counted").jpx_code_blocks_decoded;
+    let whole = blocks(full.stats);
+    let corner = page.render(&RenderOptions {
+        region: Some(PixelRegion::new(0, 0, 37, 37)),
+        stats: true,
+        ..options.clone()
+    });
+    assert!(
+        blocks(corner.stats) < whole,
+        "a corner decodes fewer code-blocks than the page"
+    );
+}
+
 /// What `builder` writes, held to the validate-on-save helper as a document
 /// this engine wrote from nothing it did not write.
 #[track_caller]

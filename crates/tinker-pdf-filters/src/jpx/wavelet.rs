@@ -1904,6 +1904,110 @@ pub(crate) fn into_samples<A: Arith>(plane: Plane<A>) -> Plane<i32> {
     }
 }
 
+/// What reconstructing every component of `tile` would refuse, without a
+/// plane: the refusals of [`reconstruct_tile`], in its order, for a tile a
+/// window misses and so does not reconstruct (`docs/design/jpx-speed.md`, "A
+/// window").
+///
+/// They are the codestream's statements about the tile — G.2's transform
+/// over fewer than three components or over components of two wavelets or
+/// two sizes, a wavelet Table A.28 does not pair with its quantisation, a
+/// component SIZ does not declare — and E.1's step for every subband
+/// [`dequantise`] would read one from: a subband of a kept resolution with a
+/// code-block holding coefficients, which is one of some area with passes,
+/// where the quantisation has steps or a region of interest asks for one. So
+/// a window refuses for its tiles' structure exactly where the decode of the
+/// whole image does.
+pub(crate) fn check_tile(stream: &Codestream<'_>, tile: &Tile, discard: u8) -> Result<(), Refusal> {
+    let count = stream.siz.components.len();
+    if !stream.cod_for(tile.index).mct {
+        for c in 0..count {
+            arithmetic(stream, tile.index, c)?;
+            check_ladder(stream, tile, c, discard)?;
+        }
+        return Ok(());
+    }
+    if count < 3 {
+        return Err(Refusal::Structure(
+            "a multiple component transform on fewer than three components",
+        ));
+    }
+    let reversible = arithmetic(stream, tile.index, 0)?;
+    for c in 1..3 {
+        if arithmetic(stream, tile.index, c)? != reversible {
+            return Err(Refusal::Structure(
+                "a multiple component transform over components with different wavelets",
+            ));
+        }
+    }
+    // `transformed`'s three ladders, then `colour::inverse_mct`'s test of
+    // their planes, which are each component's top kept resolution.
+    let mut shapes = Vec::with_capacity(3);
+    for c in 0..3 {
+        shapes.push(check_ladder(stream, tile, c, discard)?);
+    }
+    if shapes.iter().any(|shape| *shape != shapes[0]) {
+        return Err(Refusal::Structure(
+            "a multiple component transform over components of different sizes",
+        ));
+    }
+    for c in 3..count {
+        arithmetic(stream, tile.index, c)?;
+        check_ladder(stream, tile, c, discard)?;
+    }
+    Ok(())
+}
+
+/// What [`ladder`] would refuse for one tile-component, in its order, and
+/// the size of the plane it would return: the top kept resolution's.
+fn check_ladder(
+    stream: &Codestream<'_>,
+    tile: &Tile,
+    component: usize,
+    discard: u8,
+) -> Result<(u32, u32), Refusal> {
+    let tc = tile
+        .components
+        .get(component)
+        .ok_or(Refusal::Structure("a tile with no such component"))?;
+    stream
+        .siz
+        .components
+        .get(component)
+        .ok_or(Refusal::Structure(
+            "a component the SIZ marker does not declare",
+        ))?;
+    let roi = stream.roi_for(tile.index, component);
+    let quant = stream.quant_for(tile.index, component);
+    // `dequantise` reads a step for a block with coefficients unless the
+    // quantisation is none and no region of interest shifts it.
+    let reads_a_step = !(matches!(quant.style, QuantStyle::None) && roi.is_none());
+    let kept = tc
+        .resolutions
+        .len()
+        .saturating_sub(usize::from(discard))
+        .max(1);
+    let mut shape = (0, 0);
+    for (r, resolution) in tc.resolutions.iter().enumerate().take(kept) {
+        shape = (
+            resolution.x1.saturating_sub(resolution.x0),
+            resolution.y1.saturating_sub(resolution.y0),
+        );
+        for (k, band) in resolution.bands.iter().enumerate() {
+            let coded = band.precincts.iter().any(|precinct| {
+                precinct
+                    .blocks
+                    .iter()
+                    .any(|block| block.width() > 0 && block.height() > 0 && block.passes > 0)
+            });
+            if coded && reads_a_step {
+                step_for(quant, if r == 0 { 0 } else { 3 * (r - 1) + 1 + k })?;
+            }
+        }
+    }
+    Ok(shape)
+}
+
 /// G.1's DC level shift, and the clamp to the component's precision, over
 /// `region` of the plane's grid where a window names one, or the whole
 /// plane.

@@ -69,7 +69,7 @@ use tinker_pdf_color::icc::Transforms;
 use tinker_pdf_content::{FormInvocation, FormRecording};
 use tinker_pdf_raster::fill::Mask;
 
-use crate::resources::{CachedImage, Frame};
+use crate::resources::{Asked, CachedImage, Frame};
 use crate::stats;
 
 /// A document's cache budget: the most bytes what it keeps across its renders
@@ -652,7 +652,7 @@ impl<K: Kind> Drop for Claim<'_, K> {
 }
 
 // What a decoded image is kept under (`docs/design/performance.md`, P-16):
-/// the image XObject, the reduction its decode is made at, and the default
+/// the image XObject, what its decode is asked for, and the default
 /// colour spaces its scope paints device spaces in (8.6.5.6) — the one thing
 /// outside the object an image's decode reads, so two scopes that name one
 /// image and different defaults keep two entries, and two that name it and
@@ -661,11 +661,14 @@ impl<K: Kind> Drop for Claim<'_, K> {
 pub(crate) struct ImageKey {
     /// The image XObject.
     pub(crate) object: ObjRef,
-    /// How many of the image's own samples each way one decoded sample stands
-    /// for: 1 at full size, 2, 4 or 8 for a JPEG decoded at a half, a quarter
-    /// or an eighth, and `2^d` for a JPEG 2000 codestream decoded with `d`
-    /// levels dropped (`tinker_pdf_render::Reduced::factor`).
-    pub(crate) reduction: u32,
+    /// What the draw asked the decode for (`resources::Asked`): how many of
+    /// the image's own samples each way one decoded sample stands for — 1 at
+    /// full size, 2, 4 or 8 for a JPEG decoded at a half, a quarter or an
+    /// eighth, and `2^d` for a JPEG 2000 codestream decoded with `d` levels
+    /// dropped (`tinker_pdf_render::Reduced::factor`) — and the rectangle of
+    /// the decoded image it holds, where a codestream's decode holds part of
+    /// it (`tinker_pdf_render::DecodedImage::window`).
+    pub(crate) asked: Asked,
     /// The scope's `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK` that it
     /// puts in, each as written ([`Written`]); empty for a scope that paints
     /// every device space as itself.

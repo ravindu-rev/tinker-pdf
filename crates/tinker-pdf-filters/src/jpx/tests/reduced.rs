@@ -503,3 +503,103 @@ fn guard_a7_levels_decoded_are_the_levels_needed() {
         previous = kept;
     }
 }
+
+/// **The levels a header says a decode can drop are the fewest any
+/// tile-component has, by A.6.2's precedence** (`Codestream::fewest_levels`,
+/// read as `style_for` reads it, tile by tile): a main-header COC giving one
+/// component fewer than the COD; a tile's first part's COD giving its tile
+/// fewer; a COC in that part beating it for one component; a tile's COD
+/// beating the main header's COC; and a COD in every tile's first part
+/// leaving the main header's levels to no tile at all.
+#[test]
+fn the_levels_a_header_says_are_the_fewest_by_a_6_2s_precedence() {
+    use super::writer::{segment, tile_part};
+    use crate::jpx::codestream::marker::{COC, EOC};
+
+    let spec = Spec {
+        xsiz: 32,
+        ysiz: 32,
+        xtsiz: 16,
+        ytsiz: 16,
+        components: vec![(8, false, 1, 1); 2],
+        levels: 4,
+        ..Spec::default()
+    };
+    let coc = |component: u8, levels: u8| {
+        segment(
+            COC,
+            &[
+                component,
+                0,
+                levels,
+                spec.xcb,
+                spec.ycb,
+                spec.cb_style,
+                spec.transform,
+            ],
+        )
+    };
+    let cod = |levels: u8| {
+        let tile = Spec {
+            levels,
+            ..spec.clone()
+        };
+        [tile.cod(), tile.qcd()].concat()
+    };
+    let stream = |main: &[u8], tiles: [Vec<u8>; 4]| {
+        let mut out = spec.main_header();
+        out.extend_from_slice(main);
+        for (t, header) in tiles.iter().enumerate() {
+            out.extend(tile_part(t as u16, 0, 1, header, &[]));
+        }
+        out.extend_from_slice(&EOC.to_be_bytes());
+        out
+    };
+    let none = || [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for (what, bytes, want) in [
+        ("the COD alone", stream(&[], none()), 4),
+        (
+            "a main-header COC for the second component",
+            stream(&coc(1, 2), none()),
+            2,
+        ),
+        (
+            "a COD in the third tile's first part",
+            stream(&[], [Vec::new(), Vec::new(), cod(3), Vec::new()]),
+            3,
+        ),
+        (
+            "a COC beside that COD for its first component",
+            stream(
+                &[],
+                [
+                    Vec::new(),
+                    Vec::new(),
+                    [cod(3), coc(0, 1)].concat(),
+                    Vec::new(),
+                ],
+            ),
+            1,
+        ),
+        (
+            "every tile's COD beating the main header's COC",
+            stream(&coc(1, 2), [cod(4), cod(5), cod(4), cod(6)]),
+            4,
+        ),
+        (
+            "every tile's COD leaving the main header's to none",
+            stream(&[], [cod(5), cod(5), cod(6), cod(5)]),
+            5,
+        ),
+    ] {
+        let parsed = parse(&bytes).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!(parsed.fewest_levels(), want, "{what}");
+        let walked = (0..4u16)
+            .flat_map(|t| (0..2usize).map(move |c| (t, c)))
+            .map(|(t, c)| parsed.style_for(t, c).levels)
+            .min();
+        assert_eq!(walked, Some(want), "{what}: every tile-component walked");
+        let header = jpx_header(&bytes, &limits()).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!(header.levels, want, "{what}: the header read");
+    }
+}

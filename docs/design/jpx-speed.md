@@ -253,38 +253,60 @@ computes. `Page::images`, `to_svg` and every extraction path ask for the
 full size. Because the drawn size is the page frame's, a tile and the page
 pick the same levels (ruling 5).
 
-**The visible window.** P-10.9 adds the window: the part of the unit square
-the clip and any region leave visible, in image space at the chosen levels,
-widened by the sampler's margin (below), and `DecodedImage` carries the
-window it covers so `blit` maps it to its place in the unit square. The
+**The visible window.** P-10.9 adds the window: the request carries the part
+of the unit square the canvas reaches and the part the clip and the soft mask
+leave visible of it (`ImageRequest::reach`, `ImageRequest::visible`), the
+facade's JPX path takes it in the samples of the image the chosen levels
+leave, widened by the sampler's margin (below), and `DecodedImage` carries the
+window it covers, its width and height staying the whole image's, so the
+rasterizer samples the whole image and reads the held rectangle
+(`ImageSource::window`), a sample outside it read as its nearest held one. The
 sampling policy (`sampling_for` in `crates/tinker-pdf-raster/src/image.rs`)
 decides on the **whole** reduced image's dimensions, which the window carries
 beside its samples, never on the window's: the halvings an image is reduced
 by before its area filter runs depend on its size, and a window that halved
 differently would draw different pixels. The cache keys on the window as
-well.
+well. A window that holds the whole image is none, and one that shows nothing
+holds a sample, so the stand-in covers every pixel of the square.
 
 **The margin a region needs for ruling 5.** A destination pixel reads the
 decoded samples its filter reaches: one beyond its nearest sample for
 bilinear's second tap, and for the area filter its footprint — at most two
 texels per axis once the pyramid has halved the image — at the pyramid level
 it samples, which spans `2^h` decoded samples per texel after `h` halvings.
-So the window is widened by `(⌈footprint⌉ + 1) × 2^h` samples on each side,
-and each edge is rounded out to a multiple of `2^h`, so every 2 × 2 block the
-pyramid averages inside the window is the block the whole image's pyramid
-averages. With that margin a region's visible pixels read only samples its
-window holds, and a window decode is the crop of the whole decode (P-10.3),
-so a tile is byte-equal to the page under it.
+The facade works the policy out from the drawn size the request carries, and
+the draw from its own transform, so the two may round a threshold apart by a
+level; the window is therefore widened by `(⌈footprint⌉ + 2) × 2^(h + 1)`
+samples on each side, and each edge is rounded out to a multiple of
+`2^(h + 1)`, so every 2 × 2 block the pyramid averages inside the window is the
+block the whole image's pyramid averages at either level. With that margin a
+region's visible pixels read only samples its window holds, and a window
+decode is the crop of the whole decode (P-10.3), so a tile is byte-equal to
+the page under it.
+
+**A window refuses where the whole image does.** A tile's window and the
+page's differ, so whether a decode refuses must not depend on its window, or
+a tile of a damaged codestream would draw what the page refuses. The decoder
+accounts for every code-block of a kept resolution in index order — a block
+the window leaves out has its pass count checked and its cost charged as
+though decoded — decodes every block of a tile-component that signals
+segmentation symbols, whose D.5 check is made only by decoding, checks every
+tile's structure as reconstructing it would, and charges the output at the
+image the discard returns whole.
 
 **The image-run shape ruling 5 pins.** Whether an image draw joins the run
 held back so that abutting images do not conflate is decided by its overlap
-with what the run holds on the canvas, and in the one shape ruling 5 names —
-two images that overlap outside a tile and abut inside it — a tile pays the
-page's image work to keep the page's decision, by H-15's default. So an
-image draw that is a member of a run of two or more draws is decoded over the
-page's visible window, not the tile's: in that shape a tile meets the same
-samples the page does. A draw alone, or the first of a run, takes the tile's
-window.
+with what the run holds on the canvas — the coverage it accumulated wherever
+the clip hides it, composited through the clip only when the run ends. So a
+draw that can join a run is decoded over what its canvas reaches unless every
+sample is opaque: an opaque image's stand-in sample covers each pixel as its
+own would, so it may be held to what the clip shows, and one with opacity of
+its own is held to what the canvas reaches, where every pixel reads its own
+samples. Over its canvas a run then holds what it holds of the whole image,
+and decides what the whole image's run decides there — in a tile, ruling 5's
+named shape included, the canvas's decision H-15's default keeps. A draw that
+composites alone, in a knockout group or on a page too large for runs, takes
+what the clip shows.
 
 ### Code-blocks and synthesis on P-15's pool (P-10.10, P-10.11)
 
@@ -380,7 +402,8 @@ under 140 MB (P-10.13).
 | A discard past some tile-component's levels | Clamped to the fewest levels in the codestream, reported in `JpxImage::discard`; the fuzz target draws discards past every level count |
 | A window or a discard drops a code-block a kept sample depends on | The needed rectangles widen by the filter's reach at every level; `a_window_decode_is_the_crop_of_the_full_decode` runs random windows at every discard over multi-tile, multi-precinct codestreams of both filters |
 | **A region render misses samples its pixels read, and a tile differs from the page (ruling 5)** | The window is widened by `(⌈footprint⌉ + 1) × 2^h` samples and its edges rounded out to `2^h`, the sampling policy decides on the whole image's size, and `a_region_of_a_jpx_page_is_the_crop_of_the_whole_page` holds tiles that do not divide the page byte-equal |
-| **The image-run shape ruling 5 pins (H-15's default)** decides a tile's run from samples the tile's window would drop | A draw that is a member of a run of two or more draws is decoded over the page's visible window, so in that shape a tile keeps the page's image work, as H-15's default pays it |
+| **The image-run shape ruling 5 pins (H-15's default)** decides a tile's run from samples the tile's window would drop | A draw that can join a run is held to what its canvas reaches, or for an opaque image to what its clip shows, a window's nearest-sample stand-in covering every pixel; over its canvas the run holds what it holds of the whole image |
+| A tile's window leaves out the damage a page's decode refuses, and the tile draws what the page refuses | Every kept code-block is accounted for, a tile-component with segmentation symbols decodes every block, every tile's structure is checked and the output charged whole: `a_window_refuses_whatever_the_whole_decode_refuses` |
 | A minified JPX image now draws from its reduced decode, and its pixels move | That is the row's design: every JPX image drawn at half its size or less on both axes draws from the wavelet's low band rather than the box pyramid over the full decode. The `jpx` fingerprint's images are drawn magnified and do not move; `jpx_minified` is a new fingerprint; any committed render of a minified JPX image that moves is a finding for the owner before it is committed |
 | A thread count changes which block a refusal names | The budget is charged for every listed block in index order before any decode, and the slots are read in index order, so the first refusal is the serial decode's |
 | Tier-1 a tile at a time changes a refusal's order | Today tier-1 runs every tile before any reconstruction; a tier-1 refusal in a later tile then surfaces after an earlier tile's reconstruction work rather than before it, which is the same `Err` and the same warning, since the decode returns nothing but the refusal |

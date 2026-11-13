@@ -417,6 +417,37 @@ through `Stats::jpx_levels_synthesised`),
 `render_regions.rs` hold the reduced draws on every target and tile by
 tile.
 
+**Images drawn in part.** A draw's request says what of the image its canvas
+reaches and what of that the clip and the soft mask show, each as a rectangle
+of the image's unit square (`ImageRequest::reach`, `ImageRequest::visible`,
+`UnitArea`): the page's canvas, a tile's, a band's, a group buffer's or a
+pattern cell's mapped back into the square, and the clip's and the soft
+mask's rectangles. A JPEG 2000 codestream is decoded over that part alone, in
+the samples of the image its discard leaves, widened by the sampler's reach —
+`(⌈footprint⌉ + 2) · 2^(h + 1)` samples for the area filter's footprint after
+`h` halvings of the pyramid, its edges moved out to multiples of `2^(h + 1)` —
+and the decoded image carries the rectangle it holds (`DecodedImage::window`),
+its width and height staying the whole image's. The rasterizer samples a
+windowed image over the whole of it and reads only the held rectangle, its
+nearest held sample standing in for one outside it, so a pixel a draw shows
+reads the samples the whole decode would hand it and every pixel of the
+image's square is still covered. A draw that joins a run of images, which
+holds what it accumulates wherever the clip hides it and decides by that
+coverage whether a later draw joins it, is decoded over the part it shows
+only when every sample is opaque, and otherwise over what it reaches; a draw
+that composites alone, in a knockout group or on a page too large for runs,
+shows and reaches the same part. A window holding all of the image is no
+window, one that shows nothing holds a sample, and the cache keeps each
+window's decode apart: a render's own at most sixty-four decodes an image,
+the document's under its budget. A tile therefore
+decodes the code-blocks its window reaches and is still the page under it
+(ruling 5). `jpx_images.rs` holds it:
+`a_region_render_decodes_only_the_code_blocks_its_window_reaches`,
+`a_clipped_jpx_image_is_shown_from_the_samples_under_its_clip` and
+`each_window_of_a_jpx_image_is_cached_apart`; `render_regions.rs`'s
+`a_region_of_a_jpx_page_is_the_crop_of_the_whole_page` tiles a page of
+windowed draws, a clipped run among them, at lattices that do not divide it.
+
 **Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
 pasted in from another document resolves its names in the dictionary it brought
 rather than in the page's. Both seams change scope together — the interpreter
@@ -933,19 +964,21 @@ opened with a budget — `OpenOptions::cache_limits`, or
 what its renders compute across renders, pages, clones of the `Document` and
 the display lists of its pages, in one cache every one of them shares; with no
 budget stated it keeps nothing past a render, as above. What it keeps is
-**decoded images**: an image XObject's decode under its object, the reduction
-it is made at and the default colour spaces its scope paints device spaces in
-(8.6.5.6), each written exactly — a number by its bits, a name by its symbol,
+**decoded images**: an image XObject's decode under its object, what it is
+asked for — the reduction it is made at and the window it holds — and the
+default colour spaces its scope paints device spaces in (8.6.5.6), each written exactly — a number by its bits, a name by its symbol,
 a reference by its number — which is all of what outside the object a decode
 reads; so two scopes naming one image under two names and the same defaults
-share one entry, and two that paint it in different defaults keep two. The
-reduction is the one a render's own cache reads: full size for every image but
-a JPEG with no mask, and for that one the smallest of an eighth, a quarter and
-a half that the size it is drawn at allows, read against its frame. The frame
-is kept beside the decodes, under the object and the defaults, learnt by the
-image's first decode, which is made at that draw's size and kept as that
-size's; so a JPEG drawn at two sizes keeps two decodes and one frame, and each
-draw of it looks up its frame and then its decode. Every
+share one entry, and two that paint it in different defaults keep two. What
+it is asked for is what a render's own cache reads: every sample at full size
+for every image but a JPEG or a JPEG 2000 codestream with no mask; for a JPEG
+the smallest of an eighth, a quarter and a half that the size it is drawn at
+allows, and for a codestream the levels it drops and the window it holds, each
+read against its frame. The frame is kept beside the decodes, under the
+object and the defaults, learnt by the image's first decode, which is made for
+that draw and kept as its ask's; so an image drawn at two sizes keeps two
+decodes and one frame, and each draw of it looks up its frame and then its
+decode. Every
 value is a function of its key and the document's bytes, so a render draws
 the same pixels whatever was drawn before it, under any budget: a hit is the
 bytes a miss computes. A refusal is kept as firmly as a picture, in its

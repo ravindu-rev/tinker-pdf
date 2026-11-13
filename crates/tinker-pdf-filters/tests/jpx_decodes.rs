@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use tinker_pdf_filters::{crc32, jpx_decode, jpx_decode_request, JpxRequest, Limits};
+use tinker_pdf_filters::{crc32, jpx_decode, jpx_decode_request, jpx_header, JpxRequest, Limits};
 
 /// One committed codestream's decode: `(file, width, height, components,
 /// precision, truncated, CRC-32 of the samples, CRC-32 of the opacity
@@ -120,9 +120,10 @@ fn every_committed_decode_is_its_pin() {
 
 /// Every committed codestream decoded dropping 0 to 6 levels: the applied
 /// discard is the asked one up to the codestream's own levels and clamped
-/// there, each side of the image is the full side halved that many times —
-/// rounded either way by the origin (T.800 B.5) — and dropping more levels
-/// decodes no more code-blocks and synthesises no more levels.
+/// there — the levels the header read says it can drop, and each decode
+/// says it could have — each side of the image is the full side halved that
+/// many times — rounded either way by the origin (T.800 B.5) — and dropping
+/// more levels decodes no more code-blocks and synthesises no more levels.
 #[test]
 fn every_committed_codestream_decodes_at_every_discard() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/jpx");
@@ -144,6 +145,9 @@ fn every_committed_codestream_decodes_at_every_discard() {
         };
         let (whole, _) = decode(0);
         let levels = decode(u8::MAX).0.discard;
+        let header = jpx_header(&bytes, &limits).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(header.levels, levels, "{name}: the header read's levels");
+        assert_eq!(header.origin, (0, 0), "{name}: at the grid's origin");
         let mut previous = None;
         for discard in 0..=6u8 {
             let (image, counts) = decode(discard);
@@ -152,6 +156,7 @@ fn every_committed_codestream_decodes_at_every_discard() {
                 discard.min(levels),
                 "{name} dropping {discard}"
             );
+            assert_eq!(image.levels, levels, "{name} dropping {discard}");
             let d = u32::from(image.discard);
             for (full, got) in [(whole.width, image.width), (whole.height, image.height)] {
                 let (full, got) = (u64::from(full), u64::from(got));

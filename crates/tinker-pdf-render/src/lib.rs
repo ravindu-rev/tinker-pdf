@@ -41,7 +41,7 @@ use tinker_pdf_raster::{
     geom::{FillRule, Path},
     image::{
         accumulate_image, draw_image, image_bounds_in, image_coverage, ImageDraw, ImageSource,
-        Pyramid, Transform, TwoColour,
+        Pyramid, SourceWindow, Transform, TwoColour,
     },
     mesh::{draw_mesh_over, MeshDraw},
     stroke::{
@@ -487,6 +487,72 @@ pub struct DecodedImage {
     /// an image with a soft mask as not fully opaque, and its shape is its
     /// whole square (11.6.4.2).
     pub soft_masked: bool,
+    /// The rectangle of the image the samples hold, where the decode held
+    /// less than the whole of it (`docs/design/jpx-speed.md`, "The visible
+    /// window"): `rgb` and `alpha` are that rectangle's rows, and
+    /// [`Self::width`] and [`Self::height`] stay the whole image's, which the
+    /// draw is placed and sampled by. `None` where every sample is held,
+    /// which is every image but a JPEG 2000 codestream a draw showed part of.
+    pub window: Option<SourceWindow>,
+}
+
+/// A rectangle of an image's unit square, `(0, 0)` its bottom-left corner
+/// and `(1, 1)` its top-right (8.9.5.2): `u` across the image's columns and
+/// `v` up its rows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnitArea {
+    /// The left edge.
+    pub u0: f64,
+    /// The bottom edge.
+    pub v0: f64,
+    /// The right edge.
+    pub u1: f64,
+    /// The top edge.
+    pub v1: f64,
+}
+
+impl UnitArea {
+    /// The part of the unit square `to_device` puts on the device pixels of
+    /// `rect`, `(x0, y0, x1, y1)` with the far edges exclusive: the
+    /// rectangle's corners mapped back into the square, their bounding box,
+    /// clamped to it — empty, with `u0 == u1` or `v0 == v1`, where the square
+    /// misses the rectangle. `None` where the map has no inverse or the
+    /// corners are no numbers, which asks for the whole image.
+    #[must_use]
+    pub fn of_device(to_device: &Matrix, rect: (f64, f64, f64, f64)) -> Option<UnitArea> {
+        let inverse = invert(to_device)?;
+        let (x0, y0, x1, y1) = rect;
+        let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| inverse.apply(x, y));
+        if corners
+            .iter()
+            .any(|(u, v)| !u.is_finite() || !v.is_finite())
+        {
+            return None;
+        }
+        let clamp = |value: f64| value.clamp(0.0, 1.0);
+        let fold = |pick: fn(&(f64, f64)) -> f64, start: f64, keep: fn(f64, f64) -> f64| {
+            corners.iter().map(pick).fold(start, keep)
+        };
+        let u0 = clamp(fold(|c| c.0, f64::INFINITY, f64::min));
+        let u1 = clamp(fold(|c| c.0, f64::NEG_INFINITY, f64::max));
+        let v0 = clamp(fold(|c| c.1, f64::INFINITY, f64::min));
+        let v1 = clamp(fold(|c| c.1, f64::NEG_INFINITY, f64::max));
+        if x1 <= x0 || y1 <= y0 {
+            return Some(UnitArea {
+                u0,
+                v0,
+                u1: u0,
+                v1: v0,
+            });
+        }
+        Some(UnitArea { u0, v0, u1, v1 })
+    }
+
+    /// Whether it holds no part of the square.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.u1 <= self.u0 || self.v1 <= self.v0
+    }
 }
 
 /// A reduced decode's grid: [`DecodedImage::width`] by
@@ -523,18 +589,44 @@ pub struct Reduced {
 }
 
 /// What a draw asks of an image's decode (`docs/design/jpeg-speed.md`, "The
-/// drawn-size request"): the size the page draws it at.
+/// drawn-size request"; `docs/design/jpx-speed.md`, "The visible window"):
+/// the size the page draws it at, and the parts of it the draw can reach and
+/// show.
 ///
-/// Computed from the image's transform in the page frame — the frame a tile
-/// and a band share with the page (ruling 5), and the one a display list's
-/// replay computes from the transform it replays at — so every part of a page
-/// asks what the page asks.
+/// The size is computed from the image's transform in the page frame — the
+/// frame a tile and a band share with the page (ruling 5), and the one a
+/// display list's replay computes from the transform it replays at — so every
+/// part of a page asks for the size the page asks for. The parts are the
+/// canvas's own: a tile reaches less of an image than the page does, and a
+/// decoder that holds only what a draw reaches — widened by the sampler's
+/// reach — hands every pixel of the canvas the samples the page's decode
+/// hands it, so the tile is still the page under it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImageRequest {
     /// The device pixels the image's unit square spans along each of the
     /// image's own axes, its width first: `√(a² + b²)` and `√(c² + d²)` of its
     /// transform. A size that is not finite asks for the image at full size.
     pub drawn: (f64, f64),
+    /// The part of the unit square the draw can put a pixel on: the canvas's
+    /// device pixels mapped back into it ([`UnitArea::of_device`]) — the
+    /// page's, a tile's or a band's, a group's buffer inside one or a
+    /// pattern cell's — and the clip's and the soft mask's rectangles too
+    /// where the draw composites through them on its own, an element of a
+    /// knockout group or an image on a page too large to hold its images in
+    /// runs. Elsewhere a draw joins a run of images that holds what it
+    /// accumulates wherever the clip hides it, and a later draw joins the run
+    /// only where it does not overlap what the run holds, so what the run
+    /// holds under the clip still decides pixels. `None` reaches all of it.
+    pub reach: Option<UnitArea>,
+    /// The part of [`Self::reach`] the clip and the soft mask leave visible.
+    /// A decoder may hold only the samples under it, widened by the sampler's
+    /// reach, for an image every sample of which is opaque: a window reads its
+    /// nearest sample where it holds none (`ImageSource::window`), so every
+    /// pixel of the square is still covered, wholly where the image is, and a
+    /// run decides what it overlaps as it would over the whole image — which
+    /// a stand-in's opacity would not settle for an image with opacity of its
+    /// own. `None` shows all of it.
+    pub visible: Option<UnitArea>,
 }
 
 impl ImageRequest {
@@ -543,17 +635,22 @@ impl ImageRequest {
     /// is decoded at.
     pub const FULL: ImageRequest = ImageRequest {
         drawn: (f64::INFINITY, f64::INFINITY),
+        reach: None,
+        visible: None,
     };
 
     /// The request a draw makes whose unit square `to_device` maps into the
-    /// page frame: the length of each of its two columns. `sqrt` is correctly
-    /// rounded, so every target asks for the same size (ruling 4).
+    /// page frame: the length of each of its two columns, and every part of
+    /// it. `sqrt` is correctly rounded, so every target asks for the same
+    /// size (ruling 4).
     #[must_use]
     pub fn drawn_under(to_device: &Matrix) -> ImageRequest {
         let across = (to_device.a * to_device.a + to_device.b * to_device.b).sqrt();
         let down = (to_device.c * to_device.c + to_device.d * to_device.d).sqrt();
         ImageRequest {
             drawn: (across, down),
+            reach: None,
+            visible: None,
         }
     }
 }
@@ -3068,6 +3165,37 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
     }
 
+    /// What an image draw whose unit square `to_device` maps into the page
+    /// frame asks of its decode ([`ImageRequest`]): the size it is drawn at,
+    /// the part of it this canvas can reach — under the clip and the soft mask
+    /// too where the draw composites through them on its own, as
+    /// [`Renderer::blit`] decides — and the part they leave visible.
+    fn image_request(&self, to_device: &Matrix) -> ImageRequest {
+        let canvas = Bounds::of_rect(self.device());
+        let shown = [self.clip.as_ref(), self.soft.as_ref()]
+            .into_iter()
+            .flatten()
+            .fold(canvas, |shown, mask| shown.meet(Bounds::of_mask(mask)));
+        // `blit`'s own test for a draw that is no member of a run.
+        let alone = self.in_knockout() || self.frame_area() > MAX_IMAGE_RUN_PIXELS;
+        let area = |bounds: Bounds| {
+            UnitArea::of_device(
+                to_device,
+                (
+                    bounds.left as f64,
+                    bounds.top as f64,
+                    bounds.right as f64,
+                    bounds.bottom as f64,
+                ),
+            )
+        };
+        ImageRequest {
+            reach: area(if alone { shown } else { canvas }),
+            visible: area(shown),
+            ..ImageRequest::drawn_under(to_device)
+        }
+    }
+
     /// Fills an undecodable image's area with a neutral grey.
     ///
     /// Ruling 2 asks for a placeholder, not merely a warning, and the
@@ -4113,6 +4241,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                         rgb: &image.rgb,
                         alpha: shape_alpha,
                         two_colour: shape_two,
+                        // The rectangle the samples hold, as the draw below
+                        // reads them.
+                        window: image.window,
                     },
                     // Placed as the draw below places it: a reduced decode's
                     // samples over their own square, cut at the unit square.
@@ -4231,6 +4362,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     samples: &two.samples,
                     colours: two.colours,
                 }),
+                // What the decode held of it: the sampler works over the whole
+                // image and reads the held rectangle's rows.
+                window: image.window,
             },
             unit_to_device: samples_to_device.unwrap_or(unit_to_device),
             cut: samples_to_device.map(|_| unit_to_device),
@@ -5385,8 +5519,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         let state: &GraphicsState = &painting;
 
         // The size the page draws it at, in the page frame whatever canvas
-        // this is (ruling 5), so a tile, a band and a replay ask alike.
-        let request = ImageRequest::drawn_under(&state.ctm.then(&self.base));
+        // this is (ruling 5), so a tile, a band and a replay ask alike; and the
+        // parts of it this canvas reaches and shows.
+        let request = self.image_request(&state.ctm.then(&self.base));
         let decoded = if image.inline {
             match self
                 .glyphs
@@ -7090,6 +7225,7 @@ mod tests {
                 alpha: Vec::new(),
                 two_colour: None,
                 reduced: None,
+                window: None,
             }))
         }
     }
@@ -7332,6 +7468,7 @@ mod tests {
                 alpha: self.alpha.clone(),
                 two_colour: None,
                 reduced: None,
+                window: None,
             }))
         }
     }
@@ -7369,6 +7506,7 @@ mod tests {
                 alpha: Vec::new(),
                 two_colour: None,
                 reduced: None,
+                window: None,
             }))
         }
     }
@@ -7431,6 +7569,7 @@ mod tests {
                 reduced: None,
                 family: ColorFamily::Rgb,
                 soft_masked: false,
+                window: None,
             })
         }
     }
@@ -7489,7 +7628,17 @@ mod tests {
             .collect();
         assert_eq!(drawn, expected, "each draw's size in the page frame");
         let tile = asked(Canvas::new(37, 23, PixelFormat::Rgb8, Color::WHITE).at_origin(41, 19));
-        assert_eq!(tile, page, "a tile asks what the page asks");
+        let sizes = |asked: &[(Vec<u8>, ImageRequest)]| -> Vec<(Vec<u8>, (f64, f64))> {
+            asked
+                .iter()
+                .map(|(name, request)| (name.clone(), request.drawn))
+                .collect()
+        };
+        assert_eq!(
+            sizes(&tile),
+            sizes(&page),
+            "a tile asks for the size the page asks for"
+        );
 
         let infinite = ImageRequest::drawn_under(&Matrix {
             a: f64::MAX,
@@ -7504,6 +7653,145 @@ mod tests {
             "a column past f64 is no finite size: {infinite:?}"
         );
         assert!(!ImageRequest::FULL.drawn.0.is_finite() && !ImageRequest::FULL.drawn.1.is_finite());
+    }
+
+    /// **A draw asks for the parts of its image the canvas reaches and the
+    /// clip shows** (`docs/design/jpx-speed.md`, "The visible window"), each
+    /// mapped back into the image's unit square. On the whole page an image
+    /// wholly on it is reached and shown whole; a tile reaches the part of it
+    /// under the tile, and none of an image it misses; a clip narrows what is
+    /// shown and not what a draw that joins a run reaches, and on a page too
+    /// large to hold its images in runs, where each draw composites through
+    /// the clip on its own, narrows both. A quarter-turned image's square is
+    /// turned with it.
+    #[test]
+    fn a_draw_asks_for_the_parts_of_its_image_the_canvas_reaches_and_shows() {
+        // `Im0` over user (5, 5) to (45, 25), device (10, 50) to (90, 90) at
+        // twice the scale; the clip, user (10, 10) to (30, 20), device (20,
+        // 60) to (60, 80), held a pixel wider each way as every mask is;
+        // `Im1` quarter-turned over user (20, 30) to (50, 40), device (40, 20)
+        // to (100, 40).
+        let content: &[u8] = b"q 40 0 0 20 5 5 cm /Im0 Do Q \
+            q 10 10 20 10 re W n 40 0 0 20 5 5 cm /Im0 Do Q \
+            q 0 10 -30 0 50 30 cm /Im1 Do Q";
+        let asked = |canvas: Canvas, page: (u32, u32)| {
+            let source = Requests::default();
+            let mut renderer = Renderer::new(canvas, page_transform(50.0, 2.0), &source)
+                .with_page_size(page.0, page.1);
+            interpret(content, Matrix::IDENTITY, &mut renderer, &NoFonts);
+            let _ = renderer.finish();
+            source.asked.into_inner().expect("the record")
+        };
+        let area =
+            |got: Option<UnitArea>, what: &str| got.unwrap_or_else(|| panic!("{what}: an area"));
+        let near = |got: Option<UnitArea>, want: (f64, f64, f64, f64), what: &str| {
+            let got = area(got, what);
+            let (u0, v0, u1, v1) = want;
+            for (g, w) in [(got.u0, u0), (got.v0, v0), (got.u1, u1), (got.v1, v1)] {
+                assert!((g - w).abs() < 1e-9, "{what}: {got:?} where {want:?}");
+            }
+        };
+        // Holds `inner` and lies inside `outer`, to the last bits of the
+        // inverse map.
+        let between = |got: Option<UnitArea>,
+                       inner: (f64, f64, f64, f64),
+                       outer: (f64, f64, f64, f64),
+                       what: &str| {
+            let got = area(got, what);
+            let e = 1e-9;
+            assert!(
+                got.u0 <= inner.0 + e
+                    && got.v0 <= inner.1 + e
+                    && got.u1 >= inner.2 - e
+                    && got.v1 >= inner.3 - e
+                    && got.u0 >= outer.0 - e
+                    && got.v0 >= outer.1 - e
+                    && got.u1 <= outer.2 + e
+                    && got.v1 <= outer.3 + e,
+                "{what}: {got:?} between {inner:?} and {outer:?}"
+            );
+        };
+        let whole = (0.0, 0.0, 1.0, 1.0);
+        // The clip's own part of `Im0`, and that part a pixel wider each way.
+        let (clip, slack) = ((0.125, 0.25, 0.625, 0.75), (0.1125, 0.225, 0.6375, 0.775));
+
+        let page = asked(
+            Canvas::new(120, 100, PixelFormat::Rgb8, Color::WHITE),
+            (120, 100),
+        );
+        assert_eq!(page.len(), 3);
+        near(page[0].1.reach, whole, "the page reaches all of Im0");
+        near(page[0].1.visible, whole, "and shows all of it");
+        near(
+            page[1].1.reach,
+            whole,
+            "a run's member reaches past the clip",
+        );
+        between(page[1].1.visible, clip, slack, "the clip shows its part");
+        near(page[2].1.reach, whole, "the page reaches all of Im1");
+
+        // Device (41, 60) to (78, 83): user (20.5, 8.5) to (39, 20), so u
+        // from 0.3875 to 0.85 and v from 0.175 to 0.75 of Im0; Im1, from
+        // device y 20 to 40, it misses.
+        let tile = asked(
+            Canvas::new(37, 23, PixelFormat::Rgb8, Color::WHITE).at_origin(41, 60),
+            (120, 100),
+        );
+        near(
+            tile[0].1.reach,
+            (0.3875, 0.175, 0.85, 0.75),
+            "the tile's part",
+        );
+        near(tile[0].1.visible, (0.3875, 0.175, 0.85, 0.75), "shown");
+        between(
+            tile[1].1.visible,
+            (0.3875, 0.25, 0.625, 0.75),
+            (0.3875, 0.225, 0.6375, 0.75),
+            "the tile and the clip",
+        );
+        assert!(
+            tile[2].1.reach.is_some_and(|area| area.is_empty()),
+            "the tile reaches none of Im1: {:?}",
+            tile[2].1.reach
+        );
+
+        // A page past `MAX_IMAGE_RUN_PIXELS` draws each image on its own.
+        let large = asked(
+            Canvas::new(120, 100, PixelFormat::Rgb8, Color::WHITE),
+            (5_000, 4_000),
+        );
+        between(
+            large[1].1.reach,
+            clip,
+            slack,
+            "a draw alone reaches what it shows",
+        );
+        between(large[1].1.visible, clip, slack, "and shows its part");
+
+        // Im1's square turned a quarter: a tile over device (40, 20) to (70,
+        // 30), user (20, 35) to (35, 40), is u from a half to one along the
+        // turned height and v from a half to one along the turned width.
+        let turned = asked(
+            Canvas::new(30, 10, PixelFormat::Rgb8, Color::WHITE).at_origin(40, 20),
+            (120, 100),
+        );
+        near(
+            turned[2].1.reach,
+            (0.5, 0.5, 1.0, 1.0),
+            "turned with the image",
+        );
+        assert!(UnitArea::of_device(
+            &Matrix {
+                a: 0.0,
+                b: 0.0,
+                c: 0.0,
+                d: 0.0,
+                e: 0.0,
+                f: 0.0,
+            },
+            (0.0, 0.0, 1.0, 1.0)
+        )
+        .is_none());
     }
 
     /// One image under two names: `Im0` three by two samples standing for a
@@ -7561,6 +7849,7 @@ mod tests {
                 reduced,
                 family: ColorFamily::Rgb,
                 soft_masked: false,
+                window: None,
             }))
         }
     }
@@ -7972,6 +8261,7 @@ mod tests {
                         ColorFamily::Rgb
                     },
                     soft_masked: false,
+                    window: None,
                 }));
             }
             let mut rgb = Vec::new();
@@ -7996,6 +8286,7 @@ mod tests {
                     ColorFamily::Rgb
                 },
                 soft_masked: false,
+                window: None,
             }))
         }
     }
@@ -9942,6 +10233,7 @@ mod tests {
                 alpha: Vec::new(),
                 two_colour: None,
                 reduced: None,
+                window: None,
             }))
         }
     }
@@ -10331,6 +10623,7 @@ mod snapshot_tests {
                 alpha: Vec::new(),
                 two_colour: None,
                 reduced: None,
+                window: None,
             }))
         }
     }

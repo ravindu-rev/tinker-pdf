@@ -640,6 +640,7 @@ pub fn scale(layout: &Layout, data: &[u8], width: u32, height: u32) -> Option<(L
             rgb: plane,
             alpha: &alphas,
             two_colour: None,
+            window: None,
         };
         let first = group * 3;
         let count = (colours - first).min(3);

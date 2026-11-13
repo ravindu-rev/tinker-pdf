@@ -41,6 +41,37 @@ pub struct ImageSource<'a> {
     /// colours, held at one byte a sample in place of `rgb` and `alpha`.
     /// `None` for an image of three bytes a sample.
     pub two_colour: Option<TwoColour<'a>>,
+    /// The rectangle of the image the buffers hold, where they hold less
+    /// than all of it; `None` where they hold every sample.
+    ///
+    /// The image is still [`Self::width`] by [`Self::height`]: the sampling
+    /// policy, the plans and every tap are worked out over the whole of it,
+    /// in its own sample coordinates, exactly as for the image held whole, and
+    /// only the read of a sample subtracts the window's corner — an integer
+    /// subtraction, which cannot round (ruling 5's reasoning, applied to the
+    /// samples). A sample outside the window reads the nearest one inside
+    /// it: a stand-in only a pixel the caller cannot show reads, since the
+    /// caller widens the window by the sampler's reach around every pixel it
+    /// can (`docs/design/jpx-speed.md`, "The margin a region needs for
+    /// ruling 5"), and one that keeps every pixel of the image's square
+    /// covered, so a run of images decides what it overlaps as it would over
+    /// the whole image. Rows of the buffers are the window's, `width` samples
+    /// each.
+    pub window: Option<SourceWindow>,
+}
+
+/// A rectangle of an image's samples: `width` by `height` of them from column
+/// `x` and row `y`, counted from its top-left corner ([`ImageSource::window`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct SourceWindow {
+    /// The first column held.
+    pub x: u32,
+    /// The first row held.
+    pub y: u32,
+    /// Columns held.
+    pub width: u32,
+    /// Rows held.
+    pub height: u32,
 }
 
 /// An image of two colours, held as one byte a sample: a bilevel scan, a
@@ -70,13 +101,31 @@ impl ImageSource<'_> {
     /// one and not the other is exactly the divergence ruling 4 exists to
     /// catch: a wrapping multiply would read a different sample on one target
     /// and the same document would render differently there.
+    ///
+    /// A windowed source answers for every sample of the image: one inside
+    /// the window from its own buffers, one outside from the nearest inside
+    /// ([`Self::window`]); an empty window holds nothing.
     fn index(&self, x: u32, y: u32) -> Option<usize> {
         if x >= self.width || y >= self.height {
             return None;
         }
-        (y as usize)
-            .checked_mul(self.width as usize)?
-            .checked_add(x as usize)
+        let Some(window) = self.window else {
+            return (y as usize)
+                .checked_mul(self.width as usize)?
+                .checked_add(x as usize);
+        };
+        if window.width == 0 || window.height == 0 {
+            return None;
+        }
+        let clamp = |at: u32, start: u32, size: u32| {
+            let last = u64::from(start) + u64::from(size) - 1;
+            // In `u64`, since a corner plus a size may pass `u32`; the result
+            // is at most `at`, which fits.
+            u64::from(at).clamp(u64::from(start), last.max(u64::from(start))) - u64::from(start)
+        };
+        let column = usize::try_from(clamp(x, window.x, window.width)).ok()?;
+        let row = usize::try_from(clamp(y, window.y, window.height)).ok()?;
+        row.checked_mul(window.width as usize)?.checked_add(column)
     }
 
     /// The sample at `(x, y)`, or `None` where the buffer stops short: for a
@@ -412,6 +461,9 @@ struct Level {
     /// averaging, and a sample the original did not supply has to average as
     /// absent rather than as black.
     alpha: Vec<u8>,
+    /// The rectangle of the level its samples hold, a windowed image's
+    /// window halved ([`halve`]); `None` for a level of a whole image.
+    window: Option<SourceWindow>,
 }
 
 impl Level {
@@ -422,6 +474,7 @@ impl Level {
             rgb: &self.rgb,
             alpha: &self.alpha,
             two_colour: None,
+            window: self.window,
         }
     }
 }
@@ -439,10 +492,12 @@ impl Level {
 /// and leaves them here; nothing is retained between calls, so how long a
 /// pyramid lives — and whether a second draw of the same image reuses one — is
 /// a decision phase 08 makes, where an image's lifetime is known. A pyramid
-/// handed an image of different dimensions rebuilds rather than reusing.
+/// handed an image of different dimensions, or of another window, rebuilds
+/// rather than reusing.
 #[derive(Clone, Debug, Default)]
 pub struct Pyramid {
     source: (u32, u32),
+    window: Option<SourceWindow>,
     levels: Vec<Level>,
 }
 
@@ -468,9 +523,10 @@ impl Pyramid {
     /// Builds whatever is missing to reach `halvings`, and answers with the
     /// image to sample.
     fn reduce<'a>(&'a mut self, source: &ImageSource<'a>, halvings: (u32, u32)) -> ImageSource<'a> {
-        if self.source != (source.width, source.height) {
+        if self.source != (source.width, source.height) || self.window != source.window {
             self.levels.clear();
             self.source = (source.width, source.height);
+            self.window = source.window;
         }
 
         // The canonical path: every halving of x first, then every halving of
@@ -518,6 +574,13 @@ impl Pyramid {
 /// each channel's mean half up is not linear in coverage — a halved pair of
 /// two colours holds each channel's rounded midpoint, not a third weight — so
 /// a two-colour image that reduces is sampled as its RGB expansion would be.
+///
+/// A windowed source halves its window alone, into the level's window: the
+/// pairs from the one its first sample is in to the one its last is in, each
+/// the whole image's pair — samples `2x` and `2x + 1` — so a level of a window
+/// whose edges lie on a multiple of two is the same samples as the whole
+/// image's level over it, and one whose edge cuts a pair takes the pair's far
+/// sample from the nearest held, as every read of a window does.
 fn halve(source: &ImageSource<'_>, halvings: (u32, u32)) -> Level {
     let horizontal = halvings.1 == 0;
     let width = if horizontal {
@@ -530,13 +593,37 @@ fn halve(source: &ImageSource<'_>, halvings: (u32, u32)) -> Level {
     } else {
         source.height.div_ceil(2).max(1)
     };
+    let window = source.window.map(|held| {
+        if held.width == 0 || held.height == 0 {
+            return SourceWindow::default();
+        }
+        // The pairs the held samples reach, in `u64` since a corner plus a
+        // size may pass `u32`, and never past the level's own edge.
+        let halved = |start: u32, size: u32, extent: u32| {
+            let first = start / 2;
+            let end = (u64::from(start) + u64::from(size))
+                .div_ceil(2)
+                .min(u64::from(extent));
+            (first, (end as u32).saturating_sub(first))
+        };
+        if horizontal {
+            let (x, width) = halved(held.x, held.width, width);
+            SourceWindow { x, width, ..held }
+        } else {
+            let (y, height) = halved(held.y, held.height, height);
+            SourceWindow { y, height, ..held }
+        }
+    });
+    let (x0, y0, columns, rows) = window.map_or((0, 0, width, height), |held| {
+        (held.x, held.y, held.width, held.height)
+    });
 
-    let samples = (width as usize).saturating_mul(height as usize);
+    let samples = (columns as usize).saturating_mul(rows as usize);
     let mut rgb = Vec::with_capacity(samples.saturating_mul(3));
     let mut alpha = Vec::with_capacity(samples);
 
-    for y in 0..height {
-        for x in 0..width {
+    for y in (0..rows).map(|row| y0 + row) {
+        for x in (0..columns).map(|column| x0 + column) {
             let (first, second) = if horizontal {
                 ((x * 2, y), (x * 2 + 1, y))
             } else {
@@ -568,6 +655,7 @@ fn halve(source: &ImageSource<'_>, halvings: (u32, u32)) -> Level {
         height,
         rgb,
         alpha,
+        window,
     }
 }
 
@@ -1712,6 +1800,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let mut canvas = Canvas::new(64, 64, PixelFormat::Rgb8, Color::WHITE);
         for (e, f) in [(5000.0, 0.0), (-5000.0, 0.0), (0.0, 5000.0), (0.0, -5000.0)] {
@@ -1749,6 +1838,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         // The image's own square: 50 by 30 pixels at (4, 6), its first row at
         // the top.
@@ -1848,6 +1938,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         // A quarter of a turn and a bit, with a translation off the grid.
         let placement = Transform {
@@ -1913,6 +2004,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let placement = Transform {
             a: 20.0,
@@ -1998,6 +2090,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let upright = Transform {
             a: 5.5,
@@ -2102,6 +2195,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let render = |placement: Transform, edge_rule: HardEdge| {
             let mut canvas = Canvas::new(12, 12, PixelFormat::Rgb8, Color::WHITE);
@@ -2178,6 +2272,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         draw(&mut canvas, &image, over(8.0));
@@ -2200,6 +2295,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let mut canvas = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
         draw(
@@ -2226,6 +2322,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[0, 255, 0, 255],
             two_colour: None,
+            window: None,
         };
         let mut canvas = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
         draw(&mut canvas, &image, over(4.0));
@@ -2243,6 +2340,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[0, 255, 0, 255],
             two_colour: None,
+            window: None,
         };
         let mut canvas = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(4.0));
@@ -2271,6 +2369,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[255],
             two_colour: None,
+            window: None,
         };
         let rich = Some([255, 255, 255, 255]);
         let at = |canvas: &Canvas| canvas.data[..5].to_vec();
@@ -2337,6 +2436,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         draw(&mut canvas, &image, over(8.0));
@@ -2357,6 +2457,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(8.0));
@@ -2399,6 +2500,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         // Eight device pixels per axis for two samples: 4x. The footprint is a
         // quarter of a sample, so the average has one sample to take except on
@@ -2430,6 +2532,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
 
         let distinct = |interpolate: bool| {
@@ -2467,6 +2570,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(8.0));
@@ -2497,6 +2601,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         for step in 0..16 {
             let u = 0.5 / 16.0 + f64::from(step) / 16.0;
@@ -2541,6 +2646,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
 
         let row = |interpolate: bool| {
@@ -2599,6 +2705,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
 
         // 16 samples into 8 device pixels: exactly 2:1, which the pyramid
@@ -2646,6 +2753,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let squash = Transform {
             a: 8.0,
@@ -2694,6 +2802,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
 
         let sampling = sampling_for(&image, &over(16.0), false);
@@ -2749,6 +2858,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
 
         let mut pyramid = Pyramid::new();
@@ -2787,6 +2897,7 @@ mod tests {
             rgb: &other,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         // Also past `PYRAMID_ABOVE`, and deliberately so: below it a draw
         // reduces nothing, and a pyramid with no levels would prove nothing
@@ -2845,6 +2956,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let level = halve(&image, (1, 0));
         assert_eq!((level.width, level.height), (2, 1));
@@ -3141,6 +3253,7 @@ mod tests {
                     rgb: &rgb,
                     alpha: &[],
                     two_colour: None,
+                    window: None,
                 },
                 // Two thirds of the samples the dimensions claim.
                 ImageSource {
@@ -3149,6 +3262,7 @@ mod tests {
                     rgb: &rgb[..rgb.len() * 2 / 3],
                     alpha: &[],
                     two_colour: None,
+                    window: None,
                 },
                 // Alpha for the first half of them, opaque after.
                 ImageSource {
@@ -3157,6 +3271,7 @@ mod tests {
                     rgb: &rgb,
                     alpha: &alpha[..alpha.len().div_ceil(2)],
                     two_colour: None,
+                    window: None,
                 },
             ];
             for source in sources {
@@ -3241,6 +3356,7 @@ mod tests {
                 rgb: &rgb,
                 alpha: &alpha,
                 two_colour: None,
+                window: None,
             };
             for placement in turned {
                 for interpolate in [false, true] {
@@ -3286,6 +3402,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let rect = (0, 0, 128, 128);
         for (w, h, interpolate) in [(13.3, 10.0, false), (97.0, 71.3, true)] {
@@ -3346,6 +3463,7 @@ mod tests {
             rgb: &rgb,
             alpha: &alpha,
             two_colour: None,
+            window: None,
         };
         let placement = Transform {
             a: 37.3,
@@ -3440,6 +3558,7 @@ mod tests {
             rgb: &[],
             alpha: &[],
             two_colour: Some(TwoColour { samples, colours }),
+            window: None,
         }
     }
 
@@ -3617,6 +3736,7 @@ mod tests {
                                     rgb: &rgb,
                                     alpha: &alpha,
                                     two_colour: None,
+                                    window: None,
                                 },
                                 ..draw_two
                             };
@@ -3692,6 +3812,7 @@ mod tests {
                                 rgb: &rgb,
                                 alpha: &alpha,
                                 two_colour: None,
+                                window: None,
                             },
                             ..draw_two
                         };
@@ -3736,6 +3857,7 @@ mod tests {
                         rgb: &rgb,
                         alpha: &alpha,
                         two_colour: None,
+                        window: None,
                     };
                     for step_u in 0..=16 {
                         for step_v in 0..=16 {
@@ -3792,6 +3914,7 @@ mod tests {
             rgb: &rgb,
             alpha: &alpha,
             two_colour: None,
+            window: None,
         };
         let count = |source: ImageSource<'_>, placement: Transform, interpolate: bool| {
             SUMMED.with(|summed| summed.set((0, 0)));
@@ -3978,6 +4101,7 @@ mod tests {
                 rgb: &rgb,
                 alpha: if with_alpha { &alpha } else { &[] },
                 two_colour: None,
+                window: None,
             };
             for (dw, dh) in [
                 (6, 3),
@@ -4021,6 +4145,7 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         let mut emitted = 0;
         assert!(!resample(&one, 0, 4, |_, _, _| emitted += 1));
@@ -4033,6 +4158,7 @@ mod tests {
             rgb: &[],
             alpha: &[],
             two_colour: None,
+            window: None,
         };
         assert!(!resample(&vast, 1, 1, |_, _, _| emitted += 1));
         assert_eq!(emitted, 0);
@@ -4042,5 +4168,329 @@ mod tests {
             assert_eq!(got, (1, 2, 3, 255));
         }));
         assert_eq!(emitted, 6);
+    }
+
+    // ---- windows (`ImageSource::window`) ------------------------------------
+
+    /// `image`'s rectangle `window`, three bytes a sample and one of alpha
+    /// where it has alpha, row by row: the buffers a windowed source holds.
+    fn cropped(image: &ImageSource<'_>, window: SourceWindow) -> (Vec<u8>, Vec<u8>) {
+        let (mut rgb, mut alpha) = (Vec::new(), Vec::new());
+        for y in window.y..window.y + window.height {
+            for x in window.x..window.x + window.width {
+                let at = (y * image.width + x) as usize;
+                rgb.extend_from_slice(&image.rgb[at * 3..at * 3 + 3]);
+                if !image.alpha.is_empty() {
+                    alpha.push(image.alpha[at]);
+                }
+            }
+        }
+        (rgb, alpha)
+    }
+
+    /// **A sample outside a window reads the nearest inside it**, and one
+    /// inside reads its own place in the window's rows; a read off the image
+    /// is still none, and an empty window holds nothing.
+    #[test]
+    fn a_window_reads_its_own_samples_and_the_nearest_outside_itself() {
+        let (width, height) = (9u32, 7u32);
+        let rgb: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
+        let whole = ImageSource {
+            width,
+            height,
+            rgb: &rgb,
+            alpha: &[],
+            two_colour: None,
+            window: None,
+        };
+        let window = SourceWindow {
+            x: 2,
+            y: 3,
+            width: 4,
+            height: 2,
+        };
+        let (held, _) = cropped(&whole, window);
+        let windowed = ImageSource {
+            rgb: &held,
+            window: Some(window),
+            ..whole
+        };
+        for y in 0..height {
+            for x in 0..width {
+                let nearest = (x.clamp(2, 5), y.clamp(3, 4));
+                assert_eq!(
+                    windowed.texel(x, y),
+                    whole.texel(nearest.0, nearest.1),
+                    "({x}, {y}) reads ({}, {})",
+                    nearest.0,
+                    nearest.1
+                );
+            }
+        }
+        assert_eq!(windowed.texel(width, 0), None, "off the image");
+        assert_eq!(windowed.texel(0, height), None, "off the image");
+        let empty = ImageSource {
+            rgb: &[],
+            window: Some(SourceWindow {
+                x: 3,
+                y: 3,
+                width: 0,
+                height: 2,
+            }),
+            ..whole
+        };
+        assert_eq!(empty.texel(3, 3), None, "an empty window holds nothing");
+        // A window whose corner is past the image is read from the samples
+        // it was given, never past them.
+        let past = ImageSource {
+            rgb: &held,
+            window: Some(SourceWindow {
+                x: u32::MAX - 1,
+                y: 0,
+                width: 4,
+                height: 2,
+            }),
+            ..whole
+        };
+        assert_eq!(past.texel(0, 0), Some((held[0], held[1], held[2], 255)));
+    }
+
+    /// **A window halves to the whole image's level over it**: halving a
+    /// window whose edges lie on even samples, or on the image's own far edge,
+    /// gives the very samples halving the whole image gives over the window's
+    /// halves, alpha included; and the level's window is those halves.
+    #[test]
+    fn a_window_halves_to_the_whole_images_level_over_it() {
+        let (width, height) = (23u32, 17u32);
+        let rgb = noise((width * height * 3) as usize, 7);
+        let alpha = noise((width * height) as usize, 8);
+        let whole = ImageSource {
+            width,
+            height,
+            rgb: &rgb,
+            alpha: &alpha,
+            two_colour: None,
+            window: None,
+        };
+        for window in [
+            SourceWindow {
+                x: 4,
+                y: 2,
+                width: 10,
+                height: 8,
+            },
+            // To the image's odd far corner, whose last sample has no partner.
+            SourceWindow {
+                x: 14,
+                y: 8,
+                width: 9,
+                height: 9,
+            },
+            SourceWindow {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+        ] {
+            let (held_rgb, held_alpha) = cropped(&whole, window);
+            let windowed = ImageSource {
+                rgb: &held_rgb,
+                alpha: &held_alpha,
+                window: Some(window),
+                ..whole
+            };
+            for halvings in [(1, 0), (0, 1)] {
+                let all = halve(&whole, halvings);
+                let part = halve(&windowed, halvings);
+                assert_eq!(
+                    (part.width, part.height),
+                    (all.width, all.height),
+                    "{window:?} {halvings:?}: the level's own size"
+                );
+                let held = part.window.expect("a window's level is a window");
+                let want = if halvings.0 == 1 {
+                    SourceWindow {
+                        x: window.x / 2,
+                        width: (window.x + window.width).div_ceil(2) - window.x / 2,
+                        ..window
+                    }
+                } else {
+                    SourceWindow {
+                        y: window.y / 2,
+                        height: (window.y + window.height).div_ceil(2) - window.y / 2,
+                        ..window
+                    }
+                };
+                assert_eq!(held, want, "{window:?} {halvings:?}: the window halved");
+                for y in held.y..held.y + held.height {
+                    for x in held.x..held.x + held.width {
+                        assert_eq!(
+                            part.source().texel(x, y),
+                            all.source().texel(x, y),
+                            "{window:?} {halvings:?}: ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where a draw's pixel reads samples: its centre mapped into the image,
+    /// in the image's own sample coordinates, columns from the left and rows
+    /// from the top.
+    fn read_at(t: &Transform, image: &ImageSource<'_>, px: i32, py: i32) -> (f64, f64) {
+        let (u, v) = centre(&t.invert().expect("invertible"), px, py);
+        (
+            u * f64::from(image.width),
+            (1.0 - v) * f64::from(image.height),
+        )
+    }
+
+    /// **A window draws what the whole image draws wherever it holds what a
+    /// pixel reads** (`ImageSource::window`): every pixel the whole image's
+    /// walk hands on, a windowed walk hands on with the same coverage and the
+    /// same alpha — the window reads its nearest sample where it holds none,
+    /// so a run accumulating it holds what it would of the whole image — and
+    /// with the same colour wherever the pixel's reach, its filter's
+    /// footprint and two samples beside it at the level it samples, lies in
+    /// the window or runs off the image's own edge with it. Magnified, at one
+    /// sample a pixel, minified within the exact area filter and past 128:1,
+    /// where the pyramid reduces a window whose edges lie on its levels'
+    /// samples; flipped and at fractional offsets; with and without
+    /// `/Interpolate`.
+    #[test]
+    fn a_window_draws_the_whole_image_wherever_it_holds_the_samples_a_pixel_reads() {
+        let mut compared = 0usize;
+        let small: &[SourceWindow] = &[
+            SourceWindow {
+                x: 13,
+                y: 9,
+                width: 30,
+                height: 22,
+            },
+            SourceWindow {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 47,
+            },
+            SourceWindow {
+                x: 40,
+                y: 20,
+                width: 21,
+                height: 27,
+            },
+            SourceWindow {
+                x: 7,
+                y: 30,
+                width: 54,
+                height: 11,
+            },
+        ];
+        // On the level six halvings make of the 2 560 columns: edges on
+        // multiples of 64.
+        let large: &[SourceWindow] = &[
+            SourceWindow {
+                x: 640,
+                y: 0,
+                width: 1280,
+                height: 20,
+            },
+            SourceWindow {
+                x: 0,
+                y: 4,
+                width: 1536,
+                height: 12,
+            },
+        ];
+        let cases: [((u32, u32), &[(f64, f64)], &[SourceWindow]); 2] = [
+            (
+                (61, 47),
+                &[(3.0, 2.5), (1.0, 1.0), (0.59, 0.71), (0.37, 0.43)],
+                small,
+            ),
+            // Past 128:1 across, 2 560 samples into sixteen pixels, and 2:1
+            // down.
+            ((2560, 20), &[(16.0 / 2560.0, 0.5)], large),
+        ];
+        for (index, ((width, height), scales, windows)) in cases.into_iter().enumerate() {
+            let rgb = noise((width * height * 3) as usize, 40 + index as u32);
+            let whole = ImageSource {
+                width,
+                height,
+                rgb: &rgb,
+                alpha: &[],
+                two_colour: None,
+                window: None,
+            };
+            for &(sx, sy) in scales {
+                let (w, h) = (f64::from(width) * sx, f64::from(height) * sy);
+                for (flip, interpolate) in [(false, false), (true, false), (false, true)] {
+                    let t = Transform {
+                        a: if flip { -w } else { w },
+                        b: 0.0,
+                        c: 0.0,
+                        d: -h,
+                        e: if flip { 2.37 + w } else { 2.37 },
+                        f: 1.61 + h,
+                    };
+                    let sampling = sampling_for(&whole, &t, interpolate);
+                    if index == 1 {
+                        assert_eq!(sampling.halvings, (6, 0), "the pyramid reduces");
+                    }
+                    let reach = |footprint: u64, halvings: u32| {
+                        (footprint.div_ceil(1 << 16) as f64 + 2.0) * f64::from(1u32 << halvings)
+                    };
+                    let (rx, ry) = (
+                        reach(sampling.footprint.0, sampling.halvings.0),
+                        reach(sampling.footprint.1, sampling.halvings.1),
+                    );
+                    let rect = (0, 0, (w.abs() + 6.0) as u32, (h.abs() + 6.0) as u32);
+                    let mut draw = ImageDraw::new(whole, t);
+                    draw.interpolate = interpolate;
+                    let all = planned_walk(&draw, rect);
+                    for &window in windows {
+                        let (held, _) = cropped(&whole, window);
+                        let windowed = ImageSource {
+                            rgb: &held,
+                            window: Some(window),
+                            ..whole
+                        };
+                        let what = format!(
+                            "{width}x{height} at {sx}x{sy}, flipped {flip}, interpolate \
+                             {interpolate}, {window:?}"
+                        );
+                        let part = planned_walk(
+                            &ImageDraw {
+                                image: windowed,
+                                ..draw
+                            },
+                            rect,
+                        );
+                        assert_eq!(all.len(), part.len(), "{what}: the pixels handed on");
+                        let inside = |at: f64, r: f64, start: u32, size: u32, extent: u32| {
+                            (start == 0 || at - r >= f64::from(start))
+                                && (start + size == extent || at + r <= f64::from(start + size))
+                        };
+                        for (a, b) in all.iter().zip(&part) {
+                            assert_eq!(
+                                (a.0, a.1, a.3, a.4),
+                                (b.0, b.1, b.3, b.4),
+                                "{what}: where, the coverage and the alpha"
+                            );
+                            let (x, y) = read_at(&t, &whole, a.0, a.1);
+                            if inside(x, rx, window.x, window.width, width)
+                                && inside(y, ry, window.y, window.height, height)
+                            {
+                                assert_eq!(a.2, b.2, "{what}: the colour at ({}, {})", a.0, a.1);
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 10_000, "{compared} pixels compared");
     }
 }
