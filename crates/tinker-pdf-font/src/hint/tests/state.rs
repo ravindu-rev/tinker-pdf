@@ -2,7 +2,7 @@
 //! loop, the round states and what rounds by them, the distance and delta
 //! settings, and the dropout state `SCANCTRL` and `SCANTYPE` set.
 
-use super::{machine, op, program, push};
+use super::{machine, model_round, nearest, op, program, push};
 use crate::hint::state::{Dropout, GraphicsState, Point, Round, Vector, Zone};
 use crate::hint::storage::Size;
 use crate::hint::vm::{Error, Program, Vm};
@@ -424,35 +424,6 @@ fn reference_points_zones_and_the_loop_are_set_as_specified() {
     );
     assert_eq!(machine().zone(1).map(Zone::len), Some(0), "no glyph yet");
     assert!(machine().zone(2).is_none());
-}
-
-/// The value `n` rounds to under a period, phase and threshold, found as
-/// *SROUND* describes the mapping: for `n` at or above zero, the round value
-/// `phase + k · period` whose part of the domain — the threshold before it
-/// and the rest of a period after — holds `n`, the phase where that value is
-/// below zero; for a negative `n`, `-n`'s negated.
-fn model_round(n: i32, period: i64, phase: i64, threshold: i64) -> i32 {
-    let m = i64::from(n).abs();
-    let mut k = (m + threshold - phase) / period - 2;
-    let rounded = loop {
-        let r = phase + k * period;
-        if r - threshold <= m && m < r - threshold + period {
-            break r;
-        }
-        k += 1;
-    };
-    let rounded = if rounded < 0 { phase } else { rounded };
-    (if n < 0 { -rounded } else { rounded }) as i32
-}
-
-/// `numerator / denominator` to the nearest whole, a half away from zero.
-fn nearest(numerator: i64, denominator: i64) -> i64 {
-    let q = (2 * numerator.abs() + denominator) / (2 * denominator);
-    if numerator < 0 {
-        -q
-    } else {
-        q
-    }
 }
 
 #[test]

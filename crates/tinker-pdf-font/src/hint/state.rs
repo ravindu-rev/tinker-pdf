@@ -18,9 +18,9 @@ pub struct Point {
 }
 
 /// A point's flags: on the curve, and touched along each axis.
-const ON_CURVE: u8 = 1;
-const TOUCHED_X: u8 = 2;
-const TOUCHED_Y: u8 = 4;
+pub(super) const ON_CURVE: u8 = 1;
+pub(super) const TOUCHED_X: u8 = 2;
+pub(super) const TOUCHED_Y: u8 = 4;
 
 /// One of the two zones a program's points live in: zone 1 the glyph, its
 /// contour points and the phantom points after them; zone 0 the twilight
@@ -31,11 +31,11 @@ const TOUCHED_Y: u8 = 4;
 /// — its on-curve flag, and whether it has been touched across and up.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Zone {
-    current: Vec<Point>,
-    original: Vec<Point>,
-    flags: Vec<u8>,
+    pub(super) current: Vec<Point>,
+    pub(super) original: Vec<Point>,
+    pub(super) flags: Vec<u8>,
     /// Each contour's last point, increasing.
-    ends: Vec<usize>,
+    pub(super) ends: Vec<usize>,
 }
 
 impl Zone {

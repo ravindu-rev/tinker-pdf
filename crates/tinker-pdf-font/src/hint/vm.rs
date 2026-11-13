@@ -212,6 +212,8 @@ pub enum Error {
     LoopCount(i32),
     /// `SROUND` or `S45ROUND` of the reserved period, bits 7 and 6 set.
     ReservedPeriod(i32),
+    /// A move with the freedom vector orthogonal to the projection vector.
+    OrthogonalVectors,
 }
 
 impl core::fmt::Display for Error {
@@ -244,6 +246,12 @@ impl core::fmt::Display for Error {
             Error::PointIndex(n) => write!(f, "point {n} is past its zone"),
             Error::LoopCount(n) => write!(f, "SLOOP of {n}"),
             Error::ReservedPeriod(n) => write!(f, "round state {n:#x} has the reserved period"),
+            Error::OrthogonalVectors => {
+                write!(
+                    f,
+                    "a move along a freedom vector orthogonal to the projection vector"
+                )
+            }
         }
     }
 }
@@ -518,6 +526,10 @@ impl Vm {
             | 0x7C..=0x7E
             | 0x85..=0x87
             | 0x8D => self.set_state(op)?,
+            // GC, SCFS, MD, MDAP, MIAP, MSIRP, MDRP, MIRP.
+            0x46..=0x4A | 0x2E | 0x2F | 0x3E | 0x3F | 0x3A | 0x3B | 0xC0..=0xFF => {
+                self.measure_or_move(op)?;
+            }
             _ => self.undefined(op, stop)?,
         }
         Ok(at + 1)

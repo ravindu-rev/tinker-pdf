@@ -22,9 +22,11 @@
 //! - [`storage`]: the storage area, the control value table, and the
 //!   answers a program asks of its engine, at a [`Size`].
 //! - [`state`]: the zones and their points, and the graphics state.
+//! - `moves`: measuring points and moving them along the vectors.
 
 pub mod fixed;
 mod flow;
+mod moves;
 pub mod state;
 pub mod storage;
 pub mod vm;

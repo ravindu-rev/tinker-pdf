@@ -245,10 +245,16 @@ each with its current position, its original position (the scaled, unhinted
 point), its on-curve flag and a touched flag for each axis, and the contours'
 end points. **Zone 0**, the twilight zone, holds `maxTwilightPoints` points
 (`maxp`), all at the origin, their original positions the origin too until a
-move sets them (`MIAP` and `MIRP` in zone 0 set the original position with the
-current, this engine's choice where the specification is silent). A point
-index past its zone, a contour index past the glyph and a zone number other
-than 0 and 1 are errors.
+move sets them. A point `MIAP`, `MIRP`, `MSIRP` or `SCFS` moves in zone 0 takes
+its new position as its original too, and `MIAP` and `MIRP` take such a
+point's original measurement — the coordinate `MIAP`'s cut-in test compares,
+the distance `MIRP`'s does — to be the CVT value's, since it has no outline to
+measure. That is this engine's choice where the specifications say only that
+these instructions "create" twilight points, and that a new reference to one
+"will create a completely new position that has nothing to do with the
+previous position of the point" (Apple's manual, chapter 2). A point index
+past its zone, a contour index past the glyph and a zone number other than 0
+and 1 are errors.
 
 **The phantom points** follow the contour points, as the OpenType text places
 them: `n` at the horizontal origin, `xMin` less the left side bearing; `n+1`
@@ -294,6 +300,37 @@ manual gives √2), so its periods are √2/4, √2/2 and √2 pixels, each to t
 nearest 64th — 23, 45 and 91 — and its gridPeriod 45, every part taken half
 away from zero to a 64th. `ODD` and `EVEN` test the whole pixel at or below
 the rounded value.
+
+### Measuring and moving
+
+`GC[a]` and `MD[a]` measure the current outline on the projection vector for
+`a = 0` and the original one on the dual projection vector for `a = 1`, as
+both specifications' flag tables give it where their prose and figures
+disagree; `MD`'s distance runs from the point popped second, in `zp0`'s zone,
+to the one popped first, in `zp1`'s. Every instruction that moves a point
+touches it on each axis the freedom vector has a component along, whether or
+not the move is zero ("Whenever an instruction has the effect of moving a
+point, that point is marked as touched", *Instructing TrueType Glyphs*), and
+`MDAP[0]` touches without moving.
+
+- **The cut-in test** uses the outline's measurement where it and the CVT
+  value differ by more than the control value cut-in, and the CVT value
+  otherwise, at equality too, as *Instructing TrueType Glyphs*' table of the
+  cut-in shows. `MIAP` measures the point's original coordinate on the
+  projection vector; `MIRP` the original distance from `rp0` on the dual.
+- **The single width** replaces a distance whose magnitude is within the
+  single width cut-in of it, keeping the distance's sign: `MDRP`'s original
+  distance, `MIRP`'s CVT value.
+- **Auto flip** makes `MIRP`'s CVT value take the original distance's sign,
+  zero counting as positive. It touches no other instruction: the OpenType
+  text's `FLIPON` and `FLIPOFF` name `MIRP` alone, and `MIAP`'s CVT value is
+  a coordinate, whose sign means where it is.
+- **`MIRP`** takes the CVT value, its single width, auto flip, then — where
+  `c` is set — the cut-in test and the round state; **`MDRP`** the original
+  distance, its single width, then the round state where `c` is set; each
+  then keeps the minimum distance where `b` is set, in the distance's own
+  direction, a distance of zero taking the original distance's, this
+  engine's choice. `MSIRP` keeps its distance as popped.
 
 ### The pipeline
 

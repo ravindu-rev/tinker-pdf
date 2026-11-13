@@ -6,6 +6,7 @@
 //! back from the interpreter.
 
 mod flow;
+mod moves;
 mod stack;
 mod state;
 mod storage;
@@ -211,6 +212,35 @@ pub(super) fn run_on(stack: &[i32], code: &[u8]) -> Result<Vec<i32>, Error> {
     let mut vm = machine();
     vm.run_on(stack, code, Program::Glyph)?;
     Ok(vm.stack().to_vec())
+}
+
+/// The value `n` rounds to under a period, phase and threshold, found as
+/// *SROUND* describes the mapping: for `n` at or above zero, the round value
+/// `phase + k · period` whose part of the domain — the threshold before it
+/// and the rest of a period after — holds `n`, the phase where that value is
+/// below zero; for a negative `n`, `-n`'s negated.
+pub(super) fn model_round(n: i32, period: i64, phase: i64, threshold: i64) -> i32 {
+    let m = i64::from(n).abs();
+    let mut k = (m + threshold - phase) / period - 2;
+    let rounded = loop {
+        let r = phase + k * period;
+        if r - threshold <= m && m < r - threshold + period {
+            break r;
+        }
+        k += 1;
+    };
+    let rounded = if rounded < 0 { phase } else { rounded };
+    (if n < 0 { -rounded } else { rounded }) as i32
+}
+
+/// `numerator / denominator` to the nearest whole, a half away from zero.
+pub(super) fn nearest(numerator: i64, denominator: i64) -> i64 {
+    let q = (2 * numerator.abs() + denominator) / (2 * denominator);
+    if numerator < 0 {
+        -q
+    } else {
+        q
+    }
 }
 
 /// A small deterministic generator, so a sweep is the same on every run.
