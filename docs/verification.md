@@ -1880,6 +1880,39 @@ live, and it holds what they stand on.
   are in the determinism roster ([determinism](features/determinism.md)), and a
   guard a row lands later joins the roster in that row's commit.
 
+## The producers' linearity census
+
+Every producer that turns an input into a PDF is held to work linear in that
+input, counted rather than timed. `crates/tinker-pdf/tests/producer_work.rs`
+runs six of them at two sizes of their input ten times apart: a generated book
+of 100 and of 1 000 chapters (`epub_support/book.rs`'s `generated_book`, MS-04's
+layout group's shape), an HTML report through `FromHtml` and a Markdown
+document of 20 and 200 sections, an SVG of 100 and 1 000 shapes on one page,
+and an XPS package and a CBZ of 10 and 100 pages. Each is run end to end as a
+reader meets it — produced, its pages counted and looked up, and each page
+rendered at 72 dpi — and its work is every count three places keep: the
+`BookCost` the cascade and the layout spent, what the archive report (or the
+HTML report and its builder's bytes) says the synthesis wrote and parsed, and
+the `Stats` the page walk and the renders handed back. Every input is
+generated in the test and every glyph drawn in one supplied face, so both
+builds count alike and nothing is read from disk.
+
+The rule is tier P's for a book, held to all six: work at ten times the input
+at most 11 times the work at the input. The ignored `producer_work_census`
+prints `RAN` and one line a producer and writes the committed table,
+`crates/tinker-pdf/tests/producer_work.tsv` — each producer's work at both
+sizes, their ratio against 11, and the counter whose own ratio is the largest,
+the one a fix starts from:
+
+```bash
+cargo test -p tinker-pdf --test producer_work -- --ignored producer_work_census
+```
+
+`the_committed_table_is_the_censuss_shape` holds the table to the census's
+header and producers, and `every_producer_makes_the_pages_its_input_says`
+holds each generator to its shape and each synthesis to the validate-on-save
+helper.
+
 ## Peak memory, a process a case
 
 A peak resident set belongs to a whole process, so
