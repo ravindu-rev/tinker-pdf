@@ -1123,3 +1123,368 @@ fn the_centre_rule_paints_exactly_the_pixels_whose_centres_the_shape_holds() {
         }
     }
 }
+
+// ---- the any-part rule (RC-11.4) --------------------------------------------
+
+/// Whether the rectangle `[x0, x1) × [y0, y1)` meets pixel `(column, row)`'s
+/// open square on the grid (`docs/design/anti-aliasing.md`), from its corners:
+/// a unit of the pixel inside on one of its sixteen sub-scanlines — the
+/// sub-scanlines `⌈16·y0⌉` to `⌈16·y1⌉` against the row's, the units
+/// `round(256·x0)` to `round(256·x1)` against the pixel's — or a side through
+/// the square: a vertical side, in each row whose open interval its span of
+/// `y` meets, at a unit strictly inside the pixel's; a horizontal side, in the
+/// row whose open interval holds its `y`, over units reaching into the pixel's
+/// open interval.
+fn rect_meets(column: i64, row: i64, (x0, y0, x1, y1): (f64, f64, f64, f64)) -> bool {
+    let (left, right) = (column * UNITS, column * UNITS + UNITS);
+    let (top, bottom) = (row * SAMPLES, row * SAMPLES + SAMPLES);
+    let down = |y: f64| (y * SAMPLES as f64).ceil() as i64;
+    let across = |x: f64| (x * UNITS as f64).round() as i64;
+    let (first, last) = (down(y0), down(y1));
+    let (from, to) = (across(x0), across(x1));
+    let sampled = first.max(top) < last.min(bottom) && from.max(left) < to.min(right);
+    let (upper, lower) = (row as f64, (row + 1) as f64);
+    let vertical = y0 < lower && y1 > upper && [from, to].iter().any(|&x| left < x && x < right);
+    let horizontal = [y0, y1].iter().any(|&y| upper < y && y < lower) && from < right && to > left;
+    sampled || vertical || horizontal
+}
+
+/// One segment of a flattened outline, its two ends in path order.
+type Segment = ((f64, f64), (f64, f64));
+
+/// Every segment the any-part rule reads of `path`'s outline: each subpath
+/// flattened at the tolerance the fill is given, closed on its first point,
+/// every segment kept — horizontal ones and ones lying between two
+/// sub-scanlines too — and a subpath of one point a segment of no length.
+fn segments_of(path: &Path, tolerance: f64) -> Vec<Segment> {
+    let mut segments = Vec::new();
+    for poly in flatten(path, tolerance) {
+        let (Some(first), Some(last)) = (poly.first(), poly.last()) else {
+            continue;
+        };
+        for pair in poly.windows(2) {
+            segments.push(((pair[0].x, pair[0].y), (pair[1].x, pair[1].y)));
+        }
+        if first != last {
+            segments.push(((last.x, last.y), (first.x, first.y)));
+        }
+        if poly.len() == 1 {
+            segments.push(((first.x, first.y), (first.x, first.y)));
+        }
+    }
+    segments
+}
+
+/// `x` across to the nearest unit, a half going up, and whether it lies
+/// within [`NEAR`] of half a unit where either unit it could be taken to is
+/// at or inside the pixel spanning units `left` to `right`, so that the
+/// equation alone does not decide the pixel.
+fn across_near(x: f64, left: i64, right: i64) -> (i64, bool) {
+    let at = x * UNITS as f64 + 0.5;
+    let (low, high) = ((at - NEAR).floor() as i64, (at + NEAR).floor() as i64);
+    (
+        at.floor() as i64,
+        low != high && low >= left - 1 && low <= right,
+    )
+}
+
+fn inside_under(rule: FillRule, winding: i32) -> bool {
+    match rule {
+        FillRule::NonZero => winding != 0,
+        FillRule::EvenOdd => winding % 2 != 0,
+    }
+}
+
+/// Whether the outline meets pixel `(column, row)`'s open square under
+/// `rule`, from its own equations, as the design defines meeting on the grid:
+///
+/// - on each of the row's sixteen sub-scanlines, each line reaching it
+///   crosses `y = sub/16` at the `x` its equation gives, to the nearest unit;
+///   the crossings, sorted here, open and close spans under the rule, and a
+///   span holding a unit of the pixel's 256 meets it;
+/// - each segment's part inside the open row `(row, row + 1)`, from where it
+///   crosses the row's top or begins inside it to where it crosses the bottom
+///   or ends, has both ends' `x` to the nearest unit, and an extent reaching
+///   into the pixel's open interval of units meets it.
+///
+/// `None` where a crossing lies within [`NEAR`] of half a unit at or inside
+/// the pixel.
+fn meets(
+    lines: &[Line],
+    segments: &[Segment],
+    column: i64,
+    row: i64,
+    rule: FillRule,
+) -> Option<bool> {
+    let (left, right) = (column * UNITS, column * UNITS + UNITS);
+    let mut undecided = false;
+    let mut met = false;
+    for k in 0..SAMPLES {
+        let sub = row * SAMPLES + k;
+        let y = sub as f64 / SAMPLES as f64;
+        let mut crossings: Vec<(i64, i32)> = Vec::new();
+        for line in lines {
+            let first = (line.top.1 * SAMPLES as f64).ceil() as i64;
+            let last = (line.bottom.1 * SAMPLES as f64).ceil() as i64;
+            if sub < first || sub >= last {
+                continue;
+            }
+            let x = line.top.0
+                + (y - line.top.1) * (line.bottom.0 - line.top.0) / (line.bottom.1 - line.top.1);
+            let (unit, near) = across_near(x, left, right);
+            undecided |= near;
+            crossings.push((unit, line.winding));
+        }
+        crossings.sort_unstable();
+        let (mut winding, mut start) = (0i32, 0i64);
+        for (x, w) in crossings {
+            let was = inside_under(rule, winding);
+            winding += w;
+            let is = inside_under(rule, winding);
+            if !was && is {
+                start = x;
+            } else if was && !is && start < x && start < right && x > left {
+                met = true;
+            }
+        }
+    }
+    let (upper_row, lower_row) = (row as f64, (row + 1) as f64);
+    for &(a, b) in segments {
+        let (upper, lower) = if a.1 <= b.1 { (a, b) } else { (b, a) };
+        if !(upper.1 < lower_row && lower.1 > upper_row) {
+            continue;
+        }
+        let ends = if upper.1 == lower.1 {
+            [a.0, b.0]
+        } else {
+            let at = |y: f64| {
+                if y <= upper.1 {
+                    upper.0
+                } else if y >= lower.1 {
+                    lower.0
+                } else {
+                    upper.0 + (y - upper.1) * (lower.0 - upper.0) / (lower.1 - upper.1)
+                }
+            };
+            [at(upper.1.max(upper_row)), at(lower.1.min(lower_row))]
+        };
+        let (u, near_u) = across_near(ends[0], left, right);
+        let (v, near_v) = across_near(ends[1], left, right);
+        undecided |= near_u || near_v;
+        if u.min(v) < right && u.max(v) > left {
+            met = true;
+        }
+    }
+    (!undecided).then_some(met)
+}
+
+/// The any-part rule's mask of `path` over the fixtures' region.
+fn touched(path: &Path, rule: FillRule) -> Mask {
+    fill_hard(path, rule, 0, 0, W, H, 0.1, None, HardEdge::AnyPart)
+}
+
+/// Every pixel of a polygon's any-part mask against [`meets`] over its
+/// lines and segments: returns how many pixels were decided and how many of
+/// those the shape meets.
+fn assert_touched(path: &Path, rule: FillRule, name: &str) -> (u32, u32) {
+    let (lines, segments) = (lines_of(path, 0.1), segments_of(path, 0.1));
+    assert_centres(&touched(path, rule), name, |column, row| {
+        meets(&lines, &segments, column, row, rule)
+    })
+}
+
+/// **The any-part rule paints exactly the pixels the shape touches**
+/// (RC-11.4).
+///
+/// Each pixel's answer is the test's own intersection of the shape with the
+/// pixel's open square, on the grid as the design defines meeting, computed
+/// from the shape's equations and never from `fill.rs`:
+///
+/// - **rectangles at every sixteenth of a pixel** on each of their four edges
+///   and between the gradations, by [`rect_meets`] from the corners: a
+///   rectangle on whole pixels paints its own pixels and no more, an edge
+///   strictly inside a pixel paints it whatever share it covers, and a
+///   rectangle whose sides stand between sub-scanlines or between units is
+///   painted where its sides pass;
+/// - **slivers thinner than a sub-scanline** — between two sub-scanlines,
+///   across a row's edge, of no height on a row's edge, and slanted across a
+///   sub-scanline — which only their sides reach;
+/// - **triangles**, one with a horizontal side, whose corners stand at
+///   sixteenths and whose sloped sides have odd denominators, so that no
+///   crossing lands on half a unit, and **a line traced there and back**,
+///   which encloses nothing and meets the pixels it passes through; a
+///   **point** paints the pixel under it, and a point on a pixel's edge none;
+/// - **a circle**, by its flattened outline, the polygon the fill fills.
+#[test]
+fn the_any_part_rule_paints_exactly_the_pixels_the_shape_touches() {
+    let rectangle = |(x0, y0, x1, y1): (f64, f64, f64, f64)| {
+        let mut path = Path::new();
+        path.rect(x0, y0, x1 - x0, y1 - y0);
+        let far = (x0 + (x1 - x0), y0 + (y1 - y0));
+        (path, (x0, y0, far.0, far.1))
+    };
+    let assert_rect = |corners: (f64, f64, f64, f64)| {
+        let (path, corners) = rectangle(corners);
+        let (decided, held) = assert_centres(
+            &touched(&path, FillRule::NonZero),
+            &format!("the rectangle {corners:?}"),
+            |column, row| Some(rect_meets(column, row, corners)),
+        );
+        assert_eq!(decided, W * H);
+        held
+    };
+    for a in 0..16 {
+        for b in 0..16 {
+            let (fa, fb) = (f64::from(a) / 16.0, f64::from(b) / 16.0);
+            assert_rect((1.0 + fa, 1.0 + fb, 5.0 + fb, 5.0 + fa));
+            assert_rect((1.0 + fb, 2.0 + fa, 6.0 + fa, 3.0 + fb));
+        }
+    }
+    for across in [1.0 / 3.0, 0.49, 0.51, 2.0 / 3.0] {
+        for down in [0.03, 0.47, 0.53, 0.97] {
+            assert_rect((1.0 + across, 1.0 + down, 6.0 - across, 6.5 - down));
+        }
+    }
+    assert_eq!(
+        assert_rect((2.0, 3.0, 5.0, 5.0)),
+        6,
+        "on whole pixels, its own six and no more"
+    );
+
+    // Slivers: between sub-scanlines 40 and 41, across the edge of rows 3
+    // and 4, of no height on that edge, and slanted across sub-scanline 89.
+    assert_eq!(
+        assert_rect((1.25, 2.5 + 1.0 / 64.0, 5.75, 2.5 + 3.0 / 64.0)),
+        5
+    );
+    assert_eq!(
+        assert_rect((2.25, 4.0 - 1.0 / 64.0, 5.75, 4.0 + 1.0 / 64.0)),
+        8
+    );
+    assert_eq!(
+        assert_rect((2.25, 4.0, 5.75, 4.0)),
+        0,
+        "a side on a row's edge"
+    );
+    let mut slanted = Path::new();
+    slanted.move_to(1.0, 5.5 + 1.0 / 64.0);
+    slanted.line_to(7.0, 5.5 + 5.0 / 64.0);
+    slanted.line_to(7.0, 5.5 + 7.0 / 64.0);
+    slanted.line_to(1.0, 5.5 + 3.0 / 64.0);
+    slanted.close();
+    let (decided, held) = assert_touched(&slanted, FillRule::NonZero, "the slanted sliver");
+    assert_eq!((decided, held), (W * H, 6), "row 5, columns 1 to 6");
+
+    let triangles: [[(f64, f64); 3]; 4] = [
+        [(1.0, 1.0), (7.0, 2.0), (3.0, 7.0)],
+        [(0.5, 0.75), (7.5, 3.25), (2.25, 7.5)],
+        [(1.0, 1.0), (7.0, 7.0), (1.75, 1.25)],
+        [(1.0, 2.25), (7.0, 2.25), (3.5, 6.5)],
+    ];
+    for corners in triangles {
+        for reversed in [false, true] {
+            let mut order = corners;
+            if reversed {
+                order.reverse();
+            }
+            let mut path = Path::new();
+            path.move_to(order[0].0, order[0].1);
+            path.line_to(order[1].0, order[1].1);
+            path.line_to(order[2].0, order[2].1);
+            path.close();
+            let (decided, held) =
+                assert_touched(&path, FillRule::NonZero, &format!("the triangle {order:?}"));
+            assert_eq!(
+                decided,
+                W * H,
+                "{order:?}: no crossing lies near half a unit"
+            );
+            assert!(held > 0);
+        }
+    }
+
+    let mut there_and_back = Path::new();
+    there_and_back.move_to(1.25, 3.75);
+    there_and_back.line_to(6.75, 5.0);
+    let (decided, held) =
+        assert_touched(&there_and_back, FillRule::NonZero, "a line there and back");
+    assert_eq!(decided, W * H);
+    assert!(held >= 6, "it passes through {held} pixels");
+
+    let mut points = Path::new();
+    points.move_to(3.4, 2.7);
+    points.move_to(5.0, 4.5);
+    points.move_to(6.5, 6.0);
+    let mask = touched(&points, FillRule::NonZero);
+    for row in 0..H {
+        for column in 0..W {
+            assert_eq!(
+                at(&mask, column, row),
+                if (column, row) == (3, 2) { 255 } else { 0 },
+                "the points: pixel ({column}, {row})"
+            );
+        }
+    }
+
+    let mut disc = Path::new();
+    circle(&mut disc, (4.1, 3.9), 3.3);
+    let (decided, held) = assert_touched(&disc, FillRule::NonZero, "the circle");
+    assert!(decided + 8 >= W * H, "{decided} pixels decided");
+    assert!(held > 30, "the circle meets {held} pixels");
+}
+
+/// **A sliver between two sub-scanlines is not lost** (RC-11.4).
+///
+/// A rectangle a thirty-second of a pixel tall lying wholly between
+/// sub-scanlines 40 and 41 — no sub-scanline crosses it — has no coverage at
+/// any pixel and holds no centre, so the coverage, the half rule and the
+/// centre rule leave every pixel empty. The any-part rule paints the five
+/// pixels of row 2 its sides pass through, columns 1 to 5, and nothing else;
+/// and a slanted one does the same in a tile as on the page.
+#[test]
+fn a_sliver_between_sub_scanlines_is_not_lost() {
+    let mut sliver = Path::new();
+    sliver.rect(1.25, 2.5 + 1.0 / 64.0, 4.5, 1.0 / 32.0);
+    let soft = fill(&sliver, FillRule::NonZero, 0, 0, W, H, 0.1, None);
+    assert!(soft.data.iter().all(|&v| v == 0), "no sub-scanline sees it");
+    for edge in [HardEdge::Half, HardEdge::Centre] {
+        let mask = fill_hard(&sliver, FillRule::NonZero, 0, 0, W, H, 0.1, None, edge);
+        assert!(mask.data.iter().all(|&v| v == 0), "{edge:?} paints nothing");
+    }
+    let mask = touched(&sliver, FillRule::NonZero);
+    for row in 0..H {
+        for column in 0..W {
+            let met = row == 2 && (1..=5).contains(&column);
+            assert_eq!(
+                at(&mask, column, row),
+                if met { 255 } else { 0 },
+                "pixel ({column}, {row})"
+            );
+        }
+    }
+
+    let mut slanted = Path::new();
+    slanted.move_to(0.5, 3.5 + 1.0 / 64.0);
+    slanted.line_to(7.5, 4.5 + 1.0 / 64.0);
+    slanted.line_to(7.5, 4.5 + 2.0 / 64.0);
+    slanted.line_to(0.5, 3.5 + 2.0 / 64.0);
+    slanted.close();
+    let page = touched(&slanted, FillRule::NonZero);
+    assert!(page.data.iter().filter(|&&v| v == 255).count() >= 8);
+    let tile = fill_hard(
+        &slanted,
+        FillRule::NonZero,
+        3,
+        3,
+        3,
+        2,
+        0.1,
+        None,
+        HardEdge::AnyPart,
+    );
+    for y in 3..5 {
+        for x in 3..6 {
+            assert_eq!(tile.at(x, y), page.at(x, y), "the tile's pixel ({x}, {y})");
+        }
+    }
+}

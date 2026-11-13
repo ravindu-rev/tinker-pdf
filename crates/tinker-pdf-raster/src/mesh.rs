@@ -122,9 +122,10 @@ pub struct MeshDraw<'a> {
     /// reach anti-aliased.
     pub edge_bits: u8,
     /// The rule the silhouette is drawn by at 0 bits: [`HardEdge::Half`]
-    /// hardens its coverage, [`HardEdge::Centre`] paints the pixels whose
-    /// centres the triangles hold, the filler's own rule
-    /// ([`crate::fill_hard_with`]). Read at 0 bits only.
+    /// hardens its coverage; [`HardEdge::Centre`] paints the pixels whose
+    /// centres the triangles hold and [`HardEdge::AnyPart`] every pixel they
+    /// meet, the filler's own rules ([`crate::fill_hard_with`]). Read at 0
+    /// bits only.
     pub edge_rule: HardEdge,
 }
 
@@ -1743,8 +1744,9 @@ mod tests {
     /// one hardened — what hardening the buffer after the draw gave — and in
     /// every case the colours are the 8-bit draw's, spread before the level
     /// is applied. Under `HardEdge::Centre` the silhouette is the triangles'
-    /// path filled by the centre rule, every pixel it paints has a colour,
-    /// and at 8 bits the rule is not read.
+    /// path filled by the centre rule and under `HardEdge::AnyPart` by the
+    /// any-part rule, every pixel either paints has a colour, and at 8 bits
+    /// the rule is not read.
     #[test]
     fn a_mesh_silhouette_takes_its_level_and_its_rule() {
         let positions = [(1.3, 0.8), (17.6, 2.9), (9.1, 18.4), (2.2, 15.7)];
@@ -1816,5 +1818,37 @@ mod tests {
             soft.coverage.data,
             "at 8 bits the rule is not read"
         );
+
+        // Under the any-part rule the silhouette is every pixel the
+        // triangles meet: the path filled by that rule, holding every pixel
+        // the soft silhouette and the centre rule reach, each with a colour.
+        let touched = drawn(0, HardEdge::AnyPart);
+        let want = crate::fill::fill_hard(
+            &path,
+            FillRule::NonZero,
+            0,
+            0,
+            20,
+            20,
+            1.0,
+            None,
+            HardEdge::AnyPart,
+        );
+        assert_eq!(
+            touched.coverage.data, want.data,
+            "the pixels the triangles meet"
+        );
+        for y in 0..20 {
+            for x in 0..20 {
+                let reached = soft.coverage.at(x, y) > 0 || centred.coverage.at(x, y) == 255;
+                assert!(
+                    !reached || touched.coverage.at(x, y) == 255,
+                    "({x}, {y}) is reached and not painted"
+                );
+                if touched.coverage.at(x, y) == 255 {
+                    assert!(touched.at(x, y).is_some(), "({x}, {y}) has a colour");
+                }
+            }
+        }
     }
 }

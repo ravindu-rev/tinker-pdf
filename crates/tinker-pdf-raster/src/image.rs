@@ -624,9 +624,10 @@ pub struct ImageDraw<'a> {
     pub edge_bits: u8,
     /// The rule the edge is drawn by at [`ImageDraw::edge_bits`] 0, where
     /// each pixel is whole or empty: [`HardEdge::Half`], the default, reads
-    /// the square's coverage, and [`HardEdge::Centre`] paints the pixels whose
-    /// centres the square holds, the filler's own rule
-    /// ([`crate::fill_hard_with`]). Read at 0 bits only.
+    /// the square's coverage; [`HardEdge::Centre`] paints the pixels whose
+    /// centres the square holds and [`HardEdge::AnyPart`] every pixel it
+    /// meets, the filler's own rules ([`crate::fill_hard_with`]). Read at 0
+    /// bits only.
     pub edge_rule: HardEdge,
 }
 
@@ -2080,6 +2081,91 @@ mod tests {
         assert!(
             drawn.data.iter().all(|v| *v == 0 || *v == 255),
             "no partial pixel"
+        );
+    }
+
+    /// **An image's edge under the any-part rule paints every pixel its
+    /// square meets** (RC-11.4).
+    ///
+    /// A black image upright on the canvas, its corners at `(2.6, 3.35)` and
+    /// `(7.4, 7.6)`: at 0 bits under `HardEdge::AnyPart` it paints exactly the
+    /// pixels whose open squares the rectangle meets, columns 2 to 7 and rows
+    /// 3 to 7, computed here from the corners, where the centre rule keeps
+    /// columns 3 to 6 — the outer columns' shares, 0.4 of a pixel, hold no
+    /// centre. Turned, the drawn edge is the unit square filled by the rule.
+    #[test]
+    fn an_image_edge_under_the_any_part_rule_paints_every_pixel_its_square_meets() {
+        let rgb = [0u8, 0, 0].repeat(4);
+        let image = ImageSource {
+            width: 2,
+            height: 2,
+            rgb: &rgb,
+            alpha: &[],
+            two_colour: None,
+        };
+        let render = |placement: Transform, edge_rule: HardEdge| {
+            let mut canvas = Canvas::new(12, 12, PixelFormat::Rgb8, Color::WHITE);
+            draw_image(
+                &mut canvas,
+                &ImageDraw {
+                    edge_bits: 0,
+                    edge_rule,
+                    ..ImageDraw::new(image, placement)
+                },
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
+            canvas
+        };
+        let black = |canvas: &Canvas, x: usize, y: usize| canvas.data[(y * 12 + x) * 3] == 0;
+        let upright = Transform {
+            a: 4.8,
+            b: 0.0,
+            c: 0.0,
+            d: -4.25,
+            e: 2.6,
+            f: 7.6,
+        };
+        let touched = render(upright, HardEdge::AnyPart);
+        let centred = render(upright, HardEdge::Centre);
+        for y in 0..12 {
+            for x in 0..12 {
+                let (left, top) = (x as f64, y as f64);
+                let met = left < 7.4 && left + 1.0 > 2.6 && top < 7.6 && top + 1.0 > 3.35;
+                assert_eq!(black(&touched, x, y), met, "pixel ({x}, {y})");
+            }
+        }
+        assert!(black(&touched, 2, 5) && !black(&centred, 2, 5), "column 2");
+        assert!(black(&touched, 7, 5) && !black(&centred, 7, 5), "column 7");
+        assert!(black(&centred, 3, 5) && black(&centred, 6, 5));
+        assert!(
+            touched.data.iter().all(|v| *v == 0 || *v == 255),
+            "no partial pixel"
+        );
+
+        let turned = Transform {
+            a: 6.0,
+            b: 3.3,
+            c: -3.3,
+            d: 6.0,
+            e: 5.37,
+            f: 1.18,
+        };
+        let drawn = render(turned, HardEdge::AnyPart);
+        let (x0, y0, width, height) =
+            image_bounds(&turned, 12, 12).expect("the image is on the canvas");
+        let shape = unit_quad(
+            &mut FillScratch::new(),
+            &turned,
+            (x0, y0, width, height),
+            None,
+            Some(HardEdge::AnyPart),
+        );
+        let mut filled = Canvas::new(12, 12, PixelFormat::Rgb8, Color::WHITE);
+        filled.fill_mask(&shape, Color::BLACK, 1.0);
+        assert_eq!(
+            drawn.data, filled.data,
+            "the turned square, every pixel it meets"
         );
     }
 

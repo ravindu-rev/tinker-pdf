@@ -205,6 +205,139 @@ pub(crate) fn centres_reference(
     mask
 }
 
+/// The mask `HardEdge::AnyPart` makes of a path, by the sorted sweep and the
+/// outline's segments, each pixel asked of each span and each segment in turn:
+///
+/// - **the samples**: a pixel is 255 where a span [`fill_reference`]'s sweep
+///   adds on one of its row's sixteen sub-scanlines — the edges sorted by
+///   their tops, the crossings by `x`, both stably, a span added where the
+///   rule goes from inside back to outside — holds any of its 256 units;
+/// - **the edges**, with `edges_too`: a pixel is 255 where a segment of the
+///   flattened outline — each subpath closed on its first point, every
+///   segment kept, a subpath of one point a segment of no length — has a part
+///   inside the pixel's open row `(r, r + 1)` whose two ends, across to the
+///   nearest 1/256, span an extent reaching into the pixel's open interval of
+///   units `(256·col, 256·col + 256)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn touches_reference(
+    path: &Path,
+    rule: FillRule,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    tolerance: f64,
+    edges_too: bool,
+) -> Mask {
+    let mut mask = Mask::empty(x0, y0, width, height);
+    if width == 0 || height == 0 {
+        return mask;
+    }
+    let mut edges = edges_of(path, tolerance);
+    edges.sort_by_key(|edge| edge.top);
+
+    let mut crossings: Vec<(i64, i32)> = Vec::new();
+    for row in active_rows(&edges, y0, height) {
+        let row_top = y0.saturating_add(row as i32).saturating_mul(SAMPLES);
+        let base = (row as usize) * (width as usize);
+        let Some(out) = mask.data.get_mut(base..base + width as usize) else {
+            continue;
+        };
+        for sample in 0..SAMPLES {
+            let sub = row_top.saturating_add(sample);
+            crossings.clear();
+            for edge in edges
+                .iter()
+                .filter(|edge| edge.top <= sub && sub < edge.bottom)
+            {
+                crossings.push((crossing(edge, sub), edge.winding));
+            }
+            if crossings.len() < 2 {
+                continue;
+            }
+            crossings.sort_by_key(|(x, _)| *x);
+            let mut winding = 0i32;
+            let mut span_start = 0i64;
+            for (x, w) in &crossings {
+                let was_inside = inside(winding, rule);
+                winding += w;
+                let is_inside = inside(winding, rule);
+                if !was_inside && is_inside {
+                    span_start = *x;
+                } else if was_inside && !is_inside && span_start < *x {
+                    for (column, pixel) in (0i64..).zip(out.iter_mut()) {
+                        let left = (i64::from(x0) + column) * 256;
+                        if span_start < left + 256 && *x > left {
+                            *pixel = 255;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if edges_too {
+        let unit = |x: f64| (!x.is_nan()).then(|| (x * 256.0 + 0.5).floor() as i64);
+        for poly in flatten(path, tolerance) {
+            let (Some(&first), Some(&last)) = (poly.first(), poly.last()) else {
+                continue;
+            };
+            let mut segments: Vec<(Point, Point)> =
+                poly.windows(2).map(|pair| (pair[0], pair[1])).collect();
+            if first != last {
+                segments.push((last, first));
+            }
+            if poly.len() == 1 {
+                segments.push((first, first));
+            }
+            for (a, b) in segments {
+                if !a.is_finite() || !b.is_finite() {
+                    continue;
+                }
+                let (upper, lower) = if a.y <= b.y { (a, b) } else { (b, a) };
+                for row in 0..height {
+                    let r = i64::from(y0) + i64::from(row);
+                    let (top, bottom) = (r as f64, (r + 1) as f64);
+                    if !(upper.y < bottom && lower.y > top) {
+                        continue;
+                    }
+                    let (lo, hi) = if upper.y == lower.y {
+                        (unit(a.x.min(b.x)), unit(a.x.max(b.x)))
+                    } else {
+                        let at = |y: f64| {
+                            if y <= upper.y {
+                                upper.x
+                            } else if y >= lower.y {
+                                lower.x
+                            } else {
+                                upper.x + (y - upper.y) * (lower.x - upper.x) / (lower.y - upper.y)
+                            }
+                        };
+                        let (u, v) = (unit(at(upper.y.max(top))), unit(at(lower.y.min(bottom))));
+                        match (u, v) {
+                            (Some(u), Some(v)) => (Some(u.min(v)), Some(u.max(v))),
+                            _ => (None, None),
+                        }
+                    };
+                    let (Some(lo), Some(hi)) = (lo, hi) else {
+                        continue;
+                    };
+                    let base = (row as usize) * (width as usize);
+                    for column in 0..width {
+                        let left = (i64::from(x0) + i64::from(column)) * 256;
+                        if lo < left + 256 && hi > left {
+                            if let Some(pixel) = mask.data.get_mut(base + column as usize) {
+                                *pixel = 255;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    mask
+}
+
 /// The path's edges, in the order the path gives them.
 fn edges_of(path: &Path, tolerance: f64) -> Vec<Edge> {
     let mut edges = Vec::new();
@@ -1123,6 +1256,127 @@ mod tests {
         assert!(
             all_inked * 4 >= all_cases,
             "{all_inked} of {all_cases} cases held a centre"
+        );
+    }
+
+    /// **The any-part rule is the sweep's spans and the outline's extents**
+    /// (RC-11.4): `fill_hard` under `HardEdge::AnyPart` is
+    /// [`touches_reference`], byte for byte, on every path the classes
+    /// generate, at every region, under both rules, through a fresh scratch
+    /// and through one that coverage fills share. It holds every pixel the
+    /// coverage reaches, every pixel the centre rule paints and every pixel
+    /// the samples alone reach, and the slivers class reaches pixels by its
+    /// edges alone that no sample sees: the extents are the half of the rule
+    /// the samples cannot give.
+    #[test]
+    fn the_any_part_rule_is_the_sweep_s_spans_and_the_outline_s_extents() {
+        use crate::fill::{fill_hard, fill_hard_with, HardEdge};
+
+        let mut s = Stream::new(0x616e_7970_6172_74);
+        let mut scratch = FillScratch::new();
+        let mut by_edges_alone = 0u64;
+        for class in CLASSES {
+            let mut cases = 0u64;
+            for index in 0..PATHS {
+                let path = generate(class, index, &mut s);
+                let tolerance = s.range(0.05, 0.5);
+                for _ in 0..REGIONS {
+                    let (x0, y0, width, height) = region(&mut s);
+                    for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                        let want =
+                            touches_reference(&path, rule, x0, y0, width, height, tolerance, true);
+                        let sampled =
+                            touches_reference(&path, rule, x0, y0, width, height, tolerance, false);
+                        let got = fill_hard(
+                            &path,
+                            rule,
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            tolerance,
+                            None,
+                            HardEdge::AnyPart,
+                        );
+                        let reused = fill_hard_with(
+                            &mut scratch,
+                            &path,
+                            rule,
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            tolerance,
+                            None,
+                            HardEdge::AnyPart,
+                        );
+                        let soft = fill_with(
+                            &mut scratch,
+                            &path,
+                            rule,
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            tolerance,
+                            None,
+                        );
+                        assert_eq!(
+                            soft.data,
+                            fill(&path, rule, x0, y0, width, height, tolerance, None).data,
+                            "{class:?} path {index} under {rule:?}: a coverage fill after an any-part fill"
+                        );
+                        assert_eq!(
+                            reused.data, got.data,
+                            "{class:?} path {index} under {rule:?}: through the one scratch"
+                        );
+                        if let Some(at) = got.data.iter().zip(&want.data).position(|(a, b)| a != b)
+                        {
+                            let across = i64::from(width.max(1));
+                            panic!(
+                                "{class:?} path {index} under {rule:?} over {x0},{y0} \
+                                 {width}x{height} at tolerance {tolerance}: pixel ({}, {}) is \
+                                 {:?} where the reference has {:?}\n{:?}",
+                                i64::from(x0) + at as i64 % across,
+                                i64::from(y0) + at as i64 / across,
+                                got.data.get(at),
+                                want.data.get(at),
+                                path.verbs()
+                            );
+                        }
+                        let centred = fill_hard(
+                            &path,
+                            rule,
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            tolerance,
+                            None,
+                            HardEdge::Centre,
+                        );
+                        for (at, &value) in got.data.iter().enumerate() {
+                            assert!(value == 0 || value == 255, "{class:?} path {index}");
+                            let reached = soft.data.get(at).is_some_and(|v| *v > 0)
+                                || centred.data.get(at) == Some(&255)
+                                || sampled.data.get(at) == Some(&255);
+                            assert!(
+                                !reached || value == 255,
+                                "{class:?} path {index} under {rule:?}: pixel {at} is reached and not painted"
+                            );
+                            if value == 255 && sampled.data.get(at) == Some(&0) {
+                                by_edges_alone += 1;
+                            }
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+            assert_eq!(cases, PATHS * REGIONS * 2, "{class:?}: every case ran");
+        }
+        assert!(
+            by_edges_alone > 0,
+            "the extents painted no pixel the samples did not"
         );
     }
 

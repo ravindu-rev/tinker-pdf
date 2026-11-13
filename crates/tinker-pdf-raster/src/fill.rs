@@ -529,6 +529,17 @@ pub enum HardEdge {
     /// bottom, as a span does, so two shapes sharing an edge split its
     /// pixels.
     Centre,
+    /// Whole where the shape — the region the fill rule calls inside and its
+    /// outline, every crossing across taken to the nearest 1/256 — meets the
+    /// pixel's open square, `(col, col + 1) × (row, row + 1)`. On the
+    /// filler's grid that is a unit of the pixel inside on one of its sixteen
+    /// sub-scanlines, or an edge of the outline whose part inside the open
+    /// row, its ends across to the nearest 1/256, reaches into the pixel's
+    /// open interval of units, `(256·col, 256·col + 256)` — which is what a
+    /// sliver lying wholly between two sub-scanlines is made of. A shape that
+    /// only touches a pixel's edge or corner leaves it empty, and a subpath of
+    /// one point paints the pixel under it.
+    AnyPart,
 }
 
 /// What a sweep makes of each pixel of its region.
@@ -538,6 +549,9 @@ enum Measure {
     Coverage,
     /// 255 where its centre unit is inside, 0 where it is not.
     Centre,
+    /// 255 where any unit of it is inside on any of its sub-scanlines, 0
+    /// where none is; the outline's edges through it are painted after.
+    AnyPart,
 }
 
 impl Measure {
@@ -547,6 +561,7 @@ impl Measure {
         match edge {
             HardEdge::Half => Measure::Coverage,
             HardEdge::Centre => Measure::Centre,
+            HardEdge::AnyPart => Measure::AnyPart,
         }
     }
 }
@@ -582,14 +597,17 @@ pub fn fill_hard(
 
 /// [`fill_with`] with every pixel whole or empty by `edge`: under
 /// [`HardEdge::Half`] the coverage hardened, under [`HardEdge::Centre`] each
-/// pixel whose centre the shape holds on the filler's grid.
+/// pixel whose centre the shape holds on the filler's grid, under
+/// [`HardEdge::AnyPart`] each pixel the shape meets.
 ///
 /// The centre rule reads one sub-scanline a row, the row's middle, and one
 /// unit a pixel on it, the pixel's middle, in the page's device pixels: a
 /// region's left edge is a whole pixel, so a tile reads the units the page
-/// reads (ruling 5). The rows, the stop and the scratch are [`fill_with`]'s,
-/// and a row whose middle sub-scanline does not close is read as the sorted
-/// sweep reads it.
+/// reads (ruling 5). The any-part rule reads every unit of every
+/// sub-scanline, as the coverage does, and then each edge of the flattened
+/// path over each row it reaches, in the page's device pixels too. The rows,
+/// the stop and the scratch are [`fill_with`]'s, and a row whose sub-scanline
+/// does not close is read as the sorted sweep reads it.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn fill_hard_with(
@@ -622,6 +640,14 @@ pub fn fill_hard_with(
 /// [`fill_outline`] with every pixel whole or empty by `edge`, as
 /// [`fill_hard_with`] fills a path: the mask [`fill_hard_with`] gives the
 /// outline's path, byte for byte.
+///
+/// **The any-part rule reads the outline's own pieces** where an edge passes
+/// through a pixel, and a scratch holds them only from a stroke written after
+/// [`FillScratch::keep_outline_points`] asked it to — every other stroke
+/// keeps the edges alone and costs what it did. An outline written without
+/// its pieces is read under [`HardEdge::AnyPart`] from its samples alone: a
+/// pixel is whole where a unit of it is inside on a sub-scanline, and a piece
+/// lying wholly between two sub-scanlines paints nothing.
 #[must_use]
 pub fn fill_outline_hard(
     scratch: &mut FillScratch,
@@ -639,14 +665,18 @@ pub fn fill_outline_hard(
     #[cfg(test)]
     let held = scratch.capacities();
     let FillScratch { outline, work, .. } = &mut *scratch;
-    work.sweep(
+    let measure = Measure::of(edge);
+    let cut = work.sweep(
         &mut mask,
         &outline.edges,
         outline.open,
         FillRule::NonZero,
         stop,
-        Measure::of(edge),
+        measure,
     );
+    if measure == Measure::AnyPart {
+        touch_edges(&mut mask, &outline.points, &outline.ends, cut, stop);
+    }
     #[cfg(test)]
     count::allocated(scratch.grown_from(&held));
     if edge == HardEdge::Half {
@@ -743,6 +773,16 @@ impl FillScratch {
         self.outline.bounds
     }
 
+    /// Whether every stroke written into this scratch from now on keeps its
+    /// pieces' points beside their edges: what [`fill_outline_hard`] reads
+    /// under [`HardEdge::AnyPart`] where an edge passes through a pixel. Off
+    /// by default, so that a stroke filled any other way holds and costs
+    /// what it did; a caller filling outlines under that rule turns it on
+    /// once.
+    pub fn keep_outline_points(&mut self, keep: bool) {
+        self.outline.keep = keep;
+    }
+
     /// The outline, emptied for a stroke to write.
     pub(crate) fn begin_outline(&mut self) -> &mut Outline {
         self.outline.clear();
@@ -778,17 +818,22 @@ impl FillScratch {
             }
             begin = *end;
         }
-        work.sweep(mask, edges, open, rule, stop, measure);
+        let cut = work.sweep(mask, edges, open, rule, stop, measure);
+        if measure == Measure::AnyPart {
+            touch_edges(mask, points, ends, cut, stop);
+        }
     }
 
     /// The capacity of every buffer, for [`FillScratch::grown_from`].
     #[cfg(test)]
-    pub(crate) fn capacities(&self) -> [usize; 13] {
+    pub(crate) fn capacities(&self) -> [usize; 15] {
         [
             self.points.capacity(),
             self.ends.capacity(),
             self.edges.capacity(),
             self.outline.edges.capacity(),
+            self.outline.points.capacity(),
+            self.outline.ends.capacity(),
             self.work.starts.capacity(),
             self.work.next.capacity(),
             self.work.active.capacity(),
@@ -804,7 +849,7 @@ impl FillScratch {
     /// How many buffers have grown since `held` was taken: each made at least
     /// one allocation, and a fill makes none anywhere else but its mask.
     #[cfg(test)]
-    pub(crate) fn grown_from(&self, held: &[usize; 13]) -> u64 {
+    pub(crate) fn grown_from(&self, held: &[usize; 15]) -> u64 {
         self.capacities()
             .iter()
             .zip(held)
@@ -827,6 +872,9 @@ impl FillScratch {
 /// piece that reaches the bound keeps the points whose verbs fit, closed on its
 /// first as flattening closes a subpath with no close, and nothing after it is
 /// kept.
+///
+/// Asked to ([`FillScratch::keep_outline_points`]), it also keeps each piece's
+/// points, as a path's flattened subpaths are kept, for the any-part rule.
 #[derive(Default)]
 pub(crate) struct Outline {
     /// The edges, piece after piece.
@@ -837,6 +885,12 @@ pub(crate) struct Outline {
     open: bool,
     /// The verbs the pieces kept would have been in a path.
     verbs: usize,
+    /// Whether each piece's points are kept beside its edges.
+    keep: bool,
+    /// The pieces' points, piece after piece, when they are kept.
+    points: Vec<Point>,
+    /// Where in `points` each piece ends.
+    ends: Vec<usize>,
 }
 
 impl Outline {
@@ -845,6 +899,8 @@ impl Outline {
         self.bounds = None;
         self.open = false;
         self.verbs = 0;
+        self.points.clear();
+        self.ends.clear();
     }
 
     /// One piece of the outline: a polygon of finite points, wound as every
@@ -860,6 +916,10 @@ impl Outline {
             });
         }
         self.open |= build_edges(kept, &mut self.edges);
+        if self.keep && !kept.is_empty() {
+            self.points.extend_from_slice(kept);
+            self.ends.push(self.points.len());
+        }
     }
 }
 
@@ -882,6 +942,9 @@ impl Work {
     /// Sweeps `edges` into `mask`'s rectangle, which is not empty, under
     /// `rule`, measuring each pixel as `measure` says; `open` says whether
     /// [`build_edges`] dropped an edge that may cover a sub-scanline.
+    ///
+    /// Returns the device row a stop ended the sweep before, which no row at
+    /// or below holds anything of, or `None` where the sweep ran to its end.
     fn sweep(
         &mut self,
         mask: &mut Mask,
@@ -890,7 +953,7 @@ impl Work {
         rule: FillRule,
         stop: Option<&dyn Fn() -> bool>,
         measure: Measure,
-    ) {
+    ) -> Option<i64> {
         let (x0, y0, width, height) = (mask.x0, mask.y0, mask.width, mask.height);
         let Work {
             starts,
@@ -901,7 +964,7 @@ impl Work {
         } = self;
         let rows = active_rows(edges, y0, height);
         if rows.is_empty() {
-            return;
+            return None;
         }
 
         // Each edge waits in the list of the row it begins in, or of the first
@@ -937,7 +1000,7 @@ impl Work {
             // deposit: a stop leaves no row half converted and the cells
             // clear.
             if step % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
-                return;
+                return Some(i64::from(y0) + i64::from(row));
             }
             let mut at = starts.get(step).copied().unwrap_or(NONE);
             while let Some(link) = next.get(at as usize) {
@@ -951,7 +1014,7 @@ impl Work {
             let top = (i64::from(y0) + i64::from(row)) * samples;
             let base = (row as usize) * (width as usize);
             let Some(out) = mask.data.get_mut(base..base + width as usize) else {
-                return;
+                return None;
             };
             if measure == Measure::Centre {
                 // The centre rule reads the row's middle sub-scanline alone,
@@ -977,7 +1040,8 @@ impl Work {
                     cells.convert_centres(rule, out);
                 }
             } else if open && sweep.is_open(edges, active, top, rule) {
-                sweep.row(edges, active, top, rule, (x0, width), out);
+                let touch = measure == Measure::AnyPart;
+                sweep.row(edges, active, top, rule, (x0, width), out, touch);
             } else {
                 for index in active.iter() {
                     let Some(edge) = edges.get(*index as usize) else {
@@ -996,7 +1060,11 @@ impl Work {
                         );
                     });
                 }
-                cells.convert(rule, out);
+                if measure == Measure::AnyPart {
+                    cells.convert::<true>(rule, out);
+                } else {
+                    cells.convert::<false>(rule, out);
+                }
             }
 
             // The edges that end in this row leave; the hole takes the last.
@@ -1013,6 +1081,7 @@ impl Work {
                 }
             }
         }
+        None
     }
 }
 
@@ -1291,7 +1360,13 @@ impl Row {
     /// crossings taken by offset, bucketed rather than compared, those at one
     /// offset summed first, which is the sweep's zero-length span. The byte is
     /// `min(total / 16, 255)`, as the sweep's.
-    fn convert(&mut self, rule: FillRule, out: &mut [u8]) {
+    ///
+    /// With `TOUCH` the byte is instead 255 where the total is above zero —
+    /// where any unit of the pixel is inside on any of its sub-scanlines, a
+    /// pixel of one to fifteen units among them — and 0 where it is not: the
+    /// samples' half of [`HardEdge::AnyPart`]. A constant, so the coverage's
+    /// walk is compiled as it was.
+    fn convert<const TOUCH: bool>(&mut self, rule: FillRule, out: &mut [u8]) {
         let Row {
             cells,
             touched,
@@ -1311,7 +1386,7 @@ impl Row {
             while held != 0 {
                 let index = word * 64 + held.trailing_zeros() as usize;
                 held &= held - 1;
-                solid(out, at, index, inside);
+                solid::<TOUCH>(out, at, index, inside);
                 at = index + 1;
                 let (Some(cell), Some(byte)) = (cells.get_mut(index), out.get_mut(index)) else {
                     continue;
@@ -1357,11 +1432,19 @@ impl Row {
                         }
                     }
                 }
-                *byte = (total / 16).min(255) as u8;
+                *byte = if TOUCH {
+                    if total > 0 {
+                        255
+                    } else {
+                        0
+                    }
+                } else {
+                    (total / 16).min(255) as u8
+                };
                 *cell = Cell::CLEAR;
             }
         }
-        solid(out, at, out.len(), inside);
+        solid::<TOUCH>(out, at, out.len(), inside);
         *left = [0; 16];
         heads.clear();
         later.clear();
@@ -1456,13 +1539,22 @@ fn whole(out: &mut [u8], from: usize, to: usize, inside: bool) {
 /// Writes the run of pixels `from..to` of a row, none of which holds a
 /// crossing, given the count of lanes the rule calls inside across it: one
 /// slice fill of `min(16 × inside, 255)` — 255 where every lane is inside — and
-/// no write at all where none is, the mask being zero already.
-fn solid(out: &mut [u8], from: usize, to: usize, inside: i32) {
+/// no write at all where none is, the mask being zero already. With `TOUCH`,
+/// 255 where any lane is inside, as [`Row::convert`] reads a cell.
+fn solid<const TOUCH: bool>(out: &mut [u8], from: usize, to: usize, inside: i32) {
     if from >= to {
         return;
     }
     count::converted(1);
-    let value = (16 * inside).min(255) as u8;
+    let value = if TOUCH {
+        if inside > 0 {
+            255
+        } else {
+            0
+        }
+    } else {
+        (16 * inside).min(255) as u8
+    };
     if value != 0 {
         if let Some(run) = out.get_mut(from..to) {
             run.fill(value);
@@ -1566,7 +1658,10 @@ impl Sweep {
         }
     }
 
-    /// The row starting at sub-scanline `top`, swept into `out`.
+    /// The row starting at sub-scanline `top`, swept into `out`: each
+    /// pixel's coverage, or with `touch` 255 where a span holds any unit of
+    /// it and 0 where none does.
+    #[allow(clippy::too_many_arguments)]
     fn row(
         &mut self,
         edges: &[Edge],
@@ -1575,6 +1670,7 @@ impl Sweep {
         rule: FillRule,
         (x0, width): (i32, u32),
         out: &mut [u8],
+        touch: bool,
     ) {
         self.accumulator.clear();
         self.accumulator.resize(width as usize, 0);
@@ -1611,7 +1707,15 @@ impl Sweep {
             }
         }
         for (slot, total) in out.iter_mut().zip(self.accumulator.iter()) {
-            *slot = (*total / SAMPLES as u16).min(255) as u8;
+            *slot = if touch {
+                if *total > 0 {
+                    255
+                } else {
+                    0
+                }
+            } else {
+                (*total / SAMPLES as u16).min(255) as u8
+            };
         }
     }
 }
@@ -1742,6 +1846,122 @@ fn paint_centres(out: &mut [u8], x0: i32, width: u32, from: i64, to: i64) {
     if start < end {
         if let Some(run) = out.get_mut(start..end) {
             run.fill(255);
+        }
+    }
+}
+
+/// Segments [`touch_edges`] walks between one cancellation check and the
+/// next. A segment costs a row of its reach, so a thousand of them are about
+/// the work [`STOP_EVERY`] rows of a sweep are.
+const TOUCH_STOP_EVERY: usize = 1024;
+
+/// `x` across to the nearest 1/256 of a pixel, a half going up, as a crossing
+/// is taken there; `None` for a value that is not a number. A value past
+/// `i64` saturates, far outside any region.
+fn unit_of(x: f64) -> Option<i64> {
+    if x.is_nan() {
+        return None;
+    }
+    Some((x * 256.0 + 0.5).floor() as i64)
+}
+
+/// The edges' half of [`HardEdge::AnyPart`]: paints whole every pixel of
+/// `mask` an edge of the outline passes through.
+///
+/// The outline is each subpath of `points` — its points up to each of `ends`
+/// — closed on its first point, as [`build_edges`] closes it, with every
+/// segment kept, horizontal and short ones too; a subpath of one point is a
+/// segment of no length there. A segment's part inside the open row
+/// `(r, r + 1)` — from where it crosses the row's top, or begins inside the
+/// row, to where it crosses the bottom or ends — has its two ends' `x` taken
+/// to the nearest 1/256, and that extent `[lo, hi]` paints each pixel of the
+/// row whose open interval of units, `(256·col, 256·col + 256)`, it reaches:
+/// columns `⌊lo / 256⌋` to `⌈hi / 256⌉`, the last excluded. So a segment
+/// along a row's edge is in neither row, one along a column's edge reaches
+/// neither column, and a point on a pixel's edge paints none.
+///
+/// Every row is a device row and every unit a device unit, so a tile paints
+/// what the page paints under it (ruling 5). Rows at or below `cut`, where a
+/// stopped sweep stopped, are left as it left them, and `stop` is asked every
+/// [`TOUCH_STOP_EVERY`] segments, ending the walk as it ends a sweep.
+fn touch_edges(
+    mask: &mut Mask,
+    points: &[Point],
+    ends: &[usize],
+    cut: Option<i64>,
+    stop: Option<&dyn Fn() -> bool>,
+) {
+    let (left, top) = (i64::from(mask.x0), i64::from(mask.y0));
+    let right = left + i64::from(mask.width);
+    let bottom = top + i64::from(mask.height);
+    let bottom = cut.map_or(bottom, |cut| cut.min(bottom));
+    let width = mask.width as usize;
+    let mut walked = 0usize;
+    let mut begin = 0;
+    for &end in ends {
+        let poly = points.get(begin..end).unwrap_or(&[]);
+        begin = end;
+        let (Some(&first), Some(&last)) = (poly.first(), poly.last()) else {
+            continue;
+        };
+        let closing = (first != last).then_some([last, first]);
+        let alone = (poly.len() == 1).then_some([first, first]);
+        for pair in poly
+            .windows(2)
+            .chain(closing.as_ref().map(|pair| &pair[..]))
+            .chain(alone.as_ref().map(|pair| &pair[..]))
+        {
+            let [a, b] = pair else {
+                continue;
+            };
+            if walked % TOUCH_STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
+                return;
+            }
+            walked += 1;
+            if !a.is_finite() || !b.is_finite() {
+                continue;
+            }
+            let (upper, lower) = if a.y <= b.y { (*a, *b) } else { (*b, *a) };
+            // The open rows the segment reaches: `upper.y < r + 1` and
+            // `lower.y > r`, kept inside the region and above the cut.
+            let from = (upper.y.floor() as i64).max(top);
+            let to = (lower.y.ceil() as i64).min(bottom);
+            for r in from..to {
+                let (lo, hi) = if upper.y == lower.y {
+                    (unit_of(a.x.min(b.x)), unit_of(a.x.max(b.x)))
+                } else {
+                    let at = |y: f64| {
+                        if y <= upper.y {
+                            upper.x
+                        } else if y >= lower.y {
+                            lower.x
+                        } else {
+                            upper.x + (y - upper.y) * (lower.x - upper.x) / (lower.y - upper.y)
+                        }
+                    };
+                    let (u, v) = (
+                        unit_of(at(upper.y.max(r as f64))),
+                        unit_of(at(lower.y.min((r + 1) as f64))),
+                    );
+                    match (u, v) {
+                        (Some(u), Some(v)) => (Some(u.min(v)), Some(u.max(v))),
+                        _ => (None, None),
+                    }
+                };
+                let (Some(lo), Some(hi)) = (lo, hi) else {
+                    continue;
+                };
+                let first_col = lo.div_euclid(256).max(left);
+                let last_col = hi.saturating_add(255).div_euclid(256).min(right);
+                if first_col >= last_col {
+                    continue;
+                }
+                let base = (r - top) as usize * width;
+                let (start, stop_at) = ((first_col - left) as usize, (last_col - left) as usize);
+                if let Some(run) = mask.data.get_mut(base + start..base + stop_at) {
+                    run.fill(255);
+                }
+            }
         }
     }
 }
@@ -3725,6 +3945,291 @@ mod tests {
             partial.data.iter().filter(|&&v| v != 0).count(),
             cut as usize * 30,
             "exactly the rows above the cut, the bar's thirty columns of centres"
+        );
+    }
+
+    // ---- The any-part rule (RC-11.4) --------------------------------------
+
+    /// **The any-part rule over a tile is the page under it** (ruling 5,
+    /// RC-11.4).
+    ///
+    /// The centre rule's shapes, and with them slivers that only their edges
+    /// reach — one between two sub-scanlines, one across the edge of two
+    /// rows, a slanted one — points, one of them on a pixel's edge, and a
+    /// stroke's outline thinner than a sub-scanline, its pieces kept: each
+    /// filled over the whole page and over every tile of every width from one
+    /// pixel to four at every column, across three bands of rows, and every
+    /// pixel of every tile is the page's. Both halves of the rule read device
+    /// pixels: the samples are the coverage's, and an edge's extent over a
+    /// row is a function of the edge and the row alone, which a tile clips
+    /// and does not move.
+    #[test]
+    fn the_any_part_rule_on_a_tile_is_the_page_s() {
+        const WIDE: u32 = 12;
+        const TALL: u32 = 10;
+        let mut shapes: Vec<(&str, Path, FillRule)> = Vec::new();
+        let mut rects = Path::new();
+        rects.rect(2.0 + 5.0 / 16.0, 1.5, 4.0 + 3.0 / 16.0, 6.0);
+        rects.rect(8.5, 0.25, 2.0, 9.0);
+        shapes.push(("rectangles at sixteenths", rects, FillRule::NonZero));
+        let mut past = Path::new();
+        past.rect(-3.0, -2.0, 5.5, 4.0);
+        shapes.push(("a rectangle past the corner", past, FillRule::NonZero));
+        let mut triangle = Path::new();
+        triangle.move_to(0.7, 9.3);
+        triangle.line_to(11.2, 0.4);
+        triangle.line_to(6.1, 8.8);
+        triangle.close();
+        shapes.push(("a turned triangle", triangle, FillRule::NonZero));
+        let mut disc = Path::new();
+        circle(&mut disc, (6.2, 5.1), 3.7);
+        shapes.push(("a circle", disc, FillRule::NonZero));
+        let mut ring = Path::new();
+        circle(&mut ring, (5.9, 4.8), 4.4);
+        circle(&mut ring, (5.9, 4.8), 2.1);
+        shapes.push(("an even-odd ring", ring, FillRule::EvenOdd));
+        shapes.push(("an unclosed middle", unclosed_middle(), FillRule::NonZero));
+        let mut slivers = Path::new();
+        slivers.rect(1.3, 2.5 + 1.0 / 64.0, 9.4, 1.0 / 32.0);
+        slivers.rect(-0.7, 6.0 - 1.0 / 64.0, 5.2, 1.0 / 32.0);
+        slivers.move_to(4.4, 7.53);
+        slivers.line_to(11.6, 8.51);
+        slivers.line_to(11.6, 8.52);
+        slivers.line_to(4.4, 7.54);
+        slivers.close();
+        shapes.push(("slivers", slivers, FillRule::NonZero));
+        let mut points = Path::new();
+        points.move_to(3.4, 2.7);
+        points.move_to(7.0, 4.5);
+        points.move_to(9.6, 8.2);
+        shapes.push(("points", points, FillRule::NonZero));
+
+        let bands = [(0, TALL), (3, 4), (TALL as i32 - 1, 1)];
+        for (name, path, rule) in &shapes {
+            let page = fill_hard(path, *rule, 0, 0, WIDE, TALL, 0.1, None, HardEdge::AnyPart);
+            assert!(page.data.contains(&255), "{name} meets a pixel");
+            assert!(page.data.iter().all(|&v| v == 0 || v == 255), "{name}");
+            for x0 in 0..WIDE {
+                for width in 1..=(WIDE - x0).min(4) {
+                    for (y0, height) in bands {
+                        let tile = fill_hard(
+                            path,
+                            *rule,
+                            x0 as i32,
+                            y0,
+                            width,
+                            height,
+                            0.1,
+                            None,
+                            HardEdge::AnyPart,
+                        );
+                        for y in y0..y0 + height as i32 {
+                            for x in x0 as i32..(x0 + width) as i32 {
+                                assert_eq!(
+                                    tile.at(x, y),
+                                    page.at(x, y),
+                                    "{name}: the tile at ({x0}, {y0}) {width} wide, pixel ({x}, {y})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut line = Path::new();
+        line.move_to(0.6, 4.52);
+        line.line_to(11.3, 4.52);
+        let style = crate::StrokeStyle {
+            width: 0.02,
+            ..crate::StrokeStyle::default()
+        };
+        let mut scratch = FillScratch::new();
+        scratch.keep_outline_points(true);
+        crate::stroke_with(&mut scratch, &line, &style, 0.1, None);
+        let page = fill_outline_hard(&mut scratch, 0, 0, WIDE, TALL, None, HardEdge::AnyPart);
+        assert!(page.data.contains(&255), "the stroke meets a pixel");
+        for x0 in 0..WIDE {
+            for width in 1..=(WIDE - x0).min(4) {
+                for (y0, height) in bands {
+                    let tile = fill_outline_hard(
+                        &mut scratch,
+                        x0 as i32,
+                        y0,
+                        width,
+                        height,
+                        None,
+                        HardEdge::AnyPart,
+                    );
+                    for y in y0..y0 + height as i32 {
+                        for x in x0 as i32..(x0 + width) as i32 {
+                            assert_eq!(
+                                tile.at(x, y),
+                                page.at(x, y),
+                                "the stroke: the tile at ({x0}, {y0}) {width} wide, pixel ({x}, {y})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **An outline under the any-part rule reads the pieces its scratch
+    /// kept.** With `keep_outline_points` on, a stroke's outline is the
+    /// any-part fill of the path the stroker returns, byte for byte, for
+    /// every cap and join, a dash and a hairline a fiftieth of a pixel wide
+    /// lying between two sub-scanlines, which paints the row it lies in from
+    /// end to end. With it off — the default, where a stroke keeps its edges
+    /// alone — the outline is read from its samples alone, the sorted sweep's
+    /// spans of the same path, and the hairline paints nothing; the coverage
+    /// and the other rules read the same edges either way.
+    #[test]
+    fn an_outline_under_the_any_part_rule_reads_the_pieces_it_kept() {
+        use crate::fill_reference::touches_reference;
+
+        let mut curve = Path::new();
+        curve.move_to(2.2, 3.1);
+        curve.line_to(15.7, 4.9);
+        curve.curve_to(18.0, 12.0, 6.0, 17.5, 3.3, 11.8);
+        let mut hairline = Path::new();
+        hairline.move_to(1.3, 6.52);
+        hairline.line_to(16.7, 6.52);
+        let styles = [
+            (
+                &curve,
+                crate::StrokeStyle {
+                    width: 1.7,
+                    cap: crate::LineCap::Butt,
+                    join: crate::LineJoin::Miter,
+                    ..crate::StrokeStyle::default()
+                },
+            ),
+            (
+                &curve,
+                crate::StrokeStyle {
+                    width: 0.9,
+                    cap: crate::LineCap::Round,
+                    join: crate::LineJoin::Round,
+                    dashes: vec![2.5, 1.25],
+                    ..crate::StrokeStyle::default()
+                },
+            ),
+            (
+                &hairline,
+                crate::StrokeStyle {
+                    width: 0.02,
+                    cap: crate::LineCap::Butt,
+                    ..crate::StrokeStyle::default()
+                },
+            ),
+        ];
+        for (index, (path, style)) in styles.iter().enumerate() {
+            let outline = crate::stroke(path, style, 0.1, None);
+            let mut kept = FillScratch::new();
+            kept.keep_outline_points(true);
+            crate::stroke_with(&mut kept, path, style, 0.1, None);
+            let whole = fill_outline_hard(&mut kept, 0, 0, 20, 20, None, HardEdge::AnyPart);
+            let want = fill_hard(
+                &outline,
+                FillRule::NonZero,
+                0,
+                0,
+                20,
+                20,
+                0.1,
+                None,
+                HardEdge::AnyPart,
+            );
+            assert_eq!(whole.data, want.data, "style {index}, its pieces kept");
+
+            let mut bare = FillScratch::new();
+            crate::stroke_with(&mut bare, path, style, 0.1, None);
+            let sampled = fill_outline_hard(&mut bare, 0, 0, 20, 20, None, HardEdge::AnyPart);
+            let samples = touches_reference(&outline, FillRule::NonZero, 0, 0, 20, 20, 0.1, false);
+            assert_eq!(sampled.data, samples.data, "style {index}, its edges alone");
+            for edge in [HardEdge::Half, HardEdge::Centre] {
+                assert_eq!(
+                    fill_outline_hard(&mut bare, 0, 0, 20, 20, None, edge).data,
+                    fill_outline_hard(&mut kept, 0, 0, 20, 20, None, edge).data,
+                    "style {index} under {edge:?}"
+                );
+            }
+        }
+
+        let mut kept = FillScratch::new();
+        kept.keep_outline_points(true);
+        crate::stroke_with(&mut kept, &hairline, &styles[2].1, 0.1, None);
+        let painted = fill_outline_hard(&mut kept, 0, 0, 20, 20, None, HardEdge::AnyPart);
+        for y in 0..20 {
+            for x in 0..20 {
+                let met = y == 6 && (1..=16).contains(&x);
+                assert_eq!(
+                    painted.at(x, y),
+                    if met { 255 } else { 0 },
+                    "the hairline's pixel ({x}, {y})"
+                );
+            }
+        }
+        let mut bare = FillScratch::new();
+        crate::stroke_with(&mut bare, &hairline, &styles[2].1, 0.1, None);
+        let unseen = fill_outline_hard(&mut bare, 0, 0, 20, 20, None, HardEdge::AnyPart);
+        assert!(
+            unseen.data.iter().all(|&v| v == 0),
+            "no sample sees the hairline"
+        );
+    }
+
+    /// A stopped any-part fill keeps the rows it had swept, both halves of
+    /// the rule: a bar and two slivers lying between sub-scanlines, one in
+    /// row 10 and one in row 100, stopped by the fourth question, which the
+    /// sweep asks at row `3 × STOP_EVERY`. The rows above the cut hold the
+    /// bar's thirty columns and the upper sliver's three pixels, which only
+    /// its edges reach; the cut row and everything below it, the lower
+    /// sliver among them, hold nothing, though a fill that is not stopped
+    /// paints it.
+    #[test]
+    fn a_stopped_any_part_fill_keeps_the_rows_it_had_already_swept() {
+        let mut path = tall_bar();
+        path.rect(1.25, 10.5 + 1.0 / 64.0, 2.5, 1.0 / 32.0);
+        path.rect(1.25, 100.5 + 1.0 / 64.0, 2.5, 1.0 / 32.0);
+        let whole = fill_hard(
+            &path,
+            FillRule::NonZero,
+            0,
+            0,
+            40,
+            400,
+            0.1,
+            None,
+            HardEdge::AnyPart,
+        );
+        assert_eq!(whole.at(2, 100), 255, "the lower sliver, unstopped");
+        let asked = std::cell::Cell::new(0u32);
+        let ask = || {
+            asked.set(asked.get() + 1);
+            asked.get() == 4
+        };
+        let partial = fill_hard(
+            &path,
+            FillRule::NonZero,
+            0,
+            0,
+            40,
+            400,
+            0.1,
+            Some(&ask),
+            HardEdge::AnyPart,
+        );
+        let cut = 3 * STOP_EVERY as i32;
+        assert_eq!(partial.at(20, cut - 1), 255, "the rows before the cut drew");
+        assert_eq!(partial.at(20, cut), 0, "the row it stopped on did not");
+        assert_eq!(partial.at(2, 10), 255, "the upper sliver, by its edges");
+        assert_eq!(partial.at(2, 100), 0, "the lower sliver is below the cut");
+        assert_eq!(
+            partial.data.iter().filter(|&&v| v != 0).count(),
+            cut as usize * 30 + 3,
+            "the rows above the cut: the bar's thirty columns and the sliver's three pixels"
         );
     }
 }

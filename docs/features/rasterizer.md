@@ -224,8 +224,33 @@ a pixel between two centres paints nothing. A row whose middle sub-scanline
 does not close is read as the sorted sweep reads it, the span left open adding
 nothing. One sample in the page's device pixels decides a pixel, and a
 region's left edge is a whole pixel, so a tile under the rule is the page under
-it. `ImageDraw::edge_rule` and `MeshDraw::edge_rule` are the rule an image's
-unit square and a mesh's silhouette are drawn by at 0 bits; the renderer passes
+it.
+
+`AnyPart` paints a pixel the shape meets: its region and its outline, every
+crossing across to the nearest 1/256, with a point inside the pixel's open
+square. On the grid that is two halves. The samples: a sweep under the rule
+deposits every sub-scanline, as the coverage does, and a cell is whole where
+its total of units inside is above zero — a pixel holding one to fifteen units
+has a coverage of 0 and still meets the shape — the walk compiled for the rule
+apart from the coverage's, so the coverage's costs what it did. The edges:
+each segment of the flattened outline, closed, horizontal and short ones
+included and a subpath of one point a segment of no length, over each open
+row `(r, r + 1)` it reaches, paints the pixels whose open interval of units
+`(256·col, 256·col + 256)` the extent of its part in the row reaches, both
+ends across to the nearest 1/256 — which is what a sliver lying wholly
+between two sub-scanlines is made of, and what the samples cannot see. A
+shape that only touches a pixel's edge or corner leaves it empty, so a
+rectangle on whole pixels paints its own pixels and no more, and a point
+paints the pixel under it unless it lies on a pixel's edge. Both halves read
+device pixels, so a tile under the rule is the page under it; a stopped fill
+keeps the rows above the cut, both halves. A path's outline is the points
+the fill flattened; a stroke's is its pieces, which a scratch keeps beside
+their edges only after `FillScratch::keep_outline_points(true)`, so a stroke
+filled any other way holds and costs what it did, and `fill_outline_hard` on
+an outline written without them reads its samples alone.
+
+`ImageDraw::edge_rule` and `MeshDraw::edge_rule` are the rule an image's unit
+square and a mesh's silhouette are drawn by at 0 bits; the renderer passes
 `Half` to both.
 
 **Coverage levels.** `Mask::quantise(bits)` reduces a mask to a number of
@@ -675,6 +700,13 @@ tiny pattern over a long line cannot generate millions of pieces.
   `a_centre_on_a_sub_scanline_that_does_not_close_is_read_as_the_sweep_reads_it`,
   `an_edge_through_a_row_of_centres_gives_them_to_one_side` and
   `a_stopped_centre_fill_keeps_the_rows_it_had_already_swept` its pieces;
+  `the_any_part_rule_is_the_sweep_s_spans_and_the_outline_s_extents` holds
+  the any-part rule to the sorted sweep's spans and the outline's extents over
+  the generated classes, the coverage's, the centre rule's and the samples'
+  pixels inside it, and `the_any_part_rule_on_a_tile_is_the_page_s`,
+  `an_outline_under_the_any_part_rule_reads_the_pieces_it_kept` and
+  `a_stopped_any_part_fill_keeps_the_rows_it_had_already_swept` its tiles, a
+  stroke's kept pieces and its stop;
   `a_fill_after_the_first_allocates_no_scratch` counts the scratch's buffers
   that grow, none after a first fill as large as any that follows;
   `an_interior_run_is_one_slice_fill` counts conversions, exactly the cells
@@ -716,14 +748,17 @@ tiny pattern over a long line cannot generate millions of pieces.
   to its unit square's coverage quantised and filled
   (`an_image_edge_quantises_as_a_path_edge`) and under the centre rule to the
   pixels whose centres its square holds
-  (`an_image_edge_under_the_centre_rule_paints_the_pixels_whose_centres_it_holds`),
+  (`an_image_edge_under_the_centre_rule_paints_the_pixels_whose_centres_it_holds`)
+  and under the any-part rule to every pixel it meets
+  (`an_image_edge_under_the_any_part_rule_paints_every_pixel_its_square_meets`),
   and
   `canvas.rs` holds every image pixel's level to the expression rounded, over
   every coverage, sample alpha and clip at a sweep of alphas
   (`an_image_pixel_composes_as_the_float_expression_rounded`); `mesh.rs`
   proves shared edges leave no seam and holds a silhouette at every level and
-  under the centre rule to its coverage quantised and its triangles' centres,
-  the colours spread before the level (`a_mesh_silhouette_takes_its_level_and_its_rule`); `canvas.rs` covers formats, backdrops
+  under each rule to its coverage quantised, its triangles' centres and the
+  pixels they meet, the colours spread before the level
+  (`a_mesh_silhouette_takes_its_level_and_its_rule`); `canvas.rs` covers formats, backdrops
   and bounded compositing, holds the opaque composite to the general blend
   byte for byte — exhaustively over coverage, source and destination channel
   on every format it is taken on, and over whole fills
@@ -791,8 +826,14 @@ tiny pattern over a long line cannot generate millions of pieces.
   sixteenth on each edge and between the gradations by the closed form from
   their corners, and triangles, a circle and an even-odd ring under both rules
   by each edge's crossing of a row's middle, from its equation, to the nearest
-  1/256, and the winding of the crossings left of each centre. What this
-  tier adjudicates is the
+  1/256, and the winding of the crossings left of each centre.
+  `the_any_part_rule_paints_exactly_the_pixels_the_shape_touches` holds the
+  any-part rule to the test's own intersection of each shape with each
+  pixel's open square on the grid — rectangles at every sixteenth from their
+  corners, slivers thinner than a sub-scanline, triangles, a line traced
+  there and back, points and a circle from their edges' equations — and
+  `a_sliver_between_sub_scanlines_is_not_lost` the sliver no sample sees. What
+  this tier adjudicates is the
   implementation against the *stated sampling model*, which is this crate's
   own contract rather than ISO 32000's — named here because that is a weaker
   claim than a third-party vector and is worth not mistaking for one.
