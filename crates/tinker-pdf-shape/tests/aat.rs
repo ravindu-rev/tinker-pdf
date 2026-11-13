@@ -396,27 +396,93 @@ fn clusters(text: &str) -> Vec<u32> {
         .collect()
 }
 
-// --- the refusal (FT-07c.2) ----------------------------------------------
+// --- the face, and the path it takes (FT-07c.2, FT-07c.10) ----------------
 //
-// A face whose layout is AAT's is shaped as a face with no layout tables is
-// until its `morx` is run, and every run says so once: `Warning::TableNotRun`
-// naming `morx` (ruling 10; ruling 3's refusal by name), or `mort` for a face
-// carrying the predecessor table alone.
+// A face whose layout is AAT's is shaped through its `morx` chain, under the
+// design's precedence: a face carrying a readable `GSUB` or `GPOS` takes the
+// OpenType path whatever AAT tables it carries, and a face whose AAT table is
+// one this crate does not run — a `mort`, or a `morx` it cannot read — is
+// shaped by its `cmap` and `hmtx` alone, every run saying so once:
+// `Warning::TableNotRun` (ruling 10; ruling 3's refusal by name).
 
-/// The swash `x` the AAT face's chain maps its `x` to: the last of its eight
-/// glyphs, `.notdef`, `f`, `i`, `x`, an `fi`, `α`, `β` and the swash.
+/// The ligature of the AAT face's `f` and `i`.
+const FI: u16 = 4;
+/// The swash `x` the AAT face's chain maps its `x` to.
 const SWASH_X: u16 = 7;
+/// The alternate the chain maps the face's alef to.
+const ALEF_ALT: u16 = 9;
+/// The face's Han ideograph, and the vertical form its chain maps it to in a
+/// column.
+const HAN: u16 = 10;
+/// See [`HAN`].
+const VERTICAL_HAN: u16 = 11;
 
-/// A Latin face with an `f`, an `i`, an `x` and an `fi`, and a Greek alpha
-/// and beta, carrying a `morx` whose one chain maps `x` to its swash and no
-/// OpenType Layout table.
-fn aat_face() -> Face {
-    let face = Face::new(8, &[('f', 1), ('i', 2), ('x', 3), ('α', 5), ('β', 6)]);
-    let x = face.glyph('x');
-    face.with(
-        b"morx",
-        morx_table(2, &[chain(1, &[], &[noncontextual(1, &[(x, SWASH_X)])])]),
+/// The same subtable under sub-feature flags `flags`.
+fn under_flags(mut subtable: Vec<u8>, flags: u32) -> Vec<u8> {
+    subtable[8..12].copy_from_slice(&flags.to_be_bytes());
+    subtable
+}
+
+/// A ligature machine forming `fi` of `f` and `i`, glyphs 1 and 2.
+fn fi_machine() -> Vec<u8> {
+    ligature_subtable(
+        &[(1, 4), (2, 5)],
+        &[&[0, 0, 0, 0, 1, 0], &[0, 0, 0, 0, 1, 2]],
+        &[[0, 0, 0], [1, 0x8000, 0], [0, 0xA000, 0]],
+        &[0, LAST_ACTION],
+        &[0; 3],
+        &[FI],
     )
+}
+
+/// A rearrangement machine swapping `β` and an `α` after it, glyphs 6 and 5.
+fn beta_alpha_machine() -> Vec<u8> {
+    rearrangement_subtable(
+        &[(6, 4), (5, 5)],
+        &[&[0, 0, 0, 0, 1, 0], &[0, 0, 0, 0, 1, 2]],
+        &[(0, 0), (1, 0x8000), (0, 0x2001)],
+    )
+}
+
+/// The AAT face's chain: by default, flags 1 to 8 — its `x` swashed and its
+/// alef made an alternate, `f` and `i` ligated, `βα` reordered, and in a
+/// column its Han ideograph made the vertical form — with the Ligatures
+/// feature's two settings, on and off, turning the ligature's flag on and
+/// off.
+fn aat_chain() -> Vec<u8> {
+    morx_table(
+        2,
+        &[chain(
+            0b1111,
+            &[(1, 2, 0b0010, !0b0010), (1, 3, 0, !0b0010)],
+            &[
+                noncontextual(1, &[(3, SWASH_X), (8, ALEF_ALT)]),
+                under_flags(fi_machine(), 2),
+                under_flags(beta_alpha_machine(), 4),
+                noncontextual_with(VERTICAL, 8, &lookup_single(&[(HAN, VERTICAL_HAN)])),
+            ],
+        )],
+    )
+}
+
+/// A face of thirteen glyphs — `.notdef`, `f`, `i`, `x`, the `fi`, `α`, `β`,
+/// the swash `x`, alef, its alternate, a Han ideograph, its vertical form, and
+/// bet — carrying the chain [`aat_chain`] and no OpenType Layout table.
+fn aat_face() -> Face {
+    let face = Face::new(
+        13,
+        &[
+            ('f', 1),
+            ('i', 2),
+            ('x', 3),
+            ('α', 5),
+            ('β', 6),
+            ('\u{5D0}', 8),
+            ('\u{5D1}', 12),
+            ('\u{6F22}', HAN),
+        ],
+    );
+    face.with(b"morx", aat_chain())
 }
 
 /// `f` and `i` ligated to glyph 4 under `liga`.
@@ -439,97 +505,117 @@ fn refusals(warnings: &[Warning], table: &[u8; 4]) -> usize {
     warnings.iter().filter(|w| **w == not_run(table)).count()
 }
 
-/// A face carrying `morx` and no `GSUB` shapes as the face with no layout
-/// tables does, its `x` left as `cmap` gives it, and its run says so once;
-/// given a `GSUB`, the same face shapes through it and names nothing.
+/// The glyph indices of `runs`, in order.
+fn indices(runs: &[ShapedRun]) -> Vec<u16> {
+    glyphs(runs).iter().map(|g| g.glyph).collect()
+}
+
+/// FT-07c.2's face given a chain: a face carrying `morx` and no `GSUB` or
+/// `GPOS` is shaped through it — its `f` and `i` ligated, its `x` swashed,
+/// its `βα` reordered — each glyph's advance its own `hmtx` advance, filled
+/// after the chain, the ligature taking its first component's cluster and a
+/// reordered pair's clusters merged; and no run names anything.
 #[test]
-fn a_face_carrying_only_morx_is_named_and_shaped_unshaped() {
+fn a_face_carrying_only_morx_is_shaped_through_its_chain() {
     let face = aat_face();
-    let text = "fix";
     let bytes = face.build();
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
-    let runs = line_runs(&Shaper::new(&sfnt), text);
-    assert_eq!(runs.len(), 1, "one Latin run");
+    let shaper = Shaper::new(&sfnt);
 
-    // The `cmap`-only run: the same face with no `morx` at all.
+    let runs = line_runs(&shaper, "fix");
+    assert_eq!(runs.len(), 1, "one Latin run");
+    assert_eq!(
+        glyphs(&runs),
+        vec![face.plain(FI, 0), face.plain(SWASH_X, 2)],
+        "ligated and swashed, each advance the glyph's own"
+    );
+    assert!(runs[0].warnings().is_empty(), "{:?}", runs[0].warnings());
+
+    let runs = line_runs(&shaper, "βα");
+    assert_eq!(glyphs(&runs), vec![face.plain(5, 0), face.plain(6, 0)]);
+    assert!(runs.iter().all(|run| run.warnings().is_empty()));
+
+    // The same face with no `morx` is the `cmap`-only run: what the chain
+    // changed.
     let plain_face = face.clone().without(b"morx");
     let plain_bytes = plain_face.build();
     let plain_sfnt = Sfnt::parse(&plain_bytes).expect("the plain face parses");
-    let plain = line_runs(&Shaper::new(&plain_sfnt), text);
-    assert!(plain.iter().all(|run| run.warnings().is_empty()));
-
-    let expected: Vec<ShapedGlyph> = text
+    let plain = line_runs(&Shaper::new(&plain_sfnt), "fix");
+    let expected: Vec<ShapedGlyph> = "fix"
         .chars()
-        .zip(clusters(text))
+        .zip(clusters("fix"))
         .map(|(c, cluster)| face.plain(face.glyph(c), cluster))
         .collect();
-    assert_eq!(
-        glyphs(&runs),
-        expected,
-        "the cmap-only glyphs, the x unswashed"
-    );
-    assert_eq!(glyphs(&runs), glyphs(&plain), "the face without its morx");
-    assert_eq!(runs[0].warnings(), &[not_run(b"morx")], "named once");
-
-    // The same face with a `GSUB` beside its `morx` takes the OpenType
-    // path: the ligature forms, the `morx` stays unread, and nothing names it.
-    let with_gsub = face.with(b"GSUB", fi_ligature());
-    let gsub_bytes = with_gsub.build();
-    let gsub_sfnt = Sfnt::parse(&gsub_bytes).expect("the face with a GSUB parses");
-    let shaped = line_runs(&Shaper::new(&gsub_sfnt), text);
-    assert_eq!(
-        glyphs(&shaped)
-            .iter()
-            .map(|g| g.glyph)
-            .collect::<Vec<u16>>(),
-        vec![4, with_gsub.glyph('x')],
-        "the GSUB's ligature, and no swash"
-    );
-    assert!(
-        shaped.iter().all(|run| run.warnings().is_empty()),
-        "nothing names morx: {:?}",
-        shaped.iter().map(ShapedRun::warnings).collect::<Vec<_>>()
-    );
+    assert_eq!(glyphs(&plain), expected);
+    assert!(plain.iter().all(|run| run.warnings().is_empty()));
 }
 
-/// Every run of a paragraph carries the refusal, each once however many
-/// glyphs it holds, whatever features the caller asks for; a run of no
-/// glyphs is still a run shaped without the face's chain.
+/// Every run is shaped through the chain its caller asks for: from the
+/// chain's defaults; from none where `with_features` names nothing; from
+/// none with the named tags' settings asked; and from the defaults with
+/// `with_settings`' tags asked over them. A tag no AAT feature answers is
+/// named on each run, `kern` is no `morx` feature and named for nothing, and
+/// a run of no glyphs is shaped to none, naming nothing.
 #[test]
-fn every_run_over_a_morx_only_face_is_named_once() {
+fn every_run_over_a_morx_face_takes_the_chain_its_caller_asks_for() {
     let face = aat_face();
     let bytes = face.build();
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
-    let text = "fixfixfix αβαβ fi";
     let none: [Tag; 0] = [];
     let liga = [Tag::new(b"liga")];
+    let positioning = [Tag::new(b"kern"), Tag::new(b"mark")];
     let off = [(Tag::new(b"liga"), 0u32), (Tag::new(b"smcp"), 1)];
-    let shapers = [
-        Shaper::new(&sfnt),
-        Shaper::new(&sfnt).with_features(&none, &none),
-        Shaper::new(&sfnt).with_features(&liga, &none),
-        Shaper::new(&sfnt).with_settings(&off),
+    let unknown = [(Tag::new(b"mark"), 1u32)];
+    let named_mark = Warning::FeatureNotInAat {
+        tag: Tag::new(b"mark"),
+    };
+    let (f, i, x, alpha, beta) = (1u16, 2u16, 3u16, 5u16, 6u16);
+    let cases: Vec<(Shaper<'_>, Vec<u16>, Vec<u16>, Vec<Warning>)> = vec![
+        (
+            Shaper::new(&sfnt),
+            vec![FI, SWASH_X],
+            vec![alpha, beta],
+            vec![],
+        ),
+        (
+            Shaper::new(&sfnt).with_features(&none, &none),
+            vec![f, i, x],
+            vec![beta, alpha],
+            vec![],
+        ),
+        (
+            Shaper::new(&sfnt).with_features(&liga, &none),
+            vec![FI, x],
+            vec![beta, alpha],
+            vec![],
+        ),
+        (
+            Shaper::new(&sfnt).with_features(&liga, &positioning),
+            vec![FI, x],
+            vec![beta, alpha],
+            vec![named_mark],
+        ),
+        (
+            Shaper::new(&sfnt).with_settings(&off),
+            vec![f, i, SWASH_X],
+            vec![alpha, beta],
+            vec![],
+        ),
+        (
+            Shaper::new(&sfnt).with_settings(&unknown),
+            vec![FI, SWASH_X],
+            vec![alpha, beta],
+            vec![named_mark],
+        ),
     ];
-    for shaper in &shapers {
-        let runs = line_runs(shaper, text);
-        assert!(runs.len() >= 2, "a Latin and a Greek run: {}", runs.len());
-        for run in &runs {
-            assert_eq!(run.warnings(), &[not_run(b"morx")], "run {:?}", run.text());
+    for (shaper, latin, greek, warned) in &cases {
+        let runs = line_runs(shaper, "fix");
+        assert_eq!(indices(&runs), *latin);
+        let greek_runs = line_runs(shaper, "βα");
+        assert_eq!(indices(&greek_runs), *greek);
+        for run in runs.iter().chain(&greek_runs) {
+            assert_eq!(run.warnings(), warned.as_slice(), "run {:?}", run.text());
         }
-        // Unshaped: one glyph a character, each as `cmap` maps it.
-        let mapped: Vec<u16> = text
-            .chars()
-            .map(|c| {
-                face.cmap
-                    .iter()
-                    .find(|(of, _)| *of == c)
-                    .map_or(0, |(_, glyph)| *glyph)
-            })
-            .collect();
-        assert_eq!(
-            glyphs(&runs).iter().map(|g| g.glyph).collect::<Vec<u16>>(),
-            mapped
-        );
     }
     let empty = Run {
         text: 2..2,
@@ -537,22 +623,28 @@ fn every_run_over_a_morx_only_face_is_named_once() {
         level: Level::LTR,
         orientation: Orientation::Horizontal,
     };
-    let shaped = Shaper::new(&sfnt).shape(text, &empty);
+    let shaped = Shaper::new(&sfnt).shape("fix", &empty);
     assert!(shaped.glyphs().is_empty());
-    assert_eq!(shaped.warnings(), &[not_run(b"morx")]);
+    assert!(shaped.warnings().is_empty());
 }
 
-/// A right-to-left run and a column of the face go without the chain too,
-/// and each of their runs says so once, beside whatever else it says.
+/// A right-to-left run is shaped through the chain and comes back in logical
+/// order, its clusters where they were; in a column the sideways run takes
+/// the subtables for horizontal text and the upright one the subtable for
+/// vertical text, its only warning the column's own.
 #[test]
-fn a_right_to_left_run_and_a_column_over_a_morx_only_face_are_named_too() {
+fn a_right_to_left_run_and_a_column_take_the_chain_too() {
     let face = aat_face();
     let bytes = face.build();
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
     let (_, runs) = Shaper::new(&sfnt).shape_text("\u{5D0}\u{5D1}", BaseDirection::Auto);
     assert_eq!(runs.len(), 1);
     assert!(!runs[0].direction().is_forward(), "a right-to-left run");
-    assert_eq!(runs[0].warnings(), &[not_run(b"morx")]);
+    assert_eq!(
+        glyphs(&runs),
+        vec![face.plain(ALEF_ALT, 0), face.plain(12, 2)]
+    );
+    assert!(runs[0].warnings().is_empty(), "{:?}", runs[0].warnings());
 
     // Latin stands sideways in a column and Han upright, so the column is
     // two runs, one of each.
@@ -564,19 +656,21 @@ fn a_right_to_left_run_and_a_column_over_a_morx_only_face_are_named_too() {
         orientations,
         vec![Orientation::Sideways, Orientation::Upright]
     );
-    for run in &runs {
-        assert_eq!(refusals(run.warnings(), b"morx"), 1, "{:?}", run.warnings());
-    }
-    // The upright run also says its metrics were synthesized, the face
-    // having no `vmtx`: the refusal sits beside the column's own warning.
-    assert!(runs[1]
-        .warnings()
-        .contains(&Warning::VerticalMetricsSynthesized));
+    assert_eq!(indices(&runs[..1]), vec![FI]);
+    assert!(runs[0].warnings().is_empty(), "{:?}", runs[0].warnings());
+    assert_eq!(indices(&runs[1..]), vec![VERTICAL_HAN]);
+    // The upright run's metrics were synthesized, the face having no
+    // `vmtx`: that is all it says.
+    assert_eq!(runs[1].warnings(), &[Warning::VerticalMetricsSynthesized]);
+    // Along a line the Han ideograph is not the vertical form.
+    let runs = line_runs(&Shaper::new(&sfnt), "\u{6F22}");
+    assert_eq!(indices(&runs), vec![HAN]);
 }
 
-/// A face carrying `mort` alone — the table `morx` extends, which no row
-/// reads — is named by it; a face carrying both is named by its `morx`
-/// alone, the manual having a face with both ignore its `mort`.
+/// A face carrying `mort` alone — the table `morx` extends, a non-goal of
+/// the design — is shaped by its `cmap` and `hmtx` alone and named by it; a
+/// face carrying both is shaped through its `morx` and named for neither,
+/// the manual having a face with both ignore its `mort`.
 #[test]
 fn a_mort_only_face_is_named() {
     // A `mort` header: version 1.0 as a `Fixed`, and no chains.
@@ -586,61 +680,106 @@ fn a_mort_only_face_is_named() {
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
     let runs = line_runs(&Shaper::new(&sfnt), "fix");
     assert_eq!(runs[0].warnings(), &[not_run(b"mort")]);
-    assert_eq!(
-        glyphs(&runs).iter().map(|g| g.glyph).collect::<Vec<u16>>(),
-        vec![1, 2, 3]
-    );
+    assert_eq!(indices(&runs), vec![1, 2, 3]);
 
     let both = aat_face().with(b"mort", mort);
     let bytes = both.build();
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
     let runs = line_runs(&Shaper::new(&sfnt), "fix");
-    assert_eq!(runs[0].warnings(), &[not_run(b"morx")], "mort ignored");
+    assert!(runs[0].warnings().is_empty(), "mort ignored");
+    assert_eq!(indices(&runs), vec![FI, SWASH_X]);
 }
 
-/// A `GPOS` beside the `morx` is an OpenType Layout table too: the face
-/// takes the OpenType path, its kerning applied and its `morx` unread, and
-/// nothing names the `morx`.
+/// A `morx` this crate cannot read — a version other than 2 or 3, or a
+/// header cut short — is no chain to shape through: the face is shaped by
+/// its `cmap` and `hmtx` alone and every run names the table once.
 #[test]
-fn a_face_carrying_gpos_beside_its_morx_takes_the_opentype_path() {
-    let face = aat_face().with(
-        b"GPOS",
+fn a_morx_this_crate_cannot_read_is_named_and_shaped_unshaped() {
+    for unreadable in [
+        [0u8, 1, 0, 0, 0, 0, 0, 0].to_vec(),
+        [0u8, 4, 0, 0, 0, 0, 0, 0].to_vec(),
+        [0u8, 2, 0].to_vec(),
+    ] {
+        let face = aat_face().with(b"morx", unreadable.clone());
+        let bytes = face.build();
+        let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+        let runs = line_runs(&Shaper::new(&sfnt), "fix βα");
+        assert!(runs.len() >= 2);
+        for run in &runs {
+            assert_eq!(refusals(run.warnings(), b"morx"), 1, "{unreadable:?}");
+            assert_eq!(run.warnings().len(), 1, "{:?}", run.warnings());
+        }
+        assert_eq!(
+            indices(&runs[..1]),
+            vec![1, 2, 3, 0],
+            "unshaped, the space .notdef"
+        );
+    }
+}
+
+/// The precedence: a face carrying a readable `GSUB` or `GPOS` takes the
+/// OpenType path, whatever AAT tables it carries beside them, its `morx`
+/// unread and named for nothing; a face carrying neither readable takes its
+/// chain.
+#[test]
+fn a_face_carrying_both_takes_the_path_the_design_states() {
+    let kerning = || {
         layout_table(
             &[(*b"kern", vec![0])],
             &[lookup(2, &[pair_kern(1, 3, -40)])],
-        ),
-    );
+        )
+    };
+    let mort = [0u8, 1, 0, 0, 0, 0, 0, 0].to_vec();
+    // `GSUB` beside the `morx`: its ligature, and no swash.
+    let face = aat_face().with(b"GSUB", fi_ligature());
     let bytes = face.build();
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let runs = line_runs(&Shaper::new(&sfnt), "fix");
+    assert_eq!(indices(&runs), vec![FI, 3], "the GSUB's ligature, no swash");
+    assert!(runs.iter().all(|run| run.warnings().is_empty()));
+    // `βα` is not reordered: the chain is not run.
+    let runs = line_runs(&Shaper::new(&sfnt), "βα");
+    assert_eq!(indices(&runs), vec![6, 5]);
+
+    // `GPOS` beside the `morx`: kerned, and neither ligated nor swashed —
+    // a face with `GPOS` and no `GSUB` substitutes nothing.
+    let face = aat_face().with(b"GPOS", kerning());
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let runs = line_runs(&Shaper::new(&sfnt), "fix");
+    assert_eq!(indices(&runs), vec![1, 2, 3]);
     let runs = line_runs(&Shaper::new(&sfnt), "fx");
     let shaped = glyphs(&runs);
-    assert_eq!(
-        shaped.iter().map(|g| g.glyph).collect::<Vec<u16>>(),
-        vec![1, 3],
-        "no swash: the morx is not the path"
-    );
-    assert_eq!(
-        shaped[0].x_advance,
-        i32::from(face.advances[1]) - 40,
-        "the pair kerned"
-    );
+    assert_eq!(shaped[0].x_advance, i32::from(face.advances[1]) - 40);
     assert!(runs.iter().all(|run| run.warnings().is_empty()));
 
-    // So does a `mort` beside a `GPOS`.
-    let mort_face = face
-        .without(b"morx")
-        .with(b"mort", [0u8, 1, 0, 0, 0, 0, 0, 0].to_vec());
-    let bytes = mort_face.build();
+    // Both, with a `mort` and a `kerx` beside them: the OpenType path.
+    let face = aat_face()
+        .with(b"GSUB", fi_ligature())
+        .with(b"GPOS", kerning())
+        .with(b"mort", mort)
+        .with(b"kerx", [0u8, 2, 0, 0, 0, 0, 0, 0].to_vec());
+    let bytes = face.build();
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
-    let runs = line_runs(&Shaper::new(&sfnt), "fx");
+    let runs = line_runs(&Shaper::new(&sfnt), "fix");
+    assert_eq!(indices(&runs), vec![FI, 3]);
     assert!(runs.iter().all(|run| run.warnings().is_empty()));
+
+    // Neither: the chain.
+    let face = aat_face();
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    assert_eq!(
+        indices(&line_runs(&Shaper::new(&sfnt), "fix")),
+        vec![FI, SWASH_X]
+    );
 }
 
 /// A `GSUB` or `GPOS` this crate cannot read is no OpenType path to take:
-/// the face's only readable layout table is still its `morx`, and it is
-/// named.
+/// the face's only readable layout table is its `morx`, and it is shaped
+/// through it, naming nothing.
 #[test]
-fn an_unreadable_opentype_table_leaves_the_face_aat_only() {
+fn an_unreadable_opentype_table_leaves_the_face_to_its_chain() {
     for tag in [b"GSUB", b"GPOS"] {
         let mut unreadable = fi_ligature();
         unreadable[0..2].copy_from_slice(&2u16.to_be_bytes());
@@ -649,19 +788,19 @@ fn an_unreadable_opentype_table_leaves_the_face_aat_only() {
         let sfnt = Sfnt::parse(&bytes).expect("the face parses");
         let runs = line_runs(&Shaper::new(&sfnt), "fix");
         assert_eq!(
-            glyphs(&runs).iter().map(|g| g.glyph).collect::<Vec<u16>>(),
-            vec![1, 2, 3],
-            "nothing ligated beside an unreadable {tag:?}"
+            indices(&runs),
+            vec![FI, SWASH_X],
+            "the chain beside an unreadable {tag:?}"
         );
-        assert!(runs.iter().all(|run| run.warnings() == [not_run(b"morx")]));
+        assert!(runs.iter().all(|run| run.warnings().is_empty()));
     }
 }
 
-/// A `Silf` beside a `morx` leaves the face AAT's, named by its `morx` and
-/// not by its `Silf`; a `Silf` beside a `mort` is the Graphite description
-/// that names the face, and the `mort` is not named beside it.
+/// A `Silf` beside a `morx` leaves the face AAT's, shaped through its chain
+/// and named for neither table; a `Silf` beside a `mort` is the Graphite
+/// description that names the face, and the `mort` is not named beside it.
 #[test]
-fn a_silf_beside_an_aat_table_is_named_once() {
+fn a_silf_beside_an_aat_table_leaves_one_path() {
     // `Silf` 4.0 with no descriptions: present, which is all the precedence
     // reads.
     let mut silf = 0x0004_0000u32.to_be_bytes().to_vec();
@@ -672,7 +811,8 @@ fn a_silf_beside_an_aat_table_is_named_once() {
     let bytes = face.build();
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
     let runs = line_runs(&Shaper::new(&sfnt), "fix");
-    assert_eq!(runs[0].warnings(), &[not_run(b"morx")]);
+    assert!(runs[0].warnings().is_empty(), "{:?}", runs[0].warnings());
+    assert_eq!(indices(&runs), vec![FI, SWASH_X]);
 
     let face = aat_face()
         .without(b"morx")
@@ -682,6 +822,50 @@ fn a_silf_beside_an_aat_table_is_named_once() {
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
     let runs = line_runs(&Shaper::new(&sfnt), "fix");
     assert_eq!(runs[0].warnings(), &[not_run(b"Silf")]);
+}
+
+/// The AAT path maps a run's text as typed: a Brahmic character the
+/// OpenType path decomposes for the cluster model reaches the chain whole.
+#[test]
+fn a_face_shaped_through_its_chain_maps_the_text_as_typed() {
+    // U+1B13 BALINESE LETTER KA, and U+1B40 BALINESE VOWEL SIGN TALING
+    // TEDUNG, which decomposes to U+1B3E and U+1B35.
+    let face = Face::new(
+        5,
+        &[
+            ('\u{1B13}', 4),
+            ('\u{1B40}', 1),
+            ('\u{1B3E}', 2),
+            ('\u{1B35}', 3),
+        ],
+    );
+    let text = "\u{1B13}\u{1B40}";
+    let plain_bytes = face.build();
+    let plain = Sfnt::parse(&plain_bytes).expect("the face parses");
+    assert_eq!(
+        indices(&line_runs(&Shaper::new(&plain), text)),
+        vec![4, 2, 3],
+        "decomposed where the face takes no chain"
+    );
+    let chained_face = face.with(b"morx", morx_table(2, &[]));
+    let bytes = chained_face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let runs = line_runs(&Shaper::new(&sfnt), text);
+    assert_eq!(indices(&runs), vec![4, 1], "as typed through the chain");
+    assert!(runs.iter().all(|run| run.warnings().is_empty()));
+}
+
+/// A joiner is in the run while the chain runs — the ligature machine sees
+/// it between the `f` and the `i`, and forms nothing — and leaves the run
+/// after it, as it leaves after `GSUB`.
+#[test]
+fn a_joiner_is_seen_by_the_chain_and_leaves_the_run() {
+    let face = aat_face();
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let runs = line_runs(&Shaper::new(&sfnt), "f\u{200D}i");
+    assert_eq!(glyphs(&runs), vec![face.plain(1, 0), face.plain(2, 4)]);
+    assert!(runs.iter().all(|run| run.warnings().is_empty()));
 }
 
 // --- the shared machinery (FT-07c.4) -------------------------------------

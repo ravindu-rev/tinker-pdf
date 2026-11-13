@@ -33,26 +33,28 @@
 //!
 //! # What runs, and what does not
 //!
-//! Four milestones of `docs/design/shaping.md` are graded here, and they do
-//! **not** all pass:
+//! The milestones of `docs/design/shaping.md` graded here do **not** all
+//! pass:
 //!
 //! - milestone 2 on the CMAP, GSUB and GPOS sections;
 //! - milestone 4 on the Arabic-script ones, of which this corpus has exactly
 //!   one — SHARAN-1, six words of Urdu set in Nasta‘līq;
-//! - milestone 5 on the sixteen Brahmic ones, SHBALI, SHKNDA and SHLANA.
+//! - milestone 5 on the sixteen Brahmic ones, SHBALI, SHKNDA and SHLANA;
+//! - *AAT shaping*'s on the forty-one `MORX` sections, each a face built for
+//!   Apple's layout, carrying a `morx` and no `GSUB` or `GPOS`, whose chain
+//!   `Shaper::shape` runs.
 //!
-//! Twenty-seven of the seventy-one sections run; the forty-four that do not
-//! are declined **by name and with their reason** in
+//! Sixty-eight of the seventy-one sections run; the three that do not are
+//! declined **by name and with their reason** in
 //! [`the_sections_this_milestone_declines`], because a section that quietly
 //! did not run reads exactly like a section that passed. Two need what no row
-//! here builds; the other forty-two are the AAT sections *AAT shaping* names,
-//! forty-one `MORX` and `MORT-1`, vendored with their faces and declined until
-//! `Shaper::shape` runs a face's `morx` chain (FT-07c.10), and `MORT-1`, whose
-//! table is a stated non-goal, for good. Of the twenty-seven, eleven reproduce
-//! every case and fifteen do not. Which is which, and how many cases each one
-//! gets, is [`PASSING`] — **read that before believing any other number in
-//! this file**, and [`every_section_this_crate_claims_is_whole`] is what stops
-//! the two claims blurring into each other.
+//! here builds, and `MORT-1`'s table is a stated non-goal of *AAT shaping*.
+//! Four of the sixty-eight hold crash tests alone — `GSUB-3`, `MORX-24`,
+//! `MORX-34` and `MORX-36` — and are run by tests of their own. Which of the
+//! rest reproduce every case, and how many cases each one gets, is
+//! [`PASSING`] — **read that before believing any other number in this
+//! file**, and [`every_section_this_crate_claims_is_whole`] is what stops the
+//! two claims blurring into each other.
 //!
 //! SHARAN-1 is the only section whose direction is not left to right, and it
 //! is therefore the only one that exercises [`shaped`]'s reordering — and the
@@ -172,53 +174,6 @@ const SECTIONS: &[(&str, &str)] = &[
     ("MORT-1", "Glyph Metamorphosis Subtable Types"),
 ];
 
-/// Why a section of the noncontextual subtable is declined.
-const MORX_NONCONTEXTUAL: &str =
-    "the face's `morx` chain holds a noncontextual subtable, and `Shaper::shape` \
-     runs no `morx` chain: a face carrying `morx` and no `GSUB` or `GPOS` is \
-     shaped by its `cmap` and `hmtx` alone and named by `Warning::TableNotRun` \
-     until FT-07c.10 runs its chain";
-
-/// Why a section of the rearrangement subtable is declined.
-const MORX_REARRANGEMENT: &str =
-    "the face's `morx` chain holds a rearrangement subtable — marking the first \
-     and last glyphs, the verbs, a span shorter than its verb, end of text, \
-     `dontAdvance` and a loop — which FT-07c.6 reads, and `Shaper::shape` runs \
-     no `morx` chain until FT-07c.10";
-
-/// Why a section of the contextual substitution subtable is declined.
-const MORX_CONTEXTUAL: &str =
-    "the face's `morx` chain holds a contextual substitution subtable — the mark, \
-     end of text, `setMark`, both indices, `dontAdvance` and a machine that never \
-     advances — which FT-07c.7 reads, and `Shaper::shape` runs no `morx` chain \
-     until FT-07c.10";
-
-/// Why a section of the ligature subtable is declined.
-const MORX_LIGATURE: &str =
-    "the face's `morx` chain holds a ligature subtable — components, unmarked \
-     glyphs, and a component stack that underflows and overflows — which \
-     FT-07c.8 reads, and `Shaper::shape` runs no `morx` chain until FT-07c.10";
-
-/// Why a section of the insertion subtable is declined.
-const MORX_INSERTION: &str =
-    "the face's `morx` chain holds an insertion subtable — before and after, the \
-     mark kept, `setMark` on the inserting transition, `dontAdvance` and growth \
-     without bound — which FT-07c.9 reads, and `Shaper::shape` runs no `morx` \
-     chain until FT-07c.10";
-
-/// Why a section of the four processing orders is declined.
-const MORX_ORDER: &str =
-    "the face's `morx` chain holds a contextual substitution subtable processed \
-     in the order its coverage bits 30 and 28 select, over Latin and Hebrew, \
-     which FT-07c.5 and FT-07c.7 read, and `Shaper::shape` runs no `morx` chain \
-     until FT-07c.10";
-
-/// Why the section of every subtable type in one chain is declined.
-const MORX_EVERY_TYPE: &str = "the face's `morx` chain holds every subtable type — rearrangement, \
-     contextual, ligature, noncontextual and insertion — in one chain, and \
-     `Shaper::shape` runs no `morx` chain until FT-07c.10, after FT-07c.9 reads \
-     the last of them";
-
 /// Why the `mort` section is declined, for good.
 const MORT: &str = "the face carries `mort`, the table `morx` extends, which \
      `docs/design/shaping.md` names a non-goal of *AAT shaping*: a face \
@@ -250,47 +205,6 @@ const DECLINED: &[(&str, &str)] = &[
          GPOS values are deferred until a corpus document demands them \
          (ruling 3)",
     ),
-    ("MORX-1", MORX_NONCONTEXTUAL),
-    ("MORX-2", MORX_REARRANGEMENT),
-    ("MORX-3", MORX_REARRANGEMENT),
-    ("MORX-4", MORX_REARRANGEMENT),
-    ("MORX-5", MORX_REARRANGEMENT),
-    ("MORX-6", MORX_REARRANGEMENT),
-    ("MORX-7", MORX_REARRANGEMENT),
-    ("MORX-8", MORX_REARRANGEMENT),
-    ("MORX-9", MORX_REARRANGEMENT),
-    ("MORX-10", MORX_REARRANGEMENT),
-    ("MORX-11", MORX_REARRANGEMENT),
-    ("MORX-12", MORX_REARRANGEMENT),
-    ("MORX-13", MORX_REARRANGEMENT),
-    ("MORX-14", MORX_REARRANGEMENT),
-    ("MORX-16", MORX_REARRANGEMENT),
-    ("MORX-17", MORX_REARRANGEMENT),
-    ("MORX-18", MORX_CONTEXTUAL),
-    ("MORX-19", MORX_CONTEXTUAL),
-    ("MORX-20", MORX_CONTEXTUAL),
-    ("MORX-21", MORX_CONTEXTUAL),
-    ("MORX-22", MORX_CONTEXTUAL),
-    ("MORX-23", MORX_CONTEXTUAL),
-    ("MORX-24", MORX_CONTEXTUAL),
-    ("MORX-25", MORX_CONTEXTUAL),
-    ("MORX-26", MORX_CONTEXTUAL),
-    ("MORX-27", MORX_LIGATURE),
-    ("MORX-28", MORX_LIGATURE),
-    ("MORX-29", MORX_INSERTION),
-    ("MORX-30", MORX_INSERTION),
-    ("MORX-31", MORX_INSERTION),
-    ("MORX-32", MORX_INSERTION),
-    ("MORX-33", MORX_INSERTION),
-    ("MORX-34", MORX_INSERTION),
-    ("MORX-35", MORX_INSERTION),
-    ("MORX-36", MORX_INSERTION),
-    ("MORX-37", MORX_ORDER),
-    ("MORX-38", MORX_ORDER),
-    ("MORX-39", MORX_ORDER),
-    ("MORX-40", MORX_ORDER),
-    ("MORX-41", MORX_LIGATURE),
-    ("MORX-42", MORX_EVERY_TYPE),
     ("MORT-1", MORT),
 ];
 
@@ -303,7 +217,10 @@ const DECLINED: &[(&str, &str)] = &[
 ///
 /// `GSUB-3` is absent because its one case is `expected-no-crash` and states
 /// no glyphs at all; it is run by
-/// [`the_billion_laughs_face_stops_rather_than_growing`].
+/// [`the_billion_laughs_face_stops_rather_than_growing`]. So are `MORX-24`,
+/// `MORX-34` and `MORX-36`, whose cases are all crash tests, run by
+/// [`the_aat_attacks_stop_rather_than_growing_or_looping`] with the crash
+/// tests of `MORX-14` and `MORX-41`, which the counts here leave out.
 const EXPECTED: &[(&str, usize, usize)] = &[
     ("CMAP-1", 4, 3),
     ("CMAP-2", 2, 1),
@@ -314,6 +231,44 @@ const EXPECTED: &[(&str, usize, usize)] = &[
     ("GPOS-4", 4, 4),
     ("GSUB-1", 1, 1),
     ("GSUB-2", 11, 6),
+    ("MORX-1", 1, 1),
+    ("MORX-10", 1, 1),
+    ("MORX-11", 1, 1),
+    ("MORX-12", 3, 3),
+    ("MORX-13", 1, 1),
+    ("MORX-14", 1, 1),
+    ("MORX-16", 1, 1),
+    ("MORX-17", 1, 1),
+    ("MORX-18", 4, 3),
+    ("MORX-19", 2, 2),
+    ("MORX-2", 16, 15),
+    ("MORX-20", 7, 5),
+    ("MORX-21", 1, 1),
+    ("MORX-22", 1, 1),
+    ("MORX-23", 1, 1),
+    ("MORX-25", 9, 4),
+    ("MORX-26", 2, 1),
+    ("MORX-27", 3, 3),
+    ("MORX-28", 5, 5),
+    ("MORX-29", 4, 4),
+    ("MORX-3", 16, 0),
+    ("MORX-30", 4, 4),
+    ("MORX-31", 8, 8),
+    ("MORX-32", 4, 4),
+    ("MORX-33", 3, 2),
+    ("MORX-35", 2, 2),
+    ("MORX-37", 4, 3),
+    ("MORX-38", 4, 3),
+    ("MORX-39", 4, 3),
+    ("MORX-4", 15, 11),
+    ("MORX-40", 4, 3),
+    ("MORX-41", 2, 2),
+    ("MORX-42", 1, 1),
+    ("MORX-5", 25, 0),
+    ("MORX-6", 1, 1),
+    ("MORX-7", 1, 1),
+    ("MORX-8", 3, 2),
+    ("MORX-9", 1, 1),
     ("SHARAN-1", 6, 6),
     ("SHBALI-1", 22, 22),
     ("SHBALI-2", 12, 12),
@@ -771,9 +726,10 @@ const MAX_DELTA: i32 = 1;
 ///
 /// # Read this table before believing anything else in this file
 ///
-/// For every section milestones 1 to 4 are graded on, the number here **is**
-/// the section's case count, and [`every_section_this_crate_claims_is_whole`]
-/// asserts that separately so it cannot drift. Those sections pass outright.
+/// For every section milestones 1 to 4 are graded on, and every `MORX`
+/// section *AAT shaping* is, the number here **is** the section's case count,
+/// and [`every_section_this_crate_claims_is_whole`] asserts that separately so
+/// it cannot drift. Those sections pass outright.
 ///
 /// The sixteen Brahmic ones do not, and this is where that is said. They are
 /// milestone 5's, whose exit criterion in `docs/design/shaping.md` is *"every
@@ -870,12 +826,56 @@ const PASSING: &[(&str, usize)] = &[
     ("SHLANA-8", 11),
     ("SHLANA-9", 6),
     ("SHLANA-10", 35),
+    // *AAT shaping*'s sections, each whole: every one of its glyph cases.
+    ("MORX-1", 1),
+    ("MORX-2", 16),
+    ("MORX-3", 16),
+    ("MORX-4", 15),
+    ("MORX-5", 25),
+    ("MORX-6", 1),
+    ("MORX-7", 1),
+    ("MORX-8", 3),
+    ("MORX-9", 1),
+    ("MORX-10", 1),
+    ("MORX-11", 1),
+    ("MORX-12", 3),
+    ("MORX-13", 1),
+    ("MORX-14", 1),
+    ("MORX-16", 1),
+    ("MORX-17", 1),
+    ("MORX-18", 4),
+    ("MORX-19", 2),
+    ("MORX-20", 7),
+    ("MORX-21", 1),
+    ("MORX-22", 1),
+    ("MORX-23", 1),
+    ("MORX-25", 9),
+    ("MORX-26", 2),
+    ("MORX-27", 3),
+    ("MORX-28", 5),
+    ("MORX-29", 4),
+    ("MORX-30", 4),
+    ("MORX-31", 8),
+    ("MORX-32", 4),
+    ("MORX-33", 3),
+    ("MORX-35", 2),
+    ("MORX-37", 4),
+    ("MORX-38", 4),
+    ("MORX-39", 4),
+    ("MORX-40", 4),
+    ("MORX-41", 2),
+    ("MORX-42", 1),
 ];
 
 /// The sections that must pass **whole**, so that milestone 5's partial state
-/// can never be mistaken for milestone 4's complete one.
+/// can never be mistaken for milestone 4's complete one, nor *AAT shaping*'s.
 const WHOLE: &[&str] = &[
     "CMAP-1", "CMAP-2", "GPOS-1", "GPOS-2", "GPOS-3", "GPOS-4", "GSUB-1", "GSUB-2", "SHARAN-1",
+    "MORX-1", "MORX-2", "MORX-3", "MORX-4", "MORX-5", "MORX-6", "MORX-7", "MORX-8", "MORX-9",
+    "MORX-10", "MORX-11", "MORX-12", "MORX-13", "MORX-14", "MORX-16", "MORX-17", "MORX-18",
+    "MORX-19", "MORX-20", "MORX-21", "MORX-22", "MORX-23", "MORX-25", "MORX-26", "MORX-27",
+    "MORX-28", "MORX-29", "MORX-30", "MORX-31", "MORX-32", "MORX-33", "MORX-35", "MORX-37",
+    "MORX-38", "MORX-39", "MORX-40", "MORX-41", "MORX-42",
 ];
 
 /// Which one thing is wrong with a case this crate does not reproduce.
@@ -1115,7 +1115,7 @@ fn every_failing_case_says_which_of_three_things_is_wrong() {
     );
     assert_eq!(
         found.len(),
-        PASSING.iter().map(|(_, n)| n).sum::<usize>().abs_diff(387),
+        PASSING.iter().map(|(_, n)| n).sum::<usize>().abs_diff(554),
         "the triage and PASSING disagree about how many cases fail"
     );
 }
@@ -1151,7 +1151,7 @@ fn the_expected_glyph_names_resolve_except_the_ones_named_here() {
         "the set of expected glyph names this repository cannot resolve moved; \
          every one of them is a case comparing positions and not identity"
     );
-    assert_eq!(names, 1373, "the number of expected glyphs moved");
+    assert_eq!(names, 2593, "the number of expected glyphs moved");
 }
 
 #[test]
@@ -1236,7 +1236,7 @@ fn every_runnable_case_produces_what_the_fixture_says() {
         failures.len(),
         failures.join("\n")
     );
-    assert_eq!(ran, 391, "the number of cases that ran moved");
+    assert_eq!(ran, 558, "the number of cases that ran moved");
     let expected: Vec<(String, usize, char, i32)> = WITHIN_TOLERANCE
         .iter()
         .map(|(id, glyph, axis, by)| ((*id).to_string(), *glyph, *axis, *by))
@@ -1251,7 +1251,8 @@ fn every_runnable_case_produces_what_the_fixture_says() {
 /// The sections that pass outright, and the ones that do not, kept apart.
 ///
 /// Milestones 1 to 4 are graded on nine sections and every one of them
-/// reproduces every case. Milestone 5 is graded on sixteen and does not, and
+/// reproduces every case, as every `MORX` section holding a glyph case does
+/// for *AAT shaping*. Milestone 5 is graded on sixteen and does not, and
 /// [`PASSING`] is where the shortfall is written down. This test is what stops
 /// the first claim quietly weakening into the second: a section in [`WHOLE`]
 /// that loses a case fails here even if somebody moved its row in `PASSING`.
@@ -1302,11 +1303,9 @@ fn every_section_this_crate_claims_is_whole() {
 #[test]
 fn the_sections_this_milestone_declines() {
     let declined: Vec<&str> = DECLINED.iter().map(|(section, _)| *section).collect();
-    let mut expected: Vec<String> = vec!["CMAP-3".to_string(), "GPOS-5".to_string()];
-    expected.extend((1..=42).filter(|n| *n != 15).map(|n| format!("MORX-{n}")));
-    expected.push("MORT-1".to_string());
     assert_eq!(
-        declined, expected,
+        declined,
+        vec!["CMAP-3", "GPOS-5", "MORT-1"],
         "the set of sections this milestone declines changed"
     );
     let mut skipped = 0usize;
@@ -1318,81 +1317,34 @@ fn the_sections_this_milestone_declines() {
         );
         skipped += parse(section).len();
     }
-    // Each AAT section names the step that will run it, and `MORT-1` that
-    // nothing will.
-    for (section, reason) in DECLINED {
-        if section.starts_with("MORX-") {
-            assert!(
-                reason.contains("FT-07c.10"),
-                "{section} is declined without the step that runs it"
-            );
-        }
-    }
+    // `MORT-1` is declined for good, its table a stated non-goal; every
+    // `MORX` section runs.
     let mort = DECLINED
         .iter()
         .find(|(section, _)| *section == "MORT-1")
         .map(|(_, reason)| *reason)
         .expect("MORT-1 is declined");
     assert!(mort.contains("non-goal") && mort.contains("for good"));
+    assert!(
+        !DECLINED
+            .iter()
+            .any(|(section, _)| section.starts_with("MORX-")),
+        "a MORX section is declined"
+    );
     // The declined cases section by section: the two the shapers do not
-    // reach, then the AAT sections, crash tests counted with the rest.
+    // reach, then `MORT-1`.
     let per_section: Vec<(&str, usize)> = DECLINED
         .iter()
         .map(|(section, _)| (*section, parse(section).len()))
         .collect();
     assert_eq!(
         per_section,
-        vec![
-            ("CMAP-3", 20),
-            ("GPOS-5", 5),
-            ("MORX-1", 1),
-            ("MORX-2", 16),
-            ("MORX-3", 16),
-            ("MORX-4", 15),
-            ("MORX-5", 25),
-            ("MORX-6", 1),
-            ("MORX-7", 1),
-            ("MORX-8", 3),
-            ("MORX-9", 1),
-            ("MORX-10", 1),
-            ("MORX-11", 1),
-            ("MORX-12", 3),
-            ("MORX-13", 1),
-            ("MORX-14", 2),
-            ("MORX-16", 1),
-            ("MORX-17", 1),
-            ("MORX-18", 4),
-            ("MORX-19", 2),
-            ("MORX-20", 7),
-            ("MORX-21", 1),
-            ("MORX-22", 1),
-            ("MORX-23", 1),
-            ("MORX-24", 1),
-            ("MORX-25", 9),
-            ("MORX-26", 2),
-            ("MORX-27", 3),
-            ("MORX-28", 5),
-            ("MORX-29", 4),
-            ("MORX-30", 4),
-            ("MORX-31", 8),
-            ("MORX-32", 4),
-            ("MORX-33", 3),
-            ("MORX-34", 1),
-            ("MORX-35", 2),
-            ("MORX-36", 1),
-            ("MORX-37", 4),
-            ("MORX-38", 4),
-            ("MORX-39", 4),
-            ("MORX-40", 4),
-            ("MORX-41", 4),
-            ("MORX-42", 1),
-            ("MORT-1", 1),
-        ],
+        vec![("CMAP-3", 20), ("GPOS-5", 5), ("MORT-1", 1)],
         "the declined sections' cases moved"
     );
-    assert_eq!(skipped, 199, "the number of declined cases moved");
-    // And the ones that do run, plus the one that is a crash test, plus the
-    // declined ones, are the whole corpus.
+    assert_eq!(skipped, 26, "the number of declined cases moved");
+    // And the ones that do run, plus the crash tests, plus the declined
+    // ones, are the whole corpus.
     let ran: usize = runnable()
         .iter()
         .map(|(_, cases)| cases.iter().filter(|c| !c.no_crash).count())
@@ -1402,14 +1354,14 @@ fn the_sections_this_milestone_declines() {
         .map(|(_, cases)| cases.iter().filter(|c| c.no_crash).count())
         .sum();
     assert_eq!(ran + crash + skipped, 591, "the corpus changed size");
-    assert_eq!(crash, 1);
-    // Six of the declined cases are crash tests: `MORX-14/2`, `MORX-24`,
+    // Seven crash tests run: `GSUB-3`'s, and `MORX-14/2`, `MORX-24`,
     // `MORX-34`, `MORX-36` and two of `MORX-41`'s.
+    assert_eq!(crash, 7);
     let declined_crash: usize = DECLINED
         .iter()
         .map(|(section, _)| parse(section).iter().filter(|c| c.no_crash).count())
         .sum();
-    assert_eq!(declined_crash, 6, "the declined crash tests moved");
+    assert_eq!(declined_crash, 0, "a declined section holds a crash test");
 }
 
 /// GSUB-3: nine chained lookups, each turning `lol` into ten of itself.
@@ -1443,6 +1395,72 @@ fn the_billion_laughs_face_stops_rather_than_growing() {
             table: tinker_pdf_shape::Table::Gsub
         }),
         "the run stopped growing and said nothing about it: {warnings:?}"
+    );
+}
+
+/// The `MORX` crash tests: a rearrangement that rotates its span until the
+/// glyph it holds lets go (`MORX-14/2`), a contextual substitution that never
+/// advances (`MORX-24`), a chain of insertion subtables each multiplying a
+/// laugh by ten (`MORX-34`), an insertion that never advances (`MORX-36`), and
+/// a ligature's action list finding its stack shorter than it pops, or a
+/// ligature past its list (`MORX-41/3` and `/4`).
+///
+/// Upstream asks only that they neither crash nor hang. What is asserted
+/// beside that is ruling 10's: each run stays within
+/// [`tinker_pdf_shape::Limits::max_glyphs`] and **says** what stopped it — the
+/// transition ceiling, the glyph ceiling, the empty stack or the table it
+/// could not read — and the rotation that ends of its own accord says
+/// nothing.
+#[test]
+fn the_aat_attacks_stop_rather_than_growing_or_looping() {
+    use tinker_pdf_shape::Warning;
+    let mut seen: Vec<String> = Vec::new();
+    for section in ["MORX-14", "MORX-24", "MORX-34", "MORX-36", "MORX-41"] {
+        for case in parse(section).iter().filter(|case| case.no_crash) {
+            seen.push(case.id.clone());
+            let bytes = font_bytes(&case.font);
+            let face = Sfnt::parse(&bytes).expect("a fixture font is a valid sfnt");
+            let (_, runs) = Shaper::new(&face).shape_text(&case.render, BaseDirection::LeftToRight);
+            let glyphs: usize = runs.iter().map(|run| run.glyphs().len()).sum();
+            assert!(glyphs <= 65_536, "{}: the run grew to {glyphs}", case.id);
+            let warnings: Vec<Warning> = runs
+                .iter()
+                .flat_map(|run| run.warnings().iter().copied())
+                .collect();
+            let transitions = warnings
+                .iter()
+                .any(|w| matches!(w, Warning::TransitionBudgetExceeded { .. }));
+            let stopped = match case.id.as_str() {
+                "MORX-14/2" => warnings.is_empty(),
+                "MORX-24/1" | "MORX-36/1" => transitions,
+                "MORX-34/1" => {
+                    transitions
+                        && warnings
+                            .iter()
+                            .any(|w| matches!(w, Warning::InsertionBudgetExceeded { .. }))
+                }
+                "MORX-41/3" => warnings
+                    .iter()
+                    .any(|w| matches!(w, Warning::ComponentStackEmpty { .. })),
+                "MORX-41/4" => warnings
+                    .iter()
+                    .any(|w| matches!(w, Warning::MalformedAatSubtable { .. })),
+                other => panic!("{other} is a crash test this test does not know"),
+            };
+            assert!(stopped, "{}: {warnings:?}", case.id);
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![
+            "MORX-14/2",
+            "MORX-24/1",
+            "MORX-34/1",
+            "MORX-36/1",
+            "MORX-41/3",
+            "MORX-41/4"
+        ],
+        "the AAT crash tests moved"
     );
 }
 
@@ -1548,27 +1566,65 @@ fn the_suite_covers_the_sections_it_claims_to() {
             );
             continue;
         }
+        if ABOUT_LEAVING_THE_RUN.contains(section) {
+            assert_eq!(
+                *discriminating, 0,
+                "{section} is listed as holding a machine to leaving its run as \
+                 typed, so it cannot have a discriminating case; if it has one, \
+                 it belongs under the rule below instead"
+            );
+            continue;
+        }
         assert!(
             *discriminating > 0,
             "{section} has {all} cases and not one of them would fail if the \
              shaper were deleted"
         );
     }
-    // Every section vendored is counted above, or declined, or `GSUB-3`, the
-    // one crash test the suite runs, and each is exactly one of the three: a
-    // section added to `SECTIONS` and neither counted nor declined would be a
-    // section that quietly ran nothing.
+    // Every section vendored is counted above, or declined, or a section of
+    // crash tests alone, run by a test of its own, and each is exactly one of
+    // the three: a section added to `SECTIONS` and neither counted nor
+    // declined would be a section that quietly ran nothing.
     for (section, _) in SECTIONS {
         let counted = EXPECTED.iter().any(|(name, _, _)| name == section);
         let declined = DECLINED.iter().any(|(name, _)| name == section);
-        let crash_only = *section == "GSUB-3";
+        let crash_only = CRASH_ONLY.contains(section);
         assert_eq!(
             usize::from(counted) + usize::from(declined) + usize::from(crash_only),
             1,
-            "{section} is counted, declined or the crash test, exactly once"
+            "{section} is counted, declined or a section of crash tests, exactly once"
+        );
+    }
+    for section in CRASH_ONLY {
+        let cases = parse(section);
+        assert!(
+            !cases.is_empty() && cases.iter().all(|case| case.no_crash),
+            "{section} is listed as holding crash tests alone"
         );
     }
 }
+
+/// The sections whose every case is a crash test, each run by a test of its
+/// own: [`the_billion_laughs_face_stops_rather_than_growing`] and
+/// [`the_aat_attacks_stop_rather_than_growing_or_looping`].
+const CRASH_ONLY: [&str; 4] = ["GSUB-3", "MORX-24", "MORX-34", "MORX-36"];
+
+/// Sections whose every case holds a state machine to leaving the run as it
+/// was typed.
+///
+/// The discriminating count above is measured against the same text with no
+/// shaping at all, so a section whose expected output *is* the typed text
+/// agrees with that baseline by construction, however right or wrong the
+/// machine is. `MORX-3`, "Rearrangement without Marking", asks verbs to move
+/// nothing where no glyph was marked last, and `MORX-5`, "Rearrangement
+/// underflow", asks verbs to leave a span shorter than they name: what
+/// discriminates them is that the face's chain runs at all — every other
+/// `MORX` section shows it does, through the same rearrangement subtable —
+/// and `tests/aat.rs` holds both readings to machines of its own
+/// (`a_span_needs_a_last_glyph_and_starts_where_the_machine_did`,
+/// `a_span_shorter_than_its_verb_is_left_as_it_is`). The exemption is
+/// narrow on purpose: every other section stays under the ordinary rule.
+const ABOUT_LEAVING_THE_RUN: [&str; 2] = ["MORX-3", "MORX-5"];
 
 /// Sections whose subject is the `cmap` and not the lookup tables.
 ///

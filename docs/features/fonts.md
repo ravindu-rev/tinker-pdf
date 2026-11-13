@@ -1243,12 +1243,32 @@ What it does:
   slots, and setting slot attributes, its operands counting slots of the
   stream as the action found it, each insertion held to `Limits::max_glyphs`;
   a slot keeps the characters it stands for, and the stream's clusters come
-  out never going backwards. No pass runs yet, and no run is shaped through
-  any of it: the refused-by-name table below says what a run over such a face
-  does.
-- **AAT tables, read and not yet run.** `tinker_pdf_shape::aat` holds the
-  structures Apple's *TrueType Reference Manual* builds its AAT tables of
-  (*AAT shaping* in the design). `aat::Lookup` reads a lookup table in each
+  out never going backwards. `graphite::pass` runs a description's
+  line-break and substitution passes over a stream in the description's order,
+  a reversed pass over the stream turned end to end, a pass constraint that is
+  false skipping its pass: at each scan position the first rule whose
+  constraint holds for every slot of its match fires, the position moving
+  where its action leaves it, under the pass's own `maxRuleLoop` and
+  `maxBackup`; the bidi pass mirrors a run at an odd level where the
+  description has one. Its positioning passes run the same way, each making
+  only one-to-one substitutions, and `graphite::position::place` resolves what
+  they set into one glyph a slot in logical order with an integer advance and
+  offset: an attached slot's `attach.with` point on its parent's `attach.at`,
+  a shift moving a slot and what is attached to it, an advance moving the
+  slots after it, the cluster widened by the font topics' guard space, and an
+  attachment cycle or a chain past `Limits::max_attachment_depth` cut and
+  named. A pass whose flags ask for collision avoidance then shifts each slot
+  flagged to move to the least-cost place inside its rectangle, its shape its
+  box cut by its octabox's diagonals, weighing distance, ink, the margin it
+  intrudes on and its sequence order and alignment, and kerns each slot
+  flagged to kern clear of the sequence after it by its margin and any space
+  between, every slot pair charged against `Limits::max_collision_work`; a
+  slot with no room, and a spent ceiling, are named. No run is shaped through
+  any of it yet: the refused-by-name table below says what a run over such a
+  face does.
+- **AAT shaping.** `tinker_pdf_shape::aat` holds the structures Apple's
+  *TrueType Reference Manual* builds its AAT tables of, and the tables
+  themselves (*AAT shaping* in the design). `aat::Lookup` reads a lookup table in each
   of the six formats its *AAT special tables* chapter defines — the simple
   array (as long as its bytes), the segment single and segment array, the
   single table, and the trimmed and extended trimmed arrays, values of 1, 2,
@@ -1329,32 +1349,18 @@ What it does:
   `morx`, and a tag with no row is named (`Warning::FeatureNotInAat`). A
   chain that cannot be read ends the walk (`Warning::MalformedChain`), and
   `Limits::max_subtables` and `Limits::max_feature_entries` bound the chains,
-  subtables and feature entries a run reads, each refused by name. No run is
-  shaped through any of it: the refused-by-name table below says what a run
-  over such a face does.
-  out never going backwards. `graphite::pass` runs a description's
-  line-break and substitution passes over a stream in the description's order,
-  a reversed pass over the stream turned end to end, a pass constraint that is
-  false skipping its pass: at each scan position the first rule whose
-  constraint holds for every slot of its match fires, the position moving
-  where its action leaves it, under the pass's own `maxRuleLoop` and
-  `maxBackup`; the bidi pass mirrors a run at an odd level where the
-  description has one. Its positioning passes run the same way, each making
-  only one-to-one substitutions, and `graphite::position::place` resolves what
-  they set into one glyph a slot in logical order with an integer advance and
-  offset: an attached slot's `attach.with` point on its parent's `attach.at`,
-  a shift moving a slot and what is attached to it, an advance moving the
-  slots after it, the cluster widened by the font topics' guard space, and an
-  attachment cycle or a chain past `Limits::max_attachment_depth` cut and
-  named. A pass whose flags ask for collision avoidance then shifts each slot
-  flagged to move to the least-cost place inside its rectangle, its shape its
-  box cut by its octabox's diagonals, weighing distance, ink, the margin it
-  intrudes on and its sequence order and alignment, and kerns each slot
-  flagged to kern clear of the sequence after it by its margin and any space
-  between, every slot pair charged against `Limits::max_collision_work`; a
-  slot with no room, and a spent ceiling, are named. No run is shaped through
-  any of it yet: the refused-by-name table below says what a run over such a
-  face does.
+  subtables and feature entries a run reads, each refused by name.
+  `Shaper::shape` shapes a face carrying a `morx` it can read and no
+  readable `GSUB` or `GPOS` through its chain, the design's precedence: the
+  run's text mapped as typed — no decomposition, joining forms or syllables,
+  which prepare the OpenType plans — the chain run in the run's direction,
+  asked for what `with_features` and `with_settings` say, a joiner in the run
+  while it runs and gone after it, and the deleted glyphs removed and the
+  advances filled from `hmtx` after the chain. A face carrying either
+  OpenType Layout table shapes through it as before, whatever AAT tables it
+  carries beside it. text-rendering-tests' forty-one `MORX` sections run
+  through it and pass whole (`tests/text_rendering.rs`); the refused-by-name
+  table below says what a run over a face whose AAT table is not run does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so
@@ -1796,8 +1802,8 @@ could show was right.
 **Nothing outside the vendored corpora is admissible.** Unicode's
 text-rendering-tests at `26cfb96` — the commit vendored here — has no shaping
 section beyond those already vendored (`SHARAN`, `SHBALI`, `SHKNDA`,
-`SHLANA`, and AAT's `MORX` and `MORT`, which `tests/text_rendering.rs`
-declines by name until `Shaper::shape` runs a face's `morx` chain); every
+`SHLANA`, and AAT's `MORX`, which `tests/text_rendering.rs` runs, and
+`MORT`, which it declines by name, its table a stated non-goal); every
 other section tests a font format (`AVAR`, `CFF`, `GVAR` and the like). HarfBuzz's suite at `3c4d303` has in-house cases in
 eighteen of the scripts this page lists as unverified — one of them Syriac,
 none Sundanese, N'Ko, Thaana, Mandaic, Hanifi Rohingya or Tagalog — and none
@@ -1818,7 +1824,7 @@ corpora already vendored here. So every name stays on the list.
 |---|---|---|---|
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent; shaping to *produce* a document is `tinker-pdf-shape`, above | [shaping](../design/shaping.md) |
 | A face whose only layout tables are a **Graphite** description: a `Silf`, with no readable `GSUB` or `GPOS` and no `morx` beside it | `tinker_pdf_shape::Warning::TableNotRun { table: Silf }`, once a run; the run is shaped by the face's `cmap` and `hmtx` alone, as a face with no layout tables is | Graphite shaping is a capability not yet built, and refuses by name until its row closes (ruling 3); a face carrying `GSUB` or `GPOS` as well shapes through them as before | [shaping](../design/shaping.md), *Graphite shaping*; [ROADMAP](../ROADMAP.md) FT-07d |
-| A face whose layout is **AAT**'s: a `morx` with no readable `GSUB` or `GPOS` beside it, or a `mort` with none of those and no `Silf` | `tinker_pdf_shape::Warning::TableNotRun { table: morx }`, or `{ table: mort }`, once a run; the run is shaped by the face's `cmap` and `hmtx` alone, as a face with no layout tables is | AAT shaping is a capability not yet built, and refuses by name until its row closes (ruling 3); `mort`, the table `morx` extends, is a stated non-goal and stays refused, and a face carrying both is named by its `morx`, the manual having it ignore the `mort`; a face carrying `GSUB` or `GPOS` as well shapes through them as before | [shaping](../design/shaping.md), *AAT shaping*; [ROADMAP](../ROADMAP.md) FT-07c |
+| A face whose only AAT table is one this crate does not run, with no readable `GSUB` or `GPOS` beside it: a `mort` with no `morx` or `Silf`, or a `morx` it cannot read — a version other than 2 or 3, or a header cut short | `tinker_pdf_shape::Warning::TableNotRun { table: mort }`, or `{ table: morx }`, once a run; the run is shaped by the face's `cmap` and `hmtx` alone, as a face with no layout tables is | `mort`, the table `morx` extends, is a stated non-goal and stays refused, and a face carrying both is shaped through its `morx`, the manual having it ignore the `mort`; a `morx` that cannot be read names no chain to run; a face carrying `GSUB` or `GPOS` as well shapes through them as before | [shaping](../design/shaping.md), *AAT shaping*; [ROADMAP](../ROADMAP.md) FT-07c |
 | A CFF that calls a subroutine it does not carry, whose subroutine calls itself, or that declares `CharstringType 1`; or one whose flattening a kept glyph refuses — a run that meets the reader's stack, transient-array, depth or operation bound, that does not end in `endchar` or reads past it or past the end of a body, a flattened charstring past 65 535 bytes, or flattened charstrings past the program's own length | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
 | A **CID-keyed** CFF under `add_cid_font` whose charset is not one-to-one | `add_cid_font` returns false | 9.7.4.2 reads a CID through the charset, which answers with the first glyph claiming it, so a glyph whose CID another also claims is one no code reaches. A one-to-one charset is accepted and each glyph written as its CID | this page |

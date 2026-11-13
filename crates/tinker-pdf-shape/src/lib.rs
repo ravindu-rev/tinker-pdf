@@ -1,17 +1,18 @@
-//! OpenType Layout: face bytes and glyph indices in, substituted glyphs and
-//! integer positions out.
+//! Text shaping: face bytes and glyph indices in, substituted glyphs and
+//! integer positions out, through a face's OpenType Layout tables or, for a
+//! face built for Apple's layout, its AAT tables.
 //!
 //! Design documentation: `docs/design/shaping.md`. Its first milestone is
 //! here: the `GDEF`, `GSUB` and `GPOS` tables of ISO/IEC 14496-22, and the
 //! machinery that executes a lookup list against a [`Buffer`]. Its second to
 //! fifth are built on it: the default, Arabic and USE shapers ([`Shaper`]),
 //! which map text to glyphs and decide which features run, and UAX #9
-//! ([`bidi`]). [`graphite`] reads a Graphite description's tables, which no
-//! run is shaped through yet (`docs/design/shaping.md`, *Graphite shaping*),
-//! [`aat`] the structures Apple Advanced Typography's tables are built of,
-//! which no run is shaped through yet either (*AAT shaping*), and the
-//! standard's `JSTF`, a face's justification suggestions, is read by
-//! [`jstf`].
+//! ([`bidi`]). [`aat`] reads Apple Advanced Typography's tables from Apple's
+//! *TrueType Reference Manual*, and a face carrying a `morx` and no `GSUB` or
+//! `GPOS` is shaped through its chain (*AAT shaping*); [`graphite`] reads a
+//! Graphite description's tables, which no run is shaped through yet
+//! (*Graphite shaping*); and the standard's `JSTF`, a face's justification
+//! suggestions, is read by [`jstf`].
 //!
 //! **The eleventh leaf.** Ruling 8's August 2026 amendment makes the test of
 //! a leaf the definition rather than the list: *a leaf is any crate that takes
@@ -234,19 +235,19 @@ pub enum Warning {
     /// saying is that the column was set on a synthesis, and the face is the
     /// object it touched.
     VerticalMetricsSynthesized,
-    /// The face's only layout tables are a kind this crate does not run yet,
-    /// so the run was shaped as if the face had none: `cmap` and `hmtx`
-    /// alone.
+    /// The face's only layout tables are a kind this crate does not run, so
+    /// the run was shaped as if the face had none: `cmap` and `hmtx` alone.
     ///
     /// `table` names the table that was not run. A face whose layout is a
     /// Graphite description — a `Silf`, with no `GSUB`, `GPOS` or `morx`
     /// beside it — is named by `Silf` (`docs/design/shaping.md`, *Graphite
-    /// shaping*; ROADMAP row FT-07d, ruling 3). A face whose layout is AAT's —
-    /// a `morx`, with no readable `GSUB` or `GPOS` beside it — is named by
-    /// `morx` (*AAT shaping*; ROADMAP row FT-07c), and one carrying `mort`
-    /// and no `morx`, `Silf`, `GSUB` or `GPOS` by `mort`, the predecessor
-    /// table no row reads. Recorded once per run, whatever the run holds,
-    /// because the fact is the face's and the run is what it touched.
+    /// shaping*; ROADMAP row FT-07d, ruling 3). A face whose only AAT table
+    /// is one this crate does not run (*AAT shaping*), with no readable
+    /// `GSUB` or `GPOS` beside it, is named by it: `mort`, the predecessor
+    /// table the design names a non-goal, where the face carries no `morx` or
+    /// `Silf`, and a `morx` this crate cannot read — a version other than 2
+    /// or 3, or a header cut short. Recorded once per run, whatever the run
+    /// holds, because the fact is the face's and the run is what it touched.
     TableNotRun {
         /// The table, as the face's table directory spells it.
         table: Tag,

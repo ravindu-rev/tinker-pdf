@@ -643,8 +643,8 @@ column whose face has no `GPOS` writes no number.
 
 *For ROADMAP row FT-07c.* A face built for Apple's layout carries its
 substitutions in `morx`, its kerning in `kerx` and its tracking in `trak`,
-and may carry no `GSUB` or `GPOS` at all; today such a face shapes as if
-unshaped. This section reads the four tables, clause by clause, from Apple's
+and may carry no `GSUB` or `GPOS` at all; such a face is shaped through its
+`morx` chain. This section reads the four tables, clause by clause, from Apple's
 *TrueType Reference Manual* (chapter 6, `morx`, `kerx`, `trak`, `feat` and
 `ankr`, with its *AAT special tables* chapter for lookup and state tables, and
 appendix F, the *Font Feature Registry*), and from nothing else (ruling 21);
@@ -981,9 +981,9 @@ non-exclusive except those the registry marks exclusive in the mapping above.
 
 Every refusal is a typed `Warning` recorded once a run (rulings 2 and 10),
 each naming where in its table it was asked, the table, chain and subtable
-(`aat::Site`): a `mort` table not run (and, until FT-07c.10, `morx` itself —
-FT-07c.2, `Warning::TableNotRun`); a subtable type reserved or unknown, or of
-a machine not built yet (`Warning::SubtableTypeNotRun`); a chain whose header
+(`aat::Site`): a `mort` table, or a `morx` this crate cannot read, not run
+(`Warning::TableNotRun`); a subtable type reserved or unknown
+(`Warning::SubtableTypeNotRun`); a chain whose header
 or feature entries cannot be read or whose length runs past its table, which
 ends the walk, a chain's length being the only way to the next
 (`Warning::MalformedChain`); a lookup format unknown
@@ -1039,9 +1039,9 @@ test.
 
 text-rendering-tests at the vendored `26cfb96` holds 41 `morx` sections —
 `MORX-1` to `MORX-42`, there being no `MORX-15` — and `MORT-1`; no `kerx` or
-`trak` section. FT-07c.3 vendors all 42 with their faces and declines each
-until FT-07c.10, which runs the `morx` chain, and declines `MORT-1` by name
-for good:
+`trak` section. All 42 are vendored with their faces; `tests/text_rendering.rs`
+runs the 41 `MORX` sections through `Shaper::shape`, and declines `MORT-1` by
+name for good:
 
 | Sections | What they need |
 | --- | --- |

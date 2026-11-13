@@ -190,7 +190,7 @@ Convenient shortcuts between crates are how seams die.
 | `tinker-pdf-filters` | stream filters + image codecs | [filters](features/filters.md) | `ascii_filters`, `bmp`, `brotli`, `ccitt`, `gif`, `inflate`, `jbig2`, `jpeg`, `jpx`, `jxr`, `lzw`, `png`, `tiff`, `webp` |
 | `tinker-pdf-crypto` | ciphers, hashes, security handlers, RSA/ECDSA verify | [encryption](features/encryption.md) | `crypt`, `crypt_ciphers` |
 | `tinker-pdf-pki` | DER (X.690), X.509 (RFC 5280), CMS (RFC 5652) | [signatures](features/signatures.md) | `pki_der`, `pki_cms` |
-| `tinker-pdf-shape` | OpenType Layout: GDEF, GSUB, GPOS | [design/shaping.md](design/shaping.md) | `shape`, `shape_text` |
+| `tinker-pdf-shape` | text shaping: OpenType Layout (GDEF, GSUB, GPOS) and AAT (`morx`) | [design/shaping.md](design/shaping.md) | `shape`, `shape_text` |
 | `tinker-pdf-font` | font and CMap parsing, subsetting | [fonts](features/fonts.md) | `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`, `woff` |
 | `tinker-pdf-content` | interpreter + `Device` seam, text device, recording device | [content-and-text](features/content-and-text.md) | `content_tokenizer` |
 | `tinker-pdf-raster` | deterministic AA rasterizer | [rasterizer](features/rasterizer.md) | — (driven via `render_page`) |
