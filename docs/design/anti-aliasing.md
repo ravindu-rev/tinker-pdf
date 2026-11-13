@@ -314,10 +314,11 @@ every level and rule is the page under it.
    sweeps, at several phases, leave no column (row, past one in one) they
    cross empty at every level and rule — and `levels_rules_and_widths_are_pinned`,
    pinned on Linux, Windows and `wasm32-wasip1` and entered in K-07's roster.
-6. **RC-11.7a, the speed rows.** MS-04's page of 5 000 paths at 150 dpi under
-   the centre and any-part rules and at a 4-bit graphics level, and its text
-   page with an embedded face at 150 dpi at a 4-bit text level, each beside
-   the default render, unmeasured until RC-11.7b.
+6. **RC-11.7a, the speed rows.** The render group's page of 250 paths at
+   150 dpi (`paths(250)`) under the centre and any-part rules and at a 4-bit
+   graphics level, and its text page with an embedded face at 150 dpi at a
+   4-bit text level, each beside the default render of its page, which the
+   planning baseline draws in its place, unmeasured until RC-11.7b.
 
 ## Risks
 

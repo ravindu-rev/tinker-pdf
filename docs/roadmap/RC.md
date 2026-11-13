@@ -205,7 +205,6 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| RC-11.7a | measure | The new coverage paths' speed rows in MS-04's render group: its page of 5 000 paths at 150 dpi under the centre and any-part rules and at a 4-bit graphics level, and its text page with an embedded face at 150 dpi at a 4-bit text level, each beside the default render. *Note:* The any-part rule walks each edge's extent per row as well as the samples, which is the one new cost; no target is invented, and a target is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench files and `baseline.json` to one list with the operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and `cargo bench -p tinker-pdf` reports their times, recorded in `docs/verification.md`. | RC-11.5, MS-04 |
 | RC-11.7b | measure | The wall-clock figure RC-11.7a's exit names, taken in the timing phase on the named machine with nothing else running (ruling 15): by MS-04.10's fifteen runs, or by the paired run where RC-11.7a's exit names one, and committed as ruling 16 says. *Note:* Split from RC-11.7 by the owner's timing choice; RC-11.7a lands the operation unmeasured. | `crates/tinker-pdf/benches/baseline.json` | The figure RC-11.7a's exit names is committed and `cargo xtask baseline` holds it. | RC-11.7a, MS-04.10 |
 
 ## RC-12 — Per-class render controls

@@ -15,6 +15,10 @@
 //! baseline's arm draws in their place, and the forced-colour render the
 //! default render's, which it draws in that one's; no run has timed the
 //! three yet, so the design's render table gives their window as untimed.
+//! The coverage rows — the 250 paths under the centre and any-part rules and
+//! at a 4-bit graphics level, and the text page at a 4-bit text level — stand
+//! beside the default renders of the same pages, which the planning
+//! baseline's arm draws in their place, and are untimed too.
 
 mod support;
 
@@ -28,13 +32,13 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use support::cli::Cli;
 use support::{inputs, Group, Per};
 #[cfg(not(tinker_planning_baseline))]
-use tinker_pdf::ForcedColours;
-#[cfg(not(tinker_planning_baseline))]
 use tinker_pdf::{
     write::{self, AppendOptions},
     DisplayList, Parallelism,
 };
 use tinker_pdf::{Bitmap, Document, Page, RenderOptions, RenderWarning, SampleCodec};
+#[cfg(not(tinker_planning_baseline))]
+use tinker_pdf::{ForcedColours, HardEdge};
 #[cfg(tinker_planning_baseline)]
 use tinker_pdf::{PixelRegion, WriteMode, WriteOptions};
 use tinker_pdf_cos::ObjRef;
@@ -73,6 +77,74 @@ fn forced_at_150() -> RenderOptions {
     RenderOptions::at_dpi(150.0)
 }
 
+/// What a coverage row renders (RC-11.7a): graphics at 0 bits under a rule,
+/// or one class at a level, the other anti-aliased.
+#[derive(Clone, Copy)]
+#[cfg_attr(tinker_planning_baseline, allow(dead_code))]
+enum Coverage {
+    /// Graphics at 0 bits under the centre rule.
+    Centre,
+    /// Graphics at 0 bits under the any-part rule.
+    AnyPart,
+    /// Graphics at this many bits.
+    Graphics(u8),
+    /// Text at this many bits.
+    Text(u8),
+}
+
+/// 150 dpi under `coverage`.
+#[cfg(not(tinker_planning_baseline))]
+fn coverage_at_150(coverage: Coverage) -> RenderOptions {
+    let at = RenderOptions::at_dpi(150.0);
+    match coverage {
+        Coverage::Centre => RenderOptions {
+            graphics_bits: 0,
+            hard_edge: HardEdge::Centre,
+            ..at
+        },
+        Coverage::AnyPart => RenderOptions {
+            graphics_bits: 0,
+            hard_edge: HardEdge::AnyPart,
+            ..at
+        },
+        Coverage::Graphics(bits) => RenderOptions {
+            graphics_bits: bits,
+            ..at
+        },
+        Coverage::Text(bits) => RenderOptions {
+            text_bits: bits,
+            ..at
+        },
+    }
+}
+
+/// The planning baseline has no levels or rules: its arm draws the default
+/// render in their place, the operation the gate pairs each row with.
+#[cfg(tinker_planning_baseline)]
+fn coverage_at_150(_coverage: Coverage) -> RenderOptions {
+    RenderOptions::at_dpi(150.0)
+}
+
+/// Before its runs, a coverage row's render holds the page the default
+/// render holds: its size, no warning and about its ink.
+#[cfg(not(tinker_planning_baseline))]
+fn holds_the_page(page: &Page, options: &RenderOptions, what: &str) {
+    let default = page.render(&RenderOptions::at_dpi(150.0));
+    let drawn = page.render(options);
+    assert_eq!(
+        (drawn.width, drawn.height),
+        (default.width, default.height),
+        "{what}"
+    );
+    assert!(drawn.warnings.is_empty(), "{what}: {:?}", drawn.warnings);
+    assert!(
+        inked(&drawn) * 2 > inked(&default),
+        "{what} inks {} pixels where the default render inks {}",
+        inked(&drawn),
+        inked(&default)
+    );
+}
+
 /// `page` at `dpi`, `times` times: the unit is every bitmap's pixels.
 fn renders(page: &Page, dpi: f64, times: u64) -> Per {
     let bitmap = page.render(&RenderOptions::at_dpi(dpi));
@@ -80,6 +152,23 @@ fn renders(page: &Page, dpi: f64, times: u64) -> Per {
         Per::Pixels(pixels) => Per::Pixels(pixels * times),
         other => other,
     }
+}
+
+/// A coverage row of the 250-path page: the page, held to its default
+/// render before the runs, and its render at 150 dpi under `coverage`, an
+/// iteration a render.
+fn paths_under(op: &mut support::Op<'_>, coverage: Coverage, what: &str) {
+    let many_page = Document::open(stored("paths-250.pdf", || inputs::paths(250)))
+        .expect("the paths open")
+        .page(0)
+        .expect("a page");
+    let options = coverage_at_150(coverage);
+    #[cfg(not(tinker_planning_baseline))]
+    holds_the_page(&many_page, &options, what);
+    #[cfg(tinker_planning_baseline)]
+    let _ = what;
+    op.per(renders(&many_page, 150.0, 1));
+    op.iter(move || black_box(many_page.render(&options)));
 }
 
 /// One of the fixtures committed under `fuzz/corpus/render_page/`, opened.
@@ -506,12 +595,53 @@ fn render(c: &mut Criterion) {
         },
     );
 
+    // The text page beside its default render, which the planning baseline's
+    // arm draws in its place: its glyphs' masks at a 4-bit text level, two
+    // renders an iteration as that one makes.
+    group.operation("the text page at 150 dpi at a 4-bit text level", |op| {
+        let text_page: &Page = &text_page;
+        let options = coverage_at_150(Coverage::Text(4));
+        #[cfg(not(tinker_planning_baseline))]
+        holds_the_page(text_page, &options, "the text page at a 4-bit text level");
+        op.per(renders(text_page, 150.0, 2));
+        op.iter(move || {
+            for _ in 0..2 {
+                black_box(text_page.render(&options));
+            }
+        });
+    });
+
     // ---- vectors ----------------------------------------------------------
 
     group.operation("250 paths at 150 dpi", |op| {
         let many_page = paths_page(250);
         op.per(renders(&many_page, 150.0, 1));
         op.iter(move || black_box(many_page.render(&RenderOptions::at_dpi(150.0))));
+    });
+
+    // ---- coverage levels and rules ---------------------------------------
+
+    // The 250 paths beside their default render, which the planning
+    // baseline's arm draws in each one's place: at 0 bits under the centre
+    // rule, which reads one sub-scanline a row; under the any-part rule,
+    // which also walks every edge over every row it reaches; and at a 4-bit
+    // level, the coverage quantised.
+    group.operation("250 paths at 150 dpi under the centre rule", |op| {
+        paths_under(op, Coverage::Centre, "the 250 paths under the centre rule");
+    });
+    group.operation("250 paths at 150 dpi under the any-part rule", |op| {
+        paths_under(
+            op,
+            Coverage::AnyPart,
+            "the 250 paths under the any-part rule",
+        );
+    });
+    group.operation("250 paths at 150 dpi at a 4-bit graphics level", |op| {
+        paths_under(
+            op,
+            Coverage::Graphics(4),
+            "the 250 paths at a 4-bit graphics level",
+        );
     });
     group.operation("100 paths at 300 dpi", |op| {
         let many_page = paths_page(100);

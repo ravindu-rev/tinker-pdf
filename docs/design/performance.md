@@ -937,7 +937,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 167 operations over inputs the benches
+each, MS-09's `threads` among them: 171 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1255,7 +1255,11 @@ text of the document the operation reads, so all six stay inside the group.
 | `render/the 150-dpi text page scaled to a half` | pixels · 1240×1755, the render's | the text page's 150-dpi render, drawn once untimed, `Bitmap::scaled` to 620×877; the planning baseline renders the page in its place | not in tier P's table; floor 1, paired with the baseline's `the text page at 150 dpi`; a target is the owner's (H-77) | untimed | built |
 | `render/the 150-dpi text page scaled to two thirds` | pixels · 1240×1755, the render's | the same, scaled to 826×1170 | the same | untimed | built |
 | `render/the text page at 150 dpi in forced colours, fill to stroke` | pixels · 2 × 1240×1755 | `dense(1, 0)`, `RenderOptions::forced_colours` black on white with `fill_to_stroke`; the planning baseline draws the default render in its place | the same | untimed | built |
+| `render/the text page at 150 dpi at a 4-bit text level` | pixels · 2 × 1240×1755 | `dense(1, 0)`, `RenderOptions::text_bits` 4; the planning baseline draws the default render in its place | not in tier P's table; floor 1, paired with the baseline's `the text page at 150 dpi`; a target is the owner's (H-77) | untimed | built |
 | `render/250 paths at 150 dpi` | pixels · 1240×1755 | `paths(250)` | 66.3 → 22.5, rescaled from 5 000 paths' 1 326 → 450; 2.94× | in | built |
+| `render/250 paths at 150 dpi under the centre rule` | pixels · 1240×1755 | `paths(250)`, `graphics_bits` 0 under `HardEdge::Centre`; the planning baseline draws the default render in its place | not in tier P's table; floor 1, paired with the baseline's `250 paths at 150 dpi`; a target is the owner's (H-77) | untimed | built |
+| `render/250 paths at 150 dpi under the any-part rule` | pixels · 1240×1755 | the same under `HardEdge::AnyPart`, whose walk of each edge over every row it reaches is the one new cost | the same | untimed | built |
+| `render/250 paths at 150 dpi at a 4-bit graphics level` | pixels · 1240×1755 | `paths(250)`, `graphics_bits` 4 | the same | untimed | built |
 | `render/100 paths at 300 dpi` | pixels · 2480×3509 | `paths(100)` | 68.7 → 22, rescaled from 5 000 paths' 3 434 → 1 100; 3.12× | in | built |
 | `render/the 100 stroked curves alone at 150 dpi` | pixels · 1240×1755 | `curves(100)`, the 250-path page's curves | not measured apart; as the page; 2.94×, paired with the baseline's same curves | in | built |
 | `render/300 triangles at 150 dpi` | pixels · 2 × 1240×1755 | `triangles()` | 44 → 20; 2.2× | ×2 | MS-04.10 renames the seven's |
