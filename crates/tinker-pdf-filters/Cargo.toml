@@ -9,6 +9,12 @@ authors.workspace = true
 description = "PDF stream filters, hand-rolled: Flate, LZW, ASCIIHex, ASCII85, RunLength, predictors; DCT and CCITT in wave 2"
 
 [dependencies]
+# Row P-10: a JPEG 2000 decode hands its code-blocks to an executor beside its
+# request, the engine's own pool or a caller's threads, and serially
+# otherwise (`docs/design/parallelism.md`, "JPEG 2000: P-10's seam"). The
+# edge goes down into a leaf with nothing under it, which ruling 8 allows
+# without argument; `xtask`'s ALLOWED declares it.
+tinker-pdf-pool = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

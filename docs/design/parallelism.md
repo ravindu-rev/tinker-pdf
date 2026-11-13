@@ -414,12 +414,15 @@ The decoder stays a leaf (ruling 8): beside its request it takes an
 the facade crosses. The executor is a parameter of its own rather than a
 field of the request, because the request is what the facade's image cache
 keys on (P-10.8) and stays a plain, hashable value. The `tinker-pdf-filters`
-to `tinker-pdf-pool` edge is declared with it (P-10.10), and the
-architecture's note that `filters` depends on nothing then names `pool`,
-which does not depend on anything. The decoder charges
-its work budget for every block in index order before any block is decoded,
-so a refusal names the same block at every thread count, and joins results in
-index order ([jpx-speed](jpx-speed.md)).
+to `tinker-pdf-pool` edge is declared with it, and the architecture's note
+that `filters` depends on nothing names `pool`, which does not depend on
+anything. `jpx_decode_on` is the door: the decoder charges its work budget
+for every block in index order before any block is decoded, so a refusal
+names the same block at every thread count, and joins results in index
+order ([jpx-speed](jpx-speed.md)). The facade hands it the render's
+`Parallelism` (`Operation`), so a page drawn whole on the caller with threads
+decodes its blocks on them, and a band, drawn on a worker, decodes on that
+worker.
 
 ### wasm
 

@@ -46,7 +46,7 @@ Each crate with the internal crates it depends on:
 ```text
 tinker-pdf-math
 tinker-pdf-pool
-tinker-pdf-filters
+tinker-pdf-filters  → pool
 tinker-pdf-crypto
 tinker-pdf-xml
 tinker-pdf-css
@@ -83,6 +83,9 @@ closures and plain values rather than bytes — the independent parts of one
 operation, run on threads the call starts in a `std::thread::scope` and
 joins, their results joined in index order
 ([design/parallelism.md](design/parallelism.md)) — and has no internal edge.
+`filters → pool` is the one edge into it from a leaf: a JPEG 2000 decode
+hands its code-blocks to an executor beside its request, the engine's pool or
+a caller's own threads, and the pool learns nothing of what it schedules.
 
 The leaf-to-leaf edges each point from a higher layer down:
 `font → filters` (the CMap asset pipeline), `zip → filters` (raw DEFLATE
@@ -156,7 +159,8 @@ schedules.
 `cos` is not a leaf, so none of the three is leaf-to-leaf however useful
 it is.
 
-The graph cannot cycle, because `filters` depends on nothing.
+The graph cannot cycle, because `filters` depends on nothing but `pool`,
+which depends on nothing.
 
 `tinker-pdf-cos` owns file syntax, xref, repair, the writer, and the strict
 validator that reads a file back with the repairs turned off (ruling 13,

@@ -315,18 +315,20 @@ request ([parallelism](parallelism.md), "JPEG 2000: P-10's seam"), filled by
 the facade from the caller's `Parallelism` and by a test with its own scoped
 threads, so `tinker-pdf-filters` stays a leaf (ruling 8).
 
-**Code-blocks.** Tier-1 lists the code-blocks a request needs — a discard
-and a window drop the rest before any reaches a worker — in index order
-(tile, component, resolution, band, precinct, block). It charges the work
-budget for every listed block in that order before any is decoded: a block's
-charge is its area times its passes, known from tier-2, as
-`decode_code_block` charges it today, so the block the budget refuses is the
-same at every thread count. The admitted blocks are decoded on the pool, each
-worker with MQ contexts of its own, each block into a pre-sized slot, and the
-slots are read in index order: the first block whose decode refused gives the
-refusal, as a serial decode would have stopped there, and a refused budget
-after it gives the budget's. Serial unless the caller's `Parallelism` asks
-for threads.
+**Code-blocks.** Tier-1 walks every code-block of the kept resolutions in
+index order (tile, component, resolution, band, precinct, block), checking
+each one's pass count and charging the work budget its area times its passes,
+known from tier-2, and lists the blocks the request reads — a discard and a
+window leave the rest unlisted, so none of them reaches a worker — so the
+block the budget refuses is the same at every thread count, and the same with
+any window (a window refuses where the whole image does). The listed blocks
+are decoded on the pool, each with MQ contexts of its own, each into a
+pre-sized slot, and the slots are read in index order: the first block whose
+decode refused gives the refusal, as a serial decode would have stopped there,
+the budget left as it stood once that block was charged, and a refusal the
+walk stopped at after it gives its own. Serial unless the caller's
+`Parallelism` asks for threads: `jpx_decode_on` takes the executor, and
+`jpx_decode_request` is it on the caller.
 
 **Synthesis.** A horizontal pass's rows and a vertical pass's blocks of rows
 are independent within a level, and so are tiles, and components where no

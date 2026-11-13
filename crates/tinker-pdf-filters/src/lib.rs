@@ -100,8 +100,9 @@ pub use jpeg::{
     JpegOptions, JpegQuantisation, JpegSampling, JpegScale, JpegSink, JpegSource, JpegSourceColour,
 };
 pub use jpx::{
-    jpx_decode, jpx_decode_attributed, jpx_decode_counted, jpx_decode_request, jpx_header,
-    JpxColour, JpxCounts, JpxHeader, JpxImage, JpxRequest, JpxWindow, Refusal as JpxRefusal,
+    jpx_decode, jpx_decode_attributed, jpx_decode_counted, jpx_decode_on, jpx_decode_request,
+    jpx_header, JpxColour, JpxCounts, JpxHeader, JpxImage, JpxRequest, JpxWindow,
+    Refusal as JpxRefusal,
 };
 pub use jxr::{
     jxr_decode, jxr_decode_counted, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal,

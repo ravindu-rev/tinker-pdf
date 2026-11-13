@@ -618,6 +618,7 @@ name = "tinker-pdf-filters"
 version = "0.0.1"
 dependencies = [
  "proptest",
+ "tinker-pdf-pool",
 ]
 
 [[package]]

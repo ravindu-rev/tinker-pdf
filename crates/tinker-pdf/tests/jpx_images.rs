@@ -1094,3 +1094,50 @@ fn each_window_of_a_jpx_image_is_cached_apart() {
     let (_, stats) = at(None);
     assert_eq!((stats.image_misses, stats.image_hits), (0, 1), "found");
 }
+
+// ---- Code-blocks on the pool (P-10.10) ---------------------------------------
+
+/// **A JPEG 2000 page on 2, 3, 4 and 7 threads is the serial page**, its
+/// pixels and its warnings: the codestream drawn at a quarter beside a
+/// clipped one, which the pool draws in bands, each band decoding on its
+/// worker; and two of it abutting in one run of images down the whole page,
+/// which leaves no row to cut at, so the page is drawn whole on the caller and
+/// its decodes hand their code-blocks to the threads.
+#[test]
+fn a_jpx_page_on_2_3_4_and_7_threads_is_the_serial_page() {
+    let jpx = committed("irreversible-620x877.jp2");
+    let keys = jpx_keys(620, 877);
+    for (page, content) in [
+        (
+            (171.0, 233.0),
+            "q 155 0 0 219 7.3 5.1 cm /Im0 Do Q \
+             q 120.3 150.6 40.1 50.2 re W n 77 0 0 109 100.1 130.4 cm /Im0 Do Q",
+        ),
+        (
+            (310.0, 219.0),
+            "q 155 0 0 219 0 0 cm /Im0 Do Q q 155 0 0 219 155 0 cm /Im0 Do Q",
+        ),
+    ] {
+        let bytes = jpx_page(page, content, &keys, &jpx);
+        let doc = Document::open(bytes).expect("it opens");
+        let serial = doc
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        assert!(serial.warnings.is_empty(), "{:?}", serial.warnings);
+        for threads in [2usize, 3, 4, 7] {
+            let pooled = doc.page(0).expect("a page").render(&RenderOptions {
+                parallelism: tinker_pdf::Parallelism::Threads(threads),
+                ..RenderOptions::default()
+            });
+            assert!(
+                pooled.data == serial.data,
+                "{content}: {threads} threads draw the serial page"
+            );
+            assert_eq!(
+                pooled.warnings, serial.warnings,
+                "{content}: {threads} threads"
+            );
+        }
+    }
+}

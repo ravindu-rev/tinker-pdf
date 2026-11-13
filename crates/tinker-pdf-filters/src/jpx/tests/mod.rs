@@ -25,6 +25,7 @@ mod code_block_styles;
 mod colour;
 mod headers;
 mod packed;
+mod parallel;
 mod parity;
 mod reduced;
 mod refusals;

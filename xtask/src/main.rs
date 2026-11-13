@@ -470,7 +470,8 @@ fn quiet(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// This is that edge, arriving where the plan said it would: `build.rs`
 /// deflates with `tinker-pdf-filters` and the crate inflates with it. Ruling 3
 /// is untouched — a sibling workspace crate is not a third-party dependency —
-/// and the graph cannot cycle, because `filters` depends on nothing. The
+/// and the graph cannot cycle, because `filters` depends on nothing but
+/// `pool`, which depends on nothing. The
 /// runtime half is optional and disappears with `cmap-predefined`; the
 /// build-time half is unconditional and never reaches a binary.
 ///
@@ -822,12 +823,18 @@ fn quiet(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// which 7z and RAR both record per file and which is the whole of this
 /// crate's verification argument, and `inflate_raw`, because 7z method 040108
 /// is RFC 1951 with no wrapper exactly as ZIP method 8 is. It cannot cycle,
-/// because `filters` depends on nothing.
+/// because `filters` depends on nothing but `pool`, which depends on nothing.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
-    // Leaves: nothing internal beyond the maths.
-    ("tinker-pdf-filters", &[]),
+    // Leaves: nothing internal beyond the maths — and the pool. Row P-10: a
+    // JPEG 2000 decode hands its code-blocks to an executor beside its
+    // request (`docs/design/parallelism.md`, "JPEG 2000: P-10's seam"),
+    // which the facade fills with the caller's `Parallelism` and a test with
+    // its own threads. The edge goes down into a leaf with nothing under it,
+    // which ruling 8 allows without argument, and the pool learns nothing of
+    // what it schedules.
+    ("tinker-pdf-filters", &["tinker-pdf-pool"]),
     ("tinker-pdf-crypto", &[]),
     ("tinker-pdf-font", &["tinker-pdf-filters"]),
     // The fourth leaf-to-leaf edge: ASN.1 is structure walking on hostile

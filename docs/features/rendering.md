@@ -441,8 +441,13 @@ window, one that shows nothing holds a sample, and the cache keeps each
 window's decode apart: a render's own at most sixty-four decodes an image,
 the document's under its budget. A tile therefore
 decodes the code-blocks its window reaches and is still the page under it
-(ruling 5). `jpx_images.rs` holds it:
-`a_region_render_decodes_only_the_code_blocks_its_window_reaches`,
+(ruling 5). A render's `RenderOptions::parallelism` reaches its JPEG 2000
+decodes: a page drawn whole on the caller with threads, as one whose runs of
+images leave no row to cut bands at is, decodes its code-blocks on them
+(`jpx_decode_on`), and a band, drawn on a worker, decodes on that worker —
+the same pixels and warnings as the serial page
+(`a_jpx_page_on_2_3_4_and_7_threads_is_the_serial_page`). `jpx_images.rs`
+holds it: `a_region_render_decodes_only_the_code_blocks_its_window_reaches`,
 `a_clipped_jpx_image_is_shown_from_the_samples_under_its_clip` and
 `each_window_of_a_jpx_image_is_cached_apart`; `render_regions.rs`'s
 `a_region_of_a_jpx_page_is_the_crop_of_the_whole_page` tiles a page of

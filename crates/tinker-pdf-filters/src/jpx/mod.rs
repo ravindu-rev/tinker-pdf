@@ -92,6 +92,7 @@ pub(crate) mod tier2;
 pub(crate) mod wavelet;
 
 use crate::{Capability, FilterError, Limits, Warning};
+use tinker_pdf_pool::{Executor, Parallelism};
 
 // --- the budget ---------------------------------------------------------
 
@@ -592,8 +593,15 @@ pub fn jpx_decode_counted(
     warnings: &mut Vec<Warning>,
 ) -> (Result<JpxImage, FilterError>, u64) {
     let mut steps = 0u64;
-    let decoded = request_counted(input, limits, &JpxRequest::default(), warnings, &mut steps)
-        .map(|(image, _)| image);
+    let decoded = request_counted(
+        input,
+        limits,
+        &JpxRequest::default(),
+        &Parallelism::Serial,
+        warnings,
+        &mut steps,
+    )
+    .map(|(image, _)| image);
     (decoded, steps)
 }
 
@@ -611,21 +619,64 @@ pub fn jpx_decode_request(
     request: &JpxRequest,
     warnings: &mut Vec<Warning>,
 ) -> Result<(JpxImage, JpxCounts), FilterError> {
-    request_counted(input, limits, request, warnings, &mut 0)
+    request_counted(
+        input,
+        limits,
+        request,
+        &Parallelism::Serial,
+        warnings,
+        &mut 0,
+    )
 }
 
-/// [`jpx_decode_request`], adding the steps [`jpx_decode_counted`] names to
+/// [`jpx_decode_request`], the decode's independent parts handed to
+/// `executor`: tier-1's code-blocks, each decoded into a slot of its own and
+/// read back in index order (`docs/design/parallelism.md`, "JPEG 2000: P-10's
+/// seam").
+///
+/// The executor is the engine's pool — [`Parallelism`] is one, and
+/// `Parallelism::Serial` decodes every block on the caller as
+/// [`jpx_decode_request`] does — or a caller's own threads; nothing of a
+/// caller crosses but the trait (ruling 8). The image, the counts, the
+/// warnings and a refusal are the serial decode's at every thread count: the
+/// work budget is charged for every block in index order before any is
+/// decoded, so a refusal names the same block whatever ran it.
+///
+/// # Errors
+///
+/// [`FilterError::Unsupported`], as [`jpx_decode`] gives it, with the
+/// reason in `warnings`.
+pub fn jpx_decode_on(
+    input: &[u8],
+    limits: &Limits,
+    request: &JpxRequest,
+    executor: &dyn Executor,
+    warnings: &mut Vec<Warning>,
+) -> Result<(JpxImage, JpxCounts), FilterError> {
+    request_counted(input, limits, request, executor, warnings, &mut 0)
+}
+
+/// [`jpx_decode_on`], adding the steps [`jpx_decode_counted`] names to
 /// `steps`.
 fn request_counted(
     input: &[u8],
     limits: &Limits,
     request: &JpxRequest,
+    executor: &dyn Executor,
     warnings: &mut Vec<Warning>,
     steps: &mut u64,
 ) -> Result<(JpxImage, JpxCounts), FilterError> {
     let mut clamped = false;
     let mut counts = JpxCounts::default();
-    let decoded = decode_inner(input, limits, request, &mut clamped, &mut counts, steps);
+    let decoded = decode_inner(
+        input,
+        limits,
+        request,
+        executor,
+        &mut clamped,
+        &mut counts,
+        steps,
+    );
     let truncated = matches!(&decoded, Ok(image) if image.truncated);
     // Recorded whether the decode went on to succeed or not: E.1's clamp is a
     // leniency, and ruling 10 wants a leniency to survive the result it led
@@ -673,6 +724,7 @@ pub fn jpx_decode_attributed(input: &[u8], limits: &Limits) -> Result<JpxImage, 
         input,
         limits,
         &JpxRequest::default(),
+        &Parallelism::Serial,
         &mut clamped,
         &mut JpxCounts::default(),
         &mut 0,
@@ -777,6 +829,7 @@ fn decode_inner(
     input: &[u8],
     limits: &Limits,
     request: &JpxRequest,
+    executor: &dyn Executor,
     clamped: &mut bool,
     counts: &mut JpxCounts,
     steps: &mut u64,
@@ -842,8 +895,14 @@ fn decode_inner(
                 .collect::<Result<_, _>>()?,
         ),
     };
-    counts.code_blocks_decoded +=
-        tier1::decode_tiles_counted(&stream, &mut tiles, discard, needs.as_deref(), steps)?;
+    counts.code_blocks_decoded += tier1::decode_tiles_counted(
+        &stream,
+        &mut tiles,
+        discard,
+        needs.as_deref(),
+        executor,
+        steps,
+    )?;
 
     // Annex I's boxes and Annex A's components together decide what a channel
     // *is*, and that has to be settled before a single sample is written: a

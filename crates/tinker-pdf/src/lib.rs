@@ -3060,14 +3060,17 @@ impl Page {
     /// The operation one render of this page is, as `options` asks, for a
     /// render naming `usage`: counting when it asks for stats, binding the
     /// optional-content states `usage` gives once for every scope the render
-    /// opens, and keeping what it computes in the document's cache where the
-    /// document has one.
+    /// opens, keeping what it computes in the document's cache where the
+    /// document has one, and handing its decodes' independent parts to the
+    /// threads `options.parallelism` names — which a band, drawn on a worker,
+    /// runs there.
     pub(crate) fn render_operation(
         &self,
         options: &RenderOptions,
         usage: Option<Usage>,
     ) -> resources::Operation {
         self.operation(stats::tally(options.stats), usage)
+            .on(options.parallelism)
     }
 
     /// [`Page::render_operation`], counting into `work`: a tally the parts of

@@ -268,7 +268,9 @@ impl DisplayList {
             return bitmap;
         }
         // An operation of its own, keeping what it computes in the document's
-        // cache where the document has one, as a direct render does.
+        // cache where the document has one, as a direct render does; drawn
+        // whole on the caller, its decodes may spend the threads the options
+        // name, which no band took.
         let resources = self
             .resources
             .for_operation(self.page.render_operation(options, self.usage));

@@ -23,6 +23,7 @@ use tinker_pdf_filters::{
     MAX_JBIG2_WORK_MULTIPLE,
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
+use tinker_pdf_pool::{Executor, Parallelism};
 use tinker_pdf_raster::canvas::{Canvas, Color};
 use tinker_pdf_raster::fill::Mask;
 use tinker_pdf_raster::image::{sampling_for, ImageSource, SourceWindow, Transform};
@@ -926,7 +927,8 @@ impl Selection {
 /// key"): the streams it has decoded, so that it decodes each once however
 /// many of its scopes read it, its tally, when it is counting, and the
 /// optional-content states its scopes read, bound once for the usage it
-/// names (`docs/design/render-usage.md`).
+/// names (`docs/design/render-usage.md`), and the threads its decodes may
+/// spend.
 ///
 /// Made by the door the operation goes through and cloned into every scope it
 /// builds; a scope a scope makes inherits its maker's. A scope a cache keeps
@@ -959,11 +961,18 @@ pub(crate) struct Operation {
     /// renders in place of keeping it for the render alone. `None` keeps
     /// everything the render's own, as it always was.
     cache: Option<Arc<DocumentCache>>,
+    /// The threads a decode the operation makes may hand its independent
+    /// parts to — a JPEG 2000 codestream's code-blocks
+    /// (`docs/design/parallelism.md`, "JPEG 2000: P-10's seam") — which is
+    /// the caller's `RenderOptions::parallelism` for a render that asks, and
+    /// `Serial` for every other operation. A decode made on one of the
+    /// pool's workers runs its parts there, whatever this says.
+    parallelism: Parallelism,
 }
 
 impl Operation {
     /// A new operation, which has decoded nothing yet, counting into `work`
-    /// when it is counting, and naming no usage.
+    /// when it is counting, naming no usage, its decodes serial.
     pub(crate) fn new(work: Option<Arc<Work>>) -> Operation {
         Operation::rendering(work, None)
     }
@@ -977,13 +986,23 @@ impl Operation {
             usage,
             optional: Arc::default(),
             cache: None,
+            parallelism: Parallelism::Serial,
+        }
+    }
+
+    /// This operation, its decodes handing their independent parts to
+    /// `parallelism`'s threads.
+    pub(crate) fn on(self, parallelism: Parallelism) -> Operation {
+        Operation {
+            parallelism,
+            ..self
         }
     }
 
     /// No operation: what a scope a cache keeps holds between the operations
     /// that ask for it. Nothing counts, every stream is decoded as it is
-    /// read, and nothing is kept for the document; asked about optional
-    /// content itself, it binds the initial states for itself.
+    /// read, serially, and nothing is kept for the document; asked about
+    /// optional content itself, it binds the initial states for itself.
     pub(crate) fn none() -> Operation {
         Operation {
             streams: None,
@@ -991,6 +1010,7 @@ impl Operation {
             usage: None,
             optional: Arc::default(),
             cache: None,
+            parallelism: Parallelism::Serial,
         }
     }
 
@@ -6130,6 +6150,8 @@ impl PageResources {
             });
         let (discard, window) = frame.map_or((0, None), |frame| frame.ask(request));
         let mut warnings = Vec::new();
+        // The code-blocks on the threads the operation may spend, serially
+        // unless its caller asked for them.
         let decoded = Self::jpx_samples(
             raw,
             &tinker_pdf_filters::JpxRequest {
@@ -6141,6 +6163,7 @@ impl PageResources {
                     height: held.height,
                 }),
             },
+            &self.op.parallelism,
             &mut warnings,
         );
         for warning in &warnings {
@@ -6384,14 +6407,15 @@ impl PageResources {
     ///
     /// The one decode both [`Self::jpx_image`] and [`crate::Page::images`]
     /// make, under the one ceiling: asked for what `request` names — the
-    /// whole image for `Page::images` — with what the decode did counted
-    /// beside it.
+    /// whole image for `Page::images` — its code-blocks on `executor`, with
+    /// what the decode did counted beside it.
     fn jpx_samples(
         raw: &[u8],
         request: &tinker_pdf_filters::JpxRequest,
+        executor: &dyn Executor,
         warnings: &mut Vec<tinker_pdf_filters::Warning>,
     ) -> Result<(tinker_pdf_filters::JpxImage, tinker_pdf_filters::JpxCounts), String> {
-        tinker_pdf_filters::jpx_decode_request(raw, &jpx_limits(), request, warnings)
+        tinker_pdf_filters::jpx_decode_on(raw, &jpx_limits(), request, executor, warnings)
             .map_err(|e| format!("{e:?}"))
     }
 
@@ -7007,6 +7031,7 @@ impl PageResources {
                         Self::jpx_samples(
                             &raw,
                             &tinker_pdf_filters::JpxRequest::default(),
+                            &Parallelism::Serial,
                             &mut warnings,
                         )
                     })
@@ -7138,6 +7163,7 @@ impl PageResources {
                     match Self::jpx_samples(
                         &bytes,
                         &tinker_pdf_filters::JpxRequest::default(),
+                        &Parallelism::Serial,
                         &mut warnings,
                     ) {
                         Ok((jpx, _)) => take_jpx(&mut image, jpx),

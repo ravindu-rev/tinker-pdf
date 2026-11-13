@@ -51,6 +51,9 @@ use super::tier2::{CodeBlock, Orientation, Segment, Tile};
 use super::wavelet::Needs;
 use super::{Refusal, MAX_JPX_WORK};
 use crate::mq::{MqContexts, MqDecoder, MqRun};
+use tinker_pdf_pool::Executor;
+#[cfg(test)]
+use tinker_pdf_pool::Parallelism;
 
 // --- the nineteen contexts (T.800 Annex D) ------------------------------
 
@@ -1458,16 +1461,17 @@ pub(crate) fn decode_tiles_counted(
     tiles: &mut [Tile],
     discard: u8,
     needs: Option<&[Option<Vec<Needs>>]>,
+    executor: &dyn Executor,
     steps: &mut u64,
 ) -> Result<u64, Refusal> {
     let mut work = MAX_JPX_WORK;
-    let decoded = decode_within(stream, tiles, discard, needs, &mut work);
+    let decoded = decode_within(stream, tiles, discard, needs, executor, &mut work);
     *steps = steps.saturating_add(MAX_JPX_WORK.saturating_sub(work));
     decoded
 }
 
-/// [`decode_tiles_counted`] with its count dropped, the door the module's
-/// tests read tier-1 through.
+/// [`decode_tiles_counted`] with its count dropped, serial, the door the
+/// module's tests read tier-1 through.
 #[cfg(test)]
 pub(crate) fn decode_tiles(
     stream: &Codestream<'_>,
@@ -1475,30 +1479,71 @@ pub(crate) fn decode_tiles(
     discard: u8,
     needs: Option<&[Option<Vec<Needs>>]>,
 ) -> Result<u64, Refusal> {
-    decode_tiles_counted(stream, tiles, discard, needs, &mut 0)
+    decode_tiles_counted(stream, tiles, discard, needs, &Parallelism::Serial, &mut 0)
 }
 
+/// [`decode_tiles_counted`] on `executor` from a budget of `budget` rather
+/// than [`MAX_JPX_WORK`], with what is left of it: the door
+/// `tests::parallel` reaches a budget spent part way through.
+#[cfg(test)]
+pub(crate) fn decode_tiles_within(
+    stream: &Codestream<'_>,
+    tiles: &mut [Tile],
+    discard: u8,
+    executor: &dyn Executor,
+    budget: u64,
+) -> (Result<u64, Refusal>, u64) {
+    let mut work = budget;
+    let decoded = decode_within(stream, tiles, discard, None, executor, &mut work);
+    (decoded, work)
+}
+
+/// One code-block a decode lists for tier-1, by where it is: its tile,
+/// component, resolution, band, precinct and its own place in the precinct,
+/// with what decoding it needs to know of its band and its tile-component,
+/// and the budget left once it was charged.
+struct Listed {
+    at: [usize; 6],
+    orientation: Orientation,
+    style: CodingStyle,
+    left: u64,
+}
+
+/// Tier-1 over the blocks a decode keeps, in three steps
+/// (`docs/design/jpx-speed.md`, "Code-blocks and synthesis on P-15's pool").
+///
+/// 1. **In index order** — tile, component, resolution, band, precinct,
+///    block — every block of a kept resolution is accounted for
+///    ([`account`]): its pass count checked and its whole cost charged, the
+///    blocks the decode reads listed and the rest left there. A refusal
+///    stops the walk where it is.
+/// 2. **The listed blocks decoded on `executor`**, each into a slot of its
+///    own with MQ contexts of its own, from no budget, since each was charged
+///    in the walk. A block a discard or a window drops is never listed, so it
+///    never reaches a worker.
+/// 3. **The slots read back in index order**: the first block whose decode
+///    refused gives the refusal, as a decode one block after another would
+///    have stopped there — the budget then as it stood once that block was
+///    charged — and a refusal the walk stopped at, after every listed block,
+///    gives its own. So a refusal names the same block, and the budget ends
+///    where it would, at every thread count.
 fn decode_within(
     stream: &Codestream<'_>,
     tiles: &mut [Tile],
     discard: u8,
     needs: Option<&[Option<Vec<Needs>>]>,
+    executor: &dyn Executor,
     work: &mut u64,
 ) -> Result<u64, Refusal> {
-    // One context array for the whole codestream, reset per code-block. That
-    // is what `MqContexts::reset` is for, and the 64 KB it avoids
-    // reallocating for JBIG2 is nineteen entries here — what matters is that
-    // reset returns to Table D.7 rather than to zero.
-    let mut contexts = initial_contexts();
-    let mut decoded = 0u64;
-
-    for (t, tile) in tiles.iter_mut().enumerate() {
+    let mut listed: Vec<Listed> = Vec::new();
+    let mut stopped = None;
+    'walk: for (t, tile) in tiles.iter().enumerate() {
         let index = tile.index;
         // `None` reads every block; `Some(None)` a tile the window misses,
         // none of its blocks; `Some(Some(_))` the blocks its needs reach.
         let wanted: Option<Option<&Vec<Needs>>> =
             needs.map(|needs| needs.get(t).and_then(Option::as_ref));
-        for (c, component) in tile.components.iter_mut().enumerate() {
+        for (c, component) in tile.components.iter().enumerate() {
             let need: Option<Option<&Needs>> =
                 wanted.map(|wanted| wanted.and_then(|wanted| wanted.get(c)));
             let coding = stream.style_for(index, c);
@@ -1513,52 +1558,117 @@ fn decode_within(
                 .resolutions
                 .len()
                 .saturating_sub(usize::from(discard));
-            for (r, resolution) in component.resolutions.iter_mut().enumerate().take(kept) {
-                for (b, band) in resolution.bands.iter_mut().enumerate() {
+            for (r, resolution) in component.resolutions.iter().enumerate().take(kept) {
+                for (b, band) in resolution.bands.iter().enumerate() {
                     let orientation = band.orientation;
-                    for precinct in &mut band.precincts {
-                        for block in &mut precinct.blocks {
+                    for (p, precinct) in band.precincts.iter().enumerate() {
+                        for (k, block) in precinct.blocks.iter().enumerate() {
                             let read = style.segmentation_symbols
                                 || match need {
                                     None => true,
                                     Some(need) => need.is_some_and(|need| need.wants(r, b, block)),
                                 };
-                            if !read {
-                                account(block.width(), block.height(), block.passes, work)?;
-                                continue;
+                            if let Err(refusal) =
+                                account(block.width(), block.height(), block.passes, work)
+                            {
+                                stopped = Some(refusal);
+                                break 'walk;
                             }
-                            decode_one(block, orientation, style, &mut contexts, work)?;
-                            decoded += 1;
+                            if read {
+                                listed.push(Listed {
+                                    at: [t, c, r, b, p, k],
+                                    orientation,
+                                    style,
+                                    left: *work,
+                                });
+                            }
                         }
                     }
                 }
             }
         }
     }
-    Ok(decoded)
+
+    let shared: &[Tile] = tiles;
+    let slots = tinker_pdf_pool::map(executor, listed.len(), |i| {
+        let Some(entry) = listed.get(i) else {
+            return Ok(Decoded::default());
+        };
+        let Some(block) = block_at(shared, entry.at) else {
+            return Ok(Decoded::default());
+        };
+        // D.2 resets the contexts at every block, so a block's own are the
+        // state one array reset between blocks would hold; and the walk has
+        // charged it, so it decodes from a budget of its own.
+        let mut contexts = initial_contexts();
+        let mut charged = u64::MAX;
+        decode_code_block(
+            &block.segments,
+            block.width(),
+            block.height(),
+            block.passes,
+            entry.orientation,
+            entry.style,
+            &mut contexts,
+            &mut charged,
+        )
+    });
+
+    let mut decoded = 0u64;
+    for (entry, slot) in listed.iter().zip(slots) {
+        match slot {
+            Ok(result) => {
+                if let Some(block) = block_at_mut(tiles, entry.at) {
+                    block.coefficients = result.coefficients;
+                    block.half_planes = result.half_planes;
+                    block.planes = u8::try_from(result.planes).unwrap_or(u8::MAX);
+                }
+                decoded += 1;
+            }
+            Err(refusal) => {
+                *work = entry.left;
+                return Err(refusal);
+            }
+        }
+    }
+    match stopped {
+        Some(refusal) => Err(refusal),
+        None => Ok(decoded),
+    }
 }
 
-fn decode_one(
-    block: &mut CodeBlock,
-    orientation: Orientation,
-    style: CodingStyle,
-    contexts: &mut MqContexts,
-    work: &mut u64,
-) -> Result<(), Refusal> {
-    let decoded = decode_code_block(
-        &block.segments,
-        block.width(),
-        block.height(),
-        block.passes,
-        orientation,
-        style,
-        contexts,
-        work,
-    )?;
-    block.coefficients = decoded.coefficients;
-    block.half_planes = decoded.half_planes;
-    block.planes = u8::try_from(decoded.planes).unwrap_or(u8::MAX);
-    Ok(())
+/// The block [`Listed::at`] names, read.
+fn block_at(tiles: &[Tile], at: [usize; 6]) -> Option<&CodeBlock> {
+    let [t, c, r, b, p, k] = at;
+    tiles
+        .get(t)?
+        .components
+        .get(c)?
+        .resolutions
+        .get(r)?
+        .bands
+        .get(b)?
+        .precincts
+        .get(p)?
+        .blocks
+        .get(k)
+}
+
+/// The block [`Listed::at`] names, to write.
+fn block_at_mut(tiles: &mut [Tile], at: [usize; 6]) -> Option<&mut CodeBlock> {
+    let [t, c, r, b, p, k] = at;
+    tiles
+        .get_mut(t)?
+        .components
+        .get_mut(c)?
+        .resolutions
+        .get_mut(r)?
+        .bands
+        .get_mut(b)?
+        .precincts
+        .get_mut(p)?
+        .blocks
+        .get_mut(k)
 }
 
 /// The tier-1 *encoder*, for tests only (T.800 D.2, from the other side).
