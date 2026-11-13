@@ -3,26 +3,27 @@
 //!
 //! A flat colour in an `ICCBased` space — a fill, a stroke, a glyph — converts
 //! through the profile's transform for the intent in force at its painting
-//! operator, `ri`'s or a graphics state's `/RI`. Every expected colour here
-//! is recomputed from ICC.1's own arithmetic: a table's multilinear
-//! interpolation and v2's legacy Lab encoding, a matrix/TRC profile's
-//! columns over its curves, and ICC-absolute colorimetry's scaling by the
-//! media white (6.2.3). The connection space reaches sRGB through
-//! `tinker_pdf_color::lab_to_srgb`, the engine's public conversion of it, so
-//! what is under test is which transform the intent selects and what it
-//! makes of the components.
+//! operator, `ri`'s or a graphics state's `/RI`, and an image through the
+//! transform for its own `/Intent` (Table 89), or the intent in force at `Do`
+//! or `EI` where it names none. Every expected colour here is recomputed from
+//! ICC.1's own arithmetic: a table's multilinear interpolation and v2's legacy
+//! Lab encoding, a matrix/TRC profile's columns over its curves, and
+//! ICC-absolute colorimetry's scaling by the media white (6.2.3). The
+//! connection space reaches sRGB through `tinker_pdf_color::lab_to_srgb`, the
+//! engine's public conversion of it, so what is under test is which transform
+//! the intent selects and what it makes of the components.
 //!
-//! The pages are `render_support`'s, which `determinism.rs` fingerprints.
-//! Nothing here depends on a font this build may or may not bundle: the glyph
-//! is the repository's own embedded face.
+//! The flat-colour pages are `render_support`'s, which `determinism.rs`
+//! fingerprints. Nothing here depends on a font this build may or may not
+//! bundle: the glyph is the repository's own embedded face.
 
 mod render_support;
 
 use render_support::{
-    intent_lut_encoded, intent_page, intent_spot, intent_states_page, pixel, render, INTENT_PAINTS,
-    INTENT_PAPER, INTENT_SIZE, SRGB_COLUMNS,
+    intent_lut_encoded, intent_lut_profile, intent_page, intent_spot, intent_states_page, pixel,
+    render, INTENT_PAINTS, INTENT_PAPER, INTENT_SIZE, SRGB_COLUMNS,
 };
-use tinker_pdf::Bitmap;
+use tinker_pdf::{Bitmap, CacheLimits, Document, RenderOptions, Stats, SvgOptions};
 use tinker_pdf_color::lab_to_srgb;
 
 /// The four intents Table 69 names, by the name `ri` gives them.
@@ -201,12 +202,17 @@ fn at(bitmap: &Bitmap, (x, y): (f64, f64), height: f64) -> (u8, u8, u8) {
 
 /// `got` is `want` within the level of 255 the integer paths round by.
 fn within_a_level(got: (u8, u8, u8), want: (u8, u8, u8), what: &str) {
+    within_levels(got, want, 1, what);
+}
+
+/// `got` is `want` within `levels` of 255 in every channel.
+fn within_levels(got: (u8, u8, u8), want: (u8, u8, u8), levels: u8, what: &str) {
     for (channel, (g, w)) in [(got.0, want.0), (got.1, want.1), (got.2, want.2)]
         .into_iter()
         .enumerate()
     {
         assert!(
-            g.abs_diff(w) <= 1,
+            g.abs_diff(w) <= levels,
             "{what}: channel {channel} is {g}, not {w} ({got:?} against {want:?})"
         );
     }
@@ -330,4 +336,484 @@ fn ri_and_extgstate_ri_are_twins() {
         patch(&after, 60.0),
         "set before, painted after"
     );
+}
+
+// ---- images ----------------------------------------------------------------
+//
+// An image converts in its own `/Intent` where that is a name, relative
+// colorimetric for a name 8.6.5.8 does not list, and in the intent in force at
+// `Do` or `EI` otherwise; an image mask's `/Intent` is never read, its paint
+// being the fill colour (`docs/design/icc.md`, "Where each conversion takes its
+// intent").
+
+/// The samples every image here draws, row-major from the top (8.9.5.2):
+/// three corners of the table profile's cube — nodes of its grid, so their
+/// colour is the table's own — and a colour between nodes.
+const SAMPLES: [[u8; 3]; 4] = [[0, 255, 0], [255, 0, 255], [255, 255, 0], [128, 64, 191]];
+
+/// [`SAMPLES`] as an image's bytes.
+fn flat_samples() -> Vec<u8> {
+    SAMPLES.iter().flatten().copied().collect()
+}
+
+/// [`SAMPLES`] as `ASCIIHexDecode` data, its end-of-data marker included.
+fn hex_samples() -> String {
+    let mut out: String = flat_samples()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    out.push('>');
+    out
+}
+
+/// The components of [`SAMPLES`]'s sample `index`.
+fn sample_components(index: usize) -> [f64; 3] {
+    SAMPLES[index].map(|value| f64::from(value) / 255.0)
+}
+
+/// The page-space centre of sample `index` of a [`SAMPLES`] image drawn on
+/// the 40-point square whose lower left is `corner`: its first row at the
+/// top.
+fn sample_spot(index: usize, corner: (f64, f64)) -> (f64, f64) {
+    let (row, column) = ((index / 2) as f64, (index % 2) as f64);
+    (
+        corner.0 + 20.0 * column + 10.0,
+        corner.1 + 30.0 - 20.0 * row,
+    )
+}
+
+/// Every sample of a [`SAMPLES`] image drawn at `corner` on a page `height`
+/// points tall is the colour of its components through the table `intent`
+/// selects: a node of the table's grid within a level, the colour between
+/// nodes within the two levels a grid's read keeps to (`docs/design/icc.md`,
+/// P-22). The colours painted, in sample order.
+fn holds_samples(
+    bitmap: &Bitmap,
+    height: f64,
+    corner: (f64, f64),
+    intent: Intent,
+    what: &str,
+) -> Vec<(u8, u8, u8)> {
+    (0..SAMPLES.len())
+        .map(|index| {
+            let got = at(bitmap, sample_spot(index, corner), height);
+            let levels = if index == 3 { 2 } else { 1 };
+            let want = table_colour(intent, sample_components(index));
+            within_levels(got, want, levels, &format!("{what}, sample {index}"));
+            got
+        })
+        .collect()
+}
+
+/// A stream object: `entries` and its `/Length`, then `data`.
+fn stream(entries: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\nendstream");
+    out
+}
+
+/// A document of `objects`, numbered from one, with its cross-reference
+/// table.
+fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// One image XObject of a page: its resource name, its dictionary's entries
+/// but its type and length, and its samples.
+struct Picture {
+    name: &'static str,
+    entries: String,
+    samples: Vec<u8>,
+}
+
+/// A [`SAMPLES`] image's entries in the table profile's space, object 5,
+/// and `extra`.
+fn image_entries(extra: &str) -> String {
+    format!("/Width 2 /Height 2 /ColorSpace [/ICCBased 5 0 R] /BitsPerComponent 8 {extra}")
+}
+
+/// A one-page document `width` by `height` points painting `content`: its
+/// resources the table profile's space as `/L` — object 5 — beside the
+/// `/ColorSpace` entries `spaces` adds, and each of `pictures` an image
+/// XObject.
+fn picture_document(
+    width: f64,
+    height: f64,
+    spaces: &str,
+    content: &str,
+    pictures: &[Picture],
+) -> Vec<u8> {
+    let xobjects: String = pictures
+        .iter()
+        .enumerate()
+        .map(|(index, picture)| format!("/{} {} 0 R ", picture.name, 6 + index))
+        .collect();
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}]\n   \
+             /Resources << /ColorSpace << /L [/ICCBased 5 0 R] {spaces} >>\n     \
+             /XObject << {xobjects}>> >>\n   /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        stream("", content.as_bytes()),
+        stream("/N 3", &intent_lut_profile()),
+    ];
+    for picture in pictures {
+        objects.push(stream(
+            &format!("/Type /XObject /Subtype /Image {}", picture.entries),
+            &picture.samples,
+        ));
+    }
+    pdf(&objects)
+}
+
+/// **An image's `/Intent` selects its transform** (Table 89). An image
+/// XObject and an inline image in the table profile's space, each naming its
+/// own intent while `ri` names another, paint each sample as the table that
+/// intent selects makes it; a name 8.6.5.8 does not list is relative
+/// colorimetric's. An `/Intent` that is not a name, and none at all, leave
+/// the intent in force deciding, and an image mask's is never read: an
+/// XObject mask and an inline one paint the fill colour in the intent in
+/// force.
+#[test]
+fn an_images_intent_selects_its_transform() {
+    let named = Intent::ALL.map(|intent| (intent.name(), intent));
+    for (name, own) in named.into_iter().chain([("Ultraviolet", Intent::Relative)]) {
+        // The intent in force is another, so the image's own is seen to
+        // decide.
+        let state = if own == Intent::Saturation {
+            Intent::Perceptual
+        } else {
+            Intent::Saturation
+        };
+        let content = format!(
+            "/{} ri\n\
+             q 40 0 0 40 0 0 cm /Im0 Do Q\n\
+             q 40 0 0 40 40 0 cm BI /W 2 /H 2 /CS /L /BPC 8 /F /AHx /Intent /{name} ID {} EI Q\n\
+             q 40 0 0 40 0 40 cm /Im1 Do Q\n\
+             q 40 0 0 40 40 40 cm /Im2 Do Q\n\
+             /L cs 0.25 0.5 0.75 scn q 40 0 0 40 0 80 cm /Im3 Do Q\n\
+             q 40 0 0 40 40 80 cm BI /W 1 /H 1 /IM true /F /AHx /Intent /{name} ID 00> EI Q",
+            state.name(),
+            hex_samples(),
+        );
+        let pictures = [
+            Picture {
+                name: "Im0",
+                entries: image_entries(&format!("/Intent /{name}")),
+                samples: flat_samples(),
+            },
+            // An entry that is not a name leaves the intent in force.
+            Picture {
+                name: "Im1",
+                entries: image_entries("/Intent 5"),
+                samples: flat_samples(),
+            },
+            Picture {
+                name: "Im2",
+                entries: image_entries(""),
+                samples: flat_samples(),
+            },
+            Picture {
+                name: "Im3",
+                entries: format!(
+                    "/Width 1 /Height 1 /ImageMask true /BitsPerComponent 1 /Intent /{name}"
+                ),
+                samples: vec![0x00],
+            },
+        ];
+        let bitmap = render(picture_document(80.0, 120.0, "", &content, &pictures));
+        let what = |part: &str| format!("/Intent /{name} under {state:?}: {part}");
+        let xobject = holds_samples(&bitmap, 120.0, (0.0, 0.0), own, &what("the XObject"));
+        let inline = holds_samples(&bitmap, 120.0, (40.0, 0.0), own, &what("the inline image"));
+        assert_eq!(xobject, inline, "{}", what("the two images part"));
+        let not_a_name = holds_samples(
+            &bitmap,
+            120.0,
+            (0.0, 40.0),
+            state,
+            &what("an /Intent that is not a name"),
+        );
+        holds_samples(&bitmap, 120.0, (40.0, 40.0), state, &what("no /Intent"));
+        assert_ne!(
+            xobject,
+            not_a_name,
+            "{}",
+            what("the image's own intent and the one in force paint alike")
+        );
+        for (x, part) in [(0.0, "the mask XObject"), (40.0, "the inline mask")] {
+            within_a_level(
+                at(&bitmap, (x + 20.0, 100.0), 120.0),
+                table_colour(state, [0.25, 0.5, 0.75]),
+                &what(part),
+            );
+        }
+    }
+}
+
+/// **An image's `/Intent` and `ri` are twins.** A page drawing an image
+/// XObject and an inline image with no `/Intent` under each intent `ri`
+/// names, and its twin drawing them naming that intent each in its own
+/// `/Intent` with no `ri`, render byte for byte alike — directly, and from
+/// the page's display list — and write the same SVG. The four intents paint
+/// four pictures, and a name 8.6.5.8 does not list paints relative
+/// colorimetric's.
+#[test]
+fn an_image_intent_and_ri_are_twins() {
+    let options = RenderOptions::default();
+    let mut pictures_painted = Vec::new();
+    for name in Intent::ALL
+        .map(Intent::name)
+        .into_iter()
+        .chain(["Ultraviolet"])
+    {
+        let document = |ri: &str, intent: &str| {
+            let content = format!(
+                "{ri}q 40 0 0 40 0 0 cm /Im0 Do Q\n\
+                 q 40 0 0 40 40 0 cm BI /W 2 /H 2 /CS /L /BPC 8 /F /AHx {intent} ID {} EI Q",
+                hex_samples()
+            );
+            let pictures = [Picture {
+                name: "Im0",
+                entries: image_entries(intent),
+                samples: flat_samples(),
+            }];
+            Document::open(picture_document(80.0, 40.0, "", &content, &pictures)).expect("it opens")
+        };
+        let by_ri = document(&format!("/{name} ri\n"), "");
+        let by_intent = document("", &format!("/Intent /{name}"));
+        let (ri_page, intent_page) = (
+            by_ri.page(0).expect("a page"),
+            by_intent.page(0).expect("a page"),
+        );
+        let rendered = intent_page.render(&options);
+        assert!(
+            ri_page.render(&options).data == rendered.data,
+            "{name}: ri and /Intent rendered apart"
+        );
+        assert!(
+            ri_page.display_list().render(&options).data == rendered.data,
+            "{name}: ri's display list and /Intent rendered apart"
+        );
+        assert!(
+            intent_page.display_list().render(&options).data == rendered.data,
+            "{name}: /Intent's display list and its page rendered apart"
+        );
+        let svg = |page: &tinker_pdf::Page| page.to_svg(&SvgOptions::default()).markup;
+        assert!(
+            svg(&ri_page) == svg(&intent_page),
+            "{name}: ri and /Intent wrote different SVG"
+        );
+        pictures_painted.push(rendered.data);
+    }
+    for (first, second) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
+        assert!(
+            pictures_painted[first] != pictures_painted[second],
+            "{} and {} painted one picture",
+            Intent::ALL[first].name(),
+            Intent::ALL[second].name()
+        );
+    }
+    assert!(
+        pictures_painted[4] == pictures_painted[1],
+        "an unrecognised name paints otherwise than relative colorimetric"
+    );
+}
+
+/// What rendering `bytes`' first page counted.
+fn counted(bytes: Vec<u8>) -> Stats {
+    Document::open(bytes)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions {
+            stats: true,
+            ..RenderOptions::default()
+        })
+        .stats
+        .expect("a render asked for its stats hands them back")
+}
+
+/// **One image drawn under two intents decodes once per intent.** The
+/// decoded-image cache keys an image on the conversion its colours take, so
+/// an image in an `ICCBased` space drawn under four intents decodes four
+/// times and meets the decode of an intent it is drawn in again — a name
+/// 8.6.5.8 does not list meeting relative colorimetric's. An image whose
+/// colours no intent changes is one decode under every intent: one in a
+/// device space, an image mask, and one whose own `/Intent` decides for every
+/// draw. A palette over an ICC base and a device space an ICC default remaps
+/// are ICC colours, one decode an intent.
+#[test]
+fn an_image_decodes_once_in_each_intent_it_is_drawn_in() {
+    let draws = |intents: &[&str]| -> String {
+        intents
+            .iter()
+            .enumerate()
+            .map(|(index, intent)| {
+                format!("/{intent} ri q 10 0 0 10 {} 0 cm /Im0 Do Q\n", 10 * index)
+            })
+            .collect()
+    };
+    let decodes = |spaces: &str, entries: String, samples: Vec<u8>, intents: &[&str]| {
+        let picture = Picture {
+            name: "Im0",
+            entries,
+            samples,
+        };
+        let stats = counted(picture_document(
+            80.0,
+            10.0,
+            spaces,
+            &draws(intents),
+            &[picture],
+        ));
+        (stats.images_decoded, stats.image_misses, stats.image_hits)
+    };
+    let two = ["Perceptual", "Saturation"];
+
+    assert_eq!(
+        decodes(
+            "",
+            image_entries(""),
+            flat_samples(),
+            &[
+                "Perceptual",
+                "RelativeColorimetric",
+                "Perceptual",
+                "Saturation",
+                "AbsoluteColorimetric",
+                "Ultraviolet",
+            ],
+        ),
+        (4, 4, 2),
+        "an ICC image: once in each of four intents, met twice"
+    );
+    assert_eq!(
+        decodes(
+            "",
+            "/Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8".to_string(),
+            flat_samples(),
+            &two,
+        ),
+        (1, 1, 1),
+        "a device image: one decode under both intents"
+    );
+    assert_eq!(
+        decodes(
+            "",
+            "/Width 1 /Height 1 /ImageMask true /BitsPerComponent 1 /Intent /Perceptual"
+                .to_string(),
+            vec![0x00],
+            &two,
+        ),
+        (1, 1, 1),
+        "an image mask: one decode under both intents"
+    );
+    assert_eq!(
+        decodes(
+            "",
+            image_entries("/Intent /Perceptual"),
+            flat_samples(),
+            &["Perceptual", "Saturation", "AbsoluteColorimetric"],
+        ),
+        (1, 1, 2),
+        "an image naming its own intent: one decode under every intent"
+    );
+    assert_eq!(
+        decodes(
+            "",
+            "/Width 2 /Height 2 /ColorSpace [/Indexed [/ICCBased 5 0 R] 1 <00ff00ff00ff>] \
+             /BitsPerComponent 8"
+                .to_string(),
+            vec![0, 1, 1, 0],
+            &two,
+        ),
+        (2, 2, 0),
+        "a palette over an ICC base: once an intent"
+    );
+    assert_eq!(
+        decodes(
+            "/DefaultRGB [/ICCBased 5 0 R]",
+            "/Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8".to_string(),
+            flat_samples(),
+            &two,
+        ),
+        (2, 2, 0),
+        "a device image under an ICC default: once an intent"
+    );
+}
+
+/// **A document's kept image is kept under its conversion.** With a cache
+/// budget, an image in an `ICCBased` space drawn under two intents paints
+/// what a render with no budget paints, decoding once in each intent and
+/// meeting both decodes in the next render; a device image drawn under both
+/// is one decode, met by the second draw and by both of the next render's.
+#[test]
+fn a_kept_image_is_kept_under_its_conversion() {
+    let content = "/Perceptual ri q 10 0 0 10 0 0 cm /Im0 Do Q\n\
+                   /Saturation ri q 10 0 0 10 10 0 cm /Im0 Do Q\n";
+    let device = "/Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8".to_string();
+    for (what, entries, first, again) in [
+        ("an ICC image", image_entries(""), (2, 2, 0), (0, 0, 2)),
+        ("a device image", device, (1, 1, 1), (0, 0, 2)),
+    ] {
+        let picture = Picture {
+            name: "Im0",
+            entries,
+            samples: flat_samples(),
+        };
+        let bytes = picture_document(20.0, 10.0, "", content, &[picture]);
+        let options = RenderOptions {
+            stats: true,
+            ..RenderOptions::default()
+        };
+        let plain = Document::open(bytes.clone())
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .render(&options);
+        let kept = Document::open(bytes)
+            .expect("it opens")
+            .with_cache_limits(CacheLimits::new(1 << 24));
+        for (render, want) in [("the first render", first), ("the next", again)] {
+            let rendered = kept.page(0).expect("a page").render(&options);
+            assert!(
+                rendered.data == plain.data,
+                "{what}, {render}: a kept image paints otherwise than a decode"
+            );
+            let stats = rendered
+                .stats
+                .expect("a render asked for its stats hands them back");
+            assert_eq!(
+                (stats.images_decoded, stats.image_misses, stats.image_hits),
+                want,
+                "{what}, {render}: decoded, missed and met"
+            );
+        }
+    }
 }

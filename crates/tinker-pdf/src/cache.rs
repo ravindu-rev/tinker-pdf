@@ -65,7 +65,7 @@ use tinker_pdf_cos::{
     fill_open, limits, Accountant, Counter, Dict, Entries, Ledger, ObjRef, Object, OpenFill, Work,
 };
 
-use tinker_pdf_color::icc::Transforms;
+use tinker_pdf_color::icc::{Conversion, Transforms};
 use tinker_pdf_content::{FormInvocation, FormRecording};
 use tinker_pdf_raster::fill::Mask;
 
@@ -652,11 +652,13 @@ impl<K: Kind> Drop for Claim<'_, K> {
 }
 
 // What a decoded image is kept under (`docs/design/performance.md`, P-16):
-/// the image XObject, what its decode is asked for, and the default
-/// colour spaces its scope paints device spaces in (8.6.5.6) — the one thing
-/// outside the object an image's decode reads, so two scopes that name one
-/// image and different defaults keep two entries, and two that name it and
-/// the same defaults share one.
+/// the image XObject, what its decode is asked for, the conversion its
+/// colours take, and the default colour spaces its scope paints device
+/// spaces in (8.6.5.6) — the two things outside the object an image's
+/// decode reads, so two scopes that name one image and different defaults
+/// keep two entries, and two that name it and the same defaults share one,
+/// and one image drawn under two rendering intents its colours take is two
+/// decodes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ImageKey {
     /// The image XObject.
@@ -669,6 +671,11 @@ pub(crate) struct ImageKey {
     /// the decoded image it holds, where a codestream's decode holds part of
     /// it (`tinker_pdf_render::DecodedImage::window`).
     pub(crate) asked: Asked,
+    /// The conversion the image's colours take, its own `/Intent`'s or the
+    /// one in force at the draw (8.6.5.8, Table 89), where an intent changes
+    /// them — an ICC space, or a space holding one, as painted; `None` for
+    /// an image no intent changes, which is one decode under every intent.
+    pub(crate) conversion: Option<Conversion>,
     /// The scope's `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK` that it
     /// puts in, each as written ([`Written`]); empty for a scope that paints
     /// every device space as itself.

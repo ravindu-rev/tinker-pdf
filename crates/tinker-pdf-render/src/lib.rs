@@ -28,7 +28,7 @@ pub use shading::{ColorTable, Shading, ShadingScratch, TABLE_ENTRIES};
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{
     ColorFamily, Device, EventKind, Glyph, GraphicsState, ImageRef, LineCap as ContentCap,
-    LineJoin as ContentJoin, Matrix, PathSegment, StoredParameters, Transfer,
+    LineJoin as ContentJoin, Matrix, PathSegment, RenderingIntent, StoredParameters, Transfer,
 };
 
 use tinker_pdf_font::Outline;
@@ -733,15 +733,25 @@ pub trait GlyphSource {
     /// drawn size and never below it, and says so in
     /// [`DecodedImage::reduced`].
     ///
+    /// `intent` is the rendering intent in force at the draw (8.6.5.8): the
+    /// implementor converts the image's colours in the intent its own
+    /// dictionary names, where it names one, and in `intent` otherwise, so a
+    /// decode it keeps for one intent is never handed to a draw in another.
+    ///
     /// `Err` carries the codec's name so the warning can say what was missing;
     /// `Ok(None)` means the resource is not an image at all.
-    fn image(&self, name: &[u8], request: &ImageRequest) -> Result<Option<DecodedImage>, String> {
-        let _ = (name, request);
+    fn image(
+        &self,
+        name: &[u8],
+        request: &ImageRequest,
+        intent: RenderingIntent,
+    ) -> Result<Option<DecodedImage>, String> {
+        let _ = (name, request, intent);
         Ok(None)
     }
 
     /// An inline image (8.9.7), from the bytes between `BI`/`ID` and `EI`,
-    /// asked for as [`GlyphSource::image`] is.
+    /// asked for as [`GlyphSource::image`] is, in the same intent.
     ///
     /// Passed as bytes because the interpreter has no object parser; the
     /// implementor already reads dictionaries and runs filter chains for
@@ -751,8 +761,9 @@ pub trait GlyphSource {
         dict: &[u8],
         data: &[u8],
         request: &ImageRequest,
+        intent: RenderingIntent,
     ) -> Result<Option<DecodedImage>, String> {
-        let _ = (dict, data, request);
+        let _ = (dict, data, request, intent);
         Ok(None)
     }
 
@@ -5519,20 +5530,23 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         let state: &GraphicsState = &painting;
 
         // The size the page draws it at, in the page frame whatever canvas
-        // this is (ruling 5), so a tile, a band and a replay ask alike; and the
-        // parts of it this canvas reaches and shows.
+        // this is (ruling 5), so a tile, a band and a replay ask alike; the
+        // parts of it this canvas reaches and shows; and the intent in force
+        // at `Do` or `EI`, which the image's own `/Intent` overrides where it
+        // names one (8.6.5.8, Table 89).
         let request = self.image_request(&state.ctm.then(&self.base));
+        let intent = state.stored_parameters().rendering_intent;
         let decoded = if image.inline {
             match self
                 .glyphs
-                .inline_image(&image.inline_dict, &image.inline_data, &request)
+                .inline_image(&image.inline_dict, &image.inline_data, &request, intent)
             {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err("inline".to_string()),
                 Err(codec) => Err(codec),
             }
         } else {
-            match self.glyphs.image(&image.name, &request) {
+            match self.glyphs.image(&image.name, &request, intent) {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err(String::from_utf8_lossy(&image.name).into_owned()),
                 Err(codec) => Err(codec),
@@ -7209,6 +7223,7 @@ mod tests {
             &self,
             name: &[u8],
             _request: &ImageRequest,
+            _intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
             if name != b"Im0" {
                 return Ok(None);
@@ -7452,6 +7467,7 @@ mod tests {
             &self,
             name: &[u8],
             _request: &ImageRequest,
+            _intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
             if name != b"Im0" {
                 return Ok(None);
@@ -7487,6 +7503,7 @@ mod tests {
             &self,
             name: &[u8],
             _request: &ImageRequest,
+            _intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
             if name != b"Im0" {
                 return Ok(None);
@@ -7546,17 +7563,22 @@ mod tests {
         );
     }
 
-    /// A source that records every image request it is asked, and answers
-    /// each with one grey sample.
+    /// A source that records every image request it is asked, with the
+    /// intent it is asked in, and answers each with one grey sample.
     #[derive(Default)]
     struct Requests {
-        asked: std::sync::Mutex<Vec<(Vec<u8>, ImageRequest)>>,
+        asked: std::sync::Mutex<Vec<(Vec<u8>, ImageRequest, RenderingIntent)>>,
     }
 
     impl Requests {
-        fn answer(&self, name: &[u8], request: &ImageRequest) -> Option<DecodedImage> {
+        fn answer(
+            &self,
+            name: &[u8],
+            request: &ImageRequest,
+            intent: RenderingIntent,
+        ) -> Option<DecodedImage> {
             if let Ok(mut asked) = self.asked.lock() {
-                asked.push((name.to_vec(), *request));
+                asked.push((name.to_vec(), *request, intent));
             }
             Some(DecodedImage {
                 width: 1,
@@ -7582,16 +7604,18 @@ mod tests {
             &self,
             name: &[u8],
             request: &ImageRequest,
+            intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
-            Ok(self.answer(name, request))
+            Ok(self.answer(name, request, intent))
         }
         fn inline_image(
             &self,
             _dict: &[u8],
             _data: &[u8],
             request: &ImageRequest,
+            intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
-            Ok(self.answer(b"inline", request))
+            Ok(self.answer(b"inline", request, intent))
         }
     }
 
@@ -7624,16 +7648,17 @@ mod tests {
         ];
         let drawn: Vec<(Vec<u8>, (f64, f64))> = page
             .iter()
-            .map(|(name, request)| (name.clone(), request.drawn))
+            .map(|(name, request, _)| (name.clone(), request.drawn))
             .collect();
         assert_eq!(drawn, expected, "each draw's size in the page frame");
         let tile = asked(Canvas::new(37, 23, PixelFormat::Rgb8, Color::WHITE).at_origin(41, 19));
-        let sizes = |asked: &[(Vec<u8>, ImageRequest)]| -> Vec<(Vec<u8>, (f64, f64))> {
-            asked
-                .iter()
-                .map(|(name, request)| (name.clone(), request.drawn))
-                .collect()
-        };
+        let sizes =
+            |asked: &[(Vec<u8>, ImageRequest, RenderingIntent)]| -> Vec<(Vec<u8>, (f64, f64))> {
+                asked
+                    .iter()
+                    .map(|(name, request, _)| (name.clone(), request.drawn))
+                    .collect()
+            };
         assert_eq!(
             sizes(&tile),
             sizes(&page),
@@ -7794,6 +7819,50 @@ mod tests {
         .is_none());
     }
 
+    /// **A draw hands the image seam the intent in force** (8.6.5.8): the
+    /// initial relative colorimetric, then each intent `ri` names, an inline
+    /// image as an image XObject, `Q` restoring the intent `q` saved, and a
+    /// name 8.6.5.8 does not list kept as unrecognised for the source to read.
+    /// A tile asks in the intents the page asks in.
+    #[test]
+    fn a_draw_hands_the_image_seam_the_intent_in_force() {
+        let content: &[u8] = b"q 10 0 0 10 0 0 cm /Im0 Do Q \
+            /Perceptual ri q 10 0 0 10 10 0 cm /Im0 Do Q \
+            q /Saturation ri q 10 0 0 10 20 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x5a EI Q \
+            q 10 0 0 10 30 0 cm /Im1 Do Q Q \
+            q 10 0 0 10 40 0 cm /Im0 Do Q \
+            /AbsoluteColorimetric ri q 10 0 0 10 50 0 cm /Im1 Do Q \
+            /Ultraviolet ri q 10 0 0 10 60 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x5a EI Q";
+        let asked = |canvas: Canvas| {
+            let source = Requests::default();
+            let mut renderer =
+                Renderer::new(canvas, page_transform(20.0, 1.0), &source).with_page_size(80, 20);
+            interpret(content, Matrix::IDENTITY, &mut renderer, &NoFonts);
+            let _ = renderer.finish();
+            source.asked.into_inner().expect("the record")
+        };
+        let page = asked(Canvas::new(80, 20, PixelFormat::Rgb8, Color::WHITE));
+        let intents: Vec<(Vec<u8>, RenderingIntent)> = page
+            .iter()
+            .map(|(name, _, intent)| (name.clone(), *intent))
+            .collect();
+        assert_eq!(
+            intents,
+            vec![
+                (b"Im0".to_vec(), RenderingIntent::RelativeColorimetric),
+                (b"Im0".to_vec(), RenderingIntent::Perceptual),
+                (b"inline".to_vec(), RenderingIntent::Saturation),
+                (b"Im1".to_vec(), RenderingIntent::Saturation),
+                (b"Im0".to_vec(), RenderingIntent::Perceptual),
+                (b"Im1".to_vec(), RenderingIntent::AbsoluteColorimetric),
+                (b"inline".to_vec(), RenderingIntent::Unrecognised),
+            ],
+            "each draw in the intent in force at it"
+        );
+        let tile = asked(Canvas::new(23, 11, PixelFormat::Rgb8, Color::WHITE).at_origin(17, 5));
+        assert_eq!(tile, page, "a tile asks in the intents the page asks in");
+    }
+
     /// One image under two names: `Im0` three by two samples standing for a
     /// five by three image, two of its samples a sample, and `Im1` the same
     /// samples as an image of their own.
@@ -7807,6 +7876,7 @@ mod tests {
             &self,
             name: &[u8],
             _request: &ImageRequest,
+            _intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
             let (reduced, width, height) = match name {
                 b"Im0" => (
@@ -8236,6 +8306,7 @@ mod tests {
             &self,
             name: &[u8],
             _request: &ImageRequest,
+            _intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
             if name != b"Im0" && name != b"Im1" {
                 return Ok(None);
@@ -10221,6 +10292,7 @@ mod tests {
             &self,
             _name: &[u8],
             _request: &ImageRequest,
+            _intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
             Ok(Some(DecodedImage {
                 stencil: false,
@@ -10606,6 +10678,7 @@ mod snapshot_tests {
             &self,
             name: &[u8],
             _request: &ImageRequest,
+            _intent: RenderingIntent,
         ) -> Result<Option<DecodedImage>, String> {
             let (r, g, b) = match name {
                 b"A" => (200, 40, 40),

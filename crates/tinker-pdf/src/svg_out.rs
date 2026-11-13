@@ -1330,19 +1330,23 @@ impl Device for Writer<'_> {
         }
         self.note_blend(state.blend);
         // The renderer's answer and its words: `Ok(None)` is a name that is
-        // not an image, reported under the name, and `Err` the codec.
+        // not an image, reported under the name, and `Err` the codec. Its
+        // colours convert as a render's draw of it does, in the image's own
+        // `/Intent` or else the intent in force at the draw (8.6.5.8).
+        let intent = state.stored_parameters().rendering_intent;
         let decoded = if image.inline {
             match self.glyphs.inline_image(
                 &image.inline_dict,
                 &image.inline_data,
                 &ImageRequest::FULL,
+                intent,
             ) {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err("inline".to_string()),
                 Err(codec) => Err(codec),
             }
         } else {
-            match self.glyphs.image(&image.name, &ImageRequest::FULL) {
+            match self.glyphs.image(&image.name, &ImageRequest::FULL, intent) {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err(String::from_utf8_lossy(&image.name).into_owned()),
                 Err(codec) => Err(codec),

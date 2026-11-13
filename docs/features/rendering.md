@@ -65,8 +65,18 @@ interpreter keeps beside each colour the space and components it was set
 with (`GraphicsState::fill_source`, `ColorSource`) and resolves it again
 when the intent changes, so a colour set before `ri` paints in the intent at
 the paint (11.7.5.3) and `Q` restores it with the intent it was resolved
-in. An image and a shading convert in relative colorimetric, 8.6.5.8's
-initial intent. Relative colorimetric converts through the first of `D2B1`,
+in. An image converts in its own `/Intent` where that is a name (Table 89;
+an inline image's under the same key), a name 8.6.5.8 does not list read as
+relative colorimetric, and in the intent in force at `Do` or `EI` where the
+entry is absent or not a name — rendered and written as SVG alike. An image
+mask's `/Intent` is never read: its paint is the fill colour, converted as
+any flat colour is. The decoded-image cache — a render's, and a document's
+under a cache budget — keeps an image's decode under the conversion its
+colours took, so an image in an ICC space, or one holding
+one, drawn under two intents decodes once in each, and an image no intent
+changes — in a device space, a mask, or one naming its own intent — decodes
+once. A shading converts in relative colorimetric, 8.6.5.8's initial
+intent. Relative colorimetric converts through the first of `D2B1`,
 `A2B1`, `A2B0`, the model and `A2B2` the profile carries. Absolute
 colorimetric converts through `D2B3` as it stands where the profile carries
 one, that tag being ICC-absolute already, and otherwise is relative
@@ -1588,7 +1598,7 @@ compensation, overprint, flatness, smoothness, stroke adjustment, alpha
 source, text knockout, the black generation, undercolour removal and
 transfer functions, and the halftone and its origin — travel in the state as
 one shared `StoredParameters` value with the rendering intent, which flat
-colours apply, `None` while every one has its initial value, so a
+colours and images apply, `None` while every one has its initial value, so a
 `q` copies one word more and a copy allocates nothing. The transfer functions,
 black generation and undercolour removal, flatness, smoothness and stroke
 adjustment are applied

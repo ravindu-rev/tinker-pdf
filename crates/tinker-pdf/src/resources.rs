@@ -8,10 +8,10 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use tinker_pdf_color::{ColorSpace, Colorant, Colorants, Function, Process};
+use tinker_pdf_color::{icc, ColorSpace, Colorant, Colorants, Function, Process};
 use tinker_pdf_content::{
     ColorantKind, ColorantTint, ColorantTints, Device, DeviceDefaults, FontSource, Layer,
-    MarkedProps, Matrix, PathSegment, Rgb, Rgb16,
+    MarkedProps, Matrix, PathSegment, RenderingIntent, Rgb, Rgb16,
 };
 use tinker_pdf_cos::{
     decode_text_string, font as cos_font, limits, pages as cos_pages, Cached, CosDocument,
@@ -157,21 +157,29 @@ impl CachedImage {
 ///
 /// The first decode of a name reads what its frame is ([`Frame`]), and every
 /// later draw of the name reads what it asks of the decode from that; an
-/// image with no frame is decoded whole whatever a draw asks. Each decode is
-/// kept under what it was asked for ([`Asked`]): the reduction it was made
-/// at, and the window it holds. The name's first decode is its first ask's,
-/// so the render that makes it decodes the image once; each other ask fills
-/// once too, up to [`MAX_DECODES_OF_ONE_IMAGE`] of them.
+/// image with no frame is decoded whole whatever a draw asks. It reads too
+/// how the image's colours take a rendering intent ([`ImageColour`]), so a
+/// later draw knows the conversion it asks for before anything is decoded.
+/// Each decode is kept under what it was asked for ([`Asked`]) — the
+/// reduction it was made at, and the window it holds — and the conversion its
+/// colours took, where they take one: one image drawn under two intents is two
+/// conversions (`docs/design/icc.md`, "What compiling per intent costs"). The
+/// name's first decode is its first ask's in its first intent, so the render
+/// that makes it decodes the image once; each other ask and intent fills once
+/// too, up to [`MAX_DECODES_OF_ONE_IMAGE`] of them.
 struct ImageEntry {
     /// The frame a request can reduce, or `None` where none can.
     frame: Option<Frame>,
-    /// The decodes made, by what each was asked for.
-    decoded: Flights<Asked, CachedImage>,
+    /// How the image's colours take an intent.
+    colour: ImageColour,
+    /// The decodes made, by what each was asked for and [`ImageColour::key`].
+    decoded: Flights<(Asked, Option<icc::Conversion>), CachedImage>,
 }
 
 /// The most decodes [`ImageEntry`] keeps of one image: a name has four sizes
 /// as a JPEG and thirty-two as a JPEG 2000 codestream, and a codestream a
-/// window for every tile a list's renders draw. Past it each new ask decodes
+/// window for every tile a list's renders draw, each in every conversion its
+/// colours take. Past it each new ask decodes
 /// for its draw alone, as before the cache.
 const MAX_DECODES_OF_ONE_IMAGE: usize = 64;
 
@@ -399,12 +407,68 @@ impl JpxFrame {
     }
 }
 
+/// How an image XObject's colours take a rendering intent (8.6.5.8, Table
+/// 89): the intent its own `/Intent` names, which decides for the image where
+/// it names one, and whether any intent changes its colours at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ImageColour {
+    /// The image's `/Intent`, where that is a name, one 8.6.5.8 does not list
+    /// kept as unrecognised; `None` where the entry is absent or not a name,
+    /// which leaves the intent in force at the draw deciding, and for an image
+    /// mask, whose `/Intent` is never read.
+    own: Option<RenderingIntent>,
+    /// Whether converting the image's samples reads an intent: it is no image
+    /// mask, and its space as painted holds an ICC profile
+    /// ([`reads_an_intent`]). An image whose colours no intent changes is one
+    /// decode under every intent.
+    by_intent: bool,
+}
+
+impl ImageColour {
+    /// The conversion the image's colours take in a draw where `state` is
+    /// the intent in force: its own intent's where it names one.
+    fn conversion(self, state: RenderingIntent) -> icc::Conversion {
+        conversion(self.own.unwrap_or(state))
+    }
+
+    /// What a decode for a draw in `state` is kept under beside its
+    /// reduction: the conversion its colours take where an intent changes
+    /// them, and nothing where none does, so one decode serves every draw.
+    fn key(self, state: RenderingIntent) -> Option<icc::Conversion> {
+        self.by_intent.then(|| self.conversion(state))
+    }
+}
+
+/// Whether converting a colour of `space` reads a rendering intent: an ICC
+/// space's does, and so does a space's that holds one — an `/Indexed` base, a
+/// `/Separation` or `/DeviceN` alternate, an uncoloured pattern's underlying
+/// space. `ColorSpace::to_rgb_in` converts every other space as `to_rgb`
+/// converts it (`docs/design/icc.md`, "Where each conversion takes its
+/// intent").
+fn reads_an_intent(space: &ColorSpace) -> bool {
+    match space {
+        ColorSpace::Icc { .. } => true,
+        ColorSpace::Indexed { base, .. } => reads_an_intent(base),
+        ColorSpace::Separation { alternate, .. } => reads_an_intent(alternate),
+        ColorSpace::Pattern { base } => base.as_deref().is_some_and(reads_an_intent),
+        ColorSpace::DeviceGray
+        | ColorSpace::DeviceRgb
+        | ColorSpace::DeviceCmyk
+        | ColorSpace::Approximated { .. }
+        | ColorSpace::CalGray { .. }
+        | ColorSpace::CalRgb { .. }
+        | ColorSpace::Lab { .. } => false,
+    }
+}
+
 /// An image XObject decoded for one draw ([`PageResources::decode_image`]),
-/// and the frame the draws after it read their size against
-/// ([`ImageEntry::frame`]).
+/// the frame the draws after it read their size against
+/// ([`ImageEntry::frame`]), and how its colours take an intent
+/// ([`ImageEntry::colour`]).
 struct Decoded {
     image: Result<DecodedImage, String>,
     frame: Option<Frame>,
+    colour: ImageColour,
 }
 
 /// The scale a JPEG of `frame` samples, its own width and height, is decoded
@@ -523,8 +587,9 @@ struct Caches {
     programs: Flights<u64, Option<Arc<Vec<u8>>>>,
     /// Decoded images, kept because a page may draw one many times: by the
     /// resource name, each name's decodes by the reduction they were made at
-    /// (`ImageEntry`), so a hit hands back exactly what that size's miss
-    /// computes (`docs/design/jpeg-speed.md`, "The scale rule";
+    /// and the conversion their colours took (`ImageEntry`), so a hit hands
+    /// back exactly what that size's miss in that intent computes
+    /// (`docs/design/jpeg-speed.md`, "The scale rule";
     /// `docs/design/jpx-speed.md`, "The page's request").
     images: Flights<Vec<u8>, Arc<ImageEntry>>,
     /// Compiled ICC transforms, by the profile stream's object number.
@@ -1218,18 +1283,19 @@ fn jpeg_components(color: JpegColor) -> u8 {
 /// sixteen, interleaved: the layout a JPEG's samples and a JPEG 2000
 /// codestream's already have, and a stream's once its rows are whole bytes
 /// (8.9.3). Each value is read through `decode`, or Table 90's default, and
-/// each pixel through [`ColorSpace::to_rgb`], exactly as the sample loop reads
-/// a stream's — so a codec's samples and the same samples written as a stream
-/// in the same space draw the same bytes.
+/// each pixel through [`ColorSpace::to_rgb_in`] as `conversion` says, exactly
+/// as the sample loop reads a stream's — so a codec's samples and the same
+/// samples written as a stream in the same space draw the same bytes.
 fn samples_in_space(
     space: &ColorSpace,
     samples: &[u8],
     pixels: usize,
     bpc: u32,
     decode: &[(f64, f64)],
+    conversion: icc::Conversion,
 ) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(pixels.saturating_mul(3));
-    SpaceSamples::new(space, bpc, decode).extend(space, samples, pixels, &mut rgb);
+    SpaceSamples::new(space, bpc, decode, conversion).extend(space, samples, pixels, &mut rgb);
     rgb
 }
 
@@ -1255,6 +1321,9 @@ struct SampleLayout<'a> {
     mask: bool,
     /// 8.9.6.4's colour key: one inclusive range of raw values a component.
     color_key: Option<&'a [(u32, u32)]>,
+    /// How a sample's colour converts: in the rendering intent the image's
+    /// colours take (8.6.5.8, Table 89), which only an ICC space reads.
+    conversion: icc::Conversion,
 }
 
 /// An image's samples as RGB, three bytes a sample, with an alpha byte a
@@ -1337,6 +1406,7 @@ fn one_bit_outcomes(layout: &SampleLayout<'_>) -> Option<[([u8; 3], u8); 2]> {
         decode,
         mask,
         color_key,
+        conversion,
         ..
     } = *layout;
     if bpc != 1 || n != 1 {
@@ -1347,7 +1417,7 @@ fn one_bit_outcomes(layout: &SampleLayout<'_>) -> Option<[([u8; 3], u8); 2]> {
         if mask {
             return ([0, 0, 0], if value < 0.5 { 255 } else { 0 });
         }
-        let (r, g, b) = converted(space, &[value]);
+        let (r, g, b) = converted(space, &[value], conversion);
         let keyed = color_key.is_some_and(|ranges| {
             // An absent range can never match, as in the general loop.
             let (lo, hi) = ranges.first().copied().unwrap_or((1, 0));
@@ -1516,8 +1586,8 @@ fn decoded_pixels(
 /// The sample loop, a sample at a time: each component read through
 /// [`read_bits`], scaled and decoded by [`component`], tested against the
 /// colour key on its raw value, and the sample converted by
-/// `ColorSpace::to_rgb` — or, for a mask, painted where its component is below
-/// one half.
+/// `ColorSpace::to_rgb_in` in the layout's conversion — or, for a mask,
+/// painted where its component is below one half.
 fn general_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) {
     let SampleLayout {
         width,
@@ -1528,6 +1598,7 @@ fn general_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) 
         decode,
         mask,
         color_key,
+        conversion,
     } = *layout;
     let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
     let mut alpha = Vec::new();
@@ -1569,8 +1640,10 @@ fn general_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) 
                 alpha.push(if paints { 255 } else { 0 });
             } else {
                 let (r, g, b) = match remembered.as_mut() {
-                    Some(table) => table.convert(samples, || converted(space, &components)),
-                    None => converted(space, &components),
+                    Some(table) => {
+                        table.convert(samples, || converted(space, &components, conversion))
+                    }
+                    None => converted(space, &components, conversion),
                 };
                 rgb.extend_from_slice(&[r, g, b]);
                 if color_key.is_some() {
@@ -1610,11 +1683,12 @@ thread_local! {
     static SAMPLE_CONVERSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// `space.to_rgb(components)` for the sample loop, counted under `cfg(test)`.
-fn converted(space: &ColorSpace, components: &[f64]) -> (u8, u8, u8) {
+/// `space.to_rgb_in(components, conversion)` for the sample loop, counted
+/// under `cfg(test)`.
+fn converted(space: &ColorSpace, components: &[f64], conversion: icc::Conversion) -> (u8, u8, u8) {
     #[cfg(test)]
     SAMPLE_CONVERSIONS.with(|count| count.set(count.get() + 1));
-    space.to_rgb(components)
+    space.to_rgb_in(components, conversion)
 }
 
 /// [`samples_in_space`] a run of pixels at a time, for a codec that hands its
@@ -1629,13 +1703,20 @@ struct SpaceSamples<'d> {
     max: f64,
     indexed: bool,
     decode: &'d [(f64, f64)],
+    /// How a pixel's colour converts: in the intent the image's colours take.
+    conversion: icc::Conversion,
     remembered: Option<Remembered>,
     /// One pixel's values, read through `/Decode`.
     components: Vec<f64>,
 }
 
 impl<'d> SpaceSamples<'d> {
-    fn new(space: &ColorSpace, bpc: u32, decode: &'d [(f64, f64)]) -> SpaceSamples<'d> {
+    fn new(
+        space: &ColorSpace,
+        bpc: u32,
+        decode: &'d [(f64, f64)],
+        conversion: icc::Conversion,
+    ) -> SpaceSamples<'d> {
         let n = space.components();
         SpaceSamples {
             n,
@@ -1643,6 +1724,7 @@ impl<'d> SpaceSamples<'d> {
             max: ((1u32 << bpc.min(16)) - 1) as f64,
             indexed: matches!(space, ColorSpace::Indexed { .. }),
             decode,
+            conversion,
             remembered: Remembered::for_image(space, n, bpc),
             components: Vec::with_capacity(n),
         }
@@ -1652,6 +1734,7 @@ impl<'d> SpaceSamples<'d> {
     /// [`SpaceSamples::new`] was made for, onto the end of `rgb`.
     fn extend(&mut self, space: &ColorSpace, samples: &[u8], pixels: usize, rgb: &mut Vec<u8>) {
         let (n, bpc, max, indexed) = (self.n, self.bpc, self.max, self.indexed);
+        let conversion = self.conversion;
         rgb.reserve(pixels.saturating_mul(3));
         for pixel in 0..pixels {
             self.components.clear();
@@ -1685,8 +1768,8 @@ impl<'d> SpaceSamples<'d> {
             }
             let components = &self.components;
             let (r, g, b) = match self.remembered.as_mut() {
-                Some(table) => table.convert(key, || space.to_rgb(components)),
-                None => space.to_rgb(components),
+                Some(table) => table.convert(key, || space.to_rgb_in(components, conversion)),
+                None => space.to_rgb_in(components, conversion),
             };
             rgb.extend_from_slice(&[r, g, b]);
         }
@@ -1703,6 +1786,9 @@ struct JpegInto<'r, 'd> {
     named: Option<ColorSpace>,
     name: &'d [u8],
     decode: &'d [(f64, f64)],
+    /// How the samples' colours convert where they are drawn in the
+    /// dictionary's space: in the intent the image's colours take.
+    conversion: icc::Conversion,
     /// The space the samples are drawn in, when it is not the codec's own
     /// colour, and its converter.
     space: Option<(ColorSpace, SpaceSamples<'d>)>,
@@ -1722,7 +1808,7 @@ impl JpegSink for JpegInto<'_, '_> {
             .resources
             .codec_space(self.named.take(), components, self.name)
             .map(|space| {
-                let converter = SpaceSamples::new(&space, 8, self.decode);
+                let converter = SpaceSamples::new(&space, 8, self.decode, self.conversion);
                 (space, converter)
             });
     }
@@ -4496,6 +4582,7 @@ impl GlyphSource for PageResources {
         dict: &[u8],
         data: &[u8],
         request: &ImageRequest,
+        intent: RenderingIntent,
     ) -> Result<Option<DecodedImage>, String> {
         let text = expand_inline_abbreviations(dict);
 
@@ -4505,17 +4592,27 @@ impl GlyphSource for PageResources {
             return Ok(None);
         };
 
-        // Never cached, so every inline image is a decoder run.
+        // Table 91: an inline image names its intent under the full key, and
+        // where it names one its colours take it rather than the intent in
+        // force at `EI`. Never cached, so every inline image is a decoder run
+        // in the conversion it asks for.
+        let conversion = conversion(self.own_intent(dict).unwrap_or(intent));
         self.count(Counter::ImagesDecoded);
-        self.decode_inline(dict, data, request).map(Some)
+        self.decode_inline(dict, data, request, conversion)
+            .map(Some)
     }
 
-    fn image(&self, name: &[u8], request: &ImageRequest) -> Result<Option<DecodedImage>, String> {
+    fn image(
+        &self,
+        name: &[u8],
+        request: &ImageRequest,
+        intent: RenderingIntent,
+    ) -> Result<Option<DecodedImage>, String> {
         // A document with a budget keeps an image XObject's decodes across its
         // renders; an inline image has no object to key it by, and an
         // XObject that is no image is answered as it always was, below.
         if let Some(cache) = self.op.cache() {
-            if let Some(kept) = self.kept_image(cache, name, request) {
+            if let Some(kept) = self.kept_image(cache, name, request, intent) {
                 return kept;
             }
         }
@@ -4523,17 +4620,19 @@ impl GlyphSource for PageResources {
         // Whether this read decoded the image itself, rather than meeting a
         // decode another render made or is making.
         let made = Cell::new(false);
-        // The name's first decode is made for this draw, by the first render
-        // to ask; its frame says what every later draw of the name asks.
+        // The name's first decode is made for this draw in this draw's
+        // intent, by the first render to ask; its frame says what every later
+        // draw of the name asks, and its colour which conversion.
         let entry = self.caches.images.read(name.to_vec(), || {
             made.set(true);
-            let (decoded, frame) = self.decode_cached(name, request);
+            let (decoded, frame, colour) = self.decode_cached(name, request, intent);
             let entry = Arc::new(ImageEntry {
                 frame,
+                colour,
                 decoded: Flights::new(),
             });
-            let at = decoded.at;
-            entry.decoded.read(at, || Filled::Keep(decoded.cached));
+            let key = (decoded.at, colour.key(intent));
+            entry.decoded.read(key, || Filled::Keep(decoded.cached));
             // Bounded by names, as a hostile page could name thousands; a
             // name by its decodes (`MAX_DECODES_OF_ONE_IMAGE`).
             if self.caches.images.len() <= MAX_CACHED_IMAGES {
@@ -4545,9 +4644,10 @@ impl GlyphSource for PageResources {
         let at = entry
             .frame
             .map_or(Asked::WHOLE, |frame| frame.asked(request));
-        let cached = entry.decoded.read(at, || {
+        let key = (at, entry.colour.key(intent));
+        let cached = entry.decoded.read(key, || {
             made.set(true);
-            let cached = self.decode_cached(name, request).0.cached;
+            let cached = self.decode_cached(name, request, intent).0.cached;
             if entry.decoded.len() <= MAX_DECODES_OF_ONE_IMAGE {
                 Filled::Keep(cached)
             } else {
@@ -4572,14 +4672,25 @@ struct Kept {
 }
 
 impl PageResources {
-    /// Decodes image XObject `name` for a draw that asks as `request` does —
-    /// the decoder run of a miss, counted as one — and hands it back as the
-    /// cache keeps it, with the frame later draws read their size against.
-    fn decode_cached(&self, name: &[u8], request: &ImageRequest) -> (Kept, Option<Frame>) {
+    /// Decodes image XObject `name` for a draw that asks as `request` does,
+    /// `intent` the rendering intent in force at it — the decoder run of a
+    /// miss, counted as one — and hands it back as the cache keeps it, with
+    /// the frame later draws read their size against and how its colours take
+    /// an intent.
+    fn decode_cached(
+        &self,
+        name: &[u8],
+        request: &ImageRequest,
+        intent: RenderingIntent,
+    ) -> (Kept, Option<Frame>, ImageColour) {
         self.count(Counter::ImageMisses);
         self.count(Counter::ImagesDecoded);
         let label = String::from_utf8_lossy(name).into_owned();
-        let Decoded { image, frame } = self.decode_image(name, request);
+        let Decoded {
+            image,
+            frame,
+            colour,
+        } = self.decode_image(name, request, intent);
         // The damage this decode reported: every entry under this name, which
         // only this image's decode writes.
         let damage: Vec<(Option<String>, String)> = self
@@ -4612,15 +4723,51 @@ impl PageResources {
                 cached,
             },
             frame,
+            colour,
         )
+    }
+
+    /// How image XObject `dict`'s colours take a rendering intent
+    /// ([`ImageColour`]), `name` the resource name its space is read under.
+    fn image_colour(&self, dict: &Dict, name: &[u8]) -> ImageColour {
+        // 8.9.6.2: an image mask has no colour of its own. Its paint is the
+        // fill colour, which converts in the intent in force like any flat
+        // colour, so Table 89's `/Intent` is not read for it.
+        let mask = self
+            .doc
+            .resolve_key(dict, self.name(b"ImageMask"))
+            .as_bool()
+            .unwrap_or(false);
+        if mask {
+            return ImageColour::default();
+        }
+        ImageColour {
+            own: self.own_intent(dict),
+            by_intent: self
+                .image_space(dict, name)
+                .is_some_and(|space| reads_an_intent(&space)),
+        }
+    }
+
+    /// An image dictionary's own rendering intent (Table 89; an inline
+    /// image's under the same full key, Table 91), where it is a name: one
+    /// 8.6.5.8 does not list is kept as unrecognised, which converts as
+    /// relative colorimetric. `None` where the entry is absent or is not a
+    /// name, which leaves the intent in force at the draw deciding.
+    fn own_intent(&self, dict: &Dict) -> Option<RenderingIntent> {
+        let value = self.doc.resolve_key(dict, self.name(b"Intent"));
+        let name = value.as_name().and_then(|n| self.doc.name_bytes(n))?;
+        Some(RenderingIntent::from_name(&name))
     }
 }
 
 impl PageResources {
     /// The image XObject `name` selects, through the document's cache, for a
-    /// draw that asks as `request` does: its decode kept under the object,
-    /// what it is asked for and the defaults this scope paints device spaces
-    /// in (`cache::ImageKey`), filled single-flight, and what the
+    /// draw that asks as `request` does in `intent`, the rendering intent in
+    /// force at it: its decode kept under the object, what it is asked for,
+    /// the conversion its colours take where an intent changes them
+    /// ([`ImageColour::key`]) and the defaults this scope paints device
+    /// spaces in (`cache::ImageKey`), filled single-flight, and what the
     /// decode reported said again under `name`. `None` for a name that
     /// selects no image XObject, which the scope's own cache answers.
     ///
@@ -4643,6 +4790,7 @@ impl PageResources {
         cache: &DocumentCache,
         name: &[u8],
         request: &ImageRequest,
+        intent: RenderingIntent,
     ) -> Option<Result<Option<DecodedImage>, String>> {
         let (dict, reference) = self.xobject(name)?;
         let subtype = self
@@ -4657,6 +4805,10 @@ impl PageResources {
         // render's to report, as it always was, and not the image's.
         let painted = self.defaults().written.clone();
         let key_bytes = u64::try_from(painted.len()).unwrap_or(u64::MAX);
+        // How the image's colours take an intent, read through resources of
+        // their own as the decode is, so what the read reports is the
+        // decode's to say, once.
+        let colour = self.serving(self.op.clone()).image_colour(&dict, name);
         let label = String::from_utf8_lossy(name).into_owned();
         let work = self.op.work.as_deref();
         // Whether this draw decoded the image, and the decode it made to
@@ -4667,7 +4819,7 @@ impl PageResources {
             decoded.set(true);
             self.count(Counter::ImagesDecoded);
             let decoding = self.serving(self.op.clone());
-            let Decoded { image, frame } = decoding.decode_image(name, request);
+            let Decoded { image, frame, .. } = decoding.decode_image(name, request, intent);
             (Arc::new(CachedImage::of(&image, &decoding, &label)), frame)
         };
         let at = if self.reducible(&dict) {
@@ -4687,6 +4839,7 @@ impl PageResources {
         let key = ImageKey {
             object: reference,
             asked: at,
+            conversion: colour.key(intent),
             painted,
         };
         let (kept, _) = cache.image(key, work, || {
@@ -5682,21 +5835,32 @@ impl PageResources {
     }
 
     /// Decodes one image XObject to RGB (8.9) for a draw that asks as
-    /// `request` does, and says what the draws after it read their size from.
+    /// `request` does, `intent` the rendering intent in force at it, and says
+    /// what the draws after it read their size from and how its colours take
+    /// an intent.
     ///
     /// Only a JPEG and a JPEG 2000 codestream are decoded smaller than they
     /// are, and only one with no mask: a soft mask (11.6.5.3) or a `/Mask` of
     /// either form (8.9.6.3, 8.9.6.4) is sampled against the grid it was drawn
     /// for, so an image with one is decoded at full size whatever the draw
     /// asks. Each codec's own path decodes an image of palette indices whole
-    /// too ([`Frame`]).
-    fn decode_image(&self, name: &[u8], request: &ImageRequest) -> Decoded {
+    /// too ([`Frame`]). Its colours convert in its own `/Intent` where it
+    /// names one, and in `intent` otherwise (8.6.5.8, Table 89).
+    fn decode_image(
+        &self,
+        name: &[u8],
+        request: &ImageRequest,
+        intent: RenderingIntent,
+    ) -> Decoded {
         let Some((dict, reference)) = self.xobject(name) else {
             return Decoded {
                 image: Err(String::from_utf8_lossy(name).into_owned()),
                 frame: None,
+                colour: ImageColour::default(),
             };
         };
+        let colour = self.image_colour(&dict, name);
+        let conversion = colour.conversion(intent);
         let label = String::from_utf8_lossy(name).into_owned();
         // An image a soft mask applies to is held as RGB, because the mask is
         // composed into its alpha a sample at a time; any other one-bit image
@@ -5714,7 +5878,7 @@ impl PageResources {
             &ImageRequest::FULL
         };
         let decoded = self
-            .decode_image_at(&dict, reference, &label, form, request)
+            .decode_image_at(&dict, reference, &label, form, request, conversion)
             .map(|(mut image, frame)| {
                 // 11.6.5.3: /SMask is a greyscale image whose samples are this
                 // one's opacity. Without it every soft-masked image — a drop
@@ -5733,10 +5897,12 @@ impl PageResources {
             Ok((image, frame)) => Decoded {
                 image: Ok(image),
                 frame: frame.filter(|_| reducible),
+                colour,
             },
             Err(codec) => Decoded {
                 image: Err(codec),
                 frame: None,
+                colour,
             },
         }
     }
@@ -5965,7 +6131,8 @@ impl PageResources {
     }
 
     /// A JPEG's pixels, ready to blit (7.4.8), in `named`, the space its
-    /// dictionary's `/ColorSpace` was read as.
+    /// dictionary's `/ColorSpace` was read as, converted as `conversion`
+    /// says.
     ///
     /// Shared by the XObject path and the inline one so the two differ in
     /// nothing but where the still-coded bytes came from and the scope their
@@ -5996,6 +6163,7 @@ impl PageResources {
         named: Option<ColorSpace>,
         name: &[u8],
         request: &ImageRequest,
+        conversion: icc::Conversion,
     ) -> Result<(DecodedImage, Option<Frame>), String> {
         let indexed = matches!(named, Some(ColorSpace::Indexed { .. }));
         let request = if indexed {
@@ -6008,6 +6176,7 @@ impl PageResources {
             named,
             name,
             decode,
+            conversion,
             space: None,
             color: JpegColor::Gray,
             width: 0,
@@ -6121,6 +6290,7 @@ impl PageResources {
         named: Option<ColorSpace>,
         name: &[u8],
         request: &ImageRequest,
+        conversion: icc::Conversion,
     ) -> Result<(DecodedImage, Option<Frame>), String> {
         let smask_in_data = dict.get_int(self.name(b"SMaskInData")).unwrap_or(0);
         let image_mask = dict.get_bool(self.name(b"ImageMask")).unwrap_or(false);
@@ -6205,7 +6375,7 @@ impl PageResources {
             // codestream is read at its own precision.
             Some(space) => {
                 let bits = if image.precision > 8 { 16 } else { 8 };
-                samples_in_space(&space, &image.samples, count, bits, &[])
+                samples_in_space(&space, &image.samples, count, bits, &[], conversion)
             }
             None => Self::jpx_own_colour(&image, count)?,
         };
@@ -6423,8 +6593,9 @@ impl PageResources {
 
     /// Decodes an image from its dictionary, wherever that came from, a
     /// one-bit image of one component held as `form` asks, for a draw that
-    /// asks as `request` does; and, beside it, the frame a codec that can
-    /// answer a drawn size found the image to be ([`Frame`]).
+    /// asks as `request` does, its colours converted as `conversion` says;
+    /// and, beside it, the frame a codec that can answer a drawn size found
+    /// the image to be ([`Frame`]).
     fn decode_image_at(
         &self,
         dict: &Dict,
@@ -6432,6 +6603,7 @@ impl PageResources {
         name: &str,
         form: SampleForm,
         request: &ImageRequest,
+        conversion: icc::Conversion,
     ) -> Result<(DecodedImage, Option<Frame>), String> {
         let dict = dict.clone();
         let name = name.as_bytes();
@@ -6500,7 +6672,7 @@ impl PageResources {
                 .image_input(reference)
                 .map_err(|_| "DCTDecode".to_string())?;
             let named = self.image_space(&dict, name);
-            return self.jpeg_image(&raw, &decode, interpolate, named, name, request);
+            return self.jpeg_image(&raw, &decode, interpolate, named, name, request, conversion);
         }
         if matches!(last_filter.as_deref(), Some(b"JPXDecode")) {
             // Like a JPEG and unlike a fax, a JPX codestream carries its own
@@ -6511,7 +6683,7 @@ impl PageResources {
                 .image_input(reference)
                 .map_err(|_| "JPXDecode".to_string())?;
             let named = self.image_space(&dict, name);
-            return self.jpx_image(&raw, &dict, interpolate, named, name, request);
+            return self.jpx_image(&raw, &dict, interpolate, named, name, request, conversion);
         }
 
         let (data, bpc) = self.stream_samples(
@@ -6551,6 +6723,7 @@ impl PageResources {
                 decode: &decode,
                 mask: is_mask,
                 color_key: color_key.as_deref(),
+                conversion,
             },
             form,
         );
@@ -6747,7 +6920,8 @@ impl PageResources {
         Ok(InlineSamples::Samples { bytes, fax })
     }
 
-    /// Decodes an inline image's samples (8.9.7).
+    /// Decodes an inline image's samples (8.9.7), its colours converted as
+    /// `conversion` says.
     ///
     /// Separate from [`Self::decode_image_at`] because an inline image has no
     /// object number: its bytes are in hand rather than behind a stream tier,
@@ -6757,6 +6931,7 @@ impl PageResources {
         dict: &Dict,
         data: &[u8],
         request: &ImageRequest,
+        conversion: icc::Conversion,
     ) -> Result<DecodedImage, String> {
         let int = |key: &[u8]| {
             self.doc
@@ -6822,6 +6997,7 @@ impl PageResources {
                         named,
                         INLINE_NAME.as_bytes(),
                         request,
+                        conversion,
                     )
                     .map(|(image, _)| image);
             }
@@ -6843,6 +7019,7 @@ impl PageResources {
                         named,
                         INLINE_NAME.as_bytes(),
                         request,
+                        conversion,
                     )
                     .map(|(image, _)| image);
             }
@@ -6868,6 +7045,7 @@ impl PageResources {
                 decode: &decode,
                 mask: is_mask,
                 color_key: None,
+                conversion,
             },
             SampleForm::TwoColour,
         );
@@ -6919,13 +7097,16 @@ impl PageResources {
         let mask = object.as_dict()?.clone();
         // A mask that is itself masked is not a thing the spec allows, and
         // decoding it through the top-level entry point would recurse. Held
-        // as RGB, which `apply_soft_mask` reads its grey from.
+        // as RGB, which `apply_soft_mask` reads its grey from. Its samples are
+        // opacity in DeviceGray (11.6.5.3), not a colour any intent converts,
+        // so it decodes in the initial conversion whatever its image's.
         self.decode_image_at(
             &mask,
             reference,
             "SMask",
             SampleForm::Rgb,
             &ImageRequest::FULL,
+            icc::Conversion::default(),
         )
         .ok()
         .map(|(image, _)| image)
@@ -8551,6 +8732,7 @@ mod tests {
                     decode,
                     mask: false,
                     color_key: None,
+                    conversion: tinker_pdf_color::icc::Conversion::default(),
                 };
                 let before = conversions();
                 let (pixels, alpha) = image_pixels(samples, &layout);
@@ -8585,6 +8767,7 @@ mod tests {
             decode: &[],
             mask: false,
             color_key: None,
+            conversion: tinker_pdf_color::icc::Conversion::default(),
         };
         let short = &rgb[..100];
         assert_eq!(image_pixels(short, &layout), general_pixels(short, &layout));
@@ -8656,6 +8839,7 @@ mod tests {
                                 decode,
                                 mask,
                                 color_key,
+                                conversion: tinker_pdf_color::icc::Conversion::default(),
                             };
                             let before = bits_read();
                             let table = image_pixels(&bytes, &layout);
@@ -8722,6 +8906,7 @@ mod tests {
                                 decode,
                                 mask,
                                 color_key,
+                                conversion: tinker_pdf_color::icc::Conversion::default(),
                             };
                             let what = format!(
                                 "width {width}, {space:?}, /Decode {decode:?}, mask {mask}, \
@@ -8787,6 +8972,7 @@ mod tests {
                 decode: &[],
                 mask: false,
                 color_key: None,
+                conversion: tinker_pdf_color::icc::Conversion::default(),
             };
             assert!(
                 two_colour_pixels(&bytes, &layout).is_none(),
@@ -8945,9 +9131,13 @@ mod tests {
                 + image.two_colour.as_ref().map_or(0, |two| two.samples.len())
         };
         let decoded = |name: &str| {
-            res.image(name.as_bytes(), &tinker_pdf_render::ImageRequest::FULL)
-                .unwrap_or_else(|codec| panic!("{name} decodes, not {codec}"))
-                .unwrap_or_else(|| panic!("{name} is an image"))
+            res.image(
+                name.as_bytes(),
+                &tinker_pdf_render::ImageRequest::FULL,
+                tinker_pdf_content::RenderingIntent::RelativeColorimetric,
+            )
+            .unwrap_or_else(|codec| panic!("{name} decodes, not {codec}"))
+            .unwrap_or_else(|| panic!("{name} is an image"))
         };
 
         let black_and_white = [[0, 0, 0, 255], [255, 255, 255, 255]];
@@ -8994,6 +9184,7 @@ mod tests {
                 b"/W 37 /H 23 /CS /G /BPC 1",
                 &packed,
                 &tinker_pdf_render::ImageRequest::FULL,
+                tinker_pdf_content::RenderingIntent::RelativeColorimetric,
             )
             .expect("the inline image decodes")
             .expect("it is an image");

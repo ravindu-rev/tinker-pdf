@@ -313,10 +313,13 @@ one an `icc::Conversion`'s intent selects, by the table below. A flat colour
 converts in the intent in force at its painting operator: the interpreter
 passes the state's intent through `FontSource::resolve_color_wide`, which
 answers `resolve_color`'s bytes with their 16-bit light, and the facade maps
-it to an `icc::Conversion` (`resources::conversion`). An image
-and a shading convert in relative colorimetric — through the first of
-`D2B1`, `A2B1`, `A2B0`, the model and `A2B2` the profile carries — and an
-image's `/Intent` is not read. How often
+it to an `icc::Conversion` (`resources::conversion`). An image converts in
+its own `/Intent`, or in the intent in force at `Do` or `EI` where it names
+none: the renderer hands the state's intent through the image seam
+(`GlyphSource::image` and `inline_image`), and the facade reads the image's
+own entry. A shading converts in relative colorimetric — through the first
+of `D2B1`, `A2B1`, `A2B0`, the model and `A2B2` the profile carries. How
+often
 the corpus names an intent is not measured; an ExtGState names one by
 `/RI`, the graphics state parameter dictionary having no `/RenderingIntent`
 key. This section is the design RC-01's steps build, read
@@ -570,9 +573,17 @@ what this design keys by intent by the whole value.
   curves and a matrix, and its absolute twin shares the curves.
 - **Caches key on the intent's table.** The facade's ICC cache keeps a
   profile's transforms beside each other, so an intent changing finds the
-  profile already parsed; the decoded-image cache keys an image on the
-  intent it converted in, since one image drawn under two intents is two
-  conversions (RC-01.6).
+  profile already parsed; the decoded-image cache keys an image's decode on
+  the conversion its colours took beside the reduction it was made at, since
+  one image drawn under two intents is two conversions. The first decode of a
+  name records the image's own `/Intent` and whether any intent changes its
+  colours — its space as painted holds an ICC profile and it is no image
+  mask — so a later draw knows its key before it decodes: an image no intent
+  changes is one decode under every intent, and one naming its own intent is
+  one decode whatever intent is in force. A document's cache under a budget
+  keys the decodes it keeps across renders the same way (`cache::ImageKey`),
+  reading the image's `/Intent` and space before the lookup. An inline image
+  is decoded at every draw, in the conversion it asks for.
 
 #### The steps and their exit tests
 
