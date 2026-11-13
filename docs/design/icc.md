@@ -1203,12 +1203,21 @@ colours count in `Transforms::bytes_bound`.
   already reach.
 - **Multi-process elements in both directions** (RC-20.10): RC-01.4's reader
   (`icc/mpe.rs`) takes `BToD*` tags as well, the first element's input
-  interval the PCS's range; ICC.2's `segmentedCurve` formula types `0003h`
-  to `0007h` (Table 111), its `singleSampledCurve` and
-  `sampledCalculatorCurve` curves (11.2.2.2, 11.2.2.3) and the extended CLUT
-  (11.2.7) join ICC.1's elements. Which of a multi-process tag and an `A2B*`
-  table a profile carrying both converts through is RC-01's rule: the
-  `D2B*` tag, 8.10.2 a).
+  interval the PCS's range — XYZ to what `u1Fixed15` encodes, `L*` 0 to 100,
+  `a*` and `b*` −128 to 127 — and a component held there; ICC.2's
+  `segmentedCurve` formula types `0003h` to `0007h` (Table 111), its
+  `singleSampledCurve` (11.2.2.2) and the extended CLUT (11.2.7), its values
+  in any of Table 8's encodings, join ICC.1's elements, and the
+  `sampledCalculatorCurve` (11.2.2.3) joins with the calculator (RC-20.11).
+  Table 111 gives function type `0006h` a 24-byte field and lists seven
+  parameters, all of which its formula reads: seven are read. A version 5
+  profile's `AToBx` and `BToAx` tags may hold a `multiProcessElementsType`
+  (9.2.1, 9.2.38), read as a `DToBx` tag is; its `DToBx` and `BToDx` tags are
+  a spectral connection space's, read by RC-20.12. Which of a multi-process
+  tag and an `A2B*` table a profile carrying both converts through is RC-01's
+  rule: the `D2B*` tag, 8.10.2 a). Out of the connection space the order is
+  the same with `B` for `A` and `D`: the intent's `B2D*` tag first, and
+  `B2D3` ICC-absolute as `D2B3` is.
 - **The calculator element** (RC-20.11, ICC.2 11.2.1): a main function of
   operations in reverse Polish notation — eight bytes each, a signature and
   four data bytes — over input, output and temporary channels, with

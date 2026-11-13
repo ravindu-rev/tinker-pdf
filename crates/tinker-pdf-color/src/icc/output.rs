@@ -3,9 +3,13 @@
 //! compiled for a rendering intent.
 //!
 //! The transform comes from the first source ICC.1 8.10.2's rows name for the
-//! intent with `B` for `A` ([`Intent::order`]): the intent's own `B2A*` table,
-//! then `B2A0`, then the matrix/TRC or grey model inverted, then the other
-//! `B2A*` tables, each passed over where it does not read.
+//! intent with `B` for `A` and `D` ([`Intent::order`]): the intent's own
+//! `B2D*` tag, its own `B2A*` table, then `B2A0`, then the matrix/TRC or grey
+//! model inverted, then the other `B2A*` tables, each passed over where it
+//! does not read. A `B2D*` tag, and a version 5 profile's `B2A*` tag holding
+//! one, is a `multiProcessElementsType`: the connection space's three
+//! channels, each held to its range, through its elements compiled into
+//! integer stages, to the data space's.
 //!
 //! A `B2A*` table — `mft1`, `mft2` or v4's `mBA ` — takes the connection
 //! space as its input: the value is encoded on the way in as the table's
@@ -34,7 +38,7 @@
 use std::sync::Arc;
 
 use super::{
-    compile_curve, fixed, round_shift, Curve, IccError, Intent, LinkSource, Lut, MatrixStage,
+    compile_curve, fixed, mpe, round_shift, Curve, IccError, Intent, LinkSource, Lut, MatrixStage,
     Model, Profile, Step, CURVE_ENTRIES, ONE,
 };
 
@@ -139,6 +143,12 @@ enum Inverse {
         lut: Arc<Lut>,
         media: Option<[f64; 3]>,
     },
+    /// A `B2D*` tag's elements, or a version 5 profile's `B2A*` tag's, the
+    /// value divided by `media` first as a table's is.
+    Elements {
+        pipeline: Arc<mpe::Pipeline>,
+        media: Option<[f64; 3]>,
+    },
 }
 
 /// The model and its matrix, or the table's shape, and not the 4 096 entries
@@ -162,20 +172,29 @@ impl std::fmt::Debug for Inverse {
                 .field("lab", &lut.lab)
                 .field("media", media)
                 .finish_non_exhaustive(),
+            Inverse::Elements { pipeline, media } => f
+                .debug_struct("Elements")
+                .field("outputs", &pipeline.outputs())
+                .field("lab", &pipeline.lab())
+                .field("media", media)
+                .finish_non_exhaustive(),
         }
     }
 }
 
 impl Output {
     /// The profile's transform out of the connection space for `intent`,
-    /// taken by ICC.1 8.10.2's rows with `B` for `A`
+    /// taken by ICC.1 8.10.2's rows with `B` for `A` and `D`
     /// (`docs/design/icc.md`, "The output transform"): the first of the
-    /// intent's own `B2A*` table, `B2A0`, the matrix/TRC or grey model
-    /// inverted, and the other `B2A*` tables that the profile carries and
-    /// that reads — `B2A1`, `B2A0`, the model and `B2A2` for relative
-    /// colorimetric, which absolute colorimetric takes too with the media
-    /// white divided out (6.2.3). A table that does not read, or a model with
-    /// no inverse, is passed over to the next.
+    /// intent's own `B2D*` tag, its own `B2A*` table, `B2A0`, the matrix/TRC
+    /// or grey model inverted, and the other `B2A*` tables that the profile
+    /// carries and that reads — `B2D1`, `B2A1`, `B2A0`, the model and `B2A2`
+    /// for relative colorimetric, which absolute colorimetric takes too with
+    /// the media white divided out (6.2.3), except through `B2D3`, which is
+    /// ICC-absolute already. A version 5 profile adds `B2A3`, absolute
+    /// colorimetric's own, which another intent reaches last with the media
+    /// white multiplied in (ICC.2 9.2.93). A table that does not read, or a
+    /// model with no inverse, is passed over to the next.
     ///
     /// # Errors
     ///
@@ -192,34 +211,55 @@ impl Output {
     /// ([`Output::in_gamut`]), and one that does not read refuses nothing: the
     /// transform then answers no gamut.
     pub fn compile(profile: &Profile, intent: Intent) -> Result<Output, IccError> {
-        let media = (intent == Intent::AbsoluteColorimetric)
-            .then(|| profile.media_scale())
-            .filter(|scale| *scale != [1.0; 3]);
+        // What a media-relative source divides the value by: the media
+        // white under absolute colorimetric. A tag numbered 3 is
+        // ICC-absolute already, `B2D3` and a version 5 profile's `B2A3`.
+        let relative = profile.scale_for(intent, false);
         let gamut = profile
             .tables
             .read_gamut()
             .and_then(Result::ok)
-            .map(|lut| Gamut { lut, media });
+            .map(|lut| Gamut {
+                lut,
+                media: relative,
+            });
+        let channels = profile.channels().map(usize::from);
+        let elements = |element, media| match channels {
+            Some(channels) => profile
+                .tables
+                .read_output_pipeline(element, channels)
+                .map(|pipeline| Inverse::Elements { pipeline, media }),
+            None => Err(IccError::UnsupportedSpace),
+        };
         let mut passed_over = None;
         for step in intent.order() {
             let built = match step {
-                // ICC.1 8.10.2 a)'s `BToD*` tags are not read, so a profile
-                // carrying one converts through its `B2A*` tables and model.
-                Step::Pipeline(_) => continue,
-                Step::Table(tag) => {
-                    let Some((_, element)) = profile.tables.output_at(tag) else {
+                // ICC.1 8.10.2 a)'s `BToD*` tag.
+                Step::Pipeline(tag) => {
+                    let Some((_, element)) = profile.tables.output_pipeline_at(tag) else {
                         continue;
                     };
-                    match profile.channels() {
-                        Some(channels) => profile
-                            .tables
-                            .read_output(element, usize::from(channels))
-                            .map(|lut| Inverse::Table { lut, media }),
-                        None => Err(IccError::UnsupportedSpace),
+                    elements(element, profile.scale_for(intent, tag == 3))
+                }
+                Step::Table(tag) => {
+                    let media = profile.scale_for(intent, tag == 3);
+                    if let Some((_, element)) = profile.tables.output_at(tag) {
+                        match channels {
+                            Some(channels) => profile
+                                .tables
+                                .read_output(element, channels)
+                                .map(|lut| Inverse::Table { lut, media }),
+                            None => Err(IccError::UnsupportedSpace),
+                        }
+                    } else if let Some((_, element)) = profile.tables.output_table_pipeline_at(tag)
+                    {
+                        elements(element, media)
+                    } else {
+                        continue;
                     }
                 }
                 Step::Model => match &profile.model {
-                    Some(model) => invert_model(model, media),
+                    Some(model) => invert_model(model, relative),
                     None => continue,
                 },
             };
@@ -267,14 +307,15 @@ impl Output {
     }
 
     /// How many device channels the transform gives: three for a matrix/TRC
-    /// profile, one for a grey one, and a `B2A*` table's own count, the data
-    /// space's.
+    /// profile, one for a grey one, and a `B2A*` table's or a `B2D*` tag's
+    /// own count, the data space's.
     #[must_use]
     pub fn channels(&self) -> usize {
         match &self.inverse {
             Inverse::Matrix { .. } => 3,
             Inverse::Grey { .. } => 1,
             Inverse::Table { lut, .. } => lut.outputs(),
+            Inverse::Elements { pipeline, .. } => pipeline.outputs(),
         }
     }
 
@@ -334,6 +375,19 @@ impl Output {
                     *slot = (value.clamp(0.0, 1.0) * 65535.0).round() as u16;
                 }
                 DeviceColour::of(out.get(..lut.outputs()).unwrap_or(&[]))
+            }
+            // The elements take the value in its own units, held to the
+            // connection space's range, and give device values over `0..=1`.
+            Inverse::Elements { pipeline, media } => {
+                let pcs = match media {
+                    Some(scale) => scale_connection(pcs, pipeline.lab(), scale.map(|s| 1.0 / s)),
+                    None => pcs,
+                };
+                let mut out = [0u16; MAX_DEVICE_CHANNELS];
+                for (slot, value) in out.iter_mut().zip(pipeline.evaluate_all(&pcs)) {
+                    *slot = device_value(value);
+                }
+                DeviceColour::of(out.get(..pipeline.outputs()).unwrap_or(&[]))
             }
         }
     }

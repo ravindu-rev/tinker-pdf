@@ -2738,3 +2738,874 @@ fn a_named_colour_converts_through_its_connection_space() {
         }
     }
 }
+
+// ---- multi-process element pipelines -------------------------------------------
+//
+// A `multiProcessElementsType` (ICC.1 10.14, ICC.2 10.2.17 and clause 11) is a
+// chain of elements in floating point: curve sets of segmented curves — ICC.1's
+// formula types 0 to 2, ICC.2's 3 to 7 (Table 111), sampled segments — and
+// ICC.2's single sampled curves, matrices with offsets, and grids of float32
+// values or, ICC.2's extended grid, of half floats or unsigned integers. Each
+// element hands its channels to the next unclipped; a grid holds its inputs to
+// 0..=1. Here each pipeline is laid out byte by byte and recomputed in `f64`
+// from the stored numbers.
+
+/// `value` as the float32 an element stores it in.
+fn f32_bytes(value: f64) -> [u8; 4] {
+    (value as f32).to_bits().to_be_bytes()
+}
+
+/// What a float32 field holding `value` reads back as.
+fn as_f32(value: f64) -> f64 {
+    f64::from(value as f32)
+}
+
+/// A curve, as a curve set stores it and as the test recomputes it.
+#[derive(Clone, Debug)]
+enum OneCurve {
+    /// A segmented curve: break-points and a segment either side of each.
+    Segments {
+        breaks: Vec<f64>,
+        segments: Vec<Piece>,
+    },
+    /// ICC.2's single sampled curve: `values` evenly spaced from `first` to
+    /// `last`, clipped or extended beyond them, in `encoding` (Table 8).
+    Single {
+        first: f64,
+        last: f64,
+        extrapolate: bool,
+        encoding: u16,
+        values: Vec<f64>,
+    },
+}
+
+/// One segment of a segmented curve.
+#[derive(Clone, Debug)]
+enum Piece {
+    /// A formula of function type `function`, its parameters as the tables
+    /// list them.
+    Formula { function: u16, params: Vec<f64> },
+    /// Samples evenly spaced over the segment, its start excluded.
+    Samples(Vec<f64>),
+}
+
+/// An `f64` held to what a value of `encoding` (Table 8) can hold: a float32,
+/// a half float — the values here are all exact in one — or a fraction in 16
+/// or 8 bits.
+fn encoded(value: f64, encoding: u16) -> f64 {
+    match encoding {
+        0 => as_f32(value),
+        1 => value,
+        2 => (value.clamp(0.0, 1.0) * 65535.0).round() / 65535.0,
+        _ => (value.clamp(0.0, 1.0) * 255.0).round() / 255.0,
+    }
+}
+
+/// The bytes of `value` in `encoding`: a half float only for the values the
+/// tests here store, each exact in one.
+fn encoding_bytes(value: f64, encoding: u16) -> Vec<u8> {
+    match encoding {
+        0 => f32_bytes(value).to_vec(),
+        1 => {
+            let half: u16 = match value {
+                v if v == 0.0 => 0x0000,
+                v if v == 0.125 => 0x3000,
+                v if v == 0.25 => 0x3400,
+                v if v == 0.375 => 0x3600,
+                v if v == 0.5 => 0x3800,
+                v if v == 0.625 => 0x3900,
+                v if v == 0.75 => 0x3A00,
+                v if v == 0.875 => 0x3B00,
+                v if v == 1.0 => 0x3C00,
+                v => panic!("{v} is not one of the half floats the tests here use"),
+            };
+            half.to_be_bytes().to_vec()
+        }
+        2 => ((value.clamp(0.0, 1.0) * 65535.0).round() as u16)
+            .to_be_bytes()
+            .to_vec(),
+        _ => vec![(value.clamp(0.0, 1.0) * 255.0).round() as u8],
+    }
+}
+
+/// `out` padded with zeros to a four-byte boundary.
+fn pad4(mut out: Vec<u8>) -> Vec<u8> {
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+impl OneCurve {
+    /// The curve's bytes.
+    fn tag(&self) -> Vec<u8> {
+        match self {
+            OneCurve::Segments { breaks, segments } => {
+                let mut out = b"curf".to_vec();
+                out.extend_from_slice(&[0; 4]);
+                out.extend_from_slice(&(segments.len() as u16).to_be_bytes());
+                out.extend_from_slice(&[0; 2]);
+                for &point in breaks {
+                    out.extend_from_slice(&f32_bytes(point));
+                }
+                for segment in segments {
+                    match segment {
+                        Piece::Formula { function, params } => {
+                            out.extend_from_slice(b"parf");
+                            out.extend_from_slice(&[0; 4]);
+                            out.extend_from_slice(&function.to_be_bytes());
+                            out.extend_from_slice(&[0; 2]);
+                            for &param in params {
+                                out.extend_from_slice(&f32_bytes(param));
+                            }
+                        }
+                        Piece::Samples(samples) => {
+                            out.extend_from_slice(b"samf");
+                            out.extend_from_slice(&[0; 4]);
+                            out.extend_from_slice(&(samples.len() as u32).to_be_bytes());
+                            for &sample in samples {
+                                out.extend_from_slice(&f32_bytes(sample));
+                            }
+                        }
+                    }
+                }
+                out
+            }
+            OneCurve::Single {
+                first,
+                last,
+                extrapolate,
+                encoding,
+                values,
+            } => {
+                let mut out = b"sngf".to_vec();
+                out.extend_from_slice(&[0; 4]);
+                out.extend_from_slice(&(values.len() as u32).to_be_bytes());
+                out.extend_from_slice(&f32_bytes(*first));
+                out.extend_from_slice(&f32_bytes(*last));
+                out.extend_from_slice(&u16::from(*extrapolate).to_be_bytes());
+                out.extend_from_slice(&encoding.to_be_bytes());
+                for &value in values {
+                    out.extend(encoding_bytes(value, *encoding));
+                }
+                out
+            }
+        }
+    }
+
+    /// The curve at `x`, from the numbers its bytes store.
+    fn at(&self, x: f64) -> f64 {
+        match self {
+            OneCurve::Segments { breaks, segments } => {
+                let breaks: Vec<f64> = breaks.iter().map(|&b| as_f32(b)).collect();
+                let index = breaks
+                    .iter()
+                    .position(|&point| x <= point)
+                    .unwrap_or(breaks.len());
+                self.segment(&breaks, segments, index, x)
+            }
+            OneCurve::Single {
+                first,
+                last,
+                extrapolate,
+                encoding,
+                values,
+            } => {
+                let (first, last) = (as_f32(*first), as_f32(*last));
+                let values: Vec<f64> = values.iter().map(|&v| encoded(v, *encoding)).collect();
+                let n = values.len() - 1;
+                let step = (last - first) / n as f64;
+                let line = |from: usize| {
+                    let at = first + step * from as f64;
+                    values[from] + (values[from + 1] - values[from]) * (x - at) / step
+                };
+                if x < first {
+                    if *extrapolate {
+                        line(0)
+                    } else {
+                        values[0]
+                    }
+                } else if x > last {
+                    if *extrapolate {
+                        line(n - 1)
+                    } else {
+                        values[n]
+                    }
+                } else {
+                    let position = (x - first) / step;
+                    let below = (position.floor() as usize).min(n - 1);
+                    values[below] + (values[below + 1] - values[below]) * (position - below as f64)
+                }
+            }
+        }
+    }
+
+    /// Segment `index` of a segmented curve at `x`.
+    fn segment(&self, breaks: &[f64], segments: &[Piece], index: usize, x: f64) -> f64 {
+        match &segments[index] {
+            Piece::Formula { function, params } => {
+                let p: Vec<f64> = params.iter().map(|&v| as_f32(v)).collect();
+                match function {
+                    0 => (p[1] * x + p[2]).powf(p[0]) + p[3],
+                    1 => p[1] * (p[2] * x.powf(p[0]) + p[3]).log10() + p[4],
+                    2 => p[0] * p[1].powf(p[2] * x + p[3]) + p[4],
+                    3 => p[1] * (p[2] * x + p[3]).powf(p[0]) + p[4],
+                    4 => p[1] * (p[4] * x.powf(p[0]) - p[2]).ln() + p[3],
+                    5 => p[5] * ((p[4] * x.powf(p[0]) - p[3]) / p[1]).exp() + p[2],
+                    6 => {
+                        let raised = x.powf(p[1]);
+                        p[5] * ((p[6] * raised - p[2]).max(0.0) / (p[3] - p[4] * raised)).powf(p[0])
+                    }
+                    _ => {
+                        let raised = x.powf(p[1]);
+                        p[5] * ((p[2] + p[3] * raised) / (1.0 + p[4] * raised)).powf(p[0])
+                    }
+                }
+            }
+            Piece::Samples(samples) => {
+                let samples: Vec<f64> = samples.iter().map(|&v| as_f32(v)).collect();
+                let (from, to) = (breaks[index - 1], breaks[index]);
+                let count = samples.len();
+                let position = ((x - from) / (to - from) * count as f64).clamp(0.0, count as f64);
+                let below = (position.floor() as usize).min(count - 1);
+                let start = if below == 0 {
+                    self.segment(breaks, segments, index - 1, from)
+                } else {
+                    samples[below - 1]
+                };
+                start + (samples[below] - start) * (position - below as f64)
+            }
+        }
+    }
+}
+
+/// One element of a pipeline, as laid out and recomputed here.
+#[derive(Clone, Debug)]
+enum Element {
+    /// A curve set, one curve a channel.
+    Curves(Vec<OneCurve>),
+    /// A matrix: rows of coefficients, one an output, then an offset a row.
+    Matrix {
+        rows: Vec<Vec<f64>>,
+        offsets: Vec<f64>,
+    },
+    /// A grid of `grids` points an input axis, `outputs` values a node, the
+    /// last axis fastest, in `encoding`: `None` for ICC.1's `clut` of float32
+    /// values, `Some` for ICC.2's `xclt`.
+    Grid {
+        grids: Vec<usize>,
+        outputs: usize,
+        encoding: Option<u16>,
+        values: Vec<f64>,
+    },
+}
+
+impl Element {
+    /// The element's bytes.
+    fn tag(&self) -> Vec<u8> {
+        let head = |signature: &[u8; 4], p: usize, q: usize| {
+            let mut out = signature.to_vec();
+            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&(p as u16).to_be_bytes());
+            out.extend_from_slice(&(q as u16).to_be_bytes());
+            out
+        };
+        match self {
+            Element::Curves(curves) => {
+                let mut out = head(b"cvst", curves.len(), curves.len());
+                let mut data = Vec::new();
+                let start = 12 + 8 * curves.len();
+                for curve in curves {
+                    let bytes = curve.tag();
+                    out.extend_from_slice(&((start + data.len()) as u32).to_be_bytes());
+                    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    data.extend(pad4(bytes));
+                }
+                out.extend(data);
+                out
+            }
+            Element::Matrix { rows, offsets } => {
+                let mut out = head(b"matf", rows[0].len(), rows.len());
+                for row in rows {
+                    for &value in row {
+                        out.extend_from_slice(&f32_bytes(value));
+                    }
+                }
+                for &offset in offsets {
+                    out.extend_from_slice(&f32_bytes(offset));
+                }
+                out
+            }
+            Element::Grid {
+                grids,
+                outputs,
+                encoding,
+                values,
+            } => {
+                let mut counts = [0u8; 16];
+                for (slot, &points) in counts.iter_mut().zip(grids) {
+                    *slot = points as u8;
+                }
+                match encoding {
+                    None => {
+                        let mut out = head(b"clut", grids.len(), *outputs);
+                        out.extend_from_slice(&counts);
+                        for &value in values {
+                            out.extend_from_slice(&f32_bytes(value));
+                        }
+                        out
+                    }
+                    Some(encoding) => {
+                        let mut out = head(b"xclt", grids.len(), *outputs);
+                        out.extend_from_slice(&u32::from(*encoding).to_be_bytes());
+                        out.extend_from_slice(&counts);
+                        for &value in values {
+                            out.extend(encoding_bytes(value, *encoding));
+                        }
+                        out
+                    }
+                }
+            }
+        }
+    }
+
+    /// How many channels the element gives.
+    fn outputs(&self) -> usize {
+        match self {
+            Element::Curves(curves) => curves.len(),
+            Element::Matrix { rows, .. } => rows.len(),
+            Element::Grid { outputs, .. } => *outputs,
+        }
+    }
+
+    /// The element's outputs for `x`, recomputed from the stored numbers.
+    fn apply(&self, x: &[f64]) -> Vec<f64> {
+        match self {
+            Element::Curves(curves) => curves.iter().zip(x).map(|(c, &v)| c.at(v)).collect(),
+            Element::Matrix { rows, offsets } => rows
+                .iter()
+                .zip(offsets)
+                .map(|(row, &offset)| {
+                    row.iter().zip(x).map(|(&e, &v)| as_f32(e) * v).sum::<f64>() + as_f32(offset)
+                })
+                .collect(),
+            Element::Grid {
+                grids,
+                outputs,
+                encoding,
+                values,
+            } => {
+                let stored = |value: f64| match encoding {
+                    None => as_f32(value),
+                    Some(encoding) => encoded(value, *encoding),
+                };
+                let inputs = grids.len();
+                let mut base = vec![0usize; inputs];
+                let mut fraction = vec![0.0f64; inputs];
+                for axis in 0..inputs {
+                    let p = x[axis].clamp(0.0, 1.0) * (grids[axis] - 1) as f64;
+                    let index = (p.floor() as usize).min(grids[axis] - 2);
+                    base[axis] = index;
+                    fraction[axis] = p - index as f64;
+                }
+                (0..*outputs)
+                    .map(|channel| {
+                        let mut sum = 0.0;
+                        for corner in 0..1usize << inputs {
+                            let mut weight = 1.0;
+                            let mut offset = 0usize;
+                            for axis in 0..inputs {
+                                let high = (corner >> (inputs - 1 - axis)) & 1;
+                                weight *= if high == 1 {
+                                    fraction[axis]
+                                } else {
+                                    1.0 - fraction[axis]
+                                };
+                                offset = offset * grids[axis] + base[axis] + high;
+                            }
+                            sum += weight * stored(values[offset * outputs + channel]);
+                        }
+                        sum
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+/// An `mpet` tag of `inputs` channels chaining `elements`.
+fn mpet_tag(inputs: usize, elements: &[Element]) -> Vec<u8> {
+    let outputs = elements.last().map_or(inputs, Element::outputs);
+    let mut out = b"mpet".to_vec();
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(inputs as u16).to_be_bytes());
+    out.extend_from_slice(&(outputs as u16).to_be_bytes());
+    out.extend_from_slice(&(elements.len() as u32).to_be_bytes());
+    let start = 16 + 8 * elements.len();
+    let mut data = Vec::new();
+    for element in elements {
+        let bytes = element.tag();
+        out.extend_from_slice(&((start + data.len()) as u32).to_be_bytes());
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        data.extend(pad4(bytes));
+    }
+    out.extend(data);
+    out
+}
+
+/// The pipeline's outputs for `x`, held first to `domain`: each element in
+/// turn, nothing clipped between them.
+fn run(elements: &[Element], x: &[f64], domain: &[(f64, f64)]) -> Vec<f64> {
+    let mut values: Vec<f64> = x
+        .iter()
+        .zip(domain)
+        .map(|(&v, &(low, high))| v.clamp(low, high))
+        .collect();
+    for element in elements {
+        values = element.apply(&values);
+    }
+    values
+}
+
+/// A formula segment of `function` over `params`.
+fn formula(function: u16, params: &[f64]) -> Piece {
+    Piece::Formula {
+        function,
+        params: params.to_vec(),
+    }
+}
+
+/// A device-to-XYZ pipeline in ICC.1's elements: segmented curves either side
+/// of a break-point — a square below 0.4 and a line above it, a logarithm, an
+/// exponential below 0.5 and a sampled stretch to a line above it — a matrix
+/// with offsets, and a grid of float32 values.
+fn forward_elements() -> Vec<Element> {
+    vec![
+        Element::Curves(vec![
+            OneCurve::Segments {
+                breaks: vec![0.4],
+                segments: vec![
+                    formula(0, &[2.0, 1.0, 0.0, 0.0]),
+                    formula(0, &[1.0, 1.2, -0.32, 0.0]),
+                ],
+            },
+            OneCurve::Segments {
+                breaks: Vec::new(),
+                segments: vec![formula(1, &[1.0, 0.5, 9.0, 1.0, 0.0])],
+            },
+            OneCurve::Segments {
+                breaks: vec![0.5, 0.75],
+                segments: vec![
+                    formula(2, &[0.25, 2.0, 1.0, -1.0, 0.0]),
+                    Piece::Samples(vec![0.3, 0.45, 0.6]),
+                    formula(0, &[1.0, 1.0, -0.15, 0.0]),
+                ],
+            },
+        ]),
+        Element::Matrix {
+            rows: vec![
+                vec![0.6, 0.3, 0.1],
+                vec![0.2, 0.7, 0.1],
+                vec![0.1, 0.1, 0.8],
+            ],
+            offsets: vec![0.05, 0.0, -0.02],
+        },
+        Element::Grid {
+            grids: vec![2, 2, 2],
+            outputs: 3,
+            encoding: None,
+            values: (0..8usize)
+                .flat_map(|node| {
+                    let (i, j, k) = ((node >> 2) & 1, (node >> 1) & 1, node & 1);
+                    let (i, j, k) = (i as f64, j as f64, k as f64);
+                    [0.2 + 0.6 * i, 0.15 + 0.5 * j + 0.1 * i, 0.1 + 0.6 * k]
+                })
+                .collect(),
+        },
+    ]
+}
+
+/// An XYZ-to-CMYK pipeline in ICC.1's elements: curves over the connection
+/// space's range — a line below 0.5 and a square above it, an exponential, a
+/// logarithm — a matrix with offsets, and a grid of float32 values giving
+/// four inks.
+fn output_elements() -> Vec<Element> {
+    vec![
+        Element::Curves(vec![
+            OneCurve::Segments {
+                breaks: vec![0.5],
+                segments: vec![
+                    formula(0, &[1.0, 0.5, 0.0, 0.0]),
+                    formula(0, &[2.0, 0.632_455_5, -0.316_227_8, 0.25]),
+                ],
+            },
+            OneCurve::Segments {
+                breaks: Vec::new(),
+                segments: vec![formula(2, &[0.3, 2.0, 0.5, 0.0, -0.3])],
+            },
+            OneCurve::Segments {
+                breaks: Vec::new(),
+                segments: vec![formula(1, &[1.0, 0.6, 4.0, 1.0, 0.0])],
+            },
+        ]),
+        Element::Matrix {
+            rows: vec![
+                vec![0.9, -0.2, 0.1],
+                vec![-0.1, 1.1, 0.0],
+                vec![0.2, 0.1, 0.7],
+            ],
+            offsets: vec![0.02, -0.01, 0.0],
+        },
+        Element::Grid {
+            grids: vec![2, 2, 2],
+            outputs: 4,
+            encoding: None,
+            values: (0..8usize)
+                .flat_map(|node| {
+                    let (i, j, k) = ((node >> 2) & 1, (node >> 1) & 1, node & 1);
+                    let (i, j, k) = (i as f64, j as f64, k as f64);
+                    [
+                        0.9 - 0.7 * i,
+                        0.85 - 0.6 * j,
+                        0.8 - 0.5 * k,
+                        0.3 * (1.0 - i) * (1.0 - j),
+                    ]
+                })
+                .collect(),
+        },
+    ]
+}
+
+/// The XYZ a transform out of the connection space takes: from 0 to what
+/// `u1Fixed15` encodes.
+const XYZ_RANGE: (f64, f64) = (0.0, 65535.0 / 32768.0);
+
+/// Device values over three channels: each at seven levels across the range,
+/// clear of every break-point.
+fn three_channels() -> Vec<[f64; 3]> {
+    let levels = [0.0, 0.1, 0.25, 0.55, 0.62, 0.85, 1.0];
+    let mut out = Vec::new();
+    for a in levels {
+        for b in levels {
+            for c in levels {
+                out.push([a, b, c]);
+            }
+        }
+    }
+    out
+}
+
+/// XYZ values over the connection space's range, past the PCS white and
+/// clear of every break-point.
+fn xyz_lattice() -> Vec<[f64; 3]> {
+    let levels = [0.0, 0.2, 0.45, 0.7, 0.96, 1.3, 1.8];
+    let mut out = Vec::new();
+    for x in levels {
+        for y in levels {
+            for z in levels {
+                out.push([x, y, z]);
+            }
+        }
+    }
+    out
+}
+
+/// How far a pipeline's integer stages may stray from its closed forms: the
+/// fixed point the stages compute in and the curves' sampling over their
+/// intervals, as the `D2B*` tests in `icc.rs` hold it.
+const PIPELINE_SLACK: f64 = 2e-3;
+
+/// **A curve-set, matrix and CLUT pipeline is recomputed, in both
+/// directions** (ICC.1 10.14, 8.10.2 a)). A version 4 printer profile's `D2B1`
+/// chains segmented curves either side of their break-points — ICC.1's three
+/// formula types and a sampled segment — a matrix with offsets and a grid of
+/// float32 values; relative colorimetric converts through it before the
+/// profile's `A2B0`, and the connection-space value it gives each device
+/// value of a lattice is the chain recomputed from the stored numbers,
+/// within the fixed point the stages compute in. Its `B2D1` chains the same
+/// kinds of element from the connection space, each component held to the
+/// space's range, to four inks; relative colorimetric's transform out of the
+/// connection space converts through it before the profile's `B2A0`, and
+/// gives each XYZ value of a lattice past the PCS white the four inks the
+/// chain recomputed here gives.
+#[test]
+fn a_curve_set_matrix_clut_pipeline_is_recomputed() {
+    let forward = forward_elements();
+    let output = output_elements();
+    let a2b0 = forward_table(true, 4, |_| [20_000, 30_000, 25_000]);
+    let b2a0 = lut16(4);
+    let parsed = Profile::parse(&profile_of(
+        b"prtr",
+        b"CMYK",
+        b"XYZ ",
+        &[
+            (*b"A2B0", a2b0.tag()),
+            (*b"B2A0", b2a0.tag()),
+            (*b"D2B1", mpet_tag(4, &cmyk_forward(&forward))),
+            (*b"B2D1", mpet_tag(3, &output)),
+        ],
+    ))
+    .expect("the profile parses");
+    let domain = [(0.0, 1.0); 4];
+    for x in three_channels() {
+        let cmyk = [x[0], x[1], x[2], 1.0 - x[0]];
+        let got = parsed
+            .connection_value(Intent::RelativeColorimetric, &cmyk)
+            .expect("the D2B1 converts");
+        let want = run(&cmyk_forward(&forward), &cmyk, &domain);
+        for channel in 0..3 {
+            assert!(
+                (got[channel] - want[channel]).abs() < PIPELINE_SLACK,
+                "{cmyk:?}, channel {channel}: {} against {}",
+                got[channel],
+                want[channel]
+            );
+        }
+    }
+
+    let out = Output::compile(&parsed, Intent::RelativeColorimetric).expect("the B2D1 reads");
+    assert_eq!(out.channels(), 4);
+    for pcs in xyz_lattice() {
+        let got = out.apply(pcs);
+        let want = run(&output, &pcs, &[XYZ_RANGE; 3]);
+        for (channel, want) in want.into_iter().enumerate() {
+            let want = want.clamp(0.0, 1.0) * 65535.0;
+            assert!(
+                (f64::from(got.channels()[channel]) - want).abs() <= PIPELINE_SLACK * 65535.0,
+                "{pcs:?}, ink {channel}: {} against {want:.1}",
+                got.channels()[channel]
+            );
+        }
+    }
+    // Past the connection space's range a component is held to it.
+    assert_eq!(
+        out.apply([3.0, -1.0, 9.0]),
+        out.apply([XYZ_RANGE.1, 0.0, XYZ_RANGE.1])
+    );
+}
+
+/// [`forward_elements`] taking four inks: a matrix folding the fourth into
+/// the first three first, so the chain's grid sees three.
+fn cmyk_forward(three: &[Element]) -> Vec<Element> {
+    let mut out = vec![
+        Element::Curves(vec![
+            OneCurve::Segments {
+                breaks: Vec::new(),
+                segments: vec![formula(0, &[1.0, 1.0, 0.0, 0.0])],
+            };
+            4
+        ]),
+        Element::Matrix {
+            rows: vec![
+                vec![0.75, 0.0, 0.0, 0.25],
+                vec![0.0, 0.75, 0.0, 0.25],
+                vec![0.0, 0.0, 0.75, 0.25],
+            ],
+            offsets: vec![0.0, 0.0, 0.0],
+        },
+    ];
+    out.extend_from_slice(three);
+    out
+}
+
+/// A version 5 profile (ICC.2) of `tags`, its header naming `spectral` in
+/// bytes 100 to 103 and the spectral range `range` in 104 to 109.
+fn v5_profile(
+    space: &[u8; 4],
+    pcs: &[u8; 4],
+    spectral: [u8; 4],
+    range: [u16; 3],
+    tags: &[([u8; 4], Vec<u8>)],
+) -> Vec<u8> {
+    let mut out = profile_of(b"mntr", space, pcs, tags);
+    out[8..12].copy_from_slice(&0x0500_0000u32.to_be_bytes());
+    out[100..104].copy_from_slice(&spectral);
+    for (slot, value) in range.iter().enumerate() {
+        out[104 + 2 * slot..106 + 2 * slot].copy_from_slice(&value.to_be_bytes());
+    }
+    out
+}
+
+/// A device-to-XYZ pipeline in ICC.2's elements: segmented curves of formula
+/// types 3 to 7 (Table 111) either side of their break-points, a single
+/// sampled curve clipped past its ends, a matrix with offsets and an
+/// extended grid of half floats.
+fn v5_forward() -> Vec<Element> {
+    vec![
+        Element::Curves(vec![
+            OneCurve::Segments {
+                breaks: vec![0.3],
+                segments: vec![
+                    formula(3, &[2.0, 1.0, 1.0, 0.1, -0.01]),
+                    formula(4, &[1.0, 0.2, -1.0, 0.1, 1.0]),
+                ],
+            },
+            OneCurve::Single {
+                first: 0.0,
+                last: 1.0,
+                extrapolate: false,
+                encoding: 0,
+                values: vec![0.0, 0.1, 0.3, 0.55, 0.8],
+            },
+            OneCurve::Segments {
+                breaks: vec![0.4, 0.8],
+                segments: vec![
+                    formula(5, &[1.0, 1.0, -0.1, 0.0, 1.0, 0.1]),
+                    formula(7, &[1.0, 1.0, 0.0, 0.2, 0.5, 1.0]),
+                    formula(6, &[0.5, 1.0, 0.2, 2.0, 1.0, 0.4, 1.0]),
+                ],
+            },
+        ]),
+        Element::Matrix {
+            rows: vec![
+                vec![0.5, 0.3, 0.2],
+                vec![0.25, 0.6, 0.15],
+                vec![0.1, 0.2, 0.7],
+            ],
+            offsets: vec![0.0, 0.05, 0.0],
+        },
+        Element::Grid {
+            grids: vec![2, 2, 2],
+            outputs: 3,
+            encoding: Some(1),
+            values: (0..8usize)
+                .flat_map(|node| {
+                    let (i, j, k) = ((node >> 2) & 1, (node >> 1) & 1, node & 1);
+                    [
+                        [0.125, 0.875][i],
+                        [0.25, 0.75, 0.5, 1.0][2 * i + j],
+                        [0.125, 0.625][k],
+                    ]
+                })
+                .collect(),
+        },
+    ]
+}
+
+/// An XYZ-to-RGB pipeline in ICC.2's elements: a single sampled curve of
+/// 16-bit entries extended along its line past its last input, a segmented
+/// curve of type 3, one of type 0, a matrix and an extended grid of bytes.
+fn v5_output() -> Vec<Element> {
+    vec![
+        Element::Curves(vec![
+            OneCurve::Single {
+                first: 0.0,
+                last: 1.5,
+                extrapolate: true,
+                encoding: 2,
+                values: vec![0.0, 0.3, 0.5, 0.65],
+            },
+            OneCurve::Segments {
+                breaks: Vec::new(),
+                segments: vec![formula(3, &[1.0, 0.5, 1.0, 0.0, 0.0])],
+            },
+            OneCurve::Segments {
+                breaks: Vec::new(),
+                segments: vec![formula(0, &[1.0, 0.45, 0.0, 0.0])],
+            },
+        ]),
+        Element::Matrix {
+            rows: vec![
+                vec![1.1, -0.1, 0.0],
+                vec![-0.05, 1.0, 0.05],
+                vec![0.0, -0.1, 1.1],
+            ],
+            offsets: vec![0.0, 0.0, 0.0],
+        },
+        Element::Grid {
+            grids: vec![2, 2, 2],
+            outputs: 3,
+            encoding: Some(3),
+            values: (0..8usize)
+                .flat_map(|node| {
+                    let (i, j, k) = ((node >> 2) & 1, (node >> 1) & 1, node & 1);
+                    let (i, j, k) = (i as f64, j as f64, k as f64);
+                    [0.1 + 0.8 * i, 0.15 + 0.7 * j, 0.05 + 0.9 * k]
+                })
+                .collect(),
+        },
+    ]
+}
+
+/// **A version 5 profile with a multi-process transform converts, in both
+/// directions** (ICC.2 9.2.1, 9.2.38, 10.2.17). A version 5 display profile
+/// whose `A2B1` and `B2A1` are `multiProcessElementsType` — ICC.2's formula
+/// segments of types 3 to 7, single sampled curves clipped and extended,
+/// extended grids of half floats and of bytes, matrices with offsets —
+/// parses with its header's version 5 fields read; converts each device
+/// value through its `A2B1`'s chain to the XYZ recomputed here, and builds a
+/// transform to sRGB through it under every intent; and takes each XYZ value
+/// through its `B2A1`'s chain, the components held to the connection
+/// space's range, to the device values recomputed here. Its `D2B*` tags are
+/// a spectral connection space's (9.2.77), which these do not read.
+#[test]
+fn a_v5_profile_with_a_multi_process_transform_converts() {
+    let forward = v5_forward();
+    let output = v5_output();
+    // `rs0024`: reflectance spectra of 36 channels, 380 to 730 nanometres.
+    let bytes = v5_profile(
+        b"RGB ",
+        b"XYZ ",
+        *b"rs\x00\x24",
+        [0x5DF0, 0x61B4, 36],
+        &[
+            (*b"A2B1", mpet_tag(3, &forward)),
+            (*b"B2A1", mpet_tag(3, &output)),
+            (*b"D2B1", vec![0; 16]),
+        ],
+    );
+    let parsed = Profile::parse(&bytes).expect("the version 5 profile parses");
+    assert_eq!(parsed.version, 5);
+    let header = parsed.version5.expect("a version 5 header");
+    assert_eq!(header.spectral_pcs, *b"rs\x00\x24");
+    assert_eq!(
+        (
+            header.spectral_range.start,
+            header.spectral_range.end,
+            header.spectral_range.steps
+        ),
+        (380.0, 730.0, 36)
+    );
+    assert_eq!(header.mcs, [0; 4]);
+
+    let domain = [(0.0, 1.0); 3];
+    for x in three_channels() {
+        let got = parsed
+            .connection_value(Intent::RelativeColorimetric, &x)
+            .expect("the A2B1 converts");
+        let want = run(&forward, &x, &domain);
+        for channel in 0..3 {
+            assert!(
+                (got[channel] - want[channel]).abs() < PIPELINE_SLACK,
+                "{x:?}, channel {channel}: {} against {}",
+                got[channel],
+                want[channel]
+            );
+        }
+    }
+    for intent in Intent::ALL {
+        assert!(Transform::compile(&parsed, intent).is_some(), "{intent:?}");
+    }
+    assert!(Transforms::compile(parsed.clone()).is_some());
+
+    let out = Output::compile(&parsed, Intent::RelativeColorimetric).expect("the B2A1 reads");
+    assert_eq!(out.channels(), 3);
+    for pcs in xyz_lattice() {
+        let got = out.apply(pcs);
+        let want = run(&output, &pcs, &[XYZ_RANGE; 3]);
+        for (channel, want) in want.into_iter().enumerate() {
+            let want = want.clamp(0.0, 1.0) * 65535.0;
+            assert!(
+                (f64::from(got.channels()[channel]) - want).abs() <= PIPELINE_SLACK * 65535.0,
+                "{pcs:?}, channel {channel}: {} against {want:.1}",
+                got.channels()[channel]
+            );
+        }
+    }
+
+    // The same tags in a version 4 profile are tables no `A2B*` tag may
+    // hold there, and are refused for it.
+    let mut v4 = bytes.clone();
+    v4[8..12].copy_from_slice(&0x0430_0000u32.to_be_bytes());
+    assert_eq!(Profile::parse(&v4), Err(IccError::NeedsLut));
+}

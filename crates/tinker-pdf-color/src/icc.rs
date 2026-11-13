@@ -126,7 +126,12 @@ impl Intent {
     /// no intent refuses a profile another accepts. `D2B0` to `D2B3` are
     /// perceptual, media-relative colorimetric, saturation and ICC-absolute
     /// colorimetric's (9.2), and only `D2B3` is absolute colorimetric's.
-    const fn order(self) -> [Step; 5] {
+    ///
+    /// `A2B3` is a version 5 profile's (ICC.2 9.2.4), ICC-absolute
+    /// colorimetric's own table: absolute colorimetric's row reads it after
+    /// `D2B3` and before `A2B1`, and every other row last, ICC.2 8.14.2's d).
+    /// A version 2 or 4 profile carries none, so its rows are ICC.1's.
+    const fn order(self) -> [Step; 6] {
         match self {
             Intent::Perceptual => [
                 Step::Pipeline(0),
@@ -134,6 +139,7 @@ impl Intent {
                 Step::Model,
                 Step::Table(1),
                 Step::Table(2),
+                Step::Table(3),
             ],
             Intent::RelativeColorimetric => [
                 Step::Pipeline(1),
@@ -141,6 +147,7 @@ impl Intent {
                 Step::Table(0),
                 Step::Model,
                 Step::Table(2),
+                Step::Table(3),
             ],
             Intent::Saturation => [
                 Step::Pipeline(2),
@@ -148,9 +155,11 @@ impl Intent {
                 Step::Table(0),
                 Step::Model,
                 Step::Table(1),
+                Step::Table(3),
             ],
             Intent::AbsoluteColorimetric => [
                 Step::Pipeline(3),
+                Step::Table(3),
                 Step::Table(1),
                 Step::Table(0),
                 Step::Model,
@@ -164,9 +173,11 @@ impl Intent {
 /// lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
-    /// The `D2B*` tag of this number, `D2B0` to `D2B3`: ICC.1 8.10.2 a).
+    /// The `D2B*` tag of this number, `D2B0` to `D2B3`: ICC.1 8.10.2 a); out
+    /// of the connection space, the `B2D*` tag of this number.
     Pipeline(usize),
-    /// The `A2B*` tag of this number: `A2B0`, `A2B1` or `A2B2`.
+    /// The `A2B*` tag of this number, `A2B0` to `A2B2` and a version 5
+    /// profile's `A2B3`; out of the connection space, the `B2A*` tag.
     Table(usize),
     /// The matrix/TRC or grey model, ICC.1 8.10.2 d).
     Model,
@@ -418,6 +429,75 @@ pub struct Profile {
     /// carries one that reads: what a profile of class `nmcl` (8.9) is made
     /// of, and what any other may carry beside its transforms.
     pub named: Option<NamedColours>,
+    /// What a version 5 profile's header adds to ICC.1's (ICC.2 7.2.2, Table
+    /// 12); `None` for a version 2 or 4 profile, whose bytes 100 to 127 are
+    /// reserved.
+    pub version5: Option<Version5>,
+}
+
+/// The fields a version 5 profile's header adds (ICC.2 7.2.2, Table 12):
+/// bytes 100 to 123, each read as it stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Version5 {
+    /// The spectral connection space (7.2.21, Table 21): a two-letter type —
+    /// `rs` reflectance, `ts` transmission, `es` emission, `bs` bi-spectral,
+    /// `sm` sparse — and a 16-bit channel count, or zero where the
+    /// connection-space field alone defines the connection space.
+    pub spectral_pcs: [u8; 4],
+    /// The spectral connection space's wavelengths (7.2.22).
+    pub spectral_range: SpectralRange,
+    /// The incident wavelengths of a bi-spectral connection space (7.2.23).
+    pub bispectral_range: SpectralRange,
+    /// The multiplex connection space (7.2.24), or zero.
+    pub mcs: [u8; 4],
+    /// The profile's device sub-class (7.2.25), or zero.
+    pub subclass: [u8; 4],
+}
+
+/// A `spectralRange` (ICC.2 4.2.8, Table 6): a start and an end wavelength,
+/// each a `float16Number`, and how many steps sample the range, the interval
+/// between them `(end − start) / (steps − 1)` (7.2.22, formula 4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectralRange {
+    /// The first wavelength, in nanometres.
+    pub start: f64,
+    /// The last wavelength, in nanometres.
+    pub end: f64,
+    /// How many wavelengths the range samples.
+    pub steps: u16,
+}
+
+impl SpectralRange {
+    /// The range at `at` in `bytes`: two half floats and a step count.
+    fn read(reader: &Reader<'_>, at: usize) -> Option<SpectralRange> {
+        Some(SpectralRange {
+            start: half_float(reader.u16(at)?),
+            end: half_float(reader.u16(at + 2)?),
+            steps: reader.u16(at + 4)?,
+        })
+    }
+}
+
+/// An IEEE 754 half-precision number (ICC.2 4.2.2's `float16Number`) as the
+/// `f64` it is exactly: a sign, five bits of exponent and ten of fraction;
+/// an exponent of all ones is an infinity or not a number, which a reader
+/// that wants a finite value refuses.
+fn half_float(bits: u16) -> f64 {
+    let sign = if bits & 0x8000 == 0 { 1.0 } else { -1.0 };
+    let exponent = (bits >> 10) & 0x1F;
+    let fraction = f64::from(bits & 0x03FF);
+    match exponent {
+        // Subnormal: the fraction in units of 2^-24, which is exact.
+        0 => sign * fraction / 16_777_216.0,
+        0x1F if fraction == 0.0 => sign * f64::INFINITY,
+        0x1F => f64::NAN,
+        // `(1024 + fraction) * 2^(exponent - 25)`, the power of two built
+        // from its bits so it is exact.
+        _ => {
+            let power = f64::from_bits((1023 + u64::from(exponent) - 25) << 52);
+            sign * (1024.0 + fraction) * power
+        }
+    }
 }
 
 /// The PCS white, 6.3.4.3's D50, as the s15Fixed16Numbers an `XYZType` tag
@@ -470,18 +550,22 @@ impl Profile {
         }
     }
 
-    /// The scaling `intent`'s transform through `source` applies to the
-    /// connection-space value: [`Profile::media_scale`] for absolute
-    /// colorimetric where it is not one, and none otherwise — none through
-    /// `D2B3`, whose transform is ICC-absolute already and leaves the media
-    /// white unused (6.2.3, 9.2).
-    fn scale_for(&self, intent: Intent, source: &Source<'_>) -> Option<[f64; 3]> {
-        if intent != Intent::AbsoluteColorimetric
-            || matches!(source, Source::Pipeline { tag: 3, .. })
-        {
-            return None;
+    /// The scaling `intent`'s transform applies to the connection-space
+    /// value a source gives — ICC-absolute where `absolute`, `D2B3` and a
+    /// version 5 profile's `A2B3`, media-relative otherwise: under absolute
+    /// colorimetric [`Profile::media_scale`] through a media-relative source
+    /// (6.2.3); under another intent its inverse through an ICC-absolute
+    /// one, the relative value found again from the absolute (ICC.2
+    /// 9.2.93); and none where the two agree, or the scale is one. A
+    /// transform out of the connection space divides by the same scaling
+    /// before its source.
+    fn scale_for(&self, intent: Intent, absolute: bool) -> Option<[f64; 3]> {
+        let scale = Some(self.media_scale()).filter(|scale| *scale != [1.0; 3])?;
+        match (intent == Intent::AbsoluteColorimetric, absolute) {
+            (true, false) => Some(scale),
+            (false, true) => Some(scale.map(|channel| 1.0 / channel)),
+            _ => None,
         }
-        Some(self.media_scale()).filter(|scale| *scale != [1.0; 3])
     }
 }
 
@@ -636,21 +720,31 @@ impl Model {
 /// ([`Output::compile`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tables {
-    /// For `A2B0`, `A2B1` and `A2B2`, which of `tables` the tag names, or
-    /// `None` where the profile does not carry it.
-    slots: [Option<usize>; 3],
-    /// One a distinct `A2B*` element, in the order the tags first name them.
+    /// For `A2B0` to `A2B3`, which of `tables` the tag names where it holds a
+    /// lookup table, or `None`. `A2B3` is a version 5 profile's.
+    slots: [Option<usize>; 4],
+    /// One a distinct `A2B*` table, in the order the tags first name them.
     tables: Vec<Element<Lut>>,
-    /// For `D2B0` to `D2B3`, which of `pipelines` the tag names, or `None`
-    /// where the profile does not carry it.
-    pipeline_slots: [Option<usize>; 4],
-    /// One a distinct `D2B*` element, in the order the tags first name them.
+    /// For `D2B0` to `D2B3`, then `A2B0` to `A2B3` where a version 5
+    /// profile's holds a `multiProcessElementsType` (ICC.2 9.2.1 to 9.2.4),
+    /// which of `pipelines` the tag names, or `None`.
+    pipeline_slots: [Option<usize>; 8],
+    /// One a distinct element of those, in the order the tags first name
+    /// them.
     pipelines: Vec<Element<mpe::Pipeline>>,
-    /// For `B2A0`, `B2A1` and `B2A2`, which of `outputs` the tag names, or
-    /// `None` where the profile does not carry it.
-    output_slots: [Option<usize>; 3],
-    /// One a distinct `B2A*` element, in the order the tags first name them.
+    /// For `B2A0` to `B2A3`, which of `outputs` the tag names where it holds
+    /// a lookup table, or `None`.
+    output_slots: [Option<usize>; 4],
+    /// One a distinct `B2A*` table, in the order the tags first name them.
     outputs: Vec<Element<Lut>>,
+    /// For `B2D0` to `B2D3`, then `B2A0` to `B2A3` where a version 5
+    /// profile's holds a `multiProcessElementsType`, which of
+    /// `output_pipelines` the tag names, or `None`: the other direction's
+    /// pipelines, out of the connection space.
+    output_pipeline_slots: [Option<usize>; 8],
+    /// One a distinct element of those, in the order the tags first name
+    /// them.
+    output_pipelines: Vec<Element<mpe::Pipeline>>,
     /// The gamut tag, `gamt` (ICC.1 9.2.28): a table from the connection
     /// space to one channel, kept unread, as a `B2A*` table is, until a
     /// transform out of the connection space reads it.
@@ -776,25 +870,53 @@ impl LinkTags {
     }
 }
 
+/// Where a profile's transform tags are, as [`Tables::locate`] takes them:
+/// each tag's offset and size, where the profile carries it.
+struct Places {
+    /// `A2B0` to `A2B3`.
+    a2b: [Option<(usize, usize)>; 4],
+    /// `D2B0` to `D2B3`.
+    d2b: [Option<(usize, usize)>; 4],
+    /// `B2A0` to `B2A3`.
+    b2a: [Option<(usize, usize)>; 4],
+    /// `B2D0` to `B2D3`.
+    b2d: [Option<(usize, usize)>; 4],
+    /// `gamt`.
+    gamut: Option<(usize, usize)>,
+    /// Whether an `A2B*` or `B2A*` tag may hold a
+    /// `multiProcessElementsType`, as a version 5 profile's may (ICC.2 9.2.1,
+    /// 9.2.38).
+    multi_process: bool,
+}
+
 impl Tables {
-    /// The tables at the elements `places` names — `A2B0`, `A2B1` and
-    /// `A2B2`'s offset and size in `bytes`, where the profile carries them —
-    /// the pipelines at the elements `pipeline_places` names, `D2B0` to
-    /// `D2B3`'s, the other direction's tables at the elements
-    /// `output_places` names, `B2A0` to `B2A2`'s, and the gamut tag at
-    /// `gamut_place`, none of them read yet.
-    fn locate(
-        places: [Option<(usize, usize)>; 3],
-        pipeline_places: [Option<(usize, usize)>; 4],
-        output_places: [Option<(usize, usize)>; 3],
-        gamut_place: Option<(usize, usize)>,
-        bytes: &[u8],
-        lab: bool,
-    ) -> Result<Tables, IccError> {
-        let (slots, tables) = Element::locate(places, bytes)?;
-        let (pipeline_slots, pipelines) = Element::locate(pipeline_places, bytes)?;
-        let (output_slots, outputs) = Element::locate(output_places, bytes)?;
-        let (_, mut gamut) = Element::locate([gamut_place], bytes)?;
+    /// The tables and pipelines at `places` in `bytes`, none of them read
+    /// yet: an `A2B*` or `B2A*` tag holding a `multiProcessElementsType`
+    /// among the pipelines where `places` lets it, among the tables
+    /// otherwise.
+    fn locate(places: Places, bytes: &[u8], lab: bool) -> Result<Tables, IccError> {
+        let holds_elements = |place: Option<(usize, usize)>| {
+            places.multi_process
+                && place.is_some_and(|(offset, _)| bytes.get(offset..offset + 4) == Some(b"mpet"))
+        };
+        let split = |tags: [Option<(usize, usize)>; 4]| {
+            let tables = tags.map(|place| place.filter(|_| !holds_elements(place)));
+            let elements = tags.map(|place| place.filter(|_| holds_elements(place)));
+            (tables, elements)
+        };
+        let (a2b, a2b_elements) = split(places.a2b);
+        let (b2a, b2a_elements) = split(places.b2a);
+        let joined = |first: [Option<(usize, usize)>; 4], then: [Option<(usize, usize)>; 4]| {
+            [
+                first[0], first[1], first[2], first[3], then[0], then[1], then[2], then[3],
+            ]
+        };
+        let (slots, tables) = Element::locate(a2b, bytes)?;
+        let (pipeline_slots, pipelines) = Element::locate(joined(places.d2b, a2b_elements), bytes)?;
+        let (output_slots, outputs) = Element::locate(b2a, bytes)?;
+        let (output_pipeline_slots, output_pipelines) =
+            Element::locate(joined(places.b2d, b2a_elements), bytes)?;
+        let (_, mut gamut) = Element::locate([places.gamut], bytes)?;
         Ok(Tables {
             slots,
             tables,
@@ -802,6 +924,8 @@ impl Tables {
             pipelines,
             output_slots,
             outputs,
+            output_pipeline_slots,
+            output_pipelines,
             gamut: gamut.pop(),
             link: None,
             lab,
@@ -812,12 +936,14 @@ impl Tables {
     /// table converts into.
     fn none(lab: bool) -> Tables {
         Tables {
-            slots: [None; 3],
+            slots: [None; 4],
             tables: Vec::new(),
-            pipeline_slots: [None; 4],
+            pipeline_slots: [None; 8],
             pipelines: Vec::new(),
-            output_slots: [None; 3],
+            output_slots: [None; 4],
             outputs: Vec::new(),
+            output_pipeline_slots: [None; 8],
+            output_pipelines: Vec::new(),
             gamut: None,
             link: None,
             lab,
@@ -836,10 +962,38 @@ impl Tables {
         Some((index, self.pipelines.get(index)?))
     }
 
+    /// The pipeline a version 5 profile's `A2B*` tag `tag` names, where it
+    /// holds a `multiProcessElementsType`.
+    fn table_pipeline_at(&self, tag: usize) -> Option<(usize, &Element<mpe::Pipeline>)> {
+        self.pipeline_at(tag.checked_add(4)?)
+    }
+
     /// The table `B2A*` tag `tag` names, where the profile carries it.
     fn output_at(&self, tag: usize) -> Option<(usize, &Element<Lut>)> {
         let index = (*self.output_slots.get(tag)?)?;
         Some((index, self.outputs.get(index)?))
+    }
+
+    /// The pipeline `B2D*` tag `tag` names, where the profile carries it.
+    fn output_pipeline_at(&self, tag: usize) -> Option<(usize, &Element<mpe::Pipeline>)> {
+        let index = (*self.output_pipeline_slots.get(tag)?)?;
+        Some((index, self.output_pipelines.get(index)?))
+    }
+
+    /// The pipeline a version 5 profile's `B2A*` tag `tag` names, where it
+    /// holds a `multiProcessElementsType`.
+    fn output_table_pipeline_at(&self, tag: usize) -> Option<(usize, &Element<mpe::Pipeline>)> {
+        self.output_pipeline_at(tag.checked_add(4)?)
+    }
+
+    /// The pipeline out of the connection space at `element`, to `channels`
+    /// device channels, read now if nothing has read it yet.
+    fn read_output_pipeline(
+        &self,
+        element: &Element<mpe::Pipeline>,
+        channels: usize,
+    ) -> Result<Arc<mpe::Pipeline>, IccError> {
+        element.read(|bytes| mpe::read_output(bytes, self.lab, channels))
     }
 
     /// The `A2B*` table at `element`, read now if nothing has read it yet.
@@ -861,7 +1015,8 @@ impl Tables {
         Some(element.read(|bytes| read_lut(bytes, self.lab, Direction::Output { channels: 1 })))
     }
 
-    /// The `D2B*` pipeline at `element`, read now if nothing has read it yet.
+    /// The `D2B*` pipeline, or a version 5 profile's `A2B*`, at `element`,
+    /// read now if nothing has read it yet.
     fn read_pipeline(
         &self,
         element: &Element<mpe::Pipeline>,
@@ -966,15 +1121,21 @@ impl<T: PartialEq> PartialEq for Element<T> {
 /// Where one intent's transform comes from.
 #[derive(Clone, Debug)]
 enum Source<'a> {
-    /// The `D2B*` pipeline at this index of [`Tables`]'s distinct elements,
-    /// reached through the tag of number `tag`.
+    /// The pipeline at this index of [`Tables`]'s distinct elements, reached
+    /// through the `D2B*` tag of number `tag`, or a version 5 profile's
+    /// `A2B*`.
     Pipeline {
         tag: usize,
         index: usize,
         pipeline: Arc<mpe::Pipeline>,
     },
-    /// The table at this index of [`Tables`]'s distinct elements.
-    Table(usize, Arc<Lut>),
+    /// The table at this index of [`Tables`]'s distinct elements, reached
+    /// through the `A2B*` tag of number `tag`.
+    Table {
+        tag: usize,
+        index: usize,
+        lut: Arc<Lut>,
+    },
     /// The profile's matrix/TRC or grey model.
     Model(&'a Model),
 }
@@ -984,9 +1145,19 @@ impl Source<'_> {
     fn id(&self) -> SourceId {
         match self {
             Source::Pipeline { index, .. } => SourceId::Pipeline(*index),
-            Source::Table(index, _) => SourceId::Table(*index),
+            Source::Table { index, .. } => SourceId::Table(*index),
             Source::Model(_) => SourceId::Model,
         }
+    }
+
+    /// Whether the source's connection-space value is ICC-absolute already:
+    /// `D2B3`'s (6.2.3, 9.2) and a version 5 profile's `A2B3` (ICC.2
+    /// 9.2.4). Every other tag, and a model (Table 25), is media-relative.
+    fn absolute(&self) -> bool {
+        matches!(
+            self,
+            Source::Pipeline { tag: 3, .. } | Source::Table { tag: 3, .. }
+        )
     }
 }
 
@@ -1012,11 +1183,11 @@ impl Profile {
     pub fn connection_value(&self, intent: Intent, components: &[f64]) -> Option<[f64; 3]> {
         let source = self.source(intent)?;
         let pcs = match &source {
-            Source::Table(_, lut) => lut.connection(components),
+            Source::Table { lut, .. } => lut.connection(components),
             Source::Pipeline { pipeline, .. } => pipeline.evaluate(components),
             Source::Model(model) => model.connection(components),
         };
-        Some(match self.scale_for(intent, &source) {
+        Some(match self.scale_for(intent, source.absolute()) {
             Some(scale) => output::scale_connection(pcs, &self.pcs == b"Lab ", scale),
             None => pcs,
         })
@@ -1049,10 +1220,24 @@ impl Profile {
                     pipeline,
                 })
             }
-            Step::Table(tag) => {
-                let (index, element) = self.tables.at(tag)?;
-                Some(Source::Table(index, self.tables.read_table(element).ok()?))
-            }
+            Step::Table(tag) => match self.tables.at(tag) {
+                Some((index, element)) => Some(Source::Table {
+                    tag,
+                    index,
+                    lut: self.tables.read_table(element).ok()?,
+                }),
+                // A version 5 profile's `A2B*` may hold elements (ICC.2
+                // 9.2.1), which read as a `D2B*` tag's do.
+                None => {
+                    let (index, element) = self.tables.table_pipeline_at(tag)?;
+                    let pipeline = self.tables.read_pipeline(element).ok()?;
+                    Some(Source::Pipeline {
+                        tag,
+                        index,
+                        pipeline,
+                    })
+                }
+            },
             Step::Model => self.model.as_ref().map(Source::Model),
         })
     }
@@ -2103,6 +2288,20 @@ impl Profile {
         let space = reader.sig(16).ok_or(IccError::TooShort)?;
         let pcs = reader.sig(20).ok_or(IccError::TooShort)?;
         let version = (reader.u32(8).ok_or(IccError::TooShort)? >> 24) as u8;
+        // Bytes 100 to 123 are a version 5 profile's (ICC.2 7.2.2) and
+        // reserved in a version 2 or 4 one; the header is all there, so they
+        // read.
+        let version5 = (version >= 5)
+            .then(|| {
+                Some(Version5 {
+                    spectral_pcs: reader.sig(100)?,
+                    spectral_range: SpectralRange::read(&reader, 104)?,
+                    bispectral_range: SpectralRange::read(&reader, 110)?,
+                    mcs: reader.sig(116)?,
+                    subclass: reader.sig(120)?,
+                })
+            })
+            .flatten();
 
         let count = reader.u32(128).ok_or(IccError::TooShort)?;
         if count > MAX_ICC_TAGS {
@@ -2157,6 +2356,7 @@ impl Profile {
                 tables: Tables::none(lab),
                 white,
                 named: Some(named),
+                version5,
             });
         }
         let named = named.and_then(Result::ok);
@@ -2190,6 +2390,7 @@ impl Profile {
                 tables,
                 white,
                 named: None,
+                version5,
             });
         }
 
@@ -2211,17 +2412,24 @@ impl Profile {
         if model.is_none() && !tables_convert {
             return Err(IccError::UnsupportedPcs);
         }
+        // A version 5 profile adds `A2B3` and `B2A3` (ICC.2 9.2.4, 9.2.41),
+        // and its `A2B*` and `B2A*` tags may hold elements; its `D2B*` and
+        // `B2D*` tags take a spectral connection space instead (9.2.42,
+        // 9.2.77), which these do not read.
+        let v5 = version >= 5;
+        let tags_of = |names: [&[u8; 4]; 4], keep: [bool; 4]| {
+            [0, 1, 2, 3].map(|tag| place(names[tag]).filter(|_| keep[tag]))
+        };
         let mut tables = if tables_convert {
             Tables::locate(
-                [place(b"A2B0"), place(b"A2B1"), place(b"A2B2")],
-                [
-                    place(b"D2B0"),
-                    place(b"D2B1"),
-                    place(b"D2B2"),
-                    place(b"D2B3"),
-                ],
-                [place(b"B2A0"), place(b"B2A1"), place(b"B2A2")],
-                place(b"gamt"),
+                Places {
+                    a2b: tags_of([b"A2B0", b"A2B1", b"A2B2", b"A2B3"], [true, true, true, v5]),
+                    d2b: tags_of([b"D2B0", b"D2B1", b"D2B2", b"D2B3"], [!v5; 4]),
+                    b2a: tags_of([b"B2A0", b"B2A1", b"B2A2", b"B2A3"], [true, true, true, v5]),
+                    b2d: tags_of([b"B2D0", b"B2D1", b"B2D2", b"B2D3"], [!v5; 4]),
+                    gamut: place(b"gamt"),
+                    multi_process: v5,
+                },
                 bytes,
                 lab,
             )?
@@ -2255,13 +2463,22 @@ impl Profile {
                     }
                 }
                 Step::Table(tag) => {
-                    let Some((_, table)) = tables.at(tag) else {
-                        continue;
-                    };
-                    match tables.read_table(table) {
-                        Ok(_) => found = true,
-                        Err(error) if model.is_none() => return Err(error),
-                        Err(_) => {}
+                    if let Some((_, table)) = tables.at(tag) {
+                        match tables.read_table(table) {
+                            Ok(_) => found = true,
+                            Err(error) if model.is_none() => return Err(error),
+                            Err(_) => {}
+                        }
+                    } else if let Some((_, pipeline)) = tables.table_pipeline_at(tag) {
+                        // A version 5 `A2B*` tag's elements, passed over as
+                        // a `D2B*` tag's are where they do not read (ICC.2
+                        // 10.2.17).
+                        match tables.read_pipeline(pipeline) {
+                            Ok(_) => found = true,
+                            Err(error) => {
+                                passed_over.get_or_insert(error);
+                            }
+                        }
                     }
                 }
                 Step::Model => found = matches!(model, Some(Ok(_))),
@@ -2291,6 +2508,7 @@ impl Profile {
             tables,
             white,
             named,
+            version5,
         })
     }
 }
@@ -3052,7 +3270,7 @@ impl Transform {
     #[must_use]
     pub fn compile(profile: &Profile, intent: Intent) -> Option<Transform> {
         let source = profile.source(intent)?;
-        let media = profile.scale_for(intent, &source);
+        let media = profile.scale_for(intent, source.absolute());
         Some(Transform::of_source(source, media))
     }
 
@@ -3077,7 +3295,7 @@ impl Transform {
             // its grid is the matrix's replacement rather than a factor of it.
             // What compiles is the grid it is read through, whose nodes are
             // evaluated as conversions reach them.
-            Source::Table(_, lut) => Transform {
+            Source::Table { lut, .. } => Transform {
                 curves: Vec::new(),
                 matrix: [[0; 3]; 3],
                 inputs: lut.inputs,
@@ -3488,7 +3706,8 @@ impl Transforms {
     pub fn compile(profile: Profile) -> Option<Transforms> {
         let source = profile.source(Intent::RelativeColorimetric)?;
         let relative_source = source.id();
-        let relative = Arc::new(Transform::of_source(source, None));
+        let media = profile.scale_for(Intent::RelativeColorimetric, source.absolute());
+        let relative = Arc::new(Transform::of_source(source, media));
         Some(Transforms {
             profile,
             relative,
@@ -3515,18 +3734,23 @@ impl Transforms {
             let Some(source) = self.profile.source(intent) else {
                 return Arc::clone(&self.relative);
             };
-            let media = self.profile.scale_for(intent, &source);
+            let media = self.profile.scale_for(intent, source.absolute());
             if media.is_none() {
+                // An unscaled transform is shared only with another
+                // unscaled one through the same source: relative
+                // colorimetric's through a version 5 profile's `A2B3` is
+                // scaled to the media-relative value.
                 let id = source.id();
-                if id == self.relative_source {
+                if id == self.relative_source && self.relative.media.is_none() {
                     return Arc::clone(&self.relative);
                 }
                 for (other, at) in [(Intent::Perceptual, 0), (Intent::Saturation, 1)] {
                     if other == intent {
                         continue;
                     }
-                    let shared = self.others[at].get().filter(|_| {
-                        self.profile.source(other).map(|source| source.id()) == Some(id)
+                    let shared = self.others[at].get().filter(|transform| {
+                        transform.media.is_none()
+                            && self.profile.source(other).map(|source| source.id()) == Some(id)
                     });
                     if let Some(transform) = shared {
                         return Arc::clone(transform);
@@ -3789,7 +4013,8 @@ impl Tables {
     /// space reads ([`Output::compile`]).
     fn held_bound(&self) -> usize {
         let lists = (self.tables.capacity() + self.outputs.capacity()) * size_of::<Element<Lut>>()
-            + self.pipelines.capacity() * size_of::<Element<mpe::Pipeline>>();
+            + (self.pipelines.capacity() + self.output_pipelines.capacity())
+                * size_of::<Element<mpe::Pipeline>>();
         let tables = self
             .tables
             .iter()
@@ -3799,6 +4024,7 @@ impl Tables {
         let pipelines = self
             .pipelines
             .iter()
+            .chain(&self.output_pipelines)
             .map(|pipeline| pipeline.held_bound(mpe::Pipeline::held_bytes, mpe::bound));
         let link = self.link.as_ref().map_or(0, LinkTags::held_bound);
         tables
@@ -3833,7 +4059,8 @@ impl Tables {
     #[cfg(test)]
     fn held(&self) -> usize {
         let lists = (self.tables.capacity() + self.outputs.capacity()) * size_of::<Element<Lut>>()
-            + self.pipelines.capacity() * size_of::<Element<mpe::Pipeline>>();
+            + (self.pipelines.capacity() + self.output_pipelines.capacity())
+                * size_of::<Element<mpe::Pipeline>>();
         let tables: usize = self
             .tables
             .iter()
@@ -3844,6 +4071,7 @@ impl Tables {
         let pipelines: usize = self
             .pipelines
             .iter()
+            .chain(&self.output_pipelines)
             .map(|pipeline| pipeline.held(mpe::Pipeline::held_bytes))
             .sum();
         let link = self.link.as_ref().map_or(0, LinkTags::held);
@@ -4088,7 +4316,18 @@ pub(crate) mod tests {
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 16] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 18] = [
+            // A matrix/TRC profile with a `D2B0` of gamma curves and a
+            // matrix, and a `B2D0` of single sampled curves, a matrix and an
+            // extended grid of 16-bit values: the seed that reaches the
+            // multi-process reader out of the connection space and ICC.2's
+            // elements.
+            ("b2d-elements", b2d_seed(), Reaches::Output),
+            // A version 5 profile whose `A2B0` and `B2A0` are multi-process
+            // elements — ICC.2's formula segments, a single sampled curve,
+            // an extended grid — the seed that reaches the version 5 header
+            // and its tags.
+            ("v5-mpet", v5_seed(), Reaches::Output),
             // A named-colour profile (ICC.1 8.9) over CMYK and Lab whose
             // `ncl2` names three inks with a prefix and a suffix, each with
             // its four device coordinates: the seed that reaches the
@@ -4419,6 +4658,147 @@ pub(crate) mod tests {
                 ),
             ],
         )
+    }
+
+    /// A single sampled curve (`sngf`, ICC.2 11.2.2.2) of float32 `entries`
+    /// from `first` to `last`, extended past them where `extend` is one.
+    fn sngf(first: f64, last: f64, extend: u16, entries: &[f64]) -> Vec<u8> {
+        let mut out = b"sngf".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        out.extend_from_slice(&float(first));
+        out.extend_from_slice(&float(last));
+        out.extend_from_slice(&extend.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        for &entry in entries {
+            out.extend_from_slice(&float(entry));
+        }
+        out
+    }
+
+    /// An extended grid (`xclt`, ICC.2 11.2.7) of `grids` points an axis
+    /// giving `q` outputs, its 16-bit `values`, the last axis fastest.
+    fn xclt(grids: &[u8], q: u16, values: &[u16]) -> Vec<u8> {
+        let mut body = 2u32.to_be_bytes().to_vec();
+        let mut counts = [0u8; 16];
+        counts[..grids.len()].copy_from_slice(grids);
+        body.extend_from_slice(&counts);
+        for value in values {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        element_of(b"xclt", grids.len() as u16, q, &body)
+    }
+
+    /// The `b2d-elements` seed: a matrix/TRC profile whose `D2B0` takes each
+    /// channel through a gamma of 2.2 and mixes them, and whose `B2D0` takes
+    /// the connection space through single sampled curves, one extended past
+    /// its last entry, a matrix and an extended grid of 16-bit values, node
+    /// `n`'s channel `c` `((3n + 5c) mod 11) × 6 553`.
+    fn b2d_seed() -> Vec<u8> {
+        let gamma = curf(&[], &[parf(0, &[2.2, 1.0, 0.0, 0.0])]);
+        let mix = matf(
+            &[
+                vec![0.5, 0.3, 0.2],
+                vec![0.25, 0.65, 0.1],
+                vec![0.05, 0.15, 0.8],
+            ],
+            &[0.0, 0.0, 0.0],
+        );
+        let mut tags = matrix_tags();
+        tags.push((
+            *b"D2B0",
+            mpet(3, 3, &[cvst(&[gamma.clone(), gamma.clone(), gamma]), mix]),
+        ));
+        let values: Vec<u16> = (0..8usize)
+            .flat_map(|node| (0..3usize).map(move |c| (((node * 3 + c * 5) % 11) * 6553) as u16))
+            .collect();
+        tags.push((
+            *b"B2D0",
+            mpet(
+                3,
+                3,
+                &[
+                    cvst(&[
+                        sngf(0.0, 2.0, 0, &[0.0, 0.3, 0.6, 1.0]),
+                        sngf(0.0, 1.0, 1, &[0.0, 0.5, 0.9]),
+                        sngf(0.0, 2.0, 0, &[0.0, 1.0]),
+                    ]),
+                    matf(
+                        &[
+                            vec![1.0, -0.1, 0.0],
+                            vec![0.0, 1.0, -0.1],
+                            vec![-0.1, 0.0, 1.0],
+                        ],
+                        &[0.05, 0.05, 0.05],
+                    ),
+                    xclt(&[2, 2, 2], 3, &values),
+                ],
+            ),
+        ));
+        build(b"RGB ", b"XYZ ", &tags)
+    }
+
+    /// The `v5-mpet` seed: a version 5 display profile whose `A2B0` takes
+    /// each channel through ICC.2's formula segments and a single sampled
+    /// curve, then a matrix and an extended grid of 16-bit values, and whose
+    /// `B2A0` takes the connection space back through a curve of type 3 on
+    /// each channel and a matrix.
+    fn v5_seed() -> Vec<u8> {
+        let values: Vec<u16> = (0..8usize)
+            .flat_map(|node| {
+                let (i, j, k) = ((node >> 2) & 1, (node >> 1) & 1, node & 1);
+                [
+                    (8_000 + 40_000 * i) as u16,
+                    (9_000 + 45_000 * j) as u16,
+                    (7_000 + 35_000 * k) as u16,
+                ]
+            })
+            .collect();
+        let forward = mpet(
+            3,
+            3,
+            &[
+                cvst(&[
+                    curf(
+                        &[0.5],
+                        &[
+                            parf(3, &[2.0, 1.0, 1.0, 0.0, 0.0]),
+                            parf(5, &[1.0, 1.0, 0.0, 0.0, 1.0, 0.25]),
+                        ],
+                    ),
+                    sngf(0.0, 1.0, 1, &[0.0, 0.4, 1.0]),
+                    curf(&[], &[parf(7, &[1.0, 1.0, 0.0, 1.0, 0.5, 1.0])]),
+                ]),
+                matf(
+                    &[
+                        vec![0.6, 0.3, 0.1],
+                        vec![0.2, 0.7, 0.1],
+                        vec![0.1, 0.1, 0.8],
+                    ],
+                    &[0.0, 0.0, 0.0],
+                ),
+                xclt(&[2, 2, 2], 3, &values),
+            ],
+        );
+        let half = curf(&[], &[parf(3, &[1.0, 0.5, 1.0, 0.0, 0.0])]);
+        let back = mpet(
+            3,
+            3,
+            &[
+                cvst(&[half.clone(), half.clone(), half]),
+                matf(
+                    &[
+                        vec![1.2, -0.2, 0.0],
+                        vec![-0.1, 1.1, 0.0],
+                        vec![0.0, -0.1, 1.1],
+                    ],
+                    &[0.0, 0.0, 0.0],
+                ),
+            ],
+        );
+        let mut out = build(b"RGB ", b"XYZ ", &[(*b"A2B0", forward), (*b"B2A0", back)]);
+        out[8..12].copy_from_slice(&0x0500_0000u32.to_be_bytes());
+        out
     }
 
     /// The `link-cmyk` seed: a CMYK-to-CMYK device link (ICC.1 8.6) whose
@@ -5265,7 +5645,7 @@ pub(crate) mod tests {
     /// The table relative colorimetric converts `profile` through.
     fn relative_table(profile: &Profile) -> Arc<Lut> {
         match profile.source(Intent::RelativeColorimetric) {
-            Some(Source::Table(_, lut)) => lut,
+            Some(Source::Table { lut, .. }) => lut,
             other => panic!("expected a lookup table, got {other:?}"),
         }
     }
@@ -5802,7 +6182,7 @@ pub(crate) mod tests {
         );
         let tables = &profile.tables;
         assert_eq!(tables.tables.len(), 2, "two elements, two tables");
-        assert_eq!(tables.slots, [Some(0), Some(0), Some(1)]);
+        assert_eq!(tables.slots, [Some(0), Some(0), Some(1), None]);
 
         let transforms = Transforms::compile(profile).expect("a transform");
         assert_eq!(
@@ -9180,5 +9560,244 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             Output::compile(&alone, Intent::RelativeColorimetric),
             Err(IccError::MissingTags)
         );
+    }
+
+    // ---- multi-process tags out of the connection space, and version 5 -----
+
+    /// An `mpet` of three inputs whose one matrix element gives every one of
+    /// its `outputs` channels `value`, whatever comes in.
+    fn constant_elements(outputs: usize, value: f64) -> Vec<u8> {
+        mpet(
+            3,
+            outputs as u16,
+            &[matf(&vec![vec![0.0; 3]; outputs], &vec![value; outputs])],
+        )
+    }
+
+    /// An `mpet` whose one matrix element passes its three channels through.
+    fn identity_elements() -> Vec<u8> {
+        mpet(
+            3,
+            3,
+            &[matf(
+                &[
+                    vec![1.0, 0.0, 0.0],
+                    vec![0.0, 1.0, 0.0],
+                    vec![0.0, 0.0, 1.0],
+                ],
+                &[0.0; 3],
+            )],
+        )
+    }
+
+    /// An `mft2` out of the connection space over a two-point grid whose
+    /// nodes are its corners: each output its input's coordinate, so XYZ in
+    /// `u1Fixed15` comes out as half itself.
+    fn identity_table() -> Vec<u8> {
+        graded_mft2(3, 3, |node, channel| {
+            if (node >> (2 - channel)) & 1 == 1 {
+                0xFFFF
+            } else {
+                0
+            }
+        })
+    }
+
+    /// How far [`identity_table`] reads from its exact output: a two-point
+    /// grid is interpolated in 256ths of its one cell, and two units for the
+    /// roundings. The media white moves a value by a tenth, far past it.
+    const TABLE_STEP: f64 = 65535.0 / 256.0 + 2.0;
+
+    /// The constants [`constant_elements`] give each tag of a number here.
+    const ELEMENT_VALUES: [f64; 4] = [0.125, 0.25, 0.5, 0.75];
+
+    /// **A `B2D*` tag converts out of the connection space before its `B2A*`
+    /// table** (ICC.1 8.10.2 a), with `B` for `A` and `D`): each intent
+    /// through its own `B2D*` tag where the profile carries one, before its
+    /// `B2A*` table and its model; absolute colorimetric through `B2D3` as it
+    /// stands, its value not divided by the media white, and through `B2A1`
+    /// with it divided where there is no `B2D3`; a `B2D*` tag that does not
+    /// read passed over to the table; and a version 5 profile's `B2D*` tags,
+    /// a spectral connection space's (ICC.2 9.2.42), not read at all.
+    #[test]
+    fn a_b2d_tag_converts_out_of_the_connection_space_before_its_table() {
+        let mut tags = matrix_tags();
+        tags.push((*b"wtpt", xyz(PAPER[0], PAPER[1], PAPER[2])));
+        for (tag, signature) in [*b"B2D0", *b"B2D1", *b"B2D2"].into_iter().enumerate() {
+            tags.push((signature, constant_elements(3, ELEMENT_VALUES[tag])));
+        }
+        tags.push((*b"B2D3", identity_elements()));
+        tags.push((*b"B2A1", identity_table()));
+        let profile = Profile::parse(&build(b"RGB ", b"XYZ ", &tags)).expect("a profile");
+        let pcs = [0.3, 0.4, 0.2];
+        let through = |profile: &Profile, intent: Intent| {
+            let output = Output::compile(profile, intent).expect("a transform out");
+            output.apply(pcs).channels().to_vec()
+        };
+        for (tag, intent) in [
+            (0, Intent::Perceptual),
+            (1, Intent::RelativeColorimetric),
+            (2, Intent::Saturation),
+        ] {
+            let want = (ELEMENT_VALUES[tag] * 65535.0).round() as u16;
+            for value in through(&profile, intent) {
+                assert!(value.abs_diff(want) <= 1, "{intent:?}: B2D{tag}, {value}");
+            }
+        }
+        // `B2D3` is ICC-absolute already: the value goes in as it stands.
+        let absolute = through(&profile, Intent::AbsoluteColorimetric);
+        for (value, want) in absolute.iter().zip(pcs) {
+            assert!(
+                (f64::from(*value) - want * 65535.0).abs() <= 2.0,
+                "B2D3, undivided: {absolute:?}"
+            );
+        }
+
+        // No `B2D3`: absolute colorimetric through `B2A1`, divided by the
+        // media white over the PCS white first.
+        let without: Vec<([u8; 4], Vec<u8>)> = tags
+            .iter()
+            .filter(|(signature, _)| signature != b"B2D3")
+            .cloned()
+            .collect();
+        let profile = Profile::parse(&build(b"RGB ", b"XYZ ", &without)).expect("a profile");
+        let scale = closed_scale(PAPER);
+        let got = through(&profile, Intent::AbsoluteColorimetric);
+        for (channel, value) in got.iter().enumerate() {
+            let want = pcs[channel] / scale[channel] * 32768.0;
+            assert!(
+                (f64::from(*value) - want).abs() <= TABLE_STEP,
+                "B2A1, divided: {got:?}, channel {channel} {want}"
+            );
+        }
+
+        // A `B2D1` that does not read: the table.
+        let mut broken = tags.clone();
+        broken.retain(|(signature, _)| signature != b"B2D1");
+        broken.push((*b"B2D1", mpet(3, 3, &[element_of(b"JtoX", 3, 3, &[0; 16])])));
+        let profile = Profile::parse(&build(b"RGB ", b"XYZ ", &broken)).expect("a profile");
+        let got = through(&profile, Intent::RelativeColorimetric);
+        for (channel, value) in got.iter().enumerate() {
+            let want = pcs[channel] * 32768.0;
+            assert!(
+                (f64::from(*value) - want).abs() <= TABLE_STEP,
+                "passed over to B2A1: {got:?}"
+            );
+        }
+
+        // A version 5 profile's `B2D*` tags take spectra: not read.
+        let mut v5 = build(b"RGB ", b"XYZ ", &tags);
+        v5[8..12].copy_from_slice(&0x0500_0000u32.to_be_bytes());
+        let profile = Profile::parse(&v5).expect("a version 5 profile");
+        assert!(profile.tables.output_pipelines.is_empty());
+        let got = through(&profile, Intent::RelativeColorimetric);
+        for (channel, value) in got.iter().enumerate() {
+            assert!(
+                (f64::from(*value) - pcs[channel] * 32768.0).abs() <= TABLE_STEP,
+                "through B2A1: {got:?}"
+            );
+        }
+    }
+
+    /// The bytes of a version 5 profile of `tags`, its header's fields past
+    /// byte 100 zero.
+    fn version5(space: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut out = build(space, b"XYZ ", tags);
+        out[8..12].copy_from_slice(&0x0500_0000u32.to_be_bytes());
+        out
+    }
+
+    /// **A version 5 profile's `A2B3` is absolute colorimetric's own**
+    /// (ICC.2 9.2.4, 8.14.2): its `A2B*` and `B2A*` tags may hold elements,
+    /// which read as `D2B*` tags do; absolute colorimetric converts through
+    /// `A2B3` as it stands, before `A2B1`, and relative colorimetric through
+    /// `A2B1`; a profile whose only table is `A2B3` converts every other
+    /// intent through it, the media white divided out to find the relative
+    /// value (9.2.93), and its transform out of the connection space through
+    /// `B2A3` with the white multiplied in. A version 2 or 4 profile's `A2B3`
+    /// is no tag ICC.1 defines and is not read. The header's version 5
+    /// fields read as they stand, a version 2 profile's not at all.
+    #[test]
+    fn a_version_5_profiles_a2b3_is_absolute_colorimetrics_own() {
+        let mut tags = vec![(*b"wtpt", xyz(PAPER[0], PAPER[1], PAPER[2]))];
+        for (tag, signature) in [*b"A2B0", *b"A2B1", *b"A2B2", *b"A2B3"]
+            .into_iter()
+            .enumerate()
+        {
+            tags.push((signature, constant_elements(3, ELEMENT_VALUES[tag])));
+        }
+        let profile = Profile::parse(&version5(b"RGB ", &tags)).expect("a version 5 profile");
+        assert_eq!(
+            profile.version5.map(|header| header.spectral_pcs),
+            Some([0; 4])
+        );
+        let value = |profile: &Profile, intent: Intent| {
+            profile
+                .connection_value(intent, &[0.5; 3])
+                .expect("a value")
+        };
+        for (tag, intent) in [
+            (0, Intent::Perceptual),
+            (1, Intent::RelativeColorimetric),
+            (2, Intent::Saturation),
+            (3, Intent::AbsoluteColorimetric),
+        ] {
+            let got = value(&profile, intent);
+            for channel in got {
+                assert!(
+                    (channel - ELEMENT_VALUES[tag]).abs() < 1e-4,
+                    "{intent:?} through A2B{tag}, unscaled: {got:?}"
+                );
+            }
+            assert!(
+                Transform::compile(&profile, intent)
+                    .is_some_and(|transform| transform.media.is_none()),
+                "{intent:?}"
+            );
+        }
+
+        // `A2B3` alone: every intent through it, the others scaled back.
+        let alone = vec![
+            tags[0].clone(),
+            (*b"A2B3", constant_elements(3, 0.5)),
+            (*b"B2A3", identity_elements()),
+        ];
+        let profile = Profile::parse(&version5(b"RGB ", &alone)).expect("A2B3 alone");
+        let scale = closed_scale(PAPER);
+        let absolute = value(&profile, Intent::AbsoluteColorimetric);
+        let relative = value(&profile, Intent::RelativeColorimetric);
+        for channel in 0..3 {
+            assert!((absolute[channel] - 0.5).abs() < 1e-4, "{absolute:?}");
+            assert!(
+                (relative[channel] - 0.5 / scale[channel]).abs() < 1e-4,
+                "relative is the absolute value over the media white: {relative:?}"
+            );
+        }
+        let transforms = Transforms::compile(profile.clone()).expect("transforms");
+        assert!(
+            transforms.relative.media.is_some(),
+            "relative colorimetric's is scaled"
+        );
+        assert!(
+            transforms.get(Intent::AbsoluteColorimetric).media.is_none(),
+            "absolute colorimetric's shares nothing with it"
+        );
+        let out = Output::compile(&profile, Intent::RelativeColorimetric).expect("B2A3");
+        let got = out.apply([0.4, 0.4, 0.4]).channels().to_vec();
+        for (channel, value) in got.iter().enumerate() {
+            let want = (0.4 * scale[channel]).clamp(0.0, 1.0) * 65535.0;
+            assert!(
+                (f64::from(*value) - want).abs() < 4.0,
+                "the media white multiplied in before B2A3: {got:?}"
+            );
+        }
+
+        // In a version 4 profile `A2B3` is nothing ICC.1 defines: a profile
+        // whose only table it is has none.
+        let mut v4 = build(b"RGB ", b"XYZ ", &alone);
+        v4[8..12].copy_from_slice(&0x0400_0000u32.to_be_bytes());
+        assert_eq!(Profile::parse(&v4), Err(IccError::MissingTags));
+        let v2 = Profile::parse(&build(b"RGB ", b"XYZ ", &matrix_tags())).expect("v2");
+        assert_eq!(v2.version5, None);
     }
 }

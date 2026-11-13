@@ -45,7 +45,17 @@ transform reads as well (`multiProcessElementsType`: curve sets of formula
 and sampled segments, matrices with offsets and grids), compiled once into
 integer stages, and converts its intent before that intent's `A2B*` table;
 a tag holding an element of another type is refused by the element's name
-and passed over. A lookup table over one, three or four inputs, and a
+and passed over. ICC.2's elements read beside ICC.1's: formula segments of
+function types 3 to 7 (Table 111), single sampled curves clipped or extended
+past their ends, and extended grids of half floats or 8- or 16-bit
+fractions. **A version 5 profile** (ICC.2) reads its header's fields past
+byte 100 — the spectral connection space, its wavelength ranges, the
+multiplex space and the sub-class (`Profile::version5`) — and its `A2B*` and
+`B2A*` tags may hold such elements, read as a `D2B*` tag's are; it adds
+`A2B3` and `B2A3`, absolute colorimetric's own tables, which absolute
+colorimetric converts through as they stand before `A2B1`, and which another
+intent reaches last with the media white divided out (ICC.2 9.2.93). Its
+`D2B*` and `B2D*` tags take a spectral connection space. A lookup table over one, three or four inputs, and a
 `D2B*` tag's elements over as many, convert through an integer grid of
 their own pipeline — 256, 33 or 17 nodes an axis, each holding the
 pipeline's linear sRGB, evaluated the first time a conversion reaches it and
@@ -129,9 +139,15 @@ is `tinker_pdf_color::icc::Output::compile(profile, intent)`: a value in the
 profile's own connection space — D50 XYZ with the PCS white's `Y` at one, or
 `L*a*b*` — to its device channels, each from 0 to 65 535, at most fifteen
 (`DeviceColour`). It converts through the first source ICC.1 8.10.2's rows
-name for the intent with `B` for `A` — the intent's own `B2A*` table, then
-`B2A0`, then the model inverted, then the other `B2A*` tables — passing over
-one that does not read. A `B2A*` table, `mft1` or `mft2`, takes the value
+name for the intent with `B` for `A` and `D` — the intent's own `B2D*` tag,
+its own `B2A*` table, then `B2A0`, then the model inverted, then the other
+`B2A*` tables — passing over one that does not read. A `B2D*` tag, and a
+version 5 profile's `B2A*` holding elements, takes the connection space's
+three channels, each held to its range — XYZ to what `u1Fixed15` encodes,
+`L*` 0 to 100 and `a*`, `b*` −128 to 127 — through its elements compiled
+into integer stages, to the data space's channels; one giving more than
+fifteen is refused before any element is read. Absolute colorimetric's
+`B2D3` is ICC-absolute already, and the value goes into it undivided. A `B2A*` table, `mft1` or `mft2`, takes the value
 encoded as its type defines it — XYZ in `u1Fixed15` through the table's
 matrix (10.8), Lab in the table's own encoding — through its input curves,
 grid and output curves to as many channels as the data space has; one
