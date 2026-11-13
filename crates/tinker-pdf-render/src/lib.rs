@@ -2604,6 +2604,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 height: image.height,
                 rgb: &image.rgb,
                 alpha: &image.alpha,
+                two_colour: None,
             },
             unit_to_device,
             interpolate: image.interpolate,

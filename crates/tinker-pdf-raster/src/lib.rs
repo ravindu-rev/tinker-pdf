@@ -22,7 +22,7 @@ pub use fragments::Fragments;
 pub use geom::{flatten, FillRule, Path, Point, Verb};
 pub use image::{
     accumulate_image, draw_image, image_bounds, image_bounds_in, image_coverage, Filter, ImageDraw,
-    ImageSource, Pyramid, Sampling, Transform,
+    ImageSource, Pyramid, Sampling, Transform, TwoColour,
 };
 pub use mesh::{draw_mesh, draw_mesh_over, MeshBuffer, MeshDraw};
 pub use stroke::{

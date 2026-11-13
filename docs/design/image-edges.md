@@ -283,8 +283,9 @@ average of the image expanded to RGB rounds it. A stencil is the same pair with
 the paint opaque and the rest transparent, its colour the tint. Past 128:1 the
 pyramid averages each channel with round-half-up, which is not linear in
 coverage — a halved two-colour level holds each channel's rounded midpoint, not
-a third coverage value — so a draw that reduces expands the image to RGB and
-samples it as before. The form is produced where a sample's colour and alpha
+a third coverage value — so a draw that reduces builds its first level from
+the colour each sample chooses, which is the level the image expanded to RGB
+halves to, and samples the RGB levels as before. The form is produced where a sample's colour and alpha
 are a function of its bit alone: one component, one bit and no `/SMask`. A
 colour key that selects one of the two raw values folds into that value's
 alpha; one that selects both, and a soft mask, keep the RGB form. `to_svg`

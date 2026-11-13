@@ -21,40 +21,82 @@ use crate::geom::{FillRule, Path};
 
 /// A decoded image: its samples, and how many of them there are.
 ///
-/// Three bytes of colour per sample and an optional byte of coverage. What
-/// produced them — a codec, a colour conversion, a mask — is the caller's
-/// business and is deliberately not expressible here.
+/// Three bytes of colour per sample and an optional byte of coverage — or, for
+/// an image of two colours, one byte a sample choosing between them
+/// ([`TwoColour`]). What produced them — a codec, a colour conversion, a mask —
+/// is the caller's business and is deliberately not expressible here.
 #[derive(Clone, Copy, Debug)]
 pub struct ImageSource<'a> {
     /// Samples across.
     pub width: u32,
     /// Samples down.
     pub height: u32,
-    /// Three bytes per sample, row-major from the **top** row.
+    /// Three bytes per sample, row-major from the **top** row. Not read where
+    /// [`Self::two_colour`] holds the samples.
     pub rgb: &'a [u8],
     /// One byte of coverage per sample; empty means every sample is opaque.
+    /// Not read where [`Self::two_colour`] holds the samples.
     pub alpha: &'a [u8],
+    /// The one-channel form: an image whose every sample is one of two
+    /// colours, held at one byte a sample in place of `rgb` and `alpha`.
+    /// `None` for an image of three bytes a sample.
+    pub two_colour: Option<TwoColour<'a>>,
+}
+
+/// An image of two colours, held as one byte a sample: a bilevel scan, a
+/// one-bit image of one component, a stencil.
+///
+/// A sample of zero takes the first of [`Self::colours`] and any other value
+/// the second. Both filters are linear in their weights, so a pixel is sampled
+/// by summing one channel — the weight on samples of the second colour —
+/// beside the weight, and each of its four channels comes from the two sums
+/// exactly as the average of the image expanded to RGB rounds it. A stencil is
+/// the pair with its paint opaque and the rest transparent, its colour the
+/// draw's [`ImageDraw::tint`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TwoColour<'a> {
+    /// One byte per sample, row-major from the **top** row.
+    pub samples: &'a [u8],
+    /// Red, green, blue and alpha of a sample of zero, then of any other.
+    pub colours: [[u8; 4]; 2],
 }
 
 impl ImageSource<'_> {
-    /// The sample at `(x, y)`, or `None` where the buffer stops short.
+    /// Where sample `(x, y)` sits in a buffer of one entry a sample, or `None`
+    /// off the image.
     ///
     /// Every index is checked rather than saturated. `usize` is 32 bits on
     /// wasm32 and 64 on the other three targets, and a sample count that fits
     /// one and not the other is exactly the divergence ruling 4 exists to
     /// catch: a wrapping multiply would read a different sample on one target
     /// and the same document would render differently there.
-    fn texel(&self, x: u32, y: u32) -> Option<(u8, u8, u8, u8)> {
+    fn index(&self, x: u32, y: u32) -> Option<usize> {
         if x >= self.width || y >= self.height {
             return None;
         }
-        let index = (y as usize)
+        (y as usize)
             .checked_mul(self.width as usize)?
-            .checked_add(x as usize)?;
+            .checked_add(x as usize)
+    }
+
+    /// The sample at `(x, y)`, or `None` where the buffer stops short: for a
+    /// two-colour image, the colour its byte chooses.
+    fn texel(&self, x: u32, y: u32) -> Option<(u8, u8, u8, u8)> {
+        let index = self.index(x, y)?;
+        if let Some(two) = &self.two_colour {
+            let [r, g, b, a] = two.colours[usize::from(*two.samples.get(index)? != 0)];
+            return Some((r, g, b, a));
+        }
         let start = index.checked_mul(3)?;
         let rgb = self.rgb.get(start..start.checked_add(3)?)?;
         let alpha = self.alpha.get(index).copied().unwrap_or(255);
         Some((rgb[0], rgb[1], rgb[2], alpha))
+    }
+
+    /// Whether the sample at `(x, y)` of a two-colour image takes the second
+    /// colour, or `None` where the buffer stops short: one byte read.
+    fn chosen(&self, two: &TwoColour<'_>, x: u32, y: u32) -> Option<bool> {
+        Some(*two.samples.get(self.index(x, y)?)? != 0)
     }
 }
 
@@ -379,6 +421,7 @@ impl Level {
             height: self.height,
             rgb: &self.rgb,
             alpha: &self.alpha,
+            two_colour: None,
         }
     }
 }
@@ -468,6 +511,13 @@ impl Pyramid {
 /// Integer, round half up. An odd extent leaves a last sample with no partner,
 /// which averages with itself and so survives unchanged rather than being
 /// dropped or paired across the edge.
+///
+/// A two-colour source is read through the colour each sample chooses, so its
+/// first level is the level the image expanded to RGB halves to, and every
+/// level is RGB. That is what a draw past [`PYRAMID_ABOVE`] needs: rounding
+/// each channel's mean half up is not linear in coverage — a halved pair of
+/// two colours holds each channel's rounded midpoint, not a third weight — so
+/// a two-colour image that reduces is sampled as its RGB expansion would be.
 fn halve(source: &ImageSource<'_>, halvings: (u32, u32)) -> Level {
     let horizontal = halvings.1 == 0;
     let width = if horizontal {
@@ -759,7 +809,9 @@ fn walk(
 
     let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
     // Borrowed for the rest of the draw: the level, or the image itself when
-    // the policy asked for no reduction.
+    // the policy asked for no reduction. A two-colour image is sampled in its
+    // one channel only here, where nothing was reduced; its levels are RGB
+    // (`halve`).
     let image = &pyramid.reduce(image, sampling.halvings);
     let plan = Plan::new(image, &inverse, sampling, (x0, x1), (y0, y1));
     // The per-pixel area filter's two lines of taps, reused by every pixel of
@@ -838,6 +890,26 @@ thread_local! {
 fn planned_line() {
     #[cfg(test)]
     PLANNED_LINES.with(|lines| lines.set(lines.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Taps the two filters have summed on this thread, and the channel sums
+    /// those taps went into: what `a_coverage_image_sums_one_channel` counts.
+    static SUMMED: core::cell::Cell<(usize, usize)> = const { core::cell::Cell::new((0, 0)) };
+}
+
+/// Counts `taps` taps each summed into `channels` channels, under
+/// `cfg(test)` only.
+#[inline]
+fn summed(taps: usize, channels: usize) {
+    #[cfg(test)]
+    SUMMED.with(|summed| {
+        let (held, sums) = summed.get();
+        summed.set((held + taps, sums + taps * channels));
+    });
+    #[cfg(not(test))]
+    let _ = (taps, channels);
 }
 
 /// What a draw's pixels read, planned before the first of them is visited.
@@ -1129,6 +1201,9 @@ fn pair(position: f64, extent: u32) -> Pair {
 /// four weights sum to exactly 65 536, which is what keeps four identical
 /// samples returning that sample rather than one level below it.
 fn bilinear_taps(image: &ImageSource<'_>, x: Pair, y: Pair) -> Option<(u8, u8, u8, u8)> {
+    if let Some(two) = &image.two_colour {
+        return two_colour_bilinear_taps(image, two, x, y);
+    }
     // The nearer of the two rows and columns decides whether the pixel is on
     // the image at all; the other three fall back to it where the buffer is
     // shorter than the dimensions claim, so a truncated image blurs into its
@@ -1137,12 +1212,9 @@ fn bilinear_taps(image: &ImageSource<'_>, x: Pair, y: Pair) -> Option<(u8, u8, u
     let t10 = image.texel(x.far, y.near).unwrap_or(anchor);
     let t01 = image.texel(x.near, y.far).unwrap_or(anchor);
     let t11 = image.texel(x.far, y.far).unwrap_or(anchor);
+    summed(4, 4);
 
-    let (wx, wy) = (x.weight, y.weight);
-    let w00 = (256 - wx) * (256 - wy);
-    let w10 = wx * (256 - wy);
-    let w01 = (256 - wx) * wy;
-    let w11 = wx * wy;
+    let (w00, w10, w01, w11) = bilinear_weights(x, y);
     let mix = |a: u8, b: u8, c: u8, d: u8| {
         let total =
             u32::from(a) * w00 + u32::from(b) * w10 + u32::from(c) * w01 + u32::from(d) * w11;
@@ -1155,6 +1227,73 @@ fn bilinear_taps(image: &ImageSource<'_>, x: Pair, y: Pair) -> Option<(u8, u8, u
         mix(anchor.2, t10.2, t01.2, t11.2),
         mix(anchor.3, t10.3, t01.3, t11.3),
     ))
+}
+
+/// Bilinear's four weights, for the taps `(near, near)`, `(far, near)`,
+/// `(near, far)` and `(far, far)`: each the product of the two axes' shares,
+/// and the four summing to exactly 65 536.
+fn bilinear_weights(x: Pair, y: Pair) -> (u32, u32, u32, u32) {
+    let (wx, wy) = (x.weight, y.weight);
+    (
+        (256 - wx) * (256 - wy),
+        wx * (256 - wy),
+        (256 - wx) * wy,
+        wx * wy,
+    )
+}
+
+/// Four taps of a two-colour image, weighted: [`bilinear_taps`] summing one
+/// channel.
+///
+/// Each channel of the four-tap mix is `X0 × (weight on taps of the first
+/// colour) + X1 × (weight on taps of the second)`, and the four weights sum to
+/// 65 536, so `B1`, the weight on taps of the second colour, is all a pixel
+/// needs: its channels are `(X0 × (65536 − B1) + X1 × B1 + 32768) >> 16`, the
+/// same integers the image expanded to RGB mixes. A tap past a short buffer
+/// takes the anchor's choice, as the RGB taps take the anchor's colour.
+fn two_colour_bilinear_taps(
+    image: &ImageSource<'_>,
+    two: &TwoColour<'_>,
+    x: Pair,
+    y: Pair,
+) -> Option<(u8, u8, u8, u8)> {
+    let anchor = image.chosen(two, x.near, y.near)?;
+    let t10 = image.chosen(two, x.far, y.near).unwrap_or(anchor);
+    let t01 = image.chosen(two, x.near, y.far).unwrap_or(anchor);
+    let t11 = image.chosen(two, x.far, y.far).unwrap_or(anchor);
+    summed(4, 1);
+
+    let (w00, w10, w01, w11) = bilinear_weights(x, y);
+    let ones = u32::from(anchor) * w00
+        + u32::from(t10) * w10
+        + u32::from(t01) * w01
+        + u32::from(t11) * w11;
+    Some(two_colour_mix(two.colours, u64::from(ones), 1 << 16))
+}
+
+/// A pixel's colour from a two-colour image's two sums: `ones`, the weight on
+/// samples of the second colour, out of `weight` in all.
+///
+/// Each channel is `(X0 × (weight − ones) + X1 × ones + weight / 2) / weight`,
+/// which is what both filters divide the RGB expansion's channel sum by: the
+/// area filter's quotient over any weight, and bilinear's shift where the
+/// weight is 65 536. A pixel wholly on one colour is that colour, because
+/// `(X × W + W / 2) / W` is `X` for every `W`, which is what makes the
+/// interior of a scan cost no division. `weight` is never zero, and every
+/// channel sum is at most 255 × `weight`: the bound the RGB sums keep.
+fn two_colour_mix(colours: [[u8; 4]; 2], ones: u64, weight: u64) -> (u8, u8, u8, u8) {
+    let [zero, one] = colours;
+    if ones == 0 {
+        return (zero[0], zero[1], zero[2], zero[3]);
+    }
+    if ones == weight {
+        return (one[0], one[1], one[2], one[3]);
+    }
+    let zeros = weight - ones;
+    let half = weight / 2;
+    let mix =
+        |c: usize| ((u64::from(zero[c]) * zeros + u64::from(one[c]) * ones + half) / weight) as u8;
+    (mix(0), mix(1), mix(2), mix(3))
 }
 
 /// Every sample the destination pixel covers, weighted by how much of it the
@@ -1254,6 +1393,9 @@ fn area_line(lo: i64, hi: i64, extent: u32, out: &mut Vec<Tap>) {
 /// wide — an image of 2^56 samples, whose first pyramid level no address space
 /// holds. `docs/design/image-edges.md`, P-08, says the same at more length.
 fn area_taps(image: &ImageSource<'_>, columns: &[Tap], rows: &[Tap]) -> Option<(u8, u8, u8, u8)> {
+    if let Some(two) = &image.two_colour {
+        return two_colour_area_taps(image, two, columns, rows);
+    }
     let mut sum = [0u64; 4];
     let mut weight = 0u64;
     for &(ty, oy) in rows {
@@ -1263,6 +1405,7 @@ fn area_taps(image: &ImageSource<'_>, columns: &[Tap], rows: &[Tap]) -> Option<(
             let Some(texel) = image.texel(tx, ty) else {
                 continue;
             };
+            summed(1, 4);
             let ox = u64::from(ox);
             line_weight += ox;
             line[0] += ox * u64::from(texel.0);
@@ -1282,6 +1425,47 @@ fn area_taps(image: &ImageSource<'_>, columns: &[Tap], rows: &[Tap]) -> Option<(
     let half = weight / 2;
     let mix = |channel: u64| ((channel + half) / weight) as u8;
     Some((mix(sum[0]), mix(sum[1]), mix(sum[2]), mix(sum[3])))
+}
+
+/// The area filter over a two-colour image: [`area_taps`] summing one
+/// channel.
+///
+/// A channel's sum over the image expanded to RGB is
+/// `Σ (ox × oy) × X` over the samples present, which is `X0 × W0 + X1 × W1`
+/// with `W1` the weight on samples of the second colour and `W0` the rest of
+/// the weight `W` — exactly, in integers. So a pixel sums `W1` beside `W`, a
+/// row at a time as the RGB taps do, and [`two_colour_mix`] makes each channel
+/// the quotient the RGB sums give. The sampler reaches a two-colour image only
+/// where the pyramid reduced nothing, so `W` is at most 2^46 and every channel
+/// sum stays under 2^54.
+fn two_colour_area_taps(
+    image: &ImageSource<'_>,
+    two: &TwoColour<'_>,
+    columns: &[Tap],
+    rows: &[Tap],
+) -> Option<(u8, u8, u8, u8)> {
+    let mut ones = 0u64;
+    let mut weight = 0u64;
+    for &(ty, oy) in rows {
+        let mut line_ones = 0u64;
+        let mut line_weight = 0u64;
+        for &(tx, ox) in columns {
+            let Some(one) = image.chosen(two, tx, ty) else {
+                continue;
+            };
+            summed(1, 1);
+            let ox = u64::from(ox);
+            line_weight += ox;
+            line_ones += ox * u64::from(one);
+        }
+        let oy = u64::from(oy);
+        weight += oy * line_weight;
+        ones += oy * line_ones;
+    }
+    if weight == 0 {
+        return None;
+    }
+    Some(two_colour_mix(two.colours, ones, weight))
 }
 
 /// The texel indices a 16.16 span touches, clipped to the image.
@@ -1386,6 +1570,7 @@ mod tests {
             height: 8,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let mut canvas = Canvas::new(64, 64, PixelFormat::Rgb8, Color::WHITE);
         for (e, f) in [(5000.0, 0.0), (-5000.0, 0.0), (0.0, 5000.0), (0.0, -5000.0)] {
@@ -1417,6 +1602,7 @@ mod tests {
             height: 2,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         // A quarter of a turn and a bit, with a translation off the grid.
         let placement = Transform {
@@ -1471,6 +1657,7 @@ mod tests {
             height: 8,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         draw(&mut canvas, &image, over(8.0));
@@ -1492,6 +1679,7 @@ mod tests {
             height: 4,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let mut canvas = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
         draw(
@@ -1517,6 +1705,7 @@ mod tests {
             height: 2,
             rgb: &rgb,
             alpha: &[0, 255, 0, 255],
+            two_colour: None,
         };
         let mut canvas = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
         draw(&mut canvas, &image, over(4.0));
@@ -1533,6 +1722,7 @@ mod tests {
             height: 2,
             rgb: &rgb,
             alpha: &[0, 255, 0, 255],
+            two_colour: None,
         };
         let mut canvas = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(4.0));
@@ -1560,6 +1750,7 @@ mod tests {
             height: 1,
             rgb: &rgb,
             alpha: &[255],
+            two_colour: None,
         };
         let rich = Some([255, 255, 255, 255]);
         let at = |canvas: &Canvas| canvas.data[..5].to_vec();
@@ -1625,6 +1816,7 @@ mod tests {
             height: 4,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         draw(&mut canvas, &image, over(8.0));
@@ -1644,6 +1836,7 @@ mod tests {
             height: 8,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(8.0));
@@ -1685,6 +1878,7 @@ mod tests {
             height: 2,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         // Eight device pixels per axis for two samples: 4x. The footprint is a
         // quarter of a sample, so the average has one sample to take except on
@@ -1715,6 +1909,7 @@ mod tests {
             height: 2,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
 
         let distinct = |interpolate: bool| {
@@ -1751,6 +1946,7 @@ mod tests {
             height: 8,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(8.0));
@@ -1780,6 +1976,7 @@ mod tests {
             height: 2,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         for step in 0..16 {
             let u = 0.5 / 16.0 + f64::from(step) / 16.0;
@@ -1823,6 +2020,7 @@ mod tests {
             height: 1,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
 
         let row = |interpolate: bool| {
@@ -1880,6 +2078,7 @@ mod tests {
             height: 16,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
 
         // 16 samples into 8 device pixels: exactly 2:1, which the pyramid
@@ -1926,6 +2125,7 @@ mod tests {
             height: 1,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let squash = Transform {
             a: 8.0,
@@ -1973,6 +2173,7 @@ mod tests {
             height: 256,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
 
         let sampling = sampling_for(&image, &over(16.0), false);
@@ -2027,6 +2228,7 @@ mod tests {
             height: 512,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
 
         let mut pyramid = Pyramid::new();
@@ -2064,6 +2266,7 @@ mod tests {
             height: 256,
             rgb: &other,
             alpha: &[],
+            two_colour: None,
         };
         // Also past `PYRAMID_ABOVE`, and deliberately so: below it a draw
         // reduces nothing, and a pyramid with no levels would prove nothing
@@ -2121,6 +2324,7 @@ mod tests {
             height: 1,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let level = halve(&image, (1, 0));
         assert_eq!((level.width, level.height), (2, 1));
@@ -2424,6 +2628,7 @@ mod tests {
                     height,
                     rgb: &rgb,
                     alpha: &[],
+                    two_colour: None,
                 },
                 // Two thirds of the samples the dimensions claim.
                 ImageSource {
@@ -2431,6 +2636,7 @@ mod tests {
                     height,
                     rgb: &rgb[..rgb.len() * 2 / 3],
                     alpha: &[],
+                    two_colour: None,
                 },
                 // Alpha for the first half of them, opaque after.
                 ImageSource {
@@ -2438,6 +2644,7 @@ mod tests {
                     height,
                     rgb: &rgb,
                     alpha: &alpha[..alpha.len().div_ceil(2)],
+                    two_colour: None,
                 },
             ];
             for source in sources {
@@ -2518,6 +2725,7 @@ mod tests {
                 height,
                 rgb: &rgb,
                 alpha: &alpha,
+                two_colour: None,
             };
             for placement in turned {
                 for interpolate in [false, true] {
@@ -2562,6 +2770,7 @@ mod tests {
             height: 30,
             rgb: &rgb,
             alpha: &[],
+            two_colour: None,
         };
         let rect = (0, 0, 128, 128);
         for (w, h, interpolate) in [(13.3, 10.0, false), (97.0, 71.3, true)] {
@@ -2621,6 +2830,7 @@ mod tests {
             height: 9,
             rgb: &rgb,
             alpha: &alpha,
+            two_colour: None,
         };
         let placement = Transform {
             a: 37.3,
@@ -2687,5 +2897,471 @@ mod tests {
 
         canvas.fill_mask(&mask, Color::BLACK, 0.5);
         assert_eq!(rounds() - start, 1, "a fill rounds its own alpha, once");
+    }
+
+    /// A two-colour image's RGB expansion: each sample's chosen colour as
+    /// three bytes and its alpha as one.
+    fn expanded(two: &TwoColour<'_>) -> (Vec<u8>, Vec<u8>) {
+        let mut rgb = Vec::with_capacity(two.samples.len() * 3);
+        let mut alpha = Vec::with_capacity(two.samples.len());
+        for &sample in two.samples {
+            let [r, g, b, a] = two.colours[usize::from(sample != 0)];
+            rgb.extend_from_slice(&[r, g, b]);
+            alpha.push(a);
+        }
+        (rgb, alpha)
+    }
+
+    /// A two-colour image of `width` by `height` over `samples`.
+    fn two_colour_source<'a>(
+        width: u32,
+        height: u32,
+        samples: &'a [u8],
+        colours: [[u8; 4]; 2],
+    ) -> ImageSource<'a> {
+        ImageSource {
+            width,
+            height,
+            rgb: &[],
+            alpha: &[],
+            two_colour: Some(TwoColour { samples, colours }),
+        }
+    }
+
+    /// The pixels a draw paints, drawn directly onto a canvas standing at
+    /// `rect` in the page frame and through a run composited onto another.
+    fn painted(draw: &ImageDraw<'_>, rect: (i32, i32, u32, u32)) -> (Vec<u8>, Vec<u8>) {
+        let (x0, y0, width, height) = rect;
+        let mut direct = Canvas::new(width, height, PixelFormat::Rgb8, Color::rgb(30, 160, 220))
+            .at_origin(x0, y0);
+        draw_image(
+            &mut direct,
+            draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
+        let mut run = Fragments::new(x0, y0, width, height);
+        accumulate_image(
+            &mut run,
+            draw,
+            &mut Pyramid::new(),
+            rect,
+            &mut FillScratch::new(),
+        );
+        let mut held = Canvas::new(width, height, PixelFormat::Rgb8, Color::rgb(30, 160, 220))
+            .at_origin(x0, y0);
+        run.composite_region_inked(
+            &mut held,
+            (x0, y0, x0 + width as i32, y0 + height as i32),
+            draw.alpha,
+            draw.blend,
+            None,
+            None,
+            None,
+        );
+        (direct.data, held.data)
+    }
+
+    /// **A two-colour image draws as its RGB expansion, pixel for pixel.**
+    ///
+    /// Images from one sample to 600 by 3, their samples noise, long runs,
+    /// bytes other than 0 and 1, all of the first colour and all of the
+    /// second, some cut short of their dimensions; colour pairs opaque and
+    /// translucent, black and white both ways round, a stencil's opaque paint
+    /// and transparent rest drawn under a tint, a colour key folded into one
+    /// colour's alpha, and one colour twice. Each is drawn from 8:1 magnified
+    /// to past 128:1 minified — where the pyramid reduces and the image is
+    /// sampled through RGB levels — on every flip of its axes, at offsets off
+    /// the pixel grid, with both values of `/Interpolate`, hard and soft
+    /// edges, a translucent draw alpha and canvases at three places in the
+    /// page frame; and rotated, sheared and quarter-turned on the per-pixel
+    /// map. Every pixel the walk hands its consumer is the expansion's, and so
+    /// is every byte drawn directly and through a run. The three samplers,
+    /// asked at a lattice of points and footprints, answer alike too:
+    /// nearest, which the policy never picks, bilinear and the area filter.
+    #[test]
+    fn a_two_colour_image_draws_as_its_rgb_expansion() {
+        let rects = [(0, 0, 64, 64), (5, -3, 23, 17), (-20, 11, 50, 30)];
+        let images: [(u32, u32); 7] = [
+            (1, 1),
+            (2, 3),
+            (7, 5),
+            (16, 9),
+            (33, 21),
+            (600, 3),
+            (3, 600),
+        ];
+        let scales = [
+            (8.0, 8.0),
+            (3.7, 0.73),
+            (1.0, 1.0),
+            (0.5, 1.0 / 3.0),
+            (1.0 / 7.3, 2.25),
+            (1.0 / 150.0, 1.0 / 150.0),
+        ];
+        let pairs: [[[u8; 4]; 2]; 7] = [
+            [[0, 0, 0, 255], [255, 255, 255, 255]],
+            [[255, 255, 255, 255], [0, 0, 0, 255]],
+            [[31, 58, 147, 255], [242, 201, 76, 255]],
+            // A stencil: its paint opaque, the rest transparent.
+            [[0, 0, 0, 255], [0, 0, 0, 0]],
+            // A colour key that selected the samples of zero.
+            [[17, 200, 3, 0], [250, 9, 128, 255]],
+            [[10, 20, 30, 77], [200, 150, 100, 191]],
+            [[90, 91, 92, 255], [90, 91, 92, 255]],
+        ];
+        // The samples of each image, five ways.
+        let patterns = |count: usize, seed: u32| -> [Vec<u8>; 5] {
+            let raw = noise(count, seed);
+            [
+                raw.iter().map(|byte| byte & 1).collect(),
+                (0..count).map(|i| u8::from((i / 5) % 3 == 0)).collect(),
+                raw,
+                vec![0; count],
+                vec![1; count],
+            ]
+        };
+
+        let (mut cases, mut pixels) = (0usize, 0usize);
+        let mut compare = |draw_two: &ImageDraw<'_>,
+                           draw_rgb: &ImageDraw<'_>,
+                           rect: (i32, i32, u32, u32),
+                           what: &str| {
+            let (two, rgb) = (planned_walk(draw_two, rect), planned_walk(draw_rgb, rect));
+            if two != rgb {
+                let at = two
+                    .iter()
+                    .zip(&rgb)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(two.len().min(rgb.len()));
+                panic!(
+                    "{what}: the two-colour walk parts from its expansion at pixel {at} of {} \
+                     against {}: {:?} against {:?}",
+                    two.len(),
+                    rgb.len(),
+                    two.get(at),
+                    rgb.get(at),
+                );
+            }
+            if cases % 11 == 0 {
+                assert!(
+                    painted(draw_two, rect) == painted(draw_rgb, rect),
+                    "{what}: the canvases part"
+                );
+            }
+            pixels += two.len();
+            cases += 1;
+        };
+
+        for (index, &(width, height)) in images.iter().enumerate() {
+            let count = (width * height) as usize;
+            let patterns = patterns(count, 40 + index as u32);
+            for (scale, &(sx, sy)) in scales.iter().enumerate() {
+                let (w, h) = (f64::from(width) * sx, f64::from(height) * sy);
+                for (flip_x, flip_y) in [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    let (left, bottom) = (3.37, 2.61);
+                    let placement = Transform {
+                        a: if flip_x { -w } else { w },
+                        b: 0.0,
+                        c: 0.0,
+                        d: if flip_y { h } else { -h },
+                        e: if flip_x { left + w } else { left },
+                        f: if flip_y { bottom } else { bottom + h },
+                    };
+                    for interpolate in [false, true] {
+                        for (pair, colours) in pairs.iter().enumerate() {
+                            let base = &patterns[(scale + pair + index) % patterns.len()];
+                            // Every fourth draw holds two thirds of its samples.
+                            let samples = if (pair + scale) % 4 == 0 {
+                                &base[..base.len() * 2 / 3]
+                            } else {
+                                &base[..]
+                            };
+                            let two = TwoColour {
+                                samples,
+                                colours: *colours,
+                            };
+                            let (rgb, alpha) = expanded(&two);
+                            let mut draw_two = ImageDraw::new(
+                                two_colour_source(width, height, samples, *colours),
+                                placement,
+                            );
+                            draw_two.interpolate = interpolate;
+                            draw_two.antialias = (pair + scale) % 5 != 0;
+                            if pair == 3 || (pair + scale) % 3 == 0 {
+                                draw_two.tint = Some(Color::rgb(200, 30, 90));
+                            }
+                            if (pair + index) % 6 == 0 {
+                                draw_two.alpha = 0.37;
+                            }
+                            let draw_rgb = ImageDraw {
+                                image: ImageSource {
+                                    width,
+                                    height,
+                                    rgb: &rgb,
+                                    alpha: &alpha,
+                                    two_colour: None,
+                                },
+                                ..draw_two
+                            };
+                            let rect = rects[(pair + scale + index) % rects.len()];
+                            compare(
+                                &draw_two,
+                                &draw_rgb,
+                                rect,
+                                &format!(
+                                    "{width}x{height}, {} samples, colours {colours:?} at \
+                                     {sx}x{sy}, flipped {flip_x}/{flip_y}, interpolate \
+                                     {interpolate}, over {rect:?}",
+                                    samples.len()
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // The draws no plan serves: a rotation, a shear and a quarter turn.
+        let turned = [
+            Transform {
+                a: 20.0,
+                b: 11.0,
+                c: -11.0,
+                d: 20.0,
+                e: 17.3,
+                f: 4.6,
+            },
+            Transform {
+                a: 30.0,
+                b: 0.0,
+                c: 7.5,
+                d: -20.0,
+                e: 5.2,
+                f: 31.7,
+            },
+            Transform {
+                a: 0.0,
+                b: 23.5,
+                c: 31.25,
+                d: 0.0,
+                e: 2.5,
+                f: 3.75,
+            },
+        ];
+        for (index, &(width, height)) in images.iter().enumerate() {
+            let count = (width * height) as usize;
+            let patterns = patterns(count, 80 + index as u32);
+            for placement in turned {
+                for interpolate in [false, true] {
+                    for (pair, colours) in pairs.iter().enumerate() {
+                        let samples = &patterns[(pair + index) % patterns.len()];
+                        let two = TwoColour {
+                            samples,
+                            colours: *colours,
+                        };
+                        let (rgb, alpha) = expanded(&two);
+                        let mut draw_two = ImageDraw::new(
+                            two_colour_source(width, height, samples, *colours),
+                            placement,
+                        );
+                        draw_two.interpolate = interpolate;
+                        if pair == 3 {
+                            draw_two.tint = Some(Color::rgb(12, 140, 60));
+                        }
+                        let draw_rgb = ImageDraw {
+                            image: ImageSource {
+                                width,
+                                height,
+                                rgb: &rgb,
+                                alpha: &alpha,
+                                two_colour: None,
+                            },
+                            ..draw_two
+                        };
+                        compare(
+                            &draw_two,
+                            &draw_rgb,
+                            (0, 0, 64, 64),
+                            &format!(
+                                "{width}x{height}, colours {colours:?} under {placement:?}, \
+                                 interpolate {interpolate}"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            pixels > 250_000,
+            "{cases} draws compared {pixels} pixels, which is too few to say anything"
+        );
+
+        // The samplers themselves, at a lattice of points.
+        let footprints = [
+            (ONE / 4, ONE / 4),
+            (ONE, ONE),
+            (3 * ONE / 2, 5 * ONE / 2),
+            (40 * ONE, 7 * ONE),
+            (128 * ONE, 128 * ONE),
+        ];
+        let mut scratch = (Vec::new(), Vec::new());
+        let mut asked = 0usize;
+        for (index, &(width, height)) in images.iter().enumerate() {
+            let count = (width * height) as usize;
+            for samples in &patterns(count, 120 + index as u32) {
+                for colours in pairs {
+                    let two = TwoColour { samples, colours };
+                    let (rgb, alpha) = expanded(&two);
+                    let source = two_colour_source(width, height, samples, colours);
+                    let expansion = ImageSource {
+                        width,
+                        height,
+                        rgb: &rgb,
+                        alpha: &alpha,
+                        two_colour: None,
+                    };
+                    for step_u in 0..=16 {
+                        for step_v in 0..=16 {
+                            let (u, v) = (f64::from(step_u) / 16.0, f64::from(step_v) / 16.0);
+                            assert_eq!(
+                                nearest(&source, u, v),
+                                nearest(&expansion, u, v),
+                                "nearest, {width}x{height} at {u},{v}"
+                            );
+                            assert_eq!(
+                                bilinear(&source, u, v),
+                                bilinear(&expansion, u, v),
+                                "bilinear, {width}x{height} at {u},{v}"
+                            );
+                            for footprint in footprints {
+                                assert_eq!(
+                                    area(&source, u, v, footprint, &mut scratch),
+                                    area(&expansion, u, v, footprint, &mut scratch),
+                                    "area over {footprint:?}, {width}x{height} at {u},{v}"
+                                );
+                            }
+                            asked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(asked > 10_000, "the samplers were asked at {asked} points");
+    }
+
+    /// **A two-colour image sums one channel a tap.**
+    ///
+    /// Three draws of a 40 by 30 two-colour image — the area filter's plan on
+    /// a 3:1 minification, bilinear's on a magnification that asked for it,
+    /// and the area filter mapped pixel by pixel under a rotation — each sum
+    /// thousands of taps, and the channel sums those taps went into number
+    /// exactly as many: one channel a tap. Its RGB expansion, drawn the same
+    /// three ways, reads the same taps into four channels each. A draw past
+    /// 128:1 reduces through RGB levels, and sums four channels a tap there:
+    /// the one channel is summed only where nothing was reduced.
+    #[test]
+    fn a_coverage_image_sums_one_channel() {
+        let samples: Vec<u8> = noise(40 * 30, 3).iter().map(|byte| byte & 1).collect();
+        let colours = [[0, 0, 0, 255], [255, 255, 255, 255]];
+        let two = TwoColour {
+            samples: &samples,
+            colours,
+        };
+        let (rgb, alpha) = expanded(&two);
+        let coverage = two_colour_source(40, 30, &samples, colours);
+        let expansion = ImageSource {
+            width: 40,
+            height: 30,
+            rgb: &rgb,
+            alpha: &alpha,
+            two_colour: None,
+        };
+        let count = |source: ImageSource<'_>, placement: Transform, interpolate: bool| {
+            SUMMED.with(|summed| summed.set((0, 0)));
+            let mut draw = ImageDraw::new(source, placement);
+            draw.interpolate = interpolate;
+            let mut pixels = 0usize;
+            walk(
+                &draw,
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+                (0, 0, 128, 128),
+                |_, _, _, _, _| pixels += 1,
+            );
+            let (taps, sums) = SUMMED.with(core::cell::Cell::get);
+            (taps, sums, pixels)
+        };
+
+        let draws = [
+            (
+                "the area filter's plan",
+                Transform {
+                    a: 13.3,
+                    b: 0.0,
+                    c: 0.0,
+                    d: -10.0,
+                    e: 2.6,
+                    f: 13.1,
+                },
+                false,
+            ),
+            (
+                "bilinear's plan",
+                Transform {
+                    a: 97.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: -71.3,
+                    e: 2.6,
+                    f: 74.4,
+                },
+                true,
+            ),
+            (
+                "the area filter, pixel by pixel",
+                Transform {
+                    a: 30.0,
+                    b: 12.0,
+                    c: -14.0,
+                    d: 26.0,
+                    e: 40.3,
+                    f: 9.6,
+                },
+                false,
+            ),
+        ];
+        for (what, placement, interpolate) in draws {
+            let (taps, sums, pixels) = count(coverage, placement, interpolate);
+            assert!(
+                taps > 1000 && pixels > 100,
+                "{what}: {taps} taps over {pixels} pixels"
+            );
+            assert_eq!(sums, taps, "{what}: one channel a tap");
+            let (expanded_taps, expanded_sums, expanded_pixels) =
+                count(expansion, placement, interpolate);
+            assert_eq!(
+                (expanded_taps, expanded_pixels),
+                (taps, pixels),
+                "{what}: the expansion reads the same taps"
+            );
+            assert_eq!(expanded_sums, 4 * taps, "{what}: four channels a tap");
+        }
+
+        // 40 samples into a quarter of a pixel and 30 into a fifth: past
+        // 128:1 on both axes, so the pyramid reduces.
+        let squashed = Transform {
+            a: 0.25,
+            b: 0.0,
+            c: 0.0,
+            d: -0.2,
+            e: 1.3,
+            f: 1.7,
+        };
+        assert_ne!(sampling_for(&coverage, &squashed, false).halvings, (0, 0));
+        let (taps, sums, _) = count(coverage, squashed, false);
+        assert!(taps > 0, "the reduced draw read its level");
+        assert_eq!(sums, 4 * taps, "a reduced draw sums its RGB level");
     }
 }

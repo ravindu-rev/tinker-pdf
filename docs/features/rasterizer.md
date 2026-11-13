@@ -296,6 +296,23 @@ to whole device pixels, which is the same defect as the outer edge one level
 down: a render at twice the scale resolves those boundaries twice as finely, so
 box-filtering it back down could not reproduce the coarser render.
 
+*Two colours.* An image whose every sample is one of two colours — a bilevel
+scan, a one-bit image of one component, a stencil — is handed over as
+`ImageSource::two_colour`: one byte a sample choosing between two RGBA
+colours (`TwoColour`), in place of three bytes of colour and one of alpha.
+Both filters are linear in their weights, so such an image is sampled by
+summing one channel, the weight on samples of the second colour, beside the
+weight, and each of a pixel's four channels comes from the two sums exactly as
+the average of the image expanded to RGB rounds it: the area filter's channel
+is `(X0 × W0 + X1 × W1 + W / 2) / W` and bilinear's
+`(X0 × (65536 − B1) + X1 × B1 + 32768) >> 16`, the integers the expansion's
+sums divide. A pixel wholly on one colour is that colour, with no division. A
+stencil is the pair with its paint opaque and the rest transparent, drawn
+under `ImageDraw::tint`. Past 128:1 the pyramid's per-channel round-half-up is
+not linear in coverage, so a two-colour image that reduces builds its first
+level from the colour each sample chooses and is sampled through RGB levels,
+as its expansion is.
+
 *Compositing, and the artefact anti-aliasing creates.* Two images that share an
 edge each cover the pixels along it partly, and compositing them one after the
 other lets the page through in between — a half-and-half boundary keeps a
@@ -419,7 +436,7 @@ The crate root re-exports the working set: `Path`, `Verb`, `Point`,
 `FillRule`, `flatten`; `fill`, `fill_with`, `fill_outline`, `FillScratch`,
 `Mask`; `stroke`, `stroke_mapped`, `stroke_with`, `stroke_mapped_with`,
 `stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
-`blend`); `draw_image`, `ImageDraw`, `ImageSource`, `Transform`, `Filter`,
+`blend`); `draw_image`, `ImageDraw`, `ImageSource`, `TwoColour`, `Transform`, `Filter`,
 `Sampling`, `Pyramid`, `image_bounds_in`; `draw_mesh`, `draw_mesh_over`,
 `MeshDraw`, `MeshBuffer`. The bridge
 from PDF vocabulary — `/BM` names to `BlendMode`, content-stream operators
@@ -477,7 +494,12 @@ tiny pattern over a long line cannot generate millions of pieces.
   minified, flipped, short and turned
   (`the_column_plan_is_the_per_pixel_sampler`), counts one plan a column
   and one a row (`a_draw_plans_its_weights_once_per_column_and_row`) and no
-  `round` call per pixel (`an_image_draw_rounds_no_float_per_pixel`), and
+  `round` call per pixel (`an_image_draw_rounds_no_float_per_pixel`), holds
+  a two-colour image pixel for pixel to its RGB expansion over every filter,
+  ratio, flip, offset and colour pair and under a tint, past 128:1 included
+  (`a_two_colour_image_draws_as_its_rgb_expansion`), and counts one channel
+  summed a tap where the expansion sums four
+  (`a_coverage_image_sums_one_channel`), and
   `canvas.rs` holds every image pixel's level to the expression rounded, over
   every coverage, sample alpha and clip at a sweep of alphas
   (`an_image_pixel_composes_as_the_float_expression_rounded`); `mesh.rs`

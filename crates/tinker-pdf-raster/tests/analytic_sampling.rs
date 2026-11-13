@@ -148,6 +148,7 @@ fn render(source: &[u8], size: u32, side: u32) -> Canvas {
         height: size,
         rgb: source,
         alpha: &[],
+        two_colour: None,
     };
     // The unit square onto the whole canvas, y flipped, which is the placement
     // a page hands the rasterizer.
@@ -329,6 +330,7 @@ fn a_magnified_image_keeps_its_samples_whole() {
         height: 4,
         rgb: &source,
         alpha: &[],
+        two_colour: None,
     };
     let placement = Transform {
         a: 16.0,
@@ -406,6 +408,7 @@ fn black_over_white(x0: f64, y0: f64, x1: f64, y1: f64) -> Canvas {
         height: 2,
         rgb: &rgb,
         alpha: &[],
+        two_colour: None,
     };
     let placement = Transform {
         a: x1 - x0,
@@ -540,6 +543,7 @@ fn an_integer_aligned_image_keeps_every_edge_pixel_whole() {
         height: SIDE,
         rgb: &source,
         alpha: &[],
+        two_colour: None,
     };
     let placement = Transform {
         a: f64::from(SIDE),
@@ -593,6 +597,7 @@ fn two_strips(a: u8, b: u8, conflation_free: bool) -> Vec<u8> {
             height: 2,
             rgb,
             alpha: &[],
+            two_colour: None,
         }
     }
     let mut canvas = Canvas::new(SIDE, SIDE, PixelFormat::Rgb8, Color::WHITE);
