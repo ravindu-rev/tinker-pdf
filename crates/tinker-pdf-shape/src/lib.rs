@@ -99,7 +99,7 @@ pub use common::{
 };
 pub use gdef::{AttachList, Caret, Gdef, GlyphClass, LigCaretList};
 pub use limits::Limits;
-pub use shape::{Orientation, Plans, ShapedRun, Shaper};
+pub use shape::{Orientation, Plans, ShapedRun, Shaper, VerticalMetrics};
 
 use std::sync::Arc;
 
@@ -213,6 +213,16 @@ pub enum Warning {
         /// Which table was running.
         table: Table,
     },
+    /// A glyph of an upright run had no vertical metrics of its own — the
+    /// face carries no `vhea` and `vmtx`, or its `vmtx` ends before the
+    /// glyph's entry, or no box to take an origin from — so its advance or
+    /// its origin was synthesized: one em down, the origin `880/1000` of an
+    /// em above the baseline (`docs/design/shaping.md`, *Vertical shaping*).
+    ///
+    /// Recorded once per run, however many glyphs it covers: the fact worth
+    /// saying is that the column was set on a synthesis, and the face is the
+    /// object it touched.
+    VerticalMetricsSynthesized,
 }
 
 /// What positioning does with the advance a mark glyph arrived with.

@@ -610,6 +610,24 @@ What it does:
   first character does, or upright where it holds an enclosing mark (UAX #50
   §3.2.1). A line's `itemize` is unchanged and every run of it is
   `Orientation::Horizontal`.
+- **A column, shaped.** `Shaper::shape` sets an `Upright` run top to bottom
+  (`Direction::TopToBottom`): the plan its text takes along a line, except
+  that it never joins — a cursive script set upright takes its isolated forms
+  (CSS Writing Modes 3 §5.1.1) — with `vert` added to its last stage, and
+  `vrt2` in `vert`'s place where a setting turns it on and the face carries
+  it. Each glyph's pen moves down by its `vmtx` advance (`y_advance` is its
+  negative, `x_advance` zero) and its offsets put its vertical origin at the
+  pen: half its advance width in, and the `vmtx` clause's origin down. A face
+  without vertical metrics is set on a synthesized em box — one em down, the
+  origin 880/1000 of an em above the baseline — and the run records
+  `Warning::VerticalMetricsSynthesized` once. An upright run runs no `GPOS`
+  lookup; a `GDEF` mark's advance is zeroed. A `Sideways` run is shaped
+  along a line, Mongolian's joining included, with `vrtr` added and `vert`
+  and `vrt2` kept out whatever the settings, and `ShapedRun::orientation`
+  marks it for its consumer to turn 90° clockwise. `ShapedRun::advance` is a
+  run's length along its own axis, `Shaper::shape_text_vertical` shapes a
+  paragraph as a column at once, and `Shaper::vertical_metrics` reports what
+  a glyph stands on.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

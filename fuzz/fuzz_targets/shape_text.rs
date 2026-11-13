@@ -45,6 +45,13 @@
 //!   boundaries, and together they are the whole paragraph. A run boundary
 //!   inside a code point would panic a consumer that sliced on it, and a gap
 //!   would be text that never reached a glyph.
+//! - **A column is cut and set as it says.** Every paragraph is itemized and
+//!   shaped a second time as a column (`itemize_vertical`): a line's runs are
+//!   all horizontal and a column's all upright or sideways, its cuts tile the
+//!   text as a line's do, only an upright run is set top to bottom, a shaped
+//!   run stands as its run did, and no upright glyph advances across its
+//!   column. The upright runs are where a mutator's `vhea`, `vmtx`, `VORG`
+//!   and glyph bounds are read.
 //! - **Every cluster points into its own run**, and clusters never go
 //!   backwards. This is what milestone 7's `/ToUnicode` is built on: after a
 //!   ligature there is nothing left but the cluster to say which characters
@@ -86,8 +93,8 @@ use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::bidi::{self, BaseDirection, Paragraph};
-use tinker_pdf_shape::shape::{itemize, Shaper};
-use tinker_pdf_shape::{Limits, Plans, ShapedGlyph, Warning};
+use tinker_pdf_shape::shape::{itemize, itemize_vertical, Shaper};
+use tinker_pdf_shape::{Direction, Limits, Orientation, Plans, ShapedGlyph, ShapedRun, Warning};
 
 /// The three base directions, so P2/P3's own resolution and the two
 /// overrides are all on the path an ordinary input takes.
@@ -139,7 +146,11 @@ fn check_paragraph(text: &str, paragraph: &Paragraph) {
     );
 
     let line = paragraph.line(0..paragraph.len());
-    assert_eq!(line.levels().len(), count, "a whole-paragraph line lost characters");
+    assert_eq!(
+        line.levels().len(),
+        count,
+        "a whole-paragraph line lost characters"
+    );
     // The visual order of a *line* may be shorter than the line, because X9
     // removes the embedding initiators and `PDF` — but every index in it is
     // still a distinct character of the paragraph.
@@ -153,8 +164,28 @@ fn check_paragraph(text: &str, paragraph: &Paragraph) {
     }
 }
 
-/// The properties a caller of `itemize` is entitled to rely on.
-fn check_runs(text: &str, runs: &[tinker_pdf_shape::shape::Run]) {
+/// The properties a caller of `itemize` or `itemize_vertical` is entitled to
+/// rely on: the runs tile the text, and a line's are all horizontal while a
+/// column's all stand one way or the other in it.
+fn check_runs(text: &str, runs: &[tinker_pdf_shape::shape::Run], vertical: bool) {
+    for run in runs {
+        assert_eq!(
+            run.orientation == Orientation::Horizontal,
+            !vertical,
+            "a {} run in a {}",
+            if run.orientation == Orientation::Horizontal {
+                "horizontal"
+            } else {
+                "column's"
+            },
+            if vertical { "column" } else { "line" }
+        );
+        assert_eq!(
+            run.direction() == Direction::TopToBottom,
+            run.orientation == Orientation::Upright,
+            "only an upright run is set top to bottom"
+        );
+    }
     if text.is_empty() {
         assert!(runs.is_empty(), "empty text produced runs");
         return;
@@ -229,13 +260,32 @@ fn check_glyphs(run: &tinker_pdf_shape::shape::Run, glyphs: &[ShapedGlyph], limi
 /// One shaped run's level, glyphs and warnings.
 type Shaped = (u8, Vec<ShapedGlyph>, Vec<Warning>);
 
-/// Shapes one paragraph, through `plans` where it is given, and returns
-/// everything that came out, so the whole of it can be compared against a
-/// second run.
+/// What a column's shaped run promises beyond a line's: it stands as its run
+/// did, an upright one is set top to bottom, and an upright one's pen moves
+/// only down — no glyph of it advances across the column.
+fn check_column(run: &tinker_pdf_shape::shape::Run, shaped: &ShapedRun) {
+    assert_eq!(
+        shaped.orientation(),
+        run.orientation,
+        "a run changed how it stands"
+    );
+    assert_eq!(shaped.direction(), run.direction());
+    if run.orientation == Orientation::Upright {
+        assert!(
+            shaped.glyphs().iter().all(|glyph| glyph.x_advance == 0),
+            "an upright glyph advanced across its column"
+        );
+    }
+}
+
+/// Shapes one paragraph, as a line or as a column, through `plans` where it
+/// is given, and returns everything that came out, so the whole of it can be
+/// compared against a second run.
 fn shape_all(
     face: &Sfnt<'_>,
     text: &str,
     direction: BaseDirection,
+    vertical: bool,
     limits: Limits,
     plans: Option<&Plans>,
 ) -> Vec<Shaped> {
@@ -247,13 +297,18 @@ fn shape_all(
     let paragraph = Paragraph::new(text, direction);
     check_paragraph(text, &paragraph);
 
-    let runs = itemize(text, &paragraph);
-    check_runs(text, &runs);
+    let runs = if vertical {
+        itemize_vertical(text, &paragraph)
+    } else {
+        itemize(text, &paragraph)
+    };
+    check_runs(text, &runs, vertical);
 
     let mut out = Vec::new();
     for run in &runs {
         let shaped = shaper.shape(text, run);
         check_glyphs(run, shaped.glyphs(), limits);
+        check_column(run, &shaped);
         assert_eq!(
             shaped.text(),
             run.text,
@@ -311,7 +366,10 @@ fuzz_target!(|data: &[u8]| {
     for direction in DIRECTIONS {
         let paragraph = Paragraph::new(&text, direction);
         check_paragraph(&text, &paragraph);
-        check_runs(&text, &itemize(&text, &paragraph));
+        check_runs(&text, &itemize(&text, &paragraph), false);
+        // A column cuts the same paragraph a third way, by orientation, and
+        // the cuts must tile it as a line's do.
+        check_runs(&text, &itemize_vertical(&text, &paragraph), true);
         let again = Paragraph::new(&text, direction);
         assert!(
             paragraph.levels() == again.levels(),
@@ -324,20 +382,25 @@ fuzz_target!(|data: &[u8]| {
     };
     let kept = Plans::new();
     let small = Plans::new();
-    for direction in DIRECTIONS {
-        let once = shape_all(&sfnt, &text, direction, limits, None);
-        let twice = shape_all(&sfnt, &text, direction, limits, None);
-        assert!(once == twice, "shaping is not deterministic");
-        // Building the plans and indexes, and then reading them back.
-        let built = shape_all(&sfnt, &text, direction, limits, Some(&kept));
-        let read = shape_all(&sfnt, &text, direction, limits, Some(&kept));
-        assert!(once == built, "a Plans being built changed the shaping");
-        assert!(once == read, "a kept Plans changed the shaping");
-        let starving = shape_all(&sfnt, &text, direction, starved, Some(&small));
-        let plain = shape_all(&sfnt, &text, direction, starved, None);
-        assert!(
-            plain == starving,
-            "a Plans past its ceiling changed the shaping"
-        );
+    // Each paragraph twice over: along a line, and as a column, whose
+    // upright runs read `vhea`, `vmtx`, `VORG` and the glyph bounds a
+    // mutator writes, and whose sideways runs keep the line's plan.
+    for vertical in [false, true] {
+        for direction in DIRECTIONS {
+            let once = shape_all(&sfnt, &text, direction, vertical, limits, None);
+            let twice = shape_all(&sfnt, &text, direction, vertical, limits, None);
+            assert!(once == twice, "shaping is not deterministic");
+            // Building the plans and indexes, and then reading them back.
+            let built = shape_all(&sfnt, &text, direction, vertical, limits, Some(&kept));
+            let read = shape_all(&sfnt, &text, direction, vertical, limits, Some(&kept));
+            assert!(once == built, "a Plans being built changed the shaping");
+            assert!(once == read, "a kept Plans changed the shaping");
+            let starving = shape_all(&sfnt, &text, direction, vertical, starved, Some(&small));
+            let plain = shape_all(&sfnt, &text, direction, vertical, starved, None);
+            assert!(
+                plain == starving,
+                "a Plans past its ceiling changed the shaping"
+            );
+        }
     }
 });

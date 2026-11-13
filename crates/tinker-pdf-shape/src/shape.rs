@@ -34,6 +34,17 @@
 //! backwards, which is the two-step a consumer does and the only place
 //! direction is read outside this crate.
 //!
+//! # Columns
+//!
+//! A vertical paragraph goes through [`itemize_vertical`] instead, which cuts
+//! each run a third way, by how it stands in the column ([`Orientation`]).
+//! An upright run is shaped top to bottom ([`Direction::TopToBottom`]) with
+//! [`VERT`] in its plan and the face's vertical metrics; a sideways run is
+//! shaped along a line, with [`VRTR`], and marked for its consumer to turn.
+//! [`Shaper::shape_text_vertical`] is the three-line version.
+//! `docs/design/shaping.md`, *Vertical shaping*, is the reading of the
+//! OpenType feature registry, UAX #50 and CSS Writing Modes 3 this follows.
+//!
 //! # Joining scripts take a different plan
 //!
 //! A run whose text contains a character that cursively joins gets
@@ -53,7 +64,7 @@ use core::ops::Range;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tinker_pdf_font::Sfnt;
+use tinker_pdf_font::{Sfnt, VerticalOrigins};
 
 use crate::apply::LookupIndex;
 use crate::arabic;
@@ -172,6 +183,56 @@ pub const JOINING_GSUB_STAGES: &[&[Tag]] = &[
     &[Tag::new(b"mset")],
 ];
 
+/// The vertical alternates an upright run adds to its plan's last `GSUB`
+/// stage: `vert`, which the OpenType feature registry has "active by default
+/// in vertical writing mode".
+///
+/// The registry gives `vert` and `vrt2` to two kinds of layout engine: `vert`
+/// (with [`VRTR`] for sideways runs) to one that turns its sideways runs
+/// itself, which this crate's consumers do with [`Orientation::Sideways`], and
+/// [`VRT2`] "in lieu of" both to one that depends on the face for pre-rotated
+/// glyphs. See [`Shaper::with_settings`] for how a caller of the second kind
+/// asks for it.
+pub const VERT: Tag = Tag::new(b"vert");
+
+/// `vrt2`, the vertical alternates with rotation: off by default.
+///
+/// The registry's `vert` is "a subset" of it and it "overrides" `vert`, and
+/// the two are never applied together. So turned on through
+/// [`Shaper::with_settings`], it takes [`VERT`]'s place in an upright run
+/// where the face carries it for the run's script and language; where the
+/// face does not, `vert` stays, because nothing overrides it. A sideways run
+/// never takes it: its consumer turns it, and a pre-rotated glyph would be
+/// turned twice.
+pub const VRT2: Tag = Tag::new(b"vrt2");
+
+/// `vrtr`, the vertical alternates for rotation, which a sideways run adds to
+/// its plan's last stage: the registry has it "always active by default for
+/// sideways runs in vertical writing mode".
+pub const VRTR: Tag = Tag::new(b"vrtr");
+
+/// What a glyph stands on in a column, in the face's design units.
+///
+/// The metrics an upright run gives each glyph before `GPOS` runs —
+/// `y_advance` is `-advance` and the offsets are `(-origin_x, -origin_y)`, the
+/// glyph's vertical origin at the pen — reported by
+/// [`Shaper::vertical_metrics`] for a consumer that places glyphs by metrics
+/// of its own and wants only what `GPOS` changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VerticalMetrics {
+    /// The advance height: how far down the pen moves past the glyph.
+    pub advance: i32,
+    /// The vertical origin's x from the glyph's horizontal origin: half its
+    /// advance width, rounded down.
+    pub origin_x: i32,
+    /// The vertical origin's y from the glyph's horizontal origin.
+    pub origin_y: i32,
+    /// Whether the face had no vertical metrics of its own for the glyph, so
+    /// its advance or its origin was synthesized: one em down, the origin
+    /// `880/1000` of an em above the baseline.
+    pub synthesized: bool,
+}
+
 /// How a run stands: along a line, or in a column, upright or sideways.
 ///
 /// `docs/design/shaping.md`, *Vertical shaping*. [`itemize`] makes every run
@@ -208,10 +269,15 @@ pub struct Run {
 }
 
 impl Run {
-    /// Which way the run is set, from the parity of its level.
+    /// Which way the run is set: top to bottom where it stands upright in a
+    /// column, and otherwise from the parity of its level — a sideways run
+    /// is shaped along a line, and reads as its level does there.
     #[must_use]
     pub const fn direction(&self) -> Direction {
-        self.level.direction()
+        match self.orientation {
+            Orientation::Upright => Direction::TopToBottom,
+            Orientation::Horizontal | Orientation::Sideways => self.level.direction(),
+        }
     }
 }
 
@@ -220,6 +286,7 @@ impl Run {
 pub struct ShapedRun {
     glyphs: Vec<ShapedGlyph>,
     direction: Direction,
+    orientation: Orientation,
     units_per_em: u16,
     text: Range<usize>,
     warnings: Vec<Warning>,
@@ -236,6 +303,17 @@ impl ShapedRun {
     #[must_use]
     pub fn direction(&self) -> Direction {
         self.direction
+    }
+
+    /// How the run stands, as its [`Run`] said.
+    ///
+    /// [`Orientation::Sideways`] is the mark for rotation: the glyphs were
+    /// shaped along a line, and the consumer turns the run 90° clockwise to
+    /// stand it in its column, so its pen runs down the column and its
+    /// glyphs' tops face the column's right.
+    #[must_use]
+    pub fn orientation(&self) -> Orientation {
+        self.orientation
     }
 
     /// The face's units per em, which every number in [`ShapedRun::glyphs`]
@@ -255,9 +333,18 @@ impl ShapedRun {
         self.text.clone()
     }
 
-    /// The sum of the glyphs' horizontal advances.
+    /// The run's length along its own axis: the sum of its glyphs'
+    /// horizontal advances along a line, a sideways run's included, and down
+    /// a column the sum of their vertical advances negated, since the pen
+    /// moves down there.
     #[must_use]
     pub fn advance(&self) -> i32 {
+        if self.direction.is_vertical() {
+            return self
+                .glyphs
+                .iter()
+                .fold(0i32, |sum, glyph| sum.saturating_sub(glyph.y_advance));
+        }
         self.glyphs
             .iter()
             .fold(0i32, |sum, glyph| sum.saturating_add(glyph.x_advance))
@@ -600,6 +687,18 @@ impl<'a> Shaper<'a> {
     /// alternate substitution does not carry (it takes the first, see
     /// `gsub.rs`), so a caller that needs one must refuse it rather than pass
     /// it here.
+    ///
+    /// # In a column
+    ///
+    /// Settings apply over a column's plans as over a line's, with two rules
+    /// the OpenType feature registry states (`docs/design/shaping.md`,
+    /// *Vertical shaping*). [`VRT2`] turned on takes [`VERT`]'s place in an
+    /// upright run where the face carries it, the two never applied together;
+    /// that is how a caller whose consumer draws every glyph upright — and so
+    /// depends on the face for pre-rotated glyphs — asks for the face's own
+    /// rotation. And a sideways run takes neither `vert` nor `vrt2`, whatever
+    /// the settings, because its consumer turns it and a vertical form would
+    /// be turned twice.
     #[must_use]
     pub const fn with_settings(mut self, settings: &'a [(Tag, u32)]) -> Self {
         self.settings = settings;
@@ -627,30 +726,88 @@ impl<'a> Shaper<'a> {
         on
     }
 
-    /// The plan's substitution stages with the settings applied.
-    fn gsub_plan(&self, stages: Vec<&[Tag]>) -> Vec<Vec<Tag>> {
+    /// The plan's substitution stages with the settings applied, and
+    /// `excluded` kept out of every stage whatever the settings say.
+    fn gsub_plan(&self, stages: Vec<Vec<Tag>>, excluded: &[Tag]) -> Vec<Vec<Tag>> {
+        let planned: Vec<Tag> = stages.iter().flatten().copied().collect();
         let mut out: Vec<Vec<Tag>> = stages
-            .iter()
+            .into_iter()
             .map(|stage| {
                 stage
-                    .iter()
-                    .copied()
-                    .filter(|tag| self.setting(*tag) != Some(0))
+                    .into_iter()
+                    .filter(|tag| self.setting(*tag) != Some(0) && !excluded.contains(tag))
                     .collect()
             })
             .collect();
-        let planned: Vec<Tag> = stages
-            .iter()
-            .flat_map(|stage| stage.iter().copied())
-            .collect();
         if let Some(last) = out.last_mut() {
             for tag in self.turned_on() {
-                if !planned.contains(&tag) {
+                if !planned.contains(&tag) && !excluded.contains(&tag) {
                     last.push(tag);
                 }
             }
         }
         out
+    }
+
+    /// The substitution stages a run of `plan` takes standing `orientation`,
+    /// before the settings: a line's as they are, an upright run's with
+    /// [`VERT`] — or [`VRT2`] in its place — in its last stage, a sideways
+    /// run's with [`VRTR`]. A caller who named its own features gets those
+    /// and no more, in a column as along a line.
+    fn oriented_stages(
+        &self,
+        plan: Plan,
+        orientation: Orientation,
+        gsub: &LayoutTable<'a>,
+        script: Tag,
+    ) -> Vec<Vec<Tag>> {
+        let mut stages: Vec<Vec<Tag>> = plan
+            .gsub_stages(self.gsub_features)
+            .iter()
+            .map(|stage| stage.to_vec())
+            .collect();
+        if plan == Plan::AsAsked {
+            return stages;
+        }
+        let added = match orientation {
+            Orientation::Horizontal => return stages,
+            Orientation::Upright => self.vertical_alternates(gsub, script),
+            Orientation::Sideways => VRTR,
+        };
+        if let Some(last) = stages.last_mut() {
+            if !last.contains(&added) {
+                last.push(added);
+            }
+        }
+        stages
+    }
+
+    /// The features a sideways run never takes, whatever the settings: the
+    /// two vertical alternates, since its consumer turns the run and a
+    /// vertical form would be turned twice. A caller who named its own
+    /// features is taken at its word.
+    fn excluded(&self, plan: Plan, orientation: Orientation) -> &'static [Tag] {
+        if orientation == Orientation::Sideways && plan != Plan::AsAsked {
+            &[VERT, VRT2]
+        } else {
+            &[]
+        }
+    }
+
+    /// An upright run's vertical alternates: [`VERT`], or [`VRT2`] in its
+    /// place where a setting turns `vrt2` on and the face carries it for the
+    /// run's script and language. See [`VRT2`].
+    fn vertical_alternates(&self, gsub: &LayoutTable<'a>, script: Tag) -> Tag {
+        let asked = self.setting(VRT2).is_some_and(|value| value > 0);
+        if asked
+            && !gsub
+                .lookups_for_masked(script, self.language, &[(VRT2, Buffer::GLOBAL)])
+                .is_empty()
+        {
+            VRT2
+        } else {
+            VERT
+        }
     }
 
     /// The positioning features with the settings applied.
@@ -709,23 +866,87 @@ impl<'a> Shaper<'a> {
         (paragraph, runs)
     }
 
+    /// The same for a vertical paragraph: its runs cut by orientation as
+    /// well ([`itemize_vertical`]), each upright run shaped top to bottom and
+    /// each sideways one along a line and marked for rotation.
+    ///
+    /// The [`Paragraph`]'s levels are what a consumer reads a sideways run's
+    /// direction from, and nothing here lays the column out: breaking it and
+    /// placing a sideways run across it are layout's.
+    #[must_use]
+    pub fn shape_text_vertical(
+        &self,
+        text: &str,
+        direction: BaseDirection,
+    ) -> (Paragraph, Vec<ShapedRun>) {
+        let paragraph = Paragraph::new(text, direction);
+        let runs = itemize_vertical(text, &paragraph)
+            .iter()
+            .map(|run| self.shape(text, run))
+            .collect();
+        (paragraph, runs)
+    }
+
+    /// What `glyph` stands on in a column: the advance height and the
+    /// vertical origin an upright run gives it before `GPOS` runs.
+    ///
+    /// The advance is `vmtx`'s, the origin's y the `vmtx` clause's
+    /// ([`tinker_pdf_font::Sfnt::vertical_origin`]) and its x half the glyph's
+    /// advance width. Where the face has none of its own the shaper
+    /// synthesizes them — one em down, the origin `880/1000` of an em above
+    /// the baseline, CSS Writing Modes 3 §5.1.1 requiring a layout engine to
+    /// synthesize what a face lacks and leaving the heuristic open — and says
+    /// so in [`VerticalMetrics::synthesized`]. A consumer that places glyphs
+    /// by metrics of its own subtracts these to keep only what `GPOS`
+    /// changed. For a CFF face without `VORG`, each call parses the face's
+    /// `CFF ` table; shaping a run parses it once.
+    #[must_use]
+    pub fn vertical_metrics(&self, glyph: u16) -> VerticalMetrics {
+        self.metrics_of(&self.face.vertical_origins(), glyph)
+    }
+
+    /// [`Shaper::vertical_metrics`], through a view of the face's origins
+    /// made once for a run.
+    fn metrics_of(&self, origins: &VerticalOrigins<'_, '_>, glyph: u16) -> VerticalMetrics {
+        let em = i32::from(self.face.units_per_em);
+        let advance = self.face.vertical_advance(glyph).map(i32::from);
+        let origin_y = origins.origin(glyph);
+        VerticalMetrics {
+            advance: advance.unwrap_or(em),
+            // `vmtx` leaves the vertical origin's x unspecified, and ISO
+            // 32000-2 9.7.4.3 puts a PDF glyph's at half its width.
+            origin_x: i32::from(self.face.advance(glyph).unwrap_or(0)) / 2,
+            // The ideographic em box, and a PDF CIDFont's `/DW2` default:
+            // `[880 -1000]`. At most 65 535 × 880, inside `i32`.
+            origin_y: origin_y.unwrap_or(em * 880 / 1000),
+            synthesized: advance.is_none() || origin_y.is_none(),
+        }
+    }
+
     /// Shapes one run of one script at one level.
     ///
     /// `text` is the whole paragraph and `run.text` the part to shape, so that
     /// [`ShapedGlyph::cluster`] is an offset into the text the caller has
     /// rather than into a substring it would have to add back.
+    ///
+    /// The run's [`Orientation`] picks the plan and the metrics: a line's
+    /// along a line, the upright plan and the face's vertical metrics in a
+    /// column, and a line's again for a sideways run, with `vrtr` added and
+    /// `vert` and `vrt2` kept out (`docs/design/shaping.md`, *Vertical
+    /// shaping*).
     #[must_use]
     pub fn shape(&self, text: &str, run: &Run) -> ShapedRun {
         let slice = text.get(run.text.clone()).unwrap_or("");
         let mut buffer = Buffer::new();
         buffer.set_direction(run.direction());
+        let orientation = run.orientation;
 
         // Whether this run joins is asked of the text and not of the script;
         // `crate::arabic::joins` says why. A caller that asked for its own
         // feature list is taken at its word and gets one stage, because the
         // staging below is the *default* plan for a joining script and not a
         // property of the script itself.
-        let plan = self.plan(slice);
+        let plan = self.plan(slice, orientation);
         let characters = self.characters(slice, run.text.start, plan == Plan::Universal);
         let from = self.map(&characters, &mut buffer);
         if plan == Plan::Joining {
@@ -741,7 +962,10 @@ impl<'a> Shaper<'a> {
         let mut warnings = Vec::new();
         if let Some(gsub) = self.layout.gsub() {
             let script = self.script_tag(gsub, run.script);
-            let stages = self.gsub_plan(plan.gsub_stages(self.gsub_features));
+            let stages = self.gsub_plan(
+                self.oriented_stages(plan, orientation, gsub, script),
+                self.excluded(plan, orientation),
+            );
             for (index, stage) in stages.iter().enumerate() {
                 // The pair `rphf` was offered has to still be a pair. See
                 // [`withdraw_broken_repha_pairs`].
@@ -788,17 +1012,27 @@ impl<'a> Shaper<'a> {
         // it: an Ethiopic numeral whose medial form is 985 units wide kept the
         // 1149 of the isolated form it was substituted from, and every glyph
         // after it in the line was 164 units too far right.
-        for at in 0..buffer.len() {
-            let Some(glyph) = buffer.glyph(at).map(|g| g.glyph) else {
-                continue;
-            };
-            let advance = i32::from(self.face.advance(glyph).unwrap_or(0));
-            if let Some(slot) = buffer.glyph_mut(at) {
-                slot.x_advance = advance;
+        if orientation == Orientation::Upright {
+            self.stand_upright(&mut buffer, &mut warnings);
+        } else {
+            for at in 0..buffer.len() {
+                let Some(glyph) = buffer.glyph(at).map(|g| g.glyph) else {
+                    continue;
+                };
+                let advance = i32::from(self.face.advance(glyph).unwrap_or(0));
+                if let Some(slot) = buffer.glyph_mut(at) {
+                    slot.x_advance = advance;
+                }
             }
         }
 
-        if let Some(gpos) = self.layout.gpos() {
+        if orientation == Orientation::Upright {
+            // A column's positioning plan is its own; until it runs here, the
+            // marks still give up the advance their face gave them.
+            if plan.mark_widths() == MarkWidths::ZeroByGdef {
+                self.layout.zero_marks(&mut buffer);
+            }
+        } else if let Some(gpos) = self.layout.gpos() {
             let script = self.script_tag(gpos, run.script);
             let wanted: Vec<(Tag, u32)> = self
                 .gpos_plan()
@@ -828,9 +1062,36 @@ impl<'a> Shaper<'a> {
         ShapedRun {
             glyphs: buffer.glyphs().to_vec(),
             direction: run.direction(),
+            orientation,
             units_per_em: self.face.units_per_em,
             text: run.text.clone(),
             warnings,
+        }
+    }
+
+    /// Gives every glyph of an upright run its vertical metrics: the pen
+    /// moves down by the advance height, and the offsets put the glyph's
+    /// vertical origin at the pen (`docs/design/shaping.md`, *The
+    /// convention*). A run any glyph of which took synthesized metrics says
+    /// so, once.
+    fn stand_upright(&self, buffer: &mut Buffer, warnings: &mut Vec<Warning>) {
+        let origins = self.face.vertical_origins();
+        let mut synthesized = false;
+        for at in 0..buffer.len() {
+            let Some(glyph) = buffer.glyph(at).map(|g| g.glyph) else {
+                continue;
+            };
+            let metrics = self.metrics_of(&origins, glyph);
+            synthesized |= metrics.synthesized;
+            if let Some(slot) = buffer.glyph_mut(at) {
+                slot.x_advance = 0;
+                slot.y_advance = metrics.advance.saturating_neg();
+                slot.x_offset = metrics.origin_x.saturating_neg();
+                slot.y_offset = metrics.origin_y.saturating_neg();
+            }
+        }
+        if synthesized {
+            warnings.push(Warning::VerticalMetricsSynthesized);
         }
     }
 
@@ -853,11 +1114,16 @@ impl<'a> Shaper<'a> {
     }
 
     /// Which plan this run gets. See [`Plan`].
-    fn plan(&self, text: &str) -> Plan {
+    ///
+    /// An upright run never joins: CSS Writing Modes 3 §5.1.1 shapes a
+    /// cursive script set upright in its isolated forms, so its text takes
+    /// the default plan, or the Universal Shaping Engine's where it holds a
+    /// Brahmic character.
+    fn plan(&self, text: &str, orientation: Orientation) -> Plan {
         if self.gsub_features.is_some() {
             return Plan::AsAsked;
         }
-        if arabic::joins(text) {
+        if orientation != Orientation::Upright && arabic::joins(text) {
             return Plan::Joining;
         }
         if text

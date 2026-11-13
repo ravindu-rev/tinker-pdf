@@ -72,20 +72,40 @@ pub struct ShapedGlyph {
 /// milestone 3 derives it from UAX #9. A caller sets it; until then it is
 /// left-to-right, which is what makes a buffer built from bare glyph indices
 /// behave as it always did.
+///
+/// # The third direction is a column's
+///
+/// [`Direction::TopToBottom`] is an upright run's in a column
+/// (`docs/design/shaping.md`, *Vertical shaping*). Its pen moves down: each
+/// glyph's `y_advance` is the negative of its advance height and its
+/// `x_advance` is zero, and its offsets place the glyph's outline origin from
+/// the pen. The buffer is drawn in its own order, as a left-to-right run's
+/// is, so [`Direction::is_forward`] is true of it, and what differs is the
+/// axis the pen moves along, [`Direction::is_vertical`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Direction {
-    /// Latin, Devanagari, Han: the pen moves right.
+    /// Latin, Devanagari, Han along a line: the pen moves right.
     #[default]
     LeftToRight,
     /// Arabic, Hebrew: the pen moves left.
     RightToLeft,
+    /// Han, kana and Hangul standing upright in a column: the pen moves down.
+    TopToBottom,
 }
 
 impl Direction {
-    /// Whether the pen advances in the direction indices increase in.
+    /// Whether the pen advances in the direction indices increase in: the
+    /// buffer is drawn in its own order, along a left-to-right line or down a
+    /// column.
     #[must_use]
     pub const fn is_forward(self) -> bool {
-        matches!(self, Direction::LeftToRight)
+        matches!(self, Direction::LeftToRight | Direction::TopToBottom)
+    }
+
+    /// Whether the pen moves along y: a column's direction.
+    #[must_use]
+    pub const fn is_vertical(self) -> bool {
+        matches!(self, Direction::TopToBottom)
     }
 }
 
@@ -821,5 +841,19 @@ mod tests {
         assert_eq!(buffer.direction(), Direction::LeftToRight);
         buffer.set_direction(Direction::RightToLeft);
         assert!(!buffer.direction().is_forward());
+        buffer.set_direction(Direction::TopToBottom);
+        assert_eq!(buffer.direction(), Direction::TopToBottom);
+    }
+
+    /// A column is drawn in buffer order, as a left-to-right line is, and is
+    /// the one direction whose pen moves along y.
+    #[test]
+    fn a_column_is_forward_and_vertical() {
+        assert!(Direction::TopToBottom.is_forward());
+        assert!(Direction::TopToBottom.is_vertical());
+        assert!(Direction::LeftToRight.is_forward());
+        assert!(!Direction::LeftToRight.is_vertical());
+        assert!(!Direction::RightToLeft.is_forward());
+        assert!(!Direction::RightToLeft.is_vertical());
     }
 }
