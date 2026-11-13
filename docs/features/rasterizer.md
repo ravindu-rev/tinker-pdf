@@ -250,8 +250,8 @@ filled any other way holds and costs what it did, and `fill_outline_hard` on
 an outline written without them reads its samples alone.
 
 `ImageDraw::edge_rule` and `MeshDraw::edge_rule` are the rule an image's unit
-square and a mesh's silhouette are drawn by at 0 bits; the renderer passes
-`Half` to both.
+square and a mesh's silhouette are drawn by at 0 bits; the renderer passes its
+level and rule to both ([rendering](rendering.md)).
 
 **Coverage levels.** `Mask::quantise(bits)` reduces a mask to a number of
 bits of coverage ([design](../design/anti-aliasing.md)): 8 leaves it, 1 to 7
@@ -263,10 +263,10 @@ At two bits a pixel is 0, 85, 170 or 255. It is a function of one pixel's
 coverage, so a tile and the page under it agree (ruling 5).
 `ImageDraw::edge_bits`, 8 by default, is the level an image's unit square is
 quantised at before the samples are read, so an image's edge quantises as a
-path's does; the renderer passes 8, or 0 with anti-aliasing off.
+path's does; the renderer passes the level of the class the image is drawn
+in, 0 with anti-aliasing off.
 `MeshDraw::edge_bits` is the same for a mesh's silhouette, applied after the
-colours are spread over it, so they reach the pixels they reach anti-aliased;
-the renderer passes 8 and hardens the buffer itself with anti-aliasing off.
+colours are spread over it, so they reach the pixels they reach anti-aliased.
 
 **Coverage a stripe at a time.** `fill_stripes` measures a shape for a
 liquid-crystal panel's red, green and blue stripes

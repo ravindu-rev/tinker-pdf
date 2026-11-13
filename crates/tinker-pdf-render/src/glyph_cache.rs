@@ -78,6 +78,12 @@ pub(crate) struct Key {
     /// as the bits of the `f64`: one glyph shown at two flatnesses is two
     /// masks.
     pub(crate) tolerance: u64,
+    /// The bits of coverage the mask keeps, the text level
+    /// (`docs/design/anti-aliasing.md`): a mask made at one level is never
+    /// drawn at another.
+    pub(crate) bits: u8,
+    /// The rule it is whole or empty by at 0 bits, `Half` at any other.
+    pub(crate) edge: tinker_pdf_raster::HardEdge,
 }
 
 /// One kept mask.
@@ -202,6 +208,8 @@ mod tests {
             matrix: [3072, 0, 0, -3072],
             phase: [x, y],
             tolerance: 0.2f64.to_bits(),
+            bits: 8,
+            edge: tinker_pdf_raster::HardEdge::Half,
         }
     }
 
@@ -236,11 +244,24 @@ mod tests {
         let hit = cache.get(&k).expect("kept");
         assert!(Arc::ptr_eq(&hit, &kept), "the very mask, not a copy of it");
         assert_eq!(cache.charged(), 12 * 14 + ENTRY_BYTES);
-        // Another phase, another code and another font are other keys.
+        // Another phase, another code and another font are other keys, and
+        // so are another text level and another rule (RC-11.5): a mask made
+        // at one is never drawn at another.
         for other in [
             key(5 << 16, 65, 4, 0),
             key(5 << 16, 66, 3, 0),
             key(6 << 16, 65, 3, 0),
+            Key { bits: 4, ..k },
+            Key {
+                bits: 0,
+                edge: tinker_pdf_raster::HardEdge::Centre,
+                ..k
+            },
+            Key {
+                bits: 0,
+                edge: tinker_pdf_raster::HardEdge::AnyPart,
+                ..k
+            },
         ] {
             assert!(cache.get(&other).is_err(), "{other:?} is not {k:?}");
         }
@@ -589,8 +610,8 @@ mod tests {
         let asked = store.asked.lock().expect("unpoisoned");
         assert!(asked[..6]
             .iter()
-            .all(|key| key.antialias && key.font_id == 7));
-        assert!(asked[6..].iter().all(|key| !key.antialias));
+            .all(|key| key.bits == 8 && key.font_id == 7));
+        assert!(asked[6..].iter().all(|key| key.bits == 0));
         assert_eq!(asked[0].tolerance, asked[6].tolerance);
     }
 }

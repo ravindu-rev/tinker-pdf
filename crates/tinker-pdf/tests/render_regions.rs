@@ -145,7 +145,7 @@ mod written_support;
 use std::sync::Barrier;
 
 use tinker_pdf::{
-    Color, Document, DocumentBuilder, ForcedColours, Page, PixelRegion, RenderOptions,
+    Color, Document, DocumentBuilder, ForcedColours, HardEdge, Page, PixelRegion, RenderOptions,
     RenderWarning,
 };
 
@@ -1030,6 +1030,52 @@ fn a_forced_colour_tile_is_the_page_under_it() {
     check(&annotated, "annotations");
     for fixture in fixtures() {
         with_page(&fixture, |page| check(page, fixture.name));
+    }
+}
+
+/// **A tile at every level and rule is the page under it** (ruling 5,
+/// RC-11.5): every fixture, its graphics and its text at levels apart and
+/// together — 4 and 8, 8 and 2, 1 and 1, 7 and 3 — at level 0 under the
+/// centre rule and under the any-part rule, each with the other class
+/// anti-aliased, and with anti-aliasing off under all three rules, at two
+/// tile sizes and two scales: each tile its rectangle of the page, byte for
+/// byte. A level is a function of one pixel's coverage; the centre rule reads
+/// one sample of the page's device pixels and the any-part rule the shape's
+/// own edges there, neither a function of where a tile stands.
+#[test]
+fn a_tile_at_every_level_and_rule_is_the_page_under_it() {
+    let settings = [
+        (4u8, 8u8, HardEdge::Half, true),
+        (8, 2, HardEdge::Half, true),
+        (1, 1, HardEdge::Half, true),
+        (7, 3, HardEdge::Half, true),
+        (0, 8, HardEdge::Centre, true),
+        (8, 0, HardEdge::AnyPart, true),
+        (0, 0, HardEdge::AnyPart, true),
+        (8, 8, HardEdge::Centre, false),
+        (8, 8, HardEdge::AnyPart, false),
+    ];
+    for fixture in fixtures() {
+        with_page(&fixture, |page| {
+            for (index, (graphics_bits, text_bits, hard_edge, antialias)) in
+                settings.into_iter().enumerate()
+            {
+                let (scale, tile) = if index % 2 == 0 { (1.0, 37) } else { (1.5, 53) };
+                let options = RenderOptions {
+                    scale,
+                    antialias,
+                    graphics_bits,
+                    text_bits,
+                    hard_edge,
+                    ..RenderOptions::default()
+                };
+                let what = format!(
+                    "{} with graphics at {graphics_bits} bits, text at {text_bits},                      {hard_edge:?}, anti-aliasing {antialias}, at {scale}x",
+                    fixture.name
+                );
+                tiles_are_the_page(page, &options, tile, &what);
+            }
+        });
     }
 }
 

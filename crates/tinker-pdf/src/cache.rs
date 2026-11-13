@@ -729,8 +729,10 @@ pub(crate) struct MaskKey {
     pub(crate) matrix: [i32; 4],
     /// The origin's phase on each axis.
     pub(crate) phase: [u8; 2],
-    /// Whether the render anti-aliases.
-    pub(crate) antialias: bool,
+    /// The bits of coverage the mask keeps: the render's text level.
+    pub(crate) bits: u8,
+    /// The rule it is whole or empty by at 0 bits.
+    pub(crate) edge: tinker_pdf_raster::HardEdge,
     /// The bits of the tolerance the glyph's outline is flattened to.
     pub(crate) tolerance: u64,
 }
@@ -743,7 +745,8 @@ impl MaskKey {
             code: asked.code,
             matrix: asked.matrix,
             phase: asked.phase,
-            antialias: asked.antialias,
+            bits: asked.bits,
+            edge: asked.edge,
             tolerance: asked.tolerance,
         }
     }

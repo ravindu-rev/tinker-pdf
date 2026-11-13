@@ -20,7 +20,7 @@
 use tinker_pdf_content::Matrix;
 use tinker_pdf_font::{Outline, Segment};
 use tinker_pdf_raster::{
-    fill::{fill, Mask},
+    fill::{fill, fill_hard, HardEdge, Mask},
     geom::{FillRule, Path},
 };
 
@@ -127,8 +127,9 @@ impl Placement {
 /// A glyph's coverage, rasterised in its own frame: the mask's pixel (0, 0)
 /// is the page-frame pixel at [`Placement::origin`].
 ///
-/// Filled non-zero, as 9.3.6 fills a glyph. `antialias` off hardens the mask
-/// as the path route's `coverage` does, before any clip multiplies into it.
+/// Filled non-zero, as 9.3.6 fills a glyph, and kept at `bits` of coverage as
+/// the path route's `coverage` keeps a glyph, before any clip multiplies into
+/// it: 8 anti-aliased, 1 to 7 quantised, 0 whole or empty by `edge`.
 /// `None` when the mask would hold more than [`MAX_GLYPH_MASK_PIXELS`] or
 /// stand outside `i32`, which leaves the glyph to the path route; a function
 /// of the outline and the placement alone, so a tile and the page under it
@@ -137,7 +138,8 @@ pub(crate) fn rasterise(
     outline: &Outline,
     placement: &Placement,
     tolerance: f64,
-    antialias: bool,
+    bits: u8,
+    edge: HardEdge,
     stop: Option<&dyn Fn() -> bool>,
 ) -> Option<Mask> {
     let local = placement.local();
@@ -195,19 +197,31 @@ pub(crate) fn rasterise(
     // Both are at most `MAX_GLYPH_MASK_PIXELS`, so both fit.
     let width = u32::try_from(width).ok()?;
     let height = u32::try_from(height).ok()?;
-    let mut mask = fill(
-        &path,
-        FillRule::NonZero,
-        left,
-        top,
-        width,
-        height,
-        tolerance,
-        stop,
-    );
-    if !antialias {
-        mask.harden();
-    }
+    let mut mask = if bits == 0 && edge != HardEdge::Half {
+        fill_hard(
+            &path,
+            FillRule::NonZero,
+            left,
+            top,
+            width,
+            height,
+            tolerance,
+            stop,
+            edge,
+        )
+    } else {
+        fill(
+            &path,
+            FillRule::NonZero,
+            left,
+            top,
+            width,
+            height,
+            tolerance,
+            stop,
+        )
+    };
+    mask.quantise(bits);
     Some(mask)
 }
 
@@ -310,19 +324,64 @@ mod tests {
         big.d = -400.0;
         let placement = Placement::of(&big).expect("a placement");
         assert!(
-            rasterise(&square(), &placement, 0.2, true, None).is_none(),
+            rasterise(&square(), &placement, 0.2, 8, HardEdge::Half, None).is_none(),
             "a 400-pixel square is past the bound and keeps the path route"
         );
         let placement = Placement::of(&at(0.0, 0.0)).expect("a placement");
-        let mask = rasterise(&square(), &placement, 0.2, true, None).expect("a mask");
+        let mask = rasterise(&square(), &placement, 0.2, 8, HardEdge::Half, None).expect("a mask");
         assert_eq!((mask.width, mask.height), (15, 15));
     }
 
     #[test]
     fn hardening_leaves_every_pixel_whole_or_empty() {
         let placement = Placement::of(&at(0.25, 0.5)).expect("a placement");
-        let mask = rasterise(&square(), &placement, 0.2, false, None).expect("a mask");
+        let mask = rasterise(&square(), &placement, 0.2, 0, HardEdge::Half, None).expect("a mask");
         assert!(mask.data.iter().all(|v| *v == 0 || *v == 255));
         assert!(mask.data.contains(&255));
+    }
+
+    /// **A glyph's mask keeps its level and its rule** (RC-11.5): at every
+    /// level from 1 to 8 it is the 8-bit mask quantised, at 0 under `Half` the
+    /// 8-bit mask hardened, and at 0 under `Centre` and `AnyPart` the square
+    /// filled by that rule over the same pixels — each whole or empty, the
+    /// any-part mask holding every pixel the centre one does.
+    #[test]
+    fn a_glyph_mask_keeps_its_level_and_its_rule() {
+        let placement = Placement::of(&at(0.25, 0.5)).expect("a placement");
+        let soft = rasterise(&square(), &placement, 0.2, 8, HardEdge::Half, None).expect("a mask");
+        assert!(soft.data.iter().any(|v| *v != 0 && *v != 255));
+        for bits in 0..=8u8 {
+            let mut want = soft.clone();
+            want.quantise(bits);
+            let got =
+                rasterise(&square(), &placement, 0.2, bits, HardEdge::Half, None).expect("a mask");
+            assert_eq!(got.data, want.data, "{bits} bits");
+            for edge in [HardEdge::Centre, HardEdge::AnyPart] {
+                if bits != 0 {
+                    let read =
+                        rasterise(&square(), &placement, 0.2, bits, edge, None).expect("a mask");
+                    assert_eq!(read.data, want.data, "{bits} bits: {edge:?} is not read");
+                }
+            }
+        }
+        let centred =
+            rasterise(&square(), &placement, 0.2, 0, HardEdge::Centre, None).expect("a mask");
+        let touched =
+            rasterise(&square(), &placement, 0.2, 0, HardEdge::AnyPart, None).expect("a mask");
+        for (edge, mask) in [(HardEdge::Centre, &centred), (HardEdge::AnyPart, &touched)] {
+            assert_eq!(
+                (mask.x0, mask.y0, mask.width, mask.height),
+                (soft.x0, soft.y0, soft.width, soft.height)
+            );
+            assert!(mask.data.iter().all(|v| *v == 0 || *v == 255), "{edge:?}");
+            assert!(mask.data.contains(&255), "{edge:?}");
+        }
+        for (c, t) in centred.data.iter().zip(&touched.data) {
+            assert!(*c == 0 || *t == 255, "a centre held is a pixel met");
+        }
+        assert_ne!(
+            centred.data, touched.data,
+            "the square's rim parts the two rules"
+        );
     }
 }

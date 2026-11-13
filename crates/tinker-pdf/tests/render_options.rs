@@ -31,7 +31,8 @@ mod written_support;
 use render_support::{blend_grid_page, curvy_font};
 use tinker_pdf::{
     Bitmap, BlendMode, Color, DeviceSpace, Document, DocumentBuilder, ExtGState, ForcedColours,
-    FormXObject, ImageData, MaskKind, PixelFormat, RenderOptions, StateMask, TransparencyGroup,
+    FormXObject, HardEdge, ImageData, MaskKind, PixelFormat, RenderOptions, StateMask,
+    TransparencyGroup,
 };
 use tinker_pdf_raster::canvas::rgb_to_cmyk;
 
@@ -651,6 +652,9 @@ fn the_default_is_unchanged() {
     let spelled = RenderOptions {
         allow_cmyk: false,
         antialias: true,
+        graphics_bits: 8,
+        text_bits: 8,
+        hard_edge: HardEdge::Half,
         transparent: false,
         premultiplied: false,
         forced_colours: None,
@@ -1945,6 +1949,389 @@ fn a_display_list_draws_forced_colours_as_the_page_does() {
                 assert_eq!(replayed.warnings, direct.warnings, "{name} at {scale}x");
             }
         }
+    }
+}
+
+// ---- levels and rules (RC-11.5) ---------------------------------------------
+
+/// **`antialias` keeps its meaning** (RC-11.5): off, both levels read as 0
+/// under the rule, whatever they say, so the hard-edge page with
+/// anti-aliasing off renders the same bytes at any levels — under `Half`,
+/// the bytes `hard_edged_output_is_pinned` pins.
+#[test]
+fn with_anti_aliasing_off_the_levels_read_as_zero() {
+    let off = render(
+        hard_edge_page(),
+        &RenderOptions {
+            antialias: false,
+            ..RenderOptions::default()
+        },
+    );
+    for (graphics_bits, text_bits) in [(8, 8), (3, 5), (0, 8), (1, 0), (200, 9)] {
+        let other = render(
+            hard_edge_page(),
+            &RenderOptions {
+                antialias: false,
+                graphics_bits,
+                text_bits,
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!(
+            other.data, off.data,
+            "graphics at {graphics_bits} bits and text at {text_bits}, anti-aliasing off"
+        );
+    }
+}
+
+/// The hard-edge page's elements, each alone and in black on white: the
+/// twins whose 8-bit coverage `255 − pixel` is, so that a level's every pixel
+/// is computable from it. Text, the diagonal fill, the stroked curve, the
+/// hairline and the turned image, each as [`hard_edge_page`] draws it, the
+/// first in the text class and the rest in the graphics class.
+fn element_page(index: usize) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.set_subset_fonts(false);
+    assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
+    let samples = [0u8; 12];
+    assert!(builder.add_image(
+        b"Im0",
+        &ImageData::Rgb8 {
+            width: 2,
+            height: 2,
+            data: &samples,
+        }
+    ));
+    builder.add_page(160.0, 100.0, |page| match index {
+        0 => page.text(b"F0", 14.0, 4.0, 78.0, "fox 0123"),
+        1 => page.raw(b"0 g 100 45 m 150 75 l 140 40 l h f"),
+        2 => page.raw(b"0 G 2.3 w 10 10 m 30 45 60 5 80 30 c S"),
+        3 => page.raw(b"0 G 0 w 5 97 m 155 94 l S"),
+        _ => page.raw(b"q 20 12 -12 20 95 5 cm /Im0 Do Q"),
+    });
+    built("hard edge element", builder)
+}
+
+/// The value `bits` bits of coverage take a coverage `c` to, computed here
+/// from `docs/design/anti-aliasing.md`'s definition in its own integers: the
+/// nearest of the `2^b` indices, `c·n / 255` rounded half up as
+/// `(2·c·n + 255) / 510`, and that index's value, `q·255 / n` rounded as
+/// `(2·q·255 + n) / (2n)`; 0 bits the half rule, 8 the coverage itself.
+fn quantised_coverage(c: u8, bits: u8) -> u8 {
+    match bits {
+        0 => {
+            if c >= 128 {
+                255
+            } else {
+                0
+            }
+        }
+        8.. => c,
+        _ => {
+            let n = (1u32 << bits) - 1;
+            let q = (2 * u32::from(c) * n + 255) / 510;
+            ((2 * q * 255 + n) / (2 * n)) as u8
+        }
+    }
+}
+
+/// **Coverage at each level is the 8-bit coverage quantised** (RC-11.5).
+///
+/// Each element of the hard-edge page, alone in black on white, rendered at
+/// every level from 1 to 8 of its own class — text by
+/// `RenderOptions::text_bits`, the fill, the curve, the hairline and the
+/// image's edge by `RenderOptions::graphics_bits` — holds at every pixel
+/// `255 − Q_b(255 − twin)`, the twin being the same element at the default
+/// 8 bits and `Q_b` the level computed in the test. The other class's level
+/// moves no pixel of it: graphics and text apart. At 1 bit every pixel is
+/// whole or empty, the half rule's, and the twins have partial pixels to
+/// quantise, so the comparison is not of white with white.
+#[test]
+fn coverage_at_each_level_is_the_eight_bit_coverage_quantised() {
+    for index in 0..5 {
+        let text = index == 0;
+        let twin = render(element_page(index), &RenderOptions::default());
+        assert!(
+            twin.data.chunks_exact(3).any(|p| p[0] != 0 && p[0] != 255),
+            "element {index} has partial pixels"
+        );
+        assert!(twin
+            .data
+            .chunks_exact(3)
+            .all(|p| p[0] == p[1] && p[1] == p[2]));
+        for bits in 1..=8u8 {
+            let (graphics_bits, text_bits) = if text { (8, bits) } else { (bits, 8) };
+            let options = RenderOptions {
+                graphics_bits,
+                text_bits,
+                ..RenderOptions::default()
+            };
+            let level = render(element_page(index), &options);
+            for (at, (got, was)) in level
+                .data
+                .chunks_exact(3)
+                .zip(twin.data.chunks_exact(3))
+                .enumerate()
+            {
+                let want = 255 - quantised_coverage(255 - was[0], bits);
+                assert_eq!(
+                    got,
+                    &[want, want, want][..],
+                    "element {index} at {bits} bits, pixel {at}: the twin's {}",
+                    was[0]
+                );
+            }
+            // The other class's level reaches nothing of this element.
+            let (graphics_bits, text_bits) = if text { (bits, 8) } else { (8, bits) };
+            let other = render(
+                element_page(index),
+                &RenderOptions {
+                    graphics_bits,
+                    text_bits,
+                    ..RenderOptions::default()
+                },
+            );
+            assert_eq!(
+                other.data, twin.data,
+                "element {index}: the other class at {bits} bits"
+            );
+        }
+    }
+}
+
+/// One page of a single coverage site, written out: `resources` inside the
+/// page's `/Resources`, `content` its stream, and `objects` from object 5 on,
+/// each `(dictionary, stream)`.
+fn site_page(resources: &str, content: &str, objects: &[(&str, &str)]) -> Vec<u8> {
+    let mut pdf = String::from("%PDF-1.7\n");
+    pdf.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    pdf.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+    pdf.push_str(&format!(
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 160 100] \
+         /Resources << {resources} >> /Contents 4 0 R >>\nendobj\n"
+    ));
+    pdf.push_str(&format!(
+        "4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+        content.len()
+    ));
+    for (number, (dictionary, stream)) in (5..).zip(objects) {
+        if stream.is_empty() {
+            pdf.push_str(&format!("{number} 0 obj\n{dictionary}\nendobj\n"));
+        } else {
+            pdf.push_str(&format!(
+                "{number} 0 obj\n<< {dictionary} /Length {} >>\nstream\n{stream}\nendstream\nendobj\n",
+                stream.len()
+            ));
+        }
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        5 + objects.len()
+    ));
+    pdf.into_bytes()
+}
+
+/// The black pixels of a render: where its red channel is 0.
+fn black(bitmap: &Bitmap) -> Vec<bool> {
+    bitmap.data.chunks_exact(3).map(|p| p[0] == 0).collect()
+}
+
+/// **Each rule reaches every coverage site** (RC-11.5).
+///
+/// Every place a render makes coverage, each alone on a page in black: a
+/// path's fill and its stroke, a clip by `W n`, a glyph from its mask, a
+/// stroked glyph and a glyph clipping mode (`7 Tr`), a Type 3 glyph's
+/// procedure, an image's edge, a mesh's silhouette, a tiling pattern's cell
+/// and `sh` through a clip. With anti-aliasing off each is whole or empty
+/// under every rule; the any-part rule paints every pixel the half rule and
+/// the centre rule paint and more, its edges meeting pixels whose centres
+/// they miss — so each rule reached the site. And with anti-aliasing on, a
+/// level of 0 for one class reaches that class's sites alone: the text
+/// sites, the Type 3 glyph's among them, are hard at a text level of 0 and
+/// soft at a graphics level of 0, and the graphics sites the other way
+/// round.
+#[test]
+fn each_rule_reaches_every_coverage_site() {
+    let font_page = |content: &[u8]| {
+        let mut builder = DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
+        builder.add_page(160.0, 100.0, |page| page.raw(content));
+        built("coverage site", builder)
+    };
+    let type3 = "/Font << /T3 << /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+                 /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 5 0 R >> \
+                 /Encoding << /Type /Encoding /Differences [97 /a] >> \
+                 /FirstChar 97 /LastChar 97 /Widths [1000] >> >>";
+    let mesh_stream: String = [(15u8, 20u8), (110, 45), (45, 90)]
+        .iter()
+        .flat_map(|&(x, y)| [0u8, x, y, 0, 0, 0])
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        + ">";
+    let flat = "/ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 160 100] \
+                /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [0 0 0] /N 1 >>";
+    let sites: Vec<(&str, bool, Vec<u8>)> = vec![
+        (
+            "a path's fill",
+            false,
+            site_page("", "0 g 20.3 10.7 m 70.6 40.2 l 30.1 60.8 l h f", &[]),
+        ),
+        (
+            "a path's stroke",
+            false,
+            site_page("", "0 G 1.7 w 10.2 80.3 m 80.6 70.1 l S", &[]),
+        ),
+        (
+            "a clip",
+            false,
+            site_page(
+                "",
+                "20.4 20.6 m 90.3 32.2 l 60.8 70.4 l h W n 0 g 0 0 160 100 re f",
+                &[],
+            ),
+        ),
+        (
+            "a glyph from its mask",
+            true,
+            font_page(b"BT /F0 14 Tf 4.3 30.6 Td (fox 0123) Tj ET"),
+        ),
+        (
+            "a stroked glyph",
+            true,
+            font_page(b"BT /F0 14 Tf 1 Tr 0.6 w 0 G 4.3 60.6 Td (fox) Tj ET"),
+        ),
+        (
+            "a glyph clip",
+            true,
+            font_page(b"BT /F0 30 Tf 7 Tr 10.3 20.6 Td (fox) Tj ET 0 g 0 0 160 100 re f"),
+        ),
+        (
+            "a Type 3 glyph",
+            true,
+            site_page(
+                type3,
+                "BT /T3 60 Tf 20.3 10.6 Td (a) Tj ET",
+                &[("", "1000 0 d0 0 g 100 100 m 900 250 l 450 950 l h f")],
+            ),
+        ),
+        (
+            "an image's edge",
+            false,
+            site_page(
+                "/XObject << /Im0 5 0 R >>",
+                "q 20 12 -12 20 95 5 cm /Im0 Do Q",
+                &[(
+                    "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray \
+                /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                    "00000000>",
+                )],
+            ),
+        ),
+        (
+            "a mesh's silhouette",
+            false,
+            site_page(
+                "/Shading << /Sh0 5 0 R >>",
+                "/Sh0 sh",
+                &[(
+                    "/ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 8 \
+                /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 160 0 100 0 1 0 1 0 1] \
+                /Filter /ASCIIHexDecode",
+                    mesh_stream.as_str(),
+                )],
+            ),
+        ),
+        (
+            "a tiling cell",
+            false,
+            site_page(
+                "/Pattern << /P0 5 0 R >>",
+                "/Pattern cs /P0 scn 5 5 150 90 re f",
+                &[(
+                    "/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 \
+                /YStep 10 /Resources << >>",
+                    "0 g 0 0 m 10 6 l 10 10 l 4 10 l h f",
+                )],
+            ),
+        ),
+        (
+            "sh through a clip",
+            false,
+            site_page(
+                &format!("/Shading << /Sh1 << {flat} >> >>"),
+                "q 90.4 10.2 m 150.7 30.6 l 110.1 60.3 l h W n /Sh1 sh Q",
+                &[],
+            ),
+        ),
+    ];
+    for (name, text, page) in &sites {
+        let hard = |hard_edge: HardEdge| {
+            let bitmap = render(
+                page.clone(),
+                &RenderOptions {
+                    antialias: false,
+                    hard_edge,
+                    ..RenderOptions::default()
+                },
+            );
+            assert!(bitmap.warnings.is_empty(), "{name}: {:?}", bitmap.warnings);
+            assert!(
+                bitmap
+                    .data
+                    .chunks_exact(3)
+                    .all(|p| p == [0, 0, 0] || p == [255, 255, 255]),
+                "{name} under {hard_edge:?}: whole or empty everywhere"
+            );
+            black(&bitmap)
+        };
+        let (half, centre, any) = (
+            hard(HardEdge::Half),
+            hard(HardEdge::Centre),
+            hard(HardEdge::AnyPart),
+        );
+        assert!(
+            centre.iter().any(|b| *b),
+            "{name}: the centre rule paints it"
+        );
+        for (rule, pixels) in [("half", &half), ("centre", &centre)] {
+            for (at, (painted, met)) in pixels.iter().zip(&any).enumerate() {
+                assert!(
+                    !painted || *met,
+                    "{name}: pixel {at} under the {rule} rule is not met"
+                );
+            }
+        }
+        let more = any.iter().zip(&centre).filter(|(a, c)| **a && !**c).count();
+        assert!(
+            more > 0,
+            "{name}: the any-part rule reaches pixels the centre rule does not"
+        );
+
+        let partial = |graphics_bits: u8, text_bits: u8| {
+            render(
+                page.clone(),
+                &RenderOptions {
+                    graphics_bits,
+                    text_bits,
+                    hard_edge: HardEdge::AnyPart,
+                    ..RenderOptions::default()
+                },
+            )
+            .data
+            .chunks_exact(3)
+            .any(|p| p[0] != 0 && p[0] != 255)
+        };
+        let (own, other) = if *text {
+            (partial(8, 0), partial(0, 8))
+        } else {
+            (partial(0, 8), partial(8, 0))
+        };
+        assert!(
+            !own,
+            "{name}: its own class at 0 bits leaves no partial pixel"
+        );
+        assert!(other, "{name}: the other class at 0 bits leaves it soft");
     }
 }
 

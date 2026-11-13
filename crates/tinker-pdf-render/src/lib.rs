@@ -34,7 +34,9 @@ use tinker_pdf_content::{
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
     canvas::{Canvas, Color, InkTables, MaskKind, PixelFormat},
-    fill::{fill_outline, fill_with, FillScratch, HardEdge, Mask},
+    fill::{
+        fill_hard_with, fill_outline, fill_outline_hard, fill_with, FillScratch, HardEdge, Mask,
+    },
     fragments::Fragments,
     geom::{FillRule, Path},
     image::{
@@ -400,6 +402,13 @@ pub struct TileRequest {
     /// partial pixels on a page that asked for none. See
     /// [`Renderer::with_antialias`].
     pub antialias: bool,
+    /// The page's graphics level, for the cell's own graphics
+    /// ([`Renderer::with_levels`]).
+    pub graphics_bits: u8,
+    /// The page's text level, for text in the cell.
+    pub text_bits: u8,
+    /// The page's rule at level 0 ([`Renderer::with_hard_edge`]).
+    pub hard_edge: HardEdge,
 }
 
 /// One rasterized tiling-pattern cell.
@@ -709,8 +718,12 @@ pub struct MaskKey {
     pub matrix: [i32; 4],
     /// The origin's phase on each axis, in sixteenths of a pixel.
     pub phase: [u8; 2],
-    /// Whether the render anti-aliases ([`Renderer::with_antialias`]).
-    pub antialias: bool,
+    /// The bits of coverage the mask keeps: the render's text level, 0 with
+    /// anti-aliasing off ([`Renderer::with_levels`]).
+    pub bits: u8,
+    /// The rule it is whole or empty by at 0 bits
+    /// ([`Renderer::with_hard_edge`]), and [`HardEdge::Half`] at any other.
+    pub edge: HardEdge,
     /// The bits of the tolerance the glyph's outline is flattened to: the
     /// flatness in force when it is shown (10.7.2).
     pub tolerance: u64,
@@ -1235,6 +1248,21 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// Whether coverage is anti-aliased, or every pixel is whole or empty.
     /// See [`Renderer::with_antialias`].
     antialias: bool,
+    /// The bits of coverage graphics keep. See [`Renderer::with_levels`].
+    graphics_bits: u8,
+    /// The bits of coverage text keeps. See [`Renderer::with_levels`].
+    text_bits: u8,
+    /// The rule a pixel is whole by at level 0. See
+    /// [`Renderer::with_hard_edge`].
+    hard_edge: HardEdge,
+    /// Glyphs being shown: what they paint is text however it is painted.
+    showing: u32,
+    /// The count of open text objects at each save, innermost last: what its
+    /// restore lowers the count to, at most.
+    text_saves: Vec<u32>,
+    /// The count of open text objects at each form, group and mask's group
+    /// entered, innermost last: what its end puts back.
+    text_streams: Vec<u32>,
     missing_fonts: u32,
     /// Whether the interpreter refused a nested stream that named itself, for
     /// [`RenderWarning::RecursiveContent`].
@@ -1365,7 +1393,10 @@ pub struct Renderer<'g, G: GlyphSource> {
     forced: Option<Forced>,
     /// Text objects open, each `BT` without its `ET` yet (9.4.1). A fill
     /// inside one is a Type 3 glyph's procedure painting (9.6.5), which
-    /// fill-to-stroke leaves a glyph.
+    /// fill-to-stroke leaves a glyph. No text object outlives the stream it
+    /// was opened in: one a form, a transparency group or a mask's group
+    /// leaves open ends with its stream, and a restore ends every one opened
+    /// since its save, as `tinker_pdf_content::cull` counts them.
     text_depth: u32,
 }
 
@@ -1552,6 +1583,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             skipped: Arc::new(AtomicBool::new(false)),
             tolerance: DEFAULT_TOLERANCE,
             antialias: true,
+            graphics_bits: 8,
+            text_bits: 8,
+            hard_edge: HardEdge::Half,
+            showing: 0,
+            text_saves: Vec::new(),
+            text_streams: Vec::new(),
             missing_fonts: 0,
             recursion_refused: false,
             nested_budget_spent: false,
@@ -1702,12 +1739,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// that no path through the rasterizer is left soft on a page that asked
     /// for hard edges:
     ///
-    /// - every fill, stroke, glyph, clip, text clip and pattern shape goes
-    ///   through `Renderer::coverage`, which hardens the mask `fill` returns
-    ///   before the clip multiplies into it;
+    /// - every fill, stroke, clip, text clip, pattern shape and glyph drawn as
+    ///   a path goes through `Renderer::coverage`, which hardens the mask
+    ///   `fill` returns before the clip multiplies into it, and a glyph's own
+    ///   mask is hardened as it is made;
     /// - an image's edge is hardened inside the rasterizer
     ///   ([`ImageDraw::edge_bits`] at 0);
-    /// - a mesh shading's silhouette is hardened after `draw_mesh`;
+    /// - a mesh shading's silhouette is hardened inside the rasterizer
+    ///   ([`MeshDraw::edge_bits`] at 0), after its colours are spread;
     /// - a tiling pattern's cell is drawn by a renderer of its own, which is
     ///   handed the same answer through [`TileRequest::antialias`];
     /// - `sh` and a shading pattern paint through the clip or the shape, which
@@ -1724,10 +1763,90 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// device can render and a hard-edged device can render a pixel; a line
     /// narrower than that, straddling two pixels, would leave each less than
     /// half covered and vanish.
+    ///
+    /// Off, every coverage is at level 0 whatever [`Renderer::with_levels`]
+    /// says, under the rule [`Renderer::with_hard_edge`] names, whose
+    /// default, [`HardEdge::Half`], is the threshold above.
     #[must_use]
     pub fn with_antialias(mut self, antialias: bool) -> Self {
         self.antialias = antialias;
         self
+    }
+
+    /// The bits of coverage graphics and text keep, 0 to 8
+    /// (`docs/design/anti-aliasing.md`): 8, the default, anti-aliased; 1 to 7
+    /// each pixel's coverage taken to the nearest of `2^bits` values
+    /// ([`Mask::quantise`]); 0 whole or empty by the rule
+    /// [`Renderer::with_hard_edge`] names. A number above 8 reads as 8.
+    ///
+    /// Text is every glyph shown, however it is painted — from its mask, as a
+    /// path, stroked or through a pattern — and everything a text object
+    /// paints or clips: a Type 3 glyph's procedure and the clip modes 4 to 7
+    /// add at `ET`. Graphics is everything else: paths, clips, image edges and
+    /// mesh silhouettes. A tiling cell is drawn by a renderer of its own,
+    /// handed both levels and the rule through [`TileRequest`], so text in a
+    /// cell is text. Each level is applied where the coverage is made, before
+    /// the clip and the soft mask multiply into it. Read only with
+    /// anti-aliasing on: [`Renderer::with_antialias`]`(false)` reads both as
+    /// 0.
+    #[must_use]
+    pub fn with_levels(mut self, graphics: u8, text: u8) -> Self {
+        self.graphics_bits = graphics.min(8);
+        self.text_bits = text.min(8);
+        self
+    }
+
+    /// The rule a pixel is whole by at level 0: [`HardEdge::Half`], the
+    /// default, the coverage hardened at half a pixel; [`HardEdge::Centre`]
+    /// the pixels whose centres a shape holds; [`HardEdge::AnyPart`] every
+    /// pixel it meets. Under the last the renderer's scratch keeps each
+    /// stroke's pieces, which that rule reads where an edge passes
+    /// ([`FillScratch::keep_outline_points`]).
+    #[must_use]
+    pub fn with_hard_edge(mut self, edge: HardEdge) -> Self {
+        self.hard_edge = edge;
+        self.scratch.keep_outline_points(edge == HardEdge::AnyPart);
+        self
+    }
+
+    /// Whether what is painted now is text: a glyph being shown, or anything
+    /// a text object paints or clips.
+    fn painting_text(&self) -> bool {
+        self.showing > 0 || self.text_depth > 0
+    }
+
+    /// The level coverage made now keeps: 0 with anti-aliasing off, the
+    /// text level while text is painted, the graphics level otherwise.
+    fn level(&self) -> u8 {
+        if !self.antialias {
+            0
+        } else if self.painting_text() {
+            self.text_bits
+        } else {
+            self.graphics_bits
+        }
+    }
+
+    /// The rule a fill asks the filler for: the hard edge's, at level 0
+    /// under a rule that reads the shape; `None` where the coverage is read.
+    fn hard_rule(&self, level: u8) -> Option<HardEdge> {
+        (level == 0 && self.hard_edge != HardEdge::Half).then_some(self.hard_edge)
+    }
+
+    /// Notes a form, group or mask's group the interpreter `entered`, so that
+    /// a text object its stream leaves open ends with it.
+    fn entered_stream(&mut self, entered: bool) {
+        if entered {
+            self.text_streams.push(self.text_depth);
+        }
+    }
+
+    /// Notes that the innermost entered stream ended: the text objects open
+    /// are the ones open when it began.
+    fn left_stream(&mut self) {
+        if let Some(at) = self.text_streams.pop() {
+            self.text_depth = at;
+        }
     }
 
     /// The thinnest stroke this render draws, in device pixels: 8.4.3.2's
@@ -1877,8 +1996,20 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             code: glyph.code,
             matrix: placement.matrix,
             phase: placement.phase,
-            antialias: self.antialias,
+            bits: self.level(),
+            edge: self.mask_rule(),
             tolerance: self.tolerance.to_bits(),
+        }
+    }
+
+    /// The rule a glyph's mask is made under, as its keys hold it: the hard
+    /// edge's at level 0, and [`HardEdge::Half`] at any other level, where
+    /// no rule is read, so that one mask serves them all.
+    fn mask_rule(&self) -> HardEdge {
+        if self.level() == 0 {
+            self.hard_edge
+        } else {
+            HardEdge::Half
         }
     }
 
@@ -1898,6 +2029,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             matrix: placement.matrix,
             phase: placement.phase,
             tolerance: self.tolerance.to_bits(),
+            bits: self.level(),
+            edge: self.mask_rule(),
         })
     }
 
@@ -3114,9 +3247,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             color: &convert,
             stop: Some(&stop),
             scale: self.pixels_per_square_unit().sqrt(),
-            // The silhouette is hardened below when anti-aliasing is off.
-            edge_bits: 8,
-            edge_rule: HardEdge::Half,
+            // The silhouette at its level, the colours spread before it.
+            edge_bits: self.level(),
+            edge_rule: self.hard_edge,
         };
         let drawn = draw_mesh_over(&draw, wanted.rect(), whole.rect(), &mut self.scratch);
         let kept = shading.take();
@@ -3129,9 +3262,6 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.mask_pixels = self.mask_pixels.saturating_add(
                 u64::from(buffer.coverage.width) * u64::from(buffer.coverage.height),
             );
-        }
-        if !self.antialias {
-            buffer.coverage.harden();
         }
 
         // The mesh's shape for the plane: its coverage over the area the
@@ -3382,6 +3512,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             cancel: self.cancel.clone(),
             depth: self.pattern_depth + 1,
             antialias: self.antialias,
+            graphics_bits: self.graphics_bits,
+            text_bits: self.text_bits,
+            hard_edge: self.hard_edge,
         };
         let Some(tile) = self.glyphs.tile(name, &request) else {
             return false;
@@ -3560,8 +3693,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .mask_pixels
                 .saturating_add(u64::from(width) * u64::from(height));
         }
-        let mut mask = match shape {
-            Shape::Fill(path, rule) => fill_with(
+        let level = self.level();
+        let mut mask = match (shape, self.hard_rule(level)) {
+            (Shape::Fill(path, rule), None) => fill_with(
                 &mut self.scratch,
                 path,
                 rule,
@@ -3572,13 +3706,28 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 self.tolerance,
                 stop,
             ),
-            Shape::Stroke => fill_outline(&mut self.scratch, x0, y0, width, height, stop),
+            (Shape::Fill(path, rule), Some(edge)) => fill_hard_with(
+                &mut self.scratch,
+                path,
+                rule,
+                x0,
+                y0,
+                width,
+                height,
+                self.tolerance,
+                stop,
+                edge,
+            ),
+            (Shape::Stroke, None) => fill_outline(&mut self.scratch, x0, y0, width, height, stop),
+            (Shape::Stroke, Some(edge)) => {
+                fill_outline_hard(&mut self.scratch, x0, y0, width, height, stop, edge)
+            }
         };
-        // Before the clip, so the clip multiplies into a hard shape and the
-        // product of two hard masks stays hard. See `with_antialias`.
-        if !self.antialias {
-            mask.harden();
-        }
+        // Before the clip, so the clip multiplies into a shape at its level
+        // and the product of two hard masks stays hard: 8 leaves the
+        // coverage, 1 to 7 quantise it, and 0 hardens it, which a mask the
+        // filler made whole or empty already is. See `with_levels`.
+        mask.quantise(level);
         // 8.5.4: the clip multiplies rather than replaces, so an anti-aliased
         // edge clipped by another stays soft on both. In place, because the
         // region above is already no larger than the clip: the destination
@@ -3838,8 +3987,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     tint: image.stencil.then_some(Color::WHITE),
                     ink: None,
                     stop: None,
-                    edge_bits: if self.antialias { 8 } else { 0 },
-                    edge_rule: HardEdge::Half,
+                    edge_bits: self.level(),
+                    edge_rule: self.hard_edge,
                 };
                 draw_image(
                     &mut probe,
@@ -3954,8 +4103,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             tint,
             ink,
             stop: Some(&stop),
-            edge_bits: if self.antialias { 8 } else { 0 },
-            edge_rule: HardEdge::Half,
+            edge_bits: self.level(),
+            edge_rule: self.hard_edge,
         };
         // Built here and dropped here. The levels are the caller's to keep,
         // and keeping them needs an identity for the image rather than a
@@ -4484,261 +4633,10 @@ fn stroke_style(state: &GraphicsState) -> StrokeStyle {
     }
 }
 
-impl<G: GlyphSource> Device for Renderer<'_, G> {
-    fn is_cancelled(&self) -> bool {
-        self.stopping()
-    }
-
-    /// The admission's answers ([`Admission::answers_alike`]), which are
-    /// every answer this renderer gives that does not depend on cancellation;
-    /// and a renderer cancelled declines everything, so it is handed no
-    /// replay.
-    fn answers_alike(&self, events: &[tinker_pdf_content::record::Event]) -> bool {
-        !self.cancel.is_cancelled() && self.admission.answers_alike(events)
-    }
-
-    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
-        // Ends the image run: a run only holds while nothing else draws,
-        // which is what keeps its clip, soft mask and alpha constant.
-        self.flush_run();
-        if self.stopping() || self.hidden() || self.discarding() {
-            return;
-        }
-        let built = self.to_path(path);
-        if built.is_empty() {
-            return;
-        }
-        self.tolerance = flatness_tolerance(state);
-        let rule = if even_odd {
-            FillRule::EvenOdd
-        } else {
-            FillRule::NonZero
-        };
-        let painting = self.painting(state);
-        let state: &GraphicsState = &painting;
-
-        // Forced colours' fill-to-stroke: the path's stroke at the thinnest
-        // width, solid, through the same pen `0 w [] 0 d S` takes, so a fill
-        // so drawn is that stroke byte for byte. A fill inside a text object
-        // is a Type 3 glyph's, and a glyph stays filled.
-        if self.forced.is_some_and(|forced| forced.fill_to_stroke) && self.text_depth == 0 {
-            let style = StrokeStyle {
-                width: 0.0,
-                dashes: Vec::new(),
-                dash_phase: 0.0,
-                ..stroke_style(state)
-            };
-            let stop = self.stop_predicate();
-            let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
-            let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
-            self.paint_inked(
-                outline,
-                stroke_color(state),
-                state.stroke_ink,
-                state.stroke_alpha,
-                blend_mode(state.blend),
-                &set,
-            );
-            return;
-        }
-
-        // 8.7.3: a pattern supplies the paint, so the fill colour is not used
-        // at all. Painting it would put `/Pattern`'s nominal black over every
-        // gradient in the document.
-        if let Some(name) = state.fill_pattern.clone() {
-            self.fill_with_pattern(
-                Shape::Fill(&built, rule),
-                &name,
-                state,
-                state.fill_alpha,
-                fill_color(state),
-                state.fill_family,
-            );
-            return;
-        }
-
-        let color = fill_color(state);
-        let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
-        self.paint_inked(
-            Shape::Fill(&built, rule),
-            color,
-            state.fill_ink,
-            state.fill_alpha,
-            blend_mode(state.blend),
-            &set,
-        );
-    }
-
-    fn clip_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
-        // Ends the image run: a run only holds while nothing else draws,
-        // which is what keeps its clip, soft mask and alpha constant.
-        self.flush_run();
-        // A clip is a full fill of its own path plus an intersect, and it had
-        // no check at all — so a render cancelled while a clip operator was
-        // pending still paid for both. Skipping it cannot leak ink: every
-        // paint is gated too, so a clip that is never installed is never the
-        // reason something is drawn.
-        if self.stopping() {
-            return;
-        }
-        let built = self.to_path(path);
-        if built.is_empty() {
-            return;
-        }
-        // 10.7.4: the clip is the pixels a fill of the path would paint, so
-        // it is flattened at the flatness a fill there would be.
-        self.tolerance = flatness_tolerance(state);
-        let rule = if even_odd {
-            FillRule::EvenOdd
-        } else {
-            FillRule::NonZero
-        };
-        // 8.5.4: the new clip is the intersection with whatever is in force,
-        // which is a multiply rather than a replacement — an anti-aliased edge
-        // clipped by another must stay soft on both. `coverage` does that, and
-        // the region it picks is the two rectangles' overlap, so a clip stack
-        // shrinks as it nests instead of carrying a page apiece.
-        let stop = self.stop_predicate();
-        let (clip, bounds) = self.clip_coverage(&built, rule, Some(&stop));
-        self.clip = Some(clip);
-        self.clip_bounds = Some(bounds);
-    }
-
-    fn begin_text(&mut self) {
-        self.text_depth = self.text_depth.saturating_add(1);
-    }
-
-    fn end_text(&mut self) {
-        self.text_depth = self.text_depth.saturating_sub(1);
-        // Ends the image run: a run only holds while nothing else draws,
-        // which is what keeps its clip, soft mask and alpha constant.
-        self.flush_run();
-        // Before the accumulated outline is rasterized, for the same reason as
-        // `clip_path`: a text clip is a fill over every glyph of the object at
-        // once, which is the largest single clip a page can ask for.
-        if self.stopping() {
-            return;
-        }
-        // 9.3.6: text clipping modes accumulate every glyph of the text
-        // object and intersect the result at `ET`, not glyph by glyph —
-        // clipping each glyph as it arrived would leave the next one clipped
-        // to the previous, which is empty.
-        //
-        // A text object that selects a clipping mode and then shows no glyphs
-        // at all should clip everything away. It does not here: nothing
-        // records the mode unless a glyph reaches the device, so the clip
-        // stays absent rather than becoming empty.
-        let requested = std::mem::take(&mut self.text_clip_requested);
-        let path = match self.text_clip.take() {
-            Some(path) => path,
-            // 9.3.6: a text object that selected a clipping mode and produced
-            // no glyphs clips everything away. An empty path is the honest
-            // answer; leaving the clip alone would paint the whole page.
-            None if requested => {
-                self.warnings.push(RenderWarning::EmptyTextClip);
-                Path::new()
-            }
-            None => return,
-        };
-        // Each glyph at the flatness it was shown at: the one they share, or
-        // already flattened each at its own.
-        if let Some(tolerance) = self.text_clip_tolerance.take() {
-            self.tolerance = tolerance;
-        }
-        self.text_clip_flat = false;
-        let stop = self.stop_predicate();
-        let (clip, bounds) = self.clip_coverage(&path, FillRule::NonZero, Some(&stop));
-        self.clip = Some(clip);
-        self.clip_bounds = Some(bounds);
-    }
-
-    fn save_state(&mut self) {
-        let held = self.held();
-        self.clip_stack.push(held);
-    }
-
-    fn restore_state(&mut self) {
-        // Ruling 8: the soft mask is pixels and lives here rather than in the
-        // graphics state, so `Q` has to put it back -- otherwise an `/SMask`
-        // set inside `q ... Q` keeps masking everything drawn after the `Q`,
-        // which is content quietly missing from the rest of the page.
-        if let Some(held) = self.clip_stack.pop() {
-            self.restore_held(held);
-        }
-    }
-
-    fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
-        // Ends the image run: a run only holds while nothing else draws,
-        // which is what keeps its clip, soft mask and alpha constant.
-        self.flush_run();
-        if self.stopping() || self.hidden() || self.discarding() {
-            return;
-        }
-        let built = self.to_path(path);
-        if built.is_empty() {
-            return;
-        }
-        // 10.7.2: the path, and the stroker's round joins and caps, are
-        // flattened at the flatness in force.
-        self.tolerance = flatness_tolerance(state);
-        let painting = self.painting(state);
-        let state: &GraphicsState = &painting;
-
-        // 8.4.3.2: the line width is in user space, and so are the dashes —
-        // the pen is stated in user units and `pen` carries it to the device.
-        // A hairline still has to cover a pixel to be visible.
-        let style = stroke_style(state);
-        // The dash expansion below is the part of a stroke that can run away:
-        // 8.4.3.6 puts no floor on a dash length, so a page-long rule under a
-        // fine array expands into a hundred thousand pieces per segment before
-        // a single row of it is filled.
-        let stop = self.stop_predicate();
-        let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
-
-        // 8.7.3: a stroke painted with a pattern takes its paint from the
-        // pattern, exactly as a fill does — and a stroke *is* a fill, of the
-        // outline just computed. So this needs no pattern machinery of its
-        // own; what it needed was to stop asking for `stroke_color`, which for
-        // `/Pattern` is the nominal black the colour crate reports because a
-        // pattern space has no colour of its own. Every gradient-stroked rule
-        // in every document came out solid black, silently.
-        //
-        // The rule is non-zero and is stated rather than defaulted: a stroked
-        // outline overlaps itself at joins, at caps and wherever a path
-        // crosses, and under even-odd every one of those overlaps would be
-        // punched back out into a hole.
-        if let Some(name) = state.stroke_pattern.clone() {
-            // The *stroke* slot's colour, and 8.7.3.3 is why that has to be
-            // said out loud: an uncoloured pattern paints in the colour its
-            // `SCN` operands gave, and this operator's operands went to the
-            // stroking slot. Handing the fill slot's colour instead is a
-            // defect nothing else in the engine can see -- every "the pattern
-            // paints" assertion is satisfied by a cell that paints in *some*
-            // colour.
-            self.fill_with_pattern(
-                outline,
-                &name,
-                state,
-                state.stroke_alpha,
-                stroke_color(state),
-                state.stroke_family,
-            );
-            return;
-        }
-
-        let color = stroke_color(state);
-        let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
-        self.paint_inked(
-            outline,
-            color,
-            state.stroke_ink,
-            state.stroke_alpha,
-            blend_mode(state.blend),
-            &set,
-        );
-    }
-
-    fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+impl<G: GlyphSource> Renderer<'_, G> {
+    /// A glyph shown ([`Device::show_glyph`]), with the count of glyphs being
+    /// shown already raised.
+    fn show_glyph_shown(&mut self, glyph: &Glyph, state: &GraphicsState) {
         self.counts.glyphs_shown = self.counts.glyphs_shown.saturating_add(1);
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
@@ -4834,7 +4732,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                             &outline,
                             &placement,
                             self.tolerance,
-                            self.antialias,
+                            self.level(),
+                            self.mask_rule(),
                             Some(&stop),
                         )
                         .map(Arc::new);
@@ -5015,6 +4914,277 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     .extend(&polyline(&path, tolerance));
             }
         }
+    }
+}
+
+impl<G: GlyphSource> Device for Renderer<'_, G> {
+    fn is_cancelled(&self) -> bool {
+        self.stopping()
+    }
+
+    /// The admission's answers ([`Admission::answers_alike`]), which are
+    /// every answer this renderer gives that does not depend on cancellation;
+    /// and a renderer cancelled declines everything, so it is handed no
+    /// replay.
+    fn answers_alike(&self, events: &[tinker_pdf_content::record::Event]) -> bool {
+        !self.cancel.is_cancelled() && self.admission.answers_alike(events)
+    }
+
+    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
+        if self.stopping() || self.hidden() || self.discarding() {
+            return;
+        }
+        let built = self.to_path(path);
+        if built.is_empty() {
+            return;
+        }
+        self.tolerance = flatness_tolerance(state);
+        let rule = if even_odd {
+            FillRule::EvenOdd
+        } else {
+            FillRule::NonZero
+        };
+        let painting = self.painting(state);
+        let state: &GraphicsState = &painting;
+
+        // Forced colours' fill-to-stroke: the path's stroke at the thinnest
+        // width, solid, through the same pen `0 w [] 0 d S` takes, so a fill
+        // so drawn is that stroke byte for byte. A fill inside a text object
+        // is a Type 3 glyph's, and a glyph stays filled.
+        if self.forced.is_some_and(|forced| forced.fill_to_stroke) && self.text_depth == 0 {
+            let style = StrokeStyle {
+                width: 0.0,
+                dashes: Vec::new(),
+                dash_phase: 0.0,
+                ..stroke_style(state)
+            };
+            let stop = self.stop_predicate();
+            let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
+            let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
+            self.paint_inked(
+                outline,
+                stroke_color(state),
+                state.stroke_ink,
+                state.stroke_alpha,
+                blend_mode(state.blend),
+                &set,
+            );
+            return;
+        }
+
+        // 8.7.3: a pattern supplies the paint, so the fill colour is not used
+        // at all. Painting it would put `/Pattern`'s nominal black over every
+        // gradient in the document.
+        if let Some(name) = state.fill_pattern.clone() {
+            self.fill_with_pattern(
+                Shape::Fill(&built, rule),
+                &name,
+                state,
+                state.fill_alpha,
+                fill_color(state),
+                state.fill_family,
+            );
+            return;
+        }
+
+        let color = fill_color(state);
+        let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
+        self.paint_inked(
+            Shape::Fill(&built, rule),
+            color,
+            state.fill_ink,
+            state.fill_alpha,
+            blend_mode(state.blend),
+            &set,
+        );
+    }
+
+    fn clip_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
+        // A clip is a full fill of its own path plus an intersect, and it had
+        // no check at all — so a render cancelled while a clip operator was
+        // pending still paid for both. Skipping it cannot leak ink: every
+        // paint is gated too, so a clip that is never installed is never the
+        // reason something is drawn.
+        if self.stopping() {
+            return;
+        }
+        let built = self.to_path(path);
+        if built.is_empty() {
+            return;
+        }
+        // 10.7.4: the clip is the pixels a fill of the path would paint, so
+        // it is flattened at the flatness a fill there would be.
+        self.tolerance = flatness_tolerance(state);
+        let rule = if even_odd {
+            FillRule::EvenOdd
+        } else {
+            FillRule::NonZero
+        };
+        // 8.5.4: the new clip is the intersection with whatever is in force,
+        // which is a multiply rather than a replacement — an anti-aliased edge
+        // clipped by another must stay soft on both. `coverage` does that, and
+        // the region it picks is the two rectangles' overlap, so a clip stack
+        // shrinks as it nests instead of carrying a page apiece.
+        let stop = self.stop_predicate();
+        let (clip, bounds) = self.clip_coverage(&built, rule, Some(&stop));
+        self.clip = Some(clip);
+        self.clip_bounds = Some(bounds);
+    }
+
+    fn begin_text(&mut self) {
+        self.text_depth = self.text_depth.saturating_add(1);
+    }
+
+    fn end_text(&mut self) {
+        self.text_depth = self.text_depth.saturating_sub(1);
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
+        // Before the accumulated outline is rasterized, for the same reason as
+        // `clip_path`: a text clip is a fill over every glyph of the object at
+        // once, which is the largest single clip a page can ask for.
+        if self.stopping() {
+            return;
+        }
+        // 9.3.6: text clipping modes accumulate every glyph of the text
+        // object and intersect the result at `ET`, not glyph by glyph —
+        // clipping each glyph as it arrived would leave the next one clipped
+        // to the previous, which is empty.
+        //
+        // A text object that selects a clipping mode and then shows no glyphs
+        // at all should clip everything away. It does not here: nothing
+        // records the mode unless a glyph reaches the device, so the clip
+        // stays absent rather than becoming empty.
+        let requested = std::mem::take(&mut self.text_clip_requested);
+        let path = match self.text_clip.take() {
+            Some(path) => path,
+            // 9.3.6: a text object that selected a clipping mode and produced
+            // no glyphs clips everything away. An empty path is the honest
+            // answer; leaving the clip alone would paint the whole page.
+            None if requested => {
+                self.warnings.push(RenderWarning::EmptyTextClip);
+                Path::new()
+            }
+            None => return,
+        };
+        // Each glyph at the flatness it was shown at: the one they share, or
+        // already flattened each at its own.
+        if let Some(tolerance) = self.text_clip_tolerance.take() {
+            self.tolerance = tolerance;
+        }
+        self.text_clip_flat = false;
+        let stop = self.stop_predicate();
+        // The outlines the clip modes added are text, at the text level, as
+        // the object they were shown in is.
+        self.showing = self.showing.saturating_add(1);
+        let (clip, bounds) = self.clip_coverage(&path, FillRule::NonZero, Some(&stop));
+        self.showing = self.showing.saturating_sub(1);
+        self.clip = Some(clip);
+        self.clip_bounds = Some(bounds);
+    }
+
+    fn save_state(&mut self) {
+        let held = self.held();
+        self.clip_stack.push(held);
+        self.text_saves.push(self.text_depth);
+    }
+
+    fn restore_state(&mut self) {
+        if let Some(at) = self.text_saves.pop() {
+            self.text_depth = self.text_depth.min(at);
+        }
+        // Ruling 8: the soft mask is pixels and lives here rather than in the
+        // graphics state, so `Q` has to put it back -- otherwise an `/SMask`
+        // set inside `q ... Q` keeps masking everything drawn after the `Q`,
+        // which is content quietly missing from the rest of the page.
+        if let Some(held) = self.clip_stack.pop() {
+            self.restore_held(held);
+        }
+    }
+
+    fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
+        if self.stopping() || self.hidden() || self.discarding() {
+            return;
+        }
+        let built = self.to_path(path);
+        if built.is_empty() {
+            return;
+        }
+        // 10.7.2: the path, and the stroker's round joins and caps, are
+        // flattened at the flatness in force.
+        self.tolerance = flatness_tolerance(state);
+        let painting = self.painting(state);
+        let state: &GraphicsState = &painting;
+
+        // 8.4.3.2: the line width is in user space, and so are the dashes —
+        // the pen is stated in user units and `pen` carries it to the device.
+        // A hairline still has to cover a pixel to be visible.
+        let style = stroke_style(state);
+        // The dash expansion below is the part of a stroke that can run away:
+        // 8.4.3.6 puts no floor on a dash length, so a page-long rule under a
+        // fine array expands into a hundred thousand pieces per segment before
+        // a single row of it is filled.
+        let stop = self.stop_predicate();
+        let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
+
+        // 8.7.3: a stroke painted with a pattern takes its paint from the
+        // pattern, exactly as a fill does — and a stroke *is* a fill, of the
+        // outline just computed. So this needs no pattern machinery of its
+        // own; what it needed was to stop asking for `stroke_color`, which for
+        // `/Pattern` is the nominal black the colour crate reports because a
+        // pattern space has no colour of its own. Every gradient-stroked rule
+        // in every document came out solid black, silently.
+        //
+        // The rule is non-zero and is stated rather than defaulted: a stroked
+        // outline overlaps itself at joins, at caps and wherever a path
+        // crosses, and under even-odd every one of those overlaps would be
+        // punched back out into a hole.
+        if let Some(name) = state.stroke_pattern.clone() {
+            // The *stroke* slot's colour, and 8.7.3.3 is why that has to be
+            // said out loud: an uncoloured pattern paints in the colour its
+            // `SCN` operands gave, and this operator's operands went to the
+            // stroking slot. Handing the fill slot's colour instead is a
+            // defect nothing else in the engine can see -- every "the pattern
+            // paints" assertion is satisfied by a cell that paints in *some*
+            // colour.
+            self.fill_with_pattern(
+                outline,
+                &name,
+                state,
+                state.stroke_alpha,
+                stroke_color(state),
+                state.stroke_family,
+            );
+            return;
+        }
+
+        let color = stroke_color(state);
+        let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
+        self.paint_inked(
+            outline,
+            color,
+            state.stroke_ink,
+            state.stroke_alpha,
+            blend_mode(state.blend),
+            &set,
+        );
+    }
+
+    fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        // Everything a glyph paints is text, at the text level, however it is
+        // painted: from its mask, as a path, stroked or through a pattern.
+        self.showing = self.showing.saturating_add(1);
+        self.show_glyph_shown(glyph, state);
+        self.showing = self.showing.saturating_sub(1);
     }
 
     fn draw_image(&mut self, image: &ImageRef, state: &GraphicsState) {
@@ -5226,10 +5396,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             (outer, self.next_scope())
         });
         self.form_scopes.push(displaced);
-        !self.stopping()
+        let entered = !self.stopping();
+        self.entered_stream(entered);
+        entered
     }
 
     fn end_form(&mut self, _id: u64) {
+        self.left_stream();
         if let Some(Some((outer, serial))) = self.form_scopes.pop() {
             self.glyphs = outer;
             self.scope = serial;
@@ -5252,10 +5425,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Under forced colours a group's `ca` and `/BM` at the `Do` are its
         // paint's too, and composite it opaque and `Normal`.
         let painting = self.painting(state);
-        self.open_group(group, &painting)
+        let entered = self.open_group(group, &painting);
+        self.entered_stream(entered);
+        entered
     }
 
     fn end_group(&mut self) {
+        self.left_stream();
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
@@ -5274,10 +5450,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if self.stopping() {
             return false;
         }
-        self.open_soft_mask(mask, bbox)
+        let entered = self.open_soft_mask(mask, bbox);
+        self.entered_stream(entered);
+        entered
     }
 
     fn end_soft_mask(&mut self) {
+        self.left_stream();
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
@@ -6335,6 +6514,68 @@ mod tests {
             PathSegment::LineTo { x: 10.0, y: side },
             PathSegment::Close,
         ]
+    }
+
+    /// **What a text object paints is text, and no text object outlives its
+    /// save or its stream** (RC-11.5). With graphics at 0 bits and text at 8,
+    /// a turned triangle filled outside a text object is whole or empty; the
+    /// same fill inside one — a Type 3 glyph's procedure painting — keeps
+    /// its partial pixels; and a fill after a text object that a restore, or
+    /// an entered form's end, leaves open is graphics again, as
+    /// `tinker_pdf_content::cull` counts text objects.
+    #[test]
+    fn a_text_object_left_open_ends_with_its_save_and_its_stream() {
+        let triangle = vec![
+            PathSegment::MoveTo { x: 3.3, y: 4.1 },
+            PathSegment::LineTo { x: 27.6, y: 9.8 },
+            PathSegment::LineTo { x: 12.2, y: 26.4 },
+            PathSegment::Close,
+        ];
+        let soft = |drive: &dyn Fn(&mut Renderer<'_, NoGlyphs>)| {
+            let canvas = Canvas::new(32, 32, PixelFormat::Rgb8, Color::WHITE);
+            let mut renderer =
+                Renderer::new(canvas, page_transform(32.0, 1.0), &NoGlyphs).with_levels(0, 8);
+            drive(&mut renderer);
+            renderer.fill_path(&triangle, &GraphicsState::default(), false);
+            let (canvas, _) = renderer.finish();
+            canvas.data.iter().any(|v| *v != 0 && *v != 255)
+        };
+        assert!(!soft(&|_| {}), "a fill outside a text object is graphics");
+        assert!(
+            soft(&|r: &mut Renderer<'_, NoGlyphs>| r.begin_text()),
+            "a fill inside one is text"
+        );
+        assert!(
+            !soft(&|r: &mut Renderer<'_, NoGlyphs>| {
+                r.begin_text();
+                r.end_text();
+            }),
+            "an ended one is over"
+        );
+        assert!(
+            !soft(&|r: &mut Renderer<'_, NoGlyphs>| {
+                r.save_state();
+                r.begin_text();
+                r.restore_state();
+            }),
+            "a restore ends what its save did not hold"
+        );
+        assert!(
+            soft(&|r: &mut Renderer<'_, NoGlyphs>| {
+                r.begin_text();
+                r.save_state();
+                r.restore_state();
+            }),
+            "and keeps what it did"
+        );
+        assert!(
+            !soft(&|r: &mut Renderer<'_, NoGlyphs>| {
+                assert!(r.begin_form(1, b"Fm0"));
+                r.begin_text();
+                r.end_form(1);
+            }),
+            "a form's stream ends the text it left open"
+        );
     }
 
     /// Milestone 1: a clip and a text clip check before they rasterize.

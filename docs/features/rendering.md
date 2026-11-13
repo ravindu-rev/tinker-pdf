@@ -1050,6 +1050,35 @@ and vanishes; `a_hard_edged_hairline_leaves_no_column_it_crosses_empty` sweeps
 eight slopes for it. A glyph feature narrower than half a pixel can still
 vanish where it straddles a pixel edge, which is what any threshold costs.
 
+**Coverage levels and the hard-edge rules** ([design](../design/anti-aliasing.md)).
+`RenderOptions::graphics_bits` and `RenderOptions::text_bits`, 8 by default,
+are the bits of coverage each class keeps: 8 the anti-aliased coverage, 1 to 7
+each pixel's coverage taken to the nearest of `2^bits` values
+(`Mask::quantise`), 0 whole or empty by `RenderOptions::hard_edge` — `Half`, the
+default, the threshold above; `Centre`, the pixels whose centres a shape holds
+on the rasterizer's grid; `AnyPart`, every pixel a shape meets, a sliver
+between sub-scanlines included. `antialias` keeps its meaning: off, both
+levels read as 0 under the rule, so `antialias: false` with the default rule
+is the render it was. Text is every glyph shown, however it is painted — from
+its mask, whose key in the render's and the document's glyph caches holds the
+level and the rule, as a path, stroked or through a pattern — and everything a
+text object paints or clips: a Type 3 glyph's procedure, and the outlines the
+clipping modes add at `ET`. A text object counts as `tinker_pdf_content::cull`
+counts it, so none outlives its stream: one a form, a group or a mask's group
+leaves open ends with it, and a restore ends every one opened since its save.
+Graphics is everything else, and the renderer hands each site its class's
+level and the rule: `Renderer::coverage`, a glyph's mask, an image's edge
+(`ImageDraw::edge_bits` and `edge_rule`), a mesh's silhouette
+(`MeshDraw::edge_bits` and `edge_rule`, the colours spread over the
+silhouette before it is quantised) and a tiling cell's renderer
+(`TileRequest`'s levels and rule, so text in a cell is text). Each level is
+applied where the coverage is made, before the clip and the soft mask multiply
+in, and a tile at every level and rule is the page under it. Under `AnyPart`
+the renderer's scratch keeps each stroke's pieces, which the rule reads where
+an edge passes; under every other rule a stroke holds its edges alone. The
+thinnest stroke is still 8.4.3.2's floor, eight tenths of a pixel (six tenths
+for a stroked glyph) with anti-aliasing on and a whole pixel with it off.
+
 **A stroke under a transform that is not a similarity.** 8.4.3.2 measures
 the line width in user space — a stroke paints every point within half the
 width of the path *in user space* — so under an anisotropic scale or a
@@ -1130,7 +1159,9 @@ checked between operations and scanline bands), `annotations` (on by
 default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
 light), `antialias` (on; off makes every pixel of every shape whole or
-empty), `transparent` (off; on starts a page whose format has alpha with
+empty), `graphics_bits` and `text_bits` (8 each; the bits of coverage each
+class keeps), `hard_edge` (`HardEdge::Half`; the rule at 0 bits),
+`transparent` (off; on starts a page whose format has alpha with
 nothing painted rather than white), `premultiplied` (off), `stats` (off;
 on counts the render's work, below) and `parallelism` (`Parallelism::Serial`;
 the threads a page walk spends, below) — and returns a `Bitmap`: `width`,
@@ -1731,7 +1762,7 @@ under it, so the copy holds every canvas the walk closes onto.
   document's with no budget. `tinker-pdf-render`'s
   `a_source_that_keeps_masks_holds_them_across_renders` holds the seam: a
   source that keeps masks is asked for every glyph and the render keeps none,
-  a second render rasterises nothing, and a render that does not anti-alias
+  a second render rasterises nothing, and a render at another text level
   asks by keys of its own.
   `determinism.rs`'s `warm_and_starved_caches_render_the_fingerprints` holds
   every fingerprinted page to its fingerprint and its warnings through a warm
@@ -1768,6 +1799,22 @@ under it, so the copy holds every canvas the walk closes onto.
   there by its own; `with_anti_aliasing_off_a_shading_is_wholly_covered_or_not_at_all`
   does the same for a mesh, a clipped `sh`, a shading pattern and a tiling
   pattern whose cell is drawn by a renderer of its own.
+  `coverage_at_each_level_is_the_eight_bit_coverage_quantised` holds each
+  element of the hard-edge page, alone in black, at every level from 1 to 8 of
+  its own class to its 8-bit twin quantised in the test, the other class's
+  level moving none of it; `each_rule_reaches_every_coverage_site` holds a
+  path's fill and stroke, a clip, a glyph from its mask, a stroked glyph, a
+  glyph clip, a Type 3 glyph, an image's edge, a mesh, a tiling cell and `sh`
+  through a clip, each whole or empty under every rule, the any-part rule
+  painting every pixel the other two paint and more, and each site's own class
+  at 0 bits hard where the other's leaves it soft;
+  `with_anti_aliasing_off_the_levels_read_as_zero` holds the switch's meaning;
+  and `render_regions.rs`'s
+  `a_tile_at_every_level_and_rule_is_the_page_under_it` tiles every fixture at
+  levels and rules apart and together. `tinker-pdf-render`'s
+  `a_text_object_left_open_ends_with_its_save_and_its_stream` holds the text
+  class's bookkeeping, and `glyph.rs`'s
+  `a_glyph_mask_keeps_its_level_and_its_rule` a glyph's mask.
 - Output: `png_output.rs` holds `Bitmap::to_png` over all eight formats, and
   `png_input.rs` holds `Bitmap::from_png` — the round trip over every page
   format, 16-bit rounding at the samples where truncation would differ, every

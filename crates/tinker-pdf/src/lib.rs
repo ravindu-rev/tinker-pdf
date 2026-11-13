@@ -507,6 +507,7 @@ pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_filters::CcittParams;
 pub use tinker_pdf_filters::PngError;
 pub use tinker_pdf_raster::canvas::{Color, PixelFormat, Spots, TooManySpots, MAX_SPOT_PLATES};
+pub use tinker_pdf_raster::HardEdge;
 pub use tinker_pdf_render::{CancelToken, PixelRegion, RenderWarning};
 /// Signature verdicts (12.8), behind [`Document::verify_signatures`].
 pub use verdict::{
@@ -691,7 +692,42 @@ pub struct RenderOptions {
     /// A tile is still byte-equal to the page under it (ruling 5): the
     /// threshold is a function of one pixel's coverage, and the coverage
     /// already agreed.
+    ///
+    /// Off, [`RenderOptions::graphics_bits`] and [`RenderOptions::text_bits`]
+    /// both read as 0, whatever they say, under [`RenderOptions::hard_edge`],
+    /// whose default is the threshold above: so `false` is the render it has
+    /// always been.
     pub antialias: bool,
+    /// The bits of coverage graphics keep, 0 to 8
+    /// (`docs/design/anti-aliasing.md`). 8, the default, is the anti-aliased
+    /// coverage; 1 to 7 take each pixel's coverage to the nearest of `2^bits`
+    /// values spaced evenly from 0 to 255 — at 2 bits 0, 85, 170 and 255; 0
+    /// makes each pixel whole or empty by [`RenderOptions::hard_edge`]. A
+    /// number above 8 reads as 8.
+    ///
+    /// Graphics is a path's fill and stroke, a clip, an image's edge and a
+    /// mesh shading's silhouette; a tiling cell's own content keeps the
+    /// levels as a page does. The level applies to the coverage where it is
+    /// made, before the clip and the soft mask multiply in, so a clipped edge
+    /// is the product of two masks each at its own level. Only coverage is
+    /// quantised: an alpha, a soft mask's levels and an image's samples are the
+    /// document's. Read only with [`RenderOptions::antialias`] on. A tile is
+    /// still the page under it.
+    pub graphics_bits: u8,
+    /// The bits of coverage text keeps, as [`RenderOptions::graphics_bits`]
+    /// for graphics: every glyph shown, however it is painted — from its
+    /// mask, as a path, stroked or through a pattern — and everything a text
+    /// object paints or clips, a Type 3 glyph's procedure and the clipping
+    /// modes among them. 8 by default.
+    pub text_bits: u8,
+    /// The rule a pixel is whole or empty by at level 0: [`HardEdge::Half`],
+    /// the default, where a shape covers at least half the pixel;
+    /// [`HardEdge::Centre`] where it holds the pixel's centre;
+    /// [`HardEdge::AnyPart`] where it meets the pixel's square at all, a
+    /// sliver thinner than the rasterizer's sub-scanlines included. With
+    /// anti-aliasing off it applies to everything; with it on, to the class
+    /// whose level is 0.
+    pub hard_edge: HardEdge,
     /// Whether the page starts with nothing painted on it rather than white.
     /// Off by default.
     ///
@@ -841,6 +877,9 @@ impl Default for RenderOptions {
             region: None,
             allow_cmyk: false,
             antialias: true,
+            graphics_bits: 8,
+            text_bits: 8,
+            hard_edge: HardEdge::Half,
             transparent: false,
             premultiplied: false,
             stats: false,
@@ -3139,7 +3178,9 @@ impl Page {
 
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, resources)
             .with_page_size(full_width, full_height)
-            .with_antialias(options.antialias);
+            .with_antialias(options.antialias)
+            .with_levels(options.graphics_bits, options.text_bits)
+            .with_hard_edge(options.hard_edge);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }
