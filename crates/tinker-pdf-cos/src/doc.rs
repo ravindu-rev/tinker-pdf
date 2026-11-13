@@ -1621,6 +1621,22 @@ impl CosDocument {
         self.warnings.lock_safe().warn_at(offset, Some(r), kind);
     }
 
+    /// Records a warning against the object it happened to, or against no
+    /// object where it has none, unless the document already holds that
+    /// warning for that object: a leniency met at every glyph of a font is
+    /// reported once (ruling 10).
+    pub fn warn_once(&self, r: Option<ObjRef>, kind: WarningKind) {
+        let offset = r.map_or(0, |r| self.entry_offset(r.num));
+        let mut sink = self.warnings.lock_safe();
+        if !sink
+            .warnings()
+            .iter()
+            .any(|warning| warning.object == r && warning.kind == kind)
+        {
+            sink.warn_at(offset, r, kind);
+        }
+    }
+
     /// Records a warning about a byte position no object could be named for.
     pub(crate) fn warn_offset(&self, offset: u64, kind: WarningKind) {
         self.warnings.lock_safe().warn(offset, kind);

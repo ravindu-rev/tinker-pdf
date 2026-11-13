@@ -187,8 +187,8 @@ pub use tinker_pdf_cos::CharacterCollection;
 pub use tinker_pdf_cos::{kind_counts, tier_counts, Defect, DefectKind, Tier};
 pub use tinker_pdf_cos::{
     Action, Attachment, AuthError, AuthLevel, Date, DestKind, Destination, DocumentScript, Field,
-    FieldKind, FieldScripts, FieldValue, LadderLevel, Link, Metadata, OutlineItem, Script,
-    ScriptSummary, Trapped, Warning, WarningKind,
+    FieldKind, FieldScripts, FieldValue, LadderLevel, Link, Metadata, MultipleMasterInstance,
+    OutlineItem, Script, ScriptSummary, Trapped, Warning, WarningKind,
 };
 pub use tinker_pdf_cos::{
     BlendMode, CieSpace, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, PieceText,

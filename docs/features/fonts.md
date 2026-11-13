@@ -183,6 +183,21 @@ order, so an instance is the same bits on every target. A program with no weight
 vector — every ordinary Type 1 program — draws as it always did, an othersubr
 it does not know handing `pop` its arguments, the first master's values.
 
+**A page draws an embedded multiple-master program at the instance its font
+names.** An `/MMType1` font's `/BaseFont` carries the design coordinates by the
+convention 9.6.2.3 cites from Adobe's Technical Note #5088 — past a subset tag,
+every run of digits after the first underscore, `MinionMM_366_465_11_` — and
+the program is instanced at them where there is one an axis. A name with none,
+or with another number; a blend design the font crate does not instance; and a
+`/Type1` dictionary over a multiple-master program each draw the program's
+default instance. Each such font is reported once on the document's warnings,
+`WarningKind::MultipleMasterInstance` naming the instance drawn, against the
+font's dictionary. A snapshot — the conforming case, an ordinary Type 1 program
+under `/MMType1` — draws as any Type 1 program does and is not reported. The
+instance moves outlines and advances, never which glyph a code chooses, so
+rendering and `to_svg`, which draw through one outline path, draw it, and the
+glyph-usage walk is the same at every instance.
+
 **Type 42** (Adobe Technical Note #5012;
 [design](../design/type42-and-multiple-master.md)). `Type42::parse` reads the
 PostScript dictionary around a TrueType face structurally, running nothing:
@@ -1520,6 +1535,18 @@ corpora already vendored here. So every name stays on the list.
   before, as does a blend call of the wrong count; the four- and six-quantity
   othersubrs return their quantities in order; Appendix C's optical-size map
   normalises segment by segment; and the cleartext arrays are bounded.
+- `crates/tinker-pdf/tests/multiple_master.rs` — an `/MMType1` page embedding
+  a two-axis, four-master program renders byte for byte, writes the SVG and
+  reads the text of a `/Type1` twin whose one master is the instance's
+  outlines, blended in `tests/type1_support/` from the blend design: at the
+  coordinates its name gives under four spellings, a subset tag among them;
+  at the default for a name without coordinates, for one with another number
+  and for a `/Type1` dictionary; and at the maps' ends for coordinates past
+  them. Each is reported once on the document's warnings with the instance it
+  drew, however many renders ask, and a snapshot under `/MMType1` draws as its
+  `/Type1` twin and reports nothing. `resources.rs`'s unit tests read the
+  design coordinates a name carries by TN #5088's convention, and
+  `determinism.rs` fingerprints the page.
 - `crates/tinker-pdf-font/src/type42.rs` — a face wrapped as hexadecimal and
   as binary strings, whole, split at a table boundary and inside a table,
   padded and not, mixed, reads back byte for byte; each name reaches its glyph

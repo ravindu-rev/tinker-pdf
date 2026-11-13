@@ -250,6 +250,12 @@ pub enum WarningKind {
     /// left it out" and "no such CMap" are different problems with different
     /// fixes.
     PredefinedCMapApproximate(Name),
+    /// 9.6.2.3: a font embeds a whole multiple-master Type 1 program where
+    /// the clause asks an `/MMType1` font for a snapshot of one instance, and
+    /// the program was drawn at the instance this names
+    /// (`docs/design/type42-and-multiple-master.md`). Reported once a font,
+    /// the [`Warning`]'s object the font's dictionary where it has one.
+    MultipleMasterInstance(MultipleMasterInstance),
 
     // ---- the leniency ladder ---------------------------------------------
     /// No trailer dictionary was found; one was assembled from what the
@@ -326,6 +332,43 @@ pub enum WarningKind {
         /// The character the font could not draw.
         character: char,
     },
+}
+
+/// Which instance of an embedded multiple-master program a font was drawn
+/// at ([`WarningKind::MultipleMasterInstance`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MultipleMasterInstance {
+    /// The design coordinates the font's `/BaseFont` carries, by the
+    /// convention 9.6.2.3 cites.
+    Design,
+    /// Those coordinates, one or more past its axis's `/BlendDesignMap` and
+    /// taken at the map's end.
+    Clamped,
+    /// The program's default instance, its `/WeightVector`: the font's
+    /// dictionary is `/Type1`, which names no instance.
+    DefaultType1Font,
+    /// The default: the font's `/BaseFont` carries no design coordinates.
+    DefaultNoCoordinates,
+    /// The default: the font's `/BaseFont` carries another number of design
+    /// coordinates than the program has axes.
+    DefaultAxisCount,
+    /// The default: the program's blend design is not one this engine
+    /// instances.
+    DefaultBlendDesign,
+}
+
+impl MultipleMasterInstance {
+    /// A short stable identifier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MultipleMasterInstance::Design => "design",
+            MultipleMasterInstance::Clamped => "clamped",
+            MultipleMasterInstance::DefaultType1Font => "default-type1-font",
+            MultipleMasterInstance::DefaultNoCoordinates => "default-no-coordinates",
+            MultipleMasterInstance::DefaultAxisCount => "default-axis-count",
+            MultipleMasterInstance::DefaultBlendDesign => "default-blend-design",
+        }
+    }
 }
 
 impl WarningKind {
@@ -406,6 +449,7 @@ impl WarningKind {
             WarningKind::CMap(w) => w.as_str(),
             WarningKind::PredefinedCMapUnknown(_) => "predefined-cmap-unknown",
             WarningKind::PredefinedCMapApproximate(_) => "predefined-cmap-approximate",
+            WarningKind::MultipleMasterInstance(_) => "multiple-master-instance",
             WarningKind::TrailerSynthesized => "trailer-synthesized",
             WarningKind::RootSynthesized => "root-synthesized",
             WarningKind::RootMissing => "root-missing",
@@ -445,6 +489,9 @@ impl fmt::Display for WarningKind {
             }
             WarningKind::PredefinedCMapApproximate(n) => {
                 write!(f, "predefined-cmap-approximate (name #{})", n.id())
+            }
+            WarningKind::MultipleMasterInstance(instance) => {
+                write!(f, "multiple-master-instance ({})", instance.as_str())
             }
             WarningKind::SecurityHandler(n) => write!(f, "security-handler: {n:?}"),
             WarningKind::FieldCharacterUnrepresentable { character } => write!(

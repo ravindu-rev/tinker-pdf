@@ -15,7 +15,8 @@ use tinker_pdf_content::{
 };
 use tinker_pdf_cos::{
     decode_text_string, font as cos_font, limits, pages as cos_pages, Cached, CosDocument,
-    CosError, Counting, DecodedStreams, Dict, Filled, Flights, Name, ObjRef, Object,
+    CosError, Counting, DecodedStreams, Dict, Filled, Flights, MultipleMasterInstance, Name,
+    ObjRef, Object, WarningKind,
 };
 use tinker_pdf_filters::{
     ccitt_decode, jbig2_decode, jpeg_decode, jpeg_decode_strips_sized, CcittParams, Jbig2Params,
@@ -4114,6 +4115,38 @@ fn program_for(
         })
 }
 
+/// The design coordinates a multiple-master instance's `/BaseFont` carries,
+/// by the convention 9.6.2.3 cites from Adobe's TN #5088, section 5: past a
+/// subset tag (9.9.2), the family and style up to the first underscore, then
+/// each axis's coordinate as a run of decimal digits, the runs separated by
+/// labels of anything else — `MinionMM_366_465_11_`, `MyriadMM_367wd_450wt`.
+///
+/// `None` where the name has no underscore, no digits after it, or a run of
+/// more than nine digits, which is no design coordinate of any axis the
+/// supplement describes; whether there are as many as the program's axes is
+/// the caller's question.
+pub(crate) fn design_coordinates(base_font: &str) -> Option<Vec<f64>> {
+    let bytes = base_font.as_bytes();
+    let tagged =
+        bytes.len() > 7 && bytes[..6].iter().all(u8::is_ascii_uppercase) && bytes[6] == b'+';
+    let name = if tagged { &bytes[7..] } else { bytes };
+    let underscore = name.iter().position(|b| *b == b'_')?;
+    let mut out = Vec::new();
+    for run in name[underscore + 1..]
+        .split(|b| !b.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+    {
+        if run.len() > 9 {
+            return None;
+        }
+        let value = run
+            .iter()
+            .fold(0u32, |value, digit| value * 10 + u32::from(digit - b'0'));
+        out.push(f64::from(value));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 fn embedded_program(doc: &CosDocument, font: &Dict, op: &Operation) -> Option<Arc<Vec<u8>>> {
     // A composite font keeps its program on the descendant.
     let descendants = doc.resolve_key(font, Name::DESCENDANT_FONTS);
@@ -6615,7 +6648,13 @@ impl PageResources {
         // reached the two parsers above, both declined them correctly, and the
         // glyph was silently absent — an embedded Type 1 font drew nothing and
         // said nothing about why.
-        if let Some(type1) = Type1::parse(&program) {
+        if let Some(mut type1) = Type1::parse(&program) {
+            // An embedded multiple-master program is drawn at the instance
+            // its font names, or at its default; every other program has no
+            // weight vector and is drawn as it always was.
+            if type1.is_multiple_master() && !substituted {
+                self.instance_multiple_master(&found, &mut type1);
+            }
             // Type 1 addresses glyphs by *name*: through the encoding the PDF
             // font dictionary specifies, or through the font's own built-in
             // one. The index is not a glyph id.
@@ -6636,6 +6675,48 @@ impl PageResources {
         }
 
         None
+    }
+
+    /// Sets an embedded multiple-master program to the instance its font
+    /// names, and reports which once a font
+    /// (`docs/design/type42-and-multiple-master.md`).
+    ///
+    /// An `/MMType1` font names its instance in `/BaseFont`, by the design
+    /// coordinates [`design_coordinates`] reads; a `/Type1` font names none,
+    /// and draws the program's default, its `/WeightVector`, as does a name
+    /// without coordinates, with another number than the program's axes, or
+    /// a blend design the font crate does not instance. The instance moves
+    /// outlines and advances, never which glyph a code chooses, so this is
+    /// asked where an outline is drawn and nowhere else.
+    fn instance_multiple_master(&self, found: &ScopeFont, type1: &mut Type1<'_>) {
+        let mm_type1 = found
+            .dict
+            .as_dict()
+            .and_then(|dict| dict.get_name(Name::SUBTYPE))
+            .and_then(|subtype| self.doc.name_bytes(subtype))
+            .is_some_and(|subtype| subtype.as_ref() == b"MMType1");
+        let drawn = if mm_type1 {
+            let axes = type1.blend().map(tinker_pdf_font::Blend::axis_count);
+            match (design_coordinates(found.font.base_font()), axes) {
+                (None, _) => MultipleMasterInstance::DefaultNoCoordinates,
+                (Some(_), None) => MultipleMasterInstance::DefaultBlendDesign,
+                (Some(design), Some(axes)) if design.len() != axes => {
+                    MultipleMasterInstance::DefaultAxisCount
+                }
+                (Some(design), Some(_)) => match type1.instance(&design) {
+                    Ok(instance) if instance.clamped => MultipleMasterInstance::Clamped,
+                    Ok(_) => MultipleMasterInstance::Design,
+                    Err(tinker_pdf_font::InstanceRefusal::AxisCount { .. }) => {
+                        MultipleMasterInstance::DefaultAxisCount
+                    }
+                    Err(_) => MultipleMasterInstance::DefaultBlendDesign,
+                },
+            }
+        } else {
+            MultipleMasterInstance::DefaultType1Font
+        };
+        self.doc
+            .warn_once(found.object, WarningKind::MultipleMasterInstance(drawn));
     }
 
     /// Which glyph of the embedded program a code selects, and on whose
@@ -9611,14 +9692,56 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_inline_abbreviations, jpeg_scale, jpeg_scale_within, jpx_discard, jpx_skip, Answer,
-        Asked, Contents, Frame, JpxFrame, PageResources, Remembered, Room, SourceWindow,
+        design_coordinates, expand_inline_abbreviations, jpeg_scale, jpeg_scale_within,
+        jpx_discard, jpx_skip, Answer, Asked, Contents, Frame, JpxFrame, PageResources, Remembered,
+        Room, SourceWindow,
     };
     use tinker_pdf_color::{ColorSpace, Colorant, Colorants};
     use tinker_pdf_content::{ColorantKind, FontSource};
     use tinker_pdf_cos::{Name, ObjRef, Object};
     use tinker_pdf_filters::JpegScale;
     use tinker_pdf_render::{ImageRequest, UnitArea};
+
+    /// **A multiple-master instance's name carries its design coordinates by
+    /// TN #5088's convention**, which 9.6.2.3 cites: past a subset tag, every
+    /// run of digits after the first underscore, whatever labels separate
+    /// them; none where there is no underscore, no digit after it, or a run
+    /// longer than nine digits.
+    #[test]
+    fn the_design_coordinates_a_name_carries_are_read_by_the_convention() {
+        let read = |name: &str| design_coordinates(name);
+        assert_eq!(read("MinionMM_366_465_11_"), Some(vec![366.0, 465.0, 11.0]));
+        assert_eq!(read("MyriadMM_367wd_450wt"), Some(vec![367.0, 450.0]));
+        assert_eq!(
+            read("GaramMM Bol_700 wt 470 wd 24 op"),
+            Some(vec![700.0, 470.0, 24.0])
+        );
+        assert_eq!(
+            read("MinioMM ItEp_367 RG 485 NO 11 OP"),
+            Some(vec![367.0, 485.0, 11.0])
+        );
+        assert_eq!(
+            read("ABCDEF+MinionMM_366_465_11_"),
+            Some(vec![366.0, 465.0, 11.0])
+        );
+        assert_eq!(
+            read("Type1MM2_7"),
+            Some(vec![7.0]),
+            "digits before the underscore are the name's"
+        );
+        assert_eq!(
+            read("ABCDE+MM_1_2"),
+            Some(vec![1.0, 2.0]),
+            "five capitals are no subset tag"
+        );
+        assert_eq!(read("MinionMM"), None);
+        assert_eq!(read("MinionMM_"), None);
+        assert_eq!(read("Minion_MM_Regular"), None);
+        assert_eq!(read("MM_1234567890_"), None);
+        assert_eq!(read("MM_123456789_"), Some(vec![123_456_789.0]));
+        assert_eq!(read(""), None);
+        assert_eq!(read("ABCDEF+"), None);
+    }
 
     /// A draw of `across` by `down` pixels.
     fn drawn(across: f64, down: f64) -> ImageRequest {

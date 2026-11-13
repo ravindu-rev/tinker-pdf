@@ -87,9 +87,10 @@ its input, and a binary `/sfnts` string can hold those five bytes.
 
 **It is a leniency, and it is named.** Drawing it is the engine reading a
 program under a key whose format it is not, so each font whose program is read
-as Type 42 is reported once, on the render of a page that draws it,
-`RenderWarning::Type42Program { font, key }` — the font's resource name and
-the descriptor key (ruling 10).
+as Type 42 is reported once, on the document's warnings, against the font's
+dictionary — `WarningKind::Type42Program` naming the descriptor key, through
+`CosDocument::warn_once` — so a program met at every glyph is named once
+(ruling 10).
 
 #### The wrapper
 
@@ -289,14 +290,14 @@ exactly as today; so does every program without a weight vector.
 
 **What is reported.** An embedded multiple-master program is itself a
 leniency — 9.6.2.3 asks for the snapshot — so each font whose program blends is
-reported once, on the render of a page that draws it,
-`RenderWarning::MultipleMasterInstance { font, instance }`, the font's resource
-name and which instance was drawn, a stable identifier: `design`, the
-coordinates its name gives; `clamped`, those coordinates with one past its
-map, taken at the map's end; `default`, the program's own weights, because its
-dictionary is `/Type1`; `default-no-coordinates`, its name carries none;
-`default-axis-count`, its name carries another number than the program's
-axes; and `default-design`, a blend design this engine does not instance.
+reported once, on the document's warnings against the font's dictionary,
+`WarningKind::MultipleMasterInstance`, naming which instance was drawn:
+`Design`, the coordinates its name gives; `Clamped`, those coordinates with
+one past its map, taken at the map's end; `DefaultType1Font`, the program's
+own weights, because its dictionary is `/Type1`; `DefaultNoCoordinates`, its
+name carries none; `DefaultAxisCount`, its name carries another number than
+the program's axes; and `DefaultBlendDesign`, a blend design this engine does
+not instance.
 
 #### Bounds
 

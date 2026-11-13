@@ -179,7 +179,7 @@ pub use viewer::{
     viewer_preferences, Duplex, EnforcedPreference, NonFullScreenPageMode, PrintScaling,
     ReadingDirection, ViewerPreferences,
 };
-pub use warn::{Warning, WarningKind, WarningSink};
+pub use warn::{MultipleMasterInstance, Warning, WarningKind, WarningSink};
 pub use webp_embed::webp_image;
 pub use work::{Counter, Stats, Work};
 pub use write::{Encryption, ObjectSet, StreamData, WriteMode, WriteOptions, Written};

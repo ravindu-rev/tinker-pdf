@@ -57,7 +57,7 @@ each page of its table — `text`, `curves`, `shading`, `pattern`, `optional`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
 `analytic_image`, `default_spaces`, `gs_text`, `strokes`, `bilevel`, `icc`,
 `jpeg_minified`, `jpx_minified`, `intents`, `substituted_cjk`,
-`substituted_symbols` — each a hash of
+`substituted_symbols`, `multiple_master` — each a hash of
 rendered pixels
 plus the page dimensions and
 ink counts it is computed from. `strokes` is the stroker's whole pen: the
@@ -115,6 +115,13 @@ in `tests/render_support/` whose `post` table names each of its glyphs, a
 box of its own size: each code reaches its glyph through its built-in
 encoding's name ([fonts](fonts.md)), so the route by name is one picture on
 every target; `substitute_fonts.rs` reads the same page box by box.
+`multiple_master` is an `/MMType1` font embedding a two-axis, four-master
+Type 1 program, built in `tests/type1_support/`, drawn at the instance its
+`/BaseFont` names: the design vector read from the name, normalised through
+the program's maps, the masters weighted by their corners and blended by the
+blend othersubrs ([fonts](fonts.md)), so the instance is one picture on every
+target; `multiple_master.rs` holds the same page to a plain Type 1 twin drawn
+from the instance's outlines.
 
 The `analytic_` pages are a different kind of fixture from the rest: their
 pixels have a **closed-form right answer**, which

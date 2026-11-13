@@ -65,6 +65,8 @@ use tinker_pdf::{
     RenderOptions, RenderWarning, SimpleFontProvider, SvgOptions, SvgWarning,
 };
 
+mod type1_support;
+
 mod render_support;
 use render_support::{
     axial_page, bilevel_page, blend_grid_page, curvy_font, fallback_face,
@@ -1715,6 +1717,21 @@ fn grey_jpeg(width: u16, height: u16) -> Vec<u8> {
     out
 }
 
+/// An `/MMType1` font embedding `type1_support`'s two-axis, four-master
+/// Type 1 program, named `TestMM_500_700_`: the instance at weight 500 and
+/// width 700, which the facade reads from the name and the font crate blends
+/// (`docs/design/type42-and-multiple-master.md`). Its two glyphs are one at
+/// 40 points and one at 24 on a half point, so their edges land on two
+/// sub-pixel phases; `multiple_master.rs` holds the page to a plain Type 1
+/// twin drawn from the instance's outlines.
+fn multiple_master_page() -> Vec<u8> {
+    type1_support::content_page(
+        "MMType1",
+        "TestMM_500_700_",
+        &type1_support::multiple_master_program(),
+    )
+}
+
 fn page_with(content: &str, width: f64, height: f64) -> Vec<u8> {
     format!(
         "%PDF-1.7\n\
@@ -2647,6 +2664,19 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Symbolic,
         least_ink: 19_000,
     },
+    // An `/MMType1` font embedding a two-axis, four-master Type 1 program,
+    // drawn at the instance its `/BaseFont` names (FT-10.5): the design
+    // vector read from the name, normalised through the program's maps, the
+    // masters weighted by their corners and blended by othersubrs 14 to 16,
+    // on every target. The two glyphs cover about 660 pixels and the floor is
+    // under half: a glyph drawn at another instance keeps most of its ink,
+    // which is the hash's, and one not drawn at all paints none.
+    Fixture {
+        name: "multiple_master",
+        build: multiple_master_page,
+        open: Open::Closed,
+        least_ink: 300,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2902,6 +2932,9 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // built-in encodings by its glyph name, through the face's `post`
     // names, on every target.
     ("substituted_symbols", ""),
+    // An `/MMType1` font's embedded multiple-master program drawn at the
+    // instance its name gives, on every target.
+    ("multiple_master", ""),
 ];
 
 #[test]
@@ -3290,6 +3323,7 @@ fn svg_output_is_stable_across_targets() {
         ("intents", ""),
         ("substituted_cjk", ""),
         ("substituted_symbols", ""),
+        ("multiple_master", ""),
     ];
     assert_eq!(
         expected.len(),
@@ -3678,6 +3712,7 @@ const MARK_BOXES: &[(&str, &str)] = &[
     ("intents", ""),
     ("substituted_cjk", ""),
     ("substituted_symbols", ""),
+    ("multiple_master", ""),
 ];
 
 /// **The page analysis's box is the same number on every target.** The box is
@@ -3919,6 +3954,9 @@ const COMMAND_STREAMS: &[(&str, &str)] = &[
     ("jpeg_minified", ""),
     ("jpx_minified", ""),
     ("intents", ""),
+    ("substituted_cjk", ""),
+    ("substituted_symbols", ""),
+    ("multiple_master", ""),
 ];
 
 /// **The command stream is the same bytes on every target** (RC-18.4): every
