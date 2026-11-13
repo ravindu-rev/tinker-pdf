@@ -53,21 +53,37 @@
 //! 4. Branch-free reduction: a Montgomery product's final subtraction is
 //!    computed every time, with its borrow, and kept or not by mask.
 //!
+//! **The path's Montgomery core is its own**
+//! (`docs/design/crypto-throughput.md`, *The Montgomery core on SG-01's
+//! path*). A product is CIOS over exactly the modulus's limbs — sixteen for a
+//! 1 024-bit CRT half, however wide the type that holds it — with each operand
+//! cut to that width once, so that its loops walk slices and read or write no
+//! limb through a bounds check, and the two limbs above the width stay in
+//! registers. A squaring is a core of its own: each cross product `a_i · a_j`
+//! with `i < j` formed once and the sum doubled, the squares `a_i²` added, then
+//! the same reduction, so its multiplication half forms `n(n+1)/2` limb
+//! products where a product's forms `n²`. The exponentiations' squarings —
+//! four a window, one a bit of a public exponent — and the blinding pair's are
+//! that core. Its loops run over the limb count and its doubling carries by
+//! arithmetic, so it branches on no value a product does not.
+//!
 //! The path's working memory — the window table, the accumulator and the
 //! Montgomery scratch — is wiped before an operation returns. Under
 //! `cfg(test)` the path counts what it does, and
-//! `the_private_path_counts_alike_over_every_exponent` holds those counts equal
-//! over exponents of every shape: a count that moved with the exponent would
-//! be a branch or a lookup that depends on it. The counts show the shape of
-//! the source; they cannot show what a target's machine code does, which is
-//! the independent review the roadmap owes (H-67).
+//! `the_private_path_counts_alike_over_every_exponent` holds those counts —
+//! the squarings among the products and the limb products of each half among
+//! them — equal over exponents of every shape: a count that moved with the
+//! exponent would be a branch or a lookup that depends on it. The counts show
+//! the shape of the source; they cannot show what a target's machine code
+//! does, which is the independent review the roadmap owes (H-67).
 //!
 //! # Never panics
 //!
-//! Every limb access goes through [`Uint::limb`] or a `get_mut`, every
-//! arithmetic step is a `wrapping_*` or a `u128` widening, and every loop
-//! bound comes from a const parameter or a stored length. Ruling 1: the inputs
-//! are attacker-chosen bytes out of a PDF.
+//! Every limb access goes through [`Uint::limb`], a `get` or a `get_mut`, or
+//! an iterator over a slice cut once to the modulus's width; every arithmetic
+//! step is a `wrapping_*` or a `u128` widening, and every loop bound comes from
+//! a const parameter or a stored length. Ruling 1: the inputs are
+//! attacker-chosen bytes out of a PDF.
 
 use core::cmp::Ordering;
 
@@ -548,8 +564,16 @@ impl<const N: usize> Modulus<N> {
 // (`docs/design/signing.md`, *The constant-time path*). The public path above
 // stays as it is: it is what verification runs, and it touches no secret.
 
+/// The constant-time path's Montgomery scratch, in limbs: a squaring's whole
+/// square, twice the widest modulus. A product's CIOS uses the low limbs of
+/// it, a modulus's width, and holds its two limbs above that in registers.
+const SCRATCH_LIMBS: usize = 2 * MAX_LIMBS;
+
+/// The constant-time path's Montgomery scratch.
+type Scratchpad = [u64; SCRATCH_LIMBS];
+
 /// The constant-time path's working memory: the sixteen-entry window table,
-/// the accumulator, the entry a window selected and CIOS's scratch.
+/// the accumulator, the entry a window selected and the Montgomery scratch.
 ///
 /// It lives in the frame of the operation that made it and is never moved,
 /// and its `Drop` wipes every limb, so nothing a secret exponentiation
@@ -559,7 +583,7 @@ struct Workspace<const N: usize> {
     table: [Uint<N>; 16],
     accumulator: Uint<N>,
     entry: Uint<N>,
-    scratch: [u64; MAX_LIMBS + 2],
+    scratch: Scratchpad,
 }
 
 impl<const N: usize> Workspace<N> {
@@ -568,7 +592,7 @@ impl<const N: usize> Workspace<N> {
             table: [Uint::zero(); 16],
             accumulator: Uint::zero(),
             entry: Uint::zero(),
-            scratch: [0; MAX_LIMBS + 2],
+            scratch: [0; SCRATCH_LIMBS],
         }
     }
 }
@@ -658,8 +682,14 @@ macro_rules! tally {
 pub(crate) struct Counts {
     /// Montgomery products, squarings among them.
     pub(crate) products: u64,
-    /// 64-by-64-bit limb products inside those.
+    /// Of those, the squarings, each made by the dedicated squaring.
+    pub(crate) squarings: u64,
+    /// 64-by-64-bit limb products inside those, both halves of each.
     pub(crate) limb_products: u64,
+    /// Of those, the ones in the multiplication halves: `n²` a product and
+    /// `n(n+1)/2` a squaring, for a modulus of `n` limbs. The reduction
+    /// half's `n²` are the rest.
+    pub(crate) multiplication_limb_products: u64,
     /// Window-table entries read.
     pub(crate) table_reads: u64,
     /// Values kept by mask rather than chosen by a branch: a limb of a
@@ -697,101 +727,85 @@ pub(crate) mod counts {
 }
 
 impl<const N: usize> Modulus<N> {
-    /// CIOS on the constant-time path: `t = a · b · R^-1`, below `2m`, in
-    /// `t[..=used]`.
-    ///
-    /// The loops are [`Modulus::mul`]'s, whose bounds are the modulus's limb
-    /// count and nothing else; the difference is that the scratch belongs to
-    /// the caller, who wipes it, and that the final subtraction is left to
-    /// [`Modulus::finish_secret`]. `a` may be any value below `R`, `b` any
-    /// value below `m`: `(a·b + q·m) / R` is then below `2m`.
-    fn core_secret(&self, a: &Uint<N>, b: &Uint<N>, t: &mut [u64; MAX_LIMBS + 2]) {
-        let s = self.used;
-        for slot in t.iter_mut() {
-            *slot = 0;
-        }
-        #[cfg(test)]
-        let mut limb_products = 0u64;
-
-        for i in 0..s {
-            let bi = u128::from(b.limb(i));
-            let mut carry = 0u64;
-            for j in 0..s {
-                let product =
-                    u128::from(read(t, j)) + u128::from(a.limb(j)) * bi + u128::from(carry);
-                write(t, j, product as u64);
-                carry = (product >> 64) as u64;
-                #[cfg(test)]
-                {
-                    limb_products += 1;
-                }
-            }
-            let sum = u128::from(read(t, s)) + u128::from(carry);
-            write(t, s, sum as u64);
-            write(t, s + 1, (sum >> 64) as u64);
-
-            let factor = read(t, 0).wrapping_mul(self.n0inv);
-            let first = u128::from(read(t, 0)) + u128::from(factor) * u128::from(self.m.limb(0));
-            #[cfg(test)]
-            {
-                limb_products += 1;
-            }
-            let mut carry = (first >> 64) as u64;
-            for j in 1..s {
-                let product = u128::from(read(t, j))
-                    + u128::from(factor) * u128::from(self.m.limb(j))
-                    + u128::from(carry);
-                write(t, j - 1, product as u64);
-                carry = (product >> 64) as u64;
-                #[cfg(test)]
-                {
-                    limb_products += 1;
-                }
-            }
-            let sum = u128::from(read(t, s)) + u128::from(carry);
-            write(t, s.saturating_sub(1), sum as u64);
-            let top = read(t, s + 1).wrapping_add((sum >> 64) as u64);
-            write(t, s, top);
-        }
-        tally!(limb_products, limb_products);
+    /// The modulus's own limbs, `used` of them: the width every loop of the
+    /// constant-time core runs.
+    fn own_limbs(&self) -> &[u64] {
+        // `used` is at most `N` (`Modulus::new`, `SecretModulus::new`), so
+        // the cut is always there; an empty slice would compute nothing.
+        self.m.limbs.get(..self.used).unwrap_or_default()
     }
 
-    /// The product's last step, branch-free (rule 4): CIOS leaves `t` below
-    /// `2m` over `used + 1` limbs, and [`reduce_once`] takes `m` off it or
-    /// not by mask. Limbs above the modulus are cleared, which is
-    /// [`Modulus::narrow`]'s job on the public path.
-    fn finish_secret(&self, t: &[u64; MAX_LIMBS + 2], out: &mut Uint<N>) {
+    /// CIOS on the constant-time path: `a · b · R^-1`, below `2m`, its low
+    /// `used` limbs left in `t[..used]` and its carry limb returned.
+    ///
+    /// The operands are cut to the modulus's width once, here, and
+    /// [`montgomery_product`] walks the slices; the scratch belongs to the
+    /// caller, who wipes it, and the final subtraction is
+    /// [`Modulus::finish_secret`]'s. `a` may be any value below `R`, `b` any
+    /// value below `m`: `(a·b + q·m) / R` is then below `2m`.
+    fn core_secret(&self, a: &Uint<N>, b: &Uint<N>, t: &mut Scratchpad) -> u64 {
         let s = self.used;
-        for j in 0..N {
-            out.set_limb(j, if j < s { read(t, j) } else { 0 });
+        match (a.limbs.get(..s), b.limbs.get(..s), t.get_mut(..s)) {
+            (Some(a), Some(b), Some(t)) => {
+                montgomery_product(a, b, self.own_limbs(), self.n0inv, t)
+            }
+            // Unreachable: `used` is at most `N`, and `N` at most
+            // `MAX_LIMBS`, which `Modulus::new` and `SecretModulus::new`
+            // check before any value is computed.
+            _ => 0,
         }
-        reduce_once(out, &self.m, s, read(t, s));
+    }
+
+    /// The dedicated squaring on the constant-time path: `a² · R^-1`, below
+    /// `2m` for `a` below `m`, its low `used` limbs left in
+    /// `t[used..2·used]` and its carry limb returned
+    /// ([`montgomery_square`]).
+    fn square_core_secret(&self, a: &Uint<N>, t: &mut Scratchpad) -> u64 {
+        let s = self.used;
+        match (a.limbs.get(..s), t.get_mut(..2 * s)) {
+            (Some(a), Some(t)) => montgomery_square(a, self.own_limbs(), self.n0inv, t),
+            // Unreachable, as in `core_secret`.
+            _ => 0,
+        }
+    }
+
+    /// The product's last step, branch-free (rule 4): the core leaves a value
+    /// below `2m` as the modulus's width of limbs, `low`, and a carry limb,
+    /// and [`reduce_once`] takes `m` off it or not by mask. Limbs above the
+    /// modulus are cleared, which is [`Modulus::narrow`]'s job on the public
+    /// path.
+    fn finish_secret(&self, low: &[u64], carry: u64, out: &mut Uint<N>) {
+        for (limb, &value) in out.limbs.iter_mut().zip(low) {
+            *limb = value;
+        }
+        for limb in out.limbs.iter_mut().skip(self.used) {
+            *limb = 0;
+        }
+        reduce_once(out, &self.m, self.used, carry);
         tally!(products, 1);
     }
 
     /// `out = a · b · R^-1 mod m`, on the constant-time path.
-    fn product_secret(
-        &self,
-        a: &Uint<N>,
-        b: &Uint<N>,
-        out: &mut Uint<N>,
-        t: &mut [u64; MAX_LIMBS + 2],
-    ) {
-        self.core_secret(a, b, t);
-        self.finish_secret(t, out);
+    fn product_secret(&self, a: &Uint<N>, b: &Uint<N>, out: &mut Uint<N>, t: &mut Scratchpad) {
+        let carry = self.core_secret(a, b, t);
+        self.finish_secret(t.get(..self.used).unwrap_or_default(), carry, out);
     }
 
     /// `x = x · b · R^-1 mod m`, on the constant-time path. CIOS has read
     /// every limb of `x` before the first is written back.
-    fn product_assign_secret(&self, x: &mut Uint<N>, b: &Uint<N>, t: &mut [u64; MAX_LIMBS + 2]) {
-        self.core_secret(x, b, t);
-        self.finish_secret(t, x);
+    fn product_assign_secret(&self, x: &mut Uint<N>, b: &Uint<N>, t: &mut Scratchpad) {
+        let carry = self.core_secret(x, b, t);
+        self.finish_secret(t.get(..self.used).unwrap_or_default(), carry, x);
     }
 
-    /// `x = x² · R^-1 mod m`, on the constant-time path.
-    fn square_assign_secret(&self, x: &mut Uint<N>, t: &mut [u64; MAX_LIMBS + 2]) {
-        self.core_secret(x, x, t);
-        self.finish_secret(t, x);
+    /// `x = x² · R^-1 mod m` for `x` below `m`, on the constant-time path, by
+    /// the dedicated squaring. It has read every limb of `x` before the
+    /// first is written back.
+    fn square_assign_secret(&self, x: &mut Uint<N>, t: &mut Scratchpad) {
+        let s = self.used;
+        let carry = self.square_core_secret(x, t);
+        self.finish_secret(t.get(s..2 * s).unwrap_or_default(), carry, x);
+        tally!(squarings, 1);
     }
 
     /// The sixteen powers `base^0` to `base^15` in Montgomery form: entry 0
@@ -867,18 +881,199 @@ impl<const N: usize> Modulus<N> {
 /// wanted one by mask (rule 2): the memory a selection touches is the whole
 /// table whichever entry the secret names.
 fn select_entry<const N: usize>(table: &[Uint<N>; 16], index: u64, used: usize, out: &mut Uint<N>) {
-    for j in 0..N {
-        out.set_limb(j, 0);
+    for limb in &mut out.limbs {
+        *limb = 0;
     }
     for (position, entry) in (0u64..).zip(table.iter()) {
         let keep = equal_mask(position, index);
-        for j in 0..used {
-            out.set_limb(j, out.limb(j) | (entry.limb(j) & keep));
+        for (limb, &held) in out.limbs.iter_mut().zip(&entry.limbs).take(used) {
+            *limb |= held & keep;
         }
         tally!(table_reads, 1);
         tally!(selects, 1);
         tally!(branches, 1);
     }
+}
+
+/// CIOS (Koç, Acar and Kaliski 1996) over slices cut to the modulus's width:
+/// `t + carry · 2^(64s) = a · b · R^-1`, below `2m` for `a` below `R` and `b`
+/// below `m`, where `s` is `m.len()` and `a`, `b` and `t` are as long. `t` is
+/// zeroed first; the carry limb is returned.
+///
+/// Each of the `s` rounds adds `a · b_i` into `t`, then the multiple of `m`
+/// that clears `t`'s low limb, and moves `t` down a limb. The two limbs above
+/// the width are held in registers between rounds, and every loop is a walk
+/// over the slices, so no limb is read or written through a bounds check;
+/// every loop runs `s` times, and nothing branches on a value. A round forms
+/// `s` limb products in each half.
+fn montgomery_product(a: &[u64], b: &[u64], m: &[u64], n0inv: u64, t: &mut [u64]) -> u64 {
+    for limb in t.iter_mut() {
+        *limb = 0;
+    }
+    let Some((&m0, m_rest)) = m.split_first() else {
+        return 0;
+    };
+    #[cfg(test)]
+    let mut multiplying = 0u64;
+    #[cfg(test)]
+    let mut reducing = 0u64;
+
+    // `t[s]` between rounds: a value below `2m` needs no limb above it.
+    let mut top = 0u64;
+    for &bi in b {
+        let bi = u128::from(bi);
+        let mut carry = 0u64;
+        for (limb, &aj) in t.iter_mut().zip(a) {
+            let product = u128::from(*limb) + u128::from(aj) * bi + u128::from(carry);
+            *limb = product as u64;
+            carry = (product >> 64) as u64;
+            #[cfg(test)]
+            {
+                multiplying += 1;
+            }
+        }
+        // `t[s]` and `t[s + 1]` once `a · b_i` is in.
+        let sum = u128::from(top) + u128::from(carry);
+        let (above, overflow) = (sum as u64, (sum >> 64) as u64);
+
+        let Some((first, rest)) = t.split_first_mut() else {
+            return 0;
+        };
+        let factor = u128::from(first.wrapping_mul(n0inv));
+        let cleared = u128::from(*first) + factor * u128::from(m0);
+        let mut carry = (cleared >> 64) as u64;
+        #[cfg(test)]
+        {
+            reducing += 1;
+        }
+        // Each limb is written one below the limb it was read from: the
+        // division by 2^64 that the cleared low limb makes exact.
+        let mut below = first;
+        for (limb, &mj) in rest.iter_mut().zip(m_rest) {
+            let product = u128::from(*limb) + factor * u128::from(mj) + u128::from(carry);
+            *below = product as u64;
+            carry = (product >> 64) as u64;
+            below = limb;
+            #[cfg(test)]
+            {
+                reducing += 1;
+            }
+        }
+        let sum = u128::from(above) + u128::from(carry);
+        *below = sum as u64;
+        top = overflow.wrapping_add((sum >> 64) as u64);
+    }
+    tally!(limb_products, multiplying + reducing);
+    tally!(multiplication_limb_products, multiplying);
+    top
+}
+
+/// `a² · R^-1` for `a` below `m`, by a squaring of its own: `t`, of `2s` limbs
+/// for `s = m.len()` and zeroed first, receives the whole square `a²`, which
+/// is then reduced where it lies. The result's low limbs are left in
+/// `t[s..]`, its carry limb is returned, and the value is below `2m`.
+///
+/// The cross products `a_i · a_j` with `i < j` are each formed once: row `i`
+/// adds `a_i · a[i+1..]` at limb `2i + 1`, and its carry lands on limb
+/// `i + s`, which no earlier row reached. Their sum, below `2^(128s - 1)`, is
+/// doubled by a shift whose carry is arithmetic, and the squares `a_i²` are
+/// added at limbs `2i` and `2i + 1`: `s(s - 1)/2 + s = s(s + 1)/2` limb
+/// products, where a product's multiplication half forms `s²`. The reduction
+/// is the separated form of the same Montgomery reduction: for each low limb
+/// in turn, the multiple of `m` that clears it, `s` limb products a limb, the
+/// carry out of its top held for the next. Every loop runs over the limb
+/// count, and nothing branches on a value.
+fn montgomery_square(a: &[u64], m: &[u64], n0inv: u64, t: &mut [u64]) -> u64 {
+    let s = m.len();
+    for limb in t.iter_mut() {
+        *limb = 0;
+    }
+    #[cfg(test)]
+    let mut multiplying = 0u64;
+    #[cfg(test)]
+    let mut reducing = 0u64;
+
+    // The cross products, each once: row `i` covers limbs `2i + 1` to `i + s`.
+    for (i, &ai) in a.iter().enumerate() {
+        let (Some(row), Some(upper)) = (t.get_mut(2 * i + 1..=i + s), a.get(i + 1..)) else {
+            break;
+        };
+        let Some((spill, row)) = row.split_last_mut() else {
+            break;
+        };
+        let ai = u128::from(ai);
+        let mut carry = 0u64;
+        for (limb, &aj) in row.iter_mut().zip(upper) {
+            let product = u128::from(*limb) + ai * u128::from(aj) + u128::from(carry);
+            *limb = product as u64;
+            carry = (product >> 64) as u64;
+            #[cfg(test)]
+            {
+                multiplying += 1;
+            }
+        }
+        *spill = carry;
+    }
+
+    // Doubled: the cross products sum to below 2^(128s - 1), so nothing
+    // leaves the top limb.
+    let mut carry = 0u64;
+    for limb in t.iter_mut() {
+        let value = *limb;
+        *limb = (value << 1) | carry;
+        carry = value >> 63;
+    }
+
+    // The squares, each at its own two limbs, the carry passed along.
+    let mut carry = 0u64;
+    for (&ai, pair) in a.iter().zip(t.chunks_exact_mut(2)) {
+        let [low, high] = pair else {
+            break;
+        };
+        let square = u128::from(ai) * u128::from(ai);
+        let sum = u128::from(*low) + u128::from(square as u64) + u128::from(carry);
+        *low = sum as u64;
+        let sum = u128::from(*high) + (square >> 64) + (sum >> 64);
+        *high = sum as u64;
+        carry = (sum >> 64) as u64;
+        #[cfg(test)]
+        {
+            multiplying += 1;
+        }
+    }
+
+    // The reduction, a low limb at a time: limbs `i` to `i + s - 1` take the
+    // multiple of `m` that clears limb `i`, and limb `i + s` its carry and
+    // the one the row before passed up.
+    let mut extra = 0u64;
+    for i in 0..s {
+        let Some(window) = t.get_mut(i..=i + s) else {
+            break;
+        };
+        let Some((spill, window)) = window.split_last_mut() else {
+            break;
+        };
+        let Some(&low) = window.first() else {
+            break;
+        };
+        let factor = u128::from(low.wrapping_mul(n0inv));
+        let mut carry = 0u64;
+        for (limb, &mj) in window.iter_mut().zip(m) {
+            let product = u128::from(*limb) + factor * u128::from(mj) + u128::from(carry);
+            *limb = product as u64;
+            carry = (product >> 64) as u64;
+            #[cfg(test)]
+            {
+                reducing += 1;
+            }
+        }
+        let sum = u128::from(*spill) + u128::from(carry) + u128::from(extra);
+        *spill = sum as u64;
+        extra = (sum >> 64) as u64;
+    }
+    tally!(limb_products, multiplying + reducing);
+    tally!(multiplication_limb_products, multiplying);
+    extra
 }
 
 /// Takes `m` off a value below `2m` held as `x`'s low `used` limbs and a
@@ -892,16 +1087,15 @@ fn select_entry<const N: usize>(table: &[Uint<N>; 16], index: u64, used: usize, 
 /// `2^(64·used) + x - m`, the answer.
 fn reduce_once<const N: usize>(x: &mut Uint<N>, m: &Uint<N>, used: usize, carry: u64) {
     let mut borrow = 0u64;
-    for j in 0..used {
-        borrow = subtract_limb(x.limb(j), m.limb(j), borrow).1;
+    for (&limb, &modulus) in x.limbs.iter().zip(&m.limbs).take(used) {
+        borrow = subtract_limb(limb, modulus, borrow).1;
     }
     let take = mask(nonzero(carry) | (borrow ^ 1));
     let mut borrow = 0u64;
-    for j in 0..used {
-        let limb = x.limb(j);
-        let (difference, next) = subtract_limb(limb, m.limb(j), borrow);
+    for (limb, &modulus) in x.limbs.iter_mut().zip(&m.limbs).take(used) {
+        let (difference, next) = subtract_limb(*limb, modulus, borrow);
         borrow = next;
-        x.set_limb(j, select(take, difference, limb));
+        *limb = select(take, difference, *limb);
     }
     tally!(selects, used as u64);
 }
@@ -984,14 +1178,14 @@ fn r2_secret<const N: usize>(m: &Uint<N>, used: usize, out: &mut Uint<N>) {
 /// exponentiation's workspace is.
 struct Scratch<const N: usize> {
     values: [Uint<N>; 4],
-    t: [u64; MAX_LIMBS + 2],
+    t: Scratchpad,
 }
 
 impl<const N: usize> Scratch<N> {
     fn new() -> Self {
         Self {
             values: [Uint::zero(); 4],
-            t: [0; MAX_LIMBS + 2],
+            t: [0; SCRATCH_LIMBS],
         }
     }
 }
@@ -1013,7 +1207,8 @@ impl<const N: usize> Modulus<N> {
         self.product_secret(a, b, out, &mut work.t);
     }
 
-    /// `x = x² · R^-1 mod m` in place, on the constant-time path.
+    /// `x = x² · R^-1 mod m` in place for `x` below `m`, on the constant-time
+    /// path, by the dedicated squaring.
     pub(crate) fn square_secret(&self, x: &mut Uint<N>) {
         let mut work = Scratch::<N>::new();
         self.square_assign_secret(x, &mut work.t);
@@ -1816,9 +2011,11 @@ mod tests {
         out
     }
 
-    /// SG-01.2's exit: the constant-time exponentiation's operation counts —
-    /// Montgomery products, limb products, table reads, masked selections and
-    /// loop iterations — are the same for every exponent and every base under
+    /// SG-01.2's exit, extended to the dedicated squaring by P-13.8: the
+    /// constant-time exponentiation's operation counts — Montgomery products
+    /// and the squarings among them, limb products in all and in the
+    /// multiplication halves, table reads, masked selections and loop
+    /// iterations — are the same for every exponent and every base under
     /// one modulus, and the answer is the public path's.
     ///
     /// The exponents are every shape a leak would show on: zero, one, every
@@ -1827,76 +2024,209 @@ mod tests {
     /// one, two, `m - 1` and random. The moduli are a full limb, a partial top
     /// limb, four limbs with the top one short a bit, and 521 bits inside a
     /// nine-limb type — the shape in which every limb above the modulus has
-    /// to come back clear. Each count is also held to what the source should
-    /// do, so a count that agreed with itself by doing nothing would fail too.
+    /// to come back clear — and two random 1 024-bit moduli inside RSA's
+    /// sixty-four limbs, sixteen used: a CRT half of an RSA-2048 key as the
+    /// key holds it, the width the core is for. Each count is also held to
+    /// what the source should do, so a count that agreed with itself by doing
+    /// nothing would fail too.
     #[test]
     fn the_private_path_counts_alike_over_every_exponent() {
         let mut draws = Draws(0x5347_2d30_312e_3220);
         for bits in [64usize, 100, 255, 521] {
-            let m = odd_modulus::<9>(&mut draws, bits);
-            let modulus = Modulus::new(m).expect("odd and wide");
-            let (m_minus_two, _) = m.sub_borrow(&Uint::from_u64(2));
-            let (m_minus_one, _) = m.sub_borrow(&Uint::from_u64(1));
-            let mut top_bit = Uint::<9>::zero();
-            top_bit.set_limb((bits - 1) / 64, 1u64 << ((bits - 1) % 64));
+            counts_alike_under_one_modulus::<9>(&mut draws, bits, 4);
+        }
+        for _ in 0..2 {
+            counts_alike_under_one_modulus::<MAX_LIMBS>(&mut draws, 1024, 2);
+        }
+    }
 
-            let mut exponents = vec![
-                Uint::<9>::zero(),
-                Uint::from_u64(1),
-                pattern(bits, u64::MAX),
-                pattern(bits, 0x5555_5555_5555_5555),
-                pattern(bits, 0xaaaa_aaaa_aaaa_aaaa),
-                top_bit,
-                m_minus_two,
-            ];
-            let mut bases = vec![
-                Uint::<9>::zero(),
-                Uint::from_u64(1),
-                Uint::from_u64(2),
-                m_minus_one,
-            ];
-            for _ in 0..4 {
-                exponents.push(drawn(&mut draws, bits));
-                bases.push(drawn(&mut draws, bits - 1));
-            }
+    /// One random odd modulus of `bits` bits in an `N`-limb type, and the
+    /// exponentiation over the exponents and bases of
+    /// `the_private_path_counts_alike_over_every_exponent`, `random` of each
+    /// drawn: the answers the public path's, the counts equal over every
+    /// pair and what the source should do.
+    fn counts_alike_under_one_modulus<const N: usize>(
+        draws: &mut Draws,
+        bits: usize,
+        random: usize,
+    ) {
+        let m = odd_modulus::<N>(draws, bits);
+        let modulus = Modulus::new(m).expect("odd and wide");
+        let (m_minus_two, _) = m.sub_borrow(&Uint::from_u64(2));
+        let (m_minus_one, _) = m.sub_borrow(&Uint::from_u64(1));
+        let mut top_bit = Uint::<N>::zero();
+        top_bit.set_limb((bits - 1) / 64, 1u64 << ((bits - 1) % 64));
 
-            let mut first: Option<Counts> = None;
-            for base in &bases {
-                for exponent in &exponents {
-                    let _ = counts::take();
-                    let got = secret_power(&modulus, base, exponent);
-                    let counted = counts::take();
-                    assert_eq!(
-                        got,
-                        modulus.pow(base, exponent),
-                        "{bits}-bit modulus, base {base:?}, exponent {exponent:?}"
-                    );
-                    match first {
-                        None => first = Some(counted),
-                        Some(expected) => assert_eq!(
-                            counted, expected,
-                            "{bits}-bit modulus: the counts moved with base {base:?}, exponent {exponent:?}"
-                        ),
-                    }
+        let mut exponents = vec![
+            Uint::<N>::zero(),
+            Uint::from_u64(1),
+            pattern(bits, u64::MAX),
+            pattern(bits, 0x5555_5555_5555_5555),
+            pattern(bits, 0xaaaa_aaaa_aaaa_aaaa),
+            top_bit,
+            m_minus_two,
+        ];
+        let mut bases = vec![
+            Uint::<N>::zero(),
+            Uint::from_u64(1),
+            Uint::from_u64(2),
+            m_minus_one,
+        ];
+        for _ in 0..random {
+            exponents.push(drawn(draws, bits));
+            bases.push(drawn(draws, bits - 1));
+        }
+
+        let mut first: Option<Counts> = None;
+        for base in &bases {
+            for exponent in &exponents {
+                let _ = counts::take();
+                let got = secret_power(&modulus, base, exponent);
+                let counted = counts::take();
+                assert_eq!(
+                    got,
+                    modulus.pow(base, exponent),
+                    "{bits}-bit modulus, base {base:?}, exponent {exponent:?}"
+                );
+                match first {
+                    None => first = Some(counted),
+                    Some(expected) => assert_eq!(
+                        counted, expected,
+                        "{bits}-bit modulus: the counts moved with base {base:?}, exponent {exponent:?}"
+                    ),
                 }
             }
+        }
 
-            let counted = first.expect("at least one run");
-            let windows = bits.div_ceil(4) as u64;
-            let s = bits.div_ceil(64) as u64;
+        let counted = first.expect("at least one run");
+        let windows = bits.div_ceil(4) as u64;
+        let s = bits.div_ceil(64) as u64;
+        assert_eq!(
+            counted.products,
+            5 * windows + 18,
+            "two conversions, fifteen table steps, five products a window and one back"
+        );
+        assert_eq!(
+            counted.squarings,
+            4 * windows,
+            "four squarings a window, each the dedicated one"
+        );
+        let multiplied = counted.products - counted.squarings;
+        assert_eq!(
+            counted.multiplication_limb_products,
+            multiplied * s * s + counted.squarings * s * (s + 1) / 2,
+            "{bits} bits: n² limb products a product multiplies, n(n+1)/2 a squaring"
+        );
+        assert_eq!(
+            counted.limb_products,
+            counted.multiplication_limb_products + counted.products * s * s,
+            "{bits} bits: and the same reduction after each, n² more"
+        );
+        assert_eq!(
+            counted.table_reads,
+            16 * windows,
+            "the whole table, every window"
+        );
+        assert_eq!(counted.selects, 16 * windows + counted.products * s);
+        assert_eq!(counted.branches, 21 * windows + 15);
+    }
+
+    /// P-13.8's exit: the private path's squaring forms each cross product
+    /// `a_i · a_j`, `i < j`, once and doubles their sum, so that for `n = 16`
+    /// — a 1 024-bit CRT half — its multiplication half forms `n(n+1)/2` limb
+    /// products where a product's forms `n²`, and it then reduces as a
+    /// product does, `n²` more, with the same final subtraction by mask.
+    ///
+    /// And it is the public path's `mul(a, a)`, which
+    /// `montgomery_products_agree_with_u128` holds to `u128`, on random
+    /// operands and on the operands that carry most: zero, one, `m - 1`,
+    /// `m - 2` and every bit below the top set, under random moduli of every
+    /// width from two bits to sixteen limbs — a top limb full, short and one
+    /// bit long — and under the all-ones moduli of one, two and sixteen
+    /// limbs, inside a type wider than the modulus and one it fills.
+    #[test]
+    fn a_squaring_forms_each_cross_product_once() {
+        let mut draws = Draws(0x5031_332e_3820);
+        let mut scratch = [0u64; SCRATCH_LIMBS];
+
+        let m = odd_modulus::<MAX_LIMBS>(&mut draws, 1024);
+        let modulus = Modulus::new(m).expect("odd and wide");
+        assert_eq!(modulus.limbs(), 16);
+        for _ in 0..4 {
+            let x = drawn::<MAX_LIMBS>(&mut draws, 1023);
+            let _ = counts::take();
+            let mut squared = x;
+            modulus.square_assign_secret(&mut squared, &mut scratch);
+            let square = counts::take();
+            let mut product = Uint::<MAX_LIMBS>::zero();
+            modulus.product_secret(&x, &x, &mut product, &mut scratch);
+            let multiplied = counts::take();
+
             assert_eq!(
-                counted.products,
-                5 * windows + 18,
-                "two conversions, fifteen table steps, five products a window and one back"
+                squared, product,
+                "the squaring is the value's product with itself"
             );
-            assert_eq!(counted.limb_products, counted.products * 2 * s * s);
+            assert_eq!(squared, modulus.mul(&x, &x));
+            assert_eq!((square.products, square.squarings), (1, 1));
+            assert_eq!((multiplied.products, multiplied.squarings), (1, 0));
             assert_eq!(
-                counted.table_reads,
-                16 * windows,
-                "the whole table, every window"
+                square.multiplication_limb_products,
+                16 * 17 / 2,
+                "a hundred and twenty cross products once, and sixteen squares"
             );
-            assert_eq!(counted.selects, 16 * windows + counted.products * s);
-            assert_eq!(counted.branches, 21 * windows + 15);
+            assert_eq!(multiplied.multiplication_limb_products, 16 * 16);
+            assert_eq!(
+                square.limb_products - square.multiplication_limb_products,
+                16 * 16,
+                "the reduction a product makes"
+            );
+            assert_eq!(
+                multiplied.limb_products - multiplied.multiplication_limb_products,
+                16 * 16
+            );
+            assert_eq!(square.selects, multiplied.selects, "one final subtraction");
+            assert_eq!(square.selects, 16);
+        }
+
+        let mut moduli: Vec<Uint<16>> = vec![
+            pattern(64, u64::MAX),
+            pattern(128, u64::MAX),
+            pattern(1024, u64::MAX),
+            Uint::from_u64(3),
+        ];
+        for bits in [
+            2usize, 3, 63, 64, 65, 127, 128, 129, 191, 192, 255, 300, 512, 513, 777, 1000, 1023,
+            1024,
+        ] {
+            moduli.push(odd_modulus(&mut draws, bits));
+        }
+        for m in moduli {
+            let modulus = Modulus::new(m).expect("odd and above 2");
+            let bits = modulus.bits();
+            let (m_minus_one, _) = m.sub_borrow(&Uint::from_u64(1));
+            let (m_minus_two, _) = m.sub_borrow(&Uint::from_u64(2));
+            let mut operands = vec![
+                Uint::<16>::zero(),
+                Uint::from_u64(1),
+                m_minus_one,
+                m_minus_two,
+                pattern(bits - 1, u64::MAX),
+            ];
+            for _ in 0..8 {
+                operands.push(drawn(&mut draws, bits - 1));
+            }
+            for x in operands {
+                let mut squared = x;
+                modulus.square_assign_secret(&mut squared, &mut scratch);
+                assert_eq!(
+                    squared,
+                    modulus.mul(&x, &x),
+                    "{bits}-bit modulus, {x:?} squared"
+                );
+                let mut square = x;
+                modulus.square_secret(&mut square);
+                assert_eq!(square, squared);
+            }
         }
     }
 
@@ -1919,7 +2249,8 @@ mod tests {
     /// The branch-free product against the public one, which the tests above
     /// hold to `u128`, on both sides of the final subtraction — and with a
     /// one-limb modulus in a four-limb type, where the public path's borrow
-    /// once leaked into the limbs above the modulus.
+    /// once leaked into the limbs above the modulus, the dedicated squaring
+    /// beside the product there.
     #[test]
     fn a_constant_time_product_agrees_with_the_public_one() {
         let moduli: [u128; 4] = [
@@ -1928,7 +2259,7 @@ mod tests {
             0x0123_4567_89ab_cdef_fedc_ba98_7654_3211,
             0x7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff,
         ];
-        let mut scratch = [0u64; MAX_LIMBS + 2];
+        let mut scratch = [0u64; SCRATCH_LIMBS];
         for m in moduli {
             let modulus = Modulus::new(from_u128(m)).expect("odd and above 2");
             for a in SAMPLES {
@@ -1953,6 +2284,9 @@ mod tests {
                 wide.product_secret(&x, &x, &mut out, &mut scratch);
                 assert_eq!(out, wide.mul(&x, &x), "{value:x} squared");
                 assert_eq!((out.limb(1), out.limb(2), out.limb(3)), (0, 0, 0));
+                let mut squared = x;
+                wide.square_assign_secret(&mut squared, &mut scratch);
+                assert_eq!(squared, out, "{value:x} by the dedicated squaring");
             }
         }
     }

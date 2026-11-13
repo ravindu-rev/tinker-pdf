@@ -282,14 +282,16 @@ time.
 Montgomery products at the CRT halves' width — a 1 024-bit half is sixteen
 64-bit limbs. P-13.8 gives that path a core of its own:
 
-- **CIOS over the modulus's own limb count**, the limbs in fixed arrays the
-  loops index by counters bounded by that count, so there is no `read` or
-  `write` call a limb and no bounds check inside the loops; the final
-  subtraction by mask, as [signing](signing.md)'s rule 4 has it.
+- **CIOS over the modulus's own limb count**, each operand's fixed array cut
+  once to that count and the loops walking the slices, so there is no `read`
+  or `write` call a limb and no bounds check inside the loops; the two limbs
+  above the width held in registers between rounds; the final subtraction by
+  mask, as [signing](signing.md)'s rule 4 has it.
 - **A dedicated squaring**: the cross products `a_i·a_j` for `i < j` formed
   once and doubled, the squares `a_i²` added, then the same reduction — `n(n+1)/2`
   limb products in the multiplication half against `n²` for a product — used
-  for the four squarings of every window.
+  for the four squarings of every window, the fault check's squarings under
+  `e` and the blinding pair's.
 - **Still branch-free on every secret**: the squaring's loops run over the
   limb count, and its doubling carries by arithmetic.
 

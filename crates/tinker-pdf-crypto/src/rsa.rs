@@ -16,7 +16,9 @@
 //! [`RsaPrivateKey`] holds RFC 8017 §3.2's second representation and runs
 //! the private operation by it (`docs/design/signing.md`, *RSA signing*):
 //! `m1 = c^dP mod p` and `m2 = c^dQ mod q`, each the constant-time path's
-//! fixed-window exponentiation at its prime's width, joined by Garner's
+//! fixed-window exponentiation at its prime's width — its products CIOS over
+//! the prime's own limbs, its squarings the path's dedicated squaring —
+//! joined by Garner's
 //! `h = qInv · (m1 - m2) mod p` and `s = m2 + q · h`. Every operation on a
 //! secret — the reductions under each prime, the exponentiations, the
 //! recombination, the blinding — runs on that path ([`crate::bignum`], *Two
@@ -2900,6 +2902,67 @@ mod tests {
         }
         let uses = key.blinding.lock().map(|state| state.uses).unwrap_or(0);
         assert_eq!(uses, 70);
+    }
+
+    /// SG-01's operation-count test over the private operation itself, on
+    /// the core P-13.8 gives it: under each key `pss-vect.txt` publishes,
+    /// 1 024 to 2 048 bits, the operation on `0`, `1`, `n - 1` and random
+    /// representatives, blinded by one drawn pair, counts the same Montgomery
+    /// products, squarings, limb products in all and in the multiplication
+    /// halves, table reads, selections and loop iterations whatever the
+    /// message; and its squarings are the dedicated ones, four a window under
+    /// each prime and one a bit of `e` in the fault check.
+    #[test]
+    fn the_private_operation_counts_alike_over_messages() {
+        use crate::bignum::counts;
+
+        let mut entropy = Stream::new(0x5031_332e_38);
+        let mut sizes = Vec::new();
+        for vector in pss_vector_keys() {
+            let key = vector.key();
+            let bits = key.modulus_bits();
+            sizes.push(bits);
+            let pair = key.draw_pair(&mut entropy).expect("the source blinds");
+            let k = key.public.modulus.byte_len();
+            let (n_minus_one, _) = key.public.modulus.value().sub_borrow(&Uint::from_u64(1));
+            let mut messages = vec![Uint::zero(), Uint::from_u64(1), n_minus_one];
+            for _ in 0..3 {
+                // One octet short of the modulus: below 2^(8k - 8), so below n.
+                let mut octets = vec![0u8; k - 1];
+                assert!(entropy.fill(&mut octets));
+                messages.push(uint(&octets));
+            }
+
+            let mut first = None;
+            for c in &messages {
+                let _ = counts::take();
+                let signed = key.private_operation_with(c, &pair);
+                let counted = counts::take();
+                assert!(signed.is_ok(), "a {bits}-bit key: {signed:?}");
+                match first {
+                    None => first = Some(counted),
+                    Some(expected) => assert_eq!(
+                        counted, expected,
+                        "a {bits}-bit key: the counts moved with the message {c:?}"
+                    ),
+                }
+            }
+
+            let counted = first.expect("a message");
+            let windows =
+                |prime: &SecretModulus<RSA_LIMBS>| prime.modulus().bits().div_ceil(4) as u64;
+            assert_eq!(
+                counted.squarings,
+                4 * (windows(&key.p) + windows(&key.q)) + key.public.exponent.bits() as u64,
+                "a {bits}-bit key"
+            );
+        }
+        sizes.sort_unstable();
+        sizes.dedup();
+        assert_eq!(
+            sizes,
+            [1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1536, 2048]
+        );
     }
 
     /// SG-01.4's fault check: a half miscomputed in the middle of an

@@ -352,12 +352,20 @@ expansion of an
 `lib.rs` the `/P -2056` fixture that reads "printing denied, copying
 permitted" correctly. `bignum.rs` holds the constant-time path signing stands
 on (`docs/design/signing.md`) to the public path's answers and to repeated
-multiplication in `u128`, and its operation counts — Montgomery products,
-limb products, window-table reads, masked selections and loop iterations —
-equal over exponents of every shape and bases of every size under one
-modulus (`the_private_path_counts_alike_over_every_exponent`), and the
-secret moduli, reductions, sums, differences and comparisons beside it to
-the public path and to `u128`.
+multiplication in `u128`, and its operation counts — Montgomery products and
+the squarings among them, limb products in all and in the multiplication
+halves, window-table reads, masked selections and loop iterations — equal
+over exponents of every shape and bases of every size under one modulus, a
+1 024-bit CRT half held at RSA's width among them
+(`the_private_path_counts_alike_over_every_exponent`). The path's products
+are CIOS over the modulus's own limbs and its squarings a squaring of their
+own, each cross product formed once:
+`a_squaring_forms_each_cross_product_once` counts `n(n+1)/2` limb products in
+a sixteen-limb squaring's multiplication half against `n²` in a product's,
+the same reduction after each, and holds the squaring to the public product
+of a value with itself at every width to sixteen limbs. The secret moduli,
+reductions, sums, differences and comparisons beside it are held to the
+public path and to `u128`.
 
 `rsa.rs` holds the RSA private operation (`RsaPrivateKey`, by the Chinese
 remainder theorem) to every key the committed vectors publish — CAVP
@@ -367,7 +375,11 @@ their 135 published signatures from the representative it was made from
 (`crt_equals_the_plain_private_operation_on_every_vector_key`, which also
 holds each key to `c^d mod n` without the halves). Blinded runs equal
 unblinded ones under three sources and across two refreshes and the
-squarings between; a half miscomputed mid-operation and a key with a wrong
+squarings between; under each key of `pss-vect.txt` the operation counts
+alike over messages, its squarings four a window under each prime and one a
+bit of `e` in the fault check
+(`the_private_operation_counts_alike_over_messages`); a half miscomputed
+mid-operation and a key with a wrong
 `dP` are refused before a result leaves; a key that has signed reads zero in
 all nine of its secrets through the hook in each `Drop`, and so does every
 secret an operation leaves behind; a source that cannot fill, or whose draws
