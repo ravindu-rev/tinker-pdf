@@ -442,11 +442,12 @@ MS-01.8 runs the suite where ruling 4's measured targets run.
   `cargo test --workspace`, and again in `-p tinker-pdf`'s
   `--no-default-features` and `--features bundled-fonts` builds.
 - **The `wasm32-wasip1` run** is local proof: `cargo test -p tinker-pdf --test
-  guards --test guard_allocations --target wasm32-wasip1`, with wasmtime as
-  the runner, in the default build.
+  guards --test guard_allocations --test producer_work --target
+  wasm32-wasip1`, with wasmtime as the runner, in the default build.
 - **A guard in a file of its own** — A7's two, in `images.rs` and
-  `jpx_images.rs` — runs in CI's tests as every integration test does, and
-  joins the `wasm32-wasip1` run's command in its row's commit.
+  `jpx_images.rs`, and P-18's producers', in `producer_work.rs` — runs in
+  CI's tests as every integration test does, and joins the `wasm32-wasip1`
+  run's command in its row's commit.
 - **The pinned counts** join K-07's determinism roster
   (`xtask/src/determinism.rs`, which K-07.1 creates), so `cargo xtask check`
   fails when one of them is ignored or gone.
@@ -469,7 +470,7 @@ page counts, and what keeping it costs goes to the owner.
 
 ### The roster
 
-Every entry starts owed but A2's book, which P-18.5 adds landed. A guard
+Every entry starts owed but A2's book, which entered landed. A guard
 lands in the step named, in
 `crates/tinker-pdf/tests/guards.rs` unless another file is named.
 

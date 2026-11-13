@@ -1911,7 +1911,11 @@ cargo test -p tinker-pdf --test producer_work -- --ignored producer_work_census
 `the_committed_table_is_the_censuss_shape` holds the table to the census's
 header and producers, and `every_producer_makes_the_pages_its_input_says`
 holds each generator to its shape and each synthesis to the validate-on-save
-helper.
+helper. The rule is guarded in `cargo test`, by the same counts: the book by
+A2's `a2_a_thousand_chapter_book_costs_at_most_eleven_times_a_hundred` in
+`guards.rs`, and the other five by `every_producer_is_linear_in_its_input`,
+each failure naming the counter that grew fastest. Both are in the
+determinism roster and run with the guard suite on its three targets.
 
 ## Peak memory, a process a case
 

@@ -774,6 +774,12 @@ pub struct Package<'a> {
     /// refuses. Recorded at open and acted on only there, because open refuses
     /// nothing.
     broken_pieces: bool,
+    /// Each part name, folded by 6.2.2.3's equivalence, and the entry index
+    /// of the **first** item that is that part, built once at
+    /// [`Package::open`]: a package resolves a part for every page of its
+    /// documents and every resource each page names, so a search of every
+    /// entry for each would cost the pages times the parts.
+    by_name: BTreeMap<String, usize>,
 }
 
 impl<'a> Package<'a> {
@@ -817,6 +823,12 @@ impl<'a> Package<'a> {
         );
         let cache = vec![None; items.len()];
         let relationships = vec![None; items.len()];
+        let mut by_name = BTreeMap::new();
+        for (index, item) in items.iter().enumerate() {
+            if let Item::Part(part) = item {
+                by_name.entry(part.folded.clone()).or_insert(index);
+            }
+        }
         Package {
             archive,
             items,
@@ -828,6 +840,7 @@ impl<'a> Package<'a> {
             pieces,
             joined,
             broken_pieces,
+            by_name,
         }
     }
 
@@ -893,10 +906,7 @@ impl<'a> Package<'a> {
     /// The entry index of a part, by 6.2.2.3's equivalence.
     #[must_use]
     pub fn index_of(&self, name: &PartName) -> Option<usize> {
-        self.items.iter().position(|item| match item {
-            Item::Part(part) => part == name,
-            _ => false,
-        })
+        self.by_name.get(&name.folded).copied()
     }
 
     /// Whether a part of that name is in the package.

@@ -54,6 +54,9 @@
 //! missing its `dc:language` is still a book, and refusing it would lose one
 //! over a line of metadata no page depends on.
 
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
+
 use tinker_pdf_xml::{Doctype, Event, Source};
 
 use super::{Limits, MAX_EPUB_FALLBACK_DEPTH};
@@ -432,6 +435,11 @@ pub struct Package {
     language: Option<String>,
     creator: Option<String>,
     items: Vec<Item>,
+    /// Each manifest `id` and the index of the **first** item carrying it,
+    /// built once where the manifest is read: every spine `itemref` and every
+    /// `fallback` names an item, so a search of the manifest for each would
+    /// cost the spine times the manifest.
+    by_id: BTreeMap<String, usize>,
     spine: Vec<SpineItem>,
     toc: Option<String>,
     right_to_left: bool,
@@ -538,7 +546,7 @@ impl Package {
     /// in document order rather than refused.
     #[must_use]
     pub fn item_by_id(&self, id: &str) -> Option<&Item> {
-        self.items.iter().find(|item| item.id == id)
+        self.by_id.get(id).and_then(|&at| self.items.get(at))
     }
 
     /// The item carrying the `nav` property, which is the navigation document
@@ -889,7 +897,20 @@ pub fn parse(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, Archi
     if unique_identifier.is_none() {
         defects.push(PackageDefect::UniqueIdentifierUnresolved);
     }
-    if (1..items.len()).any(|at| items[..at].iter().any(|other| other.id == items[at].id)) {
+    // The first item of each `id` is the one a lookup answers with, and a
+    // second is the duplicate §5.6.1 forbids: one pass, where comparing every
+    // item with every one before it cost the manifest's square.
+    let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
+    let mut duplicated = false;
+    for (at, item) in items.iter().enumerate() {
+        match by_id.entry(item.id.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(at);
+            }
+            Entry::Occupied(_) => duplicated = true,
+        }
+    }
+    if duplicated {
         defects.push(PackageDefect::DuplicateItemId);
     }
     if unknown_layout.is_some() {
@@ -904,6 +925,7 @@ pub fn parse(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, Archi
         language: languages.into_iter().next(),
         creator: creators.into_iter().next(),
         items,
+        by_id,
         spine,
         toc,
         right_to_left,

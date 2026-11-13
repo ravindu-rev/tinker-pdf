@@ -20,11 +20,17 @@ The `mimetype` rule (§4.3.2: first, stored, exactly
 anyway* — refusing a book over a ZIP field that changes nothing about its
 contents would lose the book (ruling 2, [rulings.md](../rulings.md)).
 `full-path` resolves from the container root (§4.2.6.3.1), everything else
-from the referring document (§4.2.5).
+from the referring document (§4.2.5). A path resolves through an index of
+the container's entry names built once when it opens, the first entry of a
+name answering, so a book of many chapters pays for each name it resolves
+once and not for the whole archive each time.
 
 **The package** (`package`, `nav`). OPF 2.0 and 3.x; manifest, spine with
 `linear` and per-item `rendition:layout`, fallbacks (depth-bounded),
 `properties` (`nav`, `cover-image`, `svg`, `mathml`, `scripted`), metadata.
+An `idref` or a `fallback` finds its item through an index of the manifest's
+`id`s built as the manifest is read, the first item of an `id` answering, and
+the same pass finds a repeated `id`.
 The navigation document or the NCX becomes the PDF outline. Obfuscated fonts
 (`obfuscation`) are de-obfuscated by the IDPF and Adobe algorithms.
 

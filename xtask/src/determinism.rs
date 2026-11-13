@@ -158,6 +158,17 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a2_redaction_is_linear_in_pages",
     },
+    // P-18's guards: a generated book's work at 1 000 chapters within 11 times
+    // its work at 100, A2's, and every other producer's at ten times its
+    // input within 11 times its work at the input.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_a_thousand_chapter_book_costs_at_most_eleven_times_a_hundred",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/producer_work.rs",
+        test: "every_producer_is_linear_in_its_input",
+    },
     // MS-01's A3 guard: the fonts a page's render and text read, at most the
     // distinct `/Font` entries its content selects a font by.
     Fingerprint {

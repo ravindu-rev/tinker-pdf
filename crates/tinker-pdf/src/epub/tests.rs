@@ -1132,6 +1132,34 @@ fn two_manifest_items_with_one_id_are_read_as_the_first() {
     );
 }
 
+/// The manifest's index answers every `id` with its first item, wherever in
+/// the manifest it stands, and nothing for an `id` no item carries; two `id`s
+/// repeated are one defect, as one is.
+#[test]
+fn every_id_finds_its_first_item_through_the_index() {
+    let items: String = (0..40)
+        .map(|at| {
+            format!(
+                r#"<item id="c{}" href="ch{at}.xhtml" media-type="application/xhtml+xml"/>"#,
+                at % 30
+            )
+        })
+        .collect();
+    let body =
+        format!(r#"{METADATA}<manifest>{items}</manifest><spine><itemref idref="c0"/></spine>"#);
+    let read = package(&body).expect("a book");
+    assert_eq!(read.defects(), [PackageDefect::DuplicateItemId]);
+    for id in 0..30 {
+        assert_eq!(
+            read.item_by_id(&format!("c{id}")).map(|i| i.href.as_str()),
+            Some(format!("ch{id}.xhtml").as_str()),
+            "c{id} answers with its first item"
+        );
+    }
+    assert_eq!(read.item_by_id("c30"), None);
+    assert_eq!(read.item_by_id(""), None);
+}
+
 /// A package document is read under `Doctype::Refuse`, which is a measurement
 /// rather than milestone 2's relaxation being forgotten.
 ///

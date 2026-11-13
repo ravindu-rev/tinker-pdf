@@ -541,6 +541,40 @@ fn producer_work_census() {
     println!("producer-work-census: RAN, {} producers", PRODUCERS.len());
 }
 
+/// **Every producer is linear in its input** (P-18): each one's work at ten
+/// times its input is at most [`BOUND`] times its work at the input, with
+/// every counter's own growth named when it is not.
+///
+/// The book's guard is A2's, `a2_a_thousand_chapter_book_costs_at_most_eleven_times_a_hundred`
+/// in `guards.rs`, which reads the same book by the same counts, so its
+/// thousand chapters are read once a run rather than twice; this holds the
+/// other five.
+#[test]
+fn every_producer_is_linear_in_its_input() {
+    for producer in PRODUCERS.iter().filter(|producer| producer.name != "book") {
+        let measured = measure(producer);
+        let [n, ten_n] = producer.sizes;
+        assert!(
+            measured.ratio <= BOUND,
+            "{}: work {} at {ten_n} {} against {} at {n}, {:.2}x, over {BOUND}; \
+             the counter that grew fastest is {} at {}",
+            producer.name,
+            measured.large,
+            producer.unit,
+            measured.small,
+            measured.ratio,
+            measured.fastest,
+            measured
+                .fastest_ratio
+                .map_or_else(|| "from 0".to_owned(), |ratio| format!("{ratio:.2}x")),
+        );
+        println!(
+            "producer-guard {}: RAN {:.2}x within {BOUND}",
+            producer.name, measured.ratio
+        );
+    }
+}
+
 /// The committed table is the census's: its header, and a row of ten fields
 /// for a producer the census runs, each at most once, in the census's order.
 /// A table the census has not written yet holds its header alone.

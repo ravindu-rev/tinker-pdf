@@ -15,17 +15,20 @@
 //! draws it in an embedded face (`render_support::curvy_font`), so the
 //! default and `bundled-fonts` builds count the same work.
 
+mod epub_support;
 mod guard_support;
 mod render_support;
 mod written_support;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use epub_support::book::generated_book;
 use guard_support::{content, deflated, document, face, line, object, pdf, stream, A2_PAGES};
 use tinker_pdf::write::{
     BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions,
 };
-use tinker_pdf::{Document, RenderOptions, Stats, TextOptions};
+use tinker_pdf::{Document, OpenOptions, RenderOptions, SimpleFontProvider, Stats, TextOptions};
 use tinker_pdf_cos::Object;
 
 // ---- The roster -------------------------------------------------------------
@@ -80,7 +83,7 @@ const fn owed(
 /// Every guard test, with the row that owns it, as the design's roster gives
 /// them. Each entry starts owed, because each fails against today's code; its
 /// row flips it in the commit that fixes the cause. A2's 1 000-chapter book
-/// joins landed with P-18.5.
+/// entered landed, with P-18's guards on every producer.
 ///
 /// A10's entries follow `guard_allocations.rs`'s table: every operation it
 /// counts allocates a page in proportion to the document, through its lookup
@@ -195,6 +198,16 @@ const ROSTER: &[Guard] = &[
             "a2_validation_is_linear_in_pages",
             "P-01",
             "P-01.3",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "a generated book: work at 1 000 chapters at most 11 x work at 100",
+            "a2_a_thousand_chapter_book_costs_at_most_eleven_times_a_hundred",
+            "P-18",
+            "P-18.5",
         )
     },
     Guard {
@@ -376,6 +389,24 @@ const SUPPORT: &[(&str, &str)] = &[
     (
         "render_support/mod.rs",
         include_str!("render_support/mod.rs"),
+    ),
+    ("epub_support/mod.rs", include_str!("epub_support/mod.rs")),
+    ("epub_support/book.rs", include_str!("epub_support/book.rs")),
+    (
+        "epub_support/conservation.rs",
+        include_str!("epub_support/conservation.rs"),
+    ),
+    (
+        "epub_support/layout.rs",
+        include_str!("epub_support/layout.rs"),
+    ),
+    (
+        "epub_support/reading.rs",
+        include_str!("epub_support/reading.rs"),
+    ),
+    (
+        "epub_support/typeface.rs",
+        include_str!("epub_support/typeface.rs"),
     ),
 ];
 
@@ -1242,6 +1273,95 @@ fn a2_redaction_is_linear_in_pages() {
         }
         edited(&editor)
     });
+}
+
+// ---- A2's book ------------------------------------------------------------------
+
+/// A2's book, at tier P's two lengths: a hundred chapters and a thousand.
+const A2_CHAPTERS: [usize; 2] = [100, 1_000];
+
+/// Tier P's bound for ten times the chapters: 1.1 times the ratio.
+const A2_BOOK_BOUND: f64 = 11.0;
+
+/// What a book of `chapters` chapters costs as a reader meets it: opened and
+/// paginated, its pages counted and each looked up by its index and rendered
+/// at 72 dpi. The book's half is what its `BookCost` spent and what its
+/// synthesis wrote; the reader's half is every door's tally summed. Every
+/// glyph is drawn in `render_support::curvy_font`, supplied when the book
+/// opens, so both builds count alike — `producer_work.rs`'s census reads the
+/// book by the same counts.
+fn book_work(chapters: usize) -> (u64, Stats) {
+    let options = OpenOptions::default().with_fonts(Arc::new(SimpleFontProvider::new(
+        render_support::curvy_font(),
+    )));
+    let document = Document::open_with(generated_book(chapters), &options).expect("the book opens");
+    let report = document.archive().expect("a book has a report");
+    let cost = report.book_cost().expect("a book has a cost");
+    let spent = [
+        cost.manifest_items,
+        cost.spine_items,
+        cost.css_tokens,
+        cost.css_rules,
+        cost.css_declarations,
+        cost.selector_matches,
+        cost.boxes,
+        cost.break_work,
+        cost.layout_work,
+        cost.pages,
+        report.pages().len(),
+        report.parsed_parts(),
+        report.synthesised_bytes(),
+    ]
+    .into_iter()
+    .map(|n| u64::try_from(n).unwrap_or(u64::MAX))
+    .fold(0u64, u64::saturating_add);
+    let rendered = RenderOptions {
+        stats: true,
+        ..RenderOptions::at_dpi(72.0)
+    };
+    let read = every_page(&document, |page| {
+        page.render(&rendered)
+            .stats
+            .expect("a render asked to count counts")
+    });
+    (spent, read)
+}
+
+/// **A2, a generated book** (P-18): a book of a thousand chapters, a page
+/// each, costs at most eleven times a book of a hundred — what the book
+/// spent and wrote and what reading it back took, summed.
+#[test]
+fn a2_a_thousand_chapter_book_costs_at_most_eleven_times_a_hundred() {
+    let [(small_spent, small_read), (large_spent, large_read)] = A2_CHAPTERS.map(book_work);
+    let small = small_spent.saturating_add(small_read.work());
+    let large = large_spent.saturating_add(large_read.work());
+    assert!(
+        small_read.work() > 0,
+        "the hundred-chapter book read nothing back"
+    );
+    let ratio = large as f64 / small as f64;
+    let each = |a: u64, b: u64| if a == 0 { 0.0 } else { b as f64 / a as f64 };
+    let counters = format!(
+        "the book's own {:.2}, page walks {:.2}, nodes {:.2}, glyphs {:.2}, fonts {:.2}, \
+         operators {:.2}",
+        each(small_spent, large_spent),
+        each(small_read.page_walks, large_read.page_walks),
+        each(small_read.page_nodes_visited, large_read.page_nodes_visited),
+        each(small_read.glyphs_shown, large_read.glyphs_shown),
+        each(
+            small_read.font_dictionaries_resolved,
+            large_read.font_dictionaries_resolved
+        ),
+        each(small_read.operators_run, large_read.operators_run),
+    );
+    assert!(
+        ratio <= A2_BOOK_BOUND,
+        "book: work {large} at {} chapters against {small} at {}, {ratio:.2}x, over \
+         {A2_BOOK_BOUND}; {counters}",
+        A2_CHAPTERS[1],
+        A2_CHAPTERS[0]
+    );
+    println!("guard-a2-book: RAN {ratio:.2}x within {A2_BOOK_BOUND}; {counters}");
 }
 
 // ---- A3: the fonts a page reads -------------------------------------------------

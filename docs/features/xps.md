@@ -28,7 +28,10 @@ so the namespace is the only discriminator, on elements and on relationship
 types, and a package mixing the two is accepted.
 
 **The package layer** (`opc`): OPC part naming with 7.2.3.5's
-case-insensitive comparison (`.ODTTF` against `odttf` is real), content
+case-insensitive comparison (`.ODTTF` against `odttf` is real), every part
+found through an index of the folded names built once when the package opens,
+the first item of a name answering, so a package of many pages pays for each
+part it resolves once and not for every entry each time; content
 types by default and override, relationships parsed per source part,
 relative references resolved against the referring part's name — on markup
 attributes (`ImageSource`, `FontUri`) as well as relationship targets,

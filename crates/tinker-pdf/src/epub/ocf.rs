@@ -76,6 +76,7 @@
 //! than an inherited assumption.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use tinker_pdf_xml::{Doctype, Event, Limits as XmlLimits, Source};
 use tinker_pdf_zip::{Archive, Entry, EntryError, Method};
@@ -745,6 +746,11 @@ pub fn is_container(archive: &Archive<'_>) -> bool {
 pub struct Ocf<'a> {
     archive: Archive<'a>,
     items: Vec<Item>,
+    /// Each entry name and the index of the **first** entry spelled so, built
+    /// once at [`Ocf::open`]: a book resolves a name for every spine item and
+    /// every file each one links, so a search of the whole archive for each
+    /// would cost the chapters times the entries.
+    by_name: BTreeMap<String, usize>,
     /// One slot per archive entry. `Some` once the entry has been read, whether
     /// it produced bytes or a refusal — so a second resolution of the same file
     /// spends no more of [`Archive`]'s inflation budget, which
@@ -778,9 +784,14 @@ impl<'a> Ocf<'a> {
     pub fn open(archive: Archive<'a>, limits: &Limits) -> Ocf<'a> {
         let items: Vec<Item> = archive.entries().iter().map(classify).collect();
         let cache = vec![None; items.len()];
+        let mut by_name = BTreeMap::new();
+        for (index, entry) in archive.entries().iter().enumerate() {
+            by_name.entry(entry.name.clone()).or_insert(index);
+        }
         let mut ocf = Ocf {
             archive,
             items,
+            by_name,
             cache,
             warnings: Vec::new(),
             limits: *limits,
@@ -820,7 +831,7 @@ impl<'a> Ocf<'a> {
     /// left to be discovered.
     #[must_use]
     pub fn index_of(&self, item: &str) -> Option<usize> {
-        self.archive.entries().iter().position(|e| e.name == item)
+        self.by_name.get(item).copied()
     }
 
     /// Reads one entry, **once**.
