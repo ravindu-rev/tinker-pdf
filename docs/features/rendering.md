@@ -71,7 +71,27 @@ multiplex space and the sub-class (`Profile::version5`) — and its `A2B*` and
 `A2B3` and `B2A3`, absolute colorimetric's own tables, which absolute
 colorimetric converts through as they stand before `A2B1`, and which another
 intent reaches last with the media white divided out (ICC.2 9.2.93). Its
-`D2B*` and `B2D*` tags take a spectral connection space. A lookup table over one, three or four inputs, and a
+`D2B*` and `B2D*` tags take a spectral connection space. Where the header
+names reflectance or transmission spectra, the `D2B*` tags give a spectrum,
+one channel a wavelength, which is **reduced to XYZ when the table is
+built**: integrated against the observer's colour matching functions and the
+illuminant's power the profile's `spectralViewingConditionsTag` carries, each
+resampled to the spectrum's wavelengths, `X = Σ R S x̄ / Σ S ȳ` and alike, a
+last matrix stage of the pipeline. An intent converts through them only
+where none of the profile's colorimetric tags or its model serves it, in
+ICC.2 8.14.2's order, so a spectral-only profile converts to sRGB and,
+through another profile's output transform, to its device space; the `B2D*`
+tags take a spectrum, which no colorimetric value gives, and are not read.
+Viewing conditions other than the CIE 1931 observer under D50 connect every
+transform into the connection space through the profile's
+`customToStandardPccTag` and every one out of it through its
+`standardToCustomPccTag`; a profile carrying neither is refused for that
+direction, and a model under them, which takes no stage after it, is passed
+over. Emission, bi-spectral and sparse-matrix spectra, a profile with no
+viewing conditions, and a standard observer or illuminant named without its
+own steps are refused by name as `IccError::Spectral`, each where nothing
+else serves the profile; every spectral range is held to 1 024 steps before
+its values are read. A lookup table over one, three or four inputs, and a
 `D2B*` tag's elements over as many, convert through an integer grid of
 their own pipeline — 256, 33 or 17 nodes an axis, each holding the
 pipeline's linear sRGB, evaluated the first time a conversion reaches it and

@@ -602,6 +602,7 @@ use tinker_pdf::{MAX_ANNOTATION_BYTES, MAX_ASSOCIATED_FILE_BYTES, MAX_OUTPUT_INT
 use tinker_pdf_color::icc::{
     MAX_CALC_DEPTH, MAX_CALC_OPERATIONS, MAX_CALC_STACK, MAX_CALC_TEMPORARIES, MAX_CALC_WORK,
     MAX_CLUT_ENTRIES, MAX_ICC_BYTES, MAX_ICC_TAGS, MAX_MPE_ELEMENTS, MAX_NAMED_COLOURS,
+    MAX_SPECTRAL_STEPS,
 };
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
@@ -652,6 +653,9 @@ const ICC_MPE: &str = include_str!("../../tinker-pdf-color/src/icc/mpe.rs");
 /// The ICC engine's calculator element, which keeps its five caps and their
 /// firing tests in the module that reads it.
 const ICC_CALC: &str = include_str!("../../tinker-pdf-color/src/icc/calc.rs");
+/// The ICC engine's spectral connection space, which keeps its cap and its
+/// firing test in the module that reduces it.
+const ICC_SPECTRAL: &str = include_str!("../../tinker-pdf-color/src/icc/spectral.rs");
 const JBIG2: &str = include_str!("../../tinker-pdf-filters/src/jbig2.rs");
 /// Tier 0's memory row: the two runtime bounds, and the two sources that prove
 /// them. `RENDER` is the first `declared_in` here that is a whole crate root
@@ -1888,7 +1892,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_TAGS",
             cap: MAX_ICC_TAGS as u128,
             published: "1 024",
-            // `srgb-first-party.icc`, the busiest of the nineteen `.icc` seeds
+            // `srgb-first-party.icc`, the busiest of the twenty `.icc` seeds
             // `fuzz/corpus/icc_profile/` commits, which the `icc_profile`
             // target hands straight to `Profile::parse`. No `.pdf` or `.xps`
             // fixture in this repository embeds a profile at all — measured,
@@ -1926,7 +1930,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_BYTES",
             cap: MAX_ICC_BYTES as u128,
             published: "2 MiB",
-            // `srgb-first-party.icc`, the largest of the nineteen committed
+            // `srgb-first-party.icc`, the largest of the twenty committed
             // seeds: the engine's own sRGB profile, which `tinker-pdf-color`'s
             // `build.rs` computes.
             fixtures: 2_624,
@@ -2975,6 +2979,26 @@ fn ledger() -> Vec<Bound> {
                 ICC_CALC,
             ),
         },
+        Bound {
+            name: "MAX_SPECTRAL_STEPS",
+            cap: MAX_SPECTRAL_STEPS as u128,
+            published: "1 024",
+            // The firing test reads ranges of exactly the cap.
+            fixtures: MAX_SPECTRAL_STEPS as u128,
+            comic: 0,
+            // 380 nm to 780 nm at 5 nm, the range ICC.2 samples its own
+            // assumed observers and illuminants at (10.2.22, Tables X, Y).
+            document: 81,
+            book: 0,
+            // A `spectralRange`'s step count is a 16-bit field.
+            reachable: u128::from(u16::MAX),
+            reachable_because: "a spectralRange's 16-bit step count",
+            declared_in: ICC_SPECTRAL,
+            fires_in: (
+                "a_spectral_range_past_the_step_cap_is_refused_before_it_is_read",
+                ICC_SPECTRAL,
+            ),
+        },
     ]
 }
 
@@ -3030,9 +3054,9 @@ fn segment_size() -> u128 {
 /// `MAX_HYPHENATED_WORD`; and the ICC engine's named colours add
 /// `MAX_NAMED_COLOURS`, its multi-process elements `MAX_MPE_ELEMENTS`, and
 /// its calculator `MAX_CALC_OPERATIONS`, `MAX_CALC_STACK`, `MAX_CALC_DEPTH`,
-/// `MAX_CALC_TEMPORARIES` and `MAX_CALC_WORK`. All **seventy-six** are
-/// here, and a bound added
-/// without a row fails this.
+/// `MAX_CALC_TEMPORARIES` and `MAX_CALC_WORK`, and its spectral connection
+/// space `MAX_SPECTRAL_STEPS`. All **seventy-seven** are here, and a bound
+/// added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -3115,6 +3139,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_CALC_DEPTH",
             "MAX_CALC_TEMPORARIES",
             "MAX_CALC_WORK",
+            "MAX_SPECTRAL_STEPS",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -3220,7 +3245,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 76, "the ledger is seventy-six rows");
+    assert_eq!(measured, 77, "the ledger is seventy-seven rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -3252,7 +3277,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 76, "the ledger is seventy-six rows");
+    assert_eq!(ledger().len(), 77, "the ledger is seventy-seven rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -3566,6 +3591,7 @@ fn every_bound_names_a_test_that_exists() {
         ICC_NAMED,
         ICC_MPE,
         ICC_CALC,
+        ICC_SPECTRAL,
     ] {
         assert!(
             !source.contains("Instant::now"),

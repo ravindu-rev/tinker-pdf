@@ -15,7 +15,11 @@
 //! run takes, its stack, its nesting, its temporary channels, and the steps
 //! a tag's runs take in all — is checked before it runs, and which runs at
 //! each node of its stage's grid when the pipeline is built (`calc-v5.icc`
-//! is the seed that reaches it). Applying a lookup-table
+//! is the seed that reaches it). A version 5 profile's spectral connection
+//! space is read too: its `svcn` viewing conditions, whose step counts are
+//! file fields checked before the values they count, the reduction of its
+//! `D2B*` tags' spectra to XYZ, and its `c2sp` and `s2cp` where its viewing
+//! conditions are not the standard ones (`spectral-v5.icc`). Applying a lookup-table
 //! transform over one, three or four inputs reads it through its grid, which
 //! evaluates the table's pipeline at each node the colours reach
 //! (`docs/design/icc.md`, P-22), so a hostile table builds its grid here too.

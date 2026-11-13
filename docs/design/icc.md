@@ -1213,7 +1213,7 @@ colours count in `Transforms::bytes_bound`.
   parameters, all of which its formula reads: seven are read. A version 5
   profile's `AToBx` and `BToAx` tags may hold a `multiProcessElementsType`
   (9.2.1, 9.2.38), read as a `DToBx` tag is; its `DToBx` and `BToDx` tags are
-  a spectral connection space's, read by RC-20.12. Which of a multi-process
+  a spectral connection space's, the `DToBx` reduced below. Which of a multi-process
   tag and an `A2B*` table a profile carrying both converts through is RC-01's
   rule: the `D2B*` tag, 8.10.2 a). Out of the connection space the order is
   the same with `B` for `A` and `D`: the intent's `B2D*` tag first, and
@@ -1280,20 +1280,53 @@ colours count in `Transforms::bytes_bound`.
   - **A segmented curve finds its segment by halving its break-points**,
     which never decrease, so a curve of many segments costs a sample or an
     invocation no more than a curve of few.
-- **A spectral connection space** (RC-20.12): a `DToBx` tag giving
-  reflectance or transmission spectra is reduced to XYZ when built, each
-  spectrum integrated against the observer and illuminant the profile's
+- **A spectral connection space** (RC-20.12, ICC.2 6.3.3, 7.2.21): a
+  version 5 profile whose header names reflectance (`rs`) or transmission
+  (`ts`) spectra — its count the steps of the header's spectral range — has
+  its `DToBx` tags read as pipelines from the device to the spectrum, one
+  channel a wavelength, and reduced to XYZ when built, each spectrum
+  integrated against the observer and illuminant the profile's
   `spectralViewingConditionsTag` (`svcn`, ICC.2 9.2.111, of 10.2.22's
-  Table 69) carries, both resampled linearly to the spectral PCS range:
-  `X = Σ R(λ) S(λ) x̄(λ) / Σ S(λ) ȳ(λ)`, alike for `Y` and `Z`, so a
-  perfect reflector has `Y` of one. Viewing conditions other than the CIE
-  1931 observer under D50 connect through the profile's
-  `customToStandardPccTag` (9.2.57), and the output direction's through
-  its `standardToCustomPccTag` (9.2.113), where it carries one, and are
-  refused by name where it does not, as 10.2.22 has a CMM do. A profile with no
-  `svcn`, or one naming a standard observer with zero steps, is refused by
-  name (the non-goal above); the step count is held to
-  `MAX_SPECTRAL_STEPS` (1 024; the field allows 65 535).
+  Table 69) carries, both resampled linearly to the spectral range's
+  wavelengths and zero outside their own: `X = Σ R(λ) S(λ) x̄(λ) / Σ S(λ)
+  ȳ(λ)`, alike for `Y` and `Z`, so a perfect reflector has `Y` of one. The
+  reduction is linear, so it is a last matrix stage of three rows of a
+  weight a wavelength, built in `f64` and held in s15.16 as every stage is
+  (`icc/spectral.rs`). Between the device and the spectrum an element may
+  give as many channels as the spectrum has, a matrix's coefficients spent
+  from the tag's `MAX_CLUT_ENTRIES` as a grid's are, and the reduction's
+  with them; a grid takes no more than `MAX_LUT_INPUTS`, its sixteen counts.
+  The spectral tags are the colorimetric connection's last resort: an
+  intent converts through them, in ICC.2 8.14.2's order for a spectral
+  connection — its own, `DToB0`, `DToB1`, `DToB3` — only where none of the
+  profile's colorimetric tags or its model serves it, since 8.14.2 gives a
+  colorimetric connection the `AToBx` tags; `DToB3` is ICC-absolute as
+  `AToB3` is. A spectral-only profile's connection-space field is zero and
+  its spectral tags are all it converts through. Its `BToDx` tags take a
+  spectrum, which no colorimetric value gives, and are not read.
+- **Viewing conditions** (ICC.2 9.2.111, 10.2.22): a version 5 profile's
+  `svcn` describes both its colorimetric and its spectral connection. The
+  standard conditions are the CIE 1931 observer under D50, by their types
+  (Tables 70 and 71). Under any others the profile connects through its
+  `customToStandardPccTag` (`c2sp`, 9.2.57) after every transform into the
+  connection space — a table's, a pipeline's, a spectral reduction's —
+  and through its `standardToCustomPccTag` (`s2cp`, 9.2.113) before every
+  one out of it, its gamut tag's among them, each XYZ in and out; and it is
+  refused by name where it carries none, as 10.2.22 has a CMM do, the
+  parse refusing a profile with no `c2sp` and the output transform one with
+  no `s2cp`. A model under them is passed over, its transform taking no
+  stage after it, and refused by name where it alone serves. An `svcn` that
+  does not read leaves the colorimetric tags in the standard conditions and
+  the spectral ones refused for its reason.
+- **What is refused by name** (`IccError::Spectral`): emission,
+  bi-spectral and sparse-matrix spectra (the non-goal above); a spectral
+  connection space with no `svcn`; a standard observer or illuminant named
+  with no steps of its own, or an illuminant its colour temperature alone
+  defines (Tables X and Y, the non-goal above); and custom viewing
+  conditions with no `c2sp` or `s2cp`. Each refuses the profile only where
+  nothing else serves it. Every step count — the spectral range's, an
+  observer's, an illuminant's — is held to `MAX_SPECTRAL_STEPS` (1 024; the
+  field allows 65 535) before the values it counts are read.
 
 ##### Caps, each a `bounds_ledger.rs` row
 
@@ -1307,7 +1340,7 @@ colours count in `Transforms::bytes_bound`.
 | `MAX_CALC_DEPTH` | 16 | sub-elements, and conditional streams, within one another | RC-20.11 |
 | `MAX_CALC_TEMPORARIES` | 1 024 | temporary channels | RC-20.11 |
 | `MAX_CALC_WORK` | 67 108 864 | the steps a tag's calculators take while it is read | RC-20.11 |
-| `MAX_SPECTRAL_STEPS` | 1 024 | a spectral range's steps | RC-20.12 |
+| `MAX_SPECTRAL_STEPS` | 1 024 | a spectral range's steps: the connection space's, an observer's, an illuminant's | RC-20.12 |
 
 Fifteen is 7.2.6's `FCLR`, the most channels a data colour space has. Each
 row carries the ledger's yardsticks — the most any fixture spends, a comic,

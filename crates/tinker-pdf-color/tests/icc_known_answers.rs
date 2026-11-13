@@ -19,7 +19,8 @@
 //! (`docs/design/icc.md`, "The output transform").
 
 use tinker_pdf_color::icc::{
-    IccError, Intent, Link, Model, Output, Profile, Transform, Transforms, PCS_WHITE,
+    IccError, Intent, Link, Model, Output, Profile, SpectralRefusal, Transform, Transforms,
+    PCS_WHITE,
 };
 
 /// Entries in an inverted curve: the engine's compiled-curve resolution.
@@ -3998,5 +3999,385 @@ fn the_calculator_computes_what_its_program_says() {
                 }
             }
         }
+    }
+}
+
+// ---- a spectral connection space ----------------------------------------------
+//
+// ICC.2's spectral connection space (6.3.3, 7.2.21): a version 5 profile's
+// `D2B*` tag gives a reflectance spectrum, one channel a wavelength of the
+// header's range, which is integrated against the observer and illuminant the
+// profile's `svcn` carries (10.2.22, Table 69) when the table is built:
+// `X = Σ R(λ) S(λ) x̄(λ) / Σ S(λ) ȳ(λ)`, alike for `Y` and `Z`.
+
+/// A half float's bits for a whole number of nanometres from 256 to 2 047,
+/// each of which a half float holds exactly.
+fn half_nm(value: u16) -> u16 {
+    let exponent = 15 - value.leading_zeros() as u16;
+    let fraction = ((u32::from(value) << 10 >> exponent) - 1024) as u16;
+    ((exponent + 15) << 10) | fraction
+}
+
+/// The spectral range the profiles here sample: 400 nm to 700 nm in four
+/// steps, 100 nm apart.
+fn four_steps() -> [u16; 3] {
+    [half_nm(400), half_nm(700), 4]
+}
+
+/// The observer the profiles here carry: four steps of `x̄`, `ȳ` and `z̄`.
+const MATCHING: [[f64; 4]; 3] = [
+    [0.2, 0.4, 1.0, 0.3],
+    [0.1, 0.9, 0.6, 0.1],
+    [1.2, 0.3, 0.0, 0.0],
+];
+
+/// The illuminant's power at the same four wavelengths.
+const POWER: [f64; 4] = [0.8, 1.0, 1.1, 0.9];
+
+/// An `svcn` of `observer` and `illuminant` types (Tables 70 and 71), both
+/// over [`four_steps`], carrying [`MATCHING`] and [`POWER`].
+fn svcn_tag(observer: u32, illuminant: u32) -> Vec<u8> {
+    let range = |[start, end, steps]: [u16; 3]| {
+        let mut out = start.to_be_bytes().to_vec();
+        out.extend_from_slice(&end.to_be_bytes());
+        out.extend_from_slice(&steps.to_be_bytes());
+        out
+    };
+    let mut out = b"svcn".to_vec();
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&observer.to_be_bytes());
+    out.extend(range(four_steps()));
+    out.extend_from_slice(&[0; 2]);
+    for row in MATCHING {
+        for value in row {
+            out.extend_from_slice(&f32_bytes(value));
+        }
+    }
+    out.extend_from_slice(&illuminant.to_be_bytes());
+    out.extend_from_slice(&f32_bytes(5003.0));
+    out.extend(range(four_steps()));
+    out.extend_from_slice(&[0; 2]);
+    for value in POWER {
+        out.extend_from_slice(&f32_bytes(value));
+    }
+    out.extend_from_slice(&[0; 24]);
+    out
+}
+
+/// The XYZ a reflectance spectrum over [`four_steps`] integrates to, the
+/// sum recomputed from the float32s the `svcn` stores.
+fn integrated(reflectance: [f64; 4]) -> [f64; 3] {
+    let white: f64 = (0..4)
+        .map(|step| as_f32(POWER[step]) * as_f32(MATCHING[1][step]))
+        .sum();
+    MATCHING.map(|matching| {
+        (0..4)
+            .map(|step| reflectance[step] * as_f32(POWER[step]) * as_f32(matching[step]))
+            .sum::<f64>()
+            / white
+    })
+}
+
+/// A grey device's `D2B*` tag: the flat spectrum of a half at nought, and
+/// the stepped one — a quarter at 400 nm and 500 nm, three quarters at
+/// 600 nm and 700 nm — at one, a matrix of one input to the four
+/// wavelengths.
+fn spectrum_tag() -> Vec<u8> {
+    let step = [-0.25, -0.25, 0.25, 0.25];
+    mpet_tag(
+        1,
+        &[Element::Matrix {
+            rows: step.iter().map(|&value| vec![value]).collect(),
+            offsets: vec![0.5; 4],
+        }],
+    )
+}
+
+/// The flat spectrum and the stepped one, by the grey value giving each.
+const SPECTRA: [(f64, [f64; 4]); 2] = [(0.0, [0.5; 4]), (1.0, [0.25, 0.25, 0.75, 0.75])];
+
+/// The slack a reduced value is held to: the four weights' s15.16 rounding,
+/// each half a step of the most reflectance, and the value's own.
+const REDUCED_SLACK: f64 = 1e-4;
+
+/// A grey version 5 profile whose connection space is reflectance spectra
+/// over [`four_steps`], carrying `tags`, its connection-space field `pcs`.
+fn spectral_profile(pcs: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    v5_profile(b"GRAY", pcs, *b"rs\x00\x04", four_steps(), tags)
+}
+
+/// `got` is `want` within [`REDUCED_SLACK`], channel by channel.
+fn reduced(got: [f64; 3], want: [f64; 3], what: &str) {
+    for channel in 0..3 {
+        assert!(
+            (got[channel] - want[channel]).abs() < REDUCED_SLACK,
+            "{what}, channel {channel}: {got:?} against {want:?}"
+        );
+    }
+}
+
+/// **A spectral profile integrates against its own observer** (ICC.2
+/// 6.3.3, 10.2.22). A grey version 5 profile whose connection space is
+/// reflectance spectra over four wavelengths, whose `D2B0` gives a flat
+/// spectrum at nought and a stepped one at one, and whose `svcn` carries
+/// the CIE 1931 observer under D50 as four steps of its own: each spectrum's
+/// XYZ is the weighted sum `Σ R S x̄ / Σ S ȳ` recomputed here, a perfect
+/// reflector's `Y` one; relative colorimetric reaches the `D2B0`, as ICC.2
+/// 8.14.2 orders a spectral connection, the profile's connection-space field
+/// is zero, and every intent converts to sRGB as a colorimetric profile
+/// giving the same XYZ does; and the value converts, through another
+/// profile's output transform, to that profile's device values as the XYZ
+/// does.
+#[test]
+fn a_spectral_profile_integrates_against_its_own_observer() {
+    let bytes = spectral_profile(
+        &[0; 4],
+        &[(*b"D2B0", spectrum_tag()), (*b"svcn", svcn_tag(1, 1))],
+    );
+    let profile = Profile::parse(&bytes).expect("a spectral profile");
+    assert_eq!(profile.pcs, [0; 4]);
+    let white = integrated([1.0; 4]);
+    assert!((white[1] - 1.0).abs() < 1e-12, "a perfect reflector's Y");
+
+    let (destination, _) = matrix_profile();
+    let destination = Profile::parse(&destination).expect("a matrix profile");
+    let out = Output::compile(&destination, Intent::RelativeColorimetric).expect("its output");
+    for (grey, reflectance) in SPECTRA {
+        let want = integrated(reflectance);
+        for intent in Intent::ALL {
+            let got = profile
+                .connection_value(intent, &[grey])
+                .expect("the D2B0 converts");
+            if intent != Intent::AbsoluteColorimetric {
+                reduced(got, want, &format!("{intent:?} at {grey}"));
+            }
+        }
+        let got = profile
+            .connection_value(Intent::RelativeColorimetric, &[grey])
+            .expect("converts");
+        let through = out.apply(got);
+        let direct = out.apply(want);
+        for (a, b) in through.channels().iter().zip(direct.channels()) {
+            assert!(
+                f64::from(a.abs_diff(*b)) <= PIPELINE_SLACK * 65535.0,
+                "{grey}: {through:?} against {direct:?}"
+            );
+        }
+    }
+
+    // The same XYZ from a colorimetric version 5 profile's `A2B0`: a matrix
+    // of one input to the three, its offsets the flat spectrum's XYZ.
+    let flat = integrated(SPECTRA[0].1);
+    let stepped = integrated(SPECTRA[1].1);
+    let colorimetric = v5_profile(
+        b"GRAY",
+        b"XYZ ",
+        [0; 4],
+        [0; 3],
+        &[(
+            *b"A2B0",
+            mpet_tag(
+                1,
+                &[Element::Matrix {
+                    rows: (0..3).map(|c| vec![stepped[c] - flat[c]]).collect(),
+                    offsets: flat.to_vec(),
+                }],
+            ),
+        )],
+    );
+    let colorimetric = Profile::parse(&colorimetric).expect("a colorimetric profile");
+    for intent in [Intent::Perceptual, Intent::RelativeColorimetric] {
+        let ours = Transform::compile(&profile, intent).expect("a transform");
+        let theirs = Transform::compile(&colorimetric, intent).expect("a transform");
+        for grey in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let (a, b) = (ours.apply(&[grey]), theirs.apply(&[grey]));
+            for (x, y) in [(a.0, b.0), (a.1, b.1), (a.2, b.2)] {
+                assert!(
+                    x.abs_diff(y) <= 1,
+                    "{intent:?} at {grey}: {a:?} against {b:?}"
+                );
+            }
+        }
+    }
+}
+
+/// **Custom viewing conditions connect through the profile's own tags**
+/// (ICC.2 10.2.22): under D65, which is not the standard connection's, the
+/// spectral `D2B0`'s XYZ goes through the profile's `c2sp` into the standard
+/// conditions, and so does a colorimetric `A2B0`'s; a standard value goes
+/// through the profile's `s2cp` before its `B2A0`; a profile with no `c2sp`
+/// is refused by name, as one with no `s2cp` is out of the connection space;
+/// and a model, whose transform takes no stage after it, is passed over,
+/// refused by name where it alone serves.
+#[test]
+fn custom_viewing_conditions_connect_through_the_profiles_own_tags() {
+    // `c2sp` scales each channel; `s2cp` scales them back.
+    let scale = [0.95, 1.0, 1.25];
+    let diagonal = |values: [f64; 3]| Element::Matrix {
+        rows: (0..3)
+            .map(|row| {
+                (0..3)
+                    .map(|c| if c == row { values[c] } else { 0.0 })
+                    .collect()
+            })
+            .collect(),
+        offsets: vec![0.0; 3],
+    };
+    let c2sp = mpet_tag(3, &[diagonal(scale)]);
+    let s2cp = mpet_tag(3, &[diagonal(scale.map(|s| 1.0 / s))]);
+    let identity = mpet_tag(3, &[diagonal([1.0; 3])]);
+    let d65 = svcn_tag(1, 2);
+
+    let spectral = spectral_profile(
+        b"XYZ ",
+        &[
+            (*b"D2B0", spectrum_tag()),
+            (*b"svcn", d65.clone()),
+            (*b"c2sp", c2sp.clone()),
+        ],
+    );
+    let spectral = Profile::parse(&spectral).expect("a custom spectral profile");
+    for (grey, reflectance) in SPECTRA {
+        let custom = integrated(reflectance);
+        let want = [0, 1, 2].map(|c| as_f32(scale[c]) * custom[c]);
+        let got = spectral
+            .connection_value(Intent::RelativeColorimetric, &[grey])
+            .expect("converts");
+        reduced(got, want, &format!("the spectra through c2sp at {grey}"));
+    }
+
+    let colorimetric = |tags: &[([u8; 4], Vec<u8>)]| {
+        Profile::parse(&v5_profile(b"RGB ", b"XYZ ", [0; 4], [0; 3], tags))
+    };
+    let profile = colorimetric(&[
+        (*b"A2B0", identity.clone()),
+        (*b"B2A0", identity.clone()),
+        (*b"svcn", d65.clone()),
+        (*b"c2sp", c2sp.clone()),
+        (*b"s2cp", s2cp),
+    ])
+    .expect("a custom colorimetric profile");
+    let x = [0.2, 0.4, 0.6];
+    let got = profile
+        .connection_value(Intent::RelativeColorimetric, &x)
+        .expect("converts");
+    reduced(
+        got,
+        [0, 1, 2].map(|c| x[c] * as_f32(scale[c])),
+        "the A2B0 through c2sp",
+    );
+
+    // Out of the connection space: s2cp, then the B2A0's identity, each
+    // channel the standard value over its scale.
+    let out = Output::compile(&profile, Intent::Perceptual).expect("the B2A0 through s2cp");
+    let pcs = [0.4, 0.5, 0.6];
+    let got = out.apply(pcs);
+    for (channel, value) in got.channels().iter().enumerate() {
+        let want = pcs[channel] * as_f32(1.0 / scale[channel]) * 65535.0;
+        assert!(
+            (f64::from(*value) - want).abs() <= PIPELINE_SLACK * 65535.0,
+            "channel {channel}: {got:?}"
+        );
+    }
+
+    let no_s2cp = colorimetric(&[
+        (*b"A2B0", identity.clone()),
+        (*b"B2A0", identity),
+        (*b"svcn", d65.clone()),
+        (*b"c2sp", c2sp.clone()),
+    ])
+    .expect("converts in");
+    assert_eq!(
+        Output::compile(&no_s2cp, Intent::RelativeColorimetric).map(|_| ()),
+        Err(IccError::Spectral(SpectralRefusal::NoStandardToCustom))
+    );
+
+    let no_c2sp = spectral_profile(
+        b"XYZ ",
+        &[(*b"D2B0", spectrum_tag()), (*b"svcn", d65.clone())],
+    );
+    assert_eq!(
+        Profile::parse(&no_c2sp),
+        Err(IccError::Spectral(SpectralRefusal::NoCustomToStandard))
+    );
+
+    let model = v5_profile(
+        b"GRAY",
+        b"XYZ ",
+        [0; 4],
+        [0; 3],
+        &[
+            (*b"kTRC", gamma_tag(1.0)),
+            (*b"svcn", d65),
+            (*b"c2sp", c2sp),
+        ],
+    );
+    assert_eq!(
+        Profile::parse(&model),
+        Err(IccError::Spectral(SpectralRefusal::CustomModel))
+    );
+}
+
+/// **What a spectral connection space does not carry is refused by name**:
+/// emission spectra, by their letters; a profile with no `svcn`; one whose
+/// observer is the CIE 1931 standard observer named with no steps, whose
+/// table (10.2.22, Table X) this engine does not carry — each where the
+/// spectral tags are all the profile has. A profile carrying a colorimetric
+/// `A2B0` beside them converts through it, as ICC.2 8.14.2 orders a
+/// colorimetric connection, and the spectral `D2B0` is not what it
+/// converts through.
+#[test]
+fn what_a_spectral_connection_space_does_not_carry_is_refused_by_name() {
+    let emission = v5_profile(
+        b"GRAY",
+        &[0; 4],
+        *b"es\x00\x04",
+        four_steps(),
+        &[(*b"D2B0", spectrum_tag()), (*b"svcn", svcn_tag(1, 1))],
+    );
+    assert_eq!(
+        Profile::parse(&emission),
+        Err(IccError::Spectral(SpectralRefusal::Spectra(*b"es")))
+    );
+    let unviewed = spectral_profile(&[0; 4], &[(*b"D2B0", spectrum_tag())]);
+    assert_eq!(
+        Profile::parse(&unviewed),
+        Err(IccError::Spectral(SpectralRefusal::NoViewingConditions))
+    );
+    let mut assumed = svcn_tag(1, 1);
+    // The observer's step count, bytes 16 and 17, to zero.
+    assumed[16..18].copy_from_slice(&[0, 0]);
+    let assumed = spectral_profile(&[0; 4], &[(*b"D2B0", spectrum_tag()), (*b"svcn", assumed)]);
+    assert_eq!(
+        Profile::parse(&assumed),
+        Err(IccError::Spectral(SpectralRefusal::ObserverWithoutTable))
+    );
+
+    // Beside a colorimetric A2B0 giving a constant, the spectra are not
+    // what converts.
+    let constant = [0.3, 0.35, 0.4];
+    let both = spectral_profile(
+        b"XYZ ",
+        &[
+            (*b"D2B0", spectrum_tag()),
+            (*b"svcn", svcn_tag(1, 1)),
+            (
+                *b"A2B0",
+                mpet_tag(
+                    1,
+                    &[Element::Matrix {
+                        rows: vec![vec![0.0]; 3],
+                        offsets: constant.to_vec(),
+                    }],
+                ),
+            ),
+        ],
+    );
+    let both = Profile::parse(&both).expect("both connections");
+    for (grey, _) in SPECTRA {
+        let got = both
+            .connection_value(Intent::RelativeColorimetric, &[grey])
+            .expect("converts");
+        reduced(got, constant.map(as_f32), "the A2B0, not the spectra");
     }
 }

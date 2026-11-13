@@ -171,6 +171,14 @@ enum Ends {
     /// connection-space field names out, with no connection space at
     /// either end.
     Link { inputs: usize, outputs: usize },
+    /// A version 5 `D2B*` tag over a spectral connection space (ICC.2
+    /// 9.2.77): the device's channels in, each held to `0..=1`, and the
+    /// spectral connection space's `channels` out, one a wavelength.
+    Spectral { channels: usize },
+    /// A `customToStandardPccTag` or a `standardToCustomPccTag` (ICC.2
+    /// 9.2.57, 9.2.113): XYZ in, each held to the connection space's range,
+    /// and XYZ out.
+    Connection,
 }
 
 impl Ends {
@@ -181,8 +189,20 @@ impl Ends {
     fn domain(self, inputs: usize, lab: bool) -> Vec<(f64, f64)> {
         match self {
             Ends::Output { .. } if lab => vec![(0.0, 100.0), (-128.0, 127.0), (-128.0, 127.0)],
-            Ends::Output { .. } => vec![(0.0, XYZ_REACH); inputs],
-            Ends::Forward | Ends::Link { .. } => vec![(0.0, 1.0); inputs],
+            Ends::Output { .. } | Ends::Connection => vec![(0.0, XYZ_REACH); inputs],
+            Ends::Forward | Ends::Link { .. } | Ends::Spectral { .. } => {
+                vec![(0.0, 1.0); inputs]
+            }
+        }
+    }
+
+    /// The most channels an element between the ends may give:
+    /// `MAX_LUT_INPUTS`, or a spectral connection space's count where that
+    /// is more.
+    fn most(self) -> usize {
+        match self {
+            Ends::Spectral { channels } => channels.max(MAX_LUT_INPUTS),
+            _ => MAX_LUT_INPUTS,
         }
     }
 }
@@ -392,6 +412,43 @@ pub fn read_link(data: &[u8], inputs: usize, outputs: usize) -> Result<Pipeline,
     read_tag(data, false, Ends::Link { inputs, outputs })
 }
 
+/// A version 5 `D2B*` tag over a spectral connection space (ICC.2 9.2.77),
+/// read from `data` and reduced to XYZ: its elements give a spectrum, one
+/// channel a wavelength, which a last stage of `weights` — three rows of a
+/// weight a wavelength, `spectral`'s reduction — takes to `X`, `Y` and `Z`
+/// with the PCS white's `Y` at one. Its elements may give as many channels
+/// as the spectrum has, a matrix's coefficients spent from the tag's
+/// entries as a grid's are, and the reduction's with them.
+///
+/// # Errors
+///
+/// [`read`]'s, and [`IccError::UnsupportedSpace`] for a tag that does not
+/// give the spectrum's channels.
+pub(super) fn read_spectral(data: &[u8], weights: &[f64]) -> Result<Pipeline, IccError> {
+    let channels = weights.len() / 3;
+    let mut pipeline = read_tag(data, false, Ends::Spectral { channels })?;
+    pipeline.stages.push(Stage::Matrix {
+        inputs: channels,
+        outputs: 3,
+        coefficients: weights.iter().map(|&weight| fixed32(weight)).collect(),
+        offsets: vec![0; 3],
+    });
+    pipeline.outputs = 3;
+    Ok(pipeline)
+}
+
+/// A `customToStandardPccTag` or `standardToCustomPccTag` (ICC.2 9.2.57,
+/// 9.2.113) read from `data`: XYZ under one set of viewing conditions to XYZ
+/// under the other, three channels each way.
+///
+/// # Errors
+///
+/// [`read`]'s, and [`IccError::MalformedTag`] for a tag that does not take
+/// and give three.
+pub(super) fn read_connection(data: &[u8]) -> Result<Pipeline, IccError> {
+    read_tag(data, false, Ends::Connection)
+}
+
 /// A `multiProcessElementsType` tag's pipeline, read from `data` between the
 /// two ends `ends` names.
 fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
@@ -423,6 +480,13 @@ fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
             outputs: device,
         } if inputs != data_space || outputs != device => return Err(IccError::UnsupportedSpace),
         Ends::Link { .. } => {}
+        Ends::Spectral { channels } if outputs != channels => {
+            return Err(IccError::UnsupportedSpace)
+        }
+        Ends::Spectral { .. } => {}
+        // 9.2.57, 9.2.113: three channels in and out.
+        Ends::Connection if inputs != 3 || outputs != 3 => return Err(IccError::MalformedTag),
+        Ends::Connection => {}
     }
 
     // The elements, located, and every one's type known before any is
@@ -458,6 +522,13 @@ fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
         .collect();
     let mut intervals = start;
     let mut budget = Budget::TAG;
+    // A spectrum's channels may pass `MAX_LUT_INPUTS`, so a matrix between
+    // them is as large as a grid: its coefficients are spent as entries, and
+    // so are the reduction's that `read_spectral` ends the tag in.
+    let spectral = matches!(ends, Ends::Spectral { .. });
+    if let Ends::Spectral { channels } = ends {
+        budget.spend_entries(3 * channels + 3)?;
+    }
     let mut stages = Vec::new();
     for (signature, element) in elements {
         let reader = Reader { bytes: element };
@@ -467,7 +538,7 @@ fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
         if p != intervals.len() || q == 0 {
             return Err(IccError::MalformedTag);
         }
-        if q > MAX_LUT_INPUTS {
+        if q > ends.most() {
             return Err(IccError::TooLarge);
         }
         match &signature {
@@ -477,7 +548,12 @@ fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
                 }
                 stages.push(curve_set(element, &mut intervals, &mut budget)?);
             }
-            b"matf" => stages.push(matrix(element, q, &mut intervals)?),
+            b"matf" => {
+                if spectral {
+                    budget.spend_entries(p * q + q)?;
+                }
+                stages.push(matrix(element, q, &mut intervals)?);
+            }
             // ICC.1's grid: float32 values from byte 28, its counts at 12.
             b"clut" => stages.push(grid(
                 element,
@@ -534,14 +610,30 @@ fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
 /// the tag, and an element the tag does not hold allocates nothing, since
 /// the read refuses it too.
 pub(super) fn bound(data: &[u8]) -> usize {
+    bound_of(data, None)
+}
+
+/// [`bound`] for a spectral `D2B*` tag of `channels` wavelengths
+/// ([`read_spectral`]): a channel count read as at most `channels` where
+/// that passes `MAX_LUT_INPUTS`, a matrix's coefficients among the entries,
+/// as the read spends them, and the reduction's stage and coefficients
+/// beside the elements'.
+pub(super) fn spectral_bound(data: &[u8], channels: usize) -> usize {
+    bound_of(data, Some(channels))
+}
+
+/// [`bound`], or [`spectral_bound`] where `spectral` gives the spectrum's
+/// channels.
+fn bound_of(data: &[u8], spectral: Option<usize>) -> usize {
     let reader = Reader { bytes: data };
     let count = reader
         .u32(12)
         .map_or(0, |count| count as usize)
         .min(MAX_MPE_ELEMENTS);
-    let mut entries = 0usize;
+    let most = spectral.map_or(MAX_LUT_INPUTS, |channels| channels.max(MAX_LUT_INPUTS));
+    let mut entries = spectral.map_or(0, |channels| 3 * channels + 3);
     let mut beside = size_of::<Pipeline>()
-        + MAX_MPE_ELEMENTS * size_of::<Stage>()
+        + (MAX_MPE_ELEMENTS + usize::from(spectral.is_some())) * size_of::<Stage>()
         + MAX_LUT_INPUTS * size_of::<(i64, i64)>();
     for index in 0..count {
         let at = 16 + 8 * index;
@@ -556,8 +648,8 @@ pub(super) fn bound(data: &[u8]) -> usize {
             continue;
         };
         let header = Reader { bytes: element };
-        let p = header.u16(8).map_or(0, usize::from).min(MAX_LUT_INPUTS);
-        let q = header.u16(10).map_or(0, usize::from).min(MAX_LUT_INPUTS);
+        let p = header.u16(8).map_or(0, usize::from).min(most);
+        let q = header.u16(10).map_or(0, usize::from).min(most);
         let grid = |counts: usize| {
             (0..p)
                 .map(|axis| {
@@ -573,6 +665,7 @@ pub(super) fn bound(data: &[u8]) -> usize {
                 entries = entries.saturating_add(q * CURVE_SAMPLES);
                 beside = beside.saturating_add(q * size_of::<Sampled>());
             }
+            Some(b"matf") if spectral.is_some() => entries = entries.saturating_add(p * q + q),
             Some(b"matf") => beside = beside.saturating_add((p * q + q) * size_of::<i32>()),
             Some(b"clut") => {
                 entries = entries.saturating_add(grid(12));
@@ -957,6 +1050,11 @@ fn grid(
     layout: (usize, usize, Values),
 ) -> Result<Stage, IccError> {
     let p = intervals.len();
+    // Sixteen grid counts, so no more inputs than `MAX_LUT_INPUTS`, which a
+    // spectrum's channels may pass.
+    if p > MAX_LUT_INPUTS {
+        return Err(IccError::TooLarge);
+    }
     let (grids, read) = grid_layout(element, p, q, layout, budget.entries)?;
     budget.spend_entries(read.len())?;
     let values: Vec<i32> = read.into_iter().map(fixed32).collect();
@@ -2049,5 +2147,96 @@ mod tests {
         assert_eq!(curve.segment(f64::NEG_INFINITY), 0);
         assert_eq!(curve.segment(f64::INFINITY), count - 1);
         assert_eq!(curve.segment(f64::NAN), count - 1);
+    }
+
+    /// **A spectral tag gives as many channels as its spectrum has** (ICC.2
+    /// 9.2.77): a matrix from three device channels to 36 wavelengths and a
+    /// curve set over the 36, read as a spectral `D2B*` tag, end in the
+    /// reduction's weights — each output the weighted sum of the spectrum
+    /// the elements give — while the same tag read as a colorimetric one is
+    /// refused for its 36 channels, as it always was; a grid after the 36
+    /// is refused for its inputs, a tag giving another count than the
+    /// spectrum's is refused for it, the matrix's coefficients and the
+    /// reduction's are spent from the tag's entries, and what the read holds
+    /// is within what its bound says before it.
+    #[test]
+    fn a_spectral_tag_gives_as_many_channels_as_its_spectrum() {
+        let channels = 36usize;
+        // Wavelength `w` of the spectrum: a quarter of the first device
+        // channel, w / 72 of the second and a tenth of the third.
+        let coefficients: Vec<[f64; 3]> = (0..channels)
+            .map(|w| [0.25, w as f64 / 72.0, 0.1])
+            .collect();
+        let mut body = Vec::new();
+        for row in &coefficients {
+            for &value in row {
+                body.extend_from_slice(&float(value));
+            }
+        }
+        for _ in 0..channels {
+            body.extend_from_slice(&float(0.0));
+        }
+        let matrix = element(b"matf", 3, channels as u16, &body);
+        let curves = curves_of(channels, &formula_curve(0, &[1.0, 1.0, 0.0, 0.0]));
+        let spectral = tag(3, channels as u16, &[matrix.clone(), curves.clone()]);
+        // X weighs each wavelength by its number, Y by one, Z by nothing.
+        let weights: Vec<f64> = (0..3 * channels)
+            .map(|index| match index / channels {
+                0 => (index % channels) as f64 / 1024.0,
+                1 => 1.0 / 64.0,
+                _ => 0.0,
+            })
+            .collect();
+        let pipeline = read_spectral(&spectral, &weights).expect("the spectrum reduces");
+        assert_eq!((pipeline.inputs(), pipeline.outputs()), (3, 3));
+        assert!(!pipeline.lab());
+        let x = [0.8, 0.5, 0.3];
+        let spectrum: Vec<f64> = coefficients
+            .iter()
+            .map(|row| (0..3).map(|c| stored(row[c]) * x[c]).sum::<f64>())
+            .collect();
+        let want = [0, 1, 2].map(|row| {
+            (0..channels)
+                .map(|w| weights[row * channels + w] * spectrum[w])
+                .sum::<f64>()
+        });
+        let got = pipeline.evaluate(&x);
+        for channel in 0..3 {
+            assert!(
+                (got[channel] - want[channel]).abs() < 1e-3,
+                "channel {channel}: {got:?} against {want:?}"
+            );
+        }
+        assert!(pipeline.held_bytes() <= spectral_bound(&spectral, channels));
+
+        // A colorimetric tag's elements still give no more than fifteen.
+        let back = element(
+            b"matf",
+            channels as u16,
+            3,
+            &vec![0; (3 * channels + 3) * 4],
+        );
+        assert_eq!(
+            read(&tag(3, 3, &[matrix.clone(), back]), false),
+            Err(IccError::TooLarge)
+        );
+        assert_eq!(read(&spectral, false), Err(IccError::UnsupportedSpace));
+        let counts = [2u8; 16];
+        let grid_after = tag(
+            3,
+            channels as u16,
+            &[
+                matrix.clone(),
+                element(b"clut", channels as u16, channels as u16, &counts),
+            ],
+        );
+        assert_eq!(
+            read_spectral(&grid_after, &weights),
+            Err(IccError::TooLarge)
+        );
+        assert_eq!(
+            read_spectral(&tag(3, channels as u16 - 1, &[matrix]), &weights),
+            Err(IccError::UnsupportedSpace)
+        );
     }
 }

@@ -90,6 +90,11 @@ pub struct Output {
     inverse: Inverse,
     /// The profile's gamut tag, where it carries one that reads.
     gamut: Option<Gamut>,
+    /// The `s2cp` a standard connection-space value is taken through
+    /// first, where a version 5 profile's viewing conditions are not the
+    /// standard ones (ICC.2 10.2.22), and whether the profile's connection
+    /// space is `Lab`, which the tag's XYZ is taken from and back to.
+    before: Option<(Arc<mpe::Pipeline>, bool)>,
 }
 
 /// A gamut tag (ICC.1 9.2.28), read beside the profile's output tables: a
@@ -210,7 +215,17 @@ impl Output {
     /// The profile's gamut tag, `gamt`, is read beside the transform
     /// ([`Output::in_gamut`]), and one that does not read refuses nothing: the
     /// transform then answers no gamut.
+    ///
+    /// A version 5 profile whose viewing conditions are not the standard ones
+    /// takes a value through its `standardToCustomPccTag` (`s2cp`, ICC.2
+    /// 9.2.113) before its tables, its gamut tag or its model, and is refused
+    /// as [`super::SpectralRefusal::NoStandardToCustom`] where it carries
+    /// none.
     pub fn compile(profile: &Profile, intent: Intent) -> Result<Output, IccError> {
+        let before = profile
+            .tables
+            .from_standard()?
+            .map(|pipeline| (pipeline, &profile.pcs == b"Lab "));
         // What a media-relative source divides the value by: the media
         // white under absolute colorimetric. A tag numbered 3 is
         // ICC-absolute already, `B2D3` and a version 5 profile's `B2A3`.
@@ -264,13 +279,38 @@ impl Output {
                 },
             };
             match built {
-                Ok(inverse) => return Ok(Output { inverse, gamut }),
+                Ok(inverse) => {
+                    return Ok(Output {
+                        inverse,
+                        gamut,
+                        before,
+                    })
+                }
                 Err(error) => {
                     passed_over.get_or_insert(error);
                 }
             }
         }
         Err(passed_over.unwrap_or(IccError::MissingTags))
+    }
+
+    /// `pcs`, a value in the standard viewing conditions, in the profile's
+    /// own: taken through its `s2cp` where it has one — from Lab to XYZ and
+    /// back where its connection space is Lab, the tag taking and giving
+    /// XYZ — and as it stands otherwise.
+    fn custom(&self, pcs: [f64; 3]) -> [f64; 3] {
+        match &self.before {
+            None => pcs,
+            Some((pipeline, lab)) => {
+                let xyz = if *lab { lab_to_xyz(pcs) } else { pcs };
+                let custom = pipeline.evaluate(&xyz);
+                if *lab {
+                    xyz_to_lab(custom)
+                } else {
+                    custom
+                }
+            }
+        }
     }
 
     /// Whether `pcs`, a connection-space value as [`Output::apply`] takes
@@ -293,6 +333,7 @@ impl Output {
     #[must_use]
     pub fn in_gamut(&self, pcs: [f64; 3]) -> Option<bool> {
         let gamut = self.gamut.as_ref()?;
+        let pcs = self.custom(pcs);
         let pcs = match gamut.media {
             Some(scale) => scale_connection(pcs, gamut.lut.lab, scale.map(|s| 1.0 / s)),
             None => pcs,
@@ -327,6 +368,7 @@ impl Output {
     /// table's encoded input within its currency.
     #[must_use]
     pub fn apply(&self, pcs: [f64; 3]) -> DeviceColour {
+        let pcs = self.custom(pcs);
         match &self.inverse {
             Inverse::Matrix { inverse, curves } => {
                 let xyz = pcs.map(quantize);
@@ -876,6 +918,7 @@ mod tests {
                 ],
             },
             gamut: None,
+            before: None,
         };
         let grey = |lab: bool| Output {
             inverse: Inverse::Grey {
@@ -885,6 +928,7 @@ mod tests {
                 curve: invert_curve(&Curve::Identity).expect("inverts"),
             },
             gamut: None,
+            before: None,
         };
         for output in [matrix, grey(false), grey(true)] {
             for pcs in [

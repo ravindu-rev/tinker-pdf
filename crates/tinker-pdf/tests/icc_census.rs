@@ -522,6 +522,10 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
                     // A calculator past a cap, which only a version 5
                     // profile's elements hold.
                     IccError::CalculatorLimit(_) => "CalculatorLimit",
+                    // A spectral connection space or viewing conditions not
+                    // reduced or connected, which only a version 5 profile
+                    // names.
+                    IccError::Spectral(_) => "Spectral",
                 };
                 *refused.entry(name.to_string()).or_default() += 1;
             }

@@ -86,6 +86,7 @@ mod calc;
 mod mpe;
 mod named;
 mod output;
+mod spectral;
 
 pub use calc::{
     CalculatorLimit, MAX_CALC_DEPTH, MAX_CALC_OPERATIONS, MAX_CALC_STACK, MAX_CALC_TEMPORARIES,
@@ -94,6 +95,7 @@ pub use calc::{
 pub use mpe::MAX_MPE_ELEMENTS;
 pub use named::{NamedColour, NamedColours, MAX_NAMED_COLOURS};
 pub use output::{lab_to_xyz, xyz_to_lab, DeviceColour, Link, Output, MAX_DEVICE_CHANNELS};
+pub use spectral::{SpectralRefusal, ViewingConditions, MAX_SPECTRAL_STEPS};
 
 /// A rendering intent: ICC.1's four (6.1), the ones a transform is compiled
 /// for.
@@ -177,6 +179,21 @@ impl Intent {
     }
 }
 
+impl Intent {
+    /// The spectral `D2B*` tags this intent converts through, where nothing
+    /// colorimetric serves it, in ICC.2 8.14.2's order for a spectral
+    /// connection: its own, then `D2B0`, `D2B1` and `D2B3`.
+    fn spectral_order(self) -> [usize; 4] {
+        let own = match self {
+            Intent::Perceptual => 0,
+            Intent::RelativeColorimetric => 1,
+            Intent::Saturation => 2,
+            Intent::AbsoluteColorimetric => 3,
+        };
+        [own, 0, 1, 3]
+    }
+}
+
 /// One place an intent's transform may come from, as [`Intent::order`]
 /// lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +270,10 @@ pub enum IccError {
     /// runs would take more steps than [`MAX_CALC_WORK`]. Found before the
     /// program runs.
     CalculatorLimit(CalculatorLimit),
+    /// A version 5 profile's spectral connection space this engine does not
+    /// reduce, or viewing conditions it does not connect, named
+    /// ([`SpectralRefusal`], `docs/design/icc.md`, "Version 5").
+    Spectral(SpectralRefusal),
 }
 
 /// The most tags a profile may declare.
@@ -770,8 +791,37 @@ pub struct Tables {
     /// (ICC.1 8.6): located only for a profile of class `link`, and never
     /// an intent's table.
     link: Option<LinkTags>,
+    /// For `D2B0` to `D2B3` of a version 5 profile whose connection space is
+    /// spectral (ICC.2 9.2.77), which of `spectral` the tag names, or
+    /// `None`: what an intent converts through where nothing colorimetric
+    /// serves it, reduced to XYZ.
+    spectral_slots: [Option<usize>; 4],
+    /// One a distinct such tag, in the order the tags first name them.
+    spectral: Vec<Element<mpe::Pipeline>>,
+    /// The reduction those tags end in: three rows of a weight a wavelength
+    /// of the spectral connection space ([`ViewingConditions::reduction`]).
+    weights: Vec<f64>,
+    /// Why a version 5 profile's spectral tags are not read, where its
+    /// header names a spectral connection space they are not reduced from:
+    /// the profile's refusal where nothing else serves it.
+    spectral_refusal: Option<IccError>,
+    /// The connection tags of a version 5 profile whose viewing conditions
+    /// are not the standard ones (ICC.2 10.2.22); `None` for one whose are,
+    /// or which states none.
+    custom: Option<Custom>,
     /// Whether the connection space is `Lab` rather than `XYZ`.
     lab: bool,
+}
+
+/// How a version 5 profile's own viewing conditions connect to the standard
+/// ones (ICC.2 10.2.22): its `customToStandardPccTag` (`c2sp`, 9.2.57) after
+/// each transform into the connection space, and its
+/// `standardToCustomPccTag` (`s2cp`, 9.2.113) before each one out of it,
+/// each kept unread until a transform first needs it.
+#[derive(Clone, Debug, PartialEq)]
+struct Custom {
+    to_standard: Option<Element<mpe::Pipeline>>,
+    from_standard: Option<Element<mpe::Pipeline>>,
 }
 
 /// What a device link (ICC.1 8.6) converts through: its `D2B0`, which
@@ -945,6 +995,11 @@ impl Tables {
             output_pipelines,
             gamut: gamut.pop(),
             link: None,
+            spectral_slots: [None; 4],
+            spectral: Vec::new(),
+            weights: Vec::new(),
+            spectral_refusal: None,
+            custom: None,
             lab,
         })
     }
@@ -963,6 +1018,11 @@ impl Tables {
             output_pipelines: Vec::new(),
             gamut: None,
             link: None,
+            spectral_slots: [None; 4],
+            spectral: Vec::new(),
+            weights: Vec::new(),
+            spectral_refusal: None,
+            custom: None,
             lab,
         }
     }
@@ -1041,6 +1101,60 @@ impl Tables {
         element.read(|bytes| mpe::read(bytes, self.lab))
     }
 
+    /// The spectral `D2B*` tag `tag` names, where the profile's spectral
+    /// tags are read at all.
+    fn spectral_at(&self, tag: usize) -> Option<(usize, &Element<mpe::Pipeline>)> {
+        let index = (*self.spectral_slots.get(tag)?)?;
+        Some((index, self.spectral.get(index)?))
+    }
+
+    /// The spectral `D2B*` tag at `element`, reduced to XYZ through
+    /// `weights`, read now if nothing has read it yet.
+    fn read_spectral(
+        &self,
+        element: &Element<mpe::Pipeline>,
+    ) -> Result<Arc<mpe::Pipeline>, IccError> {
+        element.read(|bytes| mpe::read_spectral(bytes, &self.weights))
+    }
+
+    /// What a transform into the connection space connects to the standard
+    /// viewing conditions through: nothing for a profile in them, and its
+    /// `c2sp` for one that is not, read now if nothing has read it yet.
+    ///
+    /// # Errors
+    ///
+    /// [`SpectralRefusal::NoCustomToStandard`] for a profile that carries
+    /// none, and the tag's own refusal where it does not read.
+    fn to_standard(&self) -> Result<Option<Arc<mpe::Pipeline>>, IccError> {
+        let Some(custom) = &self.custom else {
+            return Ok(None);
+        };
+        let element = custom
+            .to_standard
+            .as_ref()
+            .ok_or(IccError::Spectral(SpectralRefusal::NoCustomToStandard))?;
+        element.read(mpe::read_connection).map(Some)
+    }
+
+    /// What a transform out of the connection space takes a standard value
+    /// through first: nothing for a profile in the standard viewing
+    /// conditions, and its `s2cp` for one that is not.
+    ///
+    /// # Errors
+    ///
+    /// [`SpectralRefusal::NoStandardToCustom`] for a profile that carries
+    /// none, and the tag's own refusal where it does not read.
+    fn from_standard(&self) -> Result<Option<Arc<mpe::Pipeline>>, IccError> {
+        let Some(custom) = &self.custom else {
+            return Ok(None);
+        };
+        let element = custom
+            .from_standard
+            .as_ref()
+            .ok_or(IccError::Spectral(SpectralRefusal::NoStandardToCustom))?;
+        element.read(mpe::read_connection).map(Some)
+    }
+
     /// Lets go of the bytes of every table and pipeline that has been read,
     /// whatever reading it gave: what it gave is kept, and nothing is read
     /// twice.
@@ -1050,6 +1164,18 @@ impl Tables {
         }
         for pipeline in &mut self.pipelines {
             pipeline.release_read();
+        }
+        for pipeline in &mut self.spectral {
+            pipeline.release_read();
+        }
+        if let Some(custom) = &mut self.custom {
+            for pipeline in custom
+                .to_standard
+                .iter_mut()
+                .chain(&mut custom.from_standard)
+            {
+                pipeline.release_read();
+            }
         }
         if let Some(link) = &mut self.link {
             link.release_read();
@@ -1146,6 +1272,14 @@ enum Source<'a> {
         index: usize,
         pipeline: Arc<mpe::Pipeline>,
     },
+    /// The pipeline at this index of [`Tables`]'s spectral elements, reached
+    /// through a version 5 profile's spectral `D2B*` tag of number `tag` and
+    /// reduced to XYZ.
+    Spectral {
+        tag: usize,
+        index: usize,
+        pipeline: Arc<mpe::Pipeline>,
+    },
     /// The table at this index of [`Tables`]'s distinct elements, reached
     /// through the `A2B*` tag of number `tag`.
     Table {
@@ -1162,18 +1296,22 @@ impl Source<'_> {
     fn id(&self) -> SourceId {
         match self {
             Source::Pipeline { index, .. } => SourceId::Pipeline(*index),
+            Source::Spectral { index, .. } => SourceId::Spectral(*index),
             Source::Table { index, .. } => SourceId::Table(*index),
             Source::Model(_) => SourceId::Model,
         }
     }
 
     /// Whether the source's connection-space value is ICC-absolute already:
-    /// `D2B3`'s (6.2.3, 9.2) and a version 5 profile's `A2B3` (ICC.2
-    /// 9.2.4). Every other tag, and a model (Table 25), is media-relative.
+    /// `D2B3`'s (6.2.3, 9.2), a version 5 profile's `A2B3` (ICC.2 9.2.4) and
+    /// its spectral `D2B3` (9.2.80). Every other tag, and a model (Table 25),
+    /// is media-relative.
     fn absolute(&self) -> bool {
         matches!(
             self,
-            Source::Pipeline { tag: 3, .. } | Source::Table { tag: 3, .. }
+            Source::Pipeline { tag: 3, .. }
+                | Source::Spectral { tag: 3, .. }
+                | Source::Table { tag: 3, .. }
         )
     }
 }
@@ -1182,6 +1320,7 @@ impl Source<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceId {
     Pipeline(usize),
+    Spectral(usize),
     Table(usize),
     Model,
 }
@@ -1199,13 +1338,19 @@ impl Profile {
     #[must_use]
     pub fn connection_value(&self, intent: Intent, components: &[f64]) -> Option<[f64; 3]> {
         let source = self.source(intent)?;
-        let pcs = match &source {
-            Source::Table { lut, .. } => lut.connection(components),
-            Source::Pipeline { pipeline, .. } => pipeline.evaluate(components),
-            Source::Model(model) => model.connection(components),
+        let own = &self.pcs == b"Lab ";
+        let (pcs, lab) = match &source {
+            Source::Table { lut, .. } => (lut.connection(components), lut.lab),
+            Source::Pipeline { pipeline, .. } | Source::Spectral { pipeline, .. } => {
+                (pipeline.evaluate(components), pipeline.lab())
+            }
+            Source::Model(model) => (model.connection(components), own),
         };
+        let then = self.tables.to_standard().ok().flatten();
+        let (pcs, lab) = standardised(pcs, lab, then.as_deref());
+        let pcs = encoded(pcs, lab, own);
         Some(match self.scale_for(intent, source.absolute()) {
-            Some(scale) => output::scale_connection(pcs, &self.pcs == b"Lab ", scale),
+            Some(scale) => output::scale_connection(pcs, own, scale),
             None => pcs,
         })
     }
@@ -1225,9 +1370,16 @@ impl Profile {
         })
     }
 
-    /// The first of `intent`'s own sources that reads.
+    /// The first of `intent`'s own sources that reads and connects: in a
+    /// version 5 profile's own viewing conditions, where they are not the
+    /// standard ones, a table or pipeline through its `c2sp`, and nothing
+    /// where it carries none that reads — its model passed over, since a
+    /// model's transform takes no stage after it — and its spectral `D2B*`
+    /// tags last, in [`Intent::spectral_order`].
     fn walk(&self, intent: Intent) -> Option<Source<'_>> {
-        intent.order().into_iter().find_map(|step| match step {
+        self.tables.to_standard().ok()?;
+        let custom = self.tables.custom.is_some();
+        let colorimetric = intent.order().into_iter().find_map(|step| match step {
             Step::Pipeline(tag) => {
                 let (index, element) = self.tables.pipeline_at(tag)?;
                 let pipeline = self.tables.read_pipeline(element).ok()?;
@@ -1255,8 +1407,44 @@ impl Profile {
                     })
                 }
             },
+            Step::Model if custom => None,
             Step::Model => self.model.as_ref().map(Source::Model),
+        });
+        colorimetric.or_else(|| {
+            intent.spectral_order().into_iter().find_map(|tag| {
+                let (index, element) = self.tables.spectral_at(tag)?;
+                let pipeline = self.tables.read_spectral(element).ok()?;
+                Some(Source::Spectral {
+                    tag,
+                    index,
+                    pipeline,
+                })
+            })
         })
+    }
+}
+
+/// `pcs`, a connection-space value in XYZ or, where `lab`, in Lab, taken
+/// through `then` where it is given — a `c2sp` from a version 5 profile's
+/// own viewing conditions to the standard ones (ICC.2 9.2.57), which takes
+/// and gives XYZ: the value, and whether it is in Lab after.
+fn standardised(pcs: [f64; 3], lab: bool, then: Option<&mpe::Pipeline>) -> ([f64; 3], bool) {
+    match then {
+        None => (pcs, lab),
+        Some(then) => {
+            let xyz = if lab { lab_to_xyz(pcs) } else { pcs };
+            (then.evaluate(&xyz), false)
+        }
+    }
+}
+
+/// `pcs`, in Lab where `lab` and in XYZ otherwise, in Lab where `own` and in
+/// XYZ otherwise: a source's value in its profile's own connection space.
+fn encoded(pcs: [f64; 3], lab: bool, own: bool) -> [f64; 3] {
+    match (lab, own) {
+        (false, true) => xyz_to_lab(pcs),
+        (true, false) => lab_to_xyz(pcs),
+        _ => pcs,
     }
 }
 
@@ -1809,38 +1997,49 @@ const FILLED: u64 = 1 << 63;
 /// "Which transforms a grid stands in for").
 #[derive(Clone, Copy)]
 enum Light<'a> {
-    /// A sampled table.
-    Table(&'a Lut),
-    /// A multi-process pipeline.
-    Elements(&'a mpe::Pipeline),
+    /// A sampled table, and the `c2sp` its value connects through where its
+    /// profile's viewing conditions are not the standard ones.
+    Table(&'a Lut, Option<&'a mpe::Pipeline>),
+    /// A multi-process pipeline, and the same.
+    Elements(&'a mpe::Pipeline, Option<&'a mpe::Pipeline>),
 }
 
 impl Light<'_> {
     /// How many components the pipeline takes.
     fn inputs(self) -> usize {
         match self {
-            Light::Table(lut) => lut.inputs,
-            Light::Elements(pipeline) => pipeline.inputs(),
+            Light::Table(lut, _) => lut.inputs,
+            Light::Elements(pipeline, _) => pipeline.inputs(),
         }
     }
 
-    /// How its light is encoded, which its connection space decides.
+    /// How its light is encoded, which its connection space decides: XYZ's
+    /// after a `c2sp`, which gives XYZ.
     fn encoding(self) -> Encoding {
         match self {
-            Light::Table(lut) => lut.encoding(),
-            Light::Elements(pipeline) => Encoding::of(pipeline.lab()),
+            Light::Table(lut, None) => lut.encoding(),
+            Light::Elements(pipeline, None) => Encoding::of(pipeline.lab()),
+            Light::Table(_, Some(_)) | Light::Elements(_, Some(_)) => Encoding::of(false),
         }
     }
 
     /// The pipeline's light at `components`, its connection-space value
-    /// scaled by `media` where that is given.
+    /// connected through its `c2sp` where it has one and scaled by `media`
+    /// where that is given.
     fn at(self, components: &[f64], media: Option<[f64; 3]>) -> [f64; 3] {
         match self {
-            Light::Table(lut) => lut.to_linear(components, media),
-            Light::Elements(pipeline) => {
+            Light::Table(lut, None) => lut.to_linear(components, media),
+            Light::Table(lut, then) => {
                 #[cfg(test)]
                 tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
-                pcs_to_linear(pipeline.evaluate(components), pipeline.lab(), media)
+                let (pcs, lab) = standardised(lut.connection(components), lut.lab, then);
+                pcs_to_linear(pcs, lab, media)
+            }
+            Light::Elements(pipeline, then) => {
+                #[cfg(test)]
+                tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
+                let (pcs, lab) = standardised(pipeline.evaluate(components), pipeline.lab(), then);
+                pcs_to_linear(pcs, lab, media)
             }
         }
     }
@@ -2426,14 +2625,45 @@ impl Profile {
         // refused; one carrying a model has its tables passed over, and the
         // model, which reads only those two, refuses it if it is all there is.
         let tables_convert = lab || &pcs == b"XYZ ";
+        // A version 5 profile's viewing conditions (ICC.2 9.2.111), which its
+        // colorimetric and its spectral connection both are in; where they
+        // are not the standard ones, its transforms connect to the standard
+        // ones through its `c2sp` and `s2cp` (10.2.22). Its spectral
+        // connection space (7.2.21), where its header names one, reduces to
+        // XYZ against them, or why not. An `svcn` that does not read leaves
+        // the colorimetric tags in the standard conditions and refuses the
+        // spectral ones for its reason.
+        let v5 = version >= 5;
+        let viewing = if v5 {
+            find(b"svcn").map(ViewingConditions::read)
+        } else {
+            None
+        };
+        let custom = matches!(&viewing, Some(Ok(conditions)) if !conditions.standard());
+        let reduction = version5
+            .filter(|header| v5 && header.spectral_pcs != [0; 4])
+            .map(|header| {
+                spectral::channels(&header)?;
+                match &viewing {
+                    None => Err(IccError::Spectral(SpectralRefusal::NoViewingConditions)),
+                    Some(Err(error)) => Err(*error),
+                    Some(Ok(conditions)) => conditions.reduction(header.spectral_range),
+                }
+            });
+        // A spectral-only profile's connection-space field is zero (7.2.21),
+        // and its spectral tags are what it converts through.
         if model.is_none() && !tables_convert {
-            return Err(IccError::UnsupportedPcs);
+            match &reduction {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(*error),
+                None => return Err(IccError::UnsupportedPcs),
+            }
         }
         // A version 5 profile adds `A2B3` and `B2A3` (ICC.2 9.2.4, 9.2.41),
         // and its `A2B*` and `B2A*` tags may hold elements; its `D2B*` and
         // `B2D*` tags take a spectral connection space instead (9.2.42,
-        // 9.2.77), which these do not read.
-        let v5 = version >= 5;
+        // 9.2.77), which its `D2B*` tags reduce from below and its `B2D*`
+        // tags, which take a spectrum, are not read for.
         let tags_of = |names: [&[u8; 4]; 4], keep: [bool; 4]| {
             [0, 1, 2, 3].map(|tag| place(names[tag]).filter(|_| keep[tag]))
         };
@@ -2453,6 +2683,31 @@ impl Profile {
         } else {
             Tables::none(lab)
         };
+        match reduction {
+            Some(Ok(weights)) => {
+                let (slots, elements) = Element::locate(
+                    tags_of([b"D2B0", b"D2B1", b"D2B2", b"D2B3"], [true; 4]),
+                    bytes,
+                )?;
+                tables.spectral_slots = slots;
+                tables.spectral = elements;
+                tables.weights = weights;
+            }
+            Some(Err(error)) => tables.spectral_refusal = Some(error),
+            None => {}
+        }
+        if custom {
+            let one = |name: &[u8; 4]| {
+                Element::locate([place(name)], bytes).map(|(_, mut found)| found.pop())
+            };
+            tables.custom = Some(Custom {
+                to_standard: one(b"c2sp")?,
+                from_standard: one(b"s2cp")?,
+            });
+            // Every transform into the connection space connects through
+            // the `c2sp`, so a profile with none that reads converts nothing.
+            tables.to_standard()?;
+        }
 
         // Relative colorimetric's source, found now: 8.6.5.8 makes it the
         // initial intent, so a profile with none is refused here, whatever
@@ -2498,20 +2753,47 @@ impl Profile {
                         }
                     }
                 }
+                // In viewing conditions other than the standard ones a model
+                // is passed over: its transform takes no `c2sp` after it.
+                Step::Model if custom => {
+                    if matches!(model, Some(Ok(_))) {
+                        passed_over.get_or_insert(IccError::Spectral(SpectralRefusal::CustomModel));
+                    }
+                }
                 Step::Model => found = matches!(model, Some(Ok(_))),
             }
             if found {
                 break;
             }
         }
+        // A version 5 profile's spectral tags last, in ICC.2 8.14.2's order.
+        if !found {
+            for tag in Intent::RelativeColorimetric.spectral_order() {
+                let Some((_, element)) = tables.spectral_at(tag) else {
+                    continue;
+                };
+                match tables.read_spectral(element) {
+                    Ok(_) => {
+                        found = true;
+                        break;
+                    }
+                    Err(error) => {
+                        passed_over.get_or_insert(error);
+                    }
+                }
+            }
+        }
         if !found {
             // A profile carrying a model is refused for the model's own
             // reason, one whose only source was a pipeline that does not
-            // read for that pipeline's, by name, and one carrying neither a
-            // model nor a table for lacking both.
+            // read for that pipeline's, by name, one whose spectral tags are
+            // not reduced for why not, and one carrying neither a model nor
+            // a table for lacking both.
             return Err(match model {
                 Some(Err(error)) => error,
-                _ => passed_over.unwrap_or(IccError::MissingTags),
+                _ => passed_over
+                    .or(tables.spectral_refusal)
+                    .unwrap_or(IccError::MissingTags),
             });
         }
         tables.release_read();
@@ -3182,6 +3464,11 @@ pub struct Transform {
     /// through one: shared with the profile's [`Tables`] and with every
     /// other intent that converts through it.
     pipeline: Option<Arc<mpe::Pipeline>>,
+    /// The `c2sp` the table's or pipeline's connection-space value connects
+    /// through before it becomes sRGB, where a version 5 profile's viewing
+    /// conditions are not the standard ones (ICC.2 10.2.22): shared with
+    /// the profile's [`Tables`].
+    then: Option<Arc<mpe::Pipeline>>,
     /// The table's or pipeline's connection-space value scaled channel by
     /// channel in XYZ before it becomes sRGB, where this is ICC-absolute
     /// colorimetry's transform through one (6.2.3): the media white over the
@@ -3205,6 +3492,7 @@ impl Clone for Transform {
             inputs: self.inputs,
             lut: self.lut.clone(),
             pipeline: self.pipeline.clone(),
+            then: self.then.clone(),
             media: self.media,
             grid: self.grid.clone(),
             row: OnceLock::new(),
@@ -3254,6 +3542,7 @@ impl PartialEq for Transform {
             && self.inputs == other.inputs
             && self.lut == other.lut
             && self.pipeline == other.pipeline
+            && self.then == other.then
             && self.media == other.media
     }
 }
@@ -3288,23 +3577,31 @@ impl Transform {
     pub fn compile(profile: &Profile, intent: Intent) -> Option<Transform> {
         let source = profile.source(intent)?;
         let media = profile.scale_for(intent, source.absolute());
-        Some(Transform::of_source(source, media))
+        let then = profile.tables.to_standard().ok().flatten();
+        Some(Transform::of_source(source, media, then))
     }
 
     /// The transform `source` converts through, its connection-space value
-    /// scaled by `media` where that is given.
-    fn of_source(source: Source<'_>, media: Option<[f64; 3]>) -> Transform {
+    /// connected through `then` — a `c2sp` — where that is given and scaled
+    /// by `media` where that is.
+    fn of_source(
+        source: Source<'_>,
+        media: Option<[f64; 3]>,
+        then: Option<Arc<mpe::Pipeline>>,
+    ) -> Transform {
         match source {
             // A pipeline was compiled when it was read: its stages are the
             // transform, ending in the connection space, and like a table it
-            // is read through a grid of its own light.
-            Source::Pipeline { pipeline, .. } => Transform {
+            // is read through a grid of its own light. A spectral one ends in
+            // its reduction to XYZ.
+            Source::Pipeline { pipeline, .. } | Source::Spectral { pipeline, .. } => Transform {
                 curves: Vec::new(),
                 matrix: [[0; 3]; 3],
                 inputs: pipeline.inputs(),
-                grid: Grid::over(Light::Elements(&pipeline), media),
+                grid: Grid::over(Light::Elements(&pipeline, then.as_deref()), media),
                 lut: None,
                 pipeline: Some(pipeline),
+                then,
                 media,
                 row: OnceLock::new(),
             },
@@ -3316,9 +3613,10 @@ impl Transform {
                 curves: Vec::new(),
                 matrix: [[0; 3]; 3],
                 inputs: lut.inputs,
-                grid: Grid::over(Light::Table(&lut), media),
+                grid: Grid::over(Light::Table(&lut, then.as_deref()), media),
                 lut: Some(lut),
                 pipeline: None,
+                then,
                 row: OnceLock::new(),
                 media,
             },
@@ -3357,6 +3655,7 @@ impl Transform {
                     inputs: 3,
                     lut: None,
                     pipeline: None,
+                    then: None,
                     grid: None,
                     row: OnceLock::new(),
                     media: None,
@@ -3412,6 +3711,7 @@ impl Transform {
                     inputs: 1,
                     lut: None,
                     pipeline: None,
+                    then: None,
                     grid: None,
                     row: OnceLock::new(),
                     media: None,
@@ -3430,8 +3730,8 @@ impl Transform {
     /// elements; `None` for a model, which has no grid.
     fn light_source(&self) -> Option<Light<'_>> {
         match (&self.lut, &self.pipeline) {
-            (Some(lut), _) => Some(Light::Table(lut)),
-            (None, Some(pipeline)) => Some(Light::Elements(pipeline)),
+            (Some(lut), _) => Some(Light::Table(lut, self.then.as_deref())),
+            (None, Some(pipeline)) => Some(Light::Elements(pipeline, self.then.as_deref())),
             (None, None) => None,
         }
     }
@@ -3634,11 +3934,17 @@ impl Transform {
     /// [`Transform::evaluate`] at sixteen bits, as [`Transform::apply16`]
     /// quantises it.
     pub(crate) fn evaluate16(&self, components: &[f64]) -> [u16; 3] {
+        let then = self.then.as_deref();
         if let Some(lut) = &self.lut {
-            return lut.to_rgb16(components, self.media);
+            if then.is_none() {
+                return lut.to_rgb16(components, self.media);
+            }
+            let (pcs, lab) = standardised(lut.connection(components), lut.lab, then);
+            return pcs_to_rgb16(pcs, lab, self.media);
         }
         if let Some(pipeline) = &self.pipeline {
-            return pcs_to_rgb16(pipeline.evaluate(components), pipeline.lab(), self.media);
+            let (pcs, lab) = standardised(pipeline.evaluate(components), pipeline.lab(), then);
+            return pcs_to_rgb16(pcs, lab, self.media);
         }
         self.matrix_light(components).map(|sum| {
             let linear = sum.clamp(0, ONE) as f64 / ONE as f64;
@@ -3649,13 +3955,19 @@ impl Transform {
     /// The transform's whole pipeline for one colour, with no grid: what a
     /// grid's node is evaluated as, and what the tests hold a grid to.
     pub(crate) fn evaluate(&self, components: &[f64]) -> (u8, u8, u8) {
+        let then = self.then.as_deref();
         if let Some(lut) = &self.lut {
-            return lut.to_rgb(components, self.media);
+            if then.is_none() {
+                return lut.to_rgb(components, self.media);
+            }
+            let (pcs, lab) = standardised(lut.connection(components), lut.lab, then);
+            return pcs_to_rgb(pcs, lab, self.media);
         }
         if let Some(pipeline) = &self.pipeline {
             #[cfg(test)]
             tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
-            return pcs_to_rgb(pipeline.evaluate(components), pipeline.lab(), self.media);
+            let (pcs, lab) = standardised(pipeline.evaluate(components), pipeline.lab(), then);
+            return pcs_to_rgb(pcs, lab, self.media);
         }
         let [r, g, b] = self.matrix_light(components).map(encode_srgb);
         (r, g, b)
@@ -3724,7 +4036,8 @@ impl Transforms {
         let source = profile.source(Intent::RelativeColorimetric)?;
         let relative_source = source.id();
         let media = profile.scale_for(Intent::RelativeColorimetric, source.absolute());
-        let relative = Arc::new(Transform::of_source(source, media));
+        let then = profile.tables.to_standard().ok().flatten();
+        let relative = Arc::new(Transform::of_source(source, media, then));
         Some(Transforms {
             profile,
             relative,
@@ -3774,7 +4087,8 @@ impl Transforms {
                     }
                 }
             }
-            Arc::new(Transform::of_source(source, media))
+            let then = self.profile.tables.to_standard().ok().flatten();
+            Arc::new(Transform::of_source(source, media, then))
         })
     }
 
@@ -4030,8 +4344,11 @@ impl Tables {
     /// space reads ([`Output::compile`]).
     fn held_bound(&self) -> usize {
         let lists = (self.tables.capacity() + self.outputs.capacity()) * size_of::<Element<Lut>>()
-            + (self.pipelines.capacity() + self.output_pipelines.capacity())
-                * size_of::<Element<mpe::Pipeline>>();
+            + (self.pipelines.capacity()
+                + self.output_pipelines.capacity()
+                + self.spectral.capacity())
+                * size_of::<Element<mpe::Pipeline>>()
+            + self.weights.capacity() * size_of::<f64>();
         let tables = self
             .tables
             .iter()
@@ -4042,12 +4359,28 @@ impl Tables {
             .pipelines
             .iter()
             .chain(&self.output_pipelines)
+            .chain(self.custom_elements())
             .map(|pipeline| pipeline.held_bound(mpe::Pipeline::held_bytes, mpe::bound));
+        let channels = self.weights.len() / 3;
+        let spectral = self.spectral.iter().map(|pipeline| {
+            pipeline.held_bound(mpe::Pipeline::held_bytes, |raw| {
+                mpe::spectral_bound(raw, channels)
+            })
+        });
         let link = self.link.as_ref().map_or(0, LinkTags::held_bound);
         tables
             .chain(pipelines)
+            .chain(spectral)
             .fold(lists, usize::saturating_add)
             .saturating_add(link)
+    }
+
+    /// The `c2sp` and `s2cp` tags, where the profile's viewing conditions
+    /// are not the standard ones and it carries them.
+    fn custom_elements(&self) -> impl Iterator<Item = &Element<mpe::Pipeline>> {
+        self.custom
+            .iter()
+            .flat_map(|custom| custom.to_standard.iter().chain(&custom.from_standard))
     }
 
     /// The most bytes a transform's grid over one of the tables or pipelines
@@ -4062,7 +4395,7 @@ impl Tables {
                 |raw| raw.get(8).map_or(0, |&inputs| usize::from(inputs)),
             )
         });
-        let pipelines = self.pipelines.iter().map(|pipeline| {
+        let pipelines = self.pipelines.iter().chain(&self.spectral).map(|pipeline| {
             pipeline.inputs(mpe::Pipeline::inputs, |raw| {
                 Reader { bytes: raw }.u16(8).map_or(0, usize::from)
             })
@@ -4076,8 +4409,11 @@ impl Tables {
     #[cfg(test)]
     fn held(&self) -> usize {
         let lists = (self.tables.capacity() + self.outputs.capacity()) * size_of::<Element<Lut>>()
-            + (self.pipelines.capacity() + self.output_pipelines.capacity())
-                * size_of::<Element<mpe::Pipeline>>();
+            + (self.pipelines.capacity()
+                + self.output_pipelines.capacity()
+                + self.spectral.capacity())
+                * size_of::<Element<mpe::Pipeline>>()
+            + self.weights.capacity() * size_of::<f64>();
         let tables: usize = self
             .tables
             .iter()
@@ -4089,6 +4425,8 @@ impl Tables {
             .pipelines
             .iter()
             .chain(&self.output_pipelines)
+            .chain(&self.spectral)
+            .chain(self.custom_elements())
             .map(|pipeline| pipeline.held(mpe::Pipeline::held_bytes))
             .sum();
         let link = self.link.as_ref().map_or(0, LinkTags::held);
@@ -4333,7 +4671,14 @@ pub(crate) mod tests {
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 19] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 20] = [
+            // An RGB version 5 profile whose connection space is reflectance
+            // spectra over four wavelengths, its `D2B0` a matrix from the
+            // device to them, its `svcn` the CIE 1931 observer under D65 as
+            // four steps of its own, and its `c2sp`, `s2cp` and `B2A0`: the
+            // seed that reaches the spectral reduction, the viewing
+            // conditions and the connection tags both ways.
+            ("spectral-v5", spectral_seed(), Reaches::Output),
             // A version 5 profile whose `A2B0` is a calculator element —
             // channels in and out, a matrix sub-element, temporary channels,
             // a conditional and a selection — and whose `B2A0` takes the
@@ -4901,6 +5246,70 @@ pub(crate) mod tests {
     /// selecting one of three constants, and the third's square root — and
     /// whose `B2A0` squares each component through sampled calculator
     /// curves of sixteen samples over XYZ's range, then mixes them.
+    fn spectral_seed() -> Vec<u8> {
+        let spectrum = mpet(
+            3,
+            4,
+            &[matf(
+                &[
+                    vec![0.6, 0.2, 0.1],
+                    vec![0.3, 0.5, 0.1],
+                    vec![0.1, 0.4, 0.3],
+                    vec![0.05, 0.2, 0.6],
+                ],
+                &[0.05, 0.05, 0.05, 0.05],
+            )],
+        );
+        // 400 nm and 700 nm as half floats, and four steps.
+        let range: [u16; 3] = [0x5E40, 0x6178, 4];
+        let range_bytes: Vec<u8> = range.iter().flat_map(|value| value.to_be_bytes()).collect();
+        let mut viewing = b"svcn".to_vec();
+        viewing.extend_from_slice(&[0; 4]);
+        viewing.extend_from_slice(&1u32.to_be_bytes());
+        viewing.extend_from_slice(&range_bytes);
+        viewing.extend_from_slice(&[0; 2]);
+        for value in [0.2, 0.4, 1.0, 0.3, 0.1, 0.9, 0.6, 0.1, 1.2, 0.3, 0.0, 0.0] {
+            viewing.extend_from_slice(&float(value));
+        }
+        viewing.extend_from_slice(&2u32.to_be_bytes());
+        viewing.extend_from_slice(&float(6504.0));
+        viewing.extend_from_slice(&range_bytes);
+        viewing.extend_from_slice(&[0; 2]);
+        for value in [0.8, 1.0, 1.1, 0.9] {
+            viewing.extend_from_slice(&float(value));
+        }
+        viewing.extend_from_slice(&[0; 24]);
+        let diagonal = |values: [f64; 3]| {
+            mpet(
+                3,
+                3,
+                &[matf(
+                    &[
+                        vec![values[0], 0.0, 0.0],
+                        vec![0.0, values[1], 0.0],
+                        vec![0.0, 0.0, values[2]],
+                    ],
+                    &[0.0, 0.0, 0.0],
+                )],
+            )
+        };
+        let mut out = build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"D2B0", spectrum),
+                (*b"svcn", viewing),
+                (*b"c2sp", diagonal([0.95, 1.0, 1.25])),
+                (*b"s2cp", diagonal([1.0 / 0.95, 1.0, 0.8])),
+                (*b"B2A0", diagonal([1.0, 1.0, 1.0])),
+            ],
+        );
+        out[8..12].copy_from_slice(&0x0500_0000u32.to_be_bytes());
+        out[100..104].copy_from_slice(b"rs\x00\x04");
+        out[104..110].copy_from_slice(&range_bytes);
+        out
+    }
+
     fn calc_seed() -> Vec<u8> {
         let mixing = matf(
             &[
@@ -8775,7 +9184,9 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
     /// compiled and converted a colour and a row, its grids' nodes allocated
     /// and its row tables built, and its transform out of the connection
     /// space compiled, reading the `B2A*` table into the profile the set
-    /// holds; and the bound only falls as tables are read, staying a bound.
+    /// holds — a version 5 profile's spectral `D2B0`, reduced to XYZ, and
+    /// its `c2sp` and `s2cp` among them; and the bound only falls as tables
+    /// are read, staying a bound.
     #[test]
     fn transforms_hold_no_more_than_their_bound() {
         let wider = build(
@@ -8798,7 +9209,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             tags.push((signature, constant_table(3, fallback_value(t))));
         }
         let everything = build(b"RGB ", b"XYZ ", &tags);
-        let profiles: [(&str, Vec<u8>); 9] = [
+        let profiles: [(&str, Vec<u8>); 10] = [
             ("matrix/TRC", matrix_trc(2.2)),
             ("grey", grey(b"XYZ ", 1.8)),
             ("three intents", three_intents_profile()),
@@ -8811,6 +9222,10 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             ("a model, tables and pipelines", everything),
             ("a B2A table beside an A2B one", b2a_seed()),
             ("an mBA table beside an mAB one", mba_seed()),
+            (
+                "a spectral profile in viewing conditions of its own",
+                spectral_seed(),
+            ),
         ];
         for (what, bytes) in &profiles {
             let profile = Profile::parse(bytes).unwrap_or_else(|e| panic!("{what}: {e:?}"));
