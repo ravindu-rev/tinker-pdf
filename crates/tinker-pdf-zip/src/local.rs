@@ -245,16 +245,22 @@ pub(crate) fn parse_descriptor(
 /// honest outcome: nothing here can produce a checksum for it, and gap 29's
 /// pass-through design is what makes handing back unchecked bytes the one
 /// answer this crate may not give.
-pub(crate) fn search_descriptor(bytes: &[u8], data_offset: usize) -> Option<Descriptor> {
+pub(crate) fn search_descriptor(
+    bytes: &[u8],
+    data_offset: usize,
+    warnings: &mut crate::Warnings,
+) -> Option<Descriptor> {
     let mut from = data_offset;
-    while let Some(at) = crate::le::find(bytes, from, &DESCRIPTOR_SIG) {
+    loop {
+        let found = crate::le::find(bytes, from, &DESCRIPTOR_SIG);
+        warnings.step(crate::le::searched(bytes.len(), from, found));
+        let at = found?;
         let expected = (at - data_offset) as u64;
         if let Some(d) = parse_descriptor(bytes, at, expected, false) {
             return Some(d);
         }
         from = at + 4;
     }
-    None
 }
 
 #[cfg(test)]
@@ -316,8 +322,12 @@ mod tests {
         bytes.extend_from_slice(&5u32.to_le_bytes());
         bytes.extend_from_slice(&(data_len as u32).to_le_bytes());
         bytes.extend_from_slice(&3u32.to_le_bytes());
-        let d = search_descriptor(&bytes, 4).expect("the real one, past the decoy");
+        let mut warnings = crate::Warnings::default();
+        let d = search_descriptor(&bytes, 4, &mut warnings).expect("the real one, past the decoy");
         assert_eq!((d.crc, d.compressed_size, d.uncompressed_size), (5, 16, 3));
+        // Every position from the data to the second signature was examined,
+        // the decoy's included.
+        assert_eq!(warnings.steps, 14);
     }
 
     /// An extra area whose record length runs past its own end stops the walk

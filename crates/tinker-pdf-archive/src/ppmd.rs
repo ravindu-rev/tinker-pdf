@@ -251,6 +251,10 @@ struct Model {
     /// exhaustion of the arena. Counted so a fixture named for restarts can be
     /// held to having them.
     builds: u32,
+    /// The steps [`decode_counted`] hands out: a symbol decoded, a state or
+    /// a context the decode, the update and a rescale walk examines, and a
+    /// unit the arena's restart and gluing walk.
+    steps: u64,
 }
 
 /// Which escape estimator a masked context used: one of the table's, or the
@@ -308,6 +312,7 @@ impl Model {
             run_length: 0,
             init_rl: 0,
             builds: 0,
+            steps: 0,
         };
         // Block sizes in units: 1-4 by one, 6-12 by two, 15-24 by three, then
         // by four to 128.
@@ -512,6 +517,7 @@ impl Model {
             let mut next = self.free_list[i];
             self.free_list[i] = 0;
             while next != 0 {
+                self.step(1);
                 let node = next;
                 next = self.u32_at(node);
                 self.set_u16(node, 0);
@@ -631,6 +637,8 @@ impl Model {
     // ---- The model ----------------------------------------------------------
 
     fn restart(&mut self) {
+        // The order-0 context's 256 states, and the two tables reset with it.
+        self.step(256 + 128 * 64 + 25 * 16);
         self.builds = self.builds.saturating_add(1);
         self.free_list = [0; NUM_INDEXES];
         self.text = self.align_offset;
@@ -698,6 +706,7 @@ impl Model {
             ps.push(self.found_state);
         }
         while self.suffix(c) != 0 {
+            self.step(1);
             c = self.suffix(c);
             let s = if self.num_stats(c) != 1 {
                 self.find(c, symbol)?
@@ -740,6 +749,7 @@ impl Model {
         };
 
         while let Some(state) = ps.pop() {
+            self.step(1);
             let Some(c1) = self.alloc_context() else {
                 return Ok(None);
             };
@@ -842,6 +852,7 @@ impl Model {
 
         let mut steps = 0u32;
         loop {
+            self.step(1);
             steps += 1;
             if steps > MAX_ORDER + 1 {
                 return Err(Error::Corrupt);
@@ -920,6 +931,7 @@ impl Model {
                 *b = self.u8_at(s + k as u32);
             }
             while s != stats {
+                self.step(1);
                 self.copy_state(s, s - 6);
                 s -= 6;
             }
@@ -935,6 +947,7 @@ impl Model {
         self.set_freq(stats, sum_freq);
         let mut s = stats;
         for _ in 0..count {
+            self.step(1);
             s += 6;
             let mut freq = self.freq(s);
             esc_freq = esc_freq.wrapping_sub(freq);
@@ -948,6 +961,7 @@ impl Model {
                 }
                 let mut s1 = s;
                 loop {
+                    self.step(1);
                     self.copy_state(s1, s1 - 6);
                     s1 -= 6;
                     if s1 == stats || freq <= self.freq(s1 - 6) {
@@ -1105,7 +1119,13 @@ impl Model {
 
     /// One symbol. `Ok(None)` is the end-of-data escape (an escape out of
     /// the order-0 context), which 7z's writers may put after the last byte.
+    /// `n` steps more, saturating.
+    fn step(&mut self, n: u32) {
+        self.steps = self.steps.saturating_add(u64::from(n));
+    }
+
     fn decode_symbol(&mut self, rc: &mut Range<'_>) -> Result<Option<u8>, Error> {
+        self.step(1);
         let mut mask = [true; 256];
         let mc = self.min_context;
         if self.num_stats(mc) != 1 {
@@ -1123,6 +1143,7 @@ impl Model {
             }
             self.prev_success = 0;
             for _ in 1..self.num_stats(mc) {
+                self.step(1);
                 s += 6;
                 count = count.wrapping_sub(self.freq(s));
                 if (count as i32) < 0 {
@@ -1141,7 +1162,9 @@ impl Model {
             rc.decode(hi, summ - hi);
             self.hi_bits_flag = hi_bits_3(self.symbol(self.found_state));
             let stats = self.stats(mc);
-            for i in 0..self.num_stats(mc) {
+            let n = self.num_stats(mc);
+            self.step(n);
+            for i in 0..n {
                 mask[usize::from(self.symbol(stats + i * 6))] = false;
             }
         } else {
@@ -1200,6 +1223,7 @@ impl Model {
             let mut mc = self.min_context;
             let num_masked = self.num_stats(mc);
             loop {
+                self.step(1);
                 self.order_fall += 1;
                 if self.suffix(mc) == 0 {
                     return Ok(None);
@@ -1211,6 +1235,9 @@ impl Model {
             }
             let stats = self.stats(mc);
             let n = self.num_stats(mc);
+            // The masked context's states are summed, searched and masked:
+            // three walks at most.
+            self.step(n.saturating_mul(3));
             let mut hi = 0u32;
             for i in 0..n {
                 let s = stats + i * 6;
@@ -1272,15 +1299,44 @@ pub fn decode(
     unpacked: usize,
     limits: &Limits,
 ) -> Result<Vec<u8>, Error> {
-    decode_counting(input, props, unpacked, limits).map(|(out, _)| out)
+    decode_counted(input, props, unpacked, limits).0
+}
+
+/// [`decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each symbol decoded; each state of a context the decode
+/// examined and each context its escapes walked to; each context the model's
+/// update visited and each state a rescale halved; and each unit the arena's
+/// restarts and gluing walked. The output is the one [`decode`] returns, and
+/// the steps are counted whether or not it decoded.
+pub fn decode_counted(
+    input: &[u8],
+    props: &[u8],
+    unpacked: usize,
+    limits: &Limits,
+) -> (Result<Vec<u8>, Error>, u64) {
+    let mut steps = 0u64;
+    let decoded = decode_with(input, props, unpacked, limits, &mut steps).map(|(out, _)| out);
+    (decoded, steps)
 }
 
 /// [`decode`], and how many times the arena filled and the model restarted.
+#[cfg(test)]
 pub(crate) fn decode_counting(
     input: &[u8],
     props: &[u8],
     unpacked: usize,
     limits: &Limits,
+) -> Result<(Vec<u8>, u32), Error> {
+    decode_with(input, props, unpacked, limits, &mut 0)
+}
+
+/// The decode, the restarts and the steps.
+fn decode_with(
+    input: &[u8],
+    props: &[u8],
+    unpacked: usize,
+    limits: &Limits,
+    steps: &mut u64,
 ) -> Result<(Vec<u8>, u32), Error> {
     let [order, m0, m1, m2, m3, ..] = *props else {
         return Err(Error::BadProperties);
@@ -1296,15 +1352,21 @@ pub(crate) fn decode_counting(
     let mut rc = Range::new(input)?;
     let mut model = Model::new(order, memory);
     let mut out = Vec::with_capacity(unpacked.min(1 << 20));
-    while out.len() < unpacked {
-        match model.decode_symbol(&mut rc)? {
-            Some(symbol) => out.push(symbol),
-            None => return Err(Error::Corrupt),
+    let decoded = loop {
+        if out.len() >= unpacked {
+            break Ok(());
+        }
+        match model.decode_symbol(&mut rc) {
+            Ok(Some(symbol)) => out.push(symbol),
+            Ok(None) => break Err(Error::Corrupt),
+            Err(error) => break Err(error),
         }
         if rc.overrun {
-            return Err(Error::Truncated);
+            break Err(Error::Truncated);
         }
-    }
+    };
+    *steps = steps.saturating_add(model.steps);
+    decoded?;
     Ok((out, model.builds.saturating_sub(1)))
 }
 

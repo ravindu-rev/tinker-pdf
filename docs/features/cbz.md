@@ -397,6 +397,31 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   over `tinker_pdf_archive::rar::Archive` — `open`, `entries()`,
   `read(index)` (a `Cow`, borrowed for a stored entry, with the recorded
   CRC-32 already checked), `warnings()`.
+- **Counted siblings** ([resource exhaustion](../design/resource-exhaustion.md),
+  "The counters"), each returning its uncounted sibling's answer and the steps
+  it took, counted whether or not it succeeded:
+  `tinker_pdf_zip::Archive::open_counted` (each central-directory record and
+  local header read, each
+  position a signature search examined, each byte of a name decoded and each
+  byte a streamed entry inflated to find its end); `tar::Archive::open_counted`
+  (each header, its 512 bytes looked at and summed, each byte of a name and of
+  a PAX record); `rar::Archive::open_counted` (each header and each byte its
+  CRC-32 covered, each byte of a name, each record of an extra area);
+  `sevenz::Archive::open_counted` (each byte the two header CRCs covered and the
+  grammar walked, each file, property bit, name unit and substream, and a
+  compressed header's coders) and `read_counted` (the folder's coders when it is
+  not the one decompressed already — a byte Copy or BCJ moved and BCJ looked
+  at, each byte, decision and target of BCJ2, each byte deflate inflated — and
+  each byte of the entry checked and handed over); `lzma::decode_counted` and
+  `decode_lzma2_counted` (each bit the range decoder decoded and each byte a
+  match copied, and each chunk's control byte and stored byte);
+  `bzip2::decode_counted` (each bit a code read, each selector, code length and
+  table entry, each move-to-front shift and repeated symbol, each pass of the
+  inverse transform and each byte written); `ppmd::decode_counted` (each symbol,
+  each state and context the decode, the update and a rescale walked, each unit
+  a restart and the gluing walked); and `zstd::decode_counted` (each byte a raw
+  or RLE block wrote, each literal regenerated, each sequence and each byte it
+  copied, each byte a checksum hashed).
 
 ## Refused by name
 
@@ -533,6 +558,23 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   coder inputs, which a census test holds to reaching every coding a block can
   have — every block and literals type, both Huffman weight forms, all four
   modes of all three sequence tables, all four repeat offsets.
+- `crates/tinker-pdf-zip/tests/complexity.rs` — the ZIP listing held to
+  [resource exhaustion](../design/resource-exhaustion.md)'s size-scaling law
+  through `Archive::open_counted`: the work of an archive of four times as
+  many entries is at most 4.4 times the work, by the central directory, by the
+  local-header scan, and by the scan over streamed entries it inflates to find
+  their ends. Every entry is listed by the route its shape is for and reads
+  back as it was written.
+- `crates/tinker-pdf-archive/tests/complexity.rs` — the containers and the
+  coders held to the same law through their counted siblings: a tar and a RAR
+  of more headers, a 7z of more entries in one folder, more bytes through
+  LZMA as literals and as short repeats, more LZMA2 chunks compressed and
+  stored by turns, more bytes through BCJ fed by Copy and through BCJ2 over
+  four pack streams, a longer prefix of a real writer's PPMd stream, more
+  copies of a real writer's bzip2 stream read one after another, and more
+  zstd raw and RLE blocks and frames of raw literals. The LZMA streams come
+  from a range encoder written in the test from the format's description of
+  its decoder; each read gives back what was written.
 - `crates/tinker-pdf-zip/src/tests.rs` — both routes of the archive reader;
   `crates/tinker-pdf/src/cbz/tests.rs` — ordering, classification and the
   `ComicInfo.xml` mapping, which is asserted as the table it is rather than as

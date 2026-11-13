@@ -44,7 +44,7 @@ pub(crate) fn central_directory(
     limits: &Limits,
     warnings: &mut Warnings,
 ) -> Result<Option<Vec<Entry>>, crate::ArchiveError> {
-    let Some(eocd) = find_eocd(bytes) else {
+    let Some(eocd) = find_eocd(bytes, warnings) else {
         // Distinct from `CentralDirectoryUnreadable`, and the difference is
         // worth a variant: no record at all is a writer that stopped or a
         // download that was cut, while a record that does not lead anywhere is
@@ -97,6 +97,7 @@ pub(crate) fn central_directory(
         if bytes.get(at..at + 4) != Some(&CENTRAL_SIG[..]) {
             break;
         }
+        warnings.step(1);
         match parse_central(bytes, at, entries.len(), limits, warnings) {
             Some((entry, next)) => {
                 entries.push(entry);
@@ -131,10 +132,14 @@ pub(crate) fn central_directory(
     Ok(Some(entries))
 }
 
-/// The last `PK\x05\x06` in the final 64 KiB and change.
-fn find_eocd(bytes: &[u8]) -> Option<usize> {
+/// The last `PK\x05\x06` in the final 64 KiB and change, each position the
+/// search examined a step.
+fn find_eocd(bytes: &[u8], warnings: &mut Warnings) -> Option<usize> {
     let from = bytes.len().saturating_sub(EOCD_SEARCH);
-    le::rfind(&bytes[from..], &EOCD_SIG).map(|at| from + at)
+    let tail = &bytes[from..];
+    let found = le::rfind(tail, &EOCD_SIG);
+    warnings.step(le::searched_back(tail.len(), found));
+    found.map(|at| from + at)
 }
 
 /// Zip64's locator and record (4.3.15, 4.3.14): `(entry count, directory

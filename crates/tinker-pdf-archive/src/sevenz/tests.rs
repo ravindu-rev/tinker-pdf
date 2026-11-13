@@ -1457,7 +1457,7 @@ fn the_bcj_fixture_is_a_filter_chain_that_rewrote_operands() {
         &Limits::DEFAULT.lzma(),
     )
     .expect("the LZMA2 half decodes");
-    let whole = decode_folder(&bytes, folder, &Limits::DEFAULT)
+    let whole = decode_folder(&bytes, folder, &Limits::DEFAULT, &mut 0)
         .ok()
         .expect("the folder decodes");
     assert_eq!(lzma2.len(), whole.len(), "a filter keeps the length");

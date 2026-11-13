@@ -617,15 +617,27 @@ impl Budget {
     }
 }
 
-/// Warnings, deduplicated, in first-occurrence order.
+/// Warnings, deduplicated, in first-occurrence order — and the steps a
+/// listing took, which ride the same accumulator every route is handed
+/// (`docs/design/resource-exhaustion.md`, "The counters").
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Warnings(Vec<Warning>);
+pub(crate) struct Warnings {
+    list: Vec<Warning>,
+    steps: u64,
+}
 
 impl Warnings {
     pub(crate) fn push(&mut self, w: Warning) {
-        if !self.0.contains(&w) {
-            self.0.push(w);
+        if !self.list.contains(&w) {
+            self.list.push(w);
         }
+    }
+
+    /// `n` steps more, saturating.
+    pub(crate) fn step(&mut self, n: usize) {
+        self.steps = self
+            .steps
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
     }
 }
 
@@ -652,43 +664,69 @@ impl<'a> Archive<'a> {
     ///
     /// [`ArchiveError`], one variant per refusal, each of them by name.
     pub fn open(bytes: &'a [u8], limits: &Limits) -> Result<Self, ArchiveError> {
+        Self::open_counted(bytes, limits).0
+    }
+
+    /// [`Archive::open`], and the steps the listing took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): each central
+    /// directory record and each local header read, each position a search
+    /// for a signature examined — the end record's, a local header's, a data
+    /// descriptor's — each byte of a name decoded, and each byte a streamed
+    /// entry inflated to find its end. The archive is the one [`Archive::open`]
+    /// returns, and the steps are counted whether or not it opened.
+    pub fn open_counted(bytes: &'a [u8], limits: &Limits) -> (Result<Self, ArchiveError>, u64) {
         let mut warnings = Warnings::default();
         let mut budget = Budget {
             spent: 0,
             cap: limits.max_inflated_total,
         };
-
-        let (entries, route) = match dir::central_directory(bytes, limits, &mut warnings)? {
-            Some(entries) => (entries, Route::CentralDirectory),
-            None => {
-                warnings.push(Warning::RecoveredFromLocalHeaders);
-                let entries = scan::local_headers(bytes, limits, &mut warnings, &mut budget)?;
-                if entries.is_empty() {
-                    // Two different answers, and the difference is the whole
-                    // point of refusing by name: a JPEG is not a damaged
-                    // archive, and a truncated CBZ is not "not a PDF".
-                    return Err(
-                        if le::find(bytes, 0, &local::LOCAL_SIG).is_none()
-                            && le::rfind(bytes, &local::EOCD_SIG).is_none()
-                        {
-                            ArchiveError::NotAZip
-                        } else {
-                            ArchiveError::Damaged
-                        },
-                    );
-                }
-                (entries, Route::LocalHeaderScan)
-            }
-        };
-
-        Ok(Self {
+        let listed = Self::list(bytes, limits, &mut warnings, &mut budget);
+        let steps = warnings.steps;
+        let opened = listed.map(|(entries, route)| Self {
             bytes,
             limits: *limits,
             entries,
             route,
             warnings,
             budget,
-        })
+        });
+        (opened, steps)
+    }
+
+    /// The entries and the route that found them, by the ladder.
+    fn list(
+        bytes: &[u8],
+        limits: &Limits,
+        warnings: &mut Warnings,
+        budget: &mut Budget,
+    ) -> Result<(Vec<Entry>, Route), ArchiveError> {
+        match dir::central_directory(bytes, limits, warnings)? {
+            Some(entries) => Ok((entries, Route::CentralDirectory)),
+            None => {
+                warnings.push(Warning::RecoveredFromLocalHeaders);
+                let entries = scan::local_headers(bytes, limits, warnings, budget)?;
+                if entries.is_empty() {
+                    // Two different answers, and the difference is the whole
+                    // point of refusing by name: a JPEG is not a damaged
+                    // archive, and a truncated CBZ is not "not a PDF".
+                    let local = le::find(bytes, 0, &local::LOCAL_SIG);
+                    warnings.step(le::searched(bytes.len(), 0, local));
+                    let end = if local.is_none() {
+                        let end = le::rfind(bytes, &local::EOCD_SIG);
+                        warnings.step(le::searched_back(bytes.len(), end));
+                        end
+                    } else {
+                        None
+                    };
+                    return Err(if local.is_none() && end.is_none() {
+                        ArchiveError::NotAZip
+                    } else {
+                        ArchiveError::Damaged
+                    });
+                }
+                Ok((entries, Route::LocalHeaderScan))
+            }
+        }
     }
 
     /// The entries, in the archive's own order.
@@ -718,7 +756,7 @@ impl<'a> Archive<'a> {
     /// Everything tolerated so far, including by reads already made.
     #[must_use]
     pub fn warnings(&self) -> &[Warning] {
-        &self.warnings.0
+        &self.warnings.list
     }
 
     /// Bytes of [`Limits::max_inflated_total`] spent so far.
@@ -1112,6 +1150,7 @@ fn header_disagrees(header: &local::LocalHeader, entry: &Entry) -> bool {
 
 /// Decodes one entry name, under the rules general-purpose bit 11 sets.
 pub(crate) fn decode_name(raw: &[u8], flags: u16, limits: &Limits, w: &mut Warnings) -> String {
+    w.step(raw.len());
     let mut name = if flags & local::FLAG_UTF8 != 0 {
         match std::str::from_utf8(raw) {
             Ok(s) => s.to_string(),

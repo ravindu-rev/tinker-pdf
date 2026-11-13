@@ -268,7 +268,9 @@ fn the_fixtures_reach_every_part_of_the_format() {
         overlaps,
         carried_repeats,
         treeless_after_plain,
+        steps,
     } = census;
+    assert!(steps > 0, "the decodes' work is counted");
     assert!(
         frames > single_segment && single_segment > 0,
         "both window forms"

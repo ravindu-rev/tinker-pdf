@@ -186,6 +186,19 @@ pub(crate) struct Census {
     /// Treeless literals sections after a raw or RLE one in the same frame:
     /// the tree outlives sections that did not replace it.
     pub(crate) treeless_after_plain: u32,
+    /// The steps [`decode_counted`] hands out: each byte a raw or RLE block
+    /// wrote, each literal a literals section regenerated, each sequence
+    /// decoded and each byte it copied, and each byte a checksum hashed.
+    pub(crate) steps: u64,
+}
+
+impl Census {
+    /// `n` steps more, saturating.
+    fn step(&mut self, n: usize) {
+        self.steps = self
+            .steps
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+    }
 }
 
 /// Decodes every frame of `input`, one after another, skipping skippable
@@ -196,6 +209,18 @@ pub(crate) struct Census {
 /// build reads.
 pub fn decode(input: &[u8], limits: &Limits) -> Result<Vec<u8>, Error> {
     decode_counting(input, limits, &mut Census::default())
+}
+
+/// [`decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each byte a raw or RLE block wrote, each literal a
+/// literals section regenerated, each sequence decoded and each byte it
+/// copied, literals and match alike, and each byte a frame's checksum hashed.
+/// The output is the one [`decode`] returns, and the steps are counted
+/// whether or not it decoded.
+pub fn decode_counted(input: &[u8], limits: &Limits) -> (Result<Vec<u8>, Error>, u64) {
+    let mut census = Census::default();
+    let decoded = decode_counting(input, limits, &mut census);
+    (decoded, census.steps)
 }
 
 /// [`decode`], counting what it meets into `census`.
@@ -346,6 +371,7 @@ fn decode_frame(
                 census.blocks[0] += 1;
                 let data = src.get(at..at + size).ok_or(Error::Truncated)?;
                 room_for(out, size, limits)?;
+                census.step(size);
                 out.extend_from_slice(data);
                 at += size;
             }
@@ -353,6 +379,7 @@ fn decode_frame(
                 census.blocks[1] += 1;
                 let byte = *src.get(at).ok_or(Error::Truncated)?;
                 room_for(out, size, limits)?;
+                census.step(size);
                 out.resize(out.len() + size, byte);
                 at += 1;
             }
@@ -380,6 +407,7 @@ fn decode_frame(
         let stored = little_endian(src, at, 4).ok_or(Error::Truncated)?;
         at += 4;
         let content = out.get(frame.start..).unwrap_or(&[]);
+        census.step(content.len());
         if tinker_pdf_filters::xxh64(content) & 0xFFFF_FFFF != stored {
             return Err(Error::ChecksumMismatch);
         }
@@ -450,6 +478,7 @@ fn read_literals(block: &[u8], frame: &mut Frame, census: &mut Census) -> Result
             return Err(Error::BadLiterals);
         }
         census.literals[usize::from(kind)] += 1;
+        census.step(regenerated);
         frame.plain_literals = true;
         if kind == 0 {
             let data = block
@@ -487,6 +516,7 @@ fn read_literals(block: &[u8], frame: &mut Frame, census: &mut Census) -> Result
         .get(header..header + compressed)
         .ok_or(Error::BadLiterals)?;
     census.literals[usize::from(kind)] += 1;
+    census.step(regenerated);
     if kind == 3 && frame.plain_literals {
         census.treeless_after_plain += 1;
     }
@@ -708,6 +738,7 @@ fn execute_sequences(
             return Err(Error::BadSequences);
         }
         room_for(out, frame.literals.len(), limits)?;
+        census.step(frame.literals.len());
         out.extend_from_slice(&frame.literals);
         return Ok(());
     }
@@ -793,6 +824,7 @@ fn execute_sequences(
             .and_then(|end| literals.get(taken..end))
             .ok_or(Error::BadSequences)?;
         room_for(out, copy.len(), limits)?;
+        census.step(1 + copy.len());
         out.extend_from_slice(copy);
         taken += literals_length;
 
@@ -815,6 +847,7 @@ fn execute_sequences(
         // of one byte), so it is copied in pieces no longer than the offset:
         // each piece reads only bytes that exist before it is appended, and
         // `from + piece <= out.len()` holds for every one.
+        census.step(match_length);
         let mut left = match_length;
         while left > 0 {
             let piece = left.min(offset);
@@ -833,6 +866,7 @@ fn execute_sequences(
     // Literals no sequence took end the block.
     let tail = literals.get(taken..).unwrap_or(&[]);
     room_for(out, tail.len(), limits)?;
+    census.step(tail.len());
     out.extend_from_slice(tail);
     Ok(())
 }

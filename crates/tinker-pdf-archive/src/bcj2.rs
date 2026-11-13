@@ -106,12 +106,38 @@ impl<'a> Range<'a> {
 }
 
 /// Rebuilds `out_size` bytes of x86 code from BCJ2's four streams.
+#[cfg(test)]
 pub(crate) fn decode(
     main: &[u8],
     call: &[u8],
     jump: &[u8],
     rc: &[u8],
     out_size: usize,
+) -> Result<Vec<u8>, Error> {
+    decode_counted(main, call, jump, rc, out_size).0
+}
+
+/// [`decode`], and the steps it took: each byte of the main stream copied,
+/// each decision decoded and each target read from the call or jump stream.
+pub(crate) fn decode_counted(
+    main: &[u8],
+    call: &[u8],
+    jump: &[u8],
+    rc: &[u8],
+    out_size: usize,
+) -> (Result<Vec<u8>, Error>, u64) {
+    let mut steps = 0u64;
+    let decoded = decode_into(main, call, jump, rc, out_size, &mut steps);
+    (decoded, steps)
+}
+
+fn decode_into(
+    main: &[u8],
+    call: &[u8],
+    jump: &[u8],
+    rc: &[u8],
+    out_size: usize,
+    steps: &mut u64,
 ) -> Result<Vec<u8>, Error> {
     let mut rc = Range::new(rc)?;
     // `E8` decisions by the byte before, then one for `E9` and one for a
@@ -122,6 +148,7 @@ pub(crate) fn decode(
     let mut prev = 0u8;
 
     while out.len() < out_size {
+        *steps = steps.saturating_add(1);
         let b = *main.get(m).ok_or(Error::Truncated)?;
         m += 1;
         out.push(b);
@@ -138,10 +165,12 @@ pub(crate) fn decode(
             0xE9 => 256,
             _ => 257,
         };
+        *steps = steps.saturating_add(1);
         if !rc.bit(&mut probs[slot])? {
             prev = b;
             continue;
         }
+        *steps = steps.saturating_add(1);
         let (stream, at) = if b == 0xE8 {
             (call, &mut c)
         } else {

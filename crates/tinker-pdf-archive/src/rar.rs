@@ -291,6 +291,22 @@ impl<'a> Archive<'a> {
     /// # Errors
     /// [`Error`], one variant per way a file is not a readable RAR 5.
     pub fn open(bytes: &'a [u8], limits: &Limits) -> Result<Archive<'a>, Error> {
+        Self::open_counted(bytes, limits).0
+    }
+
+    /// [`Archive::open`], and the steps the walk took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): each header
+    /// read, each byte its CRC-32 covered, each byte of a name decoded and
+    /// each record of an extra area walked. The archive is the one
+    /// [`Archive::open`] returns, and the steps are counted whether or not it
+    /// opened.
+    pub fn open_counted(bytes: &'a [u8], limits: &Limits) -> (Result<Archive<'a>, Error>, u64) {
+        let mut steps = 0u64;
+        let opened = Self::walk(bytes, limits, &mut steps);
+        (opened, steps)
+    }
+
+    fn walk(bytes: &'a [u8], limits: &Limits, steps: &mut u64) -> Result<Archive<'a>, Error> {
         if bytes.starts_with(SIGNATURE_4) {
             return Err(Error::Rar4);
         }
@@ -306,7 +322,7 @@ impl<'a> Archive<'a> {
         let mut first = true;
 
         while at < bytes.len() {
-            let Some(header) = Header::read(bytes, at, limits) else {
+            let Some(header) = Header::read(bytes, at, limits, steps) else {
                 if first {
                     return Err(Error::FirstHeaderCorrupt);
                 }
@@ -335,7 +351,9 @@ impl<'a> Archive<'a> {
                     if index >= limits.max_entries {
                         return Err(Error::TooManyEntries);
                     }
-                    if let Some(entry) = file_entry(bytes, &header, index, limits, &mut warnings) {
+                    if let Some(entry) =
+                        file_entry(bytes, &header, index, limits, &mut warnings, steps)
+                    {
                         entries.push(entry);
                     }
                 }
@@ -445,7 +463,8 @@ impl Header {
     /// `None` for a header that does not check, that runs off the end, or that
     /// is past [`Limits::max_header_bytes`] — three different ways of saying
     /// the same thing to a caller that can only stop.
-    fn read(bytes: &[u8], at: usize, limits: &Limits) -> Option<Header> {
+    fn read(bytes: &[u8], at: usize, limits: &Limits, steps: &mut u64) -> Option<Header> {
+        step(steps, 1);
         let stored = u32::from_le_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?);
         let mut p = at.checked_add(4)?;
         let covered = p;
@@ -455,6 +474,7 @@ impl Header {
         }
         let end = p.checked_add(size)?;
         let header = bytes.get(covered..end)?;
+        step(steps, header.len());
         // The CRC covers the size field and everything after it, which is
         // every byte this function is about to believe.
         if crc32(header) != stored {
@@ -494,6 +514,7 @@ fn file_entry(
     index: usize,
     limits: &Limits,
     warnings: &mut Vec<Warning>,
+    steps: &mut u64,
 ) -> Option<Entry> {
     // **Bounded by the header's own end**, so a field that runs long reads
     // nothing rather than reading the next header's bytes. The header CRC has
@@ -525,6 +546,7 @@ fn file_entry(
     let _host_os = vint(bytes, &mut p)?;
     let name_len = usize::try_from(vint(bytes, &mut p)?).ok()?;
     let raw = bytes.get(p..p.checked_add(name_len)?)?;
+    step(steps, raw.len());
 
     // The six fields RAR 5 packs into one integer. Only three of them decide
     // anything here; the dictionary size and the algorithm version decide how
@@ -541,7 +563,7 @@ fn file_entry(
 
     let encrypted = header
         .extra
-        .is_some_and(|(at, len)| has_extra_record(bytes, at, len, EXTRA_ENCRYPTION));
+        .is_some_and(|(at, len)| has_extra_record(bytes, at, len, EXTRA_ENCRYPTION, steps));
 
     let kind = if header.kind == TYPE_SERVICE {
         Kind::Service
@@ -581,12 +603,13 @@ fn file_entry(
 /// The extra area is a chain of `size, type, data` records; a size that does
 /// not advance ends the walk, which is the same shape tar's PAX parser needs
 /// and for the same reason.
-fn has_extra_record(bytes: &[u8], at: usize, len: usize, want: u64) -> bool {
+fn has_extra_record(bytes: &[u8], at: usize, len: usize, want: u64, steps: &mut u64) -> bool {
     let Some(area) = bytes.get(at..at.saturating_add(len)) else {
         return false;
     };
     let mut p = 0usize;
     while p < area.len() {
+        step(steps, 1);
         let start = p;
         let Some(size) = vint(area, &mut p).and_then(|n| usize::try_from(n).ok()) else {
             return false;
@@ -604,6 +627,11 @@ fn has_extra_record(bytes: &[u8], at: usize, len: usize, want: u64) -> bool {
         p = next;
     }
     false
+}
+
+/// `n` steps more, saturating.
+fn step(steps: &mut u64, n: usize) {
+    *steps = steps.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
 }
 
 /// RAR 5's variable-length integer: seven bits a byte, least significant

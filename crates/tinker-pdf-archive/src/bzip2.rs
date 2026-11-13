@@ -211,8 +211,16 @@ struct Code {
     symbols: Vec<u16>,
 }
 
+/// `n` steps more, saturating.
+fn step(steps: &mut u64, n: usize) {
+    *steps = steps.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+}
+
 impl Code {
-    fn new(lengths: &[u8]) -> Code {
+    fn new(lengths: &[u8], steps: &mut u64) -> Code {
+        // Every length is looked at once to count it and once for each of the
+        // twenty lengths it might be sorted under.
+        step(steps, lengths.len().saturating_mul(MAX_CODE_LEN + 1));
         let mut count = [0u16; MAX_CODE_LEN + 1];
         for &len in lengths {
             if let Some(slot) = count.get_mut(usize::from(len)) {
@@ -230,11 +238,12 @@ impl Code {
         Code { count, symbols }
     }
 
-    fn decode(&self, bits: &mut Bits<'_>) -> Result<u16, Error> {
+    fn decode(&self, bits: &mut Bits<'_>, steps: &mut u64) -> Result<u16, Error> {
         let mut code: u32 = 0;
         let mut first: u32 = 0;
         let mut index: u32 = 0;
         for len in 1..=MAX_CODE_LEN {
+            step(steps, 1);
             code |= bits.bits(1)?;
             let count = u32::from(self.count[len]);
             if code < first + count {
@@ -261,13 +270,29 @@ impl Code {
 /// [`Error`], one variant per way the input is not a bzip2 stream this build
 /// reads.
 pub fn decode(input: &[u8], limits: &Limits) -> Result<Vec<u8>, Error> {
+    decode_counted(input, limits).0
+}
+
+/// [`decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each bit a Huffman code read and each selector, code
+/// length and table entry built; each move-to-front index shifted and each
+/// symbol a run repeated; each pass of the inverse transform over a block;
+/// and each byte written. The output is the one [`decode`] returns, and the
+/// steps are counted whether or not it decoded.
+pub fn decode_counted(input: &[u8], limits: &Limits) -> (Result<Vec<u8>, Error>, u64) {
+    let mut steps = 0u64;
+    let decoded = decode_into(input, limits, &mut steps);
+    (decoded, steps)
+}
+
+fn decode_into(input: &[u8], limits: &Limits, steps: &mut u64) -> Result<Vec<u8>, Error> {
     let mut out: Vec<u8> = Vec::with_capacity(limits.max_unpacked.min(1 << 20));
-    let mut at = stream(input, 0, &mut out, limits)?;
+    let mut at = stream(input, 0, &mut out, limits, steps)?;
     while let Some(rest) = input.get(at..) {
         if !is_stream_start(rest) {
             break;
         }
-        at = stream(input, at, &mut out, limits)?;
+        at = stream(input, at, &mut out, limits, steps)?;
     }
     Ok(out)
 }
@@ -277,7 +302,13 @@ fn is_stream_start(bytes: &[u8]) -> bool {
 }
 
 /// One stream from `at`; returns where the next byte after it is.
-fn stream(input: &[u8], at: usize, out: &mut Vec<u8>, limits: &Limits) -> Result<usize, Error> {
+fn stream(
+    input: &[u8],
+    at: usize,
+    out: &mut Vec<u8>,
+    limits: &Limits,
+    steps: &mut u64,
+) -> Result<usize, Error> {
     let head = input.get(at..).unwrap_or_default();
     if !is_stream_start(head) {
         return Err(Error::NotBzip2);
@@ -293,7 +324,7 @@ fn stream(input: &[u8], at: usize, out: &mut Vec<u8>, limits: &Limits) -> Result
         let crc = bits.bits(32)?;
         match magic {
             BLOCK_MAGIC => {
-                let got = block(&mut bits, block_max, &mut tt, out, limits)?;
+                let got = block(&mut bits, block_max, &mut tt, out, limits, steps)?;
                 if got != crc {
                     return Err(Error::BlockCrcMismatch);
                 }
@@ -317,6 +348,7 @@ fn block(
     tt: &mut Vec<u32>,
     out: &mut Vec<u8>,
     limits: &Limits,
+    steps: &mut u64,
 ) -> Result<u32, Error> {
     if bits.bit()? {
         return Err(Error::Randomised);
@@ -356,6 +388,7 @@ fn block(
     let mut order: Vec<u8> = (0..groups as u8).collect();
     let mut selectors: Vec<u8> = Vec::with_capacity(selector_count.min(MAX_SELECTORS));
     for i in 0..selector_count {
+        step(steps, 1);
         let mut index = 0usize;
         while bits.bit()? {
             index += 1;
@@ -376,6 +409,7 @@ fn block(
         let mut length = bits.bits(5)? as i32;
         let mut lengths = vec![0u8; alphabet];
         for slot in &mut lengths {
+            step(steps, 1);
             loop {
                 if !(1..=MAX_CODE_LEN as i32).contains(&length) {
                     return Err(Error::BadTables);
@@ -387,7 +421,7 @@ fn block(
             }
             *slot = length as u8;
         }
-        codes.push(Code::new(&lengths));
+        codes.push(Code::new(&lengths, steps));
     }
 
     // The symbols: move-to-front indices, with runs of the front symbol coded
@@ -407,7 +441,7 @@ fn block(
             group_left = GROUP_SIZE;
         }
         group_left -= 1;
-        let symbol = code.ok_or(Error::BadTables)?.decode(bits)?;
+        let symbol = code.ok_or(Error::BadTables)?.decode(bits, steps)?;
         if symbol <= 1 {
             run += (u32::from(symbol) + 1) * weight;
             weight <<= 1;
@@ -422,6 +456,7 @@ fn block(
             if tt.len() + run as usize > block_max {
                 return Err(Error::BlockTooLarge);
             }
+            step(steps, run as usize);
             tt.extend(core::iter::repeat_n(value, run as usize));
             run = 0;
             weight = 1;
@@ -433,6 +468,8 @@ fn block(
         if index >= in_use.len() {
             return Err(Error::BadTables);
         }
+        // The list shifts by the index twice, out and back in at the front.
+        step(steps, 2 * index + 1);
         let value = front.remove(index);
         front.insert(0, value);
         if tt.len() >= block_max {
@@ -450,6 +487,9 @@ fn block(
 
     // The inverse transform. Each entry's low byte is its symbol; the high
     // bits become the index of the entry that follows it in the original.
+    // Three passes over the block and one over the byte values, then the
+    // walk below.
+    step(steps, 3 * length + 256);
     let mut next = [0u32; 256];
     for &entry in tt.iter() {
         next[(entry & 0xFF) as usize] += 1;
@@ -486,6 +526,7 @@ fn block(
             if out.len() + repeat > limits.max_unpacked {
                 return Err(Error::TooLarge);
             }
+            step(steps, repeat);
             for _ in 0..repeat {
                 out.push(value);
                 crc = crc_update(table, crc, value);

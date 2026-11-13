@@ -485,10 +485,30 @@ impl<'a> Archive<'a> {
     /// # Errors
     /// [`Error`], one variant per way a file is not a readable 7z.
     pub fn open(bytes: &'a [u8], limits: &Limits) -> Result<Archive<'a>, Error> {
+        Self::open_counted(bytes, limits).0
+    }
+
+    /// [`Archive::open`], and the steps it took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): each byte the
+    /// two header CRCs covered and the header's grammar walked; each file
+    /// listed, each bit of its properties expanded and each unit of its name
+    /// read; each substream divided; and, for a header that is itself
+    /// compressed, the steps its folder's coders took, as
+    /// [`Archive::read_counted`] counts them. The archive is the one
+    /// [`Archive::open`] returns, and the steps are counted whether or not it
+    /// opened.
+    pub fn open_counted(bytes: &'a [u8], limits: &Limits) -> (Result<Archive<'a>, Error>, u64) {
+        let mut steps = 0u64;
+        let opened = Self::walk(bytes, limits, &mut steps);
+        (opened, steps)
+    }
+
+    fn walk(bytes: &'a [u8], limits: &Limits, steps: &mut u64) -> Result<Archive<'a>, Error> {
         if bytes.get(..6) != Some(SIGNATURE) || bytes.len() < SIGNATURE_HEADER {
             return Err(Error::NotA7z);
         }
         let start = bytes.get(12..32).ok_or(Error::NotA7z)?;
+        step(steps, start.len());
         // The start header's own CRC, checked before its two `u64`s are
         // believed. See `Error::StartHeaderCorrupt`.
         let stored = le32(bytes, 8).ok_or(Error::NotA7z)?;
@@ -521,6 +541,8 @@ impl<'a> Archive<'a> {
         let header = bytes
             .get(at..at.checked_add(size).ok_or(Error::HeaderOutOfRange)?)
             .ok_or(Error::HeaderOutOfRange)?;
+        // Once for its CRC and once for the grammar's walk.
+        step(steps, 2 * header.len());
         if crc32(header) != header_crc {
             return Err(Error::HeaderCrcMismatch);
         }
@@ -534,10 +556,13 @@ impl<'a> Archive<'a> {
         let header = match header.first() {
             Some(&K_ENCODED_HEADER) => {
                 let mut at = 1usize;
-                let (folders, _) = streams_info(header, &mut at, bytes, limits, &mut warnings)?;
+                let (folders, _) =
+                    streams_info(header, &mut at, bytes, limits, &mut warnings, steps)?;
                 let folder = folders.first().ok_or(Error::BadHeader)?;
-                decoded =
-                    decode_folder(bytes, folder, limits).map_err(|_| Error::HeaderNotDecodable)?;
+                decoded = decode_folder(bytes, folder, limits, steps)
+                    .map_err(|_| Error::HeaderNotDecodable)?;
+                // Its CRC and the walk of what it decoded to.
+                step(steps, 2 * decoded.len());
                 if let Some(want) = folder.crc {
                     if crc32(&decoded) != want {
                         return Err(Error::HeaderCrcMismatch);
@@ -553,7 +578,7 @@ impl<'a> Archive<'a> {
             return Err(Error::BadHeader);
         }
         at += 1;
-        let (entries, folders, mut more) = read_header(header, &mut at, bytes, limits)?;
+        let (entries, folders, mut more) = read_header(header, &mut at, bytes, limits, steps)?;
         warnings.append(&mut more);
         Ok(Archive {
             bytes,
@@ -589,6 +614,25 @@ impl<'a> Archive<'a> {
     /// [`EntryError::CrcMismatch`] is the format adjudicating this crate's
     /// decompressor and is never tolerated.
     pub fn read(&mut self, index: usize) -> Result<Vec<u8>, EntryError> {
+        self.read_counted(index).0
+    }
+
+    /// [`Archive::read`], and the steps it took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): when the
+    /// entry's folder is not the one already decompressed, each coder's own —
+    /// a byte Copy or BCJ moved and BCJ looked at, LZMA's and LZMA2's,
+    /// bzip2's and PPMd's counted doors, each byte deflate inflated, and each
+    /// byte, decision and target BCJ2 took — and then each byte of the entry
+    /// its CRC-32 covered and handed over. The bytes are the ones
+    /// [`Archive::read`] returns, and the steps are counted whether or not it
+    /// read.
+    pub fn read_counted(&mut self, index: usize) -> (Result<Vec<u8>, EntryError>, u64) {
+        let mut steps = 0u64;
+        let read = self.read_into(index, &mut steps);
+        (read, steps)
+    }
+
+    fn read_into(&mut self, index: usize, steps: &mut u64) -> Result<Vec<u8>, EntryError> {
         let entry = self.entries.get(index).ok_or(EntryError::NoSuchEntry)?;
         match entry.kind {
             Kind::File => {}
@@ -604,20 +648,23 @@ impl<'a> Archive<'a> {
                 .folders
                 .get(folder_index)
                 .ok_or(EntryError::NoSuchEntry)?;
-            let bytes = decode_folder(self.bytes, folder, &self.limits).map_err(|e| match e {
-                FolderError::Unsupported => EntryError::UnsupportedCoder,
-                FolderError::TooLarge => EntryError::TooLarge,
-                FolderError::Lzma(e) => EntryError::FolderFailed(e),
-                FolderError::Bzip2(e) => EntryError::Bzip2Failed(e),
-                FolderError::Ppmd(e) => EntryError::PpmdFailed(e),
-                FolderError::Bcj2 => EntryError::Bcj2Failed,
-                FolderError::SizeMismatch => EntryError::Truncated,
-            })?;
+            let bytes =
+                decode_folder(self.bytes, folder, &self.limits, steps).map_err(|e| match e {
+                    FolderError::Unsupported => EntryError::UnsupportedCoder,
+                    FolderError::TooLarge => EntryError::TooLarge,
+                    FolderError::Lzma(e) => EntryError::FolderFailed(e),
+                    FolderError::Bzip2(e) => EntryError::Bzip2Failed(e),
+                    FolderError::Ppmd(e) => EntryError::PpmdFailed(e),
+                    FolderError::Bcj2 => EntryError::Bcj2Failed,
+                    FolderError::SizeMismatch => EntryError::Truncated,
+                })?;
             self.cached = Some((folder_index, bytes));
         }
         let (_, block) = self.cached.as_ref().ok_or(EntryError::Truncated)?;
         let end = offset.checked_add(size).ok_or(EntryError::Truncated)?;
         let data = block.get(offset..end).ok_or(EntryError::Truncated)?;
+        // Once for its CRC and once copied out.
+        step(steps, 2 * data.len());
         if let Some(want) = want {
             if crc32(data) != want {
                 return Err(EntryError::CrcMismatch);
@@ -659,9 +706,14 @@ enum FolderError {
 /// what it can read, before any feeder is decoded** — so the decompression a
 /// folder does on the way to its output is charged against that output
 /// rather than against nothing ([`feeders_fit`]).
-fn decode_folder(bytes: &[u8], folder: &Folder, limits: &Limits) -> Result<Vec<u8>, FolderError> {
+fn decode_folder(
+    bytes: &[u8],
+    folder: &Folder,
+    limits: &Limits,
+    steps: &mut u64,
+) -> Result<Vec<u8>, FolderError> {
     let root = folder.final_out().ok_or(FolderError::Unsupported)?;
-    decode_coder(bytes, folder, root, limits, 0)
+    decode_coder(bytes, folder, root, limits, 0, steps)
 }
 
 fn decode_coder(
@@ -670,6 +722,7 @@ fn decode_coder(
     coder: usize,
     limits: &Limits,
     depth: usize,
+    steps: &mut u64,
 ) -> Result<Vec<u8>, FolderError> {
     if depth > folder.coders.len() {
         return Err(FolderError::Unsupported);
@@ -690,7 +743,14 @@ fn decode_coder(
     let mut sources: Vec<Result<usize, &[u8]>> = Vec::with_capacity(c.in_streams);
     for stream in first..first + c.in_streams {
         if let Some(&(_, feeder)) = folder.bind_pairs.iter().find(|(i, _)| *i == stream) {
-            owned.push(decode_coder(bytes, folder, feeder, limits, depth + 1)?);
+            owned.push(decode_coder(
+                bytes,
+                folder,
+                feeder,
+                limits,
+                depth + 1,
+                steps,
+            )?);
             sources.push(Ok(owned.len() - 1));
         } else {
             let slot = folder
@@ -712,7 +772,7 @@ fn decode_coder(
             Err(packed) => packed,
         })
         .collect();
-    run_coder(c, &inputs, out_size, limits)
+    run_coder(c, &inputs, out_size, limits, steps)
 }
 
 /// Whether the inputs other coders decode for `coder` fit what it can read
@@ -780,15 +840,23 @@ fn run_coder(
     inputs: &[&[u8]],
     out_size: usize,
     limits: &Limits,
+    steps: &mut u64,
 ) -> Result<Vec<u8>, FolderError> {
     // Every coder but BCJ2 reads one stream; the arity was checked at open.
     let input = inputs.first().copied().unwrap_or_default();
     match coder.id.as_slice() {
         // Copy.
-        [0x00] => Ok(input.to_vec()),
+        [0x00] => {
+            step(steps, input.len());
+            Ok(input.to_vec())
+        }
         // LZMA2. One property byte, the dictionary size, which this decoder
         // does not need: the window is the output. See `lzma`'s header.
-        [0x21] => lzma::decode_lzma2(input, out_size, &limits.lzma()).map_err(FolderError::Lzma),
+        [0x21] => {
+            let (decoded, taken) = lzma::decode_lzma2_counted(input, out_size, &limits.lzma());
+            *steps = steps.saturating_add(taken);
+            decoded.map_err(FolderError::Lzma)
+        }
         // LZMA.
         [0x03, 0x01, 0x01] => {
             let props = coder
@@ -796,7 +864,9 @@ fn run_coder(
                 .first()
                 .copied()
                 .ok_or(FolderError::Unsupported)?;
-            lzma::decode(input, props, out_size, &limits.lzma()).map_err(FolderError::Lzma)
+            let (decoded, taken) = lzma::decode_counted(input, props, out_size, &limits.lzma());
+            *steps = steps.saturating_add(taken);
+            decoded.map_err(FolderError::Lzma)
         }
         // BCJ, the x86 branch converter `-mf=BCJ` puts in front of LZMA2. A
         // filter rather than a compressor: the output is the input with its
@@ -806,8 +876,10 @@ fn run_coder(
             if input.len() != out_size {
                 return Err(FolderError::SizeMismatch);
             }
+            step(steps, input.len());
             let mut data = input.to_vec();
-            bcj::x86_decode(&mut data);
+            let taken = bcj::x86_decode_counted(&mut data);
+            *steps = steps.saturating_add(taken);
             Ok(data)
         }
         // bzip2: a whole stream, `BZh` and all, exactly as ZIP method 12
@@ -817,7 +889,9 @@ fn run_coder(
             let limits = bzip2::Limits {
                 max_unpacked: out_size,
             };
-            let data = bzip2::decode(input, &limits).map_err(FolderError::Bzip2)?;
+            let (decoded, taken) = bzip2::decode_counted(input, &limits);
+            *steps = steps.saturating_add(taken);
+            let data = decoded.map_err(FolderError::Bzip2)?;
             if data.len() != out_size {
                 return Err(FolderError::SizeMismatch);
             }
@@ -830,13 +904,16 @@ fn run_coder(
                 max_unpacked: out_size,
                 max_memory: limits.max_unpacked,
             };
-            ppmd::decode(input, &coder.props, out_size, &limits).map_err(FolderError::Ppmd)
+            let (decoded, taken) = ppmd::decode_counted(input, &coder.props, out_size, &limits);
+            *steps = steps.saturating_add(taken);
+            decoded.map_err(FolderError::Ppmd)
         }
         // Deflate: 7z method `040108` is RFC 1951 with no wrapper, exactly as
         // ZIP method 8 is, which is the second half of this crate's edge into
         // `tinker-pdf-filters`.
         [0x04, 0x01, 0x08] => {
             let r = inflate_raw(input, &InflateLimits::new(out_size));
+            step(steps, r.data.len());
             if r.capped {
                 return Err(FolderError::TooLarge);
             }
@@ -851,7 +928,9 @@ fn run_coder(
             let [main, call, jump, rc] = inputs else {
                 return Err(FolderError::Unsupported);
             };
-            bcj2::decode(main, call, jump, rc, out_size).map_err(|e| match e {
+            let (decoded, taken) = bcj2::decode_counted(main, call, jump, rc, out_size);
+            *steps = steps.saturating_add(taken);
+            decoded.map_err(|e| match e {
                 bcj2::Error::Truncated => FolderError::SizeMismatch,
                 bcj2::Error::BadRangeStart => FolderError::Bcj2,
             })
@@ -870,6 +949,7 @@ fn read_header(
     at: &mut usize,
     file: &[u8],
     limits: &Limits,
+    steps: &mut u64,
 ) -> Result<HeaderParts, Error> {
     let mut warnings = Vec::new();
     let mut folders: Vec<Folder> = Vec::new();
@@ -896,15 +976,15 @@ fn read_header(
             K_ADDITIONAL_STREAMS => {
                 // Only used by encrypted-name archives, which are refused
                 // elsewhere; skipped as a whole rather than parsed.
-                let (_, _) = streams_info(h, at, file, limits, &mut warnings)?;
+                let (_, _) = streams_info(h, at, file, limits, &mut warnings, steps)?;
                 ignored = true;
             }
             K_MAIN_STREAMS => {
-                let (f, _) = streams_info(h, at, file, limits, &mut warnings)?;
+                let (f, _) = streams_info(h, at, file, limits, &mut warnings, steps)?;
                 folders = f;
             }
             K_FILES_INFO => {
-                let entries = files_info(h, at, &folders, limits, &mut warnings)?;
+                let entries = files_info(h, at, &folders, limits, &mut warnings, steps)?;
                 if ignored {
                     warnings.push(Warning::HeaderPropertyIgnored);
                 }
@@ -940,6 +1020,7 @@ fn streams_info(
     file: &[u8],
     limits: &Limits,
     warnings: &mut Vec<Warning>,
+    steps: &mut u64,
 ) -> Result<(Vec<Folder>, usize), Error> {
     let mut pack_pos = 0u64;
     let mut pack_sizes: Vec<u64> = Vec::new();
@@ -983,7 +1064,7 @@ fn streams_info(
                 folders = unpack_info(h, at, limits)?;
             }
             K_SUBSTREAMS_INFO => {
-                substreams_info(h, at, &mut folders, limits)?;
+                substreams_info(h, at, &mut folders, limits, steps)?;
                 divided = true;
             }
             _ => return Err(Error::BadHeader),
@@ -1000,6 +1081,7 @@ fn streams_info(
     let mut taken = 0usize;
     for folder in &mut folders {
         let count = folder.packed.len().max(1);
+        step(steps, count);
         let mut len = 0u64;
         let mut stream_at = at_pack;
         for _ in 0..count {
@@ -1220,6 +1302,7 @@ fn substreams_info(
     at: &mut usize,
     folders: &mut [Folder],
     limits: &Limits,
+    steps: &mut u64,
 ) -> Result<(), Error> {
     let mut counts: Vec<usize> = folders.iter().map(|_| 1usize).collect();
     let mut sizes: Option<Vec<Vec<u64>>> = None;
@@ -1296,6 +1379,7 @@ fn substreams_info(
 
     for (index, folder) in folders.iter_mut().enumerate() {
         let count = counts.get(index).copied().unwrap_or(1);
+        step(steps, count);
         let listed = match &sizes {
             Some(all) => all.get(index).cloned().unwrap_or_default(),
             None if count == 1 => vec![folder.unpack_size()],
@@ -1321,6 +1405,7 @@ fn files_info(
     folders: &[Folder],
     limits: &Limits,
     warnings: &mut Vec<Warning>,
+    steps: &mut u64,
 ) -> Result<Vec<Entry>, Error> {
     let count =
         usize::try_from(number(h, at).ok_or(Error::BadHeader)?).map_err(|_| Error::BadHeader)?;
@@ -1345,14 +1430,17 @@ fn files_info(
         let mut inner = 0usize;
         match u8::try_from(kind).unwrap_or(0xFF) {
             K_EMPTY_STREAM => {
+                step(steps, count);
                 empty_stream = bits(body, &mut inner, count).ok_or(Error::BadHeader)?
             }
             K_EMPTY_FILE => {
                 let n = empty_stream.iter().filter(|b| **b).count();
+                step(steps, count + n);
                 empty_file = bits(body, &mut inner, n).ok_or(Error::BadHeader)?;
             }
             K_ANTI => {
                 let n = empty_stream.iter().filter(|b| **b).count();
+                step(steps, count + n);
                 anti = bits(body, &mut inner, n).ok_or(Error::BadHeader)?;
             }
             K_NAME => {
@@ -1381,10 +1469,12 @@ fn files_info(
         }
     }
 
+    step(steps, stream_slots.len());
     let mut slots = stream_slots.into_iter();
     let mut empty_seen = 0usize;
     let mut entries = Vec::with_capacity(count);
     for index in 0..count {
+        step(steps, 1);
         let name = names
             .get(index)
             .cloned()
@@ -1427,6 +1517,11 @@ fn files_info(
 }
 
 // ---- Primitives -------------------------------------------------------------
+
+/// `n` steps more, saturating.
+fn step(steps: &mut u64, n: usize) {
+    *steps = steps.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+}
 
 /// 7z's own variable-length integer.
 ///

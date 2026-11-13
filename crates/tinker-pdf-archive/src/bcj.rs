@@ -49,10 +49,18 @@ fn near(byte: u8) -> bool {
 /// in that output. The last four bytes are never converted, because an operand
 /// there would run past the end — the encoder left them alone for the same
 /// reason.
+#[cfg(test)]
 pub(crate) fn x86_decode(data: &mut [u8]) {
+    x86_decode_counted(data);
+}
+
+/// [`x86_decode`], and the steps it took: each byte looked at for an opcode,
+/// and each candidate's operand read.
+pub(crate) fn x86_decode_counted(data: &mut [u8]) -> u64 {
+    let mut steps = 0u64;
     let len = data.len();
     if len < 5 {
-        return;
+        return steps;
     }
     // Candidates start at most here: an `E8` needs four operand bytes after it.
     let limit = len - 4;
@@ -65,6 +73,7 @@ pub(crate) fn x86_decode(data: &mut [u8]) {
     let mut pos = 0usize;
 
     while pos < limit {
+        steps = steps.saturating_add(1);
         let Some(&byte) = data.get(pos) else { break };
         if !is_branch(byte) {
             pos += 1;
@@ -129,6 +138,7 @@ pub(crate) fn x86_decode(data: &mut [u8]) {
         }
         pos += 5;
     }
+    steps
 }
 
 #[cfg(test)]

@@ -179,6 +179,9 @@ struct Range<'a> {
     range: u32,
     code: u32,
     exhausted: bool,
+    /// The steps [`decode_counted`] hands out: a bit decoded, modelled or
+    /// direct, and a byte a match copied.
+    steps: u64,
 }
 
 impl<'a> Range<'a> {
@@ -203,6 +206,7 @@ impl<'a> Range<'a> {
             range: u32::MAX,
             code,
             exhausted: false,
+            steps: 0,
         })
     }
 
@@ -227,6 +231,7 @@ impl<'a> Range<'a> {
     }
 
     fn decode_bit(&mut self, prob: &mut u16) -> u32 {
+        self.steps = self.steps.saturating_add(1);
         let bound = (self.range >> PROB_BITS).wrapping_mul(u32::from(*prob));
         let bit = if self.code < bound {
             *prob += ((1 << PROB_BITS) - *prob) >> MOVE_BITS;
@@ -246,6 +251,7 @@ impl<'a> Range<'a> {
     fn decode_direct(&mut self, count: u32) -> u32 {
         let mut result = 0u32;
         for _ in 0..count {
+            self.steps = self.steps.saturating_add(1);
             self.range >>= 1;
             self.code = self.code.wrapping_sub(self.range);
             let t = 0u32.wrapping_sub(self.code >> 31);
@@ -564,6 +570,9 @@ impl State {
             // output — `dist` of 1 and `len` of 100 is a run of one byte — so
             // a block copy would be wrong as well as unavailable.
             let want = (len as usize).min(until.saturating_sub(out.len()));
+            rc.steps = rc
+                .steps
+                .saturating_add(u64::try_from(want).unwrap_or(u64::MAX));
             for step in 0..want {
                 let byte = out.get(from + step).copied().unwrap_or(0);
                 out.push(byte);
@@ -603,6 +612,31 @@ impl State {
 /// # Errors
 /// [`Error`], one variant per way the input is not this.
 pub fn decode(input: &[u8], props: u8, unpacked: usize, limits: &Limits) -> Result<Vec<u8>, Error> {
+    decode_counted(input, props, unpacked, limits).0
+}
+
+/// [`decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each bit the range decoder decoded, through a probability
+/// or directly, and each byte a match copied. The output is the one
+/// [`decode`] returns, and the steps are counted whether or not it decoded.
+pub fn decode_counted(
+    input: &[u8],
+    props: u8,
+    unpacked: usize,
+    limits: &Limits,
+) -> (Result<Vec<u8>, Error>, u64) {
+    let mut steps = 0u64;
+    let decoded = decode_into(input, props, unpacked, limits, &mut steps);
+    (decoded, steps)
+}
+
+fn decode_into(
+    input: &[u8],
+    props: u8,
+    unpacked: usize,
+    limits: &Limits,
+    steps: &mut u64,
+) -> Result<Vec<u8>, Error> {
     if unpacked > limits.max_unpacked {
         return Err(Error::TooLarge);
     }
@@ -610,7 +644,9 @@ pub fn decode(input: &[u8], props: u8, unpacked: usize, limits: &Limits) -> Resu
     let mut state = State::new(props);
     let mut rc = Range::new(input)?;
     let mut out: Vec<u8> = Vec::with_capacity(unpacked.min(1 << 20));
-    state.run(&mut rc, &mut out, unpacked, 0)?;
+    let ran = state.run(&mut rc, &mut out, unpacked, 0);
+    *steps = steps.saturating_add(rc.steps);
+    ran?;
     if out.len() < unpacked {
         return Err(Error::ShortOutput);
     }
@@ -629,6 +665,29 @@ pub fn decode(input: &[u8], props: u8, unpacked: usize, limits: &Limits) -> Resu
 /// # Errors
 /// [`Error`], one variant per way the input is not this.
 pub fn decode_lzma2(input: &[u8], unpacked: usize, limits: &Limits) -> Result<Vec<u8>, Error> {
+    decode_lzma2_counted(input, unpacked, limits).0
+}
+
+/// [`decode_lzma2`], and the steps it took: each chunk's control byte read,
+/// each byte an uncompressed chunk copied, and in each compressed chunk the
+/// steps [`decode_counted`] counts. The output is the one [`decode_lzma2`]
+/// returns, and the steps are counted whether or not it decoded.
+pub fn decode_lzma2_counted(
+    input: &[u8],
+    unpacked: usize,
+    limits: &Limits,
+) -> (Result<Vec<u8>, Error>, u64) {
+    let mut steps = 0u64;
+    let decoded = decode_lzma2_into(input, unpacked, limits, &mut steps);
+    (decoded, steps)
+}
+
+fn decode_lzma2_into(
+    input: &[u8],
+    unpacked: usize,
+    limits: &Limits,
+    steps: &mut u64,
+) -> Result<Vec<u8>, Error> {
     if unpacked > limits.max_unpacked {
         return Err(Error::TooLarge);
     }
@@ -642,6 +701,7 @@ pub fn decode_lzma2(input: &[u8], unpacked: usize, limits: &Limits) -> Result<Ve
             return Err(Error::Truncated);
         };
         at += 1;
+        *steps = steps.saturating_add(1);
         if control == 0 {
             break;
         }
@@ -663,6 +723,7 @@ pub fn decode_lzma2(input: &[u8], unpacked: usize, limits: &Limits) -> Result<Ve
             if control == 1 {
                 dict_start = out.len();
             }
+            *steps = steps.saturating_add(u64::try_from(size).unwrap_or(u64::MAX));
             out.extend_from_slice(chunk);
             // An uncompressed chunk invalidates the probability model but not
             // the properties: the next LZMA chunk must ask for a state reset,
@@ -716,7 +777,9 @@ pub fn decode_lzma2(input: &[u8], unpacked: usize, limits: &Limits) -> Result<Ve
             return Err(Error::TooLarge);
         }
         let mut rc = Range::new(chunk)?;
-        state.run(&mut rc, &mut out, until, dict_start)?;
+        let ran = state.run(&mut rc, &mut out, until, dict_start);
+        *steps = steps.saturating_add(rc.steps);
+        ran?;
         if out.len() < until {
             return Err(Error::ShortOutput);
         }

@@ -267,6 +267,22 @@ impl<'a> Archive<'a> {
     /// [`Error::NotATar`] when the first header carries no `ustar` magic, and
     /// [`Error::TooManyEntries`] past [`Limits::max_entries`].
     pub fn open(bytes: &'a [u8], limits: &Limits) -> Result<Archive<'a>, Error> {
+        Self::open_counted(bytes, limits).0
+    }
+
+    /// [`Archive::open`], and the steps the walk took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): each header
+    /// read, each of its 512 bytes looked at for the end of the archive and
+    /// summed for its checksum, each byte of a name decoded and each byte of
+    /// a PAX record parsed. The archive is the one [`Archive::open`] returns,
+    /// and the steps are counted whether or not it opened.
+    pub fn open_counted(bytes: &'a [u8], limits: &Limits) -> (Result<Archive<'a>, Error>, u64) {
+        let mut steps = 0u64;
+        let opened = Self::walk(bytes, limits, &mut steps);
+        (opened, steps)
+    }
+
+    fn walk(bytes: &'a [u8], limits: &Limits, steps: &mut u64) -> Result<Archive<'a>, Error> {
         // The signature, at the fixed position POSIX 1003.1 puts it and
         // nowhere else. Both spellings: `ustar\0` is POSIX's and `ustar  `
         // (two spaces, then a NUL in the version field) is GNU's, which is
@@ -294,6 +310,9 @@ impl<'a> Archive<'a> {
             let Some(header) = bytes.get(at..at + BLOCK) else {
                 break;
             };
+            // The header, its bytes looked at for zeros and summed for the
+            // checksum: a step each, whichever stopped the look.
+            step(steps, 1 + 2 * BLOCK);
             if header.iter().all(|&b| b == 0) {
                 // POSIX 1003.1 ends an archive with two of these. One is
                 // accepted as the end too: a great many writers emit one, and
@@ -324,6 +343,7 @@ impl<'a> Archive<'a> {
                         // NUL-terminated, and a writer that omitted the
                         // terminator has still said how long it is.
                         let raw = raw.split(|&b| b == 0).next().unwrap_or_default();
+                        step(steps, raw.len());
                         pending_name = Some(decode_name(raw, entries.len(), limits, &mut warnings));
                     }
                     at = advance(at, declared);
@@ -332,6 +352,7 @@ impl<'a> Archive<'a> {
                 // PAX extended header, per-file (`x`) and global (`g`).
                 b'x' | b'g' => {
                     let records = data.unwrap_or_default();
+                    step(steps, records.len());
                     let (path, size, sparse, ignored) = pax(records);
                     if ignored {
                         pax_ignored = true;
@@ -377,8 +398,10 @@ impl<'a> Archive<'a> {
                         let mut joined = prefix.to_vec();
                         joined.push(b'/');
                         joined.extend_from_slice(short);
+                        step(steps, joined.len());
                         decode_name(&joined, index, limits, &mut warnings)
                     } else {
+                        step(steps, short.len());
                         decode_name(short, index, limits, &mut warnings)
                     }
                 }
@@ -473,6 +496,11 @@ impl<'a> Archive<'a> {
             .get(entry.offset..end)
             .ok_or(EntryError::Truncated)
     }
+}
+
+/// `n` steps more, saturating.
+fn step(steps: &mut u64, n: usize) {
+    *steps = steps.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
 }
 
 /// Where the next header begins: past this one and past `size` rounded up to a

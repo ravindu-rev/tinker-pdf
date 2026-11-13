@@ -56,6 +56,25 @@ pub(crate) fn find(haystack: &[u8], from: usize, needle: &[u8; 4]) -> Option<usi
     (from..=haystack.len() - 4).find(|&i| haystack.get(i..i + 4) == Some(&needle[..]))
 }
 
+/// How many positions [`find`] examined in a haystack of `len` bytes, from
+/// `from` to the answer it gave: every one up to and including a match, and
+/// every one there was when it found none.
+pub(crate) fn searched(len: usize, from: usize, found: Option<usize>) -> usize {
+    let Some(last) = len.checked_sub(4).filter(|last| from <= *last) else {
+        return 0;
+    };
+    found.map_or(last - from + 1, |at| at.saturating_sub(from) + 1)
+}
+
+/// How many positions [`rfind`] examined in a haystack of `len` bytes, from
+/// its end back to the answer it gave.
+pub(crate) fn searched_back(len: usize, found: Option<usize>) -> usize {
+    let Some(last) = len.checked_sub(4) else {
+        return 0;
+    };
+    found.map_or(last + 1, |at| last.saturating_sub(at) + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +95,21 @@ mod tests {
         assert_eq!(offset(8, 8), Some(8));
         assert_eq!(offset(9, 8), None);
         assert_eq!(offset(u64::MAX, 8), None);
+    }
+
+    #[test]
+    fn a_search_examines_every_position_up_to_its_answer() {
+        let sig = *b"PK\x03\x04";
+        let bytes = b"..PK\x03\x04..PK\x03\x04..";
+        assert_eq!(searched(bytes.len(), 0, find(bytes, 0, &sig)), 3);
+        assert_eq!(searched(bytes.len(), 3, find(bytes, 3, &sig)), 6);
+        assert_eq!(searched(bytes.len(), 9, find(bytes, 9, &sig)), 2);
+        assert_eq!(searched_back(bytes.len(), rfind(bytes, &sig)), 3);
+        assert_eq!(searched(b"....".len(), 0, find(b"....", 0, &sig)), 1);
+        assert_eq!(searched(3, 0, None), 0);
+        assert_eq!(searched(8, 9, None), 0);
+        assert_eq!(searched_back(3, None), 0);
+        assert_eq!(searched_back(8, None), 5);
     }
 
     #[test]

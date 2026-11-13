@@ -45,9 +45,12 @@ pub(crate) fn local_headers(
     let mut at = 0usize;
 
     while entries.len() < limits.max_entries {
-        let Some(found) = le::find(bytes, at, &LOCAL_SIG) else {
+        let search = le::find(bytes, at, &LOCAL_SIG);
+        warnings.step(le::searched(bytes.len(), at, search));
+        let Some(found) = search else {
             break;
         };
+        warnings.step(1);
         let Some(header) = local::parse_local(bytes, found) else {
             // A signature that does not parse as a header is data that
             // happened to contain `PK\x03\x04` -- which real image bytes do,
@@ -67,7 +70,7 @@ pub(crate) fn local_headers(
         // make.
         let streamed = header.flags & local::FLAG_STREAMED != 0;
         let (compressed, uncompressed, crc) = if streamed {
-            match extent(bytes, &header, data_at, limits, budget) {
+            match extent(bytes, &header, data_at, limits, budget, warnings) {
                 Some(triple) => triple,
                 None => {
                     // A stored streamed entry: no descriptor findable without
@@ -161,6 +164,7 @@ fn extent(
     data_at: usize,
     limits: &Limits,
     budget: &mut Budget,
+    warnings: &mut Warnings,
 ) -> Option<(u64, u64, Option<u32>)> {
     if header.method != 8 {
         return None;
@@ -185,6 +189,7 @@ fn extent(
     // never produced, not that they are produced and dropped.
     let room = limits.max_entry_bytes.min(budget.remaining());
     let raw = tinker_pdf_filters::inflate_raw(tail, &tinker_pdf_filters::Limits::new(room));
+    warnings.step(raw.data.len());
     if !raw.complete {
         return None;
     }
@@ -193,7 +198,7 @@ fn extent(
     budget.spend(raw.data.len()).ok()?;
     let descriptor =
         local::parse_descriptor(bytes, data_at + raw.end, raw.end as u64, header.zip64)
-            .or_else(|| local::search_descriptor(bytes, data_at))?;
+            .or_else(|| local::search_descriptor(bytes, data_at, warnings))?;
     Some((
         descriptor.compressed_size,
         descriptor.uncompressed_size,
