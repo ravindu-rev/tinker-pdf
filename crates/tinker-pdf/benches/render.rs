@@ -10,7 +10,11 @@
 //! *quarter-size* one a quarter, its text, its image or its shading a
 //! quarter or a sixteenth of the page's (`inputs::page_part`); fewer paths
 //! or pages where the input is a count; and the shorter operations repeated
-//! inside an iteration, their unit counting every call.
+//! inside an iteration, their unit counting every call. The bitmap toolbox's
+//! two scales count the pixels of the render they scale, which the planning
+//! baseline's arm draws in their place, and the forced-colour render the
+//! default render's, which it draws in that one's; no run has timed the
+//! three yet, so the design's render table gives their window as untimed.
 
 mod support;
 
@@ -23,6 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use support::cli::Cli;
 use support::{inputs, Group, Per};
+#[cfg(not(tinker_planning_baseline))]
+use tinker_pdf::ForcedColours;
 #[cfg(tinker_planning_baseline)]
 use tinker_pdf::PixelRegion;
 use tinker_pdf::{
@@ -30,6 +36,40 @@ use tinker_pdf::{
 };
 #[cfg(not(tinker_planning_baseline))]
 use tinker_pdf::{DisplayList, Parallelism};
+
+/// `bitmap`, the text page's 150-dpi render, resized to `width` by `height`
+/// by the bitmap toolbox's scale.
+#[cfg(not(tinker_planning_baseline))]
+fn scaled(_page: &Page, bitmap: &Bitmap, width: u32, height: u32) -> Bitmap {
+    bitmap.scaled(width, height).expect("a render is a picture")
+}
+
+/// The planning baseline has no scale: its arm renders the text page at
+/// 150 dpi, which made the bitmap, in the scale's place — the operation the
+/// gate pairs this one with (`baseline.json`'s `paired_with`).
+#[cfg(tinker_planning_baseline)]
+fn scaled(page: &Page, _bitmap: &Bitmap, _width: u32, _height: u32) -> Bitmap {
+    page.render(&RenderOptions::at_dpi(150.0))
+}
+
+/// 150 dpi in forced colours, black on white, with fill-to-stroke.
+#[cfg(not(tinker_planning_baseline))]
+fn forced_at_150() -> RenderOptions {
+    RenderOptions {
+        forced_colours: Some(ForcedColours {
+            fill_to_stroke: true,
+            ..ForcedColours::default()
+        }),
+        ..RenderOptions::at_dpi(150.0)
+    }
+}
+
+/// The planning baseline has no forced colours: its arm draws the default
+/// render in their place, the operation the gate pairs this one with.
+#[cfg(tinker_planning_baseline)]
+fn forced_at_150() -> RenderOptions {
+    RenderOptions::at_dpi(150.0)
+}
 
 /// `page` at `dpi`, `times` times: the unit is every bitmap's pixels.
 fn renders(page: &Page, dpi: f64, times: u64) -> Per {
@@ -333,6 +373,75 @@ fn render(c: &mut Criterion) {
             }
         });
     });
+
+    // ---- the bitmap toolbox and forced colours ---------------------------
+
+    // The text page's 150-dpi render, drawn once untimed and scaled a call an
+    // iteration. The unit is the render's pixels, which the planning
+    // baseline's arm renders in the scale's place.
+    let at_150 = LazyCell::new(|| text_page.render(&RenderOptions::at_dpi(150.0)));
+    group.operation("the 150-dpi text page scaled to a half", |op| {
+        let (text_page, at_150): (&Page, &Bitmap) = (&text_page, &at_150);
+        let (width, height) = (at_150.width / 2, at_150.height / 2);
+        #[cfg(not(tinker_planning_baseline))]
+        {
+            let half = scaled(text_page, at_150, width, height);
+            assert_eq!(
+                (half.width, half.height),
+                (width, height),
+                "a half each way"
+            );
+            assert!(inked(&half) > 10_000, "the glyphs survive the scale");
+        }
+        op.per(support::pixels(at_150));
+        op.iter(move || black_box(scaled(text_page, at_150, width, height)));
+    });
+    group.operation("the 150-dpi text page scaled to two thirds", |op| {
+        let (text_page, at_150): (&Page, &Bitmap) = (&text_page, &at_150);
+        let (width, height) = (at_150.width * 2 / 3, at_150.height * 2 / 3);
+        #[cfg(not(tinker_planning_baseline))]
+        {
+            let smaller = scaled(text_page, at_150, width, height);
+            assert_eq!(
+                (smaller.width, smaller.height),
+                (width, height),
+                "two thirds each way"
+            );
+            assert!(inked(&smaller) > 10_000, "the glyphs survive the scale");
+        }
+        op.per(support::pixels(at_150));
+        op.iter(move || black_box(scaled(text_page, at_150, width, height)));
+    });
+    // Beside the default render of the same page, which the planning
+    // baseline's arm draws in its place: two renders an iteration, as that
+    // one makes.
+    group.operation(
+        "the text page at 150 dpi in forced colours, fill to stroke",
+        |op| {
+            #[cfg(not(tinker_planning_baseline))]
+            {
+                let forced = text_page.render(&forced_at_150());
+                assert_eq!((forced.width, forced.height), (at_150.width, at_150.height));
+                assert!(
+                    forced
+                        .data
+                        .chunks_exact(3)
+                        .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2]),
+                    "black on white is grey"
+                );
+                assert!(
+                    inked(&forced) > 10_000,
+                    "the glyphs, still filled, ink the page"
+                );
+            }
+            op.per(renders(&text_page, 150.0, 2));
+            op.iter(|| {
+                for _ in 0..2 {
+                    black_box(text_page.render(&forced_at_150()));
+                }
+            });
+        },
+    );
 
     // ---- vectors ----------------------------------------------------------
 

@@ -936,8 +936,8 @@ column, before MS-02.6 builds the run.
 ## MS-04 — The benchmark set, replacing the seven
 
 In this design, `cargo bench` times every operation of tier P's target
-table that the tree can run, and the row's own, in fourteen groups of one file
-each, MS-09's `threads` among them: 164 operations over inputs the benches
+table that the tree can run, and the row's own, in twelve groups of one file
+each, MS-09's `threads` among them: 167 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1252,6 +1252,9 @@ text of the document the operation reads, so all six stay inside the group.
 | `render/the text page at 150 dpi` | pixels · 2 × 1240×1755 | `dense(1, 0)` | 88 → 15; 5.86× | ×2 | built |
 | `render/the text page at 300 dpi` | pixels · 2480×3509 | `dense(1, 0)` | 171 → 35; 4.88× | in | built |
 | `render/record the text page's display list` | pages · 5 | `Page::display_list` (`crates/tinker-pdf/src/display.rs:129`) | 6.3 → 1.2; 5.25× | ×5 | built |
+| `render/the 150-dpi text page scaled to a half` | pixels · 1240×1755, the render's | the text page's 150-dpi render, drawn once untimed, `Bitmap::scaled` to 620×877; the planning baseline renders the page in its place | not in tier P's table; floor 1, paired with the baseline's `the text page at 150 dpi`; a target is the owner's (H-77) | untimed | built |
+| `render/the 150-dpi text page scaled to two thirds` | pixels · 1240×1755, the render's | the same, scaled to 826×1170 | the same | untimed | built |
+| `render/the text page at 150 dpi in forced colours, fill to stroke` | pixels · 2 × 1240×1755 | `dense(1, 0)`, `RenderOptions::forced_colours` black on white with `fill_to_stroke`; the planning baseline draws the default render in its place | the same | untimed | built |
 | `render/250 paths at 150 dpi` | pixels · 1240×1755 | `paths(250)` | 66.3 → 22.5, rescaled from 5 000 paths' 1 326 → 450; 2.94× | in | built |
 | `render/100 paths at 300 dpi` | pixels · 2480×3509 | `paths(100)` | 68.7 → 22, rescaled from 5 000 paths' 3 434 → 1 100; 3.12× | in | built |
 | `render/the 100 stroked curves alone at 150 dpi` | pixels · 1240×1755 | `curves(100)`, the 250-path page's curves | not measured apart; as the page; 2.94×, paired with the baseline's same curves | in | built |
@@ -1281,6 +1284,14 @@ text of the document the operation reads, so all six stay inside the group.
 | `render/the quarter-size text page to PNG at 300 dpi, CLI` | pixels · 620×878 | `tpdf render` | 73.8 → 12.5, rescaled from A4's 1 180 → 200; 5.9× | in | built |
 | `render/8 quarter-size pages to PNG at 150 dpi, 1 job, CLI` | pages · 8 | `tpdf render --jobs 1` | 171 → 32.5, rescaled from 20 A4 pages' 6 847 → 1 300; 5.26× | in | built |
 | `render/8 quarter-size pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 8 | `tpdf render --jobs 4` | 43.6 → 10, rescaled from 20 A4 pages' 1 743 → 400; 4.35× | in | built |
+
+The bitmap toolbox's two scales and the forced-colour render (RC-09.7a,
+`docs/design/bitmap-toolbox.md`) are the toolbox's operations with real cost;
+its per-pixel maps are one pass over the bytes and have no operation of their
+own. Before its runs each holds its result to its size and its ink, the
+forced render to its grey. No run has timed them, so the named machine's entry
+names all three unmeasured and their window is *untimed*: RC-09.7b takes their
+figures, the first paired ratios among them, in the timing phase.
 
 **encode**
 
