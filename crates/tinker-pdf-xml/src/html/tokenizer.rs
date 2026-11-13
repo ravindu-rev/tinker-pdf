@@ -35,11 +35,13 @@ pub(crate) struct Tag {
 }
 
 impl Tag {
-    pub(crate) fn attribute(&self, name: &str) -> Option<&str> {
+    /// The value of the attribute with this name, each attribute looked at a
+    /// step of the tree builder's count.
+    pub(crate) fn attribute(&self, name: &str, steps: &super::Steps) -> Option<&str> {
         self.attributes
             .iter()
             .find(|(n, _)| {
-                super::step();
+                steps.one();
                 n == name
             })
             .map(|(_, v)| v.as_str())

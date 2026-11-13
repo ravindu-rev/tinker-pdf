@@ -51,7 +51,18 @@ Every parse is bounded by `Limits` (depth, attribute count, text length).
 An XPS part is read in the strict mode, `Doctype::Refuse` (ECMA-388 9.3.2
 [M2.71] forbids DTD content outright), so the XHTML named-reference table the
 relaxed mode consults for an EPUB never applies to one: `&nbsp;` in a fixed
-page is `Error::UnknownEntity`.
+page is `Error::UnknownEntity`. An element's attribute names are checked for
+repeats against a set of the names before them, once by their spelling (XML
+1.0 §3.1) and once by their expanded name (Namespaces §5.3), in source order,
+so the first repeat is refused where it stands; and the namespace bindings in
+scope are kept by prefix, each prefix with a stack of its bindings, so a name
+is resolved in one lookup however many bindings surround it, and closing an
+element unbinds what it bound. `Reader::steps` counts the reader's work
+([resource exhaustion](../design/resource-exhaustion.md), "The counters"):
+every event, every byte the cursor passed, every byte of text, an attribute
+value, a comment, a CDATA section or a processing instruction read again for
+its references and line ends, every attribute name checked, and every binding
+declared, looked up or unbound.
 
 **Markup to content stream** (`markup`, `geometry`, `brush`, `paint`). One
 XPS unit is 1/96 inch (18.1) against PDF's 1/72, so a page opens with one
@@ -257,3 +268,11 @@ naming an ICC profile part.
   13.1, 13.2 and 13.5.
 - Fuzz targets `xml` and `zip_archive`; the `bounds_ledger.rs` rows for
   every XPS cap, measured against the real packages.
+- `crates/tinker-pdf-xml/tests/complexity.rs` — the XML reader held to
+  [resource exhaustion](../design/resource-exhaustion.md)'s size-scaling law
+  through `Reader::steps`: the work of markup at four times a size is at most
+  4.4 times the work at that size, for elements nested deeper, an element of
+  more attributes, an element declaring more prefixes with an attribute in
+  each, elements nested deeper each declaring a prefix under a root whose two
+  bindings every name resolves through, and text of more character
+  references. Each read gives back what was written.

@@ -114,6 +114,7 @@
 pub mod encoding;
 pub mod html;
 pub mod limits;
+mod namespace;
 mod scan;
 mod text;
 
@@ -135,8 +136,10 @@ pub fn xhtml_entity(name: &str) -> Option<char> {
 }
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt;
 
+use namespace::Scope;
 use scan::Cursor;
 
 /// The namespace the `xml` prefix is bound to, always, without a declaration.
@@ -985,9 +988,10 @@ impl<'a> Source<'a> {
             encoding: self.encoding,
             stage: Stage::Declaration,
             open: Vec::new(),
-            scope: Vec::new(),
+            scope: Scope::default(),
             pending: None,
             tokens: 0,
+            work: 0,
             warnings: self.warnings.clone(),
             external_id: None,
             saw_doctype: false,
@@ -1026,12 +1030,13 @@ pub struct Reader<'a> {
     encoding: Encoding,
     stage: Stage,
     open: Vec<Open<'a>>,
-    /// Every namespace binding in scope, innermost last. `""` is the default
-    /// namespace; a `None` URI is a prefix that was undeclared.
-    scope: Vec<(&'a str, Option<Cow<'a, str>>)>,
+    /// Every namespace binding in scope, by prefix.
+    scope: Scope<'a>,
     /// The end event an empty-element tag still owes.
     pending: Option<Name<'a>>,
     tokens: usize,
+    /// The steps [`Reader::steps`] adds to the events and the bytes passed.
+    work: u64,
     warnings: Vec<Warning>,
     /// The external identifier a skipped declaration named, kept as two
     /// borrowed strings and nothing else. Never a handle, a path or a fetch.
@@ -1085,6 +1090,29 @@ impl<'a> Reader<'a> {
     #[must_use]
     pub fn depth(&self) -> usize {
         self.open.len()
+    }
+
+    /// The steps this reader has taken so far
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): every event
+    /// produced, every byte the cursor has passed, every byte of character
+    /// data, an attribute value, a comment, a CDATA section or a processing
+    /// instruction read again to resolve its references and line ends, every
+    /// attribute name checked against the element's others, once by its
+    /// spelling and once by its expanded name, and every namespace binding
+    /// declared, looked up or unbound. A count only adds; the reader reads
+    /// what it would read without it.
+    #[must_use]
+    pub fn steps(&self) -> u64 {
+        let events = u64::try_from(self.tokens).unwrap_or(u64::MAX);
+        let passed = u64::try_from(self.cursor.offset()).unwrap_or(u64::MAX);
+        events.saturating_add(passed).saturating_add(self.work)
+    }
+
+    /// `n` steps more, saturating.
+    fn count(&mut self, n: usize) {
+        self.work = self
+            .work
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
     }
 
     /// What this reader tolerated, deduplicated, in first-occurrence order.
@@ -1365,6 +1393,7 @@ impl<'a> Reader<'a> {
         if self.cursor.starts_with("<![CDATA[") {
             self.cursor.eat("<![CDATA[");
             let raw = self.cursor.until("]]>", Construct::CdataSection)?;
+            self.count(raw.len());
             return self.emit(Event::Cdata(text::line_ends(raw)));
         }
         if self.cursor.starts_with("<!") {
@@ -1381,6 +1410,7 @@ impl<'a> Reader<'a> {
         if raw.contains("]]>") {
             self.warn(Warning::CdataCloseInContent);
         }
+        self.count(raw.len());
         let decoded = text::value(raw, false, self.xhtml_entities)?;
         self.emit(Event::Text(decoded))
     }
@@ -1425,6 +1455,7 @@ impl<'a> Reader<'a> {
         if self.cursor.starts_with("<!--") {
             self.cursor.eat("<!--");
             let raw = self.cursor.until("-->", Construct::Comment)?;
+            self.count(raw.len());
             if raw.contains("--") || raw.ends_with('-') {
                 self.warn(Warning::DoubleHyphenInComment);
             }
@@ -1454,6 +1485,7 @@ impl<'a> Reader<'a> {
                 return Err(Error::MalformedDeclaration);
             }
             let raw = self.cursor.until("?>", Construct::Instruction)?;
+            self.count(raw.len());
             return self
                 .emit(Event::Instruction {
                     target,
@@ -1608,15 +1640,20 @@ impl<'a> Reader<'a> {
             }
             self.cursor.skip_space();
             let literal = self.cursor.attribute_value()?;
+            self.count(literal.len());
             raw.push((name, text::value(literal, true, self.xhtml_entities)?));
         }
 
         // XML 1.0's own rule, before namespaces get a look in: no element may
         // carry the same *spelling* twice. It catches a repeated `xmlns:p` as
         // well, which the expanded comparison below cannot, because a namespace
-        // declaration is not an attribute by the time that runs.
-        for (index, (name, _)) in raw.iter().enumerate() {
-            if raw.iter().take(index).any(|(earlier, _)| earlier == name) {
+        // declaration is not an attribute by the time that runs. Each name is
+        // looked up in the set of the names before it rather than compared
+        // with every one of them, which was the square of the attribute count.
+        let mut spelled: HashSet<&'a str> = HashSet::with_capacity(raw.len());
+        for (name, _) in &raw {
+            self.count(1);
+            if !spelled.insert(*name) {
                 return Err(Error::DuplicateAttribute);
             }
         }
@@ -1626,13 +1663,19 @@ impl<'a> Reader<'a> {
         // And then Namespaces §5.3, which is a different rule with the same
         // name: two prefixes bound to one namespace produce one attribute name,
         // however differently they are spelled.
+        // Expanded names are kept in a set as the spellings are, and checked
+        // in source order, so the first repeat is refused where it stands and
+        // a name after it that does not resolve is never reached.
         let mut attributes: Vec<Attribute<'a>> = Vec::new();
+        let mut expanded: HashSet<(Option<Cow<'a, str>>, &'a str)> =
+            HashSet::with_capacity(raw.len());
         for (name, value) in raw {
             if name == "xmlns" || name.starts_with("xmlns:") {
                 continue;
             }
             let resolved = self.resolve(name, false)?;
-            if attributes.iter().any(|a| a.name == resolved) {
+            self.count(1);
+            if !expanded.insert((resolved.namespace.clone(), resolved.local())) {
                 return Err(Error::DuplicateAttribute);
             }
             attributes.push(Attribute {
@@ -1694,7 +1737,8 @@ impl<'a> Reader<'a> {
             } else {
                 Some(value.clone())
             };
-            self.scope.push((prefix, bound));
+            self.scope.bind(prefix, bound);
+            self.count(1);
             pushed += 1;
         }
         Ok(pushed)
@@ -1707,7 +1751,7 @@ impl<'a> Reader<'a> {
     /// §6.2 is explicit that the default namespace does not apply to attribute
     /// names, and a reader that applied it would give `Width` and `x:Key` the
     /// same namespace and then find duplicates that are not there.
-    fn resolve(&self, qualified: &'a str, default: bool) -> Result<Name<'a>, Error> {
+    fn resolve(&mut self, qualified: &'a str, default: bool) -> Result<Name<'a>, Error> {
         match qualified.find(':') {
             Some(at) => {
                 let prefix = qualified.get(..at).unwrap_or("");
@@ -1735,19 +1779,15 @@ impl<'a> Reader<'a> {
 
     /// The innermost binding for a prefix, or `None` when there is none.
     ///
-    /// Innermost-last and searched backwards, so an inner declaration shadows
-    /// an outer one — and [`Reader::close_top`] truncates rather than removing
-    /// by name, so a shadowed binding comes back when the shadowing element
-    /// closes.
-    fn lookup(&self, prefix: &str) -> Option<Cow<'a, str>> {
+    /// An inner declaration shadows an outer one, and [`Reader::close_top`]
+    /// unbinds what the closing element bound, so a shadowed binding comes
+    /// back when the shadowing element closes (`namespace.rs`).
+    fn lookup(&mut self, prefix: &str) -> Option<Cow<'a, str>> {
         if prefix == "xml" {
             return Some(Cow::Borrowed(XML_NAMESPACE));
         }
-        self.scope
-            .iter()
-            .rev()
-            .find(|(bound, _)| *bound == prefix)
-            .and_then(|(_, uri)| uri.clone())
+        self.count(1);
+        self.scope.lookup(prefix)
     }
 
     /// `</name S? >`, matched against the open element's own spelling.
@@ -1776,8 +1816,8 @@ impl<'a> Reader<'a> {
     /// Closes the innermost element and unbinds what it declared.
     fn close_top(&mut self) {
         if let Some(open) = self.open.pop() {
-            let keep = self.scope.len().saturating_sub(open.bindings);
-            self.scope.truncate(keep);
+            self.scope.unbind(open.bindings);
+            self.count(open.bindings);
         }
         if self.open.is_empty() {
             self.stage = Stage::Epilog;

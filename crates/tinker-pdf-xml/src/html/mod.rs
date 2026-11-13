@@ -158,10 +158,7 @@ impl Element {
     pub fn attribute(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()
-            .find(|a| {
-                step();
-                a.namespace.is_none() && a.name == name
-            })
+            .find(|a| a.namespace.is_none() && a.name == name)
             .map(|a| a.value.as_str())
     }
 }
@@ -323,23 +320,41 @@ impl Document {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    /// [`step`]'s count, on this thread.
-    pub(crate) static STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+/// The tree builder's step count (`docs/design/resource-exhaustion.md`, "The
+/// counters"): one step of a loop whose length the input chooses, counted
+/// where it is taken. A child looked at in search of a reference node; an
+/// attribute compared by Noah's Ark, looked up by name or merged; an element
+/// of the stack of open elements a scope check, the reset of the insertion
+/// mode or an end tag's search examines; an entry of the list of active
+/// formatting elements Noah's Ark examines, the reconstruction rewinds over
+/// or reopens, a marker's clearing pops or the adoption agency searches; and
+/// an iteration of the adoption agency's inner loop.
+///
+/// It is always on, a plain integer in the builder's own state, and only
+/// [`parse_counted`] and its siblings hand it out: the tree builder's unit
+/// tests hold it to the input's length and `tests/complexity.rs` to the
+/// size-scaling law, from this one count, so a regression to a quadratic loop
+/// **fails** rather than runs slowly, which `cargo test`, having no timeout,
+/// would not notice.
+#[derive(Debug, Default)]
+pub(crate) struct Steps(std::cell::Cell<u64>);
 
-/// One step of a loop a crafted input could make quadratic: a child looked at
-/// in search of a reference node, two attributes compared by Noah's Ark, an
-/// attribute looked up by name. Counted only under `cfg(test)`, where the
-/// tree builder's unit tests hold the total to a multiple of the input's
-/// length — so that a regression to a quadratic loop **fails** rather than
-/// runs slowly, which `cargo test`, having no timeout, would not notice.
-/// Everywhere else it is nothing.
-#[inline]
-pub(crate) fn step() {
-    #[cfg(test)]
-    STEPS.with(|steps| steps.set(steps.get().saturating_add(1)));
+impl Steps {
+    /// `n` steps more, saturating.
+    pub(crate) fn add(&self, n: usize) {
+        let n = u64::try_from(n).unwrap_or(u64::MAX);
+        self.0.set(self.0.get().saturating_add(n));
+    }
+
+    /// One step more.
+    pub(crate) fn one(&self) {
+        self.add(1);
+    }
+
+    /// The steps so far.
+    pub(crate) fn get(&self) -> u64 {
+        self.0.get()
+    }
 }
 
 /// §13.2.3.5: every CR LF pair and every lone CR is one LF.
@@ -365,6 +380,18 @@ fn normalise_newlines(text: &str) -> std::borrow::Cow<'_, str> {
 /// Parses a document from text, with scripting disabled.
 #[must_use]
 pub fn parse(text: &str, limits: &Limits) -> Document {
+    parse_counted(text, limits).0
+}
+
+/// [`parse`], and the steps its tree builder took
+/// (`docs/design/resource-exhaustion.md`, "The counters"): each step of a
+/// loop whose length the input chooses — a child looked at, an attribute
+/// compared, looked up or merged, an element of the stack of open elements or
+/// an entry of the list of active formatting elements examined, and an
+/// iteration of the adoption agency's inner loop. The document is the one
+/// [`parse`] returns.
+#[must_use]
+pub fn parse_counted(text: &str, limits: &Limits) -> (Document, u64) {
     let text = normalise_newlines(text);
     tree::parse_document(&text, limits)
 }
@@ -374,6 +401,17 @@ pub fn parse(text: &str, limits: &Limits) -> Document {
 /// the `<html>` element the fragment's nodes are children of.
 #[must_use]
 pub fn parse_fragment(text: &str, context: (Namespace, &str), limits: &Limits) -> Document {
+    parse_fragment_counted(text, context, limits).0
+}
+
+/// [`parse_fragment`], and the steps its tree builder took, counted as
+/// [`parse_counted`] counts them.
+#[must_use]
+pub fn parse_fragment_counted(
+    text: &str,
+    context: (Namespace, &str),
+    limits: &Limits,
+) -> (Document, u64) {
     let text = normalise_newlines(text);
     tree::parse_fragment(&text, context, limits)
 }
@@ -400,13 +438,23 @@ pub fn parse_fragment(text: &str, context: (Namespace, &str), limits: &Limits) -
 /// kilobyte is read, and the only way this parses the input twice.
 #[must_use]
 pub fn parse_bytes(bytes: &[u8], limits: &Limits) -> Document {
+    parse_bytes_counted(bytes, limits).0
+}
+
+/// [`parse_bytes`], and the steps its tree builder took, counted as
+/// [`parse_counted`] counts them — both readings' steps, when §13.2.3.4
+/// changed the encoding and the bytes were parsed again.
+#[must_use]
+pub fn parse_bytes_counted(bytes: &[u8], limits: &Limits) -> (Document, u64) {
     let (text, mut decoding) = decode(bytes);
-    let mut document = parse(&text, limits);
+    let (mut document, mut steps) = parse_counted(&text, limits);
     if let Some(text) = change_encoding(bytes, &mut decoding, document.meta_encoding) {
-        document = parse(&text, limits);
+        let (again, more) = parse_counted(&text, limits);
+        document = again;
+        steps = steps.saturating_add(more);
     }
     document.decoding = Some(decoding);
-    document
+    (document, steps)
 }
 
 /// The bytes as text, and how they were read: §13.2.3.2's *encoding sniffing

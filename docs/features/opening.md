@@ -112,7 +112,18 @@ their reasons, and every tokenizer run a Rust string can express emits exactly
 the suite's tokens. An element the adoption agency nests past the XML reader's
 depth cap keeps its text in the deepest element the cap allows
 (`MarkupDefect::TooDeep`), because every reader after this one was written
-against that cap. A file opened from its bytes has nothing
+against that cap. `html::parse_counted`, `parse_fragment_counted` and
+`parse_bytes_counted` return the tree the uncounted doors build and the steps
+the tree builder took ([resource exhaustion](../design/resource-exhaustion.md),
+"The counters"), an always-on count in its own state: each child looked at in
+search of a reference node; each attribute Noah's Ark compares, a lookup
+examines or a merge checks; each element of the stack of open elements a scope
+check, the reset of the insertion mode, an end tag's search or the adoption
+agency's search for its furthest block examines; each entry of the list of
+active formatting elements Noah's Ark examines, the reconstruction rewinds
+over or reopens, a marker's clearing pops or the adoption agency searches; and
+each iteration of the adoption agency's inner loop — both readings' steps when
+§13.2.3.4 parses the bytes again. A file opened from its bytes has nothing
 beside it, so a stylesheet, a picture or a face it names by a relative
 reference is **missing and named** (`StylesheetUnresolved`, `ImageNotDrawn`,
 `SvgImageUnresolved`, `FontFace`, and an SVG `<style>` element's `@import` as
@@ -539,6 +550,14 @@ The tests that cover opening ([verification](../verification.md)):
   `hostile_input.rs`'s
   `mutated_tag_soup_never_panics_the_html_parser` and
   `fuzz/fuzz_targets/html.rs` hold the tree to being a tree.
+- **`crates/tinker-pdf-xml/tests/complexity.rs`** — the tree builder held to
+  [resource exhaustion](../design/resource-exhaustion.md)'s size-scaling law
+  through `html::parse_counted`, the count `src/html/tree.rs`'s unit tests
+  hold to the input's length: the work of markup at four times a size is at
+  most 4.4 times the work at that size, for more paragraphs each reopening the
+  formatting elements a paragraph left open, more elements and more runs of
+  text fostered out of a table, and tables nested deeper. Each tree is the one
+  the standard builds, and the one the uncounted door builds.
 - **`crates/tinker-pdf/tests/commonmark_spec.rs`** — the Markdown reader held
   to CommonMark 0.31.2's examples, compared exactly, over a `spec.txt`
   fetched at its pinned tag and SHA-256 by `tests/commonmark/fetch-spec.sh`

@@ -18,7 +18,9 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use super::tokenizer::{DoctypeToken, State, Tag, Token, Tokenizer};
-use super::{Attribute, AttributeNamespace, Document, Element, Namespace, Node, NodeData, Quirks};
+use super::{
+    Attribute, AttributeNamespace, Document, Element, Namespace, Node, NodeData, Quirks, Steps,
+};
 use crate::encoding::{self, Label};
 use crate::limits::{MAX_HTML_ACTIVE_FORMATTING, MAX_HTML_CLONE_BYTES};
 use crate::{Error, Limits};
@@ -104,13 +106,14 @@ impl Formatting {
     }
 
     /// Noah's Ark's comparison: the same tag name, and the same attributes
-    /// with the same values, in any order — linear in the attributes.
-    fn same_as(&self, other: &Formatting) -> bool {
+    /// with the same values, in any order — linear in the attributes, each
+    /// pair compared a step.
+    fn same_as(&self, other: &Formatting, steps: &Steps) -> bool {
         self.key == other.key
             && self.tag.name == other.tag.name
             && self.order.len() == other.order.len()
             && self.order.iter().zip(&other.order).all(|(&a, &b)| {
-                super::step();
+                steps.one();
                 self.tag.attributes.get(a) == other.tag.attributes.get(b)
             })
     }
@@ -476,31 +479,39 @@ pub(crate) struct TreeBuilder<'a> {
     /// has merged into — the root and the `<body>` — kept from its first
     /// merge on, so that a merge costs its own tag's attributes.
     merged: Vec<(usize, BTreeSet<String>)>,
+    /// The steps [`super::parse_counted`] hands out.
+    steps: Steps,
 }
 
 /// The encoding a `<meta>` names, as §13.2.6.4.4 reads it: a `charset` that
 /// is an encoding's label, or else an `http-equiv` of `Content-Type` and a
 /// `content` holding `charset=`.
-fn meta_encoding(tag: &Tag) -> Option<Label> {
-    if let Some(found) = tag.attribute("charset").and_then(encoding::lookup) {
+fn meta_encoding(tag: &Tag, steps: &Steps) -> Option<Label> {
+    if let Some(found) = tag.attribute("charset", steps).and_then(encoding::lookup) {
         return Some(found);
     }
     let pragma = tag
-        .attribute("http-equiv")
+        .attribute("http-equiv", steps)
         .is_some_and(|v| v.eq_ignore_ascii_case("content-type"));
     if !pragma {
         return None;
     }
-    super::charset_from_content(tag.attribute("content")?.as_bytes())
+    super::charset_from_content(tag.attribute("content", steps)?.as_bytes())
 }
 
-pub(crate) fn parse_document(text: &str, limits: &Limits) -> Document {
+/// A document, and the steps its tree builder took.
+pub(crate) fn parse_document(text: &str, limits: &Limits) -> (Document, u64) {
     let mut builder = TreeBuilder::new(text, limits);
     builder.run();
     builder.finish(0)
 }
 
-pub(crate) fn parse_fragment(text: &str, context: (Namespace, &str), limits: &Limits) -> Document {
+/// A fragment, and the steps its tree builder took.
+pub(crate) fn parse_fragment(
+    text: &str,
+    context: (Namespace, &str),
+    limits: &Limits,
+) -> (Document, u64) {
     let mut builder = TreeBuilder::new(text, limits);
     let (namespace, name) = context;
     let context_tag = Tag {
@@ -570,11 +581,13 @@ impl<'a> TreeBuilder<'a> {
             halt: false,
             meta_encoding: None,
             merged: Vec::new(),
+            steps: Steps::default(),
         }
     }
 
-    fn finish(self, root: usize) -> Document {
-        Document {
+    fn finish(self, root: usize) -> (Document, u64) {
+        let steps = self.steps.get();
+        let document = Document {
             nodes: self.nodes,
             root,
             quirks: self.quirks,
@@ -582,7 +595,8 @@ impl<'a> TreeBuilder<'a> {
             stopped: self.stopped.or(self.tokenizer.stop),
             decoding: None,
             meta_encoding: self.meta_encoding,
-        }
+        };
+        (document, steps)
     }
 
     fn run(&mut self) {
@@ -720,10 +734,12 @@ impl<'a> TreeBuilder<'a> {
     fn create_element(&mut self, tag: &Tag, namespace: Namespace) -> usize {
         let integration_point = namespace == Namespace::MathMl
             && tag.name == "annotation-xml"
-            && tag.attribute("encoding").is_some_and(|encoding| {
-                encoding.eq_ignore_ascii_case("text/html")
-                    || encoding.eq_ignore_ascii_case("application/xhtml+xml")
-            });
+            && tag
+                .attribute("encoding", &self.steps)
+                .is_some_and(|encoding| {
+                    encoding.eq_ignore_ascii_case("text/html")
+                        || encoding.eq_ignore_ascii_case("application/xhtml+xml")
+                });
         let attributes = tag
             .attributes
             .iter()
@@ -759,7 +775,7 @@ impl<'a> TreeBuilder<'a> {
         // tag after a hundred thousand siblings a hundred thousand steps.
         if let Some(p) = self.nodes.get_mut(parent) {
             if let Some(at) = p.children.iter().rposition(|&c| {
-                super::step();
+                self.steps.one();
                 c == node
             }) {
                 p.children.remove(at);
@@ -780,7 +796,7 @@ impl<'a> TreeBuilder<'a> {
         let at = before
             .and_then(|b| {
                 p.children.iter().rposition(|&c| {
-                    super::step();
+                    self.steps.one();
                     c == b
                 })
             })
@@ -901,7 +917,7 @@ impl<'a> TreeBuilder<'a> {
             // goes in front of it.
             Some(b) => self.nodes.get(parent).and_then(|p| {
                 let at = p.children.iter().rposition(|&c| {
-                    super::step();
+                    self.steps.one();
                     c == b
                 })?;
                 at.checked_sub(1).and_then(|i| p.children.get(i)).copied()
@@ -979,6 +995,7 @@ impl<'a> TreeBuilder<'a> {
         boundary: impl Fn(&Self, usize) -> bool,
     ) -> bool {
         for &node in self.open.iter().rev() {
+            self.steps.one();
             if target(self, node) {
                 return true;
             }
@@ -1082,10 +1099,11 @@ impl<'a> TreeBuilder<'a> {
         let mut same = 0;
         let mut earliest = None;
         for (at, entry) in self.active.iter().enumerate().rev() {
+            self.steps.one();
             match entry {
                 Entry::Marker => break,
                 Entry::Element(_, other) => {
-                    if other.same_as(&formatting) {
+                    if other.same_as(&formatting, &self.steps) {
                         same += 1;
                         earliest = Some(at);
                     }
@@ -1130,6 +1148,7 @@ impl<'a> TreeBuilder<'a> {
         let mut at = last;
         // Rewind.
         while at > 0 {
+            self.steps.one();
             if on_stack(self, at - 1) {
                 break;
             }
@@ -1137,6 +1156,7 @@ impl<'a> TreeBuilder<'a> {
         }
         // Advance and create.
         while at < self.active.len() {
+            self.steps.one();
             if self.halt {
                 return;
             }
@@ -1157,6 +1177,7 @@ impl<'a> TreeBuilder<'a> {
 
     fn clear_to_last_marker(&mut self) {
         while let Some(entry) = self.active.pop() {
+            self.steps.one();
             if matches!(entry, Entry::Marker) {
                 return;
             }
@@ -1169,6 +1190,7 @@ impl<'a> TreeBuilder<'a> {
         let mut index = self.open.len();
         while index > 0 {
             index -= 1;
+            self.steps.one();
             let mut node = self.open.get(index).copied().unwrap_or(0);
             let last = index == 0;
             if last {
@@ -1484,7 +1506,7 @@ impl<'a> TreeBuilder<'a> {
                 // changing the encoding makes it certain, whichever way it
                 // goes, and `parse_bytes` is the one that knows whether it was.
                 if tag.name == "meta" && self.meta_encoding.is_none() {
-                    self.meta_encoding = meta_encoding(&tag);
+                    self.meta_encoding = meta_encoding(&tag, &self.steps);
                 }
                 Step::Done
             }
@@ -1888,7 +1910,7 @@ impl<'a> TreeBuilder<'a> {
                 self.insert_html(&tag);
                 self.pop();
                 let hidden = tag
-                    .attribute("type")
+                    .attribute("type", &self.steps)
                     .is_some_and(|t| t.eq_ignore_ascii_case("hidden"));
                 if !hidden {
                     self.frameset_ok = false;
@@ -2056,7 +2078,7 @@ impl<'a> TreeBuilder<'a> {
                     .iter()
                     .filter(|a| a.namespace.is_none())
                     .map(|a| {
-                        super::step();
+                        self.steps.one();
                         a.name.clone()
                     })
                     .collect();
@@ -2071,7 +2093,7 @@ impl<'a> TreeBuilder<'a> {
             .attributes
             .iter()
             .filter(|(name, _)| {
-                super::step();
+                self.steps.one();
                 !names.contains(name.as_str())
             })
             .map(|(name, value)| Attribute {
@@ -2218,6 +2240,7 @@ impl<'a> TreeBuilder<'a> {
 
     fn any_other_end_tag(&mut self, name: &str) {
         for index in (0..self.open.len()).rev() {
+            self.steps.one();
             let Some(&node) = self.open.get(index) else {
                 return;
             };
@@ -2252,6 +2275,7 @@ impl<'a> TreeBuilder<'a> {
             // subject.
             let mut formatting = None;
             for (at, entry) in self.active.iter().enumerate().rev() {
+                self.steps.one();
                 match entry {
                     Entry::Marker => break,
                     Entry::Element(node, f) if f.tag.name == subject => {
@@ -2282,7 +2306,10 @@ impl<'a> TreeBuilder<'a> {
                 .iter()
                 .enumerate()
                 .skip(formatting_open + 1)
-                .find(|&(_, &n)| self.is_special(n))
+                .find(|&(_, &n)| {
+                    self.steps.one();
+                    self.is_special(n)
+                })
                 .map(|(at, &n)| (at, n));
             let Some((_, furthest_block)) = furthest else {
                 self.open.truncate(formatting_open);
@@ -2305,6 +2332,7 @@ impl<'a> TreeBuilder<'a> {
             let mut node_index = self.open.iter().position(|&n| n == node).unwrap_or(0);
             loop {
                 inner += 1;
+                self.steps.one();
                 // The element above `node` on the stack, as it was.
                 node_index = match node_index.checked_sub(1) {
                     Some(above) => above,
@@ -2523,7 +2551,7 @@ impl<'a> TreeBuilder<'a> {
             Token::StartTag(ref tag)
                 if tag.name == "input"
                     && tag
-                        .attribute("type")
+                        .attribute("type", &self.steps)
                         .is_some_and(|t| t.eq_ignore_ascii_case("hidden")) =>
             {
                 self.error();
@@ -3124,7 +3152,7 @@ impl<'a> TreeBuilder<'a> {
                     || (tag.name == "font"
                         && ["color", "face", "size"]
                             .iter()
-                            .any(|a| tag.attribute(a).is_some())) =>
+                            .any(|a| tag.attribute(a, &self.steps).is_some())) =>
             {
                 self.error();
                 self.pop_out_of_foreign();
@@ -3291,22 +3319,22 @@ fn quirks_of(doctype: &DoctypeToken) -> Quirks {
 /// **The loops the review made linear, held linear by count.** Each case is
 /// an input the review timed — a slow test is not a failing one, since
 /// `cargo test` has no timeout — and each asserts that the steps
-/// [`super::step`] counts in it stay under the input's length in bytes: a
-/// child looked at from the end of its parent's list, two attributes Noah's
-/// Ark compares, a name a merge looks up. Put back the scan from the front, a
-/// name lookup per attribute or a set built per merge, and the count is the
-/// square of the input rather than a fraction of it.
+/// [`super::parse_counted`] counts in it stay under the input's length in
+/// bytes: a child looked at from the end of its parent's list, two attributes
+/// Noah's Ark compares, a name a merge looks up. Put back the scan from the
+/// front, a name lookup per attribute or a set built per merge, and the count
+/// is the square of the input rather than a fraction of it.
+/// `tests/complexity.rs` reads the same count.
 #[cfg(test)]
 mod tests {
-    use super::super::{parse, STEPS};
+    use super::super::parse_counted;
     use crate::Limits;
 
     /// The steps parsing `markup` takes, and that it parsed to its end.
     fn steps(markup: &str) -> usize {
-        STEPS.with(|steps| steps.set(0));
-        let document = parse(markup, &Limits::DEFAULT);
+        let (document, steps) = parse_counted(markup, &Limits::DEFAULT);
         assert_eq!(document.stopped(), None);
-        STEPS.with(std::cell::Cell::get)
+        usize::try_from(steps).unwrap_or(usize::MAX)
     }
 
     fn assert_linear(markup: &str, what: &str) {

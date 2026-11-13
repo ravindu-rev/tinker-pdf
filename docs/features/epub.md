@@ -1140,6 +1140,16 @@ rather than zero.
   winning, and doing nothing. `Longhand::ALL` is a list and not a `match`, so
   `rustc` cannot check it — `defaulting.rs` checks it against
   `IMPLEMENTED_NAMES` instead, and the proof does not pretend to.
+- `crates/tinker-pdf-css/tests/complexity.rs` — tokenising, parsing,
+  selector matching and the cascade held to [resource
+  exhaustion](../design/resource-exhaustion.md)'s size-scaling law, the work
+  being the four totals one `Budget` spends: the work at four times a size is
+  at most 4.4 times the work at that size, for a stylesheet of more rules, a
+  selector of more compounds under child and descendant combinators matched
+  against the chain of elements its subject ends, more elements each matched
+  by its own rule of as many, and a rule of more declarations cascaded over
+  the elements it matches. Each cascade gives the computed style the sheet
+  says.
 - **Committed books from real producers** (pandoc 3.10.2 and 3.11, calibre
   9.13.0 and 9.14.0, KCC 11.0.1) over text authored here, in
   `crates/tinker-pdf/tests/epub/`, with epubcheck 5.3.0 verdicts recorded in
