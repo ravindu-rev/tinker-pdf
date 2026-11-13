@@ -41,7 +41,8 @@ Clause and table numbers are ISO 32000-2's.
   RC-13.5's print test is the guard for it once it lands.
 - **Alternate configurations, the zoom, language and user categories,
   per-render overrides, `/RBGroups`, `/Locked` and `/Order`** are RC-14's,
-  built on the usage and the binding here.
+  built on the usage and the binding here
+  ([design/optional-content-config.md](optional-content-config.md)).
 - **Text and image extraction** read the default configuration's initial
   states, as they do today: they read the content a document has, not a use's
   view of it, and name no usage.
