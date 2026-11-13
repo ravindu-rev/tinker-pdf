@@ -3589,6 +3589,7 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
         W::UnsupportedShading { kind } => format!("UnsupportedShading({kind})"),
         W::UnsupportedPattern { .. } => "UnsupportedPattern".to_string(),
         W::HiddenOptionalContent { .. } => "HiddenOptionalContent".to_string(),
+        W::UnreadableLayerConfiguration { .. } => "UnreadableLayerConfiguration".to_string(),
         W::GroupBudgetSpent { .. } => "GroupBudgetSpent".to_string(),
         W::RecursiveContent => "RecursiveContent".to_string(),
         W::DeviceParametersSpent => "DeviceParametersSpent".to_string(),
