@@ -332,19 +332,44 @@ pub struct ColorantTints {
 impl ColorantTints {
     /// A DeviceCMYK colour's own components, as bytes, on the four process
     /// colorants (8.6.4.4): `k`, `K` and four components read with no space
-    /// named.
+    /// named — each zero where its byte is ([`ColorantTint::zero`]), since
+    /// the bytes are all there is to read.
     #[must_use]
     pub fn device_cmyk(ink: [u8; 4]) -> ColorantTints {
+        ColorantTints::cmyk_of(ink.map(|tint| (tint, tint == 0)))
+    }
+
+    /// A DeviceCMYK colour of the components the file gives, each its tint
+    /// `round(255 × component)` clamped into the unit interval, and zero
+    /// exactly where the component is 0 (8.6.7: the non-zero overprint mode's
+    /// test is made on the file's value, before it is quantised — `0.001`'s
+    /// tint is 0 and it is not zero).
+    #[must_use]
+    pub fn device_cmyk_components(components: [f64; 4]) -> ColorantTints {
+        ColorantTints::cmyk_of(components.map(|component| {
+            let tint = if component.is_finite() {
+                (component.clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                0
+            };
+            (tint, component == 0.0)
+        }))
+    }
+
+    /// DeviceCMYK's four process colorants at `tints`, each with whether it
+    /// is zero.
+    fn cmyk_of(tints: [(u8, bool); 4]) -> ColorantTints {
         let names: [&[u8]; 4] = [b"Cyan", b"Magenta", b"Yellow", b"Black"];
         ColorantTints {
             kind: ColorantKind::DirectCmyk,
             tints: names
                 .iter()
-                .zip(ink)
-                .map(|(name, tint)| ColorantTint {
+                .zip(tints)
+                .map(|(name, (tint, zero))| ColorantTint {
                     name: Arc::from(*name),
                     tint,
                     alone: None,
+                    zero,
                 })
                 .collect(),
             alternate: None,
@@ -387,6 +412,12 @@ pub struct ColorantTint {
     /// colorant of its name; `None` for a process colorant and for every
     /// other kind's colorants, which revert as a whole.
     pub alone: Option<[u8; 4]>,
+    /// Whether the component the file gives is 0 exactly — what the non-zero
+    /// overprint mode reads (8.6.7: "determination of whether a tint value is
+    /// zero or non-zero shall be made on the tint value defined within the
+    /// PDF file, before quantisation"). A tint of 0 need not be zero: `0.001`
+    /// is the byte 0 and not zero.
+    pub zero: bool,
 }
 
 /// How a stroke's ends are finished (8.4.3.3, Table 54).
@@ -964,6 +995,49 @@ impl GraphicsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A DeviceCMYK colour knows which components are zero** (8.6.7): one
+    /// of the file's components is zero exactly where it is 0 — `0.001` is
+    /// the byte 0 and not zero, `-0` is zero, a component past the unit
+    /// interval clamps its tint and is not zero, one not finite takes no ink
+    /// and is not zero — and a colour of bytes alone takes each byte 0 for
+    /// zero; either way the four are the process colorants, in order, of
+    /// DeviceCMYK's kind.
+    #[test]
+    fn a_device_cmyk_colour_knows_which_components_are_zero() {
+        let read = |colour: &ColorantTints| -> Vec<(Vec<u8>, u8, bool)> {
+            colour
+                .tints
+                .iter()
+                .map(|t| (t.name.to_vec(), t.tint, t.zero))
+                .collect()
+        };
+        let names: [&[u8]; 4] = [b"Cyan", b"Magenta", b"Yellow", b"Black"];
+        let file = ColorantTints::device_cmyk_components([0.001, -0.0, 1.5, f64::NAN]);
+        assert_eq!(file.kind, ColorantKind::DirectCmyk);
+        assert_eq!(
+            read(&file),
+            names
+                .iter()
+                .zip([(0, false), (0, true), (255, false), (0, false)])
+                .map(|(name, (tint, zero))| (name.to_vec(), tint, zero))
+                .collect::<Vec<_>>()
+        );
+        let bytes = ColorantTints::device_cmyk([0, 7, 0, 255]);
+        assert_eq!(
+            read(&bytes),
+            names
+                .iter()
+                .zip([(0, true), (7, false), (0, true), (255, false)])
+                .map(|(name, (tint, zero))| (name.to_vec(), tint, zero))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ColorantTints::device_cmyk_components([0.0, 0.2, 0.4, 1.0]),
+            ColorantTints::device_cmyk([0, 51, 102, 255]),
+            "a colour with no tiny component is its bytes' colour"
+        );
+    }
 
     #[test]
     fn composition_follows_pdfs_row_vector_convention() {

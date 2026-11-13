@@ -71,7 +71,11 @@ light and its DeviceCMYK ink (`GraphicsState::fill_ink`), the state keeps
 `fill_colorants` and `stroke_colorants`, an `Option<Arc<ColorantTints>>` each:
 the kind of space the colour was chosen in — DeviceCMYK directly, a
 `/Separation` or plain `/DeviceN`, an `NChannel` one, `/All` or `/None` — each
-colorant it names with its tint as a byte, and the process ink it paints
+colorant it names with its tint as a byte and whether the file gave its
+component as 0 (`ColorantTint::zero`, which 8.6.7's non-zero overprint mode
+reads before quantising: `0.001` is the byte 0 and not zero;
+`a_device_cmyk_colour_carries_whether_each_component_is_zero`), and the
+process ink it paints
 through its alternate, or component by component through each spot's own
 space and its process space, where a device has no colorant of a name it
 gives (8.6.6.4, 8.6.6.5). `k` and `K`, and four components with no space

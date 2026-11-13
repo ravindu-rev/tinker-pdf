@@ -56,8 +56,9 @@ pub const MAGIC: [u8; 8] = *b"\x89TPCMD\r\n";
 pub const MAJOR: u16 = 1;
 
 /// The minor version this build writes, and the newest whose every kind it
-/// knows.
-pub const MINOR: u16 = 0;
+/// knows. Minor 1 appends to [`CommandKind::Colorants`] the tints that are no
+/// ink and not zero (`ColorantTint::zero`); a stream of minor 0 holds none.
+pub const MINOR: u16 = 1;
 
 /// The most glyphs one [`CommandKind::GlyphRun`] holds; a longer run of one
 /// font and state is written as several.
@@ -238,7 +239,7 @@ kinds! {
     1 Function "Function" ["type", "domain", "range or c0 or functions", "size or c1 or bounds or code", "bits or n or encode or numbers", "encode or operators", "decode", "samples"]
     2 Halftone "Halftone" ["type", "frequency or names or width or xsquare", "angle or halftones or height or ysquare", "spot function or thresholds or second width", "spot names or transfer or second height", "accurate or thresholds", "transfer"]
     3 Stored "Stored" ["rendering intent", "black-point compensation", "stroke overprint", "fill overprint", "overprint mode", "alpha is shape", "text knockout", "flatness", "smoothness", "stroke adjustment", "black generation", "undercolour removal", "transfer", "halftone", "halftone origin"]
-    4 Colorants "Colorants" ["kind", "names", "tints", "own inks", "inks", "alternate", "process"]
+    4 Colorants "Colorants" ["kind", "names", "tints", "own inks", "inks", "alternate", "process", "no ink and not zero"]
     5 Source "Source" ["family", "components"]
     6 State "State" ["ctm", "text numbers", "render mode", "font", "fill alpha", "stroke alpha", "fill colour", "stroke colour", "sixteen bits", "fill ink", "stroke ink", "fill family", "stroke family", "fill colorants", "stroke colorants", "line width", "line cap", "line join", "miter limit", "dashes", "dash phase", "fill space", "stroke space", "fill pattern", "blend", "stroke pattern", "stored", "fill source", "stroke source"]
     16 BeginText "BeginText" []
@@ -967,6 +968,16 @@ impl<'a> Fields<'a> {
             Field::Naturals(naturals) => Ok(naturals),
             _ => Err(self.mistyped(at, "naturals")),
         }
+    }
+
+    /// A naturals field a later minor appended to its kind: the field where
+    /// the record carries it, and none where the record, written by an
+    /// earlier minor, ends before it.
+    pub fn appended_naturals(&self, at: usize) -> Result<&'a [u64], CommandError> {
+        if at >= self.fields.len() {
+            return Ok(&[]);
+        }
+        self.naturals(at)
     }
 
     /// A naturals field, or nothing.
@@ -1798,6 +1809,16 @@ impl EventWriter {
             .map(|(i, _)| i as u64)
             .collect();
         let inks: Vec<u8> = c.tints.iter().filter_map(|t| t.alone).flatten().collect();
+        // A tint that is zero is the byte 0, so a reader takes every byte 0
+        // for zero but these: the tints of no ink whose file value was not
+        // zero (8.6.7).
+        let not_zero: Vec<u64> = c
+            .tints
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.tint == 0 && !t.zero)
+            .map(|(i, _)| i as u64)
+            .collect();
         let record = Record::new(CommandKind::Colorants)
             .with(Field::Unsigned(kind))
             .with(Field::Strings(names))
@@ -1805,7 +1826,8 @@ impl EventWriter {
             .with(Field::Naturals(own))
             .with(Field::Bytes(Arc::from(inks)))
             .with(ink_field(c.alternate))
-            .with(ink_field(c.process));
+            .with(ink_field(c.process))
+            .with(Field::Naturals(not_zero));
         let index = self.colorants.index(record, &mut self.head);
         self.colorants_by_address
             .insert(address, (Arc::clone(colorants), index));
@@ -2599,6 +2621,7 @@ impl EventReader {
                 name: Arc::from(name.as_slice()),
                 tint,
                 alone: None,
+                zero: tint == 0,
             })
             .collect();
         let mut last: Option<u64> = None;
@@ -2613,6 +2636,21 @@ impl EventReader {
                 .ok_or_else(|| fields.wrong("an own ink past the colorants"))?;
             let ink = &inks[at * 4..at * 4 + 4];
             slot.alone = Some([ink[0], ink[1], ink[2], ink[3]]);
+        }
+        // Minor 1: the tints of no ink that are not zero, in order; a tint
+        // of ink is never zero, so one listed is malformed.
+        let mut last: Option<u64> = None;
+        for &index in fields.appended_naturals(7)? {
+            if last.is_some_and(|last| index <= last) {
+                return Err(fields.wrong("tints not zero out of order"));
+            }
+            last = Some(index);
+            let slot = usize::try_from(index)
+                .ok()
+                .and_then(|i| tints.get_mut(i))
+                .filter(|slot| slot.tint == 0)
+                .ok_or_else(|| fields.wrong("a tint not zero that is no tint of no ink"))?;
+            slot.zero = false;
         }
         let colorants = ColorantTints {
             kind,
@@ -3303,11 +3341,19 @@ mod tests {
                     name: Arc::from(&b"Cyan"[..]),
                     tint: 0,
                     alone: None,
+                    zero: false,
                 },
                 ColorantTint {
                     name: Arc::from(&b"PANTONE 131"[..]),
                     tint: 200,
                     alone: Some([1, 2, 3, 4]),
+                    zero: false,
+                },
+                ColorantTint {
+                    name: Arc::from(&b"Magenta"[..]),
+                    tint: 0,
+                    alone: None,
+                    zero: true,
                 },
             ],
             alternate: Some([5, 6, 7, 8]),
@@ -3769,6 +3815,80 @@ mod tests {
             Some(odd_nan().to_bits())
         );
         assert!(states_alike(&state, back));
+    }
+
+    /// **A tint of no ink that is not zero reads back** (minor 1, RC-03.5): a
+    /// fill whose colorants hold `0.001`'s cyan, the byte 0 and not zero, and
+    /// a zero black reads back with each as it was written; the same
+    /// colorants' record as minor 0 wrote it, with no list, reads every byte
+    /// 0 as zero; and a list naming a tint of ink, or out of order, is
+    /// refused by name.
+    #[test]
+    fn a_tint_of_no_ink_that_is_not_zero_reads_back() {
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.fill_colorants = Some(Arc::new(ColorantTints::device_cmyk_components([
+            0.001, 0.5, 0.0, 0.0,
+        ])));
+        let fill = |state: &GraphicsState| Event::FillPath {
+            path: every_path(),
+            even_odd: false,
+            state: Some(Box::new(state.clone())),
+        };
+        let events = vec![fill(&state)];
+        let read = decode_events(&encode_events(&events), &Budgets::DEFAULT).expect("it reads");
+        let zeros = |events: &[Event]| -> Vec<(u8, bool)> {
+            match events.first() {
+                Some(Event::FillPath {
+                    state: Some(state), ..
+                }) => state
+                    .fill_colorants
+                    .iter()
+                    .flat_map(|c| c.tints.iter().map(|t| (t.tint, t.zero)))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        assert_eq!(
+            zeros(&read),
+            vec![(0, false), (128, false), (0, true), (0, true)],
+            "cyan is no ink and not zero, yellow and black zero"
+        );
+
+        // The same stream with the appended field taken off, as minor 0
+        // wrote it: every byte 0 reads as zero.
+        let mut writer = EventWriter::new();
+        writer.event(&events[0]);
+        let (head, body) = writer.finish();
+        let mut records: Vec<Record> = head;
+        records.extend(body);
+        let colorants = CommandKind::Colorants.number();
+        let mut older = records.clone();
+        for record in older.iter_mut().filter(|r| r.kind == colorants) {
+            record.fields.truncate(7);
+        }
+        let read = decode_events(&write_stream_at(MAJOR, 0, &older), &Budgets::DEFAULT)
+            .expect("minor 0 reads");
+        assert_eq!(
+            zeros(&read),
+            vec![(0, true), (128, false), (0, true), (0, true)]
+        );
+
+        for (list, why) in [
+            (vec![1u64], "a tint not zero that is no tint of no ink"),
+            (vec![2, 0], "tints not zero out of order"),
+            (vec![9], "a tint not zero that is no tint of no ink"),
+        ] {
+            let mut bad = records.clone();
+            for record in bad.iter_mut().filter(|r| r.kind == colorants) {
+                if let Some(field) = record.fields.get_mut(7) {
+                    *field = Field::Naturals(list.clone());
+                }
+            }
+            match decode_events(&write_stream(&bad), &Budgets::DEFAULT) {
+                Err(CommandError::Malformed { what, .. }) => assert_eq!(what, why, "{list:?}"),
+                other => panic!("{list:?}: {other:?}"),
+            }
+        }
     }
 
     /// **A newer minor's unknown record is skipped**, wherever it stands, and

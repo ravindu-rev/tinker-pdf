@@ -55,7 +55,7 @@ read, for roadmap row RC-18, and names the test that holds each part.
 stream  := magic major minor record* end
 magic   := 89 54 50 43 4D 44 0D 0A          ("\x89TPCMD\r\n")
 major   := u16, little-endian                 (1)
-minor   := u16, little-endian                 (0)
+minor   := u16, little-endian                 (1)
 record  := kind:varint length:varint field*   (length counts the fields' bytes)
 end     := the record of kind 0, with no fields, and nothing after it
 field   := tag:u8 value
@@ -84,7 +84,9 @@ reader skips a record of a kind it does not know in a stream whose minor is
 newer than its own, ignores fields past the ones it reads, and refuses an
 unknown kind in a stream of its own minor or older (`UnknownRecord`). **A
 newer major is refused by name** (`NewerMajor`), and so is anything that is
-not a stream (`NotACommandStream`).
+not a stream (`NotACommandStream`). Minor 1 appends a field to `Colorants`,
+and a reader takes a `Colorants` record of minor 0, which ends before it, as
+listing none.
 
 A reference is a field `Unsigned(i)`, the `i`th record of its table counted
 from zero in stream order, or `Nothing` for none. Every definition precedes
@@ -113,7 +115,7 @@ fields, so a binding names a field without knowing the format.
 | 1 | `Function` | type (0 sampled, 2 exponential, 3 stitching, 4 calculator, 5 array, 6 identity); sampled: domain, range, size, bits, encode, decode, samples; exponential: domain, c0, c1, n; stitching: domain, functions, bounds, encode; calculator: domain, range, code, numbers, operators; array: functions |
 | 2 | `Halftone` | type (1, 5, 6, 10, 16); 1: frequency, angle, spot function or nothing, spot names, accurate, transfer; 5: names, halftones; 6: width, height, thresholds, transfer; 10: xsquare, ysquare, thresholds, transfer; 16: width, height, second width, second height, thresholds, transfer |
 | 3 | `Stored` | rendering intent, black-point compensation, stroke overprint, fill overprint, overprint mode, alpha is shape, text knockout, flatness, smoothness, stroke adjustment, black generation, undercolour removal, transfer, halftone, halftone origin |
-| 4 | `Colorants` | kind, names, tints, which have their own ink, those inks, alternate, process |
+| 4 | `Colorants` | kind, names, tints, which have their own ink, those inks, alternate, process; and, from minor 1, which tints are no ink and not zero — a tint of 0 a file gave as more than 0, which 8.6.7's non-zero overprint mode reads as not zero (`ColorantTint::zero`); every other byte 0 is zero, and a tint of ink listed there is malformed |
 | 5 | `Source` | the device space the components were read in, by name, or nothing for the slot's own; the components |
 | 6 | `State` | ctm; the text numbers — size, character spacing, word spacing, horizontal scale, leading, rise; render mode; font; fill alpha; stroke alpha; fill colour; stroke colour; both at sixteen bits, fill then stroke; fill ink; stroke ink; fill family; stroke family; fill colorants; stroke colorants; line width; line cap; line join; miter limit; dashes; dash phase; fill space; stroke space; fill pattern; blend; stroke pattern; stored; fill source; stroke source |
 

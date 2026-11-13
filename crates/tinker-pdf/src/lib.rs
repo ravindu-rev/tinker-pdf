@@ -836,6 +836,19 @@ pub struct RenderOptions {
     ///   is not.
     /// - **Alpha** is the canvas's, with [`RenderOptions::transparent`].
     ///
+    /// **Overprint** (8.6.7, 11.7.4): a paint whose overprint flag is set —
+    /// `/op` for a fill, a glyph filled, a stencil mask and an uncoloured
+    /// pattern filled, `/OP` for a stroke, a glyph stroked and an uncoloured
+    /// pattern stroked — marks only the plates its colour names, and every
+    /// other plate keeps what was under it: DeviceCMYK as the current colour
+    /// its four process plates, or under `/OPM 1` those whose component the
+    /// file gives as not zero (`0.001` is not zero, though it is no ink); a
+    /// `/Separation` or `/DeviceN` the plates of its colorants, process ones
+    /// among them; `/All` every plate; and a colour of any other space, or a
+    /// separation reverting to its alternate, the four process plates. A
+    /// paint whose flag is clear erases every plate it names no ink for, and
+    /// `/None` paints nothing.
+    ///
     /// Where a page's spots are more than [`MAX_SPOT_PLATES`], or than keep
     /// its plates inside [`MAX_PLATE_BYTES`] at its size, those past the cap,
     /// in inventory order, are drawn through their alternates on the process
@@ -4244,7 +4257,11 @@ pub(crate) fn draw_canvas<S: Drawn>(
         renderer = renderer.with_forced_colours(forced.fill_to_stroke);
     }
     if let Some(plan) = plates {
-        renderer = renderer.with_plates(plan);
+        // A render simulating overprint draws each paint through the
+        // channels it marks; a separations render's plates knock out.
+        renderer = renderer
+            .with_plates(plan)
+            .with_overprint(matches!(inks, Inks::Simulated(_)));
     }
     paint(&mut renderer, source);
     let (canvas, warnings, counts, parameters) = renderer.finish_with_parameters();

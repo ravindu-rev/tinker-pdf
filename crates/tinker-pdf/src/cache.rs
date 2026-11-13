@@ -944,6 +944,9 @@ pub(crate) struct CellKey {
     /// (`TileRequest::plate_bytes`), which decide whether a group inside it
     /// composites on plates or in ink.
     pub(crate) plate_bytes: u64,
+    /// Whether the cell's paints overprint (`TileRequest::overprint`), which
+    /// decides which channels each of them leaves.
+    pub(crate) overprint: bool,
 }
 
 impl CellKey {

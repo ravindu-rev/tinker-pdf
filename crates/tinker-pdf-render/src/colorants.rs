@@ -140,7 +140,15 @@ fn tints_at(
         return None;
     }
     match space {
-        ColorSpace::DeviceCmyk => Some(ColorantTints::device_cmyk(ink_bytes(components))),
+        ColorSpace::DeviceCmyk => {
+            let at = |i: usize| components.get(i).copied().unwrap_or(0.0);
+            Some(ColorantTints::device_cmyk_components([
+                at(0),
+                at(1),
+                at(2),
+                at(3),
+            ]))
+        }
         ColorSpace::Indexed { base, lookup, high } => {
             // 8.6.6.3, as `to_rgb` reads the palette.
             let index = components
@@ -185,6 +193,7 @@ fn separation_tints(
         name: Arc::from(name),
         tint: tint_byte(tint),
         alone,
+        zero: tint == 0.0,
     };
     let none = || ColorantTints {
         kind: ColorantKind::None,

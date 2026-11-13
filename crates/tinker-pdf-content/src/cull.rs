@@ -1087,6 +1087,7 @@ mod tests {
                 name: Arc::from(&b"PANTONE 131"[..]),
                 tint: 200,
                 alone: None,
+                zero: false,
             }],
             alternate: Some([0, 100, 200, 0]),
             process: None,

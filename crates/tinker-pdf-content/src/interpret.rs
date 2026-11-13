@@ -954,8 +954,8 @@ impl Exact {
     }
 
     /// What a colour paints by colorant ([`ColorantTints`]), exactly: its
-    /// kind, each colorant's name, tint and own ink, and the inks it paints
-    /// through its alternate and its process space.
+    /// kind, each colorant's name, tint, own ink and whether it is zero, and
+    /// the inks it paints through its alternate and its process space.
     fn colorants(&mut self, colorants: &ColorantTints) {
         let ColorantTints {
             kind,
@@ -965,10 +965,17 @@ impl Exact {
         } = colorants;
         self.named(kind);
         self.word(tints.len() as u64);
-        for crate::state::ColorantTint { name, tint, alone } in tints {
+        for crate::state::ColorantTint {
+            name,
+            tint,
+            alone,
+            zero,
+        } in tints
+        {
             self.bytes(name);
             self.0.push(*tint);
             self.maybe_ink(alone.as_ref());
+            self.flag(*zero);
         }
         self.maybe_ink(alternate.as_ref());
         self.maybe_ink(process.as_ref());
@@ -2562,7 +2569,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                             device_wide(&ColorSpace::DeviceCmyk, &[c, m, y, k]),
                             Some(ink),
                             None,
-                            self.device_cmyk_colorants(ink),
+                            self.device_cmyk_colorants([c, m, y, k]),
                         )
                     });
                     self.set_device_color(op == b"k", color, wide, ink, source, family, colorants);
@@ -2708,18 +2715,17 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                                 (Some((color, wide)), ink, source, colorants)
                             }
                             None => {
-                                let ink = match components[..] {
-                                    [c, m, y, k] => {
-                                        Some([to_byte(c), to_byte(m), to_byte(y), to_byte(k)])
-                                    }
+                                let cmyk = match components[..] {
+                                    [c, m, y, k] => Some([c, m, y, k]),
                                     _ => None,
                                 };
+                                let ink = cmyk.map(|cmyk| cmyk.map(to_byte));
                                 let wide = components_to_wide(&components);
                                 (
                                     Some((components_to_rgb(&components), wide)),
                                     ink,
                                     None,
-                                    ink.and_then(|ink| self.device_cmyk_colorants(ink)),
+                                    cmyk.and_then(|cmyk| self.device_cmyk_colorants(cmyk)),
                                 )
                             }
                         }
@@ -3097,9 +3103,9 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
 
     /// A DeviceCMYK colour's own components on the four process colorants,
     /// where the device composites colorants.
-    fn device_cmyk_colorants(&self, ink: [u8; 4]) -> Option<Arc<ColorantTints>> {
+    fn device_cmyk_colorants(&self, components: [f64; 4]) -> Option<Arc<ColorantTints>> {
         self.colorants
-            .then(|| Arc::new(ColorantTints::device_cmyk(ink)))
+            .then(|| Arc::new(ColorantTints::device_cmyk_components(components)))
     }
 
     /// The rendering intent in force (8.6.5.8).
@@ -5847,6 +5853,7 @@ mod tests {
                         name: Arc::from(*name),
                         tint: to_byte(*tint),
                         alone: None,
+                        zero: *tint == 0.0,
                     })
                     .collect(),
                 alternate: Some([0, first, 0, 0]),
@@ -5961,6 +5968,56 @@ mod tests {
         /Rgb cs 0.1 0.2 0.3 sc 0 0 m 10 10 l S \
         0.5 g 0 0 0 1 sc 0 0 m 10 10 l S \
         /Pat cs 0.3 /P1 scn 0 0 m 10 10 l S";
+
+    /// **A DeviceCMYK colour carries which components the file gave as
+    /// zero** (8.6.7, RC-03.5): `k`, `K` and four components with no space
+    /// named, on a device compositing colorants, carry each component's tint
+    /// and whether the file gave 0 — `0.001` is the byte 0 and not zero, `0`
+    /// and `-0` are zero, and a component past the unit interval keeps its
+    /// clamped tint and is not zero.
+    #[test]
+    fn a_device_cmyk_colour_carries_whether_each_component_is_zero() {
+        let source = ColorantSpaces::new(DeviceDefaults::NONE);
+        let mut d = RecordingDevice::new().recording_colorants(true);
+        interpret(
+            b"0.001 0 -0 1.5 k 0 0.5 0 0.001 K 0 0 1 1 re S \
+              0 -0.2 0.002 0 sc 0 0.004 0 0 SC 0 0 1 1 re S",
+            Matrix::IDENTITY,
+            &mut d,
+            &source,
+        );
+        let states: Vec<&GraphicsState> = d
+            .of_kind(EventKind::StrokePath)
+            .filter_map(Event::state)
+            .collect();
+        assert_eq!(states.len(), 2);
+        let zeros = |colorants: &Option<Arc<ColorantTints>>| -> Vec<(u8, bool)> {
+            colorants
+                .iter()
+                .flat_map(|c| c.tints.iter().map(|t| (t.tint, t.zero)))
+                .collect()
+        };
+        assert_eq!(
+            zeros(&states[0].fill_colorants),
+            vec![(0, false), (0, true), (0, true), (255, false)],
+            "`k`"
+        );
+        assert_eq!(
+            zeros(&states[0].stroke_colorants),
+            vec![(0, true), (128, false), (0, true), (0, false)],
+            "`K`"
+        );
+        assert_eq!(
+            zeros(&states[1].fill_colorants),
+            vec![(0, true), (0, false), (1, false), (0, true)],
+            "four components with no space named"
+        );
+        assert_eq!(
+            zeros(&states[1].stroke_colorants),
+            vec![(0, true), (1, false), (0, true), (0, true)],
+            "and their stroking twin"
+        );
+    }
 
     /// **A colour carries the colorants its space answers** (RC-04.6), beside
     /// `a_device_cmyk_colour_keeps_its_components_beside_its_light`: on a

@@ -1118,8 +1118,44 @@ without it; `a_spot_composites_its_colour_alone_at_its_tint`;
 `spots_past_the_cap_composite_through_their_alternates`;
 `where_the_switch_has_nothing_to_draw_by_it_changes_nothing`; and
 `render_regions.rs`'s `an_overprint_simulated_page_tiles_as_the_page`, direct
-and replayed, turned, cropped and at 2x). Every paint there knocks out the
-plates it names no ink for, as 8.6.7 has a paint do with overprint off.
+and replayed, turned, cropped and at 2x).
+
+**Flat colours overprint there** (8.6.7, 11.7.4.3, Table 146; the design's
+"Overprint: which channels a paint marks"). The renderer of a render
+simulating overprint is told so (`Renderer::with_overprint`, and a coloured
+tiling cell through `TileRequest::overprint`), and each flat paint — a fill,
+a stroke, a glyph from its mask or its path, a stencil mask, an uncoloured
+pattern's cell — composites through the channels its colour marks, put in
+force on the canvas around it (`Canvas::set_marked`), every other channel
+keeping its backdrop. A paint reads its slot's flag, `/op` for what fills and
+`/OP` for what strokes, and `/OPM 1` is the non-zero mode, every other value
+mode 0. With its flag clear a paint marks every channel, erasing what it names
+no ink for. With it set, `PlatePlan::marks` reads the colour's colorants:
+DeviceCMYK as the current colour — `k`, `K`, `cs`/`sc` in DeviceCMYK, four
+components with no space named, and such a colour under `/DefaultCMYK`, which
+keeps its own components (H-135) — marks the four process channels, and under
+the non-zero mode those whose component the file gives as not zero:
+`ColorantTint::zero` is decided on the file's value, so `0.001`'s cyan, the
+byte 0, is marked and erases the backdrop's cyan while a `0`'s keeps it. A
+`/Separation` or a plain `/DeviceN` marks the channel of each colorant it
+names, a process name its process channel, under either mode; one with a name
+the plan gives no plate reverts to its alternate and marks the process
+channels. An `NChannel` colour marks each placed colorant's channel, and the
+process channels where a spot without a plate or another process space reaches
+them. `/All` marks every channel; `/None` paints nothing. A colour of any
+other space — DeviceGray, DeviceRGB, a CIE-based or ICC one — is its light
+turned into ink and marks the four process channels. An image run carries the
+channels its draws mark, and a draw marking others ends it. A separations
+render's plates knock out whatever the flags say, as the design keeps them,
+and a render without the switch draws as it did (`overprint.rs`:
+`each_overprint_case_paints_its_closed_form`, every kind of colour through a
+fill, a stroke, a glyph, a stroked glyph and a stencil under no overprint, `/OPM
+0`, `/OPM 1`, `/OP` alone and `/OP` without `/op`, each pixel the composite of
+the plates worked out from the table at the paint's own coverage;
+`an_uncoloured_pattern_overprints_as_its_colour_does`;
+`the_twins_the_clause_makes_equal_render_alike`; and
+`separations_and_a_render_without_the_switch_knock_out`). A recorded colour's
+zero test travels in the command stream's `Colorants` record from minor 1.
 
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
@@ -2324,8 +2360,9 @@ colours, images and shadings apply, `None` while every one has its initial value
 `q` copies one word more and a copy allocates nothing. The transfer functions,
 black generation and undercolour removal, flatness, smoothness and stroke
 adjustment are applied
-([design/device-dependent-state.md](../design/device-dependent-state.md)); the
-rest move no pixel until their rows apply them.
+([design/device-dependent-state.md](../design/device-dependent-state.md)), and
+overprint and its mode where a render simulates overprint (*Flat colours
+overprint there*, above); the rest move no pixel until their rows apply them.
 
 **Flatness** (`/FL` and `i`, 10.7.2) is the tolerance each paint's curves are
 flattened to, in device pixels, from the paint's own state: a fill, a stroke

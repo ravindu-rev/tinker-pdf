@@ -43,7 +43,7 @@ use tinker_pdf_content::{
 
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
-    canvas::{Canvas, Color, InkTables, MaskKind, PixelFormat, PlateInk},
+    canvas::{Canvas, Channels, Color, InkTables, MaskKind, PixelFormat, PlateInk},
     fill::{
         fill_hard_with, fill_outline, fill_outline_hard, fill_with, FillScratch, HardEdge, Mask,
     },
@@ -512,6 +512,10 @@ pub struct TileRequest {
     /// beside ([`Renderer::with_held_plates`], [`MAX_PLATE_BYTES`]); 0 for a
     /// cell drawn in any other format.
     pub plate_bytes: u64,
+    /// Whether the cell's own paints overprint as the page's do
+    /// ([`Renderer::with_overprint`]): the page's answer for a coloured cell
+    /// drawn on plates by its plan, false for every other.
+    pub overprint: bool,
 }
 
 /// One rasterized tiling-pattern cell.
@@ -1329,6 +1333,10 @@ struct ImageRun {
     /// ([`ImagePlates::Tints`]), a tint a plate a pixel, rather than light: a
     /// draw of the other kind ends it.
     plates: bool,
+    /// The colour channels every draw in the run marks
+    /// ([`Renderer::with_overprint`]): a draw marking others ends it, since
+    /// the run reaches the canvas through one set.
+    marks: Channels,
     /// The bytes a run of tints is charged against [`MAX_PLATE_BYTES`], at
     /// the size its canvas has on a render of the whole page; 0 for a run of
     /// light.
@@ -1766,6 +1774,11 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// ([`Renderer::with_plates`]); `None` for every other render, which then
     /// asks no colorants of anybody.
     plan: Option<Arc<PlatePlan>>,
+    /// Whether the render simulates overprint ([`Renderer::with_overprint`]):
+    /// on plates by a plan, a paint whose overprint flag is set marks only the
+    /// channels its colour names; false for every other render, every paint
+    /// then marking every channel.
+    overprint: bool,
     /// The bytes of plates the render holds live outside this renderer — for
     /// a tiling cell's renderer, the page's and its open groups'
     /// ([`Renderer::with_held_plates`]); 0 for a page's.
@@ -1804,13 +1817,45 @@ struct DeviceSet {
 
 /// A colour slot's paint, as the state holds it: the colour's light, its
 /// DeviceCMYK ink where it was chosen in DeviceCMYK
-/// (`GraphicsState::fill_ink`), and what it paints by colorant where the
-/// render composites colorants (`GraphicsState::fill_colorants`).
+/// (`GraphicsState::fill_ink`), what it paints by colorant where the render
+/// composites colorants (`GraphicsState::fill_colorants`), and how it
+/// overprints.
 #[derive(Clone, Copy, Debug)]
 struct Paint<'a> {
     light: Color,
     ink: Option<[u8; 4]>,
     colorants: Option<&'a ColorantTints>,
+    overprint: Overprint,
+}
+
+/// How a paint overprints (8.6.7): its slot's flag — `/op` for what fills,
+/// `/OP` for what strokes — and whether the non-zero overprint mode, `/OPM 1`,
+/// is in force; every other `/OPM` is mode 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Overprint {
+    on: bool,
+    nonzero: bool,
+}
+
+impl Overprint {
+    /// The fill slot's: `/op`, or `/OP` where `/op` is absent, as K-01
+    /// stores it.
+    fn fill(state: &GraphicsState) -> Overprint {
+        let stored = state.stored_parameters();
+        Overprint {
+            on: stored.fill_overprint,
+            nonzero: stored.overprint_mode == 1,
+        }
+    }
+
+    /// The stroke slot's: `/OP`.
+    fn stroke(state: &GraphicsState) -> Overprint {
+        let stored = state.stored_parameters();
+        Overprint {
+            on: stored.stroke_overprint,
+            nonzero: stored.overprint_mode == 1,
+        }
+    }
 }
 
 impl<'a> Paint<'a> {
@@ -1820,6 +1865,7 @@ impl<'a> Paint<'a> {
             light: fill_color(state),
             ink: state.fill_ink,
             colorants: state.fill_colorants.as_deref(),
+            overprint: Overprint::fill(state),
         }
     }
 
@@ -1829,15 +1875,18 @@ impl<'a> Paint<'a> {
             light: stroke_color(state),
             ink: state.stroke_ink,
             colorants: state.stroke_colorants.as_deref(),
+            overprint: Overprint::stroke(state),
         }
     }
 
-    /// A colour of light alone, which the renderer chose: a placeholder's.
+    /// A colour of light alone, which the renderer chose: a placeholder's,
+    /// which overprints nothing.
     fn light(light: Color) -> Paint<'static> {
         Paint {
             light,
             ink: None,
             colorants: None,
+            overprint: Overprint::default(),
         }
     }
 }
@@ -2064,6 +2113,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             every_paint_opaque: true,
             forced: None,
             plan: None,
+            overprint: false,
             held_plates: 0,
             own_plates,
             text_depth: 0,
@@ -2409,6 +2459,30 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self
     }
 
+    /// Simulates overprint on plates by a plan (8.6.7, 11.7.4;
+    /// `docs/design/overprint-separations.md`, "Overprint: which channels a
+    /// paint marks"): a paint whose overprint flag is set — `/op` for a fill,
+    /// a glyph filled, a stencil mask and an uncoloured pattern filled; `/OP`
+    /// for a stroke, a glyph stroked and an uncoloured pattern stroked —
+    /// composites through the channels its colour marks
+    /// ([`PlatePlan::marks`]), each other channel keeping its backdrop
+    /// (`Canvas::set_marked`): DeviceCMYK as the current colour its four
+    /// process channels, or under `/OPM 1` those whose component is not
+    /// zero; a `/Separation` or `/DeviceN` its colorants' channels; `/All`
+    /// every channel; a colour of any other space, and a separation reverting
+    /// to its alternate, the four process channels. A paint whose flag is
+    /// clear marks every channel, as 8.6.7 has a paint erase what it does
+    /// not name.
+    ///
+    /// Read only on plates by a plan ([`Renderer::with_plates`]); on any
+    /// other canvas every paint marks every channel. A coloured tiling cell
+    /// is drawn with the page's answer ([`TileRequest::overprint`]).
+    #[must_use]
+    pub fn with_overprint(mut self, overprint: bool) -> Self {
+        self.overprint = overprint;
+        self
+    }
+
     /// Says the render holds `bytes` of plates live outside this renderer's
     /// own canvas, so every plates buffer it opens is charged beside them
     /// against [`MAX_PLATE_BYTES`]: what a tiling cell's renderer is told of
@@ -2497,6 +2571,31 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             Some(PlatePaint::Ink(ink)) => Plating::Ink(ink),
             Some(PlatePaint::Nothing) => Plating::Nothing,
             None => Plating::Light,
+        }
+    }
+
+    /// The colour channels `paint`, put on the canvas drawn on now as
+    /// `plating` says, marks there ([`Renderer::with_overprint`]): every
+    /// channel unless the render simulates overprint on plates by a plan and
+    /// the paint's flag is set; then the channels its colorants name by the
+    /// plan ([`PlatePlan::marks`]), and the four process channels for a
+    /// colour of light turned into ink.
+    fn marks(&self, paint: Paint<'_>, plating: &Plating) -> Channels {
+        if !self.overprint || !paint.overprint.on {
+            return Channels::ALL;
+        }
+        let (Some(plan), PixelFormat::Plates { spots }) =
+            (self.plan.as_deref(), self.canvas.format)
+        else {
+            return Channels::ALL;
+        };
+        match (plating, paint.colorants) {
+            (Plating::Nothing, _) => Channels::NONE,
+            (Plating::Ink(_), Some(colorants)) => {
+                plan.marks(colorants, spots, paint.overprint.nonzero)
+            }
+            // Light turned into ink: a process colour.
+            _ => Channels::of(0..4),
         }
     }
 
@@ -2694,6 +2793,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             .as_ref()
             .or(self.clip.as_ref())
             .or(self.soft.as_ref());
+        let marked = self.canvas.set_marked(run.marks);
         run.fragments.composite_region_inked(
             &mut self.canvas,
             run.covered,
@@ -2703,6 +2803,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             run.ink,
             Some(&stop),
         );
+        self.canvas.set_marked(marked);
     }
 
     /// What this render could not see of the page's image runs so far
@@ -4348,6 +4449,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             text_bits: self.text_bits,
             hard_edge: self.hard_edge,
             thinnest_line: self.thinnest_line,
+            overprint: self.overprint && plates.is_some(),
             plates,
             plate_bytes,
         };
@@ -4390,6 +4492,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         } else {
             None
         };
+        // An uncoloured cell paints its filler's colour and marks as that
+        // colour does; a coloured one composites as a group, every channel
+        // (Table 146's last row).
+        let marks = if tint.is_some() {
+            self.marks(paint, &plating)
+        } else {
+            Channels::ALL
+        };
+        let marked = self.canvas.set_marked(marks);
         // The fill's shape for the plane: the shape where the cells painted
         // (11.6.4.2, 11.6.7), gathered as they are placed.
         let mut cells = Vec::new();
@@ -4403,6 +4514,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             // work it exists for, and `composite` is asked again every sixteen
             // rows inside each cell.
             if self.stopping() {
+                self.canvas.set_marked(marked);
                 self.release_removal(held);
                 return true;
             }
@@ -4446,6 +4558,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
         }
+        self.canvas.set_marked(marked);
         self.release_removal(held);
         if self.records(set.entry) {
             let shape_area = unmasked.as_ref().unwrap_or(&coverage);
@@ -4670,6 +4783,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         set: &DeviceSet,
     ) {
         let held = self.hold_removal(&set.removal);
+        let marked = self.canvas.set_marked(self.marks(paint, plating));
         match plating {
             Plating::Ink(ink) => self.canvas.fill_mask_plates(mask, ink, alpha, mode),
             Plating::Light => {
@@ -4678,6 +4792,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             }
             Plating::Nothing => {}
         }
+        self.canvas.set_marked(marked);
         self.release_removal(held);
     }
 
@@ -4823,6 +4938,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if matches!(plating, Plating::Nothing) {
             return;
         }
+        // The channels the draw marks: a stencil's fill colour's
+        // (8.9.6.2), and every channel for an image of its own colours.
+        let marks = if image.stencil {
+            self.marks(Paint::fill(state), &plating)
+        } else {
+            Channels::ALL
+        };
         // An image whose samples name colorants is drawn on plates by them
         // (RC-04.12): in `/None` it has no effect on the page, and otherwise
         // its tints are sampled plate by plate through the raster's sampler
@@ -5002,6 +5124,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 || run.masks != masks
                 || run.ink != ink
                 || run.plates != tints.is_some()
+                || run.marks != marks
         });
         // The draw's bounds within the frame, which this canvas may cut: what
         // a render of the whole page asks the run about (`RunReach`).
@@ -5090,6 +5213,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         });
         let mut plate_pyramid = PlatePyramid::new();
         if direct {
+            let marked = self.canvas.set_marked(marks);
             if let Some(source) = &source {
                 draw_plate_image(
                     &mut self.canvas,
@@ -5098,6 +5222,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     &mut plate_pyramid,
                     &mut self.scratch,
                 );
+                self.canvas.set_marked(marked);
                 return;
             }
             let held = removing.then(|| self.canvas.set_ink_tables(set.removal.clone()));
@@ -5105,6 +5230,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             if let Some(previous) = held {
                 self.canvas.set_ink_tables(previous);
             }
+            self.canvas.set_marked(marked);
             return;
         }
 
@@ -5125,6 +5251,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             masks,
             ink,
             plates: source.is_some(),
+            marks,
             plate_bytes: run_bytes,
             covered: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
             framed: Bounds::NONE,
@@ -12041,6 +12168,7 @@ mod plate_tests {
                     name: Arc::from(*name),
                     tint: byte(*tint),
                     alone: None,
+                    zero: *tint == 0.0,
                 })
                 .collect(),
             alternate,

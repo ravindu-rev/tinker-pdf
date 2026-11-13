@@ -5585,9 +5585,12 @@ pub(crate) fn paint_cell<G: GlyphSource>(
         .with_thinnest_line(request.thinnest_line)
         .with_held_plates(request.plate_bytes);
     // A coloured cell drawn on plates paints its colorants by the page's plan,
-    // so a spot inside it reaches its own plate.
+    // so a spot inside it reaches its own plate, and overprints as the page's
+    // paints do.
     if let Some(plan) = &request.plates {
-        renderer = renderer.with_plates(Arc::clone(plan));
+        renderer = renderer
+            .with_plates(Arc::clone(plan))
+            .with_overprint(request.overprint);
     }
 
     // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already that
@@ -5952,6 +5955,7 @@ impl PageResources {
             magnification: self.op.magnification_key(&self.doc),
             plates: request.plates.clone(),
             plate_bytes: request.plate_bytes,
+            overprint: request.overprint,
         }
     }
 

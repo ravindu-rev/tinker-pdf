@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use tinker_pdf_color::{ColorSpace, Colorant};
 use tinker_pdf_content::{ColorantKind, ColorantTints};
-use tinker_pdf_raster::{PlateInk, Spots, MAX_SPOT_PLATES};
+use tinker_pdf_raster::{Channels, PlateInk, Spots, MAX_SPOT_PLATES};
 
 /// The process colorants 8.6.6.4 reserves, in their channels' order: cyan 0,
 /// magenta 1, yellow 2, black 3.
@@ -271,6 +271,77 @@ impl PlatePlan {
         }
     }
 
+    /// The colour channels a colour naming `colorants` **marks** on a canvas
+    /// of `spots` spot channels under this plan when it overprints (8.6.7,
+    /// 11.7.4.3, Table 146; `docs/design/overprint-separations.md`,
+    /// "Overprint: which channels a paint marks"), `nonzero` whether the
+    /// non-zero overprint mode is in force — the channels whose blend is `Cs`,
+    /// every other keeping its backdrop:
+    ///
+    /// - DeviceCMYK as the current colour marks its four process channels,
+    ///   or under the non-zero mode each whose component the file gives as
+    ///   not zero ([`ColorantTint::zero`](tinker_pdf_content::ColorantTint::zero)).
+    /// - A `/Separation` or a plain `/DeviceN` that paints its colorants marks
+    ///   the channel of each it names, a process name its process channel;
+    ///   one reverting to its alternate is a process colour and marks the four
+    ///   process channels, whatever the mode.
+    /// - An `NChannel` colour marks each component's channel where it has
+    ///   one, and the four process channels where a component reaches them —
+    ///   a spot through its own process ink, another process space's
+    ///   components through it.
+    /// - `/All` marks every channel; `/None` none.
+    ///
+    /// The non-zero mode reads DeviceCMYK alone: 11.7.4.3 applies it where
+    /// the current colour space is DeviceCMYK.
+    #[must_use]
+    pub fn marks(&self, colorants: &ColorantTints, spots: Spots, nonzero: bool) -> Channels {
+        let width = 4 + spots.count();
+        let placed = |name: &[u8]| self.channel(name).filter(|&channel| channel < width);
+        let process = Channels::of(0..4);
+        match colorants.kind {
+            ColorantKind::None => Channels::NONE,
+            ColorantKind::All => Channels::ALL,
+            ColorantKind::DirectCmyk => {
+                if !nonzero {
+                    return process;
+                }
+                colorants
+                    .tints
+                    .iter()
+                    .filter(|tint| !tint.zero)
+                    .filter_map(|tint| placed(&tint.name))
+                    .fold(Channels::NONE, Channels::with)
+            }
+            ColorantKind::Colorants => {
+                let channels: Option<Vec<usize>> = colorants
+                    .tints
+                    .iter()
+                    .map(|tint| placed(&tint.name))
+                    .collect();
+                match channels {
+                    Some(channels) => Channels::of(channels),
+                    // 8.6.6.4, 8.6.6.5: the whole colour through its
+                    // alternate, process ink.
+                    None => process,
+                }
+            }
+            ColorantKind::NChannel => {
+                let mut marks = Channels::NONE;
+                for tint in &colorants.tints {
+                    match (placed(&tint.name), tint.alone) {
+                        (Some(channel), _) => marks = marks.with(channel),
+                        (None, Some(_)) => marks = (0..4).fold(marks, Channels::with),
+                        (None, None) => {}
+                    }
+                }
+                if colorants.process.is_some() {
+                    marks = (0..4).fold(marks, Channels::with);
+                }
+                marks
+            }
+        }
+    }
+
     /// The tints one sample of an image puts on each channel of a canvas of
     /// `spots` spot channels, into `out`, one a channel
     /// (`docs/design/overprint-separations.md`, "Images on plates"): a sample
@@ -470,6 +541,7 @@ mod tests {
                     name: Arc::from(*name),
                     tint: *tint,
                     alone: *alone,
+                    zero: *tint == 0,
                 })
                 .collect(),
             alternate,
@@ -657,6 +729,101 @@ mod tests {
             Some(vec![255, 255, 0, 80, 50, 0, 0]),
             "cyan 100 + 60 + 200, magenta 10 + 250, black 70 + 10"
         );
+    }
+
+    /// **A colour marks the channels Table 146 gives** (RC-03.5): DeviceCMYK
+    /// its four process channels, and under the non-zero mode those whose
+    /// component the file gives as not zero — a tint of 0 not zero among
+    /// them, a zero one left; a separation the channel of each name it gives,
+    /// a process name its process channel and a disabled spot its own plate,
+    /// whatever the mode; the four process channels once a name has no plate
+    /// here — a composite spot, one the plan does not name, one past the
+    /// canvas — since the colour then reverts to its alternate; an `NChannel`
+    /// colour each placed colorant's channel, and the process channels where
+    /// a spot with no plate or another process space reaches them; `/All`
+    /// every channel and `/None` none.
+    #[test]
+    fn a_colour_marks_the_channels_table_146_gives() {
+        let plan = plan();
+        let process = Channels::of(0..4);
+        let cmyk = ColorantTints::device_cmyk_components([0.6, 0.0, 0.001, 0.0]);
+        assert_eq!(plan.marks(&cmyk, spots(3), false), process);
+        assert_eq!(
+            plan.marks(&cmyk, spots(3), true),
+            Channels::of([0, 2]),
+            "cyan, and yellow's 0.001, not the zero magenta and black"
+        );
+        let none_zero = ColorantTints::device_cmyk_components([0.0; 4]);
+        assert_eq!(plan.marks(&none_zero, spots(3), true), Channels::NONE);
+
+        for nonzero in [false, true] {
+            let gold = colour(ColorantKind::Colorants, &[(b"Gold", 153, None)], None, None);
+            assert_eq!(plan.marks(&gold, spots(3), nonzero), Channels::of([4]));
+            let mixed = colour(
+                ColorantKind::Colorants,
+                &[(b"Orange", 0, None), (b"Cyan", 200, None)],
+                Some([1, 2, 3, 4]),
+                None,
+            );
+            assert_eq!(
+                plan.marks(&mixed, spots(3), nonzero),
+                Channels::of([0, 6]),
+                "a named channel is marked at no ink too"
+            );
+            let silver = colour(ColorantKind::Colorants, &[(b"Silver", 7, None)], None, None);
+            assert_eq!(plan.marks(&silver, spots(3), nonzero), Channels::of([5]));
+            for missing in [&b"Violet"[..], b"Teal"] {
+                let reverting = colour(
+                    ColorantKind::Colorants,
+                    &[(b"Gold", 153, None), (missing, 40, None)],
+                    Some([12, 0, 240, 3]),
+                    None,
+                );
+                assert_eq!(plan.marks(&reverting, spots(3), nonzero), process);
+            }
+            assert_eq!(
+                plan.marks(&mixed, spots(2), nonzero),
+                process,
+                "a plate past the canvas is no plate"
+            );
+
+            let n_channel = colour(
+                ColorantKind::NChannel,
+                &[(b"Black", 100, None), (b"Gold", 50, Some([0, 0, 255, 0]))],
+                None,
+                None,
+            );
+            assert_eq!(
+                plan.marks(&n_channel, spots(3), nonzero),
+                Channels::of([3, 4])
+            );
+            let reaching = colour(
+                ColorantKind::NChannel,
+                &[(b"Gold", 50, None), (b"Teal", 30, Some([200, 0, 0, 70]))],
+                None,
+                None,
+            );
+            assert_eq!(
+                plan.marks(&reaching, spots(3), nonzero),
+                Channels::of([0, 1, 2, 3, 4]),
+                "a spot with no plate reaches the process channels"
+            );
+            let other_process = colour(
+                ColorantKind::NChannel,
+                &[(b"Orange", 30, None)],
+                None,
+                Some([0, 250, 0, 10]),
+            );
+            assert_eq!(
+                plan.marks(&other_process, spots(3), nonzero),
+                Channels::of([0, 1, 2, 3, 6])
+            );
+
+            let all = colour(ColorantKind::All, &[(b"All", 102, None)], None, None);
+            assert_eq!(plan.marks(&all, spots(3), nonzero), Channels::ALL);
+            let none = colour(ColorantKind::None, &[], None, None);
+            assert_eq!(plan.marks(&none, spots(3), nonzero), Channels::NONE);
+        }
     }
 
     /// **A spotless ink is its process tints**, and an ink tinting a spot is
