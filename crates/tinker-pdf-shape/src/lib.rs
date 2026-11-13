@@ -373,6 +373,21 @@ pub enum Warning {
         /// The subtable.
         site: aat::Site,
     },
+    /// A contextual kerning subtable's entry pushed a glyph on a full
+    /// kerning stack — the chapter's "up to eight glyphs",
+    /// [`aat::KERNING_STACK`] — so the glyph was not pushed and the machine
+    /// went on.
+    KerningStackFull {
+        /// The subtable.
+        site: aat::Site,
+    },
+    /// A contextual kerning subtable's value found no glyph on the kerning
+    /// stack to pop, so its value list ended there, the glyphs it had kerned
+    /// standing.
+    KerningStackEmpty {
+        /// The subtable.
+        site: aat::Site,
+    },
 }
 
 /// What positioning does with the advance a mark glyph arrived with.

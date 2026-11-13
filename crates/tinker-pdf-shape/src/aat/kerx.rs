@@ -59,9 +59,42 @@
 //!   `rowCount × columnCount` cells.
 //!
 //! A cell a subtable's values point past is named as malformed and kerns
-//! nothing. Formats 1 and 4 are state machines this crate does not run yet,
-//! each refused by name (ruling 3), as a format the chapter does not define
-//! is ([`Warning::SubtableTypeNotRun`]).
+//! nothing.
+//!
+//! # Contextual kerning, format 1
+//!
+//! "A state table for contextual kerning of up to eight glyphs": an
+//! extended state table and a `uint32` `valueTable`, "Offset in bytes from
+//! the beginning of the state table to the beginning of the kerning value
+//! array", its entries "three words in length", a new state, flags and an
+//! index into the value array, `0xFFFF` meaning "no kerning is to be
+//! performed". `push` (`0x8000`) pushes "the position of the current glyph in
+//! the glyph array ... onto a stack of up to eight glyphs, called the kerning
+//! stack", `dontAdvance` (`0x4000`) holds the position, and `reset`
+//! (`0x2000`) will "reset the kerning data (clear the stack)". The value list
+//! the index starts holds "FUnit kerning values. Each pops one glyph from the
+//! kerning stack and applies the kerning value to it. The end of the list is
+//! marked by the value 0xFFFF." A value moves its glyph as a pair's value
+//! moves the pair's left glyph: its advance, or across the line its
+//! `y_offset`. The machine walks the run in layout order, backward where the
+//! coverage sets `processDirection`, on the driver every AAT machine runs on
+//! ([`StateTable::run`]), and runs only over a run holding a glyph its class
+//! table names, as a `morx` machine does.
+//!
+//! The chapter gives the three actions of one entry no order. This engine
+//! clears the stack, then pushes the current glyph, then pops the values
+//! against it, so an entry that starts a new context both resets and pushes,
+//! and one that kerns pops what the context pushed. At the end of text the
+//! current glyph is the last one the walk met, as it is for every machine on
+//! the driver, and the stack lives for one run of the subtable. A push onto a
+//! full stack is refused and named ([`Warning::KerningStackFull`]), and a
+//! value with no glyph to pop ends its list, named
+//! ([`Warning::KerningStackEmpty`]); a value list is so bounded by the stack's
+//! eight glyphs, and the machine by [`Limits::max_transitions`].
+//!
+//! Format 4 is a state machine this crate does not run yet, refused by name
+//! (ruling 3), as a format the chapter does not define is
+//! ([`Warning::SubtableTypeNotRun`]).
 //!
 //! # Bounds
 //!
@@ -74,6 +107,7 @@
 //! nothing and never panics (ruling 1).
 
 use super::lookup::{Lookup, LookupError};
+use super::state::{Cursor, Entry, StateTable, Traversal};
 use super::Site;
 use crate::buffer::{Buffer, Direction};
 use crate::common::Tag;
@@ -106,6 +140,21 @@ const PAIRS_HEADER: usize = 16;
 const PAIR: usize = 6;
 /// Format 6's `valuesAreLong`.
 const VALUES_ARE_LONG: u32 = 0x0000_0001;
+
+/// The kerning stack's depth: "a stack of up to eight glyphs".
+pub const KERNING_STACK: usize = 8;
+/// The bytes of a format 1 entry: new state, flags and the value index.
+const CONTEXTUAL_ENTRY: usize = 6;
+/// Where format 1's `valueTable` offset sits, after the `STXHeader`.
+const VALUE_TABLE: usize = 16;
+/// Format 1's flag pushing the current glyph on the kerning stack.
+const PUSH: u16 = 0x8000;
+/// Format 1's flag clearing the kerning stack.
+const RESET: u16 = 0x2000;
+/// The value index naming no list.
+const NO_VALUES: u16 = 0xFFFF;
+/// The value ending a list.
+const END_OF_VALUES: u16 = 0xFFFF;
 
 /// A `kerx` table.
 #[derive(Clone, Copy, Debug)]
@@ -226,16 +275,19 @@ impl<'a> Kerx<'a> {
             let cross = subtable.coverage & CROSS_STREAM != 0;
             let outcome = match subtable.format() {
                 0 => Pairs::parse(subtable.bytes)
-                    .map(|table| kern_pairs(&table, buffer, cross, site, &mut warnings)),
+                    .map(|table| kern_pairs(&table, buffer, cross, site, &mut warnings))
+                    .map_err(|refused| refused.warning(site)),
+                1 => kern_contextually(subtable, buffer, limits, site, &mut warnings),
                 2 => ClassArray::parse(subtable.bytes)
-                    .map(|table| kern_pairs(&table, buffer, cross, site, &mut warnings)),
+                    .map(|table| kern_pairs(&table, buffer, cross, site, &mut warnings))
+                    .map_err(|refused| refused.warning(site)),
                 6 => IndexArray::parse(subtable.bytes)
-                    .map(|table| kern_pairs(&table, buffer, cross, site, &mut warnings)),
-                kind => Err(Refused::Format(kind)),
+                    .map(|table| kern_pairs(&table, buffer, cross, site, &mut warnings))
+                    .map_err(|refused| refused.warning(site)),
+                kind => Err(Refused::Format(kind).warning(site)),
             };
-            match outcome {
-                Ok(()) => {}
-                Err(refused) => warnings.push(refused.warning(site)),
+            if let Err(warning) = outcome {
+                warnings.push(warning);
             }
         }
         if rtl {
@@ -263,6 +315,14 @@ fn dedup(warnings: Vec<Warning>) -> Vec<Warning> {
         }
     }
     out
+}
+
+/// Records `warning` unless it is recorded already: a refusal a machine meets
+/// at every transition is held once, not once a transition.
+fn note(warnings: &mut Vec<Warning>, warning: Warning) {
+    if !warnings.contains(&warning) {
+        warnings.push(warning);
+    }
 }
 
 /// One subtable of a `kerx` table.
@@ -374,7 +434,7 @@ fn kern_pairs<T: PairTable>(
                     }
                 }
             }
-            Cell::Malformed => warnings.push(Warning::MalformedAatSubtable { site }),
+            Cell::Malformed => note(warnings, Warning::MalformedAatSubtable { site }),
         }
     }
 }
@@ -545,9 +605,120 @@ impl PairTable for IndexArray<'_> {
     }
 }
 
+/// Runs a format 1 subtable, contextual kerning, over `buffer`; see the
+/// module documentation. A push or a value list the subtable cannot serve is
+/// recorded in `warnings` and the machine goes on.
+///
+/// # Errors
+///
+/// The state table's, where it cannot be read, [`Warning::MalformedAatSubtable`]
+/// where the subtable holds no `valueTable` offset, or one past its end, and
+/// the driver's: the machine stopped at its ceiling, or at a state, entry or
+/// class its tables do not hold, the run as it left it.
+fn kern_contextually(
+    subtable: &KerxSubtable<'_>,
+    buffer: &mut Buffer,
+    limits: &Limits,
+    site: Site,
+    warnings: &mut Vec<Warning>,
+) -> Result<(), Warning> {
+    let body = subtable
+        .bytes
+        .get(SUBTABLE_HEADER..)
+        .ok_or(Warning::MalformedAatSubtable { site })?;
+    let table = StateTable::parse(body, CONTEXTUAL_ENTRY).map_err(|error| error.warning(site))?;
+    // As a `morx` machine does, one runs only over a run holding a glyph its
+    // class table names: the chapter's coverage bitfields, which "are only
+    // used for type 1 and 4 'kerx' subtables", let a subtable none of whose
+    // glyphs a run uses be skipped, and the class table is what says which.
+    if !table.reaches(buffer) {
+        return Ok(());
+    }
+    let data = Bytes::new(body);
+    let values = data
+        .u32(VALUE_TABLE)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .and_then(|offset| data.at(offset))
+        .ok_or(Warning::MalformedAatSubtable { site })?;
+    let cross = subtable.coverage & CROSS_STREAM != 0;
+    let traversal = if subtable.coverage & PROCESS_DIRECTION != 0 {
+        Traversal::Backward
+    } else {
+        Traversal::Forward
+    };
+    let mut stack: Vec<usize> = Vec::with_capacity(KERNING_STACK);
+    let mut act =
+        |buffer: &mut Buffer, entry: &Entry<'_>, cursor: &mut Cursor| -> Result<(), Warning> {
+            if entry.flags & RESET != 0 {
+                stack.clear();
+            }
+            if entry.flags & PUSH != 0 {
+                if let Some(at) = cursor.glyph {
+                    if stack.len() >= KERNING_STACK {
+                        note(warnings, Warning::KerningStackFull { site });
+                    } else {
+                        stack.push(at);
+                    }
+                }
+            }
+            let first = entry.field(0).unwrap_or(NO_VALUES);
+            if first != NO_VALUES {
+                pop_values(values, first, &mut stack, buffer, cross, site, warnings);
+            }
+            Ok(())
+        };
+    table.run(buffer, traversal, limits, site, &mut act)
+}
+
+/// Kerns the glyphs on `stack` by the value list starting at value `first`:
+/// each value pops one glyph and is added to its advance, or across the line
+/// to its `y_offset`, until the list's `0xFFFF`. A value with no glyph to pop
+/// ends the list, named ([`Warning::KerningStackEmpty`]), as does one the
+/// value table does not hold, named as malformed; a list is bounded by the
+/// stack, its eight glyphs and the end.
+fn pop_values(
+    values: Bytes<'_>,
+    first: u16,
+    stack: &mut Vec<usize>,
+    buffer: &mut Buffer,
+    cross: bool,
+    site: Site,
+    warnings: &mut Vec<Warning>,
+) {
+    let mut index = usize::from(first);
+    loop {
+        let Some(raw) = index.checked_mul(2).and_then(|at| values.u16(at)) else {
+            note(warnings, Warning::MalformedAatSubtable { site });
+            return;
+        };
+        if raw == END_OF_VALUES {
+            return;
+        }
+        let Some(at) = stack.pop() else {
+            note(warnings, Warning::KerningStackEmpty { site });
+            return;
+        };
+        let value = i32::from(i16::from_be_bytes(raw.to_be_bytes()));
+        if let Some(glyph) = buffer.glyph_mut(at) {
+            if cross {
+                glyph.y_offset = glyph.y_offset.saturating_add(value);
+            } else {
+                glyph.x_advance = glyph.x_advance.saturating_add(value);
+            }
+        }
+        index = match index.checked_add(1) {
+            Some(next) => next,
+            None => return,
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cell, ClassArray, IndexArray, PairTable, Pairs, Refused};
+    use super::{pop_values, Cell, ClassArray, IndexArray, PairTable, Pairs, Refused};
+    use crate::buffer::Buffer;
+    use crate::read::Bytes;
+    use crate::Warning;
 
     fn u16s(values: &[u16]) -> Vec<u8> {
         values.iter().flat_map(|v| v.to_be_bytes()).collect()
@@ -662,5 +833,70 @@ mod tests {
             assert_eq!(table.cell(9, 4), Cell::Value(0), "size {size}");
             assert_eq!(table.cell(3, 5), Cell::Malformed, "size {size}");
         }
+    }
+
+    /// A format 1 value list pops the kerning stack's top first, one glyph a
+    /// value, until the list's `0xFFFF`, into the advance or across the line
+    /// into the `y_offset`; a value finding the stack empty, or a list the
+    /// value table does not hold, ends the list, each named once.
+    #[test]
+    fn a_value_list_pops_the_stack_until_its_end() {
+        let site = super::site(0);
+        // Two lists: 10 and −20 from value 0, 7 and 8 from value 3.
+        let table = u16s(&[10, 0xFFEC, 0xFFFF, 7, 8, 0xFFFF]);
+        let values = Bytes::new(&table);
+        let mut buffer = Buffer::from_glyphs(&[1, 2, 3]);
+        let mut stack: Vec<usize> = vec![0, 1, 2];
+        let mut warnings: Vec<Warning> = Vec::new();
+        pop_values(
+            values,
+            0,
+            &mut stack,
+            &mut buffer,
+            false,
+            site,
+            &mut warnings,
+        );
+        let advances: Vec<i32> = buffer.glyphs().iter().map(|g| g.x_advance).collect();
+        assert_eq!(advances, vec![0, -20, 10], "the top popped first");
+        assert_eq!(stack, vec![0], "the list's two values popped two");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Across the line: 7 pops glyph 0, and 8 finds the stack empty.
+        pop_values(
+            values,
+            3,
+            &mut stack,
+            &mut buffer,
+            true,
+            site,
+            &mut warnings,
+        );
+        assert_eq!(buffer.glyphs()[0].y_offset, 7);
+        assert_eq!(buffer.glyphs()[0].x_advance, 0);
+        assert!(stack.is_empty());
+        assert_eq!(warnings, vec![Warning::KerningStackEmpty { site }]);
+        // A list starting past the value table, twice, named once; the glyph
+        // on the stack is neither kerned nor popped.
+        let mut held: Vec<usize> = vec![1];
+        for _ in 0..2 {
+            pop_values(
+                values,
+                9,
+                &mut held,
+                &mut buffer,
+                false,
+                site,
+                &mut warnings,
+            );
+        }
+        assert_eq!(held, vec![1]);
+        assert_eq!(buffer.glyphs()[1].x_advance, -20);
+        assert_eq!(
+            warnings,
+            vec![
+                Warning::KerningStackEmpty { site },
+                Warning::MalformedAatSubtable { site },
+            ]
+        );
     }
 }

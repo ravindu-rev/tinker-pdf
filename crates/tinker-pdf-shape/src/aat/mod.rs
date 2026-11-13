@@ -23,9 +23,10 @@
 //!   ligature, on a component stack [`COMPONENT_STACK`] deep, and insertion,
 //!   each inserted glyph marked with how ([`crate::Insertion`]);
 //!   [`Selection`] is what a caller's OpenType features ask of it;
-//! - [`Kerx`], the extended kerning table: its subtables' coverage, and the
-//!   pair formats 0, 2 and 6 run over a run in layout order, along the line
-//!   or across it;
+//! - [`Kerx`], the extended kerning table: its subtables' coverage, the
+//!   pair formats 0, 2 and 6 and the contextual kerning machine of format 1,
+//!   on a kerning stack [`KERNING_STACK`] deep, run over a run in layout
+//!   order, along the line or across it;
 //! - [`Feat`], the feature name table, which says which features' settings
 //!   exclude one another.
 //!
@@ -47,7 +48,8 @@ mod state;
 
 pub use feat::{Feat, FeatureName, FEAT};
 pub use kerx::{
-    Kerx, KerxSubtable, CROSS_STREAM, KERX, KERX_VARIATION, KERX_VERTICAL, PROCESS_DIRECTION,
+    Kerx, KerxSubtable, CROSS_STREAM, KERNING_STACK, KERX, KERX_VARIATION, KERX_VERTICAL,
+    PROCESS_DIRECTION,
 };
 pub use ligature::COMPONENT_STACK;
 pub use lookup::{Lookup, LookupError, LookupFormat};

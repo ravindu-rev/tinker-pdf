@@ -931,13 +931,24 @@ does not say whether a shift carries to the glyphs after it.
 - **Format 6**, an index array: row and column indices from two lookup
   tables, the row's pre-multiplied by `columnCount`, summed into the kerning
   array, two-byte values or four where `valuesAreLong` (bit 0) is set.
-- **Format 1**, contextual kerning: an entry's `push` (`0x8000`) pushes the
-  current glyph on the kerning stack of "up to eight glyphs", `dontAdvance`
+- **Format 1**, contextual kerning: an extended state table whose header is
+  followed by a `uint32` `valueTable`, "Offset in bytes from the beginning of
+  the state table to the beginning of the kerning value array", and whose
+  entries are three words. An entry's `push` (`0x8000`) pushes the current
+  glyph on the kerning stack of "up to eight glyphs", `dontAdvance`
   (`0x4000`) holds the position, `reset` (`0x2000`) clears the stack, and its
-  value index, `0xFFFF` for none, starts a list of values in the value table,
-  each popping one glyph and kerning it, ended by `0xFFFF`. A push onto a full
-  stack is refused and recorded, and a value with no glyph to pop ends its
-  list.
+  value index, "an index into the kerning value array", `0xFFFF` for none,
+  starts a list of values there, each popping one glyph and kerning it,
+  ended by `0xFFFF`. The chapter gives one entry's three actions no order:
+  this engine clears, then pushes, then pops, so an entry that starts a
+  context both resets and pushes its own glyph, and one that pushes and
+  kerns kerns its own glyph first (*Risks*). At the end of text the current
+  glyph is the last one the walk met, as for every machine on the driver.
+  The machine walks the run backward where `processDirection` is set, and
+  runs only over a run holding a glyph its class table names, as a `morx`
+  machine does. A push onto a full stack is refused and recorded
+  (`Warning::KerningStackFull`), the glyph not pushed, and a value with no
+  glyph to pop ends its list (`Warning::KerningStackEmpty`).
 - **Format 4**, attachment: `mark` (`0x8000`) remembers the current glyph and
   an action index, `0xFFFF` for none, names an action of the type the
   subtable's flags give: control points (type 0), `ankr` anchor points (1) or
@@ -1140,6 +1151,7 @@ row here reads.
 | A behaviour the manual leaves open is read one way where a face expects another | The default mark, the end-of-text entry and an insertion's advance are pinned by named test sections; the rest are stated here as this engine's readings |
 | A rearrangement under a reverse traversal reads its span the other way | Spans are layout positions whatever the traversal; no test section rearranges in reverse, so `MORX-37` to `MORX-40` hold the traversal and FT-07c.6's verb test the spans |
 | `kerx` format 2's sentences on where a value lies disagree, its first saying the left values are "offset by the offset of the array" | The chapter's last sentence and its zero for an uncovered glyph decide: the array's address plus the two class values, the `kern` chapter's subtable-relative layout being the one an uncovered zero breaks; a face built the other way kerns by the wrong cell, never out of bounds |
+| `kerx` format 1 gives one entry's push, reset and value list no order | Read as reset, then push, then the values, so a context's last glyph is kerned by the entry that meets it, and pinned by `an_entry_clears_the_stack_then_pushes_then_pops`; a face written to another order kerns a glyph one place off, never out of bounds |
 | A cross-stream shift is cumulative in some faces' intent | Read per glyph, the reading the `kerx` chapter's text supports; the `kern` example that steps the baseline is that table's convention |
 | The OpenType-to-AAT mapping is by meaning, not stated | Only `ss01` to `ss20` and `hojo` are stated by the registry; the rest follow its descriptions, and a tag with no row is recorded, never guessed |
 | A face carrying both kinds of table is shaped otherwise than today | It is not: OpenType Layout wins wherever it is present, and a different precedence is the owner's to take |

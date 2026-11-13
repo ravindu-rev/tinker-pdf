@@ -21,9 +21,9 @@ use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::aat::{
     aat_setting, AatSetting, Cursor, Entry, Feat, FeatureEntry, Kerx, Lookup, LookupError,
     LookupFormat, Morx, Selection, Site, StateError, StateTable, Traversal, ANY_ORIENTATION,
-    COMPONENT_STACK, CONTEXTUAL, CROSS_STREAM, DELETED, DELETED_GLYPH, DESCENDING, END_OF_TEXT,
-    INSERTION, KERX_VARIATION, KERX_VERTICAL, LIGATURE, LOGICAL, NONCONTEXTUAL, OUT_OF_BOUNDS,
-    REARRANGEMENT, VERTICAL,
+    COMPONENT_STACK, CONTEXTUAL, CROSS_STREAM, DELETED, DELETED_GLYPH, DESCENDING, DONT_ADVANCE,
+    END_OF_TEXT, INSERTION, KERNING_STACK, KERX_VARIATION, KERX_VERTICAL, LIGATURE, LOGICAL,
+    NONCONTEXTUAL, OUT_OF_BOUNDS, PROCESS_DIRECTION, REARRANGEMENT, VERTICAL,
 };
 use tinker_pdf_shape::bidi::{BaseDirection, Level};
 use tinker_pdf_shape::shape::Run;
@@ -5105,8 +5105,9 @@ fn kerx_runs_under_the_precedence_the_design_states() {
 
 /// A `kerx` this crate cannot read is named on every run, which is not
 /// kerned; a subtable the table cannot hold ends the walk, named, the ones
-/// before it run; a format the chapter does not define, or a state-machine
-/// format not run, is skipped and named; and past `Limits::max_subtables`
+/// before it run; a format the chapter does not define, or the state-machine
+/// format not run, is skipped and named, as a contextual kerning subtable
+/// whose state table cannot be read is; and past `Limits::max_subtables`
 /// nothing more is read.
 #[test]
 fn a_kerx_table_or_subtable_that_cannot_be_read_is_named() {
@@ -5141,8 +5142,8 @@ fn a_kerx_table_or_subtable_that_cannot_be_read_is_named() {
         );
     }
 
-    // Formats 3, 5 and 7, undefined, and 1 and 4, state machines not run.
-    for format in [3u8, 5, 7, 255, 1, 4] {
+    // Formats 3, 5 and 7, undefined, and 4, a state machine not run.
+    for format in [3u8, 5, 7, 255, 4] {
         let face = kerning_face().with(
             b"kerx",
             kerx_table(2, &[kerx_subtable(u32::from(format), 0, &[0; 32]), good()]),
@@ -5158,6 +5159,17 @@ fn a_kerx_table_or_subtable_that_cannot_be_read_is_named() {
             "format {format}"
         );
     }
+    // Format 1 runs, and a zeroed body is no state table it can read.
+    let face = kerning_face().with(
+        b"kerx",
+        kerx_table(2, &[kerx_subtable(1, 0, &[0; 32]), good()]),
+    );
+    let (out, warnings) = kerned(&face, "AV");
+    assert_eq!(out, moved_by(&face, "AV", &[-80, 0]));
+    assert_eq!(
+        warnings,
+        vec![Warning::MalformedAatSubtable { site: kerx_site(0) }]
+    );
 
     // The subtable ceiling, read through the table directly.
     let table = kerx_table(2, &[good(), good(), good()]);
@@ -5238,5 +5250,443 @@ fn a_pair_table_pointing_past_itself_is_named() {
             site: kerx_site(0),
             format: 3
         }]
+    );
+}
+
+// --- kerx: contextual kerning (FT-07c.12) ----------------------------------
+//
+// Format 1's state machine, on the driver every AAT machine runs on: its
+// entries clear the kerning stack, push the current glyph on it and start a
+// value list, each value popping one glyph and kerning it — along the line
+// into its advance, across it into its `y_offset`.
+
+/// Format 1's `push`: the current glyph onto the kerning stack.
+const PUSH: u16 = 0x8000;
+/// Format 1's `reset`: the kerning stack cleared.
+const RESET: u16 = 0x2000;
+/// A format 1 value index naming no value list.
+const NO_VALUES: u16 = 0xFFFF;
+
+/// A format 1 subtable's body: an extended state table — `classes` giving
+/// glyphs their classes, `lines` the state array, and `entries` each entry's
+/// new state, flags and value index — whose `valueTable` offset, from the
+/// state table's start, names `values`, the value lists one after another.
+fn kerx_contextual(
+    classes: &[(u16, u16)],
+    lines: &[&[u16]],
+    entries: &[(u16, u16, u16)],
+    values: &[u16],
+) -> Vec<u8> {
+    let entries: Vec<Vec<u16>> = entries
+        .iter()
+        .map(|(state, flags, index)| vec![*state, *flags, *index])
+        .collect();
+    let entries: Vec<&[u16]> = entries.iter().map(Vec::as_slice).collect();
+    let class_count = lines.first().map_or(4, |line| line.len());
+    let mut out = stx(
+        count32(class_count),
+        1,
+        &lookup_single(classes),
+        lines,
+        &entries,
+    );
+    let values_at = count32(out.len());
+    put32(&mut out, 16, values_at);
+    out.extend(u16s(values));
+    out
+}
+
+/// A format 1 value list: `values` in font units, then the `0xFFFF` that
+/// ends it.
+fn value_list(values: &[i16]) -> Vec<u16> {
+    values
+        .iter()
+        .map(|value| u16::from_be_bytes(value.to_be_bytes()))
+        .chain([0xFFFF])
+        .collect()
+}
+
+/// One worked example of the manual's for a `kerx` state machine: where it
+/// is, the whole subtable it transcribes, and each case's glyphs with the
+/// advance each leaves with, over a left-to-right run whose advances start
+/// at zero.
+type WorkedKerning = (
+    &'static str,
+    fn() -> Vec<u8>,
+    &'static [(&'static [u16], &'static [i32])],
+);
+
+/// Format 1's worked examples: none. The `kerx` chapter gives none, and the
+/// `kern` chapter's *Kerning Table Example* is a `kern` format-1 machine
+/// whose value lists keep conventions `kerx`'s does not share
+/// (`docs/design/shaping.md`, *The manual's worked examples*), so the machine
+/// is held by the readings below; H-142's expectations are what the count
+/// waits on.
+const CONTEXTUAL_KERNING_EXAMPLES: &[WorkedKerning] = &[];
+
+/// Runs each worked example through a `kerx` of its one subtable, and says
+/// how many there were.
+fn hold_kerning_to_worked_examples(examples: &[WorkedKerning]) -> usize {
+    for (source, subtable, cases) in examples {
+        let table = kerx_table(2, &[subtable()]);
+        let kerx = Kerx::parse(&table).expect("a readable kerx");
+        assert!(!cases.is_empty(), "{source} states a case");
+        for (input, advances) in *cases {
+            let mut buffer = Buffer::from_glyphs(input);
+            let warnings = kerx.run(&mut buffer, &Limits::DEFAULT);
+            let out: Vec<i32> = buffer.glyphs().iter().map(|g| g.x_advance).collect();
+            assert_eq!(out, *advances, "{source}, {input:?}");
+            assert!(warnings.is_empty(), "{source}: {warnings:?}");
+        }
+    }
+    examples.len()
+}
+
+/// Contextual kerning reproduces each worked example
+/// `docs/design/shaping.md` lists for `kerx` format 1, and there are none.
+#[test]
+fn contextual_kerning_reproduces_the_manuals_worked_examples() {
+    assert_eq!(
+        hold_kerning_to_worked_examples(CONTEXTUAL_KERNING_EXAMPLES),
+        0
+    );
+}
+
+/// A machine kerning `A V A`, under `coverage` and format 1: an `A` clears
+/// the stack and pushes itself, a `V` after it pushes itself, and an `A`
+/// after the two pushes itself and pops all three — itself by −30, the `V`
+/// by −20 and the first `A` by −10. Classes: `A` 4 and `V` 5. States 0 and 1
+/// are the start, 2 after an `A` and 3 after `A V`.
+fn triple_machine(coverage: u32) -> Vec<u8> {
+    kerx_subtable(
+        coverage | 1,
+        0,
+        &kerx_contextual(
+            &[(KA, 4), (KV, 5)],
+            &[
+                &[0, 0, 0, 0, 1, 0],
+                &[0, 0, 0, 0, 1, 0],
+                &[0, 0, 0, 0, 1, 2],
+                &[0, 0, 0, 0, 3, 0],
+            ],
+            &[
+                (0, 0, NO_VALUES),
+                (2, RESET | PUSH, NO_VALUES),
+                (3, PUSH, NO_VALUES),
+                (0, PUSH, 0),
+            ],
+            &value_list(&[-30, -20, -10]),
+        ),
+    )
+}
+
+/// A context's glyphs are pushed as the machine meets them and its value
+/// list pops them, the last pushed first, each moved by its value; a run
+/// holding no whole context is not kerned, and `kern` set to 0 turns the
+/// subtable off as it does a pair format.
+#[test]
+fn a_context_pushes_its_glyphs_and_a_value_list_kerns_them() {
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[triple_machine(0)]));
+    for (text, moved) in [
+        ("AVA", &[-10, -20, -30][..]),
+        ("VAVA", &[0, -10, -20, -30]),
+        ("AVAVA", &[-10, -20, -30, 0, 0]),
+        ("AAVA", &[0, -10, -20, -30]),
+        ("AV", &[0, 0]),
+        ("AVV", &[0, 0, 0]),
+        ("AVTA", &[0, 0, 0, 0]),
+    ] {
+        let (out, warnings) = kerned(&face, text);
+        assert!(warnings.is_empty(), "{text}: {warnings:?}");
+        assert_eq!(out, moved_by(&face, text, moved), "{text}");
+    }
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let off = [(Tag::new(b"kern"), 0u32)];
+    let runs = line_runs(&Shaper::new(&sfnt).with_settings(&off), "AVA");
+    assert_eq!(glyphs(&runs), moved_by(&face, "AVA", &[0, 0, 0]));
+}
+
+/// `processDirection` walks the run from its last glyph to its first, so the
+/// context is met the other way round; a cross-stream subtable moves each
+/// popped glyph up by its value, that glyph alone, and changes no advance.
+#[test]
+fn a_contextual_subtable_walks_and_kerns_the_way_its_coverage_says() {
+    let forward = kerning_face().with(b"kerx", kerx_table(2, &[triple_machine(0)]));
+    let backward =
+        kerning_face().with(b"kerx", kerx_table(2, &[triple_machine(PROCESS_DIRECTION)]));
+    let (out, warnings) = kerned(&forward, "AVAA");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, moved_by(&forward, "AVAA", &[-10, -20, -30, 0]));
+    let (out, warnings) = kerned(&backward, "AVAA");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        out,
+        moved_by(&backward, "AVAA", &[-30, -20, -10, 0]),
+        "the last `A` starts the context and the first ends it"
+    );
+
+    let across = kerning_face().with(b"kerx", kerx_table(2, &[triple_machine(CROSS_STREAM)]));
+    let (out, warnings) = kerned(&across, "AVA");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut expected = moved_by(&across, "AVA", &[0, 0, 0]);
+    for (glyph, up) in expected.iter_mut().zip([-10, -20, -30]) {
+        glyph.y_offset = up;
+    }
+    assert_eq!(out, expected);
+}
+
+/// A machine whose every entry stays in state 0: an `A` pushes itself, a `T`
+/// clears the stack and pushes itself, an `o` pops two glyphs by −7 and −9,
+/// and an `x` pushes itself and pops one by +5. Classes: `A` 4, `T` 5, `o` 6
+/// and `x` 7.
+fn stacker_machine() -> Vec<u8> {
+    let line: &[u16] = &[0, 0, 0, 0, 1, 2, 3, 4];
+    let mut values = value_list(&[-7, -9]);
+    let x_list = count16(values.len());
+    values.extend(value_list(&[5]));
+    kerx_subtable(
+        1,
+        0,
+        &kerx_contextual(
+            &[(KA, 4), (KT, 5), (KO, 6), (KX, 7)],
+            &[line, line],
+            &[
+                (0, 0, NO_VALUES),
+                (0, PUSH, NO_VALUES),
+                (0, RESET | PUSH, NO_VALUES),
+                (0, 0, 0),
+                (0, PUSH, x_list),
+            ],
+            &values,
+        ),
+    )
+}
+
+/// One entry's three actions in the design's order: the stack is cleared,
+/// then the current glyph pushed, then the values popped — so a `T`'s reset
+/// leaves the `T` it pushes, and an `x` that pushes and kerns kerns itself.
+/// A value with no glyph to pop ends its list, named, what it kerned
+/// standing.
+#[test]
+fn an_entry_clears_the_stack_then_pushes_then_pops() {
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[stacker_machine()]));
+    let empty = Warning::KerningStackEmpty { site: kerx_site(0) };
+    for (text, moved, warned) in [
+        ("AAo", &[-9, -7, 0][..], false),
+        ("AATo", &[0, 0, -7, 0], true),
+        ("Ax", &[0, 5], false),
+        ("AxAo", &[-9, 5, -7, 0], false),
+        ("o", &[0], true),
+    ] {
+        let (out, warnings) = kerned(&face, text);
+        assert_eq!(out, moved_by(&face, text, moved), "{text}");
+        let expected = if warned { vec![empty] } else { Vec::new() };
+        assert_eq!(warnings, expected, "{text}");
+    }
+}
+
+/// A machine holding its place once: an `A` met in state 0 pushes itself and
+/// moves to state 2 without advancing, and the `A` met again in state 2 pops
+/// one glyph by −11 and moves back. Classes: `A` 4.
+fn holding_kerner() -> Vec<u8> {
+    kerx_subtable(
+        1,
+        0,
+        &kerx_contextual(
+            &[(KA, 4)],
+            &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1], &[0, 0, 0, 0, 2]],
+            &[
+                (0, 0, NO_VALUES),
+                (2, PUSH | DONT_ADVANCE, NO_VALUES),
+                (0, 0, 0),
+            ],
+            &value_list(&[-11]),
+        ),
+    )
+}
+
+/// `dontAdvance` holds the machine on its glyph, which it meets again in the
+/// state the entry names: each `A` is pushed, then kerned by the entry its
+/// second meeting takes.
+#[test]
+fn dont_advance_meets_the_glyph_again_in_its_new_state() {
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[holding_kerner()]));
+    let (out, warnings) = kerned(&face, "AAV");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, moved_by(&face, "AAV", &[-11, -11, 0]));
+}
+
+/// A machine pushing every `A` and, at the end of text, popping a list of
+/// `pops` values, 1 to `pops`. Classes: `A` 4.
+fn ceiling_machine(pops: i16) -> Vec<u8> {
+    let values: Vec<i16> = (1..=pops).collect();
+    kerx_subtable(
+        1,
+        0,
+        &kerx_contextual(
+            &[(KA, 4)],
+            &[&[2, 0, 0, 0, 1], &[2, 0, 0, 0, 1]],
+            &[(0, 0, NO_VALUES), (0, PUSH, NO_VALUES), (0, 0, 0)],
+            &value_list(&values),
+        ),
+    )
+}
+
+/// The kerning stack holds the chapter's eight glyphs: eight are pushed and
+/// kerned with nothing said, and a ninth push is refused and named, the glyph
+/// not pushed; the list's ninth value then finds no glyph to pop, which ends
+/// it, named. Each is named once however often it is met.
+#[test]
+fn a_kerning_stack_past_its_ceiling_is_refused_and_named() {
+    assert_eq!(KERNING_STACK, 8);
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[ceiling_machine(8)]));
+    let (out, warnings) = kerned(&face, "AAAAAAAA");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        out,
+        moved_by(&face, "AAAAAAAA", &[8, 7, 6, 5, 4, 3, 2, 1]),
+        "the last pushed popped first"
+    );
+
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[ceiling_machine(9)]));
+    let (out, warnings) = kerned(&face, "AAAAAAAAAA");
+    assert_eq!(
+        warnings,
+        vec![
+            Warning::KerningStackFull { site: kerx_site(0) },
+            Warning::KerningStackEmpty { site: kerx_site(0) },
+        ]
+    );
+    assert_eq!(
+        out,
+        moved_by(&face, "AAAAAAAAAA", &[8, 7, 6, 5, 4, 3, 2, 1, 0, 0]),
+        "the ninth and tenth `A` never pushed"
+    );
+}
+
+/// A contextual machine meeting no glyph its class table names does not run
+/// — its end-of-text list, which would find the stack empty, is not taken —
+/// and one meeting such a glyph runs over the whole run.
+#[test]
+fn a_contextual_machine_meeting_no_glyph_it_names_does_not_run() {
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[ceiling_machine(1)]));
+    let (out, warnings) = kerned(&face, "xoV");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, moved_by(&face, "xoV", &[0, 0, 0]));
+    let (out, warnings) = kerned(&face, "xAV");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, moved_by(&face, "xAV", &[0, 1, 0]));
+}
+
+/// A right-to-left run is walked in layout order: the machine pushes a bet
+/// and kerns it by −60 where an alef follows it on the line, as the text's
+/// alef then bet lays out, and does nothing in the text's own order.
+#[test]
+fn a_right_to_left_run_is_kerned_contextually_in_layout_order() {
+    let machine = kerx_subtable(
+        1,
+        0,
+        &kerx_contextual(
+            &[(KBET, 4), (KALEF, 5)],
+            &[
+                &[0, 0, 0, 0, 1, 0],
+                &[0, 0, 0, 0, 1, 0],
+                &[0, 0, 0, 0, 1, 2],
+            ],
+            &[(0, 0, NO_VALUES), (2, RESET | PUSH, NO_VALUES), (0, 0, 0)],
+            &value_list(&[-60]),
+        ),
+    );
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[machine]));
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let (_, runs) = Shaper::new(&sfnt).shape_text("\u{5D0}\u{5D1}", BaseDirection::Auto);
+    assert!(!runs[0].direction().is_forward());
+    assert!(runs[0].warnings().is_empty(), "{:?}", runs[0].warnings());
+    assert_eq!(
+        glyphs(&runs),
+        moved_by(&face, "\u{5D0}\u{5D1}", &[0, -60]),
+        "the bet, left of the alef on the line, moved"
+    );
+}
+
+/// A machine that loops stops at its ceiling, the pushes past the stack's
+/// refused on the way; a value list the value table does not hold, a
+/// `valueTable` past the subtable and a class table of a format the manual
+/// does not define are each named, and kern nothing.
+#[test]
+fn a_contextual_kerning_subtable_that_loops_or_cannot_be_read_is_named() {
+    let site = kerx_site(0);
+    let lines: &[&[u16]] = &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]];
+
+    // An `A` pushed again and again without advancing.
+    let looping = kerx_subtable(
+        1,
+        0,
+        &kerx_contextual(
+            &[(KA, 4)],
+            lines,
+            &[(0, 0, NO_VALUES), (0, PUSH | DONT_ADVANCE, NO_VALUES)],
+            &value_list(&[]),
+        ),
+    );
+    let table = kerx_table(2, &[looping]);
+    let kerx = Kerx::parse(&table).expect("readable");
+    let limits = Limits {
+        max_transitions: 50,
+        ..Limits::DEFAULT
+    };
+    let mut buffer = Buffer::from_glyphs(&[KA, KA]);
+    assert_eq!(
+        kerx.run(&mut buffer, &limits),
+        vec![
+            Warning::KerningStackFull { site },
+            Warning::TransitionBudgetExceeded { site },
+        ]
+    );
+    assert!(buffer.glyphs().iter().all(|glyph| glyph.x_advance == 0));
+
+    // A value index forty values into a table of two.
+    let past = kerx_contextual(
+        &[(KA, 4)],
+        lines,
+        &[(0, 0, NO_VALUES), (0, PUSH, 40)],
+        &value_list(&[-5]),
+    );
+    // The `valueTable` offset, past the subtable.
+    let mut far = kerx_contextual(
+        &[(KA, 4)],
+        lines,
+        &[(0, 0, NO_VALUES), (0, PUSH, 0)],
+        &value_list(&[-5]),
+    );
+    put32(&mut far, 16, 4_000);
+    for (name, body) in [("value index", past), ("valueTable", far)] {
+        let face = kerning_face().with(b"kerx", kerx_table(2, &[kerx_subtable(1, 0, &body)]));
+        let (out, warnings) = kerned(&face, "AA");
+        assert_eq!(out, moved_by(&face, "AA", &[0, 0]), "{name}");
+        assert_eq!(
+            warnings,
+            vec![Warning::MalformedAatSubtable { site }],
+            "{name}"
+        );
+    }
+
+    // The class table, after the `STXHeader` and `valueTable` at 20, made a
+    // lookup of format 3.
+    let mut odd = kerx_contextual(
+        &[(KA, 4)],
+        lines,
+        &[(0, 0, NO_VALUES), (0, PUSH, 0)],
+        &value_list(&[-5]),
+    );
+    odd[20..22].copy_from_slice(&3u16.to_be_bytes());
+    let face = kerning_face().with(b"kerx", kerx_table(2, &[kerx_subtable(1, 0, &odd)]));
+    let (out, warnings) = kerned(&face, "A");
+    assert_eq!(out, moved_by(&face, "A", &[0]));
+    assert_eq!(
+        warnings,
+        vec![Warning::UnknownLookupFormat { site, format: 3 }]
     );
 }

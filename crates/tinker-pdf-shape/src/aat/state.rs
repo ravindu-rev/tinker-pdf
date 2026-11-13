@@ -105,7 +105,8 @@ pub struct StateTable<'a> {
 impl<'a> StateTable<'a> {
     /// Reads the `STXHeader` at the start of `bytes`, whose entries are
     /// `entry_size` bytes each: four for a rearrangement subtable, eight for
-    /// a contextual or an insertion one, six for a ligature one.
+    /// a contextual or an insertion one, six for a ligature one or a `kerx`
+    /// contextual kerning one.
     ///
     /// # Errors
     ///

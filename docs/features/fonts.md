@@ -1369,14 +1369,24 @@ What it does:
   address, an uncovered glyph's zero landing on row or column 0) and 6 (row
   and column indices into the array, two-byte values or four) adding a pair's
   value to its left glyph's advance, or, across the line, to its right
-  glyph's `y_offset`; unless `kern` is set to 0, `font-kerning: none`, or a
-  caller naming its own features names no `kern`. A version-4 subtable of
+  glyph's `y_offset`; and format 1, contextual kerning, a state machine on
+  the shared driver, walking the run backward where `processDirection` is
+  set, whose entries clear the kerning stack, push the current glyph on it
+  and start a list in the value table, in that order, each value popping one
+  glyph — the last pushed first — and adding to its advance, or across the
+  line to its `y_offset`, until the list's `0xFFFF`. All of it unless `kern`
+  is set to 0, `font-kerning: none`, or a caller naming its own features
+  names no `kern`. The stack holds the chapter's eight glyphs
+  (`aat::KERNING_STACK`): a push onto a full one is refused and named
+  (`Warning::KerningStackFull`), and a value with no glyph to pop ends its
+  list, named (`Warning::KerningStackEmpty`). A version-4 subtable of
   variation tuples (`Warning::VariationKerningNotRun`), a vertical subtable
-  in an upright run (`Warning::VerticalKerningNotRun`) and a format not run
-  (`Warning::SubtableTypeNotRun`) are refused by name, a cell a subtable
-  points past is named as malformed, and `Limits::max_subtables` bounds the
-  subtables read. A face carrying `GSUB` or `GPOS` is not kerned by its
-  `kerx`.
+  in an upright run (`Warning::VerticalKerningNotRun`) and a format not run,
+  format 4 among them (`Warning::SubtableTypeNotRun`), are refused by name,
+  a cell, value list or state a subtable points past is named as malformed,
+  a contextual machine stops at `Limits::max_transitions`, and
+  `Limits::max_subtables` bounds the subtables read. A face carrying `GSUB`
+  or `GPOS` is not kerned by its `kerx`.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so
