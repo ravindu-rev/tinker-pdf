@@ -627,6 +627,36 @@ pub(crate) fn configurations(doc: &CosDocument) -> Vec<Option<Dict>> {
     })
 }
 
+/// The `/Order` configuration `configuration` presents to a layer panel
+/// (Table 99), as written — an array or a reference to one — or
+/// `Object::Null` where there is none: the configuration's own, or, for an
+/// entry of `/Configs` without one, `/D`'s, since "in the default
+/// configuration dictionary, the default value shall be an empty array; in
+/// other configuration dictionaries, the default shall be the Order value
+/// from the default configuration dictionary". A null value is an absent one
+/// (7.3.9). An index naming no configuration presents `/D`'s, as a render
+/// naming it draws `/D`'s states.
+pub(crate) fn order(doc: &CosDocument, configuration: Option<usize>) -> Object {
+    let Some(catalog) = doc.catalog() else {
+        return Object::Null;
+    };
+    let entry = doc.resolve_key(&catalog, doc.intern(b"OCProperties"));
+    let Some(properties) = entry.as_dict() else {
+        return Object::Null;
+    };
+    let own = |dict: &Dict| {
+        dict.get(doc.intern(b"Order"))
+            .filter(|value| !read_resolved(doc, value, |value| matches!(value, Object::Null)))
+            .cloned()
+    };
+    if let Some(chosen) = configuration.and_then(|index| configuration_at(doc, properties, index)) {
+        if let Some(order) = own(&chosen) {
+            return order;
+        }
+    }
+    read_key(doc, properties, b"D", |d| d.as_dict().and_then(own)).unwrap_or(Object::Null)
+}
+
 /// Whether a render naming configuration `index` finds it: an entry of
 /// `/Configs` that is a configuration dictionary. One that is not renders as
 /// `/D` and is reported (`RenderWarning::UnreadableLayerConfiguration`).

@@ -212,18 +212,6 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-12.7a | measure | The controls' speed rows in MS-04's render group: a layout-only render of the JPEG page at 300 dpi, and the 300-dpi text page culled to one 256-pixel rectangle, each paired with the planning baseline's whole render of the same page. *Note:* Head-side operations sized 20-300 ms, as MS-04 requires. The row gives no target and none is invented here: the measured figures are recorded, and a target for them is the owner's (H-77). | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench file and `baseline.json` to one list with the two operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and their first paired ratios against the planning baseline, taken by a local MS-02 paired run, are recorded in `docs/verification.md`. | RC-12.4, RC-12.5, MS-02, MS-04 |
 | RC-12.7b | measure | The wall-clock figure RC-12.7a's exit names, taken in the timing phase on the named machine with nothing else running (ruling 15): by MS-04.10's fifteen runs, or by the paired run where RC-12.7a's exit names one, and committed as ruling 16 says. *Note:* Split from RC-12.7 by the owner's timing choice; RC-12.7a lands the operation unmeasured. | `crates/tinker-pdf/benches/baseline.json` | The figure RC-12.7a's exit names is committed and `cargo xtask baseline` holds it. | RC-12.7a, MS-04.10 |
 
-## RC-14 — Optional-content configuration at render time
-
-**Optional-content configuration at render time**: choose an alternate `/Configs` entry, override a layer per render, honour `/AS` auto-state (zoom, language, user, print/view/export events), `/RBGroups`, `/Locked`, and expose the `/Order` UI tree
-
-**Exit criterion.** fixtures per configuration and auto-state category with twins written as the equivalent `/D`
-
-**Doc:** [design/optional-content-config.md](../design/optional-content-config.md) · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| RC-14.5 | build | `Document::layer_tree` returns a configuration's `/Order` (8.11.4.3) as a tree: each node a group (its reference, `/Name` and state under that configuration) or a label (a text string, placed as RC-14.1 reads 8.11.4.3), a nested array's entries as its children, bounded in depth and size, with a cycle or an entry that is no group read as RC-14.1 settles and never a panic; the `render_page` fuzz target walks every configuration's tree. *Note:* Read only: writing `/Order` is ED-40's. The builder already writes `/Order` (`crates/tinker-pdf-cos/src/build.rs:8877`), which is what the facade test reads back. If SU-12's coverage check has landed, the new API is projected or named in `docs/features/bindings.md`'s refusal table. | `crates/tinker-pdf/src/layers.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/facade_read.rs`, `fuzz/fuzz_targets/render_page.rs`, `docs/features/document-model.md` | `layers.rs` `the_order_tree_is_the_configurations_own` (new): nested labels and groups, a group listed twice, an array nested past the bound, an `/Order` containing itself, a configuration without `/Order` and one whose `/Order` names an unlisted group, each give its known tree; `facade_read.rs` reads a builder-written document's tree back in the order the builder wrote it. | RC-14.2 |
-
 ## RC-15 — Resumable progressive rendering
 
 **Resumable progressive rendering** with progress reporting: start, pause co-operatively on a budget, continue from where it stopped, present the partial result

@@ -74,8 +74,9 @@ numbers are ISO 32000-2's.
    usage. A configuration without `/AS` has none — Table 99 gives `/Order`
    and `/RBGroups` a default "from the default configuration dictionary" and
    `/AS` none, and "If no AS entry is present, states shall not be
-   automatically adjusted based on usage information" (8.11.4.4). With
-   RC-14.4, its entries read the zoom, language and user categories too.
+   automatically adjusted based on usage information" (8.11.4.4). Its
+   entries read the zoom, language and user categories too (*The zoom,
+   language and user categories*, below).
 4. **The render's overrides**, last (*Overrides*, below).
 
 The configuration's **`/Intent`** then decides which groups count at all
@@ -211,14 +212,17 @@ inside multiple layers of groups"; a nested array **without** one that follows
 a group holds that group's sublayers, its children — "To reflect actual
 nesting of groups in the content, such as for layers with sublayers, nested
 arrays of groups without a text label shall be used" — and one that follows
-no group is a node with no label of its own, its entries its children. A text
-string anywhere but first in its array is a label with no children, kept so
-that nothing the file shows is lost. A group listed twice appears twice, as
+no group is a node with no label of its own, its entries its children; an
+entry passed over between a group and the array does not part them. A text
+string anywhere but first in a nested array is a label with no children, kept
+so that nothing the file shows is lost. A group listed twice appears twice, as
 written; a group `/OCGs` does not list is a group node all the same, its state
-on as every unlisted group's is.
+on as every unlisted group's is. An index naming no configuration reads
+`/D`'s tree, as a render naming it draws `/D`'s states.
 
-**Bounds, and what is not a node.** The tree is read 16 arrays deep, as a
-visibility expression is (`MAX_EXPRESSION_DEPTH`), and to 4 096 nodes in all;
+**Bounds, and what is not a node.** The tree is read 16 arrays deep, the
+top level the first, as a visibility expression is (`MAX_EXPRESSION_DEPTH`),
+and to 4 096 nodes in all;
 an array past either bound is not read further and the tree says it was cut.
 An array reached again through a reference while it is being read is a cycle,
 and is not descended into a second time. An entry that is neither a group — a
@@ -235,9 +239,13 @@ whose override changes nothing, or whose magnification no `/Zoom` entry reads,
 among them — and any other draws the direct way, through `Page::render`. So a
 render naming another configuration is drawn as a direct render draws it,
 pixels and warnings alike, and a list that is not retained is unaffected.
-`Page::display_list_for` records under a usage today; under RC-14.2 it takes
-the layer options too, so a viewer that keeps one configuration keeps
-replaying.
+`Page::display_list_for` records under a usage and `Page::display_list_with`
+under layer options too, so a viewer that keeps one configuration keeps
+replaying. A list keeps the magnification its states were bound at, 1 for the
+lists a caller asks for, and a render at another binds its own states to
+compare only where the list's read a `/Zoom` entry; a form's kept drawing is
+keyed by the magnification likewise, so documents that read none keep sharing
+drawings across zoom levels.
 
 ## Milestones
 

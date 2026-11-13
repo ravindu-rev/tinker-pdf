@@ -329,6 +329,31 @@ dictionary, so the index read off the list is the index
 ([rendering](rendering.md)). It reads the array the renderer reads, 256
 entries in, and is empty for a document with no `/Configs`.
 
+`Document::layer_tree(configuration)` is the tree a layer panel shows for a
+configuration — `None` for `/D`, `Some(i)` for an entry of `/Configs` — read
+from its `/Order` (8.11.4.3 Table 99), or `/D`'s where an entry has none, as
+the table defaults it; `/D`'s own is empty by default, presenting nothing. A
+`LayerTree` holds the top level's `LayerNode`s in order and whether it was
+`cut`. A node is a `Group` — its reference, its `/Name` and its state under
+that configuration with no usage and no override, as `layers()` reports
+`/D`'s, a group `/OCGs` does not list being on — a `Label`, or a `Nested`
+array with neither. As the clause's two examples read it, a nested array whose
+first entry is a text string is a collection under that label, its other
+entries the label's children; an unlabelled array straight after a group,
+entries passed over aside, is that group's sublayers; and one after anything
+else is a `Nested` node of its own. A text string anywhere but first in a
+nested array is a label with no children, a group listed twice appears twice,
+and an entry that is none of these — a number, a name, a membership
+dictionary, a group written in place rather than reached by reference — is
+passed over. The tree is read sixteen arrays deep, the top level the first,
+and to 4 096 nodes, past which `cut` says it stopped; an array reached again
+by a reference while it is being read is not read a second time, so an
+`/Order` containing itself reads once. An index naming no configuration reads
+`/D`'s, as a render naming it draws `/D`'s states. `/ListMode` is not read:
+the tree is handed back whole, for a caller showing some pages to filter
+(`layers.rs`'s `the_order_tree_is_the_configurations_own`, `facade_read.rs`'s
+`a_built_documents_layer_tree_is_the_order_it_was_written_in`).
+
 **Layers are written too.** `DocumentBuilder::add_layer(name, visible)`
 writes an `/OCG` and returns a `LayerId`; `PageBuilder::optional(layer, |page|
 ...)` draws inside `/OC /OCn BDC … EMC` with the group in the page's

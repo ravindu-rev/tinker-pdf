@@ -106,7 +106,7 @@ pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 /// `DocumentBuilder::from_html(markup, stylesheet, page)` lays markup out
 /// through the EPUB reader's cascade, layout and painter.
 pub use html::{FromHtml, HtmlError, HtmlReport, PageBox};
-pub use layers::{LayerConfiguration, OptionalGroup};
+pub use layers::{LayerConfiguration, LayerNode, LayerTree, OptionalGroup};
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};
 /// Output intents, the catalog's and (PDF 2.0) a page's: what
@@ -2668,6 +2668,32 @@ impl Document {
     #[must_use]
     pub fn layer_configurations(&self) -> Vec<Option<LayerConfiguration>> {
         layers::configurations_of(&self.inner)
+    }
+
+    /// The tree a layer panel shows for a configuration — `None` for `/D`,
+    /// `Some(i)` for the `i`th entry of `/Configs`, the index
+    /// [`LayerOptions::configuration`] takes — read from its `/Order`
+    /// (8.11.4.3 Table 99), or from `/D`'s where an entry of `/Configs` has
+    /// none ([`LayerTree`]).
+    ///
+    /// Each [`LayerNode`] is a group — its reference, its `/Name` and its
+    /// state under that configuration, with no usage and no override — or a
+    /// label, or a nested array with neither: a nested array whose first
+    /// entry is a text string is a collection under that label, one without
+    /// a label after a group is that group's sublayers, and one after no group
+    /// is a node of its own. A group listed twice appears twice; a text
+    /// string elsewhere is a label with no children; anything else in the
+    /// array is passed over. The tree is read sixteen arrays deep and to
+    /// 4 096 nodes, past which [`LayerTree::cut`] says it stopped, and an
+    /// array that contains itself is read once. An index naming no
+    /// configuration reads `/D`'s, as a render naming it draws `/D`'s; a
+    /// document with no optional content has an empty tree.
+    ///
+    /// Read only: `/Order` is written by `DocumentBuilder::add_layer`, in the
+    /// order the groups were added.
+    #[must_use]
+    pub fn layer_tree(&self, configuration: Option<usize>) -> LayerTree {
+        layers::tree_of(&self.inner, configuration)
     }
 
     /// The document's interactive form fields (12.7).

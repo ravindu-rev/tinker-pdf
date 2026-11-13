@@ -127,6 +127,13 @@ fuzz_target!(|data: &[u8]| {
         },
         ..RenderOptions::at_dpi(12.0)
     });
+    // The tree a layer panel shows for `/D` and for every configuration, and
+    // one past them: the `/Order` arrays the input nests, labels, cycles and
+    // widens, each node walked.
+    for configuration in std::iter::once(None).chain((0..=configurations.len()).map(Some)) {
+        let tree = doc.layer_tree(configuration);
+        let _ = walk(&tree.nodes) + usize::from(tree.cut);
+    }
     // The SVG writer over the same page: a second device fed from a display
     // list, whose numbers and data URIs a hostile page shapes. Rasterised
     // paints at the lowest scale it takes, for the reason above.
@@ -134,3 +141,16 @@ fuzz_target!(|data: &[u8]| {
     svg.raster_scale = 0.25;
     let _ = page.to_svg(&svg);
 });
+
+/// Every node of a layer tree, counted: a walk the tree's own bounds keep
+/// short, sixteen deep and 4 096 nodes.
+fn walk(nodes: &[tinker_pdf::LayerNode]) -> usize {
+    nodes
+        .iter()
+        .map(|node| match node {
+            tinker_pdf::LayerNode::Group { children, .. }
+            | tinker_pdf::LayerNode::Label { children, .. }
+            | tinker_pdf::LayerNode::Nested { children } => 1 + walk(children),
+        })
+        .sum()
+}

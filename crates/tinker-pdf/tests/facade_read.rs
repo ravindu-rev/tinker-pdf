@@ -29,7 +29,7 @@
 
 mod written_support;
 
-use tinker_pdf::{AnnotationKind, Document, FontKind, ProgramKey};
+use tinker_pdf::{AnnotationKind, Document, FontKind, LayerNode, LayerTree, ProgramKey};
 
 /// A one-page document carrying two fonts, two layers and five annotations.
 ///
@@ -276,6 +276,58 @@ fn an_arc_handed_to_open_is_not_copied() {
         std::ptr::eq(document.cos().bytes().as_ptr(), bytes.as_ptr()),
         "the document reads the caller's allocation"
     );
+}
+
+/// **A built document's layer tree reads back in the order it was written**
+/// (RC-14.5): the builder writes `/D`'s `/Order` as its layers in the order
+/// they were added, and `Document::layer_tree` hands that tree back to a crate
+/// outside — each group by the reference `Document::layers` hands out, with
+/// its name and its state in `/D`, in the order written, whole — and under a
+/// configuration index the document does not have, `/D`'s.
+#[test]
+fn a_built_documents_layer_tree_is_the_order_it_was_written_in() {
+    let mut builder = tinker_pdf::DocumentBuilder::new();
+    let grid = builder.add_layer("Grid", true).expect("a layer");
+    let notes = builder.add_layer("Notes", false).expect("a layer");
+    let base = builder.add_layer("Base", true).expect("a layer");
+    builder.add_page(200.0, 100.0, |page| {
+        for layer in [grid, notes, base] {
+            assert!(page.optional(layer, |page| page.fill_rect(0.0, 0.0, 1.0, 1.0, 0.0)));
+        }
+    });
+    let document =
+        Document::open(built("a built layer tree", builder)).expect("the document opens");
+    let layers = document.layers();
+    assert_eq!(
+        layers
+            .iter()
+            .map(|layer| layer.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Grid", "Notes", "Base"]
+    );
+    let want = LayerTree {
+        nodes: layers
+            .iter()
+            .map(|layer| LayerNode::Group {
+                reference: layer.reference,
+                name: layer.name.clone(),
+                visible: layer.visible,
+                children: Vec::new(),
+            })
+            .collect(),
+        cut: false,
+    };
+    assert_eq!(document.layer_tree(None), want, "the order written");
+    assert_eq!(
+        document.layer_tree(Some(0)),
+        want,
+        "an index naming no configuration reads /D's"
+    );
+    match document.layer_tree(None).nodes.as_slice() {
+        [LayerNode::Group { visible: true, .. }, LayerNode::Group { visible: false, .. }, LayerNode::Group { visible: true, .. }] =>
+            {}
+        other => panic!("the hidden layer is the second: {other:?}"),
+    }
 }
 
 /// What `builder` writes, held to the validate-on-save helper as a document

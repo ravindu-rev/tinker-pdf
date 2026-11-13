@@ -110,13 +110,16 @@ for that event over them.
   is OFF if any is OFF and ON otherwise, and a group with none keeps its
   initial state.
 
-**This row reads three categories: `/View`, `/Print` and `/Export`.** RC-14.4
-adds `/Zoom`, `/Language` and `/User`, whose inputs — a magnification, the
-caller's languages, the caller's identity — a render does not have until RC-13
-and RC-14 give it them; until then a category this build does not read
-recommends nothing, as an absent entry does. `/CreatorInfo` and
-`/PageElement` carry no state and recommend nothing in any build. RC-14.2 adds
-an alternate configuration's own `/AS`; here it is always `/D`'s.
+**This row reads three categories: `/View`, `/Print` and `/Export`.**
+`/Zoom`, `/Language` and `/User`, whose inputs are a magnification, the
+caller's language and the caller's identity, are read as
+[optional-content-config.md](optional-content-config.md) states: `/Zoom` at
+the render's magnification, 1 unless the caller states one, and `/Language`
+and `/User` recommending nothing where the render states no language, or no
+user of the kind compared. `/CreatorInfo` and
+`/PageElement` carry no state and recommend nothing. An alternate
+configuration's own `/AS` is applied as that document states; here it is
+`/D`'s.
 
 **What is malformed leaves its group as `/D` set it.** An `/AS` that is not an
 array, an entry that is not a dictionary, an `/Event` that is none of the
