@@ -462,6 +462,13 @@ fn the_changed_numbers_are_the_sections_objects() {
     // (`a_reopen_parses_only_what_changed`), so the numbers it touches are
     // the rows the section states.
     let section = editor.save_update(&options);
+    // The save is the document's bytes and then the section, held before the
+    // count starts so the door's own reading touches nothing it counts.
+    rewritten(
+        "three pages, an update that moves, deletes and adds",
+        doc.bytes(),
+        [doc.bytes(), &section[..]].concat(),
+    );
     let _ = crate::doc::count::take();
     let reopened = CosDocument::reopen(&doc, section).expect("it reopens");
     let mut rows = crate::doc::count::take();
