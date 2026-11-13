@@ -1677,51 +1677,363 @@ fn finish(
     })
 }
 
-/// The inverse DCT of one block, separable and in integers.
-fn idct_block(input: &[i32; 64], precision: u8, out: &mut [u8; 64]) {
-    // A straightforward separable implementation: rows then columns, with
-    // fixed-point cosines. Determinism matters more here than the last unit
-    // of precision (ruling 4).
-    let mut tmp = [0i32; 64];
+/// The largest dequantised coefficient, in magnitude, whose block the
+/// transform sums in `i32` (`docs/design/jpeg-speed.md`, "The lane
+/// transform").
+///
+/// Every row of [`COS_TABLE`] sums to 43 284 in magnitude, so with every
+/// coefficient at most this a row pass's sums stay within 18 779 × 43 284 =
+/// 812 830 236, its floored results within 49 612, and a column pass's sums
+/// within 49 612 × 43 284 = 2 147 405 808, all under 2^31.
+/// `the_lane_bound_keeps_every_sum_inside_i32` derives it from the table.
+const LANE_BOUND: u32 = 18_779;
 
-    for row in 0..8usize {
-        for x in 0..8usize {
-            let mut sum = 0i64;
-            for u in 0..8usize {
-                let coefficient = input.get(row * 8 + u).copied().unwrap_or(0);
-                if coefficient == 0 {
-                    continue;
+/// Which rows of a dequantised block hold what, a bit a row. The transform's
+/// shortcuts read nothing else, and each is exact: what one skips is a
+/// product of zero.
+#[derive(Clone, Copy, Debug)]
+struct Profile {
+    /// The largest coefficient, in magnitude.
+    largest: u32,
+    /// Rows holding any coefficient.
+    rows: u8,
+    /// Rows holding an AC term, `u` at least 1.
+    ac: u8,
+    /// Rows holding a term in their upper half, `u` at least 4.
+    high: u8,
+}
+
+impl Profile {
+    fn of(input: &[i32; 64]) -> Profile {
+        let mut profile = Profile {
+            largest: 0,
+            rows: 0,
+            ac: 0,
+            high: 0,
+        };
+        for (row, coefficients) in input.chunks_exact(8).enumerate() {
+            let (mut any, mut ac, mut high) = (0u32, 0u32, 0u32);
+            for (u, &value) in coefficients.iter().enumerate() {
+                let magnitude = value.unsigned_abs();
+                profile.largest = profile.largest.max(magnitude);
+                any |= magnitude;
+                if u >= 1 {
+                    ac |= magnitude;
                 }
-                // The basis function already carries C(u); no extra scale.
-                let cos = COS_TABLE.get(x * 8 + u).copied().unwrap_or(0);
-                sum += i64::from(coefficient) * i64::from(cos);
+                if u >= 4 {
+                    high |= magnitude;
+                }
             }
-            if let Some(slot) = tmp.get_mut(row * 8 + x) {
-                *slot = (sum >> 14) as i32;
+            let bit = 1u8 << row;
+            if any != 0 {
+                profile.rows |= bit;
+            }
+            if ac != 0 {
+                profile.ac |= bit;
+            }
+            if high != 0 {
+                profile.high |= bit;
             }
         }
+        profile
+    }
+}
+
+/// The [`COS_TABLE`] entries an eight-point pass multiplies by.
+///
+/// The table holds `COS_TABLE[7 − x][u] = (−1)^u · COS_TABLE[x][u]`, so
+/// outputs `x` and `7 − x` share every product and differ in the odd half's
+/// sign; and within the even half `COS_TABLE[x][0]` is `k0` for every `x`,
+/// `COS_TABLE[x][4]` is `±k4` and `COS_TABLE[x][2]` and `COS_TABLE[x][6]` are
+/// each `±k2` or `±k6`. `the_cosine_table_has_the_symmetry_the_lanes_share`
+/// holds the table to all of it.
+struct Kernel {
+    k0: i32,
+    k2: i32,
+    k4: i32,
+    k6: i32,
+    /// `COS_TABLE[x][u]` for `x` below four and the odd `u`, in order.
+    odd: [[i32; 4]; 4],
+}
+
+static KERNEL: std::sync::LazyLock<Kernel> = std::sync::LazyLock::new(|| {
+    let entry = |x: usize, u: usize| COS_TABLE.get(x * 8 + u).copied().unwrap_or(0);
+    let odd = |x: usize| [entry(x, 1), entry(x, 3), entry(x, 5), entry(x, 7)];
+    Kernel {
+        k0: entry(0, 0),
+        k2: entry(0, 2),
+        k4: entry(0, 4),
+        k6: entry(0, 6),
+        odd: [odd(0), odd(1), odd(2), odd(3)],
+    }
+});
+
+/// What an eight-point pass sums in: `i32` within [`LANE_BOUND`], `i64`
+/// past it, and [`Lanes`] for the column pass's eight columns at once.
+trait Sum:
+    Copy + core::ops::Add<Output = Self> + core::ops::Sub<Output = Self> + core::ops::Mul<Output = Self>
+{
+    /// A table entry, as this type.
+    fn of(entry: i32) -> Self;
+}
+
+impl Sum for i32 {
+    fn of(entry: i32) -> i32 {
+        entry
+    }
+}
+
+impl Sum for i64 {
+    fn of(entry: i32) -> i64 {
+        i64::from(entry)
+    }
+}
+
+/// Eight `i32` lanes, a column each: the column pass, one operation for all
+/// eight columns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Lanes([i32; 8]);
+
+impl Lanes {
+    fn with(self, other: Lanes, f: impl Fn(i32, i32) -> i32) -> Lanes {
+        let mut out = [0i32; 8];
+        for ((slot, a), b) in out.iter_mut().zip(self.0).zip(other.0) {
+            *slot = f(a, b);
+        }
+        Lanes(out)
+    }
+}
+
+impl core::ops::Add for Lanes {
+    type Output = Lanes;
+
+    fn add(self, other: Lanes) -> Lanes {
+        self.with(other, |a, b| a + b)
+    }
+}
+
+impl core::ops::Sub for Lanes {
+    type Output = Lanes;
+
+    fn sub(self, other: Lanes) -> Lanes {
+        self.with(other, |a, b| a - b)
+    }
+}
+
+impl core::ops::Mul for Lanes {
+    type Output = Lanes;
+
+    fn mul(self, other: Lanes) -> Lanes {
+        self.with(other, |a, b| a * b)
+    }
+}
+
+impl Sum for Lanes {
+    fn of(entry: i32) -> Lanes {
+        Lanes([entry; 8])
+    }
+}
+
+/// One eight-point pass's sums, before its floor: outputs `x` and `7 − x` as
+/// `E(x) ± O(x)`, from six even products and sixteen odd ones, or, when the
+/// upper half of the input is zero (`half`), three and eight.
+///
+/// Integer sums are the same in any grouping, so each output is the sum
+/// today's transform makes, product for product.
+#[inline(always)]
+fn butterfly<T: Sum>(v: &[T; 8], kernel: &Kernel, half: bool) -> [T; 8] {
+    let [v0, v1, v2, v3, v4, v5, v6, v7] = *v;
+    let p0 = v0 * T::of(kernel.k0);
+    let a = v2 * T::of(kernel.k2);
+    let b = v2 * T::of(kernel.k6);
+    let (e0, e1, e2, e3) = if half {
+        (p0 + a, p0 + b, p0 - b, p0 - a)
+    } else {
+        let p4 = v4 * T::of(kernel.k4);
+        let c = v6 * T::of(kernel.k6);
+        let d = v6 * T::of(kernel.k2);
+        (
+            p0 + p4 + a + c,
+            p0 - p4 + b - d,
+            p0 - p4 - b + d,
+            p0 + p4 - a - c,
+        )
+    };
+    let odd = |entries: &[i32; 4]| {
+        let low = v1 * T::of(entries[0]) + v3 * T::of(entries[1]);
+        if half {
+            low
+        } else {
+            low + v5 * T::of(entries[2]) + v7 * T::of(entries[3])
+        }
+    };
+    let [o0, o1, o2, o3] = [
+        odd(&kernel.odd[0]),
+        odd(&kernel.odd[1]),
+        odd(&kernel.odd[2]),
+        odd(&kernel.odd[3]),
+    ];
+    [
+        e0 + o0,
+        e1 + o1,
+        e2 + o2,
+        e3 + o3,
+        e3 - o3,
+        e2 - o2,
+        e1 - o1,
+        e0 - o0,
+    ]
+}
+
+// Multiplies the transform made on this thread, for the count's test.
+#[cfg(test)]
+thread_local! {
+    static MULTIPLIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts `n` multiplies, in the test build.
+#[inline(always)]
+fn multiplied(n: u64) {
+    #[cfg(test)]
+    MULTIPLIES.with(|count| count.set(count.get() + n));
+    let _ = n;
+}
+
+/// The multiplies a pass over the rows a `rows` bit set holds makes, in the
+/// shape the column pass takes.
+fn column_shape(rows: u8) -> (bool, bool) {
+    // Only row 0: each column is its constant. Nothing in rows 4 to 7: the
+    // half shape.
+    (rows == 1, rows & 0xF0 == 0)
+}
+
+/// The inverse DCT of one block, separable and in integers: rows then
+/// columns, with fixed-point cosines, each pass floored by `>> 14`.
+///
+/// Every product is the one a direct sum makes, made once
+/// (`docs/design/jpeg-speed.md`, "The lane transform"): `direct::idct_block`
+/// is that direct sum, and `the_lane_transform_is_the_direct_transform_on_every_block`
+/// holds this to it. Determinism matters more here than the last unit of
+/// precision (ruling 4).
+fn idct_block(input: &[i32; 64], precision: u8, out: &mut [u8; 64]) {
+    // A.3.1's level shift is `2^(P-1)`, and the clamp is to the frame's own
+    // range. A 12-bit sample is then narrowed to the eight this crate hands
+    // out -- see [`JpegImage::data`] -- which for `P = 8` is a shift of zero
+    // and leaves the byte untouched.
+    let half = 1i64 << (precision - 1);
+    let ceiling = (1i64 << precision) - 1;
+    let narrow = precision - 8;
+    let level = |sum: i64| (((sum >> 14) + half).clamp(0, ceiling) >> narrow) as u8;
+
+    let profile = Profile::of(input);
+    let kernel = &*KERNEL;
+    if profile.rows == 0 {
+        out.fill(level(0));
+        return;
+    }
+    if profile.rows == 1 && profile.ac & 1 == 0 {
+        // No AC term: one row of one product, then one column of one.
+        multiplied(2);
+        let dc = input.first().copied().map_or(0, i64::from);
+        let row = (dc * i64::from(kernel.k0)) >> 14;
+        out.fill(level(row * i64::from(kernel.k0)));
+        return;
+    }
+    if profile.largest <= LANE_BOUND {
+        lane_transform(input, profile, kernel, &level, out);
+    } else {
+        wide_transform(input, profile, kernel, &level, out);
+    }
+}
+
+/// The row pass's sums for one row, in the shape its profile allows.
+#[inline(always)]
+fn row_sums<T: Sum>(v: &[T; 8], kernel: &Kernel, ac: bool, high: bool) -> [T; 8] {
+    if !ac {
+        // No AC term: every output is the DC's one product.
+        multiplied(1);
+        return [v[0] * T::of(kernel.k0); 8];
+    }
+    multiplied(if high { 22 } else { 11 });
+    butterfly(v, kernel, !high)
+}
+
+/// [`idct_block`] for a block within [`LANE_BOUND`]: rows in `i32`, then the
+/// eight columns as lanes.
+fn lane_transform(
+    input: &[i32; 64],
+    profile: Profile,
+    kernel: &Kernel,
+    level: &impl Fn(i64) -> u8,
+    out: &mut [u8; 64],
+) {
+    let mut rows = [Lanes::default(); 8];
+    for (index, (row, coefficients)) in rows.iter_mut().zip(input.chunks_exact(8)).enumerate() {
+        let bit = 1u8 << index;
+        if profile.rows & bit == 0 {
+            continue;
+        }
+        let v = <[i32; 8]>::try_from(coefficients).unwrap_or([0; 8]);
+        let sums = row_sums(&v, kernel, profile.ac & bit != 0, profile.high & bit != 0);
+        *row = Lanes(sums.map(|sum| sum >> 14));
     }
 
-    for col in 0..8usize {
-        for y in 0..8usize {
-            let mut sum = 0i64;
-            for v in 0..8usize {
-                let coefficient = tmp.get(v * 8 + col).copied().unwrap_or(0);
-                if coefficient == 0 {
-                    continue;
-                }
-                let cos = COS_TABLE.get(y * 8 + v).copied().unwrap_or(0);
-                sum += i64::from(coefficient) * i64::from(cos);
-            }
-            // A.3.1's level shift is `2^(P-1)`, and the clamp is to the
-            // frame's own range. A 12-bit sample is then narrowed to the
-            // eight this crate hands out -- see [`JpegImage::data`] -- which
-            // for `P = 8` is a shift of zero and leaves the byte untouched.
-            let half = 1i64 << (precision - 1);
-            let ceiling = (1i64 << precision) - 1;
-            let value = (((sum >> 14) + half).clamp(0, ceiling) >> (precision - 8)) as u8;
-            if let Some(slot) = out.get_mut(y * 8 + col) {
-                *slot = value;
+    let (constant, half) = column_shape(profile.rows);
+    let sums = if constant {
+        multiplied(8);
+        [rows[0] * Lanes::of(kernel.k0); 8]
+    } else {
+        multiplied(if half { 88 } else { 176 });
+        butterfly(&rows, kernel, half)
+    };
+    for (line, sum) in out.chunks_exact_mut(8).zip(sums) {
+        for (slot, sum) in line.iter_mut().zip(sum.0) {
+            *slot = level(i64::from(sum));
+        }
+    }
+}
+
+/// [`idct_block`] for a block past [`LANE_BOUND`]: the same shapes in `i64`,
+/// the row pass's floored sums truncated to `i32` as the direct transform's
+/// are.
+fn wide_transform(
+    input: &[i32; 64],
+    profile: Profile,
+    kernel: &Kernel,
+    level: &impl Fn(i64) -> u8,
+    out: &mut [u8; 64],
+) {
+    let mut rows = [[0i32; 8]; 8];
+    for (index, (row, coefficients)) in rows.iter_mut().zip(input.chunks_exact(8)).enumerate() {
+        let bit = 1u8 << index;
+        if profile.rows & bit == 0 {
+            continue;
+        }
+        let v = <[i32; 8]>::try_from(coefficients)
+            .unwrap_or([0; 8])
+            .map(i64::from);
+        let sums = row_sums(&v, kernel, profile.ac & bit != 0, profile.high & bit != 0);
+        *row = sums.map(|sum| (sum >> 14) as i32);
+    }
+
+    let (constant, half) = column_shape(profile.rows);
+    multiplied(if constant {
+        8
+    } else if half {
+        88
+    } else {
+        176
+    });
+    for column in 0..8 {
+        let v = rows.map(|row| row.get(column).copied().map_or(0, i64::from));
+        let sums = if constant {
+            [v[0] * i64::from(kernel.k0); 8]
+        } else {
+            butterfly(&v, kernel, half)
+        };
+        for (y, sum) in sums.iter().enumerate() {
+            if let Some(slot) = out.get_mut(y * 8 + column) {
+                *slot = level(*sum);
             }
         }
     }
@@ -3877,6 +4189,255 @@ mod tests {
         assert!(
             long_codes > 1_000,
             "the second level was reached {long_codes} times"
+        );
+    }
+
+    // ---- The lane transform ---------------------------------------------
+    //
+    // `idct_block` against `direct::idct_block`, every product made, over
+    // blocks of every shape and magnitude a dequantiser can hand it
+    // (`docs/design/jpeg-speed.md`, "The lane transform").
+
+    /// **The table has the symmetry the transform's shared products rest
+    /// on**, and every entry is far enough from a rounding boundary that
+    /// every target's `cos` rounds it to the same integer.
+    #[test]
+    fn the_cosine_table_has_the_symmetry_the_lanes_share() {
+        let entry = |x: usize, u: usize| COS_TABLE[x * 8 + u];
+        for x in 0..8 {
+            for u in 0..8 {
+                let mirrored = if u % 2 == 0 {
+                    entry(x, u)
+                } else {
+                    -entry(x, u)
+                };
+                assert_eq!(entry(7 - x, u), mirrored, "({x}, {u})");
+            }
+        }
+        let kernel = &*KERNEL;
+        for x in 0..4 {
+            assert_eq!(entry(x, 0), kernel.k0, "({x}, 0)");
+            assert_eq!(
+                entry(x, 4),
+                [kernel.k4, -kernel.k4, -kernel.k4, kernel.k4][x]
+            );
+            assert_eq!(
+                entry(x, 2),
+                [kernel.k2, kernel.k6, -kernel.k6, -kernel.k2][x]
+            );
+            assert_eq!(
+                entry(x, 6),
+                [kernel.k6, -kernel.k2, kernel.k2, -kernel.k6][x]
+            );
+            assert_eq!(
+                kernel.odd[x],
+                [entry(x, 1), entry(x, 3), entry(x, 5), entry(x, 7)]
+            );
+        }
+        for x in 0..8 {
+            for u in 0..8 {
+                let cu = if u == 0 {
+                    1.0 / std::f64::consts::SQRT_2
+                } else {
+                    1.0
+                };
+                let exact = cu / 2.0
+                    * ((2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI / 16.0).cos()
+                    * 16384.0;
+                let from_half = (exact - exact.floor() - 0.5).abs();
+                assert!(
+                    from_half > 0.07,
+                    "({x}, {u}) is {from_half} from rounding the other way"
+                );
+            }
+        }
+    }
+
+    /// **[`LANE_BOUND`] is the largest magnitude whose sums all fit in
+    /// `i32`**, derived from the table: a row's sum, its floored result and a
+    /// column's sum of those, each at its largest.
+    #[test]
+    fn the_lane_bound_keeps_every_sum_inside_i32() {
+        let row_sum = |x: usize| {
+            (0..8)
+                .map(|u| i64::from(COS_TABLE[x * 8 + u].abs()))
+                .sum::<i64>()
+        };
+        let span = row_sum(0);
+        for x in 0..8 {
+            assert_eq!(row_sum(x), span, "row {x}");
+        }
+        assert_eq!(span, 43_284);
+        // The floor of a negative sum rounds away from zero, so the largest
+        // floored magnitude is the ceiling.
+        let column = |bound: i64| (bound * span + 16_383) / 16_384 * span;
+        let bound = i64::from(LANE_BOUND);
+        assert!(bound * span <= i64::from(i32::MAX));
+        assert!(column(bound) <= i64::from(i32::MAX));
+        assert!(
+            column(bound + 1) > i64::from(i32::MAX),
+            "the bound could be larger"
+        );
+    }
+
+    /// A dequantised block of `shape` whose coefficients are at most
+    /// `magnitude`, some exactly it.
+    fn random_block(noise: &mut Noise, shape: u64, magnitude: i64) -> [i32; 64] {
+        let value = |noise: &mut Noise| -> i32 {
+            let v = if noise.below(8) == 0 {
+                magnitude
+            } else {
+                (noise.next() % (magnitude as u64 + 1)) as i64
+            };
+            let v = if noise.below(2) == 0 { v } else { -v };
+            v as i32
+        };
+        let mut block = [0i32; 64];
+        match shape {
+            // A single coefficient anywhere.
+            0 => block[noise.below(64) as usize] = value(noise),
+            // A few, anywhere.
+            1 => {
+                for _ in 0..1 + noise.below(6) {
+                    block[noise.below(64) as usize] = value(noise);
+                }
+            }
+            // The low rows only, as a photograph's blocks mostly are.
+            2 => {
+                for slot in block.iter_mut().take(32) {
+                    *slot = value(noise);
+                }
+            }
+            // Every row's lower half only.
+            3 => {
+                for (index, slot) in block.iter_mut().enumerate() {
+                    if index % 8 < 4 {
+                        *slot = value(noise);
+                    }
+                }
+            }
+            // Row 0 only, or column 0 only.
+            4 => {
+                for index in 0..8 {
+                    let at = if noise.below(2) == 0 {
+                        index
+                    } else {
+                        index * 8
+                    };
+                    block[at] = value(noise);
+                }
+            }
+            // Every coefficient.
+            _ => {
+                for slot in block.iter_mut() {
+                    *slot = value(noise);
+                }
+            }
+        }
+        block
+    }
+
+    /// **The lane transform gives the bytes the direct transform gives, on
+    /// every block**: at 8 and 12 bits, sparse and dense, small, at
+    /// [`LANE_BOUND`], one past it and as large as an `i16` coefficient times
+    /// a 16-bit quantiser makes, where the direct transform's row pass wraps.
+    #[test]
+    fn the_lane_transform_is_the_direct_transform_on_every_block() {
+        let mut noise = Noise(0x0123_4567_89AB_CDEF);
+        let bound = i64::from(LANE_BOUND);
+        let magnitudes = [
+            64,
+            1 << 11,
+            1 << 14,
+            bound,
+            bound + 1,
+            1 << 20,
+            32_768 * 65_535,
+        ];
+        let mut past = 0;
+        for case in 0..30_000 {
+            let precision = if case % 3 == 0 { 12 } else { 8 };
+            let magnitude = magnitudes[noise.below(magnitudes.len() as u64) as usize];
+            let shape = noise.below(6);
+            let block = random_block(&mut noise, shape, magnitude);
+            past += usize::from(Profile::of(&block).largest > LANE_BOUND);
+            let (mut lanes, mut direct) = ([0u8; 64], [0u8; 64]);
+            idct_block(&block, precision, &mut lanes);
+            direct::idct_block(&block, precision, &mut direct);
+            assert_eq!(lanes, direct, "case {case}: {block:?} at {precision} bits");
+        }
+        assert!(past > 5_000, "{past} blocks took the wide sums");
+
+        // The edges themselves, every coefficient at once.
+        for value in [bound, bound + 1, 32_768 * 65_535] {
+            for sign in [1i64, -1] {
+                let mut block = [(sign * value) as i32; 64];
+                for (index, slot) in block.iter_mut().enumerate() {
+                    if index % 3 == 0 {
+                        *slot = -*slot;
+                    }
+                }
+                for precision in [8, 12] {
+                    let (mut lanes, mut direct) = ([0u8; 64], [0u8; 64]);
+                    idct_block(&block, precision, &mut lanes);
+                    direct::idct_block(&block, precision, &mut direct);
+                    assert_eq!(lanes, direct, "{value} x {sign} at {precision} bits");
+                }
+            }
+        }
+    }
+
+    /// **A block costs the products it shares, and no more**: twenty-two
+    /// multiplies an eight-point pass where the direct sum makes sixty-four,
+    /// eleven for a pass whose upper half is zero, and one for a row or a
+    /// column with nothing but its first term — counted.
+    #[test]
+    fn a_block_costs_the_shared_products() {
+        fn multiplies(block: &[i32; 64]) -> u64 {
+            MULTIPLIES.with(|count| count.set(0));
+            let mut out = [0u8; 64];
+            idct_block(block, 8, &mut out);
+            MULTIPLIES.with(|count| count.get())
+        }
+        let filled = |keep: &dyn Fn(usize, usize) -> bool, value: i32| {
+            let mut block = [0i32; 64];
+            for (index, slot) in block.iter_mut().enumerate() {
+                if keep(index / 8, index % 8) {
+                    *slot = value + (index as i32 % 5);
+                }
+            }
+            block
+        };
+        let every = |_: usize, _: usize| true;
+        let bound = LANE_BOUND as i32;
+        for (name, block, expected) in [
+            ("a zero block", [0; 64], 0),
+            ("a DC-only block", filled(&|r, u| r == 0 && u == 0, 40), 2),
+            ("a dense block", filled(&every, 40), 8 * 22 + 8 * 22),
+            (
+                "a dense block past the bound",
+                filled(&every, bound),
+                8 * 22 + 8 * 22,
+            ),
+            ("row 0 alone", filled(&|r, _| r == 0, 40), 22 + 8),
+            ("column 0 alone", filled(&|_, u| u == 0, 40), 8 + 8 * 22),
+            ("rows 0 to 3", filled(&|r, _| r < 4, 40), 4 * 22 + 8 * 11),
+            (
+                "every row's lower half",
+                filled(&|_, u| u < 4, 40),
+                8 * 11 + 8 * 22,
+            ),
+            (
+                "the top-left quarter",
+                filled(&|r, u| r < 4 && u < 4, 40),
+                4 * 11 + 8 * 11,
+            ),
+        ] {
+            assert_eq!(multiplies(&block), expected, "{name}");
+        }
+        assert!(
+            multiplies(&filled(&every, 40)) * 2 < 1024,
+            "a dense block's direct sum makes 1 024"
         );
     }
 }

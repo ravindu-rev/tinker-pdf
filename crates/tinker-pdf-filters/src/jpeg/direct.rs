@@ -6,7 +6,7 @@
 //! inputs that reach every branch of both, so that a full-size decode stays
 //! byte-identical for every stream.
 
-use super::HuffmanTable;
+use super::{HuffmanTable, COS_TABLE};
 
 /// Reads bits from the entropy-coded segment a byte at a time, unstuffing as
 /// it goes: [`super::BitReader`] without its word.
@@ -116,6 +116,59 @@ impl<'a> BitwiseReader<'a> {
                 }
             }
             self.at += 1;
+        }
+    }
+}
+
+/// The inverse DCT of one block, separable and in integers, every product
+/// made: [`super::idct_block`] without its shared products, its lanes or its
+/// shortcuts.
+pub(super) fn idct_block(input: &[i32; 64], precision: u8, out: &mut [u8; 64]) {
+    // A straightforward separable implementation: rows then columns, with
+    // fixed-point cosines. Determinism matters more here than the last unit
+    // of precision (ruling 4).
+    let mut tmp = [0i32; 64];
+
+    for row in 0..8usize {
+        for x in 0..8usize {
+            let mut sum = 0i64;
+            for u in 0..8usize {
+                let coefficient = input.get(row * 8 + u).copied().unwrap_or(0);
+                if coefficient == 0 {
+                    continue;
+                }
+                // The basis function already carries C(u); no extra scale.
+                let cos = COS_TABLE.get(x * 8 + u).copied().unwrap_or(0);
+                sum += i64::from(coefficient) * i64::from(cos);
+            }
+            if let Some(slot) = tmp.get_mut(row * 8 + x) {
+                *slot = (sum >> 14) as i32;
+            }
+        }
+    }
+
+    for col in 0..8usize {
+        for y in 0..8usize {
+            let mut sum = 0i64;
+            for v in 0..8usize {
+                let coefficient = tmp.get(v * 8 + col).copied().unwrap_or(0);
+                if coefficient == 0 {
+                    continue;
+                }
+                let cos = COS_TABLE.get(y * 8 + v).copied().unwrap_or(0);
+                sum += i64::from(coefficient) * i64::from(cos);
+            }
+            // A.3.1's level shift is `2^(P-1)`, and the clamp is to the
+            // frame's own range. A 12-bit sample is then narrowed to the
+            // eight this crate hands out -- see [`super::JpegImage::data`] --
+            // which for `P = 8` is a shift of zero and leaves the byte
+            // untouched.
+            let half = 1i64 << (precision - 1);
+            let ceiling = (1i64 << precision) - 1;
+            let value = (((sum >> 14) + half).clamp(0, ceiling) >> (precision - 8)) as u8;
+            if let Some(slot) = out.get_mut(y * 8 + col) {
+                *slot = value;
+            }
         }
     }
 }
