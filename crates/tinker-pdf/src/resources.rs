@@ -5628,8 +5628,9 @@ impl PageResources {
     /// drawn as `request` asks, is kept under in this scope
     /// (`cache::CellKey`): the pattern, the request's every field the cell's
     /// pixels read, this scope's resources where the pattern brings none of
-    /// its own, so that its names resolve in them, and the usage the
-    /// operation binds its optional-content states for.
+    /// its own, so that its names resolve in them, and the usage, the layer
+    /// options and the magnification the operation binds its optional-content
+    /// states for — the last only where those states read a `/Zoom` entry.
     fn cell_key(
         &self,
         dict: &Dict,
@@ -5656,6 +5657,8 @@ impl PageResources {
             depth: request.depth,
             scope: (!owns).then(|| self.written().clone()),
             usage: self.op.usage(),
+            layers: self.op.layers().clone(),
+            magnification: self.op.magnification_key(&self.doc),
         }
     }
 

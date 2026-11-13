@@ -2114,3 +2114,81 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
         );
     }
 }
+
+/// **A kept tiling cell is keyed by the render's layers and zoom** (RC-14.2
+/// to RC-14.4, P-23.2): a document with a cache keeps a tiling pattern's
+/// cell across renders, and a cell whose content group A marks is drawn
+/// under `/D`, under a configuration turning A off, under an override turning
+/// it off, in a view at magnification 1 and at 3, where a `/Zoom` entry turns
+/// it off, and under `/D` again — each with the pixels its `/D` twin draws,
+/// never a cell another render kept.
+#[test]
+fn a_kept_tiling_cell_is_keyed_by_the_renders_layers_and_zoom() {
+    let patterned = |d: &str, configs: &str| {
+        let marked = "/OC /A BDC 1 0 0 rg 0 0 5 5 re f EMC";
+        let content = "0 1 0 rg 0 0 10 40 re f /Pattern cs /P0 scn 10 0 30 40 re f";
+        format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << {d} >> {configs} >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /Pattern << /P0 6 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (A) /Usage << /Zoom << /max 2 >> >> >>\nendobj\n\
+6 0 obj\n<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 \
+/Resources << /Properties << /A 5 0 R >> >> /Length {} >>\nstream\n{marked}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+            content.len(),
+            marked.len()
+        )
+        .into_bytes()
+    };
+    let document = Document::open(patterned(
+        "/AS [<< /Event /View /Category [/Zoom] /OCGs [5 0 R] >>]",
+        "/Configs [<< /BaseState /OFF >>]",
+    ))
+    .expect("it opens")
+    .with_cache_limits(CacheLimits::new(1 << 20));
+    let page = document.page(0).expect("a page");
+    let shown = render_for(&patterned("/ON [5 0 R]", ""), None);
+    let hidden = render_for(&patterned("/OFF [5 0 R]", ""), None);
+    assert!(
+        shown.data != hidden.data,
+        "the cell's mark is the difference"
+    );
+    let nobody = LayerUser::default();
+    let configured = RenderOptions {
+        layers: LayerOptions {
+            configuration: Some(0),
+            ..LayerOptions::default()
+        },
+        ..RenderOptions::default()
+    };
+    for (what, options, twin) in [
+        ("/D", RenderOptions::default(), &shown),
+        ("a configuration turning A off", configured, &hidden),
+        (
+            "an override turning A off",
+            overriding(None, None, &[(5, false)]),
+            &hidden,
+        ),
+        (
+            "a view at magnification 1",
+            stating(Some(Usage::View), 1.0, None, &nobody),
+            &shown,
+        ),
+        (
+            "a view at magnification 3",
+            stating(Some(Usage::View), 3.0, None, &nobody),
+            &hidden,
+        ),
+        ("/D again", RenderOptions::default(), &shown),
+    ] {
+        let got = page.render(&options);
+        assert_eq!((got.width, got.height), (twin.width, twin.height), "{what}");
+        assert!(
+            got.data == twin.data,
+            "{what}: the cell drawn is another render's"
+        );
+    }
+}

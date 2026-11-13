@@ -893,9 +893,11 @@ pub(crate) struct KeptForm {
 /// level 0 and the thinnest stroke the cell is drawn with, and the nesting
 /// depth, which the recursion cap reads; for a pattern that brings no
 /// resources of its own, the scope its names resolve in, its resource
-/// dictionary written exactly ([`Written`]); and the usage the render names,
-/// whose optional-content states the cell's content is shown or hidden by
-/// (8.11.4.4). A `PaintType 2` cell is drawn as its content draws it, a
+/// dictionary written exactly ([`Written`]); and the usage, the layer options
+/// and, where those states read a `/Zoom` entry, the magnification the render
+/// names, whose optional-content states the cell's content is shown or hidden
+/// by (8.11.4.4, 8.11.4.3), as a form's kept drawing is keyed
+/// ([`FormKey`]). A `PaintType 2` cell is drawn as its content draws it, a
 /// shape whose colour the fill takes at the blit, so one cell serves every
 /// colour it is filled in.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -925,16 +927,42 @@ pub(crate) struct CellKey {
     pub(crate) scope: Option<Written>,
     /// The usage the render names (`crate::RenderOptions::usage`).
     pub(crate) usage: Option<crate::Usage>,
+    /// The layer options the render names (`crate::RenderOptions::layers`):
+    /// its configuration, overrides, language and user.
+    pub(crate) layers: crate::LayerOptions,
+    /// The render's magnification, as its bits, where its states read a
+    /// `/Zoom` entry (`crate::RenderOptions::magnification`); `None` where
+    /// they read none, so cells kept at one magnification serve every other.
+    pub(crate) magnification: Option<u64>,
 }
 
 impl CellKey {
     /// The bytes the key holds beside its own fields: a scope's resources,
-    /// written.
+    /// written, and what its layer options hold — the overrides, the language
+    /// and the user's names.
     pub(crate) fn held(&self) -> u64 {
-        self.scope
+        let scope = self
+            .scope
             .as_ref()
-            .map_or(0, |scope| u64::try_from(scope.len()).unwrap_or(u64::MAX))
+            .map_or(0, |scope| u64::try_from(scope.len()).unwrap_or(u64::MAX));
+        scope.saturating_add(layers_held(&self.layers))
     }
+}
+
+/// The bytes `layers` holds beside its own fields: its overrides, its
+/// language and its user's names.
+fn layers_held(layers: &crate::LayerOptions) -> u64 {
+    let overrides = layers
+        .overrides
+        .len()
+        .saturating_mul(std::mem::size_of::<(ObjRef, bool)>());
+    let text = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+    let bytes = overrides
+        .saturating_add(text(&layers.language))
+        .saturating_add(text(&layers.user.name))
+        .saturating_add(text(&layers.user.title))
+        .saturating_add(text(&layers.user.organisation));
+    u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
 /// A tiling pattern's cell as the document keeps it: the cell, and what its
