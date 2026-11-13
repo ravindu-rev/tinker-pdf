@@ -38,8 +38,17 @@ the linear layers shifts and XORs, so no table is read at an index a state or
 key byte chooses and nothing branches on either; the key schedule runs SubWord
 through the same circuit, and a decryption's padding check reads its whole last
 block and decides by masks, reporting `AesNote::BadPadding` exactly where the
-check byte by byte would. A lone CBC chain is one block a pass. The circuits
-and both ciphers are held to FIPS 197 when the crate compiles. That is a claim
+check byte by byte would. A word of the core holds four blocks, and a pass of
+it runs every block it holds through every round at once. A lone CBC chain is
+one block a pass of one word. CBC decryption is not sequential — each
+plaintext block is the inverse cipher of a ciphertext block the input already
+holds, XORed with the block before it — so it decrypts eight blocks a pass of
+two words, a shorter tail through the same pass with its other lanes empty,
+into output reserved once; `AesNote::TooShort` and `AesNote::RaggedTail` are
+decided by the lengths before any block is, and the padding check reads the
+last block whichever pass gave it, so the notes are the ones decryption a
+block at a time gives. The circuits and both ciphers are held to FIPS 197, at
+both widths of a pass, when the crate compiles. That is a claim
 about the source; H-67 reviews the machine code. An `Aes` is an expanded key,
 its round keys wiped when it is dropped and never printed, and a `FileKey`
 expands an `/AESV3` file key once, as it is made, for every string and stream
@@ -305,14 +314,22 @@ see EDE3's *order*, the CBC chain, or the 16-byte key bundle at all; the
 three-key file sees the first two and the two-key file the third. AES's
 circuit and its inverse, the slicing and both ciphers are held to FIPS 197's
 S-box and its inverse at all 256 inputs and to appendix B's, C.1's and C.3's
-blocks both ways in every lane by a `const` item, so a wrong gate fails the
-build; `the_core_reads_no_secret_indexed_table_and_branches_alike` and
+blocks both ways, alone and in every lane of a pass of one word and of two,
+by `const` items, so a wrong gate fails the build;
+`the_core_reads_no_secret_indexed_table_and_branches_alike` and
 `the_inverse_core_reads_no_secret_indexed_table_and_branches_alike`
 (`aes.rs`) record every table read and branch the cipher, the inverse cipher
 and the key schedule make, one trace over random keys and blocks of each key
-length, and `the_padding_check_by_masks_is_the_check_byte_by_byte` holds the
-padding check to the check byte by byte at every last byte. `handler.rs` pins
-constant-time comparison, Algorithm 2.B termination and one expansion of an
+length and pass width, and `the_padding_check_by_masks_is_the_check_byte_by_byte`
+holds the padding check to the check byte by byte at every last byte.
+`batched_decryption_is_block_by_block_decryption_at_every_length` holds the
+batched decryption to decryption a block a pass — every plaintext length to
+three passes of blocks, the padding made bad three ways, ragged tails, random
+ciphertext and every length under two blocks, plaintext and notes alike — and
+`a_decrypted_block_costs_a_lane_not_a_pass` counts its passes: eight blocks a
+pass, where a block at a time and a sealed chain are a pass a block.
+`handler.rs` pins constant-time comparison, Algorithm 2.B termination and one
+expansion of an
 `/AESV3` file key a file (`the_aesv3_key_is_expanded_once_per_file`), and
 `lib.rs` the `/P -2056` fixture that reads "printing denied, copying
 permitted" correctly. `bignum.rs` holds the constant-time path signing stands
