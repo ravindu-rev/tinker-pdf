@@ -56,7 +56,22 @@ fn decrypt(data: &[u8], key: u16, skip: usize) -> Vec<u8> {
     out
 }
 
+/// The most masters a multiple-master program holds (Type 1 Font Format
+/// Supplement, section 3.2).
+pub const MAX_MASTERS: usize = 16;
+/// The most design axes it has (section 3.2).
+pub const MAX_AXES: usize = 4;
+/// The most points one axis's `/BlendDesignMap` holds (section 3.5).
+pub const MAX_MAP_POINTS: usize = 12;
+/// How deep a cleartext array the multiple-master keys are read from may
+/// nest: `/BlendDesignMap`'s three levels.
+const MAX_ARRAY_DEPTH: usize = 3;
+/// How many values, at every level, such an array may hold: four axes of
+/// twelve points is 148, sixteen masters of four coordinates 80.
+const MAX_ARRAY_ITEMS: usize = 256;
+
 /// A parsed Type 1 font program.
+#[derive(Clone, Debug)]
 pub struct Type1<'a> {
     /// Charstrings by glyph name, in the order the font declared them.
     glyphs: Vec<(Vec<u8>, Vec<u8>)>,
@@ -66,7 +81,199 @@ pub struct Type1<'a> {
     encoding: Vec<(u8, Vec<u8>)>,
     /// `/FontMatrix`, which is usually 1/1000 but need not be.
     pub font_matrix: [f64; 6],
+    /// `/WeightVector`, where the program is a multiple-master one: its
+    /// default instance (the supplement's section 3.4).
+    weight_vector: Option<Vec<f64>>,
+    /// The blend design, where the program states one (section 3.5).
+    blend: Option<Blend>,
+    /// The weights the blend othersubrs blend with: the default instance's
+    /// until [`Type1::instance`] sets another.
+    weights: Option<Vec<f64>>,
     _marker: core::marker::PhantomData<&'a ()>,
+}
+
+/// A multiple-master program's blend design, as the supplement's section 3.5
+/// has `/FontInfo` state it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blend {
+    /// `/BlendAxisTypes`: one name an axis, `Weight`, `Width`,
+    /// `OpticalSize` and the like.
+    pub axes: Vec<Vec<u8>>,
+    /// `/BlendDesignPositions`: each master's place in the blend space, one
+    /// coordinate an axis, in the order the program holds its masters.
+    pub positions: Vec<Vec<f64>>,
+    /// `/BlendDesignMap`: each axis's design-to-blend points `(D, B)`.
+    pub maps: Vec<Vec<(f64, f64)>>,
+}
+
+/// The weights an instance blends its masters with, and whether a design
+/// coordinate was past its axis's map.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Instance {
+    /// One weight a master, in the program's order.
+    pub weights: Vec<f64>,
+    /// Whether a coordinate lay outside its map and was taken at the map's
+    /// end.
+    pub clamped: bool,
+}
+
+/// Why a design vector was not instanced; the program keeps drawing the
+/// instance it drew (`docs/design/type42-and-multiple-master.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstanceRefusal {
+    /// The program has no `/WeightVector` of two to sixteen numbers, so it is
+    /// no multiple-master program this crate blends.
+    NotMultipleMaster,
+    /// Its blend design — `/BlendAxisTypes`, `/BlendDesignPositions` and
+    /// `/BlendDesignMap` — is missing, or past the supplement's limits.
+    NoDesign,
+    /// Its blend design is not the supplement's standard form: one to four
+    /// axes, `2^n` masters each at its own corner of the blend space, as many
+    /// as `/WeightVector` holds, and each axis's map two to twelve points
+    /// rising in design coordinates with blend coordinates from 0 to 1.
+    NotStandard,
+    /// The design vector does not hold one coordinate an axis.
+    AxisCount {
+        /// How many axes the program has.
+        axes: usize,
+        /// How many coordinates were given.
+        given: usize,
+    },
+    /// A design coordinate is not a finite number.
+    NotFinite,
+}
+
+impl Blend {
+    /// How many axes the design has.
+    #[must_use]
+    pub fn axis_count(&self) -> usize {
+        self.axes.len()
+    }
+
+    /// How many masters it places.
+    #[must_use]
+    pub fn master_count(&self) -> usize {
+        self.positions.len()
+    }
+
+    /// Whether the design is the supplement's standard form, the one sections
+    /// 3.8 and 3.9 give the arithmetic for: one to four axes, the same number
+    /// of maps and of coordinates in every position, `2^n` masters each at a
+    /// corner of the blend space no other holds, and each map two to twelve
+    /// points, its design coordinates rising strictly and its blend
+    /// coordinates from 0 to 1, every number finite.
+    #[must_use]
+    pub fn is_standard(&self) -> bool {
+        let axes = self.axes.len();
+        if axes == 0 || axes > MAX_AXES || self.maps.len() != axes {
+            return false;
+        }
+        if self.positions.len() != 1 << axes {
+            return false;
+        }
+        let mut corners = 0u32;
+        for position in &self.positions {
+            if position.len() != axes {
+                return false;
+            }
+            let mut corner = 0u32;
+            for (axis, coordinate) in position.iter().enumerate() {
+                if *coordinate == 1.0 {
+                    corner |= 1 << axis;
+                } else if *coordinate != 0.0 {
+                    return false;
+                }
+            }
+            if corners & (1 << corner) != 0 {
+                return false;
+            }
+            corners |= 1 << corner;
+        }
+        self.maps.iter().all(|map| {
+            (2..=MAX_MAP_POINTS).contains(&map.len())
+                && map
+                    .iter()
+                    .all(|(d, b)| d.is_finite() && (0.0..=1.0).contains(b))
+                && map.windows(2).all(|pair| pair[0].0 < pair[1].0)
+        })
+    }
+
+    /// One axis's blend coordinate for a design coordinate, and whether the
+    /// coordinate was past the map and taken at its end (section 3.8,
+    /// Appendix C): on the segment `D_i ≤ d ≤ D_(i+1)`,
+    /// `B_i + (d − D_i) × (B_(i+1) − B_i) ÷ (D_(i+1) − D_i)`, a map's own
+    /// point answering its own blend coordinate. `None` for an axis the
+    /// design does not have or a map with no point.
+    #[must_use]
+    pub fn normalise(&self, axis: usize, design: f64) -> Option<(f64, bool)> {
+        let map = self.maps.get(axis)?;
+        let first = *map.first()?;
+        let last = *map.last()?;
+        if design <= first.0 {
+            return Some((first.1, design < first.0));
+        }
+        if design >= last.0 {
+            return Some((last.1, design > last.0));
+        }
+        for pair in map.windows(2) {
+            let ((d0, b0), (d1, b1)) = (pair[0], pair[1]);
+            if design == d1 {
+                return Some((b1, false));
+            }
+            if design < d1 {
+                return Some((b0 + (design - d0) * (b1 - b0) / (d1 - d0), false));
+            }
+        }
+        Some((last.1, false))
+    }
+
+    /// The weight vector at a design vector, one coordinate an axis, by the
+    /// supplement's arithmetic: each coordinate normalised through its map,
+    /// and master `i` at corner `p_i` weighing `Π_j (p_ij = 1 ? b_j : 1 − b_j)`,
+    /// the product taken over the axes in order (section 3.9, Appendix D).
+    ///
+    /// # Errors
+    ///
+    /// [`InstanceRefusal::NotStandard`] for a design that is not the
+    /// standard form, [`InstanceRefusal::AxisCount`] for a vector of another
+    /// length, [`InstanceRefusal::NotFinite`] for a coordinate that is no
+    /// number.
+    pub fn instance(&self, design: &[f64]) -> Result<Instance, InstanceRefusal> {
+        if !self.is_standard() {
+            return Err(InstanceRefusal::NotStandard);
+        }
+        if design.len() != self.axes.len() {
+            return Err(InstanceRefusal::AxisCount {
+                axes: self.axes.len(),
+                given: design.len(),
+            });
+        }
+        if !design.iter().all(|d| d.is_finite()) {
+            return Err(InstanceRefusal::NotFinite);
+        }
+        let mut blend = Vec::with_capacity(design.len());
+        let mut clamped = false;
+        for (axis, coordinate) in design.iter().enumerate() {
+            let (b, past) = self
+                .normalise(axis, *coordinate)
+                .ok_or(InstanceRefusal::NotStandard)?;
+            blend.push(b);
+            clamped |= past;
+        }
+        let weights = self
+            .positions
+            .iter()
+            .map(|position| {
+                position
+                    .iter()
+                    .zip(&blend)
+                    .fold(1.0, |weight, (corner, b)| {
+                        weight * if *corner == 1.0 { *b } else { 1.0 - b }
+                    })
+            })
+            .collect();
+        Ok(Instance { weights, clamped })
+    }
 }
 
 impl Type1<'_> {
@@ -120,13 +327,75 @@ impl Type1<'_> {
         let len_iv = read_int_after(&private, b"/lenIV").unwrap_or(LEN_IV as i64);
         let len_iv = len_iv.clamp(0, 16) as usize;
 
+        let weight_vector = read_weight_vector(clear);
         Some(Type1 {
             glyphs: read_charstrings(&private, len_iv, steps),
             subrs: read_subrs(&private, len_iv, steps),
             encoding: read_encoding(clear),
             font_matrix: read_font_matrix(clear).unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]),
+            blend: read_blend(clear),
+            weights: weight_vector.clone(),
+            weight_vector,
             _marker: core::marker::PhantomData,
         })
+    }
+
+    /// Whether this is a multiple-master program this crate blends: one with
+    /// a `/WeightVector` of two to sixteen numbers (the supplement's section
+    /// 3.4). Any other program's blend othersubrs, 14 to 18, are othersubrs
+    /// it does not know, which hand `pop` their arguments — the first
+    /// master's values — as the Type 1 book's chapter 8 says.
+    #[must_use]
+    pub fn is_multiple_master(&self) -> bool {
+        self.weight_vector.is_some()
+    }
+
+    /// The program's own `/WeightVector`: its default instance.
+    #[must_use]
+    pub fn weight_vector(&self) -> Option<&[f64]> {
+        self.weight_vector.as_deref()
+    }
+
+    /// The weights the program draws with now: its `/WeightVector`, or the
+    /// last instance [`Type1::instance`] set.
+    #[must_use]
+    pub fn weights(&self) -> Option<&[f64]> {
+        self.weights.as_deref()
+    }
+
+    /// The program's blend design, where it states one this crate reads.
+    #[must_use]
+    pub fn blend(&self) -> Option<&Blend> {
+        self.blend.as_ref()
+    }
+
+    /// Draws the program at the instance a design vector names, one design
+    /// coordinate an axis, from now on: its outlines and advances are the
+    /// masters blended with the weights [`Blend::instance`] computes.
+    ///
+    /// # Errors
+    ///
+    /// The [`InstanceRefusal`] that kept the instance the program drew,
+    /// which is then unchanged: its default, unless an earlier call set
+    /// another.
+    pub fn instance(&mut self, design: &[f64]) -> Result<Instance, InstanceRefusal> {
+        let masters = self
+            .weight_vector
+            .as_ref()
+            .ok_or(InstanceRefusal::NotMultipleMaster)?
+            .len();
+        let blend = self.blend.as_ref().ok_or(InstanceRefusal::NoDesign)?;
+        if blend.master_count() != masters {
+            return Err(InstanceRefusal::NotStandard);
+        }
+        let instance = blend.instance(design)?;
+        self.weights = Some(instance.weights.clone());
+        Ok(instance)
+    }
+
+    /// Draws the program at its default instance again, its `/WeightVector`.
+    pub fn default_instance(&mut self) {
+        self.weights = self.weight_vector.clone();
     }
 
     /// How many glyphs the font defines.
@@ -568,7 +837,8 @@ impl Run<'_, '_> {
     ///
     /// The interpreter is expected to know othersubrs 0 to 3 itself; a font
     /// that defines others is asking for a PostScript interpreter, which this
-    /// is not.
+    /// is not — except for a multiple-master program's blend othersubrs, 14 to
+    /// 18, which [`Run::blend`] answers without one.
     fn othersubr(&mut self) {
         let index = self.stack.pop().unwrap_or(0.0) as i64;
         let count = self.stack.pop().unwrap_or(0.0).max(0.0) as usize;
@@ -576,6 +846,17 @@ impl Run<'_, '_> {
         // The arguments were pushed before the count and index.
         let at = self.stack.len().saturating_sub(count);
         let args: Vec<f64> = self.stack.split_off(at);
+
+        if (14..=18).contains(&index) {
+            if let Some(results) = self.blend(index, count, &args) {
+                // `pop` takes the results in the order of their quantities,
+                // `a` first: the last pushed is the first taken.
+                for value in results.into_iter().rev() {
+                    self.ps_stack.push(value);
+                }
+                return;
+            }
+        }
 
         match index {
             0 => {
@@ -612,6 +893,46 @@ impl Run<'_, '_> {
                 }
             }
         }
+    }
+
+    /// A multiple-master program's blend othersubr: 14 to 18 blend 1, 2, 3, 4
+    /// and 6 quantities (the supplement's section 3.12).
+    ///
+    /// The `k × m` arguments are the `m` quantities' first-master values and
+    /// then, quantity by quantity, the other `k − 1` masters' deltas from them;
+    /// each result is `a1 + ((Δ2 × W_1 + Δ3 × W_2) + … + Δk × W_(k−1))`,
+    /// `$Blend`'s own order of operations (section 3.4), `W_0` unused as it
+    /// is there. `None` — the othersubr unknown, its arguments handed to
+    /// `pop` — for a program with no weights or a call whose count is not `k`
+    /// times its results.
+    fn blend(&self, index: i64, count: usize, args: &[f64]) -> Option<Vec<f64>> {
+        let weights = self.font.weights.as_deref()?;
+        let masters = weights.len();
+        let quantities = match index {
+            14 => 1,
+            15 => 2,
+            16 => 3,
+            17 => 4,
+            18 => 6,
+            _ => return None,
+        };
+        if masters < 2 || count != masters * quantities || args.len() != count {
+            return None;
+        }
+        let deltas = masters - 1;
+        let mut results = Vec::with_capacity(quantities);
+        // In range: `args` holds `masters × quantities` values, checked above,
+        // and `weights` `masters`, at least two.
+        for quantity in 0..quantities {
+            let first = args[quantity];
+            let from = quantities + quantity * deltas;
+            let mut sum = args[from] * weights[1];
+            for master in 1..deltas {
+                sum += args[from + master] * weights[master + 1];
+            }
+            results.push(first + sum);
+        }
+        Some(results)
     }
 
     /// The last `n` operands, oldest first, padded with zeros.
@@ -696,6 +1017,203 @@ fn read_font_matrix(clear: &[u8]) -> Option<[f64; 6]> {
         [
             values[0], values[1], values[2], values[3], values[4], values[5],
         ]
+    })
+}
+
+/// A value of the cleartext arrays the multiple-master keys are written as.
+#[derive(Clone, Debug, PartialEq)]
+enum Value {
+    Number(f64),
+    Name(Vec<u8>),
+    Array(Vec<Value>),
+}
+
+impl Value {
+    fn number(&self) -> Option<f64> {
+        match self {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    fn array(&self) -> Option<&[Value]> {
+        match self {
+            Value::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+}
+
+/// The literal array a cleartext key is defined as: the first occurrence of
+/// `key` that `[` follows, so a procedure that names the key — the
+/// supplement's `makeblendedfont` reads `/WeightVector get` — is passed over.
+/// `None` where no definition is an array this reads, nested at most
+/// [`MAX_ARRAY_DEPTH`] deep and holding at most [`MAX_ARRAY_ITEMS`] values.
+fn read_array(clear: &[u8], key: &[u8]) -> Option<Value> {
+    let mut from = 0usize;
+    while let Some(found) = find(clear.get(from..)?, key) {
+        let after = from + found + key.len();
+        let rest = clear.get(after..)?;
+        let start = rest.iter().position(|b| !b.is_ascii_whitespace())?;
+        if rest[start] == b'[' {
+            let mut at = after + start;
+            let mut items = 0usize;
+            return parse_array(clear, &mut at, 0, &mut items);
+        }
+        from = after;
+    }
+    None
+}
+
+/// The array that opens at `data[*at]`, `[`, and every array inside it.
+fn parse_array(data: &[u8], at: &mut usize, depth: usize, items: &mut usize) -> Option<Value> {
+    if depth >= MAX_ARRAY_DEPTH {
+        return None;
+    }
+    *at += 1;
+    let mut out = Vec::new();
+    loop {
+        while data.get(*at).is_some_and(u8::is_ascii_whitespace) {
+            *at += 1;
+        }
+        let value = match data.get(*at)? {
+            b']' => {
+                *at += 1;
+                return Some(Value::Array(out));
+            }
+            b'[' => parse_array(data, at, depth + 1, items)?,
+            b'/' => {
+                let start = *at + 1;
+                let end = regular_end(data, start);
+                *at = end;
+                Value::Name(data.get(start..end)?.to_vec())
+            }
+            _ => {
+                let start = *at;
+                let end = regular_end(data, start);
+                if end == start {
+                    return None;
+                }
+                *at = end;
+                Value::Number(ps_number(data.get(start..end)?)?)
+            }
+        };
+        *items += 1;
+        if *items > MAX_ARRAY_ITEMS {
+            return None;
+        }
+        out.push(value);
+    }
+}
+
+/// Where a run of PostScript's regular characters from `start` ends.
+fn regular_end(data: &[u8], start: usize) -> usize {
+    data.get(start..)
+        .and_then(|rest| {
+            rest.iter().position(|b| {
+                b.is_ascii_whitespace()
+                    || matches!(
+                        b,
+                        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+                    )
+            })
+        })
+        .map_or(data.len(), |at| start + at)
+}
+
+/// A PostScript integer or real, `0.53`, `.53`, `-12` or `1e-3`, finite.
+fn ps_number(token: &[u8]) -> Option<f64> {
+    let body = token
+        .strip_prefix(b"-")
+        .or_else(|| token.strip_prefix(b"+"))
+        .unwrap_or(token);
+    let starts = body
+        .first()
+        .is_some_and(|b| b.is_ascii_digit() || *b == b'.');
+    let allowed = body
+        .iter()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-'));
+    if !starts || !allowed {
+        return None;
+    }
+    core::str::from_utf8(token)
+        .ok()?
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite())
+}
+
+/// `/WeightVector [w1 … wk]`: two to [`MAX_MASTERS`] numbers.
+fn read_weight_vector(clear: &[u8]) -> Option<Vec<f64>> {
+    let values = read_array(clear, b"/WeightVector")?;
+    let weights: Vec<f64> = values
+        .array()?
+        .iter()
+        .map(Value::number)
+        .collect::<Option<_>>()?;
+    (2..=MAX_MASTERS)
+        .contains(&weights.len())
+        .then_some(weights)
+}
+
+/// `/BlendAxisTypes`, `/BlendDesignPositions` and `/BlendDesignMap`, read as
+/// written, within the supplement's limits: one to [`MAX_AXES`] axes, two to
+/// [`MAX_MASTERS`] masters, at most [`MAX_MAP_POINTS`] points a map, every
+/// point a pair. Whether the design is the standard form is
+/// [`Blend::is_standard`]'s question, not this one's.
+fn read_blend(clear: &[u8]) -> Option<Blend> {
+    let axes: Vec<Vec<u8>> = read_array(clear, b"/BlendAxisTypes")?
+        .array()?
+        .iter()
+        .map(|value| match value {
+            Value::Name(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    if axes.is_empty() || axes.len() > MAX_AXES {
+        return None;
+    }
+    let positions: Vec<Vec<f64>> = read_array(clear, b"/BlendDesignPositions")?
+        .array()?
+        .iter()
+        .map(|position| {
+            let coordinates: Vec<f64> = position
+                .array()?
+                .iter()
+                .map(Value::number)
+                .collect::<Option<_>>()?;
+            (1..=MAX_AXES)
+                .contains(&coordinates.len())
+                .then_some(coordinates)
+        })
+        .collect::<Option<_>>()?;
+    if !(2..=MAX_MASTERS).contains(&positions.len()) {
+        return None;
+    }
+    let maps: Vec<Vec<(f64, f64)>> = read_array(clear, b"/BlendDesignMap")?
+        .array()?
+        .iter()
+        .map(|map| {
+            let points: Vec<(f64, f64)> = map
+                .array()?
+                .iter()
+                .map(|point| match point.array()? {
+                    [d, b] => Some((d.number()?, b.number()?)),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            (1..=MAX_MAP_POINTS)
+                .contains(&points.len())
+                .then_some(points)
+        })
+        .collect::<Option<_>>()?;
+    if maps.is_empty() || maps.len() > MAX_AXES {
+        return None;
+    }
+    Some(Blend {
+        axes,
+        positions,
+        maps,
     })
 }
 
@@ -1065,11 +1583,664 @@ mod tests {
             subrs: Vec::new(),
             encoding: Vec::new(),
             font_matrix: [0.001, 0.0, 0.0, 0.001, 0.0, 0.0],
+            weight_vector: None,
+            blend: None,
+            weights: None,
             _marker: core::marker::PhantomData,
         };
         // The side bearing lands at 2000, not at 2000/65536.
         let outline = font.outline(0).expect("it runs");
         assert!(outline.is_empty(), "no drawing operators");
         assert_eq!(font.advance(0), Some(0.0));
+    }
+
+    /// One number in the Type 1 charstring encodings, whichever is shortest.
+    fn push_number(v: i32, out: &mut Vec<u8>) {
+        if (-107..=107).contains(&v) {
+            out.push((v + 139) as u8);
+        } else if (108..=1131).contains(&v) {
+            let u = v - 108;
+            out.push((u / 256 + 247) as u8);
+            out.push((u % 256) as u8);
+        } else if (-1131..=-108).contains(&v) {
+            let u = -v - 108;
+            out.push((u / 256 + 251) as u8);
+            out.push((u % 256) as u8);
+        } else {
+            out.push(255);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+
+    /// One blended group of a multiple-master charstring, as the supplement's
+    /// section 3.11 writes it: `masters[i][q]` is master `i`'s value of
+    /// quantity `q`, written as each quantity's first-master value, then each
+    /// quantity's deltas from it, then the count, the blend othersubr for that
+    /// many quantities, `callothersubr` and one `pop` a quantity.
+    fn blended(masters: &[Vec<i32>], out: &mut Vec<u8>) {
+        let quantities = masters[0].len();
+        for q in 0..quantities {
+            push_number(masters[0][q], out);
+        }
+        for q in 0..quantities {
+            for master in &masters[1..] {
+                push_number(master[q] - masters[0][q], out);
+            }
+        }
+        push_number((masters.len() * quantities) as i32, out);
+        let othersubr = match quantities {
+            1 => 14,
+            2 => 15,
+            3 => 16,
+            4 => 17,
+            6 => 18,
+            other => panic!("no blend othersubr takes {other} quantities"),
+        };
+        push_number(othersubr, out);
+        out.extend_from_slice(&[12, 16]);
+        for _ in 0..quantities {
+            out.extend_from_slice(&[12, 17]);
+        }
+    }
+
+    /// A program whose cleartext carries `keys` before `/FontMatrix`, and
+    /// whose `/CharStrings` holds `charstrings`.
+    fn mm_program(keys: &str, charstrings: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut private = Vec::new();
+        private.extend_from_slice(b"dup /Private 8 dict dup begin\n/lenIV 4 def\n");
+        private.extend_from_slice(b"/Subrs 0 array ND\n");
+        private.extend_from_slice(
+            format!("/CharStrings {} dict dup begin\n", charstrings.len()).as_bytes(),
+        );
+        for (name, charstring) in charstrings {
+            let encrypted = encrypt(charstring, CHARSTRING_KEY, 4);
+            private.extend_from_slice(format!("/{name} {} RD ", encrypted.len()).as_bytes());
+            private.extend_from_slice(&encrypted);
+            private.extend_from_slice(b" ND\n");
+        }
+        private.extend_from_slice(b"end\nend\n");
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%!PS-AdobeFont-1.0: TestMM 001.000\n");
+        out.extend_from_slice(keys.as_bytes());
+        out.extend_from_slice(b"/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n");
+        out.extend_from_slice(b"/Encoding 256 array\ndup 65 /square put\nreadonly def\n");
+        out.extend_from_slice(b"currentfile eexec\n");
+        out.extend_from_slice(&encrypt(&private, EEXEC_KEY, 4));
+        out
+    }
+
+    /// The two-axis, four-master design the tests instance: a weight axis
+    /// mapped linearly from 100 to 900, and a width axis of three points, so
+    /// one segment of each kind is crossed. Each master at its own corner,
+    /// written out of the corners' order, and a procedure before the real
+    /// definition that names `/WeightVector` as `makeblendedfont` does.
+    const FOUR_MASTERS: &str = "/FontInfo 5 dict dup begin\n\
+         /BlendAxisTypes [/Weight /Width ] def\n\
+         /BlendDesignPositions [[0 0] [1 0] [0 1] [1 1]] def\n\
+         /BlendDesignMap [[[100 0][900 1]] [[0 0][400 0.5][1000 1]]] def\n\
+         end readonly def\n\
+         /FontName /TestMM def\n\
+         /makeblendedfont { dup /WeightVector get pop } def\n\
+         /WeightVector [0.125 0.375 0.125 0.375 ] def\n\
+         /$Blend {0.375 mul exch 0.125 mul add exch 0.375 mul add add} bind def\n";
+
+    /// The four masters of the test glyph: an advance, a move, a box's two
+    /// sides and a curve back, each quantity different in every master.
+    struct Masters {
+        hsbw: Vec<Vec<i32>>,
+        moveto: Vec<Vec<i32>>,
+        width: Vec<Vec<i32>>,
+        height: Vec<Vec<i32>>,
+        curve_a: Vec<Vec<i32>>,
+        curve_b: Vec<Vec<i32>>,
+    }
+
+    fn four_masters() -> Masters {
+        Masters {
+            hsbw: vec![vec![10, 500], vec![30, 700], vec![50, 600], vec![70, 900]],
+            moveto: vec![vec![0, 0], vec![20, 10], vec![40, 20], vec![60, 30]],
+            width: vec![vec![400], vec![600], vec![500], vec![800]],
+            height: vec![vec![300], vec![300], vec![500], vec![500]],
+            curve_a: vec![
+                vec![-100, 50, -100],
+                vec![-150, 60, -150],
+                vec![-120, 70, -130],
+                vec![-200, 80, -200],
+            ],
+            curve_b: vec![
+                vec![0, -200, -50],
+                vec![0, -300, -60],
+                vec![10, -250, -80],
+                vec![20, -400, -100],
+            ],
+        }
+    }
+
+    /// The test glyph's charstring: every operand blended, the curve's six
+    /// split over two calls of othersubr 16 as section 3.11 splits them.
+    fn square_charstring(masters: &Masters) -> Vec<u8> {
+        let mut cs = Vec::new();
+        blended(&masters.hsbw, &mut cs);
+        cs.push(13); // hsbw
+        blended(&masters.moveto, &mut cs);
+        cs.push(21); // rmoveto
+        blended(&masters.width, &mut cs);
+        cs.push(6); // hlineto
+        blended(&masters.height, &mut cs);
+        cs.push(7); // vlineto
+        blended(&masters.curve_a, &mut cs);
+        blended(&masters.curve_b, &mut cs);
+        cs.push(8); // rrcurveto
+        cs.push(9); // closepath
+        cs.push(14); // endchar
+        cs
+    }
+
+    /// The test's own piecewise-linear map, written from section 3.8.
+    fn through_map(map: &[(f64, f64)], d: f64) -> f64 {
+        if d <= map[0].0 {
+            return map[0].1;
+        }
+        for pair in map.windows(2) {
+            if d <= pair[1].0 {
+                let ((d0, b0), (d1, b1)) = (pair[0], pair[1]);
+                return b0 + (d - d0) * (b1 - b0) / (d1 - d0);
+            }
+        }
+        map[map.len() - 1].1
+    }
+
+    /// The test's own weights at a design vector, by section 3.9's
+    /// multilinear rule over the corners the design places its masters at.
+    fn weights_for(design: [f64; 2]) -> Vec<f64> {
+        let b = [
+            through_map(&[(100.0, 0.0), (900.0, 1.0)], design[0]),
+            through_map(&[(0.0, 0.0), (400.0, 0.5), (1000.0, 1.0)], design[1]),
+        ];
+        let corners = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        corners
+            .iter()
+            .map(|corner: &[f64; 2]| {
+                (0..2)
+                    .map(|axis| {
+                        if corner[axis] == 1.0 {
+                            b[axis]
+                        } else {
+                            1.0 - b[axis]
+                        }
+                    })
+                    .product()
+            })
+            .collect()
+    }
+
+    /// Each quantity of a group blended with `weights`, the masters' values
+    /// times their weights, summed.
+    fn mix(group: &[Vec<i32>], weights: &[f64]) -> Vec<f64> {
+        (0..group[0].len())
+            .map(|q| {
+                group
+                    .iter()
+                    .zip(weights)
+                    .map(|(master, w)| f64::from(master[q]) * w)
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// The test glyph's outline and advance at `weights`, drawn by hand as
+    /// the charstring's commands draw them.
+    fn expected_square(masters: &Masters, weights: &[f64]) -> (Vec<Segment>, f64) {
+        let hsbw = mix(&masters.hsbw, weights);
+        let moveto = mix(&masters.moveto, weights);
+        let width = mix(&masters.width, weights)[0];
+        let height = mix(&masters.height, weights)[0];
+        let a = mix(&masters.curve_a, weights);
+        let b = mix(&masters.curve_b, weights);
+        let (x, y) = (hsbw[0] + moveto[0], moveto[1]);
+        let after_width = x + width;
+        let after_height = y + height;
+        let c1 = (after_width + a[0], after_height + a[1]);
+        let c2 = (c1.0 + a[2], c1.1 + b[0]);
+        let end = (c2.0 + b[1], c2.1 + b[2]);
+        (
+            vec![
+                Segment::MoveTo { x, y },
+                Segment::LineTo { x: after_width, y },
+                Segment::LineTo {
+                    x: after_width,
+                    y: after_height,
+                },
+                Segment::CurveTo {
+                    c1x: c1.0,
+                    c1y: c1.1,
+                    c2x: c2.0,
+                    c2y: c2.1,
+                    x: end.0,
+                    y: end.1,
+                },
+                Segment::Close,
+            ],
+            hsbw[1],
+        )
+    }
+
+    fn four_master_font() -> Type1<'static> {
+        let masters = four_masters();
+        Type1::parse(&mm_program(
+            FOUR_MASTERS,
+            &[("square", square_charstring(&masters))],
+        ))
+        .expect("the program parses")
+    }
+
+    #[test]
+    fn the_blend_design_is_read_as_written() {
+        let font = four_master_font();
+        assert!(font.is_multiple_master());
+        assert_eq!(
+            font.weight_vector(),
+            Some([0.125, 0.375, 0.125, 0.375].as_slice())
+        );
+        let blend = font.blend().expect("a blend design");
+        assert_eq!(blend.axes, vec![b"Weight".to_vec(), b"Width".to_vec()]);
+        assert_eq!(
+            blend.positions,
+            vec![
+                vec![0.0, 0.0],
+                vec![1.0, 0.0],
+                vec![0.0, 1.0],
+                vec![1.0, 1.0]
+            ]
+        );
+        assert_eq!(
+            blend.maps,
+            vec![
+                vec![(100.0, 0.0), (900.0, 1.0)],
+                vec![(0.0, 0.0), (400.0, 0.5), (1000.0, 1.0)]
+            ]
+        );
+        assert!(blend.is_standard());
+        assert_eq!((blend.axis_count(), blend.master_count()), (2, 4));
+    }
+
+    /// **FT-10.4's exit.** Instanced at several design vectors, the program's
+    /// outline points and advance are its masters blended with weights the
+    /// test computes from the blend design itself, and the weights it keeps
+    /// are those weights.
+    #[test]
+    fn an_instance_is_its_masters_blended_at_the_design_weights() {
+        let masters = four_masters();
+        let mut font = four_master_font();
+        for design in [
+            [500.0, 700.0],
+            [300.0, 400.0],
+            [100.0, 0.0],
+            [900.0, 1000.0],
+            [700.0, 100.0],
+        ] {
+            let weights = weights_for(design);
+            let instance = font.instance(&design).expect("a standard design instances");
+            assert_eq!(instance.weights, weights, "{design:?}");
+            assert!(!instance.clamped, "{design:?}");
+            assert_eq!(font.weights(), Some(weights.as_slice()));
+            let (segments, advance) = expected_square(&masters, &weights);
+            assert_eq!(
+                font.outline(0).expect("it draws").segments,
+                segments,
+                "{design:?}"
+            );
+            assert_eq!(font.advance(0), Some(advance), "{design:?}");
+        }
+
+        // A corner draws its own master, and past the maps a coordinate is
+        // taken at the map's end, which the instance says.
+        let instance = font.instance(&[50.0, 2000.0]).expect("it instances");
+        assert!(instance.clamped);
+        assert_eq!(instance.weights, vec![0.0, 0.0, 1.0, 0.0]);
+        let (segments, advance) = expected_square(&masters, &instance.weights);
+        assert_eq!(font.outline(0).expect("it draws").segments, segments);
+        assert_eq!(font.advance(0), Some(advance));
+        assert_eq!(advance, 600.0, "master 3's own width");
+    }
+
+    #[test]
+    fn the_weight_vector_is_the_default_instance() {
+        let masters = four_masters();
+        let mut font = four_master_font();
+        let default = vec![0.125, 0.375, 0.125, 0.375];
+        assert_eq!(font.weights(), Some(default.as_slice()));
+        let (segments, advance) = expected_square(&masters, &default);
+        assert_eq!(font.outline(0).expect("it draws").segments, segments);
+        assert_eq!(font.advance(0), Some(advance));
+
+        // Another instance, and back.
+        font.instance(&[500.0, 700.0]).expect("it instances");
+        assert_ne!(font.outline(0).expect("it draws").segments, segments);
+        font.default_instance();
+        assert_eq!(font.weights(), Some(default.as_slice()));
+        assert_eq!(font.outline(0).expect("it draws").segments, segments);
+
+        // A refused instance keeps what the program drew.
+        font.instance(&[300.0, 400.0]).expect("it instances");
+        let drawn = font.outline(0).expect("it draws").segments;
+        assert_eq!(
+            font.instance(&[300.0]),
+            Err(InstanceRefusal::AxisCount { axes: 2, given: 1 })
+        );
+        assert_eq!(
+            font.instance(&[f64::NAN, 1.0]),
+            Err(InstanceRefusal::NotFinite)
+        );
+        assert_eq!(font.outline(0).expect("it draws").segments, drawn);
+    }
+
+    /// A design other than the standard form is not instanced, and draws the
+    /// program's default.
+    #[test]
+    fn a_design_off_the_standard_form_keeps_the_default_instance() {
+        let masters = four_masters();
+        let charstrings = [("square", square_charstring(&masters))];
+        let default = vec![0.125, 0.375, 0.125, 0.375];
+        for (from, to) in [
+            // An intermediate master.
+            ("[[0 0] [1 0] [0 1] [1 1]]", "[[0 0] [1 0] [0 1] [0.5 1]]"),
+            // A corner held twice.
+            ("[[0 0] [1 0] [0 1] [1 1]]", "[[0 0] [1 0] [0 1] [1 0]]"),
+            // A map out of order.
+            ("[[100 0][900 1]]", "[[900 0][100 1]]"),
+            // A blend coordinate past 1.
+            ("[[100 0][900 1]]", "[[100 0][900 1.5]]"),
+            // Three axes' types for two axes' maps.
+            ("[/Weight /Width ]", "[/Weight /Width /OpticalSize]"),
+        ] {
+            let keys = FOUR_MASTERS.replace(from, to);
+            assert_ne!(keys, FOUR_MASTERS);
+            let mut font = Type1::parse(&mm_program(&keys, &charstrings)).expect("it parses");
+            assert_eq!(
+                font.instance(&[500.0, 700.0]),
+                Err(InstanceRefusal::NotStandard),
+                "{to}"
+            );
+            assert_eq!(font.weights(), Some(default.as_slice()), "{to}");
+            let (segments, _) = expected_square(&masters, &default);
+            assert_eq!(
+                font.outline(0).expect("it draws").segments,
+                segments,
+                "{to}"
+            );
+        }
+
+        // Masters other than the weight vector holds.
+        let keys = FOUR_MASTERS.replace("[0.125 0.375 0.125 0.375 ]", "[0.25 0.25 0.5]");
+        let mut font = Type1::parse(&mm_program(&keys, &charstrings)).expect("it parses");
+        assert_eq!(
+            font.instance(&[500.0, 700.0]),
+            Err(InstanceRefusal::NotStandard)
+        );
+
+        // No design at all, or one past the supplement's limits.
+        for (from, to) in [
+            ("/BlendDesignMap", "/BlendDesignMapping"),
+            (
+                "[[0 0][400 0.5][1000 1]]",
+                "[[0 0][1 0][2 0][3 0][4 0][5 0][6 0][7 0][8 0][9 0][10 0][11 0][12 1]]",
+            ),
+            ("[[100 0][900 1]]", "[[[100 0][900 1]]]"),
+        ] {
+            let keys = FOUR_MASTERS.replace(from, to);
+            let mut font = Type1::parse(&mm_program(&keys, &charstrings)).expect("it parses");
+            assert!(font.blend().is_none(), "{to}");
+            assert_eq!(
+                font.instance(&[500.0, 700.0]),
+                Err(InstanceRefusal::NoDesign),
+                "{to}"
+            );
+            assert!(font.is_multiple_master());
+        }
+    }
+
+    /// A program with no weight vector — every ordinary Type 1 program, and a
+    /// multiple-master one whose `/WeightVector` is past sixteen numbers —
+    /// draws as it always has: its blend othersubrs are unknown, and `pop`
+    /// takes their arguments, the first master's values.
+    #[test]
+    fn a_program_without_a_weight_vector_draws_its_first_master_as_before() {
+        let masters = four_masters();
+        let charstrings = [("square", square_charstring(&masters))];
+        let first = [1.0, 0.0, 0.0, 0.0];
+        let (segments, advance) = expected_square(&masters, &first);
+        for keys in [
+            FOUR_MASTERS.replace("/WeightVector", "/WeightVectors"),
+            FOUR_MASTERS.replace(
+                "[0.125 0.375 0.125 0.375 ]",
+                "[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1]",
+            ),
+            FOUR_MASTERS.replace("[0.125 0.375 0.125 0.375 ]", "[1]"),
+        ] {
+            let mut font = Type1::parse(&mm_program(&keys, &charstrings)).expect("it parses");
+            assert!(!font.is_multiple_master());
+            assert_eq!(font.weights(), None);
+            assert_eq!(
+                font.instance(&[500.0, 700.0]),
+                Err(InstanceRefusal::NotMultipleMaster)
+            );
+            assert_eq!(font.outline(0).expect("it draws").segments, segments);
+            assert_eq!(font.advance(0), Some(advance));
+        }
+
+        // A blend call whose count is not the masters times its quantities
+        // is an othersubr this interpreter does not know, in a program that
+        // blends as well.
+        let mut cs = Vec::new();
+        for v in [10, 500, 20, 40, 60] {
+            push_number(v, &mut cs);
+        }
+        push_number(5, &mut cs);
+        push_number(15, &mut cs);
+        cs.extend_from_slice(&[12, 16, 12, 17, 12, 17, 13, 14]);
+        let font = Type1::parse(&mm_program(FOUR_MASTERS, &[("square", cs)])).expect("it parses");
+        assert!(font.is_multiple_master());
+        assert_eq!(
+            font.advance(0),
+            Some(500.0),
+            "the first master's width, popped as written"
+        );
+    }
+
+    /// Othersubrs 17 and 18, the four- and six-quantity blends, on a one-axis
+    /// program of two masters.
+    #[test]
+    fn the_four_and_six_quantity_blends_return_their_quantities_in_order() {
+        let keys = "/FontInfo 4 dict dup begin\n\
+             /BlendAxisTypes [/Weight] def\n\
+             /BlendDesignPositions [[0] [1]] def\n\
+             /BlendDesignMap [[[0 0] [1000 1]]] def\n\
+             end readonly def\n\
+             /WeightVector [0.5 0.5] def\n";
+        let hsbw = vec![vec![20, 600], vec![40, 800]];
+        let moveto = vec![vec![0, 0], vec![10, 10]];
+        let curve = vec![
+            vec![100, 0, 100, 100, 0, 100],
+            vec![140, 0, 160, 120, 0, 160],
+        ];
+        let vh = vec![vec![-100, -50, -50, -100], vec![-160, -60, -80, -120]];
+        let mut cs = Vec::new();
+        blended(&hsbw, &mut cs);
+        cs.push(13);
+        blended(&moveto, &mut cs);
+        cs.push(21);
+        blended(&curve, &mut cs);
+        cs.push(8);
+        blended(&vh, &mut cs);
+        cs.push(30); // vhcurveto
+        cs.extend_from_slice(&[9, 14]);
+        let mut font = Type1::parse(&mm_program(keys, &[("curve", cs)])).expect("it parses");
+
+        for (design, weights) in [(None, [0.5, 0.5]), (Some(250.0), [0.75, 0.25])] {
+            if let Some(design) = design {
+                let instance = font.instance(&[design]).expect("it instances");
+                assert_eq!(instance.weights, weights.to_vec());
+            }
+            let h = mix(&hsbw, &weights);
+            let m = mix(&moveto, &weights);
+            let c = mix(&curve, &weights);
+            let v = mix(&vh, &weights);
+            let start = (h[0] + m[0], m[1]);
+            let c1 = (start.0 + c[0], start.1 + c[1]);
+            let c2 = (c1.0 + c[2], c1.1 + c[3]);
+            let end = (c2.0 + c[4], c2.1 + c[5]);
+            let d1 = (end.0, end.1 + v[0]);
+            let d2 = (d1.0 + v[1], d1.1 + v[2]);
+            let back = (d2.0 + v[3], d2.1);
+            assert_eq!(
+                font.outline(0).expect("it draws").segments,
+                vec![
+                    Segment::MoveTo {
+                        x: start.0,
+                        y: start.1
+                    },
+                    Segment::CurveTo {
+                        c1x: c1.0,
+                        c1y: c1.1,
+                        c2x: c2.0,
+                        c2y: c2.1,
+                        x: end.0,
+                        y: end.1
+                    },
+                    Segment::CurveTo {
+                        c1x: d1.0,
+                        c1y: d1.1,
+                        c2x: d2.0,
+                        c2y: d2.1,
+                        x: back.0,
+                        y: back.1
+                    },
+                    Segment::Close,
+                ],
+                "{design:?}"
+            );
+            assert_eq!(font.advance(0), Some(h[1]));
+        }
+    }
+
+    /// Section 3.8's normalisation: a map's own points answer their own
+    /// blend coordinates, a segment interpolates, and past the ends a
+    /// coordinate takes the end and says so.
+    #[test]
+    fn a_design_coordinate_is_normalised_through_its_axis_map() {
+        let font = four_master_font();
+        let blend = font.blend().expect("a design");
+        assert_eq!(blend.normalise(0, 100.0), Some((0.0, false)));
+        assert_eq!(blend.normalise(0, 500.0), Some((0.5, false)));
+        assert_eq!(blend.normalise(0, 900.0), Some((1.0, false)));
+        assert_eq!(blend.normalise(0, 99.0), Some((0.0, true)));
+        assert_eq!(blend.normalise(0, 901.0), Some((1.0, true)));
+        assert_eq!(blend.normalise(1, 400.0), Some((0.5, false)));
+        assert_eq!(blend.normalise(1, 200.0), Some((0.25, false)));
+        assert_eq!(blend.normalise(1, 700.0), Some((0.75, false)));
+        assert_eq!(blend.normalise(2, 0.0), None, "no third axis");
+
+        // Appendix C's Minion optical-size axis, segment by segment.
+        let minion = Blend {
+            axes: vec![b"OpticalSize".to_vec()],
+            positions: vec![vec![0.0], vec![1.0]],
+            maps: vec![vec![
+                (6.0, 0.0),
+                (8.0, 0.35),
+                (11.0, 0.5),
+                (18.0, 0.75),
+                (72.0, 1.0),
+            ]],
+        };
+        assert!(minion.is_standard());
+        assert_eq!(minion.normalise(0, 8.0), Some((0.35, false)));
+        assert_eq!(minion.normalise(0, 11.0), Some((0.5, false)));
+        let (at_45, _) = minion.normalise(0, 45.0).expect("a coordinate");
+        assert_eq!(at_45, 0.75 + (45.0 - 18.0) * (1.0 - 0.75) / (72.0 - 18.0));
+        assert_eq!(
+            minion.instance(&[11.0]),
+            Ok(Instance {
+                weights: vec![0.5, 0.5],
+                clamped: false
+            })
+        );
+    }
+
+    #[test]
+    fn postscript_numbers_read_as_written() {
+        assert_eq!(ps_number(b"0.125"), Some(0.125));
+        assert_eq!(ps_number(b".53"), Some(0.53));
+        assert_eq!(ps_number(b"-12"), Some(-12.0));
+        assert_eq!(ps_number(b"+3"), Some(3.0));
+        assert_eq!(ps_number(b"1e-3"), Some(0.001));
+        assert_eq!(ps_number(b"inf"), None);
+        assert_eq!(ps_number(b"NaN"), None);
+        assert_eq!(ps_number(b"1e400"), None);
+        assert_eq!(ps_number(b"-"), None);
+        assert_eq!(ps_number(b""), None);
+        assert_eq!(ps_number(b"/Weight"), None);
+    }
+
+    /// A cleartext array is read within its limits and no further: nested
+    /// past three levels, holding more than 256 values, or never closing, it
+    /// is not read, and a definition that is no array is passed over.
+    #[test]
+    fn the_cleartext_arrays_are_bounded() {
+        assert!(read_array(b"/K [1 [2 [3]]] def", b"/K").is_some());
+        assert!(read_array(b"/K [1 [2 [3 [4]]]] def", b"/K").is_none());
+        let many = format!("/K [{}] def", "1 ".repeat(MAX_ARRAY_ITEMS + 1));
+        assert!(read_array(many.as_bytes(), b"/K").is_none());
+        let enough = format!("/K [{}] def", "1 ".repeat(MAX_ARRAY_ITEMS));
+        assert!(read_array(enough.as_bytes(), b"/K").is_some());
+        assert!(read_array(b"/K [1 2", b"/K").is_none());
+        assert!(read_array(b"/K [1 (two)] def", b"/K").is_none());
+        assert_eq!(
+            read_array(b"/K get /K [1 /n] def", b"/K"),
+            Some(Value::Array(vec![
+                Value::Number(1.0),
+                Value::Name(b"n".to_vec())
+            ]))
+        );
+        assert!(read_array(b"/Kx [1] def", b"/K").is_none());
+    }
+
+    /// Every truncation of a multiple-master program, and every instance asked
+    /// of what it parses to, is survived.
+    #[test]
+    fn every_truncation_of_a_multiple_master_program_is_survivable() {
+        let full = mm_program(
+            FOUR_MASTERS,
+            &[("square", square_charstring(&four_masters()))],
+        );
+        for cut in (0..full.len()).step_by(3) {
+            if let Some(mut font) = Type1::parse(&full[..cut]) {
+                for design in [[500.0, 700.0], [0.0, 0.0]] {
+                    let _ = font.instance(&design);
+                    for glyph in 0..font.glyph_count().min(4) as u16 {
+                        let _ = font.outline(glyph);
+                        let _ = font.advance(glyph);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The `type1` fuzz target's multiple-master seed, the program the tests
+    /// above instance, written by this file's own builder rather than
+    /// fetched: run by name, `cargo test -p tinker-pdf-font --lib --
+    /// --ignored type1::tests::write_the_multiple_master_fuzz_seed --exact`,
+    /// and its output committed.
+    #[test]
+    #[ignore = "writes fuzz/corpus/type1/multiple-master.t1; run it when the program it is built from changes"]
+    fn write_the_multiple_master_fuzz_seed() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/type1/multiple-master.t1");
+        let program = mm_program(
+            FOUR_MASTERS,
+            &[("square", square_charstring(&four_masters()))],
+        );
+        std::fs::write(path, program).expect("the seed is written");
     }
 }

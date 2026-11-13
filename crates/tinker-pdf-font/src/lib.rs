@@ -47,6 +47,6 @@ pub use sbix::{Graphic, Sbix, SbixGlyph, SbixRefusal, SbixStrike, StrikeChoice};
 pub use sfnt::{Sfnt, VerticalOrigins};
 pub use subset::{glyphs_for, subset};
 pub use symbolic::{substitute_glyph, SymbolRoute};
-pub use type1::Type1;
+pub use type1::{Blend, Instance, InstanceRefusal, Type1};
 pub use type42::{Type42, Type42Refusal};
 pub use woff::{packaging, Packaging, WoffError};

@@ -1,5 +1,6 @@
 //! Bare Type 1: eexec decryption, charstring decryption, `/CharStrings`, and
-//! the Type 1 charstring interpreter with its othersubr machinery.
+//! the Type 1 charstring interpreter with its othersubr machinery, a
+//! multiple-master program's blend othersubrs among them, at three instances.
 //!
 //! Two layers of a stream cipher stand between the input and the interpreter,
 //! so every byte of a damaged program decrypts to *something* and the
@@ -29,7 +30,7 @@ use libfuzzer_sys::fuzz_target;
 use tinker_pdf_font::Type1;
 
 fuzz_target!(|data: &[u8]| {
-    let Some(font) = Type1::parse(data) else {
+    let Some(mut font) = Type1::parse(data) else {
         return;
     };
 
@@ -59,4 +60,36 @@ fuzz_target!(|data: &[u8]| {
         let _ = font.outline(glyph);
         let _ = font.advance(glyph);
     }
+
+    // A multiple-master program instanced at three design vectors — every
+    // axis at its map's first design coordinate, at its last, and midway —
+    // and at one of the wrong length, each outlined through the blend
+    // othersubrs; then its default instance again.
+    let _ = font.is_multiple_master();
+    let _ = font.weight_vector();
+    let Some(blend) = font.blend().cloned() else {
+        return;
+    };
+    let _ = blend.is_standard();
+    let low: Vec<f64> = blend
+        .maps
+        .iter()
+        .map(|map| map.first().map_or(0.0, |point| point.0))
+        .collect();
+    let high: Vec<f64> = blend
+        .maps
+        .iter()
+        .map(|map| map.last().map_or(0.0, |point| point.0))
+        .collect();
+    let middle: Vec<f64> = low.iter().zip(&high).map(|(a, b)| (a + b) / 2.0).collect();
+    for design in [low, high, middle, Vec::new()] {
+        let _ = font.instance(&design);
+        let _ = font.weights();
+        for glyph in 0..count as u16 {
+            let _ = font.outline(glyph);
+            let _ = font.advance(glyph);
+        }
+    }
+    font.default_instance();
+    let _ = font.outline(0);
 });

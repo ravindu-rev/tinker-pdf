@@ -165,6 +165,24 @@ side bearing, `seac` accent composition, and `flex` through the
 `callothersubr`/`pop` callback protocol. Glyphs are addressed by name, via
 the encoding the font dictionary specifies or the program's built-in one.
 
+**A multiple-master program** (the Type 1 Font Format Supplement's section 3;
+[design](../design/type42-and-multiple-master.md)) is read with its
+`/WeightVector` — two to sixteen numbers, its default instance — and its blend
+design, `/BlendAxisTypes`, `/BlendDesignPositions` and `/BlendDesignMap`, each
+within the supplement's limits of four axes, sixteen masters and twelve points
+a map. Its blend othersubrs, 14 to 18, blend the masters' operands as the
+font's `$Blend` would, `a1 + ((Δ2 × W_1 + Δ3 × W_2) + … + Δk × W_(k−1))`, so
+`outline` and `advance` draw the instance the program is set to.
+`Type1::instance` sets another from a design vector: each coordinate through
+its axis's map piecewise-linearly, one past the map's ends taken at it and said
+so, and each master weighted by its corner, `Π (corner ? b : 1 − b)` — for the
+standard form, one to four axes and `2^n` masters at the corners of the blend
+space; any other design keeps the instance the program drew, refused as an
+`InstanceRefusal` naming why. Only IEEE 754's exact operations, in a fixed
+order, so an instance is the same bits on every target. A program with no weight
+vector — every ordinary Type 1 program — draws as it always did, an othersubr
+it does not know handing `pop` its arguments, the first master's values.
+
 **Type 42** (Adobe Technical Note #5012;
 [design](../design/type42-and-multiple-master.md)). `Type42::parse` reads the
 PostScript dictionary around a TrueType face structurally, running nothing:
@@ -1488,6 +1506,20 @@ corpora already vendored here. So every name stays on the list.
   order or overcounted are read as written; and `glyf::bounds` reads the
   header as written, bounds an empty glyph at its origin and a missing one
   not at all. The `sfnt` fuzz target asks for each of them.
+- `crates/tinker-pdf-font/src/type1.rs` — a two-axis, four-master program
+  built in the test, its masters at the corners out of their order and a
+  procedure naming `/WeightVector` before the definition, reads its blend
+  design as written; instanced at five design vectors, its outline points and
+  advance are the masters blended with weights the test computes from the
+  design itself, a corner drawing its own master and a coordinate past its map
+  clamped and said so; its `/WeightVector` is the default instance, restored by
+  `default_instance`, and a refused instance changes nothing; five designs off
+  the standard form, and masters other than the weight vector counts, keep the
+  default, and a design missing or past the limits is no design; a program with
+  no weight vector, or one past sixteen numbers, draws its first master as
+  before, as does a blend call of the wrong count; the four- and six-quantity
+  othersubrs return their quantities in order; Appendix C's optical-size map
+  normalises segment by segment; and the cleartext arrays are bounded.
 - `crates/tinker-pdf-font/src/type42.rs` — a face wrapped as hexadecimal and
   as binary strings, whole, split at a table boundary and inside a table,
   padded and not, mixed, reads back byte for byte; each name reaches its glyph
