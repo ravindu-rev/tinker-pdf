@@ -207,6 +207,29 @@ pub struct Limits {
     /// ([`crate::Warning::FeatureEntryBudgetExceeded`]). A face's ceiling,
     /// which [`Limits::for_glyphs`] leaves alone.
     pub max_feature_entries: u32,
+    /// How deep one block of Graphite code's stack may grow.
+    ///
+    /// **Two hundred and fifty-six.** A block's depth is computed before it
+    /// runs, so the ceiling refuses code rather than stopping it: a block
+    /// that would push past it fails its check by name
+    /// (`graphite::Fault::StackOverflow`) and never runs. The deepest block
+    /// of the three vendored faces reaches five. A face's ceiling, which
+    /// [`Limits::for_glyphs`] leaves alone.
+    pub max_stack_depth: u32,
+
+    /// How many Graphite instructions one run may execute.
+    ///
+    /// **Four million, or sixty-four thousand a glyph where that is more.**
+    /// No instruction jumps backwards, so a block cannot loop; what can
+    /// grow is how often blocks run — every pass over every position, each
+    /// candidate rule's constraint once for each slot of its match — and a
+    /// hostile description multiplies those by the counts it writes. The
+    /// budget makes the product finite and linear in the run, which is the
+    /// shape [`Limits::max_operations`] gives the OpenType path; once it is
+    /// spent the run's remaining code is refused by name
+    /// (`graphite::Refusal::TooManyInstructions`). Scaled by
+    /// [`Limits::for_glyphs`].
+    pub max_instructions: u32,
 }
 
 impl Limits {
@@ -231,9 +254,11 @@ impl Limits {
         max_transitions: 4_096,
         max_subtables: 4_096,
         max_feature_entries: 4_096,
+        max_stack_depth: 256,
+        max_instructions: 4_000_000,
     };
 
-    /// The default ceilings, with the three work numbers scaled to a run of
+    /// The default ceilings, with the four work numbers scaled to a run of
     /// `count` glyphs.
     ///
     /// **A thousand operations, thirty-two glyphs and thirty-two machine
@@ -244,10 +269,19 @@ impl Limits {
     /// times. What they bound is the *shape* of the growth — linear in the
     /// input — which is the property that makes a paragraph's cost
     /// predictable and a hostile face's cost finite.
+    /// **A thousand operations, thirty-two glyphs and sixty-four thousand
+    /// Graphite instructions each.** The multipliers are generous on
+    /// purpose: an Indic cluster of eight code points can legitimately cost a
+    /// few hundred lookup applications, a decomposition-heavy face can
+    /// double a run's length twice over, and a Graphite description runs
+    /// every one of its passes over every position. What they bound is the
+    /// *shape* of the growth — linear in the input — which is the property
+    /// that makes a paragraph's cost predictable and a hostile face's cost
+    /// finite.
     #[must_use]
     pub fn for_glyphs(count: usize) -> Self {
-        let ops = u32::try_from(count)
-            .unwrap_or(u32::MAX)
+        let count32 = u32::try_from(count).unwrap_or(u32::MAX);
+        let ops = count32
             .saturating_mul(1_000)
             .max(Self::DEFAULT.max_operations);
         let glyphs = count
@@ -259,10 +293,14 @@ impl Limits {
             .saturating_add(1)
             .saturating_mul(32)
             .max(Self::DEFAULT.max_transitions);
+        let instructions = count32
+            .saturating_mul(64_000)
+            .max(Self::DEFAULT.max_instructions);
         Self {
             max_operations: ops,
             max_glyphs: glyphs,
             max_transitions: transitions,
+            max_instructions: instructions,
             ..Self::DEFAULT
         }
     }
@@ -333,7 +371,23 @@ mod tests {
     fn scaling_cannot_wrap() {
         let huge = Limits::for_glyphs(usize::MAX);
         assert_eq!(huge.max_operations, u32::MAX);
+        assert_eq!(huge.max_instructions, u32::MAX);
         assert!(huge.max_glyphs >= Limits::DEFAULT.max_glyphs);
+    }
+
+    /// The instruction budget is a run's: its floor is the default, and
+    /// past the floor it grows with the run, sixty-four thousand a glyph.
+    #[test]
+    fn the_instruction_budget_scales_with_the_run() {
+        assert_eq!(Limits::DEFAULT.max_instructions, 4_000_000);
+        assert_eq!(Limits::for_glyphs(0).max_instructions, 4_000_000);
+        assert_eq!(Limits::for_glyphs(62).max_instructions, 4_000_000);
+        assert_eq!(Limits::for_glyphs(63).max_instructions, 4_032_000);
+        assert_eq!(Limits::for_glyphs(1_000).max_instructions, 64_000_000);
+        // The stack's ceiling is a face's: no run moves it.
+        for count in [0usize, 1, 1_000, usize::MAX] {
+            assert_eq!(Limits::for_glyphs(count).max_stack_depth, 256);
+        }
     }
 
     /// The index ceiling is a face's, not a run's: no run length moves it.
@@ -364,6 +418,7 @@ mod tests {
                 limits.max_rule_candidates,
                 Limits::DEFAULT.max_rule_candidates
             );
+            assert_eq!(limits.max_stack_depth, Limits::DEFAULT.max_stack_depth);
         }
         assert_eq!(Limits::DEFAULT.max_table_bytes, 16 << 20);
         assert_eq!(Limits::DEFAULT.max_attribute_runs, 256);

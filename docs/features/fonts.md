@@ -1007,9 +1007,22 @@ What it does:
   pre-context reaches before the stream dropped, the rest by sort key and
   then rule number; a transition past the table, a rule past the count, a
   walk past `Limits::max_context_length` and a position past
-  `Limits::max_rule_candidates` are each refused by name. No rule's code runs
-  yet, and no run is shaped through any of it: the refused-by-name table
-  below says what a run over such a face does.
+  `Limits::max_rule_candidates` are each refused by name. The stack machine
+  (`graphite::machine`) checks every block of a pass's code before it runs —
+  each opcode one the GTF's table lists and implements, its operands inside
+  the block and in range, each `ContextItem` skip landing on an instruction
+  and its block one test, a constraint holding no action, and the stack never
+  below empty nor past `Limits::max_stack_depth` — and refuses one that fails
+  by name (`graphite::Refusal::CodeRefused`), so that it never runs. A slot
+  attribute or metric is named by the number the vendored faces' compiled
+  code gives it, and a number none of their code reveals is refused. A
+  constraint's computing instructions run against a slot stream
+  (`graphite::Reads`), in wrapping `i32` arithmetic, each skipped
+  `ContextItem` block a test that holds, every instruction charged against
+  `Limits::max_instructions`; a division the machine cannot do, a slot
+  outside the stream and a spent budget are each refused by name. No rule's
+  action runs yet, and no run is shaped through any of it: the
+  refused-by-name table below says what a run over such a face does.
 - **AAT tables, read and not yet run.** `tinker_pdf_shape::aat` holds the
   structures Apple's *TrueType Reference Manual* builds its AAT tables of
   (*AAT shaping* in the design). `aat::Lookup` reads a lookup table in each

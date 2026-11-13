@@ -178,11 +178,7 @@ const FEATURES: [Tag; 6] = [
 
 /// The scripts tried, including one no face declares so the `DFLT` fallback
 /// is on the path an ordinary input takes.
-const SCRIPTS: [Tag; 3] = [
-    Tag::new(b"latn"),
-    Tag::new(b"arab"),
-    Tag::new(b"zzzz"),
-];
+const SCRIPTS: [Tag; 3] = [Tag::new(b"latn"), Tag::new(b"arab"), Tag::new(b"zzzz")];
 
 /// Runs both tables over one buffer and returns what came out.
 fn shape(
@@ -439,6 +435,8 @@ fuzz_target!(|data: &[u8]| {
         max_transitions: Limits::DEFAULT.max_transitions,
         max_subtables: Limits::DEFAULT.max_subtables,
         max_feature_entries: Limits::DEFAULT.max_feature_entries,
+        max_stack_depth: Limits::DEFAULT.max_stack_depth,
+        max_instructions: Limits::DEFAULT.max_instructions,
     };
     let marks = if more & 4 == 0 {
         MarkWidths::ZeroByGdef

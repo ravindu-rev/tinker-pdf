@@ -1373,17 +1373,35 @@ span, so clusters stay monotonic. Every insertion is charged against
 every opcode the GTF's table lists and none it marks unimplemented (`NextN`,
 `PushIGlyphAttr`, `PushProcState`, `PutSubs2`, `PutSubs3`), every operand
 inside the block, every `ContextItem` skip landing on an instruction boundary
-inside it, and the stack's depth, computed from each opcode's pops and pushes
-along both ways past every `ContextItem`, never below empty and never above
-`Limits::max_stack_depth`. Code that fails is refused by name and never runs:
-a rule whose constraint or action fails its check never fires. Operands are
-the GTF appendix's, which gives `PushFeat` and `SetFeat` their slot offset and
-adds the 16-bit class and attribute forms and the bit operations that the
-earlier standalone document lacks; the opcode range the appendix's text states
-(0x00 to 0x3E) ends four opcodes before its table does (0x42), and the table
-is read. Values are `i32`; arithmetic wraps, as two's complement does on every
-target, and a division by zero, or of `i32::MIN` by −1, is refused by name and
-ends the code. Every instruction is charged against
+inside it and inside any `ContextItem` block around it, each `ContextItem`'s
+block one test — it leaves exactly one value — and the stack's depth,
+computed from each opcode's pops and pushes, never below empty and never
+above `Limits::max_stack_depth`. A constraint holds no instruction that acts
+on the stream and an action no `ContextItem`, which has no slot under test
+there. Operands are held to the description and the face: a class to the
+class map's count, a feature to `Feat`'s, a user attribute to the
+description's count, an attachment level and an index to zero and up, and a
+slot attribute or metric to the numbers vendored code reveals (*The numbering
+an instruction names*), each used only by the instructions that can take it
+— an indexed attribute by the indexed instructions, a slot reference by
+`AttrSetSlot` and `IAttrSetSlot`, a read-only one never set. Code that fails
+is refused by name and never runs: a rule whose constraint or action fails
+its check never fires. Operands are the GTF appendix's, which gives
+`PushFeat` and `SetFeat` their slot offset and adds the 16-bit class and
+attribute forms and the bit operations that the earlier standalone document
+lacks; the opcode range the appendix's text states (0x00 to 0x3E) ends four
+opcodes before its table does (0x42), and the table is read. Where the table
+leaves a reading open it is taken as its notation states: `PushShortU` pushes
+its operand unsigned, as its name and braces say, where the appendix's text
+calls it signed; `SetBits`' mask and value are signed sixteen-bit, sign
+extended; `Trunc8` and `Trunc16` keep the low eight and sixteen bits; `Cond`'s
+first popped value, the top, chooses the second popped where it is true and
+the third where it is false; `Div` truncates toward zero; and `PushVersion`
+pushes 0x00050000, `Silf` 5's stack-machine language version, the latest the
+GTF defines. Values are `i32`; arithmetic wraps, as two's complement does on
+every target, and a division by zero, or of `i32::MIN` by −1, is refused by
+name and ends the code. No instruction jumps backwards, so a block cannot
+loop; every instruction executed is charged against
 `Limits::max_instructions`, past which the run's remaining code is refused by
 name.
 
@@ -1391,26 +1409,57 @@ name.
 first pre-context slot to the slot that brought the machine to the state that
 accepted it, with that slot the one `ContextItem` compares its offset to —
 the GTF's "the slot currently being tested" — and each run starts with true on
-the stack. The compiled faces show why the true is there: a test written
-before a `ContextItem` and one inside it are joined by `And` after it, which
-leaves a single operand where the second is skipped, and only a true beneath
-makes the run's answer the first test's. A run's answer is the value
-`PopRet` returns, or the top of the stack where the code ends without one;
-the rule fires where every run answers true. A pass constraint is run once,
-with nothing under test. An action starts with an empty stack and answers the
-scan offset (*Passes running*).
+the stack. Every other slot offset in a constraint counts from the slot under
+test: Awami Nastaliq's pass 14 reads the attached slot's `att.to` inside its
+`ContextItem` block at offset 0. A `ContextItem` block skipped for the slot
+under test is a test that holds — the GTF's "a test that is irrelevant for
+this slot" — so the skip leaves a true in place of the one value the block
+would have left. The compiled faces show why both are needed: a constraint
+on several slots is their tests joined by one `And` fewer than there are
+tests, as in Awami Nastaliq's pass 14, rule 0, whose
+`_=D {att.to==0}  _=H {att.to==0}` is two blocks and one `And`. Without a
+true for each skipped block a slot under test that is neither would pop past
+the stack's bottom; and the true beneath answers for a block with nothing
+after it, and for a constraint that is empty. All 431 `ContextItem` blocks in
+the vendored faces leave one value, none nests in another, and none is in an
+action. A run's answer is the value `PopRet` returns, or the top of the stack
+where the code ends without one; the rule fires where every run answers true.
+A pass constraint is run once, with nothing under test: its offsets count
+from the stream's first slot, and every `ContextItem` in it is skipped. An
+action starts with an empty stack and answers the scan offset (*Passes
+running*).
 
 **The numbering an instruction names.** The GTF and the GDL name the slot
 attributes and glyph metrics an instruction reads and sets but number
 neither. Their numbers are read off compiled code: the vendored faces'
 `Silf`, against the GDL sources the faces' authors publish beside them, each
 number recorded where the step that runs it lands, with the rule it was read
-from, and held by a test against the face's code. Read so far: a line-break
-pass sets slot attribute 14, `breakweight` (the vendored Dai Banna SIL); the
-indexed attribute a ligature's components are referenced by is 15 (Tagmukay);
-`AttrSetSlot`'s attribute in a positioning pass, `attach.to`, is 2, and the
-indexed attribute numbered by the user count is 55 (Awami Nastaliq). An
-attribute no vendored code reveals is refused by name.
+from, and held by a test against the face's code. The slot attributes, each
+with the compiled rule it is read from: 0 `advance.x` (Awami Nastaliq's pass
+7, rule 0, `seqWidth = @P.advance.x + @P.seqWidth`); 2 `attach.to`, a slot
+reference (the same rule's `AttrSetSlot`, and pass 14, rule 0's
+`{att.to==0}`); 3 and 4 `attach.at.x` and `.y`, set from the point on the
+glyph attached to, and 8 and 9 `attach.with.x` and `.y`, from the point on
+the slot's own (pass 7, rule 0); 14 `breakweight` (Dai Banna SIL's
+line-break pass); 15 `component.X.reference`, indexed (Tagmukay's pass 0);
+16 `directionality` (Awami Nastaliq's pass 6, rule 24,
+`_ {directionality == 1}`); 17 `insert` (pass 7, rule 0: cleared on the slot
+it attaches, `{insert=1}` on the one after); 19 `position.y`, read only (pass
+12, rule 22, `{position.y + bb.top > SHORTFINAL2}`); 20 and 21 `shift.x` and
+`.y` (pass 17, rule 17, `shift { x = 300m; y = 350m; }`); 55 `userX`,
+indexed by X − 1 (pass 7, rule 0 sets `seqWidth`, its `user5`, as index 4);
+57 `collision.flags`, 58 `min.x`, 59 `min.y`, 60 `max.x` and 61 `max.y`, 69
+`sequence.class`, 70 `proxClass` and 71 `order` (pass 17, rule 17); 62
+`collision.fix.x`, read only (pass 19, rule 16, `advance.x += max(0,
+@N.collision.fix.x) + 300m`); 64 `collision.margin` and 65 `marginweight`
+(pass 17, rule 69, `margin = 300m; marginweight = 500`); and 66
+`collision.exclude.glyph`, 67 `exclude.offset.x` and 68 `exclude.offset.y`
+(pass 9, rule 73). The one glyph metric any of their code reads is 2,
+`bb.top`, in that pass 12 rule. An attribute or metric no vendored code
+reveals is refused by name, which is how the GDL's own constraint example
+`_ {bb.height > 1000m}` (4.1.3) is held: no vendored face numbers
+`bb.height`, so a block naming any metric but `bb.top` fails its check, and
+the comparison the example makes is run through `bb.top`.
 
 **Passes running.** Passes run in the description's order over the whole
 run, each over the stream the last left; a reversed pass runs over the stream
@@ -1494,7 +1543,7 @@ work past each bound is refused by name.
 | `Limits::max_context_length` | 64 | the slots one rule's machine reads (the OpenType bound, shared) |
 | `Limits::max_rule_candidates` | 1 024 | the rules one position tries |
 | `Limits::max_stack_depth` | 256 | one block of code's stack |
-| `Limits::max_instructions` | scaled to the run, as `max_operations` | the instructions a run executes |
+| `Limits::max_instructions` | 4 000 000, or 64 000 a glyph where that is more | the instructions a run executes |
 | `Limits::max_glyphs` | as today | the slots insertions may grow the stream to |
 | `Limits::max_attachment_depth` | 64 | an attachment chain |
 | `Limits::max_collision_work` | scaled to the run | the slot pairs collision fixing compares |

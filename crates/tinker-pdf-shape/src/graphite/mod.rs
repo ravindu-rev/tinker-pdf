@@ -11,12 +11,14 @@
 //! its glyph attributes ([`Attributes`]); and its features and languages
 //! ([`Features`], [`Languages`]), and the value each feature takes for a run
 //! ([`FeatureValues`], which `Shaper::graphite_features` makes from a
-//! shaper's settings, features and language); and its rules ([`Silf`]): each
+//! shaper's settings, features and language); its rules ([`Silf`]): each
 //! description's header, pseudo-glyph map and class map, and each pass's
-//! machine finding the rules that match at a scan position ([`Pass`]), with
-//! no rule's code run. A face whose only layout
-//! tables are these is still shaped as though it carried none, and every run
-//! over it says so (`crate::Warning::TableNotRun`).
+//! machine finding the rules that match at a scan position ([`Pass`]); and
+//! the stack machine their code runs on ([`machine`]): every block checked
+//! before it runs, and a constraint's computing instructions run against a
+//! stream ([`Reads`]) to decide whether its rule fires. A face whose only
+//! layout tables are these is still shaped as though it carried none, and
+//! every run over it says so (`crate::Warning::TableNotRun`).
 //!
 //! # Every count is a bound, and every bound refuses by name
 //!
@@ -37,10 +39,14 @@ use crate::read::Bytes;
 pub mod feat;
 pub mod glat;
 mod lz4;
+pub mod machine;
 pub mod silf;
 
 pub use feat::{Feature, FeatureValues, Features, Languages, Setting};
 pub use glat::{Attributes, GlatVersion, Octabox, Subbox};
+pub use machine::{
+    Block, Bounds, Budget, Fault, Frame, Metric, Op, Program, Reads, Site, SlotAttribute,
+};
 pub use silf::{
     Candidate, ClassKind, ClassMap, Description, JustificationLevel, Matched, Pass, Silf,
 };
@@ -169,6 +175,23 @@ pub enum Refusal {
         /// The pass.
         pass: u8,
     },
+    /// A block of a pass's code refused: by its check, so that it never
+    /// runs and its rule never fires, or where it ran and could not go on —
+    /// a division the machine cannot do, a slot offset outside the stream —
+    /// so that it ended there (`machine::check`, `machine::Fault`).
+    CodeRefused {
+        /// The pass.
+        pass: u8,
+        /// Which of its blocks.
+        block: machine::Block,
+        /// The byte offset of the instruction refused in the block.
+        at: u16,
+        /// Why.
+        fault: machine::Fault,
+    },
+    /// The run spent [`Limits::max_instructions`]; the rest of its code did
+    /// not run.
+    TooManyInstructions,
 }
 
 /// The table `table` as it reads uncompressed: the bytes themselves where it

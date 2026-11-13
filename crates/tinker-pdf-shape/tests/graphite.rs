@@ -2962,3 +2962,1021 @@ fn the_vendored_faces_silf_reads() {
     );
     assert_eq!(description.pass(3, &limits).expect("pass 3").max_backup, 50);
 }
+
+// --- the stack machine (FT-07d.7) ----------------------------------------
+//
+// `Stream` is a slot stream as a test states it — each slot's glyph and
+// attributes, the features, what is attached to what, and each glyph's
+// attributes and box top — so that a program's every read is answered from
+// what the test wrote. Each program is the bytes the GTF appendix's table
+// lays an instruction out as, and its answer is the one the table's text
+// gives.
+
+use std::cell::Cell;
+
+use tinker_pdf_shape::graphite::machine::{self, Block, Bounds, Budget, Fault, Frame, Metric, Op};
+use tinker_pdf_shape::graphite::{Reads, Site, SlotAttribute};
+
+/// A slot stream as a test states it.
+#[derive(Debug, Default)]
+struct Stream {
+    /// Each slot's glyph.
+    glyphs: Vec<u16>,
+    /// `(slot, attribute, index)` to value; anything absent is 0.
+    slot_attributes: BTreeMap<(usize, SlotAttribute, u8), i32>,
+    /// `(glyph, attribute)` to value; anything absent is 0.
+    glyph_attributes: BTreeMap<(u16, u16), i32>,
+    /// Each glyph's box top; a level past 0 adds a thousand a level, so a
+    /// test sees the level arrive.
+    tops: BTreeMap<u16, i32>,
+    /// Each feature's value, every slot alike.
+    features: Vec<i32>,
+    /// Which slot each attached slot is attached to.
+    attached: BTreeMap<usize, usize>,
+    /// Glyphs whose attributes the face cannot read.
+    unreadable: Vec<u16>,
+    /// How many reads the code made.
+    reads: Cell<usize>,
+}
+
+impl Stream {
+    fn read(&self) {
+        self.reads.set(self.reads.get() + 1);
+    }
+}
+
+impl Reads for Stream {
+    fn slot_count(&self) -> usize {
+        self.glyphs.len()
+    }
+
+    fn slot_attribute(
+        &self,
+        slot: usize,
+        attribute: SlotAttribute,
+        index: u8,
+    ) -> Result<i32, Refusal> {
+        self.read();
+        Ok(self
+            .slot_attributes
+            .get(&(slot, attribute, index))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    fn glyph_attribute(&self, slot: usize, attribute: u16) -> Result<i32, Refusal> {
+        self.read();
+        let glyph = self.glyphs[slot];
+        if self.unreadable.contains(&glyph) {
+            return Err(Refusal::GlyphUnreadable { glyph });
+        }
+        Ok(self
+            .glyph_attributes
+            .get(&(glyph, attribute))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    fn metric(&self, slot: usize, metric: Metric, level: u8) -> Result<i32, Refusal> {
+        self.read();
+        let Metric::BoundingBoxTop = metric;
+        let top = self.tops.get(&self.glyphs[slot]).copied().unwrap_or(0);
+        Ok(top + i32::from(level) * 1000)
+    }
+
+    fn feature(&self, _slot: usize, feature: u8) -> i32 {
+        self.read();
+        self.features
+            .get(usize::from(feature))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn attached_to(&self, slot: usize) -> Option<usize> {
+        self.attached.get(&slot).copied()
+    }
+}
+
+/// The bounds the machine's tests check against: four classes, two
+/// features and three user attributes.
+const BOUNDS: Bounds = Bounds {
+    classes: 4,
+    features: 2,
+    user_attributes: 3,
+};
+
+/// A rule's constraint, in pass 3.
+const CONSTRAINT: Site = Site {
+    pass: 3,
+    block: Block::Constraint(7),
+};
+
+/// A rule's action, in pass 3.
+const ACTION: Site = Site {
+    pass: 3,
+    block: Block::Action(7),
+};
+
+/// `code` checked as the block at `site`, under the default ceilings.
+fn checked(code: &[u8], site: Site) -> Result<machine::Program, Refusal> {
+    machine::check(code, site, &BOUNDS, &Limits::DEFAULT)
+}
+
+/// The stream the machine's tests read: glyphs 10, 11 and 12; slot 1, the
+/// one under test, attached to slot 0; and the attributes, tops and
+/// features the cases read.
+fn reading_stream() -> Stream {
+    Stream {
+        glyphs: vec![10, 11, 12],
+        slot_attributes: BTreeMap::from([
+            ((0, SlotAttribute::ShiftX, 0), -40),
+            ((2, SlotAttribute::ShiftX, 0), 250),
+            ((1, SlotAttribute::User, 2), 6),
+        ]),
+        glyph_attributes: BTreeMap::from([((10, 5), 33), ((11, 5), 77), ((12, 300), -9)]),
+        tops: BTreeMap::from([(10, 600), (11, 700)]),
+        features: vec![0, 2],
+        attached: BTreeMap::from([(1, 0)]),
+        ..Stream::default()
+    }
+}
+
+/// The answer `code`, checked as a constraint, gives with slot 1 under
+/// test at scan position 0 of [`reading_stream`].
+fn answered(code: &[u8]) -> Result<i32, Refusal> {
+    let program = checked(code, CONSTRAINT)?;
+    let mut budget = Budget::new(&Limits::DEFAULT);
+    machine::answer(
+        &program,
+        &reading_stream(),
+        Frame {
+            position: 0,
+            under_test: Some(1),
+        },
+        &mut budget,
+    )
+}
+
+/// The refusal `code` meets at `site`, as `(fault, at)`.
+fn refused(code: &[u8], site: Site, limits: &Limits) -> (Fault, u16) {
+    match machine::check(code, site, &BOUNDS, limits) {
+        Err(Refusal::CodeRefused {
+            pass,
+            block,
+            at,
+            fault,
+        }) => {
+            assert_eq!((pass, block), (site.pass, site.block), "{code:02X?}");
+            (fault, at)
+        }
+        other => panic!("{code:02X?} was not refused: {other:?}"),
+    }
+}
+
+/// A program per computing instruction, its answer the one the GTF
+/// appendix's table states; then the constraint examples the design lists,
+/// transcribed and counted.
+#[test]
+fn each_computing_instruction_does_what_the_specification_states() {
+    let cases: &[(&str, &[u8], i32)] = &[
+        ("Nop", &[0x00, 0x01, 5, 0x30], 5),
+        ("PushByte, signed", &[0x01, 0xFD, 0x30], -3),
+        ("PushByteU, unsigned", &[0x02, 0xFD, 0x30], 253),
+        ("PushShort, signed", &[0x03, 0xFF, 0xFE, 0x30], -2),
+        ("PushShortU, unsigned", &[0x04, 0xFF, 0xFE, 0x30], 65_534),
+        (
+            "PushLong",
+            &[0x05, 0x01, 0x02, 0x03, 0x04, 0x30],
+            0x0102_0304,
+        ),
+        ("PushLong, signed", &[0x05, 0x80, 0, 0, 0, 0x30], i32::MIN),
+        ("Add", &[0x01, 7, 0x01, 5, 0x06, 0x30], 12),
+        (
+            "Add wraps",
+            &[0x05, 0x7F, 0xFF, 0xFF, 0xFF, 0x01, 1, 0x06, 0x30],
+            i32::MIN,
+        ),
+        (
+            "Sub: the top from the next",
+            &[0x01, 7, 0x01, 5, 0x07, 0x30],
+            2,
+        ),
+        ("Mul", &[0x01, 7, 0x01, 0xFB, 0x08, 0x30], -35),
+        (
+            "Div: the next by the top",
+            &[0x01, 7, 0x01, 2, 0x09, 0x30],
+            3,
+        ),
+        (
+            "Div truncates toward zero",
+            &[0x01, 0xF9, 0x01, 2, 0x09, 0x30],
+            -3,
+        ),
+        ("Min", &[0x01, 7, 0x01, 0xFB, 0x0A, 0x30], -5),
+        ("Max", &[0x01, 7, 0x01, 0xFB, 0x0B, 0x30], 7),
+        ("Neg", &[0x01, 7, 0x0C, 0x30], -7),
+        ("Neg wraps", &[0x05, 0x80, 0, 0, 0, 0x0C, 0x30], i32::MIN),
+        ("Trunc8", &[0x04, 0x12, 0x34, 0x0D, 0x30], 0x34),
+        ("Trunc8 of −1", &[0x01, 0xFF, 0x0D, 0x30], 0xFF),
+        ("Trunc16", &[0x05, 0, 1, 0x23, 0x45, 0x0E, 0x30], 0x2345),
+        ("Trunc16 of −1", &[0x01, 0xFF, 0x0E, 0x30], 0xFFFF),
+        ("Cond, true", &[0x01, 10, 0x01, 20, 0x01, 1, 0x0F, 0x30], 20),
+        (
+            "Cond, false",
+            &[0x01, 10, 0x01, 20, 0x01, 0, 0x0F, 0x30],
+            10,
+        ),
+        ("And", &[0x01, 2, 0x01, 3, 0x10, 0x30], 1),
+        ("And, one false", &[0x01, 2, 0x01, 0, 0x10, 0x30], 0),
+        ("Or", &[0x01, 0, 0x01, 5, 0x11, 0x30], 1),
+        ("Or, both false", &[0x01, 0, 0x01, 0, 0x11, 0x30], 0),
+        ("Not", &[0x01, 0, 0x12, 0x30], 1),
+        ("Not of a true", &[0x01, 7, 0x12, 0x30], 0),
+        ("Equal", &[0x01, 4, 0x01, 4, 0x13, 0x30], 1),
+        ("NotEqu", &[0x01, 4, 0x01, 4, 0x14, 0x30], 0),
+        (
+            "Less: the next than the top",
+            &[0x01, 3, 0x01, 4, 0x15, 0x30],
+            1,
+        ),
+        ("Less, the other way", &[0x01, 4, 0x01, 3, 0x15, 0x30], 0),
+        ("Gtr", &[0x01, 4, 0x01, 3, 0x16, 0x30], 1),
+        ("LessEq", &[0x01, 4, 0x01, 4, 0x17, 0x30], 1),
+        ("GtrEq", &[0x01, 3, 0x01, 4, 0x18, 0x30], 0),
+        ("BitAnd", &[0x01, 0b1100, 0x01, 0b1010, 0x3E, 0x30], 0b1000),
+        ("BitOr", &[0x01, 0b1100, 0x01, 0b1010, 0x3F, 0x30], 0b1110),
+        ("BitNot", &[0x01, 0, 0x40, 0x30], -1),
+        (
+            "SetBits: mask cleared, value set",
+            &[0x01, 0b0110, 0x41, 0, 0b0010, 0, 0b1001, 0x30],
+            0b1101,
+        ),
+        (
+            "SetBits' operands are signed",
+            &[0x01, 0, 0x41, 0, 0, 0x80, 0, 0x30],
+            -32_768,
+        ),
+        ("PushVersion", &[0x37, 0x30], 0x0005_0000),
+        ("RetZero", &[0x01, 5, 0x31], 0),
+        ("RetTrue", &[0x01, 0, 0x32], 1),
+        ("PopRet ends the code", &[0x01, 4, 0x30, 0x01, 8], 4),
+        ("the code's end answers the top", &[0x01, 9], 9),
+        ("an empty constraint answers its true", &[], 1),
+        ("PushSlotAttr, a slot after", &[0x28, 20, 1, 0x30], 250),
+        ("PushSlotAttr, a slot before", &[0x28, 20, 0xFF, 0x30], -40),
+        ("PushISlotAttr", &[0x2E, 55, 0, 2, 0x30], 6),
+        ("PushGlyphAttr", &[0x29, 5, 0, 0x30], 77),
+        ("PushGlyphAttr, 16-bit", &[0x3C, 0x01, 0x2C, 1, 0x30], -9),
+        ("PushGlyphAttr, none stored", &[0x29, 6, 0, 0x30], 0),
+        ("PushGlyphMetric", &[0x2A, 2, 0, 0, 0x30], 700),
+        ("PushGlyphMetric, a level", &[0x2A, 2, 0, 2, 0x30], 2_700),
+        ("PushFeat", &[0x2B, 1, 0, 0x30], 2),
+        ("PushAttToGlyphAttr", &[0x2C, 5, 0, 0x30], 33),
+        ("PushAttToGlyphAttr, 16-bit", &[0x3D, 0, 5, 0, 0x30], 33),
+        ("PushAttToGlyphAttr, unattached", &[0x2C, 5, 1, 0x30], 0),
+        ("PushAttToGlyphMetric", &[0x2D, 2, 0, 0, 0x30], 600),
+        (
+            "ContextItem at the slot under test runs",
+            &[0x22, 1, 2, 0x01, 0, 0x30],
+            0,
+        ),
+        (
+            "ContextItem at another is skipped, a true in its place",
+            &[0x22, 0, 2, 0x01, 0, 0x30],
+            1,
+        ),
+    ];
+    for (name, code, expected) in cases {
+        assert_eq!(answered(code), Ok(*expected), "{name}: {code:02X?}");
+    }
+    assert_eq!(cases.len(), 62, "a program per case");
+
+    let mut held = 0usize;
+    let run = |program: &machine::Program, stream: &Stream, under_test: usize| {
+        let mut budget = Budget::new(&Limits::DEFAULT);
+        let frame = Frame {
+            position: 0,
+            under_test: Some(under_test),
+        };
+        machine::answer(program, stream, frame, &mut budget)
+    };
+
+    // The compiler documentation: "the number 11509 is written as '44 –11'
+    // (since 11509 = x2CF5, x2C = 44 and xF5 = –11)" — `PushShort`'s two
+    // bytes, most significant first.
+    assert_eq!(answered(&[0x03, 44, 0xF5, 0x30]), Ok(11_509));
+    held += 1;
+
+    // GDL 4.1.2: `gA > gB / _ {ligatures == all}`, `ligatures` feature 0
+    // and `all` its value 3 — a slot test, so a `ContextItem` for the rule's
+    // one slot.
+    let ligatures = checked(&[0x22, 0, 6, 0x2B, 0, 0, 0x01, 3, 0x13, 0x30], CONSTRAINT)
+        .expect("the rule checks");
+    let mut stream = Stream {
+        glyphs: vec![1],
+        features: vec![3],
+        ..Stream::default()
+    };
+    assert_eq!(run(&ligatures, &stream, 0), Ok(1), "ligatures == all");
+    stream.features = vec![2];
+    assert_eq!(run(&ligatures, &stream, 0), Ok(0), "ligatures == std");
+    held += 1;
+
+    // GDL 4.1.3: `gA > gB / _ {bb.height > 1000m}`. No vendored face's
+    // code numbers `bb.height`, so the rule naming it is refused by name,
+    // whatever number it is given; the comparison runs through `bb.top`,
+    // the one metric the faces reveal.
+    for number in (0..=255u8).filter(|n| *n != 2) {
+        let code = [0x22, 0, 8, 0x2A, number, 0, 0, 0x03, 0x03, 0xE8, 0x16, 0x30];
+        assert_eq!(
+            refused(&code, CONSTRAINT, &Limits::DEFAULT),
+            (Fault::UnknownMetric(number), 3)
+        );
+    }
+    let tall = checked(
+        &[0x22, 0, 8, 0x2A, 2, 0, 0, 0x03, 0x03, 0xE8, 0x16, 0x30],
+        CONSTRAINT,
+    )
+    .expect("bb.top checks");
+    let mut stream = Stream {
+        glyphs: vec![4],
+        tops: BTreeMap::from([(4, 1_200)]),
+        ..Stream::default()
+    };
+    assert_eq!(run(&tall, &stream, 0), Ok(1));
+    stream.tops.insert(4, 800);
+    assert_eq!(run(&tall, &stream, 0), Ok(0));
+    held += 1;
+
+    // GDL 6.9.2.1: a feature's default is tested on its public and its
+    // hidden id together, `eng == descender && eng__Engs == descender`:
+    // `cv43` feature 0, `Engs` feature 1, `descender` 0.
+    let default = checked(
+        &[
+            0x2B, 0, 0, 0x01, 0, 0x13, 0x2B, 1, 0, 0x01, 0, 0x13, 0x10, 0x30,
+        ],
+        CONSTRAINT,
+    )
+    .expect("the test checks");
+    let mut stream = Stream {
+        glyphs: vec![1],
+        features: vec![0, 0],
+        ..Stream::default()
+    };
+    assert_eq!(run(&default, &stream, 0), Ok(1), "both at the default");
+    stream.features = vec![0, 2];
+    assert_eq!(run(&default, &stream, 0), Ok(0), "the hidden id set");
+    stream.features = vec![1, 0];
+    assert_eq!(run(&default, &stream, 0), Ok(0), "the public id set");
+    held += 1;
+
+    assert_eq!(held, 4, "the computing examples the design counts");
+}
+
+/// Every fault the check names, each at the instruction it names, so that
+/// the block never runs; and every byte sequence checked and, where it
+/// passes, run without a panic.
+#[test]
+fn code_that_fails_its_check_never_runs() {
+    let limits = Limits::DEFAULT;
+    let cases: &[(&[u8], Site, Fault, u16)] = &[
+        (&[0x43], CONSTRAINT, Fault::IllegalOpcode(0x43), 0),
+        (&[0x01, 1, 0xFF], CONSTRAINT, Fault::IllegalOpcode(0xFF), 2),
+        (&[0x1A, 1], ACTION, Fault::Unimplemented(0x1A), 0),
+        (
+            &[0x2F, 0, 0, 0, 0x30],
+            CONSTRAINT,
+            Fault::Unimplemented(0x2F),
+            0,
+        ),
+        (&[0x36, 0, 0x30], CONSTRAINT, Fault::Unimplemented(0x36), 0),
+        (&[0x39], ACTION, Fault::Unimplemented(0x39), 0),
+        (&[0x3A], ACTION, Fault::Unimplemented(0x3A), 0),
+        (&[0x05, 1, 2], CONSTRAINT, Fault::Truncated, 0),
+        (&[0x01, 1, 0x03, 1], CONSTRAINT, Fault::Truncated, 2),
+        (&[0x21, 3, 0, 0], ACTION, Fault::Truncated, 0),
+        (&[0x01, 1, 0x41, 0, 1, 0], CONSTRAINT, Fault::Truncated, 2),
+        (
+            &[0x22, 0, 1, 0x03, 0, 1],
+            CONSTRAINT,
+            Fault::SkipOffBoundary,
+            0,
+        ),
+        (
+            &[0x22, 0, 9, 0x01, 1],
+            CONSTRAINT,
+            Fault::SkipOffBoundary,
+            0,
+        ),
+        (
+            &[0x22, 0, 5, 0x22, 1, 5, 0x01, 1, 0x01, 2, 0x10],
+            CONSTRAINT,
+            Fault::SkipOffBoundary,
+            3,
+        ),
+        (
+            &[0x22, 0, 4, 0x01, 1, 0x01, 2, 0x10],
+            CONSTRAINT,
+            Fault::NotOneTest,
+            7,
+        ),
+        (
+            &[0x22, 0, 0, 0x01, 1, 0x10],
+            CONSTRAINT,
+            Fault::NotOneTest,
+            3,
+        ),
+        (
+            &[0x22, 0, 2, 0x01, 1, 0x30],
+            ACTION,
+            Fault::ContextItemInAction,
+            0,
+        ),
+        (&[0x19], CONSTRAINT, Fault::ActionInConstraint(0x19), 0),
+        (
+            &[0x01, 1, 0x23, 20],
+            CONSTRAINT,
+            Fault::ActionInConstraint(0x23),
+            2,
+        ),
+        (&[0x06, 0x30], CONSTRAINT, Fault::StackUnderflow, 0),
+        (&[0x30], ACTION, Fault::StackUnderflow, 0),
+        (&[0x23, 20], ACTION, Fault::StackUnderflow, 0),
+        (
+            &[0x28, 1, 0, 0x30],
+            CONSTRAINT,
+            Fault::UnknownSlotAttribute(1),
+            0,
+        ),
+        (
+            &[0x28, 18, 0, 0x30],
+            CONSTRAINT,
+            Fault::UnknownSlotAttribute(18),
+            0,
+        ),
+        (
+            &[0x01, 1, 0x23, 255],
+            ACTION,
+            Fault::UnknownSlotAttribute(255),
+            2,
+        ),
+        (
+            &[0x2A, 0, 0, 0, 0x30],
+            CONSTRAINT,
+            Fault::UnknownMetric(0),
+            0,
+        ),
+        (
+            &[0x2D, 3, 0, 0, 0x30],
+            CONSTRAINT,
+            Fault::UnknownMetric(3),
+            0,
+        ),
+        (
+            &[0x2E, 20, 0, 0, 0x30],
+            CONSTRAINT,
+            Fault::AttributeMisused(20),
+            0,
+        ),
+        (
+            &[0x01, 1, 0x27, 55, 0],
+            ACTION,
+            Fault::AttributeMisused(55),
+            2,
+        ),
+        (
+            &[0x01, 1, 0x33, 15, 0],
+            ACTION,
+            Fault::AttributeMisused(15),
+            2,
+        ),
+        (&[0x01, 1, 0x24, 62], ACTION, Fault::AttributeMisused(62), 2),
+        (
+            &[0x2A, 2, 0, 0xFF, 0x30],
+            CONSTRAINT,
+            Fault::OperandOutOfRange,
+            0,
+        ),
+        (
+            &[0x2E, 55, 0, 0xFF, 0x30],
+            CONSTRAINT,
+            Fault::OperandOutOfRange,
+            0,
+        ),
+        (&[0x1C, 4], ACTION, Fault::ClassOutOfRange(4), 0),
+        (&[0x3B, 1, 0], ACTION, Fault::ClassOutOfRange(256), 0),
+        (&[0x1D, 0, 1, 9], ACTION, Fault::ClassOutOfRange(9), 0),
+        (&[0x38, 0, 0, 1, 0, 9], ACTION, Fault::ClassOutOfRange(9), 0),
+        (
+            &[0x2B, 2, 0, 0x30],
+            CONSTRAINT,
+            Fault::FeatureOutOfRange(2),
+            0,
+        ),
+        (
+            &[0x01, 1, 0x42, 7, 0],
+            ACTION,
+            Fault::FeatureOutOfRange(7),
+            2,
+        ),
+        (
+            &[0x2E, 55, 0, 3, 0x30],
+            CONSTRAINT,
+            Fault::UserAttributeOutOfRange(3),
+            0,
+        ),
+        (
+            &[0x01, 1, 0x33, 55, 3],
+            ACTION,
+            Fault::UserAttributeOutOfRange(3),
+            2,
+        ),
+    ];
+    for (code, site, fault, at) in cases {
+        assert_eq!(refused(code, *site, &limits), (*fault, *at), "{code:02X?}");
+    }
+    // A block whose stack would rise past the ceiling: three pushes over a
+    // constraint's true, under a ceiling of three; and a ceiling of none,
+    // which a constraint's true alone passes.
+    let shallow = Limits {
+        max_stack_depth: 3,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(
+        refused(&[0x01, 1, 0x01, 2, 0x01, 3], CONSTRAINT, &shallow),
+        (Fault::StackOverflow, 4)
+    );
+    let none = Limits {
+        max_stack_depth: 0,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(refused(&[], CONSTRAINT, &none), (Fault::StackOverflow, 0));
+    assert!(machine::check(&[0x01, 1, 0x30], ACTION, &BOUNDS, &shallow).is_ok());
+
+    // A block whose first instruction reads and whose second is refused is
+    // never run: there is no program to run, and the stream was never
+    // read.
+    let stream = reading_stream();
+    let code = [0x28, 20, 0, 0x2A, 9, 0, 0, 0x30];
+    assert!(checked(&code, CONSTRAINT).is_err());
+    assert_eq!(stream.reads.get(), 0);
+
+    // Every byte sequence of one and two bytes, and a fixed sweep of longer
+    // ones, checked as a constraint and as an action: none panics, and each
+    // that passes runs to an answer or a refusal.
+    let mut sequences: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
+    for first in 0..=255u8 {
+        for second in 0..=255u8 {
+            sequences.push(vec![first, second]);
+        }
+    }
+    let mut seed = 0x2545_F491u32;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for _ in 0..20_000 {
+        let length = 3 + (next() % 22) as usize;
+        let code: Vec<u8> = (0..length).map(|_| (next() % 0x44) as u8).collect();
+        sequences.push(code);
+    }
+    let mut passed = 0usize;
+    for code in &sequences {
+        for site in [CONSTRAINT, ACTION] {
+            if let Ok(program) = machine::check(code, site, &BOUNDS, &limits) {
+                passed += 1;
+                if !site.block.is_action() {
+                    let mut budget = Budget::new(&limits);
+                    let frame = Frame {
+                        position: 0,
+                        under_test: Some(1),
+                    };
+                    let _ = machine::answer(&program, &stream, frame, &mut budget);
+                }
+            }
+        }
+    }
+    assert!(passed > 0, "some sequences pass their check");
+}
+
+/// Every instruction executed is charged against the run's one budget, a
+/// skipped block's instructions excepted; the instruction past it is
+/// refused by name, and so is every block the run runs after it.
+#[test]
+fn a_program_past_its_budget_is_refused_and_named() {
+    let stream = reading_stream();
+    let frame = Frame {
+        position: 0,
+        under_test: Some(1),
+    };
+    let four = checked(&[0x01, 1, 0x01, 2, 0x06, 0x30], CONSTRAINT).expect("checks");
+    assert_eq!(four.instructions().len(), 4);
+
+    let exact = Limits {
+        max_instructions: 4,
+        ..Limits::DEFAULT
+    };
+    let mut budget = Budget::new(&exact);
+    assert_eq!(machine::answer(&four, &stream, frame, &mut budget), Ok(3));
+    assert_eq!(budget.left(), 0);
+    assert!(!budget.is_spent());
+    // The next block the run runs finds the budget spent.
+    assert_eq!(
+        machine::answer(&four, &stream, frame, &mut budget),
+        Err(Refusal::TooManyInstructions)
+    );
+    assert!(budget.is_spent());
+
+    let short = Limits {
+        max_instructions: 3,
+        ..Limits::DEFAULT
+    };
+    let mut budget = Budget::new(&short);
+    assert_eq!(
+        machine::answer(&four, &stream, frame, &mut budget),
+        Err(Refusal::TooManyInstructions)
+    );
+
+    // A skipped block costs its `ContextItem` and nothing inside it.
+    let skipped = checked(&[0x22, 0, 5, 0x01, 1, 0x01, 2, 0x06, 0x30], CONSTRAINT).expect("checks");
+    let two = Limits {
+        max_instructions: 2,
+        ..Limits::DEFAULT
+    };
+    let mut budget = Budget::new(&two);
+    assert_eq!(
+        machine::answer(&skipped, &stream, frame, &mut budget),
+        Ok(1)
+    );
+    assert_eq!(budget.left(), 0);
+
+    // Two blocks share one budget.
+    let seven = Limits {
+        max_instructions: 7,
+        ..Limits::DEFAULT
+    };
+    let mut budget = Budget::new(&seven);
+    assert_eq!(machine::answer(&four, &stream, frame, &mut budget), Ok(3));
+    assert_eq!(
+        machine::answer(&four, &stream, frame, &mut budget),
+        Err(Refusal::TooManyInstructions)
+    );
+    // The run's budget is scaled to its length.
+    assert_eq!(Budget::new(&Limits::for_glyphs(1_000)).left(), 64_000_000);
+}
+
+/// What stops a program that passed its check: a division the machine
+/// cannot do, a slot offset outside the stream, a read the stream refuses
+/// and an action's program run as a constraint, each named; and a pass
+/// constraint, which tests no slot.
+#[test]
+fn a_program_that_cannot_go_on_is_refused_and_named() {
+    let named = |code: &[u8], fault: Fault, at: u16| {
+        assert_eq!(
+            answered(code),
+            Err(Refusal::CodeRefused {
+                pass: 3,
+                block: Block::Constraint(7),
+                at,
+                fault,
+            }),
+            "{code:02X?}"
+        );
+    };
+    named(&[0x01, 7, 0x01, 0, 0x09, 0x30], Fault::DivisionByZero, 4);
+    named(
+        &[0x05, 0x80, 0, 0, 0, 0x01, 0xFF, 0x09, 0x30],
+        Fault::DivisionOverflow,
+        7,
+    );
+    named(&[0x28, 20, 5, 0x30], Fault::SlotOutOfRange, 0);
+    named(&[0x28, 20, 0x80, 0x30], Fault::SlotOutOfRange, 0);
+    named(&[0x2B, 0, 2, 0x30], Fault::SlotOutOfRange, 0);
+
+    // A glyph the face cannot read is the stream's refusal, passed on.
+    let mut stream = reading_stream();
+    stream.unreadable = vec![11];
+    let program = checked(&[0x29, 5, 0, 0x30], CONSTRAINT).expect("checks");
+    let frame = Frame {
+        position: 0,
+        under_test: Some(1),
+    };
+    let mut budget = Budget::new(&Limits::DEFAULT);
+    assert_eq!(
+        machine::answer(&program, &stream, frame, &mut budget),
+        Err(Refusal::GlyphUnreadable { glyph: 11 })
+    );
+
+    // An action's program handed to a constraint's run is refused at its
+    // first instruction that acts.
+    let action = checked(&[0x1B, 0x31], ACTION).expect("an action checks");
+    assert_eq!(
+        machine::answer(&action, &stream, frame, &mut budget),
+        Err(Refusal::CodeRefused {
+            pass: 3,
+            block: Block::Action(7),
+            at: 0,
+            fault: Fault::ActionInConstraint(0x1B),
+        })
+    );
+
+    // A pass constraint tests no slot: its offsets count from the stream's
+    // first slot, and every `ContextItem` in it is skipped.
+    let pass = Site {
+        pass: 3,
+        block: Block::PassConstraint,
+    };
+    let none = Frame {
+        position: 0,
+        under_test: None,
+    };
+    let skipped = checked(&[0x22, 0, 2, 0x01, 0, 0x30], pass).expect("checks");
+    let mut budget = Budget::new(&Limits::DEFAULT);
+    assert_eq!(machine::answer(&skipped, &stream, none, &mut budget), Ok(1));
+    let first = checked(&[0x28, 20, 0, 0x30], pass).expect("checks");
+    assert_eq!(machine::answer(&first, &stream, none, &mut budget), Ok(-40));
+    assert!(machine::holds(&skipped, &stream, none, &mut budget).expect("runs"));
+}
+
+/// Every block of the three vendored faces passes its check against its
+/// own description's bounds; each slot attribute and metric number the
+/// design reads off them decodes to its name in the rule it was read from;
+/// and Awami Nastaliq's two-slot constraint holds for every slot of its
+/// match, as the design's skipped-test reading has it.
+#[test]
+fn the_vendored_faces_code_checks_and_names_its_attributes() {
+    let limits = Limits::DEFAULT;
+    let mut blocks = BTreeMap::new();
+    let mut programs: BTreeMap<(&'static str, u8, String), machine::Program> = BTreeMap::new();
+    for (name, bytes) in [
+        ("Dai Banna", DAI_BANNA),
+        ("Tagmukay", TAGMUKAY),
+        ("Awami", AWAMI),
+    ] {
+        let face = Sfnt::parse(bytes).expect("the face parses");
+        let tables = Tables::parse(&face, &limits).expect("a description");
+        let features = tables
+            .features()
+            .map_or(0, |f| f.expect("its Feat reads").len());
+        let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+        let description = silf.description(0).expect("its description");
+        let bounds = Bounds::of(&description, features);
+        let mut counted = [0usize; 3];
+        for number in 0..usize::from(description.passes) {
+            let pass = description.pass(number, &limits).expect("the pass reads");
+            let pass_number = u8::try_from(number).expect("a few passes");
+            let mut each = |block: Block, code: &[u8], slot: usize| {
+                let site = Site {
+                    pass: pass_number,
+                    block,
+                };
+                let program = machine::check(code, site, &bounds, &limits)
+                    .unwrap_or_else(|refusal| panic!("{name} {site:?}: {refusal:?}"));
+                counted[slot] += 1;
+                programs.insert((name, pass_number, format!("{block:?}")), program);
+            };
+            if let Some(code) = pass.pass_constraint() {
+                each(Block::PassConstraint, code, 2);
+            }
+            for rule in 0..pass.rules {
+                let constraint = pass.constraint(rule).expect("its constraint");
+                each(Block::Constraint(rule), constraint, 0);
+                let action = pass.action(rule).expect("its action");
+                each(Block::Action(rule), action, 1);
+            }
+        }
+        blocks.insert(name, counted);
+    }
+    assert_eq!(
+        blocks,
+        BTreeMap::from([
+            ("Awami", [2_731, 2_731, 6]),
+            ("Dai Banna", [59, 59, 0]),
+            ("Tagmukay", [13, 13, 0]),
+        ]),
+        "rule constraints, actions and pass constraints, every one checked"
+    );
+
+    let ops = |name: &'static str, pass: u8, block: Block| -> Vec<Op> {
+        programs
+            .get(&(name, pass, format!("{block:?}")))
+            .expect("a checked block")
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.op)
+            .collect()
+    };
+    let set = |attribute| Op::SetAttribute { attribute };
+    let read = |attribute, slot| Op::PushSlotAttribute { attribute, slot };
+
+    // Dai Banna SIL's line-break rule: `breakweight`, 14.
+    assert_eq!(
+        ops("Dai Banna", 0, Block::Action(0)),
+        vec![
+            Op::PutCopy { slot: 0 },
+            Op::Push(-30),
+            set(SlotAttribute::BreakWeight),
+            Op::Next,
+            Op::ReturnZero
+        ]
+    );
+    // Tagmukay's ligatures reference their components, 15; its features
+    // are tested by their index in `Feat`.
+    assert!(ops("Tagmukay", 0, Block::Action(0))
+        .iter()
+        .any(|op| matches!(
+            op,
+            Op::SetIndexedSlotReference {
+                attribute: SlotAttribute::ComponentReference,
+                ..
+            }
+        )));
+    assert_eq!(
+        ops("Tagmukay", 1, Block::Constraint(3)),
+        vec![
+            Op::PushFeature {
+                feature: 1,
+                slot: 0
+            },
+            Op::PopReturn
+        ]
+    );
+    // Awami Nastaliq's pass 17, rule 17: `shift`, `collision` and
+    // `sequence`, in the order the rule writes them.
+    let flags = SlotAttribute::CollisionFlags;
+    assert_eq!(
+        ops("Awami", 17, Block::Action(17)),
+        vec![
+            Op::PutCopy { slot: 0 },
+            Op::Push(300),
+            set(SlotAttribute::ShiftX),
+            Op::Push(350),
+            set(SlotAttribute::ShiftY),
+            read(flags, 0),
+            Op::SetBits { mask: 2, value: 0 },
+            set(flags),
+            read(flags, 0),
+            Op::SetBits { mask: 1, value: 1 },
+            set(flags),
+            Op::Push(-200),
+            set(SlotAttribute::CollisionMinX),
+            Op::Push(250),
+            set(SlotAttribute::CollisionMaxX),
+            Op::Push(-300),
+            set(SlotAttribute::CollisionMinY),
+            Op::Push(200),
+            set(SlotAttribute::CollisionMaxY),
+            Op::Push(4),
+            set(SlotAttribute::SequenceClass),
+            Op::Push(1),
+            set(SlotAttribute::SequenceProxClass),
+            Op::Push(8),
+            set(SlotAttribute::SequenceOrder),
+            Op::Next,
+            Op::ReturnZero,
+        ]
+    );
+    // Its pass 17, rule 69: `margin = 300m; marginweight = 500`.
+    let margins = ops("Awami", 17, Block::Action(69));
+    let wanted = [
+        Op::Push(300),
+        set(SlotAttribute::CollisionMargin),
+        Op::Push(500),
+        set(SlotAttribute::CollisionMarginWeight),
+    ];
+    assert!(margins.windows(4).any(|w| w == wanted));
+    // Its pass 9, rule 73: the exclusion glyph and its offset.
+    let exclude = ops("Awami", 9, Block::Action(73));
+    for (attribute, glyph_attribute) in [
+        (SlotAttribute::CollisionExcludeGlyph, 130u16),
+        (SlotAttribute::CollisionExcludeOffsetX, 72),
+        (SlotAttribute::CollisionExcludeOffsetY, 73),
+    ] {
+        let pair = [
+            Op::PushGlyphAttribute {
+                attribute: glyph_attribute,
+                slot: 0,
+            },
+            set(attribute),
+        ];
+        assert!(exclude.windows(2).any(|w| w == pair), "{attribute:?}");
+    }
+    // Its pass 7, rule 0: the cursive attachment, its points, `insert` and
+    // `seqWidth`, its `user5`.
+    let cursive = ops("Awami", 7, Block::Action(0));
+    for wanted in [
+        Op::SetSlotReference {
+            attribute: SlotAttribute::AttachTo,
+        },
+        set(SlotAttribute::AttachWithX),
+        set(SlotAttribute::AttachWithY),
+        set(SlotAttribute::AttachAtX),
+        set(SlotAttribute::AttachAtY),
+        set(SlotAttribute::Insert),
+        read(SlotAttribute::AdvanceX, -6),
+        Op::PushIndexedSlotAttribute {
+            attribute: SlotAttribute::User,
+            slot: -6,
+            index: 4,
+        },
+        Op::SetIndexedAttribute {
+            attribute: SlotAttribute::User,
+            index: 4,
+        },
+        Op::PushAttachedGlyphAttribute {
+            attribute: 86,
+            slot: 0,
+        },
+    ] {
+        assert!(cursive.contains(&wanted), "{wanted:?}");
+    }
+    // Its pass 12, rule 22: `{position.y + bb.top > SHORTFINAL2}`.
+    assert_eq!(
+        &ops("Awami", 12, Block::Constraint(22))[1..],
+        &[
+            read(SlotAttribute::PositionY, 0),
+            Op::PushGlyphMetric {
+                metric: Metric::BoundingBoxTop,
+                slot: 0,
+                level: 0
+            },
+            Op::Add,
+            Op::Push(2_700),
+            Op::Greater,
+            Op::PopReturn,
+        ]
+    );
+    // Its pass 19, rule 16: `advance.x += max(0, @N.collision.fix.x) + 300m`.
+    assert_eq!(
+        ops("Awami", 19, Block::Action(16)),
+        vec![
+            Op::PutCopy { slot: 0 },
+            Op::Push(0),
+            read(SlotAttribute::CollisionFixX, 1),
+            Op::Max,
+            Op::Push(300),
+            Op::Add,
+            Op::AddAttribute {
+                attribute: SlotAttribute::AdvanceX
+            },
+            Op::Next,
+            Op::ReturnZero,
+        ]
+    );
+    // Its pass 11, rule 133: `shift.y -= 100m; collision.margin -= 50m`.
+    assert_eq!(
+        ops("Awami", 11, Block::Action(133)),
+        vec![
+            Op::PutCopy { slot: 0 },
+            Op::Push(100),
+            Op::SubtractAttribute {
+                attribute: SlotAttribute::ShiftY
+            },
+            Op::Push(50),
+            Op::SubtractAttribute {
+                attribute: SlotAttribute::CollisionMargin
+            },
+            Op::Next,
+            Op::ReturnZero,
+        ]
+    );
+    // Its pass 6, rule 24: a feature test and `_ {directionality == 1}`.
+    let direction = ops("Awami", 6, Block::Constraint(24));
+    assert!(direction.contains(&read(SlotAttribute::Directionality, 0)));
+
+    // Its pass 14, rule 0: `_=D {att.to==0}  _=H {att.to==0}`, two blocks
+    // joined by one `And`. Every slot of the match answers true while D and
+    // H are unattached, and the slot under test that is H answers false
+    // once H is attached.
+    let constraint = programs
+        .get(&("Awami", 14u8, format!("{:?}", Block::Constraint(0))))
+        .expect("a checked block");
+    let blocks_in = constraint
+        .instructions()
+        .iter()
+        .filter(|i| matches!(i.op, Op::ContextItem { .. }))
+        .count();
+    assert_eq!(blocks_in, 2);
+    let mut stream = Stream {
+        glyphs: vec![1; 6],
+        ..Stream::default()
+    };
+    let answers = |stream: &Stream, under_test: usize| {
+        let mut budget = Budget::new(&limits);
+        let frame = Frame {
+            position: 0,
+            under_test: Some(under_test),
+        };
+        machine::holds(constraint, stream, frame, &mut budget).expect("runs")
+    };
+    for under_test in 0..6 {
+        assert!(answers(&stream, under_test), "slot {under_test}");
+    }
+    stream
+        .slot_attributes
+        .insert((5, SlotAttribute::AttachTo, 0), -1);
+    assert!(!answers(&stream, 5));
+    assert!(answers(&stream, 4) && answers(&stream, 0));
+}
