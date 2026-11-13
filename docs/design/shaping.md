@@ -63,6 +63,11 @@ covers the producing half of the engine only.
   run by a justify call in integer font units, chosen by CSS Text 3's
   `text-justify`, offered a line's slack by layout and drawn as measured —
   *Justification* below.
+- **Person-written expectations** (FT-09): the case format a reader of a
+  script writes by hand, the provenance it carries, the bar it is wired into,
+  how a script leaves the shaped-and-unverified list, and the rules of the
+  two mechanisms refused until a case exists — *Person-written expectations*
+  below.
 
 ## Non-goals
 
@@ -167,6 +172,8 @@ lookup type) and Unicode's **text-rendering-tests** corpus (real fonts with
 expected glyph names and positions per script), committed as fixtures with
 their licences recorded in `THIRDPARTY.md`. Both carry their expected output
 inside the fixture, which is what makes them gates rather than comparisons.
+The third bar is an expectation a reader of the script writes by hand, in the
+format *Person-written expectations* below fixes.
 
 **What no shaping engine here adjudicates.** Ruling 13 rules out running
 another shaper and diffing. Those two corpora between them cover a large
@@ -1986,3 +1993,329 @@ lookup past its `LookupList` changes nothing.
 | A committed book's pages move | `auto` keeps its spaces (H-143), `inter-character` is refused until FT-07e.7 and no committed book declares `text-justify`; `epub_fallback.rs` and `epub_conservation.rs` hold the books |
 | Flat extenders break joins off the baseline | A join `curs` attached takes no kashida |
 | `inter-character` half built | The half not built is named here and counted by element in the books |
+
+## Person-written expectations
+
+*For ROADMAP row FT-09.* For a script neither published corpus covers, the
+only expected answer ruling 13 admits is one a person wrote: text-rendering-tests
+and aots are admissible because people wrote their expectations, and another
+shaper's recorded output never is. H-64 is the person's act — a reader of the
+script writing, from the face's own tables, the glyphs and positions the
+script needs. This section fixes the format that person writes in, the
+provenance every case carries, where the cases and faces live, the bar they are
+wired into, how a script leaves [features/fonts.md](../features/fonts.md)'s
+shaped-and-unverified row, and the rules of the two mechanisms refused until a
+case exists: Syriac's Alaph and the topographical features of a joining script
+the Universal Shaping Engine shapes.
+
+The Alaph rules are read from the Unicode Standard, version 17.0.0, §9.3.2
+*Syriac Shaping*, and from Microsoft's *Developing OpenType Fonts for Syriac
+Script*, *Shaping features* and *Features*; the topographical stage from
+Microsoft's *Creating and supporting OpenType fonts for the Universal Shaping
+Engine*, *How the Universal Shaping Engine works* and *OpenType feature
+application II*.
+
+### Scope
+
+- **The case format** (FT-09.1): a text file a person writes by hand —
+  the text as code points, the face, its feature settings, language and
+  direction, and per glyph its name or index, its cluster, its advance and its
+  offsets — readable without reading this crate. It is the format every
+  person-written row reads: FT-07a.8, FT-07b.10, FT-07d.17 and FT-07e.10 each
+  add the fields their harness needs in their own section, by the extension
+  rule below.
+- **Provenance**: the author, the date, the author's standing as a reader of
+  the script, and the face's source and SPDX identifier, whose absence refuses
+  a case.
+- **The bar** (FT-09.2): `crates/tinker-pdf-shape/tests/person_written.rs`,
+  shaping each case as a consumer does and comparing it glyph by glyph, with a
+  per-script ratchet and a `RAN` line.
+- **Leaving the list** (FT-09.3), one delivery at a time.
+- **Two mechanisms' rules**: Alaph's three forms (FT-09.4) and the
+  topographical features under the Universal Shaping Engine (FT-09.5).
+
+### Non-goals
+
+- **Writing an expectation.** Nothing here, and no step, writes a case on a
+  person's behalf. The bar's own check transcribes a published case,
+  `SHARAN-1/1`, which people wrote; every delivered case is H-64's.
+- **Another shaper's output, or a tolerance.** No expected value comes from a
+  run of any program, and every number is compared exactly in the case's own
+  units.
+- **Pixels.** A case states glyphs and positions, not a picture: the outlines
+  are the face's, and a picture would put the rasterizer between the reader's
+  statement and the shaper's answer.
+- **A face the allowlist does not admit.** It is not vendored (ruling 18); its
+  script stays listed until its licence is the owner's to admit.
+- **Partial credit.** A script leaves the list when every one of its cases
+  passes, never on a share of them.
+- **The other rows' harnesses.** Variations, columns, Graphite and
+  justification read this format through their own tests and add their own
+  fields; the bar here runs scripts along a line.
+
+### Design
+
+#### The case file
+
+A case file is UTF-8 text with LF line ends and the extension `.cases`. Each
+line is one statement, a keyword and its value separated by the first run of
+spaces; a line whose first character is `#` is a comment, and a blank line is
+nothing. A **header** comes first, each of its keywords once; then one or more
+**cases**, each opened by a `case` line and holding the statements after it up
+to the next `case` line.
+
+| Header keyword | Value | Required |
+| --- | --- | --- |
+| `format` | `1` | yes |
+| `script` | the ISO 15924 code of the script the file's cases are in, as Unicode's `PropertyValueAliases.txt` gives it for `Scripts.txt`'s values: `Syrc`, `Nkoo`, `Mong` | yes |
+| `face` | the face's file name, in the case file's own directory | yes |
+| `author` | who wrote the file's expectations | provenance |
+| `standing` | the author's standing as a reader of the script | provenance |
+| `date` | the day they were written, `YYYY-MM-DD` | provenance |
+| `face-source` | where the face comes from: its publisher, its release or version, and where it was fetched | provenance |
+| `face-licence` | the face's SPDX identifier | provenance |
+| `units-per-em` | the em the file's numbers are written in, 16 to 16 384; absent, the face's own `unitsPerEm` | no |
+
+| Case keyword | Value | Required |
+| --- | --- | --- |
+| `case` | the case's name, unique among its script's cases | yes |
+| `text` | the text as code points, separated by spaces: `U+0712 U+0710` | yes |
+| `direction` | the paragraph's direction: `ltr`, `rtl`, or `auto` for UAX #9's P2 and P3 | yes |
+| `features` | feature settings over the default plan, as css-fonts-4 §6.12's `font-feature-settings` sets them: `liga=0 ss01=1`, each tag four letters or digits and each value a decimal number, `0` off; absent, the default plan | no |
+| `language` | the OpenType language system tag, padded with spaces to four characters: `SYR`; absent, the script's default language system | no |
+| `glyph` | one glyph, as below; one line a glyph, in drawn order | one at least |
+
+A **glyph** line is `glyph <id> <cluster> <x-advance> <y-advance> <x-offset>
+<y-offset>`:
+
+- `<id>` is `gid` and a decimal glyph index, or the glyph's name as the face's
+  own `post` table or `CFF ` charset gives it. A name the face does not give
+  refuses the case, because a name resolved any other way is a guess about
+  which glyph the person meant.
+- `<cluster>` is the index, counted from 0 in the case's `text`, of the first
+  code point of the characters the glyph stands for; an inserted glyph takes
+  the cluster of the character that produced it. A case that states no
+  clusters writes `-` in every glyph line, and one that states them writes
+  them in every line.
+- The advances and offsets are integers in the file's units: the pen moves by
+  the advance after the glyph is drawn, and the glyph is drawn at the pen plus
+  its offset, `y` upward. The last glyph's two advances may each be `-` in a
+  case that does not state where its line ends.
+
+The glyphs are listed in **drawn order**: left to right, as a reader reads
+them off a proof, so a right-to-left word lists its last letter's glyphs
+first. That is the order text-rendering-tests writes its glyphs in, and the
+one a person can check against a printed line.
+
+**The extension rule.** A keyword this format does not define refuses the case
+in every harness that does not read it, so nothing a person writes is quietly
+ignored. A row whose harness needs more — FT-07a's instance coordinates,
+FT-07b's column, FT-07d's Graphite language, FT-07e's width to justify —
+defines its keyword in its own section, and its harness reads the rest of the
+file as here.
+
+#### What is compared
+
+Each case is shaped as a consumer shapes a line: `Shaper::shape_text` over its
+text and direction, with its feature settings through `Shaper::with_settings`
+and its language through `Shaper::with_language`; the runs are put in drawn
+order by UAX #9's rule L2 over their levels (`bidi::reorder`), and a
+right-to-left run's glyphs are walked from its end. The pen starts at the
+origin, and for each glyph in drawn order:
+
+1. **the glyph** is the one the line states;
+2. **its cluster**, where the case states clusters, is the code point index of
+   the glyph's byte cluster;
+3. **where it is drawn** — the pen plus its offset, on each axis — is where the
+   line's own advances and offsets draw it.
+
+And where the case states it, **the pen's end** — the line's advance on each
+axis — is where the line's advances leave it. A position is compared rather
+than the advance and offset it was written as, because two ways of reaching one
+point draw one line: a reader sees where a mark stands, and whether the pen's
+share of it is the mark's advance or the base's is a convention of a shaper,
+which no reader can see and none should have to know.
+
+In the face's own units every number is the shaper's integer, compared
+exactly. A file written at another `units-per-em` has each of the shaper's
+positions scaled once, `units × N ÷ unitsPerEm` rounded half away from zero —
+the arithmetic `tests/text_rendering.rs` scales by — and compared exactly with
+the sum the file's own numbers give.
+
+A case that does not reproduce fails with its first difference and a verdict:
+the glyph **set** differs, their **order** differs, a **cluster** differs, or
+only a **position** does — `text_rendering.rs`'s three, and the cluster.
+
+#### Provenance, and what refuses a case
+
+Every case carries its file's provenance. A file without one of `author`,
+`standing`, `date`, `face-source` or `face-licence` refuses every case in it,
+naming the field. A case is refused, each by name, as well for: a keyword the
+format does not define; a header keyword after the first case or given twice;
+a `format` other than `1`; a `date` that is no calendar day; a `face-licence`
+with a character SPDX's identifier syntax does not allow; a `script` that is no
+four-letter code; a character of the text in another script, `Common` and
+`Inherited` aside, or a text with none in its own; a code point that is no
+Unicode scalar value; a case without a `text`, a `direction` or a glyph; a
+glyph name the face does not give, or an index past its glyphs; clusters stated
+for some glyphs and not others; a `-` as any advance but the last glyph's; a
+`units-per-em` outside its range; a malformed feature setting or language tag;
+a case name its script has twice; and a face that is not in the directory or
+that `Sfnt::parse` declines. A refusal fails the bar: it is a delivery to
+mend, never a case to pass over.
+
+#### Where cases and faces live
+
+`crates/tinker-pdf-shape/data/person-written/` is one vendored tree: each
+delivered face, whole and unmodified, its licence beside it as
+`LICENSE-<face>`, and the `.cases` files that name it. `THIRDPARTY.md`
+declares the tree with its faces' SPDX identifier, as it declares
+`data/graphite`'s three faces, so `cargo xtask vendor` holds the licence to
+`deny.toml`'s allowlist; the cases are this repository's own, contributed under
+its licence as a test is. A face under an admitted licence other than the
+tree's goes in a tree of its own beside it, `data/person-written-<name>`,
+declared the same way, which the bar reads too. `.gitattributes` already gives
+`crates/tinker-pdf-shape/data/**` `-text linguist-vendored`, so a delivered
+face needs no attribute line.
+
+The tree comes into being with H-64's first delivery: git keeps no empty
+directory, and `cargo xtask vendor` requires every tree under a crate's `data/`
+to be declared with its licence, which a tree with no face cannot be. The bar
+reads a missing tree as nothing delivered, and its ratchet — which counts each
+script's cases — is what notices a tree that went missing.
+
+#### The bar (FT-09.2)
+
+`tests/person_written.rs` reads every `.cases` file in the trees, refuses as
+above, shapes and compares each case, and holds `PERSON_WRITTEN` — per script,
+its cases and how many reproduce — as `text_rendering.rs` holds `PASSING`: a
+ratchet whose rows the run must equal, so a case delivered, lost or newly
+failing changes the table in the commit that does it, and a count that falls
+is a visible edit. It prints one `RAN` line naming each script and its count,
+and says so when no script has a case. It runs as `cargo test -p
+tinker-pdf-shape --test person_written`; the crate declares no
+`bundled-fonts`, so there is one build.
+
+#### Leaving the list (FT-09.3)
+
+A script leaves `fonts.md`'s shaped-and-unverified row, and H-64's list, when
+every one of its cases reproduces, each states its clusters and every advance
+— a person's case is whole — and its face is vendored as above. The row names
+each script with its ISO 15924 code, which is what FT-09.3's test reads. A
+script with a failing case stays listed, and each failing case goes in a triage
+table with its verdict; the failure is a finding for the shaper's own rows
+(FT-08's cluster models among them), never a reason to edit the case.
+
+#### Syriac's Alaph (FT-09.4)
+
+§9.3.2 makes U+0710 SYRIAC LETTER ALAPH right-joining with `Joining_Group`
+`Alaph`, and gives its word-final forms three rules of their own, read with the
+Standard's visual terms — *to its right* is the character before it in logical
+order, *to its left* the one after — and characters of `Joining_Type`
+`Transparent` skipped on both sides, so the Syriac counterpart of the Arabic
+rule R1 takes precedence:
+
+- **S1**: a left-joining character to its right, and a non-joining character
+  or the end of the text to its left: **Afj**.
+- **S2**: a character to its right that does not join to its left, other than
+  one of `Joining_Group` `Dalath_Rish`, and a non-joining character or the end
+  of the text to its left: **Afn**.
+- **S3**: a character of `Joining_Group` `Dalath_Rish` to its right, and a
+  non-joining character or the end of the text to its left: **Afx**.
+
+Table 9-15 names the three final glyph types; Table 9-19 draws Alaph's five
+forms, the two of a letter that is not final among them, **Xn** and **Xr**;
+Table 9-18 lists the right-joining letters with their groups, `Dalath_Rish`
+among them. Microsoft's Syriac specification names the features: `fin2` for
+Alaph at the end of a word "when the preceding base character cannot be joined
+to" and is no Dalath, Rish or dotless Dalath-Rish, `fin3` after one of those,
+and `med2` for Alaph "in the middle of Syriac words when the preceding base
+character can be joined to"; its *Features* section keeps Alaph out of `medi`.
+So, with the start of the text read as a character that does not join, as a
+space before Alaph is:
+
+| Alaph | Form | Feature |
+| --- | --- | --- |
+| last letter of its word, joined to the letter before it (S1) | Afj | `fina` |
+| last letter, after a letter that does not join to it and is no `Dalath_Rish` (S2) | Afn | `fin2` |
+| last letter, after a letter of `Joining_Group` `Dalath_Rish` (S3) | Afx | `fin3` |
+| followed by a letter of its word, joined to the letter before it | Xr | `med2` |
+| followed by a letter of its word, not joined | Xn | `isol` |
+
+Alaph's last-letter test is S1 to S3's *non-joining character or end of the
+text to its left*: the next character in logical order that is not
+`Transparent` is of `Joining_Type` `Non_Joining`, or there is none. Its join to
+the letter before is `crate::arabic::forms`'s answer, unchanged; the table
+above only renames the form an Alaph takes. The stages are Microsoft's
+*Shaping features* order — `isol`, `fina`, `fin2`, `fin3`, `medi`, `med2`,
+`init` — so FT-09.4 puts `fin2` and `fin3` after `fina` and `med2` after `medi`
+in `JOINING_GSUB_STAGES`, each its own stage, and gives Alaph's glyph the mask
+of its one form. `Joining_Group` is field 3 of `ArabicShaping.txt`, the file
+FT-07e.4 reads for kashida's groups; FT-09.4 vendors it at the pinned 17.0.0
+wherever it is not yet in the tree and compiles the property in `build.rs`. A
+run with no Alaph shapes exactly as before.
+
+#### The topographical features under the Universal Shaping Engine (FT-09.5)
+
+The engine's stages are character classification, split vowels, cluster
+validation, *OpenType feature application I* (basic cluster formation), glyph
+reordering, and *OpenType feature application II*, whose first group is the
+**topographical features**, `isol`, `init`, `medi` and `fina`, applied "as
+required features on a per cluster basis in order to invoke a particular form
+based on non-joining or white space boundaries", the boundaries being where a
+character's `Joining_Type` does not join on the side a join would take, and
+`ZWJ` and `ZWNJ` making or breaking one. The standard typographic features
+(`abvs`, `blws`, `haln`, `pres`, `psts` and the rest) follow, and positioning
+after them.
+
+So a run that both joins (`arabic::joins`) and holds a character the engine
+categorises keeps its syllables, as `Plan::Universal` cuts them, and takes one
+form a character from `arabic::forms` over the whole run, because a join
+crosses clusters. The four features are one stage each, in the order they are
+listed, after `USE_REORDER_AFTER`'s pause and before the presentation group,
+each lookup masked per glyph by its form and matched within its cluster as the
+engine's other per-cluster features are. A run with no joining character, and
+every run of a script the engine does not shape — Arabic, Syriac — keeps the
+plan it has today.
+
+### Milestones
+
+1. **FT-09.1, this section.** Its exit is the section.
+2. **FT-09.2, the bar.** `tests/person_written.rs`:
+   `every_person_written_case_reproduces` runs and prints its `RAN` line with
+   nothing delivered; `a_case_without_its_provenance_is_refused`;
+   `the_harness_compares_what_it_claims` writes `SHARAN-1/1` into the format
+   inside the test, passes it, and fails it with one glyph or one offset
+   changed. `features/fonts.md`'s table of what adjudicates each script gains
+   the bar, empty.
+3. **FT-09.3, a delivery**, one run of the step per script H-64 delivers:
+   `every_person_written_case_reproduces` passes with the script;
+   `the_unverified_list_names_every_script_without_a_whole_fixture` reads
+   `features/fonts.md`'s row and fails while a script whose cases all pass is
+   listed, or one whose cases do not is missing; `cargo xtask vendor` and
+   `cargo xtask check` pass with the face declared.
+4. **FT-09.4, Alaph.** `arabic.rs`'s
+   `alaph_takes_the_form_its_neighbours_give_it` holds each row of the table
+   above against the rule worked in the test; H-64's Syriac cases pass in
+   `person_written.rs`; `ucd_version.rs`'s
+   `each_tree_holds_the_files_its_algorithms_need` names `ArabicShaping.txt`
+   at 17.0.0; `text_rendering.rs`'s `PASSING` and `aots.rs` unchanged;
+   `fingerprints.rs` gains a Syriac run.
+5. **FT-09.5, the topographical stage.** `shape.rs`'s
+   `a_joining_brahmic_run_keeps_its_syllables_and_its_forms` holds syllable
+   numbers and form masks on a run worked by hand; H-64's cases for the script
+   pass in `person_written.rs`; `text_rendering.rs`'s `PASSING` and `TRIAGE`
+   and every Arabic-script case unchanged; `fingerprints.rs` gains the run.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A person's numbers are wrong, and a shaper that matches them is wrong with them | The standing and the face's source travel with every case, so a case is answerable to a person; a failing case is triaged before anyone decides which side is wrong, and the shaper is changed only on the specification's text, never to match a number |
+| A case is written against one release of a face and run against another | The face is vendored whole and unmodified, its release named in `face-source` and in `THIRDPARTY.md`; another release is another delivery, whose cases run against it in the commit that brings it |
+| A position written as advance and offset in a split this crate does not make fails a case that draws right | What is drawn is compared, not the split, so any split that draws the line passes |
+| A field the harness does not read is ignored, and a case passes that says more than was checked | A keyword the harness does not read refuses the case |
+| A delivered tree is deleted and the bar reads it as nothing delivered | `PERSON_WRITTEN` counts each script's cases, so a lost tree fails the ratchet |
+| The bar compares less than it says | `the_harness_compares_what_it_claims` passes a published case and fails it with one glyph and with one offset changed |
+| The Standard's and Microsoft's descriptions of Alaph read apart — Microsoft's `med2` example puts Alaph after a Waw, which does not join to it | The forms are read from §9.3.2's rules and Table 9-19, the features from Microsoft's definitions; H-64's Syriac cases decide, and FT-09.4 lands only with them |
+| A face's licence is not on the allowlist | It is not vendored and its script stays listed (ruling 18) |
