@@ -311,16 +311,24 @@ ink, `fill_mask_inked` takes a path of its own, reading the mask's rows as
 slices. Over an opaque pixel — any pixel of `Gray8` or `Rgb8`, and one whose
 alpha byte is 255 in a format with alpha — the general blend collapses to
 `min(mul255(cs, c) + mul255(cb, 255 − c), 255)` a colour channel at coverage
-`c`, the alpha staying whole: a pixel of full coverage is the encoded colour,
-and one of none is untouched. A row is walked in blocks of sixteen pixels: a
-block of no coverage is passed over, a block of full coverage over opaque
-pixels is one slice copy of the colour, any other block over opaque pixels
-takes that expression at every byte, alpha included, in one loop of
+`c`, the alpha staying whole, and one of none is untouched. **At a full
+effective alpha under `Normal` the general blend collapses over any pixel**:
+the colour's channels and an alpha of 255, whatever the pixel held, its
+initial backdrop and its format — the two rounded terms of the mix sum to the
+source channel, `ab·cs/255` never being a half-integer, and an ink channel is
+complemented in and out. So a row is walked in blocks of sixteen pixels: a
+block of no coverage is passed over, a block of full coverage is one slice
+copy of the colour whatever its pixels held, any other block over opaque
+pixels takes that expression at every byte, alpha included, in one loop of
 sixteen-bit lanes, and a block holding a pixel that is not opaque, like the
-pixels after the last whole block, is taken a pixel at a time. A pixel that
-is not opaque, and every other case — an alpha below 255, another mode, the
-ink canvas, a non-isolated group's backdrop — goes through the general blend,
-whose rounding they need.
+pixels after the last whole block, is taken a pixel at a time, the colour
+where the coverage is full. And wherever coverage, the colour's alpha and the
+state's alpha multiply to 255 under `Normal`, every other route writes the
+colour and 255 the same way: the general fill onto an ink buffer, the
+document's ink kept, or onto a group's buffer that has a backdrop; an image
+or a shading's pixel at a full level; and a nested group's composite. A pixel
+partly covered that is not opaque, and every other case — an alpha below 255,
+another mode — goes through the general blend, whose rounding they need.
 
 **A canvas is a rectangle of a page.** `Canvas::origin` is the device pixel
 its top-left is — `(0, 0)` for a canvas that is the whole page, a tile's
@@ -622,7 +630,7 @@ tiny pattern over a long line cannot generate millions of pieces.
   sixteen-bit product to `mul255` over every pair of bytes
   (`mul255_in_sixteen_bits_is_mul255`), and rows of every count of blocks and
   every tail to the general blend, with the general blends counted to the
-  covered pixels that are not opaque
+  pixels partly covered that are not opaque
   (`the_row_walk_takes_every_block_and_tail_as_the_general_blend`); holds
   `to_mask` to `pixel` read the long way round, over every value each format's
   reading depends on (`to_mask_reads_every_format_as_pixel_does`); and
@@ -639,7 +647,16 @@ tiny pattern over a long line cannot generate millions of pieces.
   buffers inside the parent, all of it and hanging off it
   (`a_group_reads_its_backdrop_from_its_parent_as_a_copy_would_hold_it`), and
   a copy past a canvas's right edge to nothing there
-  (`a_copy_past_a_canvas_s_right_edge_reads_nothing_there`).
+  (`a_copy_past_a_canvas_s_right_edge_reads_nothing_there`); holds the
+  composite at a full effective alpha to `blend` over every source and
+  destination channel value against a lattice of own and backdrop alphas in
+  every format (`the_opaque_normal_path_is_blend_in_every_group_format`), every
+  route into a group's buffer — a fill, sampled pixels and a nested group's
+  composite, into isolated, non-isolated and knockout buffers, an ink buffer
+  with and without the document's ink — to `blend` at every pixel
+  (`every_route_into_a_group_writes_what_blend_writes`), and counts the
+  general blends an opaque paint inside a group makes, none
+  (`an_opaque_paint_inside_a_group_skips_blend`).
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
   the render fingerprints `text`, `curves`, `shading`, `blend`, `pattern`,
   `image`, `transparency`, `tiling`, `mesh` and `strokes` exercise this crate

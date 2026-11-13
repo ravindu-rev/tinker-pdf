@@ -556,7 +556,11 @@ impl Canvas {
 
     /// [`Canvas::fill_mask_inked`]'s general composite: every pixel the mask
     /// covers through `blend`, at the coverage, the colour's alpha and the
-    /// state's alpha multiplied, over the canvas pixels `(x0, y0, x1, y1)`.
+    /// state's alpha multiplied, over the canvas pixels `(x0, y0, x1, y1)` —
+    /// but for a pixel those multiply to 255 under `Normal`, which takes
+    /// [`opaque_normal`], what `blend` writes there whatever the pixel, its
+    /// backdrop or the format: a group's buffer, one with a backdrop and an ink
+    /// one, the document's ink kept, alike.
     fn fill_blended(
         &mut self,
         mask: &Mask,
@@ -584,6 +588,12 @@ impl Canvas {
                 }
 
                 let base = (row as usize) * self.stride + (col as usize) * components;
+                if effective == 255 && mode == BlendMode::Normal {
+                    if let Some(pixel) = self.data.get_mut(base..base + components) {
+                        opaque_normal(pixel, source, self.format);
+                    }
+                    continue;
+                }
                 let backdrop = self.backdrop_alpha(col, row);
                 blend(
                     self.data.get_mut(base..base + components),
@@ -608,19 +618,21 @@ impl Canvas {
     /// the coverage `c` — `mul255(x, 255)` is `x` — the backdrop's weight is
     /// whole, Normal's mix is the source, and each colour channel comes out
     /// `min(mul255(cs, c) + mul255(cb, 255 − c), 255)`, the alpha staying 255
-    /// ([`over_opaque`]). A pixel that is not opaque goes through `blend`,
-    /// whose rounding a pixel that is not opaque needs.
+    /// ([`over_opaque`]). **At full coverage `blend` collapses over any
+    /// pixel**: the colour and an alpha of 255, whatever the pixel held
+    /// ([`opaque_normal`]). A pixel that is not opaque under any other
+    /// coverage goes through `blend`, whose rounding it needs.
     ///
     /// **A row is walked in blocks of [`BLOCK`] pixels** ([`opaque_row`]),
     /// and the loops over a block's bytes are of a fixed width with no call
     /// inside, written so that the `+simd128` build vectorises them: a block
-    /// of no coverage is passed over, a block of full coverage over opaque
-    /// pixels is one slice copy of the encoded colour, any other block over
-    /// opaque pixels takes the collapse at every byte ([`opaque_block`]), and
-    /// a block holding a pixel that is not opaque, like the pixels past the
-    /// last whole block, is taken a pixel at a time ([`opaque_pixel`]) —
-    /// `blend` for each covered pixel that is not opaque, exactly as many as
-    /// before.
+    /// of no coverage is passed over, a block of full coverage is one slice
+    /// copy of the encoded colour whatever its pixels held, any other block
+    /// over opaque pixels takes the collapse at every byte ([`opaque_block`]),
+    /// and a block holding a pixel that is not opaque, like the pixels past
+    /// the last whole block, is taken a pixel at a time ([`opaque_pixel`]) —
+    /// `blend` for each pixel partly covered that is not opaque, and for no
+    /// other.
     fn fill_opaque(
         &mut self,
         mask: &Mask,
@@ -753,6 +765,12 @@ impl Canvas {
             _ => self.encode(color),
         };
         let base = (y as usize) * self.stride + (x as usize) * components;
+        if effective == 255 && mode == BlendMode::Normal {
+            if let Some(pixel) = self.data.get_mut(base..base + components) {
+                opaque_normal(pixel, &source, self.format);
+            }
+            return;
+        }
         let backdrop = self.backdrop_alpha(x, y);
         blend(
             self.data.get_mut(base..base + components),
@@ -935,6 +953,12 @@ impl Canvas {
                 }
 
                 let base = (row as usize) * self.stride + (col as usize) * components;
+                if effective == 255 && mode == BlendMode::Normal {
+                    if let Some(pixel) = self.data.get_mut(base..base + components) {
+                        opaque_normal(pixel, &source, self.format);
+                    }
+                    continue;
+                }
                 let backdrop = self.backdrop_alpha(col, row);
                 blend(
                     self.data.get_mut(base..base + components),
@@ -1495,12 +1519,14 @@ const BLOCK: usize = 16;
 ///
 /// Whole blocks of [`BLOCK`] pixels first, each classed by its coverage —
 /// one AND and one OR over its bytes — and, in a format with alpha, by an
-/// AND over its pixels' alpha bytes: no coverage passes the block over; over
-/// pixels all opaque, full coverage copies `solid` whole and any other takes
-/// [`opaque_block`]; a block holding a pixel that is not opaque, and the
-/// pixels past the last whole block, take [`opaque_pixel`] wherever their
-/// coverage is not zero. Each class writes the bytes the pixel-by-pixel walk
-/// writes, so the order and the grouping decide nothing.
+/// AND over its pixels' alpha bytes: no coverage passes the block over; full
+/// coverage copies `solid` whole, whatever its pixels held, `solid` being the
+/// colour with an alpha of 255 ([`opaque_normal`]); over pixels all opaque,
+/// any other coverage takes [`opaque_block`]; a block holding a pixel that is
+/// not opaque, and the pixels past the last whole block, take
+/// [`opaque_pixel`] wherever their coverage is not zero. Each class writes
+/// the bytes the pixel-by-pixel walk writes, so the order and the grouping
+/// decide nothing.
 fn opaque_row<const N: usize, const ALPHA: bool>(
     pixels: &mut [u8],
     coverage: &[u8],
@@ -1517,18 +1543,20 @@ fn opaque_row<const N: usize, const ALPHA: bool>(
         if any == 0 {
             continue;
         }
+        if all == 255 {
+            if let Some(from) = solid.get(..block.len()) {
+                block.copy_from_slice(from);
+            }
+            continue;
+        }
         let opaque = !ALPHA
             || block.chunks_exact(N).fold(255u8, |held, pixel| {
                 held & pixel.last().copied().unwrap_or(0)
             }) == 255;
-        if !opaque {
-            each_opaque_pixel::<N>(block, cover, source, format);
-        } else if all == 255 {
-            if let Some(from) = solid.get(..block.len()) {
-                block.copy_from_slice(from);
-            }
-        } else {
+        if opaque {
             opaque_block::<N>(block, cover, solid);
+        } else {
+            each_opaque_pixel::<N>(block, cover, source, format);
         }
     }
     each_opaque_pixel::<N>(blocks.into_remainder(), covers.remainder(), source, format);
@@ -1580,11 +1608,14 @@ fn mul255_narrow(a: u16, b: u16) -> u16 {
 }
 
 /// One pixel of [`Canvas::fill_opaque`], at a coverage `c` that is not zero:
-/// a pixel that is not opaque through `blend`, and an opaque one taking the
-/// colour at full coverage and [`over_opaque`] at any other.
+/// the colour at full coverage over any pixel ([`opaque_normal`]), and at any
+/// other a pixel that is not opaque through `blend` and an opaque one through
+/// [`over_opaque`].
 fn opaque_pixel(pixel: &mut [u8], source: &[u8; 5], c: u8, format: PixelFormat) {
     let channels = color_channels(format);
-    if format.has_alpha() && pixel.get(channels) != Some(&255) {
+    if c == 255 {
+        opaque_normal(pixel, source, format);
+    } else if format.has_alpha() && pixel.get(channels) != Some(&255) {
         blend(
             Some(pixel),
             source,
@@ -1593,12 +1624,37 @@ fn opaque_pixel(pixel: &mut [u8], source: &[u8; 5], c: u8, format: PixelFormat) 
             BlendMode::Normal,
             0,
         );
-    } else if c == 255 {
-        if let Some(colour) = source.get(..pixel.len()) {
-            pixel.copy_from_slice(colour);
-        }
     } else {
         over_opaque(pixel, source, u32::from(c), channels);
+    }
+}
+
+/// `blend`'s `Normal` composite at a full effective alpha: the source's
+/// colour channels, and an alpha of 255 in a format that carries one,
+/// whatever the pixel held, whatever its initial backdrop and in every
+/// format (`docs/design/performance.md`, P-25).
+///
+/// **Why that is `blend` exactly.** At an alpha of 255 the union alpha is 255
+/// and Normal's mix is the source channel `cs`, so the colour comes out
+/// `mul255(255 − ab, cs) + mul255(ab, cs)` renormalised against 255, for the
+/// backdrop alpha `ab`. The two terms are `round(x)` and `round(cs − x)` for
+/// `x = ab·cs/255`, which sum to `cs` unless `x` is a half-integer, and it
+/// never is: `2·ab·cs` is even and an odd multiple of 255 is odd. So every
+/// colour channel is `cs` and the alpha `255 + mul255(a, 0)`, 255. A
+/// subtractive channel enters Normal complemented and leaves it complemented
+/// again, so an ink buffer gets the source's ink, the document's own where
+/// [`Canvas::fill_mask_inked`] was handed it.
+/// `the_opaque_normal_path_is_blend_in_every_group_format` holds it to `blend`
+/// over every channel value against a lattice of alphas, per format.
+fn opaque_normal(pixel: &mut [u8], source: &[u8; 5], format: PixelFormat) {
+    let channels = color_channels(format);
+    for (slot, from) in pixel.iter_mut().zip(source.iter()).take(channels) {
+        *slot = *from;
+    }
+    if format.has_alpha() {
+        if let Some(alpha) = pixel.get_mut(channels) {
+            *alpha = 255;
+        }
     }
 }
 
@@ -2668,8 +2724,9 @@ mod tests {
     /// **An opaque Normal fill onto an opaque canvas calls no general
     /// `blend`** (P-07.6's guard), counted; and every case outside the path's
     /// conditions still does — an alpha below 255 in the state or in the
-    /// colour, another mode, a canvas that is not opaque, the ink canvas, and
-    /// a non-isolated group's backdrop.
+    /// colour, another mode, and, at the pixels the shape covers in part, a
+    /// canvas that is not opaque, the ink canvas and a non-isolated group's
+    /// backdrop.
     #[test]
     fn an_opaque_normal_fill_calls_no_general_blend() {
         let mask = square_mask(3.3, 4.6, 50.2, 47.9, 64);
@@ -2831,8 +2888,9 @@ mod tests {
     /// coverage none, full, mixed or random and its pixels all opaque, holding
     /// one pixel that is not, or of random alpha: the opaque path against the
     /// general composite on the same canvas, byte for byte, and the general
-    /// `blend` called once for each covered pixel that is not opaque and never
-    /// otherwise — the count the walk a pixel at a time made.
+    /// `blend` called once for each pixel partly covered that is not opaque
+    /// and never otherwise — a pixel of full coverage takes the colour
+    /// whatever it held (P-25.4).
     #[test]
     fn the_row_walk_takes_every_block_and_tail_as_the_general_blend() {
         let mut state = 0x7a11_5eed_u32;
@@ -2900,7 +2958,7 @@ mod tests {
                             .data
                             .chunks_exact(components)
                             .zip(&mask.data)
-                            .filter(|(pixel, c)| **c != 0 && pixel[channels] != 255)
+                            .filter(|(pixel, c)| **c != 0 && **c != 255 && pixel[channels] != 255)
                             .count() as u64
                     } else {
                         0
@@ -3929,6 +3987,402 @@ mod tests {
         let mut canvas = Canvas::new(2, 2, PixelFormat::Rgb8, Color::WHITE);
         for alpha in [0.0, -1.0, 2.0, f64::NAN] {
             canvas.fill_mask(&square_mask(0.0, 0.0, 2.0, 2.0, 2), Color::BLACK, alpha);
+        }
+    }
+    /// The formats a group's buffer can be: every one that carries alpha.
+    const GROUP_FORMATS: [PixelFormat; 4] = [
+        PixelFormat::GrayA8,
+        PixelFormat::Rgba8,
+        PixelFormat::CmykA8,
+        PixelFormat::LabA8,
+    ];
+
+    /// **The opaque Normal path is `blend` in every group format** (P-25.4):
+    /// at a full effective alpha under `Normal`, `opaque_normal` writes what
+    /// `blend` writes, over every source and destination channel value,
+    /// against a lattice of the destination's own alphas and of its initial
+    /// backdrop's, for `GrayA8`, `Rgba8`, `CmykA8` and `LabA8` — and for the
+    /// two formats without alpha too, which a page is.
+    #[test]
+    fn the_opaque_normal_path_is_blend_in_every_group_format() {
+        let own_alphas = [0u8, 1, 2, 64, 127, 128, 200, 254, 255];
+        let initials = [0u32, 1, 77, 128, 254, 255];
+        let mut compared = 0u64;
+        for format in GROUP_FORMATS
+            .into_iter()
+            .chain([PixelFormat::Gray8, PixelFormat::Rgb8])
+        {
+            let components = format.components();
+            let channels = color_channels(format);
+            let owns: &[u8] = if format.has_alpha() {
+                &own_alphas
+            } else {
+                &[255]
+            };
+            for cs in 0..=255u8 {
+                let mut source = [cs; 5];
+                source[channels] = 255;
+                for cb in 0..=255u8 {
+                    for &own in owns {
+                        let mut pixel = [cb; 5];
+                        if format.has_alpha() {
+                            pixel[channels] = own;
+                        }
+                        for initial in initials {
+                            let (mut want, mut got) = (pixel, pixel);
+                            blend(
+                                want.get_mut(..components),
+                                &source,
+                                255,
+                                format,
+                                BlendMode::Normal,
+                                initial,
+                            );
+                            opaque_normal(&mut got[..components], &source, format);
+                            if got != want {
+                                panic!(
+                                    "{format:?}: {cs} over {cb} at its own alpha {own} and \
+                                     a backdrop alpha {initial}: {got:?} against {want:?}"
+                                );
+                            }
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            compared,
+            65_536 * initials.len() as u64 * (4 * own_alphas.len() as u64 + 2),
+            "every case ran"
+        );
+    }
+
+    /// What `fill_mask_inked` writes, the long way round: `blend` at every
+    /// pixel `mask` covers, at the coverage times the colour's and the state's
+    /// alphas, against the canvas's own backdrop.
+    fn filled_by_blend(
+        canvas: &Canvas,
+        mask: &Mask,
+        source: &[u8; 5],
+        color_alpha: u32,
+        alpha: u32,
+        mode: BlendMode,
+    ) -> Vec<u8> {
+        let mut out = canvas.data.clone();
+        let components = canvas.format.components();
+        let (ox, oy) = canvas.origin();
+        for row in 0..canvas.height {
+            for col in 0..canvas.width {
+                let coverage = u32::from(mask.at(ox + col as i32, oy + row as i32));
+                let effective = mul255(mul255(coverage, color_alpha), alpha);
+                if effective == 0 {
+                    continue;
+                }
+                let backdrop = canvas.backdrop_alpha(col, row);
+                let base = (row as usize) * canvas.stride + (col as usize) * components;
+                blend(
+                    out.get_mut(base..base + components),
+                    source,
+                    effective,
+                    canvas.format,
+                    mode,
+                    backdrop,
+                );
+            }
+        }
+        out
+    }
+
+    /// What `composite` writes, the long way round: `blend` at every pixel of
+    /// `src` placed at `at`, at its own alpha times `alpha` times the mask's
+    /// coverage, against the canvas's own backdrop.
+    fn composited_by_blend(
+        canvas: &Canvas,
+        src: &Canvas,
+        at: (i32, i32),
+        alpha: u32,
+        mask: Option<&Mask>,
+    ) -> Vec<u8> {
+        let mut out = canvas.data.clone();
+        let components = canvas.format.components();
+        let (ox, oy) = canvas.origin();
+        for row in 0..canvas.height {
+            for col in 0..canvas.width {
+                let (px, py) = (ox + col as i32, oy + row as i32);
+                let (sx, sy) = (i64::from(px - at.0), i64::from(py - at.1));
+                if sx < 0 || sy < 0 || sx >= i64::from(src.width) || sy >= i64::from(src.height) {
+                    continue;
+                }
+                let Some((source, own)) = canvas.source_from(src, sx as u32, sy as u32) else {
+                    continue;
+                };
+                let coverage = mask.map_or(255, |mask| u32::from(mask.at(px, py)));
+                let effective = mul255(mul255(own, alpha), coverage);
+                if effective == 0 {
+                    continue;
+                }
+                let backdrop = canvas.backdrop_alpha(col, row);
+                let base = (row as usize) * canvas.stride + (col as usize) * components;
+                blend(
+                    out.get_mut(base..base + components),
+                    &source,
+                    effective,
+                    canvas.format,
+                    BlendMode::Normal,
+                    backdrop,
+                );
+            }
+        }
+        out
+    }
+
+    /// The group buffers a paint can land in, each `format` standing at
+    /// `(3, 2)` over a page of random pixels: isolated, holding the page;
+    /// non-isolated, its backdrop adopted from it; and the non-isolated one
+    /// after a knockout restore has put its initial state back in part.
+    fn groups_over_a_page(
+        format: PixelFormat,
+        next: &mut impl FnMut() -> u32,
+    ) -> Vec<(&'static str, Canvas)> {
+        let mut page = Canvas::new(23, 17, PixelFormat::Rgba8, Color::WHITE);
+        for (index, byte) in page.data.iter_mut().enumerate() {
+            *byte = if index % 4 == 3 {
+                [0, 255, next() as u8][index % 3]
+            } else {
+                next() as u8
+            };
+        }
+        let made = Canvas::new(16, 11, format, Color::TRANSPARENT).at_origin(3, 2);
+        let mut isolated = made.clone();
+        isolated.hold_parent(page.clone());
+        let mut non_isolated = made.clone();
+        non_isolated.adopt_backdrop(page);
+        let mut cover = Mask::empty(5, 4, 9, 6);
+        for value in &mut cover.data {
+            *value = match next() % 3 {
+                0 => 0,
+                1 => 255,
+                _ => next() as u8,
+            };
+        }
+        let mut knocked = non_isolated.clone();
+        knocked.fill_mask_inked(
+            &cover,
+            Color::rgb(10, 200, 90),
+            None,
+            0.7,
+            BlendMode::Normal,
+        );
+        knocked.knock_out(&cover);
+        vec![
+            ("an isolated group", isolated),
+            ("a non-isolated group", non_isolated),
+            ("a knockout group", knocked),
+        ]
+    }
+
+    /// **Every route into a group buffer writes what `blend` writes** (P-25.4):
+    /// a fill, an image or a shading's pixel and a nested group's composite,
+    /// into an isolated, a non-isolated and a knockout group's buffer in each
+    /// group format, an ink buffer handed the document's ink and one handed
+    /// none, under masks whose coverage is none, full and between, at a whole
+    /// and a partial alpha: byte for byte the canvas `blend` makes at every
+    /// pixel, so the opaque path, which takes the pixels of full effective
+    /// alpha, writes them as `blend` does.
+    #[test]
+    fn every_route_into_a_group_writes_what_blend_writes() {
+        let mut state = 0x0bad_cafe_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let mut checked = 0;
+        for format in GROUP_FORMATS {
+            let inks: &[Option<[u8; 4]>] = if format == PixelFormat::CmykA8 {
+                &[None, Some([255, 255, 255, 255]), Some([30, 200, 0, 90])]
+            } else {
+                &[None]
+            };
+            for (what, group) in groups_over_a_page(format, &mut next) {
+                for &ink in inks {
+                    for alpha in [1.0, 0.6] {
+                        let case = format!("{what}, {format:?}, ink {ink:?}, alpha {alpha}");
+                        let colour = Color::rgb(next() as u8, next() as u8, next() as u8);
+                        let mut cover = Mask::empty(1, 0, 20, 14);
+                        for value in &mut cover.data {
+                            *value = match next() % 3 {
+                                0 => 0,
+                                1 => 255,
+                                _ => next() as u8,
+                            };
+                        }
+                        let source = match (ink, format) {
+                            (Some([c, m, y, k]), PixelFormat::CmykA8) => [c, m, y, k, colour.a],
+                            _ => group.encode(colour),
+                        };
+                        let level = operation_level(alpha);
+                        let want =
+                            filled_by_blend(&group, &cover, &source, 255, level, BlendMode::Normal);
+                        let mut got = group.clone();
+                        got.fill_mask_inked(&cover, colour, ink, alpha, BlendMode::Normal);
+                        assert_eq!(got.data, want, "{case}: a fill");
+
+                        let mut sampled = group.clone();
+                        let mut by_blend = group.clone();
+                        for row in 0..group.height {
+                            for col in 0..group.width {
+                                let level = [255, 255, 128, 0][(next() % 4) as usize];
+                                sampled.blend_pixel_level(
+                                    col,
+                                    row,
+                                    colour,
+                                    ink,
+                                    level,
+                                    BlendMode::Normal,
+                                );
+                                let base = (row as usize) * group.stride
+                                    + (col as usize) * format.components();
+                                if level != 0 {
+                                    blend(
+                                        by_blend.data.get_mut(base..base + format.components()),
+                                        &source,
+                                        level,
+                                        format,
+                                        BlendMode::Normal,
+                                        group.backdrop_alpha(col, row),
+                                    );
+                                }
+                            }
+                        }
+                        assert_eq!(sampled.data, by_blend.data, "{case}: sampled pixels");
+
+                        let mut nested = Canvas::new(12, 8, format, colour).at_origin(5, 4);
+                        for (index, pixel) in nested
+                            .data
+                            .chunks_exact_mut(format.components())
+                            .enumerate()
+                        {
+                            if index % 5 == 0 {
+                                if let Some(alpha) = pixel.last_mut() {
+                                    *alpha = 90;
+                                }
+                            }
+                        }
+                        for mask in [None, Some(&cover)] {
+                            let want = composited_by_blend(&group, &nested, (5, 4), level, mask);
+                            let mut got = group.clone();
+                            got.composite(&nested, (5, 4), alpha, BlendMode::Normal, mask, None);
+                            assert_eq!(
+                                got.data,
+                                want,
+                                "{case}: a nested group, mask {}",
+                                mask.is_some()
+                            );
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 3 * 2 * (1 + 1 + 3 + 1), "every case ran");
+    }
+
+    /// **An opaque paint inside a group calls no `blend`** (P-25.4's guard),
+    /// counted: a fill of full coverage, the document's ink in an ink buffer,
+    /// an image's or a shading's pixels at a full level and a nested group's
+    /// fully opaque composite, each into an isolated, a non-isolated and a
+    /// knockout group's buffer in every group format, make none; and a pixel
+    /// covered in part, another mode and an alpha below one still take
+    /// `blend`.
+    #[test]
+    fn an_opaque_paint_inside_a_group_skips_blend() {
+        let mut state = 0x1dea_5eed_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let colour = Color::rgb(220, 40, 120);
+        for format in GROUP_FORMATS {
+            let ink = (format == PixelFormat::CmykA8).then_some([10, 250, 60, 30]);
+            for (what, group) in groups_over_a_page(format, &mut next) {
+                let case = format!("{what}, {format:?}");
+                let whole = Mask::uniform(3, 2, 16, 11, 255);
+
+                let mut painted = group.clone();
+                blends::take();
+                painted.fill_mask_inked(&whole, colour, ink, 1.0, BlendMode::Normal);
+                assert_eq!(blends::take(), 0, "{case}: a fill of full coverage");
+                assert_eq!(
+                    painted.pixel(5, 5).map(|c| c.a),
+                    Some(255),
+                    "{case}: opaque"
+                );
+
+                let mut sampled = group.clone();
+                blends::take();
+                for row in 0..group.height {
+                    for col in 0..group.width {
+                        sampled.blend_pixel_level(col, row, colour, ink, 255, BlendMode::Normal);
+                    }
+                }
+                assert_eq!(blends::take(), 0, "{case}: sampled pixels at a full level");
+                assert_eq!(
+                    sampled.data, painted.data,
+                    "{case}: the same paint either way"
+                );
+
+                let nested = Canvas::new(10, 7, format, colour).at_origin(6, 4);
+                let mut composited = group.clone();
+                blends::take();
+                composited.composite(&nested, (6, 4), 1.0, BlendMode::Normal, None, None);
+                composited.composite(&nested, (6, 4), 1.0, BlendMode::Normal, Some(&whole), None);
+                assert_eq!(blends::take(), 0, "{case}: an opaque nested group");
+
+                let mut knocked = group.clone();
+                blends::take();
+                knocked.knock_out(&whole);
+                knocked.fill_mask_inked(&whole, colour, ink, 1.0, BlendMode::Normal);
+                assert_eq!(blends::take(), 0, "{case}: restored and painted");
+                assert_eq!(
+                    knocked.data, painted.data,
+                    "{case}: full coverage replaces all"
+                );
+
+                // What still blends.
+                let blended = |paint: &dyn Fn(&mut Canvas)| {
+                    let mut canvas = group.clone();
+                    blends::take();
+                    paint(&mut canvas);
+                    blends::take()
+                };
+                let mut edge = whole.clone();
+                edge.data[17] = 128;
+                assert_eq!(
+                    blended(&|c| c.fill_mask_inked(&edge, colour, ink, 1.0, BlendMode::Normal)),
+                    1,
+                    "{case}: one pixel covered in part"
+                );
+                assert!(
+                    blended(&|c| c.fill_mask_inked(&whole, colour, ink, 1.0, BlendMode::Multiply))
+                        > 0,
+                    "{case}: another mode"
+                );
+                assert!(
+                    blended(&|c| c.fill_mask_inked(&whole, colour, ink, 0.5, BlendMode::Normal))
+                        > 0,
+                    "{case}: half alpha"
+                );
+                assert!(
+                    blended(&|c| c.blend_pixel_level(4, 4, colour, ink, 254, BlendMode::Normal))
+                        > 0,
+                    "{case}: a level below full"
+                );
+            }
         }
     }
 }
