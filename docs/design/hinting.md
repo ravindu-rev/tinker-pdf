@@ -365,6 +365,42 @@ point, that point is marked as touched", *Instructing TrueType Glyphs*), and
 - **The loop.** `SHP`, `SHPIX`, `IP`, `FLIPPT` and `ALIGNRP` repeat for the
   loop count, popping a point each time, and leave it at one.
 
+### Interpolation and exceptions
+
+- **`IUP[a]`** interpolates along y for `a = 0` and x for `a = 1`, over the
+  zone `zp2` points at, which must be the glyph's ("Applying IUP to zone 0 is
+  an error", Apple's manual). Each contour is taken alone, by the touched
+  flag of the axis: with no touched point it stays as it stands; with one,
+  every other point moves to its original coordinate plus that point's
+  displacement; with more, each run of untouched points between two touched
+  points that follow each other round the contour — the run after the last
+  taking the last and the first — is placed from those two. A point whose
+  original coordinate lies strictly between theirs keeps its place relative
+  to them in the original outline, `c1 + (o − o1)(c2 − c1)/(o2 − o1)` from
+  the lower of the two, rounded half away from zero; one at or past either
+  moves as that one did. Where the two stand at one original coordinate, a
+  point at or below it moves as the touched point before its run and one
+  above it as the one after, this engine's choice. An untouched point is
+  placed from its original coordinate, wherever it stands, and stays
+  untouched, this engine's reading: the instruction moves the untouched
+  points and its section never touches them, so a second `IUP` over the same
+  touched points moves nothing. The phantom points are in no contour.
+- **`DELTAP1` to `DELTAP3` and `DELTAC1` to `DELTAC3`** pop a count of pairs,
+  a uint32, so a negative count names more pairs than any stack holds, then
+  each pair's target — a point in `zp0`'s zone, or a CVT entry — and then its
+  argument. An argument's high four bits name a size above `delta_base`, 0
+  more for `DELTAP1` and `DELTAC1`, 16 for the second and 32 for the third,
+  compared with `MPPEM`'s whole pixels per em; its low four bits a step of
+  −8 to −1 or 1 to 8 (0 is −8, 7 is −1, 8 is 1, 15 is 8), of
+  `1 / 2^delta_shift` pixels. Bits past the low byte are not read. A shift
+  of 0 to 6 steps by whole sixty-fourths; one above 6, which the
+  specifications give no range for, by the step's share of a sixty-fourth
+  rounded half away from zero, and one below zero by more than a pixel, each
+  held to 32 bits, this engine's reading. At its size a point moves by the
+  amount along the freedom vector, its projection changing by it, and is
+  touched; a CVT entry gains it, wrapping. Every target is checked at every
+  size, so a program is the same program at each.
+
 ### The pipeline
 
 **A face** is read once: `maxp`'s limits, `head`'s units per em and flags,
@@ -457,7 +493,7 @@ a panic and never a wait:
 | --- | --- |
 | The stack | `maxStackElements` plus 32 entries, at least 256 and at most 65 536: a producer that under-declares still runs, and a hostile `maxp` holds 256 KiB |
 | The storage area, the CVT, the function and instruction definitions, the twilight zone | `maxStorage`, the `cvt ` table's entries, `maxFunctionDefs`, `maxInstructionDefs` (an opcode is a byte, so at most 256), `maxTwilightPoints` capped at 16 384; an index past any of them |
-| Instructions a run executes | 1 048 576 (2^20) for each run of `fpgm`, `prep`, a glyph's or a component's program, counting each instruction dispatched, each instruction `IF`, `ELSE`, `FDEF` and `IDEF` pass over, each stack element `MINDEX` moves, each point a loop-counted instruction moves, each point `SHC`, `SHZ`, `FLIPRGON` and `FLIPRGOFF` act on, and each call `LOOPCALL` makes |
+| Instructions a run executes | 1 048 576 (2^20) for each run of `fpgm`, `prep`, a glyph's or a component's program, counting each instruction dispatched, each instruction `IF`, `ELSE`, `FDEF` and `IDEF` pass over, each stack element `MINDEX` moves, each point a loop-counted instruction moves, each point `SHC`, `SHZ`, `FLIPRGON` and `FLIPRGOFF` act on, each contour point `IUP` considers, each pair a delta exception pops, and each call `LOOPCALL` makes |
 | Call depth | 64: `CALL`, `LOOPCALL` and a dispatch to an `IDEF` nest no deeper |
 | The instruction stream | a push that runs past its program's end, a jump outside it, an `IF` with no `EIF` or a definition with no `ENDF` |
 | Where definitions may stand | `FDEF` and `IDEF` in a glyph program or inside a definition, and `ENDF` outside one |

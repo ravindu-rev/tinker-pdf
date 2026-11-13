@@ -6,6 +6,7 @@
 //! back from the interpreter.
 
 mod flow;
+mod iup;
 mod moves;
 mod shift;
 mod stack;

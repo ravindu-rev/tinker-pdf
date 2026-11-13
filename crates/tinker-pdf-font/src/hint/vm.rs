@@ -221,6 +221,9 @@ pub enum Error {
     /// in the original outline: "This instruction is not valid if rp1 and rp2
     /// have the same position on the projection_vector."
     CoincidentReferences,
+    /// `IUP` with `zp2` pointing at the twilight zone, which has no contours
+    /// to interpolate along: "Applying IUP to zone 0 is an error."
+    TwilightInterpolation,
 }
 
 impl core::fmt::Display for Error {
@@ -263,6 +266,7 @@ impl core::fmt::Display for Error {
             Error::CoincidentReferences => {
                 write!(f, "IP between reference points at one original position")
             }
+            Error::TwilightInterpolation => write!(f, "IUP over the twilight zone"),
         }
     }
 }
@@ -546,6 +550,8 @@ impl Vm {
             0x32..=0x39 | 0x3C | 0x27 | 0x0F | 0x29 | 0x80..=0x82 | 0x7F => {
                 self.shift_or_flip(op)?;
             }
+            // IUP, DELTAP1 to DELTAP3, DELTAC1 to DELTAC3.
+            0x30 | 0x31 | 0x5D | 0x71..=0x75 => self.interpolate_or_except(op)?,
             _ => self.undefined(op, stop)?,
         }
         Ok(at + 1)

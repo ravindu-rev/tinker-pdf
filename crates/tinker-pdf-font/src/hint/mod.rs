@@ -24,9 +24,11 @@
 //! - [`state`]: the zones and their points, and the graphics state.
 //! - `moves`: measuring points and moving them along the vectors.
 //! - `shift`: shifting, aligning, interpolating and flipping points.
+//! - `iup`: interpolating the untouched points, and the delta exceptions.
 
 pub mod fixed;
 mod flow;
+mod iup;
 mod moves;
 mod shift;
 pub mod state;
