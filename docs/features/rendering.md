@@ -2415,7 +2415,10 @@ under it, so the copy holds every canvas the walk closes onto.
 - In-crate: unit tests in `tinker-pdf-render/src/lib.rs` (among them
   `a_small_fill_on_a_large_page_stays_small`, which counts mask pixels asked
   for so an O(canvas) regression fails rather than merely costs, and
-  `a_cancelled_clip_and_text_clip_rasterize_nothing`), `shading.rs`,
+  `a_cancelled_clip_and_text_clip_rasterize_nothing`), `run_shadows.rs`
+  (`a_run_reads_only_the_band_where_a_draw_meets_it`, which counts the pixels
+  the run-membership question reads, and the test-only shadows RC-21 prices
+  in the page's frame, `docs/design/image-edges.md`), `shading.rs`,
   `mesh.rs`, and `tinker-pdf-color`'s tests over conversion, palettes, tint
   transforms and all function types.
 - Determinism: the render fingerprints `text`, `curves`, `shading`, `blend`,

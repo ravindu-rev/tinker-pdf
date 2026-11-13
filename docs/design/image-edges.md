@@ -572,22 +572,35 @@ holds beyond today's run, and the answers that differ from the canvas's. It
 decides nothing the render uses, so no pin moves while it is there.
 
 **What RC-21.3 prices.** The class's eleven pages, drawn by the render crate's
-own interpreter from the same content; a page where a stencil is drawn over
-another's unpainted half, beside a third that abuts the first, which C moves
-and A and B do not; and a generated 300-dpi page of abutting strips, 4 by 6
-inches, 1200 by 1800 pixels, of forty-one full-width RGB strips each drawn
-from samples at 1:1 and meeting its neighbour at a fractional row. Each page
-whole, in four bands and on a 64-pixel lattice; for each mechanism and
-today's, per tile, the pixels read, the members scanned and the bytes held,
-the answers and the tiles whose answer changes, and the time against today's,
-in a release and a debug build. A time is a ratio to today's on one quiet
-machine, never a baseline. The table is `crates/tinker-pdf-render/data/run_prices.tsv`,
-which the probe rewrites:
+own interpreter from the same content, the annotation's appearance as the form
+it is; a page where a stencil is drawn over another's unpainted half, beside a
+third that abuts the first, which C moves and A and B do not; and a generated
+300-dpi page of abutting strips, 4 by 6 inches, 1200 by 1800 pixels, of
+forty-one full-width strips each drawn from 1200 by 44 RGB samples and
+meeting its neighbour at a fractional row. Each page whole, in four bands and
+on a 64-pixel lattice; for each mechanism and today's, per tile, the
+questions asked, the pixels read, the members scanned and the bytes held, the
+answers and the tiles whose answer changes, and the time against today's, in
+a release and a debug build. A time is a ratio to today's on one quiet
+machine, never a baseline. The shadows and the probe are
+`crates/tinker-pdf-render/src/run_shadows.rs`; the table is
+`crates/tinker-pdf-render/data/run_prices.tsv`, whose head names its columns,
+and each build's run rewrites that build's rows:
 
 ```bash
 cargo test -p tinker-pdf-render --release -- --ignored price_of_deciding_runs_in_the_page_frame
 cargo test -p tinker-pdf-render -- --ignored price_of_deciding_runs_in_the_page_frame
 ```
+
+The shadows are held to what they stand for before anything is priced from
+them: `the_shadows_answer_in_the_pages_frame` holds A's and B's answers, on
+every tile of every lattice of the class and the open-overlap page, to the
+page's question by question, and C's to its own answers on the page;
+`every_page_of_the_class_parts_some_tile_from_the_page` holds each class page
+to a tile whose canvas parts from the page; `geometry_ends_a_run_coverage_keeps`
+is C's moved render on the open-overlap page; `the_shadows_change_no_pixel`
+holds a render with every shadow on to the render with none; and
+`two_quadrilaterals_share_their_overlap` holds C's area arithmetic.
 
 ### Milestones
 
@@ -626,3 +639,4 @@ cargo test -p tinker-pdf-render -- --ignored price_of_deciding_runs_in_the_page_
 | The time of a debug build misleads | Both builds are priced, and a time is only ever a ratio to today's on the same machine |
 | C moves pages that render correctly today | Named as its price above; under C a moved fingerprint is a finding the owner reviews before anything is committed |
 | A soft mask's or a group's frame differs from the page's canvas | Every shadow asks in the frame of the canvas it is on, the rectangle that canvas would have on the whole page, and is reset where the canvas swaps |
+| A decode that holds a window of its image (`SourceWindow`) has no samples outside it, so B resamples a stand-in alpha there | The window keeps every pixel of the square covered, so an opaque member is exact; for one whose alpha the window cuts, B asks the decode for the band's part, which RC-21.4 prices if H-15 takes B |

@@ -1,0 +1,31 @@
+# The price of deciding an image run in the page's frame: each mechanism
+# docs/design/image-edges.md (RC-21) gives, shadowed beside today's answer,
+# written by price_of_deciding_runs_in_the_page_frame in
+# crates/tinker-pdf-render/src/run_shadows.rs:
+#
+#   cargo test -p tinker-pdf-render --release -- --ignored price_of_deciding_runs_in_the_page_frame
+#   cargo test -p tinker-pdf-render -- --ignored price_of_deciding_runs_in_the_page_frame
+#
+# A run rewrites its own build's rows and keeps the other build's. Twelve
+# tab-separated fields, a row for each build, page, lattice and mechanism:
+#
+#   build            release or debug
+#   page             the page, as the probe draws it
+#   lattice          whole, 4 bands, or 64 pixels
+#   tiles            the tiles the lattice cuts the page into
+#   mechanism        canvas (today's), whole frame (A), recomputed band (B)
+#                    or geometry (C)
+#   questions        run-membership questions a tile asks, on average
+#   pixels           pixels a tile reads answering them, on average: each
+#                    question's band, and what the mechanism resamples or
+#                    accumulates outside the canvas
+#   members          run members a tile scans answering them, on average
+#   bytes            the most one tile holds: today's run's fragments for the
+#                    canvas, and what the mechanism keeps beyond them
+#   answers_changed  questions answered otherwise than the canvas answers
+#                    them, over the lattice
+#   tiles_changed    tiles holding such an answer
+#   time             the lattice drawn with the mechanism's shadow beside
+#                    today's answer, over the lattice drawn with none, the
+#                    least of three draws each, on one quiet machine
+build	page	lattice	tiles	mechanism	questions	pixels	members	bytes	answers_changed	tiles_changed	time

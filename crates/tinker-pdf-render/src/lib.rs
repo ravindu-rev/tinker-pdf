@@ -17,6 +17,8 @@ pub mod display;
 mod glyph;
 mod glyph_cache;
 pub mod mesh;
+#[cfg(test)]
+mod run_shadows;
 pub mod shading;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1567,6 +1569,18 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// rather than merely costs is if something counts.
     #[cfg(test)]
     mask_pixels: u64,
+    /// Pixels the run-membership question read (`docs/design/image-edges.md`,
+    /// RC-21): for each question `run_would_overlap` asked, the band it
+    /// filled the draw's square over and read the run's fragments at. The
+    /// instrument behind `a_run_reads_only_the_band_where_a_draw_meets_it`.
+    #[cfg(test)]
+    run_pixels: u64,
+    /// The test-only shadows of RC-21's three mechanisms, answering each
+    /// run-membership question in the page's frame beside the canvas's
+    /// answer, when a test switches them on (`run_shadows`). They decide
+    /// nothing the render uses.
+    #[cfg(test)]
+    shadows: Option<Box<run_shadows::Shadows>>,
     /// The memory every fill of this renderer works in — each path, clip and
     /// glyph, each image's unit square and each mesh's coverage, on the page,
     /// in a group's or a soft mask's buffer and in a tile alike — grown for
@@ -1814,6 +1828,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             pattern_depth: 0,
             #[cfg(test)]
             mask_pixels: 0,
+            #[cfg(test)]
+            run_pixels: 0,
+            #[cfg(test)]
+            shadows: None,
             scratch: FillScratch::new(),
             plane: None,
             page_rect: canvas_rect,
@@ -2293,6 +2311,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// soft mask can only change through one of those, so the state in force
     /// now is the state every draw in the run was made with.
     fn flush_run(&mut self) {
+        // What ends the real run for anything but an overlap ends the page's,
+        // so it ends every shadow's too (`run_shadows`).
+        #[cfg(test)]
+        if let Some(shadows) = self.shadows.as_mut() {
+            shadows.end_runs();
+        }
+        self.composite_run();
+    }
+
+    /// Composites the run held back so far, if any: [`Renderer::flush_run`]
+    /// less the shadows, for the one call site that has told them already.
+    fn composite_run(&mut self) {
         let Some(run) = self.run.take() else {
             return;
         };
@@ -4364,8 +4394,20 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // A different graphics state, or a picture laid *over* another rather
         // than beside it: both end the run. Fragments are added, so an overlap
         // added rather than composited would show both pictures at once.
-        if direct || state_changed || self.run_would_overlap(&unit_to_device) {
-            self.flush_run();
+        let ends = direct || state_changed;
+        #[cfg(test)]
+        let asked = self.run_pixels;
+        let overlaps = !ends && self.run_would_overlap(&unit_to_device);
+        #[cfg(test)]
+        self.shadow_question(
+            &unit_to_device,
+            framed,
+            ends,
+            overlaps,
+            self.run_pixels - asked,
+        );
+        if ends || overlaps {
+            self.composite_run();
         }
 
         // The same predicate the fill and the stroker are given. It was a
@@ -4454,6 +4496,40 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if let Some(framed) = framed {
             run.framed = run.framed.hull(framed);
         }
+        #[cfg(test)]
+        if let Some(shadows) = self.shadows.as_mut() {
+            shadows.join(
+                &draw,
+                image,
+                framed,
+                self.frame,
+                Bounds::of_rect(extent),
+                &mut self.scratch,
+            );
+        }
+    }
+
+    /// Hands a run-membership question, and the canvas's answer to it, to
+    /// the shadows a test switched on (`run_shadows`): a draw that ends the
+    /// run is no question, and ends every shadow's run too.
+    #[cfg(test)]
+    fn shadow_question(
+        &mut self,
+        t: &Transform,
+        framed: Option<Bounds>,
+        ends: bool,
+        overlaps: bool,
+        band: u64,
+    ) {
+        let canvas = Bounds::of_rect(self.device());
+        let Some(shadows) = self.shadows.as_mut() else {
+            return;
+        };
+        if ends {
+            shadows.end_runs();
+        } else {
+            shadows.question(t, framed, canvas, overlaps, band, &mut self.scratch);
+        }
     }
 
     /// Records what this canvas cannot see of the run an image could join
@@ -4506,6 +4582,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let y1 = by0.saturating_add(bh as i32).min(cy1);
         if x1 <= x0 || y1 <= y0 {
             return false;
+        }
+        #[cfg(test)]
+        {
+            self.run_pixels = self
+                .run_pixels
+                .saturating_add(u64::from(x1.abs_diff(x0)) * u64::from(y1.abs_diff(y0)));
         }
         let shape = image_coverage(
             t,
