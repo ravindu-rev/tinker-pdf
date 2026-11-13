@@ -687,7 +687,7 @@ coverage value is produced, and there are five such places rather than one:
 `Renderer::coverage`, through which every fill, stroke, clip, text clip,
 pattern shape and glyph drawn as a path passes; a filled glyph's own mask,
 before the clip multiplies into it; an image's unit square, hardened inside the
-rasterizer through `ImageDraw::antialias`; a mesh shading's silhouette after
+rasterizer through `ImageDraw::edge_bits` at 0; a mesh shading's silhouette after
 `draw_mesh`; and a tiling pattern's cell, drawn by a renderer of its own and
 handed the same answer on `TileRequest::antialias`. `sh` and a shading pattern
 paint through a clip or a shape that was hardened when it was made. Because the

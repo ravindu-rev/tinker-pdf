@@ -1184,7 +1184,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ///   through `Renderer::coverage`, which hardens the mask `fill` returns
     ///   before the clip multiplies into it;
     /// - an image's edge is hardened inside the rasterizer
-    ///   ([`ImageDraw::antialias`]);
+    ///   ([`ImageDraw::edge_bits`] at 0);
     /// - a mesh shading's silhouette is hardened after `draw_mesh`;
     /// - a tiling pattern's cell is drawn by a renderer of its own, which is
     ///   handed the same answer through [`TileRequest::antialias`];
@@ -2649,7 +2649,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             tint,
             ink,
             stop: Some(&stop),
-            antialias: self.antialias,
+            edge_bits: if self.antialias { 8 } else { 0 },
         };
         // Built here and dropped here. The levels are the caller's to keep,
         // and keeping them needs an identity for the image rather than a

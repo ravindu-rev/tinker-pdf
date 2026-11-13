@@ -191,6 +191,31 @@ impl Mask {
         }
     }
 
+    /// Every pixel's coverage reduced to `bits` bits
+    /// (`docs/design/anti-aliasing.md`): 8 leaves it as it is, 1 to 7 take each
+    /// to the nearest of the `2^bits` values spaced evenly from 0 to 255, and 0
+    /// is [`Mask::harden`]; a number above 8 reads as 8.
+    ///
+    /// With `n = 2^bits − 1`, a coverage `c` takes the nearest index
+    /// `q = (c·n + 127) / 255`, a half rounding up, and that index's value
+    /// `(q·255 + (n − 1) / 2) / n`, in integers: `n` is odd, so `q·255 / n`
+    /// is never a whole number and a half and the second division has no tie.
+    /// At one bit that is `harden`'s threshold at half, and at eight the
+    /// identity. A function of one pixel's coverage, so a tile and the page
+    /// under it still agree (ruling 5).
+    pub fn quantise(&mut self, bits: u8) {
+        match bits {
+            0 => self.harden(),
+            1..=7 => {
+                let table = quantised(bits);
+                for value in &mut self.data {
+                    *value = table[usize::from(*value)];
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Intersects with another mask, multiplying coverages.
     ///
     /// How clipping composes: a clip stack is the product of its masks, and
@@ -240,6 +265,19 @@ impl Mask {
             }
         }
     }
+}
+
+/// The value each of the 256 coverages takes at `bits` bits, 1 to 8
+/// ([`Mask::quantise`]); a number outside reads as the nearest of them.
+fn quantised(bits: u8) -> [u8; 256] {
+    let n = (1u32 << bits.clamp(1, 8)) - 1;
+    let mut table = [0u8; 256];
+    for (coverage, slot) in (0u32..).zip(table.iter_mut()) {
+        let index = (coverage * n + 127) / 255;
+        // At most `(n·255 + (n − 1)/2) / n`, which is 255.
+        *slot = u8::try_from((index * 255 + (n - 1) / 2) / n).unwrap_or(u8::MAX);
+    }
+    table
 }
 
 /// Two coverages multiplied, rounded rather than truncated so that full
@@ -1560,6 +1598,75 @@ mod tests {
             both <= 2,
             "{both} pixels taken by both: only an exact half may be"
         );
+    }
+
+    /// **Every coverage quantises to its level** (RC-11.2).
+    ///
+    /// A mask holding each of the 256 coverages once, quantised at every
+    /// level from 0 to 8 and past it. Each value is the quantisation computed
+    /// here from its definition, in its own integers: the nearest of the
+    /// `2^b` indices, `c·n / 255` rounded half up as `(2·c·n + 255) / 510`,
+    /// and that index's value, `q·255 / n` rounded as `(2·q·255 + n) / (2n)`.
+    /// Level 0 is `harden`, and so is level 1; level 8 and every number above
+    /// it leave the mask alone. At each level the values are non-decreasing,
+    /// run from 0 to 255, and are exactly the `2^b` levels, two bits giving 0,
+    /// 85, 170 and 255.
+    #[test]
+    fn every_coverage_quantises_to_its_level() {
+        let all: Vec<u8> = (0..=255).collect();
+        let at = |bits: u8| {
+            let mut mask = Mask {
+                x0: -3,
+                y0: 7,
+                width: 16,
+                height: 16,
+                data: all.clone(),
+            };
+            mask.quantise(bits);
+            assert_eq!(
+                (mask.x0, mask.y0, mask.width, mask.height),
+                (-3, 7, 16, 16),
+                "{bits} bits keeps the rectangle"
+            );
+            mask.data
+        };
+        let mut hard = Mask {
+            x0: 0,
+            y0: 0,
+            width: 16,
+            height: 16,
+            data: all.clone(),
+        };
+        hard.harden();
+        assert_eq!(at(0), hard.data, "level 0 is harden");
+        assert_eq!(at(1), hard.data, "and so is level 1");
+        for bits in [8u8, 9, 16, 255] {
+            assert_eq!(at(bits), all, "{bits} bits leaves the coverage");
+        }
+        for bits in 1..=7u8 {
+            let n = (1u64 << bits) - 1;
+            let got = at(bits);
+            for (&c, &value) in all.iter().zip(&got) {
+                let index = (2 * u64::from(c) * n + 255) / 510;
+                let want = (2 * index * 255 + n) / (2 * n);
+                assert_eq!(u64::from(value), want, "coverage {c} at {bits} bits");
+            }
+            assert!(
+                got.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{bits} bits never decreases"
+            );
+            assert_eq!((got[0], got[255]), (0, 255), "{bits} bits keeps both ends");
+            let mut levels = got.clone();
+            levels.dedup();
+            assert_eq!(
+                levels.len() as u64,
+                n + 1,
+                "{bits} bits holds 2^{bits} levels"
+            );
+        }
+        let mut two = at(2);
+        two.dedup();
+        assert_eq!(two, [0, 85, 170, 255]);
     }
 
     #[test]

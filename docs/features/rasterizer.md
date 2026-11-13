@@ -196,14 +196,25 @@ no length writes what it writes without them, at the same cost
 
 **Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
 empty at every pixel: at least half becomes 255, less becomes 0. It is what
-turning anti-aliasing off means one layer up ([rendering](rendering.md)), and
-`ImageDraw::antialias` applies it to an image's unit square before the samples
-are read. A mask value is `floor(units / 16)` of the 4 096 units a pixel holds,
+turning anti-aliasing off means one layer up ([rendering](rendering.md)). A
+mask value is `floor(units / 16)` of the 4 096 units a pixel holds,
 so it is at least 128 exactly when the shape holds half the units; two shapes
 that split a pixel's units between them split the pixel too, except at an
 exact half, where both take it — which is the property
 `hardened_shapes_sharing_an_edge_partition_its_pixels` holds, and the reason
 the threshold is a half and not anything above it.
+
+**Coverage levels.** `Mask::quantise(bits)` reduces a mask to a number of
+bits of coverage ([design](../design/anti-aliasing.md)): 8 leaves it, 1 to 7
+take each pixel to the nearest of `2^bits` values spaced evenly from 0 to 255
+— with `n = 2^bits − 1`, the index `(c·n + 127) / 255` and its value
+`(q·255 + (n − 1) / 2) / n`, in integers and with no tie, since `n` is odd —
+and 0 is `harden`; one bit is `harden` too, and a number above 8 reads as 8.
+At two bits a pixel is 0, 85, 170 or 255. It is a function of one pixel's
+coverage, so a tile and the page under it agree (ruling 5).
+`ImageDraw::edge_bits`, 8 by default, is the level an image's unit square is
+quantised at before the samples are read, so an image's edge quantises as a
+path's does; the renderer passes 8, or 0 with anti-aliasing off.
 
 **Coverage a stripe at a time.** `fill_stripes` measures a shape for a
 liquid-crystal panel's red, green and blue stripes
@@ -510,7 +521,9 @@ tiny pattern over a long line cannot generate millions of pieces.
   quadratic flattens point-for-point like its exact cubic equivalent across
   seven curve shapes and five tolerances, and that flattening is
   deterministic; `fill.rs` covers both fill rules, mask algebra and the
-  partial-mask stop, and `a_fill_sorts_nothing` counts the comparisons a fill
+  partial-mask stop, `every_coverage_quantises_to_its_level` holds
+  `Mask::quantise` to its definition at each of the 256 coverages and every
+  level, and `a_fill_sorts_nothing` counts the comparisons a fill
   makes — none on any closed path or on the 300 triangles of the benchmark
   page — beside the crossings that share a lane, which must be the count the
   sorted sweep's own arithmetic gives; `fill_reference.rs` keeps that sweep,
@@ -556,7 +569,9 @@ tiny pattern over a long line cannot generate millions of pieces.
   ratio, flip, offset and colour pair and under a tint, past 128:1 included
   (`a_two_colour_image_draws_as_its_rgb_expansion`), and counts one channel
   summed a tap where the expansion sums four
-  (`a_coverage_image_sums_one_channel`), and
+  (`a_coverage_image_sums_one_channel`), holds an image's edge at every level
+  to its unit square's coverage quantised and filled
+  (`an_image_edge_quantises_as_a_path_edge`), and
   `canvas.rs` holds every image pixel's level to the expression rounded, over
   every coverage, sample alpha and clip at a sweep of alphas
   (`an_image_pixel_composes_as_the_float_expression_rounded`); `mesh.rs`

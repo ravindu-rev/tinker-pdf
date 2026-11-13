@@ -604,15 +604,16 @@ pub struct ImageDraw<'a> {
     /// Asked once per destination row; drawing stops as soon as it answers
     /// `true`.
     pub stop: Option<&'a dyn Fn() -> bool>,
-    /// Whether the image's own edge is anti-aliased.
-    ///
-    /// `false` hardens the unit square's coverage through [`Mask::harden`],
-    /// the same threshold every path takes when anti-aliasing is off, so an
-    /// image edge and a filled edge beside it still agree about which pixels
-    /// are in. Only the *edge*: the samples inside are resampled exactly as
-    /// before, because what a pixel's colour is and whether the pixel is
-    /// covered at all are different questions.
-    pub antialias: bool,
+    /// The bits of coverage the image's own edge keeps
+    /// (`docs/design/anti-aliasing.md`): 8, the default, anti-aliased; 1 to 7
+    /// quantised; 0 whole or empty at half a pixel's coverage. The unit
+    /// square's coverage goes through [`Mask::quantise`] at this level, the
+    /// same function a path's coverage goes through at its own, so an image
+    /// edge and a filled edge beside it agree about every pixel. Only the
+    /// *edge*: the samples inside are resampled exactly as before, because
+    /// what a pixel's colour is and how much of it is covered are different
+    /// questions.
+    pub edge_bits: u8,
 }
 
 impl<'a> ImageDraw<'a> {
@@ -629,7 +630,7 @@ impl<'a> ImageDraw<'a> {
             tint: None,
             ink: None,
             stop: None,
-            antialias: true,
+            edge_bits: 8,
         }
     }
 }
@@ -803,9 +804,7 @@ fn walk(
         (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)),
         draw.stop,
     );
-    if !draw.antialias {
-        shape.harden();
-    }
+    shape.quantise(draw.edge_bits);
 
     let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
     // Borrowed for the rest of the draw: the level, or the image itself when
@@ -1613,10 +1612,10 @@ mod tests {
             e: 17.3,
             f: 4.6,
         };
-        let render = |antialias: bool| {
+        let render = |edge_bits: u8| {
             let mut canvas = Canvas::new(48, 48, PixelFormat::Rgb8, Color::WHITE);
             let draw = ImageDraw {
-                antialias,
+                edge_bits,
                 ..ImageDraw::new(image, placement)
             };
             draw_image(
@@ -1634,7 +1633,7 @@ mod tests {
                 .filter(|p| *p != [255, 255, 255] && *p != [0, 160, 40])
                 .count()
         };
-        let (soft, hard) = (render(true), render(false));
+        let (soft, hard) = (render(8), render(0));
         assert!(partial(&soft) > 20, "the soft edge has partial pixels");
         assert_eq!(partial(&hard), 0, "the hard edge has none");
         let inked = hard
@@ -1647,6 +1646,85 @@ mod tests {
             inked.abs_diff(521) < 30,
             "a hard edge keeps the image's area, {inked} against 521"
         );
+    }
+
+    /// **An image's edge quantises as a path's edge** (RC-11.2).
+    ///
+    /// A black image turned a little past a quarter and placed off the grid,
+    /// drawn with its edge at every level from 0 to 8, is byte for byte the
+    /// canvas its unit square's coverage — `image_coverage` over the same
+    /// pixels — quantised at that level by `Mask::quantise` and filled in
+    /// black gives: the image's edge goes through the function a path's
+    /// coverage goes through. Over white, a pixel the edge covers `c` is
+    /// `255 − c`, so at 1 to 7 bits every pixel is one of the level's values
+    /// taken from white; at 8 the edge has partial pixels, and at 0 none.
+    #[test]
+    fn an_image_edge_quantises_as_a_path_edge() {
+        let rgb = [0u8, 0, 0].repeat(4);
+        let image = ImageSource {
+            width: 2,
+            height: 2,
+            rgb: &rgb,
+            alpha: &[],
+            two_colour: None,
+        };
+        let placement = Transform {
+            a: 20.0,
+            b: 11.0,
+            c: -11.0,
+            d: 20.0,
+            e: 17.3,
+            f: 4.6,
+        };
+        let (x0, y0, width, height) =
+            image_bounds(&placement, 48, 48).expect("the image is on the canvas");
+        let partial = |canvas: &Canvas| {
+            canvas
+                .data
+                .iter()
+                .filter(|v| **v != 0 && **v != 255)
+                .count()
+        };
+        for edge_bits in 0..=8u8 {
+            let mut drawn = Canvas::new(48, 48, PixelFormat::Rgb8, Color::WHITE);
+            draw_image(
+                &mut drawn,
+                &ImageDraw {
+                    edge_bits,
+                    ..ImageDraw::new(image, placement)
+                },
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
+            let mut shape = image_coverage(
+                &placement,
+                x0,
+                y0,
+                width,
+                height,
+                None,
+                &mut FillScratch::new(),
+            );
+            shape.quantise(edge_bits);
+            let mut filled = Canvas::new(48, 48, PixelFormat::Rgb8, Color::WHITE);
+            filled.fill_mask(&shape, Color::BLACK, 1.0);
+            assert_eq!(drawn.data, filled.data, "the edge at {edge_bits} bits");
+
+            match edge_bits {
+                0 => assert_eq!(partial(&drawn), 0, "a hard edge has no partial pixel"),
+                8 => assert!(partial(&drawn) > 20, "the soft edge has partial pixels"),
+                bits => {
+                    let n = (1u32 << bits) - 1;
+                    let levels: Vec<u8> = (0..=n)
+                        .map(|k| (255 - (2 * k * 255 + n) / (2 * n)) as u8)
+                        .collect();
+                    assert!(
+                        drawn.data.iter().all(|v| levels.contains(v)),
+                        "at {bits} bits every pixel is one of the level's values"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2382,9 +2460,7 @@ mod tests {
                 (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)),
                 draw.stop,
             );
-            if !draw.antialias {
-                shape.harden();
-            }
+            shape.quantise(draw.edge_bits);
             let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
             let filter = sampling.filter;
             let image = &pyramid.reduce(image, sampling.halvings);
@@ -2665,7 +2741,7 @@ mod tests {
                         for interpolate in [false, true] {
                             let mut draw = ImageDraw::new(source, placement);
                             draw.interpolate = interpolate;
-                            draw.antialias = cases % 5 != 0;
+                            draw.edge_bits = if cases % 5 != 0 { 8 } else { 0 };
                             if cases % 7 == 0 {
                                 draw.tint = Some(Color::rgb(200, 30, 90));
                             }
@@ -3088,7 +3164,7 @@ mod tests {
                                 placement,
                             );
                             draw_two.interpolate = interpolate;
-                            draw_two.antialias = (pair + scale) % 5 != 0;
+                            draw_two.edge_bits = if (pair + scale) % 5 != 0 { 8 } else { 0 };
                             if pair == 3 || (pair + scale) % 3 == 0 {
                                 draw_two.tint = Some(Color::rgb(200, 30, 90));
                             }
