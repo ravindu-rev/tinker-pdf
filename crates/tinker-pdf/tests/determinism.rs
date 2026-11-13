@@ -65,8 +65,8 @@ use tinker_pdf::{
 
 mod render_support;
 use render_support::{
-    axial_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink, pen_page,
-    radial_page,
+    axial_page, bilevel_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink,
+    pen_page, radial_page,
 };
 
 /// How a fixture's document is opened, and which of its pages is hashed.
@@ -2248,6 +2248,18 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 1500,
     },
+    // 5 759 today, of 15 345: one raster of one-bit samples five ways, each at
+    // four sizes (`render_support::bilevel_page`), and the floor is about
+    // half. Every row reaches the sampler through the one-bit sample loop, so
+    // a loop that stops drawing takes the page under it. A row drawn as its
+    // own negative keeps its ink, and a refusal paints a grey placeholder
+    // that counts as ink, so both of those are the hash's to catch.
+    Fixture {
+        name: "bilevel",
+        build: bilevel_page,
+        open: Open::Closed,
+        least_ink: 2_800,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2461,6 +2473,15 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     (
         "strokes",
         "2fb79647b749afcb45cb9bd4aa78d84101b88ab4fb1bacfd98351a185b0e9771",
+    ),
+    // One-bit images: DeviceGray plain and CCITT G4, under `/Decode [1 0]`, a
+    // two-colour `/Indexed` palette and an `/ImageMask` in a fill colour, each
+    // magnified, at 1:1 and minified 2:1 and 3:1 at fractional offsets. Every
+    // bilevel path through the sample loops and the sampler draws on it, and
+    // `render_regions.rs` tiles it.
+    (
+        "bilevel",
+        "79a059cfb544d0b0a1b64c6aedafe7e70a64a821372a6fd245eae49327676f60",
     ),
 ];
 
@@ -2752,6 +2773,10 @@ fn svg_output_is_stable_across_targets() {
         (
             "strokes",
             "36c441354931cc517d46b3d87070e3075d3664eeb05124ecb189d126180633a9",
+        ),
+        (
+            "bilevel",
+            "17704be079071402a99457f13912c81f590ee940ff3625c311ec39ee19ac9f7f",
         ),
     ];
     assert_eq!(

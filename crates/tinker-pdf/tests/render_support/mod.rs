@@ -7,6 +7,11 @@
 //! the writer's output against a hand-written twin. All four had their own copy
 //! of `fn render`, and two had their own copy of the comparator.
 //!
+//! It also builds the pages two files must agree on byte for byte: the analytic
+//! pages `determinism.rs` fingerprints and `render_analytic.rs` evaluates, and
+//! the pen and bilevel pages `determinism.rs` fingerprints and `render_regions.rs`
+//! tiles.
+//!
 //! Only the helpers those four need live here. The twenty-odd other test
 //! binaries that open a document and look at a pixel keep their own copies
 //! deliberately: pulling them in would be a diff across the whole `tests/`
@@ -331,6 +336,154 @@ pub fn pen_page() -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
     builder.add_page(91.0, 131.0, |page| page.raw(CONTENT.as_bytes()));
     builder.finish()
+}
+
+// ---- the bilevel page --------------------------------------------------------
+//
+// One-bit images, which `determinism.rs` fingerprints and `render_regions.rs`
+// tiles. Built here so the page the hash covers and the page the tile guard
+// holds are one document.
+
+/// The bilevel raster's width in samples: not a multiple of eight, so every row
+/// ends inside a byte and its padding bits are there to be ignored.
+pub const BILEVEL_WIDTH: u32 = 21;
+/// Its height in samples.
+pub const BILEVEL_HEIGHT: u32 = 15;
+
+/// Whether the bilevel raster is black at `(x, y)`, row 0 the top.
+///
+/// A ring, a diagonal stripe and a bar down the right-hand side only: no axis
+/// of symmetry, so a mirrored or transposed draw is a different picture, and
+/// runs of every length for the fax coder's horizontal and vertical modes.
+fn bilevel_black(x: u32, y: u32) -> bool {
+    let (dx, dy) = (x as i32 - 7, y as i32 - 6);
+    let ring = (16..=36).contains(&(dx * dx + dy * dy));
+    let stripe = (x + 2 * y) % 7 == 0;
+    let bar = x >= 16 && y % 4 < 2;
+    ring || stripe || bar
+}
+
+/// The bilevel raster as one-bit DeviceGray samples, 0 for black, each row
+/// padded to a byte with zeros (8.9.3).
+pub fn bilevel_samples() -> Vec<u8> {
+    let stride = BILEVEL_WIDTH.div_ceil(8) as usize;
+    let mut packed = vec![0u8; stride * BILEVEL_HEIGHT as usize];
+    for y in 0..BILEVEL_HEIGHT {
+        for x in 0..BILEVEL_WIDTH {
+            if !bilevel_black(x, y) {
+                packed[y as usize * stride + (x / 8) as usize] |= 0x80 >> (x % 8);
+            }
+        }
+    }
+    packed
+}
+
+/// Bytes as `ASCIIHexDecode` text, end-of-data marker included.
+fn ascii_hex(bytes: &[u8]) -> String {
+    let mut out: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    out.push('>');
+    out
+}
+
+/// The bilevel page: one raster five ways, each drawn magnified, at 1:1 and
+/// minified 2:1 and 3:1, at fractional offsets.
+///
+/// The five are the ways a one-bit picture reaches the sampler: DeviceGray
+/// samples as they stand, the same raster T.6-coded as a CCITT G4 fax, the
+/// samples under `/Decode [1 0]`, a two-colour one-bit `/Indexed` palette, and
+/// an `/ImageMask` painted in a fill colour (8.9.6.2). One raster, so the plain
+/// row and the fax row draw one picture through two decoders and the inverted
+/// row its negative. Magnified by 1.75, so each sample's edge falls inside a
+/// pixel; the minified draws average whole and partial samples, which is where
+/// a one-bit image's greys come from.
+///
+/// The fax is coded by the engine's own `ccitt_g4_encode`. That says nothing
+/// about T.6 — `ccitt.rs` holds the decoder to hand-coded bits — and need not:
+/// what this page pins is how a decoded one-bit raster is drawn, and a coder
+/// that changed its codes without changing the raster would leave the page as
+/// it is.
+///
+/// 93 by 165 points, both coprime with every tile size `render_regions.rs`
+/// cuts, so no lattice of its divides the page.
+pub fn bilevel_page() -> Vec<u8> {
+    let samples = bilevel_samples();
+    let fax = tinker_pdf_filters::ccitt_g4_encode(&tinker_pdf_filters::CcittSource {
+        columns: BILEVEL_WIDTH,
+        rows: BILEVEL_HEIGHT,
+        black_is_1: false,
+        stride: BILEVEL_WIDTH.div_ceil(8) as usize,
+        end_of_block: true,
+        data: &samples,
+    })
+    .expect("the raster codes as G4");
+    let (plain, coded) = (ascii_hex(&samples), ascii_hex(&fax));
+
+    // One row of the page per image, top to bottom; across each row the four
+    // sizes, from 1.75 device pixels a sample down to a third of one.
+    let mut content = String::new();
+    for (row, name) in ["Im0", "Im1", "Im2", "Im3", "Im4"].iter().enumerate() {
+        if *name == "Im4" {
+            content.push_str("0.8 0.1 0.25 rg\n");
+        }
+        let base = 134.65 - 32.2 * row as f64;
+        for (width, height, x, rise) in [
+            (36.75, 26.25, 2.3, 0.0),
+            (21.0, 15.0, 42.15, 2.6),
+            (10.5, 7.5, 66.35, 7.45),
+            (7.0, 5.0, 80.05, 10.3),
+        ] {
+            content.push_str(&format!(
+                "q {width} 0 0 {height} {x} {:.2} cm /{name} Do Q\n",
+                base + rise
+            ));
+        }
+    }
+
+    let image = |extra: &str, data: &str| {
+        format!(
+            "<< /Type /XObject /Subtype /Image /Width {BILEVEL_WIDTH} /Height {BILEVEL_HEIGHT} \
+             /BitsPerComponent 1 {extra} /Length {} >>\nstream\n{data}\nendstream",
+            data.len()
+        )
+    };
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 93 165]\n   \
+         /Resources << /XObject << /Im0 5 0 R /Im1 6 0 R /Im2 7 0 R /Im3 8 0 R /Im4 9 0 R >> >>\n   \
+         /Contents 4 0 R >>"
+            .to_string(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ),
+        image("/ColorSpace /DeviceGray /Filter /ASCIIHexDecode", &plain),
+        image(
+            &format!(
+                "/ColorSpace /DeviceGray /Filter [/ASCIIHexDecode /CCITTFaxDecode] \
+                 /DecodeParms [null << /K -1 /Columns {BILEVEL_WIDTH} /Rows {BILEVEL_HEIGHT} >>]"
+            ),
+            &coded,
+        ),
+        image(
+            "/ColorSpace /DeviceGray /Decode [1 0] /Filter /ASCIIHexDecode",
+            &plain,
+        ),
+        image(
+            "/ColorSpace [/Indexed /DeviceRGB 1 <1f3a93f2c94c>] /Filter /ASCIIHexDecode",
+            &plain,
+        ),
+        image("/ImageMask true /Filter /ASCIIHexDecode", &plain),
+    ];
+    let mut out = String::from("%PDF-1.7\n");
+    for (index, object) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        objects.len() + 1
+    ));
+    out.into_bytes()
 }
 
 // ---- the face this repository writes for itself -----------------------------

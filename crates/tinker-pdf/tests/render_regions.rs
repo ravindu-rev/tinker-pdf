@@ -38,6 +38,10 @@
 //! - **A crop box offset from the media box**, because the region's translation
 //!   and the crop box's translation compose, and a sign error in either is a
 //!   plausible-looking page.
+//! - **One-bit images**, five ways at four sizes (`render_support::bilevel_page`,
+//!   the page `determinism.rs` fingerprints as `bilevel`): a fax, a palette,
+//!   an inverted `/Decode` and a stencil reach the sampler by the bilevel
+//!   paths, and minified they sample partial samples at a tile's edge.
 //! - **Canvases that stand somewhere in the page**: a non-isolated group under
 //!   a blend mode, a knockout group and a luminosity soft mask; a tiling
 //!   pattern's cell; a Gouraud mesh's own buffer. Each is a buffer the size of
@@ -135,7 +139,7 @@ use tinker_pdf::{
 };
 
 mod render_support;
-use render_support::{curvy_font, ink, pen_page};
+use render_support::{bilevel_page, curvy_font, ink, pen_page};
 
 /// The fixture page, in points. Not round, and coprime with every tile size
 /// below, so no lattice in this file ever divides it evenly.
@@ -522,6 +526,10 @@ fn fixtures() -> Vec<Fixture> {
     // join, a miter past its limit, dashes at two phases along a curve and an
     // even-odd star, the outlines the stroker overlaps by construction.
     add("pen", pen_page(), 1_500);
+    // One-bit images five ways at four sizes: the page `determinism.rs`
+    // fingerprints as `bilevel`, built by the same function. A page of its own
+    // size, 93 by 165, which no tile size here divides either.
+    add("bilevel", bilevel_page(), 2_800);
     out
 }
 
