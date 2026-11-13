@@ -153,8 +153,8 @@ pub struct Glyph {
     /// (9.6.6.4, 9.7.4.2), where the device asked for it
     /// ([`GlyphQueries::unmapped_glyph_ids`]) and the code maps to no text;
     /// `None` everywhere else, and wherever the font has no program whose
-    /// glyphs the source selects (a Type 1 program, which names its glyphs, a
-    /// Type 3 font, a font with nothing embedded).
+    /// glyphs the source selects (a Type 3 font, a font with nothing
+    /// embedded).
     ///
     /// Asked of [`crate::FontSource::glyph_id`] only where it is wanted,
     /// because answering reads the font program, which nothing else the text

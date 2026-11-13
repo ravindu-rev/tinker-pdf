@@ -273,8 +273,8 @@ below). Then:
   index its font program selects for the code (`Glyph::glyph_id`): U+100000
   plus the index, in Supplementary Private Use Area-B, for an index up to
   0xFFFD, and U+FFFD for a larger one and for a glyph whose font cannot say —
-  a font with nothing embedded, a Type 1 program, which addresses its glyphs by
-  name, and a Type 3 font.
+  a font with nothing embedded or a program no parser here reads, and a Type 3
+  font, whose glyphs are procedures.
 
 Private use, because Unicode reserves those planes for private agreement and a
 producer's text means none of them, so a fallback is never read as a letter;
@@ -284,8 +284,9 @@ other is — it joins lines, words and search, with the em box — and its
 `Bidi_Class` is `L`, as every private-use character's is, which ruling 14
 reads as it reads any letter. The index is `PageResources::selection`'s, the
 glyph a render draws: the `cmap` through the code's character or the code, a
-`/CIDToGIDMap` through the CID, a CFF charset through a name, and 9.6.6.4's
-closing guess. Fixture and known answer (FT-17.4): a page embedding a
+`/CIDToGIDMap` through the CID, a CFF charset through a name, 9.6.6.4's
+closing guess, and for a Type 1 program, which names its glyphs, the
+charstring's place in the order the program holds them. Fixture and known answer (FT-17.4): a page embedding a
 Liberation face as a composite font with no `/ToUnicode`, whose
 `/CIDToGIDMap` sends two drawn codes to the glyphs of two characters the test
 reads from the face's `cmap`, gives the two private-use characters of each

@@ -4383,9 +4383,10 @@ impl FontSource for PageResources {
     /// The glyph a render draws for `code` in the font `font` names here:
     /// [`PageResources::selection`]'s, the embedded program's `cmap` through
     /// the code's character or the code, a `/CIDToGIDMap` through the CID, a
-    /// CFF charset through a name, or 9.6.6.4's closing guess. `None` where
-    /// that selects no glyph index: no embedded program, a program neither
-    /// parser reads, a Type 1 program, a Type 3 font.
+    /// CFF charset through a name, 9.6.6.4's closing guess, or a Type 1
+    /// program's charstring by its place in the program. `None` where that
+    /// selects no glyph index: no embedded program, a program no parser here
+    /// reads, a Type 3 font.
     fn glyph_id(&self, font: &[u8], code: u32) -> Option<u16> {
         let id = FontSource::font_id(self, font);
         self.selection(id, code).map(|selected| selected.glyph)

@@ -276,15 +276,16 @@ composite one — U+F0000 plus the code, in Supplementary Private Use Area-A,
 and `Unmapped::Glyph` as one standing for the glyph its font program selects
 for the code, U+100000 plus the glyph's index, in Supplementary Private Use
 Area-B; a code or an index past 0xFFFD, and a glyph whose font cannot say (no
-embedded program, a Type 1 program, which names its glyphs, a Type 3 font),
-stand as U+FFFD. Private use, so a fallback is never read as a letter a
+embedded program, or one no parser here reads, and a Type 3 font), stand as
+U+FFFD. Private use, so a fallback is never read as a letter a
 producer meant, and the value is the character less its area's first code
 point. A kept glyph is a character like any other, in lines, words and
 search, with the em box its glyph is drawn in, and the code is reported
 whatever the mode. The glyph's index is the one a render draws, read through
 the same selection (the `cmap` through the code's character or the code, a
-`/CIDToGIDMap` through the CID, a CFF charset through a name, and 9.6.6.4's
-closing guess) and asked only in the glyph mode (`Device::glyph_queries`,
+`/CIDToGIDMap` through the CID, a CFF charset through a name, 9.6.6.4's
+closing guess, and a Type 1 program's charstring by its place in the program)
+and asked only in the glyph mode (`Device::glyph_queries`,
 `FontSource::glyph_id`), only for a glyph whose code maps to nothing: the
 default extraction parses no font program. A text extraction's resources
 report no glyph a font does not carry (`Operation::reporting_no_glyphs`), so
