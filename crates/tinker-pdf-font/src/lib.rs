@@ -48,7 +48,7 @@ pub use facts::{face_facts, FaceFacts};
 pub use outline::{Outline, Segment};
 pub use sbix::{Graphic, Sbix, SbixGlyph, SbixRefusal, SbixStrike, StrikeChoice};
 pub use sfnt::{Sfnt, VerticalOrigins};
-pub use subset::{glyphs_for, subset, subset_with, Reshape};
+pub use subset::{glyphs_for, subset, subset_with, symbol_cmap, Reshape};
 pub use svg_table::{SvgDocument, SvgRecord, SvgRefusal, SvgTable, SvgWarning, MAX_SVG_DOCUMENT};
 pub use symbolic::{substitute_glyph, SymbolRoute};
 pub use type1::{Blend, Instance, InstanceRefusal, Type1};

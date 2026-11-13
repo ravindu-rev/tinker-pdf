@@ -21,9 +21,10 @@
 //! nothing for leaves the font: embedding would make a missing glyph
 //! permanent.
 //!
-//! Each font's objects — the cut program, a new descriptor, the font
-//! dictionary with its new `/Subtype`, `/BaseFont` and, where it had none,
-//! `/Widths` — are written in one editor transaction, and before it commits
+//! Each font's objects — the cut program, a new descriptor, a `/ToUnicode`,
+//! the font dictionary with its new `/Subtype`, `/BaseFont`, the `/Encoding`
+//! the form ISO 19005 admits gives it and, where it had none, `/Widths` — are
+//! written in one editor transaction, and before it commits
 //! the font is read back through the editor and every drawn code asked what
 //! a reader of the new file asks: the glyph the embedded program's mapping
 //! chooses, the width it is laid out with and the text it reads as. One that
@@ -244,6 +245,22 @@ pub enum LeftReason {
     /// charstring whose width must be set and is stated behind a subroutine
     /// call among the reasons.
     NotSubsettable,
+    /// The document reads this code as no text, and a TrueType font, read by
+    /// code alone, states a code's text only in its `/ToUnicode`, which ISO
+    /// 19005's Unicode clause asks to map every code drawn.
+    NoText {
+        /// The first such code.
+        code: u32,
+    },
+    /// After the cut, this code's glyph advances otherwise than the width the
+    /// font lays it out with, by more than ISO 19005's metrics clause admits:
+    /// two codes chose one glyph at two widths, or the face's units per em
+    /// cannot state the width that closely. Embedded, the font would not
+    /// conform, and it is left rather than embedded half-conforming.
+    WidthsDisagree {
+        /// The first such code.
+        code: u32,
+    },
     /// A composite font: the pass embeds simple fonts.
     Composite,
 }
@@ -279,6 +296,10 @@ impl core::fmt::Display for LeftReason {
             }
             LeftReason::NotSubsettable => {
                 f.write_str("the face could not be cut to the drawn glyphs")
+            }
+            LeftReason::NoText { code } => write!(f, "code {code} reads as no text"),
+            LeftReason::WidthsDisagree { code } => {
+                write!(f, "code {code}'s glyph cannot advance by its width")
             }
             LeftReason::Composite => f.write_str("it is a composite font"),
         }
@@ -545,12 +566,49 @@ fn embed_simple(
 
     let glyphs: BTreeSet<u16> = chosen.values().copied().collect();
     let (warnings, advances) = widths(font, &original, answer.program, &chosen);
+
+    // What each drawn code reads as: the text the document gives it, which
+    // the font as written states in a `/ToUnicode`.
+    let texts: BTreeMap<u32, String> = chosen
+        .keys()
+        .map(|&code| (code, original.text_of(code)))
+        .filter(|(_, text)| !text.is_empty())
+        .collect();
+
+    // The form ISO 19005's encoding clause admits at every part: a TrueType
+    // font symbolic, with no `/Encoding` and one (3,0) subtable stating each
+    // drawn code's glyph; a CFF font's own encoding where it reaches the
+    // glyphs it drew, and `/Differences` naming them where it does not.
+    let (cmap, encoding) = match answer.format {
+        Format::TrueType => {
+            // Read by code alone, the font reads a code's text only through
+            // its `/ToUnicode`.
+            if let Some(&code) = chosen.keys().find(|code| !texts.contains_key(code)) {
+                return Err(LeftReason::NoText { code });
+            }
+            let mut by_code: BTreeMap<u8, u16> = BTreeMap::new();
+            for (&code, &glyph) in &chosen {
+                let byte = u8::try_from(code).map_err(|_| LeftReason::DrawsOtherwise { code })?;
+                by_code.insert(byte, glyph);
+            }
+            (
+                Some(tinker_pdf_font::symbol_cmap(&by_code)),
+                EncodingPlan::Removed,
+            )
+        }
+        Format::Cff => (
+            None,
+            cff_encoding(&*editor, dict, &original, answer.program, &chosen)?,
+        ),
+    };
+
     let cut = tinker_pdf_font::subset_with(
         answer.program,
         &glyphs,
-        &tinker_pdf_font::Reshape { advances },
+        &tinker_pdf_font::Reshape { advances, cmap },
     )
     .ok_or(LeftReason::NotSubsettable)?;
+    metrics_hold(&original, &cut, &chosen)?;
 
     let mut name = subset_tag(&cut);
     name.extend_from_slice(&stem(&facts, &base_font_of(&*editor, dict)));
@@ -595,11 +653,41 @@ fn embed_simple(
                 request,
                 base_font,
                 (key, program),
-                original.is_symbolic(),
+                // A TrueType font is read by code alone, and says so; Symbol
+                // and ZapfDingbats, whose encodings are their own (Annex D.5,
+                // D.6), are symbolic whatever their dictionary states.
+                format == Format::TrueType
+                    || original.is_symbolic()
+                    || original.built_in_encoding().is_some(),
             );
             editor.put(descriptor, Object::Dict(written));
 
-            let mut rewritten = dict.clone();
+            let mut rewritten = Dict::new();
+            for (key, value) in dict.iter() {
+                // A symbolic TrueType font has no `/Encoding` (9.6.5.4, ISO
+                // 19005's 6.3.7, 6.2.11.6 and 6.2.10.6), and a `/ToUnicode`
+                // of the document's own states codes the pass draws through
+                // its own.
+                let dropped = *key == Name::TO_UNICODE
+                    || (*key == Name::ENCODING && encoding != EncodingPlan::Kept);
+                if !dropped {
+                    rewritten.insert(*key, value.clone());
+                }
+            }
+            if let EncodingPlan::Differences(differences) = &encoding {
+                rewritten.insert(Name::ENCODING, differences.clone());
+            }
+            if let Some(data) = to_unicode(&texts) {
+                let stream = editor.allocate();
+                editor.put_stream(
+                    stream,
+                    StreamData {
+                        dict: Dict::new(),
+                        data,
+                    },
+                );
+                rewritten.insert(Name::TO_UNICODE, Object::Ref(stream));
+            }
             rewritten.insert(Name::SUBTYPE, Object::Name(editor.intern(subtype)));
             rewritten.insert(Name::BASE_FONT, Object::Name(base_font));
             rewritten.insert(Name::FONT_DESCRIPTOR, Object::Ref(descriptor));
@@ -634,6 +722,158 @@ fn embed_simple(
             })
         })
         .map(|embedded| (embedded, warnings))
+}
+
+/// How a font's `/Encoding` is written.
+#[derive(Clone, Debug, PartialEq)]
+enum EncodingPlan {
+    /// As the document wrote it.
+    Kept,
+    /// Not at all: a symbolic TrueType font.
+    Removed,
+    /// This encoding dictionary: the document's base encoding and
+    /// differences, and a name for each code its encoding read otherwise
+    /// than the face drew it.
+    Differences(Object),
+}
+
+/// The encoding a CFF font is written with: its own, where every drawn
+/// code's name in it reaches the glyph the face drew (`cff_glyph`, the
+/// reading Table 124's Type1C gives a CFF under a Type 1 font), and
+/// otherwise its own with `/Differences` naming each code that does not by
+/// the name the face's charset gives its glyph. The font's base encoding and
+/// its own differences stand under them. A glyph the charset names nothing
+/// leaves the font.
+fn cff_encoding(
+    editor: &DocumentEditor,
+    dict: &Dict,
+    original: &cos_font::Font,
+    program: &[u8],
+    chosen: &BTreeMap<u32, u16>,
+) -> Result<EncodingPlan, LeftReason> {
+    let cff = Cff::parse(program).ok_or(LeftReason::Unreadable)?;
+    let otherwise: Vec<(u32, u16)> = chosen
+        .iter()
+        .filter(|(&code, &glyph)| resources::cff_glyph(&cff, original, code) != Some(glyph))
+        .map(|(&code, &glyph)| (code, glyph))
+        .collect();
+    if otherwise.is_empty() {
+        return Ok(EncodingPlan::Kept);
+    }
+
+    let encoding = editor.resolve_key(dict, Name::ENCODING);
+    let (base, mut differences) = match encoding.as_ref() {
+        Object::Name(name) => (Some(*name), BTreeMap::new()),
+        Object::Dict(encoding) => (
+            encoding.get_name(Name::BASE_ENCODING),
+            differences_of(editor, encoding),
+        ),
+        _ => (None, BTreeMap::new()),
+    };
+    for (code, glyph) in otherwise {
+        let name = cff
+            .glyph_name(glyph)
+            .ok_or(LeftReason::DrawsOtherwise { code })?;
+        differences.insert(code, editor.intern(name.as_bytes()));
+    }
+
+    let mut written = Dict::new();
+    written.insert(Name::TYPE, Object::Name(editor.intern(b"Encoding")));
+    if let Some(base) = base {
+        written.insert(Name::BASE_ENCODING, Object::Name(base));
+    }
+    let mut array = Vec::with_capacity(differences.len() * 2);
+    for (code, name) in differences {
+        array.push(Object::Int(i64::from(code)));
+        array.push(Object::Name(name));
+    }
+    written.insert(Name::DIFFERENCES, Object::Array(array));
+    Ok(EncodingPlan::Differences(Object::Dict(written)))
+}
+
+/// An encoding dictionary's `/Differences` as a code's name each (9.6.6.1):
+/// a number restarts the count, and each name takes the next code.
+fn differences_of(editor: &DocumentEditor, encoding: &Dict) -> BTreeMap<u32, Name> {
+    let mut out = BTreeMap::new();
+    let array = editor.resolve_key(encoding, Name::DIFFERENCES);
+    let Some(items) = array.as_array() else {
+        return out;
+    };
+    let mut code: Option<u32> = None;
+    for item in items {
+        match editor.resolve(item).as_ref() {
+            Object::Int(n) => code = u32::try_from(*n).ok(),
+            Object::Name(name) => {
+                if let Some(at) = code {
+                    out.insert(at, *name);
+                    code = at.checked_add(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A `/ToUnicode` CMap for one-byte codes (9.10.3), each drawn code with a
+/// text mapped to it in a `bfchar` entry; `None` when no code has one,
+/// since a CMap that maps nothing is no statement.
+fn to_unicode(texts: &BTreeMap<u32, String>) -> Option<Vec<u8>> {
+    /// 9.10.3 caps a `beginbfchar` section at a hundred entries.
+    const PER_SECTION: usize = 100;
+    let entries: Vec<(u32, Vec<u16>)> = texts
+        .iter()
+        .filter(|(code, text)| **code <= 0xFF && !text.is_empty())
+        .map(|(code, text)| (*code, text.encode_utf16().collect()))
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n");
+    out.extend_from_slice(
+        b"/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n",
+    );
+    out.extend_from_slice(b"/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n");
+    out.extend_from_slice(b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n");
+    for chunk in entries.chunks(PER_SECTION) {
+        out.extend_from_slice(format!("{} beginbfchar\n", chunk.len()).as_bytes());
+        for (code, units) in chunk {
+            out.extend_from_slice(format!("<{code:02X}> <").as_bytes());
+            for unit in units {
+                out.extend_from_slice(format!("{unit:04X}").as_bytes());
+            }
+            out.extend_from_slice(b">\n");
+        }
+        out.extend_from_slice(b"endbfchar\n");
+    }
+    out.extend_from_slice(b"endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    Some(out)
+}
+
+/// ISO 19005's metrics clause, asked of the cut as its rule asks it
+/// ([`ProgramMetrics`]): each drawn code's width within a thousandth of an
+/// em of its glyph's advance. The advances were set to the widths; a code
+/// still past it is one of two codes that chose one glyph at two widths, or
+/// a width the face's units per em cannot state that closely, and leaves the
+/// font rather than embedding it half-conforming.
+fn metrics_hold(
+    original: &cos_font::Font,
+    cut: &[u8],
+    chosen: &BTreeMap<u32, u16>,
+) -> Result<(), LeftReason> {
+    let Some(metrics) = ProgramMetrics::read(cut) else {
+        return Err(LeftReason::NotSubsettable);
+    };
+    for (&code, &glyph) in chosen {
+        let width = original.width_of(code).0;
+        if let Some(advance) = metrics.advance(glyph) {
+            if (advance - width).abs() > WIDTH_TOLERANCE {
+                return Err(LeftReason::WidthsDisagree { code });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Each drawn code's width against its glyph's advance in `program`, as
@@ -775,9 +1015,9 @@ const ITALIC: i64 = 1 << 6;
 ///
 /// The flags are the document's where it had a descriptor; otherwise fixed
 /// pitch, serif, script and italic as the face says, else as the request
-/// says. The symbolic flag is the font's own (`symbolic`), so the codes are
-/// read in the order they were, and the nonsymbolic flag its inverse
-/// (9.8.2).
+/// says. The symbolic flag is `symbolic` — set for every TrueType font, read
+/// by code alone, and for a CFF one the font's own, Symbol and ZapfDingbats
+/// symbolic among them — and the nonsymbolic flag its inverse (9.8.2).
 fn descriptor_for(
     editor: &DocumentEditor,
     holder: &Dict,

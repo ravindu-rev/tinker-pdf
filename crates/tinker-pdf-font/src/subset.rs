@@ -221,12 +221,73 @@ pub struct Reshape {
     /// cut does not keep — one the face lacks among them — has no advance to
     /// set, and its entry is passed over.
     pub advances: BTreeMap<u16, f64>,
+    /// A `cmap` table to write in place of the face's own — [`symbol_cmap`]'s,
+    /// say. A `glyf` face only: a CFF has no `cmap` to replace.
+    pub cmap: Option<Vec<u8>>,
 }
 
 impl Reshape {
     fn is_empty(&self) -> bool {
-        self.advances.is_empty()
+        self.advances.is_empty() && self.cmap.is_none()
     }
+}
+
+/// A `cmap` table of exactly one subtable, platform 3 encoding 0 — the
+/// symbol encoding — in format 4, mapping `0xF000` plus each code to its
+/// glyph.
+///
+/// The form a symbolic TrueType program is read by code: a reader prefixes
+/// each byte of a string with the high byte of the subtable's range (ISO
+/// 32000-2 9.6.5.4), and one subtable is all ISO 19005-1 6.3.7 admits on a
+/// symbolic font. A segment a code, and the `0xFFFF` segment the format ends
+/// with. A code mapped to glyph 0 is no mapping, and is left out.
+#[must_use]
+pub fn symbol_cmap(codes: &BTreeMap<u8, u16>) -> Vec<u8> {
+    let pairs: Vec<(u16, u16)> = codes
+        .iter()
+        .filter(|(_, glyph)| **glyph != 0)
+        .map(|(code, glyph)| (0xF000 | u16::from(*code), *glyph))
+        .collect();
+    let segments = pairs.len() + 1;
+    let mut selector = 0u16;
+    while (1usize << (selector + 1)) <= segments {
+        selector += 1;
+    }
+    let search = 2 * (1u16 << selector);
+    let doubled = (segments * 2) as u16;
+
+    let mut sub = Vec::with_capacity(16 + segments * 8);
+    // format, length (filled in below), language, segCountX2, searchRange,
+    // entrySelector, rangeShift.
+    for value in [4u16, 0, 0, doubled, search, selector, doubled - search] {
+        sub.extend_from_slice(&value.to_be_bytes());
+    }
+    for (point, _) in &pairs {
+        sub.extend_from_slice(&point.to_be_bytes());
+    }
+    sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+    for (point, _) in &pairs {
+        sub.extend_from_slice(&point.to_be_bytes());
+    }
+    sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    for (point, glyph) in &pairs {
+        sub.extend_from_slice(&glyph.wrapping_sub(*point).to_be_bytes());
+    }
+    sub.extend_from_slice(&1u16.to_be_bytes());
+    // Every idRangeOffset zero: each glyph is its code plus its delta.
+    sub.extend(core::iter::repeat_n(0u8, segments * 2));
+    let length = sub.len() as u16;
+    sub[2..4].copy_from_slice(&length.to_be_bytes());
+
+    let mut table = Vec::with_capacity(12 + sub.len());
+    // version, one encoding record: platform 3, encoding 0, at offset 12.
+    for value in [0u16, 1, 3, 0] {
+        table.extend_from_slice(&value.to_be_bytes());
+    }
+    table.extend_from_slice(&12u32.to_be_bytes());
+    table.extend(sub);
+    table
 }
 
 /// [`subset`], with the cut's advances set as `reshape` says.
@@ -235,13 +296,19 @@ impl Reshape {
 /// glyph where a glyph past `numberOfHMetrics` changes, or the last full
 /// entry they repeat, so every other glyph keeps its own — and `hhea`'s
 /// `numberOfHMetrics` and `advanceWidthMax` follow. A bare CFF's charstrings take each as their width operand
-/// ([`crate::cff_subset::subset_cff_with`]). An `OpenType/CFF` face, whose
-/// advances are two tables' to keep in step, is declined with any advance to
-/// set, as is an advance no `hmtx` entry can hold.
+/// ([`crate::cff_subset::subset_cff_with`]). A `glyf` face's `cmap` is the
+/// one `reshape` hands over, where it hands one. An `OpenType/CFF` face, whose
+/// advances are two tables' to keep in step, is declined with anything to
+/// set, as is an advance no `hmtx` entry can hold and a `cmap` for a bare
+/// CFF.
 #[must_use]
 pub fn subset_with(program: &[u8], glyphs: &BTreeSet<u16>, reshape: &Reshape) -> Option<Vec<u8>> {
     let Some(sfnt) = Sfnt::parse(program) else {
         // Not an sfnt at all: a bare CFF program, or nothing this can read.
+        // A CFF has no `cmap` to replace.
+        if reshape.cmap.is_some() {
+            return None;
+        }
         return crate::cff_subset::subset_cff_with(program, glyphs, &reshape.advances);
     };
     if sfnt.table(TAG_GLYF).is_none() && sfnt.table(TAG_CFF).is_some() {
@@ -372,7 +439,7 @@ fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>, reshape: &Reshape) -
 
     // The advances asked of the glyphs the cut keeps; a dropped glyph has
     // none to set.
-    let metrics = if reshape.is_empty() {
+    let metrics = if reshape.advances.is_empty() {
         None
     } else {
         let kept: BTreeMap<u16, f64> = reshape
@@ -436,6 +503,7 @@ fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>, reshape: &Reshape) -
             (0x6865_6164, _) => new_head.clone(),
             (0x6868_6561, Some((hhea, _))) => hhea.clone(),
             (0x686D_7478, Some((_, hmtx))) => hmtx.clone(),
+            (0x636D_6170, _) if reshape.cmap.is_some() => reshape.cmap.clone().unwrap_or_default(),
             _ => match sfnt.table(tag) {
                 Some(data) => data.to_vec(),
                 None => continue,
@@ -734,6 +802,7 @@ mod tests {
 
         let reshape = Reshape {
             advances: BTreeMap::from([(2u16, 640.4), (3, 610.6), (6, 999.0)]),
+            ..Reshape::default()
         };
         let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
         let before = Sfnt::parse(&program).expect("the fixture parses");
@@ -774,6 +843,7 @@ mod tests {
         let keep: BTreeSet<u16> = [1u16, 5].into_iter().collect();
         let reshape = Reshape {
             advances: BTreeMap::from([(5u16, 700.0)]),
+            ..Reshape::default()
         };
         let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
         let after = Sfnt::parse(&out).expect("the reshaped cut parses");
@@ -796,6 +866,7 @@ mod tests {
         // setting it widens the table too, and they keep theirs.
         let reshape = Reshape {
             advances: BTreeMap::from([(1u16, 650.0)]),
+            ..Reshape::default()
         };
         let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
         let after = Sfnt::parse(&out).expect("the reshaped cut parses");
@@ -809,6 +880,7 @@ mod tests {
         // Before it, the table keeps its shape.
         let reshape = Reshape {
             advances: BTreeMap::from([(0u16, 450.0)]),
+            ..Reshape::default()
         };
         let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
         let after = Sfnt::parse(&out).expect("the reshaped cut parses");
@@ -830,6 +902,7 @@ mod tests {
         for bad in [-1.0, 70_000.0, f64::NAN, f64::INFINITY] {
             let reshape = Reshape {
                 advances: BTreeMap::from([(1u16, bad)]),
+                ..Reshape::default()
             };
             assert_eq!(subset_with(&program, &keep, &reshape), None, "{bad}");
         }
@@ -839,8 +912,56 @@ mod tests {
         );
         let reshape = Reshape {
             advances: BTreeMap::from([(1u16, 600.0)]),
+            ..Reshape::default()
         };
         assert_eq!(subset_with(&otto, &keep, &reshape), None);
+    }
+
+    /// A symbol `cmap` is one (3,0) subtable reaching each code's glyph at
+    /// `0xF000` plus the code — as the face's character lookup reads a code
+    /// below 256 through such a subtable, and as its symbol-code lookup
+    /// does — and nothing else: a code it was not handed, and a code handed
+    /// glyph 0, reach nothing. A `glyf` face's cut takes it in place of its
+    /// own, and a bare CFF, which has none, declines one.
+    #[test]
+    fn a_symbol_cmap_maps_each_code_at_f000() {
+        let codes = BTreeMap::from([(0x20u8, 3u16), (0x41, 5), (0x42, 0), (0xFF, 7)]);
+        let table = symbol_cmap(&codes);
+        assert_eq!(be16(&table, 2), Some(1), "exactly one subtable");
+        assert_eq!(
+            (be16(&table, 4), be16(&table, 6)),
+            (Some(3), Some(0)),
+            "the symbol encoding"
+        );
+
+        let program = font(8);
+        let keep: BTreeSet<u16> = [3u16, 5, 7].into_iter().collect();
+        let reshape = Reshape {
+            cmap: Some(table.clone()),
+            ..Reshape::default()
+        };
+        let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
+        let sfnt = Sfnt::parse(&out).expect("the cut parses");
+        assert_eq!(sfnt.table(0x636D_6170), Some(table.as_slice()));
+        for (code, glyph) in [(0x20u8, Some(3u16)), (0x41, Some(5)), (0xFF, Some(7))] {
+            assert_eq!(sfnt.glyph_for_char(char::from(code)), glyph, "{code:#04X}");
+            assert_eq!(sfnt.glyph_for_symbol_code(code), glyph, "{code:#04X}");
+        }
+        for code in [0x42u8, 0x43, 0x00] {
+            assert_eq!(
+                sfnt.glyph_for_char(char::from(code)).filter(|g| *g != 0),
+                None,
+                "{code:#04X} reaches nothing"
+            );
+        }
+        assert_eq!(
+            sfnt.glyph_for_char('A'),
+            Some(5),
+            "a character below 256 is read at F0xx, as a code is"
+        );
+
+        // A program that is no sfnt — a bare CFF — has no `cmap` to replace.
+        assert_eq!(subset_with(&[1, 0, 4, 4], &keep, &reshape), None);
     }
 
     #[test]

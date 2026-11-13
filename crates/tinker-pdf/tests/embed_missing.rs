@@ -835,3 +835,398 @@ fn a_cff_faces_widths_are_set_too() {
         );
     }
 }
+
+// ---- ISO 19005's font clauses on what the pass writes (FT-12.5) ------------
+
+/// Every part and level `validate_pdfa` reads a claim of.
+const FLAVOURS: [(&str, Option<&str>); 11] = [
+    ("1", Some("A")),
+    ("1", Some("B")),
+    ("2", Some("A")),
+    ("2", Some("B")),
+    ("2", Some("U")),
+    ("3", Some("A")),
+    ("3", Some("B")),
+    ("3", Some("U")),
+    ("4", None),
+    ("4", Some("E")),
+    ("4", Some("F")),
+];
+
+/// Where a part numbers its font clauses: 6.3 in part 1, 6.2.11 in parts 2
+/// and 3, 6.2.10 in part 4 (`pdfa.rs`'s clause tables).
+fn font_clauses(part: &str) -> &'static str {
+    match part {
+        "1" => "6.3.",
+        "4" => "6.2.10.",
+        _ => "6.2.11.",
+    }
+}
+
+/// The XMP packet claiming `part` and `level`.
+fn packet(part: &str, level: Option<&str>) -> String {
+    let conformance = level.map_or(String::new(), |letter| {
+        format!(r#" pdfaid:conformance="{letter}""#)
+    });
+    let revision = if part == "4" {
+        r#" pdfaid:rev="2020""#
+    } else {
+        ""
+    };
+    format!(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
+ pdfaid:part="{part}"{conformance}{revision}/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
+    )
+}
+
+/// Every finding `validate_pdfa` reports under a font clause of `bytes`
+/// claimed as `part` and `level`, the claim written over a save that
+/// touches nothing else.
+fn font_findings(bytes: &[u8], part: &str, level: Option<&str>) -> Vec<String> {
+    let document = Document::open(bytes.to_vec()).expect("it opens");
+    let mut editor = document.editor();
+    let _ = editor
+        .set_xmp_metadata(packet(part, level).as_bytes())
+        .expect("the document has a catalog");
+    let claimed = save(
+        &mut editor,
+        &SaveOptions {
+            fonts: FontPolicy::Keep,
+            ..SaveOptions::default()
+        },
+    );
+    let verdict = Document::open(claimed.bytes)
+        .expect("it opens")
+        .validate_pdfa();
+    assert!(verdict.coverage.fonts, "the font group ran");
+    verdict
+        .findings
+        .iter()
+        .filter(|finding| finding.clause.0.starts_with(font_clauses(part)))
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A page showing `text` in the standard Symbol font, which embeds nothing.
+fn symbol_page(text: &str) -> Vec<u8> {
+    font_page(
+        "/Type /Font /Subtype /Type1 /BaseFont /Symbol",
+        "",
+        &[],
+        &format!("BT /F0 24 Tf 12 30 Td ({text}) Tj ET"),
+    )
+}
+
+/// A page showing `text` in the standard ZapfDingbats font.
+fn dingbats_page(text: &str) -> Vec<u8> {
+    font_page(
+        "/Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats",
+        "",
+        &[],
+        &format!("BT /F0 24 Tf 12 30 Td ({text}) Tj ET"),
+    )
+}
+
+/// A face for Symbol's `alpha` and `beta` and ZapfDingbats' `a1` and `a2`,
+/// reached as the substitute route reaches them: by the Unicode value the
+/// glyph lists give each name, through the face's (3,1) subtable.
+fn symbols_face() -> Face {
+    Face::covering("TinkerSymbols", "\u{3B1}\u{3B2}\u{2701}\u{2702}", 600)
+}
+
+/// A face whose CFF charset names Symbol's `alpha` and `beta` by those
+/// names, which a bare CFF is read by alone.
+fn greek_face() -> Face {
+    Face::covering("TinkerGreek", "\u{3B1}\u{3B2}", 600)
+        .named('\u{3B1}', "alpha")
+        .named('\u{3B2}', "beta")
+}
+
+/// **The row's exit** (FT-12.5): every fixture, rewritten and claimed as each
+/// part and level the validator reads, has no finding under a font clause;
+/// and the same page unrewritten does, so the check is not vacuous.
+#[test]
+fn the_rewritten_document_passes_the_pdfa_font_rules() {
+    let face = sans();
+    let fixtures = [
+        (
+            "a standard-14 page and a TrueType face",
+            standard_page("Hello World"),
+            face.truetype(),
+        ),
+        (
+            "an unembedded TrueType page and a TrueType face",
+            truetype_page(&face, "Hello World"),
+            face.truetype(),
+        ),
+        (
+            "a standard-14 page and a CFF face",
+            standard_page("Hello World"),
+            face.cff(),
+        ),
+        (
+            "an unembedded TrueType page and an OpenType CFF face",
+            truetype_page(&face, "Hello World"),
+            face.opentype_cff(),
+        ),
+        (
+            "a Symbol page",
+            symbol_page("ab"),
+            symbols_face().truetype(),
+        ),
+        (
+            "a ZapfDingbats page",
+            dingbats_page("!\""),
+            symbols_face().truetype(),
+        ),
+        (
+            "a Symbol page and a CFF face",
+            symbol_page("ab"),
+            greek_face().cff(),
+        ),
+    ];
+    for (label, source, program) in fixtures {
+        let saved = embedded(&source, &provider(program), FontPolicy::Keep);
+        let report = report_of(&saved);
+        assert_eq!(report.embedded.len(), 1, "{label}: {report:?}");
+        assert!(report.left.is_empty(), "{label}: {report:?}");
+        for (part, level) in FLAVOURS {
+            let findings = font_findings(&saved.bytes, part, level);
+            assert!(
+                findings.is_empty(),
+                "{label}, PDF/A-{part}{}: {findings:#?}",
+                level.unwrap_or("")
+            );
+        }
+        assert!(
+            !font_findings(&source, "2", Some("B")).is_empty(),
+            "{label}: the page as it was fails the embedding clause"
+        );
+    }
+}
+
+/// A face that cannot meet a clause is left, named, never embedded
+/// half-conforming: two codes that choose one glyph at two widths, whose
+/// program can advance by only one of them; and a face whose units per em
+/// cannot state a width within a thousandth of an em.
+#[test]
+fn a_face_that_cannot_meet_a_clause_is_left_and_named() {
+    let face = sans();
+    let shared = font_page(
+        "/Type /Font /Subtype /TrueType /BaseFont /Arial \
+         /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [66 /A] >> \
+         /FirstChar 65 /LastChar 66 /Widths [600 700] /FontDescriptor 5 0 R",
+        "/Type /FontDescriptor /FontName /Arial /Flags 32 /FontBBox [0 -200 1000 800] \
+         /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80",
+        &[],
+        "BT /F0 24 Tf 12 30 Td (AB) Tj ET",
+    );
+    let saved = embedded(&shared, &provider(face.truetype()), FontPolicy::Keep);
+    let report = report_of(&saved);
+    assert!(report.embedded.is_empty(), "{report:?}");
+    assert_eq!(
+        report.left,
+        [LeftFont {
+            font: Some(ObjRef::new(4, 0)),
+            base_font: "Arial".to_string(),
+            reason: LeftReason::WidthsDisagree {
+                code: u32::from(b'B')
+            },
+        }]
+    );
+    let output = Document::open(saved.bytes).expect("it opens");
+    assert!(
+        output.fonts().iter().all(|font| !font.is_embedded()),
+        "and nothing of it was written"
+    );
+
+    // Sixteen units per em state a width in steps of 62.5 thousandths.
+    let coarse = sans().at_units(16);
+    let report = report_of(&embedded(
+        &standard_page("AB"),
+        &provider(coarse.truetype()),
+        FontPolicy::Keep,
+    ));
+    assert!(report.embedded.is_empty(), "{report:?}");
+    assert_eq!(
+        report
+            .left
+            .iter()
+            .map(|left| left.reason)
+            .collect::<Vec<_>>(),
+        [LeftReason::WidthsDisagree {
+            code: u32::from(b'A')
+        }]
+    );
+}
+
+/// Symbol and ZapfDingbats, which a substituted face draws by each code's
+/// glyph name, are embedded in the symbolic form and draw and read as they
+/// did: their codes map to the glyphs their names reached, and nothing in
+/// the file is read by a name again.
+#[test]
+fn a_symbol_page_draws_as_its_provider_face_drew_it() {
+    let provider = provider(symbols_face().truetype());
+    for (label, source) in [
+        ("Symbol", symbol_page("abba")),
+        ("ZapfDingbats", dingbats_page("!\"!")),
+    ] {
+        let before = drawn(&opened_with(&source, &provider));
+        assert!(
+            before.ink > 0 && !before.warnings.contains(&RenderWarning::UnreadableFont),
+            "{label}: the face draws every code by its name: {:?}",
+            before.warnings
+        );
+        let saved = embedded(&source, &provider, FontPolicy::Subset);
+        let report = report_of(&saved);
+        assert_eq!(report.embedded.len(), 1, "{label}: {report:?}");
+        let rewritten = written_support::rewritten(label, &source, &saved.bytes);
+        let after = drawn(&rewritten);
+        assert_eq!(after.fingerprint, before.fingerprint, "{label}");
+        assert_eq!(after.text, before.text, "{label}");
+    }
+}
+
+/// Every TrueType font the pass embeds is written symbolic, with no
+/// `/Encoding`, a `/ToUnicode` and a program whose `cmap` is one (3,0)
+/// subtable; a CFF font keeps the encoding that reaches its glyphs, and
+/// gains a `/ToUnicode` too.
+#[test]
+fn every_truetype_font_takes_the_symbolic_form() {
+    let face = sans();
+    for (label, source, program, truetype) in [
+        (
+            "a standard-14 page",
+            standard_page("Hello"),
+            face.truetype(),
+            true,
+        ),
+        (
+            "a WinAnsi TrueType page",
+            truetype_page(&face, "Hello"),
+            face.truetype(),
+            true,
+        ),
+        ("a CFF answer", standard_page("Hello"), face.cff(), false),
+    ] {
+        let saved = embedded(&source, &provider(program), FontPolicy::Keep);
+        let reference = report_of(&saved).embedded.first().expect("embedded").font;
+        let doc = tinker_pdf_cos::CosDocument::open(saved.bytes).expect("it opens");
+        let font = doc
+            .get(reference)
+            .expect("the font")
+            .as_dict()
+            .cloned()
+            .expect("a dictionary");
+        let descriptor = doc.resolve_key(&font, doc.intern(b"FontDescriptor"));
+        let flags = descriptor
+            .as_dict()
+            .and_then(|d| d.get_int(doc.intern(b"Flags")))
+            .expect("flags");
+        assert!(
+            font.get_ref(doc.intern(b"ToUnicode")).is_some(),
+            "{label}: a /ToUnicode states each code's text"
+        );
+        if truetype {
+            assert!(
+                !font.contains_key(doc.intern(b"Encoding")),
+                "{label}: a symbolic TrueType font has no /Encoding"
+            );
+            assert_eq!(
+                flags & 0b10_0100,
+                0b100,
+                "{label}: symbolic, not nonsymbolic"
+            );
+            let program = descriptor
+                .as_dict()
+                .and_then(|d| d.get_ref(doc.intern(b"FontFile2")))
+                .and_then(|r| doc.stream_decoded(r).ok())
+                .expect("a /FontFile2");
+            let sfnt = tinker_pdf_font::Sfnt::parse(&program).expect("an sfnt");
+            let cmap = sfnt.table(u32::from_be_bytes(*b"cmap")).expect("a cmap");
+            assert_eq!(
+                &cmap[..8],
+                &[0, 0, 0, 1, 0, 3, 0, 0],
+                "{label}: one subtable, (3,0)"
+            );
+        } else {
+            assert_eq!(
+                font.get_name(doc.intern(b"Encoding")),
+                Some(doc.intern(b"WinAnsiEncoding")),
+                "{label}: the encoding that reaches the glyphs is kept"
+            );
+            assert_eq!(flags & 0b10_0100, 0b10_0000, "{label}: nonsymbolic still");
+        }
+    }
+}
+
+/// A CFF face drawn under Symbol by glyph name is written with the names that
+/// reach the glyphs it drew. Symbol's codes, read through a CFF's charset by
+/// `StandardEncoding`, reach no Greek glyph, so each drawn code is named in
+/// `/Differences` by the name the face's charset gives the glyph it drew —
+/// over no `/BaseEncoding`, since Symbol named none — and the page draws and
+/// reads as it did.
+#[test]
+fn a_cff_face_drawn_by_name_is_written_with_its_names() {
+    let provider = provider(greek_face().cff());
+    let source = symbol_page("abba");
+    let before = drawn(&opened_with(&source, &provider));
+    assert!(
+        before.ink > 0 && !before.warnings.contains(&RenderWarning::UnreadableFont),
+        "the face draws every code by its name: {:?}",
+        before.warnings
+    );
+
+    let saved = embedded(&source, &provider, FontPolicy::Subset);
+    let report = report_of(&saved);
+    assert_eq!(report.left, []);
+    assert_eq!(report.embedded.len(), 1, "{report:?}");
+    assert_eq!(report.embedded[0].format, EmbeddedFormat::Type1C);
+
+    let doc = tinker_pdf_cos::CosDocument::open(saved.bytes.clone()).expect("it opens");
+    let font = doc
+        .get(report.embedded[0].font)
+        .expect("the font")
+        .as_dict()
+        .cloned()
+        .expect("a dictionary");
+    let encoding = doc.resolve_key(&font, doc.intern(b"Encoding"));
+    let encoding = encoding.as_dict().expect("an encoding dictionary");
+    assert!(
+        !encoding.contains_key(doc.intern(b"BaseEncoding")),
+        "Symbol named no base encoding, and none is written"
+    );
+    let differences = doc.resolve_key(encoding, doc.intern(b"Differences"));
+    let written: Vec<String> = differences
+        .as_array()
+        .expect("a /Differences array")
+        .iter()
+        .map(|item| match item {
+            tinker_pdf_cos::Object::Int(n) => n.to_string(),
+            tinker_pdf_cos::Object::Name(name) => doc
+                .name_bytes(*name)
+                .map(|bytes| format!("/{}", String::from_utf8_lossy(&bytes)))
+                .unwrap_or_default(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(written, ["97", "/alpha", "98", "/beta"]);
+    let flags = doc
+        .resolve_key(&font, doc.intern(b"FontDescriptor"))
+        .as_dict()
+        .and_then(|descriptor| descriptor.get_int(doc.intern(b"Flags")))
+        .expect("flags");
+    assert_eq!(
+        flags & 0b10_0100,
+        0b100,
+        "Symbol's glyphs are outside the standard Latin set (9.8.2)"
+    );
+
+    let rewritten = written_support::rewritten("a CFF Symbol page", &source, &saved.bytes);
+    let after = drawn(&rewritten);
+    assert_eq!(after.fingerprint, before.fingerprint, "it draws as it did");
+    assert_eq!(after.text, before.text, "and reads as it did");
+}

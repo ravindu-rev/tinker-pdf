@@ -477,17 +477,27 @@ it with no provider at all: a simple font — Type 1, the standard 14 included,
 or TrueType — whose descriptor names no `/FontFile*` stream, the face cut to
 the glyphs the pages drew through the renderer's own reading of it, a TrueType
 face as `/FontFile2` under `/TrueType` and a CFF one as `/FontFile3 /Type1C`
-under `/Type1`, named after the face behind a subset tag, its encoding and
-`/Widths` kept and checked by reading the font back before it is written; a
-face whose advances differ from `/Widths` is warned of code by code, and the
-embedded program's advances set to the dictionary's —
+under `/Type1`, named after the face behind a subset tag, and checked by
+reading the font back before it is written. A TrueType face is written in the
+symbolic form every part of ISO 19005 admits — no `/Encoding`, and a `cmap`
+of one (3,0) subtable mapping `0xF000` plus each drawn code to the glyph it
+drew, which `tinker_pdf_font::symbol_cmap` builds and `subset_with` writes in
+place of the face's own — so a font drawn by glyph name, Symbol and
+ZapfDingbats, is read by the glyph it drew; a CFF face keeps the font's
+encoding where its names reach the glyphs drawn, `/Differences` naming any
+code they do not; and each gets a `/ToUnicode` stating the text the document
+read, and keeps its `/Widths`. A face whose advances differ from `/Widths` is
+warned of code by code, and the embedded program's advances set to the
+dictionary's —
 `tinker_pdf_font::subset_with` cuts a face and sets its advances in one call,
 `hmtx` for a `glyf` face, widened where a glyph past `numberOfHMetrics` or
 the last full entry changes, and a charstring's width operand for a CFF,
 replaced where it states one and written where it takes `defaultWidthX`; a
 width stated behind a subroutine call declines the cut. A
 code the face has no glyph for, a face whose `OS/2` `fsType` forbids embedding
-or a subset, and a composite font leave the font as it was, named;
+or a subset, a cut whose advances still miss a drawn code's width by more
+than ISO 19005's thousandth of an em, a TrueType font with a drawn code that
+reads as no text, and a composite font leave the font as it was, named;
 [writing](writing.md) has the report. `tinker_pdf_font::face_facts` reads what
 a face states of itself for the descriptor — its PostScript name (`name` ID 6,
 or a CFF's Name INDEX), `fsType`, `sFamilyClass`, box, ascent, descent, cap

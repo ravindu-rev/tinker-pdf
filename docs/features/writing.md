@@ -423,13 +423,23 @@ own reading of the substituted face (`resources::substitute_choice`). A
 TrueType answer is embedded as `/FontFile2` under `/Subtype /TrueType`, a CFF
 one — bare, or an `OpenType/CFF` face's `CFF ` table — as `/FontFile3
 /Subtype /Type1C` under `/Subtype /Type1` (Table 124). The font gets a new
-descriptor — its own entries kept where it had one, `/FontName`, `/Flags` with
-the symbolic bit as the font had it, each metric key Table 120 requires that
-it lacks from the face's own tables (`tinker_pdf_font::face_facts`), and no
-`/FontFile*`, `/CharSet` or `/CIDSet` describing another program — the face's
-PostScript name behind a 9.9.2 subset tag, its `/Encoding` and `/ToUnicode`
-as they were, and its `/Widths` as they were; a font with none, the standard
+descriptor — its own entries kept where it had one, `/FontName`, `/Flags`,
+each metric key Table 120 requires that it lacks from the face's own tables
+(`tinker_pdf_font::face_facts`), and no `/FontFile*`, `/CharSet` or `/CIDSet`
+describing another program — the face's PostScript name behind a 9.9.2
+subset tag, and its `/Widths` as they were; a font with none, the standard
 14, is given the widths it was laid out with over the drawn codes' range.
+Every TrueType font is written in the symbolic form each part of ISO 19005
+admits: the symbolic flag, no `/Encoding`, and a program whose `cmap` is one
+(3,0) subtable mapping `0xF000` plus each drawn code to the glyph it drew
+(`tinker_pdf_font::symbol_cmap`, handed to the cut in place of the face's
+own), so Symbol and ZapfDingbats, drawn by glyph name, are read by the glyph
+they drew. A CFF font keeps its symbolic flag as it had it, Symbol and
+ZapfDingbats symbolic, and its `/Encoding` where the names that encoding
+gives reach the glyphs drawn; otherwise it gains `/Differences` naming each
+code that does not by the name the face's charset gives its glyph. Every
+font gets a new `/ToUnicode` stating each drawn code's text as the document
+read it, in place of its own.
 Before a font's objects commit, the font is read back through the editor and
 each drawn code asked what a reader of the new file asks — its glyph, through
 the embedded program's mapping and the renderer's own functions, its width
@@ -442,7 +452,15 @@ the program's advance is set to the width of the lowest drawn code that chose
 the glyph — its `hmtx` entry for a TrueType face, its charstring's width
 operand for a CFF, through `tinker_pdf_font::subset_with` — so the program
 and `/Widths` agree; the pen moves by `/Widths` either way, so the page draws
-as it did. The new programs are cut by the pass whatever
+as it did. After the cut the metrics rule is asked of the program written,
+and a code still past its tolerance — two codes that chose one glyph at two
+widths, or a width the face's units per em cannot state that closely — leaves
+the font, as does a TrueType font with a drawn code the document read as no
+text, which only a `/ToUnicode` entry could state: so what the pass writes
+draws no finding under any font clause `validate_pdfa` runs, at any part and
+level, and a font that would is left rather than embedded half-conforming.
+`/CharSet` and `/CIDSet` are not written; their rules are the validator's
+staged ones. The new programs are cut by the pass whatever
 `SaveOptions::fonts` says, and the font pass passes over them, so its report
 is of the document's own programs. `Saved::embedded` is `None` for `Leave`,
 and otherwise an `EmbedReport`: `embedded`, each `EmbeddedFont` with its font,
@@ -451,7 +469,8 @@ the cut's and the glyphs' counts; `warnings`, by font and code; and `left`,
 each `LeftFont` with its `LeftReason` — `Declined`, `Unreadable`, `EmbeddingForbidden` and
 `SubsettingForbidden` (the face's `OS/2` `fsType`, 9.9.1), `NotAnObject`,
 `FieldResource`, `Type3Resource`, `TooManyCodes`, `NoGlyph { code }`,
-`DrawsOtherwise { code }`, `NotSubsettable` and `Composite`. A font that
+`DrawsOtherwise { code }`, `NotSubsettable`, `NoText { code }`,
+`WidthsDisagree { code }` and `Composite`. A font that
 embeds a program, and a Type 3 font, is no candidate and is not reported. An
 incremental save appends the new programs with the dictionaries that name
 them, and the original file, which embedded none, keeps nothing of the
@@ -537,6 +556,7 @@ of the page before the edit, by the rectangle the edit changed
 | Embedding a missing font whose face's licence forbids embedding it, or a subset of it | `LeftReason::EmbeddingForbidden`, `LeftReason::SubsettingForbidden` | a face's `OS/2` `fsType` is its licence, and the pass embeds a subset (`a_face_whose_licence_forbids_it_is_left`) | 9.9.1 |
 | Embedding a missing font whose face reaches a drawn code only as `.notdef`, or only by the code as a glyph number | `LeftReason::NoGlyph { code }` | embedding would make the missing glyph permanent, where a reader with a better face draws it (`a_code_the_face_has_no_glyph_for_leaves_the_font`) | 9.6.6.4 |
 | Embedding a missing font that is written directly into a resource dictionary, that a form field's `/DA` may draw with, or that a Type 3 font's own `/Resources` names | `LeftReason::NotAnObject`, `FieldResource`, `Type3Resource` | there is no object to address; a field may draw any character; the codes are credited to another font | 12.7.3.3, 9.6.5 |
+| Embedding a missing font whose cut still advances a drawn code otherwise than its width, or a TrueType font with a drawn code that reads as no text | `LeftReason::WidthsDisagree { code }`, `LeftReason::NoText { code }` | embedded, the font would fail ISO 19005's metrics clause, or state no text for a code where only its `/ToUnicode` can (`a_face_that_cannot_meet_a_clause_is_left_and_named`) | ISO 19005-1 6.3.6, 6.3.8 |
 | Embedding a missing composite font | `LeftReason::Composite` | the pass embeds simple fonts; a composite font is [ROADMAP](../ROADMAP.md) FT-12 | 9.7 |
 
 ## Verified
@@ -688,7 +708,17 @@ glyph; `a_cff_answer_is_embedded_as_type1c` takes a bare CFF and an
 `a_cff_faces_widths_are_set_too` hold a face two of whose advances differ
 from `/Widths` to exactly two warnings carrying both widths, a
 metric-compatible face to none, the page to its fingerprint and the
-program's advances to the dictionary's; `the_new_faces_are_cut_whatever_the_font_policy` holds
+program's advances to the dictionary's;
+`the_rewritten_document_passes_the_pdfa_font_rules` claims each fixture's
+output — TrueType and CFF answers, a Symbol and a ZapfDingbats page — as
+every part and level `validate_pdfa` reads and finds nothing under a font
+clause, where the page as it was fails the embedding clause;
+`every_truetype_font_takes_the_symbolic_form` reads the written dictionary,
+flags and `cmap` back; `a_symbol_page_draws_as_its_provider_face_drew_it`
+holds Symbol and ZapfDingbats to their fingerprints and text;
+`a_face_that_cannot_meet_a_clause_is_left_and_named` leaves two codes sharing
+a glyph at two widths and a face of sixteen units per em;
+`the_new_faces_are_cut_whatever_the_font_policy` holds
 `FontPolicy::Keep` and `Subset` to one cut and the font pass's report to the
 document's own programs; and the rest reach every `LeftReason` a simple font
 can — a declined request, the three `fsType` refusals beside the permissions

@@ -220,10 +220,11 @@ key follows the outlines, and the `/Subtype` follows the key.
   state is written `0`, which Table 120 reads as unknown. The flags are the
   document's where it had a descriptor; otherwise fixed pitch, serif, script
   and italic as the face's `post`, `sFamilyClass` and italic angle say, else
-  as the request says. The symbolic flag is kept as the font had it, so that
-  the codes are read in the order they were (a symbolic font asks its `cmap`
-  by code first), and the nonsymbolic flag set as its inverse, as 9.8.2 asks
-  of a writer — except in the TrueType form *What PDF/A asks of it* settles.
+  as the request says. The symbolic flag is kept as the font had it — Symbol
+  and ZapfDingbats, whose built-in encodings are their own (Annex D.5, D.6),
+  symbolic whatever their dictionary states — and the nonsymbolic flag set as
+  its inverse, as 9.8.2 asks of a writer, except in the TrueType form *What
+  PDF/A asks of it* settles, which is symbolic.
 - **The name** is the face's: 9.9.2 names a subset by its tag, a plus sign and
   the PostScript name of the font the subset was cut from, and that font is the
   face. The face's name ID 6 — or a CFF's Name INDEX entry — where it is one to
@@ -253,11 +254,12 @@ program, `simple_glyph_by_cmap` for a TrueType program and `cff_glyph` for a
 CFF one — the width it is laid out with, and the text it reads as. A code
 whose glyph, width or text differs from what the document drew and read
 before rolls the transaction back and leaves the font
-(`DrawsOtherwise { code }`). Under the form FT-12.3 writes, a TrueType program
-keeps the face's `cmap` and the dictionary its `/Encoding`, so a text face is
-read through the same mapping it was drawn through; a font drawn by name —
-Symbol and ZapfDingbats, drawn through `substitute_glyph` — is where the two
-readings part, and FT-12.5's form reads each code by the glyph it drew.
+(`DrawsOtherwise { code }`). A TrueType program is written in the symbolic
+form (*What PDF/A asks of it*), its `cmap` mapping each drawn code to the
+glyph that code drew, so a font drawn by name — Symbol and ZapfDingbats,
+drawn through `substitute_glyph` — is read by the glyph it drew as a text face
+is; a CFF program is read by the names its encoding gives, written so that
+each reaches the glyph drawn.
 
 ### Widths, and a face whose advances disagree
 
@@ -337,10 +339,13 @@ CFF font with new `/Differences`, read their codes as text otherwise than the
 document did, so every simple font the pass embeds carries a `/ToUnicode`
 stating each drawn code's text as the document read it — its own `/ToUnicode`
 where it had one, else its encoding — in one-byte `bfchar` entries; a code
-whose text was empty stays unmapped. The read-back holds the result: a drawn
-code that reads otherwise — one the document read as no text, which
-`StandardEncoding` reads as a character once the font's own encoding is
-gone — leaves the font.
+whose text was empty stays unmapped. The read-back holds the result. A
+TrueType font with a drawn code the document read as no text is left before
+anything is written (`NoText { code }`): with its `/Encoding` gone, a reader
+reads such a code through `StandardEncoding` as a character, and only a
+`/ToUnicode` entry could say otherwise, which an empty text is not. Under a
+CFF font that keeps its encoding the code reads as it did, and the read-back
+judges one whose `/Differences` changed.
 
 **A face that cannot meet a clause is left and named, never embedded
 half-conforming.** After the cut, the pass checks the metrics clause on what
@@ -419,8 +424,8 @@ pub enum EmbedWarning {
 reason and a new one is a compile error where it is handled: `Declined`,
 `Unreadable`, `EmbeddingForbidden`, `SubsettingForbidden`, `NotAnObject`,
 `FieldResource`, `Type3Resource`, `TooManyCodes`, `NoGlyph { code }`,
-`DrawsOtherwise { code }`, `NotSubsettable`, `WidthsDisagree { code }` and
-`NotOfItsCollection`. Until FT-12.6 lands, a composite font is left as
+`DrawsOtherwise { code }`, `NotSubsettable`, `NoText { code }`,
+`WidthsDisagree { code }` and `NotOfItsCollection`. Until FT-12.6 lands, a composite font is left as
 `Composite`, which that step replaces.
 
 **The same bytes on every target** (ruling 4). The faces are the provider's

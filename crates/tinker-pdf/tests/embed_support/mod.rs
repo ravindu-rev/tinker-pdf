@@ -48,6 +48,9 @@ pub struct Face {
     /// Whether the face has a `cmap` at all; one with none has nothing to be
     /// read by.
     pub mapped: bool,
+    /// The glyph names a CFF charset gives the glyphs of these characters in
+    /// place of their standard names, each a string of the String INDEX.
+    pub names: Vec<(char, &'static str)>,
 }
 
 impl Face {
@@ -76,7 +79,34 @@ impl Face {
             fs_type: 0,
             family_class: 0x0801,
             mapped: true,
+            names: Vec::new(),
         }
+    }
+
+    /// The same face with its CFF charset naming `ch`'s glyph `name`.
+    #[must_use]
+    pub fn named(mut self, ch: char, name: &'static str) -> Face {
+        self.names.push((ch, name));
+        self
+    }
+
+    /// The String INDEX's strings and the SID each glyph is named by, in
+    /// glyph order from 1: a name [`Face::named`] gave it, at 391 on as
+    /// Appendix A numbers a font's own strings, else its character's
+    /// standard name.
+    fn charset_names(&self) -> (Vec<Vec<u8>>, Vec<u16>) {
+        let mut strings = Vec::new();
+        let mut sids = Vec::with_capacity(self.glyphs.len());
+        for glyph in &self.glyphs {
+            match self.names.iter().find(|(ch, _)| *ch == glyph.ch) {
+                Some((_, name)) => {
+                    sids.push(391 + strings.len() as u16);
+                    strings.push(name.as_bytes().to_vec());
+                }
+                None => sids.push(standard_sid(glyph.ch)),
+            }
+        }
+        (strings, sids)
     }
 
     /// The same face with `ch`'s advance `advance`.
@@ -146,17 +176,19 @@ impl Face {
     }
 
     /// The face as a bare CFF program: its glyphs named by the standard
-    /// strings their characters' glyph names are, each charstring stating
-    /// its width over a `nominalWidthX` of zero.
+    /// strings their characters' glyph names are, or the names
+    /// [`Face::named`] gave them, each charstring stating its width over a
+    /// `nominalWidthX` of zero.
     pub fn cff(&self) -> Vec<u8> {
         let header = [1u8, 0, 4, 4];
         let names = index(&[self.name.as_bytes().to_vec()]);
-        let strings = index(&[]);
+        let (own, sids) = self.charset_names();
+        let strings = index(&own);
         let globals = index(&[]);
         let mut charset = vec![0u8];
         let mut charstrings = vec![vec![14u8]];
-        for glyph in &self.glyphs {
-            charset.extend_from_slice(&standard_sid(glyph.ch).to_be_bytes());
+        for (glyph, sid) in self.glyphs.iter().zip(sids) {
+            charset.extend_from_slice(&sid.to_be_bytes());
             charstrings.push(box_charstring(glyph));
         }
         let charstrings = index(&charstrings);
