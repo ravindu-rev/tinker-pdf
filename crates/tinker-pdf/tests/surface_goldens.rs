@@ -20,14 +20,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tinker_pdf::{
-    Bitmap, Date, DigestAlgorithm, Document, Rect, RenderOptions, RenderWarning, SignRefused,
-    SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget, SimpleFontProvider,
-    WriteMode, WriteOptions,
+    Bitmap, Date, DigestAlgorithm, Document, OpenOptions, Rect, RenderOptions, RenderWarning,
+    SignRefused, SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget,
+    SimpleFontProvider, WriteMode, WriteOptions,
 };
 use tinker_pdf_cos::{CosDocument, DocumentEditor, ObjRef};
 
+mod cbz_support;
 mod golden_support;
 mod render_support;
+use cbz_support::{rgb_png, zip, Damage, ZipFile};
 use golden_support::{
     assert_small_enough, disagreement, goldens_in, ppm_mismatch, ppm_samples, read_header,
     read_svg_header, reviewer_and_date, svg_body, svg_mismatch, to_ppm, to_svg_golden, Golden,
@@ -74,12 +76,63 @@ const SURFACES: &[Surface] = &[
         // About half of what the page paints, 2 867 pixels.
         least_ink: 1400,
     },
+    Surface {
+        name: "epub-page",
+        clause: "EPUB 3.3 3.2, 6.1, 6.3.1",
+        draw: epub_page,
+        // About half of what the page paints, 1 306 pixels.
+        least_ink: 650,
+    },
+    Surface {
+        name: "html-page",
+        clause: "HTML 15.3.3, 15.3.4, 15.3.6, 15.3.8",
+        draw: html_page,
+        // About half of what the page paints, 1 124 pixels.
+        least_ink: 560,
+    },
+    Surface {
+        name: "markdown-page",
+        clause: "CommonMark 0.31.2 4.2, 4.8, 5.2, 5.3, 6.2",
+        draw: markdown_page,
+        // About half of what the page paints, 810 pixels.
+        least_ink: 400,
+    },
+    Surface {
+        name: "fb2-page",
+        clause: "FictionBook 2.1 section, title, epigraph, p, emphasis",
+        draw: fb2_page,
+        // About half of what the page paints, 609 pixels.
+        least_ink: 300,
+    },
+    Surface {
+        name: "svg-page",
+        clause: "SVG 1.1 8.3, 9.2, 9.3, 10.4, 11.3, 11.4, 13.2.2",
+        draw: svg_page,
+        // About half of what the page paints, 3 441 pixels.
+        least_ink: 1700,
+    },
+    Surface {
+        name: "xps-page",
+        clause: "ECMA-388 11.1, 12.1, 13.1, 13.2, 13.5",
+        draw: xps_page,
+        // About half of what the page paints, 5 178 pixels.
+        least_ink: 2580,
+    },
 ];
 
 /// The surfaces no person has read yet: exactly those whose golden's header
 /// reads `reviewer: unreviewed`. A surface leaves this list when a person has
 /// read its golden against its clause and put their name in it (H-73).
-const UNREVIEWED: &[&str] = &["annotation-appearances", "visible-signature"];
+const UNREVIEWED: &[&str] = &[
+    "annotation-appearances",
+    "visible-signature",
+    "epub-page",
+    "html-page",
+    "markdown-page",
+    "fb2-page",
+    "svg-page",
+    "xps-page",
+];
 
 fn surfaces_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -336,6 +389,284 @@ fn visible_signature() -> Bitmap {
         .render(&RenderOptions::default())
 }
 
+// ---- pages made from other formats --------------------------------------------
+
+/// The page box the four reflowable samples are laid out into, in points. The
+/// reading system's margin of 36 points leaves the text a square of 72.
+const BOOK_PAGE: (f64, f64) = (144.0, 144.0);
+
+/// The base size, in points, the reflowable samples are set at, so that what
+/// each one shows fits its square.
+const BOOK_FONT_SIZE: f64 = 7.0;
+
+/// How a sample is opened: in the book box at the base size, which only a
+/// reflowable one is laid out into, and — for a sample whose text names a face
+/// it does not embed — with the test's own face as the provider, which every
+/// build asks before any face it bundles. The sample text is ASCII, which the
+/// standard faces' built-in metrics set alike in every build, so only the
+/// glyphs are the provider's.
+fn book_options(provider: bool) -> OpenOptions {
+    let mut options = OpenOptions::at_page(BOOK_PAGE.0, BOOK_PAGE.1);
+    options.font_size = BOOK_FONT_SIZE;
+    if provider {
+        options = options.with_fonts(Arc::new(SimpleFontProvider::new(curvy_font())));
+    }
+    options
+}
+
+/// The one page of a synthesised document, rendered, after checking that the
+/// sample is what it is meant to be: a document of its format that fits one
+/// page, with nothing in it a reader is told was dropped.
+fn only_page(name: &str, document: &Document) -> Bitmap {
+    assert_eq!(document.page_count(), 1, "{name}: the sample fits one page");
+    let report = document
+        .archive()
+        .expect("a synthesised document has a report");
+    assert!(
+        report.warnings().is_empty(),
+        "{name}: the sample is not clean: {:?}",
+        report.warnings()
+    );
+    document
+        .page(0)
+        .expect("the page")
+        .render(&RenderOptions::default())
+}
+
+/// OCF 3.3's container document, naming the one package.
+const CONTAINER_XML: &str = concat!(
+    r#"<?xml version="1.0" encoding="utf-8"?>"#,
+    r#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">"#,
+    r#"<rootfiles><rootfile full-path="EPUB/package.opf" "#,
+    r#"media-type="application/oebps-package+xml"/></rootfiles></container>"#
+);
+
+/// A book of one chapter whose every character is set in its own embedded
+/// face: the package, a navigation document, the chapter and `curvy_font`
+/// as `font/ttf`, a core media type (3.2), named by the chapter's
+/// `@font-face`.
+fn epub_sample() -> Vec<u8> {
+    let package = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">"#,
+        r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+        r#"<dc:identifier id="id">urn:uuid:5a1d0c62-8d0e-4c1b-9f4a-0b7c3e2d1a90</dc:identifier>"#,
+        r#"<dc:title>A Sample Book</dc:title><dc:language>en</dc:language>"#,
+        r#"<meta property="dcterms:modified">2026-11-13T00:00:00Z</meta></metadata>"#,
+        r#"<manifest>"#,
+        r#"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#,
+        r#"<item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/>"#,
+        r#"<item id="face" href="fonts/curvy.ttf" media-type="font/ttf"/>"#,
+        r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+    );
+    let nav = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">"#,
+        r#"<head><title>Contents</title></head><body><nav epub:type="toc"><ol>"#,
+        r#"<li><a href="chapter.xhtml">Chapter One</a></li></ol></nav></body></html>"#
+    );
+    let chapter = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en"><head>"#,
+        r#"<title>Chapter One</title><style>"#,
+        r#"@font-face { font-family: "Curvy"; src: url(fonts/curvy.ttf) format("truetype"); } "#,
+        r#"body { margin: 0; font-family: "Curvy"; } "#,
+        r#"h1 { font-size: 1.6em; margin: 0 0 0.5em 0; color: #1f3a93; } "#,
+        r#"p { margin: 0; text-indent: 1em; text-align: justify; }"#,
+        r#"</style></head><body><h1>Chapter 1</h1>"#,
+        r#"<p>The road ran on through the hills, and the rain came down.</p>"#,
+        r#"<p>Then it stopped.</p></body></html>"#
+    );
+    let files = [
+        ZipFile::stored("mimetype", b"application/epub+zip"),
+        ZipFile::deflated("META-INF/container.xml", CONTAINER_XML.as_bytes()),
+        ZipFile::deflated("EPUB/package.opf", package.as_bytes()),
+        ZipFile::deflated("EPUB/nav.xhtml", nav.as_bytes()),
+        ZipFile::deflated("EPUB/chapter.xhtml", chapter.as_bytes()),
+        ZipFile::deflated("EPUB/fonts/curvy.ttf", &curvy_font()),
+    ];
+    zip(&files, Damage::None)
+}
+
+/// EPUB 3.3 6.1 and 6.3.1: the chapter, an XHTML content document, laid out
+/// with its style sheet into the book box, its text in the face the book
+/// embeds (3.2) and no other.
+fn epub_page() -> Bitmap {
+    let document =
+        Document::open_with(epub_sample(), &book_options(false)).expect("the book opens");
+    only_page("epub-page", &document)
+}
+
+/// HTML 15.3: a loose HTML file of a heading, a paragraph with bold and
+/// italic words and a row of bordered table cells, laid out with the
+/// user-agent sheet HTML's rendering section states and a sheet of its own.
+fn html_page() -> Bitmap {
+    let html = concat!(
+        "<!DOCTYPE html>\n<html lang=\"en\"><head><title>A Sample Page</title><style>",
+        "h1 { font-size: 1.5em; color: #8a1c1c } ",
+        "td { border: 1px solid #4a4a4a; background: #e8eef8 }",
+        "</style></head><body><h1>A heading</h1>",
+        "<p>Some <b>bold</b> and <i>italic</i> words.</p>",
+        "<table><tr><td>one</td><td>two</td><td>three</td></tr></table>",
+        "</body></html>\n"
+    );
+    let document =
+        Document::open_with(html.as_bytes().to_vec(), &book_options(true)).expect("the page opens");
+    only_page("html-page", &document)
+}
+
+/// CommonMark 0.31.2: an ATX heading (4.2), a paragraph (4.8) with emphasis
+/// and strong emphasis (6.2), and an ordered list (5.3) of two items (5.2),
+/// laid out as the XHTML the reader translates them to.
+fn markdown_page() -> Bitmap {
+    let text = "## A heading\n\nSome *emphasis* and **strong** words.\n\n1. One\n2. Two\n";
+    let document = Document::open_markdown(text.as_bytes().to_vec(), &book_options(true))
+        .expect("the text opens");
+    only_page("markdown-page", &document)
+}
+
+/// FictionBook 2.1: a section with its title, an epigraph and a paragraph
+/// with an emphasis, set by the reading system's sheet for the format.
+fn fb2_page() -> Bitmap {
+    let fb2 = concat!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+        "<FictionBook xmlns=\"http://www.gribuser.ru/xml/fictionbook/2.0\">",
+        "<description><title-info><genre>prose</genre>",
+        "<author><first-name>Anna</first-name><last-name>Writer</last-name></author>",
+        "<book-title>A Sample</book-title><lang>en</lang></title-info></description>",
+        "<body><section><title><p>One</p></title>",
+        "<epigraph><p>All roads are long.</p></epigraph>",
+        "<p>It began with <emphasis>one</emphasis> step.</p>",
+        "</section></body></FictionBook>\n"
+    );
+    let document =
+        Document::open_with(fb2.as_bytes().to_vec(), &book_options(true)).expect("the book opens");
+    only_page("fb2-page", &document)
+}
+
+/// The SVG sample's page, in points: the document's own `width` and `height`
+/// of 160 by 128 CSS pixels, which a standalone SVG's page is, its `viewBox`
+/// making one user unit a point.
+const SVG_PAGE: (f64, f64) = (120.0, 96.0);
+
+/// SVG 1.1: a rounded `rect` (9.2) filled with a linear gradient (13.2.2), a
+/// `circle` (9.3) filled and stroked (11.3, 11.4), a dashed cubic `path`
+/// (8.3) and a line of `text` (10.4), on a page the document's own size.
+fn svg_page() -> Bitmap {
+    let svg = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="128" viewBox="0 0 120 96">"#,
+        r#"<defs><linearGradient id="ramp" x1="0" y1="0" x2="1" y2="0">"#,
+        r##"<stop offset="0" stop-color="#1f77b4"/><stop offset="1" stop-color="#ff7f0e"/>"##,
+        r#"</linearGradient></defs>"#,
+        r#"<rect x="6" y="6" width="54" height="34" rx="6" fill="url(#ramp)"/>"#,
+        r##"<circle cx="88" cy="24" r="16" fill="#ffd54f" stroke="#6d4c41" stroke-width="3"/>"##,
+        r##"<path d="M 8 88 C 30 54 62 104 112 64" fill="none" stroke="#2e7d32" "##,
+        r#"stroke-width="2.5" stroke-dasharray="6 3"/>"#,
+        r##"<text x="8" y="60" font-family="serif" font-size="12" fill="#222222">SVG text</text>"##,
+        r#"</svg>"#
+    );
+    let document = Document::open_with(svg.as_bytes().to_vec(), &book_options(true))
+        .expect("the picture opens");
+    let page = document.page(0).expect("page one");
+    assert_eq!(page.size(), SVG_PAGE, "the page is the document's own size");
+    only_page("svg-page", &document)
+}
+
+/// ECMA-388's 1.0 namespace, which every fixed-payload part here is in.
+const XPS_NS: &str = "http://schemas.microsoft.com/xps/2005/06";
+
+/// A package of one fixed page whose text is set in its own font part: a
+/// `Path` filled with a solid colour and stroked (11.1, 13.1), one filled with
+/// a linear gradient (13.5), one filled with a picture (13.2) and a `Glyphs`
+/// run (12.1) in `curvy_font`, a plain OpenType part (9.1.7).
+fn xps_sample() -> Vec<u8> {
+    let picture: Vec<u8> = (0..8u32)
+        .flat_map(|y| {
+            (0..8u32).flat_map(move |x| {
+                if (x + y) % 2 == 0 {
+                    [40u8, 40, 160]
+                } else {
+                    [240u8, 220, 120]
+                }
+            })
+        })
+        .collect();
+    let page = format!(
+        concat!(
+            r#"<FixedPage xmlns="{ns}" Width="160" Height="128" xml:lang="en-US">"#,
+            r##"<Path Data="M 8,8 L 72,8 L 72,56 L 8,56 Z" Fill="#FF3366CC" "##,
+            r##"Stroke="#FF1A1A1A" StrokeThickness="3"/>"##,
+            r#"<Path Data="M 84,8 L 152,8 L 152,56 L 84,56 Z"><Path.Fill>"#,
+            r#"<LinearGradientBrush MappingMode="Absolute" StartPoint="84,8" EndPoint="152,56">"#,
+            r#"<LinearGradientBrush.GradientStops>"#,
+            r##"<GradientStop Color="#FFFFC107" Offset="0"/><GradientStop Color="#FF2E7D32" Offset="1"/>"##,
+            r#"</LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Fill></Path>"#,
+            r#"<Path Data="M 8,68 L 48,68 L 48,108 L 8,108 Z"><Path.Fill>"#,
+            r#"<ImageBrush ImageSource="/Resources/picture.png" Viewbox="0,0,8,8" "#,
+            r#"ViewboxUnits="Absolute" Viewport="8,68,40,40" ViewportUnits="Absolute"/>"#,
+            r#"</Path.Fill></Path>"#,
+            r##"<Glyphs OriginX="60" OriginY="98" FontRenderingEmSize="18" "##,
+            r##"FontUri="/Resources/curvy.ttf" UnicodeString="XPS text" Fill="#FF202020"/>"##,
+            r#"</FixedPage>"#
+        ),
+        ns = XPS_NS
+    );
+    let types = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+        r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
+        r#"<Default Extension="fdseq" ContentType="application/vnd.ms-package.xps-fixeddocumentsequence+xml"/>"#,
+        r#"<Default Extension="fdoc" ContentType="application/vnd.ms-package.xps-fixeddocument+xml"/>"#,
+        r#"<Default Extension="fpage" ContentType="application/vnd.ms-package.xps-fixedpage+xml"/>"#,
+        r#"<Default Extension="png" ContentType="image/png"/>"#,
+        r#"<Default Extension="ttf" ContentType="application/vnd.ms-opentype"/>"#,
+        r#"</Types>"#
+    );
+    let rels = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Type="{ns}/fixedrepresentation" Target="/Sequence.fdseq" Id="R0"/>"#,
+            r#"</Relationships>"#
+        ),
+        ns = XPS_NS
+    );
+    let page_rels = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Type="http://schemas.microsoft.com/xps/2005/06/required-resource" "#,
+        r#"Target="/Resources/curvy.ttf" Id="R1"/>"#,
+        r#"<Relationship Type="http://schemas.microsoft.com/xps/2005/06/required-resource" "#,
+        r#"Target="/Resources/picture.png" Id="R2"/>"#,
+        r#"</Relationships>"#
+    );
+    let sequence = format!(
+        r#"<FixedDocumentSequence xmlns="{XPS_NS}"><DocumentReference Source="/Document.fdoc"/></FixedDocumentSequence>"#
+    );
+    let document = format!(
+        r#"<FixedDocument xmlns="{XPS_NS}"><PageContent Source="/Pages/1.fpage"/></FixedDocument>"#
+    );
+    let files = [
+        ZipFile::deflated("_rels/.rels", rels.as_bytes()),
+        ZipFile::deflated("Sequence.fdseq", sequence.as_bytes()),
+        ZipFile::deflated("Document.fdoc", document.as_bytes()),
+        ZipFile::deflated("Pages/1.fpage", page.as_bytes()),
+        ZipFile::deflated("Pages/_rels/1.fpage.rels", page_rels.as_bytes()),
+        ZipFile::deflated("Resources/curvy.ttf", &curvy_font()),
+        ZipFile::deflated("Resources/picture.png", &rgb_png(8, 8, &picture)),
+        ZipFile::deflated("[Content_Types].xml", types.as_bytes()),
+    ];
+    zip(&files, Damage::None)
+}
+
+/// ECMA-388: the package's one fixed page, its text drawn from the package's
+/// own font part.
+fn xps_page() -> Bitmap {
+    let document = Document::open(xps_sample()).expect("the package opens");
+    only_page("xps-page", &document)
+}
+
 // ---- the checks -------------------------------------------------------------
 
 /// Every surface golden is what this build draws, byte for byte, above the
@@ -562,7 +893,8 @@ fn write_the_surface_goldens() {
         let drawn = ink(&bitmap);
         assert!(
             drawn >= surface.least_ink,
-            "{}: the page painted {drawn} pixels, fewer than the {} it is              supposed to -- a blank golden is not written",
+            "{}: the page painted {drawn} pixels, fewer than the {} it is \
+             supposed to -- a blank golden is not written",
             surface.name,
             surface.least_ink
         );

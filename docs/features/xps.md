@@ -250,5 +250,10 @@ naming an ICC profile part.
 - The `xps` determinism fingerprint and the fixed-document byte-hash
   ([determinism](determinism.md)) — a fixture whose input this repository did
   not author.
+- `surface_goldens.rs`'s `xps-page`, a reviewed-golden surface: one fixed
+  page of a solid path with its stroke, a gradient path, a picture path and a
+  glyph run in the package's own font part, held byte for byte in both builds
+  and listed unreviewed until a person reads it against ECMA-388 11.1, 12.1,
+  13.1, 13.2 and 13.5.
 - Fuzz targets `xml` and `zip_archive`; the `bounds_ledger.rs` rows for
   every XPS cap, measured against the real packages.

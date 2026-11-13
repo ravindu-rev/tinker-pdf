@@ -502,6 +502,18 @@ The tests that cover opening ([verification](../verification.md)):
   cut book read as far as it goes, and an `.fb2.zip` the
   same book while a ZIP of one picture stays a comic. `hostile_input.rs` sweeps a damaged FB2 and holds its translation to
   being XML; `fuzz/fuzz_targets/fb2.rs` is the deep version.
+- **`crates/tinker-pdf/tests/surface_goldens.rs`** — one page of each format
+  these paths synthesise, held byte for byte as a reviewed-golden surface in
+  both builds and listed unreviewed until a person reads it against its
+  clause: `html-page`, a heading, a paragraph with bold and italic words and a
+  row of bordered cells (HTML 15.3); `markdown-page`, a heading, a paragraph
+  with emphasis and an ordered list (CommonMark 0.31.2); `fb2-page`, a
+  section's title, an epigraph and a paragraph (FictionBook 2.1's schema);
+  and `svg-page`, a gradient-filled rounded rectangle, a stroked circle, a
+  dashed curve and a line of text (SVG 1.1). Each is laid out at a box and
+  base size of the test's own and draws its text from the test's own face
+  through `OpenOptions::fonts`, which every build asks first, so one golden
+  serves both builds.
 - **`crates/tinker-pdf-xml/tests/html5lib.rs`** and
   **`crates/tinker-pdf-xml/src/html/suite.rs`** — the HTML parser held to
   html5lib's tree-construction and tokenizer tests, vendored at the last

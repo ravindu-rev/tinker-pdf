@@ -1192,6 +1192,11 @@ rather than zero.
   streams are decoded operator by operator so a placeholder page and a page
   that reads are told apart, and its embedded faces keep their own `/W`
   advances.
+- `surface_goldens.rs`'s `epub-page`, a reviewed-golden surface: a book of
+  one chapter whose every character is set in the face it embeds — a heading
+  and two justified paragraphs, laid out with the chapter's style sheet —
+  held byte for byte in both builds and listed unreviewed until a person
+  reads it against EPUB 3.3 3.2, 6.1 and 6.3.1.
 - `epub_analytic.rs` and `epub_reftest.rs`. Analytic layout sets every
   document in `monospace`, where Courier's 600/1000 advance makes the line
   breaker a division, and **computes every expected number in the test**:
