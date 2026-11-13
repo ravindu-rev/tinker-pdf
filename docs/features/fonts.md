@@ -158,6 +158,24 @@ CBDT inherits from EBDT — 1 to 9, uncompressed and component bitmaps — are
 `ColourBitmaps::choose_strike` takes the same `StrikeChoice` as `sbix`,
 comparing `ppemY`.
 
+SVG documents (the SVG chapter). `SvgTable::parse` reads version 0's header
+and its document list, refusing the table where the list's offset is zero or
+the header or the records run past it, and checks the records' order once:
+sorted by `startGlyphID`, each range starting past the one before, a lookup
+bisects; otherwise `SvgWarning::DocumentsOutOfOrder` is warned and the
+records are scanned, the first whose range holds a glyph answering for it, as
+overlapping ranges are read. `SvgTable::record` answers a glyph's record and
+`SvgTable::document` its document: the table's own bytes for a plain one, and
+for one whose first bytes are gzip's 1F 8B 08 (*Document encoding and
+format*) what `tinker_pdf_filters::gzip_decode` inflates them to under
+`MAX_SVG_DOCUMENT`, 16 MiB — with the id of the element that describes the
+glyph, `glyph` and its id in decimal. Two records naming one offset and length
+name one document, which a caller reads once. What it refuses it names
+(`SvgRefusal`): a record whose offset or length is zero or whose document runs
+past the table (`Malformed`), a member RFC 1952's reader refuses (`Gzip`, with
+its reason), and one that inflates past the cap (`TooLarge`), refused rather
+than cut.
+
 **Type 1** (9.9, `/FontFile`). `Type1::parse` reads PFB, PFA and the bare
 bytes a PDF embeds: eexec decryption, the second decryption layer around each
 charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
@@ -1491,6 +1509,7 @@ corpora already vendored here. So every name stays on the list.
 | A truncated CMap mapping section | `cmap::Warning::SectionUnterminated(Section)` | What parsed is kept and the section is named, so partial coverage is visible | [rulings](../rulings.md) ruling 10 |
 | An `sbix` graphic of type `mask` or `pdf `, or of any type but `png `, `jpg ` and `tiff` | `SbixRefusal::GraphicType` | The sbix chapter's *Glyph data* names `mask` and `pdf ` as not supported in OpenType, and defines no other | [design](../design/colour-fonts.md) |
 | CBDT's uncompressed and component glyph data, the EBDT formats 1 to 9 it inherits | `CbdtRefusal::DataFormat(n)` | Read and drawn by their own step; the PNG formats 17 to 19 are what colour fonts carry | [ROADMAP](../ROADMAP.md) FT-06.21 |
+| A gzip-encoded `SVG ` document that inflates past `MAX_SVG_DOCUMENT` (16 MiB), or that RFC 1952's reader refuses | `SvgRefusal::TooLarge`, `SvgRefusal::Gzip` | A few kilobytes of deflate inflate to gigabytes (ruling 1), and a document cut short or read past a failed check is a different picture, so the glyph is left to the next table that describes it | [design](../design/colour-fonts.md) |
 | TrueType and Type 2 hinting | none — outlines are unhinted, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree. Stem darkening, the bytecode interpreter, CFF hints and an autohinter are roadmap rows, the small-text judgement a person's | [ROADMAP](../ROADMAP.md) FT-04a…FT-04d |
 
 ## Verified
@@ -1728,10 +1747,14 @@ corpora already vendored here. So every name stays on the list.
   `CBLC`/`CBDT` through all five index formats and the three PNG formats,
   small metrics in each direction the flags name, the inherited and unknown
   formats refused, and ranges, lists, subtables and data that overrun or run
-  backwards; and every prefix and flipped byte of the tables answering
+  backwards; the `SVG ` index's documents by glyph range, in order, out of
+  it and overlapping, one document under two ranges, a GNU-gzipped document
+  inflated, one inflating to the 16 MiB cap read and one past it refused, a
+  damaged member refused with its reason, and every overrunning header, list
+  and record; and every prefix and flipped byte of the tables answering
   without a panic. The `sfnt` fuzz target's `colr-v0.ttf`, `colr-v1.ttf`,
-  `sbix.ttf` and `cbdt.ttf` seeds are written by the same builders, and read
-  back through their directories.
+  `sbix.ttf`, `cbdt.ttf` and `svg.ttf` seeds are written by the same
+  builders, and read back through their directories.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

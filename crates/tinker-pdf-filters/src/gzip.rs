@@ -357,8 +357,14 @@ pub fn gzip_decode(input: &[u8], limits: &Limits) -> Result<Vec<u8>, GzipError> 
             },
             other => other,
         })?;
-        out.extend_from_slice(&member.data);
         at += member.end;
+        // The first member's data is the file's so far, moved rather than
+        // copied, so a file of one member holds its data once.
+        if out.is_empty() {
+            out = member.data;
+        } else {
+            out.extend_from_slice(&member.data);
+        }
         if at >= input.len() {
             return Ok(out);
         }

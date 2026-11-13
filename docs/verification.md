@@ -175,16 +175,19 @@ corpus needs its refusal cases: `type1/truncated-eexec.pfb` does not parse on
 purpose, and `truetype/cmap12-glyph-id-overflow.ttf` is exactly what its name
 says.
 
-The `sfnt` corpus's colour seeds — `colr-v0.ttf`, `colr-v1.ttf`, `sbix.ttf`
-and `cbdt.ttf` — are each held by name to the readers they are there for:
-`crates/tinker-pdf-font/tests/colour_tables.rs` reads the committed seed
-through its directory and asserts what it reaches, a glyph's layers, a
-version 1 graph with no refusal, a `dupe` resolved and a `mask` refused, a
-PNG through each index format and an inherited format refused, as it does
+The `sfnt` corpus's colour seeds — `colr-v0.ttf`, `colr-v1.ttf`, `sbix.ttf`,
+`cbdt.ttf` and `svg.ttf` — are each held by name to the readers they are
+there for: `crates/tinker-pdf-font/tests/colour_tables.rs` reads the
+committed seed through its directory and asserts what it reaches, a glyph's
+layers, a version 1 graph with no refusal, a `dupe` resolved and a `mask`
+refused, a PNG through each index format and an inherited format refused, a
+plain SVG document, a shared one and a gzip-encoded one inflated, as it does
 the seed its builders write (`write_the_fuzz_seeds`, ignored, writes them).
 The bitmaps they carry are a format's signature and a byte, handed back
 undecoded: the `sfnt` target reaches no image decoder, and the `png`, `jpeg`
-and `tiff` targets are what fuzz those.
+and `tiff` targets are what fuzz those. The gzip-encoded document is a member
+GNU gzip wrote once, so the target reaches `tinker-pdf-filters`' RFC 1952
+reader through it, each distinct document read once an input.
 
 `truetype` is held to two floors more, because composite recursion is what
 the target's own header calls "the interesting part": a floor on the seeds

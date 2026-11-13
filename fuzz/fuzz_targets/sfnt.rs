@@ -28,7 +28,7 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeSet;
 use tinker_pdf_font::{
     glyf, glyphs_for, subset, substitute_glyph, BuiltInEncoding, ColourBitmaps, Colr, Cpal,
-    PaletteChoice, Sbix, Sfnt, StrikeChoice,
+    PaletteChoice, Sbix, Sfnt, StrikeChoice, SvgTable, MAX_SVG_DOCUMENT,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -181,6 +181,29 @@ fuzz_target!(|data: &[u8]| {
                 }
                 for choice in [StrikeChoice::Largest, StrikeChoice::Nearest(48)] {
                     let _ = bitmaps.choose_strike(glyph, choice);
+                }
+            }
+        }
+    }
+
+    // The `SVG ` table's index: each glyph's record, bisected or scanned, and
+    // each distinct document read once — a gzip-encoded one inflated through
+    // RFC 1952's reader under `MAX_SVG_DOCUMENT`, which `svg.ttf` carries so a
+    // run reaches it.
+    if let Some(svg) = font
+        .table(u32::from_be_bytes(*b"SVG "))
+        .and_then(SvgTable::parse)
+    {
+        let _ = svg.warnings();
+        let _ = svg.records();
+        let mut read = BTreeSet::new();
+        for glyph in (0..64u16).chain([u16::MAX]) {
+            let Some(record) = svg.record(glyph) else {
+                continue;
+            };
+            if read.insert((record.offset, record.length)) {
+                if let Ok(Some(document)) = svg.document(glyph) {
+                    assert!(document.data.len() <= MAX_SVG_DOCUMENT || !document.gzipped);
                 }
             }
         }

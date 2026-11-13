@@ -3726,6 +3726,7 @@ fn fuzz_paths() -> Vec<FuzzPath> {
     let slots = tinker_pdf_cos::limits::MAX_XREF_SLOTS as u128;
     let slot = std::mem::size_of::<Option<tinker_pdf_cos::XrefEntry>>() as u128;
     let unpacked = tinker_pdf_archive::sevenz::limits::MAX_7Z_UNPACKED as u128;
+    let svg_document = tinker_pdf_font::MAX_SVG_DOCUMENT as u128;
     let segments = tinker_pdf_svg::Limits::DEFAULT.max_segments as u128;
     let segment = std::mem::size_of::<tinker_pdf_font::Segment>() as u128;
     // `content_stream`'s page: 72 points a side at a scale of 3, or a region
@@ -4623,6 +4624,13 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                     "the directory, and the tables the subset reads",
                 ),
                 buffer(Input, 2, 1, "the subset"),
+                buffer(
+                    Value(svg_document),
+                    1,
+                    1,
+                    "an SVG document inflated at MAX_SVG_DOCUMENT; the documents are read one \
+                     after another",
+                ),
             ],
         ),
         path(

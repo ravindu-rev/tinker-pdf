@@ -2,12 +2,15 @@
 //! (`docs/design/colour-fonts.md`).
 //!
 //! Every table here is written from the OpenType 1.9.1 chapter's own layout —
-//! the CPAL, COLR, sbix, CBLC and CBDT chapters — by a builder in this file,
-//! so each assertion compares what the reader hands back with the bytes the
-//! test put there, and none with another program's reading (ruling 13). The
-//! builders also write the `fuzz/corpus/sfnt` seeds the `sfnt` target starts
-//! from (`write_the_fuzz_seeds`), so the seeds and the fixtures cannot drift.
+//! the CPAL, COLR, sbix, CBLC, CBDT and SVG chapters — by a builder in this
+//! file, so each assertion compares what the reader hands back with the bytes
+//! the test put there, and none with another program's reading (ruling 13).
+//! The one gzip-encoded SVG document is a member GNU gzip wrote once, kept as
+//! bytes beside the text it holds. The builders also write the
+//! `fuzz/corpus/sfnt` seeds the `sfnt` target starts from
+//! (`write_the_fuzz_seeds`), so the seeds and the fixtures cannot drift.
 
+use tinker_pdf_filters::{crc32, GzipError};
 use tinker_pdf_font::colr::{
     ClipBox, ColourLine, ColourStop, ColrRefusal, ColrWarning, CompositeMode, Extend, Paint,
     PaintId, FOREGROUND, MAX_PAINT_DEPTH, MAX_PAINT_NODES,
@@ -15,7 +18,7 @@ use tinker_pdf_font::colr::{
 use tinker_pdf_font::{
     Bearings, BitmapMetrics, BitmapStrike, CbdtRefusal, ColourBitmaps, ColourIndex, Colr, Cpal,
     Graphic, Layer, LayerColour, PaletteChoice, PaletteType, Rgba, Sbix, SbixGlyph, SbixRefusal,
-    SbixStrike, Sfnt, StrikeChoice,
+    SbixStrike, Sfnt, StrikeChoice, SvgRefusal, SvgTable, SvgWarning, MAX_SVG_DOCUMENT,
 };
 
 /// A colour, written as the reader hands it back.
@@ -2901,6 +2904,412 @@ fn cbdt_seed() -> Vec<u8> {
     ])
 }
 
+// ---- The SVG table ---------------------------------------------------------
+
+/// A plain document describing glyph 1.
+const SVG_ONE: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\">\
+<path id=\"glyph1\" d=\"M0 0H500V-700H0Z\"/></svg>";
+
+/// A plain document describing glyphs 2, 13 and 14 — two records name it, as
+/// the chapter's *Example 1* has one document serve discontinuous ranges.
+const SVG_SHARED: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\">\
+<rect id=\"glyph2\" width=\"10\" height=\"10\"/><rect id=\"glyph13\" width=\"20\" height=\"20\"/>\
+<rect id=\"glyph14\" width=\"30\" height=\"30\"/></svg>";
+
+/// The document [`SVG_GZIPPED`] holds, describing glyphs 2 and 3 of its own.
+const SVG_TEXT: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"glyph2\" \
+x=\"100\" y=\"-700\" width=\"300\" height=\"700\" fill=\"#0080ff\"/><circle id=\"glyph3\" \
+cx=\"500\" cy=\"-350\" r=\"250\" fill=\"red\"/></svg>";
+
+/// [`SVG_TEXT`] as GNU gzip 1.14 wrote it with `-n -9` from a pipe: MTIME 0,
+/// XFL 2, OS 3, a dynamic-Huffman block, CRC32 0x149BEE84 and ISIZE 181.
+/// Generated once by that program and committed; nothing asks it anything.
+const SVG_GZIPPED: &[u8] = &[
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x45, 0x8e, 0xcb, 0x0e, 0xc2, 0x20,
+    0x14, 0x44, 0x7f, 0x85, 0x8c, 0x6b, 0xcb, 0x15, 0xd2, 0x68, 0x4c, 0x2f, 0x3f, 0x43, 0x79, 0x25,
+    0xa8, 0x0d, 0x25, 0xd2, 0xfe, 0xbd, 0xc5, 0x85, 0xee, 0x4e, 0x32, 0x33, 0x27, 0x33, 0xad, 0xef,
+    0x20, 0xb6, 0x47, 0x7e, 0xae, 0x8c, 0x58, 0xeb, 0x72, 0x97, 0xb2, 0xb5, 0x36, 0x34, 0x3d, 0xbc,
+    0x4a, 0x90, 0x8a, 0x88, 0xe4, 0xd1, 0x80, 0x99, 0x8a, 0xb3, 0x55, 0xa4, 0x99, 0x11, 0xf2, 0xbe,
+    0x44, 0x05, 0xb1, 0x31, 0x2e, 0x44, 0x10, 0x3b, 0xe3, 0x7c, 0xed, 0xd0, 0xd2, 0x5c, 0x23, 0x43,
+    0x77, 0x8e, 0x2e, 0x85, 0x58, 0x19, 0xdf, 0xc0, 0xa7, 0x9c, 0x19, 0x27, 0xa2, 0x1b, 0x79, 0x0f,
+    0x69, 0x26, 0x9b, 0x8a, 0xcd, 0xee, 0x6f, 0xd3, 0x10, 0xf6, 0xd0, 0x8d, 0xbd, 0x6c, 0xbb, 0x4f,
+    0x8f, 0x07, 0x15, 0x86, 0x1a, 0x7f, 0xf3, 0xe2, 0xe6, 0x3e, 0xed, 0x6f, 0xcc, 0x07, 0x84, 0xee,
+    0x9b, 0x14, 0xb5, 0x00, 0x00, 0x00,
+];
+
+/// An `SVG ` table laid out as *SVG table formats* lays it out: the header,
+/// the `SVGDocumentList` at offset 10 with `records` in the order given —
+/// each a glyph range and the index of its document among `documents` — and
+/// the documents after the records, each once, in order.
+fn svg_table(records: &[(u16, u16, usize)], documents: &[&[u8]]) -> Vec<u8> {
+    let mut offsets = Vec::new();
+    let mut at = 2 + 12 * records.len();
+    for document in documents {
+        offsets.push(at);
+        at += document.len();
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&10u32.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&(records.len() as u16).to_be_bytes());
+    for &(start, end, document) in records {
+        out.extend_from_slice(&start.to_be_bytes());
+        out.extend_from_slice(&end.to_be_bytes());
+        out.extend_from_slice(&(offsets[document] as u32).to_be_bytes());
+        out.extend_from_slice(&(documents[document].len() as u32).to_be_bytes());
+    }
+    for document in documents {
+        out.extend_from_slice(document);
+    }
+    out
+}
+
+/// The records' order the chapter requires: glyph 1, glyph 2, glyphs 5 to 7
+/// and glyphs 13 and 14, the second and the last sharing a document.
+const SVG_RECORDS: [(u16, u16, usize); 4] = [(1, 1, 0), (2, 2, 1), (5, 7, 2), (13, 14, 1)];
+
+/// What each glyph of [`SVG_RECORDS`]' table answers: its document's text,
+/// whether it was gzip-encoded, and its record's range.
+fn expected_svg(glyph: u16) -> Option<(&'static [u8], bool, (u16, u16))> {
+    match glyph {
+        1 => Some((SVG_ONE, false, (1, 1))),
+        2 => Some((SVG_SHARED, false, (2, 2))),
+        5..=7 => Some((SVG_TEXT, true, (5, 7))),
+        13 | 14 => Some((SVG_SHARED, false, (13, 14))),
+        _ => None,
+    }
+}
+
+/// Every glyph of a face of 20, and the last glyph id there is, read as
+/// [`expected_svg`] says.
+fn assert_svg_documents(table: &SvgTable<'_>) {
+    for glyph in (0..20u16).chain([u16::MAX]) {
+        let document = table.document(glyph).expect("no record refuses");
+        assert_eq!(table.has_document(glyph), document.is_some(), "{glyph}");
+        match (document, expected_svg(glyph)) {
+            (None, None) => {}
+            (Some(document), Some((text, gzipped, range))) => {
+                assert_eq!(&document.data[..], text, "glyph {glyph}");
+                assert_eq!(document.gzipped, gzipped, "glyph {glyph}");
+                assert_eq!(
+                    (document.record.start_glyph, document.record.end_glyph),
+                    range,
+                    "glyph {glyph}"
+                );
+                assert_eq!(document.element, format!("glyph{glyph}"));
+                // A plain document is the table's own bytes, an inflated one
+                // the reader's.
+                assert_eq!(
+                    matches!(document.data, std::borrow::Cow::Borrowed(_)),
+                    !gzipped,
+                    "glyph {glyph}"
+                );
+            }
+            (got, wanted) => panic!("glyph {glyph}: {got:?} where {wanted:?}"),
+        }
+    }
+}
+
+#[test]
+fn svg_documents_are_found_by_glyph_range() {
+    let documents: [&[u8]; 3] = [SVG_ONE, SVG_SHARED, SVG_GZIPPED];
+    let bytes = svg_table(&SVG_RECORDS, &documents);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    assert!(table.warnings().is_empty(), "{:?}", table.warnings());
+    assert_svg_documents(&table);
+    let records = table.records();
+    assert_eq!(records.len(), 4);
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| (r.start_glyph, r.end_glyph))
+            .collect::<Vec<_>>(),
+        vec![(1, 1), (2, 2), (5, 7), (13, 14)]
+    );
+    // Two records naming one document name the same bytes.
+    assert_eq!(
+        (records[1].offset, records[1].length),
+        (records[3].offset, records[3].length)
+    );
+    assert_eq!(table.record(13), Some(records[3]));
+    assert_eq!(table.record(6), Some(records[2]));
+    assert_eq!(table.record(4), None);
+
+    // The same records in another order: scanned, named, and every glyph
+    // answering as it did.
+    let scrambled = [
+        SVG_RECORDS[3],
+        SVG_RECORDS[0],
+        SVG_RECORDS[2],
+        SVG_RECORDS[1],
+    ];
+    let bytes = svg_table(&scrambled, &documents);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    assert_eq!(table.warnings(), [SvgWarning::DocumentsOutOfOrder]);
+    assert_svg_documents(&table);
+
+    // Ranges that overlap, which the chapter forbids: the first in table
+    // order answers for the glyphs both hold.
+    let bytes = svg_table(&[(1, 5, 0), (3, 8, 1)], &documents);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    assert_eq!(table.warnings(), [SvgWarning::DocumentsOutOfOrder]);
+    for (glyph, text) in [(1u16, SVG_ONE), (4, SVG_ONE), (5, SVG_ONE), (6, SVG_SHARED)] {
+        let document = table.document(glyph).expect("reads").expect("held");
+        assert_eq!(&document.data[..], text, "glyph {glyph}");
+    }
+    assert_eq!(table.document(9), Ok(None));
+
+    // A record whose end is below its start holds no glyph, and is out of
+    // the chapter's order.
+    let bytes = svg_table(&[(9, 4, 0), (10, 10, 1)], &documents);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    assert_eq!(table.warnings(), [SvgWarning::DocumentsOutOfOrder]);
+    for glyph in 4..10 {
+        assert_eq!(table.document(glyph), Ok(None), "glyph {glyph}");
+    }
+    assert!(table.has_document(10));
+
+    // An id is the glyph's decimal digits, unpadded, to the last glyph id.
+    let bytes = svg_table(&[(7, 7, 0), (65_535, 65_535, 0)], &documents);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    for (glyph, id) in [(7u16, "glyph7"), (65_535, "glyph65535")] {
+        let document = table.document(glyph).expect("reads").expect("held");
+        assert_eq!(document.element, id);
+    }
+
+    // A table of no records holds no document.
+    let bytes = svg_table(&[], &[]);
+    let table = SvgTable::parse(&bytes).expect("an empty list reads");
+    assert!(table.records().is_empty());
+    assert_eq!(table.document(1), Ok(None));
+}
+
+/// A gzip member (RFC 1952) inflating to `length` bytes of `a`: one final
+/// fixed-Huffman block (RFC 1951 3.2.6) of a literal, matches of 258 bytes at
+/// distance 1, literals for what is left and the end of the block — thirteen
+/// bits for every 258 bytes, so 16 MiB is a member of about 104 KiB.
+fn run_of_a(length: usize) -> Vec<u8> {
+    /// RFC 1951 3.1.1: data elements packed from each byte's least
+    /// significant bit, a Huffman code from its own most significant bit.
+    struct Bits {
+        out: Vec<u8>,
+        at: usize,
+    }
+    impl Bits {
+        fn put(&mut self, value: u32, count: u32) {
+            for i in 0..count {
+                if self.at % 8 == 0 {
+                    self.out.push(0);
+                }
+                let last = self.out.len() - 1;
+                self.out[last] |= (((value >> i) & 1) as u8) << (self.at % 8);
+                self.at += 1;
+            }
+        }
+        fn code(&mut self, code: u32, length: u32) {
+            for i in (0..length).rev() {
+                self.put((code >> i) & 1, 1);
+            }
+        }
+    }
+    let mut bits = Bits {
+        out: Vec::new(),
+        at: 0,
+    };
+    // BFINAL, then BTYPE 01: compressed with fixed Huffman codes.
+    bits.put(1, 1);
+    bits.put(1, 2);
+    // Literals 0 to 143 are the eight-bit codes from 00110000.
+    let literal = |bits: &mut Bits| bits.code(0x30 + u32::from(b'a'), 8);
+    let mut left = length;
+    if left > 0 {
+        literal(&mut bits);
+        left -= 1;
+    }
+    while left >= 258 {
+        // Length 258 is code 285, the eight-bit codes from 11000000 for 280
+        // to 287, with no extra bits; distance 1 is the five-bit code 0.
+        bits.code(0b1100_0101, 8);
+        bits.code(0, 5);
+        left -= 258;
+    }
+    for _ in 0..left {
+        literal(&mut bits);
+    }
+    // End of block, 256: the seven-bit code 0000000.
+    bits.code(0, 7);
+    let mut member = vec![0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 255];
+    member.extend_from_slice(&bits.out);
+    member.extend_from_slice(&crc32(&vec![b'a'; length]).to_le_bytes());
+    member.extend_from_slice(&(length as u32).to_le_bytes());
+    member
+}
+
+#[test]
+fn a_gzipped_document_inflates_and_one_past_the_cap_is_refused() {
+    // A real producer's member inflates to its document.
+    let bytes = svg_table(&[(2, 3, 0)], &[SVG_GZIPPED]);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    let document = table.document(3).expect("inflates").expect("held");
+    assert!(document.gzipped);
+    assert_eq!(&document.data[..], SVG_TEXT);
+    assert_eq!(document.element, "glyph3");
+    let record = table.record(2).expect("held");
+    assert_eq!(record.length as usize, SVG_GZIPPED.len());
+    let (data, gzipped) = table.document_of(&record).expect("inflates");
+    assert!(gzipped);
+    assert_eq!(&data[..], SVG_TEXT);
+
+    // A document inflating to the cap reads, whole; one byte past it is
+    // refused by name rather than cut.
+    let at_cap = run_of_a(MAX_SVG_DOCUMENT);
+    let past_cap = run_of_a(MAX_SVG_DOCUMENT + 1);
+    let bytes = svg_table(&[(1, 1, 0), (2, 2, 1)], &[&at_cap, &past_cap]);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    let document = table.document(1).expect("at the cap").expect("held");
+    assert_eq!(document.data.len(), MAX_SVG_DOCUMENT);
+    assert!(document.data.iter().all(|&byte| byte == b'a'));
+    assert_eq!(table.document(2), Err(SvgRefusal::TooLarge));
+    assert_eq!(MAX_SVG_DOCUMENT, 16 * 1024 * 1024);
+
+    // A gzip member its own checks disagree with is refused with RFC 1952's
+    // reason: its CRC32 changed, and its data cut short.
+    let mut damaged = SVG_GZIPPED.to_vec();
+    let crc_at = damaged.len() - 8;
+    damaged[crc_at] ^= 0x01;
+    let cut = &SVG_GZIPPED[..SVG_GZIPPED.len() - 12];
+    let bytes = svg_table(&[(1, 1, 0), (2, 2, 1)], &[&damaged, cut]);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    assert!(matches!(
+        table.document(1),
+        Err(SvgRefusal::Gzip(GzipError::Crc { .. }))
+    ));
+    assert_eq!(
+        table.document(2),
+        Err(SvgRefusal::Gzip(GzipError::TruncatedData))
+    );
+
+    // Gzip-encoding is the three bytes the chapter names: 1F 8B and CM 8. A
+    // document that begins 1F 8B with another method is handed back as it is
+    // written, for the SVG reader to refuse.
+    let mut other_method = SVG_GZIPPED.to_vec();
+    other_method[2] = 0x07;
+    let bytes = svg_table(&[(1, 1, 0)], &[&other_method]);
+    let table = SvgTable::parse(&bytes).expect("the table reads");
+    let document = table.document(1).expect("reads").expect("held");
+    assert!(!document.gzipped);
+    assert_eq!(&document.data[..], &other_method[..]);
+}
+
+#[test]
+fn an_index_overrunning_its_table_answers_none() {
+    let documents: [&[u8]; 3] = [SVG_ONE, SVG_SHARED, SVG_GZIPPED];
+    let bytes = svg_table(&SVG_RECORDS, &documents);
+    let records_end = 10 + 2 + 12 * SVG_RECORDS.len();
+    // Every prefix that cuts the header or the records is no table; every
+    // longer one reads, and a document it cuts is refused by name.
+    for end in 0..bytes.len() {
+        let Some(table) = SvgTable::parse(&bytes[..end]) else {
+            assert!(end < records_end, "a prefix of {end} bytes did not read");
+            continue;
+        };
+        assert!(end >= records_end, "a prefix of {end} bytes read");
+        for glyph in 0..20 {
+            match table.document(glyph) {
+                Ok(Some(document)) => {
+                    let (text, _, _) = expected_svg(glyph).expect("a glyph with a record");
+                    assert_eq!(&document.data[..], text);
+                }
+                Ok(None) => assert!(expected_svg(glyph).is_none(), "glyph {glyph} at {end}"),
+                Err(refusal) => assert!(
+                    matches!(refusal, SvgRefusal::Malformed | SvgRefusal::Gzip(_)),
+                    "glyph {glyph} at {end}: {refusal:?}"
+                ),
+            }
+        }
+    }
+    assert!(SvgTable::parse(&bytes).is_some());
+
+    // A count of records past the table.
+    let mut counted = bytes[..records_end].to_vec();
+    counted[10..12].copy_from_slice(&5u16.to_be_bytes());
+    assert!(SvgTable::parse(&counted).is_none());
+    // Another version, a list offset of zero, and one past the table.
+    let mut versioned = bytes.clone();
+    versioned[0..2].copy_from_slice(&1u16.to_be_bytes());
+    assert!(SvgTable::parse(&versioned).is_none());
+    for offset in [0u32, bytes.len() as u32, u32::MAX] {
+        let mut moved = bytes.clone();
+        moved[2..6].copy_from_slice(&offset.to_be_bytes());
+        assert!(SvgTable::parse(&moved).is_none(), "list offset {offset}");
+    }
+
+    // A record whose offset or length is zero, whose document runs past the
+    // table, or whose offset and length overflow, refused by name.
+    for (offset, length) in [
+        (0u32, 10u32),
+        (50, 0),
+        (50, bytes.len() as u32),
+        (u32::MAX, 1),
+        (1, u32::MAX),
+    ] {
+        let mut bad = svg_table(&[(1, 1, 0)], &[SVG_ONE]);
+        bad[16..20].copy_from_slice(&offset.to_be_bytes());
+        bad[20..24].copy_from_slice(&length.to_be_bytes());
+        let table = SvgTable::parse(&bad).expect("the index reads");
+        assert_eq!(
+            table.document(1),
+            Err(SvgRefusal::Malformed),
+            "offset {offset} length {length}"
+        );
+        assert!(table.has_document(1), "the record still holds the glyph");
+    }
+}
+
+#[test]
+fn every_prefix_and_flip_of_an_svg_table_answers_without_panicking() {
+    let documents: [&[u8]; 3] = [SVG_ONE, SVG_SHARED, SVG_GZIPPED];
+    let table = svg_table(&SVG_RECORDS, &documents);
+    let walk = |bytes: &[u8]| {
+        if let Some(svg) = SvgTable::parse(bytes) {
+            let _ = svg.warnings();
+            let _ = svg.records();
+            for glyph in 0..20 {
+                if let Ok(Some(document)) = svg.document(glyph) {
+                    assert!(document.data.len() <= MAX_SVG_DOCUMENT);
+                    assert!(svg.has_document(glyph));
+                }
+            }
+        }
+    };
+    walk(&table);
+    for end in 0..=table.len() {
+        walk(&table[..end]);
+    }
+    for at in 0..table.len() {
+        for flip in [0x01u8, 0x80, 0xFF] {
+            let mut bytes = table.clone();
+            bytes[at] ^= flip;
+            walk(&bytes);
+        }
+    }
+}
+
+/// `fuzz/corpus/sfnt/svg.ttf`: a plain document for glyph 1, a shared one
+/// for glyphs 2, 13 and 14, and GNU gzip's member for glyphs 5 to 7 — so the
+/// `sfnt` target reaches RFC 1952's reader — in a face of 20 glyphs.
+fn svg_seed() -> Vec<u8> {
+    face(&[
+        (
+            b"SVG ",
+            svg_table(&SVG_RECORDS, &[SVG_ONE, SVG_SHARED, SVG_GZIPPED]),
+        ),
+        (b"head", head(1000)),
+        (b"maxp", maxp(20)),
+    ])
+}
+
 /// The colour tables a seed carries, read through its directory, as the
 /// `sfnt` target reads them.
 fn colour_tables_of(face: &[u8]) -> (Option<Colr<'_>>, Option<Cpal<'_>>) {
@@ -2915,7 +3324,13 @@ fn colour_tables_of(face: &[u8]) -> (Option<Colr<'_>>, Option<Cpal<'_>>) {
 }
 
 /// The `fuzz/corpus/sfnt` seeds the builders here write.
-const SEEDS: [&str; 4] = ["colr-v0.ttf", "colr-v1.ttf", "sbix.ttf", "cbdt.ttf"];
+const SEEDS: [&str; 5] = [
+    "colr-v0.ttf",
+    "colr-v1.ttf",
+    "sbix.ttf",
+    "cbdt.ttf",
+    "svg.ttf",
+];
 
 /// A seed's bytes, as the builders write it.
 fn seed_bytes(name: &str) -> Vec<u8> {
@@ -2924,6 +3339,7 @@ fn seed_bytes(name: &str) -> Vec<u8> {
         "colr-v1.ttf" => colr_v1_seed(),
         "sbix.ttf" => sbix_seed(),
         "cbdt.ttf" => cbdt_seed(),
+        "svg.ttf" => svg_seed(),
         _ => Vec::new(),
     }
 }
@@ -2986,6 +3402,21 @@ fn reaches(name: &str, face: &[u8]) -> bool {
                         .glyph(1, 10)
                         .is_ok_and(|glyph| glyph.is_some_and(|glyph| glyph.format == 19))
             })
+        }
+        "svg.ttf" => {
+            let font = Sfnt::parse(face).expect("the seed's directory reads");
+            let Some(table) = font
+                .table(u32::from_be_bytes(*b"SVG "))
+                .and_then(SvgTable::parse)
+            else {
+                return false;
+            };
+            let document = |glyph: u16| table.document(glyph).ok().flatten();
+            table.warnings().is_empty()
+                && document(1).is_some_and(|plain| !plain.gzipped && &plain.data[..] == SVG_ONE)
+                && document(6)
+                    .is_some_and(|inflated| inflated.gzipped && &inflated.data[..] == SVG_TEXT)
+                && document(14).is_some_and(|shared| &shared.data[..] == SVG_SHARED)
         }
         _ => false,
     }
