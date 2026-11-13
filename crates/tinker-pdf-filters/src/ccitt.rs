@@ -80,17 +80,24 @@ impl<'a> Bits<'a> {
         self.at >= self.data.len() * 8
     }
 
+    /// The next `count` bits, at most 24, the first in bit `count - 1`, and
+    /// zeros past the end of the data: one word read at the cursor's byte and
+    /// shifted, rather than a bit at a time.
     fn peek(&self, count: u32) -> u32 {
-        let mut value = 0u32;
-        for i in 0..count.min(24) {
-            let index = self.at + i as usize;
-            let bit = self
-                .data
-                .get(index / 8)
-                .map_or(0, |byte| (byte >> (7 - (index % 8))) & 1);
-            value = (value << 1) | u32::from(bit);
+        let count = count.min(24);
+        if count == 0 {
+            return 0;
         }
-        value
+        let byte = self.at / 8;
+        let word = match self.data.get(byte..byte.saturating_add(4)) {
+            Some(&[a, b, c, d]) => u32::from_be_bytes([a, b, c, d]),
+            _ => (0..4).fold(0u32, |word, offset| {
+                let next = self.data.get(byte.saturating_add(offset)).copied();
+                (word << 8) | u32::from(next.unwrap_or(0))
+            }),
+        };
+        // `at % 8` is at most 7, so the word holds 25 bits past the cursor.
+        (word << (self.at % 8)) >> (32 - count)
     }
 
     fn skip(&mut self, count: u32) {
@@ -378,43 +385,147 @@ const EXT_MAKEUP: [(u32, u32, u16); 13] = [
 /// One entry of a run-length table: `(bit length, code, run)`.
 type RunCode = (u32, u32, u16);
 
+/// What the next bits of a row are, read through a colour's run table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Run {
+    /// No code of the colour begins with them: an end-of-line, or damage.
+    Invalid,
+    /// A terminating code (T.4 Table 2): its run and its length in bits.
+    Terminating(u16, u8),
+    /// A make-up code (Table 3a or 3b): its run and its length; more of the
+    /// run follows.
+    MakeUp(u16, u8),
+    /// The code is longer than [`RUN_FIRST_BITS`]: its second-level table
+    /// starts at this index.
+    Longer(u16),
+}
+
+/// The bits the first level of a run table is indexed by: every white code
+/// but Table 3b's is no longer, and so is every black code of up to nine
+/// bits.
+const RUN_FIRST_BITS: u32 = 9;
+
+/// The further bits a second-level table is indexed by: T.4's longest code
+/// is thirteen bits, Table 3a's longest black make-up codes.
+const RUN_SECOND_BITS: u32 = 4;
+
+/// The bits a run's code is looked up by.
+const RUN_BITS: u32 = RUN_FIRST_BITS + RUN_SECOND_BITS;
+
+/// A run table's entries: the first level, then room for sixteen
+/// second-level tables, one for each nine-bit prefix a longer code begins
+/// with. A colour whose codes needed more would not compile: [`run_table`]
+/// runs at compile time, where an index past the end is an error.
+const RUN_ENTRIES: usize = (1 << RUN_FIRST_BITS) + 16 * (1 << RUN_SECOND_BITS);
+
+/// Writes `entry` at every index of `table[base..base + span]`, where no other
+/// code may already be: the codes of a colour are prefix-free, and a table
+/// built from ones that are not fails to compile.
+const fn fill(table: &mut [Run; RUN_ENTRIES], base: usize, span: usize, entry: Run) {
+    let mut index = base;
+    while index < base + span {
+        assert!(
+            matches!(table[index], Run::Invalid),
+            "a run code is a prefix of another"
+        );
+        table[index] = entry;
+        index += 1;
+    }
+}
+
+/// **A colour's run table, built from T.4's own tables at compile time**:
+/// the terminating codes, the colour's make-up codes and the extended
+/// make-up codes both colours share.
+///
+/// A code no longer than [`RUN_FIRST_BITS`] fills every first-level entry its
+/// bits begin, so one probe of the next nine bits finds it; a longer one
+/// fills its share of the second-level table its first nine bits point to.
+/// [`WHITE_TERM`] and its neighbours stay the tables the encoder writes from
+/// and `the_run_tables_are_itu_t_t_4_s_own` holds to the Recommendation, and
+/// this is derived from them rather than transcribed a second time.
+const fn run_table(term: &[RunCode], makeup: &[RunCode]) -> [Run; RUN_ENTRIES] {
+    let mut table = [Run::Invalid; RUN_ENTRIES];
+    let mut next = 1usize << RUN_FIRST_BITS;
+    let lists: [(&[RunCode], bool); 3] = [(term, true), (makeup, false), (&EXT_MAKEUP, false)];
+    let mut list = 0;
+    while list < lists.len() {
+        let (codes, terminating) = lists[list];
+        let mut at = 0;
+        while at < codes.len() {
+            let (length, code, run) = codes[at];
+            let entry = if terminating {
+                Run::Terminating(run, length as u8)
+            } else {
+                Run::MakeUp(run, length as u8)
+            };
+            if length <= RUN_FIRST_BITS {
+                let free = RUN_FIRST_BITS - length;
+                fill(&mut table, (code as usize) << free, 1 << free, entry);
+            } else {
+                let rest = length - RUN_FIRST_BITS;
+                let prefix = (code >> rest) as usize;
+                let offset = match table[prefix] {
+                    Run::Longer(offset) => offset as usize,
+                    Run::Invalid => {
+                        let offset = next;
+                        table[prefix] = Run::Longer(offset as u16);
+                        next += 1 << RUN_SECOND_BITS;
+                        offset
+                    }
+                    Run::Terminating(..) | Run::MakeUp(..) => {
+                        panic!("a run code is a prefix of another")
+                    }
+                };
+                let free = RUN_SECOND_BITS - rest;
+                let low = (code as usize) & ((1 << rest) - 1);
+                fill(&mut table, offset + (low << free), 1 << free, entry);
+            }
+            at += 1;
+        }
+        list += 1;
+    }
+    table
+}
+
+/// White's run table. `static`, as CRC-32's table is, so it is one copy.
+static WHITE_RUNS: [Run; RUN_ENTRIES] = run_table(&WHITE_TERM, &WHITE_MAKEUP);
+
+/// Black's run table.
+static BLACK_RUNS: [Run; RUN_ENTRIES] = run_table(&BLACK_TERM, &BLACK_MAKEUP);
+
+/// The code at the head of `next`, the row's next [`RUN_BITS`] bits with the
+/// first in the top one: its run, its length and whether it terminates the
+/// run. One probe, and a second for a code longer than the first level.
+fn lookup_run(table: &[Run; RUN_ENTRIES], next: u32) -> Option<(u32, u32, bool)> {
+    let mut entry = probe(table, (next >> RUN_SECOND_BITS) as usize);
+    if let Run::Longer(offset) = entry {
+        let low = (next & ((1 << RUN_SECOND_BITS) - 1)) as usize;
+        entry = probe(table, offset as usize + low);
+    }
+    match entry {
+        Run::Terminating(run, length) => Some((u32::from(run), u32::from(length), true)),
+        Run::MakeUp(run, length) => Some((u32::from(run), u32::from(length), false)),
+        Run::Invalid | Run::Longer(_) => None,
+    }
+}
+
+/// One read of a run table, counted under test.
+fn probe(table: &[Run; RUN_ENTRIES], index: usize) -> Run {
+    #[cfg(test)]
+    tests::PROBES.with(|probes| probes.set(probes.get() + 1));
+    table.get(index).copied().unwrap_or(Run::Invalid)
+}
+
 /// Reads one run length, following make-up codes until a terminating one.
 fn read_run(bits: &mut Bits, white: bool) -> Option<u32> {
+    let table = if white { &WHITE_RUNS } else { &BLACK_RUNS };
     let mut total = 0u32;
     // A run is at most one terminating code plus a chain of make-ups; the
     // bound stops a corrupt stream looping.
     for _ in 0..64 {
-        let (term, makeup): (&[RunCode], &[RunCode]) = if white {
-            (&WHITE_TERM, &WHITE_MAKEUP)
-        } else {
-            (&BLACK_TERM, &BLACK_MAKEUP)
-        };
-
-        let mut matched = None;
-        // Shorter codes first: the tables are prefix-free, so the first
-        // length that matches is the right one.
-        for length in 2..=14u32 {
-            let candidate = bits.peek(length);
-            if let Some((_, _, run)) = term
-                .iter()
-                .find(|(l, code, _)| *l == length && *code == candidate)
-            {
-                matched = Some((length, *run, true));
-                break;
-            }
-            if let Some((_, _, run)) = makeup
-                .iter()
-                .chain(EXT_MAKEUP.iter())
-                .find(|(l, code, _)| *l == length && *code == candidate)
-            {
-                matched = Some((length, *run, false));
-                break;
-            }
-        }
-
-        let (length, run, terminating) = matched?;
+        let (run, length, terminating) = lookup_run(table, bits.peek(RUN_BITS))?;
         bits.skip(length);
-        total = total.saturating_add(u32::from(run));
+        total = total.saturating_add(run);
         if terminating {
             return Some(total);
         }
@@ -423,6 +534,66 @@ fn read_run(bits: &mut Bits, white: bool) -> Option<u32> {
         }
     }
     Some(total)
+}
+
+/// A two-dimensional coding mode (T.6 Table 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// P: the run continues past b2.
+    Pass,
+    /// H: two runs follow, coded as T.4's run lengths.
+    Horizontal,
+    /// V: a1 is this far from b1, -3 to 3, positive to the right.
+    Vertical(i8),
+}
+
+/// The bits a mode code is looked up by: T.6 Table 1's longest, VR(3) and
+/// VL(3), are seven.
+const MODE_BITS: u32 = 7;
+
+/// T.6 Table 1's mode codes, as `(bit length, code, mode)`. The extension
+/// codes (`0000001xxx`) and an end-of-line begin with the two seven-bit
+/// patterns none of these fills, and end the row.
+const MODE_CODES: [(u32, u32, Mode); 9] = [
+    (4, 0b0001, Mode::Pass),
+    (3, 0b001, Mode::Horizontal),
+    (1, 0b1, Mode::Vertical(0)),
+    (3, 0b011, Mode::Vertical(1)),
+    (6, 0b000011, Mode::Vertical(2)),
+    (7, 0b0000011, Mode::Vertical(3)),
+    (3, 0b010, Mode::Vertical(-1)),
+    (6, 0b000010, Mode::Vertical(-2)),
+    (7, 0b0000010, Mode::Vertical(-3)),
+];
+
+/// [`MODE_CODES`] by the next seven bits: each code fills every entry its
+/// bits begin, so one probe finds it.
+const fn mode_table() -> [Option<(Mode, u8)>; 1 << MODE_BITS] {
+    let mut table = [None; 1 << MODE_BITS];
+    let mut at = 0;
+    while at < MODE_CODES.len() {
+        let (length, code, mode) = MODE_CODES[at];
+        let free = MODE_BITS - length;
+        let mut index = (code as usize) << free;
+        while index < ((code as usize) + 1) << free {
+            assert!(table[index].is_none(), "a mode code is a prefix of another");
+            table[index] = Some((mode, length as u8));
+            index += 1;
+        }
+        at += 1;
+    }
+    table
+}
+
+static MODES: [Option<(Mode, u8)>; 1 << MODE_BITS] = mode_table();
+
+/// The mode code at the head of `next`, the row's next [`MODE_BITS`] bits,
+/// and its length: one probe.
+fn lookup_mode(next: u32) -> Option<(Mode, u32)> {
+    #[cfg(test)]
+    tests::PROBES.with(|probes| probes.set(probes.get() + 1));
+    let (mode, length) = MODES.get(next as usize).copied().flatten()?;
+    Some((mode, u32::from(length)))
 }
 
 /// Records a leniency once. The crate's contract is one entry per condition
@@ -733,66 +904,40 @@ fn decode_row(
         }
 
         if two_dimensional {
-            // T.6 mode codes, longest first so a prefix cannot shadow one.
             passed.reach(reference, a0, steps);
             let b1 = next_change(reference, a0, white, columns, passed.start, steps);
             let b2 = following(reference, b1, columns, passed.start, steps);
 
-            if bits.peek(4) == 0b0001 {
-                // Pass: the run continues past b2.
-                bits.skip(4);
-                a0 = b2 as isize;
-                continue;
-            }
-            if bits.peek(3) == 0b001 {
-                // Horizontal: two explicit runs follow.
-                bits.skip(3);
-                let first = read_run(bits, white)?;
-                let second = read_run(bits, !white)?;
-                let start = if a0 < 0 { 0 } else { a0 as usize };
-                let one = (start + first as usize).min(columns);
-                let two = (one + second as usize).min(columns);
-                changes.push(one);
-                changes.push(two);
-                a0 = two as isize;
-                continue;
-            }
-
-            // Vertical modes: the change sits within three pixels of b1.
-            let delta = if bits.peek(1) == 1 {
-                bits.skip(1);
-                Some(0i32)
-            } else if bits.peek(3) == 0b011 {
-                bits.skip(3);
-                Some(1)
-            } else if bits.peek(3) == 0b010 {
-                bits.skip(3);
-                Some(-1)
-            } else if bits.peek(6) == 0b000011 {
-                bits.skip(6);
-                Some(2)
-            } else if bits.peek(6) == 0b000010 {
-                bits.skip(6);
-                Some(-2)
-            } else if bits.peek(7) == 0b0000011 {
-                bits.skip(7);
-                Some(3)
-            } else if bits.peek(7) == 0b0000010 {
-                bits.skip(7);
-                Some(-3)
-            } else {
-                None
-            };
-
-            let Some(delta) = delta else {
-                // An end-of-line or an unrecognized code ends the row.
+            // T.6 Table 1, one probe of the next seven bits. An end-of-line
+            // or an unrecognized code ends the row.
+            let Some((mode, length)) = lookup_mode(bits.peek(MODE_BITS)) else {
                 return (!changes.is_empty()).then_some(changes);
             };
-
-            let a1 = (b1 as i64 + i64::from(delta)).clamp(0, columns as i64) as usize;
-            changes.push(a1);
-            a0 = a1 as isize;
-            white = !white;
+            bits.skip(length);
+            match mode {
+                Mode::Pass => {
+                    // The run continues past b2.
+                    a0 = b2 as isize;
+                }
+                Mode::Horizontal => {
+                    // Two explicit runs follow.
+                    let first = read_run(bits, white)?;
+                    let second = read_run(bits, !white)?;
+                    let start = if a0 < 0 { 0 } else { a0 as usize };
+                    let one = (start + first as usize).min(columns);
+                    let two = (one + second as usize).min(columns);
+                    changes.push(one);
+                    changes.push(two);
+                    a0 = two as isize;
+                }
+                Mode::Vertical(delta) => {
+                    // The change sits within three pixels of b1.
+                    let a1 = (b1 as i64 + i64::from(delta)).clamp(0, columns as i64) as usize;
+                    changes.push(a1);
+                    a0 = a1 as isize;
+                    white = !white;
+                }
+            }
         } else {
             let run = read_run(bits, white)?;
             let start = if a0 < 0 { 0 } else { a0 as usize };
@@ -885,6 +1030,13 @@ fn following(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        /// Every read of a run or mode table this thread has made, so a test
+        /// can say what a code costs to decode — a property of the code rather
+        /// than of the machine.
+        pub(super) static PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     /// Builds a bit string from a pattern of '0' and '1', padded with zeros.
     fn bits_from(pattern: &str) -> Vec<u8> {
@@ -1488,11 +1640,11 @@ mod tests {
     /// **The tables both directions share are ITU-T T.4's own.**
     ///
     /// This is the test that makes sharing them defensible. `encode.rs` emits
-    /// from the same five arrays [`read_run`] reads, which is the right
-    /// engineering — the two directions must agree entry for entry or nothing
-    /// round-trips, and a second copy is a second thing to get wrong — but it
-    /// means a wrong entry cancels between them and every round trip in this
-    /// file still passes. Nothing in the tree notices except this, which
+    /// from the same five arrays [`read_run`]'s tables are built from, which
+    /// is the right engineering — the two directions must agree entry for
+    /// entry or nothing round-trips, and a second copy is a second thing to
+    /// get wrong — but it means a wrong entry cancels between them and every
+    /// round trip in this file still passes. Nothing in the tree notices except this, which
     /// compares against a transcription of the Recommendation rather than
     /// against either implementation.
     ///
@@ -1546,6 +1698,159 @@ mod tests {
                 "extended make-up {index}"
             );
             assert_eq!(EXT_MAKEUP[index].2 as usize, 1792 + index * 64);
+        }
+    }
+
+    /// **ITU-T T.6 Table 1, transcribed from the Recommendation and not from
+    /// [`MODE_CODES`]**: the two-dimensional mode codes, as `(code word,
+    /// mode)`, read out of the 11/88 Recommendation's PDF with this
+    /// repository's own text extraction. The table's last row, the extension
+    /// code `0000001xxx`, is no mode this decoder reads.
+    const T6_MODE_CODES: [(&str, Mode); 9] = [
+        ("0001", Mode::Pass),
+        ("001", Mode::Horizontal),
+        ("1", Mode::Vertical(0)),
+        ("011", Mode::Vertical(1)),
+        ("000011", Mode::Vertical(2)),
+        ("0000011", Mode::Vertical(3)),
+        ("010", Mode::Vertical(-1)),
+        ("000010", Mode::Vertical(-2)),
+        ("0000010", Mode::Vertical(-3)),
+    ];
+
+    /// The value a code word spells, most significant bit first.
+    fn word(code: &str) -> u32 {
+        code.chars()
+            .fold(0, |value, bit| (value << 1) | u32::from(bit == '1'))
+    }
+
+    /// Every code of T.4 Tables 2, 3a and 3b for one colour, as `(code word,
+    /// run, terminating)`, out of the transcriptions above.
+    fn t4_codes(white: bool) -> Vec<(&'static str, u32, bool)> {
+        let (term, makeup) = if white {
+            (&T4_WHITE_TERM, &T4_WHITE_MAKEUP)
+        } else {
+            (&T4_BLACK_TERM, &T4_BLACK_MAKEUP)
+        };
+        let mut codes: Vec<(&'static str, u32, bool)> = term
+            .iter()
+            .enumerate()
+            .map(|(run, code)| (*code, run as u32, true))
+            .collect();
+        codes.extend(
+            makeup
+                .iter()
+                .enumerate()
+                .map(|(index, code)| (*code, (index as u32 + 1) * 64, false)),
+        );
+        codes.extend(
+            T4_EXT_MAKEUP
+                .iter()
+                .enumerate()
+                .map(|(index, code)| (*code, 1792 + index as u32 * 64, false)),
+        );
+        codes
+    }
+
+    /// **Every code decodes through the tables as T.4 and T.6 list it.**
+    ///
+    /// Each code word of T.4's Tables 2, 3a and 3b, for both colours,
+    /// followed by every suffix that fills the rest of [`RUN_BITS`], is
+    /// looked up to its run, its length and whether it terminates; each of
+    /// T.6 Table 1's mode codes, followed by every suffix to [`MODE_BITS`],
+    /// to its mode and length. The codes are the transcriptions of the
+    /// Recommendations rather than the arrays the tables are built from. An
+    /// end-of-line, and the extension codes, are neither a run nor a mode.
+    #[test]
+    fn every_code_decodes_through_the_tables_as_t4_and_t6_list_it() {
+        for white in [true, false] {
+            let table = if white { &WHITE_RUNS } else { &BLACK_RUNS };
+            let colour = if white { "white" } else { "black" };
+            for (code, run, terminating) in t4_codes(white) {
+                let length = code.len() as u32;
+                let free = RUN_BITS - length;
+                for suffix in 0..1u32 << free {
+                    assert_eq!(
+                        lookup_run(table, (word(code) << free) | suffix),
+                        Some((run, length, terminating)),
+                        "{colour} code {code} followed by {suffix:0width$b}",
+                        width = free as usize
+                    );
+                }
+            }
+            // T.4 4.1.2's end-of-line, eleven zeros and a one, opens no run.
+            assert_eq!(lookup_run(table, word("000000000001") << 1), None);
+            assert_eq!(lookup_run(table, 0), None);
+        }
+        for (code, mode) in T6_MODE_CODES {
+            let length = code.len() as u32;
+            let free = MODE_BITS - length;
+            for suffix in 0..1u32 << free {
+                assert_eq!(
+                    lookup_mode((word(code) << free) | suffix),
+                    Some((mode, length)),
+                    "mode code {code} followed by {suffix:0width$b}",
+                    width = free as usize
+                );
+            }
+        }
+        // The extension codes begin 0000001, and an end-of-line 0000000.
+        assert_eq!(lookup_mode(0b000_0001), None);
+        assert_eq!(lookup_mode(0), None);
+    }
+
+    /// **A run costs at most two table probes a code.**
+    ///
+    /// Counted through [`PROBES`]: every code of both colours' tables, read
+    /// as a whole run by [`read_run`] — a make-up code followed by the
+    /// terminating code for zero — costs one probe for each code no longer
+    /// than the first level and two for a longer one; every mode code costs
+    /// one. The search the tables replaced tried every length from two to
+    /// fourteen against the entries of three tables.
+    #[test]
+    fn a_run_costs_at_most_two_table_probes() {
+        let cost = |code: &str| {
+            if code.len() as u32 <= RUN_FIRST_BITS {
+                1
+            } else {
+                2
+            }
+        };
+        for white in [true, false] {
+            let colour = if white { "white" } else { "black" };
+            let zero = if white {
+                T4_WHITE_TERM[0]
+            } else {
+                T4_BLACK_TERM[0]
+            };
+            for (code, run, terminating) in t4_codes(white) {
+                let (pattern, codes) = if terminating {
+                    (code.to_string(), 1)
+                } else {
+                    (format!("{code}{zero}"), 2)
+                };
+                let data = bits_from(&pattern);
+                let mut bits = Bits::new(&data);
+                PROBES.with(|probes| probes.set(0));
+                assert_eq!(
+                    read_run(&mut bits, white),
+                    Some(run),
+                    "{colour} code {code}"
+                );
+                let probes = PROBES.with(std::cell::Cell::get);
+                let expected = cost(code) + if terminating { 0 } else { cost(zero) };
+                assert_eq!(probes, expected, "{colour} code {code}");
+                assert!(probes <= 2 * codes, "{colour} code {code}: {probes} probes");
+            }
+        }
+        for (code, _) in T6_MODE_CODES {
+            let free = MODE_BITS - code.len() as u32;
+            PROBES.with(|probes| probes.set(0));
+            assert!(
+                lookup_mode(word(code) << free).is_some(),
+                "mode code {code}"
+            );
+            assert_eq!(PROBES.with(std::cell::Cell::get), 1, "mode code {code}");
         }
     }
 

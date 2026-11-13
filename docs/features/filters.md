@@ -138,15 +138,19 @@ parameters are honoured — `/K`, `/Columns`, `/Rows`, `/BlackIs1`,
 `/EncodedByteAlign`, `/EndOfLine`, `/EndOfBlock` — with EOL, RTC and EOFB
 recognised wherever they appear (T.4 4.1.2). A row that will not decode is
 one row, not the rest of the page: the row above is replicated with a warning,
-which is the standard fax recovery. A two-dimensional code finds b1 and b2 on
-the reference line from the changes its row has not yet passed rather than
-from the line's start: every change before that point is at or left of an
-`a0` that has not moved back since, so it can be neither, and a damaged code
-that moves `a0` back starts the search again from the line's start. Every
-answer is the one a search from the start gives, and a row costs work in
-proportion to its changes rather than to their square; the G4 encoder shares
-both searches and the cursor. Output is packed one bit per pixel,
-MSB-first, rows byte-padded — exactly the shape `/BitsPerComponent 1`
+which is the standard fax recovery. Codes are read by table lookup on a word
+read at the cursor: a run's next thirteen bits index its colour's run table,
+built at compile time from T.4's Tables 2, 3a and 3b, in one probe for a code
+of up to nine bits and two through a second-level table for a longer one, and
+a mode's next seven bits index a table of T.6's Table 1. A two-dimensional
+code finds b1 and b2 on the reference line from the changes its row has not
+yet passed rather than from the line's start: every change before that point
+is at or left of an `a0` that has not moved back since, so it can be neither,
+and a damaged code that moves `a0` back starts the search again from the
+line's start. Every answer is the one a search from the start gives, and a
+row costs work in proportion to its changes rather than to their square; the
+G4 encoder shares both searches and the cursor. Output is packed one bit per
+pixel, MSB-first, rows byte-padded — exactly the shape `/BitsPerComponent 1`
 describes, so `/ImageMask`, `/Decode` and `/ColorSpace` compose with a fax
 the way they do with any other image.
 
