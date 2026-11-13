@@ -347,7 +347,11 @@ interlace, `tRNS` in all three forms, and palettes applied with a bounds
 check — an out-of-range index becomes a black pixel with a warning rather
 than a refusal of every pixel that was fine (ruling 2). `png_scan` serves the
 pass-through path: it walks chunks, checks every CRC and hands back the
-concatenated IDAT without inflating it. Beside it sit `inflate_raw` (RFC 1951
+concatenated IDAT without inflating it, and `PngScan::idat_matches_header` is
+the check the path makes before it places those bytes: one streamed inflate,
+keeping only the inflater's window, that holds the data to every row the
+header describes, each led by a filter type 9.2 defines, in a zlib stream that
+reads as `/FlateDecode` reads it with no repair. Beside it sit `inflate_raw` (RFC 1951
 with no wrapper, for ZIP entries) and `crc32` — the reflected-polynomial
 CRC-32 that ZIP (APPNOTE 4.4.7) and PNG (5.3) both carry, with a resumable
 `Crc32` for checksums over non-adjacent slices; and `xxh64`, XXH64 with a

@@ -2,9 +2,10 @@
 //!
 //! The core is a resumable state machine: every state either completes or
 //! reports `NeedInput` without discarding the bits it already read, so the
-//! one-shot wrapper below and a future streaming surface share the same
-//! decoder. Back-references read the output `Vec` directly — decoding is to
-//! memory, so the output doubles as the 32 KB window.
+//! one-shot wrapper below and the streamed read in [`zlib_reads_clean`] share
+//! the same decoder. Back-references read the output `Vec` directly: the
+//! one-shot read decodes to memory, so its output doubles as the 32 KB window,
+//! and the streamed one keeps that window and lets the rest go.
 
 use crate::{Limits, Tail, Warning, Warnings};
 
@@ -334,8 +335,8 @@ enum Progress {
     OutputCap,
 }
 
-/// The resumable RFC 1951 decoder. Private on purpose: wave 1 exposes only
-/// the one-shot API, and this is the shape a streaming surface would take.
+/// The resumable RFC 1951 decoder. Private on purpose: the crate exposes the
+/// one-shot reads, and [`zlib_reads_clean`] is the streamed one inside it.
 struct Inflate {
     bits: BitState,
     state: State,
@@ -775,7 +776,13 @@ fn zlib_header(input: &[u8]) -> Option<bool> {
 }
 
 fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u64, 0u64);
+    adler32_from(1, data)
+}
+
+/// Adler-32 carried on from `adler`, the checksum of the bytes before `data`,
+/// so a stream read a piece at a time is summed the same as one read whole.
+fn adler32_from(adler: u32, data: &[u8]) -> u32 {
+    let (mut a, mut b) = (u64::from(adler & 0xffff), u64::from(adler >> 16));
     for chunk in data.chunks(5552) {
         for &x in chunk {
             a += u64::from(x);
@@ -837,6 +844,89 @@ pub(crate) fn flate_bytes(
         w.push(Warning::TrailingGarbage);
     }
     (r.data, r.complete)
+}
+
+/// The largest distance a back-reference reaches (3.2.5), and so all of the
+/// output a streamed read has to keep.
+const WINDOW: usize = 32 * 1024;
+
+/// Input handed to the decoder at a time by [`zlib_reads_clean`], which bounds
+/// each piece of output it yields to this times DEFLATE's largest expansion,
+/// whatever the stream holds: a 258-byte copy coded in as few as two bits, so
+/// about a thousand to one.
+const STEP: usize = 4 * 1024;
+
+/// [`flate_bytes`] read as a stream, for a caller that looks at the data
+/// without holding it: the decoded bytes reach `sink` in order, a piece at a
+/// time, and the read keeps only a window of them, the 32 KiB back-references
+/// copy from, let go in runs of three times that.
+///
+/// True when the read is clean and `sink` took every piece, which is exactly
+/// when [`flate_bytes`] with no output ceiling returns the bytes complete and
+/// pushes no warning: a zlib header with no preset dictionary, a stream that
+/// ends, an Adler-32 that matches what it held, and nothing `tail` calls
+/// garbage after it. `sink` returns false to stop the read, which is then not
+/// clean. With no ceiling, the work is bounded by the input, a thousand bytes
+/// of data at most for each byte of code, and a caller that knows how much
+/// data to expect stops the read from `sink` once it is past that.
+pub(crate) fn zlib_reads_clean(
+    input: &[u8],
+    tail: Tail,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> bool {
+    // A preset dictionary is ignored with a warning, and bytes that are not a
+    // zlib header are retried as raw DEFLATE with one: neither read is clean.
+    if zlib_header(input) != Some(false) {
+        return false;
+    }
+    let body = input.get(2..).unwrap_or_default();
+    let mut inf = Inflate::new();
+    let mut out = Vec::new();
+    // `out[..handed]` has been through `sink` and the checksum.
+    let mut handed = 0usize;
+    let mut adler = 1u32;
+    let mut pos = 0usize;
+    let mut fed = 0usize;
+    loop {
+        fed = body.len().min(fed.saturating_add(STEP));
+        let mut src = Bits {
+            input: body.get(..fed).unwrap_or_default(),
+            pos,
+        };
+        let progress = inf.run(&mut src, &mut out, usize::MAX);
+        pos = src.pos;
+        let fresh = out.get(handed..).unwrap_or_default();
+        adler = adler32_from(adler, fresh);
+        if !fresh.is_empty() && !sink(fresh) {
+            return false;
+        }
+        // Drained in long runs, so the window is moved once for every few
+        // times its own length decoded rather than once a piece.
+        if out.len() >= 4 * WINDOW {
+            out.drain(..out.len() - WINDOW);
+        }
+        handed = out.len();
+        match progress {
+            Progress::NeedInput if fed < body.len() => {}
+            Progress::Finished => {
+                // As in `raw_bytes`: whole bytes still in the accumulator were
+                // never part of the stream.
+                let end = pos.saturating_sub(inf.bits.cnt as usize / 8);
+                let rest = body.get(end..).unwrap_or_default();
+                // And as in `flate_bytes`: four bytes after the data are the
+                // checksum, and fewer are a checksum missing, which costs no
+                // data and is no repair.
+                return match rest.split_first_chunk::<4>() {
+                    Some((checksum, after)) => {
+                        u32::from_be_bytes(*checksum) == adler && !tail.garbage(after)
+                    }
+                    None => true,
+                };
+            }
+            // Cut short, corrupt, or a ceiling, which this read does not set.
+            Progress::NeedInput | Progress::Corrupt | Progress::OutputCap => return false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1124,5 +1214,143 @@ mod tests {
         }
         assert_eq!(p, Progress::Finished);
         assert_eq!(out, b"Hello");
+    }
+
+    /// A streamed read's pieces, joined, and whether it was clean.
+    fn streamed(input: &[u8], tail: Tail) -> (Vec<u8>, bool) {
+        let mut seen = Vec::new();
+        let clean = zlib_reads_clean(input, tail, &mut |piece: &[u8]| {
+            seen.extend_from_slice(piece);
+            true
+        });
+        (seen, clean)
+    }
+
+    /// Words from a small vocabulary, with now and then a run repeated from
+    /// most of a window back: it compresses, but to many steps of input, and
+    /// its back-references reach across every drain of the streamed window.
+    fn page_like(len: usize) -> Vec<u8> {
+        let words: Vec<Vec<u8>> = (0..64u32)
+            .map(|i| {
+                (0..5 + i % 8)
+                    .map(|k| b'a' + ((i * 7 + k * 3) % 26) as u8)
+                    .collect()
+            })
+            .collect();
+        let mut x = 0x2545_f491_u32;
+        let mut out = Vec::with_capacity(len + 512);
+        while out.len() < len {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            if x % 40 == 0 && out.len() > WINDOW {
+                let from = out.len() - WINDOW + (x as usize >> 20) % 1024;
+                out.extend_from_within(from..from + 300);
+            } else {
+                out.extend_from_slice(&words[(x >> 8) as usize % words.len()]);
+                out.push(b' ');
+            }
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// What [`flate_bytes`] says of a stream with a ceiling it cannot reach.
+    fn whole(input: &[u8], tail: Tail) -> (Vec<u8>, bool) {
+        let mut w = Warnings::default();
+        let (data, complete) = flate_bytes(input, &Limits::new(1 << 26), tail, &mut w);
+        (data, complete && w.into_vec().is_empty())
+    }
+
+    #[test]
+    fn a_streamed_read_hands_on_the_bytes_a_whole_read_returns() {
+        for len in [0, 1, 1000, 4 * WINDOW, 600_000] {
+            let data = page_like(len);
+            let coded = crate::deflate::zlib_compress(&data);
+            if len == 600_000 {
+                assert!(coded.len() > 8 * STEP, "{} bytes of code", coded.len());
+            }
+            let (seen, clean) = streamed(&coded, Tail::WhiteSpace);
+            assert!(clean, "{len} bytes read clean");
+            assert_eq!(seen, data, "{len} bytes handed on in order");
+        }
+    }
+
+    /// Clean exactly when the whole read is complete with no warning, over a
+    /// stream cut, flipped, extended, given a dictionary and stripped of its
+    /// header; and where both are clean, the same bytes.
+    #[test]
+    fn a_streamed_read_is_clean_exactly_when_a_whole_read_needs_no_repair() {
+        let coded = crate::deflate::zlib_compress(&page_like(200_000));
+        let n = coded.len();
+        let mut cases: Vec<Vec<u8>> = vec![coded.clone()];
+        for cut in [0, 1, 2, 3, n / 2, n - 6, n - 5, n - 4, n - 3, n - 1] {
+            cases.push(coded[..cut].to_vec());
+        }
+        for at in [0, 1, 2, 3, 10, n / 3, n / 2, n - 6, n - 5, n - 4, n - 1] {
+            for bit in [0x01, 0x80] {
+                let mut flipped = coded.clone();
+                flipped[at] ^= bit;
+                cases.push(flipped);
+            }
+        }
+        for tail in [&b"\n"[..], b" \r\n", b"x", b"\nx", b"\0\0"] {
+            let mut longer = coded.clone();
+            longer.extend_from_slice(tail);
+            cases.push(longer);
+        }
+        // FDICT set (0x7820 is 31 x 992) and a dictionary id, then the same
+        // body; and the body alone, raw DEFLATE under no header at all.
+        let mut fdict = vec![0x78, 0x20, 0, 0, 0, 1];
+        fdict.extend_from_slice(&coded[2..]);
+        cases.push(fdict);
+        cases.push(coded[2..n - 4].to_vec());
+
+        for (i, case) in cases.iter().enumerate() {
+            for tail in [Tail::WhiteSpace, Tail::Nothing] {
+                let (data, expected) = whole(case, tail);
+                let (seen, clean) = streamed(case, tail);
+                assert_eq!(clean, expected, "case {i} under {tail:?}");
+                if clean {
+                    assert_eq!(seen, data, "case {i} under {tail:?}");
+                }
+            }
+        }
+        // Both answers occur, so the agreement is not vacuous: the stream as
+        // written reads clean, a white-space tail only where white space is
+        // allowed, and half a stream not at all.
+        assert!(streamed(&coded, Tail::Nothing).1);
+        let mut newline = coded.clone();
+        newline.push(b'\n');
+        assert!(streamed(&newline, Tail::WhiteSpace).1);
+        assert!(!streamed(&newline, Tail::Nothing).1);
+        assert!(!streamed(&coded[..n / 2], Tail::WhiteSpace).1);
+    }
+
+    #[test]
+    fn a_sink_that_stops_the_read_ends_it() {
+        // A megabyte of zeros in about a kilobyte of code: the sink has seen
+        // enough after the first piece, and the read goes no further.
+        let coded = crate::deflate::zlib_compress(&vec![0u8; 1 << 20]);
+        let mut pieces = 0;
+        let clean = zlib_reads_clean(&coded, Tail::WhiteSpace, &mut |_: &[u8]| {
+            pieces += 1;
+            false
+        });
+        assert!(!clean);
+        assert_eq!(pieces, 1);
+    }
+
+    #[test]
+    fn the_checksum_is_carried_across_pieces() {
+        let data = page_like(100_000);
+        for split in [0, 1, 5551, 5552, 5553, 65_521, 99_999] {
+            let (a, b) = data.split_at(split);
+            assert_eq!(
+                adler32_from(adler32(a), b),
+                adler32(&data),
+                "split at {split}"
+            );
+        }
     }
 }

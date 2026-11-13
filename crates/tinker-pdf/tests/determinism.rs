@@ -2868,9 +2868,9 @@ fn the_synthesised_document_is_the_same_bytes_on_every_target() {
     );
     // Ruling 10: "it opened" and "it opened cleanly" stay distinguishable, and
     // for this archive the difference is one warning and no others. Without
-    // this the fixture could be quietly damaged — a wrong Adler-32 on an IDAT
-    // that is passed through is never inflated by the embedder, so it reaches
-    // the page, renders the same picture and reports leniency nobody reads.
+    // this the fixture could be quietly damaged — an IDAT with a wrong
+    // Adler-32 takes the decode route rather than passing through, renders the
+    // same picture and reports a leniency only this count reads.
     assert_eq!(
         report.warnings().len(),
         1,

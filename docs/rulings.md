@@ -808,6 +808,7 @@ instead of living in one feature's head.
     | ED-06a.3 | A recoloured shading under a non-linear conversion | exact wherever the shading's own function can carry the conversion (a Type 4 calculator composed with it); a mesh's per-vertex colours are resampled, subdividing until the worst deviation is within one level of 255, which is reported |
     | ED-24.1 | The optimisation presets | every preset lossless; presets differ in resolution caps, font subsetting and object streams |
     | ED-36e.2–ED-36e.4 | Redaction residue outside the content | scrubbed by default — links and annotations in the area, field values and annotation `/Contents`, `/ActualText`, `/Alt` and `/E`, outline titles, named destinations and attachments — with a typed opt-out naming each place kept; `tpdf redact` inherits it |
+    | K-03.9 | A passed-through PNG | verified by one streamed inflate at open; a PNG whose data does not match its header takes the decode route; the owner took the open-time cost |
 
 ## How to add a ruling
 

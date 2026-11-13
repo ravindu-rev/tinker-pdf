@@ -167,7 +167,14 @@ nothing first-party to be held to (ruling 13). See
 passes through verbatim: its IDAT *is* a `/FlateDecode` stream with
 `/DecodeParms << /Predictor 15 … >>`, byte for byte, because PDF's predictor
 is PNG 9.2's row-filter specification adopted wholesale — so the common case
-copies bytes, reads a thirteen-byte header and never builds a raster. A `tRNS`
+copies bytes, reads a thirteen-byte header and never builds a raster. Before
+the IDAT is placed it is inflated once as a stream, keeping only the
+inflater's window and never the raster, and held to the header: every row the
+header describes, each a filter type 9.2 defines, and not a byte more, in a
+zlib stream that reads clean. A PNG whose data does not match its header takes
+the decoder instead, which repairs it or refuses it with its typed warning, so
+the PDF holds no image stream that reads only with a repair; the inflate is
+the open-time price the owner took for that (ruling 23, K-03.9). A `tRNS`
 naming one fully transparent colour, or one contiguous run of palette
 indices, becomes 8.9.6.4's colour-key `/Mask` and still passes through. A
 JPEG is placed exactly as the archive holds it. Adam7 interlace (PNG 7.2),

@@ -27,7 +27,9 @@
 //! a lookup for. [`png_scan`] exists for the pass-through side of that split:
 //! it walks the chunks, checks every CRC and hands back the concatenated IDAT
 //! **without inflating it**, which is what an embedder needs and what a decoder
-//! must not be asked to do first.
+//! must not be asked to do first. [`PngScan::idat_matches_header`] is the
+//! embedder's check before it places those bytes: one streamed inflate that
+//! holds the data to the header and keeps no raster.
 //!
 //! # What is reused, and why none of it is reimplemented here
 //!
@@ -357,7 +359,9 @@ pub enum PngTransparency {
 ///
 /// Handed back whole so that the *pass-through* path — gap 29's default — can
 /// have the header, the palette, the transparency and the compressed bytes
-/// without any of them being inflated. [`PngScan::decode`] is the other half.
+/// without a raster being built: [`PngScan::idat_matches_header`] checks the
+/// compressed bytes against the header with one streamed inflate, and
+/// [`PngScan::decode`] is the other half.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PngScan {
     pub header: PngHeader,
@@ -941,6 +945,70 @@ impl PngScan {
             complete,
             warnings: w.into_vec(),
         })
+    }
+
+    /// Whether the IDAT holds exactly the image IHDR describes, read the way a
+    /// PDF `/FlateDecode` stream is read: one zlib stream that reads clean (no
+    /// preset dictionary, its Adler-32 matching, nothing but white space after
+    /// it), holding every row of every raster 7.2 lays out for the header,
+    /// each row a filter type 9.2 defines and then the row's bytes, and not
+    /// one byte more.
+    ///
+    /// This is the check gap 29's pass-through makes before it places the
+    /// IDAT. The IDAT is inflated once, as a stream: the bytes are counted and
+    /// each row's filter type read as they go by, and nothing is kept but the
+    /// inflater's window, so no raster is built. A file this is false for
+    /// decodes only with a repair, or not at all.
+    #[must_use]
+    pub fn idat_matches_header(&self) -> bool {
+        let h = self.header;
+        // Each raster's row, its filter type included, and its row count.
+        let rasters: Vec<(u64, u64)> = if h.interlaced {
+            (0..7)
+                .filter_map(|p| pass_extent(p, h.width, h.height))
+                .collect()
+        } else {
+            vec![(h.width, h.height)]
+        }
+        .into_iter()
+        .map(|(pw, ph)| (h.row_bytes(pw).saturating_add(1), u64::from(ph)))
+        .collect();
+        let total = rasters
+            .iter()
+            .map(|&(row, rows)| row.saturating_mul(rows))
+            .fold(0u64, u64::saturating_add);
+
+        // The raster the next filter type belongs to, the rows it has left,
+        // and where in the data that type is.
+        let mut raster = 0usize;
+        let mut rows_left = rasters.first().map_or(0, |&(_, rows)| rows);
+        let mut next_type = 0u64;
+        let mut seen = 0u64;
+        let clean =
+            inflate::zlib_reads_clean(&self.idat, Tail::WhiteSpace, &mut |piece: &[u8]| {
+                let end = seen.saturating_add(piece.len() as u64);
+                if end > total {
+                    return false;
+                }
+                while next_type < end {
+                    let Some(&(row, _)) = rasters.get(raster) else {
+                        break;
+                    };
+                    let at = usize::try_from(next_type - seen).unwrap_or(usize::MAX);
+                    if piece.get(at).is_none_or(|&t| t > 4) {
+                        return false;
+                    }
+                    next_type = next_type.saturating_add(row);
+                    rows_left = rows_left.saturating_sub(1);
+                    if rows_left == 0 {
+                        raster += 1;
+                        rows_left = rasters.get(raster).map_or(0, |&(_, rows)| rows);
+                    }
+                }
+                seen = end;
+                true
+            });
+        clean && seen == total
     }
 
     /// The channel layout and component width the source produces.

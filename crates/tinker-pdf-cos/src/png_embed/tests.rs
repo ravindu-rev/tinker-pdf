@@ -447,8 +447,9 @@ fn a_pass_through_reports_what_the_walk_found() {
         sound.warnings()
     );
 
-    // A file whose IEND was cut off. Nothing here inflates, so what is known is
-    // that the file did not end where PNG says a file ends.
+    // A file whose IEND was cut off. Its IDAT is whole, so it still passes
+    // through, and what is known is that the file did not end where PNG says a
+    // file ends.
     let mut cut = good.clone();
     cut.truncate(cut.len() - 12);
     let short = png_image(&cut, &CAP).expect("still prepares");
@@ -498,6 +499,121 @@ fn a_decoded_image_reports_its_own_raster() {
     );
     // And the image is still produced: ruling 2 degrades rather than refuses.
     assert!(prepared.soft_mask.is_some());
+}
+
+// --- an IDAT that does not hold its header's image -----------------------
+
+/// The 2 x 2 RGB file `crates/tinker-pdf/tests/hostile_input.rs` sweeps. Its
+/// CRCs are right and its IDAT is a clean zlib stream, of four bytes,
+/// `00 FF 00 00`, where IHDR's two rows of a filter type and six bytes want
+/// fourteen.
+fn short_2x2() -> Vec<u8> {
+    [
+        &b"\x89PNG\r\n\x1A\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x02\x08\x02\0\0\0\xFD\xD4\x9A\x73"[..],
+        b"\0\0\0\x0CIDATx\x9Cc\xF8\xCF\xC0\0\0\x03\x01\x01\0\xC9\xFE\x92\xEF",
+        b"\0\0\0\0IEND\xAEB`\x82",
+    ]
+    .concat()
+}
+
+/// What a reader of the written image stream gets, and what it had to repair.
+fn placed(prepared: &PngImageData) -> (Vec<u8>, Vec<FilterWarning>) {
+    let decoded = tinker_pdf_filters::flate_decode(&prepared.data, &CAP, None)
+        .expect("the placed stream has no predictor to refuse");
+    (decoded.data, decoded.warnings)
+}
+
+/// Placed as it is, the short file's stream would read only with a repair, in
+/// a PDF this engine wrote. So it is decoded: the decoder repairs it with its
+/// typed warning and places samples that read clean. The same picture with its
+/// rows whole still passes through, byte for byte.
+#[test]
+fn an_idat_short_of_its_header_is_decoded_and_a_whole_one_passes_through() {
+    let short = png_image(&short_2x2(), &CAP).expect("still prepares");
+    assert_eq!(short.route(), PngRoute::Decoded);
+    assert!(
+        short.warnings().contains(&FilterWarning::TruncatedInput),
+        "{:?}",
+        short.warnings()
+    );
+    assert!(!short.complete(), "a row and a half is missing");
+    let (samples, repairs) = placed(&short);
+    assert!(repairs.is_empty(), "{repairs:?}");
+    // Two rows of two RGB pixels; the one pixel the file holds is red.
+    assert_eq!(samples.len(), 12);
+    assert_eq!(samples[..3], [0xFF, 0, 0]);
+
+    let whole = plain(2, 2, 8, 2, 0);
+    let through = png_image(&whole, &CAP).expect("prepares");
+    assert_eq!(through.route(), PngRoute::PassedThrough);
+    assert_eq!(
+        through.data,
+        png_scan(&whole).expect("scans").idat,
+        "the IDAT reaches the page as the file holds it"
+    );
+    assert!(through.warnings().is_empty(), "{:?}", through.warnings());
+    assert!(through.complete());
+}
+
+/// Every other way an IDAT fails its header takes the decode route too, and
+/// arrives with the warning that names it; and the stream they were all made
+/// from, as written, passes through.
+#[test]
+fn every_idat_that_fails_its_header_is_decoded_with_the_warning_that_names_it() {
+    // 2 x 2 RGB: two rows of a filter type and six bytes.
+    let rows = [[0u8, 1, 2, 3, 4, 5, 6], [0, 6, 5, 4, 3, 2, 1]].concat();
+    let coded = zlib_compress(&rows);
+    let n = coded.len();
+    let mut checksum = coded.clone();
+    checksum[n - 1] ^= 1;
+    // FDICT set (0x7820 is 31 x 992) and a dictionary id before the body.
+    let mut dictionary = vec![0x78, 0x20, 0, 0, 0, 1];
+    dictionary.extend_from_slice(&coded[2..]);
+    let undefined = [[5u8, 1, 2, 3, 4, 5, 6], [0, 6, 5, 4, 3, 2, 1]].concat();
+    let cases: [(&str, Vec<u8>, FilterWarning); 6] = [
+        (
+            "a row over",
+            zlib_compress(&[&rows[..], &rows[..7]].concat()),
+            FilterWarning::OutputCapHit,
+        ),
+        (
+            "a filter type 9.2 does not define",
+            zlib_compress(&undefined),
+            FilterWarning::BadPredictorTag,
+        ),
+        ("a broken checksum", checksum, FilterWarning::AdlerMismatch),
+        (
+            "a byte after the stream",
+            [&coded[..], b"x"].concat(),
+            FilterWarning::TrailingGarbage,
+        ),
+        (
+            "a preset dictionary",
+            dictionary,
+            FilterWarning::FdictIgnored,
+        ),
+        (
+            "no zlib header",
+            coded[2..n - 4].to_vec(),
+            FilterWarning::RawDeflateFallback,
+        ),
+    ];
+    for (what, data, warning) in cases {
+        let bytes = file(ihdr(2, 2, 8, 2, 0), &[chunk(b"IDAT", &data)]);
+        let prepared = png_image(&bytes, &CAP).expect(what);
+        assert_eq!(prepared.route(), PngRoute::Decoded, "{what}");
+        assert!(
+            prepared.warnings().contains(&warning),
+            "{what}: {:?}",
+            prepared.warnings()
+        );
+        let (samples, repairs) = placed(&prepared);
+        assert_eq!(samples.len(), 12, "{what}");
+        assert!(repairs.is_empty(), "{what}: {repairs:?}");
+    }
+
+    let bytes = file(ihdr(2, 2, 8, 2, 0), &[chunk(b"IDAT", &coded)]);
+    assert_eq!(route_of(&bytes), PngRoute::PassedThrough);
 }
 
 // --- what reaches the dictionary ----------------------------------------

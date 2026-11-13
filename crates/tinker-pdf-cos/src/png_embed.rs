@@ -13,8 +13,8 @@
 //! byte for byte, because PDF's `/Predictor` is PNG 9.2's row-filter
 //! specification adopted wholesale — the per-row tag, the five filter types and
 //! the `ceil(colors x bpc / 8)` left-neighbour offset floored at one. So the
-//! common case copies bytes and reads a thirteen-byte header, and never builds
-//! a raster at all.
+//! common case copies bytes, reads a thirteen-byte header and inflates the IDAT
+//! once as a stream to check it, and never builds a raster at all.
 //!
 //! That is load-bearing rather than elegant. A CBZ is synthesised whole at
 //! open, so whatever a page holds is held for the document's life; decoding
@@ -22,6 +22,20 @@
 //! archive at 2000 x 3000. [`tinker_pdf_filters::png_scan`] exists for exactly
 //! this reason — it walks the chunks, checks every CRC and hands back the
 //! concatenated IDAT with nothing inflated.
+//!
+//! # The IDAT is checked against its header before it is placed
+//!
+//! A CRC says the bytes are the ones the encoder wrote, not that they hold the
+//! image IHDR describes. An IDAT that inflates short of its rows, past them, to
+//! a filter type 9.2 does not define, or not cleanly at all would reach the
+//! page as a stream a reader decodes only with a repair, in a PDF this engine
+//! wrote. So [`PngScan::idat_matches_header`] reads it first, one streamed
+//! inflate that counts the bytes and reads each row's filter type and keeps
+//! only the inflater's window, and a file it refuses takes the decode route,
+//! which repairs the damage or refuses the file with its typed warning and
+//! places samples any reader reads clean. The inflate is the open-time price
+//! the owner took for that (ruling 23, K-03.9); the memory argument above is
+//! unchanged by it.
 //!
 //! # What cannot pass through, and why each one cannot
 //!
@@ -34,6 +48,7 @@
 //! | `tRNS` transparent entries in two separate runs | one range cannot name two runs | decode, `/SMask` |
 //! | Colour types 0, 2, 3 non-interlaced | — | **pass through** |
 //! | ... with a `tRNS` naming one fully transparent colour, or one contiguous run of indices | 8.9.6.4's `/Mask` array expresses exactly a range test | **pass through**, with `/Mask` |
+//! | ... whose IDAT does not hold the image IHDR describes | placed as it is, it would read only with a repair | decode |
 //!
 //! The contiguous-run rule is slightly wider than gap 29's table, which says
 //! "one fully transparent index". A run is what 8.9.6.4 actually expresses, one
@@ -49,7 +64,10 @@
 //! and refused. Four candidates, and every one of them would be decoration:
 //!
 //! - **Nothing on the pass-through.** Its allocation is a copy of the input's
-//!   own IDAT bytes, so the input length bounds it; there is no raster.
+//!   own IDAT bytes, so the input length bounds it; there is no raster. Its
+//!   check keeps only the inflater's window and stops at the first byte past
+//!   what IHDR describes, so its work is bounded by the smaller of the IDAT's
+//!   own expansion and the header's size.
 //! - **Nothing on the decode.** [`tinker_pdf_filters::MAX_PNG_SAMPLES`] refuses
 //!   the geometry before a buffer exists and the caller's own
 //!   [`Limits::max_output`] refuses it again under the caller's number. A third
@@ -176,10 +194,8 @@ impl PngImageData {
     ///
     /// On the decoded route this is [`PngImage::complete`] — a short raster or a
     /// damaged IDAT. On the pass-through it means the chunk walk reached IEND
-    /// with the file intact, which is as much as can be known without
-    /// inflating: the bytes are checked by their CRCs and then trusted, which
-    /// is the cost of not building a raster and the reason the CRCs are
-    /// compared rather than stored.
+    /// with the file intact: the IDAT itself is whole, or the file would have
+    /// been decoded instead.
     #[must_use]
     pub const fn complete(&self) -> bool {
         self.complete
@@ -204,8 +220,10 @@ impl PngImageData {
 pub fn png_image(bytes: &[u8], limits: &Limits) -> Result<PngImageData, PngError> {
     let scan = png_scan(bytes)?;
     match choose(&scan) {
-        Route::Through(mask) => Ok(pass_through(scan, mask)),
-        Route::Decode => decode(&scan, limits),
+        Route::Through(mask) if scan.idat_matches_header() => Ok(pass_through(scan, mask)),
+        // Shapes PDF cannot express, and an IDAT that does not hold the image
+        // its header describes, which the decoder repairs or refuses.
+        Route::Through(_) | Route::Decode => decode(&scan, limits),
     }
 }
 
@@ -351,8 +369,8 @@ fn pass_through(scan: PngScan, mask: Option<Vec<(u32, u32)>>) -> PngImageData {
         color_key_mask: mask.unwrap_or_default(),
         soft_mask: None,
         route: PngRoute::PassedThrough,
-        // The file ended where it said it would. Nothing here inflates, so the
-        // chunk CRCs are the whole of what is known.
+        // The file ended where it said it would. The IDAT was checked whole
+        // before this route was taken, so the walk is what is left to say.
         complete: !scan
             .warnings
             .iter()

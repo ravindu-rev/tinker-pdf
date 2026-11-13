@@ -1541,3 +1541,110 @@ fn write_the_fuzz_seeds() {
         std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
     }
 }
+
+// --- the pass-through's check -------------------------------------------
+
+/// Already-filtered data, each row behind whatever filter type it was given,
+/// zlib-compressed into one IDAT under no promise that it fits a header.
+fn idat_of(filtered: &[u8]) -> Vec<u8> {
+    chunk(b"IDAT", &zlib_compress(filtered))
+}
+
+fn matches(bytes: &[u8]) -> bool {
+    png_scan(bytes).expect("scans").idat_matches_header()
+}
+
+/// Lengths and filter types written out from 7.2 and 9.2: a row is one filter
+/// type and `ceil(width x channels x depth / 8)` bytes, and the data is the
+/// header's rows, no fewer and no more.
+#[test]
+fn the_idat_is_held_to_the_rows_its_header_describes() {
+    // 3 x 2 RGB at eight bits: two rows of a filter type and nine bytes.
+    let header = ihdr_data(3, 2, 8, 2, 0);
+    let row = |filter: u8| [&[filter][..], &[7u8; 9]].concat();
+    let exact = [row(0), row(4)].concat();
+    assert!(matches(&png(&header, &[idat_of(&exact)])));
+    // Short by a row, short by a byte, over by a byte.
+    assert!(!matches(&png(&header, &[idat_of(&exact[..10])])));
+    assert!(!matches(&png(&header, &[idat_of(&exact[..19])])));
+    assert!(!matches(&png(
+        &header,
+        &[idat_of(&[&exact[..], &[0]].concat())]
+    )));
+    // A filter type 9.2 does not define, on either row.
+    assert!(!matches(&png(
+        &header,
+        &[idat_of(&[row(5), row(0)].concat())]
+    )));
+    assert!(!matches(&png(
+        &header,
+        &[idat_of(&[row(0), row(255)].concat())]
+    )));
+
+    // Cut across two chunks it is the same stream (10.3).
+    let coded = zlib_compress(&exact);
+    let (front, back) = coded.split_at(5);
+    assert!(matches(&png(
+        &header,
+        &[chunk(b"IDAT", front), chunk(b"IDAT", back)]
+    )));
+    // A broken checksum, or a byte after the stream that is not white space,
+    // is damage whatever the rows hold; white space is what a stream may end
+    // in (7.3.8.1) and a reader passes over.
+    let mut broken = coded.clone();
+    let n = broken.len();
+    broken[n - 1] ^= 1;
+    assert!(!matches(&png(&header, &[chunk(b"IDAT", &broken)])));
+    assert!(!matches(&png(
+        &header,
+        &[chunk(b"IDAT", &[&coded[..], b"x"].concat())]
+    )));
+    assert!(matches(&png(
+        &header,
+        &[chunk(b"IDAT", &[&coded[..], b"\n"].concat())]
+    )));
+
+    // Sub-byte rows: five pixels at one bit are one byte, ceil(5 / 8).
+    let header = ihdr_data(5, 3, 1, 0, 0);
+    assert!(matches(&png(
+        &header,
+        &[idat_of(&[0, 0xF8, 1, 0x08, 2, 0])]
+    )));
+    assert!(!matches(&png(
+        &header,
+        &[idat_of(&[0, 0xF8, 1, 0x08, 2, 0, 3])]
+    )));
+}
+
+/// The two twins produced outside this repository: one raster, and Adam7's
+/// seven reduced ones, each pass with its own row width (7.2).
+#[test]
+fn both_twins_hold_the_rows_their_headers_describe() {
+    assert!(matches(&PLAIN_8X8));
+    assert!(matches(&ADAM7_8X8));
+}
+
+/// A raster many times the inflater's window, with the filter types in turn:
+/// each row's type is found wherever the stream's pieces happen to break, and
+/// one undefined type deep in the image is found too.
+#[test]
+fn a_filter_type_is_found_wherever_the_stream_breaks_its_pieces() {
+    let (width, height) = (301u32, 200u32);
+    let row = 301 * 3;
+    let mut x = 0x9E37_79B9_u32;
+    let mut filtered = Vec::new();
+    for y in 0..height {
+        filtered.push((y % 5) as u8);
+        for _ in 0..row {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            filtered.push((x >> 24) as u8);
+        }
+    }
+    let header = ihdr_data(width, height, 8, 2, 0);
+    assert!(matches(&png(&header, &[idat_of(&filtered)])));
+    let mut undefined = filtered;
+    undefined[(row + 1) * 150] = 9;
+    assert!(!matches(&png(&header, &[idat_of(&undefined)])));
+}
