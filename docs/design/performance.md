@@ -3210,9 +3210,11 @@ plane, and the ink tables are in force while it composites.
 
 #### The key, and the font in it
 
-A mask is a function of four things, and they are its key: **the font**, **the
-code**, **the quantised 2x2** and **the phase**, a sixteenth on each axis and
-so one of 256. The origin is not in it. One shape at one size is therefore up
+A mask is a function of five things, and they are its key: **the font**, **the
+code**, **the quantised 2x2**, **the phase**, a sixteenth on each axis and so
+one of 256, and **the flattening tolerance** the outline is flattened at, the
+flatness in force ([device-dependent-state.md](device-dependent-state.md)),
+which is the device's 0.2 on a page that sets none. The origin is not in it. One shape at one size is therefore up
 to 256 masks rather than one, and a page asks for as many of them as the
 phases its glyphs of that shape fall at — a line's origins spread across the
 sixteen phases of its axis, and a page's lines across the sixteen of the
@@ -3342,7 +3344,8 @@ with its reason.
 #### How P-16 takes the bound over
 
 P-16.7 makes the masks a kind of the document cache. The key stays — font
-identity, code, quantised 2x2 and phase, a `Scoped` font keyed by the
+identity, code, quantised 2x2, phase and flattening tolerance, a `Scoped` font
+keyed by the
 document's scope rather than a render's serial — and only who holds the bytes
 changes: a mask is charged what it is charged here and evicted in P-16.1's
 order with the document's images, transforms and recordings under
@@ -3453,7 +3456,7 @@ a typed key:
 | a decoded image | the image's object and its decode request: full, or reduced by a factor (*Reduced-resolution decode*) | its samples and its soft mask's, at the decoded size | P-16.2, P-16.9 |
 | a compiled ICC transform | today's key, the profile stream's object; P-22.7 re-keys it by the profile's bytes, intent and black-point compensation | its tables, three 4 096-entry ones for an RGB output | P-16.4, P-22.7 |
 | a form recording | the form's object and the parts of the invoking state its drawing reads (P-16.5 settles them) | the recorded calls, as a display list counts its own | P-16.5, P-16.6 |
-| a glyph mask | P-06.3's key: font identity, code, quantised 2x2 and phase | P-06.3's charge, its pixels and 64 bytes | P-16.7 |
+| a glyph mask | P-06.3's key: font identity, code, quantised 2x2, phase and flattening tolerance | P-06.3's charge, its pixels and 64 bytes | P-16.7 |
 | a tiling cell | P-23.2's | its pixels | P-23.2 |
 
 Each kind is a map from its key to its value, so a lookup is one hash of the

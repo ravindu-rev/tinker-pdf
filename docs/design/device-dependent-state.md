@@ -268,7 +268,10 @@ per object:
   before it is stroked, and the stroker's round joins and caps), clips (`W n`
   flattens at the paint that ends the path, as a fill would, 10.7.4), glyph
   outlines filled and stroked, and a text clip's glyphs, each at the flatness
-  in force when it was shown. It is a device-pixel tolerance on device
+  in force when it was shown. A glyph drawn from a mask of its own is
+  flattened at it too, and the mask is kept under it beside the rest of its key
+  ([performance.md](performance.md), P-06.3), so one glyph shown at two
+  flatnesses is two masks. It is a device-pixel tolerance on device
   geometry, so a tile flattens the page's curves (ruling 5).
 - **The flattener's rule is unchanged** — `ceil(1.5 × √(polygon / tolerance))`
   steps, one to 512 — only its tolerance is the state's; `determinism.rs`'s
@@ -404,7 +407,8 @@ per object:
    the flattener's rule at that tolerance; `5 i` and `/FL 5` twins; 0, a
    negative value and over 100 read as this design reads them; without `/FL` no
    byte moves and `determinism.rs` passes unchanged; `render_regions.rs` holds a
-   tile to the page; both builds.
+   tile to the page; both builds; `a_glyph_mask_is_kept_per_flatness` — one
+   glyph shown at two flatnesses in one render is two masks.
 3. **RC-08.4, smoothness.** Exit: `device_state.rs`'s
    `smoothness_bounds_a_patch_s_colour_error`.
 4. **RC-08.5, stroke adjustment.** Exit: `device_state.rs`'s

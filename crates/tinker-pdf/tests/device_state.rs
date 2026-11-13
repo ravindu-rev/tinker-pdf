@@ -651,3 +651,345 @@ fn black_generation_and_undercolour_removal_make_the_ink_the_test_computes() {
         "inside the /DeviceCMYK group"
     );
 }
+
+// ---- flatness (10.7.2) --------------------------------------------------------
+
+/// A cubic in device pixels, as four points.
+type Cubic = [(f64, f64); 4];
+
+/// The flattener's control-polygon rule (`tinker-pdf-raster`'s `geom.rs`),
+/// written out here: the control polygon's length, one segment within the
+/// tolerance, and otherwise `ceil(1.5 × √(polygon / tolerance))` steps, one to
+/// 512, each point the Bernstein form at `i / steps` in the same order of
+/// operations. Appends the points after the first.
+fn flatten_cubic(p: Cubic, tolerance: f64, out: &mut Vec<(f64, f64)>) {
+    let distance = |a: (f64, f64), b: (f64, f64)| {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        (dx * dx + dy * dy).sqrt()
+    };
+    let polygon = distance(p[0], p[1]) + distance(p[1], p[2]) + distance(p[2], p[3]);
+    if !polygon.is_finite() || polygon <= tolerance {
+        out.push(p[3]);
+        return;
+    }
+    let steps = ((polygon / tolerance).sqrt() * 1.5)
+        .ceil()
+        .clamp(1.0, 512.0) as u32;
+    for i in 1..=steps {
+        let t = f64::from(i) / f64::from(steps);
+        let u = 1.0 - t;
+        let x = u * u * u * p[0].0
+            + 3.0 * u * u * t * p[1].0
+            + 3.0 * u * t * t * p[2].0
+            + t * t * t * p[3].0;
+        let y = u * u * u * p[0].1
+            + 3.0 * u * u * t * p[1].1
+            + 3.0 * u * t * t * p[2].1
+            + t * t * t * p[3].1;
+        out.push((x, y));
+    }
+}
+
+/// An ellipse about `(cx, cy)` with radii `rx`, `ry` as four cubics in PDF
+/// space, its handles `9/16` of each radius: every coordinate a short dyadic
+/// fraction, so the page transform's `64 − y` is exact and the device points
+/// are the ones the test computes.
+fn ellipse(cx: f64, cy: f64, rx: f64, ry: f64) -> [Cubic; 4] {
+    let (hx, hy) = (rx * 0.5625, ry * 0.5625);
+    [
+        [
+            (cx + rx, cy),
+            (cx + rx, cy + hy),
+            (cx + hx, cy + ry),
+            (cx, cy + ry),
+        ],
+        [
+            (cx, cy + ry),
+            (cx - hx, cy + ry),
+            (cx - rx, cy + hy),
+            (cx - rx, cy),
+        ],
+        [
+            (cx - rx, cy),
+            (cx - rx, cy - hy),
+            (cx - hx, cy - ry),
+            (cx, cy - ry),
+        ],
+        [
+            (cx, cy - ry),
+            (cx + hx, cy - ry),
+            (cx + rx, cy - hy),
+            (cx + rx, cy),
+        ],
+    ]
+}
+
+/// The content drawing `curves` as one closed path.
+fn curve_operators(curves: &[Cubic]) -> String {
+    let mut out = format!("{} {} m", curves[0][0].0, curves[0][0].1);
+    for c in curves {
+        out.push_str(&format!(
+            " {} {} {} {} {} {} c",
+            c[1].0, c[1].1, c[2].0, c[2].1, c[3].0, c[3].1
+        ));
+    }
+    out.push_str(" h");
+    out
+}
+
+/// The two shapes every flatness page draws: a circle and an ellipse.
+fn flatness_shapes() -> [[Cubic; 4]; 2] {
+    [
+        ellipse(32.0, 32.0, 24.0, 24.0),
+        ellipse(96.0, 32.0, 24.0, 12.0),
+    ]
+}
+
+/// A 128 by 64 page drawing `body` after `/F gs`, `/F` setting `state`.
+fn flatness_page(state: &str, body: &str) -> Vec<u8> {
+    page(
+        128,
+        64,
+        &format!("<< /ExtGState << /F << {state} >> >> >>"),
+        &format!("/F gs {body}"),
+        &[],
+    )
+}
+
+/// Both shapes filled, `0.2 0.4 0.8 rg`.
+fn filled_shapes() -> String {
+    let [circle, oval] = flatness_shapes();
+    format!(
+        "0.2 0.4 0.8 rg {} f {} f",
+        curve_operators(&circle),
+        curve_operators(&oval)
+    )
+}
+
+/// **Flatness sets the tolerance a curve is flattened to** (10.7.2): a circle
+/// and an ellipse filled under `/FL` 1, 5 and 20 are byte for byte the
+/// polygons the test derives from the flattener's rule at that tolerance,
+/// filled through the same rasterizer onto a white canvas; `5 i` draws as
+/// `/FL 5` filled, stroked and as a clip; 0, a negative value and the
+/// device's own 0.2 draw as no flatness at all; a value past 100 draws as 100
+/// and one finer than 1/256 of a pixel as 1/256; and a coarse flatness moves a
+/// stroke, a clip and a glyph, filled and as a text clip, so each of those
+/// paths takes it too.
+#[test]
+fn flatness_sets_the_tolerance_a_curve_is_flattened_to() {
+    use tinker_pdf_raster::{fill, Canvas, Color, FillRule, Path};
+    let options = RenderOptions::default();
+    let none = render(flatness_page("", &filled_shapes()), &options);
+
+    for flatness in [1.0, 5.0, 20.0] {
+        let page = render(
+            flatness_page(&format!("/FL {flatness}"), &filled_shapes()),
+            &options,
+        );
+        let mut twin = Canvas::new(128, 64, tinker_pdf_raster::PixelFormat::Rgb8, Color::WHITE);
+        for shape in flatness_shapes() {
+            // Device space: x as it is, y counted down from the top.
+            let device = shape.map(|c| c.map(|(x, y)| (x, 64.0 - y)));
+            let mut points = vec![device[0][0]];
+            for cubic in device {
+                flatten_cubic(cubic, flatness, &mut points);
+            }
+            let mut path = Path::new();
+            path.move_to(points[0].0, points[0].1);
+            for (x, y) in &points[1..] {
+                path.line_to(*x, *y);
+            }
+            path.close();
+            let mask = fill(&path, FillRule::NonZero, 0, 0, 128, 64, flatness, None);
+            twin.fill_mask(&mask, Color::rgb(51, 102, 204), 1.0);
+        }
+        assert_eq!(
+            page.data, twin.data,
+            "/FL {flatness}: not the derived polygons"
+        );
+        if flatness >= 5.0 {
+            assert_ne!(page.data, none.data, "/FL {flatness} moved nothing");
+        }
+    }
+
+    // The operator's twin, and the readings of what Table 56 does not allow.
+    let [circle, _] = flatness_shapes();
+    let stroked = format!("0 0 1 RG 3 w {} S", curve_operators(&circle));
+    let clipped = format!(
+        "q {} W n 0.9 0.1 0.1 rg 0 0 128 64 re f Q",
+        curve_operators(&circle)
+    );
+    for body in [filled_shapes(), stroked.clone(), clipped.clone()] {
+        let gs = render(flatness_page("/FL 5", &body), &options);
+        let operator = render(flatness_page("", &format!("5 i {body}")), &options);
+        assert_eq!(gs.data, operator.data, "5 i against /FL 5: {body}");
+        let without = render(flatness_page("", &body), &options);
+        for device in ["/FL 0.2", "/FL 0", "/FL -3"] {
+            assert_eq!(
+                render(flatness_page(device, &body), &options).data,
+                without.data,
+                "{device} is the device's own: {body}"
+            );
+        }
+        assert_eq!(
+            render(flatness_page("/FL 1000", &body), &options).data,
+            render(flatness_page("/FL 100", &body), &options).data,
+            "past 100 is 100: {body}"
+        );
+        assert_eq!(
+            render(flatness_page("/FL 0.000000001", &body), &options).data,
+            render(flatness_page("/FL 0.00390625", &body), &options).data,
+            "finer than 1/256 is 1/256: {body}"
+        );
+    }
+    for body in [stroked, clipped] {
+        assert_ne!(
+            render(flatness_page("/FL 40", &body), &options).data,
+            render(flatness_page("", &body), &options).data,
+            "a coarse flatness moved nothing: {body}"
+        );
+    }
+
+    // A glyph of the curved face, filled and as a text clip, under `i`.
+    let glyph = |flatness: &str, mode: u8| {
+        let mut builder = tinker_pdf::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(b"F0", b"Curvy", &render_support::curvy_font()));
+        builder.add_page(96.0, 48.0, |page| {
+            page.raw(flatness.as_bytes());
+            page.raw(format!("{mode} Tr").as_bytes());
+            page.text(b"F0", 30.0, 4.0, 10.0, "0123");
+            // What the clip lets through; a filled glyph is the page itself.
+            if mode == 7 {
+                page.raw(b"0.9 0.1 0.1 rg 0 0 96 48 re f");
+            }
+        });
+        render(builder.finish(), &options).data
+    };
+    for mode in [0, 7] {
+        assert_eq!(glyph("0.2 i", mode), glyph("", mode), "mode {mode}: 0.2 i");
+        assert_eq!(glyph("0 i", mode), glyph("", mode), "mode {mode}: 0 i");
+        assert_ne!(
+            glyph("30 i", mode),
+            glyph("", mode),
+            "mode {mode}: 30 i moved nothing"
+        );
+    }
+}
+
+/// **A text clip's glyphs are each flattened at the flatness they were shown
+/// at**: a clipping text object whose glyphs are all shown at one coarse
+/// flatness clips as it does with that flatness set before `BT`, and one
+/// whose second glyph is shown after `i` changed it differs from both
+/// readings that hold one flatness for the whole object.
+#[test]
+fn a_text_clip_flattens_each_glyph_at_its_own_flatness() {
+    let options = RenderOptions::default();
+    let clip = |before: &str, between: &str| {
+        let mut builder = tinker_pdf::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(b"F0", b"Curvy", &render_support::curvy_font()));
+        builder.add_page(96.0, 48.0, |page| {
+            // Shown invisibly, which binds the face to the page.
+            page.raw(b"3 Tr");
+            page.text(b"F0", 30.0, 4.0, 10.0, "0123");
+            page.raw(before.as_bytes());
+            // One text object: its glyphs clip together at its `ET`.
+            page.raw(format!("BT /F0 30 Tf 7 Tr 4 10 Td (01) Tj {between} (23) Tj ET").as_bytes());
+            page.raw(b"0 Tr 0.9 0.1 0.1 rg 0 0 96 48 re f");
+        });
+        render(builder.finish(), &options).data
+    };
+    let coarse = clip("30 i", "");
+    assert_eq!(clip("30 i", "30 i"), coarse, "one flatness, set twice");
+    let mixed = clip("30 i", "0.2 i");
+    assert_ne!(mixed, coarse, "the second glyphs took the first's flatness");
+    assert_ne!(
+        mixed,
+        clip("", ""),
+        "the first glyphs took the second's flatness"
+    );
+}
+
+/// **A glyph's mask is kept per flatness**: within one render, the same four
+/// glyphs at the same phases, shown once at the device's flatness and once at
+/// a coarse one, in either order, each draw as they do on a page that shows
+/// them alone — so neither run is drawn from the other's masks — and the
+/// coarse run is not the device's.
+#[test]
+fn a_glyph_mask_is_kept_per_flatness() {
+    let options = RenderOptions::default();
+    // "0123" at x 4 and at x 100, a whole 96 pixels apart, so each glyph of
+    // the second run stands at its twin's phase; `None` leaves a run out.
+    let shown = |left: Option<&str>, right: Option<&str>| {
+        let mut builder = tinker_pdf::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(b"F0", b"Curvy", &render_support::curvy_font()));
+        builder.add_page(192.0, 48.0, |page| {
+            for (flatness, x) in [(left, 4.0), (right, 100.0)] {
+                if let Some(flatness) = flatness {
+                    page.raw(format!("q {flatness}").as_bytes());
+                    page.text(b"F0", 30.0, x, 10.0, "0123");
+                    page.raw(b"Q");
+                }
+            }
+        });
+        render(builder.finish(), &options)
+    };
+    // The left or the right 96 columns, row after row.
+    let half = |bitmap: &Bitmap, right: bool| -> Vec<u8> {
+        let from = if right { 96 * 3 } else { 0 };
+        (0..bitmap.height as usize)
+            .flat_map(|row| bitmap.data[row * bitmap.stride + from..][..96 * 3].to_vec())
+            .collect()
+    };
+    for (first, second) in [("", "30 i"), ("30 i", "")] {
+        let both = shown(Some(first), Some(second));
+        assert_eq!(
+            half(&both, false),
+            half(&shown(Some(first), None), false),
+            "{first:?} then {second:?}: the first run"
+        );
+        assert_eq!(
+            half(&both, true),
+            half(&shown(None, Some(second)), true),
+            "{first:?} then {second:?}: the second run"
+        );
+    }
+    assert_ne!(
+        half(&shown(None, Some("30 i")), true),
+        half(&shown(None, Some("")), true),
+        "30 i moved nothing"
+    );
+}
+
+/// **A flattened tile is the page under it** (ruling 5): the tolerance is a
+/// device-pixel measure of device geometry, so a tile flattens the page's
+/// curves and is its rectangle of the page.
+#[test]
+fn a_flattened_tile_is_the_page_under_it() {
+    let [circle, _] = flatness_shapes();
+    let body = format!(
+        "{} 0 0 1 RG 2 w {} S",
+        filled_shapes(),
+        curve_operators(&circle)
+    );
+    let doc = Document::open(flatness_page("/FL 6", &body)).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let options = RenderOptions::default();
+    let whole = page.render(&options);
+    for (x, y, w, h) in [(0, 0, 37, 23), (37, 23, 64, 41), (90, 5, 38, 59)] {
+        let tile = page.render(&RenderOptions {
+            region: Some(PixelRegion::new(x, y, w, h)),
+            ..options.clone()
+        });
+        for row in 0..h {
+            let from = (y + row) as usize * whole.stride + x as usize * 3;
+            assert_eq!(
+                &tile.data[row as usize * tile.stride..][..w as usize * 3],
+                &whole.data[from..from + w as usize * 3],
+                "tile ({x}, {y}) row {row}"
+            );
+        }
+    }
+}

@@ -149,8 +149,8 @@ use tinker_pdf::{Document, DocumentBuilder, Page, PixelRegion, RenderOptions, Re
 mod region_support;
 mod render_support;
 use region_support::{
-    annotated_page, fixtures, framed_page, image_run_page, shaped, strokes_page, Fixture, Shape,
-    PAGE_H, PAGE_W,
+    annotated_page, fixtures, framed_page, image_run_page, raw_page, shaped, strokes_page, Fixture,
+    Shape, PAGE_H, PAGE_W,
 };
 use render_support::ink;
 
@@ -348,6 +348,31 @@ fn every_tile_is_byte_equal_to_the_page_under_it() {
                 tiles_are_the_page(page, &options, tile, fixture.name);
             }
         });
+    }
+}
+
+/// **A page under a coarse flatness tiles as the page does** (10.7.2): curves
+/// filled, stroked and used as a clip under `/FL` from a `gs` and from `i`,
+/// at the three tile sizes and at 2x. The tolerance is a device-pixel measure
+/// of device geometry, decided per paint and never per tile, so each tile is
+/// its rectangle of the page byte for byte.
+#[test]
+fn flattened_tiles_are_the_flattened_page() {
+    let content = "/F gs 0.2 0.4 0.8 rg 45 120 m 85 120 85 70 45 70 c 5 70 5 120 45 120 c f \
+                   9 i 0 0 1 RG 3 w 10 10 m 80 60 10 60 80 10 c S \
+                   q 45 40 m 75 40 75 5 45 5 c 15 5 15 40 45 40 c W n \
+                   0.9 0.2 0.1 rg 0 0 91 131 re f Q";
+    let bytes = raw_page(content, "<< /ExtGState << /F << /FL 7 >> >> >>", &[]);
+    let document = Document::open(bytes).expect("the page opens");
+    let page = document.page(0).expect("a page");
+    for scale in [1.0f64, 2.0] {
+        let options = RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        };
+        for tile in [64u32, 37, 23] {
+            tiles_are_the_page(&page, &options, tile, &format!("flatness at {scale}x"));
+        }
     }
 }
 

@@ -993,6 +993,50 @@ pub struct RenderCounts {
     pub glyph_mask_hits: u64,
 }
 
+/// The device's own flattening tolerance, in device pixels: what a curve is
+/// flattened to where the content sets no flatness (10.7.2).
+const DEFAULT_TOLERANCE: f64 = 0.2;
+
+/// The coarsest flatness a paint may ask for: Table 56's "a number in the
+/// range 0 to 100".
+const COARSEST_TOLERANCE: f64 = 100.0;
+
+/// The finest: 1/256 of a pixel, the grid the filler places an edge's
+/// crossing on, below which a closer chord cannot change a coverage.
+const FINEST_TOLERANCE: f64 = 1.0 / 256.0;
+
+/// The flattening tolerance a paint in `state` takes (10.7.2): the flatness
+/// in force, in device pixels, no coarser than 100 and no finer than 1/256;
+/// 0 — Table 56's "the output device's default flatness tolerance" — a
+/// negative value, and none set are the device's own,
+/// [`DEFAULT_TOLERANCE`] (`docs/design/device-dependent-state.md`).
+fn flatness_tolerance(state: &GraphicsState) -> f64 {
+    match state.stored_parameters().flatness {
+        Some(flatness) if flatness.is_finite() && flatness > 0.0 => {
+            flatness.clamp(FINEST_TOLERANCE, COARSEST_TOLERANCE)
+        }
+        _ => DEFAULT_TOLERANCE,
+    }
+}
+
+/// `path` flattened at `tolerance` into straight segments, one subpath a
+/// polyline: a text clip's glyph kept at the flatness it was shown at, once
+/// the clip's glyphs no longer share one.
+fn polyline(path: &Path, tolerance: f64) -> Path {
+    let mut out = Path::new();
+    for subpath in tinker_pdf_raster::flatten(path, tolerance) {
+        let mut points = subpath.iter();
+        if let Some(first) = points.next() {
+            out.move_to(first.x, first.y);
+            for point in points {
+                out.line_to(point.x, point.y);
+            }
+            out.close();
+        }
+    }
+    out
+}
+
 /// The rasterizing device.
 pub struct Renderer<'g, G: GlyphSource> {
     canvas: Canvas,
@@ -1039,7 +1083,8 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// takes. `Relaxed` for the same reason [`CancelToken`] is: nothing is
     /// published through this flag, only observed.
     skipped: Arc<AtomicBool>,
-    /// Curve flattening tolerance in device pixels.
+    /// Curve flattening tolerance in device pixels: the flatness of the paint
+    /// being drawn (10.7.2), set from its state at the paint.
     tolerance: f64,
     /// Whether coverage is anti-aliased, or every pixel is whole or empty.
     /// See [`Renderer::with_antialias`].
@@ -1063,6 +1108,12 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// keying that off the accumulated path alone cannot tell "clipped to
     /// nothing" from "never clipped".
     text_clip_requested: bool,
+    /// The flatness every glyph in `text_clip` was shown at, while they share
+    /// one: the accumulated outlines are flattened at it at `ET`, as one fill.
+    text_clip_tolerance: Option<f64>,
+    /// Whether `text_clip` already holds its glyphs flattened, each at its
+    /// own flatness, because two of them were shown at different ones.
+    text_clip_flat: bool,
     /// The answers to the interpreter's three questions, and what they
     /// depend on: marked-content visibility, how many groups and masks are
     /// open, and the group-buffer budget.
@@ -1343,7 +1394,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             warnings: Vec::new(),
             cancel: CancelToken::new(),
             skipped: Arc::new(AtomicBool::new(false)),
-            tolerance: 0.2,
+            tolerance: DEFAULT_TOLERANCE,
             antialias: true,
             missing_fonts: 0,
             recursion_refused: false,
@@ -1351,6 +1402,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             counts: RenderCounts::default(),
             text_clip: None,
             text_clip_requested: false,
+            text_clip_tolerance: None,
+            text_clip_flat: false,
             run: None,
             pushed_scopes: Vec::new(),
             form_scopes: Vec::new(),
@@ -1613,6 +1666,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             code: glyph.code,
             matrix: placement.matrix,
             phase: placement.phase,
+            tolerance: self.tolerance.to_bits(),
         })
     }
 
@@ -3918,6 +3972,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if built.is_empty() {
             return;
         }
+        self.tolerance = flatness_tolerance(state);
         let rule = if even_odd {
             FillRule::EvenOdd
         } else {
@@ -3951,7 +4006,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         );
     }
 
-    fn clip_path(&mut self, path: &[PathSegment], _state: &GraphicsState, even_odd: bool) {
+    fn clip_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
@@ -3967,6 +4022,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if built.is_empty() {
             return;
         }
+        // 10.7.4: the clip is the pixels a fill of the path would paint, so
+        // it is flattened at the flatness a fill there would be.
+        self.tolerance = flatness_tolerance(state);
         let rule = if even_odd {
             FillRule::EvenOdd
         } else {
@@ -4014,6 +4072,12 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             }
             None => return,
         };
+        // Each glyph at the flatness it was shown at: the one they share, or
+        // already flattened each at its own.
+        if let Some(tolerance) = self.text_clip_tolerance.take() {
+            self.tolerance = tolerance;
+        }
+        self.text_clip_flat = false;
         let stop = self.stop_predicate();
         let (clip, bounds) = self.clip_coverage(&path, FillRule::NonZero, Some(&stop));
         self.clip = Some(clip);
@@ -4046,6 +4110,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if built.is_empty() {
             return;
         }
+        // 10.7.2: the path, and the stroker's round joins and caps, are
+        // flattened at the flatness in force.
+        self.tolerance = flatness_tolerance(state);
 
         // 8.4.3.2: the line width is in user space, and so are the dashes —
         // the pen is stated in user units and `pen` carries it to the device.
@@ -4161,6 +4228,10 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if outline.is_empty() {
             return; // A space, legitimately.
         }
+
+        // 10.7.2: a glyph's outline, filled, stroked or clipped by, is
+        // flattened at the flatness in force when it is shown.
+        self.tolerance = flatness_tolerance(state);
 
         // The glyph's transform maps its em square into user space; the base
         // transform takes that to pixels.
@@ -4347,7 +4418,31 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             // 9.3.6: the glyphs of a text object accumulate into one clip that
             // takes effect at `ET`, not glyph by glyph — clipping immediately
             // would leave each glyph clipped to itself, which is empty.
-            self.text_clip.get_or_insert_with(Path::new).extend(&path);
+            //
+            // Each at its own flatness: while every glyph shares one, the
+            // outlines are kept as curves and flattened together at `ET`,
+            // exactly as one fill; once two differ, what is held is
+            // flattened at its own and every glyph after at its own.
+            let tolerance = self.tolerance;
+            let shared = self
+                .text_clip_tolerance
+                .is_none_or(|held| held.to_bits() == tolerance.to_bits());
+            if shared && !self.text_clip_flat {
+                self.text_clip_tolerance = Some(tolerance);
+                self.text_clip.get_or_insert_with(Path::new).extend(&path);
+            } else {
+                if !self.text_clip_flat {
+                    if let (Some(held), Some(at)) =
+                        (self.text_clip.take(), self.text_clip_tolerance.take())
+                    {
+                        self.text_clip = Some(polyline(&held, at));
+                    }
+                    self.text_clip_flat = true;
+                }
+                self.text_clip
+                    .get_or_insert_with(Path::new)
+                    .extend(&polyline(&path, tolerance));
+            }
         }
     }
 

@@ -2,9 +2,10 @@
 //! render's glyph masks, kept under the key a mask is a function of.
 //!
 //! A mask is the coverage of one glyph's outline under its quantised 2x2 and
-//! its origin's phase (`glyph.rs`), so it is a function of four things — the
-//! font, the code, the 2x2 and the phase — and those are its [`Key`]. The
-//! origin is not in it: the same glyph at the same phase is the same pixels
+//! its origin's phase (`glyph.rs`), flattened at the flatness in force
+//! (10.7.2), so it is a function of five things — the font, the code, the
+//! 2x2, the phase and the flattening tolerance — and those are its [`Key`].
+//! The origin is not in it: the same glyph at the same phase is the same pixels
 //! wherever it stands. **A hit is the mask a miss rasterises**: the renderer
 //! keeps a mask only when its rasterisation ran to the end, so whether a
 //! glyph hit moves no pixel.
@@ -67,6 +68,10 @@ pub(crate) struct Key {
     pub(crate) matrix: [i32; 4],
     /// The origin's phase on each axis (`glyph::Placement::phase`).
     pub(crate) phase: [u8; 2],
+    /// The tolerance the outline is flattened at, in device pixels (10.7.2),
+    /// as the bits of the `f64`: one glyph shown at two flatnesses is two
+    /// masks.
+    pub(crate) tolerance: u64,
 }
 
 /// One kept mask.
@@ -189,6 +194,7 @@ mod tests {
             code,
             matrix: [3072, 0, 0, -3072],
             phase: [x, y],
+            tolerance: 0.2f64.to_bits(),
         }
     }
 

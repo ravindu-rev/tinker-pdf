@@ -522,11 +522,12 @@ are drawn as paths in the page's frame, so a glyph far larger than its
 canvas is rasterised only where it can show.
 
 **A render keeps its glyph masks** (`glyph_cache.rs`). A mask is a function
-of the font, the code, the quantised 2x2 and the phase, one of 256, and is
-kept for the rest of the render under those four; a later glyph with the same
-four is drawn from it, building no path, and a hit is the mask a miss would
+of the font, the code, the quantised 2x2, the phase, one of 256, and the
+flattening tolerance its outline is flattened at, the flatness in force, and is
+kept for the rest of the render under those five; a later glyph with the same
+five is drawn from it, building no path, and a hit is the mask a miss would
 rasterise, because a mask a cancelled render stopped short is drawn and never
-kept. The font is the glyph source's answer, `GlyphSource::font_identity`, so
+kept (`device_state.rs`'s `a_glyph_mask_is_kept_per_flatness`). The font is the glyph source's answer, `GlyphSource::font_identity`, so
 the render crate holds no dictionary: the facade gives a font with an object —
 its `/Font` entry's reference, or the object a reserved name spells — as
 `FontIdentity::Object`, one font in every scope; a font written into a
@@ -1062,10 +1063,26 @@ source, text knockout, the black generation, undercolour removal and
 transfer functions, and the halftone and its origin — travel in the state as
 one shared `StoredParameters` value with the rendering intent, which flat
 colours apply, `None` while every one has its initial value, so a
-`q` copies one word more and a copy allocates nothing. The transfer functions
-and black generation and undercolour removal are applied
+`q` copies one word more and a copy allocates nothing. The transfer functions,
+black generation and undercolour removal, and flatness are applied
 ([design/device-dependent-state.md](../design/device-dependent-state.md)); the
 rest move no pixel until their rows apply them.
+
+**Flatness** (`/FL` and `i`, 10.7.2) is the tolerance each paint's curves are
+flattened to, in device pixels, from the paint's own state: a fill, a stroke
+(its path and the stroker's round joins and caps), a clip (at the paint that
+ends its path, as a fill there would be) and a glyph's outline, filled,
+stroked or clipped by — a text clip's glyphs each at the flatness they were
+shown at, kept as curves and flattened together while they share one. Table
+56's range bounds it: past 100 it is 100, and it is no finer than 1/256 of a
+pixel, the grid the filler places a crossing on; 0, a negative value and none
+set are the device's own 0.2, so a page that sets none keeps its bytes (Table
+52's initial 1.0 is a tolerance 10.7.2 lets a processor ignore, and 0.2 is no
+coarser). The flattener's rule is unchanged, only its tolerance is the state's
+(`device_state.rs`'s `flatness_sets_the_tolerance_a_curve_is_flattened_to`,
+`a_text_clip_flattens_each_glyph_at_its_own_flatness`,
+`a_glyph_mask_is_kept_per_flatness`,
+`a_flattened_tile_is_the_page_under_it`).
 
 **Transfer functions** (`/TR2` over `/TR`, 10.5) are kept per point, as
 11.7.5.2 has them: each elementary object writes, where its shape is not zero,
