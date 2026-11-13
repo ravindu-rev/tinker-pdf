@@ -2302,4 +2302,515 @@ mod tests {
             "expected TooLarge, got {parsed:?}"
         );
     }
+
+    // ---- the price of an integer grid --------------------------------------
+
+    /// sRGB's primaries under three `curv` gammas of `g`: a matrix/TRC
+    /// profile.
+    fn matrix_trc(g: f64) -> Vec<u8> {
+        build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"rXYZ", xyz(SRGB_R[0], SRGB_R[1], SRGB_R[2])),
+                (*b"gXYZ", xyz(SRGB_G[0], SRGB_G[1], SRGB_G[2])),
+                (*b"bXYZ", xyz(SRGB_B[0], SRGB_B[1], SRGB_B[2])),
+                (*b"rTRC", gamma(g)),
+                (*b"gTRC", gamma(g)),
+                (*b"bTRC", gamma(g)),
+                (*b"wtpt", xyz(0.9642, 1.0, 0.8249)),
+            ],
+        )
+    }
+
+    /// A grey profile whose `kTRC` is a gamma of `g`, into the connection
+    /// space `pcs`.
+    fn grey(pcs: &[u8; 4], g: f64) -> Vec<u8> {
+        build(
+            b"GRAY",
+            pcs,
+            &[(*b"kTRC", gamma(g)), (*b"wtpt", xyz(0.9642, 1.0, 0.8249))],
+        )
+    }
+
+    /// The light a printed CMYK patch gives back, as linear sRGB: each ink's
+    /// dot spread by a fifth of the paper at half cover, and the paper's light
+    /// through what the inks leave of it.
+    fn printed(cmyk: [f64; 4]) -> [f64; 3] {
+        let spread = |t: f64| t + 0.8 * t * (1.0 - t);
+        let black = 1.0 - spread(cmyk[3]);
+        [
+            (1.0 - spread(cmyk[0])) * black,
+            (1.0 - spread(cmyk[1])) * black,
+            (1.0 - spread(cmyk[2])) * black,
+        ]
+    }
+
+    /// Linear sRGB as D50 XYZ.
+    fn xyz_of(rgb: [f64; 3]) -> [f64; 3] {
+        let row = |i: usize| -> f64 {
+            crate::SRGB_TO_XYZ_D50[i]
+                .iter()
+                .zip(rgb)
+                .map(|(m, v)| m * v)
+                .sum()
+        };
+        [row(0), row(1), row(2)]
+    }
+
+    /// D50 XYZ as CIE L*a*b*, 8.6.5.4's relation run forwards.
+    fn lab_of(xyz: [f64; 3]) -> [f64; 3] {
+        const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+        const DELTA: f64 = 6.0 / 29.0;
+        let f = |t: f64| {
+            if t > DELTA * DELTA * DELTA {
+                tinker_pdf_math::cbrt(t)
+            } else {
+                t / (3.0 * DELTA * DELTA) + 4.0 / 29.0
+            }
+        };
+        let (fx, fy, fz) = (
+            f(xyz[0] / WHITE[0]),
+            f(xyz[1] / WHITE[1]),
+            f(xyz[2] / WHITE[2]),
+        );
+        [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+    }
+
+    /// A four-input `mft2` printer table over a nine-point grid holding
+    /// [`printed`]'s light, in v2's legacy 16-bit Lab where `lab` and
+    /// otherwise in XYZ, whose 1.0 is `0x8000`.
+    fn cmyk_table(lab: bool) -> Vec<u8> {
+        let grid = 9usize;
+        let encode = |v: f64| v.round().clamp(0.0, 65535.0) as u16;
+        let clut: Vec<[u16; 3]> = (0..grid.pow(4))
+            .map(|index| {
+                let mut cmyk = [0.0; 4];
+                let mut rest = index;
+                for slot in cmyk.iter_mut().rev() {
+                    *slot = (rest % grid) as f64 / (grid - 1) as f64;
+                    rest /= grid;
+                }
+                let xyz = xyz_of(printed(cmyk));
+                if lab {
+                    let [l, a, b] = lab_of(xyz);
+                    [
+                        encode(l / 100.0 * 65280.0),
+                        encode((a + 128.0) / 255.0 * 65280.0),
+                        encode((b + 128.0) / 255.0 * 65280.0),
+                    ]
+                } else {
+                    xyz.map(|v| encode(v * 32768.0))
+                }
+            })
+            .collect();
+        let pcs = if lab { b"Lab " } else { b"XYZ " };
+        lut_profile(b"CMYK", pcs, mft2(4, grid, &clut))
+    }
+
+    /// A three-input `mAB ` carrying all five of its stages: A curves of
+    /// gamma 2.2, a grid of nine, seven and five points that passes its inputs
+    /// through, identity M curves, the matrix that takes linear sRGB to the
+    /// connection space's XYZ, and identity B curves — an RGB profile on
+    /// sRGB's primaries written the v4 way, with a grid count of its own on
+    /// each axis.
+    fn mab_every_stage() -> Vec<u8> {
+        fn pad(tag: &mut Vec<u8>) {
+            while tag.len() % 4 != 0 {
+                tag.push(0);
+            }
+        }
+        let identity = {
+            let mut curve = b"curv".to_vec();
+            curve.extend_from_slice(&[0; 4]);
+            curve.extend_from_slice(&0u32.to_be_bytes());
+            curve
+        };
+        let mut tag = b"mAB ".to_vec();
+        tag.extend_from_slice(&[0; 4]);
+        tag.push(3);
+        tag.push(3);
+        tag.extend_from_slice(&[0; 2]);
+        // The five offsets, filled in below in the header's order: B,
+        // matrix, M, CLUT, A.
+        tag.extend_from_slice(&[0; 20]);
+        let mut offsets = [0u32; 5];
+
+        offsets[0] = tag.len() as u32;
+        for _ in 0..3 {
+            tag.extend_from_slice(&identity);
+        }
+
+        // 1.0 of XYZ is 0x8000 of the 16-bit range the stages speak.
+        offsets[1] = tag.len() as u32;
+        let scale = 32768.0 / 65535.0;
+        for row in crate::SRGB_TO_XYZ_D50 {
+            for value in row {
+                let fixed = (value * scale * 65536.0).round() as i32;
+                tag.extend_from_slice(&(fixed as u32).to_be_bytes());
+            }
+        }
+        tag.extend_from_slice(&[0; 12]);
+
+        offsets[2] = tag.len() as u32;
+        for _ in 0..3 {
+            tag.extend_from_slice(&identity);
+        }
+
+        offsets[3] = tag.len() as u32;
+        let grids = [9usize, 7, 5];
+        let mut counts = [0u8; 16];
+        for (slot, &points) in counts.iter_mut().zip(&grids) {
+            *slot = points as u8;
+        }
+        tag.extend_from_slice(&counts);
+        // Two bytes a sample, then three of padding.
+        tag.push(2);
+        tag.extend_from_slice(&[0; 3]);
+        for i in 0..grids[0] {
+            for j in 0..grids[1] {
+                for k in 0..grids[2] {
+                    for (at, points) in [(i, grids[0]), (j, grids[1]), (k, grids[2])] {
+                        let value = (at as f64 / (points - 1) as f64 * 65535.0).round() as u16;
+                        tag.extend_from_slice(&value.to_be_bytes());
+                    }
+                }
+            }
+        }
+        pad(&mut tag);
+
+        offsets[4] = tag.len() as u32;
+        for _ in 0..3 {
+            let mut curve = gamma(2.2);
+            pad(&mut curve);
+            tag.extend_from_slice(&curve);
+        }
+
+        for (slot, offset) in offsets.iter().enumerate() {
+            tag[12 + 4 * slot..16 + 4 * slot].copy_from_slice(&offset.to_be_bytes());
+        }
+        tag
+    }
+
+    /// How a probe grid is read between its nodes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Form {
+        /// One step along each axis in turn from the cell's lowest node,
+        /// the largest fraction first, through the simplex that holds the
+        /// point: linear over one input, tetrahedral over three, the
+        /// 4-simplex's five nodes over four.
+        Simplex,
+        /// Tetrahedral over the first three inputs at the two nodes of the
+        /// fourth that bracket it, then linear between them: C, M and Y, and
+        /// then K, eight nodes.
+        TetrahedralThenLinear,
+        /// Every corner of the cell, weighted by the product of its
+        /// fractions: sixteen nodes over four inputs.
+        Multilinear,
+    }
+
+    impl Form {
+        /// The forms a grid over `inputs` is priced in: the one simplex over
+        /// one or three, and each form over four that the design weighs.
+        fn priced(inputs: usize) -> &'static [Form] {
+            if inputs == 4 {
+                &[
+                    Form::Simplex,
+                    Form::TetrahedralThenLinear,
+                    Form::Multilinear,
+                ]
+            } else {
+                &[Form::Simplex]
+            }
+        }
+
+        /// The form's name in the table, for a grid over `inputs`.
+        fn name(self, inputs: usize) -> &'static str {
+            match (self, inputs) {
+                (Form::Simplex, 1) => "linear",
+                (Form::Simplex, 3) => "tetrahedral",
+                (Form::Simplex, _) => "simplex",
+                (Form::TetrahedralThenLinear, _) => "tetrahedral then linear",
+                (Form::Multilinear, _) => "multilinear",
+            }
+        }
+    }
+
+    /// Where `x` falls on an axis of `points` nodes: the lower node of its
+    /// cell, and the fraction past it in 16 bits, which is 65 536 at the top
+    /// of the last cell.
+    fn locate(x: f64, points: usize) -> (usize, i64) {
+        let scaled = (x.clamp(0.0, 1.0) * (points - 1) as f64 * 65536.0).round() as i64;
+        let cell = (scaled >> 16) as usize;
+        if cell >= points - 1 {
+            (points - 2, 65536)
+        } else {
+            (cell, scaled & 0xFFFF)
+        }
+    }
+
+    /// A probe's integer grid: a transform's sRGB at every node of `points`
+    /// per axis over its inputs, the last axis fastest, three bytes a node.
+    /// A node holds the direct pipeline's own answer there, so between the
+    /// nodes the grid's difference from the pipeline is what it costs.
+    struct ProbeGrid {
+        inputs: usize,
+        points: usize,
+        nodes: Vec<[u8; 3]>,
+    }
+
+    impl ProbeGrid {
+        /// The grid, and the pipeline evaluations its build made.
+        fn build(transform: &Transform, points: usize) -> (ProbeGrid, u64) {
+            let inputs = transform.inputs();
+            let count = points.pow(inputs as u32);
+            let mut evaluations = 0u64;
+            let nodes = (0..count)
+                .map(|index| {
+                    evaluations += 1;
+                    let (r, g, b) = transform.apply(&Self::node_input(index, inputs, points));
+                    [r, g, b]
+                })
+                .collect();
+            (
+                ProbeGrid {
+                    inputs,
+                    points,
+                    nodes,
+                },
+                evaluations,
+            )
+        }
+
+        /// The input node `index` stands at: each axis's node over 0..=1.
+        fn node_input(index: usize, inputs: usize, points: usize) -> Vec<f64> {
+            let mut x = vec![0.0; inputs];
+            let mut rest = index;
+            for slot in x.iter_mut().rev() {
+                *slot = (rest % points) as f64 / (points - 1) as f64;
+                rest /= points;
+            }
+            x
+        }
+
+        fn node(&self, at: &[usize]) -> [u8; 3] {
+            self.nodes[at.iter().fold(0, |index, &i| index * self.points + i)]
+        }
+
+        /// The grid's bytes, one a channel.
+        fn bytes(&self) -> usize {
+            self.nodes.len() * 3
+        }
+
+        /// `x` read through the grid in `form`, in 16-bit fixed point, each
+        /// channel rounded once, at the end, to its byte.
+        fn read(&self, form: Form, x: &[f64]) -> [u8; 3] {
+            let (cells, fractions): (Vec<usize>, Vec<i64>) =
+                x.iter().map(|&v| locate(v, self.points)).unzip();
+            let round =
+                |v: i128, bits: u32| ((v + (1i128 << (bits - 1))) >> bits).clamp(0, 255) as u8;
+            match form {
+                Form::Simplex => {
+                    let axes: Vec<usize> = (0..self.inputs).collect();
+                    self.simplex(cells, &axes, &fractions)
+                        .map(|channel| round(channel, 16))
+                }
+                Form::TetrahedralThenLinear => {
+                    let last = self.inputs - 1;
+                    let axes: Vec<usize> = (0..last).collect();
+                    let low = self.simplex(cells.clone(), &axes, &fractions);
+                    let mut above = cells;
+                    above[last] += 1;
+                    let high = self.simplex(above, &axes, &fractions);
+                    let along = i128::from(fractions[last]);
+                    [0, 1, 2].map(|c| round(low[c] * 65536 + along * (high[c] - low[c]), 32))
+                }
+                Form::Multilinear => {
+                    let mut sum = [0i128; 3];
+                    for corner in 0..1usize << self.inputs {
+                        let mut weight = 1i128;
+                        let mut at = cells.clone();
+                        for (axis, &fraction) in fractions.iter().enumerate() {
+                            if corner & (1 << axis) != 0 {
+                                weight *= i128::from(fraction);
+                                at[axis] += 1;
+                            } else {
+                                weight *= 65536 - i128::from(fraction);
+                            }
+                        }
+                        let node = self.node(&at);
+                        for (slot, value) in sum.iter_mut().zip(node) {
+                            *slot += weight * i128::from(value);
+                        }
+                    }
+                    sum.map(|channel| round(channel, 16 * self.inputs as u32))
+                }
+            }
+        }
+
+        /// From the node at `at`, a step along each of `axes` in turn, the
+        /// largest fraction first, the earlier axis first between equals:
+        /// each node so reached weighed by its step's fraction against the
+        /// one before it. In units of 2^-16 of a level.
+        fn simplex(&self, mut at: Vec<usize>, axes: &[usize], fractions: &[i64]) -> [i128; 3] {
+            let mut order = axes.to_vec();
+            order.sort_by(|&a, &b| fractions[b].cmp(&fractions[a]).then(a.cmp(&b)));
+            let mut previous = self.node(&at);
+            let mut sum = previous.map(|value| i128::from(value) << 16);
+            for axis in order {
+                at[axis] += 1;
+                let next = self.node(&at);
+                for ((slot, now), before) in sum.iter_mut().zip(next).zip(previous) {
+                    *slot += i128::from(fractions[axis]) * (i128::from(now) - i128::from(before));
+                }
+                previous = next;
+            }
+            sum
+        }
+    }
+
+    /// The inputs a grid is priced over: 8-bit values, every one over one
+    /// input, every fifth over three, every seventeenth over four, every
+    /// combination of them.
+    fn sweep(inputs: usize) -> Vec<Vec<f64>> {
+        let step = match inputs {
+            1 => 1,
+            3 => 5,
+            _ => 17,
+        };
+        let axis: Vec<f64> = (0..=255u32)
+            .step_by(step)
+            .map(|v| f64::from(v) / 255.0)
+            .collect();
+        (0..axis.len().pow(inputs as u32))
+            .map(|index| {
+                let mut x = vec![0.0; inputs];
+                let mut rest = index;
+                for slot in x.iter_mut().rev() {
+                    *slot = axis[rest % axis.len()];
+                    rest /= axis.len();
+                }
+                x
+            })
+            .collect()
+    }
+
+    /// The head of `crates/tinker-pdf-color/data/icc_grid_prices.tsv`, which
+    /// [`the_grid_prices_the_design_quotes`] writes before its rows.
+    const GRID_PRICES_HEAD: &str = "\
+# The price of an integer grid standing in for each compiled ICC transform,
+# written by the_grid_prices_the_design_quotes in
+# crates/tinker-pdf-color/src/icc.rs:
+#
+#   cargo test -p tinker-pdf-color --release -- --ignored the_grid_prices_the_design_quotes
+#
+# Nine tab-separated fields, a row for each profile, grid size and
+# interpolation:
+#
+#   profile        the model the tree reads, as the probe builds it
+#   inputs         the transform's input components
+#   points         grid points along each axis
+#   interpolation  how the grid is read between its nodes, in 16-bit fixed point
+#   nodes          points to the power of inputs
+#   bytes          three a node, an sRGB byte a channel
+#   evaluations    pipeline evaluations the grid's build made
+#   worst          the largest difference, in levels of 255, from Transform::apply
+#   mean           the mean difference, over every channel of every input swept
+#
+# The sweep is of 8-bit inputs: every value over one input, every fifth over
+# three, every seventeenth over four. Every node reproduces Transform::apply
+# exactly, which the probe asserts before it prices a grid.
+profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
+";
+
+    /// **The grid prices the design quotes.**
+    ///
+    /// For each profile model the tree reads — matrix/TRC at gamma 1.0 and
+    /// 2.2, grey under XYZ and under Lab, `mft2` CMYK into Lab and into XYZ,
+    /// and a three-input `mAB ` with every stage — a 17- and a 33-point grid
+    /// built from [`Transform::apply`] at its nodes, read in fixed point in
+    /// each form [`Form::priced`] names, against `apply` over [`sweep`]'s
+    /// inputs: its nodes, bytes and build evaluations, and its worst and mean
+    /// difference in levels. Today's evaluation is the reference because it
+    /// is this engine's own, pinned by this module's known-answer tests; no
+    /// other colour engine is asked (ruling 13).
+    ///
+    /// Every node is read back through every form and must be `apply`'s
+    /// answer exactly before the grid is priced, so a wrong grid cannot price
+    /// itself. The rows are printed after a `RAN` banner and written to the
+    /// committed table, which this run regenerates.
+    #[test]
+    #[ignore = "prices every grid, about six million pipeline evaluations; rewrites \
+                crates/tinker-pdf-color/data/icc_grid_prices.tsv"]
+    fn the_grid_prices_the_design_quotes() {
+        let profiles: [(&str, Vec<u8>); 7] = [
+            ("matrix/TRC, gamma 1.0", matrix_trc(1.0)),
+            ("matrix/TRC, gamma 2.2", matrix_trc(2.2)),
+            ("grey under XYZ, gamma 2.2", grey(b"XYZ ", 2.2)),
+            ("grey under Lab, gamma 1.0", grey(b"Lab ", 1.0)),
+            ("mft2 CMYK to Lab", cmyk_table(true)),
+            ("mft2 CMYK to XYZ", cmyk_table(false)),
+            (
+                "mAB RGB to XYZ",
+                lut_profile(b"RGB ", b"XYZ ", mab_every_stage()),
+            ),
+        ];
+        let mut rows = String::new();
+        for (name, bytes) in &profiles {
+            let profile = Profile::parse(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let transform = Transform::compile(&profile).unwrap_or_else(|| panic!("{name}"));
+            let inputs = transform.inputs();
+            let samples = sweep(inputs);
+            let direct: Vec<[u8; 3]> = samples
+                .iter()
+                .map(|x| {
+                    let (r, g, b) = transform.apply(x);
+                    [r, g, b]
+                })
+                .collect();
+            for points in [17usize, 33] {
+                let (grid, evaluations) = ProbeGrid::build(&transform, points);
+                assert_eq!(
+                    evaluations,
+                    grid.nodes.len() as u64,
+                    "{name}: one evaluation a node"
+                );
+                for index in 0..grid.nodes.len() {
+                    let x = ProbeGrid::node_input(index, inputs, points);
+                    let (r, g, b) = transform.apply(&x);
+                    for &form in Form::priced(inputs) {
+                        assert_eq!(
+                            grid.read(form, &x),
+                            [r, g, b],
+                            "{name}, {points} points, {form:?}: node {index} is not the pipeline"
+                        );
+                    }
+                }
+                for &form in Form::priced(inputs) {
+                    let (mut worst, mut total) = (0u8, 0u64);
+                    for (x, want) in samples.iter().zip(&direct) {
+                        for (got, want) in grid.read(form, x).into_iter().zip(*want) {
+                            let difference = got.abs_diff(want);
+                            worst = worst.max(difference);
+                            total += u64::from(difference);
+                        }
+                    }
+                    let mean = total as f64 / (samples.len() * 3) as f64;
+                    rows.push_str(&format!(
+                        "{name}\t{inputs}\t{points}\t{}\t{}\t{}\t{evaluations}\t{worst}\t{mean:.4}\n",
+                        form.name(inputs),
+                        grid.nodes.len(),
+                        grid.bytes(),
+                    ));
+                }
+            }
+        }
+        println!("icc-grid-prices: RAN, {} rows", rows.lines().count());
+        print!("{rows}");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("icc_grid_prices.tsv");
+        std::fs::write(&path, format!("{GRID_PRICES_HEAD}{rows}"))
+            .unwrap_or_else(|error| panic!("writing {path:?}: {error}"));
+    }
 }

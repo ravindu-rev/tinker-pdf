@@ -229,6 +229,40 @@ volume, and the corpus census counts tags and bytes.
   bit-identical contract across targets, a page under `ICCBased` and CIE
   default spaces among them.
 
+### The price of an integer grid
+
+Conversion evaluates a transform's whole pipeline for every colour, as Stage
+2 describes. What a grid standing in for that pipeline would cost is priced
+by a probe in `icc.rs`'s tests, `the_grid_prices_the_design_quotes`, and
+held in a committed table, `crates/tinker-pdf-color/data/icc_grid_prices.tsv`,
+which the probe rewrites:
+
+```bash
+cargo test -p tinker-pdf-color --release -- --ignored the_grid_prices_the_design_quotes
+```
+
+- **What is priced.** One profile of each model the tree reads, built in the
+  test as the module's other fixtures are: matrix/TRC at gamma 1.0 and 2.2,
+  grey under XYZ and under Lab, a four-input `mft2` printer table into Lab
+  and into XYZ, and a three-input `mAB ` carrying all five of its stages.
+  For each, a 17- and a 33-point grid whose nodes hold
+  `Transform::apply`'s sRGB bytes at the node.
+- **How a grid is read.** In 16-bit fixed point, each channel rounded once at
+  the end: linearly over one input, tetrahedrally over three, and over four
+  in each form a four-input grid can take — the 4-simplex's five nodes,
+  tetrahedra over C, M and Y at the two K nodes either side and linear
+  between them, and all sixteen corners multilinearly.
+- **Against what.** `apply` itself, the engine's own evaluation, which the
+  known-answer tests above pin; no other colour engine is asked (ruling 13).
+  The sweep is of 8-bit inputs — every value of one input, every fifth of
+  three, every seventeenth of four — and each row records a grid's nodes, its
+  bytes at three a node, the pipeline evaluations its build made, and its
+  worst and mean difference from `apply` in levels of 255.
+- **Why it cannot flatter itself.** Before a grid is priced, every one of its
+  nodes is read back through every form and must be `apply`'s answer
+  exactly, so a grid built or read wrongly fails rather than reporting a
+  price.
+
 ### Default colour spaces (8.6.5.6)
 
 Roadmap row K-02. A resource dictionary's `/ColorSpace` may carry

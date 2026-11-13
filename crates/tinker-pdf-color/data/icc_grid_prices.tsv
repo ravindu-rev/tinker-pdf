@@ -1,0 +1,23 @@
+# The price of an integer grid standing in for each compiled ICC transform,
+# written by the_grid_prices_the_design_quotes in
+# crates/tinker-pdf-color/src/icc.rs:
+#
+#   cargo test -p tinker-pdf-color --release -- --ignored the_grid_prices_the_design_quotes
+#
+# Nine tab-separated fields, a row for each profile, grid size and
+# interpolation:
+#
+#   profile        the model the tree reads, as the probe builds it
+#   inputs         the transform's input components
+#   points         grid points along each axis
+#   interpolation  how the grid is read between its nodes, in 16-bit fixed point
+#   nodes          points to the power of inputs
+#   bytes          three a node, an sRGB byte a channel
+#   evaluations    pipeline evaluations the grid's build made
+#   worst          the largest difference, in levels of 255, from Transform::apply
+#   mean           the mean difference, over every channel of every input swept
+#
+# The sweep is of 8-bit inputs: every value over one input, every fifth over
+# three, every seventeenth over four. Every node reproduces Transform::apply
+# exactly, which the probe asserts before it prices a grid.
+profile	inputs	points	interpolation	nodes	bytes	evaluations	worst	mean
