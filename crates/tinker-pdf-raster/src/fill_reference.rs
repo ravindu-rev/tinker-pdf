@@ -823,7 +823,7 @@ pub(crate) fn region(s: &mut Stream) -> (i32, i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fill::fill;
+    use crate::fill::{fill, fill_with, FillScratch};
 
     /// Paths generated of each class.
     const PATHS: u64 = 48;
@@ -831,7 +831,10 @@ mod tests {
     const REGIONS: u64 = 3;
 
     /// **The safety net**: `fill` is the sweep, byte for byte, on every path
-    /// the classes generate, at every region, under both rules.
+    /// the classes generate, at every region, under both rules — and so is
+    /// every fill made back to back through one [`FillScratch`], over shapes
+    /// and regions of every size, so nothing a fill leaves in its scratch
+    /// reaches the next one's pixels.
     ///
     /// The harness counts what it ran, so it cannot pass by generating
     /// nothing: every case of every class is compared, a quarter of them at
@@ -842,6 +845,7 @@ mod tests {
     #[test]
     fn fill_is_the_reference_sweep_on_generated_paths() {
         let mut s = Stream::new(0x7072_6573_7465);
+        let mut scratch = FillScratch::new();
         for class in CLASSES {
             let (mut cases, mut inked) = (0u64, 0u64);
             let mut met = Census::default();
@@ -854,6 +858,21 @@ mod tests {
                         let want =
                             fill_reference(&path, rule, x0, y0, width, height, tolerance, None);
                         let got = fill(&path, rule, x0, y0, width, height, tolerance, None);
+                        let reused = fill_with(
+                            &mut scratch,
+                            &path,
+                            rule,
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            tolerance,
+                            None,
+                        );
+                        assert_eq!(
+                            reused.data, got.data,
+                            "{class:?} path {index} under {rule:?}: through the one scratch"
+                        );
                         assert_eq!(
                             (got.x0, got.y0, got.width, got.height),
                             (want.x0, want.y0, want.width, want.height),

@@ -15,7 +15,7 @@
 
 use crate::blend::BlendMode;
 use crate::canvas::{mul255, Canvas, Color};
-use crate::fill::{fill, Mask};
+use crate::fill::{fill_with, FillScratch, Mask};
 use crate::fragments::Fragments;
 use crate::geom::{FillRule, Path};
 
@@ -591,26 +591,40 @@ impl<'a> ImageDraw<'a> {
 ///
 /// `pyramid` is scratch space the caller owns: any reduced copies this draw
 /// needs are built into it and left there. Pass a fresh [`Pyramid::new`] to
-/// throw them away, or keep one beside the image to reuse them.
-pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyramid) {
+/// throw them away, or keep one beside the image to reuse them. `scratch` is
+/// the memory the image's unit square is filled in, which a caller drawing
+/// many things keeps and passes to every fill ([`fill_with`]).
+pub fn draw_image(
+    canvas: &mut Canvas,
+    draw: &ImageDraw<'_>,
+    pyramid: &mut Pyramid,
+    scratch: &mut FillScratch,
+) {
     let alpha = draw.alpha.clamp(0.0, 1.0);
     // The canvas's own device pixels, which is all a draw can reach. The walk
     // is in device pixels — the frame every placement is stated in — and only
     // the write below turns one into a canvas index (ruling 5).
     let rect = canvas.device_rect();
     let ink = draw.tint.and(draw.ink);
-    walk(draw, pyramid, rect, |px, py, color, covered, own| {
-        let clip = draw.clip.map_or(255, |mask| mask.at(px, py));
-        if clip == 0 {
-            return;
-        }
-        let Some((x, y)) = canvas.local(px, py) else {
-            return;
-        };
-        let effective =
-            alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0 * f64::from(clip) / 255.0;
-        canvas.blend_pixel_inked(x, y, color, ink, effective, draw.blend);
-    });
+    walk(
+        draw,
+        pyramid,
+        scratch,
+        rect,
+        |px, py, color, covered, own| {
+            let clip = draw.clip.map_or(255, |mask| mask.at(px, py));
+            if clip == 0 {
+                return;
+            }
+            let Some((x, y)) = canvas.local(px, py) else {
+                return;
+            };
+            let effective = alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0
+                * f64::from(clip)
+                / 255.0;
+            canvas.blend_pixel_inked(x, y, color, ink, effective, draw.blend);
+        },
+    );
 }
 
 /// Adds an image draw to a run instead of compositing it.
@@ -622,21 +636,29 @@ pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyram
 ///
 /// `canvas` is the device rectangle the draw is clipped to, as `(x0, y0,
 /// width, height)` — the canvas's [`Canvas::device_rect`], which is the same
-/// extent [`draw_image`] would have used.
+/// extent [`draw_image`] would have used. `pyramid` and `scratch` are as
+/// [`draw_image`]'s.
 pub fn accumulate_image(
     fragments: &mut Fragments,
     draw: &ImageDraw<'_>,
     pyramid: &mut Pyramid,
     canvas: (i32, i32, u32, u32),
+    scratch: &mut FillScratch,
 ) {
-    walk(draw, pyramid, canvas, |px, py, color, covered, own| {
-        fragments.add(
-            px,
-            py,
-            color,
-            mul255(u32::from(covered), u32::from(own)) as u8,
-        );
-    });
+    walk(
+        draw,
+        pyramid,
+        scratch,
+        canvas,
+        |px, py, color, covered, own| {
+            fragments.add(
+                px,
+                py,
+                color,
+                mul255(u32::from(covered), u32::from(own)) as u8,
+            );
+        },
+    );
 }
 
 /// The device pixels an image draw can reach on a canvas at the origin, as
@@ -666,7 +688,8 @@ pub fn image_bounds_in(t: &Transform, rect: (i32, i32, u32, u32)) -> Option<(i32
 /// lands on coverage it is already holding before it adds any, and that
 /// question is about the geometry rather than the samples. The region is the
 /// caller's so the question can be asked of the band where two draws meet
-/// rather than of either draw whole.
+/// rather than of either draw whole. The square is filled in `scratch`
+/// ([`fill_with`]).
 #[must_use]
 pub fn image_coverage(
     t: &Transform,
@@ -675,8 +698,9 @@ pub fn image_coverage(
     width: u32,
     height: u32,
     stop: Option<&dyn Fn() -> bool>,
+    scratch: &mut FillScratch,
 ) -> Mask {
-    unit_quad(t, x0, y0, width, height, stop)
+    unit_quad(scratch, t, (x0, y0, width, height), stop)
 }
 
 /// Walks the destination pixels of one image draw, handing each to `emit` as
@@ -690,6 +714,7 @@ pub fn image_coverage(
 fn walk(
     draw: &ImageDraw<'_>,
     pyramid: &mut Pyramid,
+    scratch: &mut FillScratch,
     rect: (i32, i32, u32, u32),
     mut emit: impl FnMut(i32, i32, Color, u8, u8),
 ) {
@@ -722,11 +747,9 @@ fn walk(
     // filled path does — same sub-scanline grid, same fixed point, same
     // cancellation. `docs/design/image-edges.md` records what this trades.
     let mut shape = unit_quad(
+        scratch,
         &draw.unit_to_device,
-        x0,
-        y0,
-        x1.abs_diff(x0),
-        y1.abs_diff(y0),
+        (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)),
         draw.stop,
     );
     if !draw.antialias {
@@ -790,19 +813,18 @@ fn walk(
 ///
 /// The tolerance cannot matter — four corners and four straight edges have
 /// nothing to flatten — but `fill` takes one, so it is named rather than left
-/// as a bare number somebody would later try to tune.
+/// as a bare number somebody would later try to tune. The region is `(x0, y0,
+/// width, height)`, and the square is filled in `scratch`.
 fn unit_quad(
+    scratch: &mut FillScratch,
     t: &Transform,
-    x0: i32,
-    y0: i32,
-    width: u32,
-    height: u32,
+    (x0, y0, width, height): (i32, i32, u32, u32),
     stop: Option<&dyn Fn() -> bool>,
 ) -> Mask {
     /// Unused: the quad has no curves.
     const TOLERANCE: f64 = 0.2;
 
-    // Snapped to the sweep's own 1/256 grid. An image rectangle placed by a
+    // Snapped to the fill's own 1/256 grid. An image rectangle placed by a
     // translation lands on a 1/256 boundary far more often than not — every
     // strip of every scan does. The translation is exact but the arithmetic
     // that applies it need not be: `a + (e - t)` and `(a + e) - t` differ by
@@ -831,7 +853,8 @@ fn unit_quad(
     }
     quad.close();
 
-    fill(
+    fill_with(
+        scratch,
         &quad,
         FillRule::NonZero,
         x0,
@@ -1081,7 +1104,12 @@ mod tests {
     }
 
     fn draw(canvas: &mut Canvas, image: &ImageSource<'_>, t: Transform) {
-        draw_image(canvas, &ImageDraw::new(*image, t), &mut Pyramid::new());
+        draw_image(
+            canvas,
+            &ImageDraw::new(*image, t),
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
     }
 
     /// An image wholly off the canvas draws nothing and **allocates nothing**.
@@ -1148,7 +1176,12 @@ mod tests {
                 antialias,
                 ..ImageDraw::new(image, placement)
             };
-            draw_image(&mut canvas, &draw, &mut Pyramid::new());
+            draw_image(
+                &mut canvas,
+                &draw,
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
             canvas
         };
         let partial = |canvas: &Canvas| {
@@ -1247,7 +1280,12 @@ mod tests {
         let mut canvas = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(4.0));
         draw.tint = Some(Color::rgb(255, 0, 0));
-        draw_image(&mut canvas, &draw, &mut Pyramid::new());
+        draw_image(
+            &mut canvas,
+            &draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
 
         assert_eq!(canvas.pixel(0, 0), Some(Color::WHITE), "still transparent");
         assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)), "tinted");
@@ -1273,11 +1311,22 @@ mod tests {
         draw.tint = Some(Color::BLACK);
         draw.ink = rich;
         let mut direct = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
-        draw_image(&mut direct, &draw, &mut Pyramid::new());
+        draw_image(
+            &mut direct,
+            &draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
         assert_eq!(at(&direct), [255, 255, 255, 255, 255], "drawn directly");
 
         let mut run = Fragments::new(0, 0, 4, 4);
-        accumulate_image(&mut run, &draw, &mut Pyramid::new(), (0, 0, 4, 4));
+        accumulate_image(
+            &mut run,
+            &draw,
+            &mut Pyramid::new(),
+            (0, 0, 4, 4),
+            &mut FillScratch::new(),
+        );
         let mut held = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
         run.composite_region_inked(
             &mut held,
@@ -1291,12 +1340,22 @@ mod tests {
         assert_eq!(at(&held), [255, 255, 255, 255, 255], "through a run");
 
         let mut light = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
-        draw_image(&mut light, &draw, &mut Pyramid::new());
+        draw_image(
+            &mut light,
+            &draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
         assert_eq!(light.pixel(0, 0), Some(Color::BLACK), "light reads no ink");
 
         draw.tint = None;
         let mut untinted = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
-        draw_image(&mut untinted, &draw, &mut Pyramid::new());
+        draw_image(
+            &mut untinted,
+            &draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
         assert_eq!(at(&untinted), [0, 0, 0, 255, 255], "no tint, no ink");
     }
 
@@ -1333,7 +1392,12 @@ mod tests {
         let mut draw = ImageDraw::new(image, over(8.0));
         let stop = || true;
         draw.stop = Some(&stop);
-        draw_image(&mut canvas, &draw, &mut Pyramid::new());
+        draw_image(
+            &mut canvas,
+            &draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
         assert!(canvas.data.iter().all(|b| *b == 255), "no row was drawn");
     }
 
@@ -1400,7 +1464,12 @@ mod tests {
             let mut canvas = Canvas::new(16, 16, PixelFormat::Rgb8, Color::WHITE);
             let mut draw = ImageDraw::new(image, over(16.0));
             draw.interpolate = interpolate;
-            draw_image(&mut canvas, &draw, &mut Pyramid::new());
+            draw_image(
+                &mut canvas,
+                &draw,
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
             let mut values: Vec<u8> = canvas.data.iter().step_by(3).copied().collect();
             values.sort_unstable();
             values.dedup();
@@ -1429,7 +1498,12 @@ mod tests {
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(8.0));
         draw.interpolate = true;
-        draw_image(&mut canvas, &draw, &mut Pyramid::new());
+        draw_image(
+            &mut canvas,
+            &draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
 
         for y in 0..8u32 {
             for x in 0..8u32 {
@@ -1508,7 +1582,12 @@ mod tests {
                 },
             );
             draw.interpolate = interpolate;
-            draw_image(&mut canvas, &draw, &mut Pyramid::new());
+            draw_image(
+                &mut canvas,
+                &draw,
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
             canvas.data.iter().step_by(3).copied().collect::<Vec<u8>>()
         };
 
@@ -1562,6 +1641,7 @@ mod tests {
             &mut canvas,
             &ImageDraw::new(image, over(8.0)),
             &mut Pyramid::new(),
+            &mut FillScratch::new(),
         );
         let values: Vec<u8> = canvas.data.iter().step_by(3).copied().collect();
 
@@ -1665,6 +1745,7 @@ mod tests {
             &mut canvas,
             &ImageDraw::new(image, over(16.0)),
             &mut pyramid,
+            &mut FillScratch::new(),
         );
         let values: Vec<u8> = canvas.data.iter().step_by(3).copied().collect();
 
@@ -1693,7 +1774,12 @@ mod tests {
 
         let mut pyramid = Pyramid::new();
         let mut first = Canvas::new(2, 2, PixelFormat::Rgb8, Color::WHITE);
-        draw_image(&mut first, &ImageDraw::new(image, over(2.0)), &mut pyramid);
+        draw_image(
+            &mut first,
+            &ImageDraw::new(image, over(2.0)),
+            &mut pyramid,
+            &mut FillScratch::new(),
+        );
 
         // 512 samples into 2 pixels is 256:1, which is past
         // `PYRAMID_ABOVE` and so the one shape of draw that still reduces:
@@ -1704,7 +1790,12 @@ mod tests {
         assert_eq!(pyramid.level_size(11), Some((8, 8)));
 
         let mut second = Canvas::new(2, 2, PixelFormat::Rgb8, Color::WHITE);
-        draw_image(&mut second, &ImageDraw::new(image, over(2.0)), &mut pyramid);
+        draw_image(
+            &mut second,
+            &ImageDraw::new(image, over(2.0)),
+            &mut pyramid,
+            &mut FillScratch::new(),
+        );
         assert_eq!(first.data, second.data, "the reused levels are the same");
         assert_eq!(pyramid.levels(), 12, "and nothing was rebuilt");
 
@@ -1725,6 +1816,7 @@ mod tests {
             &mut third,
             &ImageDraw::new(smaller, over(1.0)),
             &mut pyramid,
+            &mut FillScratch::new(),
         );
         assert_eq!(
             pyramid.level_size(0),

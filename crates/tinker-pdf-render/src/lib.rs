@@ -31,7 +31,7 @@ use tinker_pdf_content::{
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
     canvas::{Canvas, Color, MaskKind, PixelFormat},
-    fill::{fill, Mask},
+    fill::{fill_with, FillScratch, Mask},
     fragments::Fragments,
     geom::{FillRule, Path},
     image::{
@@ -927,6 +927,12 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// rather than merely costs is if something counts.
     #[cfg(test)]
     mask_pixels: u64,
+    /// The memory every fill of this renderer works in — each path, clip and
+    /// glyph, each image's unit square and each mesh's coverage, on the page,
+    /// in a group's or a soft mask's buffer and in a tile alike — grown for
+    /// the largest and reused by the rest. A tiling cell is drawn by a
+    /// renderer of its own, with its own.
+    scratch: FillScratch,
 }
 
 impl<'g, G: GlyphSource> Renderer<'g, G> {
@@ -967,6 +973,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             pattern_depth: 0,
             #[cfg(test)]
             mask_pixels: 0,
+            scratch: FillScratch::new(),
         }
     }
 
@@ -1831,7 +1838,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             stop: Some(&stop),
             scale: self.pixels_per_square_unit().sqrt(),
         };
-        let Some(mut buffer) = draw_mesh_over(&draw, wanted.rect(), whole.rect()) else {
+        let Some(mut buffer) =
+            draw_mesh_over(&draw, wanted.rect(), whole.rect(), &mut self.scratch)
+        else {
             return false;
         };
         #[cfg(test)]
@@ -2176,7 +2185,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .mask_pixels
                 .saturating_add(u64::from(width) * u64::from(height));
         }
-        let mut mask = fill(path, rule, x0, y0, width, height, self.tolerance, stop);
+        let mut mask = fill_with(
+            &mut self.scratch,
+            path,
+            rule,
+            x0,
+            y0,
+            width,
+            height,
+            self.tolerance,
+            stop,
+        );
         // Before the clip, so the clip multiplies into a hard shape and the
         // product of two hard masks stays hard. See `with_antialias`.
         if !self.antialias {
@@ -2371,7 +2390,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // phase 08's, so this deliberately does not invent one.
         let mut pyramid = Pyramid::new();
         if direct {
-            draw_image(&mut self.canvas, &draw, &mut pyramid);
+            draw_image(&mut self.canvas, &draw, &mut pyramid, &mut self.scratch);
             return;
         }
 
@@ -2384,7 +2403,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             ink,
             covered: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
         });
-        accumulate_image(&mut run.fragments, &draw, &mut pyramid, extent);
+        accumulate_image(
+            &mut run.fragments,
+            &draw,
+            &mut pyramid,
+            extent,
+            &mut self.scratch,
+        );
         if let Some((bx0, by0, bw, bh)) = bounds {
             run.covered = (
                 run.covered.0.min(bx0),
@@ -2401,7 +2426,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// question is asked only of that row — the intersection of the draw's own
     /// rectangle with the rectangle the run has painted — rather than of
     /// either draw whole, so the common case costs a band and not a page.
-    fn run_would_overlap(&self, t: &Transform) -> bool {
+    fn run_would_overlap(&mut self, t: &Transform) -> bool {
         let Some(run) = &self.run else {
             return false;
         };
@@ -2416,7 +2441,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if x1 <= x0 || y1 <= y0 {
             return false;
         }
-        let shape = image_coverage(t, x0, y0, (x1 - x0) as u32, (y1 - y0) as u32, None);
+        let shape = image_coverage(
+            t,
+            x0,
+            y0,
+            (x1 - x0) as u32,
+            (y1 - y0) as u32,
+            None,
+            &mut self.scratch,
+        );
         run.fragments.would_overlap(&shape)
     }
 
@@ -3912,6 +3945,7 @@ mod tests {
     use super::*;
     use tinker_pdf_content::interpret;
     use tinker_pdf_content::FontSource;
+    use tinker_pdf_raster::fill::fill;
 
     struct NoFonts;
     impl FontSource for NoFonts {

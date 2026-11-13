@@ -230,61 +230,99 @@ pub(crate) fn flatten_mapped(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
     flatten_at(path, tolerance)
 }
 
+/// [`flatten`] into two buffers the caller owns and reuses: every subpath's
+/// points one after another in `points`, and in `ends` the index in `points`
+/// each subpath ends at. Both are emptied first. The same points as
+/// [`flatten`], from the same walk, without a vector a subpath.
+pub(crate) fn flatten_flat(
+    path: &Path,
+    tolerance: f64,
+    points: &mut Vec<Point>,
+    ends: &mut Vec<usize>,
+) {
+    let tolerance = if tolerance.is_finite() && tolerance > 1e-6 {
+        tolerance
+    } else {
+        0.1
+    };
+    points.clear();
+    ends.clear();
+    flatten_walk(path, tolerance, points, |points, _| ends.push(points.len()));
+}
+
 /// The flattening itself, at a tolerance already known to be finite and
 /// positive.
 fn flatten_at(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
     let mut out: Vec<Vec<Point>> = Vec::new();
-    let mut current: Vec<Point> = Vec::new();
+    let mut points: Vec<Point> = Vec::new();
+    flatten_walk(path, tolerance, &mut points, |points, begin| {
+        out.push(points.split_off(begin));
+    });
+    out
+}
+
+/// The walk both forms share: each subpath's points are pushed onto the end
+/// of `points`, and `close(points, begin)` is called as each one ends, with
+/// the subpath being `points[begin..]`. A `close` may take those points away
+/// or leave them; the next subpath begins wherever `points` then ends.
+fn flatten_walk(
+    path: &Path,
+    tolerance: f64,
+    points: &mut Vec<Point>,
+    mut close: impl FnMut(&mut Vec<Point>, usize),
+) {
+    let mut begin = points.len();
     let mut start = Point::new(0.0, 0.0);
     let mut cursor = start;
 
     for verb in path.verbs() {
         match *verb {
             Verb::MoveTo(p) => {
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
+                if points.len() > begin {
+                    close(points, begin);
+                    begin = points.len();
                 }
-                current.push(p);
+                points.push(p);
                 start = p;
                 cursor = p;
             }
             Verb::LineTo(p) => {
-                if current.is_empty() {
-                    current.push(cursor);
+                if points.len() == begin {
+                    points.push(cursor);
                 }
-                current.push(p);
+                points.push(p);
                 cursor = p;
             }
             Verb::QuadTo(c, end) => {
-                if current.is_empty() {
-                    current.push(cursor);
+                if points.len() == begin {
+                    points.push(cursor);
                 }
-                subdivide_quadratic(cursor, c, end, tolerance, &mut current);
+                subdivide_quadratic(cursor, c, end, tolerance, points);
                 cursor = end;
             }
             Verb::CurveTo(c1, c2, end) => {
-                if current.is_empty() {
-                    current.push(cursor);
+                if points.len() == begin {
+                    points.push(cursor);
                 }
-                subdivide(cursor, c1, c2, end, tolerance, &mut current);
+                subdivide(cursor, c1, c2, end, tolerance, points);
                 cursor = end;
             }
             Verb::Close => {
-                if current.len() > 1 {
-                    current.push(start);
+                if points.len() - begin > 1 {
+                    points.push(start);
                 }
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
+                if points.len() > begin {
+                    close(points, begin);
+                    begin = points.len();
                 }
                 cursor = start;
             }
         }
     }
 
-    if !current.is_empty() {
-        out.push(current);
+    if points.len() > begin {
+        close(points, begin);
     }
-    out
 }
 
 /// How many segments a curve whose control polygon is `polygon` long needs.
@@ -632,5 +670,38 @@ mod tests {
         path.move_to(0.0, 10.0);
         path.line_to(10.0, 10.0);
         assert_eq!(flatten(&path, 0.1).len(), 2);
+    }
+
+    /// The flat form the filler reuses is the nested form, point for point
+    /// and subpath for subpath — over moves without lines, lines without a
+    /// move, closes twice over, both curve verbs, and the tolerances `flatten`
+    /// replaces — and it empties its buffers first.
+    #[test]
+    fn the_flat_form_is_the_nested_one() {
+        let mut path = Path::new();
+        path.line_to(3.0, 4.0);
+        path.quad_to(9.0, 1.0, 12.0, 7.5);
+        path.move_to(1.0, 1.0);
+        path.move_to(2.0, 2.0);
+        path.curve_to(30.0, 2.0, -10.0, 20.0, 15.0, 18.0);
+        path.close();
+        path.close();
+        path.line_to(40.0, 3.0);
+        path.quad_to(44.0, 9.0, 41.0, 12.0);
+        path.close();
+        path.move_to(5.0, 5.0);
+        let (mut points, mut ends) = (vec![Point::new(9.0, 9.0)], vec![7]);
+        for tolerance in [0.01, 0.2, 1.0, 0.0, f64::NAN] {
+            flatten_flat(&path, tolerance, &mut points, &mut ends);
+            let mut flat = Vec::new();
+            let mut begin = 0;
+            for end in &ends {
+                flat.push(points.get(begin..*end).map(<[Point]>::to_vec));
+                begin = *end;
+            }
+            assert_eq!(begin, points.len(), "every point is in a subpath");
+            let nested: Vec<_> = flatten(&path, tolerance).into_iter().map(Some).collect();
+            assert_eq!(flat, nested, "at tolerance {tolerance}");
+        }
     }
 }

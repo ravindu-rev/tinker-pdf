@@ -42,7 +42,7 @@
 //! interpolates numbers it cannot interpret and converts nothing.
 
 use crate::canvas::Color;
-use crate::fill::{fill, Mask};
+use crate::fill::{fill_with, FillScratch, Mask};
 use crate::geom::{FillRule, Path};
 
 /// The most work one mesh may cost, summed over its triangles.
@@ -160,7 +160,8 @@ impl MeshBuffer {
 /// `None` refuses a mesh that would cost more than [`MAX_MESH_WORK`]. The
 /// region is the caller's: a mesh is bounded by the clip in force exactly as
 /// every other paint is, and clamping the triangles to it before the budget is
-/// measured is what makes a mesh far off the page cost nothing.
+/// measured is what makes a mesh far off the page cost nothing. The mesh's
+/// coverage is filled in `scratch` ([`fill_with`]).
 #[must_use]
 pub fn draw_mesh(
     draw: &MeshDraw<'_>,
@@ -168,9 +169,10 @@ pub fn draw_mesh(
     y0: i32,
     width: u32,
     height: u32,
+    scratch: &mut FillScratch,
 ) -> Option<MeshBuffer> {
     let region = (x0, y0, width, height);
-    draw_mesh_over(draw, region, region)
+    draw_mesh_over(draw, region, region, scratch)
 }
 
 /// [`draw_mesh`] for a canvas that is a part of the picture the mesh is in.
@@ -197,6 +199,7 @@ pub fn draw_mesh_over(
     draw: &MeshDraw<'_>,
     wanted: (i32, i32, u32, u32),
     whole: (i32, i32, u32, u32),
+    scratch: &mut FillScratch,
 ) -> Option<MeshBuffer> {
     let empty = |(x0, y0, width, height): (i32, i32, u32, u32)| {
         let pixels = (width as usize).checked_mul(height as usize)?;
@@ -278,7 +281,8 @@ pub fn draw_mesh_over(
     }
     // A mesh path holds nothing but straight lines, so the flattening
     // tolerance is never consulted; it is passed because `fill` takes one.
-    let coverage = fill(
+    let coverage = fill_with(
+        scratch,
         &path,
         FillRule::NonZero,
         x0,
@@ -539,7 +543,7 @@ mod tests {
             stop: None,
             scale: 1.0,
         };
-        draw_mesh(&draw, 0, 0, size, size).expect("it fits the budget")
+        draw_mesh(&draw, 0, 0, size, size, &mut FillScratch::new()).expect("it fits the budget")
     }
 
     /// **Milestone 2's exit criterion.** Two triangles sharing an edge
@@ -711,13 +715,13 @@ mod tests {
             scale: 1.0,
         };
         assert!(
-            draw_mesh(&draw, 0, 0, 2000, 2000).is_none(),
+            draw_mesh(&draw, 0, 0, 2000, 2000, &mut FillScratch::new()).is_none(),
             "40 000 page-tall slivers is past any sane budget"
         );
 
         // And the same mesh into a region only a few rows tall fits, because
         // the budget is charged on the clamped boxes.
-        assert!(draw_mesh(&draw, 0, 0, 8, 4).is_some());
+        assert!(draw_mesh(&draw, 0, 0, 8, 4, &mut FillScratch::new()).is_some());
     }
 
     /// Whether a mesh is affordable is a question about the mesh, so every
@@ -756,7 +760,7 @@ mod tests {
                 let width = (4.0 * scale) as u32;
                 let height = (tall * scale) as u32;
                 assert_eq!(
-                    draw_mesh(&draw, 0, 0, width, height).is_some(),
+                    draw_mesh(&draw, 0, 0, width, height, &mut FillScratch::new()).is_some(),
                     drawn,
                     "{count} slivers {tall} tall at {scale}x"
                 );

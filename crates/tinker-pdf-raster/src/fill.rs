@@ -27,7 +27,7 @@
 
 use core::ops::Range;
 
-use crate::geom::{flatten, FillRule, Path, Point};
+use crate::geom::{flatten_flat, FillRule, Path, Point};
 
 /// Sub-scanlines per pixel row. Sixteen gives 4-bit vertical resolution,
 /// combined with exact horizontal spans for 8-bit total coverage.
@@ -341,9 +341,41 @@ const NONE: u32 = u32::MAX;
 /// The bytes are the sorted sweep's, which `fill_reference.rs` keeps and
 /// compares with this byte for byte; `docs/design/rasterizer-accumulation.md`
 /// is the design.
+///
+/// The fill works in a [`FillScratch`] of its own, dropped when it returns; a
+/// caller filling many shapes keeps one and fills through [`fill_with`].
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn fill(
+    path: &Path,
+    rule: FillRule,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
+) -> Mask {
+    fill_with(
+        &mut FillScratch::new(),
+        path,
+        rule,
+        x0,
+        y0,
+        width,
+        height,
+        tolerance,
+        stop,
+    )
+}
+
+/// [`fill`], working in `scratch`: the same mask, and from the second fill on
+/// no allocation but the mask's while no fill needs more than an earlier one
+/// did.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn fill_with(
+    scratch: &mut FillScratch,
     path: &Path,
     rule: FillRule,
     x0: i32,
@@ -357,95 +389,202 @@ pub fn fill(
     if width == 0 || height == 0 {
         return mask;
     }
+    #[cfg(test)]
+    let held = scratch.capacities();
+    scratch.sweep_into(&mut mask, path, rule, tolerance, stop);
+    #[cfg(test)]
+    count::allocated(scratch.grown_from(&held));
+    mask
+}
 
-    let mut edges = Vec::new();
-    let mut open = false;
-    for poly in &flatten(path, tolerance) {
-        open |= build_edges(poly, &mut edges);
+/// The memory a fill works in, which the caller owns and every fill through
+/// it reuses: grown when a fill needs more, never shrunk.
+///
+/// The flattened points, the edges and the lists that hold each until its
+/// row, the active set, one row of [`Cell`]s with the crowded lanes' later
+/// crossings, and the buffers of a row swept because it does not close. A
+/// renderer filling a page's paths, clips, glyphs, image quads and meshes
+/// through one allocates for the largest of them, and after that only the
+/// masks it is handed back.
+///
+/// **Nothing left in it reaches a pixel.** A fill empties the points, the
+/// edges, the lists and the active set before it uses them; every cell is
+/// cleared as it is turned into a byte and the crowded-lane table as it is
+/// read, and a stop is asked before a row's deposit, so the cells are clear
+/// between fills however the last one ended.
+#[derive(Default)]
+pub struct FillScratch {
+    /// The path's points, subpath after subpath.
+    points: Vec<Point>,
+    /// Where in `points` each subpath ends.
+    ends: Vec<usize>,
+    /// The edges, in the order the path gives them.
+    edges: Vec<Edge>,
+    /// Each active row's list of the edges that begin in it: its first edge.
+    starts: Vec<u32>,
+    /// Each edge's successor in its row's list.
+    next: Vec<u32>,
+    /// The edges reaching the current row, in no order.
+    active: Vec<u32>,
+    /// The current row's cells.
+    row: Row,
+    /// A row that does not close.
+    sweep: Sweep,
+}
+
+impl FillScratch {
+    /// An empty scratch, which the first fill through it sizes.
+    #[must_use]
+    pub fn new() -> FillScratch {
+        FillScratch::default()
     }
-    let rows = active_rows(&edges, y0, height);
-    if rows.is_empty() {
-        return mask;
-    }
 
-    // Each edge waits in the list of the row it begins in, or of the first
-    // row when it begins above the region; an edge that ends above the region
-    // or begins below it is in no list. Lists, not a sort: the order an edge
-    // joins the active set in decides nothing.
-    let samples = i64::from(SAMPLES);
-    let first_row = i64::from(y0) + i64::from(rows.start);
-    let mut starts = vec![NONE; (rows.end - rows.start) as usize];
-    let mut next = vec![NONE; edges.len()];
-    for (index, edge) in edges.iter().enumerate() {
-        let begins = i64::from(edge.top).div_euclid(samples);
-        let ends = (i64::from(edge.bottom) - 1).div_euclid(samples);
-        if ends < first_row {
-            continue;
-        }
-        let slot = (begins.max(first_row) - first_row) as usize;
-        if let (Some(head), Some(link)) = (starts.get_mut(slot), next.get_mut(index)) {
-            *link = *head;
-            *head = index as u32;
-        }
-    }
+    /// Fills `path` into `mask`'s rectangle, which is not empty.
+    fn sweep_into(
+        &mut self,
+        mask: &mut Mask,
+        path: &Path,
+        rule: FillRule,
+        tolerance: f64,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
+        let (x0, y0, width, height) = (mask.x0, mask.y0, mask.width, mask.height);
+        let FillScratch {
+            points,
+            ends,
+            edges,
+            starts,
+            next,
+            active,
+            row: cells,
+            sweep,
+        } = self;
 
-    let mut cells = Row::new(width as usize);
-    let mut sweep = Sweep::default();
-    let mut active: Vec<u32> = Vec::new();
-    let origin = i64::from(x0) * 256;
-    let units = i64::from(width) * 256;
-
-    for (step, row) in rows.enumerate() {
-        // Row granularity, not pixel granularity, and before the row's
-        // deposit: a stop leaves no row half converted and the cells clear.
-        if step % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
-            return mask;
+        flatten_flat(path, tolerance, points, ends);
+        edges.clear();
+        let mut open = false;
+        let mut begin = 0;
+        for end in ends.iter() {
+            if let Some(poly) = points.get(begin..*end) {
+                open |= build_edges(poly, edges);
+            }
+            begin = *end;
         }
-        let mut at = starts.get(step).copied().unwrap_or(NONE);
-        while let Some(link) = next.get(at as usize) {
-            active.push(at);
-            at = *link;
+        let rows = active_rows(edges, y0, height);
+        if rows.is_empty() {
+            return;
         }
 
-        // The row's first sub-scanline. `active_rows` keeps every row the
-        // edges reach between `i32::MIN / 16` and `i32::MAX / 16`, so this is
-        // the sweep's `(y0 + row) × 16` with nothing to saturate.
-        let top = (i64::from(y0) + i64::from(row)) * samples;
-        let base = (row as usize) * (width as usize);
-        let Some(out) = mask.data.get_mut(base..base + width as usize) else {
-            break;
-        };
-        if open && sweep.is_open(&edges, &active, top, rule) {
-            sweep.row(&edges, &active, top, rule, (x0, width), out);
-        } else {
-            for index in &active {
-                let Some(edge) = edges.get(*index as usize) else {
-                    continue;
-                };
-                for sub in i64::from(edge.top).max(top)..i64::from(edge.bottom).min(top + samples) {
-                    let rel = crossing(edge, sub).saturating_sub(origin);
-                    cells.deposit((sub - top) as usize, rel, units, edge.winding);
+        // Each edge waits in the list of the row it begins in, or of the first
+        // row when it begins above the region; an edge that ends above the
+        // region or begins below it is in no list. Lists, not a sort: the
+        // order an edge joins the active set in decides nothing.
+        let samples = i64::from(SAMPLES);
+        let first_row = i64::from(y0) + i64::from(rows.start);
+        starts.clear();
+        starts.resize((rows.end - rows.start) as usize, NONE);
+        next.clear();
+        next.resize(edges.len(), NONE);
+        for (index, edge) in edges.iter().enumerate() {
+            let begins = i64::from(edge.top).div_euclid(samples);
+            let ends = (i64::from(edge.bottom) - 1).div_euclid(samples);
+            if ends < first_row {
+                continue;
+            }
+            let slot = (begins.max(first_row) - first_row) as usize;
+            if let (Some(head), Some(link)) = (starts.get_mut(slot), next.get_mut(index)) {
+                *link = *head;
+                *head = index as u32;
+            }
+        }
+
+        cells.prepare(width as usize);
+        active.clear();
+        let origin = i64::from(x0) * 256;
+        let units = i64::from(width) * 256;
+
+        for (step, row) in rows.enumerate() {
+            // Row granularity, not pixel granularity, and before the row's
+            // deposit: a stop leaves no row half converted and the cells
+            // clear.
+            if step % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
+                return;
+            }
+            let mut at = starts.get(step).copied().unwrap_or(NONE);
+            while let Some(link) = next.get(at as usize) {
+                active.push(at);
+                at = *link;
+            }
+
+            // The row's first sub-scanline. `active_rows` keeps every row the
+            // edges reach between `i32::MIN / 16` and `i32::MAX / 16`, so this
+            // is the sweep's `(y0 + row) × 16` with nothing to saturate.
+            let top = (i64::from(y0) + i64::from(row)) * samples;
+            let base = (row as usize) * (width as usize);
+            let Some(out) = mask.data.get_mut(base..base + width as usize) else {
+                return;
+            };
+            if open && sweep.is_open(edges, active, top, rule) {
+                sweep.row(edges, active, top, rule, (x0, width), out);
+            } else {
+                for index in active.iter() {
+                    let Some(edge) = edges.get(*index as usize) else {
+                        continue;
+                    };
+                    for sub in
+                        i64::from(edge.top).max(top)..i64::from(edge.bottom).min(top + samples)
+                    {
+                        let rel = crossing(edge, sub).saturating_sub(origin);
+                        cells.deposit((sub - top) as usize, rel, units, edge.winding);
+                    }
+                }
+                cells.convert(rule, out);
+            }
+
+            // The edges that end in this row leave; the hole takes the last.
+            let below = top + samples;
+            let mut at = 0;
+            while let Some(index) = active.get(at) {
+                if edges
+                    .get(*index as usize)
+                    .is_none_or(|edge| i64::from(edge.bottom) <= below)
+                {
+                    active.swap_remove(at);
+                } else {
+                    at += 1;
                 }
             }
-            cells.convert(rule, out);
-        }
-
-        // The edges that end in this row leave; the hole takes the last.
-        let below = top + samples;
-        let mut at = 0;
-        while let Some(index) = active.get(at) {
-            if edges
-                .get(*index as usize)
-                .is_none_or(|edge| i64::from(edge.bottom) <= below)
-            {
-                active.swap_remove(at);
-            } else {
-                at += 1;
-            }
         }
     }
 
-    mask
+    /// The capacity of every buffer, for [`FillScratch::grown_from`].
+    #[cfg(test)]
+    fn capacities(&self) -> [usize; 11] {
+        [
+            self.points.capacity(),
+            self.ends.capacity(),
+            self.edges.capacity(),
+            self.starts.capacity(),
+            self.next.capacity(),
+            self.active.capacity(),
+            self.row.cells.capacity(),
+            self.row.heads.capacity(),
+            self.row.later.capacity(),
+            self.sweep.accumulator.capacity(),
+            self.sweep.crossings.capacity(),
+        ]
+    }
+
+    /// How many buffers have grown since `held` was taken: each made at least
+    /// one allocation, and a fill makes none anywhere else but its mask.
+    #[cfg(test)]
+    fn grown_from(&self, held: &[usize; 11]) -> u64 {
+        self.capacities()
+            .iter()
+            .zip(held)
+            .filter(|(now, then)| now != then)
+            .count() as u64
+    }
 }
 
 /// Where `edge` meets sub-scanline `sub`, in 1/256 pixel.
@@ -534,16 +673,28 @@ struct Row {
     map: [u64; 4],
 }
 
-impl Row {
-    fn new(width: usize) -> Row {
+impl Default for Row {
+    fn default() -> Row {
         Row {
-            cells: vec![Cell::CLEAR; width],
+            cells: Vec::new(),
             left: [0; 16],
             heads: Vec::new(),
             later: Vec::new(),
             table: [0; 256],
             map: [0; 4],
         }
+    }
+}
+
+impl Row {
+    /// Readies the row for a fill `width` pixels wide. The cells are clear
+    /// already — a fill clears each as it converts it — so only their number
+    /// changes.
+    fn prepare(&mut self, width: usize) {
+        self.cells.resize(width, Cell::CLEAR);
+        self.left = [0; 16];
+        self.heads.clear();
+        self.later.clear();
     }
 
     /// Puts a crossing with winding `w` on `lane`, at `rel` 1/256 units right
@@ -766,6 +917,7 @@ pub(crate) mod count {
     std::thread_local! {
         static COMPARED: Cell<u64> = const { Cell::new(0) };
         static SHARED: Cell<u64> = const { Cell::new(0) };
+        static ALLOCATED: Cell<u64> = const { Cell::new(0) };
     }
 
     /// One comparison made ordering edges or crossings.
@@ -778,13 +930,30 @@ pub(crate) mod count {
         SHARED.with(|count| count.set(count.get() + crowd));
     }
 
-    /// The comparisons and the shared crossings counted on this thread since
-    /// the last call, which starts both again from zero.
-    pub(crate) fn take() -> (u64, u64) {
-        (
-            COMPARED.with(|c| c.replace(0)),
-            SHARED.with(|c| c.replace(0)),
-        )
+    /// `buffers` of a fill's scratch that grew, each by at least one
+    /// allocation.
+    pub(crate) fn allocated(buffers: u64) {
+        ALLOCATED.with(|count| count.set(count.get() + buffers));
+    }
+
+    /// What was counted on this thread since the last call, which starts every
+    /// count again from zero.
+    pub(crate) fn take() -> Counts {
+        Counts {
+            compared: COMPARED.with(|c| c.replace(0)),
+            shared: SHARED.with(|c| c.replace(0)),
+            allocated: ALLOCATED.with(|c| c.replace(0)),
+        }
+    }
+
+    /// The counts [`take`] reads.
+    pub(crate) struct Counts {
+        /// Comparisons made ordering edges or crossings.
+        pub(crate) compared: u64,
+        /// Crossings that shared a lane of a cell.
+        pub(crate) shared: u64,
+        /// Scratch buffers that grew.
+        pub(crate) allocated: u64,
     }
 }
 
@@ -1011,6 +1180,7 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::flatten;
 
     fn rect_mask(x: f64, y: f64, w: f64, h: f64) -> Mask {
         let mut path = Path::new();
@@ -1429,7 +1599,9 @@ mod tests {
                 for rule in [FillRule::NonZero, FillRule::EvenOdd] {
                     count::take();
                     let _ = fill(&path, rule, x0, y0, width, height, tolerance, None);
-                    let (compared, shared) = count::take();
+                    let count::Counts {
+                        compared, shared, ..
+                    } = count::take();
                     assert_eq!(
                         compared, 0,
                         "{class:?} path {index} under {rule:?}: a closed path compared"
@@ -1482,11 +1654,122 @@ mod tests {
                 None,
             );
             assert!(mask.data.contains(&255), "triangle {index} drew its inside");
-            let (compared, shared) = count::take();
+            let count::Counts {
+                compared, shared, ..
+            } = count::take();
             assert_eq!(compared, 0, "triangle {index} compared");
             crowded += shared;
         }
         assert!(crowded > 0, "the triangles' corners crowd a lane");
+    }
+
+    /// **A fill after the first allocates nothing but its mask** (P-07.4's
+    /// guard).
+    ///
+    /// Every allocation a fill makes besides its mask is in its scratch's
+    /// buffers, and a buffer that grew made at least one, so the count of
+    /// buffers grown is zero exactly when a fill allocated nothing there. The
+    /// first fill here is the union of every path after it over the union of
+    /// their regions, which needs as much of every buffer as any of them —
+    /// points, edges, rows, the active set, the cells and the crowded lanes'
+    /// lists. Each fill after it, through the same scratch, under either rule,
+    /// grows nothing and draws what a fill through a scratch of its own draws.
+    #[test]
+    fn a_fill_after_the_first_allocates_no_scratch() {
+        use crate::fill_reference::{census, generate, region, Class, Stream, CLASSES};
+        use crate::geom::Verb;
+
+        const TOLERANCE: f64 = 0.2;
+        let mut s = Stream::new(0x73_6372_6174_6368);
+        let mut cases = Vec::new();
+        for class in CLASSES {
+            if class == Class::Dropped {
+                continue;
+            }
+            for index in 0..12 {
+                let path = generate(class, index, &mut s);
+                cases.push((path, region(&mut s)));
+            }
+        }
+
+        let mut union = Path::new();
+        let (mut left, mut top, mut right, mut bottom) = (0i32, 0i32, 0i32, 0i32);
+        for (path, (x0, y0, width, height)) in &cases {
+            for verb in path.verbs() {
+                match *verb {
+                    Verb::MoveTo(p) => union.move_to(p.x, p.y),
+                    Verb::LineTo(p) => union.line_to(p.x, p.y),
+                    Verb::QuadTo(c, p) => union.quad_to(c.x, c.y, p.x, p.y),
+                    Verb::CurveTo(a, b, p) => union.curve_to(a.x, a.y, b.x, b.y, p.x, p.y),
+                    Verb::Close => union.close(),
+                }
+            }
+            left = left.min(*x0);
+            top = top.min(*y0);
+            right = right.max(x0 + *width as i32);
+            bottom = bottom.max(y0 + *height as i32);
+        }
+        let (width, height) = ((right - left) as u32, (bottom - top) as u32);
+        assert_eq!(
+            census(
+                &union,
+                FillRule::NonZero,
+                left,
+                top,
+                width,
+                height,
+                TOLERANCE
+            )
+            .unclosed,
+            0,
+            "the union closes, so no row of it is swept"
+        );
+
+        let mut scratch = FillScratch::new();
+        count::take();
+        let all = fill_with(
+            &mut scratch,
+            &union,
+            FillRule::NonZero,
+            left,
+            top,
+            width,
+            height,
+            TOLERANCE,
+            None,
+        );
+        assert!(all.data.contains(&255), "the union draws");
+        assert!(
+            count::take().allocated > 0,
+            "the first fill sized the scratch"
+        );
+
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            for (index, (path, (x0, y0, width, height))) in cases.iter().enumerate() {
+                let alone = fill(path, rule, *x0, *y0, *width, *height, TOLERANCE, None);
+                count::take();
+                let reused = fill_with(
+                    &mut scratch,
+                    path,
+                    rule,
+                    *x0,
+                    *y0,
+                    *width,
+                    *height,
+                    TOLERANCE,
+                    None,
+                );
+                assert_eq!(
+                    count::take().allocated,
+                    0,
+                    "fill {index} under {rule:?} grew the scratch"
+                );
+                assert_eq!(
+                    reused.data, alone.data,
+                    "fill {index} under {rule:?}: the scratch reached a pixel"
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

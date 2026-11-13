@@ -178,8 +178,8 @@ The cells, the edges, the buckets, the active list, the later crossings, the
 table and the row buffers live in a **`FillScratch` the caller owns**, grown
 when a fill needs more and never shrunk; `fill_with(&mut scratch, …)` fills
 through it, and `fill(…)` is a fill through a scratch of its own. The flattener
-hands its points straight to `build_edges`, so a path is never collected into
-polylines on its way in. `tinker-pdf-render`'s `Renderer` holds one scratch and
+writes every subpath into one reused buffer of points, so a path is never
+collected into a vector a polyline on its way in. `tinker-pdf-render`'s `Renderer` holds one scratch and
 threads it through every path, clip, glyph, image-quad and mesh fill, so a
 group's buffer, a soft mask's and a tile's canvas share the renderer's; a
 tiling cell, drawn by a renderer of its own, has its own. **Nothing left in the

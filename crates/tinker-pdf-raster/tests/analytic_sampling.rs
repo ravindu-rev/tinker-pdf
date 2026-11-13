@@ -76,6 +76,7 @@
 
 use tinker_pdf_raster::blend::BlendMode;
 use tinker_pdf_raster::canvas::{Canvas, Color, PixelFormat};
+use tinker_pdf_raster::fill::FillScratch;
 use tinker_pdf_raster::fragments::Fragments;
 use tinker_pdf_raster::image::{
     accumulate_image, draw_image, ImageDraw, ImageSource, Pyramid, Transform,
@@ -163,6 +164,7 @@ fn render(source: &[u8], size: u32, side: u32) -> Canvas {
         &mut canvas,
         &ImageDraw::new(image, placement),
         &mut Pyramid::new(),
+        &mut FillScratch::new(),
     );
     canvas
 }
@@ -341,6 +343,7 @@ fn a_magnified_image_keeps_its_samples_whole() {
         &mut canvas,
         &ImageDraw::new(image, placement),
         &mut Pyramid::new(),
+        &mut FillScratch::new(),
     );
     for y in 0..16u32 {
         for x in 0..16u32 {
@@ -417,6 +420,7 @@ fn black_over_white(x0: f64, y0: f64, x1: f64, y1: f64) -> Canvas {
         &mut canvas,
         &ImageDraw::new(image, placement),
         &mut Pyramid::new(),
+        &mut FillScratch::new(),
     );
     canvas
 }
@@ -550,6 +554,7 @@ fn an_integer_aligned_image_keeps_every_edge_pixel_whole() {
         &mut canvas,
         &ImageDraw::new(image, placement),
         &mut Pyramid::new(),
+        &mut FillScratch::new(),
     );
     for y in 0..SIDE {
         for x in 0..SIDE {
@@ -600,6 +605,7 @@ fn two_strips(a: u8, b: u8, conflation_free: bool) -> Vec<u8> {
                 &ImageDraw::new(source(rgb), t),
                 &mut Pyramid::new(),
                 (0, 0, SIDE, SIDE),
+                &mut FillScratch::new(),
             );
         }
         run.composite(&mut canvas, 1.0, BlendMode::Normal, None, None);
@@ -609,6 +615,7 @@ fn two_strips(a: u8, b: u8, conflation_free: bool) -> Vec<u8> {
                 &mut canvas,
                 &ImageDraw::new(source(rgb), t),
                 &mut Pyramid::new(),
+                &mut FillScratch::new(),
             );
         }
     }

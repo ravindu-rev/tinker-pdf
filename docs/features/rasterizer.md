@@ -46,7 +46,24 @@ holding several crossings in one pixel has them bucketed by their offset in
 the pixel rather than compared, so a crowded pixel costs its crossings and no
 more. An edge waits in a list of the row it begins in and leaves the active
 set when it ends, and a cancellation is asked before a row's deposit, so a
-stop leaves no row half converted. A sub-scanline closes — its windings sum
+stop leaves no row half converted.
+
+*Memory.* A fill works in a `FillScratch` the caller owns — the flattened
+points, the edges and their row lists, the active set, one row of cells
+(forty bytes a pixel of the region's width) with the crowded lanes' later
+crossings, and the buffers of a row that does not close — grown when a fill
+needs more and never shrunk, so after the largest fill a renderer has made the
+only allocation a fill makes is the mask it returns. The flattener writes
+every subpath into one reused buffer rather than a vector each. `fill` is a
+fill through a scratch of its own; `tinker-pdf-render`'s renderer holds one and
+fills every path, clip, glyph, image quad and mesh through it, on the page,
+in a group's or a soft mask's buffer and in a tile alike, while a tiling
+cell, drawn by a renderer of its own, has its own. Nothing left in a scratch
+reaches a pixel: a fill empties what it reuses before it uses it, every cell
+is cleared as it is converted, and a stop comes before a row's deposit, so
+the cells are clear between fills however the last one ended.
+
+A sub-scanline closes — its windings sum
 to zero — wherever every edge of a closed subpath reaches it, so the only row
 that does not is one where an edge was dropped — a point past the finite or
 too large to take sixteen times, a slope that is not finite, a height under
@@ -309,8 +326,13 @@ let mut canvas = Canvas::new(100, 100, PixelFormat::Rgb8, Color::WHITE);
 canvas.fill_mask(&mask, Color::BLACK, 1.0);
 ```
 
+A caller filling many shapes keeps a `FillScratch` and fills through
+`fill_with(&mut scratch, …)`; `draw_image`, `accumulate_image`,
+`image_coverage`, `draw_mesh` and `draw_mesh_over` take one too, for the
+image's unit square and the mesh's coverage.
+
 The crate root re-exports the working set: `Path`, `Verb`, `Point`,
-`FillRule`, `flatten`; `fill`, `Mask`; `stroke`, `stroke_mapped`,
+`FillRule`, `flatten`; `fill`, `fill_with`, `FillScratch`, `Mask`; `stroke`, `stroke_mapped`,
 `stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `Transform`, `Filter`,
 `Sampling`, `Pyramid`, `image_bounds_in`; `draw_mesh`, `draw_mesh_over`,
@@ -345,7 +367,10 @@ tiny pattern over a long line cannot generate millions of pieces.
   to it byte for byte under both rules over seven classes of generated path —
   overlapping subpaths wound either way, self-intersections, crowded pixels,
   slivers, coordinates near 1e9, every cap, join and dash of the stroker, and
-  dropped edges; `stroke.rs` covers caps, joins, the miter limit and
+  dropped edges — through a fresh scratch and back to back through one;
+  `a_fill_after_the_first_allocates_no_scratch` counts the scratch's buffers
+  that grow, none after a first fill as large as any that follows;
+  `stroke.rs` covers caps, joins, the miter limit and
   dash phase; `blend.rs` pins all sixteen modes in integers; `image.rs`
   measures the sampling policy against numbers — a magnified gradient's
   largest step, a 2:1 checkerboard averaging to uniform 128, and an image
