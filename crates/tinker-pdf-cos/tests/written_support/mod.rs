@@ -253,17 +253,33 @@ fn spelled(packet: &[u8], text: &str) -> bool {
 }
 
 /// One strict finding as the policy reads it: the structure tier is the
-/// writer's, and the kind's label is what survives renumbering, and what a
-/// failure names it by.
-fn item(defect: &Defect) -> held::Item {
+/// writer's, its [`class`] is what survives a rewrite, and the kind's label is
+/// what a failure names it by.
+pub fn item(defect: &Defect) -> held::Item {
     let tier = defect.kind.tier();
     held::Item {
         verdict: tier.as_str(),
         owned: tier == Tier::Structure,
         exact: format!("{:?}", defect.kind),
-        class: defect.kind.as_str().to_string(),
+        class: class(defect.kind),
         at: defect.offset,
         shown: format!("[{}] {defect}", defect.kind.as_str()),
+    }
+}
+
+/// What survives a rewrite: the kind's label, which renumbering leaves, and
+/// for a repair the label of the warning it repaired, whichever phase of the
+/// reading met it. The validator reports each warning's label once, in the
+/// first phase that meets it — the open, an object re-parsed at its entry's
+/// offset, or reading on — and which phase that is depends on what the reader
+/// read before, which a rewrite changes. The prefix keeps a repair apart from
+/// a rule that shares its warning's name.
+fn class(kind: DefectKind) -> String {
+    match kind {
+        DefectKind::Repaired(warning)
+        | DefectKind::ObjectRepaired(warning)
+        | DefectKind::RepairedWhileReading(warning) => format!("repair: {}", warning.as_str()),
+        other => other.as_str().to_string(),
     }
 }
 

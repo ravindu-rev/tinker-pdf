@@ -175,9 +175,24 @@ Each verdict's findings become items as follows.
 
 | Verdict | Owned | Class, a rewrite's key | Exact, the expected form's key |
 | --- | --- | --- | --- |
-| strict, `Tier::Structure` | yes | `DefectKind::as_str` | the `DefectKind` |
-| strict, `Tier::Semantics` | no | `DefectKind::as_str` | the `DefectKind` |
+| strict, `Tier::Structure` | yes | `DefectKind::as_str`; for a repair, `repair:` and the repaired warning's `WarningKind::as_str` | the `DefectKind` |
+| strict, `Tier::Semantics` | no | the same | the `DefectKind` |
 | a claimed profile | no | the claim, the clause and the `FindingKind` | the `FindingKind` |
+
+A repair is classed by the warning it repaired, not by the phase of the
+reading that met it. `validate` reports each warning's label once
+(`seen_repairs`, `crates/tinker-pdf-cos/src/validate.rs:865`), in the first
+of three phases that meets it: the open, as `Repaired`; an object re-parsed
+at its entry's offset, as `ObjectRepaired`; or reading on, as
+`RepairedWhileReading`. Which phase meets a warning first depends on what
+the reader read before it, and a rewrite changes that — damage a rewrite
+copies through can be met at open in its input and while reading in its
+output — so `Repaired(k)`, `ObjectRepaired(k)` and `RepairedWhileReading(k)`
+are one class, `repair: filter` or `repair: real-overflow-clamped`, wherever
+they are met. The prefix keeps a repair apart from a rule that shares its
+warning's name: `ObjectHeaderMismatch` is both. `authored` admits no repair
+in any phase, and the expected form, which matches `exact`, still names the
+phase.
 
 **`authored(label, bytes)`** — a document this engine wrote from nothing it
 did not write: built by `DocumentBuilder`, synthesised by a conversion, or
@@ -212,9 +227,11 @@ Classes rather than findings, because a rewrite renumbers: a defect's
 object and offset move, and so do the kinds that carry a number
 (`PageParentWrong { found }`, `ObjStmNumberMismatch { container, .. }`),
 while a kind's label does not. It is the corpus report's own unit
-(`kind_counts`, `validate.rs:757`). With a clean input, no more than nothing
-is nothing: `rewritten` is then `authored`, so choosing it cannot loosen a
-test whose input is this engine's.
+(`kind_counts`, `validate.rs:757`), but for a repair, which a rewrite can
+also move from one phase of the reading to another and which is classed by
+its warning. With a clean input, no more than nothing is nothing:
+`rewritten` is then `authored`, so choosing it cannot loosen a test whose
+input is this engine's.
 
 **`expecting(label, bytes, expected)`** — the expected-defects form, for a
 test that writes damage on purpose: `strict_validator.rs`'s injections, a

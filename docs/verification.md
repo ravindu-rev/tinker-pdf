@@ -813,7 +813,9 @@ doors: `authored`, for a document this engine wrote from nothing it did not
 write, which every verdict must leave empty; `rewritten`, for a save of a
 file this engine did not write, which owns the structure it wrote — all of
 a full rewrite's, and everything past an incremental update's input — and
-leaves every other class of finding no worse than its input; `expecting`,
+leaves every other class of finding no worse than its input, a repair
+counted under the warning it repaired whichever phase of the reading met
+it; `expecting`,
 for damage written on purpose, which must find exactly the defects the test
 lists; and the facade's `synthesised`, which holds the PDF a conversion
 wrote as authored.

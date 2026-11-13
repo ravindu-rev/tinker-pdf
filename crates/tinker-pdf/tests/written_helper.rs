@@ -22,8 +22,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use tinker_pdf::{
-    CosDocument, DefectKind, DocumentBuilder, DocumentEditor, Encryption, LadderLevel, ObjRef,
-    WarningKind, WriteMode, WriteOptions,
+    CosDocument, Defect, DefectKind, DocumentBuilder, DocumentEditor, Encryption, LadderLevel,
+    ObjRef, WarningKind, WriteMode, WriteOptions,
 };
 use written_support::{authored, expecting, rewritten, Expected, Key, Locked};
 
@@ -426,6 +426,119 @@ fn a_rewrite_is_held_to_its_input() {
         message.contains("a full rewrite owns the structure it writes"),
         "{message}"
     );
+}
+
+/// A repair is classed by the warning it repaired, whichever phase of the
+/// reading met it. The validator reports each warning's label once, in the
+/// first phase that meets it — the open, an object re-parsed at its entry's
+/// offset, or reading on — and a rewrite changes what the reader reads first.
+/// So the three phases of one warning are one class in both readings, apart
+/// from a rule that shares the warning's name; a rewrite whose input met a
+/// repair at open and whose output met it while reading passes `rewritten`; a
+/// repair of another warning fails it; the expected form still names the
+/// phase; and `authored` still admits no repair at all.
+#[test]
+fn a_repair_is_one_class_whichever_phase_met_it() {
+    let met = |kind: DefectKind| Defect {
+        object: Some(ObjRef::new(5, 0)),
+        offset: Some(40),
+        kind,
+    };
+    let unknown = WarningKind::FilterUnknown;
+    for kind in [
+        DefectKind::Repaired(unknown),
+        DefectKind::ObjectRepaired(unknown),
+        DefectKind::RepairedWhileReading(unknown),
+    ] {
+        let facade = written_support::item(&met(kind));
+        let cos = cos_reading::item(&met(kind));
+        assert_eq!(format!("{facade:?}"), format!("{cos:?}"), "{kind:?}");
+        assert_eq!(facade.class, "repair: filter-unknown", "{kind:?}");
+        assert_eq!(facade.verdict, "semantics", "{kind:?}");
+        assert!(!facade.owned, "{kind:?}");
+        assert_eq!(facade.exact, format!("{kind:?}"), "the expected form's key");
+    }
+
+    // `ObjectHeaderMismatch` is a warning and a rule: the rule keeps its own
+    // label, and a repair of the warning is not counted as the rule.
+    let rule = written_support::item(&met(DefectKind::ObjectHeaderMismatch {
+        found: ObjRef::new(4, 0),
+    }));
+    assert_eq!(rule.class, "object-header-mismatch");
+    let repair = written_support::item(&met(DefectKind::Repaired(
+        WarningKind::ObjectHeaderMismatch,
+    )));
+    assert_eq!(repair.class, "repair: object-header-mismatch");
+    assert_eq!(
+        format!("{repair:?}"),
+        format!(
+            "{:?}",
+            cos_reading::item(&met(DefectKind::Repaired(
+                WarningKind::ObjectHeaderMismatch
+            )))
+        )
+    );
+
+    let read = |bytes: &[u8], kinds: &[DefectKind]| written_support::held::Read {
+        bytes: Arc::from(bytes),
+        items: kinds
+            .iter()
+            .map(|&kind| written_support::item(&met(kind)))
+            .collect(),
+        notes: Vec::new(),
+    };
+    let input = read(b"the input".as_slice(), &[DefectKind::Repaired(unknown)]);
+    let output = read(
+        b"its rewrite".as_slice(),
+        &[DefectKind::RepairedWhileReading(unknown)],
+    );
+    written_support::held::rewritten("a repair met at open, then while reading", &input, &output);
+    written_support::held::rewritten(
+        "a repair met re-parsing an object, then at open",
+        &read(
+            b"the input".as_slice(),
+            &[DefectKind::ObjectRepaired(unknown)],
+        ),
+        &read(b"its rewrite".as_slice(), &[DefectKind::Repaired(unknown)]),
+    );
+
+    let other = read(
+        b"its rewrite".as_slice(),
+        &[DefectKind::RepairedWhileReading(
+            WarningKind::FilterParamsBad,
+        )],
+    );
+    let message = refusal(|| {
+        written_support::held::rewritten("a repair of another warning", &input, &other);
+    });
+    assert!(
+        message.contains("`repair: filter-params-bad`: 1 in the output, 0 in the input"),
+        "{message}"
+    );
+
+    let message = refusal(|| {
+        written_support::held::authored("a repair", "authored", &output);
+    });
+    assert!(message.contains("[repaired-while-reading]"), "{message}");
+    written_support::held::expecting(
+        "a repair, listed by its phase",
+        &output,
+        &[written_support::held::Want {
+            verdict: "semantics",
+            exact: format!("{:?}", DefectKind::RepairedWhileReading(unknown)),
+        }],
+    );
+    let message = refusal(|| {
+        written_support::held::expecting(
+            "a repair, listed under another phase",
+            &output,
+            &[written_support::held::Want {
+                verdict: "semantics",
+                exact: format!("{:?}", DefectKind::Repaired(unknown)),
+            }],
+        );
+    });
+    assert!(message.contains("found and not listed"), "{message}");
 }
 
 // ---- the two readings -------------------------------------------------------
