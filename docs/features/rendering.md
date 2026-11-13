@@ -744,6 +744,52 @@ a short file of forms each invoking the next several times stops where that
 budget does, in a recording as in a render, and its list is retained
 (`the_review_s_fan_out_of_forms_is_bounded_where_it_is_read`).
 
+**The document's cache** (`crates/tinker-pdf/src/cache.rs`). A document
+opened with a budget — `OpenOptions::cache_limits`, or
+`Document::with_cache_limits` on an open one ([opening](opening.md)) — keeps
+what its renders compute across renders, pages, clones of the `Document` and
+the display lists of its pages, in one cache every one of them shares; with no
+budget stated it keeps nothing past a render, as above. What it keeps is
+**decoded images**: an image XObject's decode under its object, the reduction
+it is made at and the default colour spaces its scope paints device spaces in
+(8.6.5.6), each written exactly — a number by its bits, a name by its symbol,
+a reference by its number — which is all of what outside the object a decode
+reads; so two scopes naming one image under two names and the same defaults
+share one entry, and two that paint it in different defaults keep two. The
+reduction is the one a render's own cache reads: full size for every image but
+a JPEG with no mask, and for that one the smallest of an eighth, a quarter and
+a half that the size it is drawn at allows, read against its frame. The frame
+is kept beside the decodes, under the object and the defaults, learnt by the
+image's first decode, which is made at that draw's size and kept as that
+size's; so a JPEG drawn at two sizes keeps two decodes and one frame, and each
+draw of it looks up its frame and then its decode. Every
+value is a function of its key and the document's bytes, so a render draws
+the same pixels whatever was drawn before it, under any budget: a hit is the
+bytes a miss computes. A refusal is kept as firmly as a picture, in its
+codec's words, and an entry keeps what its decode reported — damage, and the
+colour spaces it read with a repair — which every render that meets it reports
+again, the image's own name as that render gives it (a soft mask's `SMask` as
+it was). The decode is single-flight (`docs/design/parallelism.md`): renders
+on several threads that reach one image at once decode it once, the others
+waiting for its value, and a thread already inside a fill — of this cache or
+of a `tinker_pdf_cos::Flights`, which `tinker_pdf_cos::fill_open` says —
+decodes for itself and keeps nothing, so no thread waits on one that waits.
+Each entry is charged its samples, its alpha and its two-colour bytes at the
+decoded size, the words of what it reported and the bytes of its key's
+defaults, and 64 bytes beside them, and a frame its key's defaults and 64
+bytes; the bytes held never pass the budget,
+because an entry is charged under the cache's lock before it is published.
+Every lookup takes the next number of one counter and the entry it reaches
+records it, and a fill that would pass the budget evicts the entries least
+recently requested first, through one ordered index, until it fits; an entry
+larger than the whole budget is used by the render that made it and not kept,
+so a budget of zero keeps nothing and every draw decodes. The maps are looked
+up and never iterated, so on one thread which entries leave is a function of
+the requests, the same on every run and every target. An inline image has no
+object and stays the render's. `Page::render`, `Page::render_form`,
+`Page::render_annotation`, `DisplayList::render` and the page walk read
+through it; `Page::to_svg` keeps its pictures for the write alone.
+
 **A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
 (`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
 rather than interpreting the page again, so `DisplayList::to_svg` writes the
@@ -957,7 +1003,13 @@ dictionary read;
 `images_decoded`, an image XObject's decode on a cache miss and every inline
 image's; and a `_hits` and a `_misses` for each of the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
-`form_scope`; `page_walks`, each walk of the page tree from its root,
+`form_scope`, an image the document's cache keeps counted as `image` too;
+`cache_hits` and `cache_misses`, each lookup of the document's cache that
+found its entry kept and each that computed it, of every kind it keeps,
+`cache_evictions`, each entry it evicted to make room for one the operation
+kept, and `cache_bytes_held`, the most bytes it held at any of the
+operation's lookups — all four zero for a document with no budget;
+`page_walks`, each walk of the page tree from its root,
 `page_nodes_visited`, each node a walk or a one-page lookup reads, and
 `page_entries_copied`, each page a lookup or a read of every page copies out
 of the page index a count built ([document model](document-model.md)), which
@@ -1003,7 +1055,8 @@ at once beside the image it decoded into — its coefficients, its planes and
 its strip; `jpeg_samples_transformed`, the samples the JPEG decodes' inverse
 transforms output, `N × N` for each block a decode at `N/8` transformed; from
 `Bitmap::to_png_counted`, `png_image_scratch` and
-`png_peak`, maxima of the bytes a PNG write held; `stream_seal_passes`, each
+`png_peak`, maxima of the bytes a PNG write held, as `cache_bytes_held` is a
+maximum; `stream_seal_passes`, each
 pass of the AES core that sealed a save's streams side by side, which only a
 save that encrypts counts ([writing](writing.md)); and
 `pool_items_on_workers` and `pool_items_on_caller`, where a page of a page walk
@@ -1390,6 +1443,29 @@ defect to hide in.
   it. `tinker-pdf-render`'s `a_group_left_open_hands_back_the_page` finishes
   renderers inside groups and soft masks' groups, nested either way, and
   cancels one inside a group, each handing back the page.
+- The document's cache: `crates/tinker-pdf/tests/caches.rs`.
+  `a_second_render_at_another_dpi_decodes_no_image`, a page's two images
+  decoded at 72 dpi and found at 150 dpi and by a tile at 300, the second
+  render byte-equal to a document's with no budget;
+  `pages_sharing_an_image_object_decode_it_once`, five pages and two names
+  over one object, one decode;
+  `a_jpeg_drawn_at_two_sizes_keeps_a_decode_at_each`, a JPEG decoded at an
+  eighth at 72 dpi and at a quarter at 144, its frame looked up first and
+  kept once, each render byte-equal to a document's with no budget, and a
+  budget of zero decoding once a draw at the draw's own size;
+  `eviction_follows_the_request_sequence_and_never_passes_the_budget`, three
+  images under a budget of two scripted A, B, A, C, A, B, each render's hits,
+  misses, evictions and bytes held pinned, the same on every run;
+  `a_document_with_no_budget_keeps_nothing_past_its_render` and
+  `a_budget_of_zero_decodes_an_image_at_every_draw`; a damaged fax and a
+  refused codestream reported under each page's own name from one entry; one
+  image in two scopes' defaults kept twice and in a third with the first's
+  defaults found; clones, pages, display lists and the four-thread page walk
+  sharing one cache, a new budget or new fonts starting another. The
+  machinery's own tests are `cache.rs`'s: the eviction order whatever the hash
+  order, an entry past the budget used once, single-flight fills on four
+  threads, a re-entry and crossed fills — across a `Flights` too — that
+  compute rather than wait, and a fill that unwinds releasing its waiters.
 - What a scope reads once: `crates/tinker-pdf/tests/resource_work.rs`'s
   `a_scope_parses_each_named_space_and_state_once`, a page of a thousand
   `cs`, `scn`, `sh` and `gs` operators whose render reads each colour space

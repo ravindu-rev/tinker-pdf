@@ -266,9 +266,11 @@ impl DisplayList {
         if let Some(bitmap) = self.render_in_bands(options) {
             return bitmap;
         }
+        // An operation of its own, keeping what it computes in the document's
+        // cache where the document has one, as a direct render does.
         let resources = self
             .resources
-            .for_one_render_counted(crate::stats::tally(options.stats), self.usage);
+            .for_operation(self.page.render_operation(options, self.usage));
         self.page
             .render_layer_with(options, None, &resources, |renderer, resources| {
                 self.replay_onto(options, renderer, resources);
@@ -371,9 +373,11 @@ impl DisplayList {
                 };
                 work.add(place, 1);
             }
+            // Each band's operation keeps what it computes in the document's
+            // cache, as the whole list's render does.
             let resources = self
                 .resources
-                .for_one_render_counted(work.clone(), self.usage);
+                .for_operation(self.page.operation(work.clone(), self.usage));
             let band_options = RenderOptions {
                 region: Some(*band),
                 parallelism: Parallelism::Serial,

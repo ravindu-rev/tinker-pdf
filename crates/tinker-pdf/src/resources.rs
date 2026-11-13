@@ -28,6 +28,7 @@ use tinker_pdf_render::{
     Shading, TilingPattern, TwoColourSamples,
 };
 
+use crate::cache::{self, DocumentCache, Fill, FrameKey, ImageKey, Written};
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
 use crate::stats::{self, Counter, Work};
@@ -52,21 +53,98 @@ const MAX_CACHED_IMAGES: usize = 256;
 const MAX_CACHED_OUTLINES: usize = 1 << 16;
 
 /// A decoded image, or the codec that could not decode it, and the damage the
-/// decode tolerated as `(resource name, what was tolerated)`.
+/// decode tolerated as `(name, what was tolerated)`.
 ///
 /// The failure is kept in the words the decode used and the damage beside
 /// the picture, because both are reported **per render**: a render that meets
 /// the image from the cache reports what the decode reported, rather than
 /// nothing (the damage) or the resource name standing in for a codec (the
 /// failure, which is what a cached `None` used to come back as).
+///
+/// A name of `None` is the image's own, said again under the name the render
+/// that meets it gives the image: one image XObject named two ways in two
+/// scopes is one entry of the document's cache (`crate::cache`), and each
+/// render reports it by its own name. `Some` is a name the decode gave
+/// something else, a soft mask's `SMask`, said again as it was.
 #[derive(Clone)]
-struct CachedImage {
+pub(crate) struct CachedImage {
     image: Result<Arc<DecodedImage>, String>,
-    damage: Vec<(String, String)>,
-    /// What [`PageResources::repaired_spaces`] gained under the image's name
-    /// while it decoded, said again by every render that meets the image
-    /// here, as `damage` is.
-    repairs: Vec<(String, String)>,
+    damage: Vec<(Option<String>, String)>,
+    /// What [`PageResources::repaired_spaces`] gained while the image
+    /// decoded, said again by every render that meets the image here, as
+    /// `damage` is.
+    repairs: Vec<(Option<String>, String)>,
+}
+
+impl CachedImage {
+    /// What `decoded` and the scope it decoded through, `decoding`, reported
+    /// for the image `label` names: every damage and repair `decoding` noted,
+    /// each under `None` where it was noted under `label`.
+    fn of(
+        decoded: &Result<DecodedImage, String>,
+        decoding: &PageResources,
+        label: &str,
+    ) -> CachedImage {
+        let named = |(name, what): (String, String)| ((name != label).then_some(name), what);
+        CachedImage {
+            image: match decoded {
+                Ok(image) => Ok(Arc::new(image.clone())),
+                Err(codec) => Err(codec.clone()),
+            },
+            damage: decoding.damaged_images().into_iter().map(named).collect(),
+            repairs: decoding.repaired_spaces().into_iter().map(named).collect(),
+        }
+    }
+
+    /// What the entry is charged beside the cache's own bookkeeping: the
+    /// samples, alpha and two-colour bytes at the decoded size, and the
+    /// words it keeps.
+    fn bytes(&self) -> u64 {
+        let pixels = match &self.image {
+            Ok(image) => {
+                image.rgb.len()
+                    + image.alpha.len()
+                    + image.two_colour.as_ref().map_or(0, |two| two.samples.len())
+            }
+            Err(codec) => codec.len(),
+        };
+        let words = self
+            .damage
+            .iter()
+            .chain(&self.repairs)
+            .map(|(name, what)| name.as_ref().map_or(0, String::len) + what.len())
+            .sum::<usize>();
+        u64::try_from(pixels.saturating_add(words)).unwrap_or(u64::MAX)
+    }
+
+    /// Says again, to `resources`, what the decode reported, the image's own
+    /// name being `label`.
+    fn say_again(&self, resources: &PageResources, label: &str) {
+        let named = |name: &Option<String>| name.clone().unwrap_or_else(|| label.to_string());
+        for (name, what) in &self.damage {
+            resources.note_damaged_image((named(name), what.clone()));
+        }
+        for (name, what) in &self.repairs {
+            resources.note_repaired_space((named(name), what.clone()));
+        }
+    }
+
+    /// The image, or the codec that refused it, as a render is handed it.
+    fn handed(&self) -> Result<Option<DecodedImage>, String> {
+        match &self.image {
+            Ok(image) => Ok(Some((**image).clone())),
+            Err(codec) => Err(codec.clone()),
+        }
+    }
+
+    /// The reduction the decode was made at ([`reduction`]): its grid's
+    /// factor, and 1 for an image at full size or a refusal.
+    fn reduction(&self) -> u32 {
+        match &self.image {
+            Ok(image) => image.reduced.map_or(1, |grid| grid.factor),
+            Err(_) => 1,
+        }
+    }
 }
 
 /// One image name's decodes in [`Caches::images`].
@@ -388,6 +466,12 @@ struct Defaults {
     /// order, as `RepairedColorSpace`'s `reason` names it: what an image
     /// drawn in that family says it fell back from (`Page::images`).
     refused: [Option<&'static str>; 3],
+    /// The defaults this scope puts in, each family's `/ColorSpace` entry as
+    /// written ([`cache::write_exact`]) after the family's own name: what a
+    /// decoded image the document's cache keeps is a function of beside its
+    /// object (`ImageKey::painted`). Nothing for a scope that puts none in;
+    /// a refused default paints its device space as itself and writes none.
+    written: Written,
 }
 
 impl Defaults {
@@ -579,6 +663,11 @@ pub(crate) struct Operation {
     /// them. Shared by every clone, so the page's scope, each form's, each
     /// tiling cell's and each appearance's read one binding.
     optional: Arc<OnceLock<OptionalContent>>,
+    /// The document's cache, where its caller stated a budget for it
+    /// (`crate::cache`): what every scope of the operation keeps across
+    /// renders in place of keeping it for the render alone. `None` keeps
+    /// everything the render's own, as it always was.
+    cache: Option<Arc<DocumentCache>>,
 }
 
 impl Operation {
@@ -596,19 +685,21 @@ impl Operation {
             work,
             usage,
             optional: Arc::default(),
+            cache: None,
         }
     }
 
     /// No operation: what a scope a cache keeps holds between the operations
-    /// that ask for it. Nothing counts, and every stream is decoded as it is
-    /// read; asked about optional content itself, it binds the initial states
-    /// for itself.
+    /// that ask for it. Nothing counts, every stream is decoded as it is
+    /// read, and nothing is kept for the document; asked about optional
+    /// content itself, it binds the initial states for itself.
     pub(crate) fn none() -> Operation {
         Operation {
             streams: None,
             work: None,
             usage: None,
             optional: Arc::default(),
+            cache: None,
         }
     }
 
@@ -620,14 +711,26 @@ impl Operation {
             .get_or_init(|| OptionalContent::bind_for(doc, self.usage))
     }
 
+    /// This operation, keeping what it computes in the document's cache
+    /// where the document has one.
+    pub(crate) fn with_cache(mut self, cache: Option<&Arc<DocumentCache>>) -> Operation {
+        self.cache = cache.cloned();
+        self
+    }
+
     /// The tally, when the operation is counting.
     pub(crate) fn work(&self) -> Option<&Arc<Work>> {
         self.work.as_ref()
     }
 
+    /// The document's cache, when the document has one.
+    pub(crate) fn cache(&self) -> Option<&DocumentCache> {
+        self.cache.as_deref()
+    }
+
     /// Whether this is [`Operation::none`].
     fn is_none(&self) -> bool {
-        self.streams.is_none() && self.work.is_none()
+        self.streams.is_none() && self.work.is_none() && self.cache.is_none()
     }
 
     /// `r`'s bytes through its filter chain, once an operation: the
@@ -1679,6 +1782,14 @@ impl PageResources {
         self.serving(Operation::rendering(work, usage))
     }
 
+    /// [`PageResources::for_one_render`], serving `op`: a render that
+    /// counts as `op` counts and keeps what it computes where `op` keeps it —
+    /// the document's cache, for a document with a budget.
+    #[must_use]
+    pub(crate) fn for_operation(&self, op: Operation) -> PageResources {
+        self.serving(op)
+    }
+
     /// These resources over the same dictionary and caches, serving `op`:
     /// nothing tolerated yet, and every stream read through `op`'s and every
     /// step counted into its tally.
@@ -2305,7 +2416,8 @@ impl PageResources {
             (b"DefaultRGB", ColorSpace::DeviceRgb),
             (b"DefaultCMYK", ColorSpace::DeviceCmyk),
         ];
-        for (key, device) in families {
+        let mut written = Vec::new();
+        for (family, (key, device)) in families.into_iter().enumerate() {
             let Some(entry) = table.get(self.name(key)) else {
                 continue;
             };
@@ -2326,11 +2438,17 @@ impl PageResources {
                 Some(space) => Ok(Some(space)),
             };
             match refusal {
-                Ok(default) => match device {
-                    ColorSpace::DeviceGray => defaults.gray = default,
-                    ColorSpace::DeviceRgb => defaults.rgb = default,
-                    _ => defaults.cmyk = default,
-                },
+                Ok(default) => {
+                    if default.is_some() {
+                        written.push(u8::try_from(family).unwrap_or(u8::MAX));
+                        cache::write_exact(entry, &mut written);
+                    }
+                    match device {
+                        ColorSpace::DeviceGray => defaults.gray = default,
+                        ColorSpace::DeviceRgb => defaults.rgb = default,
+                        _ => defaults.cmyk = default,
+                    }
+                }
                 Err(reason) => {
                     let at = match device {
                         ColorSpace::DeviceGray => 0,
@@ -2345,6 +2463,7 @@ impl PageResources {
                 }
             }
         }
+        defaults.written = Written::of(written);
         defaults
     }
 
@@ -3791,6 +3910,15 @@ impl GlyphSource for PageResources {
     }
 
     fn image(&self, name: &[u8], request: &ImageRequest) -> Result<Option<DecodedImage>, String> {
+        // A document with a budget keeps an image XObject's decodes across its
+        // renders; an inline image has no object to key it by, and an
+        // XObject that is no image is answered as it always was, below.
+        if let Some(cache) = self.op.cache() {
+            if let Some(kept) = self.kept_image(cache, name, request) {
+                return kept;
+            }
+        }
+
         // Whether this read decoded the image itself, rather than meeting a
         // decode another render made or is making.
         let made = Cell::new(false);
@@ -3825,17 +3953,9 @@ impl GlyphSource for PageResources {
             self.count(Counter::ImageHits);
             // What the decode said, said again: a render that meets the image
             // here met it as surely as the one that decoded it.
-            for entry in &cached.damage {
-                self.note_damaged_image(entry.clone());
-            }
-            for entry in &cached.repairs {
-                self.note_repaired_space(entry.clone());
-            }
+            cached.say_again(self, &String::from_utf8_lossy(name));
         }
-        match &cached.image {
-            Ok(image) => Ok(Some((**image).clone())),
-            Err(codec) => Err(codec.clone()),
-        }
+        cached.handed()
     }
 }
 
@@ -3856,35 +3976,141 @@ impl PageResources {
         let label = String::from_utf8_lossy(name).into_owned();
         let Decoded { image, frame } = self.decode_image(name, request);
         // The damage this decode reported: every entry under this name, which
-        // only this image's decode (and its soft mask's, part of it) writes.
-        let damage: Vec<(String, String)> = self
+        // only this image's decode writes.
+        let damage: Vec<(Option<String>, String)> = self
             .damaged_images
             .lock()
             .map(|damaged| {
                 damaged
                     .iter()
                     .filter(|(named, _)| *named == label)
-                    .cloned()
+                    .map(|(_, what)| (None, what.clone()))
                     .collect()
             })
             .unwrap_or_default();
         // And the repairs, by the same rule: the decode names its colour
         // space by the image's name.
-        let repairs: Vec<(String, String)> = self
+        let repairs: Vec<(Option<String>, String)> = self
             .repaired_spaces()
             .into_iter()
             .filter(|(named, _)| *named == label)
+            .map(|(_, what)| (None, what))
             .collect();
-        let at = match &image {
-            Ok(image) => image.reduced.map_or(1, |grid| grid.factor),
-            Err(_) => 1,
-        };
         let cached = CachedImage {
             image: image.map(Arc::new),
             damage,
             repairs,
         };
-        (Kept { at, cached }, frame)
+        (
+            Kept {
+                at: cached.reduction(),
+                cached,
+            },
+            frame,
+        )
+    }
+}
+
+impl PageResources {
+    /// The image XObject `name` selects, through the document's cache, for a
+    /// draw that asks as `request` does: its decode kept under the object, the
+    /// reduction it is made at and the defaults this scope paints device
+    /// spaces in (`cache::ImageKey`), filled single-flight, and what the
+    /// decode reported said again under `name`. `None` for a name that
+    /// selects no image XObject, which the scope's own cache answers.
+    ///
+    /// The reduction is the one the scope's own cache reads ([`ImageEntry`]):
+    /// 1 for an image no draw reduces, and for a JPEG with no mask the one its
+    /// frame gives this draw's size ([`jpeg_scale`]). The frame is kept beside
+    /// the decodes under the image and the defaults (`cache::FrameKey`),
+    /// learnt by a decode at this draw's size, which the lookup of its
+    /// reduction then keeps rather than decoding again — so a hit is the
+    /// decode a miss at that size makes, and a JPEG drawn at two sizes keeps
+    /// two decodes and one frame.
+    ///
+    /// The decode runs through resources of its own over this scope's caches
+    /// and operation (`serving`), so what it reports is exactly its own,
+    /// whatever this render had already reported, and is kept with it.
+    fn kept_image(
+        &self,
+        cache: &DocumentCache,
+        name: &[u8],
+        request: &ImageRequest,
+    ) -> Option<Result<Option<DecodedImage>, String>> {
+        let (dict, reference) = self.xobject(name)?;
+        let subtype = self
+            .doc
+            .resolve_key(&dict, Name::SUBTYPE)
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n))?;
+        if subtype.as_ref() != b"Image" {
+            return None;
+        }
+        // Read before the decode, so that a default the scope refuses is the
+        // render's to report, as it always was, and not the image's.
+        let painted = self.defaults().written.clone();
+        let key_bytes = u64::try_from(painted.len()).unwrap_or(u64::MAX);
+        let label = String::from_utf8_lossy(name).into_owned();
+        let work = self.op.work.as_deref();
+        // Whether this draw decoded the image, and the decode it made to
+        // learn the frame, for the lookup of its reduction to keep.
+        let decoded = Cell::new(false);
+        let learnt: Cell<Option<Arc<CachedImage>>> = Cell::new(None);
+        let decode = || {
+            decoded.set(true);
+            self.count(Counter::ImagesDecoded);
+            let decoding = self.serving(self.op.clone());
+            let Decoded { image, frame } = decoding.decode_image(name, request);
+            (Arc::new(CachedImage::of(&image, &decoding, &label)), frame)
+        };
+        let at = if self.reducible(&dict) {
+            let key = FrameKey {
+                object: reference,
+                painted: painted.clone(),
+            };
+            let (frame, _) = cache.frame(key, work, || {
+                let (entry, frame) = decode();
+                learnt.set(Some(entry));
+                Fill::Keep(frame, key_bytes)
+            });
+            frame.map_or(1, |frame| reduction(jpeg_scale(frame, request)))
+        } else {
+            1
+        };
+        let key = ImageKey {
+            object: reference,
+            reduction: at,
+            painted,
+        };
+        let (kept, _) = cache.image(key, work, || {
+            let entry = match learnt.take() {
+                Some(entry) if entry.reduction() == at => entry,
+                _ => decode().0,
+            };
+            let bytes = entry.bytes().saturating_add(key_bytes);
+            Fill::Keep(entry, bytes)
+        });
+        self.count(if decoded.get() {
+            Counter::ImageMisses
+        } else {
+            Counter::ImageHits
+        });
+        kept.say_again(self, &label);
+        Some(kept.handed())
+    }
+
+    /// Whether a draw's size can reduce the decode of image `dict`: a JPEG
+    /// with no soft mask (11.6.5.3) and no `/Mask` of either form (8.9.6.3,
+    /// 8.9.6.4), which are sampled against the grid they were drawn for
+    /// ([`PageResources::decode_image`]).
+    fn reducible(&self, dict: &Dict) -> bool {
+        let masked =
+            dict.get_ref(self.name(b"SMask")).is_some() || dict.get(self.name(b"Mask")).is_some();
+        let jpeg = matches!(
+            self.last_filter(dict).as_deref(),
+            Some(b"DCTDecode") | Some(b"DCT")
+        );
+        jpeg && !masked
     }
 }
 
@@ -4779,12 +5005,7 @@ impl PageResources {
         } else {
             SampleForm::TwoColour
         };
-        let masked = soft || dict.get(self.name(b"Mask")).is_some();
-        let jpeg = matches!(
-            self.last_filter(&dict).as_deref(),
-            Some(b"DCTDecode") | Some(b"DCT")
-        );
-        let reducible = jpeg && !masked;
+        let reducible = self.reducible(&dict);
         let request = if reducible {
             request
         } else {

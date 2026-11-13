@@ -3415,7 +3415,8 @@ what a second render at another dpi reuses.
 
 - **The document cache** (P-16.2): one per document, shared by every clone of
   a `Document` and its pages, of typed entries each charged its bytes —
-  decoded images keyed by the image object and its decode request (P-16.2),
+  decoded images keyed by the image object and the reduction their decode
+  is made at, beside the frames of the JPEGs a draw's size reduces (P-16.2),
   compiled ICC transforms (P-16.4), form recordings (P-16.5, P-16.6) and
   P-06's glyph masks (P-16.7), with room for P-22.7's re-keyed transforms and
   P-23.2's tiling cells.
@@ -3457,7 +3458,8 @@ a typed key:
 
 | Kind | Key | Charged | Row |
 | --- | --- | --- | --- |
-| a decoded image | the image's object and its decode request: full, or reduced by a factor (*Reduced-resolution decode*) | its samples and its soft mask's, at the decoded size | P-16.2, P-16.9 |
+| a decoded image | the image's object, the reduction its decode is made at — 1 at full size, or 2, 4 or 8 for a JPEG decoded at the size it is drawn at (P-09.8), and the budget's reduced decode (*Reduced-resolution decode*) — and the default colour spaces its scope paints device spaces in (8.6.5.6), each `/ColorSpace` entry written exactly, the one thing outside the object a decode reads | its samples and its soft mask's, at the decoded size, the words of what its decode reported and its key's defaults | P-16.2, P-16.9 |
+| a JPEG's frame | the image's object and its scope's defaults, as its decodes: the width and height every draw of a JPEG with no mask reads its reduction against, learnt by its first decode | its key's defaults | P-16.2 |
 | a compiled ICC transform | today's key, the profile stream's object; P-22.7 re-keys it by the profile's bytes, intent and black-point compensation | its tables, three 4 096-entry ones for an RGB output | P-16.4, P-22.7 |
 | a form recording | the form's object and the parts of the invoking state its drawing reads (P-16.5 settles them) | the recorded calls, as a display list counts its own | P-16.5, P-16.6 |
 | a glyph mask | P-06.3's key: font identity, code, quantised 2x2, phase and flattening tolerance | P-06.3's charge, its pixels and 64 bytes | P-16.7 |
@@ -3472,13 +3474,16 @@ charged at least 64 bytes beside its payload, P-06.3's `ENTRY_BYTES`, so a
 document of empty entries is bounded too.
 
 **Filled single-flight.** A miss fills by `docs/design/parallelism.md`'s
-rule, through `tinker_pdf_cos::Flights`: one thread fills a slot and the
-threads that want it wait, unless a thread is itself in the middle of a fill,
-in which case it computes the value for itself and publishes nothing — the
-re-entry rule, for the reason `crates/tinker-pdf-cos/src/store.rs` gives at
-its head, that a `/Length` pointing into its own stream re-enters. A fill that
-unwinds or is cancelled publishes nothing, so a cancelled render's partial
-decode is never kept.
+rule, which the cache keeps in its own table under the lock its index is kept
+under, so that a charge and a publication are one step: one thread fills a
+slot and the threads that want it wait, unless a thread is itself in the
+middle of a fill, in which case it computes the value for itself and publishes
+nothing — the re-entry rule, for the reason `crates/tinker-pdf-cos/src/store.rs`
+gives at its head, that a `/Length` pointing into its own stream re-enters. A
+thread's open fills are counted where `tinker_pdf_cos::Flights` counts its
+own (`tinker_pdf_cos::OpenFill`, `fill_open`), so the rule holds across this
+table and every `Flights` at once. A fill that unwinds or is cancelled
+publishes nothing, so a cancelled render's partial decode is never kept.
 
 #### `CacheLimits { bytes }`, and where a caller states it
 
@@ -3613,8 +3618,11 @@ finding against the kind that held the bytes, never a larger budget.
 #### What a second render at another dpi reuses
 
 A second render of a page under a stated budget large enough for the page
-reuses every decoded image (a full decode is the same samples at every
-resolution, and the resampler draws from it), every compiled transform, every
+reuses every decoded image the second resolution draws at the first's
+reduction (a decode is the same samples at every resolution that asks for it,
+and the resampler draws from it): every image but a JPEG, and a JPEG wherever
+the size it is drawn at gives the same reduction — one that gives another is
+decoded once at that one. It reuses every compiled transform, every
 form recording (a recording is a function of the stream and the invoking
 state, never of the canvas — ruling 5 — so a tile and the page hit it too),
 every parsed object and every font program; it rasterises its glyph masks

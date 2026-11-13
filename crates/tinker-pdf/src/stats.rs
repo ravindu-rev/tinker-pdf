@@ -109,6 +109,15 @@ pub(crate) fn jpeg_transformed(work: Option<&Work>, samples: u64) {
     }
 }
 
+/// Records the bytes the document's cache held at one of the operation's
+/// lookups, when the operation is counting: the most it held is
+/// [`Stats::cache_bytes_held`].
+pub(crate) fn cache_held(work: Option<&Work>, bytes: u64) {
+    if let Some(work) = work {
+        work.cache_held(bytes);
+    }
+}
+
 /// Adds what a renderer counted — its glyphs shown, its outlines painted,
 /// its glyph masks rasterised and found in its cache, its shading functions
 /// evaluated, and the pixels its group buffers and soft masks held beside the

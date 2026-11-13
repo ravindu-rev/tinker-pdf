@@ -45,7 +45,6 @@ use tinker_pdf_content::{interpret, FontSource, Matrix};
 use tinker_pdf_cos::Object;
 
 use crate::annotations::MAX_ANNOTS;
-use crate::resources::Operation;
 use crate::{annots, Bitmap, Page, RenderOptions};
 
 /// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
@@ -182,7 +181,7 @@ impl Page {
         // One operation for the whole door, this scope's reading of the name
         // included: it is work the door does before the render starts, and
         // the form it reads here is the one the render's `Do` draws.
-        let op = Operation::rendering(crate::stats::tally(options.stats), options.usage);
+        let op = self.render_operation(options, options.usage);
         let resources = crate::resources::PageResources::new_in(
             &self.doc,
             &self.inner,
@@ -260,7 +259,7 @@ impl Page {
 
         // The operation is made before the appearance is decoded, so the
         // decode counts too.
-        let op = Operation::rendering(crate::stats::tally(options.stats), options.usage);
+        let op = self.render_operation(options, options.usage);
         let appearance = annots::prepare(&self.doc, &dict, &op).map_err(not_drawn)?;
         let rect = appearance.rect();
         Ok(

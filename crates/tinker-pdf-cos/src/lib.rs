@@ -130,7 +130,7 @@ pub use edit::{
     PageLabelRange, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport, SaveRefusal,
 };
 pub use fill::{text_appearance, TextLayout};
-pub use flight::{Filled, Flights};
+pub use flight::{fill_open, Filled, Flights, OpenFill};
 // The pool's one knob, so a caller of this crate alone can ask the writer for
 // threads (`WriteOptions::parallelism`).
 pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};

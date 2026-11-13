@@ -639,6 +639,9 @@ impl Batch {
             doc: Arc::clone(&self.doc),
             inner,
             fonts: self.fonts.clone(),
+            // Read for its text and rules, never rendered, so nothing it
+            // computes is a render's to keep.
+            cache: None,
         })
     }
 

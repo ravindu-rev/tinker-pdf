@@ -46,7 +46,7 @@ fn lowest(one: Option<ObjRef>, other: Option<ObjRef>) -> Option<ObjRef> {
 /// What one operation counted: the value a door hands back when asked.
 ///
 /// Every field is public, and each but [`Stats::most_decoded_stream`] a `u64`:
-/// a count of steps of one kind, but for four maxima, the stream one was
+/// a count of steps of one kind, but for five maxima, the stream one was
 /// reached on, six quantities — the bytes decoded, the samples JPEG decodes
 /// transformed, and four counts of pixels the renderer's group buffers and
 /// soft masks held — and two counts of where a pooled operation's parts ran,
@@ -131,6 +131,26 @@ pub struct Stats {
     pub form_scope_hits: u64,
     /// Lookups of a form XObject's resource scope that had to build it.
     pub form_scope_misses: u64,
+    /// Lookups of the document's cache (`docs/design/performance.md`, P-16)
+    /// that found the entry kept, of any kind it keeps — or found its
+    /// refusal kept, which is kept as firmly.
+    ///
+    /// This and the three below are counted by the facade's document cache,
+    /// which a document has only where a budget is stated
+    /// (`tinker_pdf::CacheLimits`); with none, nothing is kept past a render
+    /// and none of the four counts.
+    pub cache_hits: u64,
+    /// Lookups of the document's cache that found nothing kept and computed
+    /// the entry, kept or not.
+    pub cache_misses: u64,
+    /// Entries the document's cache evicted, least recently requested first,
+    /// to make room for one a lookup of this operation kept.
+    pub cache_evictions: u64,
+    /// The most bytes the document's cache held at once, at any lookup of
+    /// this operation, as its entries are charged. A quantity rather than a
+    /// count of steps: [`Stats::work`] leaves it out, and `+` keeps the
+    /// larger of two.
+    pub cache_bytes_held: u64,
     /// Walks of the page tree from its root: each listing of a document's
     /// pages, whatever it found.
     ///
@@ -435,6 +455,12 @@ pub enum Counter {
     FormScopeHits,
     /// [`Stats::form_scope_misses`].
     FormScopeMisses,
+    /// [`Stats::cache_hits`].
+    CacheHits,
+    /// [`Stats::cache_misses`].
+    CacheMisses,
+    /// [`Stats::cache_evictions`].
+    CacheEvictions,
     /// [`Stats::page_walks`].
     PageWalks,
     /// [`Stats::page_nodes_visited`].
@@ -493,14 +519,14 @@ impl Stats {
     ///
     /// The maxima and the quantities are left out —
     /// `most_decodes_of_one_stream`, `bytes_decoded`, `png_image_scratch`,
-    /// `png_peak`, `jpeg_held`, `jpeg_samples_transformed` and the four pixel
-    /// counts of group buffers and soft masks — because a byte, sample or
-    /// pixel total grows with the page and would hide a step count that
-    /// grows with the document. `bytes_scanned` is in: each of its bytes is a
-    /// step the repair scan took, not output. The two pool counts are out
-    /// too: they say on which thread a part ran, and the part's own steps are
-    /// counted where they were taken, so a page walked on a pool totals what
-    /// the same page rendered alone does.
+    /// `png_peak`, `jpeg_held`, `jpeg_samples_transformed`, the four pixel
+    /// counts of group buffers and soft masks and `cache_bytes_held` —
+    /// because a byte, sample or pixel total grows with the page and would
+    /// hide a step count that grows with the document. `bytes_scanned` is
+    /// in: each of its bytes is a step the repair scan took, not output. The
+    /// two pool counts are out too: they say on which thread a part ran, and
+    /// the part's own steps are counted where they were taken, so a page
+    /// walked on a pool totals what the same page rendered alone does.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -520,6 +546,9 @@ impl Stats {
             self.glyph_outline_misses,
             self.form_scope_hits,
             self.form_scope_misses,
+            self.cache_hits,
+            self.cache_misses,
+            self.cache_evictions,
             self.page_walks,
             self.page_nodes_visited,
             self.page_entries_copied,
@@ -564,6 +593,9 @@ impl Stats {
             Counter::GlyphOutlineMisses => &mut self.glyph_outline_misses,
             Counter::FormScopeHits => &mut self.form_scope_hits,
             Counter::FormScopeMisses => &mut self.form_scope_misses,
+            Counter::CacheHits => &mut self.cache_hits,
+            Counter::CacheMisses => &mut self.cache_misses,
+            Counter::CacheEvictions => &mut self.cache_evictions,
             Counter::PageWalks => &mut self.page_walks,
             Counter::PageNodesVisited => &mut self.page_nodes_visited,
             Counter::PageEntriesCopied => &mut self.page_entries_copied,
@@ -634,6 +666,10 @@ impl Add for Stats {
             form_scope_misses: self
                 .form_scope_misses
                 .saturating_add(other.form_scope_misses),
+            cache_hits: self.cache_hits.saturating_add(other.cache_hits),
+            cache_misses: self.cache_misses.saturating_add(other.cache_misses),
+            cache_evictions: self.cache_evictions.saturating_add(other.cache_evictions),
+            cache_bytes_held: self.cache_bytes_held.max(other.cache_bytes_held),
             page_walks: self.page_walks.saturating_add(other.page_walks),
             page_nodes_visited: self
                 .page_nodes_visited
@@ -815,6 +851,15 @@ impl Work {
         }
     }
 
+    /// Records the bytes the document's cache held at a lookup, kept where it
+    /// is the larger ([`Stats::cache_bytes_held`]).
+    pub fn cache_held(&self, bytes: u64) {
+        if let Ok(mut tally) = self.counts.lock() {
+            let stats = &mut tally.stats;
+            stats.cache_bytes_held = stats.cache_bytes_held.max(bytes);
+        }
+    }
+
     /// What has been counted so far.
     #[must_use]
     pub fn stats(&self) -> Stats {
@@ -831,7 +876,7 @@ mod tests {
 
     /// Every counter of a step, so a test of one property covers them all;
     /// [`PLACES`] holds the two that count where a part ran.
-    const ALL: [Counter; 35] = [
+    const ALL: [Counter; 38] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::GlyphMasksRasterised,
@@ -848,6 +893,9 @@ mod tests {
         Counter::GlyphOutlineMisses,
         Counter::FormScopeHits,
         Counter::FormScopeMisses,
+        Counter::CacheHits,
+        Counter::CacheMisses,
+        Counter::CacheEvictions,
         Counter::PageWalks,
         Counter::PageNodesVisited,
         Counter::PageEntriesCopied,
@@ -1114,6 +1162,30 @@ mod tests {
             u64::MAX,
             "saturating"
         );
+    }
+
+    /// The bytes a document's cache held are a maximum: the larger is kept,
+    /// in a tally and across `+`, and they are no step `work()` totals.
+    #[test]
+    fn the_bytes_a_cache_held_keep_the_larger_and_count_no_work() {
+        let work = Work::new();
+        work.cache_held(70_000);
+        work.cache_held(2_000);
+        work.add(Counter::CacheHits, 3);
+        work.add(Counter::CacheMisses, 2);
+        work.add(Counter::CacheEvictions, 1);
+        let stats = work.stats();
+        assert_eq!(stats.cache_bytes_held, 70_000);
+        assert_eq!(
+            (stats.cache_hits, stats.cache_misses, stats.cache_evictions),
+            (3, 2, 1)
+        );
+        assert_eq!(stats.work(), 6, "the lookups and the eviction are steps");
+        let other = Work::new();
+        other.cache_held(90_000);
+        let sum = stats + other.stats();
+        assert_eq!(sum.cache_bytes_held, 90_000);
+        assert_eq!(other.stats() + stats, sum, "in either order");
     }
 
     #[test]

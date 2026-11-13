@@ -25,6 +25,7 @@
 mod annotations;
 mod annots;
 mod associated_files;
+mod cache;
 pub mod cbz;
 mod copies;
 mod display;
@@ -86,6 +87,9 @@ pub use annotations::{Annotation, AnnotationFlags, AnnotationKind};
 pub use associated_files::{
     AssociatedFile, MarkedContentFileList, MarkedContentFiles, MAX_ASSOCIATED_FILE_BYTES,
 };
+/// A document's cache budget: [`OpenOptions::cache_limits`] and
+/// [`Document::with_cache_limits`].
+pub use cache::CacheLimits;
 /// Comic archives: what [`Document::open`] does with a `PK\x03\x04` at offset
 /// zero, and what it refuses by name.
 pub use cbz::{
@@ -1402,6 +1406,11 @@ pub struct OpenOptions {
     /// many pages a reflowable document has. For a PDF, a comic and a fixed
     /// document it does exactly what `with_fonts` does and arrives earlier.
     pub fonts: Option<Arc<dyn FontProvider>>,
+    /// The most bytes the document keeps across its renders
+    /// ([`CacheLimits`]), or `None` — the default — to keep nothing past the
+    /// render that made it, as [`Document::open`] does. The same as
+    /// [`Document::with_cache_limits`] on the opened document.
+    pub cache_limits: Option<CacheLimits>,
 }
 
 impl Default for OpenOptions {
@@ -1410,6 +1419,7 @@ impl Default for OpenOptions {
             page: epub::DEFAULT_PAGE,
             font_size: epub::DEFAULT_FONT_SIZE,
             fonts: None,
+            cache_limits: None,
         }
     }
 }
@@ -1430,6 +1440,20 @@ impl OpenOptions {
         self.fonts = Some(provider);
         self
     }
+
+    /// The same options with a cache budget stated ([`CacheLimits`]).
+    #[must_use]
+    pub fn with_cache_limits(mut self, limits: CacheLimits) -> OpenOptions {
+        self.cache_limits = Some(limits);
+        self
+    }
+
+    /// The document cache these options ask for: one of the budget stated,
+    /// or none.
+    fn cache(&self) -> Option<Arc<cache::DocumentCache>> {
+        self.cache_limits
+            .map(|limits| Arc::new(cache::DocumentCache::new(limits)))
+    }
 }
 
 impl core::fmt::Debug for OpenOptions {
@@ -1438,13 +1462,15 @@ impl core::fmt::Debug for OpenOptions {
             .field("page", &self.page)
             .field("font_size", &self.font_size)
             .field("fonts", &self.fonts.is_some())
+            .field("cache_limits", &self.cache_limits)
             .finish()
     }
 }
 
 /// An open document.
 ///
-/// Cheap to clone: the bytes and the object store are shared.
+/// Cheap to clone: the bytes, the object store and the document's cache are
+/// shared.
 #[derive(Clone)]
 pub struct Document {
     inner: Arc<CosDocument>,
@@ -1457,6 +1483,10 @@ pub struct Document {
     /// Present only when this document was **synthesised** from a container
     /// rather than parsed from a PDF. See [`Document::archive`].
     archive: Option<Arc<ArchiveReport>>,
+    /// What the document keeps across its renders, where its caller stated a
+    /// budget ([`CacheLimits`]); shared by every clone and every page handed
+    /// out. `None` keeps everything a render's own, as it always was.
+    cache: Option<Arc<cache::DocumentCache>>,
 }
 
 /// Opens a recognised container **once** and routes it by what it holds.
@@ -1691,6 +1721,7 @@ impl Document {
             inner: Arc::new(inner),
             fonts: fonts::effective(options.fonts.clone()),
             archive: None,
+            cache: options.cache(),
         })
     }
 
@@ -1711,6 +1742,7 @@ impl Document {
             inner: Arc::new(inner),
             fonts: fonts::effective(options.fonts.clone()),
             archive: Some(Arc::new(report)),
+            cache: options.cache(),
         })
     }
 
@@ -1819,6 +1851,7 @@ impl Document {
             inner: Arc::new(inner),
             fonts: fonts::effective(options.fonts.clone()),
             archive: None,
+            cache: options.cache(),
         })
     }
 
@@ -1894,6 +1927,10 @@ impl Document {
     ///
     /// Nothing is warned about for a PDF, a comic or a fixed document, whose
     /// pages this cannot move.
+    ///
+    /// A document with a cache budget ([`CacheLimits`]) is handed back with
+    /// a cache of its own under the same budget: what the old one kept was
+    /// drawn with the old faces.
     #[must_use]
     pub fn with_fonts(mut self, provider: Arc<dyn FontProvider>) -> Document {
         // Through the same seam `open_with` uses, so the two cannot disagree
@@ -1904,7 +1941,32 @@ impl Document {
                 Arc::make_mut(report).warn(ArchiveWarning::FontsAttachedAfterPagination);
             }
         }
+        if let Some(limits) = self.cache_limits() {
+            self.cache = Some(Arc::new(cache::DocumentCache::new(limits)));
+        }
         self
+    }
+
+    /// This document, sharing its bytes, keeping what its renders compute
+    /// across renders, pages and clones under `limits` (`CacheLimits`), in a
+    /// cache of its own: the decoded images of every render through it, its
+    /// pages and their display lists, while the bytes fit.
+    ///
+    /// The same as [`OpenOptions::cache_limits`] at open. Whatever the
+    /// budget, a page draws the same pixels and reports the same warnings as
+    /// it does with none: a kept entry is what computing it again would
+    /// compute.
+    #[must_use]
+    pub fn with_cache_limits(mut self, limits: CacheLimits) -> Document {
+        self.cache = Some(Arc::new(cache::DocumentCache::new(limits)));
+        self
+    }
+
+    /// The budget this document's cache holds to, or `None` where none was
+    /// stated and nothing is kept past a render.
+    #[must_use]
+    pub fn cache_limits(&self) -> Option<CacheLimits> {
+        self.cache.as_ref().map(|cache| cache.limits())
     }
 
     /// Whether the bytes look like a PDF, without opening them.
@@ -2042,6 +2104,7 @@ impl Document {
                 doc: self.inner.clone(),
                 inner,
                 fonts: self.fonts.clone(),
+                cache: self.cache.clone(),
             })
             .collect()
     }
@@ -2081,6 +2144,7 @@ impl Document {
             doc: Arc::clone(&self.inner),
             inner,
             fonts: self.fonts.clone(),
+            cache: self.cache.clone(),
         })
     }
 
@@ -2586,6 +2650,9 @@ pub struct Page {
     doc: Arc<CosDocument>,
     inner: cos_pages::Page,
     fonts: Option<Arc<dyn FontProvider>>,
+    /// The document's cache, where it has one: every render of the page
+    /// keeps what it computes there.
+    cache: Option<Arc<cache::DocumentCache>>,
 }
 
 impl Page {
@@ -2711,8 +2778,9 @@ impl Page {
         }
         // The operation is made before the content is decoded, so the decode
         // counts too; it binds the optional-content states the render's usage
-        // gives once, for every scope the render opens.
-        let op = resources::Operation::rendering(stats::tally(options.stats), options.usage);
+        // gives once, for every scope the render opens, and keeps what it
+        // computes in the document's cache where the document has one.
+        let op = self.render_operation(options, options.usage);
         let content = stats::content(&self.doc, &self.inner, op.work());
         self.render_layer(options, None, op, |renderer, resources| {
             interpret(&content, Matrix::IDENTITY, renderer, resources);
@@ -2728,6 +2796,29 @@ impl Page {
                 );
             }
         })
+    }
+
+    /// The operation one render of this page is, as `options` asks, for a
+    /// render naming `usage`: counting when it asks for stats, binding the
+    /// optional-content states `usage` gives once for every scope the render
+    /// opens, and keeping what it computes in the document's cache where the
+    /// document has one.
+    pub(crate) fn render_operation(
+        &self,
+        options: &RenderOptions,
+        usage: Option<Usage>,
+    ) -> resources::Operation {
+        self.operation(stats::tally(options.stats), usage)
+    }
+
+    /// [`Page::render_operation`], counting into `work`: a tally the parts of
+    /// one render share, a band's among them.
+    pub(crate) fn operation(
+        &self,
+        work: Option<Arc<stats::Work>>,
+        usage: Option<Usage>,
+    ) -> resources::Operation {
+        resources::Operation::rendering(work, usage).with_cache(self.cache.as_ref())
     }
 
     /// **The one pipeline every render of this page goes through** — the page

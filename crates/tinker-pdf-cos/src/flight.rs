@@ -22,7 +22,9 @@
 //!    unless this thread is itself in the middle of a fill, of any key in any
 //!    map, in which case it computes the value for itself and publishes
 //!    nothing. A thread-local count of the fills a thread has open says
-//!    which.
+//!    which: every `Flights` fill's, and every fill a table of another
+//!    crate's that keeps these rules marks with [`OpenFill`] — the facade's
+//!    document cache — so the rule holds across all of them.
 //! 4. A same-thread re-entry for a key the thread is filling is rule 3's
 //!    exception: it computes without waiting, as an uncached read does.
 //! 5. A fill that unwinds — or answers a value that is not to be kept —
@@ -154,6 +156,35 @@ impl<K: Eq + Hash + Clone, V: Clone> Flights<K, V> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         lock(&self.slots).is_empty()
+    }
+}
+
+/// Whether this thread has a fill open in any single-flight map — a
+/// [`Flights`], or a table that keeps these rules under a lock of its own
+/// and marks its fills with [`OpenFill`] — and so must compute rather than
+/// wait (rule 3).
+#[must_use]
+pub fn fill_open() -> bool {
+    OPEN.with(Cell::get) > 0
+}
+
+/// One fill this thread has open in a single-flight table that keeps this
+/// module's rules under a lock of its own — the facade's document cache — for
+/// as long as it lives. It is counted where every [`Flights`] fill is, so rule
+/// 3 holds across that table and every `Flights` at once: a thread with a
+/// fill open in either never waits in either, and no cycle of waits can form
+/// between them.
+#[must_use = "the fill is open only while the guard lives"]
+pub struct OpenFill {
+    _open: Open,
+}
+
+impl OpenFill {
+    /// Marks a fill open on this thread until the guard is dropped.
+    pub fn enter() -> OpenFill {
+        OpenFill {
+            _open: Open::enter(),
+        }
     }
 }
 
@@ -422,5 +453,54 @@ mod tests {
     fn a_map_of_flights_is_shared_between_threads() {
         fn shared<T: Send + Sync>() {}
         shared::<Flights<u32, std::sync::Arc<Vec<u8>>>>();
+    }
+
+    /// **A fill open in a table of another crate's counts as one here.** A
+    /// thread holding an [`OpenFill`] reads a key another thread is filling
+    /// and computes it for itself rather than waiting, as a thread inside a
+    /// `Flights` fill does; and [`fill_open`] says so while the guard lives
+    /// and not after.
+    #[test]
+    fn an_open_fill_elsewhere_computes_rather_than_waits() {
+        assert!(!fill_open(), "nothing is open on a fresh test thread");
+        {
+            let _outer = OpenFill::enter();
+            assert!(fill_open());
+            let _inner = OpenFill::enter();
+            assert!(fill_open(), "nested guards count");
+        }
+        assert!(!fill_open(), "both guards dropped, none open");
+
+        let flights: Flights<u32, u32> = Flights::new();
+        let claimed = Barrier::new(2);
+        let release = Barrier::new(2);
+        let (filled, computed) = std::thread::scope(|scope| {
+            let filling = scope.spawn(|| {
+                flights.read(4, || {
+                    claimed.wait();
+                    // Held until the other thread has computed its own.
+                    release.wait();
+                    Filled::Keep(40)
+                })
+            });
+            let other = scope.spawn(|| {
+                claimed.wait();
+                let _open = OpenFill::enter();
+                // Waiting here would never end: the fill waits on `release`.
+                let value = flights.read(4, || Filled::Keep(41));
+                release.wait();
+                value
+            });
+            (
+                filling.join().expect("no panic"),
+                other.join().expect("no panic"),
+            )
+        });
+        assert_eq!((filled, computed), (40, 41), "the other thread computed");
+        assert_eq!(
+            flights.read(4, || Filled::Keep(0)),
+            40,
+            "only the claim published"
+        );
     }
 }

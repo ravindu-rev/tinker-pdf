@@ -319,7 +319,22 @@ and a `FontProvider` arrive early enough to decide pagination), `sniff(bytes)`
 `cos()` — the escape hatch to `CosDocument`, whose types (`Object`, `Dict`,
 `Name`, `PdfString`, `ObjRef`, `StreamObj`, `XrefTable`, `XrefEntry`,
 `Revision`) are re-exported on the facade so the hatch can be named without a
-second dependency. On `CosDocument`: `get`, `resolve`, `trailer`,
+second dependency.
+
+**A cache budget is a document-wide choice, stated where the others are.**
+`OpenOptions::cache_limits` (`with_cache_limits(CacheLimits)`) and
+`Document::with_cache_limits(CacheLimits)` on an open document give it a cache
+of its own, shared by every clone of it and every page and display list it
+hands out, that keeps what its renders compute under `CacheLimits { bytes }`;
+`Document::cache_limits()` says which budget, or none. With none — the default,
+and `Document::open` — a document keeps nothing past the render that made it,
+so nothing it holds grows unasked; a budget of zero is stated and keeps
+nothing at all. `Document::with_fonts` on a document with a budget hands it
+back with a fresh cache under the same budget, since what the old one kept was
+drawn with the old faces. What is kept, and how, is
+[rendering](rendering.md)'s "The document's cache".
+
+On `CosDocument`: `get`, `resolve`, `trailer`,
 `revisions`, `xref`, and the tiers `stream_raw_encrypted` / `stream_raw` /
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an
 image codec); `open_appended(original, update)`, the open over an original
