@@ -171,6 +171,7 @@ in grey exactly as today otherwise:
 | Not a Type 3 glyph | Its procedure paints graphics, which are grey |
 | The page's own canvas, in `Rgb8` or in `Rgba8` without `transparent` | A light page with a backdrop under every pixel. An ink page (`CmykA8`) composites quantities of ink, not light; a grey page has no channels to stripe; a transparent page has no backdrop |
 | Not inside a transparency group, a soft mask's group or a tiling pattern's cell | Each of those is a buffer composited later, over a backdrop it does not hold, or sampled as an image |
+| Text at eight bits, with `antialias` on | A quantised or thresholded coverage has lost the fractions the filter distributes ([anti-aliasing](anti-aliasing.md)) |
 
 A glyph's fill alpha, a clip and a soft mask are all allowed: each multiplies
 the three coverages alike. Both routes take stripes — a glyph drawn from its
@@ -260,8 +261,10 @@ The two render options are passed through `render_layer_with` to the
 
 ### Anti-aliasing levels
 
-RC-11's text level acts on the same glyph coverage. Its design lands after
-this one and says how the two combine.
+RC-11's text level acts on the same glyph coverage, and its design
+([anti-aliasing](anti-aliasing.md), *Stripes and contrast*) says how the two
+combine: stripes need the text's eight bits, and contrast comes before the
+level.
 
 ## Milestones
 
