@@ -90,8 +90,8 @@ The facade turns `TextOptions` into what `tinker-pdf-content` reads,
 `Option<(f64, f64, f64, f64)>`, `TextClip::CropBox` resolved to
 `Page::crop_box`. It is `Copy` and `PartialEq` and not `Eq`, since nothing
 compares two. `TextDevice::with_options(&ExtractionOptions)` reads the first
-five; `TextPage::apply_character_options(&ExtractionOptions)` reads the two
-character options. `TextDevice::new()` is `with_options` of the default, so
+five; `text::apply_character_options(&mut TextPage, &ExtractionOptions)`
+reads the two character options. `TextDevice::new()` is `with_options` of the default, so
 every device built today is unchanged.
 
 ### What the interpreter is asked, and when
@@ -163,12 +163,14 @@ one ligature presentation form, is replaced by one character a piece:
   Presentation Forms block (U+FB00 to U+FB4F) or of the Arabic Presentation
   Forms-A and -B blocks (U+FB50 to U+FDFF, U+FE70 to U+FEFF) whose
   decomposition in `UnicodeData.txt` is tagged `<compat>`, `<isolated>`,
-  `<initial>`, `<medial>` or `<final>` and is, fully expanded, two pieces or
-  more. Its pieces are the expansion's: U+FB01 is `f` `i`, U+FB03 `f` `f` `i`,
-  U+FB4F `א` `ל`, U+FEFB `ل` `ا`. A form whose expansion is one piece — a wide
-  Hebrew letter, a letter with its point — is no ligature, and is kept. The
-  table is compiled from the vendored `UnicodeData.txt` by
-  `tinker-pdf-content`'s `build.rs`, beside the diacritic folding.
+  `<initial>`, `<medial>` or `<final>` and names, as written, two pieces or
+  more. Its pieces are the decomposition's: U+FB01 is `f` `i`, U+FB03 `f` `f`
+  `i`, U+FB4F `א` `ל`, U+FEFB `ل` `ا`, and U+FB05 `ſ` `t`, the letters as the
+  UCD spells the ligature, not decomposed again. A form whose decomposition is
+  one piece — a mark on a space — or untagged or `<font>` — a letter with its
+  point, a wide Hebrew letter — is no ligature, and is kept. The table is
+  compiled from the vendored `UnicodeData.txt` by `tinker-pdf-content`'s
+  `build.rs`, beside the diacritic folding.
 - **Each piece takes an equal share of the quad along its baseline**: the
   lower edge, from `ll` to `lr`, and the upper, from `ul` to `ur`, each in as
   many equal parts as there are pieces. The first piece takes the part at the

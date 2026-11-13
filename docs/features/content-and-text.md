@@ -316,6 +316,26 @@ the union of its span's, and the lines' and blocks' quads are made again from
 the characters'. So a box option changes the quads, and the words', search's
 and the serialisations' boxes built from them, and nothing else.
 
+**Ligatures and white space** (`TextOptions::split_ligatures` and
+`normalize_whitespace`, the design's options 1 and 2), one pass over every
+character once the page is read and its boxes are in
+(`text::apply_character_options`), so the characters an `/ActualText` states
+are read as a glyph's are. By default both are kept as the page states them.
+Split, a character whose text is two pieces or more — a ligature its
+`/ToUnicode` spells out, `ffi` — or one ligature presentation form — `ﬁ`,
+`ﻻ`, read by its tagged decomposition in the vendored `UnicodeData.txt`,
+compiled by the crate's `build.rs` — becomes one character a piece: a piece is
+a character with the marks and joiners after it (`Word_Break` `Extend`,
+`Format`, `ZWJ`), so a letter keeps its accent. Each takes an equal share of
+the character's quad along the baseline, the first at the quad's start, or at
+its end where the letters read right to left, down the column on a vertical
+line, its origin moved to its share's start and every other field the
+character's; the line's text is made again, and words, search and the
+serialisations read the letters, so a match inside a ligature is boxed inside
+it. Normalised, every `White_Space` character of a text but U+0020 — a tab, a
+no-break space, an ideographic space, a line separator — is written U+0020,
+one for one, each character keeping its box.
+
 A horizontal line is measured along its own baseline (`text.rs`'s `Frame`):
 along its first glyph's direction, and across it at a quarter turn from it.
 Where the pen stands after a glyph is the furthest of its box's corners along
@@ -752,8 +772,9 @@ extraction options ([design](../design/extraction-options.md)), each a field
 whose default is `Page::text()`'s reading, so `TextOptions` stays `Copy` and
 `Eq` and a caller names a base for the fields it leaves: `unmapped` keeps a
 glyph whose code maps to no text as a character standing for its code or its
-glyph, and `boxes` reports each character in its em box, the font's metrics or
-its outline (above). A page's blocks
+glyph, `boxes` reports each character in its em box, the font's metrics or
+its outline, `split_ligatures` splits a ligature into its letters and
+`normalize_whitespace` writes white space as spaces (above). A page's blocks
 are read through `TextPage::blocks()` and changed only through
 `blocks_mut()`, because a search keeps what it folded them into (below):
 `blocks_mut` drops every kept form before it hands the blocks out, so a
@@ -1275,7 +1296,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | A command stream that would have its reader hold more than its budgets — 2^24 records, 2^30 bytes, cells nested 8 deep, functions 32 and colour spaces or halftones 8 | `CommandError::OverBudget { budget }`, naming which | a stream is a host's bytes, and every length, count and reference in it is hostile: refused whole rather than read in part, under budgets a caller can set (`Budgets`) | [design](../design/command-stream.md) |
 | A command stream of a newer major version, or of this minor or older carrying a kind it does not define | `CommandError::NewerMajor { found, read }`, `CommandError::UnknownRecord { kind }` | a newer minor only adds kinds and appends fields, which a reader steps over; a newer major may change what any record means, and an unknown kind of a minor this build reads is damage | [design](../design/command-stream.md) |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
-| Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not refused: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
+| Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says, and `TextOptions::split_ligatures` divides its box among the letters that names, which shapes nothing. Bidi *reordering* is not refused: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
 | L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, on a page that declares no direction for it (a structure element's `/WritingMode`, above), a line of a right-to-left paragraph that holds nothing left to right and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an ellipsis, a straight or closing-form quotation mark used to open; `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's known limit, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark where `/ToUnicode` names the typed character (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`) — where it names the mirrored glyph, `»` for `«`, the line reads like a dash — nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו`. A mark of several characters reads reversed as well, in the order drawn: the line `<p dir="rtl">?! שלום</p>` draws reads `שלום !?` where nothing declares its direction. The EPUB writer's book declares it, and reads `?! שלום` as typed, the mark styled apart or not (`a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`) | ruling 14 |
 | Telling apart two texts UAX #9 draws alike | — | the algorithm is not one-to-one, so no reader can: `logical_order` returns the first order its search reaches that draws the line, and says which (`שלום now 2026`, not `שלום 2026 now`). Some of `BidiCharacterTest.txt`'s lines, each holding a bracket pair, read back as another text the same picture could be (N0 pairs brackets in logical order, and they are drawn mirrored). The paragraph's direction is such a choice where the line alone cannot make it: with no `dir`, a line with Arabic at both ends and a Latin run in brackets between, `… عوامل عدّة (HDAC). وقد …`, is a left-to-right paragraph's, its pair drawn facing inward — exactly the line a right-to-left paragraph whose `/ToUnicode` names the mirrored glyph draws for `وقد … (HDAC) … عوامل عدّة` — and on a page that declares no direction for it, it reads as that one, `(HDAC).` coming back `.)HDAC(`: both readings draw the line, and ruling 14's bracket tie-break counts only a pair facing outward. A page that declares the line's direction (a structure element's `/WritingMode`, above) reads it as typed, as the EPUB writer's book does. Pinned by `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin` | ruling 14 |
 | Brackets typed closing before opening, each set against the text between them | — | a known limit of ruling 14's bracket tie-break: where both paragraph directions draw a line that draws a closing bracket left of an opening one, and the other direction's reading pairs more brackets in all and more of them facing outward and set against what they enclose, that reading is taken — so `x)שלום(y` in a left-to-right paragraph, drawn `x)םולש(y`, reads `y(שלום)x`, and so does a sentence written in this shape, `x)שלום(y and a)עולם(b`; a text typed so is a fragment rather than prose. Pinned by `brackets_typed_closing_first_against_a_word_read_as_the_other_direction_pairs_them` | ruling 14 |

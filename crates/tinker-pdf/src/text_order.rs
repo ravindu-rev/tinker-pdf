@@ -166,6 +166,16 @@ pub struct TextOptions {
     /// from geometry — lines, blocks, ruling 14's order — reads the em box
     /// whatever this says, so it changes the quads and nothing else.
     pub boxes: CharBoxes,
+    /// Split each character whose text is several letters — a ligature its
+    /// `/ToUnicode` spells out — or is a ligature presentation form into its
+    /// letters, each with an equal share of the character's box along the
+    /// baseline. `false`, the default, keeps ligatures as the page states
+    /// them.
+    pub split_ligatures: bool,
+    /// Write every `White_Space` character of the text but U+0020 SPACE — a
+    /// tab, a no-break space, an ideographic space — as U+0020, one for one.
+    /// `false`, the default, keeps white space as the page states it.
+    pub normalize_whitespace: bool,
 }
 
 impl TextOptions {
@@ -174,6 +184,8 @@ impl TextOptions {
         ExtractionOptions {
             unmapped: self.unmapped,
             boxes: self.boxes,
+            split_ligatures: self.split_ligatures,
+            normalize_whitespace: self.normalize_whitespace,
         }
     }
 }

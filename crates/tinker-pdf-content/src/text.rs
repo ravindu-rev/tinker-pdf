@@ -499,6 +499,186 @@ pub struct ExtractionOptions {
     pub unmapped: Unmapped,
     /// Which box a character is reported with.
     pub boxes: CharBoxes,
+    /// Whether a character whose text is several letters — a ligature its
+    /// `/ToUnicode` spells out — or is a ligature presentation form is split
+    /// into its letters, each with its share of the character's box
+    /// ([`apply_character_options`]). `false` keeps ligatures, as the page
+    /// states them.
+    pub split_ligatures: bool,
+    /// Whether every `White_Space` character of a character's text but
+    /// U+0020 SPACE is written U+0020 ([`apply_character_options`]). `false`
+    /// keeps white space as the page states it.
+    pub normalize_whitespace: bool,
+}
+
+include!(concat!(env!("OUT_DIR"), "/ligatures.rs"));
+
+/// The letters a ligature presentation form stands for
+/// (`docs/design/extraction-options.md`, option 1): its tagged
+/// decomposition's, from [`LIGATURE_FORMS`]; `None` for a character that is
+/// no such form.
+#[must_use]
+pub fn ligature_letters(c: char) -> Option<&'static [char]> {
+    LIGATURE_FORMS
+        .binary_search_by_key(&c, |(form, _)| *form)
+        .ok()
+        .and_then(|at| LIGATURE_FORMS.get(at))
+        .map(|(_, letters)| *letters)
+}
+
+/// `text` in its pieces: each character with every character after it whose
+/// UAX #29 `Word_Break` is `Extend`, `Format` or `ZWJ`, which ride on what
+/// precedes them ([`strong`]). A text that opens with such a character keeps
+/// it in its first piece.
+fn pieces(text: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    // Whether the piece being read holds a character that rides on nothing.
+    let mut base = false;
+    for (at, c) in text.char_indices() {
+        let rides = matches!(
+            word_break(c),
+            WordBreak::Extend | WordBreak::Format | WordBreak::ZWJ
+        );
+        if !rides {
+            if base {
+                out.extend(text.get(start..at));
+                start = at;
+            }
+            base = true;
+        }
+    }
+    if start < text.len() {
+        out.extend(text.get(start..));
+    }
+    out
+}
+
+/// A point `fraction` of the way from `a` to `b`.
+fn between(a: (f64, f64), b: (f64, f64), fraction: f64) -> (f64, f64) {
+    (a.0 + (b.0 - a.0) * fraction, a.1 + (b.1 - a.1) * fraction)
+}
+
+/// `c`, a character of a line of `wmode`, split into its letters where its
+/// text is two pieces or more, or one ligature presentation form whose
+/// letters are; `None` where it is one letter, kept as it is.
+///
+/// Each letter takes an equal share of the quad along the baseline — the
+/// first at the quad's start where the letters hold no right-to-left
+/// character, and at its end where they hold one, as each is drawn; on a
+/// vertical line from the top down — and its origin is the character's moved
+/// along the baseline by its share's offset from the quad's start. Every other
+/// field is the character's.
+fn split_ligature(c: &TextChar, wmode: WritingMode) -> Option<Vec<TextChar>> {
+    let mut chars = c.text.chars();
+    let form = match (chars.next(), chars.next()) {
+        (Some(only), None) => {
+            ligature_letters(only).map(|letters| letters.iter().collect::<String>())
+        }
+        _ => None,
+    };
+    let letters = form.as_deref().unwrap_or(&c.text);
+    let pieces = pieces(letters);
+    if pieces.len() < 2 {
+        return None;
+    }
+    let n = pieces.len() as f64;
+    let backwards = wmode == WritingMode::Horizontal && letters.chars().any(reads_right_to_left);
+    let q = &c.quad;
+    let mut out = Vec::with_capacity(pieces.len());
+    for (k, piece) in pieces.iter().enumerate() {
+        let share = if backwards { pieces.len() - 1 - k } else { k } as f64;
+        let (from, to) = (share / n, (share + 1.0) / n);
+        // The share's corners, and where it starts, against where the quad
+        // does: along the baseline, or down the column.
+        let (quad, start, quad_start) = match wmode {
+            WritingMode::Horizontal => (
+                Quad {
+                    ll: between(q.ll, q.lr, from),
+                    lr: between(q.ll, q.lr, to),
+                    ul: between(q.ul, q.ur, from),
+                    ur: between(q.ul, q.ur, to),
+                },
+                between(q.ll, q.lr, from),
+                q.ll,
+            ),
+            WritingMode::Vertical => (
+                Quad {
+                    ul: between(q.ul, q.ll, from),
+                    ur: between(q.ur, q.lr, from),
+                    ll: between(q.ul, q.ll, to),
+                    lr: between(q.ur, q.lr, to),
+                },
+                between(q.ul, q.ll, from),
+                q.ul,
+            ),
+        };
+        let offset = (start.0 - quad_start.0, start.1 - quad_start.1);
+        out.push(TextChar {
+            text: (*piece).to_owned(),
+            quad,
+            origin: (c.origin.0 + offset.0, c.origin.1 + offset.1),
+            ..c.clone()
+        });
+    }
+    Some(out)
+}
+
+/// Writes every `White_Space` character of `text` but U+0020 as U+0020, and
+/// says whether it wrote any.
+fn normalize_whitespace(text: &mut String) -> bool {
+    if !text.chars().any(|c| c.is_whitespace() && c != ' ') {
+        return false;
+    }
+    *text = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    true
+}
+
+/// The character options of `options` applied to every character of `page`
+/// (`docs/design/extraction-options.md`, options 1 and 2): ligatures split
+/// into their letters ([`ExtractionOptions::split_ligatures`]), then white
+/// space normalised ([`ExtractionOptions::normalize_whitespace`]), each line's
+/// text made again from its characters where any changed. Its boxes and its
+/// order are the page's: a split character's letters tile its quad.
+///
+/// Run after ruling 14 has read the page and its boxes are in, so that the
+/// characters an `/ActualText` states are split and normalised as the
+/// glyphs' are, and a share is of the box the caller reads. With both off
+/// the page is left as it is, to the bit.
+pub fn apply_character_options(page: &mut TextPage, options: &ExtractionOptions) {
+    if !options.split_ligatures && !options.normalize_whitespace {
+        return;
+    }
+    for block in page.blocks_mut() {
+        for line in &mut block.lines {
+            let mut changed = false;
+            if options.split_ligatures {
+                let chars = std::mem::take(&mut line.chars);
+                let mut out = Vec::with_capacity(chars.len());
+                for c in chars {
+                    match split_ligature(&c, line.wmode) {
+                        Some(letters) => {
+                            out.extend(letters);
+                            changed = true;
+                        }
+                        None => out.push(c),
+                    }
+                }
+                line.chars = out;
+            }
+            if options.normalize_whitespace {
+                for c in &mut line.chars {
+                    changed |= normalize_whitespace(&mut c.text);
+                }
+            }
+            if changed {
+                line.text = line.chars.iter().map(|c| c.text.as_str()).collect();
+            }
+        }
+    }
 }
 
 /// The boxes a box option asked for ([`CharBoxes`]), held apart from a page
@@ -3437,6 +3617,237 @@ mod tests {
             near(at_a.ll, (100.0, 700.0)) && near(at_a.ur, (105.0, 705.0)),
             "{at_a:?}"
         );
+    }
+
+    /// A character of `text` at `x` along an upright baseline at 700, at a
+    /// size of 10, `ems` wide, carrying a sequence, a stream, a font, a span
+    /// and a glyph, so that a split is seen to keep them.
+    fn drawn(text: &str, x: f64, ems: f64) -> TextChar {
+        TextChar {
+            text: text.into(),
+            quad: upright(x, (0.0, -0.2, ems, 0.8)),
+            size: 10.0,
+            origin: (x, 700.0),
+            mcid: Some(4),
+            stream: 7,
+            font: Some(std::sync::Arc::from("Lig")),
+            stated: Some(2),
+            artifact: false,
+            glyph: Some(9),
+        }
+    }
+
+    /// A page of one line of `chars`, in `wmode`, read left to right.
+    fn line_of(chars: Vec<TextChar>, wmode: WritingMode) -> TextPage {
+        let text: String = chars.iter().map(|c| c.text.as_str()).collect();
+        let quad = enclosing(chars.iter().map(|c| c.quad)).expect("a box");
+        TextPage::new(
+            vec![TextBlock {
+                lines: vec![TextLine {
+                    chars,
+                    text,
+                    quad,
+                    wmode,
+                    rtl: false,
+                    size: 10.0,
+                }],
+                quad,
+            }],
+            BTreeMap::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// The options that split ligatures, or normalise white space, alone.
+    fn character_options(split_ligatures: bool, normalize_whitespace: bool) -> ExtractionOptions {
+        ExtractionOptions {
+            split_ligatures,
+            normalize_whitespace,
+            ..ExtractionOptions::default()
+        }
+    }
+
+    /// The text, the box's left and right and the origin's `x` of each of
+    /// `page`'s characters.
+    fn spans_of(page: &TextPage) -> Vec<(String, f64, f64, f64)> {
+        page.lines()
+            .iter()
+            .flat_map(|line| line.chars.iter())
+            .map(|c| {
+                let (x0, _, x1, _) = c.quad.bounds();
+                (c.text.clone(), x0, x1, c.origin.0)
+            })
+            .collect()
+    }
+
+    /// Whether two lists of characters' texts, boxes and origins are one, to
+    /// a millionth of a point.
+    fn same_spans(a: &[(String, f64, f64, f64)], b: &[(&str, f64, f64, f64)]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|((t, x0, x1, o), (u, y0, y1, p))| {
+                t == u && near((*x0, *x1), (*y0, *y1)) && (o - p).abs() < 1e-6
+            })
+    }
+
+    /// **A ligature splits into its letters, tiling its quad**
+    /// (`docs/design/extraction-options.md`, option 1): a character whose
+    /// text is `ffi` comes back as three, U+FB01 as two, each an equal share
+    /// along the baseline in reading order, its origin at its share's start
+    /// and every other field the character's; an Arabic and a Hebrew
+    /// ligature form give their first letter the share at the right; a
+    /// letter and its mark, and a mark opening a text, stay one piece.
+    #[test]
+    fn a_ligature_splits_into_its_letters_tiling_its_quad() {
+        let mut page = line_of(
+            vec![
+                drawn("ffi", 0.0, 1.5),
+                drawn("\u{FB01}", 20.0, 1.0),
+                drawn("\u{FEFB}", 40.0, 1.0),
+                drawn("\u{FB4F}", 60.0, 1.0),
+                drawn("e\u{301}", 80.0, 0.5),
+                drawn("\u{301}x", 90.0, 0.5),
+            ],
+            WritingMode::Horizontal,
+        );
+        apply_character_options(&mut page, &character_options(true, false));
+        assert!(
+            same_spans(
+                &spans_of(&page),
+                &[
+                    ("f", 0.0, 5.0, 0.0),
+                    ("f", 5.0, 10.0, 5.0),
+                    ("i", 10.0, 15.0, 10.0),
+                    ("f", 20.0, 25.0, 20.0),
+                    ("i", 25.0, 30.0, 25.0),
+                    ("\u{644}", 45.0, 50.0, 45.0),
+                    ("\u{627}", 40.0, 45.0, 40.0),
+                    ("\u{5D0}", 65.0, 70.0, 65.0),
+                    ("\u{5DC}", 60.0, 65.0, 60.0),
+                    ("e\u{301}", 80.0, 85.0, 80.0),
+                    ("\u{301}x", 90.0, 95.0, 90.0),
+                ]
+            ),
+            "{:?}",
+            spans_of(&page)
+        );
+        let line = page.lines()[0];
+        assert_eq!(
+            line.text,
+            "ffifi\u{644}\u{627}\u{5D0}\u{5DC}e\u{301}\u{301}x"
+        );
+        for c in &line.chars {
+            assert_eq!(
+                (
+                    c.mcid,
+                    c.stream,
+                    c.font.as_deref(),
+                    c.stated,
+                    c.glyph,
+                    c.size
+                ),
+                (Some(4), 7, Some("Lig"), Some(2), Some(9), 10.0),
+                "{:?} keeps its fields",
+                c.text
+            );
+            let (_, y0, _, y1) = c.quad.bounds();
+            assert!(near((y0, y1), (698.0, 708.0)), "{:?}: its height", c.text);
+        }
+        assert_eq!(ligature_letters('\u{FB03}'), Some(&['f', 'f', 'i'][..]));
+        assert_eq!(ligature_letters('f'), None);
+        assert_eq!(
+            ligature_letters('\u{FB2A}'),
+            None,
+            "a letter with its point"
+        );
+    }
+
+    /// A vertical line's letters run down its column, the first at the top.
+    #[test]
+    fn a_vertical_ligature_splits_down_its_column() {
+        let mut c = drawn("fl", 0.0, 1.0);
+        c.quad = Quad {
+            ul: (0.0, 720.0),
+            ur: (10.0, 720.0),
+            ll: (0.0, 700.0),
+            lr: (10.0, 700.0),
+        };
+        c.origin = (5.0, 720.0);
+        let mut page = line_of(vec![c], WritingMode::Vertical);
+        apply_character_options(&mut page, &character_options(true, false));
+        let chars = &page.lines()[0].chars;
+        assert_eq!(chars.len(), 2);
+        assert_eq!((chars[0].text.as_str(), chars[1].text.as_str()), ("f", "l"));
+        assert!(near(chars[0].quad.ul, (0.0, 720.0)) && near(chars[0].quad.ll, (0.0, 710.0)));
+        assert!(near(chars[1].quad.ul, (0.0, 710.0)) && near(chars[1].quad.lr, (10.0, 700.0)));
+        assert!(near(chars[0].origin, (5.0, 720.0)) && near(chars[1].origin, (5.0, 710.0)));
+    }
+
+    /// **White space is normalised**: a tab, a no-break space and an
+    /// ideographic space each read as one U+0020, an em space inside a text
+    /// too, each character keeping its box; a zero-width space, which is no
+    /// white space, is kept; and with the splits a ligature's white space
+    /// reads so as well.
+    #[test]
+    fn white_space_is_normalised_one_for_one() {
+        let fresh = || {
+            line_of(
+                vec![
+                    drawn("a", 0.0, 0.5),
+                    drawn("\t", 5.0, 0.5),
+                    drawn("b", 10.0, 0.5),
+                    drawn("\u{A0}", 15.0, 0.5),
+                    drawn("c", 20.0, 0.5),
+                    drawn("\u{3000}", 25.0, 1.0),
+                    drawn("d\u{2003}e", 35.0, 1.0),
+                    drawn("\u{200B}", 45.0, 0.5),
+                ],
+                WritingMode::Horizontal,
+            )
+        };
+        let mut page = fresh();
+        apply_character_options(&mut page, &character_options(false, true));
+        assert_eq!(page.plain_text(), "a b c d e\u{200B}\n");
+        let quads = |page: &TextPage| -> Vec<Quad> {
+            page.lines()
+                .iter()
+                .flat_map(|line| line.chars.iter())
+                .map(|c| c.quad)
+                .collect()
+        };
+        assert_eq!(quads(&page), quads(&fresh()));
+
+        let mut both = fresh();
+        apply_character_options(&mut both, &character_options(true, true));
+        assert_eq!(both.plain_text(), "a b c d e\u{200B}\n");
+        assert_eq!(both.lines()[0].chars.len(), 10, "d, the space and e split");
+    }
+
+    /// **With both options off the page is left as it is**, to the bit;
+    /// and a search after a split finds a match inside a ligature boxed
+    /// inside it, where before it the match was the whole glyph or none.
+    #[test]
+    fn the_character_options_change_nothing_unasked_and_search_reads_the_letters() {
+        let fresh = || {
+            line_of(
+                vec![drawn("ffi", 0.0, 1.5), drawn("\u{FB01}", 20.0, 1.0)],
+                WritingMode::Horizontal,
+            )
+        };
+        let mut kept = fresh();
+        apply_character_options(&mut kept, &ExtractionOptions::default());
+        assert_eq!(format!("{kept:?}"), format!("{:?}", fresh()));
+
+        let before = fresh();
+        assert_eq!(before.search("fi").len(), 1, "inside the ffi glyph only");
+        let mut split = fresh();
+        apply_character_options(&mut split, &character_options(true, false));
+        let hits = split.search("fi");
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        let (x0, _, x1, _) = hits[0].bounds();
+        assert!(near((x0, x1), (5.0, 15.0)), "inside ffi: {x0}..{x1}");
+        let (x0, _, x1, _) = hits[1].bounds();
+        assert!(near((x0, x1), (20.0, 30.0)), "the fi ligature: {x0}..{x1}");
     }
 
     /// What an artifact scope draws is not the page's text (14.8.2.2), so a

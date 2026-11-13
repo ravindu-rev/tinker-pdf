@@ -989,7 +989,7 @@ asserts the second, since no header can.
 | --- | --- | --- | --- |
 | `WordBreakProperty.txt` | `auxiliary/WordBreakProperty.txt` | `72274cac1e6b919507db35655c3e175aa27274668a1ece95c28d2069f2ad9852` | The `Word_Break` property, which **is** UAX #29's word algorithm |
 | `emoji-data.txt` | `emoji/emoji-data.txt` | `2cb2bb9455cda83e8481541ecf5b6dfda66a3bb89efa3fa7c5297eccf607b72b` | `Extended_Pictographic`, which rule WB3c is written in |
-| `UnicodeData.txt` | `UnicodeData.txt` | `2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c` | Field 5's canonical decompositions — published nowhere else — and field 2's `General_Category`, for diacritic-insensitive search |
+| `UnicodeData.txt` | `UnicodeData.txt` | `2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c` | Field 5's canonical decompositions — published nowhere else — and field 2's `General_Category`, for diacritic-insensitive search; and field 5's tagged decompositions of the presentation forms' blocks, the letters extraction splits a ligature form into where a caller asks |
 | `PropList.txt` | `PropList.txt` | `130dcddcaadaf071008bdfce1e7743e04fdfbc910886f017d9f9ac931d8c64dd` | `Diacritic`: a nonspacing mark that is also `Diacritic` is what that search removes, so a Devanagari vowel sign, which is `Mn` and not an accent, stays |
 | `WordBreakTest.txt` | `auxiliary/WordBreakTest.txt` | `1de23a75f37904abc7d206239ee8d34f8fdf0fb4ab32a7174dfbabbde25419b2` | **The conformance oracle.** 1 944 cases, every one run by `tests/uax29_conformance.rs` against the function `TextLine::words` calls |
 | `LICENSE.txt` | — | `e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96` | The Unicode License v3, byte for byte the file the other two UCD trees carry |

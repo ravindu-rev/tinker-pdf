@@ -8,12 +8,15 @@
 //! really makes, from a real content stream, are the lines those rules see,
 //! and that the default is the unoptioned answer to the byte.
 
+mod epub_support;
 mod written_support;
 
+use epub_support::typeface::Face;
 use tinker_pdf::{
     CharBoxes, Document, PlainTextOptions, SearchOptions, TextFormat, TextOptions, TextWarning,
     Unmapped,
 };
+use tinker_pdf_cos::build::{Glyph, PlacedGlyph};
 use tinker_pdf_cos::DocumentBuilder;
 
 /// A one-page document whose content stream is `content`, with Helvetica
@@ -491,6 +494,217 @@ fn each_box_option_is_the_faces_own_metrics() {
         }
     }
     assert_eq!(checked, 15, "five letters in three modes");
+}
+
+/// Every glyph the stated pages draw: each stated text that is no single
+/// letter of the face is drawn with a glyph of its own, so that no two
+/// texts claim one glyph's `/ToUnicode`.
+const STATED_COVERS: &str = "abcdxypqr \u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+
+/// The size the stated pages draw at: the face's 500-unit advance of a
+/// 1000-unit em is ten points.
+const STATED_SIZE: f64 = 20.0;
+
+/// One glyph of a stated page: the face's glyph for `char`, standing for
+/// `&str`, its origin `f64` along the run from the run's origin.
+type Stated<'a> = (char, &'a str, f64);
+
+/// A one-page document drawing each of `runs` — a baseline and its glyphs —
+/// from 40 points in, at [`STATED_SIZE`], in a composite font of a face that
+/// covers [`STATED_COVERS`], each glyph standing for the text it is given.
+fn stated_page(runs: &[(f64, Vec<Stated<'_>>)]) -> Document {
+    let face = Face::new("Fixture Ligatures", STATED_COVERS);
+    let program = face.build();
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"F0", b"FixtureLigatures", &program));
+    let mut content = Vec::new();
+    for (baseline, strokes) in runs {
+        let glyphs: Vec<PlacedGlyph<'_>> = strokes
+            .iter()
+            .map(|&(ch, text, x)| PlacedGlyph {
+                glyph: Glyph {
+                    id: face
+                        .glyph_of(ch)
+                        .expect("the face covers what the page draws"),
+                    text,
+                },
+                x,
+                rise: 0.0,
+            })
+            .collect();
+        assert!(builder.glyph_run(
+            &mut content,
+            b"F0",
+            STATED_SIZE,
+            [1.0, 0.0, 0.0, 1.0, 40.0, *baseline],
+            &glyphs
+        ));
+    }
+    builder.add_page(300.0, 200.0, |page| page.raw(&content));
+    Document::open(built("stated page", builder)).expect("it opens")
+}
+
+/// The text and the left and right of the box of each character of
+/// `line`.
+fn boxes_of(line: &tinker_pdf::TextLine) -> Vec<(String, f64, f64)> {
+    line.chars
+        .iter()
+        .map(|c| {
+            let (x0, _, x1, _) = c.quad.bounds();
+            (c.text.clone(), x0, x1)
+        })
+        .collect()
+}
+
+/// **Ligatures split into letters when not kept** (FT-17.6,
+/// `docs/design/extraction-options.md`'s option 1): a glyph whose
+/// `/ToUnicode` spells `ffi` and one that names U+FB01 come back as three and
+/// two characters whose boxes tile the glyph's, in the order the letters are
+/// read, on a left-to-right line and inside a right-to-left one; the line's
+/// text is the kept one with U+FB01 spelled out; and kept by default.
+#[test]
+fn ligatures_split_into_letters_when_not_kept() {
+    let doc = stated_page(&[
+        (
+            150.0,
+            vec![
+                ('a', "a", 0.0),
+                ('x', "ffi", 10.0),
+                ('y', "\u{FB01}", 20.0),
+                ('b', "b", 30.0),
+            ],
+        ),
+        (
+            100.0,
+            vec![
+                ('\u{5DD}', "\u{5DD}", 0.0),
+                ('\u{5D5}', "\u{5D5}", 10.0),
+                ('\u{5DC}', "\u{5DC}", 20.0),
+                ('\u{5E9}', "\u{5E9}", 30.0),
+                (' ', " ", 40.0),
+                ('x', "ffi", 50.0),
+                ('y', "\u{FB01}", 60.0),
+                (' ', " ", 70.0),
+                ('\u{5DD}', "\u{5DD}", 80.0),
+                ('\u{5D5}', "\u{5D5}", 90.0),
+                ('\u{5DC}', "\u{5DC}", 100.0),
+                ('\u{5E9}', "\u{5E9}", 110.0),
+            ],
+        ),
+    ]);
+    let page = doc.page(0).expect("a page");
+    let kept = page.text();
+    let split = page.text_with(&TextOptions {
+        split_ligatures: true,
+        ..TextOptions::default()
+    });
+    let (kept_lines, split_lines) = (kept.lines(), split.lines());
+    assert_eq!(kept_lines.len(), 2, "{:?}", kept.plain_text());
+    assert_eq!(split_lines.len(), 2);
+    assert_eq!(kept_lines[0].text, "affi\u{FB01}b", "kept by default");
+    assert_eq!(split_lines[0].text, "affifib");
+    assert!(kept_lines[1].rtl, "the second line reads right to left");
+    assert!(
+        kept_lines[1].text.contains("ffi\u{FB01}"),
+        "{:?}",
+        kept_lines[1].text
+    );
+    assert_eq!(
+        split_lines[1].text,
+        kept_lines[1].text.replace('\u{FB01}', "fi"),
+        "the right-to-left line reads its ligatures' letters where they stood"
+    );
+
+    // Each glyph's box, from 40 in, each glyph ten points wide.
+    for (line, ffi, fi) in [(split_lines[0], 50.0, 60.0), (split_lines[1], 90.0, 100.0)] {
+        let boxes = boxes_of(line);
+        let at = boxes
+            .iter()
+            .position(|(_, x0, _)| (x0 - ffi).abs() < 1e-6)
+            .expect("the ffi glyph's first letter");
+        let third = 10.0 / 3.0;
+        let expected = [
+            ("f", ffi, ffi + third),
+            ("f", ffi + third, ffi + 2.0 * third),
+            ("i", ffi + 2.0 * third, ffi + 10.0),
+            ("f", fi, fi + 5.0),
+            ("i", fi + 5.0, fi + 10.0),
+        ];
+        for (k, (text, x0, x1)) in expected.iter().enumerate() {
+            let (t, a, b) = &boxes[at + k];
+            assert!(
+                t == text && (a - x0).abs() < 1e-6 && (b - x1).abs() < 1e-6,
+                "{} letter {k}: {:?} against {text:?} {x0}..{x1}",
+                line.text,
+                boxes[at + k]
+            );
+        }
+        let (_, y0, _, y1) = line.chars[at].quad.bounds();
+        let baseline = if line.rtl { 100.0 } else { 150.0 };
+        assert!(
+            (y0 - (baseline - 0.2 * STATED_SIZE)).abs() < 1e-6
+                && (y1 - (baseline + 0.8 * STATED_SIZE)).abs() < 1e-6,
+            "the glyph's height: {y0}..{y1}"
+        );
+    }
+
+    // A match inside a ligature is boxed inside it.
+    let hits = split.search("fi");
+    assert_eq!(hits.len(), 4, "{hits:?}");
+    let (x0, _, x1, _) = hits[0].bounds();
+    assert!(
+        (x0 - (50.0 + 10.0 / 3.0)).abs() < 1e-6 && (x1 - 60.0).abs() < 1e-6,
+        "inside ffi: {x0}..{x1}"
+    );
+    assert_eq!(
+        kept.search("fi").len(),
+        2,
+        "kept, only inside the ffi glyphs"
+    );
+}
+
+/// **White space is normalised when not kept** (FT-17.6, option 2): a tab, a
+/// no-break space and an ideographic space each read as one U+0020, each
+/// character keeping its box; kept by default.
+#[test]
+fn whitespace_is_normalised_when_not_kept() {
+    let doc = stated_page(&[(
+        150.0,
+        vec![
+            ('a', "a", 0.0),
+            ('p', "\t", 10.0),
+            ('b', "b", 20.0),
+            ('q', "\u{A0}", 30.0),
+            ('c', "c", 40.0),
+            ('r', "\u{3000}", 50.0),
+            ('d', "d", 60.0),
+        ],
+    )]);
+    let page = doc.page(0).expect("a page");
+    let kept = page.text();
+    assert_eq!(kept.plain_text(), "a\tb\u{A0}c\u{3000}d\n");
+    let normalised = page.text_with(&TextOptions {
+        normalize_whitespace: true,
+        ..TextOptions::default()
+    });
+    assert_eq!(normalised.plain_text(), "a b c d\n");
+    let (kept_line, line) = (kept.lines()[0], normalised.lines()[0]);
+    assert_eq!(line.chars.len(), 7);
+    for (c, k) in line.chars.iter().zip(&kept_line.chars) {
+        assert_eq!(c.quad, k.quad, "{:?} keeps its box", k.text);
+        assert_eq!(c.origin, k.origin);
+    }
+    assert_eq!(
+        normalised.search("b c").len(),
+        1,
+        "the spaces are searched as spaces"
+    );
+    let both = page.text_with(&TextOptions {
+        normalize_whitespace: true,
+        split_ligatures: true,
+        ..TextOptions::default()
+    });
+    assert_eq!(both.plain_text(), "a b c d\n");
 }
 
 /// What `builder` writes, held to the validate-on-save helper as a document

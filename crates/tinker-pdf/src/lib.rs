@@ -3605,7 +3605,10 @@ impl Page {
     /// extraction options each change what is read only where they ask
     /// (`docs/design/extraction-options.md`): [`TextOptions::unmapped`] keeps a
     /// glyph whose code maps to no text as a character standing for its code
-    /// or its glyph.
+    /// or its glyph, [`TextOptions::boxes`] reports each character in its em
+    /// box, the font's metrics or its outline, [`TextOptions::split_ligatures`]
+    /// splits a ligature into its letters and
+    /// [`TextOptions::normalize_whitespace`] writes white space as spaces.
     #[must_use]
     pub fn text_with(&self, options: &TextOptions) -> TextPage {
         self.text_ordered(options, None)
@@ -3637,8 +3640,11 @@ impl Page {
             self.put_in_logical_order(&mut page);
         }
         // The boxes a box option asked for go in once the page is read with
-        // the em box, so they change no decision ruling 14 makes.
+        // the em box, so they change no decision ruling 14 makes; and the
+        // character options then read every character, the ones an
+        // `/ActualText` states among them, in the boxes the caller reads.
         held.apply(&mut page);
+        tinker_pdf_content::text::apply_character_options(&mut page, &options.extraction());
         page
     }
 
