@@ -25,10 +25,13 @@
 //! on a pixel path, which is what `cargo run -p xtask -- libm` exists to
 //! stop.
 
+use std::ops::Range;
+
 use crate::jpx::codestream::Roi;
 use crate::jpx::wavelet::{
-    into_samples, ladder, level_shift, maxshift, mul_q24, synthesise_97, Arith, Fixed, Realigned,
-    ALPHA, BETA, DELTA, GAMMA, K, MAX_PRODUCT, PLANE_BOUND, Q, QC, TWO_OVER_K,
+    into_samples, ladder, level_shift, line_at_a_time, lines_copied, maxshift, mul_q24,
+    synthesise_97, Arith, Exact, Fixed, Realigned, ALPHA, BETA, DELTA, GAMMA, K, MAX_PRODUCT,
+    PLANE_BOUND, Q, QC, TWO_OVER_K,
 };
 use crate::jpx::{boxes, codestream, tier1, tier2};
 
@@ -73,6 +76,19 @@ impl Arith for Reference {
         for (dst, src) in line.iter_mut().zip(y) {
             *dst = Reference(src);
         }
+    }
+
+    /// A line at a time, each line through [`reference_97`]: F.3.4 as the
+    /// standard draws it.
+    fn synthesise_2d(
+        samples: &mut [Self],
+        width: usize,
+        rows: Range<usize>,
+        cols: Range<usize>,
+        out: Range<usize>,
+        i0: (u32, u32),
+    ) {
+        line_at_a_time(samples, width, rows, cols, out, i0);
     }
 
     fn sample(self) -> i32 {
@@ -233,8 +249,10 @@ fn the_q24_product_rounds_half_up_rather_than_truncating() {
 /// A plane entry is bounded by `PLANE_BOUND` because the dequantiser clamps
 /// it there, and every figure in the overflow proof follows from that one
 /// number. This drives a line of alternating extremes — the shape that
-/// maximises every lifting step at once — through the shipped synthesis, so
-/// the `debug_assert` inside `mul_q24` is the thing under test.
+/// maximises every lifting step at once — through the line-at-a-time
+/// synthesis, and a plane of them laid out as a checkerboard through the
+/// shipped row-blocked one, both passes, so the `debug_assert` inside
+/// `mul_q24` is the thing under test.
 #[test]
 fn the_lifting_stays_inside_the_i64_product_bound() {
     for i0 in 0..2u32 {
@@ -258,6 +276,22 @@ fn the_lifting_stays_inside_the_i64_product_bound() {
                      proof bounds it by"
                 );
             }
+        }
+    }
+    // Past the in-place bound, so the passes lift in `i64` rows and strips,
+    // the vertical one over more columns than a strip holds.
+    for (w, h) in [(2usize, 2usize), (5, 3), (8, 8), (33, 2), (70, 9)] {
+        for i0 in [(0, 0), (1, 1), (0, 1)] {
+            let mut plane: Vec<Fixed> = (0..w * h)
+                .map(|k| {
+                    let corner = (k % w + k / w) % 2 == 0;
+                    Fixed::dyadic(if corner { PLANE_BOUND } else { -PLANE_BOUND }, -12)
+                })
+                .collect();
+            let mut lined = plane.clone();
+            Fixed::synthesise_2d(&mut plane, w, 0..h, 0..w, 0..w, i0);
+            line_at_a_time(&mut lined, w, 0..h, 0..w, 0..w, i0);
+            assert_eq!(plane, lined, "{w}x{h} at {i0:?}");
         }
     }
     assert_eq!(MAX_PRODUCT, 1 << 60, "the asserted product bound moved");
@@ -511,4 +545,180 @@ fn h1s_three_branches_land_where_the_clause_puts_them() {
             assert!(r.magnitude >= 0, "shift {shift}, align {align}");
         }
     }
+}
+
+// --- row-blocked lifting against a line at a time (P-10.7) --------------
+
+/// SplitMix64, so the planes are the same on every target.
+fn next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A seeded value in `[-bound, bound]`.
+fn noise(seed: &mut u64, bound: i64) -> i64 {
+    (next(seed) % (2 * bound as u64 + 1)) as i64 - bound
+}
+
+/// The widths and heights the planes take: one sample, both parities of
+/// every small size, and one wider than a 9/7 strip of columns.
+const SIZES: [usize; 9] = [1, 2, 3, 4, 5, 6, 7, 16, 67];
+
+/// What a plane `w` by `h` is synthesised over, as `(rows, cols, out)`: the
+/// whole plane, and three seeded sub-rectangles, `out` inside `cols` as a
+/// window's `out` is inside what its synthesis reads.
+fn windows(w: usize, h: usize, seed: &mut u64) -> Vec<(Range<usize>, Range<usize>, Range<usize>)> {
+    let mut out = vec![(0..h, 0..w, 0..w)];
+    let span = |seed: &mut u64, n: usize| {
+        let start = (next(seed) % n as u64) as usize;
+        let end = start + 1 + (next(seed) % (n - start) as u64) as usize;
+        start..end
+    };
+    for _ in 0..3 {
+        let rows = span(seed, h);
+        let cols = span(seed, w);
+        let inner = span(seed, cols.len());
+        let outs = cols.start + inner.start..cols.start + inner.end;
+        out.push((rows, cols, outs));
+    }
+    out
+}
+
+/// `samples` synthesised by the shipped row-blocked lifting and a line at a
+/// time, which must agree sample for sample.
+fn agree<A: Arith + PartialEq + std::fmt::Debug>(
+    samples: &[A],
+    w: usize,
+    (rows, cols, out): (Range<usize>, Range<usize>, Range<usize>),
+    i0: (u32, u32),
+    label: &str,
+) {
+    let mut blocked = samples.to_vec();
+    let mut lined = samples.to_vec();
+    A::synthesise_2d(&mut blocked, w, rows.clone(), cols.clone(), out.clone(), i0);
+    line_at_a_time(&mut lined, w, rows.clone(), cols.clone(), out.clone(), i0);
+    assert_eq!(
+        blocked, lined,
+        "{label}: rows {rows:?}, columns {cols:?}, out {out:?}, i0 {i0:?}"
+    );
+}
+
+/// **Row-blocked lifting is the line-at-a-time synthesis**, at every shape.
+///
+/// Planes of every width and height in [`SIZES`] — one-row and one-column
+/// ones among them — with their first sample at absolute indices of both
+/// parities on each axis, synthesised whole and over seeded sub-rectangles a
+/// window's synthesis lifts, in both arithmetics: the 5/3 at coefficients a
+/// 16-bit picture reaches, and the 9/7 inside the in-place bound, at it,
+/// past it and at the plane's own bound, where its passes lift in `i64` rows
+/// and strips. Every sample equals the line at a time's, which reads every
+/// neighbour through `mirror` and lifts each line copied out on its own.
+#[test]
+fn row_blocked_synthesis_is_the_column_synthesis_at_every_shape() {
+    let mut seed = 0x5031_3037;
+    let mut compared = 0u64;
+    for w in SIZES {
+        for h in SIZES {
+            for origin in [(0u32, 0u32), (1, 0), (0, 1), (1, 1), (6, 9)] {
+                for window in windows(w, h, &mut seed) {
+                    let i0 = (
+                        origin.0 + window.1.start as u32,
+                        origin.1 + window.0.start as u32,
+                    );
+                    let label = format!("{w}x{h}");
+                    let exact: Vec<Exact> = (0..w * h)
+                        .map(|_| Exact::dyadic(noise(&mut seed, 1 << 18), 0))
+                        .collect();
+                    agree(&exact, w, window.clone(), i0, &format!("5/3, {label}"));
+                    for bound in [1i64 << 20, 1 << 25, 1 << 27, PLANE_BOUND] {
+                        let fixed: Vec<Fixed> = (0..w * h)
+                            .map(|_| Fixed::dyadic(noise(&mut seed, bound), -12))
+                            .collect();
+                        agree(
+                            &fixed,
+                            w,
+                            window.clone(),
+                            i0,
+                            &format!("9/7 within {bound}, {label}"),
+                        );
+                    }
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(compared, (SIZES.len() * SIZES.len() * 5 * 4) as u64);
+}
+
+/// **A synthesis copies no line into scratch.**
+///
+/// Every committed codestream under `tests/jpx/`, reversible and
+/// irreversible, one component and three, reconstructed tile by tile, and
+/// planes of every shape in both arithmetics at the magnitudes an 8- to
+/// 12-bit picture's coefficients take: the passes lift the plane where it
+/// lies, and not one line is copied out and back. The count is live — a 9/7
+/// pass over samples past the in-place bound widens its lines to `i64`, and
+/// counts them.
+#[test]
+fn a_synthesis_copies_no_line_into_scratch() {
+    let before = lines_copied();
+
+    let directory = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/jpx"));
+    let mut names: Vec<_> = std::fs::read_dir(&directory)
+        .expect("tests/jpx")
+        .map(|entry| entry.expect("an entry").path())
+        .filter(|path| path.extension().is_some_and(|e| e == "jp2"))
+        .collect();
+    names.sort();
+    let mut reconstructed = 0;
+    for path in &names {
+        let bytes = std::fs::read(path).expect("a fixture");
+        let container = boxes::parse(&bytes).expect("the fixture is a JP2");
+        let stream = codestream::parse(container.codestream).expect("the codestream parses");
+        let mut tiles = tier2::decode_tiles(&stream).expect("tier-2 runs");
+        tier1::decode_tiles(&stream, &mut tiles, 0, None).expect("tier-1 runs");
+        for tile in &tiles {
+            let mut clamped = false;
+            crate::jpx::wavelet::reconstruct_tile(&stream, tile, 0, None, &mut clamped)
+                .unwrap_or_else(|e| panic!("{path:?}: {e:?}"));
+        }
+        reconstructed += 1;
+    }
+    assert!(
+        reconstructed >= 39,
+        "only {reconstructed} fixtures reconstructed"
+    );
+
+    let mut seed = 0x434F_5059;
+    for w in SIZES {
+        for h in SIZES {
+            for i0 in [(0u32, 0u32), (1, 1), (0, 1), (1, 0)] {
+                let mut exact: Vec<Exact> = (0..w * h)
+                    .map(|_| Exact::dyadic(noise(&mut seed, 1 << 14), 0))
+                    .collect();
+                Exact::synthesise_2d(&mut exact, w, 0..h, 0..w, 0..w, i0);
+                let mut fixed: Vec<Fixed> = (0..w * h)
+                    .map(|_| Fixed::dyadic(noise(&mut seed, 1 << 24), -12))
+                    .collect();
+                Fixed::synthesise_2d(&mut fixed, w, 0..h, 0..w, 0..w, i0);
+            }
+        }
+    }
+    assert_eq!(
+        lines_copied(),
+        before,
+        "a synthesis copied lines into scratch"
+    );
+
+    // A row of 9/7 samples past the in-place bound: its horizontal pass
+    // widens the row, and its one-row vertical pass halves in place.
+    let mut wide: Vec<Fixed> = (0..9)
+        .map(|_| Fixed::dyadic(noise(&mut seed, PLANE_BOUND), -12))
+        .collect();
+    wide[0] = Fixed::dyadic(PLANE_BOUND, -12);
+    Fixed::synthesise_2d(&mut wide, 9, 0..1, 0..9, 0..9, (0, 0));
+    assert_eq!(lines_copied(), before + 1, "the widened row is counted");
 }

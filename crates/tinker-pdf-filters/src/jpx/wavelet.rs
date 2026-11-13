@@ -83,6 +83,7 @@ use super::codestream::{Codestream, Quant, QuantStyle, Roi};
 use super::colour;
 use super::tier2::{CodeBlock, Orientation, Subband, Tile, TileComponent};
 use super::Refusal;
+use std::ops::Range;
 
 // --- the fixed-point format ---------------------------------------------
 
@@ -188,7 +189,7 @@ impl<T: Copy + Default> Plane<T> {
 
 /// The arithmetic one tile-component is reconstructed in.
 ///
-/// Three methods, which is exactly what the 5/3 and the 9/7 disagree about.
+/// Four methods, which is exactly what the 5/3 and the 9/7 disagree about.
 /// Everything else — B.5's subband geometry, F.3.3's interleave, the walk up
 /// the resolution ladder — is shared, and is shared deliberately: it is the
 /// part gate 1 already pins byte-identically against `opj_decompress`, and a
@@ -205,8 +206,26 @@ pub(crate) trait Arith: Copy + Default {
 
     /// F.3.8's 1D synthesis over one interleaved line, whose first sample
     /// sits at index `i0` of the subband coordinate system — so `i0`'s parity
-    /// is what says which end the low band starts on.
+    /// is what says which end the low band starts on: the line at a time
+    /// [`line_at_a_time`] lifts, which the tests hold the shipped
+    /// [`Arith::synthesise_2d`] to.
+    #[cfg(test)]
     fn synthesise(line: &mut [Self], i0: u32);
+
+    /// F.3.4's 2D synthesis of one resolution step over a plane's samples,
+    /// `width` to a row: HOR_SR over the columns `cols` of the rows `rows`,
+    /// each row's first sample at absolute index `i0.0`, then VER_SR over the
+    /// columns `out` of the same rows, each column's first sample at absolute
+    /// index `i0.1` — so the windowed synthesis lifts the sub-lines it always
+    /// has (`synthesise_2d`).
+    fn synthesise_2d(
+        samples: &mut [Self],
+        width: usize,
+        rows: Range<usize>,
+        cols: Range<usize>,
+        out: Range<usize>,
+        i0: (u32, u32),
+    );
 
     /// The integer sample this coefficient reconstructs to, before G.1's
     /// level shift.
@@ -244,15 +263,46 @@ impl Arith for Exact {
         Exact(clamp_i32(shift_round(m, e)))
     }
 
+    #[cfg(test)]
     fn synthesise(line: &mut [Self], i0: u32) {
-        // The 5/3 is left on `i32` exactly as milestone 4 wrote it and gate 1
-        // proved it. The copy in and out is one allocation per line, which is
-        // what its own `out` buffer already cost.
         let mut scratch: Vec<i32> = line.iter().map(|v| v.0).collect();
         synthesise_53(&mut scratch, i0);
         for (dst, src) in line.iter_mut().zip(scratch) {
             *dst = Exact(src);
         }
+    }
+
+    fn synthesise_2d(
+        samples: &mut [Self],
+        width: usize,
+        rows: Range<usize>,
+        cols: Range<usize>,
+        out: Range<usize>,
+        (xi0, yi0): (u32, u32),
+    ) {
+        // HOR_SR: each row lifted in place along its own samples.
+        for y in rows.clone() {
+            let line = &mut samples[y * width..][cols.clone()];
+            if line.len() < 2 {
+                lone(line, xi0, |Exact(v)| Exact(v / 2));
+                continue;
+            }
+            let (low, high) = parities(xi0);
+            step_line(line, low, low_53);
+            step_line(line, high, high_53);
+        }
+        // VER_SR: each lifting step over the whole rows of the block.
+        if rows.len() < 2 {
+            for y in rows {
+                lone(&mut samples[y * width..][out.clone()], yi0, |Exact(v)| {
+                    Exact(v / 2)
+                });
+            }
+            return;
+        }
+        let (low, high) = parities(yi0);
+        step_rows(samples, width, rows.clone(), out.clone(), low, low_53);
+        step_rows(samples, width, rows, out, high, high_53);
     }
 
     fn sample(self) -> i32 {
@@ -275,17 +325,107 @@ impl Arith for Fixed {
         Fixed(clamp_plane(shift_round(m, e + Q as i32)))
     }
 
+    #[cfg(test)]
     fn synthesise(line: &mut [Self], i0: u32) {
-        // The lifting line is `i64` and the plane is `i32`, and that is not
-        // an accident of convenience: the running value grows 4.59 bits
-        // inside a pass (the four steps multiply the bound by 24.08 in total)
-        // and does not fit the plane's own format mid-flight. Keeping the
-        // plane at `i32` is what holds a 4096x4096 four-component tile at
-        // 268 MB of scratch rather than 536.
         let mut scratch: Vec<i64> = line.iter().map(|v| i64::from(v.0)).collect();
         synthesise_97(&mut scratch, i0);
         for (dst, src) in line.iter_mut().zip(scratch) {
             *dst = Fixed(clamp_plane(src));
+        }
+    }
+
+    /// The 9/7's two passes, each over the plane's own `i32` samples where
+    /// the samples it reads are small enough that no intermediate leaves an
+    /// `i32` ([`IN_PLACE_BOUND`], thirty-two times an 8-bit picture's range),
+    /// and in `i64` rows otherwise: the running value grows 4.59 bits inside a
+    /// pass (the four steps multiply the bound by 24.08 in total) and from a
+    /// sample near [`PLANE_BOUND`] does not fit the plane's own format
+    /// mid-flight. Keeping the plane at `i32` is what holds a 4096x4096
+    /// four-component tile at 268 MB of scratch rather than 536. Either way
+    /// every product is the same `i64` at Q36, rounded by [`mul_q24`] in the
+    /// same order, and each pass ends clamped to [`PLANE_BOUND`], as the
+    /// overflow proof in this module's header has it.
+    fn synthesise_2d(
+        samples: &mut [Self],
+        width: usize,
+        rows: Range<usize>,
+        cols: Range<usize>,
+        out: Range<usize>,
+        (xi0, yi0): (u32, u32),
+    ) {
+        // HOR_SR.
+        if magnitude(samples, width, rows.clone(), cols.clone()) <= IN_PLACE_BOUND {
+            for y in rows.clone() {
+                let line = &mut samples[y * width..][cols.clone()];
+                lift_97(line, xi0, |Fixed(v)| i64::from(v), narrow);
+                clamp_fixed(line);
+            }
+        } else {
+            let mut wide = Vec::with_capacity(cols.len());
+            for y in rows.clone() {
+                let line = &mut samples[y * width..][cols.clone()];
+                wide.clear();
+                wide.extend(line.iter().map(|&Fixed(v)| i64::from(v)));
+                #[cfg(test)]
+                count_line_copies(1);
+                lift_97(&mut wide, xi0, |v| v, |v| v);
+                for (dst, &v) in line.iter_mut().zip(&wide) {
+                    *dst = Fixed(clamp_plane(v));
+                }
+            }
+        }
+
+        // VER_SR.
+        if rows.len() < 2 {
+            for y in rows {
+                let line = &mut samples[y * width..][out.clone()];
+                lone(line, yi0, |Fixed(v)| Fixed(v / 2));
+                clamp_fixed(line);
+            }
+            return;
+        }
+        if magnitude(samples, width, rows.clone(), out.clone()) <= IN_PLACE_BOUND {
+            lift_97_rows(
+                samples,
+                width,
+                rows.clone(),
+                out.clone(),
+                yi0,
+                |Fixed(v)| i64::from(v),
+                narrow,
+            );
+            for y in rows {
+                clamp_fixed(&mut samples[y * width..][out.clone()]);
+            }
+            return;
+        }
+        // Past the bound, the columns in strips of `STRIP`, each strip's
+        // rows widened into one block and lifted there, whole row by whole
+        // row as above.
+        let height = rows.len();
+        let mut block: Vec<i64> = Vec::with_capacity(height * STRIP.min(out.len()));
+        let mut start = out.start;
+        while start < out.end {
+            let strip = start..(start + STRIP).min(out.end);
+            let across = strip.len();
+            block.clear();
+            for y in rows.clone() {
+                block.extend(
+                    samples[y * width..][strip.clone()]
+                        .iter()
+                        .map(|&Fixed(v)| i64::from(v)),
+                );
+            }
+            #[cfg(test)]
+            count_line_copies(across as u64);
+            lift_97_rows(&mut block, across, 0..height, 0..across, yi0, |v| v, |v| v);
+            for (k, y) in rows.clone().enumerate() {
+                let line = &mut samples[y * width..][strip.clone()];
+                for (dst, &v) in line.iter_mut().zip(&block[k * across..(k + 1) * across]) {
+                    *dst = Fixed(clamp_plane(v));
+                }
+            }
+            start = strip.end;
         }
     }
 
@@ -354,7 +494,293 @@ pub(crate) fn mul_q24(v: i64, c: i64) -> i64 {
     (p + (1 << (QC - 1))) >> QC
 }
 
-// --- the reversible 5/3 (F.3.8.1) -----------------------------------------
+// --- row-blocked lifting (F.3.8) ------------------------------------------
+//
+// A pass lifts the plane's samples where they lie: HOR_SR along each row, and
+// VER_SR a whole row at a time, each lifting step updating every row of one
+// parity from the rows beside it, so every step's inner loop runs along
+// contiguous samples. F.3.7's symmetric extension is taken at a line's two
+// ends by index; no line is copied out and back, and the 5/3 allocates
+// nothing. The 9/7 keeps the standard's order exactly — the scaling, then
+// delta, gamma, beta and alpha — every product in `i64` at Q36 rounded by
+// `mul_q24`, so each intermediate is the one a line at a time computes.
+
+/// The magnitude, in Q12, up to which a 9/7 pass lifts the plane's own `i32`
+/// samples in place.
+///
+/// The overflow proof in this module's header, run from a smaller start: the
+/// scaling multiplies a magnitude by at most 1.6258 and the four lifting steps
+/// by 24.08 together, and each of the five rounds by at most one, so from
+/// `2^25` no intermediate passes `39.15 * 2^25 + 5`, about `2^30.3`, inside
+/// `i32`'s `2^31`. A pass whose samples reach past it lifts in `i64` instead.
+const IN_PLACE_BOUND: u32 = 1 << 25;
+
+/// The columns a 9/7 vertical pass past [`IN_PLACE_BOUND`] lifts at a time,
+/// whole rows of them widened into one `i64` block.
+const STRIP: usize = 64;
+
+/// Where a line's two bands start, for a line whose first sample sits at
+/// absolute index `i0`: the index of its first low-band sample and of its
+/// first high-band one. F.3.3 puts low-pass samples at even indices.
+const fn parities(i0: u32) -> (usize, usize) {
+    if i0 % 2 == 1 {
+        (1, 0)
+    } else {
+        (0, 1)
+    }
+}
+
+/// F.3.7: a line of a single sample is scaled rather than lifted, and only
+/// when it sits on an odd index — `halve` it then. Every sample of `samples`
+/// is such a line: the one a row of one column holds, or each of a row's
+/// samples where a column holds one row.
+fn lone<T: Copy>(samples: &mut [T], i0: u32, halve: impl Fn(T) -> T) {
+    if i0 % 2 == 1 {
+        for v in samples {
+            *v = halve(*v);
+        }
+    }
+}
+
+/// One lifting step along a line of two samples or more: every other sample
+/// from index `first` on, each from its two neighbours, with F.3.7's
+/// symmetric extension taken at the line's two ends by index — index −1 reads
+/// index 1, and index `n` reads `n − 2`.
+fn step_line<T: Copy>(line: &mut [T], first: usize, step: impl Fn(T, T, T) -> T) {
+    let n = line.len();
+    let mut k = first;
+    if k == 0 {
+        line[0] = step(line[0], line[1], line[1]);
+        k = 2;
+    }
+    while k + 1 < n {
+        line[k] = step(line[k], line[k - 1], line[k + 1]);
+        k += 2;
+    }
+    if k + 1 == n {
+        line[k] = step(line[k], line[k - 1], line[k - 1]);
+    }
+}
+
+/// Row `target` of a plane `width` samples to a row, to be written, and rows
+/// `above` and `below`, neither of them `target`, to be read: each over the
+/// columns `cols`.
+fn three_rows<T>(
+    samples: &mut [T],
+    width: usize,
+    (target, above, below): (usize, usize, usize),
+    cols: Range<usize>,
+) -> (&mut [T], &[T], &[T]) {
+    let (before, from) = samples.split_at_mut(target * width);
+    let (row, after) = from.split_at_mut(width);
+    let above = row_of(before, after, (target, above), width, cols.clone());
+    let below = row_of(before, after, (target, below), width, cols.clone());
+    (&mut row[cols], above, below)
+}
+
+/// Row `r` of a plane split around row `target`, which `r` is not: `before`
+/// holds the rows above `target` and `after` the rows below it.
+fn row_of<'a, T>(
+    before: &'a [T],
+    after: &'a [T],
+    (target, r): (usize, usize),
+    width: usize,
+    cols: Range<usize>,
+) -> &'a [T] {
+    if r < target {
+        &before[r * width..][cols]
+    } else {
+        &after[(r - target - 1) * width..][cols]
+    }
+}
+
+/// One lifting step down the columns `cols` of the rows `rows`, two or more
+/// of them, of a plane `width` samples to a row: every other row from the
+/// block's row `first` on, each from the rows above and below it, with F.3.7's
+/// symmetric extension taken at the block's first and last rows by index. So
+/// a step streams whole rows.
+fn step_rows<T: Copy>(
+    samples: &mut [T],
+    width: usize,
+    rows: Range<usize>,
+    cols: Range<usize>,
+    first: usize,
+    step: impl Fn(T, T, T) -> T,
+) {
+    let m = rows.len();
+    let mut j = first;
+    while j < m {
+        let above = if j == 0 { 1 } else { j - 1 };
+        let below = if j + 1 == m { m - 2 } else { j + 1 };
+        let (row, above, below) = three_rows(
+            samples,
+            width,
+            (rows.start + j, rows.start + above, rows.start + below),
+            cols.clone(),
+        );
+        for ((v, &a), &b) in row.iter_mut().zip(above).zip(below) {
+            *v = step(*v, a, b);
+        }
+        j += 2;
+    }
+}
+
+/// F.3.8.1's first step, a low-band sample from its two high-band
+/// neighbours: `x - floor((a + b + 2) / 4)`.
+///
+/// Wrapping, as the `i32` it is held in: the dequantiser holds each
+/// coefficient to an `i32` alone, so a sum of two that only a hostile stream
+/// asks for wraps, the same on every target, rather than panicking (ruling 1).
+fn low_53(Exact(x): Exact, Exact(a): Exact, Exact(b): Exact) -> Exact {
+    Exact(x.wrapping_sub(a.wrapping_add(b).wrapping_add(2).div_euclid(4)))
+}
+
+/// F.3.8.1's second step, a high-band sample from the two low-band samples
+/// the first step wrote: `x + floor((a + b) / 2)`, wrapping as [`low_53`]
+/// does.
+fn high_53(Exact(x): Exact, Exact(a): Exact, Exact(b): Exact) -> Exact {
+    Exact(x.wrapping_add(a.wrapping_add(b).div_euclid(2)))
+}
+
+/// F.3.8.2's six steps along one line whose first sample sits at absolute
+/// index `i0`, over samples `wide` reads as `i64` and `narrow` writes back:
+/// STEP1 and STEP2 (F-8, F-9) scale the low band by `K` and the high band by
+/// `2/K`; STEP3 to STEP6 (F-10 to F-13) lift with delta, gamma, beta and
+/// alpha. Table F.4 gives alpha and beta as negative and gamma and delta as
+/// positive and all four equations subtract, so with the constants'
+/// magnitudes the two middle steps add.
+fn lift_97<T: Copy>(
+    line: &mut [T],
+    i0: u32,
+    wide: impl Fn(T) -> i64 + Copy,
+    narrow: impl Fn(i64) -> T + Copy,
+) {
+    if line.len() < 2 {
+        lone(line, i0, |v| narrow(wide(v) / 2));
+        return;
+    }
+    let (low, high) = parities(i0);
+    for v in line.iter_mut().skip(low).step_by(2) {
+        *v = narrow(mul_q24(wide(*v), K));
+    }
+    for v in line.iter_mut().skip(high).step_by(2) {
+        *v = narrow(mul_q24(wide(*v), TWO_OVER_K));
+    }
+    let lifting =
+        move |c: i64| move |x: T, a: T, b: T| narrow(wide(x) + mul_q24(wide(a) + wide(b), c));
+    step_line(line, low, lifting(-DELTA));
+    step_line(line, high, lifting(-GAMMA));
+    step_line(line, low, lifting(BETA));
+    step_line(line, high, lifting(ALPHA));
+}
+
+/// [`lift_97`] down the columns `cols` of the rows `rows`, two or more of
+/// them, whose first sits at absolute index `i0`: the scaling a row at a
+/// time, a low-band row by `K` and a high-band one by `2/K`, then each
+/// lifting step over whole rows.
+fn lift_97_rows<T: Copy>(
+    samples: &mut [T],
+    width: usize,
+    rows: Range<usize>,
+    cols: Range<usize>,
+    i0: u32,
+    wide: impl Fn(T) -> i64 + Copy,
+    narrow: impl Fn(i64) -> T + Copy,
+) {
+    let (low, high) = parities(i0);
+    for (j, y) in rows.clone().enumerate() {
+        let c = if j % 2 == low { K } else { TWO_OVER_K };
+        for v in &mut samples[y * width..][cols.clone()] {
+            *v = narrow(mul_q24(wide(*v), c));
+        }
+    }
+    let lifting =
+        move |c: i64| move |x: T, a: T, b: T| narrow(wide(x) + mul_q24(wide(a) + wide(b), c));
+    step_rows(
+        samples,
+        width,
+        rows.clone(),
+        cols.clone(),
+        low,
+        lifting(-DELTA),
+    );
+    step_rows(
+        samples,
+        width,
+        rows.clone(),
+        cols.clone(),
+        high,
+        lifting(-GAMMA),
+    );
+    step_rows(
+        samples,
+        width,
+        rows.clone(),
+        cols.clone(),
+        low,
+        lifting(BETA),
+    );
+    step_rows(samples, width, rows, cols, high, lifting(ALPHA));
+}
+
+/// The largest magnitude among the columns `cols` of the rows `rows`.
+fn magnitude(samples: &[Fixed], width: usize, rows: Range<usize>, cols: Range<usize>) -> u32 {
+    rows.map(|y| {
+        samples[y * width..][cols.clone()]
+            .iter()
+            .map(|&Fixed(v)| v.unsigned_abs())
+            .max()
+            .unwrap_or(0)
+    })
+    .max()
+    .unwrap_or(0)
+}
+
+/// An `i64` intermediate back into the plane's `i32`, which a pass that began
+/// within [`IN_PLACE_BOUND`] proves it fits.
+fn narrow(v: i64) -> Fixed {
+    debug_assert!(
+        i32::try_from(v).is_ok(),
+        "a 9/7 intermediate of {v} left the i32 a pass within IN_PLACE_BOUND keeps it in"
+    );
+    Fixed(v as i32)
+}
+
+/// The end of a 9/7 pass: every sample back inside [`PLANE_BOUND`], as each
+/// line's synthesis ends.
+fn clamp_fixed(samples: &mut [Fixed]) {
+    for v in samples {
+        *v = Fixed(clamp_plane(i64::from(v.0)));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lines the shipped synthesis has copied into a scratch: the 9/7's rows
+    /// and columns widened to `i64` where a pass's samples reach past
+    /// [`IN_PLACE_BOUND`].
+    static LINES_COPIED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts `n` lines copied into a scratch.
+#[cfg(test)]
+fn count_line_copies(n: u64) {
+    LINES_COPIED.with(|copied| copied.set(copied.get() + n));
+}
+
+/// The lines this thread's synthesis has copied into a scratch so far.
+#[cfg(test)]
+pub(crate) fn lines_copied() -> u64 {
+    LINES_COPIED.with(std::cell::Cell::get)
+}
+
+// --- a line at a time (F.3.8, for the tests) ------------------------------
+//
+// The synthesis written a line at a time, each row and column copied into a
+// line and lifted there with every neighbour read through `mirror`: F.3.4 and
+// F.3.8 as the standard draws them, which `row_blocked_synthesis_is_the_
+// column_synthesis_at_every_shape` holds the row-blocked lifting to, and the
+// shape the `f64` reference's synthesis takes.
 
 /// Symmetric extension (F.3.6): the signal is mirrored about its ends without
 /// repeating the end sample, so index -1 reads index 1.
@@ -363,6 +789,7 @@ pub(crate) fn mul_q24(v: i64, c: i64) -> i64 {
 /// extension a filter asks for. Replacing this with zero padding leaves every
 /// unit test in the crate passing and fails only the oracle comparison, which
 /// is the sharpest available statement of what that gate buys.
+#[cfg(test)]
 fn mirror(n: i64, mut i: i64) -> usize {
     while i < 0 || i >= n {
         if i < 0 {
@@ -382,6 +809,7 @@ fn mirror(n: i64, mut i: i64) -> usize {
 /// runs first and the odd step reads the evens it just produced. Swapping
 /// them is the analysis order, and it decodes to something that still looks
 /// like an image.
+#[cfg(test)]
 fn synthesise_53(y: &mut [i32], i0: u32) {
     let n = y.len();
     if n == 0 {
@@ -418,8 +846,6 @@ fn synthesise_53(y: &mut [i32], i0: u32) {
     y.copy_from_slice(&out);
 }
 
-// --- the irreversible 9/7 (F.3.8.2) ---------------------------------------
-
 /// F.3.8.2's 1D synthesis for the irreversible 9/7, over an `i64` Q12 line.
 ///
 /// Six steps, in the standard's own order, and the order is the whole of it:
@@ -431,6 +857,7 @@ fn synthesise_53(y: &mut [i32], i0: u32) {
 /// Each lifting step reads only the opposite parity, which is why they are
 /// safe in place and why lifting exists at all: there is no ordering hazard
 /// within a step, only between them.
+#[cfg(test)]
 pub(crate) fn synthesise_97(y: &mut [i64], i0: u32) {
     let n = y.len();
     if n == 0 {
@@ -469,6 +896,7 @@ pub(crate) fn synthesise_97(y: &mut [i64], i0: u32) {
 
 /// One lifting step: every sample of one parity, updated by `c` times the sum
 /// of its two neighbours of the other parity.
+#[cfg(test)]
 fn lift(y: &mut [i64], odd_first: bool, target_even: bool, c: i64) {
     let n = y.len() as i64;
     for k in 0..y.len() {
@@ -480,6 +908,35 @@ fn lift(y: &mut [i64], odd_first: bool, target_even: bool, c: i64) {
         let left = y[mirror(n, i - 1)];
         let right = y[mirror(n, i + 1)];
         y[k] += mul_q24(left + right, c);
+    }
+}
+
+/// F.3.4's 2D synthesis a line at a time: each row of `cols` copied into a
+/// line, through [`Arith::synthesise`] and back, then each column of `out`.
+#[cfg(test)]
+pub(crate) fn line_at_a_time<A: Arith>(
+    samples: &mut [A],
+    width: usize,
+    rows: Range<usize>,
+    cols: Range<usize>,
+    out: Range<usize>,
+    (xi0, yi0): (u32, u32),
+) {
+    let mut line = vec![A::default(); cols.len()];
+    for y in rows.clone() {
+        line.copy_from_slice(&samples[y * width..][cols.clone()]);
+        A::synthesise(&mut line, xi0);
+        samples[y * width..][cols.clone()].copy_from_slice(&line);
+    }
+    let mut column = vec![A::default(); rows.len()];
+    for x in out {
+        for (at, y) in column.iter_mut().zip(rows.clone()) {
+            *at = samples[y * width + x];
+        }
+        A::synthesise(&mut column, yi0);
+        for (&at, y) in column.iter().zip(rows.clone()) {
+            samples[y * width + x] = at;
+        }
     }
 }
 
@@ -848,41 +1305,37 @@ fn dequantise<A: Arith>(
 ///
 /// Rows first, then columns — F.3.4's HOR_SR followed by VER_SR. Every row
 /// the column pass reads is lifted, along the columns `read` spans; then each
-/// of `out`'s columns is lifted along the rows `read` spans. A sub-line is
+/// of `out`'s columns is lifted along the rows `read` spans, a whole row of
+/// them at each lifting step ([`Arith::synthesise_2d`]). A sub-line is
 /// lifted with its first sample's own absolute index as `i0`, so its
 /// parities are the whole line's. A value within the filter's reach of a
 /// sub-line's end that is not the resolution's own end comes out wrong —
 /// the symmetric extension reflects at the wrong place — and is never read:
 /// `read` is `out` widened by that reach, and a sample of `out` depends on
 /// nothing outside it (`Needs::of`). With nothing windowed, `read` and `out`
-/// are the whole grid and this is the whole-plane synthesis.
+/// are the whole grid and this is the whole-plane synthesis. Both rectangles
+/// lie inside the grid by construction, and are held to the plane besides,
+/// so no sample outside it is ever reached (ruling 1).
 fn synthesise_2d<A: Arith>(plane: &mut Plane<A>, x0: u32, y0: u32, read: Rect, out: Rect) {
     if read.is_empty() || out.is_empty() {
         return;
     }
-    let (rx0, rx1) = (read.x0 - x0, read.x1 - x0);
-    let (ry0, ry1) = (read.y0 - y0, read.y1 - y0);
-    let mut row = vec![A::default(); (rx1 - rx0) as usize];
-    for y in ry0..ry1 {
-        for x in rx0..rx1 {
-            row[(x - rx0) as usize] = plane.get(x, y);
-        }
-        A::synthesise(&mut row, read.x0);
-        for x in rx0..rx1 {
-            plane.set(x, y, row[(x - rx0) as usize]);
-        }
-    }
-
-    let mut column = vec![A::default(); (ry1 - ry0) as usize];
-    for x in (out.x0 - x0)..(out.x1 - x0) {
-        for y in ry0..ry1 {
-            column[(y - ry0) as usize] = plane.get(x, y);
-        }
-        A::synthesise(&mut column, read.y0);
-        for y in ry0..ry1 {
-            plane.set(x, y, column[(y - ry0) as usize]);
-        }
-    }
+    let (width, height) = (plane.width as usize, plane.height as usize);
+    let span = |from: u32, to: u32, origin: u32, limit: usize| {
+        let start = (from.saturating_sub(origin) as usize).min(limit);
+        start..(to.saturating_sub(origin) as usize).clamp(start, limit)
+    };
+    let rows = span(read.y0, read.y1, y0, height);
+    let cols = span(read.x0, read.x1, x0, width);
+    let outs = span(out.x0, out.x1, x0, width);
+    A::synthesise_2d(
+        &mut plane.samples,
+        width,
+        rows,
+        cols,
+        outs,
+        (read.x0, read.y0),
+    );
 }
 
 // --- what a window needs (P-10.3) -----------------------------------------

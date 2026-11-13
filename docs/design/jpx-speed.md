@@ -119,21 +119,30 @@ flowcharts register for register, stays in `mq.rs`'s tests as the reference.
 
 ### Row-blocked lifting (P-10.7)
 
-`synthesise_2d` copies every row into a scratch line, lifts it, and copies it
-back, then does the same for every column, and `synthesise_53` allocates two
-index lists and an output line per call. The row-blocked form lifts the
-horizontal pass in place along each row, and the vertical pass over blocks
-of whole rows: each lifting step updates every sample of one parity's rows
-from the two rows beside it, so the inner loop runs along contiguous memory
-for every step and the compiler can vectorise it. The symmetric extension
-(F.3.7's mirror) is applied at the two ends of a line by index, not through
-`mirror` at every sample. The 9/7 keeps its order of operations exactly —
-the scaling, then delta, gamma, beta and alpha, each product formed in `i64`
-and rounded by `mul_q24` — so every intermediate is today's, and the line is
-clamped back into the `i32` plane at the end of each pass as `Fixed`'s
-synthesis clamps it; the overflow proof in `wavelet.rs`'s header still
-holds, step for step. The windowed synthesis P-10.3 lands keeps its rows and
-columns.
+Each arithmetic's `Arith::synthesise_2d` lifts the plane where it lies: the
+horizontal pass in place along each row, and the vertical pass over the
+block of whole rows, each lifting step updating every row of one parity from
+the two rows beside it, so the inner loop runs along contiguous memory for
+every step and the compiler can vectorise it. The symmetric extension
+(F.3.7's mirror) is applied at the two ends of a line, or of the block, by
+index, not through `mirror` at every sample, and no line is copied out and
+back. The 5/3 lifts its `i32` samples with wrapping arithmetic, so a sum of
+two coefficients only a hostile stream asks for wraps alike on every target
+rather than panicking, and allocates nothing. The 9/7 keeps its order of
+operations exactly — the scaling, then delta, gamma, beta and alpha, each
+product formed in `i64` and rounded by `mul_q24` — so every intermediate is
+the one a line at a time computes, and each pass ends clamped into the plane
+bound as `Fixed`'s synthesis clamps it; the overflow proof in `wavelet.rs`'s
+header still holds, step for step. A 9/7 pass lifts the plane's own `i32`
+samples where every sample it reads is within `2^25` at Q12 — 8 192 sample
+units, thirty-two times an 8-bit picture's range — from which that proof
+leaves no intermediate past `i32`, and every committed codestream's decode
+lifts so; otherwise in `i64`: each row widened for the horizontal pass, and
+the vertical pass over strips of 64 columns, whole rows of each widened into
+one block. The windowed synthesis P-10.3 lands keeps its rows and columns. The
+line-at-a-time synthesis, each line copied into a scratch and every
+neighbour read through `mirror`, stays in the tests as the reference the
+row-blocked lifting is held to.
 
 ### The decode request (P-10.2, P-10.3)
 

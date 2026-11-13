@@ -356,7 +356,14 @@ that becomes significant sets its bits in the words around it; magnitudes
 and the plane each coefficient is known to stay one a coefficient. The test
 encoder keeps the transcribed state, a flag a coefficient, and the packed one
 is held to it at every coefficient after every pass and at every
-neighbourhood a word can hold ([design](../design/jpx-speed.md)).
+neighbourhood a word can hold ([design](../design/jpx-speed.md)). Both
+inverse wavelets lift the plane where it lies, along each row and then a
+whole row at a time down the columns, with the symmetric extension taken at
+a line's ends by index: the 5/3 in its `i32` samples, wrapping, and the 9/7
+in its own `i32` samples wherever the samples a pass reads are small enough
+that no intermediate leaves them (within `2^25` at Q12, 8 192 sample units),
+in `i64` rows otherwise, every product and rounding in the standard's order
+either way.
 
 **A decode can drop resolution levels.** `jpx_decode_request` takes a
 `JpxRequest` whose `discard` drops the top levels of every tile-component:
