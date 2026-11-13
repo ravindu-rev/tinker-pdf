@@ -313,6 +313,9 @@ struct Edge {
     dxdy: i64,
     /// +1 or -1, for the non-zero winding rule.
     winding: i32,
+    /// Whether no crossing of the edge can saturate ([`unsaturating`]), so
+    /// that each sub-scanline's crossing is the one above it plus `dxdy`.
+    plain: bool,
 }
 
 /// The end of a list: no edge, no block of list heads, no later crossing.
@@ -698,12 +701,18 @@ impl Work {
                     let Some(edge) = edges.get(*index as usize) else {
                         continue;
                     };
-                    for sub in
-                        i64::from(edge.top).max(top)..i64::from(edge.bottom).min(top + samples)
-                    {
-                        let rel = crossing(edge, sub).saturating_sub(origin);
-                        cells.deposit((sub - top) as usize, rel, units, edge.winding);
-                    }
+                    let from = i64::from(edge.top).max(top);
+                    let to = i64::from(edge.bottom).min(top + samples);
+                    // `crossing` is within 2^47 of zero and `origin` within
+                    // 2^39, so the difference cannot wrap.
+                    each_crossing(edge, from, to, |sub, x| {
+                        cells.deposit(
+                            (sub - top) as usize,
+                            x.wrapping_sub(origin),
+                            units,
+                            edge.winding,
+                        );
+                    });
                 }
                 cells.convert(rule, out);
             }
@@ -745,12 +754,107 @@ fn crossing(edge: &Edge, sub: i64) -> i64 {
         >> SUBSTEP_BITS
 }
 
-/// 1 where the rule calls a winding inside, 0 where it does not.
-fn inside_as(winding: i32, rule: FillRule) -> i32 {
-    match rule {
-        FillRule::NonZero => i32::from(winding != 0),
-        FillRule::EvenOdd => winding & 1,
+/// Hands `put` each sub-scanline of `from..to`, which lie inside the edge's
+/// own, with [`crossing`] there.
+///
+/// **An edge [`Edge::plain`] marks is stepped, not multiplied.** None of its
+/// products or sums saturates, so the sum `crossing` reduces is exact, and the
+/// next sub-scanline's is this one's plus `dxdy`: one wrapping add a
+/// sub-scanline, which cannot wrap, where `crossing` makes a saturating
+/// multiply and two saturating adds. Any other edge keeps `crossing` itself,
+/// whose saturation is what puts a crossing past `i64` far outside the region.
+#[inline(always)]
+fn each_crossing(edge: &Edge, from: i64, to: i64, mut put: impl FnMut(i64, i64)) {
+    if edge.plain {
+        let mut at = edge
+            .dxdy
+            .wrapping_mul(from - i64::from(edge.top))
+            .wrapping_add(edge.x)
+            .wrapping_add(SUBSTEP / 2);
+        for sub in from..to {
+            put(sub, at >> SUBSTEP_BITS);
+            at = at.wrapping_add(edge.dxdy);
+        }
+    } else {
+        for sub in from..to {
+            put(sub, crossing(edge, sub));
+        }
     }
+}
+
+/// Whether an edge whose first crossing is `x`, whose slope is `dxdy` and
+/// which covers `height` sub-scanlines makes no crossing [`crossing`]
+/// saturates: `|dxdy| × height + |x| + SUBSTEP / 2` is at most `i64::MAX`.
+///
+/// Then for every step from 0 to `height` the product, both sums and the
+/// rounding half are exact, each bounded by that one figure, so
+/// [`each_crossing`] may step from one sub-scanline to the next by adding
+/// `dxdy` and lands on `crossing`'s value at each — the step past the last
+/// sub-scanline included, which it takes and does not use. Decided once an
+/// edge, as it is built.
+fn unsaturating(x: i64, dxdy: i64, height: i64) -> bool {
+    dxdy.unsigned_abs()
+        .checked_mul(height.unsigned_abs())
+        .and_then(|reach| reach.checked_add(x.unsigned_abs()))
+        .and_then(|reach| reach.checked_add(SUBSTEP.unsigned_abs() / 2))
+        .is_some_and(|reach| reach <= i64::MAX.unsigned_abs())
+}
+
+/// The rule as a mask on a winding: the rule calls a winding inside where the
+/// winding, so masked, is not zero — every bit for non-zero, the lowest for
+/// even-odd, which is oddness in two's complement for a negative winding too.
+/// One expression for both rules, so the walk over a cell's lanes holds no
+/// branch on the rule.
+fn rule_mask(rule: FillRule) -> i32 {
+    match rule {
+        FillRule::NonZero => -1,
+        FillRule::EvenOdd => 1,
+    }
+}
+
+/// 1 where a winding is inside under the rule `mask` is [`rule_mask`] of, 0
+/// where it is not.
+#[inline(always)]
+fn inside_by(winding: i32, mask: i32) -> i32 {
+    i32::from(winding & mask != 0)
+}
+
+/// Each lane's bit in a cell's `lanes` and `multi`, lane 0 the lowest.
+const LANE_BITS: [u16; 16] = [
+    0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040, 0x0080, 0x0100, 0x0200, 0x0400, 0x0800,
+    0x1000, 0x2000, 0x4000, 0x8000,
+];
+
+/// The lanes of a cell that hold one crossing each, all sixteen at once: each
+/// such lane's winding moved by its crossing's, and what the cell's total and
+/// the count of lanes inside gain by it, as `(total, inside)`.
+///
+/// **One sixteen-wide loop of `i32` with no branch**, written so that the
+/// `+simd128` build vectorises it and the plain one runs it as it stands: the
+/// lanes that hold one crossing are taken by their bit as a multiplier on the
+/// crossing's winding, so a lane that holds none, or several, moves by
+/// nothing and gains nothing here, and the rule is [`rule_mask`]'s mask. A
+/// lane moved from `W` to `W + w` gains `(256 − o) × (I(W + w) − I(W))`, the
+/// units from its crossing at offset `o` to the cell's right edge; the lanes
+/// are independent, so taking them together is taking them one by one.
+#[inline(always)]
+fn single_lanes(winding: &mut [i32; 16], cell: &Cell, mask: i32) -> (i32, i32) {
+    let single = cell.lanes & !cell.multi;
+    let (mut total, mut inside) = (0i32, 0i32);
+    for (((w, &moved), &off), &bit) in winding
+        .iter_mut()
+        .zip(&cell.w)
+        .zip(&cell.off)
+        .zip(&LANE_BITS)
+    {
+        let take = i32::from(single & bit != 0);
+        let before = inside_by(*w, mask);
+        *w += take * i32::from(moved);
+        let change = inside_by(*w, mask) - before;
+        total += (256 - i32::from(off)) * change;
+        inside += change;
+    }
+    (total, inside)
 }
 
 /// One pixel of the row being filled: a **lane** for each of its sixteen
@@ -900,10 +1004,11 @@ impl Row {
     /// adds `(256 − o) × (I(W + w) − I(W))` as it moves the lane's winding —
     /// the units from the crossing to the cell's right edge change sides
     /// together. The lanes are independent, so the order they are taken in
-    /// decides nothing; inside one lane the crossings are taken by offset,
-    /// bucketed rather than compared, those at one offset summed first, which
-    /// is the sweep's zero-length span. The byte is `min(total / 16, 255)`,
-    /// as the sweep's.
+    /// decides nothing: the lanes holding one crossing are taken all sixteen
+    /// at once ([`single_lanes`]), and then each lane holding several, its
+    /// crossings taken by offset, bucketed rather than compared, those at one
+    /// offset summed first, which is the sweep's zero-length span. The byte is
+    /// `min(total / 16, 255)`, as the sweep's.
     fn convert(&mut self, rule: FillRule, out: &mut [u8]) {
         let Row {
             cells,
@@ -914,8 +1019,9 @@ impl Row {
             table,
             map,
         } = self;
+        let mask = rule_mask(rule);
         let mut winding = *left;
-        let mut inside: i32 = winding.iter().map(|w| inside_as(*w, rule)).sum();
+        let mut inside: i32 = winding.iter().map(|w| inside_by(*w, mask)).sum();
         // The first pixel not yet written.
         let mut at = 0;
         for (word, bits) in touched.iter_mut().enumerate() {
@@ -930,19 +1036,13 @@ impl Row {
                 };
                 count::converted(1);
 
-                let mut total = 256 * inside;
-                let mut lanes = cell.lanes;
-                while lanes != 0 {
-                    let lane = (lanes.trailing_zeros() & 15) as usize;
-                    lanes &= lanes - 1;
-                    if cell.multi & (1 << lane) == 0 {
-                        let before = inside_as(winding[lane], rule);
-                        winding[lane] += i32::from(cell.w[lane]);
-                        let change = inside_as(winding[lane], rule) - before;
-                        total += (256 - i32::from(cell.off[lane])) * change;
-                        inside += change;
-                        continue;
-                    }
+                let (moved, changed) = single_lanes(&mut winding, cell, mask);
+                let mut total = 256 * inside + moved;
+                inside += changed;
+                let mut crowded = cell.multi;
+                while crowded != 0 {
+                    let lane = (crowded.trailing_zeros() & 15) as usize;
+                    crowded &= crowded - 1;
 
                     // A crowded lane: its windings bucketed by offset.
                     let mut put = |off: u8, w: i8| {
@@ -967,9 +1067,9 @@ impl Row {
                             let off = word * 64 + taken.trailing_zeros() as usize;
                             taken &= taken - 1;
                             let d = core::mem::take(&mut table[off & 255]);
-                            let before = inside_as(winding[lane], rule);
+                            let before = inside_by(winding[lane], mask);
                             winding[lane] += d;
-                            let change = inside_as(winding[lane], rule) - before;
+                            let change = inside_by(winding[lane], mask) - before;
                             total += (256 - off as i32) * change;
                             inside += change;
                         }
@@ -1333,6 +1433,7 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) -> bool {
         // the fingerprint pages moving a level for no reason a geometry can
         // name.
         let sub = |v: f64| (v * 256.0 * SUBSTEP as f64).round() as i64;
+        let (x, dxdy) = (sub(x_first), sub(dxdy));
 
         edges.push(Edge {
             top: y_top,
@@ -1364,9 +1465,10 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) -> bool {
             // `fl(u + e - tx)` are two roundings at two magnitudes, and
             // `crates/tinker-pdf/tests/render_regions.rs` bounds that residual
             // by measurement rather than claiming it away.
-            x: sub(x_first),
-            dxdy: sub(dxdy),
+            x,
+            dxdy,
             winding,
+            plain: unsaturating(x, dxdy, i64::from(y_bottom) - i64::from(y_top)),
         });
     }
     dropped
@@ -2024,6 +2126,238 @@ mod tests {
             }
         }
         assert!(runs > 1000, "{runs} runs written whole");
+    }
+
+    /// The walk over a cell's single lanes one lane at a time: each lane
+    /// holding one crossing taken by its set bit in turn, with the rule read
+    /// by `inside`. What [`single_lanes`] is held to.
+    fn lane_by_lane(winding: &mut [i32; 16], cell: &Cell, rule: FillRule) -> (i32, i32) {
+        let (mut total, mut inside_count) = (0i32, 0i32);
+        let mut lanes = cell.lanes & !cell.multi;
+        while lanes != 0 {
+            let lane = lanes.trailing_zeros() as usize;
+            lanes &= lanes - 1;
+            let before = i32::from(inside(winding[lane], rule));
+            winding[lane] += i32::from(cell.w[lane]);
+            let change = i32::from(inside(winding[lane], rule)) - before;
+            total += (256 - i32::from(cell.off[lane])) * change;
+            inside_count += change;
+        }
+        (total, inside_count)
+    }
+
+    /// **The sixteen-wide walk of a cell's lanes is the walk lane by lane**
+    /// (P-07.9a).
+    ///
+    /// Random cells — lanes holding one crossing, several and none, every
+    /// offset, windings of either sign and of several crossings summed —
+    /// over windings coming in from the left at every sign and size, the
+    /// extremes an `i32` can carry among them, under both rules: the total,
+    /// the count inside and every lane's winding after it, against the walk
+    /// that takes each set lane in turn. A lane holding several crossings, or
+    /// none, is left alone by both, whatever its first crossing's fields say.
+    #[test]
+    fn the_sixteen_lane_walk_is_the_walk_lane_by_lane() {
+        use crate::fill_reference::Stream;
+
+        let mut s = Stream::new(0x6c61_6e65);
+        let mut walked = 0u64;
+        for trial in 0..20_000u32 {
+            let lanes = s.below(1 << 16) as u16;
+            let multi = match s.below(3) {
+                0 => 0,
+                1 => lanes,
+                _ => lanes & s.below(1 << 16) as u16,
+            };
+            let mut cell = Cell {
+                lanes,
+                multi,
+                ..Cell::CLEAR
+            };
+            for (w, off) in cell.w.iter_mut().zip(cell.off.iter_mut()) {
+                *w = match s.below(4) {
+                    0 => -1,
+                    1 => 1,
+                    _ => (s.below(256) as u8) as i8,
+                };
+                *off = s.below(256) as u8;
+            }
+            let mut incoming = [0i32; 16];
+            for value in &mut incoming {
+                *value = match s.below(6) {
+                    0 => 0,
+                    1 => s.below(7) as i32 - 3,
+                    2 => i32::MIN + 128 + s.below(64) as i32,
+                    3 => i32::MAX - 128 - s.below(64) as i32,
+                    _ => s.below(1 << 20) as i32 - (1 << 19),
+                };
+            }
+            for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                let (mut wide, mut narrow) = (incoming, incoming);
+                let got = single_lanes(&mut wide, &cell, rule_mask(rule));
+                let want = lane_by_lane(&mut narrow, &cell, rule);
+                assert_eq!(got, want, "trial {trial} under {rule:?}: total and inside");
+                assert_eq!(wide, narrow, "trial {trial} under {rule:?}: the windings");
+                walked += u64::from((lanes & !multi).count_ones());
+            }
+        }
+        assert!(walked > 100_000, "{walked} single lanes walked");
+    }
+
+    /// The rule's mask reads every winding as the rule does: non-zero and
+    /// odd, the negative windings and both ends of an `i32` among them.
+    #[test]
+    fn the_rule_mask_reads_a_winding_as_the_rule_does() {
+        let windings = (-1000..=1000).chain([i32::MIN, i32::MIN + 1, i32::MAX - 1, i32::MAX]);
+        for winding in windings {
+            for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                assert_eq!(
+                    inside_by(winding, rule_mask(rule)),
+                    i32::from(inside(winding, rule)),
+                    "{winding} under {rule:?}"
+                );
+            }
+        }
+    }
+
+    /// A hand-made edge: `x` and `dxdy` as an edge stores them, from
+    /// sub-scanline `top` down `height` of them.
+    fn edge_of(x: i64, dxdy: i64, top: i32, height: i32) -> Edge {
+        Edge {
+            top,
+            bottom: top.saturating_add(height),
+            x,
+            dxdy,
+            winding: 1,
+            plain: unsaturating(x, dxdy, i64::from(height)),
+        }
+    }
+
+    /// The crossings `each_crossing` hands over for `from..to`, beside
+    /// `crossing` at each of the same sub-scanlines.
+    fn stepped_and_direct(edge: &Edge, from: i64, to: i64) -> (Vec<(i64, i64)>, Vec<(i64, i64)>) {
+        let mut stepped = Vec::new();
+        each_crossing(edge, from, to, |sub, x| stepped.push((sub, x)));
+        let direct = (from..to).map(|sub| (sub, crossing(edge, sub))).collect();
+        (stepped, direct)
+    }
+
+    /// **A stepped crossing is the saturating one wherever it is taken**
+    /// (P-07.9a).
+    ///
+    /// An edge none of whose crossings can saturate is stepped, one add a
+    /// sub-scanline; every other edge keeps `crossing`. Over random edges at
+    /// every scale — slopes and positions near the bound, past it and far
+    /// inside it, either sign, tall and short — each window of sixteen
+    /// sub-scanlines a row takes, at the edge's top, at its foot and between,
+    /// hands over exactly `crossing`'s value at each. The bound itself is
+    /// exact: an edge that reaches `i64::MAX` is stepped, and one a unit
+    /// further is not, at either sign of `x`.
+    #[test]
+    fn a_stepped_crossing_is_the_saturating_one_wherever_it_is_taken() {
+        use crate::fill_reference::Stream;
+
+        let mut s = Stream::new(0x7374_6570);
+        let (mut stepped_edges, mut kept_edges) = (0u32, 0u32);
+        for trial in 0..4000u32 {
+            let scale = s.below(63) as u32;
+            let magnitude = |s: &mut Stream| -> i64 {
+                let value = s.below(1u64 << scale.min(62)) as i64;
+                if s.coin() {
+                    -value
+                } else {
+                    value
+                }
+            };
+            let x = magnitude(&mut s);
+            let dxdy = magnitude(&mut s);
+            let top = s.below(1 << 20) as i32 - (1 << 19);
+            let span = s.below(31);
+            let height = 1 + s.below(1 << span) as i32;
+            let edge = edge_of(x, dxdy, top, height);
+            if edge.plain {
+                stepped_edges += 1;
+            } else {
+                kept_edges += 1;
+            }
+            let (first, last) = (i64::from(edge.top), i64::from(edge.bottom));
+            let middle = first + (last - first) / 2;
+            for from in [first, middle, (last - 16).max(first)] {
+                let to = (from + 16).min(last);
+                let (stepped, direct) = stepped_and_direct(&edge, from, to);
+                assert_eq!(
+                    stepped, direct,
+                    "trial {trial}: x {x}, dxdy {dxdy}, height {height}, from {from}"
+                );
+            }
+        }
+        assert!(stepped_edges > 1000, "{stepped_edges} edges stepped");
+        assert!(kept_edges > 100, "{kept_edges} edges kept their saturation");
+
+        // The bound, exactly, with the edge's foot in the window.
+        let half = SUBSTEP / 2;
+        for sign in [1i64, -1] {
+            let (dxdy, height) = (sign * 3_000_000_007, 1_000_003i32);
+            let reach = dxdy.abs() * i64::from(height) + half;
+            let at = edge_of(sign * (i64::MAX - reach), dxdy, -500, height);
+            assert!(at.plain, "an edge reaching i64::MAX steps, sign {sign}");
+            let past = edge_of(sign * (i64::MAX - reach + 1), dxdy, -500, height);
+            assert!(!past.plain, "one a unit further does not, sign {sign}");
+            for edge in [&at, &past] {
+                let last = i64::from(edge.bottom);
+                let (stepped, direct) = stepped_and_direct(edge, last - 16, last);
+                assert_eq!(stepped, direct, "at the bound, sign {sign}");
+            }
+        }
+    }
+
+    /// **An edge that could saturate keeps the saturating crossing, and the
+    /// fill keeps the sweep's bytes.** A triangle with a corner a thousand
+    /// million million pixels out has edges whose slope and position no
+    /// `i64` sum can carry, so `build_edges` marks them; the fill through
+    /// them is the reference sweep's, byte for byte, under both rules, and
+    /// so is a page-sized one whose every edge steps.
+    #[test]
+    fn an_edge_that_could_saturate_keeps_the_saturating_crossing() {
+        use crate::fill_reference::fill_reference;
+
+        let mut far = Path::new();
+        far.move_to(3.5, 2.25);
+        far.line_to(1e15, 9.75);
+        far.line_to(5.5, 30.5);
+        far.close();
+        let mut near = Path::new();
+        near.move_to(3.5, 2.25);
+        near.line_to(611.25, 9.75);
+        near.line_to(5.5, 790.5);
+        near.close();
+
+        let plainness = |path: &Path| -> Vec<bool> {
+            let mut edges = Vec::new();
+            for poly in &flatten(path, 0.1) {
+                build_edges(poly, &mut edges);
+            }
+            edges.iter().map(|edge| edge.plain).collect()
+        };
+        assert!(
+            plainness(&far).contains(&false),
+            "the far corner's edges are marked"
+        );
+        assert!(
+            plainness(&near).iter().all(|plain| *plain),
+            "a page's edges all step"
+        );
+        for path in [&far, &near] {
+            for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                let mask = fill(path, rule, 0, 0, 64, 40, 0.1, None);
+                assert!(mask.data.contains(&255), "{rule:?}: the fixture draws");
+                assert_eq!(
+                    mask.data,
+                    fill_reference(path, rule, 0, 0, 64, 40, 0.1, None).data,
+                    "{rule:?}"
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

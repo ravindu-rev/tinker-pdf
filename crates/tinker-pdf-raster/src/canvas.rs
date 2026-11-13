@@ -221,13 +221,6 @@ pub struct Canvas {
     /// not, which is why the flag exists on the buffer that can see it —
     /// nothing lower down knows what a warning is (ruling 8).
     approximated_blends: u32,
-    /// The encoded colour of the last opaque fill, repeated pixel after pixel,
-    /// that a run of full coverage is copied from in one slice
-    /// ([`Canvas::fill_opaque`]); grown to the widest run a fill has held and
-    /// rebuilt when the colour changes.
-    solid: Vec<u8>,
-    /// The colour `solid` repeats, and the bytes it was encoded in.
-    solid_of: ([u8; 5], usize),
 }
 
 impl Canvas {
@@ -251,8 +244,6 @@ impl Canvas {
             origin: (0, 0),
             backdrop: None,
             approximated_blends: 0,
-            solid: Vec::new(),
-            solid_of: ([0; 5], 0),
         };
         canvas.clear(background);
         canvas
@@ -482,11 +473,19 @@ impl Canvas {
     /// the coverage `c` — `mul255(x, 255)` is `x` — the backdrop's weight is
     /// whole, Normal's mix is the source, and each colour channel comes out
     /// `min(mul255(cs, c) + mul255(cb, 255 − c), 255)`, the alpha staying 255
-    /// ([`over_opaque`]). So full coverage is the encoded colour: in a format
-    /// without alpha a run of it is one slice copy from [`Canvas::solid`], and
-    /// in one with alpha each opaque pixel of it takes the colour. A pixel
-    /// that is not opaque goes through `blend`, whose rounding a pixel that
-    /// is not opaque needs.
+    /// ([`over_opaque`]). A pixel that is not opaque goes through `blend`,
+    /// whose rounding a pixel that is not opaque needs.
+    ///
+    /// **A row is walked in blocks of [`BLOCK`] pixels** ([`opaque_row`]),
+    /// and the loops over a block's bytes are of a fixed width with no call
+    /// inside, written so that the `+simd128` build vectorises them: a block
+    /// of no coverage is passed over, a block of full coverage over opaque
+    /// pixels is one slice copy of the encoded colour, any other block over
+    /// opaque pixels takes the collapse at every byte ([`opaque_block`]), and
+    /// a block holding a pixel that is not opaque, like the pixels past the
+    /// last whole block, is taken a pixel at a time ([`opaque_pixel`]) —
+    /// `blend` for each covered pixel that is not opaque, exactly as many as
+    /// before.
     fn fill_opaque(
         &mut self,
         mask: &Mask,
@@ -495,21 +494,20 @@ impl Canvas {
     ) {
         let format = self.format;
         let components = format.components();
-        let has_alpha = format.has_alpha();
         let width = x1.saturating_sub(x0) as usize;
         let stride = self.stride;
         let Some(colour) = source.get(..components) else {
             return;
         };
-        if !has_alpha {
-            if self.solid_of != (*source, components) {
-                self.solid.clear();
-                self.solid_of = (*source, components);
-            }
-            while self.solid.len() < width * components {
-                self.solid.extend_from_slice(colour);
-            }
+        // A block's worth of the encoded colour, which a block of full
+        // coverage is copied from and the collapse reads its source bytes from.
+        let mut solid = [0u8; BLOCK * 5];
+        for pixel in solid.chunks_exact_mut(components) {
+            pixel.copy_from_slice(colour);
         }
+        let Some(solid) = solid.get(..BLOCK * components) else {
+            return;
+        };
 
         // The mask pixel under canvas pixel `(x0, y0)`. The rectangle is the
         // mask's own, clamped to the canvas, so neither is negative.
@@ -518,41 +516,25 @@ impl Canvas {
         let (Ok(column), Ok(line)) = (usize::try_from(column), usize::try_from(line)) else {
             return;
         };
-        let Canvas { data, solid, .. } = self;
+        // One instance of the row walk for each pixel size a format of this
+        // path has, so that every loop inside it is of a fixed width.
+        let row_of: fn(&mut [u8], &[u8], &[u8; 5], &[u8], PixelFormat) = match format {
+            PixelFormat::Gray8 => opaque_row::<1, false>,
+            PixelFormat::GrayA8 => opaque_row::<2, true>,
+            PixelFormat::Rgb8 => opaque_row::<3, false>,
+            PixelFormat::Rgba8 | PixelFormat::LabA8 => opaque_row::<4, true>,
+            PixelFormat::CmykA8 => opaque_row::<5, true>,
+        };
         for (index, row) in (y0..y1).enumerate() {
             let start = (line + index) * (mask.width as usize) + column;
             let Some(coverage) = mask.data.get(start..start + width) else {
                 continue;
             };
             let base = (row as usize) * stride + (x0 as usize) * components;
-            let Some(pixels) = data.get_mut(base..base + width * components) else {
+            let Some(pixels) = self.data.get_mut(base..base + width * components) else {
                 continue;
             };
-            let mut at = 0;
-            while let Some(&c) = coverage.get(at) {
-                if c == 0 {
-                    at += 1;
-                    continue;
-                }
-                if c == 255 && !has_alpha {
-                    let run = coverage
-                        .get(at..)
-                        .map_or(1, |rest| rest.iter().take_while(|v| **v == 255).count());
-                    let bytes = run * components;
-                    if let (Some(to), Some(from)) = (
-                        pixels.get_mut(at * components..at * components + bytes),
-                        solid.get(..bytes),
-                    ) {
-                        to.copy_from_slice(from);
-                    }
-                    at += run;
-                    continue;
-                }
-                if let Some(pixel) = pixels.get_mut(at * components..(at + 1) * components) {
-                    opaque_pixel(pixel, source, c, format);
-                }
-                at += 1;
-            }
+            row_of(pixels, coverage, source, solid, format);
         }
     }
 
@@ -963,8 +945,6 @@ impl Canvas {
             origin: self.origin,
             backdrop: None,
             approximated_blends: 0,
-            solid: Vec::new(),
-            solid_of: ([0; 5], 0),
         }
     }
 
@@ -1242,6 +1222,99 @@ pub fn rgb_to_cmyk(r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
     }
     let ink = |v: u8| (255 - (u32::from(v) * 255 + white / 2) / white).min(255) as u8;
     (ink(r), ink(g), ink(b), (255 - white).min(255) as u8)
+}
+
+/// Pixels in a block of [`Canvas::fill_opaque`]'s row walk.
+const BLOCK: usize = 16;
+
+/// One row of [`Canvas::fill_opaque`]: `coverage` over `pixels`, `N` bytes a
+/// pixel, `ALPHA` whether the last of them is alpha, and `solid` a block's
+/// worth of the encoded colour `source`.
+///
+/// Whole blocks of [`BLOCK`] pixels first, each classed by its coverage —
+/// one AND and one OR over its bytes — and, in a format with alpha, by an
+/// AND over its pixels' alpha bytes: no coverage passes the block over; over
+/// pixels all opaque, full coverage copies `solid` whole and any other takes
+/// [`opaque_block`]; a block holding a pixel that is not opaque, and the
+/// pixels past the last whole block, take [`opaque_pixel`] wherever their
+/// coverage is not zero. Each class writes the bytes the pixel-by-pixel walk
+/// writes, so the order and the grouping decide nothing.
+fn opaque_row<const N: usize, const ALPHA: bool>(
+    pixels: &mut [u8],
+    coverage: &[u8],
+    source: &[u8; 5],
+    solid: &[u8],
+    format: PixelFormat,
+) {
+    let mut blocks = pixels.chunks_exact_mut(BLOCK * N);
+    let mut covers = coverage.chunks_exact(BLOCK);
+    for (block, cover) in (&mut blocks).zip(&mut covers) {
+        let (all, any) = cover
+            .iter()
+            .fold((255u8, 0u8), |(all, any), &c| (all & c, any | c));
+        if any == 0 {
+            continue;
+        }
+        let opaque = !ALPHA
+            || block.chunks_exact(N).fold(255u8, |held, pixel| {
+                held & pixel.last().copied().unwrap_or(0)
+            }) == 255;
+        if !opaque {
+            each_opaque_pixel::<N>(block, cover, source, format);
+        } else if all == 255 {
+            if let Some(from) = solid.get(..block.len()) {
+                block.copy_from_slice(from);
+            }
+        } else {
+            opaque_block::<N>(block, cover, solid);
+        }
+    }
+    each_opaque_pixel::<N>(blocks.into_remainder(), covers.remainder(), source, format);
+}
+
+/// [`opaque_pixel`] for each pixel of `pixels`, `N` bytes each, whose
+/// coverage is not zero.
+fn each_opaque_pixel<const N: usize>(
+    pixels: &mut [u8],
+    coverage: &[u8],
+    source: &[u8; 5],
+    format: PixelFormat,
+) {
+    for (pixel, &c) in pixels.chunks_exact_mut(N).zip(coverage) {
+        if c != 0 {
+            opaque_pixel(pixel, source, c, format);
+        }
+    }
+}
+
+/// A block of opaque pixels, `N` bytes each, under coverage `cover`: every
+/// byte, colour and alpha alike, `min(mul255(s, c) + mul255(b, 255 − c), 255)`
+/// for its byte `s` of `solid` and its pixel's coverage `c`.
+///
+/// That is [`opaque_pixel`] at every coverage, zero and full included: at 0
+/// it is the pixel as it was, at 255 the colour, and between them
+/// [`over_opaque`]; an alpha byte of 255 under a source alpha of 255 stays
+/// 255, `mul255(255, c) + mul255(255, 255 − c)` being `c + (255 − c)`. So the
+/// block is one loop over its bytes, branch-free, in sixteen-bit lanes
+/// ([`mul255_narrow`]), each byte's coverage spread from its pixel's first.
+fn opaque_block<const N: usize>(block: &mut [u8], cover: &[u8], solid: &[u8]) {
+    let mut spread = [0u8; BLOCK * 5];
+    for (bytes, &c) in spread.chunks_exact_mut(N).zip(cover) {
+        bytes.fill(c);
+    }
+    for ((byte, &s), &c) in block.iter_mut().zip(solid).zip(&spread) {
+        let (c, s, b) = (u16::from(c), u16::from(s), u16::from(*byte));
+        *byte = (mul255_narrow(s, c) + mul255_narrow(b, 255 - c)).min(255) as u8;
+    }
+}
+
+/// [`mul255`] in sixteen bits, for operands of at most 255: `a·b + 128` is at
+/// most 65 153 and adding its high byte at most 65 407, so nothing wraps and
+/// the answer is `mul255`'s, in lanes half as wide.
+#[inline(always)]
+fn mul255_narrow(a: u16, b: u16) -> u16 {
+    let product = a * b + 128;
+    (product + (product >> 8)) >> 8
 }
 
 /// One pixel of [`Canvas::fill_opaque`], at a coverage `c` that is not zero:
@@ -2116,6 +2189,229 @@ mod tests {
         let mut group = Canvas::new(64, 64, PixelFormat::Rgba8, Color::TRANSPARENT);
         group.adopt_backdrop(opaque());
         assert!(blended(&mut group, colour, 1.0, BlendMode::Normal) > 0);
+    }
+
+    /// `mul255` in sixteen bits is `mul255`, over every pair of bytes.
+    #[test]
+    fn mul255_in_sixteen_bits_is_mul255() {
+        for a in 0..=255u16 {
+            for b in 0..=255u16 {
+                assert_eq!(
+                    u32::from(mul255_narrow(a, b)),
+                    mul255(u32::from(a), u32::from(b)),
+                    "{a} x {b}"
+                );
+            }
+        }
+    }
+
+    /// One block of opaque pixels through [`opaque_block`] and the same
+    /// block a pixel at a time through [`opaque_pixel`], from the same bytes.
+    fn block_both_ways<const N: usize>(
+        format: PixelFormat,
+        block: &[u8],
+        cover: &[u8],
+        source: &[u8; 5],
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut solid = Vec::new();
+        for _ in 0..BLOCK {
+            solid.extend_from_slice(&source[..N]);
+        }
+        let mut whole = block.to_vec();
+        opaque_block::<N>(&mut whole, cover, &solid);
+        let mut by_pixel = block.to_vec();
+        each_opaque_pixel::<N>(&mut by_pixel, cover, source, format);
+        (whole, by_pixel)
+    }
+
+    /// The block test of [`an_opaque_block_is_the_composite_a_pixel_at_a_time`]
+    /// for one format of `N` bytes a pixel.
+    fn blocks_of<const N: usize>(format: PixelFormat, next: &mut impl FnMut() -> u32) -> u32 {
+        let channels = color_channels(format);
+        let mut ran = 0;
+        // Every coverage at every source byte, sixteen coverages a block,
+        // over destination bytes that differ by pixel and by channel.
+        for base in 0..16u32 {
+            for cs in 0..=255u32 {
+                let mut source = [cs as u8; 5];
+                source[channels] = 255;
+                let cover: Vec<u8> = (0..16).map(|i| (base * 16 + i) as u8).collect();
+                let mut block = Vec::with_capacity(BLOCK * N);
+                for i in 0..BLOCK as u32 {
+                    for k in 0..N as u32 {
+                        block.push(((cs * 7 + i * 31 + k * 13 + base) % 256) as u8);
+                    }
+                    if format.has_alpha() {
+                        if let Some(alpha) = block.last_mut() {
+                            *alpha = 255;
+                        }
+                    }
+                }
+                let (whole, by_pixel) = block_both_ways::<N>(format, &block, &cover, &source);
+                assert_eq!(
+                    whole,
+                    by_pixel,
+                    "{format:?}: source {cs}, coverages from {}",
+                    base * 16
+                );
+                ran += 1;
+            }
+        }
+        // And random blocks: random colours over random opaque pixels, the
+        // coverage drawn from none, full and between.
+        for trial in 0..2000 {
+            let mut source = [0u8; 5];
+            for byte in &mut source {
+                *byte = next() as u8;
+            }
+            source[channels] = 255;
+            let cover: Vec<u8> = (0..BLOCK)
+                .map(|_| match next() % 3 {
+                    0 => 0,
+                    1 => 255,
+                    _ => next() as u8,
+                })
+                .collect();
+            let mut block: Vec<u8> = (0..BLOCK * N).map(|_| next() as u8).collect();
+            if format.has_alpha() {
+                for pixel in block.chunks_exact_mut(N) {
+                    pixel[channels] = 255;
+                }
+            }
+            let (whole, by_pixel) = block_both_ways::<N>(format, &block, &cover, &source);
+            assert_eq!(whole, by_pixel, "{format:?}, trial {trial}");
+            ran += 1;
+        }
+        ran
+    }
+
+    /// **A block of opaque pixels is the composite a pixel at a time**
+    /// (P-07.9a): the collapse at every byte, colour and alpha, in sixteen
+    /// bits, writes what [`opaque_pixel`] writes pixel by pixel — the colour
+    /// at full coverage, the pixel untouched at none, and [`over_opaque`]
+    /// between — on every format the path is taken on, at every coverage and
+    /// source byte, over destinations of every byte.
+    #[test]
+    fn an_opaque_block_is_the_composite_a_pixel_at_a_time() {
+        let mut state = 0x0b10_c4ed_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let mut ran = 0;
+        ran += blocks_of::<1>(PixelFormat::Gray8, &mut next);
+        ran += blocks_of::<2>(PixelFormat::GrayA8, &mut next);
+        ran += blocks_of::<3>(PixelFormat::Rgb8, &mut next);
+        ran += blocks_of::<4>(PixelFormat::Rgba8, &mut next);
+        ran += blocks_of::<4>(PixelFormat::LabA8, &mut next);
+        assert_eq!(
+            ran,
+            5 * (16 * 256 + 2000),
+            "every block of every format ran"
+        );
+    }
+
+    /// **The row walk takes every block and every tail as the general
+    /// blend does, and blends exactly the pixels it must** (P-07.9a).
+    ///
+    /// Rows of every width from one pixel to past three blocks, so every
+    /// count of whole blocks and every length of tail is met, each block's
+    /// coverage none, full, mixed or random and its pixels all opaque, holding
+    /// one pixel that is not, or of random alpha: the opaque path against the
+    /// general composite on the same canvas, byte for byte, and the general
+    /// `blend` called once for each covered pixel that is not opaque and never
+    /// otherwise — the count the walk a pixel at a time made.
+    #[test]
+    fn the_row_walk_takes_every_block_and_tail_as_the_general_blend() {
+        let mut state = 0x7a11_5eed_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let mut tails = [false; BLOCK];
+        for format in OPAQUE_FORMATS {
+            let components = format.components();
+            let channels = color_channels(format);
+            for width in 1..=(3 * BLOCK as u32 + BLOCK as u32 / 2) {
+                tails[width as usize % BLOCK] = true;
+                for trial in 0..12 {
+                    let mut canvas = Canvas::new(width, 2, format, Color::WHITE).at_origin(-3, 5);
+                    let mut data = Vec::with_capacity(width as usize * 2);
+                    for row in 0..2u32 {
+                        for x in 0..width {
+                            let block = (x as usize / BLOCK + row as usize + trial) % 4;
+                            data.push(match block {
+                                0 => 0,
+                                1 => 255,
+                                2 => [0, 255, 128, 1, 254][(x as usize + trial) % 5],
+                                _ => next() as u8,
+                            });
+                        }
+                    }
+                    for (index, pixel) in canvas.data.chunks_exact_mut(components).enumerate() {
+                        for byte in pixel.iter_mut() {
+                            *byte = next() as u8;
+                        }
+                        if format.has_alpha() {
+                            let block = index / BLOCK;
+                            pixel[channels] = match (trial % 3, block % 2) {
+                                (0, _) => 255,
+                                (1, 0) if index % BLOCK == 7 => next() as u8 % 255,
+                                (1, _) => 255,
+                                _ => match next() % 3 {
+                                    0 => 0,
+                                    1 => next() as u8,
+                                    _ => 255,
+                                },
+                            };
+                        }
+                    }
+                    let mask = Mask {
+                        x0: -3,
+                        y0: 5,
+                        width,
+                        height: 2,
+                        data,
+                    };
+                    let mut source = [0u8; 5];
+                    for byte in &mut source {
+                        *byte = next() as u8;
+                    }
+                    if format.has_alpha() {
+                        source[channels] = 255;
+                    }
+                    let owed = if format.has_alpha() {
+                        canvas
+                            .data
+                            .chunks_exact(components)
+                            .zip(&mask.data)
+                            .filter(|(pixel, c)| **c != 0 && pixel[channels] != 255)
+                            .count() as u64
+                    } else {
+                        0
+                    };
+                    let rect = mask.overlap_at(canvas.origin(), canvas.width, canvas.height);
+                    let mut general = canvas.clone();
+                    blends::take();
+                    canvas.fill_opaque(&mask, &source, rect);
+                    assert_eq!(
+                        blends::take(),
+                        owed,
+                        "{format:?}, width {width}, trial {trial}: general blends"
+                    );
+                    general.fill_blended(&mask, &source, 255, 255, BlendMode::Normal, rect);
+                    assert_eq!(
+                        canvas.data, general.data,
+                        "{format:?}, width {width}, trial {trial}"
+                    );
+                }
+            }
+        }
+        assert!(tails.iter().all(|met| *met), "every tail length was met");
     }
 
     #[test]

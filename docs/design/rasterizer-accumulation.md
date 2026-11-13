@@ -252,8 +252,14 @@ wasm build vectorises them and the plain one does not need to:
 - **a touched cell's lanes**, the sixteen windings, offsets and insides as one
   16-wide loop of `i32` with no branch, the lane mask applied as a multiplier;
 - **the solid span**, a slice fill;
-- **the opaque composite**, the mask row and the canvas row walked in
-  `chunks_exact` of the pixel's components, the run copy a slice copy;
+- **the opaque composite**, the mask row and the canvas row walked in blocks
+  of sixteen pixels, `chunks_exact` of the pixel's components inside each,
+  one instance a pixel size: a block of no coverage passed over, one of full
+  coverage over opaque pixels a slice copy, any other over opaque pixels the
+  collapsed arithmetic at every byte in sixteen-bit lanes — exact at zero and
+  full coverage and on an alpha of 255 — and a block holding a pixel that is
+  not opaque, with the pixels after the last whole block, a pixel at a time,
+  so `blend` is called for exactly the pixels it was;
 - **the deposit of an edge whose crossings cannot saturate** — decided once
   per edge from its `x`, its slope and its height — as a plain wrapping loop
   over its sub-scanlines in the row; an edge that could saturate keeps the

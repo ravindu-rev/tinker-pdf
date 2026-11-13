@@ -54,6 +54,19 @@ waits in a list of the row it begins in and leaves the active
 set when it ends, and a cancellation is asked before a row's deposit, so a
 stop leaves no row half converted.
 
+*The loops a pixel runs are written for the vectoriser*: fixed-width integer
+loops over arrays and slices, bounds checks outside them and no call inside,
+so the `+simd128` wasm build vectorises them and every other build runs the
+same code. A touched cell's lanes that hold one crossing are taken all
+sixteen at once, one loop of `i32` with no branch — the lane's bit a
+multiplier on its crossing's winding, and the rule a mask on the winding,
+every bit for non-zero and the lowest for even-odd — and a lane holding
+several is bucketed after them. An edge none of whose crossings can saturate,
+which `build_edges` decides once from its position, slope and height, steps
+from one sub-scanline's crossing to the next by one add; any other keeps the
+saturating product. Integer lanes give the same bytes vectorised or not, so
+none of this moves a pixel.
+
 *Memory.* A fill works in a `FillScratch` the caller owns — the flattened
 points, the edges and their row lists, the active set, one row of cells
 (forty bytes a pixel of the region's width) with the crowded lanes' later
@@ -235,10 +248,15 @@ slices. Over an opaque pixel — any pixel of `Gray8` or `Rgb8`, and one whose
 alpha byte is 255 in a format with alpha — the general blend collapses to
 `min(mul255(cs, c) + mul255(cb, 255 − c), 255)` a colour channel at coverage
 `c`, the alpha staying whole: a pixel of full coverage is the encoded colour,
-and a run of them in a format without alpha is one slice copy from a row of
-that colour the canvas keeps. A pixel that is not opaque, and every other
-case — an alpha below 255, another mode, the ink canvas, a non-isolated
-group's backdrop — goes through the general blend, whose rounding they need.
+and one of none is untouched. A row is walked in blocks of sixteen pixels: a
+block of no coverage is passed over, a block of full coverage over opaque
+pixels is one slice copy of the colour, any other block over opaque pixels
+takes that expression at every byte, alpha included, in one loop of
+sixteen-bit lanes, and a block holding a pixel that is not opaque, like the
+pixels after the last whole block, is taken a pixel at a time. A pixel that
+is not opaque, and every other case — an alpha below 255, another mode, the
+ink canvas, a non-isolated group's backdrop — goes through the general blend,
+whose rounding they need.
 
 **A canvas is a rectangle of a page.** `Canvas::origin` is the device pixel
 its top-left is — `(0, 0)` for a canvas that is the whole page, a tile's
@@ -475,6 +493,14 @@ tiny pattern over a long line cannot generate millions of pieces.
   `an_interior_run_is_one_slice_fill` counts conversions, exactly the cells
   holding a crossing plus one a run on every closed generated path — five a
   row for a rectangle 193 pixels wide;
+  `the_sixteen_lane_walk_is_the_walk_lane_by_lane` holds the branch-free walk
+  of a cell's lanes to the walk a lane at a time over random cells and
+  windings, both rules, `the_rule_mask_reads_a_winding_as_the_rule_does` the
+  rule's mask to the rule, and
+  `a_stepped_crossing_is_the_saturating_one_wherever_it_is_taken` a stepped
+  edge's crossings to the saturating ones at every scale, the bound itself
+  exact, while `an_edge_that_could_saturate_keeps_the_saturating_crossing`
+  fills edges past it as the sorted sweep does;
   `stroke.rs` covers caps, joins, the miter limit and
   dash phase, holds the outline written into a scratch to `fill` of the path
   the same stroke returns, byte for byte and from the same bounds, over every
@@ -509,7 +535,14 @@ tiny pattern over a long line cannot generate millions of pieces.
   on every format it is taken on, and over whole fills
   (`the_opaque_path_is_the_general_blend_where_it_applies`) — and counts the
   general blends an opaque Normal fill onto an opaque canvas makes, none
-  (`an_opaque_normal_fill_calls_no_general_blend`).
+  (`an_opaque_normal_fill_calls_no_general_blend`); holds a block of opaque
+  pixels to the composite a pixel at a time at every coverage and source
+  byte (`an_opaque_block_is_the_composite_a_pixel_at_a_time`), the
+  sixteen-bit product to `mul255` over every pair of bytes
+  (`mul255_in_sixteen_bits_is_mul255`), and rows of every count of blocks and
+  every tail to the general blend, with the general blends counted to the
+  covered pixels that are not opaque
+  (`the_row_walk_takes_every_block_and_tail_as_the_general_blend`).
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
   the render fingerprints `text`, `curves`, `shading`, `blend`, `pattern`,
   `image`, `transparency`, `tiling`, `mesh` and `strokes` exercise this crate
