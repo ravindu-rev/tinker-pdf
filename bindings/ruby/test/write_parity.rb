@@ -502,6 +502,43 @@ def graphics
   bytes
 end
 
+# The field, made again through the constructor its tag names.
+def rebuilt_field(field)
+  tags = TinkerPdf::CommandFieldTag
+  value = field.value
+  case field.tag
+  when tags::NOTHING then TinkerPdf::CommandField.nothing
+  when tags::UNSIGNED then TinkerPdf::CommandField.unsigned(value)
+  when tags::SIGNED then TinkerPdf::CommandField.signed(value)
+  when tags::REAL then TinkerPdf::CommandField.real(value)
+  when tags::BYTES then TinkerPdf::CommandField.bytes(value)
+  when tags::REALS then TinkerPdf::CommandField.reals(value)
+  when tags::NATURALS then TinkerPdf::CommandField.naturals(value)
+  when tags::STRINGS then TinkerPdf::CommandField.strings(value)
+  else fail!("command-stream: a field of tag #{field.tag}")
+  end
+end
+
+# The command stream of each page of the graphics artefact, read into the
+# binding's own records and fields, each record made again from its kind and
+# its fields and written back through the encoder; what that wrote, page
+# after page.
+def command_streams(document_bytes)
+  document = TinkerPdf::Document.open(document_bytes)
+  out = ''.b
+  document.page_count.times do |index|
+    stream = TinkerPdf::CommandStream.parse(document.command_stream(index))
+    records = stream.records
+    stream.close
+    encoder = TinkerPdf::CommandEncoder.new
+    records.each { |record| encoder.push(record.kind, record.fields.map { |field| rebuilt_field(field) }) }
+    out << encoder.finish
+    encoder.close
+  end
+  document.close
+  out
+end
+
 # Tagged writing through open_tag and close_tag.
 def tagged
   builder = TinkerPdf::Builder.new
@@ -583,6 +620,9 @@ form_data_dir = File.join(File.dirname(support), 'form_data')
 formed, form_lines = forms(fixture, form_data_dir)
 report('forms', formed)
 report_read('form-data', form_data_text(formed, form_lines, form_data_dir))
-report('graphics', graphics)
+graphed = graphics
+report('graphics', graphed)
+streams = command_streams(graphed)
+puts "READ sha256=#{sha(streams)} surface=ruby script=command-stream bytes=#{streams.bytesize}"
 report('tagged', tagged)
 puts 'RUBY-PARITY: RAN'

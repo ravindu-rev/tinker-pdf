@@ -1,5 +1,6 @@
 import io.github.ravindu_rev.tinkerpdf.Attachments;
 import io.github.ravindu_rev.tinkerpdf.Builder;
+import io.github.ravindu_rev.tinkerpdf.CommandStream;
 import io.github.ravindu_rev.tinkerpdf.Document;
 import io.github.ravindu_rev.tinkerpdf.Editor;
 import io.github.ravindu_rev.tinkerpdf.FormData;
@@ -7,6 +8,8 @@ import io.github.ravindu_rev.tinkerpdf.OutlineEntry;
 import io.github.ravindu_rev.tinkerpdf.PageBuilder;
 import io.github.ravindu_rev.tinkerpdf.Tag;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf;
+import io.github.ravindu_rev.tinkerpdf.TinkerPdf.CommandField;
+import io.github.ravindu_rev.tinkerpdf.TinkerPdf.CommandRecord;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.DestKind;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.Destination;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.Link;
@@ -650,6 +653,51 @@ public final class WriteParity {
         }
     }
 
+    /** The field, made again through the constructor its tag names. */
+    @SuppressWarnings("unchecked")
+    static CommandField rebuiltField(CommandField field) {
+        Object value = field.value();
+        return switch (field.tag()) {
+            case NOTHING -> CommandField.nothing();
+            case UNSIGNED -> CommandField.unsigned((Long) value);
+            case SIGNED -> CommandField.signed((Long) value);
+            case REAL -> CommandField.real((Double) value);
+            case BYTES -> CommandField.bytes((byte[]) value);
+            case REALS -> CommandField.reals((double[]) value);
+            case NATURALS -> CommandField.naturals((long[]) value);
+            case STRINGS -> CommandField.strings((List<byte[]>) value);
+        };
+    }
+
+    /**
+     * The command stream of each page of the graphics artefact, read into the
+     * binding's own records and fields, each record made again from its kind
+     * and its fields and written back through the encoder; what that wrote,
+     * page after page.
+     */
+    static byte[] commandStreams(byte[] document) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (Document graphed = Document.open(document)) {
+            for (int index = 0; index < graphed.pageCount(); index++) {
+                List<CommandRecord> records;
+                try (CommandStream stream = CommandStream.parse(graphed.commandStream(index))) {
+                    records = stream.records();
+                }
+                try (CommandStream.Encoder encoder = new CommandStream.Encoder()) {
+                    for (CommandRecord record : records) {
+                        List<CommandField> fields = new ArrayList<>(record.fields().size());
+                        for (CommandField field : record.fields()) {
+                            fields.add(rebuiltField(field));
+                        }
+                        encoder.push(record.kind(), fields);
+                    }
+                    out.writeBytes(encoder.finish());
+                }
+            }
+        }
+        return out.toByteArray();
+    }
+
     static void openTag(PageBuilder page, String kind, java.util.function.Consumer<Tag> configure) {
         try (Tag tag = new Tag(kind)) {
             configure.accept(tag);
@@ -733,7 +781,10 @@ public final class WriteParity {
         Formed formed = forms(fixture, formDataDir);
         report("forms", formed.saved());
         reportRead("form-data", formDataText(formed.saved(), formed.lines(), formDataDir));
-        report("graphics", graphics());
+        byte[] graphed = graphics();
+        report("graphics", graphed);
+        byte[] streams = commandStreams(graphed);
+        System.out.println("READ sha256=" + sha(streams) + " surface=java script=command-stream bytes=" + streams.length);
         report("tagged", tagged());
         System.out.println("JAVA-PARITY: RAN");
     }

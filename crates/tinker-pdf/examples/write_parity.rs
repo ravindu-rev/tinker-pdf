@@ -222,6 +222,18 @@
 //!   open is refused, and the document is what it would have been without
 //!   it.
 //!
+//! And one for the command stream, which reads what a surface writes:
+//!
+//! - **command-stream** takes the **graphics** artefact -- the parity
+//!   document, which every surface has just built to the same bytes -- and
+//!   for each of its pages in order reads the page's command stream into the
+//!   surface's own records and fields, makes each field again through the
+//!   constructor its tag names and each record again from its kind and those
+//!   fields, writes the records back through the surface's encoder, and
+//!   appends what that wrote. It prints `READ sha256=` of the appended bytes,
+//!   so a surface whose decode drops, reorders or alters a field, or whose
+//!   encoder writes one otherwise, prints another hash.
+//!
 //! An attachment's hash is of its decoded bytes, `-` when it names no stream
 //! or the stream does not read. The warnings are read last on purpose:
 //! reading a page can tolerate more, so the order of the reads is part of the
@@ -237,9 +249,9 @@
 use std::path::PathBuf;
 
 use tinker_pdf::{
-    Date, DestKind, Document, DocumentBuilder, EmbeddedFile, EntryHolder, ImageData, LabelStyle,
-    MetadataSync, OutlineEntry, OutlineItem, PageBoundary, PageLabelRange, PathStep, Removal,
-    Sanitise, Target, Trapped, WriteMode, WriteOptions,
+    CommandRecord, CommandStream, Date, DestKind, Document, DocumentBuilder, EmbeddedFile,
+    EntryHolder, ImageData, LabelStyle, MetadataSync, OutlineEntry, OutlineItem, PageBoundary,
+    PageLabelRange, PathStep, Removal, Sanitise, Target, Trapped, WriteMode, WriteOptions,
 };
 
 /// The eight-by-eight grey image both the Rust and the binding scripts build,
@@ -1109,6 +1121,35 @@ fn graphics() -> Vec<u8> {
     builder.finish()
 }
 
+/// Script: the command stream of each page of the graphics artefact, read
+/// into the facade's own records and fields, each record made again from its
+/// kind and its fields one at a time, and written back; what was written
+/// back, page after page.
+fn command_streams(document: &[u8]) -> Vec<u8> {
+    let document = Document::open(document.to_vec()).expect("the graphics artefact reopens");
+    let mut out = Vec::new();
+    for index in 0..document.page_count() {
+        let page = document.page(index).expect("a page the count names");
+        let stream =
+            CommandStream::parse(&page.command_stream()).expect("a page's own stream reads");
+        let records: Vec<CommandRecord> = stream
+            .records()
+            .iter()
+            .map(|record| {
+                let kind = record.command_kind().expect("a kind this build wrote");
+                record
+                    .fields
+                    .iter()
+                    .cloned()
+                    .fold(CommandRecord::new(kind), CommandRecord::with)
+            })
+            .collect();
+        let written = CommandStream::from_records(&records).expect("the records write back");
+        out.extend_from_slice(&written.to_bytes());
+    }
+    out
+}
+
 /// Script: tagged writing through `open_tag` and `close_tag`.
 fn tagged() -> Vec<u8> {
     use tinker_pdf::Tag;
@@ -1392,7 +1433,14 @@ fn main() {
         sha256_hex(said.as_bytes()),
         said.len()
     );
-    report("graphics", &graphics());
+    let graphed = graphics();
+    report("graphics", &graphed);
+    let streams = command_streams(&graphed);
+    println!(
+        "READ sha256={} surface=facade script=command-stream bytes={}",
+        sha256_hex(&streams),
+        streams.len()
+    );
     report("tagged", &tagged());
     println!("FACADE-PARITY: RAN");
 }

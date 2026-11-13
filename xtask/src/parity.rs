@@ -79,6 +79,13 @@ use std::process::Command;
 /// date or identifier in them, so they are as fixed as the rest. `graphics`
 /// was recorded the same way when the builder's graphics resources crossed,
 /// and `tagged` when tagged writing did.
+///
+/// `command-stream` is the bytes each surface writes back from the graphics
+/// artefact's page streams, read into its own records and fields: a surface
+/// whose decode drops, reorders or alters a field, or whose encoder writes
+/// one otherwise, prints another hash. The hash is a run's output and is
+/// entered empty, so every surface fails on it until the facade's line is
+/// recorded here.
 const EXPECTED: &[(&str, &str)] = &[
     (
         "fill-and-save",
@@ -128,6 +135,7 @@ const EXPECTED: &[(&str, &str)] = &[
         "graphics",
         "8bf69d84af79241a94e6770e315ce79dfa9cf1d6f85052af122444c3b94dac5f",
     ),
+    ("command-stream", ""),
     (
         "tagged",
         "ca75ed2bff10974b46fcc9a55a77fd0b75411085b37a5f263c1559b4d3fba29f",
@@ -828,7 +836,7 @@ GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
     /// than a silent pass.
     #[test]
     fn the_recorded_answer_names_both_scripts_once() {
-        assert_eq!(EXPECTED.len(), 13);
+        assert_eq!(EXPECTED.len(), 14);
         let names: Vec<&str> = EXPECTED.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
@@ -845,6 +853,7 @@ GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
                 "forms",
                 "form-data",
                 "graphics",
+                "command-stream",
                 "tagged"
             ]
         );

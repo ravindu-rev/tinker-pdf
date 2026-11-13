@@ -405,10 +405,19 @@ has none, in its smoke program, where it runs — and never binding API.
    the FFI's `the_command_stream_enums_have_the_numbers_the_bindings_transcribe`
    pins the three enums .NET and Ruby transcribe and Java passes by position,
    while Go names the header's constants.
-8. **RC-18.9, parity.** `cargo xtask bindings-parity --require-all` prints
-   the recorded `command-stream` hash from every surface, and
-   `cargo xtask bindings-coverage` passes with no refusal line left for the
-   stream.
+8. **RC-18.9a, landed: parity.** The *command-stream* script in the
+   facade's `crates/tinker-pdf/examples/write_parity.rs` and in every
+   surface's parity program — `bindings/python/tests/write_parity.py`,
+   `bindings/js/tests/write_parity.mjs`, `bindings/dotnet/tests/Smoke`,
+   `bindings/go/cmd/parity`, `bindings/ruby/test/write_parity.rb` and
+   `bindings/java/test/WriteParity.java` — decodes each page's stream of the
+   graphics artefact into that surface's own records and fields, rebuilds
+   each field from its tag and each record from its kind, writes the records
+   back and prints `READ sha256=` of the bytes, and `cargo xtask
+   bindings-parity --require-all` holds every surface to the one hash
+   `xtask/src/parity.rs` records. **RC-18.9b** projects what no surface
+   carries yet, so `cargo xtask bindings-coverage` passes with no refusal
+   line left for the stream.
 9. **RC-18.10a, the speed rows**, unmeasured, in MS-04's render group:
    writing the 150-dpi text page's stream, and rendering it at 150 dpi from
    its parsed stream, each paired with the planning baseline's direct render

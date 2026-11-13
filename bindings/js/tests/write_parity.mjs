@@ -61,6 +61,9 @@ const {
   PdfFormData,
   PdfExtGState,
   PdfTag,
+  PdfCommandStream,
+  PdfCommandRecord,
+  PdfCommandField,
 } = module_;
 
 const wasmUrl = new URL('tinker_pdf_js_bg.wasm', entry);
@@ -748,6 +751,56 @@ function graphics() {
   return bytes;
 }
 
+// The field, made again through the constructor its tag names.
+function rebuiltField(field) {
+  switch (field.tagName) {
+    case 'nothing':
+      return PdfCommandField.nothing();
+    case 'unsigned':
+      return PdfCommandField.unsigned(field.value);
+    case 'signed':
+      return PdfCommandField.signed(field.value);
+    case 'real':
+      return PdfCommandField.real(field.value);
+    case 'bytes':
+      return PdfCommandField.bytes(field.value);
+    case 'reals':
+      return PdfCommandField.reals(field.value);
+    case 'naturals':
+      return PdfCommandField.naturals(field.value);
+    case 'strings':
+      return PdfCommandField.strings(field.value);
+    default:
+      throw new Error(`a field of tag ${field.tagName}`);
+  }
+}
+
+// The command stream of each page of the graphics artefact, read into the
+// binding's own records and fields, each record made again from its kind and
+// its fields, and written back; what was written back, page after page.
+function commandStreams(documentBytes) {
+  const document_ = new PdfDocument(documentBytes);
+  const written = [];
+  for (let index = 0; index < document_.pageCount; index += 1) {
+    const stream = PdfCommandStream.parse(document_.commandStream(index));
+    const records = stream
+      .records()
+      .map((record) => new PdfCommandRecord(record.kind, record.fields.map(rebuiltField)));
+    stream.free();
+    const back = PdfCommandStream.fromRecords(records);
+    written.push(back.toBytes());
+    back.free();
+  }
+  document_.free();
+  const out = new Uint8Array(written.reduce((total, bytes) => total + bytes.length, 0));
+  let at = 0;
+  for (const bytes of written) {
+    out.set(bytes, at);
+    at += bytes.length;
+  }
+  return out;
+}
+
 // Tagged writing through openTag and closeTag.
 function tagged() {
   const builder = new PdfBuilder();
@@ -842,7 +895,10 @@ report('forms', formed);
 const said = encoder.encode(formDataText(formed, formLines, formDataDir));
 if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(said));
 console.log(`READ sha256=${sha256(said)} surface=js script=form-data bytes=${said.length}`);
-report('graphics', graphics());
+const graphed = graphics();
+report('graphics', graphed);
+const streams = commandStreams(graphed);
+console.log(`READ sha256=${sha256(streams)} surface=js script=command-stream bytes=${streams.length}`);
 report('tagged', tagged());
 transactionRollsBackOnAThrow(fixture);
 

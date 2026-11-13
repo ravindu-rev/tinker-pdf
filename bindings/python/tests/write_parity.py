@@ -561,6 +561,32 @@ def graphics() -> bytes:
     return builder.finish()
 
 
+def rebuilt_field(field):
+    """The field, made again through the constructor its tag names."""
+    if field.tag_name == "nothing":
+        return tinker_pdf.CommandField.nothing()
+    return getattr(tinker_pdf.CommandField, field.tag_name)(field.value)
+
+
+def command_streams(document_bytes: bytes) -> bytes:
+    """The command stream of each page of the graphics artefact, read into
+    the binding's own records and fields, each record made again from its kind
+    and its fields, and written back; what was written back, page after
+    page."""
+    document = tinker_pdf.Document(document_bytes)
+    out = bytearray()
+    for index in range(document.page_count):
+        stream = tinker_pdf.CommandStream(document.command_stream(index))
+        records = [
+            tinker_pdf.CommandRecord(
+                record.kind, [rebuilt_field(field) for field in record.fields]
+            )
+            for record in stream.records
+        ]
+        out += tinker_pdf.CommandStream.from_records(records).to_bytes()
+    return bytes(out)
+
+
 def tagged() -> bytes:
     """Tagged writing through open_tag and close_tag."""
     builder = tinker_pdf.DocumentBuilder()
@@ -660,7 +686,13 @@ def main(fixture_path: str) -> None:
         f"READ sha256={hashlib.sha256(said).hexdigest()} "
         f"surface=python script=form-data bytes={len(said)}"
     )
-    report("graphics", graphics())
+    graphed = graphics()
+    report("graphics", graphed)
+    streams = command_streams(graphed)
+    print(
+        f"READ sha256={hashlib.sha256(streams).hexdigest()} "
+        f"surface=python script=command-stream bytes={len(streams)}"
+    )
     report("tagged", tagged())
     transaction_rolls_back_on_an_exception(fixture)
 

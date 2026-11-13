@@ -874,6 +874,18 @@ second that only turns the mask off, a tiling pattern with a matrix filling
 and stroking, a bleed box, and an image the second page does not name, the
 list being cleared before it.
 
+*command-stream* reads the graphics artefact back as command streams: for
+each of its pages in order, the page's stream is decoded into the surface's
+own records and fields, each field is made again through the constructor its
+tag names and each record again from its kind and those fields, and the
+records are written back — through `CommandStream.from_records` in Python,
+`PdfCommandStream.fromRecords` in JavaScript and the encoder over the C ABI
+in .NET, Java, Go and Ruby. The surface prints `READ sha256=` of the bytes
+written back, page after page. A surface whose decode drops, reorders or
+alters a field, or whose encoder writes one otherwise, prints another hash;
+the facade's example does the same through `CommandRecord::new` and
+`CommandRecord::with`.
+
 *tagged* builds a two-page tagged document through `open_tag` and
 `close_tag`: the catalog's `/Lang`, a custom type mapped to `H1` with a
 title, a paragraph with a language and an actual text opened on page one and
@@ -1265,7 +1277,7 @@ cargo xtask bindings-coverage
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
 | Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats`; `Document::page_counted`, `Page::text_counted`, `Page::images_counted`, `SaveOptions::stats`, `Saved::stats`, `DocumentEditor::count_work`, `Document::inferred_orders_counted`, `Bitmap::to_png_counted`, and `Document::validate_pdfa_counted`, `Document::validate_pdfua_counted` and `Document::validate_pdfx_counted` | not projected; `tpdf_page_render`, every binding's render, text, save and validation count nothing and hand back no stats | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, as each counted sibling does, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [performance](../design/performance.md) |
 | Render parts, placement, usage and layers: `RenderOptions::content`, `RenderOptions::widgets`, `RenderOptions::other_annotations`, `RenderOptions::magnification`, `RenderOptions::usage`, `RenderOptions::layers`, `LayerOptions::*` and `LayerUser::*` | not projected; `tpdf_page_render` and every binding's render draw the page's content and every annotation, as a render naming no usage draws them, at magnification 1, in `/D`'s states | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so each needs an entry point of its own or a struct of options that can grow, as `RenderOptions::stats` does. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [design/render-usage.md](../design/render-usage.md) |
-| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; in Python and JavaScript as their `CommandStream` classes, records, fields, kinds, budgets and device protocol, with no display list and no record built field by field (`CommandRecord::with`) or read by the facade's typed reader (`CommandRecord::read`); in .NET, Java, Go and Ruby as their `CommandStream`, commands, records, fields, tables, encoder and device interface over the C ABI's calls | what a surface lacks of these stands here until RC-18.9 holds every surface's stream to one recorded answer and takes this row off | [design](../design/command-stream.md) |
+| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; in Python and JavaScript as their `CommandStream` classes, records, fields, kinds, budgets and device protocol, with no display list and no record built field by field (`CommandRecord::with`) or read by the facade's typed reader (`CommandRecord::read`); in .NET, Java, Go and Ruby as their `CommandStream`, commands, records, fields, tables, encoder and device interface over the C ABI's calls | what a surface lacks of these stands here until RC-18.9b projects every one of them on every surface and takes this row off | [design](../design/command-stream.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge; a CommonJS entry that re-exports the one ESM build cannot | [ROADMAP](../ROADMAP.md) SU-14 |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
@@ -1441,6 +1453,10 @@ cargo xtask bindings-coverage
   `no-anchors` with no subject and no trust when nothing is trusted.
 - `cargo xtask bindings-parity` compares every surface against the recorded
   answer in `xtask/src/parity.rs`.
+- **The command stream on every surface** is held by the *command-stream*
+  script's hash: the graphics artefact's page streams, decoded into each
+  surface's own records and fields and written back through its own types,
+  equal to the facade's.
 - **Go, Ruby and Java** are held by the parity programs — every recorded hash,
   equal to the facade's — and by smoke programs that render
   blank-then-inked and then call every declaration the parity programs do

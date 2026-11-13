@@ -1567,6 +1567,30 @@ using (var graphicsBuilder = DocumentBuilder.WithVersion(2, 0))
 }
 Report("graphics", graphicsBytes);
 
+// The command-stream script: each page of the graphics artefact's command
+// stream, read into the binding's own records and fields, each record made
+// again from its kind and its fields and written back through the encoder;
+// what that wrote, page after page.
+byte[] streamBytes;
+using (var graphed = Document.Open(graphicsBytes))
+using (var streamsOut = new MemoryStream())
+{
+    for (uint index = 0; index < graphed.PageCount; index++)
+    {
+        using var pageStream = CommandStream.Parse(graphed.CommandStream(index));
+        using var streamEncoder = new CommandEncoder();
+        foreach (var record in pageStream.Records())
+        {
+            streamEncoder.Push(record.Kind!.Value, Rebuilt(record.Fields));
+        }
+        streamsOut.Write(streamEncoder.Finish());
+    }
+    streamBytes = streamsOut.ToArray();
+}
+Console.WriteLine(
+    $"DOTNET-SMOKE: READ sha256={Sha256(streamBytes)} surface=dotnet script=command-stream " +
+    $"bytes={streamBytes.Length}");
+
 // Script eight: tagged. Structure elements through OpenTag and CloseTag.
 static void OpenTagged(PageBuilder page, string kind, Action<Tag> configure)
 {

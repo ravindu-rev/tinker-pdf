@@ -827,6 +827,64 @@ func graphics() []byte {
 	return bytes
 }
 
+// rebuiltField is field, made again through the constructor its tag names.
+func rebuiltField(field tp.CommandField) tp.CommandField {
+	switch field.Tag {
+	case tp.FieldNothing:
+		return tp.NothingField()
+	case tp.FieldUnsigned:
+		return tp.UnsignedField(field.Natural)
+	case tp.FieldSigned:
+		return tp.SignedField(field.Integer)
+	case tp.FieldReal:
+		return tp.RealField(field.Real)
+	case tp.FieldBytes:
+		return tp.BytesField(field.Bytes)
+	case tp.FieldReals:
+		return tp.RealsField(field.Reals)
+	case tp.FieldNaturals:
+		return tp.NaturalsField(field.Naturals)
+	case tp.FieldStrings:
+		return tp.StringsField(field.Strings)
+	}
+	check(false, fmt.Sprintf("command-stream: a field of tag %v", field.Tag))
+	return field
+}
+
+// commandStreams is the command stream of each page of the graphics
+// artefact, read into the binding's own records and fields, each record made
+// again from its kind and its fields and written back through the encoder;
+// what that wrote, page after page.
+func commandStreams(document []byte) []byte {
+	graphed, err := tp.Open(document)
+	must(err)
+	defer graphed.Close()
+	var out []byte
+	for index := uint32(0); index < graphed.PageCount(); index++ {
+		written, err := graphed.CommandStream(index)
+		must(err)
+		stream, err := tp.ParseCommandStream(written)
+		must(err)
+		records, err := stream.Records()
+		must(err)
+		stream.Close()
+		encoder, err := tp.NewCommandEncoder()
+		must(err)
+		for _, record := range records {
+			fields := make([]tp.CommandField, len(record.Fields))
+			for at, field := range record.Fields {
+				fields[at] = rebuiltField(field)
+			}
+			must(encoder.Push(record.Kind, fields))
+		}
+		back, err := encoder.Finish()
+		must(err)
+		encoder.Close()
+		out = append(out, back...)
+	}
+	return out
+}
+
 // tagged writes a structure tree through OpenTag and CloseTag.
 func tagged() []byte {
 	builder, err := tp.NewBuilder()
@@ -912,7 +970,10 @@ func main() {
 	formed, lines := forms(fixture, formDataDir)
 	report("forms", formed)
 	reportRead("form-data", formDataText(formed, lines, formDataDir))
-	report("graphics", graphics())
+	graphed := graphics()
+	report("graphics", graphed)
+	streams := commandStreams(graphed)
+	fmt.Printf("READ sha256=%s surface=go script=command-stream bytes=%d\n", sum(streams), len(streams))
 	report("tagged", tagged())
 	fmt.Println("GO-PARITY: RAN")
 }
