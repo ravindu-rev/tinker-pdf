@@ -1405,6 +1405,30 @@ one are copies of it, stride and all, and each answers `None` for a bitmap
 that is not a picture, a size or factor of zero, or a result whose bytes
 cannot be allocated.
 
+**Forced colours** draw a page in two colours for high contrast:
+`RenderOptions::forced_colours` takes a `ForcedColours` — a `background`, a
+`foreground` and `fill_to_stroke` — and is `None` by default. The renderer
+(`Renderer::with_forced_colours`) draws the page's coverage black on white
+into grey: every fill, stroke and glyph paints opaque black by its own
+coverage whatever its colour, ink or pattern, a stencil mask included; an
+image, `sh` and a mesh paint the grey of their own lightness; and no constant
+alpha, blend mode, soft mask, knockout or group colour space applies. It
+answers the interpreter's questions as an ordinary render does — every group
+opened and composited at full strength, every soft mask's group accepted,
+drawn into nothing and never installed — so a display list replays into it
+as into any render. The grey is then tinted into the format asked for by
+`toolbox::tint_grey`, each channel `(foreground * (255 - v) + background * v +
+127) / 255` for the black-on-white grey `v`, written as a canvas of the format
+is filled and opaque, so every pixel is the background plus its coverage times
+the difference, rounded once, and no transfer function is applied to it: the
+page's colours are what forced colours replace. The page is opaque whatever
+`transparent` asks.
+With `fill_to_stroke`, each path fill paints the stroke of its own path at the
+renderer's thinnest width, solid, under the same clip, with the caps and joins
+in force — the bytes `0 w [] 0 d` and `S` paint — and a fill inside a text
+object, which is a Type 3 glyph's, stays a fill. A tile of a forced-colour
+page is its rectangle of the page (ruling 5).
+
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
 
@@ -1628,6 +1652,28 @@ defect to hide in.
   canvas's own, and scale and subsample on cases worked by hand; its `image`
   tests hold `resample`'s planned lines to the rationals and every resampled
   pixel to an area average written from the definition.
+- Forced colours: `render_options.rs`'s
+  `forced_colours_are_coverage_over_the_two_colours` holds every pixel of a
+  page of text, translucent and blended paint, a turned image, a knockout ink
+  group and a soft mask, of a page of a mesh, `sh` and two pattern fills, and
+  of a Type 3 page, in every page format and four pairs of colours, at two
+  scales, with and without fill-to-stroke, to the tint of its coverage read
+  from the black-on-white render, computed in the test;
+  `forced_colours_apply_no_alpha_blend_mask_knockout_or_group_space` holds the
+  black-on-white render to the ordinary grey render of a twin that asks for
+  none of it; `a_pattern_fill_paints_its_shape_and_a_shading_its_lightness`
+  does the same for patterns and shadings;
+  `fill_to_stroke_draws_each_fill_as_its_stroke` holds a page of fills under a
+  wide dashed pen to its twin stroking the same paths with `0 w [] 0 d`, at
+  three scales, anti-aliased and not; `a_type3_glyph_stays_filled_under_fill_to_stroke`,
+  `forced_colours_apply_no_transfer_function`, the opacity and premultiplied
+  cases and a display list's forced render are
+  held beside them. `render_regions.rs`'s
+  `a_forced_colour_tile_is_the_page_under_it` tiles every fixture and the
+  annotated page in forced colours, directly and from a display list. The
+  render crate's `forced_colour_tests` drive the device calls: each paint
+  black whatever its state, fill-to-stroke as the thinnest stroke, a Type 3
+  fill kept, and the questions answered as an ordinary render answers them.
 - SVG output: `crates/tinker-pdf/tests/svg_output.rs` reads every file the
   writer makes back through `tinker-pdf-svg` and compares the scene with what
   the page states, worked out from the content stream's own numbers — a

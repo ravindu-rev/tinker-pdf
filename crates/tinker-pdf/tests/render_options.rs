@@ -1,6 +1,6 @@
 //! The `RenderOptions` fields that change what a page's bytes *are* rather than
-//! which page or how large: ink instead of light, and what a pixel means when
-//! it is not fully painted.
+//! which page or how large: ink instead of light, what a pixel means when it
+//! is not fully painted, and a page drawn in two colours by its coverage.
 //!
 //! # Why a file of its own, and why these hashes are not in `determinism.rs`
 //!
@@ -30,8 +30,10 @@ mod written_support;
 
 use render_support::{blend_grid_page, curvy_font};
 use tinker_pdf::{
-    Bitmap, BlendMode, Document, DocumentBuilder, ExtGState, ImageData, PixelFormat, RenderOptions,
+    Bitmap, BlendMode, Color, DeviceSpace, Document, DocumentBuilder, ExtGState, ForcedColours,
+    FormXObject, ImageData, MaskKind, PixelFormat, RenderOptions, StateMask, TransparencyGroup,
 };
+use tinker_pdf_raster::canvas::rgb_to_cmyk;
 
 /// `determinism.rs`'s `analytic_blend` row, copied: the blend grid rendered
 /// with the default options. If this and that file ever disagree, one of them
@@ -614,6 +616,7 @@ fn the_default_is_unchanged() {
         antialias: true,
         transparent: false,
         premultiplied: false,
+        forced_colours: None,
         ..RenderOptions::default()
     };
     for (name, page, least, want) in [
@@ -1186,6 +1189,17 @@ fn a_hard_edged_tile_is_the_hard_edged_page_under_it() {
 /// coverage value is produced, which is why each gets a flat colour here
 /// rather than the gradient that would hide an edge inside a ramp.
 fn hard_edge_shadings_page() -> Vec<u8> {
+    shadings_page(
+        "q 90 10 m 150 30 l 110 60 l h W n /Sh1 sh Q\n\
+         /Pattern cs /P0 scn 95 75 m 115 99 145 90 150 70 c 120 62 l h f\n\
+         /P1 scn 5 65 65 30 re f",
+    )
+}
+
+/// [`hard_edge_shadings_page`]'s document drawing `content` after the mesh,
+/// with its shadings `/Sh0` (the mesh) and `/Sh1` and its patterns `/P0` (a
+/// shading) and `/P1` (a tiling cell) in its resources.
+fn shadings_page(content: &str) -> Vec<u8> {
     // One vertex a line: flag, x, y, r, g, b, eight bits each, so the stream
     // is byte-aligned and needs no packing. `/Decode` maps the coordinates
     // onto the page and the colour straight through.
@@ -1200,9 +1214,6 @@ fn hard_edge_shadings_page() -> Vec<u8> {
     let axial = "/ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 160 100] \
                  /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0.5 0] \
                  /C1 [1 0.5 0] /N 1 >>";
-    let content = "q 90 10 m 150 30 l 110 60 l h W n /Sh1 sh Q\n\
-                   /Pattern cs /P0 scn 95 75 m 115 99 145 90 150 70 c 120 62 l h f\n\
-                   /P1 scn 5 65 65 30 re f";
     let cell = "0.5 0 0.5 rg 0 0 m 10 6 l 10 10 l 4 10 l h f";
     format!(
         "%PDF-1.7\n\
@@ -1330,6 +1341,572 @@ fn hard_edged_output_is_pinned() {
             least,
             want,
         );
+    }
+}
+
+// ---- forced colours ----------------------------------------------------------
+
+/// Text in an embedded face, a translucent `/Multiply` fill and dashed
+/// stroke, a turned image, a knockout group declaring ink and a fill under a
+/// luminosity soft mask that shows its left half: everything forced colours
+/// do not apply, beside everything they draw by coverage. `dark` draws the
+/// page as forced colours should see it — every paint black, opaque and
+/// `Normal`, the group's fills drawn straight and the masked one unmasked.
+fn forced_page(dark: bool) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.set_subset_fonts(false);
+    assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
+    assert!(builder.add_ext_gstate(
+        b"Half",
+        &ExtGState {
+            fill_alpha: Some(0.5),
+            stroke_alpha: Some(0.3),
+            blend_mode: Some(BlendMode::Multiply),
+            ..ExtGState::default()
+        }
+    ));
+    assert!(builder.add_form(
+        b"Knock",
+        &FormXObject {
+            bbox: [96.0, 4.0, 156.0, 56.0],
+            matrix: None,
+            group: Some(TransparencyGroup {
+                color_space: DeviceSpace::Cmyk,
+                isolated: true,
+                knockout: true,
+            }),
+            content: b"0.2 0.6 0.9 rg 100 8 40 30 re f 0.9 0.2 0.1 rg 112 20 40 30 re f",
+        }
+    ));
+    assert!(builder.add_form(
+        b"Left",
+        &FormXObject {
+            bbox: [0.0, 0.0, 160.0, 100.0],
+            matrix: None,
+            group: Some(TransparencyGroup {
+                color_space: DeviceSpace::Gray,
+                isolated: true,
+                knockout: false,
+            }),
+            content: b"1 g 0 0 80 100 re f",
+        }
+    ));
+    assert!(builder.add_ext_gstate(
+        b"Masked",
+        &ExtGState {
+            soft_mask: Some(StateMask::Group {
+                kind: MaskKind::Luminosity,
+                form: b"Left",
+                backdrop: None,
+            }),
+            ..ExtGState::default()
+        }
+    ));
+    let samples = [250u8, 20, 20, 20, 200, 40, 30, 30, 220, 240, 240, 60];
+    assert!(builder.add_image(
+        b"Im0",
+        &ImageData::Rgb8 {
+            width: 2,
+            height: 2,
+            data: &samples,
+        }
+    ));
+    builder.add_page(160.0, 100.0, |page| {
+        page.raw(if dark { b"0 g" } else { b"0.8 0.1 0.1 rg" });
+        page.text(b"F0", 14.0, 4.0, 78.0, "fox 0123");
+        page.raw(b"q");
+        if dark {
+            page.raw(b"0 g 0 G");
+        } else {
+            assert!(page.set_ext_gstate(b"Half"));
+            page.raw(b"0 0.5 0 rg 0 0 1 RG");
+        }
+        page.raw(b"10 10 60 30 re f 2 w [4 2] 0 d 10 50 m 70 60 l S Q");
+        page.raw(b"q 20 12 -12 20 76 62 cm /Im0 Do Q");
+        if dark {
+            page.raw(b"0 g 100 8 40 30 re f 112 20 40 30 re f");
+        } else {
+            assert!(page.form(b"Knock"));
+        }
+        page.raw(b"q");
+        if dark {
+            page.raw(b"0 g");
+        } else {
+            assert!(page.set_ext_gstate(b"Masked"));
+            page.raw(b"0.3 0.3 0.3 rg");
+        }
+        page.raw(b"40 20 100 30 re f Q");
+    });
+    built("forced page", builder)
+}
+
+/// Two squares a Type 3 glyph's procedure fills (9.6.5) — or, `as_page`, the
+/// same two squares filled by the page itself — and a filled triangle beside
+/// them on the page.
+fn type3_page(as_page: bool) -> Vec<u8> {
+    let glyph = "1000 0 0 0 1000 1000 d1 100 100 600 600 re f";
+    let shown = if as_page {
+        "12 12 12 12 re f 32 12 12 12 re f"
+    } else {
+        "BT /T3 20 Tf 10 10 Td (AA) Tj ET"
+    };
+    let content = format!("{shown} 60 10 m 90 40 l 60 40 l h f");
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 50] \
+/Resources << /Font << /T3 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+/FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /sq 6 0 R >> \
+/Encoding << /Type /Encoding /Differences [65 /sq] >> /FirstChar 65 \
+/LastChar 65 /Widths [1000] /Resources << >> >>\nendobj\n\
+6 0 obj\n<< /Length {} >>\nstream\n{glyph}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        content.len() + 1,
+        glyph.len() + 1,
+    )
+    .into_bytes()
+}
+
+/// Every page this section draws in forced colours, by name.
+fn forced_fixtures() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("forced page", forced_page(false)),
+        ("shadings page", hard_edge_shadings_page()),
+        ("type 3 page", type3_page(false)),
+    ]
+}
+
+/// Forced colours, black on white, with or without fill-to-stroke.
+fn forced(fill_to_stroke: bool) -> ForcedColours {
+    ForcedColours {
+        fill_to_stroke,
+        ..ForcedColours::default()
+    }
+}
+
+/// `options` drawing in `colours`.
+fn forced_options(scale: f64, format: PixelFormat, colours: ForcedColours) -> RenderOptions {
+    RenderOptions {
+        scale,
+        format,
+        allow_cmyk: format == PixelFormat::CmykA8,
+        forced_colours: Some(colours),
+        ..RenderOptions::default()
+    }
+}
+
+/// Rec.601 luma in thousandths, rounded: `Color::luma`'s closed form, how a
+/// grey canvas holds a colour.
+fn luma(r: u8, g: u8, b: u8) -> u8 {
+    ((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 + 500) / 1000) as u8
+}
+
+/// What a forced-colour render in `colours` should hold, computed from the
+/// black-on-white render of the same page: every pixel the background plus
+/// its coverage times the difference, `(fg (255 - v) + bg v + 127) / 255` a
+/// channel for the grey `v`, written as a canvas of `format` is filled, and
+/// opaque.
+fn tinted(coverage: &Bitmap, colours: ForcedColours, format: PixelFormat) -> Vec<u8> {
+    assert_eq!(coverage.format, PixelFormat::Gray8);
+    let (fg, bg) = (colours.foreground, colours.background);
+    let mut out = Vec::new();
+    for y in 0..coverage.height as usize {
+        for x in 0..coverage.width as usize {
+            let v = u32::from(coverage.data[y * coverage.stride + x]);
+            let ramp = |dark: u8, light: u8| {
+                ((u32::from(dark) * (255 - v) + u32::from(light) * v + 127) / 255) as u8
+            };
+            let (r, g, b) = (ramp(fg.r, bg.r), ramp(fg.g, bg.g), ramp(fg.b, bg.b));
+            match format {
+                PixelFormat::Gray8 => out.push(luma(r, g, b)),
+                PixelFormat::GrayA8 => out.extend([luma(r, g, b), 255]),
+                PixelFormat::Rgb8 => out.extend([r, g, b]),
+                PixelFormat::Rgba8 => out.extend([r, g, b, 255]),
+                PixelFormat::Bgr8 => out.extend([b, g, r]),
+                PixelFormat::Bgra8 => out.extend([b, g, r, 255]),
+                PixelFormat::CmykA8 => {
+                    let (c, m, yellow, k) = rgb_to_cmyk(r, g, b);
+                    out.extend([c, m, yellow, k, 255]);
+                }
+                PixelFormat::LabA8 => panic!("Lab is not a page format"),
+            }
+        }
+    }
+    out
+}
+
+/// The page formats a forced render is asked for in.
+const FORCED_FORMATS: [PixelFormat; 7] = [
+    PixelFormat::Gray8,
+    PixelFormat::GrayA8,
+    PixelFormat::Rgb8,
+    PixelFormat::Rgba8,
+    PixelFormat::Bgr8,
+    PixelFormat::Bgra8,
+    PixelFormat::CmykA8,
+];
+
+/// **The exit criterion: forced colours are coverage over the two colours.**
+/// Every pixel of a forced-colour render, in every page format, in colours
+/// dark on light, light on dark and two hues, is the background plus its
+/// coverage times the difference — coverage read from the black-on-white
+/// render of the same page and the tint computed here — at two scales, with
+/// and without fill-to-stroke; and that black-on-white render holds black,
+/// white and coverage between, so the closed form is held on edges.
+#[test]
+fn forced_colours_are_coverage_over_the_two_colours() {
+    let pairs = [
+        (Color::BLACK, Color::WHITE),
+        (Color::WHITE, Color::BLACK),
+        (Color::rgb(255, 230, 0), Color::rgb(10, 20, 90)),
+        (Color::rgb(0, 90, 40), Color::rgb(250, 245, 230)),
+    ];
+    let mut held = 0usize;
+    for (name, bytes) in forced_fixtures() {
+        for scale in [1.0, 1.7] {
+            for fill_to_stroke in [false, true] {
+                let what = format!("{name} at {scale}x, fill-to-stroke {fill_to_stroke}");
+                let coverage = render(
+                    bytes.clone(),
+                    &forced_options(scale, PixelFormat::Gray8, forced(fill_to_stroke)),
+                );
+                assert!(
+                    coverage.data.contains(&0)
+                        && coverage.data.contains(&255)
+                        && coverage.data.iter().any(|v| (1..255).contains(v)),
+                    "{what}: the coverage holds black, white and edges between"
+                );
+                for (foreground, background) in pairs {
+                    let colours = ForcedColours {
+                        background,
+                        foreground,
+                        fill_to_stroke,
+                    };
+                    for format in FORCED_FORMATS {
+                        let got = render(bytes.clone(), &forced_options(scale, format, colours));
+                        assert_eq!(
+                            (got.width, got.height, got.format, got.stride),
+                            (
+                                coverage.width,
+                                coverage.height,
+                                format,
+                                coverage.width as usize * format.components()
+                            ),
+                            "{what}, {format:?}"
+                        );
+                        assert!(!got.premultiplied);
+                        let want = tinted(&coverage, colours, format);
+                        if got.data != want {
+                            let at = got.data.iter().zip(&want).position(|(a, b)| a != b);
+                            panic!(
+                                "{what}, {format:?}, {foreground:?} on {background:?}: byte \
+                                 {at:?} is not the tint of its coverage"
+                            );
+                        }
+                        held += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("forced colours: RAN, {held} renders held to the tint of their coverage");
+}
+
+/// **What forced colours do not apply.** The black-on-white forced render of
+/// a page asking for colour, constant alpha, `/Multiply`, a knockout group in
+/// ink and a soft mask is the ordinary grey render of its twin that asks for
+/// none of it — every paint black, opaque and `Normal`, the group's fills
+/// drawn straight and the masked fill unmasked — byte for byte; the image is
+/// its lightness in both. At the scales where every edge the group draws is
+/// whole, so its composite has no partial pixel to round.
+#[test]
+fn forced_colours_apply_no_alpha_blend_mask_knockout_or_group_space() {
+    for scale in [1.0, 2.0] {
+        let forced_render = render(
+            forced_page(false),
+            &forced_options(scale, PixelFormat::Gray8, forced(false)),
+        );
+        let twin = render(
+            forced_page(true),
+            &RenderOptions {
+                scale,
+                format: PixelFormat::Gray8,
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!(forced_render.data, twin.data, "at {scale}x");
+        // And the twin is not the page drawn as it asks: the mask and the
+        // alphas change pixels there.
+        let ordinary = render(
+            forced_page(false),
+            &RenderOptions {
+                scale,
+                format: PixelFormat::Gray8,
+                ..RenderOptions::default()
+            },
+        );
+        assert_ne!(ordinary.data, twin.data, "at {scale}x");
+    }
+}
+
+/// A shading pattern and a tiling pattern fill paint their shapes black by
+/// coverage, as every fill does, and `sh` and a mesh paint their lightness:
+/// the forced black-on-white render of the shadings page is the ordinary grey
+/// render of the page with its two pattern fills made black fills.
+#[test]
+fn a_pattern_fill_paints_its_shape_and_a_shading_its_lightness() {
+    let twin = shadings_page(
+        "q 90 10 m 150 30 l 110 60 l h W n /Sh1 sh Q\n\
+         0 g 95 75 m 115 99 145 90 150 70 c 120 62 l h f\n\
+         5 65 65 30 re f",
+    );
+    for scale in [1.0, 1.7] {
+        let forced_render = render(
+            hard_edge_shadings_page(),
+            &forced_options(scale, PixelFormat::Gray8, forced(false)),
+        );
+        let plain = render(
+            twin.clone(),
+            &RenderOptions {
+                scale,
+                format: PixelFormat::Gray8,
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!(forced_render.data, plain.data, "at {scale}x");
+        assert!(
+            forced_render.warnings.is_empty(),
+            "{:?}",
+            forced_render.warnings
+        );
+    }
+}
+
+/// `fills` with every `re f`, `f*` and `B` written as `fill` asks, under a
+/// wide dashed pen and a clip.
+fn fills_page(content: &str) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(120.0, 90.0, |page| {
+        page.raw(b"5 w [3 2] 1 d 1 J 1 j");
+        page.raw(content.as_bytes());
+    });
+    built("fills page", builder)
+}
+
+/// Each fill of [`fill_to_stroke_draws_each_fill_as_its_stroke`]'s page, as a
+/// path and the operator that fills it.
+const FILLS: [(&str, &str); 5] = [
+    ("10 10 30 20 re", "f"),
+    ("50 10 m 80 40 l 60 45 l h", "f"),
+    ("90 10 m 110 20 l 95 35 l 100 10 l 115 30 l h", "f*"),
+    ("15 50 m 25 85 45 85 55 50 c h", "f"),
+    ("70 55 30 25 re", "B"),
+];
+
+/// **The exit criterion: fill-to-stroke draws each fill as its stroke.** A
+/// page of fills in a colour under a wide dashed pen with round caps and
+/// joins — a rectangle, a triangle, an even-odd star, a curve, a
+/// fill-and-stroke and one under a clip — renders in forced colours with
+/// fill-to-stroke byte for byte as its twin that strokes the same paths with
+/// `0 w [] 0 d`, in forced colours, at scales a hairline lands on
+/// differently, anti-aliased and not; and differs from the same page with its
+/// fills filled.
+#[test]
+fn fill_to_stroke_draws_each_fill_as_its_stroke() {
+    let mut fills = String::from("q 0 0 120 90 re W n 0.2 0.8 0.3 rg ");
+    let mut strokes = String::from("q 0 0 120 90 re W n 0.2 0.8 0.3 rg ");
+    for (path, op) in FILLS {
+        fills.push_str(&format!("{path} {op}\n"));
+        strokes.push_str(&format!("q 0 w [] 0 d {path} S Q\n"));
+        if op == "B" {
+            // The fill-and-stroke's stroke is its own, at the page's pen.
+            strokes.push_str(&format!("{path} S\n"));
+        }
+    }
+    fills.push_str("Q q 30 40 40 40 re W n 20 45 60 30 re f Q");
+    strokes.push_str("Q q 30 40 40 40 re W n q 0 w [] 0 d 20 45 60 30 re S Q Q");
+    let (fills, strokes) = (fills_page(&fills), fills_page(&strokes));
+    for scale in [1.0, 1.3, 2.5] {
+        for antialias in [true, false] {
+            let options = RenderOptions {
+                antialias,
+                ..forced_options(scale, PixelFormat::Rgb8, forced(true))
+            };
+            let drawn = render(fills.clone(), &options);
+            let twin = render(strokes.clone(), &options);
+            assert_eq!(
+                drawn.data, twin.data,
+                "at {scale}x, anti-aliased {antialias}"
+            );
+            let filled = render(
+                fills.clone(),
+                &RenderOptions {
+                    antialias,
+                    ..forced_options(scale, PixelFormat::Rgb8, forced(false))
+                },
+            );
+            assert_ne!(drawn.data, filled.data, "the interiors are not painted");
+        }
+    }
+}
+
+/// A Type 3 glyph's fills are a glyph's, and a glyph stays filled: the type 3
+/// page renders the same with fill-to-stroke and without, in its glyphs,
+/// while the same squares filled by the page become their outlines.
+#[test]
+fn a_type3_glyph_stays_filled_under_fill_to_stroke() {
+    for scale in [1.0, 2.0] {
+        let glyphs = |fill_to_stroke: bool, as_page: bool| {
+            render(
+                type3_page(as_page),
+                &forced_options(scale, PixelFormat::Gray8, forced(fill_to_stroke)),
+            )
+        };
+        // The triangle the page fills is outlined either way, so compare the
+        // rows the squares are on, below it.
+        let squares = |bitmap: &Bitmap| -> Vec<u8> {
+            let rows = (f64::from(bitmap.height) * 0.4) as usize;
+            bitmap.data[bitmap.stride * (bitmap.height as usize - rows)..]
+                .chunks(bitmap.stride)
+                .flat_map(|row| row[..(bitmap.width as usize / 2)].to_vec())
+                .collect()
+        };
+        let (filled, outlined) = (glyphs(false, false), glyphs(true, false));
+        assert!(squares(&filled).contains(&0), "the glyphs are drawn");
+        assert_eq!(squares(&filled), squares(&outlined), "at {scale}x");
+        assert_ne!(
+            filled.data, outlined.data,
+            "the page's own triangle is outlined"
+        );
+        let (page_filled, page_outlined) = (glyphs(false, true), glyphs(true, true));
+        assert_ne!(
+            squares(&page_filled),
+            squares(&page_outlined),
+            "at {scale}x, the page's squares are outlined"
+        );
+    }
+}
+
+/// A forced render is opaque whatever `transparent` says, and premultiplying
+/// an opaque page changes no byte of it.
+#[test]
+fn a_forced_render_is_opaque_and_its_options_mean_what_they_mean() {
+    let colours = ForcedColours {
+        background: Color::rgb(20, 20, 60),
+        foreground: Color::rgb(250, 250, 180),
+        fill_to_stroke: false,
+    };
+    for format in [PixelFormat::GrayA8, PixelFormat::Rgba8, PixelFormat::Bgra8] {
+        let plain = forced_options(1.0, format, colours);
+        let opaque = render(forced_page(false), &plain);
+        let alpha_at = format.components() - 1;
+        assert!(opaque
+            .data
+            .chunks_exact(format.components())
+            .all(|pixel| pixel[alpha_at] == 255));
+        for (transparent, premultiplied) in [(true, false), (false, true), (true, true)] {
+            let asked = RenderOptions {
+                transparent,
+                premultiplied,
+                ..plain.clone()
+            };
+            let got = render(forced_page(false), &asked);
+            assert_eq!(
+                got.data, opaque.data,
+                "{format:?}, {transparent}, {premultiplied}"
+            );
+            assert_eq!(got.premultiplied, premultiplied);
+        }
+    }
+    // The default forced colours are black on white with fills filled.
+    assert_eq!(
+        ForcedColours::default(),
+        ForcedColours {
+            background: Color::WHITE,
+            foreground: Color::BLACK,
+            fill_to_stroke: false,
+        }
+    );
+}
+
+/// Two greys and a red filled on a page, under a transfer function that turns
+/// every component over (10.5) where `transfer` asks, and under none where it
+/// does not: the function a type 4 calculator, `{ 1 exch sub }`.
+fn transfer_page(transfer: bool) -> Vec<u8> {
+    let content = format!(
+        "{} 0.25 g 10 10 50 30 re f 0.8 g 20 25 40 20 re f 1 0 0 rg 70 5 20 40 re f",
+        if transfer { "/T gs" } else { "" }
+    );
+    let function = "{ 1 exch sub }";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 50] \
+/Resources << /ExtGState << /T << /TR 5 0 R >> >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Length {} >>\nstream\n\
+{function}\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        function.len(),
+    )
+    .into_bytes()
+}
+
+/// **No transfer function applies to a forced render** (10.5): the page's
+/// colours are what forced colours replace, and the tint is the final colour.
+/// A page under a function that turns every component over renders in forced
+/// colours, in every page format, with fill-to-stroke and without, exactly as
+/// the same page under none — though drawn as it asks, the function moves its
+/// pixels.
+#[test]
+fn forced_colours_apply_no_transfer_function() {
+    let asked = render(transfer_page(true), &RenderOptions::default());
+    let plain = render(transfer_page(false), &RenderOptions::default());
+    assert_ne!(asked.data, plain.data, "an ordinary render applies it");
+    for format in FORCED_FORMATS {
+        for fill_to_stroke in [false, true] {
+            let colours = ForcedColours {
+                background: Color::rgb(250, 250, 235),
+                foreground: Color::rgb(10, 30, 90),
+                fill_to_stroke,
+            };
+            let options = forced_options(1.0, format, colours);
+            let with = render(transfer_page(true), &options);
+            let without = render(transfer_page(false), &options);
+            assert_eq!(with.data, without.data, "{format:?}, {fill_to_stroke}");
+            assert!(with.warnings.is_empty(), "{:?}", with.warnings);
+        }
+    }
+}
+
+/// A display list draws a page in forced colours as the page draws itself:
+/// the same bytes and the same warnings, with fill-to-stroke and without, at
+/// two scales — the recording made for an ordinary render, whose answers a
+/// forced renderer gives too.
+#[test]
+fn a_display_list_draws_forced_colours_as_the_page_does() {
+    for (name, bytes) in forced_fixtures() {
+        let doc = Document::open(bytes).expect("the fixture opens");
+        let page = doc.page(0).expect("a page");
+        let list = page.display_list();
+        assert!(list.is_retained(), "{name}");
+        for scale in [1.0, 1.7] {
+            for fill_to_stroke in [false, true] {
+                let options = forced_options(scale, PixelFormat::Rgb8, forced(fill_to_stroke));
+                let direct = page.render(&options);
+                let replayed = list.render(&options);
+                assert_eq!(
+                    replayed.data, direct.data,
+                    "{name} at {scale}x, {fill_to_stroke}"
+                );
+                assert_eq!(replayed.warnings, direct.warnings, "{name} at {scale}x");
+            }
+        }
     }
 }
 

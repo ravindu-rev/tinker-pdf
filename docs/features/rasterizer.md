@@ -547,7 +547,10 @@ image covers exactly — column `x` of `width` covering
 `[x W / width, (x + 1) W / width)` of the image, each tap that span's overlap
 with a sample measured in `1 / width` of one, so the weights are the
 rationals themselves rather than a centre a floating-point inverse found;
-`subsample` keeps the first sample of each block. `gamma_table` is gamma's 256 bytes,
+`subsample` keeps the first sample of each block. `tint_grey` writes a `Gray8`
+picture into any format, opaque, each grey on `tint`'s ramp between two
+colours — what a forced-colour render's black-on-white coverage becomes in the
+facade. `gamma_table` is gamma's 256 bytes,
 built through `tinker_pdf_math::pow`, and `decode` and `encode` are a pixel's
 sRGB and a colour's bytes exactly as a `Canvas` of the format reads and fills
 them; `canvas::lab_bytes` is public beside `lab_to_rgb`, its inverse, so the

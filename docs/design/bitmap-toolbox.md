@@ -257,24 +257,47 @@ A fill becomes a stroke only where the path is known, so this is the
 renderer's and not a pass over a finished `Bitmap`.
 
 **The page is drawn in its coverage, then tinted.** Under forced colours the
-renderer draws the page black on white into `Gray8`: every fill, stroke and
-glyph paints opaque black by its own coverage; an image or a shading paints
-the grey of its own lightness, `Y`, by its coverage, so its darkness is
-coverage too; constant alpha, blend modes, soft masks and knockout are not
-applied, so every paint is opaque and `Normal` and the coverage is what the
-page's marks make of white. That buffer is then tinted by the toolbox, `dark`
-the foreground and `light` the background, into the format the options ask
-for. So every pixel is the background plus its coverage times the difference,
+renderer draws the page black on white into `Gray8`, whatever space a page
+group declares: every fill, stroke and glyph paints opaque black by its own
+coverage — whatever colour, DeviceCMYK ink or pattern it was given, so a
+shading or tiling pattern's fill is its shape, and a stencil mask, which
+paints the fill colour, is black too; an image, `sh` and a mesh paint their
+own colours, which a grey canvas holds as their lightness, `Y`, so their
+darkness is coverage too; constant alpha, blend modes, soft masks, knockout
+and a group's colour space are not applied, so every paint is opaque and
+`Normal` and the coverage is what the page's marks make of white. The
+renderer does it by handing each paint a copy of its state whose paint is
+opaque black, `Normal`, with no ink and no pattern (`Renderer::painting`),
+the pen, the transform and the text state left the page's.
+
+The renderer's answers to the interpreter's three questions stay an ordinary
+render's, because a display list recorded once replays into either: a group
+is opened, composited at full strength in the page's grey with no knockout,
+and a soft mask's group is accepted and drawn into nothing — its paints are
+skipped, since nothing reads them — and is never installed. That buffer is
+then tinted by the toolbox (`toolbox::tint_grey`), `dark` the foreground and
+`light` the background, into the format the options ask for, opaque. So every
+pixel is the background plus its coverage times the difference,
 `(foreground * (255 - v) + background * v + 127) / 255` for the black-on-white
-grey `v`, **exactly**: the rounding is the tint's alone, not one a composite
-of two colours took at every overlap.
+grey `v`, written as a canvas of the format is filled, **exactly**: the
+rounding is the tint's alone, not one a composite of two colours took at every
+overlap. The page starts at the background whatever `transparent` asks, so a
+forced render is opaque; `premultiplied` then changes no byte of it. No
+transfer function (10.5) applies to a forced render, though its paints keep
+the graphics state's: the page's colours are what forced colours replace, and
+the tint is the final colour. Black generation and undercolour removal have
+nothing to act on, since nothing is turned into ink before the tint.
 
 **Fill-to-stroke** replaces the interior of every path fill (`f`, `f*` and the
-fill of `B`, `B*`, `b`, `b*`) by the stroke of the same path at 8.4.3.2's
-thinnest line, width 0 — one device pixel at any scale — solid, under the same
-clip. Glyphs, images and shadings are drawn as forced colours draw them. A page
-of fills so drawn is byte for byte its twin that strokes the same paths with
-`0 w`, both in forced colours.
+fill of `B`, `B*`, `b`, `b*`) by the stroke of the same path at width 0, solid,
+under the same clip and with the caps, joins and miter limit in force — the
+renderer's thinnest line (8.4.3.2), which a stroke of `0 w` draws too, at
+eight tenths of a device pixel anti-aliased and a whole one hard-edged, at any
+scale. Glyphs, images and shadings are drawn as forced colours draw them, and
+a Type 3 glyph is a glyph: its procedure's fills arrive inside the text object
+that shows it (9.6.5), and a fill inside a text object stays a fill. A page of
+fills so drawn is byte for byte its twin that strokes the same paths with
+`0 w [] 0 d`, both in forced colours.
 
 Off by default, so no fingerprint and no golden moves. A tile is the same
 pipeline over a smaller canvas (ruling 5), and the tint is a per-pixel map, so
@@ -306,7 +329,7 @@ a tile of a forced-colour page is the page's subregion byte for byte.
    background plus coverage times the difference, coverage read from the
    black-on-white render of the same page, computed in the test;
    `fill_to_stroke_draws_each_fill_as_its_stroke`: a page of fills renders
-   byte-identical to its twin stroking the same paths at width 0;
+   byte-identical to its twin stroking the same paths at width 0, solid;
    `render_regions.rs` holds a forced-colour tile to its page; both builds.
 5. **RC-09.6, fingerprints.** `bitmap_toolbox.rs`
    `the_toolbox_is_stable_across_targets` and `render_options.rs`
@@ -333,4 +356,5 @@ a tile of a forced-colour page is the page's subregion byte for byte.
 | Forced colours composited in two colours round differently at every overlap than the coverage they stand for | They are drawn as coverage and tinted once, so the closed form holds by construction |
 | The pyramid's per-level rounding breaks scale's area average past 128:1 | The toolbox never takes it; a one-off resize integrates exactly |
 | A span found through a floating-point inverse breaks the average's ties one way or the other | A scale plans its spans as the rationals they are, in `1 / width` and `1 / height` of a sample, and sums them with the sampler's own filter |
-| Fill-to-stroke reaches a fill whose path is not known | Only path fills become strokes; glyph, image and shading paints are not paths and are drawn as forced colours draw them |
+| Fill-to-stroke reaches a fill whose path is not known | Only path fills become strokes; glyph, image and shading paints are not paths and are drawn as forced colours draw them, and a fill inside a text object is a Type 3 glyph's and stays a fill |
+| A display list recorded for an ordinary render disagrees with a forced renderer about a group or a mask, and a replay drops the bracket's content | The forced renderer answers the interpreter's three questions as an ordinary one does — it opens every group and accepts every soft mask's group — and applies neither: a group composites at full strength, a mask is never installed |

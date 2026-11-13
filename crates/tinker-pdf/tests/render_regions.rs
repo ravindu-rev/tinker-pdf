@@ -144,7 +144,10 @@ mod written_support;
 
 use std::sync::Barrier;
 
-use tinker_pdf::{Document, DocumentBuilder, Page, PixelRegion, RenderOptions, RenderWarning};
+use tinker_pdf::{
+    Color, Document, DocumentBuilder, ForcedColours, Page, PixelRegion, RenderOptions,
+    RenderWarning,
+};
 
 mod region_support;
 mod render_support;
@@ -980,6 +983,47 @@ fn a_display_list_tiles_as_the_page_does() {
                 tile_divergence_through(page, &options, 37, &what, &|asked| list.render(asked))
             {
                 panic!("{message}: a tile of the recording is not the page under it");
+            }
+        }
+    };
+    check(&annotated, "annotations");
+    for fixture in fixtures() {
+        with_page(&fixture, |page| check(page, fixture.name));
+    }
+}
+
+/// **A forced-colour tile is the forced-colour page under it.** Every fixture
+/// and the annotated page in two colours, with fill-to-stroke and without, at
+/// two scales, a tile at a time, directly and from a display list: the
+/// coverage is drawn through the one frame every render shares and the tint
+/// is a function of one pixel, so each tile is its rectangle of the whole
+/// forced render byte for byte (ruling 5).
+#[test]
+fn a_forced_colour_tile_is_the_page_under_it() {
+    let annotated = Document::open(annotated_page()).expect("it opens");
+    let annotated = annotated.page(0).expect("a page");
+    let check = |page: &Page, name: &str| {
+        let list = page.display_list();
+        for (scale, tile) in [(1.0f64, 37u32), (1.5, 53)] {
+            for fill_to_stroke in [false, true] {
+                let options = RenderOptions {
+                    scale,
+                    forced_colours: Some(ForcedColours {
+                        background: Color::rgb(16, 24, 64),
+                        foreground: Color::rgb(255, 240, 160),
+                        fill_to_stroke,
+                    }),
+                    ..RenderOptions::default()
+                };
+                let what = format!("{name} in forced colours at {scale}x, {fill_to_stroke}");
+                tiles_are_the_page(page, &options, tile, &what);
+                if let Some(message) =
+                    tile_divergence_through(page, &options, tile, &what, &|asked| {
+                        list.render(asked)
+                    })
+                {
+                    panic!("{message}: a tile of the recording is not the page under it");
+                }
             }
         }
     };

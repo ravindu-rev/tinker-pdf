@@ -839,6 +839,15 @@ const MAX_TILE_AREA: u64 = 1 << 24;
 /// does.
 const MAX_TILE_WORK: u64 = 1 << 25;
 
+/// What a forced-colour render does differently
+/// ([`Renderer::with_forced_colours`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Forced {
+    /// Whether a path fill outside a text object paints the stroke of its
+    /// path at the thinnest width in place of its interior.
+    fill_to_stroke: bool,
+}
+
 /// The clip and the soft mask, with their page-frame rectangles, as `q` saves
 /// them (8.5.4, 11.6.5).
 struct Held {
@@ -1305,6 +1314,13 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// Whether every paint was fully opaque (11.7.5.2), for a tiling cell's
     /// [`Tile::opaque`].
     every_paint_opaque: bool,
+    /// Forced colours ([`Renderer::with_forced_colours`]); `None` for an
+    /// ordinary render.
+    forced: Option<Forced>,
+    /// Text objects open, each `BT` without its `ET` yet (9.4.1). A fill
+    /// inside one is a Type 3 glyph's procedure painting (9.6.5), which
+    /// fill-to-stroke leaves a glyph.
+    text_depth: u32,
 }
 
 /// One set of the rendering parameters 11.7.5.2 keeps per point: the
@@ -1516,6 +1532,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             removals: Vec::new(),
             parameters_spent: false,
             every_paint_opaque: true,
+            forced: None,
+            text_depth: 0,
         }
     }
 
@@ -1680,6 +1698,65 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
         self
+    }
+
+    /// Draws the page in **forced colours** (`docs/design/bitmap-toolbox.md`):
+    /// as its coverage, black on white, for the caller to tint into two
+    /// colours afterwards.
+    ///
+    /// Every fill, stroke and glyph paints opaque black by its own coverage —
+    /// whatever its colour, its DeviceCMYK ink, its pattern or a stencil's
+    /// fill colour — and an image or a shading paints its own colours, which
+    /// the white `Gray8` canvas the caller hands over holds as their
+    /// lightness, so its darkness is its coverage too. No constant alpha,
+    /// blend mode, soft mask, knockout or group colour space applies: every
+    /// paint is opaque and `Normal`, so the canvas ends as what the page's
+    /// marks make of white.
+    ///
+    /// The interpreter's three questions are answered as an ordinary render
+    /// answers them — a group is opened and composited at full strength, a
+    /// soft mask's group is accepted, drawn into nothing and never installed
+    /// — so a display list recorded for an ordinary render replays into this
+    /// one without a disagreement.
+    ///
+    /// With `fill_to_stroke`, each path fill paints, in place of its
+    /// interior, the stroke of the same path at 8.4.3.2's thinnest line,
+    /// solid, under the same clip, with the caps, joins and miter limit in
+    /// force: exactly what `0 w [] 0 d` and `S` would paint there. A fill
+    /// inside a text object is a Type 3 glyph's (9.6.5) and stays a fill, as
+    /// every glyph does.
+    #[must_use]
+    pub fn with_forced_colours(mut self, fill_to_stroke: bool) -> Self {
+        self.forced = Some(Forced { fill_to_stroke });
+        self
+    }
+
+    /// The state a paint is made with: `state` itself, or under forced
+    /// colours a copy whose paint is opaque black and `Normal`, with no ink
+    /// and no pattern ([`Renderer::with_forced_colours`]). Everything else —
+    /// the transform, the pen, the text state — is the page's.
+    fn painting<'s>(&self, state: &'s GraphicsState) -> std::borrow::Cow<'s, GraphicsState> {
+        if self.forced.is_none() {
+            return std::borrow::Cow::Borrowed(state);
+        }
+        let mut forced = state.clone();
+        forced.fill_color = tinker_pdf_content::Rgb::BLACK;
+        forced.stroke_color = tinker_pdf_content::Rgb::BLACK;
+        forced.fill_ink = None;
+        forced.stroke_ink = None;
+        forced.fill_alpha = 1.0;
+        forced.stroke_alpha = 1.0;
+        forced.blend = tinker_pdf_content::BlendMode::Normal;
+        forced.fill_pattern = None;
+        forced.stroke_pattern = None;
+        std::borrow::Cow::Owned(forced)
+    }
+
+    /// Whether what is drawn now would be thrown away unread: the inside of a
+    /// soft mask's group under forced colours, which install no soft mask, so
+    /// its paints are skipped rather than drawn into a buffer nothing reads.
+    fn discarding(&self) -> bool {
+        self.forced.is_some() && !self.mask_frames.is_empty()
     }
 
     /// Whether to stop now — and, if so, a record that this check is one that
@@ -2214,9 +2291,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // holds that space's components. Where it declared none it inherits the
         // one it will be composited into, which is what "the group's colour
         // space is the one it is painted onto" comes to in practice.
+        //
+        // Forced colours composite every group in the page's grey, whatever
+        // space it declared: a paint there is black or a lightness, and a
+        // trip through ink or Lab and back would round a grey that needs none.
         let format = match group.space {
-            Some(space) => Self::group_format_of(space),
-            None => Self::alpha_format(self.canvas.format),
+            Some(space) if self.forced.is_none() => Self::group_format_of(space),
+            _ => Self::alpha_format(self.canvas.format),
         };
         let buffer = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(x0, y0);
         self.count_group_buffer(&buffer);
@@ -2264,7 +2345,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             clip_bounds: self.clip_bounds,
             soft_bounds: self.soft_bounds.take(),
             frame: self.frame,
-            knockout: group.knockout,
+            // No knockout under forced colours: every element's coverage adds
+            // to what is under it, inside a group as on the page.
+            knockout: group.knockout && self.forced.is_none(),
             opaque,
             removal,
             clip_depth: self.clip_stack.len(),
@@ -2508,6 +2591,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self.clip_bounds = frame.clip_bounds;
         // The mask's own buffer on the page, before the parent's is restored.
         let inner_bounds = mem::replace(&mut self.frame, frame.frame);
+
+        // Forced colours install no soft mask: the group was accepted for the
+        // answer an ordinary render gives, and nothing in it was drawn.
+        if self.forced.is_some() {
+            self.soft = None;
+            self.soft_bounds = None;
+            return;
+        }
 
         // The group's box, read back, and beyond it the backdrop's value
         // (11.6.5.2). With a pale `/BC` the page outside the box is
@@ -4133,6 +4224,27 @@ fn stroke_color(state: &GraphicsState) -> Color {
     )
 }
 
+/// The pen `state` strokes a path with (8.4.3): the line width, cap, join,
+/// miter limit and dashes in force, all in user space.
+fn stroke_style(state: &GraphicsState) -> StrokeStyle {
+    StrokeStyle {
+        width: state.line_width,
+        cap: match state.line_cap {
+            ContentCap::Butt => LineCap::Butt,
+            ContentCap::Round => LineCap::Round,
+            ContentCap::Square => LineCap::Square,
+        },
+        join: match state.line_join {
+            ContentJoin::Miter => LineJoin::Miter,
+            ContentJoin::Round => LineJoin::Round,
+            ContentJoin::Bevel => LineJoin::Bevel,
+        },
+        miter_limit: state.miter_limit,
+        dashes: state.dashes.clone(),
+        dash_phase: state.dash_phase,
+    }
+}
+
 impl<G: GlyphSource> Device for Renderer<'_, G> {
     fn is_cancelled(&self) -> bool {
         self.stopping()
@@ -4150,7 +4262,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
-        if self.stopping() || self.hidden() {
+        if self.stopping() || self.hidden() || self.discarding() {
             return;
         }
         let built = self.to_path(path);
@@ -4163,6 +4275,33 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         } else {
             FillRule::NonZero
         };
+        let painting = self.painting(state);
+        let state: &GraphicsState = &painting;
+
+        // Forced colours' fill-to-stroke: the path's stroke at the thinnest
+        // width, solid, through the same pen `0 w [] 0 d S` takes, so a fill
+        // so drawn is that stroke byte for byte. A fill inside a text object
+        // is a Type 3 glyph's, and a glyph stays filled.
+        if self.forced.is_some_and(|forced| forced.fill_to_stroke) && self.text_depth == 0 {
+            let style = StrokeStyle {
+                width: 0.0,
+                dashes: Vec::new(),
+                dash_phase: 0.0,
+                ..stroke_style(state)
+            };
+            let stop = self.stop_predicate();
+            let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
+            let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
+            self.paint_inked(
+                outline,
+                stroke_color(state),
+                state.stroke_ink,
+                state.stroke_alpha,
+                blend_mode(state.blend),
+                &set,
+            );
+            return;
+        }
 
         // 8.7.3: a pattern supplies the paint, so the fill colour is not used
         // at all. Painting it would put `/Pattern`'s nominal black over every
@@ -4226,7 +4365,12 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         self.clip_bounds = Some(bounds);
     }
 
+    fn begin_text(&mut self) {
+        self.text_depth = self.text_depth.saturating_add(1);
+    }
+
     fn end_text(&mut self) {
+        self.text_depth = self.text_depth.saturating_sub(1);
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
@@ -4288,7 +4432,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
-        if self.stopping() || self.hidden() {
+        if self.stopping() || self.hidden() || self.discarding() {
             return;
         }
         let built = self.to_path(path);
@@ -4298,26 +4442,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // 10.7.2: the path, and the stroker's round joins and caps, are
         // flattened at the flatness in force.
         self.tolerance = flatness_tolerance(state);
+        let painting = self.painting(state);
+        let state: &GraphicsState = &painting;
 
         // 8.4.3.2: the line width is in user space, and so are the dashes —
         // the pen is stated in user units and `pen` carries it to the device.
         // A hairline still has to cover a pixel to be visible.
-        let style = StrokeStyle {
-            width: state.line_width,
-            cap: match state.line_cap {
-                ContentCap::Butt => LineCap::Butt,
-                ContentCap::Round => LineCap::Round,
-                ContentCap::Square => LineCap::Square,
-            },
-            join: match state.line_join {
-                ContentJoin::Miter => LineJoin::Miter,
-                ContentJoin::Round => LineJoin::Round,
-                ContentJoin::Bevel => LineJoin::Bevel,
-            },
-            miter_limit: state.miter_limit,
-            dashes: state.dashes.clone(),
-            dash_phase: state.dash_phase,
-        };
+        let style = stroke_style(state);
         // The dash expansion below is the part of a stroke that can run away:
         // 8.4.3.6 puts no floor on a dash length, so a page-long rule under a
         // fine array expands into a hundred thousand pieces per segment before
@@ -4379,9 +4510,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // layer clip away the visible ones -- and must not be counted as an
         // unreadable font, which is a warning about a page that is missing
         // something rather than about one that is doing as it was told.
-        if self.stopping() || self.hidden() {
+        if self.stopping() || self.hidden() || self.discarding() {
             return;
         }
+        let painting = self.painting(state);
+        let state: &GraphicsState = &painting;
         // 9.3.6: mode 3 paints nothing, which is exactly what a scanned page's
         // invisible OCR layer relies on. It is still extracted, just not drawn.
         //
@@ -4651,9 +4784,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // about the page: decoding first would report `UnsupportedImage` for
         // a JPX nobody was going to see, and paint the grey placeholder that
         // goes with it.
-        if self.stopping() || self.hidden() {
+        if self.stopping() || self.hidden() || self.discarding() {
             return;
         }
+        let painting = self.painting(state);
+        let state: &GraphicsState = &painting;
 
         // The size the page draws it at, in the page frame whatever canvas
         // this is (ruling 5), so a tile, a band and a replay ask alike.
@@ -4692,9 +4827,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
-        if self.stopping() || self.hidden() {
+        if self.stopping() || self.hidden() || self.discarding() {
             return;
         }
+        let painting = self.painting(state);
+        let state: &GraphicsState = &painting;
 
         let shading = match self.glyphs.shading(name) {
             Ok(Some(shading)) => shading,
@@ -4873,7 +5010,10 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if self.stopping() || self.hidden() {
             return false;
         }
-        self.open_group(group, state)
+        // Under forced colours a group's `ca` and `/BM` at the `Do` are its
+        // paint's too, and composite it opaque and `Normal`.
+        let painting = self.painting(state);
+        self.open_group(group, &painting)
     }
 
     fn end_group(&mut self) {
@@ -8801,6 +8941,196 @@ mod tests {
                 assert!(warnings.contains(&RenderWarning::Cancelled), "{steps:?}");
             }
         }
+    }
+}
+
+/// Forced colours (`Renderer::with_forced_colours`), driven through the
+/// device calls themselves: each paint black by its coverage whatever its
+/// state asked, fill-to-stroke as the thinnest stroke, and the interpreter's
+/// questions answered as an ordinary render answers them.
+#[cfg(test)]
+mod forced_colour_tests {
+    use super::*;
+    use tinker_pdf_content::{BlendMode as ContentBlend, Form, Group, GroupSpace, MaskGroup, Rgb};
+
+    const SIZE: u32 = 24;
+
+    static GLYPHS: NoGlyphs = NoGlyphs;
+
+    /// A square in user space with whole-pixel corners, so it covers each
+    /// pixel wholly or not at all and a composite has no edge to round.
+    fn square(x: f64, y: f64, side: f64) -> Vec<PathSegment> {
+        vec![
+            PathSegment::MoveTo { x, y },
+            PathSegment::LineTo { x: x + side, y },
+            PathSegment::LineTo {
+                x: x + side,
+                y: y + side,
+            },
+            PathSegment::LineTo { x, y: y + side },
+            PathSegment::Close,
+        ]
+    }
+
+    /// A renderer over a white grey canvas: forced, with or without
+    /// fill-to-stroke, or ordinary.
+    fn renderer(forced: Option<bool>) -> Renderer<'static, NoGlyphs> {
+        let canvas = Canvas::new(SIZE, SIZE, PixelFormat::Gray8, Color::WHITE);
+        let renderer = Renderer::new(canvas, page_transform(f64::from(SIZE), 1.0), &GLYPHS);
+        match forced {
+            Some(fill_to_stroke) => renderer.with_forced_colours(fill_to_stroke),
+            None => renderer,
+        }
+    }
+
+    /// The plain state: opaque black, `Normal`.
+    fn plain() -> GraphicsState {
+        GraphicsState::new(Matrix::IDENTITY)
+    }
+
+    /// A state asking for everything forced colours do not apply: colours,
+    /// ink, constant alphas, a blend mode, a pattern, and a pen that is wide
+    /// and dashed.
+    fn loud() -> GraphicsState {
+        let mut state = plain();
+        state.fill_color = Rgb { r: 255, g: 0, b: 0 };
+        state.stroke_color = Rgb { r: 0, g: 0, b: 255 };
+        state.fill_ink = Some([0, 255, 255, 0]);
+        state.stroke_ink = Some([255, 255, 0, 0]);
+        state.fill_alpha = 0.4;
+        state.stroke_alpha = 0.6;
+        state.blend = ContentBlend::Multiply;
+        state.line_width = 3.0;
+        state.dashes = vec![2.0, 1.0];
+        state.dash_phase = 0.5;
+        state
+    }
+
+    fn pixels(renderer: Renderer<'static, NoGlyphs>) -> Vec<u8> {
+        let (canvas, warnings) = renderer.finish();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        canvas.data
+    }
+
+    /// **Every paint is opaque black by its coverage**: a fill and a stroke
+    /// whose state asks for colour, ink, alpha and a blend mode paint what
+    /// the plain state paints, and a fill naming a pattern no scope holds
+    /// paints its shape rather than nothing.
+    #[test]
+    fn every_paint_is_opaque_black_by_its_coverage() {
+        let mut forced = renderer(Some(false));
+        forced.fill_path(&square(2.0, 2.0, 8.0), &loud(), false);
+        forced.stroke_path(&square(12.0, 12.0, 8.0), &loud());
+        let mut pattern = loud();
+        pattern.fill_pattern = Some(b"P0".to_vec());
+        forced.fill_path(&square(14.0, 2.0, 6.0), &pattern, false);
+
+        let mut ordinary = renderer(None);
+        let mut pen = plain();
+        pen.line_width = 3.0;
+        pen.dashes = vec![2.0, 1.0];
+        pen.dash_phase = 0.5;
+        ordinary.fill_path(&square(2.0, 2.0, 8.0), &plain(), false);
+        ordinary.stroke_path(&square(12.0, 12.0, 8.0), &pen);
+        ordinary.fill_path(&square(14.0, 2.0, 6.0), &plain(), false);
+        let forced = pixels(forced);
+        assert_eq!(forced, pixels(ordinary));
+        assert!(forced.contains(&0), "black was painted");
+    }
+
+    /// **Fill-to-stroke is the thinnest solid stroke of the path**: a fill
+    /// under a wide dashed pen paints exactly what stroking the same path
+    /// with `0 w [] 0 d` paints, and not its interior.
+    #[test]
+    fn fill_to_stroke_is_the_thinnest_solid_stroke_of_the_path() {
+        let mut fill = renderer(Some(true));
+        fill.fill_path(&square(4.0, 4.0, 14.0), &loud(), true);
+        let mut stroke = renderer(Some(false));
+        let mut thin = plain();
+        thin.line_width = 0.0;
+        stroke.stroke_path(&square(4.0, 4.0, 14.0), &thin);
+        let (fill, stroke) = (pixels(fill), pixels(stroke));
+        assert_eq!(fill, stroke);
+        let centre = (SIZE as usize / 2) * SIZE as usize + SIZE as usize / 2;
+        assert_eq!(fill[centre], 255, "the interior is not painted");
+        assert!(fill.iter().any(|&v| v < 255), "the outline is");
+    }
+
+    /// A fill inside a text object is a Type 3 glyph's, and a glyph stays
+    /// filled; after the text object a fill is a stroke again.
+    #[test]
+    fn a_fill_inside_a_text_object_stays_a_fill() {
+        let mut glyph = renderer(Some(true));
+        glyph.begin_text();
+        glyph.fill_path(&square(4.0, 4.0, 8.0), &plain(), false);
+        glyph.end_text();
+        let mut filled = renderer(Some(false));
+        filled.fill_path(&square(4.0, 4.0, 8.0), &plain(), false);
+        assert_eq!(pixels(glyph), pixels(filled));
+
+        let mut after = renderer(Some(true));
+        after.begin_text();
+        after.end_text();
+        after.fill_path(&square(4.0, 4.0, 8.0), &plain(), false);
+        let mut stroked = renderer(Some(true));
+        stroked.fill_path(&square(4.0, 4.0, 8.0), &plain(), false);
+        assert_eq!(pixels(after), pixels(stroked));
+    }
+
+    /// The interpreter's questions are answered as an ordinary render answers
+    /// them, so a display list recorded for one replays into the other; a
+    /// knockout group declaring ink composites opaque and `Normal`, and a
+    /// soft mask's group is drawn into nothing and never installed.
+    #[test]
+    fn forced_colours_answer_as_an_ordinary_render_and_install_no_soft_mask() {
+        let group = Group {
+            isolated: true,
+            knockout: true,
+            space: Some(GroupSpace::Cmyk),
+        };
+        let mask = MaskGroup {
+            form: Form {
+                content: Vec::new(),
+                matrix: Matrix::IDENTITY,
+                bbox: Some([0.0, 0.0, 24.0, 24.0]),
+                group: None,
+                stream: 0,
+            },
+            luminosity: true,
+            backdrop: None,
+            transfer: None,
+        };
+        let draw = |renderer: &mut Renderer<'static, NoGlyphs>| -> (bool, bool) {
+            let grouped = renderer.begin_group(group, &loud());
+            renderer.fill_path(&square(2.0, 2.0, 8.0), &loud(), false);
+            renderer.fill_path(&square(6.0, 6.0, 8.0), &loud(), false);
+            if grouped {
+                renderer.end_group();
+            }
+            let masked = renderer.begin_soft_mask(&mask, &square(0.0, 0.0, 24.0), &plain());
+            renderer.fill_path(&square(0.0, 0.0, 24.0), &plain(), false);
+            if masked {
+                renderer.end_soft_mask();
+            }
+            renderer.fill_path(&square(14.0, 14.0, 6.0), &loud(), false);
+            (grouped, masked)
+        };
+        let mut ordinary = renderer(None);
+        let mut forced = renderer(Some(false));
+        let answers = draw(&mut ordinary);
+        assert_eq!(draw(&mut forced), answers, "the same answers");
+        assert_eq!(answers, (true, true));
+
+        let mut direct = renderer(Some(false));
+        direct.fill_path(&square(2.0, 2.0, 8.0), &plain(), false);
+        direct.fill_path(&square(6.0, 6.0, 8.0), &plain(), false);
+        direct.fill_path(&square(14.0, 14.0, 6.0), &plain(), false);
+        let (forced, direct) = (pixels(forced), pixels(direct));
+        assert_eq!(forced, direct, "drawn as if no group or mask were there");
+        // An ordinary render masks the last square away under a black /BC.
+        let ordinary = pixels(ordinary);
+        let at = (SIZE as usize - 17) * SIZE as usize + 17;
+        assert_eq!((forced[at], ordinary[at]), (0, 255));
     }
 }
 

@@ -377,6 +377,66 @@ pub fn tint(layout: &Layout, data: &mut [u8], dark: Color, light: Color) -> bool
     })
 }
 
+/// A grey picture tinted into `format`, opaque: each grey `v` — its own
+/// lightness — placed on the ramp from `dark` to `light` exactly as [`tint`]
+/// places a pixel, each sRGB channel [`ramp`]'s, and the ramp's colour
+/// written as a canvas of `format` is filled, with an alpha of 255 where the
+/// format has one. What a forced-colour render's black-on-white coverage
+/// becomes (`docs/design/bitmap-toolbox.md`): black goes to `dark`, white to
+/// `light`, and every pixel between by its coverage.
+///
+/// `None` for a buffer that is not a `Gray8` picture or a result whose bytes
+/// cannot be had; otherwise the result's layout, its rows packed, and its
+/// bytes.
+#[must_use]
+pub fn tint_grey(
+    layout: &Layout,
+    data: &[u8],
+    dark: Color,
+    light: Color,
+    format: PixelFormat,
+) -> Option<(Layout, Vec<u8>)> {
+    if layout.format != PixelFormat::Gray8 {
+        return None;
+    }
+    let components = format.components();
+    let stride = (layout.width as usize).checked_mul(components)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(stride.checked_mul(layout.height as usize)?)
+        .ok()?;
+    // The 256 pixels a grey can become, worked out once.
+    let mut table = [[0u8; 5]; 256];
+    for (v, pixel) in table.iter_mut().enumerate() {
+        let v = v as u8;
+        let colour = Color::rgb(
+            ramp(dark.r, light.r, v),
+            ramp(dark.g, light.g, v),
+            ramp(dark.b, light.b, v),
+        );
+        let (bytes, count) = encode(format, colour);
+        pixel[..count].copy_from_slice(&bytes[..count]);
+        if format.has_alpha() {
+            pixel[count] = 255;
+        }
+    }
+    let picture = each_pixel(layout, data, |grey| {
+        if let Some(pixel) = grey.first().and_then(|&v| table.get(usize::from(v))) {
+            out.extend_from_slice(&pixel[..components]);
+        }
+        true
+    });
+    picture.then_some((
+        Layout {
+            format,
+            width: layout.width,
+            height: layout.height,
+            stride,
+            premultiplied: false,
+        },
+        out,
+    ))
+}
+
 /// Every pixel its own lightness, in its own format: a grey unchanged, RGB
 /// `(Y, Y, Y)`, ink `rgb_to_cmyk(Y, Y, Y)`, Lab its `L*` with `a*` and `b*`
 /// at the encoded zero, 128. `false`, with nothing done, for a buffer that is
@@ -836,6 +896,60 @@ mod tests {
         let mut translucent = data;
         translucent[14] = 254;
         assert_eq!(is_monochrome(&layout, &translucent), Some(false));
+    }
+
+    /// A grey picture tinted into each format is the ramp's colour as a canvas
+    /// of that format is filled with it, opaque: black at `dark`, white at
+    /// `light`, a grey between; its padding is not read, and a buffer that is
+    /// not a grey picture is refused.
+    #[test]
+    fn a_grey_tinted_into_a_format_is_the_ramp_filled_opaque() {
+        let dark = Color::rgb(10, 40, 200);
+        let light = Color::rgb(250, 240, 120);
+        let grey = Layout {
+            format: PixelFormat::Gray8,
+            width: 3,
+            height: 2,
+            stride: 4,
+            premultiplied: false,
+        };
+        let data = [0u8, 255, 100, 7, 255, 0, 200, 9];
+        for format in FORMATS {
+            let (layout, out) =
+                tint_grey(&grey, &data, dark, light, format).expect("a grey picture");
+            assert_eq!(
+                (layout.width, layout.height, layout.stride, layout.format),
+                (3, 2, 3 * format.components(), format)
+            );
+            assert!(!layout.premultiplied);
+            let values = [0u8, 255, 100, 255, 0, 200];
+            for (pixel, &v) in out.chunks_exact(format.components()).zip(&values) {
+                let ramped = Color::rgb(
+                    ramp(dark.r, light.r, v),
+                    ramp(dark.g, light.g, v),
+                    ramp(dark.b, light.b, v),
+                );
+                let canvas = Canvas::new(1, 1, format, ramped);
+                assert_eq!(pixel, &canvas.data[..], "{format:?}, grey {v}");
+            }
+            assert_eq!(
+                &out[..colours(format)],
+                &encode(format, dark).0[..colours(format)]
+            );
+        }
+        let not_grey = Layout {
+            format: PixelFormat::GrayA8,
+            ..grey
+        };
+        assert_eq!(
+            tint_grey(&not_grey, &data, dark, light, PixelFormat::Rgb8),
+            None
+        );
+        assert_eq!(
+            tint_grey(&grey, &data[..6], dark, light, PixelFormat::Rgb8),
+            None,
+            "the last row is cut"
+        );
     }
 
     /// A packed layout of `format`, `width` by `height`.

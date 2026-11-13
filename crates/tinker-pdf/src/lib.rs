@@ -767,6 +767,56 @@ pub struct RenderOptions {
     /// the same warnings. No caller's behaviour changes unless it asks; on
     /// wasm32 no thread starts and the same work runs on the caller.
     pub parallelism: Parallelism,
+    /// Draws the page in two colours for high contrast, or `None`, the
+    /// default, for its own colours. See [`ForcedColours`].
+    pub forced_colours: Option<ForcedColours>,
+}
+
+/// A page drawn in two colours by the coverage of what it paints, for high
+/// contrast ([`RenderOptions::forced_colours`],
+/// `docs/design/bitmap-toolbox.md`).
+///
+/// The page starts at `background`, and **every pixel is the background plus
+/// its coverage times the difference**: each channel
+/// `(foreground * (255 - v) + background * v + 127) / 255`, for `v` the grey
+/// the same page draws black on white, written in the bitmap's format as a
+/// canvas of it is filled and opaque — [`Bitmap::tint`]'s ramp, foreground
+/// at the dark end. In that black-on-white page every fill, stroke and glyph
+/// paints opaque black by its own coverage, whatever colour, ink or pattern
+/// it was given, a stencil mask included; an image or a shading paints the
+/// grey of its own lightness, so its darkness is its coverage too; and no
+/// constant alpha, blend mode, soft mask, knockout or group colour space
+/// applies, so every paint is opaque and `Normal`. The rounding is the
+/// tint's alone, taken once a pixel, not at every overlap of two colours.
+///
+/// The page is opaque whatever [`RenderOptions::transparent`] says: forced
+/// colours start it at the background. Every other option means what it
+/// means without them — the scale, the region, the format, anti-aliasing,
+/// cancellation, annotations — and a tile is the page's rectangle byte for
+/// byte (ruling 5). A [`DisplayList`] renders it as the page does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForcedColours {
+    /// What the page starts at, and what a pixel nothing covers is.
+    pub background: Color,
+    /// What a pixel wholly covered is.
+    pub foreground: Color,
+    /// Whether each path fill paints the stroke of its own path in place of
+    /// its interior: 8.4.3.2's thinnest line, solid, under the same clip and
+    /// with the caps and joins in force — exactly what stroking the path
+    /// with `0 w [] 0 d` paints. Glyphs, a Type 3 glyph's own fills among
+    /// them, images and shadings are drawn as forced colours draw them.
+    pub fill_to_stroke: bool,
+}
+
+impl Default for ForcedColours {
+    /// Black on white, fills filled.
+    fn default() -> Self {
+        ForcedColours {
+            background: Color::WHITE,
+            foreground: Color::BLACK,
+            fill_to_stroke: false,
+        }
+    }
 }
 
 impl Default for RenderOptions {
@@ -784,6 +834,7 @@ impl Default for RenderOptions {
             stats: false,
             usage: None,
             parallelism: Parallelism::Serial,
+            forced_colours: None,
         }
     }
 }
@@ -3023,12 +3074,21 @@ impl Page {
         // converted back for the caller at the end; 11.4.7 says the page group
         // is composited and then converted to the output device's space, which
         // is exactly those two steps.
+        //
+        // Forced colours draw the page's coverage black on white into grey,
+        // whatever space it composites in, and tint it into the format asked
+        // for at the end ([`ForcedColours`]).
+        let forced = options.forced_colours;
         let page_space = resources.page_group_space(&self.inner);
         // A blue-first order is an output order: the page composites red
         // first and is reordered by the `extract` below.
-        let canvas_format = page_space
-            .map(tinker_pdf_render::group_format)
-            .unwrap_or_else(|| tinker_pdf_render::canvas_format(options.format));
+        let canvas_format = if forced.is_some() {
+            PixelFormat::Gray8
+        } else {
+            page_space
+                .map(tinker_pdf_render::group_format)
+                .unwrap_or_else(|| tinker_pdf_render::canvas_format(options.format))
+        };
         // What the caller is handed, decided before the canvas exists: a page
         // may start with nothing on it only if the format it comes back in can
         // say so. A transparent canvas converted to `Rgb8` at the end would
@@ -3045,6 +3105,9 @@ impl Page {
             .with_antialias(options.antialias);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
+        }
+        if let Some(forced) = forced {
+            renderer = renderer.with_forced_colours(forced.fill_to_stroke);
         }
         paint(&mut renderer, resources);
         let (canvas, warnings, counts, parameters) = renderer.finish_with_parameters();
@@ -3067,24 +3130,59 @@ impl Page {
         // Back to something a caller can read. A page group composited over
         // ink comes back as light, which is 11.4.7's own last step — unless
         // the caller asked for ink by name *and* said they know it is ink.
-        let mut canvas = if canvas.format == wanted {
-            canvas
-        } else {
-            canvas.extract(canvas.origin(), canvas.width, canvas.height, wanted)
+        // Forced colours' black-on-white coverage is tinted into the format
+        // asked for instead, foreground at the dark end — once a pixel, so the
+        // rounding is the tint's alone — and no transfer function applies to
+        // it: the page's colours are what forced colours replace.
+        let (width, height) = (canvas.width, canvas.height);
+        let (format, stride, data) = match forced {
+            Some(forced) => {
+                let grey = tinker_pdf_raster::toolbox::Layout {
+                    format: canvas.format,
+                    width,
+                    height,
+                    stride: canvas.stride,
+                    premultiplied: false,
+                };
+                match tinker_pdf_raster::toolbox::tint_grey(
+                    &grey,
+                    &canvas.data,
+                    forced.foreground,
+                    forced.background,
+                    wanted,
+                ) {
+                    Some((layout, data)) => (wanted, layout.stride, data),
+                    // A region off the page has no pixels to tint.
+                    None => (
+                        wanted,
+                        (width as usize).saturating_mul(wanted.components()),
+                        Vec::new(),
+                    ),
+                }
+            }
+            None => {
+                let mut canvas = if canvas.format == wanted {
+                    canvas
+                } else {
+                    canvas.extract(canvas.origin(), width, height, wanted)
+                };
+                // 10.5 and 11.7.5.2: the transfer functions of each point's
+                // topmost fully opaque object, on the output's own components,
+                // now that the final colour there is known and in the
+                // output's space.
+                if let Some(parameters) = &parameters {
+                    parameters.apply(&mut canvas);
+                }
+                (canvas.format, canvas.stride, canvas.data)
+            }
         };
-        // 10.5 and 11.7.5.2: the transfer functions of each point's topmost
-        // fully opaque object, on the output's own components, now that the
-        // final colour there is known and in the output's space.
-        if let Some(parameters) = &parameters {
-            parameters.apply(&mut canvas);
-        }
 
         let mut pixels = Bitmap {
-            width: canvas.width,
-            height: canvas.height,
-            format: canvas.format,
-            stride: canvas.stride,
-            data: canvas.data,
+            width,
+            height,
+            format,
+            stride,
+            data,
             warnings: Vec::new(),
             premultiplied: false,
             stats: resources.work().map(|work| work.stats()),
