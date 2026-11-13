@@ -1025,6 +1025,22 @@ The content crate's doors it reads are each usable alone:
 `SearchOptions::fold`, `TextPage::folded_lines`, `Needle`,
 `TextLine::span_quad` and `plain::hyphen_join`.
 
+`tpdf grep <needle> <file.pdf>...` runs the search from the command line, a
+wrapper over `Document::search` (ruling 11): `--case-sensitive`,
+`--whole-word` and `--ignore-diacritics` are the page search's options,
+`--keep-lines`, `--keep-paragraphs` and `--keep-hyphens` the joins,
+`--sources` a comma-separated list of `pages`, `annotations`, `fields`,
+`outline`, `attachments` and `attached` or `all`, the default, and
+`--password` opens an encrypted file as the reading verbs do, the empty
+password tried otherwise. Each hit is one line,
+`<file>:<place>: <before>[<hit>]<after>`; a file that does not open and each
+attachment the search did not read are named on standard error; and the
+status is 0 for a hit with everything read, 1 for none, and 2 when anything
+could not be read. `tools/tpdf/src/grep.rs`'s tests run it over `testdata/`:
+`page 3 of 3` once, on `simple-text.pdf`'s third page, `Chapter 1` once, in
+`outline-3level.pdf`'s outline, and the two encrypted fixtures named when no
+password is given.
+
 ### Words and word boxes (UAX #29)
 
 `TextLine::words()` returns the line's words as `TextWord`s — the word's

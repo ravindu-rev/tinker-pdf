@@ -14,6 +14,7 @@
 
 #[cfg(test)]
 mod doubled_peak;
+mod grep;
 mod images;
 mod source;
 mod writing;
@@ -36,8 +37,8 @@ macro_rules! say {
 use tinker_pdf::{
     BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, HeaderEvidence,
     InferenceOptions, InferredOrder, LadderLevel, ObjRef, Object, OrderedText, Page, PageTables,
-    Parallelism, ReadingOrder, RenderOptions, Sanitise, SimpleFontProvider, StreamObj,
-    StructureTree, TableEvidence, TableSource, TextFormat, TextWriter, Tier, WriteMode,
+    Parallelism, ReadingOrder, RenderOptions, Sanitise, SearchSources, SimpleFontProvider,
+    StreamObj, StructureTree, TableEvidence, TableSource, TextFormat, TextWriter, Tier, WriteMode,
     WriteOptions, XrefEntry,
 };
 
@@ -56,6 +57,9 @@ usage:
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
   tpdf check   <file.pdf>... [--strict] [--pdfa] [--pdfua] [--pdfx]
+  tpdf grep    <needle> <file.pdf>... [--case-sensitive] [--whole-word]
+                          [--ignore-diacritics] [--keep-lines] [--keep-paragraphs]
+                          [--keep-hyphens] [--sources LIST] [--password P]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH] [--stages [--stage-limit S]]
 
 writing (each writes a new file, and takes --font-policy and the image flags):
@@ -116,6 +120,21 @@ options:
                structure tree states, or else ones inferred from what the page
                draws, labelled as such; a line for each table, then one for
                each cell
+  --case-sensitive
+               with grep, match case exactly
+  --whole-word with grep, a hit begins and ends on a word boundary
+  --ignore-diacritics
+               with grep, accents and other diacritics are not significant
+  --keep-lines with grep, no hit crosses a line's end
+  --keep-paragraphs
+               with grep, no hit crosses a block's end, and so a page's
+  --keep-hyphens
+               with grep, a word hyphenated at a line's end stays two words
+  --sources LIST
+               with grep, what is searched: pages, annotations, fields,
+               outline, attachments (their names and descriptions) and
+               attached (the PDFs attached), comma-separated, or all (the
+               default)
 
 writing options:
   --out FILE   the file a writing command writes; for split, a directory
@@ -176,6 +195,18 @@ and to stdout. The default is 1.
 `check` opens each file and reports its warnings, exiting non-zero if any
 file failed to open at all. It never renders, so it is the fast pass over a
 corpus.
+
+`grep` searches each file for the needle, its first argument: the page text
+joined across lines, blocks and pages, then the annotations, the form fields'
+values, the outline, the attachments' names and descriptions and the PDFs
+attached, as `--sources` lets it. Each hit is one line on standard output,
+`<file>:<place>: <before>[<hit>]<after>`, the place `page N`, `pages N-M`,
+`annotation I on page N (contents)`, `field NAME`, `outline T1 > T2` or
+`attachment NAME (description)`, after `attached NAME >` for each attachment
+a hit is inside. A file that does not open, or that its password does not
+open, is named on standard error, and so is each attachment it did not read.
+It exits 0 when it found a hit and read everything, 1 when it found none and
+read everything, and 2 when anything could not be read.
 
 `--strict` adds the validator of ruling 13: the file is read again with the
 leniency ladder off and held to the structures a tolerant read never consults
@@ -312,6 +343,15 @@ fn main() -> ExitCode {
         }
     };
 
+    if args[0] == "grep" {
+        let status = grep::run(
+            &options,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        );
+        return ExitCode::from(status);
+    }
+
     let result = match args[0].as_str() {
         "info" => run(&options, info),
         "text" => run(&options, text),
@@ -385,6 +425,21 @@ struct Options {
     /// (`RenderOptions::simulate_overprint`). Off unless asked, so no
     /// existing invocation changes.
     overprint: bool,
+    /// `--case-sensitive`, for `grep`: match case exactly.
+    case_sensitive: bool,
+    /// `--whole-word`, for `grep`: a hit begins and ends on a word boundary.
+    whole_word: bool,
+    /// `--ignore-diacritics`, for `grep`: diacritics are not significant.
+    ignore_diacritics: bool,
+    /// `--keep-lines`, for `grep`: no hit crosses a line's end.
+    keep_lines: bool,
+    /// `--keep-paragraphs`, for `grep`: no hit crosses a block's end.
+    keep_paragraphs: bool,
+    /// `--keep-hyphens`, for `grep`: no line is rejoined at a hyphen.
+    keep_hyphens: bool,
+    /// `--sources LIST`, for `grep`: what is searched; every source when it
+    /// is not given.
+    sources: Option<SearchSources>,
     /// Print the record format version and stop, naming no file.
     ///
     /// The corpus runner asks before it spawns anything, because a child one
@@ -513,6 +568,13 @@ impl Options {
             order: ReadingOrder::Stream,
             tables: false,
             overprint: false,
+            case_sensitive: false,
+            whole_word: false,
+            ignore_diacritics: false,
+            keep_lines: false,
+            keep_paragraphs: false,
+            keep_hyphens: false,
+            sources: None,
             record_version: false,
             stages: false,
             stage_limit: None,
@@ -643,6 +705,13 @@ impl Options {
                 }
                 "--tables" => options.tables = true,
                 "--overprint" => options.overprint = true,
+                "--case-sensitive" => options.case_sensitive = true,
+                "--whole-word" => options.whole_word = true,
+                "--ignore-diacritics" => options.ignore_diacritics = true,
+                "--keep-lines" => options.keep_lines = true,
+                "--keep-paragraphs" => options.keep_paragraphs = true,
+                "--keep-hyphens" => options.keep_hyphens = true,
+                "--sources" => options.sources = Some(grep::sources(&value()?)?),
                 // The two values `FontPolicy` has, by the names it gives them.
                 // Anything else is refused: a typo that fell back to the
                 // default would subset a document somebody asked to keep
