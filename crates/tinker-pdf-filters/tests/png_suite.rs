@@ -21,7 +21,7 @@
 //! ```text
 //! curl -LO http://www.schaik.com/pngsuite/PngSuite-2017jul19.zip
 //! unzip -d pngsuite PngSuite-2017jul19.zip
-//! TINKER_PNGSUITE=$PWD/pngsuite cargo test -p tinker-pdf-filters --test png_suite
+//! TINKER_PNGSUITE=$PWD/pngsuite cargo test -p tinker-pdf-filters --test png_suite -- --nocapture
 //! ```
 //!
 //! Gap 17's SerenityOS JBIG2 streams are the precedent for both halves of that:
@@ -110,14 +110,16 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tinker_pdf_filters::{
-    crc32, flate_decode, png_decode, png_encode, png_scan, zlib_compress, Limits, PngColour,
-    PngError, PngImage, PngSource, PNG_SIGNATURE,
+    crc32, flate_decode, png_decode, png_encode, png_scan, zlib_compress_at, DeflateLevel, Limits,
+    PngColour, PngError, PngImage, PngSource, PNG_SIGNATURE,
 };
 
-/// Printed once per test that actually read the corpus. CI greps for it.
+/// Printed once per test that actually read the corpus. A local run is proof
+/// only where every test prints it (`docs/verification.md`).
 const RAN: &str = "pngsuite-oracle: RAN";
 
-/// Printed once per test that could not. CI greps for it too, and fails.
+/// Printed once per test that could not, which is every test in CI, since CI
+/// fetches nothing.
 const SKIPPED: &str = "pngsuite-oracle: SKIPPED";
 
 /// Comfortably above the 256 x 256 montage, which is the largest file present.
@@ -764,7 +766,9 @@ fn unfilter_by_clause_9_2(stream: &[u8], width: usize, height: usize, bpp: usize
 /// The container is asserted against the specification rather than against the
 /// reader: the signature, IHDR first with 11.2.2's thirteen bytes, IEND last
 /// and empty, every chunk's CRC recomputed over its type and its data, and the
-/// IDAT payload equal to what `zlib_compress` makes of the filtered stream.
+/// IDAT payload equal to the zlib stream the fast level makes of the filtered
+/// stream, the level the writer compresses at (`DeflateLevel::Fast`), which
+/// is the same bytes however the stream is fed.
 #[test]
 fn every_file_in_the_suite_survives_a_pass_through_this_encoder() {
     with_suite!("encoder-round-trip", |dir| {
@@ -786,8 +790,8 @@ fn every_file_in_the_suite_survives_a_pass_through_this_encoder() {
             let (idat, stream) = idat_and_stream(&file, &name);
             assert_eq!(
                 idat,
-                zlib_compress(&stream),
-                "{name}: the IDAT is not zlib_compress of its own filtered stream"
+                zlib_compress_at(&stream, DeflateLevel::Fast),
+                "{name}: the IDAT is not the fast level's zlib stream of its own filtered stream"
             );
             let walked = chunks(&file, &name);
             let ihdr = &walked[0].1;

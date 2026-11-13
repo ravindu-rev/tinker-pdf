@@ -587,12 +587,21 @@ spawns nothing. What stands where an outside program would:
 Ruling 13 removes *programs* from the verification surface and keeps *inputs*,
 and PngSuite is squarely the second: Willem van Schaik's 176 files say what a
 PNG implementation should do by being deliberately correct in 162 documented
-ways and deliberately broken in fourteen. Nothing of it is committed. It is
-fetched — `http://www.schaik.com/pngsuite/PngSuite-2017jul19.zip`, with
-`TINKER_PNGSUITE` pointing at the extracted directory — and
+ways and deliberately broken in fourteen. Nothing of it is committed, and CI,
+which fetches nothing, skips it. It runs locally, fetched once into a
+directory of its own, with `TINKER_PNGSUITE` pointing at what it extracts to:
+
+```sh
+curl -LO http://www.schaik.com/pngsuite/PngSuite-2017jul19.zip
+unzip -d pngsuite PngSuite-2017jul19.zip
+TINKER_PNGSUITE=$PWD/pngsuite \
+  cargo test -p tinker-pdf-filters --test png_suite -- --nocapture
+```
+
 `crates/tinker-pdf-filters/tests/png_suite.rs` prints `pngsuite-oracle: RAN` or
 `pngsuite-oracle: SKIPPED` per test, because a skipped check exits 0 and reads
-exactly like a pass.
+exactly like a pass, so a run is proof only where every one of its tests
+prints `RAN` and none prints `SKIPPED`.
 
 **It adjudicates the decoder**: the filename convention is an independent
 statement of every IHDR, the fifteen `bas*` pairs are Table 11.1's fifteen
@@ -620,8 +629,9 @@ that compare two *third-party* files against each other — the Adam7 twins and
 the published equivalence classes — because a shared defect has nothing there
 to cancel against. The container is held to clause 5 on the way past —
 signature, IHDR first, IEND last and empty, every CRC recomputed over its
-chunk's type and data, and the IDAT payload equal to `zlib_compress` of the
-filtered stream.
+chunk's type and data, and the IDAT payload equal to the zlib stream the
+writer's fast level makes of the filtered stream
+(`zlib_compress_at(stream, DeflateLevel::Fast)`).
 
 What PngSuite cannot see is the `Bitmap` side of it — it has no `PixelFormat`
 and no notion of ink or `L*a*b*` — so the format mapping is
