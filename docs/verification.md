@@ -27,6 +27,7 @@ recorded in the roadmap row it closes:
 | --- | --- |
 | The gates — fmt, clippy, the tests, the determinism and shaping fingerprints, the examples, `cargo xtask check` | `python3 -I tools/gates.py` |
 | Fuzzing, on Linux | `cargo fuzz build`, then `cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=20 -timeout=20` a target |
+| The fuzzing service's build, on Linux | `fuzz/service/Dockerfile`'s image built over `git archive HEAD`, its `compile` run, then `cargo xtask fuzz --service-out DIR` (`fuzz/README.md`) |
 | The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner |
 | The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
 | The benches | `cargo bench -p tinker-pdf`, then `cargo xtask bench-check --machine NAME` |
@@ -49,6 +50,19 @@ They run locally, on Linux. `cargo fuzz build` builds every target, and
 seconds; a longer session is the same command with a longer
 `-max_total_time`. A change to a parser runs its target before it lands, and
 an input a session finds is committed as a seed of that target.
+
+The build a public continuous-fuzzing service runs is in the tree too,
+`fuzz/service/build.sh` ([design/continuous-fuzzing.md](design/continuous-fuzzing.md)):
+every target in the sessions' mode, its seeds packed from its corpus when the
+build runs and its options the sessions' `-timeout=20`, so a crash or a
+timeout the service reports is one a session here reproduces. It is built
+locally the way the service builds it — `fuzz/service/Dockerfile`'s image
+over the commit, and the image's `compile` — and `cargo xtask fuzz
+--service-out DIR` reads what it wrote, naming every target whose binary is
+missing or not an ELF file, whose seed archive does not read back through
+`tinker_pdf_zip` to exactly the files of its corpus, byte for byte, or whose
+options file does not set the sessions' timeout. The service's own check of
+a build runs the targets and decides nothing here (ruling 13).
 
 `cff_subset` is the one target that fuzzes a **writer**. Its assertion is
 not "it did not panic": whatever the subsetter emits must parse with this

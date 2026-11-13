@@ -59,6 +59,31 @@ its own profile and sanitizer flags, and `libfuzzer-sys` pulls in a C++
 runtime the engine itself refuses — tooling is exempt from the hand-rolled
 rule, and none of it ships inside the library.
 
+## The continuous-fuzzing service's build
+
+`service/build.sh` is the build a public continuous-fuzzing service runs
+([`docs/design/continuous-fuzzing.md`](../docs/design/continuous-fuzzing.md)):
+every target in `fuzz_targets/`, built in the local sessions' mode, written
+to `$OUT` beside `<target>_seed_corpus.zip`, every file of
+`corpus/<target>/` packed when the build runs, and `<target>.options`,
+which holds the sessions' `timeout = 20`. `service/Dockerfile` is the
+service's recipe with its clone of this repository replaced by the commit
+it is built from. To build it locally, from the checkout's root, on a
+machine with Docker running Linux containers:
+
+```sh
+git archive HEAD | docker build -f fuzz/service/Dockerfile -t tinker-pdf-fuzz-service -
+docker run --rm --privileged -e FUZZING_LANGUAGE=rust -e SANITIZER=address \n  -e FUZZING_ENGINE=libfuzzer -e ARCHITECTURE=x86_64 \n  -v "$PWD/target/fuzz-service:/out" tinker-pdf-fuzz-service compile
+cargo xtask fuzz --service-out target/fuzz-service
+```
+
+The first builds the image over the commit, the second is the service's own
+build in it — `compile` runs `build.sh` in the configuration the service's
+address build sets, and is privileged because `compile` sets a kernel
+parameter first — and the third checks what it wrote: each target's binary
+an ELF file, its seed archive exactly its corpus, file for file, and its
+options the sessions' timeout. Nothing in the three runs a target.
+
 ## What runs without nightly
 
 Because these targets need a toolchain nobody has by accident, they cannot be

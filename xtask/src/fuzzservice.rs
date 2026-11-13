@@ -454,4 +454,34 @@ mod tests {
             None
         );
     }
+
+    /// The build writes what this check reads: the options it writes for
+    /// every target are, as this reads them, the sessions' timeout, and it
+    /// writes the archive and options names the service looks for beside a
+    /// binary.
+    #[test]
+    fn the_options_the_build_writes_are_the_ones_this_check_holds() {
+        let script = std::fs::read_to_string(crate::repo_root().join("fuzz/service/build.sh"))
+            .expect("fuzz/service/build.sh");
+        let written = script
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                line.strip_prefix("printf '")
+                    .and_then(|rest| rest.split_once("' > \"$OUT/$target.options\""))
+                    .map(|(format, _)| format.replace("\\n", "\n"))
+            })
+            .expect("fuzz/service/build.sh writes no options file");
+        assert_eq!(
+            libfuzzer_timeout(&written),
+            Some(SESSION_TIMEOUT_SECONDS),
+            "fuzz/service/build.sh writes {written:?}"
+        );
+        assert!(
+            script.contains("\"$OUT/${target}_seed_corpus.zip\""),
+            "fuzz/service/build.sh does not write the seed archive's name"
+        );
+        assert_eq!(seed_archive("x"), "x_seed_corpus.zip");
+        assert_eq!(options_file("x"), "x.options");
+    }
 }

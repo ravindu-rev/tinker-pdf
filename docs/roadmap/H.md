@@ -84,7 +84,7 @@ this file for [ruling 23](../rulings.md) or the ruling that states it.
 | H-115 | Release engineering beyond today's registries: Maven Central (account and signing key), RubyGems, Go module tags, the Swift package index; code signing and notarisation of native libraries and wheels | SU-17, SU-15; also SU-20, whose steps wait on it |
 | H-117 | A hardware key store session (PKCS#11 token, smart card or HSM) to confirm SG-27's provider on real hardware — SG-27.2's local run signs through a software token | SG-27's hardware claim |
 | H-118 | A remote-signing test account, plug-test registration, trusted-list endpoints | SG-24, SG-12, SG-14 |
-| H-119 | Apply to a public continuous-fuzzing service | K-10 |
+| H-119 | Apply to a public continuous-fuzzing service, submitting the service-side files `docs/design/continuous-fuzzing.md` gives | the service's builds of `fuzz/service/build.sh` and its crash reports |
 | H-120 | Export-control notification for published cryptographic source; licence review of trust-list and model data | publishing with SG rows |
 | H-121 | A security-advisory process: advisories and identifiers issued, a disclosure timeline | — |
 | H-122 | Obtain the published definition of JPEG XL as a PDF image filter — its name, parameters and colour handling — once it is published | FI-07c |
