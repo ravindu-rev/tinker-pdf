@@ -5,25 +5,27 @@
 //! Algorithm 2.B's hardened hash runs CBC with no padding at all and an
 //! explicit IV (7.6.4.3.4).
 //!
-//! **Encryption runs on a sliced core** (`docs/design/crypto-throughput.md`).
-//! The state is eight planes of 64-bit words, plane `b` holding bit `b` of
-//! every byte of four blocks; SubBytes is a boolean circuit over the planes
-//! and the linear layers are shifts and XORs, so no table is read at an index
-//! a state byte or a key byte chooses, and nothing branches on either. The
-//! key schedule runs SubWord through the same circuit. The core records, in
-//! test builds, every table it reads and every condition it tests, and a test
-//! holds that record equal over random keys and blocks
-//! (`the_core_reads_no_secret_indexed_table_and_branches_alike`). The circuit
-//! and the cipher are held to FIPS 197 when the crate compiles: the `const`
-//! item below this module's core fails the build if they disagree.
-//!
-//! **Decryption is not a claim of constant-time execution.** The inverse
-//! cipher reads an inverse S-box table at each state byte and multiplies in
-//! GF(2^8) by a loop that branches on the multiplier's bits.
+//! **This is a claim of constant-time execution, in the source.** Both
+//! directions run on a sliced core (`docs/design/crypto-throughput.md`): the
+//! state is eight planes of 64-bit words, plane `b` holding bit `b` of every
+//! byte of four blocks; SubBytes is a boolean circuit over the planes and its
+//! inverse the same circuit between two inverse affine maps, and the linear
+//! layers are shifts and XORs, so no table is read at an index a state byte
+//! or a key byte chooses, and nothing branches on either. The key schedule
+//! runs SubWord through the same circuit, and a decryption's padding check
+//! reads its last block whole and decides by masks. The core records, in test
+//! builds, every table it reads and every condition it tests, and two tests
+//! hold that record equal over random keys and blocks
+//! (`the_core_reads_no_secret_indexed_table_and_branches_alike` and
+//! `the_inverse_core_reads_no_secret_indexed_table_and_branches_alike`). The
+//! circuits and the cipher are held to FIPS 197 when the crate compiles: the
+//! `const` item below this module's core fails the build if they disagree.
+//! What the source cannot show is the machine code a target runs, which H-67
+//! reviews.
 
-/// FIPS 197's S-box (5.1.1). Encryption never reads it: the circuit in
-/// [`sub_bytes`] is held to it at every input when the crate compiles, and
-/// the inverse cipher reads its inverse.
+/// FIPS 197's S-box (5.1.1). Nothing reads it but the `const` item that
+/// holds the circuit in [`sub_bytes`] to it at every input, and its inverse
+/// to [`inv_sub_bytes`], when the crate compiles.
 const SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -46,35 +48,6 @@ const SBOX: [u8; 256] = [
 const RCON: [u8; 11] = [
     0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36,
 ];
-
-fn inv_sbox() -> [u8; 256] {
-    let mut inv = [0u8; 256];
-    for (i, &s) in SBOX.iter().enumerate() {
-        if let Some(slot) = inv.get_mut(usize::from(s)) {
-            *slot = i as u8;
-        }
-    }
-    inv
-}
-
-/// Multiplication in GF(2^8) with the AES reduction polynomial 0x11b.
-fn xtime(x: u8) -> u8 {
-    (x << 1) ^ if x & 0x80 != 0 { 0x1b } else { 0 }
-}
-
-fn mul(a: u8, b: u8) -> u8 {
-    let mut result = 0u8;
-    let mut a = a;
-    let mut b = b;
-    while b != 0 {
-        if b & 1 != 0 {
-            result ^= a;
-        }
-        a = xtime(a);
-        b >>= 1;
-    }
-    result
-}
 
 // ---------------------------------------------------------------------------
 // The sliced core (`docs/design/crypto-throughput.md`).
@@ -420,6 +393,33 @@ const fn sub_bytes(x: &mut Word) {
     x[0] = !(l6 ^ l23);
 }
 
+/// FIPS 197 5.3.2's inverse of the affine map, over planes:
+/// `b'_i = b_(i+2) ⊕ b_(i+5) ⊕ b_(i+7) ⊕ d_i` with `d` = 0x05, which sets
+/// bits 0 and 2.
+#[inline(always)]
+const fn inv_affine(x: &mut Word) {
+    let v = *x;
+    x[0] = !(v[2] ^ v[5] ^ v[7]);
+    x[1] = v[3] ^ v[6] ^ v[0];
+    x[2] = !(v[4] ^ v[7] ^ v[1]);
+    x[3] = v[5] ^ v[0] ^ v[2];
+    x[4] = v[6] ^ v[1] ^ v[3];
+    x[5] = v[7] ^ v[2] ^ v[4];
+    x[6] = v[0] ^ v[3] ^ v[5];
+    x[7] = v[1] ^ v[4] ^ v[6];
+}
+
+/// InvSubBytes (5.3.2): the S-box is the affine map of the inverse in
+/// GF(2^8), so the inverse S-box is the inverse affine map of the S-box of
+/// the inverse affine map — the forward circuit between two of them, and no
+/// table.
+#[inline(always)]
+const fn inv_sub_bytes(x: &mut Word) {
+    inv_affine(x);
+    sub_bytes(x);
+    inv_affine(x);
+}
+
 /// Each sixteen-bit row of `x` rotated right by `shift`, a multiple of four
 /// under sixteen: column `c + shift / 4` of each row brought to column `c`.
 #[inline(always)]
@@ -485,6 +485,52 @@ const fn mix_columns(x: &mut Word, round: usize, trace: &mut Trace) {
     }
 }
 
+/// `SR^-J ∘ InvMixColumns ∘ SR^J` (5.3.3 conjugated). InvMixColumns' row
+/// `[0E 0B 0D 09]` is MixColumns' `[02 03 01 01]` times `[05 00 04 00]` as
+/// circulants, so it is `D` and then MixColumns, `D(a)_r = a_r ⊕ 4(a_r ⊕
+/// a_(r+2))`; conjugated alike, `D`'s neighbour is two rows down and `2J`
+/// columns across, and `4·` on planes is a renaming of them and six XORs.
+#[inline(always)]
+const fn unmix<const J: u32>(x: &mut Word, trace: &mut Trace) {
+    let mut y = [0u64; 8];
+    let mut b = 0;
+    while trace.branch(SITE_PLANE, b < 8) {
+        y[b] = x[b] ^ moved(x[b], 2, 2 * J);
+        b += 1;
+    }
+    let quadrupled = [
+        y[6],
+        y[6] ^ y[7],
+        y[0] ^ y[7],
+        y[1] ^ y[6],
+        y[2] ^ y[6] ^ y[7],
+        y[3] ^ y[7],
+        y[4],
+        y[5],
+    ];
+    b = 0;
+    while trace.branch(SITE_PLANE, b < 8) {
+        x[b] ^= quadrupled[b];
+        b += 1;
+    }
+    mix::<J>(x, trace);
+}
+
+/// The inverse cipher's mixing for a state held as `SR^moved` of the
+/// cipher's: `SR^moved ∘ InvMixColumns ∘ SR^-moved`, which is [`unmix`] at
+/// the drift `−moved` modulo 4, the count public.
+#[inline(always)]
+const fn unmix_columns(x: &mut Word, moved: usize, trace: &mut Trace) {
+    let drift = (4 - moved % 4) % 4;
+    trace.choice(SITE_DRIFT, drift);
+    match drift {
+        0 => unmix::<0>(x, trace),
+        1 => unmix::<1>(x, trace),
+        2 => unmix::<2>(x, trace),
+        _ => unmix::<3>(x, trace),
+    }
+}
+
 /// `SR²`, ShiftRows twice: rows 1 and 3 moved two columns across, rows 0 and
 /// 2 as they stand.
 #[inline(always)]
@@ -507,17 +553,18 @@ const fn add_round_key(x: &mut Word, key: &Word, trace: &mut Trace) {
     }
 }
 
-/// An expanded key: FIPS 197 5.2's words, and its round keys each sliced into
-/// every lane of a word for the fixsliced cipher — round key `i` moved by
-/// `SR^-i` for `0 < i < rounds`, the first and the last as they are.
+/// An expanded key: its round keys each sliced into every lane of a word, as
+/// the fixsliced cipher and inverse cipher take them — round key `i` moved by
+/// `SR^-i` for the cipher and by `SR^(rounds − i)` for the inverse cipher,
+/// for `0 < i < rounds`, and the first and the last as they are for both.
 #[derive(Clone, Copy)]
 struct Expanded {
     /// 10 for a 16-byte key, 14 for a 32-byte one.
     rounds: usize,
-    /// The schedule's words, four a round key.
-    words: [[u8; 4]; 4 * (MAX_ROUNDS + 1)],
     /// The cipher's round keys, sliced.
     enc: [Word; MAX_ROUNDS + 1],
+    /// The inverse cipher's round keys, sliced.
+    dec: [Word; MAX_ROUNDS + 1],
 }
 
 /// FIPS 197 5.2's SubWord through the circuit: the word in lane 0's first
@@ -574,29 +621,34 @@ const fn expand(key: &[u8], trace: &mut Trace) -> Option<Expanded> {
     }
 
     let mut enc = [[0u64; 8]; MAX_ROUNDS + 1];
+    let mut dec = [[0u64; 8]; MAX_ROUNDS + 1];
     let mut round = 0;
     while trace.branch(SITE_KEY_ROUND, round <= rounds) {
         let ends = round == 0 || round == rounds;
-        let drift = if trace.branch(SITE_KEY_MOVE, ends) {
-            0
+        let (back, on) = if trace.branch(SITE_KEY_MOVE, ends) {
+            (0, 0)
         } else {
-            round % 4
+            (round % 4, (rounds - round) % 4)
         };
-        // `SR^-drift`: byte (r, c) takes the round key's (r, c - drift·r).
-        let mut bytes = [0u8; 16];
+        // The cipher's `SR^-back`: byte (r, c) takes the round key's
+        // (r, c − back·r). The inverse cipher's `SR^on`: (r, c + on·r).
+        let mut forward = [0u8; 16];
+        let mut inverse = [0u8; 16];
         let mut c = 0;
         while trace.branch(SITE_BYTE, c < 4) {
             let mut r = 0;
             while trace.branch(SITE_BYTE, r < 4) {
-                bytes[r + 4 * c] = words[4 * round + (c + 4 - (drift * r) % 4) % 4][r];
+                forward[r + 4 * c] = words[4 * round + (c + 4 - (back * r) % 4) % 4][r];
+                inverse[r + 4 * c] = words[4 * round + (c + on * r) % 4][r];
                 r += 1;
             }
             c += 1;
         }
-        enc[round] = slice(&[bytes; LANES], trace);
+        enc[round] = slice(&[forward; LANES], trace);
+        dec[round] = slice(&[inverse; LANES], trace);
         round += 1;
     }
-    Some(Expanded { rounds, words, enc })
+    Some(Expanded { rounds, enc, dec })
 }
 
 /// FIPS 197 5.1's cipher, fixsliced, over the four lanes of a word: the state
@@ -625,6 +677,36 @@ const fn encrypt_word(keys: &Expanded, x: &mut Word, trace: &mut Trace) {
 const fn encrypt_alone(keys: &Expanded, block: [u8; 16], trace: &mut Trace) -> [u8; 16] {
     let mut word = slice(&[block, [0; 16], [0; 16], [0; 16]], trace);
     encrypt_word(keys, &mut word, trace);
+    unslice(&word, trace)[0]
+}
+
+/// FIPS 197 5.3's inverse cipher, fixsliced the other way, over the four
+/// lanes of a word: the state before round `i` is undone held as
+/// `SR^(rounds − i)` of the inverse cipher's, one more each round, so that
+/// InvShiftRows never runs between rounds — a round is its moved round key,
+/// [`unmix_columns`] and InvSubBytes — and the plaintext is `SR²` of the
+/// last state, the round count being 2 modulo 4, before the first round key.
+const fn decrypt_word(keys: &Expanded, x: &mut Word, trace: &mut Trace) {
+    trace.read(TABLE_ROUND_KEY, keys.rounds);
+    add_round_key(x, &keys.dec[keys.rounds], trace);
+    inv_sub_bytes(x);
+    let mut round = keys.rounds - 1;
+    while trace.branch(SITE_ROUND, round > 0) {
+        trace.read(TABLE_ROUND_KEY, round);
+        add_round_key(x, &keys.dec[round], trace);
+        unmix_columns(x, keys.rounds - round, trace);
+        inv_sub_bytes(x);
+        round -= 1;
+    }
+    shift_rows_twice(x, trace);
+    trace.read(TABLE_ROUND_KEY, 0);
+    add_round_key(x, &keys.dec[0], trace);
+}
+
+/// A block through the inverse cipher alone in lane 0 of a word.
+const fn decrypt_alone(keys: &Expanded, block: [u8; 16], trace: &mut Trace) -> [u8; 16] {
+    let mut word = slice(&[block, [0; 16], [0; 16], [0; 16]], trace);
+    decrypt_word(keys, &mut word, trace);
     unslice(&word, trace)[0]
 }
 
@@ -670,6 +752,39 @@ const fn circuit_is_the_table() -> bool {
     true
 }
 
+/// Whether the inverse circuit is the inverse of FIPS 197's S-box at all 256
+/// inputs, as [`circuit_is_the_table`] holds the circuit to the table.
+const fn inverse_is_the_tables_inverse() -> bool {
+    let mut inverse = [0u8; 256];
+    let mut at = 0;
+    while at < 256 {
+        inverse[SBOX[at] as usize] = at as u8;
+        at += 1;
+    }
+    let mut word = 0;
+    while word < 4 {
+        let mut blocks = [[0u8; 16]; LANES];
+        at = 0;
+        while at < 64 {
+            blocks[at / 16][at % 16] = (64 * word + at) as u8;
+            at += 1;
+        }
+        let mut trace = Trace::new();
+        let mut planes = slice(&blocks, &mut trace);
+        inv_sub_bytes(&mut planes);
+        let out = unslice(&planes, &mut trace);
+        at = 0;
+        while at < 64 {
+            if out[at / 16][at % 16] != inverse[64 * word + at] {
+                return false;
+            }
+            at += 1;
+        }
+        word += 1;
+    }
+    true
+}
+
 /// Whether slicing puts byte `(r, c)` of lane `l` at bit `16r + 4c + l` of
 /// every plane, and unslicing gives every block back.
 const fn slicing_is_the_layout() -> bool {
@@ -704,23 +819,29 @@ const fn slicing_is_the_layout() -> bool {
     true
 }
 
-/// Whether `key` takes `plain` to `cipher` alone in lane 0 and in all four
-/// lanes abreast, and four different blocks abreast to what each gives alone.
+/// Whether `key` takes `plain` to `cipher` and `cipher` back to `plain`,
+/// alone in lane 0 and in all four lanes abreast, and four different blocks
+/// abreast, either way, to what each gives alone.
 const fn cipher_vector(key: &[u8], plain: [u8; 16], cipher: [u8; 16]) -> bool {
     let mut trace = Trace::new();
     let Some(keys) = expand(key, &mut trace) else {
         return false;
     };
-    if !same(&encrypt_alone(&keys, plain, &mut trace), &cipher) {
+    if !same(&encrypt_alone(&keys, plain, &mut trace), &cipher)
+        || !same(&decrypt_alone(&keys, cipher, &mut trace), &plain)
+    {
         return false;
     }
     let mut word = slice(&[plain; LANES], &mut trace);
     encrypt_word(&keys, &mut word, &mut trace);
-    let abreast = unslice(&word, &mut trace);
+    let sealed = unslice(&word, &mut trace);
+    let mut word = slice(&[cipher; LANES], &mut trace);
+    decrypt_word(&keys, &mut word, &mut trace);
+    let opened = unslice(&word, &mut trace);
     let mut blocks = [[0u8; 16]; LANES];
     let mut lane = 0;
     while lane < LANES {
-        if !same(&abreast[lane], &cipher) {
+        if !same(&sealed[lane], &cipher) || !same(&opened[lane], &plain) {
             return false;
         }
         let mut at = 0;
@@ -732,12 +853,18 @@ const fn cipher_vector(key: &[u8], plain: [u8; 16], cipher: [u8; 16]) -> bool {
     }
     let mut word = slice(&blocks, &mut trace);
     encrypt_word(&keys, &mut word, &mut trace);
-    let together = unslice(&word, &mut trace);
+    let sealed = unslice(&word, &mut trace);
+    let mut word = slice(&blocks, &mut trace);
+    decrypt_word(&keys, &mut word, &mut trace);
+    let opened = unslice(&word, &mut trace);
     lane = 0;
     while lane < LANES {
         if !same(
-            &together[lane],
+            &sealed[lane],
             &encrypt_alone(&keys, blocks[lane], &mut trace),
+        ) || !same(
+            &opened[lane],
+            &decrypt_alone(&keys, blocks[lane], &mut trace),
         ) {
             return false;
         }
@@ -746,13 +873,18 @@ const fn cipher_vector(key: &[u8], plain: [u8; 16], cipher: [u8; 16]) -> bool {
     true
 }
 
-/// The S-box circuit, the slicing and the cipher, held to FIPS 197 — the
-/// table, and appendix B's and C.1's AES-128 blocks and C.3's AES-256 — or
-/// the crate does not compile.
+/// The S-box circuit and its inverse, the slicing, and the cipher and the
+/// inverse cipher, held to FIPS 197 — the table and its inverse, and appendix
+/// B's and C.1's AES-128 blocks and C.3's AES-256, both ways — or the crate
+/// does not compile.
 const _: () = {
     assert!(
         circuit_is_the_table(),
         "the S-box circuit is FIPS 197's table"
+    );
+    assert!(
+        inverse_is_the_tables_inverse(),
+        "the inverse circuit is the table's inverse"
     );
     assert!(
         slicing_is_the_layout(),
@@ -855,11 +987,8 @@ impl Drop for Aes {
     /// fence so that they are not dropped as writes to memory about to be
     /// freed; the crate forbids `unsafe`, so no volatile write.
     fn drop(&mut self) {
-        let Expanded { words, enc, .. } = &mut self.keys;
-        for word in words.iter_mut() {
-            *word = [0; 4];
-        }
-        for planes in enc.iter_mut() {
+        let Expanded { enc, dec, .. } = &mut self.keys;
+        for planes in enc.iter_mut().chain(dec.iter_mut()) {
             *planes = [0; 8];
         }
         let _ = core::hint::black_box(&mut self.keys);
@@ -885,34 +1014,9 @@ impl Aes {
         *block = encrypt_alone(&self.keys, *block, &mut Trace::new());
     }
 
-    fn add_round_key_bytes(&self, state: &mut [u8; 16], round: usize) {
-        for (col, chunk) in state.chunks_exact_mut(4).enumerate() {
-            let w = self
-                .keys
-                .words
-                .get(round * 4 + col)
-                .copied()
-                .unwrap_or([0; 4]);
-            for (byte, k) in chunk.iter_mut().zip(w.iter()) {
-                *byte ^= k;
-            }
-        }
-    }
-
-    fn decrypt_block(&self, block: &mut [u8; 16], inv: &[u8; 256]) {
-        let rounds = self.keys.rounds;
-        self.add_round_key_bytes(block, rounds);
-
-        for round in (1..=rounds).rev() {
-            inv_shift_rows(block);
-            for byte in block.iter_mut() {
-                *byte = inv.get(usize::from(*byte)).copied().unwrap_or(0);
-            }
-            self.add_round_key_bytes(block, round - 1);
-            if round != 1 {
-                inv_mix_columns(block);
-            }
-        }
+    /// One block through the inverse cipher, alone in lane 0 of a word.
+    fn decrypt_block(&self, block: &mut [u8; 16]) {
+        *block = decrypt_alone(&self.keys, *block, &mut Trace::new());
     }
 
     /// CBC with PKCS#7 padding, the IV prefixed — the layout
@@ -964,7 +1068,6 @@ impl Aes {
             notes.push(AesNote::RaggedTail);
         }
 
-        let inv = inv_sbox();
         let mut prev = [0u8; 16];
         prev.copy_from_slice(iv);
 
@@ -973,7 +1076,7 @@ impl Aes {
             let mut block = [0u8; 16];
             block.copy_from_slice(chunk);
             let cipher = block;
-            self.decrypt_block(&mut block, &inv);
+            self.decrypt_block(&mut block);
             for (byte, p) in block.iter_mut().zip(prev.iter()) {
                 *byte ^= p;
             }
@@ -981,16 +1084,9 @@ impl Aes {
             prev = cipher;
         }
 
-        match out.last().copied() {
-            Some(pad @ 1..=16) if usize::from(pad) <= out.len() => {
-                let keep = out.len() - usize::from(pad);
-                if out.get(keep..).is_some_and(|t| t.iter().all(|&b| b == pad)) {
-                    out.truncate(keep);
-                } else {
-                    notes.push(AesNote::BadPadding);
-                }
-            }
-            _ => notes.push(AesNote::BadPadding),
+        match padding(&last_block(&out)) {
+            Some(pad) => out.truncate(out.len().saturating_sub(pad)),
+            None => notes.push(AesNote::BadPadding),
         }
 
         (out, notes)
@@ -1017,14 +1113,13 @@ impl Aes {
     /// unwraps `/UE` and `/OE` (7.6.4.3.3); a ragged tail is left out.
     #[must_use]
     pub fn cbc_decrypt_no_padding(&self, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-        let inv = inv_sbox();
         let mut out = Vec::with_capacity(data.len());
         let mut prev = *iv;
         for chunk in data.chunks_exact(16) {
             let mut block = [0u8; 16];
             block.copy_from_slice(chunk);
             let cipher = block;
-            self.decrypt_block(&mut block, &inv);
+            self.decrypt_block(&mut block);
             for (byte, p) in block.iter_mut().zip(prev.iter()) {
                 *byte ^= p;
             }
@@ -1035,27 +1130,41 @@ impl Aes {
     }
 }
 
-fn inv_shift_rows(state: &mut [u8; 16]) {
-    for row in 1..4usize {
-        let mut tmp = [0u8; 4];
-        for col in 0..4usize {
-            tmp[(col + row) % 4] = state.get(col * 4 + row).copied().unwrap_or(0);
-        }
-        for (col, value) in tmp.iter().enumerate() {
-            if let Some(slot) = state.get_mut(col * 4 + row) {
-                *slot = *value;
-            }
-        }
+/// The last block of a decryption's output, which holds its padding; the
+/// output is whole blocks and at least one, so there is one.
+fn last_block(out: &[u8]) -> [u8; 16] {
+    let mut last = [0u8; 16];
+    if let Some(tail) = out.len().checked_sub(16).and_then(|at| out.get(at..)) {
+        last.copy_from_slice(tail);
     }
+    last
 }
 
-fn inv_mix_columns(state: &mut [u8; 16]) {
-    for col in state.chunks_exact_mut(4) {
-        let [a0, a1, a2, a3] = [col[0], col[1], col[2], col[3]];
-        col[0] = mul(a0, 14) ^ mul(a1, 11) ^ mul(a2, 13) ^ mul(a3, 9);
-        col[1] = mul(a0, 9) ^ mul(a1, 14) ^ mul(a2, 11) ^ mul(a3, 13);
-        col[2] = mul(a0, 13) ^ mul(a1, 9) ^ mul(a2, 14) ^ mul(a3, 11);
-        col[3] = mul(a0, 11) ^ mul(a1, 13) ^ mul(a2, 9) ^ mul(a3, 14);
+/// The PKCS#7 padding length a last block states, where it is well formed:
+/// its last byte `n` in 1..=16 and the `n` bytes before the block's end all
+/// `n`; `None` otherwise.
+///
+/// **Decided by masks over the whole block**, so that the time the check
+/// takes says nothing of the plaintext: every byte is read whatever `n` is, a
+/// byte counts against the padding through a mask that is all ones exactly
+/// where it lies within `n` of the end, and the range of `n` is a mask too.
+/// The answer is the one the check a byte at a time gives, and is the one
+/// thing it tells: whether `AesNote::BadPadding` is reported, and how much
+/// is stripped, which the plaintext's length shows anyway.
+fn padding(last: &[u8; 16]) -> Option<usize> {
+    let pad = last[15];
+    // Zero exactly when `pad` is in 1..=16.
+    let mut wrong = pad.wrapping_sub(1) >> 4;
+    for (at, &byte) in last.iter().enumerate() {
+        let from_end = 16 - at as u8;
+        // All ones where `from_end <= pad`: `pad - from_end` borrows otherwise.
+        let within = !((u16::from(pad).wrapping_sub(u16::from(from_end)) >> 8) as u8);
+        wrong |= within & (byte ^ pad);
+    }
+    if core::hint::black_box(wrong) == 0 {
+        Some(usize::from(pad))
+    } else {
+        None
     }
 }
 
@@ -1138,7 +1247,7 @@ mod tests {
         aes.encrypt_block(&mut block);
         assert_eq!(hex(&block), "69c4e0d86a7b0430d8cdb78070b4c55a");
 
-        aes.decrypt_block(&mut block, &inv_sbox());
+        aes.decrypt_block(&mut block);
         assert_eq!(hex(&block), hex(&plain));
     }
 
@@ -1154,7 +1263,7 @@ mod tests {
         aes.encrypt_block(&mut block);
         assert_eq!(hex(&block), "8ea2b7ca516745bfeafc49904b496089");
 
-        aes.decrypt_block(&mut block, &inv_sbox());
+        aes.decrypt_block(&mut block);
         assert_eq!(hex(&block), hex(&plain));
     }
 
@@ -1336,9 +1445,9 @@ mod tests {
     }
 
     /// One block through an expanded key, back.
-    fn backward(aes: &Aes, inverse: &[u8; 256], block: [u8; 16]) -> [u8; 16] {
+    fn backward(aes: &Aes, block: [u8; 16]) -> [u8; 16] {
         let mut block = block;
-        aes.decrypt_block(&mut block, inverse);
+        aes.decrypt_block(&mut block);
         block
     }
 
@@ -1365,7 +1474,6 @@ mod tests {
     /// each section ran.
     fn run_monte_carlo(name: &str, source: &str) -> (usize, usize) {
         let all = records(source);
-        let inverse = inv_sbox();
         let mut ran = (0, 0);
         for encrypt in [true, false] {
             let section: Vec<&Record> = all.iter().filter(|r| r.encrypt == encrypt).collect();
@@ -1395,7 +1503,7 @@ mod tests {
                     let out = if encrypt {
                         forward(&aes, xor16(block, chain))
                     } else {
-                        xor16(backward(&aes, &inverse, block), chain)
+                        xor16(backward(&aes, block), chain)
                     };
                     let next = if step == 0 { iv } else { last };
                     before = last;
@@ -1628,5 +1736,103 @@ mod tests {
             one, two,
             "a read at a moving index leaves a different trace"
         );
+    }
+
+    /// **The inverse core reads no secret-indexed table and branches alike**
+    /// (P-13.5).
+    ///
+    /// The same record as the encryption core's, of the inverse cipher: over
+    /// random keys of both lengths and random ciphertext in one lane and in
+    /// all four, one trace for each key length, and every block the inverse
+    /// cipher gives back is the one the cipher took. InvSubBytes reads no
+    /// table — it is the forward circuit between two inverse affine maps —
+    /// and InvMixColumns multiplies by no loop, so nothing in the record moves
+    /// with a key or a state byte; the record of a different length differs.
+    #[test]
+    fn the_inverse_core_reads_no_secret_indexed_table_and_branches_alike() {
+        let mut bytes = Bytes(0x696e_7665_7273_6573);
+        let mut seen = Vec::new();
+        for length in [16usize, 32] {
+            let mut first: Option<Trace> = None;
+            for trial in 0..300 {
+                let mut key = vec![0u8; length];
+                bytes.fill(&mut key);
+                let keys = expand(&key, &mut Trace::new()).expect("the key expands");
+                let mut blocks = [[0u8; 16]; LANES];
+                let filled = if trial % 2 == 0 { 1 } else { LANES };
+                for block in blocks.iter_mut().take(filled) {
+                    bytes.fill(block);
+                }
+
+                let mut inverse = Trace::new();
+                let mut word = slice(&blocks, &mut inverse);
+                decrypt_word(&keys, &mut word, &mut inverse);
+                let opened = unslice(&word, &mut inverse);
+                assert!(
+                    inverse.reads > 0 && inverse.branches > 0,
+                    "the inverse recorded"
+                );
+                match &first {
+                    Some(first) => assert_eq!(
+                        inverse, *first,
+                        "{length}-byte key, trial {trial}: the inverse cipher's reads and branches"
+                    ),
+                    None => first = Some(inverse),
+                }
+
+                let mut word = slice(&opened, &mut Trace::new());
+                encrypt_word(&keys, &mut word, &mut Trace::new());
+                assert_eq!(
+                    unslice(&word, &mut Trace::new()),
+                    blocks,
+                    "{length}-byte key, trial {trial}: the cipher takes back what the inverse gave"
+                );
+            }
+            seen.push(first);
+        }
+        assert_ne!(
+            seen[0], seen[1],
+            "the two key lengths, public, are told apart"
+        );
+    }
+
+    /// The padding check by masks gives the answer the check a byte at a
+    /// time gives, for every last byte and every last block a corruption of
+    /// a well-formed one can make: a length in 1..=16 whose bytes all agree
+    /// strips that many, and anything else — a length of 0 or past 16, or a
+    /// byte inside the padding that differs — strips nothing.
+    #[test]
+    fn the_padding_check_by_masks_is_the_check_byte_by_byte() {
+        let by_bytes = |last: &[u8; 16]| -> Option<usize> {
+            let pad = usize::from(last[15]);
+            if (1..=16).contains(&pad) && last[16 - pad..].iter().all(|&b| usize::from(b) == pad) {
+                Some(pad)
+            } else {
+                None
+            }
+        };
+        let mut checked = 0;
+        for pad in 0..=255u8 {
+            for fill in [0u8, 0x5a, 0xff] {
+                let mut last = [fill; 16];
+                let span = usize::from(pad).clamp(1, 16);
+                last[16 - span..].fill(pad);
+                assert_eq!(padding(&last), by_bytes(&last), "pad {pad}, fill {fill}");
+                checked += 1;
+                for flip in 0..16 {
+                    let mut wrong = last;
+                    wrong[flip] ^= 0x01;
+                    assert_eq!(
+                        padding(&wrong),
+                        by_bytes(&wrong),
+                        "pad {pad}, byte {flip} flipped"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 256 * 3 * 17);
+        assert_eq!(padding(&[16; 16]), Some(16), "a whole block of padding");
+        assert_eq!(padding(&[0; 16]), None, "a length of zero");
     }
 }
