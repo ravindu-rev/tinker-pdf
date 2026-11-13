@@ -124,6 +124,16 @@ honours (Arial for Helvetica, TimesNewRoman for Times). Above 0x7F a width is
 approximated from the glyph's base letter, and the approximation is reported
 by the flag `Standard14::advance` returns beside the width, never silently.
 
+**The symbolic fonts' built-in encodings** (Annex D.5, D.6). Symbol and
+ZapfDingbats each have an encoding of their own, and `BuiltInEncoding` holds
+both as Annex D tabulates them: Table D.5's 189 Symbol codes and Table D.6's
+188 ZapfDingbats codes, each with the glyph name its table gives it and the
+Unicode value the Adobe Glyph List — or, for ZapfDingbats' `a` names, the ITC
+Zapf Dingbats Glyph List — gives the name, and the fourteen names that list
+holds and Table D.6 does not encode
+([design](../design/symbol-faces.md); the sources are in
+[THIRDPARTY.md](../../THIRDPARTY.md)).
+
 **The host seam.** `FontRequest::read` distils a font dictionary and its
 descriptor (9.8.2 Table 123 flags, the 9.6.4 subset tag stripped, weight and
 slope read from the name too because plenty of producers set no flags) into a

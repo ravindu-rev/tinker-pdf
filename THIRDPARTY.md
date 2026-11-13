@@ -1084,6 +1084,74 @@ type. So the reader decodes each as the file it is — a PPM, and a PAM read
 where its tuple type is `CMYK` — and nothing in it claims more about either
 producer than the rows above say.
 
+### The symbolic standard fonts' encodings and their glyph lists
+
+Transcribed into `crates/tinker-pdf-font/src/encoding.rs` (`BuiltInEncoding`)
+rather than vendored, for the reason the XMP schema tables above are: 391 rows
+of `(code, name, value)` are short enough to read in a diff, and `cargo xtask
+vendor` checks directories under `crates/<crate>/data`, which this is
+deliberately not.
+
+| Table | Source | Revision | Bytes | SHA-256 |
+| --- | --- | --- | ---: | --- |
+| `SYMBOL`'s and `DINGBATS`' codes and names | ISO 32000-2:2020 with errata collection 3, Annex D, Table D.5 "Symbol set and encoding" and Table D.6 "ZapfDingbats set and encoding", the PDF Association's sponsored copy, read with this repository's own `tpdf text` on its pages 887 to 891 | 2020, EC3 | 19 216 586 | `b0217fcea6f11bce566bcc059e97268bc496d68db64243ed1ebc17ef418899db` |
+| The values of Symbol's names and of `space` | The Adobe Glyph List, `glyphlist.txt` in [adobe-type-tools/agl-aglfn](https://github.com/adobe-type-tools/agl-aglfn), table version 2.0 | `4036a9c` (2019-10-31) | 78 060 | `a3b2f61ced9f3644cc0d4ecde5c59df34ca286c689d9484a43a710a81c466789` |
+| The values of ZapfDingbats' `a` names, `DINGBATS_UNENCODED` | The ITC Zapf Dingbats Glyph List, `zapfdingbats.txt` in the same repository, table version 2.0 | `4036a9c` (2019-10-31) | 3 879 | `f6394e3cb8a447e84a1dad75d4baaf2aa7f45dc104faf369f4720e1a774ef2dc` |
+
+**The two tables were read twice.** Once in the text's reading order, a name
+and the code after it, and once by the cells' positions on the page, each name
+taken with the code beside it on its row; the two readings agree on all 189
+Symbol and 188 ZapfDingbats pairs, and `encoding.rs`'s tests hold the source
+table, keyed by code, to the second reading, keyed by name. Nothing of the
+standard's text is reproduced: what was taken is the tables' facts — a code
+and the glyph name the table gives it — and the standard's pictures of the
+characters are not used.
+
+**The values are the lists', never the tables' pictures.** Each name of the
+two encodings has exactly one value in its list. The ITC list's fourteen names
+Table D.6 gives no code (`a85` to `a96`, `a205`, `a206`) are kept with their
+values for a `/Differences` array that names them.
+
+Both lists carry Adobe's BSD licence — SPDX `BSD-3-Clause`, already on
+`deny.toml`'s allowlist — and their values are compiled into the crate, which
+is a binary redistribution, so the notice the lists carry is reproduced here
+in full:
+
+```
+Copyright 2002-2019 Adobe (http://www.adobe.com/).
+
+Redistribution and use in source and binary forms, with or
+without modification, are permitted provided that the
+following conditions are met:
+
+Redistributions of source code must retain the above
+copyright notice, this list of conditions and the following
+disclaimer.
+
+Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following
+disclaimer in the documentation and/or other materials
+provided with the distribution.
+
+Neither the name of Adobe nor the names of its contributors
+may be used to endorse or promote products derived from this
+software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
 ## Test fixtures
 
 `testdata/` holds PDFs written by mutool, copied from Tinker; see

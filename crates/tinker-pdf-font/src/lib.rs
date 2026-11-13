@@ -26,7 +26,8 @@ pub use cff::Cff;
 pub use cff_subset::subset_cff;
 pub use cmap::CMap;
 pub use encoding::{
-    base_char, base_glyph_name, glyph_name_for_char, glyph_name_to_char, BaseEncoding,
+    base_char, base_glyph_name, glyph_name_for_char, glyph_name_to_char, BaseEncoding, BuiltInCode,
+    BuiltInEncoding,
 };
 pub use outline::{Outline, Segment};
 pub use sfnt::Sfnt;
