@@ -784,9 +784,11 @@ skipped and recorded.
 - **Rearrangement (0).** `markFirst` and `markLast` make the current glyph the
   first or the last of the span; the verb then rearranges the span's glyphs as
   the verb table states (`Ax ⇒ xA` to `ABxCD ⇒ DCxBA`), `A` and `B` its first
-  glyphs and `C` and `D` its last in layout order. A span with fewer glyphs
-  than its verb names is left as it is. Clusters across a rearranged span are
-  merged as `Buffer::reorder` merges them, so they stay monotonic.
+  glyphs and `C` and `D` its last in layout order, the span running from the
+  leftmost of its two marks to the rightmost. A span with fewer glyphs than
+  its verb names is left as it is. Clusters across a rearranged span are
+  merged as `Buffer::reorder` merges them, so they stay monotonic; a verb that
+  leaves every glyph where it was merges nothing.
 - **Contextual (1).** The entry's `markIndex` and `currentIndex` name
   per-glyph lookup tables — through a list of 32-bit offsets at the
   subtable's `substitutionTable` — for the marked glyph and the current one,
@@ -822,10 +824,21 @@ skipped and recorded.
 **Readings the manual leaves open, pinned by the test sections.** Where no
 glyph has been marked, the mark is the first glyph the machine met — a
 rearrangement's span starts there (`MORX-7`), a contextual mark substitutes it
-(`MORX-19`) and an insertion goes beside it (`MORX-32`). The end-of-text entry
-is taken once (`MORX-10`, `MORX-11`, `MORX-17`, `MORX-20`). A machine that never
-advances stops at its ceiling (`MORX-24`, `MORX-36`), and one that inserts
-without bound at the glyph ceiling (`MORX-34`).
+(`MORX-19`) and an insertion goes beside it (`MORX-32`) — and a rearrangement
+with no glyph marked last has no span, its verbs moving nothing (`MORX-3`). The
+end-of-text entry is taken once (`MORX-10`, `MORX-11`, `MORX-17`, `MORX-20`),
+its current glyph the last one the machine met: `markLast` there extends a
+span to it (`MORX-11`) and a contextual `currentIndex` substitutes it
+(`MORX-20`). A rearrangement's marks stay where they were after its verb, so a
+later verb acts on the same positions (`MORX-6`). A machine runs only over a
+run holding a glyph its class table gives a class other than out of bounds:
+the chapter lets a subtable none of whose glyphs a run uses be skipped
+("Subtable Glyph Coverage Tables"), a version-2 table's class table is the only
+statement of which glyphs a machine uses, and a machine skipped takes no
+end-of-text transition either (`MORX-20`'s `EE` and `E` keep their glyphs
+though its end-of-text entry substitutes). A machine that never advances stops
+at its ceiling (`MORX-24`, `MORX-36`), and one that inserts without bound at
+the glyph ceiling (`MORX-34`).
 
 **After the chain** the deleted glyphs are removed — within it they are class
 2 to every later subtable — and the glyphs' advances are read from `hmtx`, as

@@ -52,15 +52,18 @@
 //! The noncontextual subtable, type 4, is one lookup table: "a lookup table
 //! that maps a single glyph index into another glyph index", a value of 0
 //! meaning "do nothing" ("Lookup tables in a 'morx'"). Types 0, 1, 2 and 5 are
-//! state machines on the shared driver ([`super::StateTable::run`]); type 3 is
-//! reserved and a type above 5 unknown, and each such subtable, and each of a
-//! type this crate does not run yet, is skipped and named. A glyph a
-//! subtable makes `0xFFFF` is deleted: the later subtables see it as the
+//! state machines on the shared driver ([`super::StateTable::run`]), and the
+//! rearrangement subtable, type 0, runs (`super::rearrangement`); a machine
+//! runs only over a run holding a glyph its class table names (`machine`).
+//! Type 3 is reserved and a type above 5 unknown, and each such subtable, and
+//! each of a type this crate does not run yet, is skipped and named. A glyph
+//! a subtable makes `0xFFFF` is deleted: the later subtables see it as the
 //! deleted glyph, class 2, and it leaves the run when the chain ends.
 
 use super::feat::Feat;
 use super::lookup::{Lookup, LookupError};
-use super::state::DELETED;
+use super::rearrangement;
+use super::state::{StateTable, DELETED};
 use super::Site;
 use crate::buffer::{Buffer, Direction};
 use crate::common::Tag;
@@ -294,9 +297,26 @@ impl<'a> Morx<'a> {
                     chain: chain.index,
                     subtable: subtable.index,
                 };
-                match subtable.kind() {
-                    NONCONTEXTUAL => noncontextual(subtable.body, buffer, site, &mut warnings),
-                    kind => warnings.push(Warning::SubtableTypeNotRun { site, kind }),
+                let traversal = subtable.traversal(rtl);
+                let outcome = match subtable.kind() {
+                    NONCONTEXTUAL => {
+                        noncontextual(subtable.body, buffer, site, &mut warnings);
+                        Ok(())
+                    }
+                    REARRANGEMENT => match machine(
+                        subtable.body,
+                        rearrangement::ENTRY_SIZE,
+                        buffer,
+                        site,
+                        &mut warnings,
+                    ) {
+                        Some(table) => rearrangement::run(&table, buffer, traversal, limits, site),
+                        None => Ok(()),
+                    },
+                    kind => Err(Warning::SubtableTypeNotRun { site, kind }),
+                };
+                if let Err(warning) = outcome {
+                    warnings.push(warning);
                 }
             }
         }
@@ -305,6 +325,35 @@ impl<'a> Morx<'a> {
             buffer.reverse();
         }
         dedup(warnings)
+    }
+}
+
+/// The state machine of a subtable whose entries are `entry_size` bytes,
+/// where it is to run over `buffer`: `None` where its header cannot be read,
+/// which is named, and where the run holds no glyph its class table gives a
+/// class other than out of bounds.
+///
+/// The second is this engine's reading. The chapter lets "the subtable ...
+/// be skipped" where "none of the glyphs in the run is used by the subtable"
+/// ("Subtable Glyph Coverage Tables"), and where a table states no coverage —
+/// version 2 states none — the glyphs a machine uses are the ones its class
+/// table names. A machine skipped takes no end-of-text transition either:
+/// text-rendering-tests `MORX-20` holds it, its `EE` and `E` keeping their
+/// glyphs though the machine's end-of-text entry substitutes both the marked
+/// and the current glyph.
+fn machine<'a>(
+    body: &'a [u8],
+    entry_size: usize,
+    buffer: &Buffer,
+    site: Site,
+    warnings: &mut Vec<Warning>,
+) -> Option<StateTable<'a>> {
+    match StateTable::parse(body, entry_size) {
+        Ok(table) => table.reaches(buffer).then_some(table),
+        Err(error) => {
+            warnings.push(error.warning(site));
+            None
+        }
     }
 }
 

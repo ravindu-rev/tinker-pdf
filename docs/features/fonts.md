@@ -973,8 +973,15 @@ What it does:
   an upright run, horizontal along a line and sideways), over the run in
   layout order, a right-to-left run reversed for the chain and back, each
   walking it the way bits 30 and 28 choose; glyphs made `0xFFFF` leave the
-  run when the chains end. The noncontextual subtable runs; a reserved,
-  unknown or not yet built type is skipped and named
+  run when the chains end. The noncontextual subtable runs, and so does the
+  rearrangement subtable: `markFirst` and `markLast` mark a span's ends in
+  layout order — its start the first glyph the machine met where none was
+  marked first, no span where none was marked last, the last glyph met being
+  the current one at the end of text — and each of the sixteen verbs moves
+  the glyphs it names, a span too short for its verb left as it is, the
+  marks kept after a verb, and a rearranged span's clusters merged. A state
+  machine runs only over a run holding a glyph its class table names. A
+  reserved, unknown or not yet built type is skipped and named
   (`Warning::SubtableTypeNotRun`). `aat::Selection::from_opentype` turns a
   caller's `with_features` and `with_settings` into the settings asked for,
   by the design's table (`aat::aat_setting`): named features start from no

@@ -33,6 +33,7 @@
 mod feat;
 mod lookup;
 mod morx;
+mod rearrangement;
 mod state;
 
 pub use feat::{Feat, FeatureName, FEAT};

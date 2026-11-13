@@ -21,8 +21,8 @@ use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::aat::{
     aat_setting, AatSetting, Cursor, Entry, Feat, FeatureEntry, Lookup, LookupError, LookupFormat,
     Morx, Selection, Site, StateError, StateTable, Traversal, ANY_ORIENTATION, CONTEXTUAL, DELETED,
-    DELETED_GLYPH, END_OF_TEXT, INSERTION, LIGATURE, NONCONTEXTUAL, OUT_OF_BOUNDS, REARRANGEMENT,
-    VERTICAL,
+    DELETED_GLYPH, DESCENDING, END_OF_TEXT, INSERTION, LIGATURE, NONCONTEXTUAL, OUT_OF_BOUNDS,
+    REARRANGEMENT, VERTICAL,
 };
 use tinker_pdf_shape::bidi::{BaseDirection, Level};
 use tinker_pdf_shape::shape::Run;
@@ -2124,7 +2124,7 @@ fn a_reserved_unknown_or_unbuilt_subtable_type_is_skipped_and_named() {
     }
     // Each type of the chapter's not run yet leaves this list when its
     // machine lands.
-    for kind in [REARRANGEMENT, CONTEXTUAL, LIGATURE, INSERTION] {
+    for kind in [CONTEXTUAL, LIGATURE, INSERTION] {
         let table = morx_table(
             2,
             &[chain(
@@ -2419,4 +2419,461 @@ fn a_chain_reads_back_as_written() {
     );
     assert_eq!(sub.body().len(), 24);
     assert_eq!(&sub.body()[..2], &[0, 6]);
+}
+
+// --- the rearrangement subtable (FT-07c.6) -------------------------------
+//
+// Marking a span's first and last glyphs, and every verb of the chapter's
+// table applied to the glyphs between them.
+
+/// One worked example of the manual's for a state machine: where it is,
+/// the subtable it transcribes, and the glyphs in and out.
+struct Worked {
+    /// Chapter, section and figure.
+    source: &'static str,
+    /// The subtable, every byte as the manual gives it, its corrections named
+    /// where it is built.
+    subtable: fn() -> Vec<u8>,
+    /// The glyphs in, and the run's direction.
+    input: &'static [u16],
+    /// The glyphs out.
+    output: &'static [u16],
+}
+
+/// The rearrangement subtable's worked examples: none. The verb table
+/// defines each verb's effect and shows no machine
+/// (`docs/design/shaping.md`, *The manual's worked examples*), so the verbs
+/// are held by [`every_rearrangement_verb_moves_what_it_names`] and the
+/// machine by the readings below and text-rendering-tests `MORX-2` to
+/// `MORX-17`; H-142's expectations are what the count waits on.
+const REARRANGEMENT_EXAMPLES: &[Worked] = &[];
+
+/// Runs each worked example through a one-chain `morx` whose default flags
+/// select its subtable, and says how many there were.
+fn hold_to_worked_examples(examples: &[Worked]) -> usize {
+    for example in examples {
+        let table = morx_table(2, &[chain(1, &[], &[(example.subtable)()])]);
+        let (out, warnings) = chained(
+            &table,
+            example.input,
+            Direction::LeftToRight,
+            &Selection::defaults(),
+        );
+        assert_eq!(out, example.output, "{}", example.source);
+        assert!(warnings.is_empty(), "{}: {warnings:?}", example.source);
+    }
+    examples.len()
+}
+
+/// The rearrangement subtable reproduces each worked example
+/// `docs/design/shaping.md` lists for type 0, and there are none.
+#[test]
+fn rearrangement_reproduces_the_manuals_worked_examples() {
+    assert_eq!(hold_to_worked_examples(REARRANGEMENT_EXAMPLES), 0);
+}
+
+/// A rearrangement subtable for both orientations under flag 1: `classes`
+/// gives glyphs their classes, `lines` the state array and `entries` each
+/// entry's new state and flags.
+fn rearrangement_subtable(
+    classes: &[(u16, u16)],
+    lines: &[&[u16]],
+    entries: &[(u16, u16)],
+) -> Vec<u8> {
+    let entries: Vec<Vec<u16>> = entries
+        .iter()
+        .map(|(state, flags)| vec![*state, *flags])
+        .collect();
+    let entries: Vec<&[u16]> = entries.iter().map(Vec::as_slice).collect();
+    let classes_count = lines.first().map_or(4, |line| line.len());
+    subtable(
+        ANY_ORIENTATION | u32::from(REARRANGEMENT),
+        1,
+        &stx(
+            count32(classes_count),
+            0,
+            &lookup_single(classes),
+            lines,
+            &entries,
+        ),
+    )
+}
+
+/// The glyphs and clusters one subtable leaves of `glyphs`, walked as its
+/// coverage says over a left-to-right run, and what it refused.
+fn through(subtable: Vec<u8>, glyphs: &[u16], limits: &Limits) -> (Vec<(u16, u32)>, Vec<Warning>) {
+    let table = morx_table(2, &[chain(1, &[], &[subtable])]);
+    let morx = Morx::parse(&table).expect("a readable morx");
+    let mut buffer = run_of(glyphs, Direction::LeftToRight);
+    let warnings = morx.run(&mut buffer, &Selection::defaults(), limits);
+    let out = buffer
+        .glyphs()
+        .iter()
+        .map(|g| (g.glyph, g.cluster))
+        .collect();
+    (out, warnings)
+}
+
+/// Just the glyphs of [`through`].
+fn glyphs_through(subtable: Vec<u8>, glyphs: &[u16]) -> Vec<u16> {
+    let (out, warnings) = through(subtable, glyphs, &Limits::DEFAULT);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    out.into_iter().map(|(glyph, _)| glyph).collect()
+}
+
+/// The chapter's verb table as it writes each verb.
+const VERBS: [&str; 16] = [
+    "no change",
+    "Ax=>xA",
+    "xD=>Dx",
+    "AxD=>DxA",
+    "ABx=>xAB",
+    "ABx=>xBA",
+    "xCD=>CDx",
+    "xCD=>DCx",
+    "AxCD=>CDxA",
+    "AxCD=>DCxA",
+    "ABxD=>DxAB",
+    "ABxD=>DxBA",
+    "ABxCD=>CDxAB",
+    "ABxCD=>CDxBA",
+    "ABxCD=>DCxAB",
+    "ABxCD=>DCxBA",
+];
+
+/// `span` as the verb `pattern` writes it rearranged, read letter by
+/// letter: the letters before `x` name the span's first glyphs, the ones
+/// after it its last, `x` what lies between; a span with fewer glyphs than
+/// the letters is left as it is.
+fn by_the_table(pattern: &str, span: &[u16]) -> Vec<u16> {
+    let Some((from, to)) = pattern.split_once("=>") else {
+        return span.to_vec();
+    };
+    let (front, back) = from.split_once('x').expect("an x");
+    if span.len() < front.len() + back.len() {
+        return span.to_vec();
+    }
+    let middle = &span[front.len()..span.len() - back.len()];
+    let mut named: BTreeMap<char, u16> = BTreeMap::new();
+    for (letter, glyph) in front.chars().zip(span) {
+        named.insert(letter, *glyph);
+    }
+    for (letter, glyph) in back.chars().zip(&span[span.len() - back.len()..]) {
+        named.insert(letter, *glyph);
+    }
+    let mut out = Vec::new();
+    for letter in to.chars() {
+        if letter == 'x' {
+            out.extend_from_slice(middle);
+        } else {
+            out.push(named[&letter]);
+        }
+    }
+    out
+}
+
+/// A machine marking glyph 1 first and glyph 5 last, glyph 7 both, and
+/// applying `verb` at the end of the text.
+fn verb_machine(verb: u16) -> Vec<u8> {
+    rearrangement_subtable(
+        &[(1, 4), (5, 5), (7, 6)],
+        &[&[2, 0, 0, 0, 1, 3, 4], &[2, 0, 0, 0, 1, 3, 4]],
+        &[(0, 0), (0, 0x8000), (0, verb), (0, 0x2000), (0, 0xA000)],
+    )
+}
+
+/// Each verb of the chapter's table moves the glyphs it names, over a
+/// five-glyph run `A B x C D` marked from its first glyph to its last.
+#[test]
+fn every_rearrangement_verb_moves_what_it_names() {
+    let run = [1u16, 2, 3, 4, 5];
+    let expected: [[u16; 5]; 16] = [
+        [1, 2, 3, 4, 5],
+        [2, 3, 4, 5, 1],
+        [5, 1, 2, 3, 4],
+        [5, 2, 3, 4, 1],
+        [3, 4, 5, 1, 2],
+        [3, 4, 5, 2, 1],
+        [4, 5, 1, 2, 3],
+        [5, 4, 1, 2, 3],
+        [4, 5, 2, 3, 1],
+        [5, 4, 2, 3, 1],
+        [5, 3, 4, 1, 2],
+        [5, 3, 4, 2, 1],
+        [4, 5, 3, 1, 2],
+        [4, 5, 3, 2, 1],
+        [5, 4, 3, 1, 2],
+        [5, 4, 3, 2, 1],
+    ];
+    for (verb, (pattern, want)) in (0u16..).zip(VERBS.iter().zip(expected)) {
+        assert_eq!(by_the_table(pattern, &run), want, "the table's verb {verb}");
+        assert_eq!(
+            glyphs_through(verb_machine(verb), &run),
+            want,
+            "verb {verb}, {pattern}"
+        );
+    }
+}
+
+/// A span shorter than the glyphs its verb names is left as it is, and one
+/// just long enough moves them past an empty `x`: every verb over every span
+/// from one glyph to six.
+#[test]
+fn a_span_shorter_than_its_verb_is_left_as_it_is() {
+    for (verb, pattern) in (0u16..).zip(VERBS) {
+        for len in 1..=6usize {
+            // One glyph is marked first and last at once; a longer span runs
+            // from glyph 1 to glyph 5 over glyphs no entry names.
+            let run: Vec<u16> = if len == 1 {
+                vec![7]
+            } else {
+                let mut run = vec![1u16];
+                run.extend((0..len - 2).map(|n| 10 + u16::try_from(n).expect("small")));
+                run.push(5);
+                run
+            };
+            assert_eq!(
+                glyphs_through(verb_machine(verb), &run),
+                by_the_table(pattern, &run),
+                "verb {verb} over {len}"
+            );
+        }
+    }
+}
+
+/// Where no glyph was marked first, the span starts at the first glyph the
+/// machine met (text-rendering-tests `MORX-7`); where none was marked last
+/// there is no span, and a verb moves nothing (`MORX-3`).
+#[test]
+fn a_span_needs_a_last_glyph_and_starts_where_the_machine_did() {
+    // `O B C D 1`: B, C and D mark the last glyph, `1` applies verb 1, and
+    // nothing marks the first.
+    let unstarted = rearrangement_subtable(
+        &[(2, 4), (3, 4), (4, 4), (9, 5)],
+        &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+        &[(0, 0), (0, 0x2000), (0, 1)],
+    );
+    assert_eq!(
+        glyphs_through(unstarted, &[8, 2, 3, 4, 9]),
+        [2, 3, 4, 8, 9],
+        "the O moves after the D"
+    );
+    // Verbs with no mark at all, and verbs after a first glyph alone.
+    for (first, input) in [(0u16, [1u16, 2, 3, 9]), (0x8000, [1, 2, 3, 9])] {
+        for verb in 1..=15u16 {
+            let unmarked = rearrangement_subtable(
+                &[(1, 4), (9, 5)],
+                &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+                &[(0, 0), (0, first), (0, verb)],
+            );
+            assert_eq!(
+                glyphs_through(unmarked, &input),
+                input,
+                "verb {verb}, first {first:#x}"
+            );
+        }
+    }
+}
+
+/// At the end of text the current glyph is the last one met: `markLast`
+/// there extends the span to it (`MORX-11`), and the end-of-text verb acts
+/// once, `dontAdvance` meaning nothing there (`MORX-10`, `MORX-17`).
+#[test]
+fn the_end_of_text_marks_the_last_glyph_and_its_verb_acts_once() {
+    // `B A B B A A B X`: each A marks itself first and last; the end of text
+    // marks the X last and applies verb 2, `xD ⇒ Dx`, to the trailing
+    // `A B X`.
+    let eleven = rearrangement_subtable(
+        &[(1, 4)],
+        &[&[0, 1, 1, 1, 2], &[0, 1, 1, 1, 2]],
+        &[(0, 0x2002), (0, 0), (0, 0xA000)],
+    );
+    assert_eq!(
+        glyphs_through(eleven, &[2, 1, 2, 2, 1, 1, 2, 24]),
+        [2, 1, 2, 2, 1, 24, 1, 2]
+    );
+    // `A B`: A marks first, B last, and the end of text applies verb 1 with
+    // `dontAdvance`: once, so the pair is swapped and not swapped back.
+    let seventeen = rearrangement_subtable(
+        &[(1, 4), (2, 5)],
+        &[&[0, 1, 1, 1, 2, 3], &[0, 1, 1, 1, 2, 3]],
+        &[(0, 0x4001), (0, 0), (0, 0x8000), (0, 0x2000)],
+    );
+    assert_eq!(glyphs_through(seventeen, &[1, 2]), [2, 1]);
+    // `ABABAB`: each A marks itself first and last, each B last, and the end
+    // of text swaps the last pair.
+    let ten = rearrangement_subtable(
+        &[(1, 4), (2, 5)],
+        &[&[0, 1, 1, 1, 2, 3], &[0, 1, 1, 1, 2, 3]],
+        &[(0, 0x0001), (0, 0), (0, 0xA000), (0, 0x2000)],
+    );
+    assert_eq!(glyphs_through(ten, &[1, 2, 1, 2, 1, 2]), [1, 2, 1, 2, 2, 1]);
+}
+
+/// The marks stay where they were after a verb, so each later verb acts on
+/// the same positions (`MORX-6`): `OOOABCDEFGOOO3141` becomes
+/// `OOOEFAGBCDOOO3141`.
+#[test]
+fn a_span_is_kept_after_its_verb() {
+    // O is 30; A to G are 1 to 7; the digits 3, 1 and 4 are 43, 41 and 44.
+    let machine = rearrangement_subtable(
+        &[
+            (1, 4),
+            (2, 5),
+            (3, 5),
+            (4, 5),
+            (5, 5),
+            (6, 5),
+            (7, 5),
+            (41, 6),
+            (43, 7),
+            (44, 8),
+        ],
+        &[&[0, 0, 0, 0, 1, 2, 3, 4, 5], &[0, 0, 0, 0, 1, 2, 3, 4, 5]],
+        &[(0, 0), (0, 0x8000), (0, 0x2000), (0, 1), (0, 3), (0, 4)],
+    );
+    let input = [
+        30u16, 30, 30, 1, 2, 3, 4, 5, 6, 7, 30, 30, 30, 43, 41, 44, 41,
+    ];
+    let output = [
+        30u16, 30, 30, 5, 6, 1, 7, 2, 3, 4, 30, 30, 30, 43, 41, 44, 41,
+    ];
+    assert_eq!(glyphs_through(machine, &input), output);
+}
+
+/// An entry with `dontAdvance` and `markLast` marks the glyph it holds, and
+/// the next transition sees the same glyph (`MORX-13`): `ABCDE` becomes
+/// `BCDEA`.
+#[test]
+fn dont_advance_with_mark_last_marks_the_glyph_it_holds() {
+    // A marks first and last, B to D last; E in state 0 marks last, holds
+    // and moves to state 1, where E applies verb 1.
+    let machine = rearrangement_subtable(
+        &[(1, 4), (2, 5), (3, 5), (4, 5), (5, 6)],
+        &[
+            &[0, 0, 0, 0, 1, 2, 3],
+            &[0, 0, 0, 0, 1, 2, 3],
+            &[4, 4, 4, 4, 1, 5, 6],
+        ],
+        &[
+            (0, 0),
+            (0, 0xA000),
+            (0, 0x2000),
+            (2, 0x6000),
+            (2, 0),
+            (2, 0x2000),
+            (2, 0x0001),
+        ],
+    );
+    assert_eq!(glyphs_through(machine, &[1, 2, 3, 4, 5]), [2, 3, 4, 5, 1]);
+}
+
+/// A backward walk marks positions in layout order: the span runs from the
+/// first glyph it met, the rightmost, to the one it marked last, and its
+/// verb names its glyphs from the left.
+#[test]
+fn a_backward_walk_marks_positions_in_layout_order() {
+    let machine = {
+        let mut bytes = rearrangement_subtable(
+            &[(1, 4)],
+            &[&[1, 0, 0, 0, 2], &[1, 0, 0, 0, 2]],
+            &[(0, 0), (0, 0x0001), (0, 0x2000)],
+        );
+        // The coverage, at bytes 4 to 8 of the subtable: reverse layout
+        // order, both orientations, type 0.
+        bytes[4..8].copy_from_slice(&(DESCENDING | ANY_ORIENTATION).to_be_bytes());
+        bytes
+    };
+    // Walking back from 5 to 1, glyph 1 is marked last; the span is the
+    // whole run, and verb 1 moves its leftmost glyph to its end.
+    assert_eq!(glyphs_through(machine, &[1, 2, 3, 4, 5]), [2, 3, 4, 5, 1]);
+}
+
+/// A rearranged span's clusters are merged, every glyph of it taking the
+/// smallest, so they stay monotonic; a verb that leaves every glyph where
+/// it was merges nothing.
+#[test]
+fn a_rearranged_span_merges_its_clusters_and_a_still_one_does_not() {
+    // A marks first, D marks last and applies `verb` there.
+    let machine = |verb: u16| {
+        rearrangement_subtable(
+            &[(1, 4), (5, 5)],
+            &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+            &[(0, 0), (0, 0x8000), (0, 0x2000 | verb)],
+        )
+    };
+    let (out, warnings) = through(machine(3), &[9, 1, 2, 5, 9], &Limits::DEFAULT);
+    assert!(warnings.is_empty());
+    assert_eq!(out, vec![(9, 0), (5, 1), (2, 1), (1, 1), (9, 4)]);
+    // Verb 6, `xCD ⇒ CDx`, over the two glyphs `A D`: C and D are those two,
+    // and x is empty, so nothing moves and nothing merges.
+    let (out, _) = through(machine(6), &[9, 1, 5, 9], &Limits::DEFAULT);
+    assert_eq!(out, vec![(9, 0), (1, 1), (5, 2), (9, 3)]);
+}
+
+/// A run holding no glyph the machine's class table names is not walked at
+/// all, its end-of-text verb included; holding one, it is.
+#[test]
+fn a_rearrangement_naming_no_glyph_of_the_run_does_not_run() {
+    // A marks itself first and last; the end of text marks last and applies
+    // verb 2, `xD ⇒ Dx`.
+    let machine = || {
+        rearrangement_subtable(
+            &[(1, 4)],
+            &[&[0, 1, 1, 1, 2], &[0, 1, 1, 1, 2]],
+            &[(0, 0x2002), (0, 0), (0, 0xA000)],
+        )
+    };
+    assert_eq!(glyphs_through(machine(), &[8, 9]), [8, 9]);
+    assert_eq!(glyphs_through(machine(), &[8, 1, 9]), [8, 9, 1]);
+}
+
+/// A machine that holds a glyph for ever stops at its ceiling, named, the
+/// run as it stood; a subtable that cannot be read is named and moves
+/// nothing.
+#[test]
+fn a_rearrangement_that_loops_or_cannot_be_read_is_named() {
+    // A marks first, B last, and C swaps them with verb 1 and holds.
+    let looping = rearrangement_subtable(
+        &[(1, 4), (2, 5), (3, 6)],
+        &[&[0, 0, 0, 0, 1, 2, 3], &[0, 0, 0, 0, 1, 2, 3]],
+        &[(0, 0), (0, 0x8000), (0, 0x2000), (0, 0x4001)],
+    );
+    for (ceiling, glyphs) in [(10u32, [1u16, 2, 3]), (11, [2, 1, 3])] {
+        let limits = Limits {
+            max_transitions: ceiling,
+            ..Limits::DEFAULT
+        };
+        let (out, warnings) = through(looping.clone(), &[1, 2, 3], &limits);
+        assert_eq!(
+            out.iter().map(|(glyph, _)| *glyph).collect::<Vec<_>>(),
+            glyphs,
+            "ceiling {ceiling}: two passed, the rest swaps"
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::TransitionBudgetExceeded { site: site(0) }]
+        );
+    }
+
+    let short = subtable(ANY_ORIENTATION | u32::from(REARRANGEMENT), 1, &[0, 0, 0, 5]);
+    let (out, warnings) = through(short, &[1, 2], &Limits::DEFAULT);
+    assert_eq!(out, vec![(1, 0), (2, 1)]);
+    assert_eq!(
+        warnings,
+        vec![Warning::MalformedAatSubtable { site: site(0) }]
+    );
+    let odd_classes = subtable(
+        ANY_ORIENTATION | u32::from(REARRANGEMENT),
+        1,
+        &stx(4, 0, &u16s(&[9, 0, 0]), &[&[0, 0, 0, 0]], &[&[0, 0]]),
+    );
+    let (_, warnings) = through(odd_classes, &[1, 2], &Limits::DEFAULT);
+    assert_eq!(
+        warnings,
+        vec![Warning::UnknownLookupFormat {
+            site: site(0),
+            format: 9
+        }]
+    );
 }
