@@ -17,13 +17,21 @@
 //! `hsbw` carries the side bearing that shifts every subsequent point, there
 //! is no implicit width, and `flex` and `seac` arrive through a callback
 //! protocol (`callothersubr`) rather than as operators.
+//!
+//! The scanner that finds `/Subrs` and `/CharStrings` entries keeps where
+//! each one sits ([`Entry`]), and the reader decrypts what it finds, so
+//! [`crate::type1_subset`] edits exactly the entries this reader draws
+//! (`docs/design/subsetting.md`).
+
+use std::collections::BTreeSet;
+use std::ops::Range;
 
 use crate::outline::{Outline, Segment};
 
-/// The eexec key (Type 1 spec, chapter 7).
-const EEXEC_KEY: u16 = 55_665;
-/// The charstring key.
-const CHARSTRING_KEY: u16 = 4330;
+/// The eexec key (Type 1 Font Format, 7.2).
+pub const EEXEC_KEY: u16 = 55_665;
+/// The charstring key (7.3).
+pub const CHARSTRING_KEY: u16 = 4330;
 /// How many plaintext bytes to discard after decrypting a charstring.
 const LEN_IV: usize = 4;
 
@@ -32,16 +40,24 @@ const MAX_DEPTH: u32 = 10;
 /// A bound on total operators, so a program that calls itself in a loop that
 /// the depth cap does not catch still terminates.
 const MAX_OPS: u32 = 100_000;
+/// The operands the stack holds; a push past them is dropped.
+const MAX_OPERANDS: usize = 48;
+/// The most charstrings the scanner reads.
+pub(crate) const MAX_GLYPHS: usize = 20_000;
+/// The subroutine indices the reader stores.
+const MAX_SUBRS: usize = 65_536;
 
-/// Reverses Adobe's stream cipher.
+/// The cipher's two constants (7.1).
+const C1: u16 = 52_845;
+const C2: u16 = 22_719;
+
+/// Reverses Adobe's stream cipher (7.1).
 ///
 /// `skip` drops the leading random bytes: four for eexec, `lenIV` for a
 /// charstring. Both are there to randomize the first cipher state and carry no
 /// information.
-fn decrypt(data: &[u8], key: u16, skip: usize) -> Vec<u8> {
-    const C1: u16 = 52_845;
-    const C2: u16 = 22_719;
-
+#[must_use]
+pub fn decrypt(data: &[u8], key: u16, skip: usize) -> Vec<u8> {
     let mut r = key;
     let mut out = Vec::with_capacity(data.len().saturating_sub(skip));
     for (index, byte) in data.iter().enumerate() {
@@ -69,6 +85,26 @@ const MAX_ARRAY_DEPTH: usize = 3;
 /// How many values, at every level, such an array may hold: four axes of
 /// twelve points is 148, sixteen masters of four coordinates 80.
 const MAX_ARRAY_ITEMS: usize = 256;
+
+/// Adobe's stream cipher in the encrypting direction (7.1): `lead` first —
+/// the random bytes a reader discards — then `plain`.
+///
+/// The one copy of it in the repository: [`crate::type1_subset`] writes both
+/// layers through it, and every test that builds a Type 1 program builds it
+/// with this.
+#[must_use]
+pub fn encrypt(plain: &[u8], key: u16, lead: &[u8]) -> Vec<u8> {
+    let mut r = key;
+    let mut out = Vec::with_capacity(lead.len() + plain.len());
+    for byte in lead.iter().chain(plain) {
+        let cipher = byte ^ (r >> 8) as u8;
+        r = (u16::from(cipher).wrapping_add(r))
+            .wrapping_mul(C1)
+            .wrapping_add(C2);
+        out.push(cipher);
+    }
+    out
+}
 
 /// A parsed Type 1 font program.
 #[derive(Clone, Debug)]
@@ -276,6 +312,77 @@ impl Blend {
     }
 }
 
+/// A program's portions as the reader finds them (chapter 2; ISO 32000-2
+/// Table 125): where the clear text ends and the encrypted portion begins,
+/// and the private section decrypted.
+pub(crate) struct Layout<'d> {
+    /// The program, PFB headers and all.
+    pub(crate) data: &'d [u8],
+    /// Where the clear text ends: the first `eexec`'s first byte.
+    pub(crate) eexec: usize,
+    /// Where the encrypted portion begins: after `eexec` and the white space
+    /// after it.
+    pub(crate) encrypted_at: usize,
+    /// Whether the reader takes the encrypted portion as hexadecimal: its
+    /// first four bytes are all hexadecimal digits.
+    pub(crate) hex: bool,
+    /// How many bytes of ciphertext the reader decrypted.
+    pub(crate) cipher_len: usize,
+    /// Everything after the encrypted portion's start, decrypted, its four
+    /// lead bytes dropped.
+    pub(crate) private: Vec<u8>,
+    /// `/lenIV` as written, before the reader clamps it.
+    pub(crate) len_iv: Option<i64>,
+}
+
+impl Layout<'_> {
+    /// Finds the portions, or `None` for a program with no `eexec`.
+    pub(crate) fn read(data: &[u8]) -> Option<Layout<'_>> {
+        let data = strip_pfb(data);
+
+        // The cleartext half ends at `eexec`; everything after it is
+        // encrypted. A font with no `eexec` at all is not one this can read.
+        let at = find(data, b"eexec")?;
+        let rest = &data[at + 5..];
+
+        // Whitespace between the keyword and the ciphertext is not part of it.
+        let start = rest
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(0);
+        let encrypted_at = at + 5 + start;
+        let encrypted = &rest[start..];
+
+        // PFA stores the private half as hexadecimal. Four bytes are enough to
+        // tell: real ciphertext is binary and almost never all hex digits.
+        let hex = encrypted.iter().take(4).all(u8::is_ascii_hexdigit);
+        let binary;
+        let cipher = if hex {
+            binary = unhex(encrypted);
+            &binary[..]
+        } else {
+            encrypted
+        };
+
+        let private = decrypt(cipher, EEXEC_KEY, 4);
+        let len_iv = read_int_after(&private, b"/lenIV");
+        Some(Layout {
+            data,
+            eexec: at,
+            encrypted_at,
+            hex,
+            cipher_len: cipher.len(),
+            private,
+            len_iv,
+        })
+    }
+
+    /// `/lenIV` as the reader uses it: 4 when absent, clamped to 0 to 16.
+    pub(crate) fn len_iv(&self) -> usize {
+        self.len_iv.unwrap_or(LEN_IV as i64).clamp(0, 16) as usize
+    }
+}
+
 impl Type1<'_> {
     /// Reads a Type 1 program: PFB, PFA, or the bare bytes a PDF embeds.
     #[must_use]
@@ -296,41 +403,15 @@ impl Type1<'_> {
     }
 
     fn parse_with(data: &[u8], steps: &mut u64) -> Option<Type1<'static>> {
-        let data = strip_pfb(data);
-
-        // The cleartext half ends at `eexec`; everything after it is
-        // encrypted. A font with no `eexec` at all is not one this can read.
-        let at = find(data, b"eexec")?;
-        let clear = &data[..at];
-        let rest = &data[at + 5..];
-
-        // Whitespace between the keyword and the ciphertext is not part of it.
-        let start = rest
-            .iter()
-            .position(|b| !b.is_ascii_whitespace())
-            .unwrap_or(0);
-        let encrypted = &rest[start..];
-
-        // PFA stores the private half as hexadecimal. Four bytes are enough to
-        // tell: real ciphertext is binary and almost never all hex digits.
-        let binary;
-        let encrypted = if encrypted.iter().take(4).all(|b| b.is_ascii_hexdigit()) {
-            binary = unhex(encrypted);
-            &binary[..]
-        } else {
-            encrypted
-        };
-
-        let private = decrypt(encrypted, EEXEC_KEY, 4);
-        step(steps, encrypted.len());
-
-        let len_iv = read_int_after(&private, b"/lenIV").unwrap_or(LEN_IV as i64);
-        let len_iv = len_iv.clamp(0, 16) as usize;
+        let layout = Layout::read(data)?;
+        step(steps, layout.cipher_len);
+        let len_iv = layout.len_iv();
+        let clear = &layout.data[..layout.eexec];
 
         let weight_vector = read_weight_vector(clear);
         Some(Type1 {
-            glyphs: read_charstrings(&private, len_iv, steps),
-            subrs: read_subrs(&private, len_iv, steps),
+            glyphs: read_charstrings(&layout.private, len_iv, steps),
+            subrs: read_subrs(&layout.private, len_iv, steps),
             encoding: read_encoding(clear),
             font_matrix: read_font_matrix(clear).unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]),
             blend: read_blend(clear),
@@ -445,21 +526,7 @@ impl Type1<'_> {
         let Some((_, charstring)) = self.glyphs.get(usize::from(glyph)) else {
             return (None, 0);
         };
-        let mut run = Run {
-            font: self,
-            outline: Outline::default(),
-            stack: Vec::new(),
-            ps_stack: Vec::new(),
-            x: 0.0,
-            y: 0.0,
-            open: false,
-            width: 0.0,
-            left_side_bearing: 0.0,
-            flex: Vec::new(),
-            in_flex: false,
-            ops: 0,
-            seac: None,
-        };
+        let mut run = Run::new(self, None);
         run.execute(charstring, 0);
         run.close();
         let steps = u64::from(run.ops);
@@ -477,26 +544,38 @@ impl Type1<'_> {
     #[must_use]
     pub fn advance(&self, glyph: u16) -> Option<f64> {
         let (_, charstring) = self.glyphs.get(usize::from(glyph))?;
-        let mut run = Run {
-            font: self,
-            outline: Outline::default(),
-            stack: Vec::new(),
-            ps_stack: Vec::new(),
-            x: 0.0,
-            y: 0.0,
-            open: false,
-            width: 0.0,
-            left_side_bearing: 0.0,
-            flex: Vec::new(),
-            in_flex: false,
-            ops: 0,
-            seac: None,
-        };
+        let mut run = Run::new(self, None);
         run.execute(charstring, 0);
         Some(run.width)
     }
 
-    /// Builds an accented glyph from its two components (`seac`).
+    /// A glyph's run as [`crate::type1_subset`] reads it: the subroutines it
+    /// called, the hint replacements it asked for, its `seac` components and
+    /// the first bound it met, and the steps it took. `None` for a glyph the
+    /// font does not have.
+    pub(crate) fn trace_glyph(&self, glyph: u16) -> Option<(Trace, u64)> {
+        let (_, charstring) = self.glyphs.get(usize::from(glyph))?;
+        Some(self.trace(charstring, 0))
+    }
+
+    /// [`Type1::trace_glyph`] for a subroutine, run as a `callsubr` from a
+    /// charstring would run it: at depth 1. `None` for an index the program
+    /// stores nothing at.
+    pub(crate) fn trace_subr(&self, index: usize) -> Option<(Trace, u64)> {
+        let code = self.subrs.get(index)?;
+        Some(self.trace(code, 1))
+    }
+
+    /// Runs `code` at `depth`, tracing.
+    fn trace(&self, code: &[u8], depth: u32) -> (Trace, u64) {
+        let mut run = Run::new(self, Some(Trace::default()));
+        run.execute(code, depth);
+        let steps = u64::from(run.ops);
+        let mut trace = run.trace.unwrap_or_default();
+        trace.seac = run.seac.map(|(base, accent, _, _)| (base, accent));
+        (trace, steps)
+    }
+
     /// A `seac` glyph from its two components, and the steps their outlines
     /// took.
     fn compose(&self, base: u8, accent: u8, adx: f64, ady: f64) -> (Option<Outline>, u64) {
@@ -518,10 +597,10 @@ impl Type1<'_> {
         let base_name = crate::encoding::base_glyph_name(crate::BaseEncoding::Standard, base)?;
         let accent_name = crate::encoding::base_glyph_name(crate::BaseEncoding::Standard, accent)?;
 
-        let (outline, taken) = self.outline_counted(self.glyph_for_name(base_name.as_bytes())?);
+        let (outline, taken) = self.component(self.glyph_for_name(base_name.as_bytes())?);
         *steps = steps.saturating_add(taken);
         let mut outline = outline?;
-        let (accent, taken) = self.outline_counted(self.glyph_for_name(accent_name.as_bytes())?);
+        let (accent, taken) = self.component(self.glyph_for_name(accent_name.as_bytes())?);
         *steps = steps.saturating_add(taken);
         let accent = accent?;
 
@@ -529,6 +608,23 @@ impl Type1<'_> {
             outline.segments.push(shift(segment, adx, ady));
         }
         Some(outline)
+    }
+
+    /// One component of a `seac`: its own charstring, never composed again.
+    ///
+    /// Chapter 6 builds an accented character from two characters of the
+    /// StandardEncoding, none of which is itself accented, so a component
+    /// that is a `seac` is drawn as its own charstring. Following it would be
+    /// unbounded: a `seac` that names itself recursed until the thread's
+    /// stack ran out.
+    fn component(&self, glyph: u16) -> (Option<Outline>, u64) {
+        let Some((_, charstring)) = self.glyphs.get(usize::from(glyph)) else {
+            return (None, 0);
+        };
+        let mut run = Run::new(self, None);
+        run.execute(charstring, 0);
+        run.close();
+        (Some(run.outline), u64::from(run.ops))
     }
 }
 
@@ -567,6 +663,37 @@ fn shift(segment: Segment, dx: f64, dy: f64) -> Segment {
     }
 }
 
+/// What one charstring's run reached, as [`crate::type1_subset`] reads it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Trace {
+    /// Every subroutine index a `callsubr` called, whether or not the program
+    /// stores one there.
+    pub(crate) called: BTreeSet<usize>,
+    /// Every `subr#` handed to OtherSubrs entry 3 (chapter 8.1), which an
+    /// interpreter that replaces hints calls where this one calls entry 3.
+    pub(crate) hints: BTreeSet<usize>,
+    /// The `seac` components, as StandardEncoding codes.
+    pub(crate) seac: Option<(u8, u8)>,
+    /// The first bound the run met.
+    pub(crate) bound: Option<Bound>,
+}
+
+/// A bound a Type 1 run meets, where what it draws is this reader's rather
+/// than the program's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Bound {
+    /// A call past ten levels deep (chapter 6, *callsubr*), which does not
+    /// run.
+    Depth,
+    /// The operator budget, past which nothing runs.
+    Budget,
+    /// More operands than the stack holds, the excess dropped.
+    Stack,
+    /// A `callsubr` naming no subroutine the program stores: a negative index,
+    /// or one past the array.
+    Missing,
+}
+
 /// One charstring in flight.
 struct Run<'f, 'a> {
     font: &'f Type1<'a>,
@@ -584,9 +711,39 @@ struct Run<'f, 'a> {
     in_flex: bool,
     ops: u32,
     seac: Option<(u8, u8, f64, f64)>,
+    /// What a subsetter asked to learn of the run; `None` when drawing.
+    trace: Option<Trace>,
+}
+
+impl<'f, 'a> Run<'f, 'a> {
+    fn new(font: &'f Type1<'a>, trace: Option<Trace>) -> Run<'f, 'a> {
+        Run {
+            font,
+            outline: Outline::default(),
+            stack: Vec::new(),
+            ps_stack: Vec::new(),
+            x: 0.0,
+            y: 0.0,
+            open: false,
+            width: 0.0,
+            left_side_bearing: 0.0,
+            flex: Vec::new(),
+            in_flex: false,
+            ops: 0,
+            seac: None,
+            trace,
+        }
+    }
 }
 
 impl Run<'_, '_> {
+    /// Records the first bound the run meets, when it is being traced.
+    fn meet(&mut self, bound: Bound) {
+        if let Some(trace) = self.trace.as_mut() {
+            trace.bound.get_or_insert(bound);
+        }
+    }
+
     fn close(&mut self) {
         if self.open {
             self.outline.segments.push(Segment::Close);
@@ -631,6 +788,7 @@ impl Run<'_, '_> {
 
     fn execute(&mut self, code: &[u8], depth: u32) {
         if depth > MAX_DEPTH {
+            self.meet(Bound::Depth);
             return;
         }
 
@@ -638,6 +796,7 @@ impl Run<'_, '_> {
         while i < code.len() {
             self.ops += 1;
             if self.ops > MAX_OPS {
+                self.meet(Bound::Budget);
                 return;
             }
 
@@ -667,8 +826,10 @@ impl Run<'_, '_> {
                     }
                     f64::from(v)
                 };
-                if self.stack.len() < 48 {
+                if self.stack.len() < MAX_OPERANDS {
                     self.stack.push(value);
+                } else {
+                    self.meet(Bound::Stack);
                 }
                 continue;
             }
@@ -724,12 +885,18 @@ impl Run<'_, '_> {
                     // Flex and hint replacement are implemented as subroutine
                     // calls in every Type 1 font, and subrs 0..3 are reserved
                     // for them by convention.
-                    if let Some(subr) = usize::try_from(index as i64)
-                        .ok()
-                        .and_then(|i| self.font.subrs.get(i))
-                    {
-                        let subr = subr.clone();
-                        self.execute(&subr, depth + 1);
+                    let target = usize::try_from(index as i64).ok();
+                    if let Some(trace) = self.trace.as_mut() {
+                        if let Some(target) = target {
+                            trace.called.insert(target);
+                        }
+                    }
+                    match target.and_then(|i| self.font.subrs.get(i)) {
+                        Some(subr) => {
+                            let subr = subr.clone();
+                            self.execute(&subr, depth + 1);
+                        }
+                        None => self.meet(Bound::Missing),
                     }
                 }
                 11 => return, // return
@@ -882,7 +1049,13 @@ impl Run<'_, '_> {
             2 => {}
             3 => {
                 // Hint replacement: the following `pop` wants a subr number,
-                // and 3 is the conventional no-op answer.
+                // and 3 is the conventional no-op answer. The number asked
+                // for is what an interpreter that replaces hints calls.
+                if let Some(trace) = self.trace.as_mut() {
+                    if let Some(subr) = args.first().and_then(|v| usize::try_from(*v as i64).ok()) {
+                        trace.hints.insert(subr);
+                    }
+                }
                 self.ps_stack.push(3.0);
             }
             _ => {
@@ -961,7 +1134,7 @@ fn strip_pfb(data: &[u8]) -> &[u8] {
     data
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
@@ -1262,62 +1435,111 @@ fn read_encoding(clear: &[u8]) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
+/// Which array an entry belongs to, and its key there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Key {
+    /// A `/Subrs` entry, by the index its `dup` gives, as written.
+    Subr(i64),
+    /// A `/CharStrings` entry, by its name.
+    Glyph(Vec<u8>),
+}
+
+/// One `RD` entry of the private section, as the scanner found it, every
+/// offset into the decrypted private section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Entry {
+    pub(crate) key: Key,
+    /// The first byte of its text: `dup`'s `d`, or the name's `/`.
+    pub(crate) start: usize,
+    /// The first byte of its length operand.
+    pub(crate) length: usize,
+    /// The `RD` token, as the program spells it (`RD`, `-|`).
+    pub(crate) rd: Range<usize>,
+    /// Its binary bytes.
+    pub(crate) data: Range<usize>,
+}
+
+/// What the scanner found in one of the private section's two arrays.
+pub(crate) struct Scan {
+    pub(crate) entries: Vec<Entry>,
+    /// How many bytes of its region the scan walked, which the reader counts.
+    walked: usize,
+    /// Whether the charstrings' scan stopped at [`MAX_GLYPHS`].
+    pub(crate) capped: bool,
+}
+
 /// `/Subrs <n> array` followed by `dup <i> <len> RD <bytes> NP`.
-fn read_subrs(private: &[u8], len_iv: usize, steps: &mut u64) -> Vec<Vec<u8>> {
+pub(crate) fn scan_subrs(private: &[u8]) -> Scan {
+    let mut scan = Scan {
+        entries: Vec::new(),
+        walked: 0,
+        capped: false,
+    };
     let Some(at) = find(private, b"/Subrs") else {
-        return Vec::new();
+        return scan;
     };
     let region = &private[at..];
 
-    let mut subrs: Vec<Vec<u8>> = Vec::new();
     let mut i = 0usize;
     while let Some(found) = find(&region[i..], b"dup ") {
         let start = i + found + 4;
         let rest = &region[start..];
 
-        let Some((index, after_index)) = read_number(rest) else {
+        let Some((index, _, after_index)) = read_number(rest) else {
             i = start;
             continue;
         };
-        let Some((length, after_length)) = read_number(&rest[after_index..]) else {
+        let Some((length, length_at, after_length)) = read_number(&rest[after_index..]) else {
             i = start;
             continue;
         };
+        let length_at = after_index + length_at;
         let after_length = after_index + after_length;
 
-        let Some(data_start) = binary_start(&rest[after_length..]) else {
+        let Some((rd, data_start)) = binary_start(&rest[after_length..]) else {
             i = start;
             continue;
         };
         let from = after_length + data_start;
-        let to = from + length as usize;
-        let Some(bytes) = rest.get(from..to) else {
+        // A negative length ends the array, as one past the section does.
+        let Some(to) = usize::try_from(length)
+            .ok()
+            .and_then(|length| from.checked_add(length))
+        else {
             break;
         };
-
-        let index = index.max(0) as usize;
-        if index < 65_536 {
-            if subrs.len() <= index {
-                subrs.resize(index + 1, Vec::new());
-            }
-            subrs[index] = decrypt(bytes, CHARSTRING_KEY, len_iv);
-            step(steps, bytes.len());
+        if rest.get(from..to).is_none() {
+            break;
         }
+
+        let base = at + start;
+        scan.entries.push(Entry {
+            key: Key::Subr(index),
+            start: base - 4,
+            length: base + length_at,
+            rd: base + after_length + rd.start..base + after_length + rd.end,
+            data: base + from..base + to,
+        });
         i = start + to;
     }
-    step(steps, i.min(region.len()));
-    subrs
+    scan.walked = i.min(region.len());
+    scan
 }
 
 /// `/CharStrings <n> dict dup begin` then `/<name> <len> RD <bytes> ND`.
-fn read_charstrings(private: &[u8], len_iv: usize, steps: &mut u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn scan_charstrings(private: &[u8]) -> Scan {
+    let mut scan = Scan {
+        entries: Vec::new(),
+        walked: 0,
+        capped: false,
+    };
     let Some(at) = find(private, b"/CharStrings") else {
-        return Vec::new();
+        return scan;
     };
     // Past the header, so `/CharStrings` itself is not read as a glyph name.
-    let region = &private[at + 12..];
+    let region_at = at + 12;
+    let region = &private[region_at..];
 
-    let mut out = Vec::new();
     let mut i = 0usize;
     while i < region.len() {
         let Some(slash) = region[i..].iter().position(|b| *b == b'/') else {
@@ -1332,30 +1554,89 @@ fn read_charstrings(private: &[u8], len_iv: usize, steps: &mut u64) -> Vec<(Vec<
             .unwrap_or(rest.len());
         let name = rest[..name_end].to_vec();
 
-        let Some((length, after_length)) = read_number(&rest[name_end..]) else {
+        let Some((length, length_at, after_length)) = read_number(&rest[name_end..]) else {
             i = name_start;
             continue;
         };
+        let length_at = name_end + length_at;
         let after_length = name_end + after_length;
 
-        let Some(data_start) = binary_start(&rest[after_length..]) else {
+        let Some((rd, data_start)) = binary_start(&rest[after_length..]) else {
             i = name_start;
             continue;
         };
         let from = after_length + data_start;
-        let to = from + length.max(0) as usize;
-        let Some(bytes) = rest.get(from..to) else {
+        let Some(to) = usize::try_from(length.max(0))
+            .ok()
+            .and_then(|length| from.checked_add(length))
+        else {
             break;
         };
+        if rest.get(from..to).is_none() {
+            break;
+        }
 
-        out.push((name, decrypt(bytes, CHARSTRING_KEY, len_iv)));
-        step(steps, bytes.len());
-        if out.len() > 20_000 {
+        let base = region_at + name_start;
+        scan.entries.push(Entry {
+            key: Key::Glyph(name),
+            start: base - 1,
+            length: base + length_at,
+            rd: base + after_length + rd.start..base + after_length + rd.end,
+            data: base + from..base + to,
+        });
+        if scan.entries.len() > MAX_GLYPHS {
+            scan.capped = true;
             break;
         }
         i = name_start + to;
     }
-    step(steps, i.min(region.len()));
+    scan.walked = i.min(region.len());
+    scan
+}
+
+/// The subroutines the reader stores, by index: the last entry for an index
+/// wins, as PostScript's `put` does, and an index past 65 535 is passed over.
+fn read_subrs(private: &[u8], len_iv: usize, steps: &mut u64) -> Vec<Vec<u8>> {
+    let scan = scan_subrs(private);
+    let mut subrs: Vec<Vec<u8>> = Vec::new();
+    for entry in &scan.entries {
+        let Key::Subr(index) = entry.key else {
+            continue;
+        };
+        let Some(index) = usize::try_from(index.max(0))
+            .ok()
+            .filter(|index| *index < MAX_SUBRS)
+        else {
+            continue;
+        };
+        let Some(bytes) = private.get(entry.data.clone()) else {
+            continue;
+        };
+        if subrs.len() <= index {
+            subrs.resize(index + 1, Vec::new());
+        }
+        subrs[index] = decrypt(bytes, CHARSTRING_KEY, len_iv);
+        step(steps, bytes.len());
+    }
+    step(steps, scan.walked);
+    subrs
+}
+
+/// The charstrings the reader draws, in the order the program gives them.
+fn read_charstrings(private: &[u8], len_iv: usize, steps: &mut u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let scan = scan_charstrings(private);
+    let mut out = Vec::with_capacity(scan.entries.len());
+    for entry in &scan.entries {
+        let Key::Glyph(name) = &entry.key else {
+            continue;
+        };
+        let Some(bytes) = private.get(entry.data.clone()) else {
+            continue;
+        };
+        out.push((name.clone(), decrypt(bytes, CHARSTRING_KEY, len_iv)));
+        step(steps, bytes.len());
+    }
+    step(steps, scan.walked);
     out
 }
 
@@ -1364,8 +1645,9 @@ fn step(steps: &mut u64, n: usize) {
     *steps = steps.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
 }
 
-/// An integer and how many bytes it and its leading whitespace took.
-fn read_number(data: &[u8]) -> Option<(i64, usize)> {
+/// An integer, where its digits begin, and how many bytes it and its leading
+/// whitespace took.
+fn read_number(data: &[u8]) -> Option<(i64, usize, usize)> {
     let start = data.iter().position(|b| !b.is_ascii_whitespace())?;
     let rest = &data[start..];
     let end = rest
@@ -1376,56 +1658,101 @@ fn read_number(data: &[u8]) -> Option<(i64, usize)> {
         return None;
     }
     let value: i64 = core::str::from_utf8(&rest[..end]).ok()?.parse().ok()?;
-    Some((value, start + end))
+    Some((value, start, start + end))
 }
 
-/// Where the binary data begins after an `RD` or `-|` token.
+/// The `RD` or `-|` token after a length, and where the binary data begins.
 ///
 /// Exactly one space separates the token from the bytes, and the bytes may
 /// begin with anything at all — including another space — so counting is the
 /// only correct way to find them.
-fn binary_start(data: &[u8]) -> Option<usize> {
+fn binary_start(data: &[u8]) -> Option<(Range<usize>, usize)> {
     let start = data.iter().position(|b| !b.is_ascii_whitespace())?;
     let rest = &data[start..];
     let token_end = rest
         .iter()
         .position(u8::is_ascii_whitespace)
         .unwrap_or(rest.len());
-    Some(start + token_end + 1)
+    Some((start..start + token_end, start + token_end + 1))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Adobe's cipher, in the encrypting direction, so a test can build a
-    /// font the way a font tool would.
-    fn encrypt(plain: &[u8], key: u16, pad: usize) -> Vec<u8> {
-        const C1: u16 = 52_845;
-        const C2: u16 = 22_719;
-
-        let mut r = key;
-        let mut out = Vec::new();
-        // The leading bytes are discarded on the way back, so their value is
-        // irrelevant as long as they are there.
-        let mut input = vec![0x55u8; pad];
-        input.extend_from_slice(plain);
-
-        for byte in input {
-            let cipher = byte ^ (r >> 8) as u8;
-            r = (u16::from(cipher).wrapping_add(r))
-                .wrapping_mul(C1)
-                .wrapping_add(C2);
-            out.push(cipher);
-        }
-        out
-    }
+    /// The lead bytes the tests' programs carry, as a font tool would choose
+    /// them: their value is irrelevant, since a reader discards them.
+    const PAD: [u8; 4] = [0x55; 4];
 
     #[test]
     fn the_cipher_round_trips() {
         let plain = b"/CharStrings 1 dict dup begin".to_vec();
-        let cipher = encrypt(&plain, EEXEC_KEY, 4);
+        let cipher = encrypt(&plain, EEXEC_KEY, &PAD);
         assert_eq!(decrypt(&cipher, EEXEC_KEY, 4), plain);
+        // 7.3's worked example: four zero lead bytes before the block letter
+        // "C"'s 37 bytes give the 41 bytes of ciphertext the chapter prints.
+        let charstring = [
+            0xBD, 0xF9, 0xB4, 0x0D, 0x8B, 0xEF, 0x03, 0x8B, 0xEF, 0x01, 0xF8, 0xEC, 0xEF, 0x01,
+            0x8B, 0x16, 0xF9, 0x50, 0x06, 0xEF, 0x07, 0xFC, 0xEC, 0x06, 0xF8, 0x88, 0x07, 0xF8,
+            0xEC, 0x06, 0xEF, 0x07, 0xFD, 0x50, 0x06, 0x09, 0x0E,
+        ];
+        let expected = [
+            0x10, 0xBF, 0x31, 0x70, 0x4F, 0xAB, 0x5B, 0x1F, 0x03, 0xF9, 0xB6, 0x8B, 0x1F, 0x39,
+            0xA6, 0x65, 0x21, 0xB1, 0x84, 0x1F, 0x14, 0x81, 0x69, 0x7F, 0x8E, 0x12, 0xB7, 0xF7,
+            0xDD, 0xD6, 0xE3, 0xD7, 0x24, 0x8D, 0x96, 0x5B, 0x1C, 0xD4, 0x5E, 0x21, 0x14,
+        ];
+        assert_eq!(encrypt(&charstring, CHARSTRING_KEY, &[0; 4]), expected);
+        assert_eq!(decrypt(&expected, CHARSTRING_KEY, 4), charstring);
+    }
+
+    /// A Type 1 number in its shortest form.
+    fn num(v: i32, out: &mut Vec<u8>) {
+        if (-107..=107).contains(&v) {
+            out.push((v + 139) as u8);
+        } else if (108..=1131).contains(&v) {
+            let v = v - 108;
+            out.push((v / 256 + 247) as u8);
+            out.push((v % 256) as u8);
+        } else if (-1131..=-108).contains(&v) {
+            let v = -v - 108;
+            out.push((v / 256 + 251) as u8);
+            out.push((v % 256) as u8);
+        } else {
+            out.push(255);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+
+    /// A program of `glyphs` and `subrs`, each a plaintext charstring.
+    fn program(glyphs: &[(&[u8], Vec<u8>)], subrs: &[(i64, Vec<u8>)]) -> Vec<u8> {
+        let mut private = Vec::new();
+        private.extend_from_slice(b"dup /Private 8 dict dup begin\n/lenIV 4 def\n");
+        private.extend_from_slice(format!("/Subrs {} array\n", subrs.len()).as_bytes());
+        for (index, code) in subrs {
+            let encrypted = encrypt(code, CHARSTRING_KEY, &PAD);
+            private.extend_from_slice(format!("dup {index} {} RD ", encrypted.len()).as_bytes());
+            private.extend_from_slice(&encrypted);
+            private.extend_from_slice(b" NP\n");
+        }
+        private.extend_from_slice(b"ND\n");
+        private.extend_from_slice(
+            format!("2 index /CharStrings {} dict dup begin\n", glyphs.len()).as_bytes(),
+        );
+        for (name, code) in glyphs {
+            let encrypted = encrypt(code, CHARSTRING_KEY, &PAD);
+            private.push(b'/');
+            private.extend_from_slice(name);
+            private.extend_from_slice(format!(" {} RD ", encrypted.len()).as_bytes());
+            private.extend_from_slice(&encrypted);
+            private.extend_from_slice(b" ND\n");
+        }
+        private.extend_from_slice(b"end\nend\nmark currentfile closefile\n");
+
+        let mut out = b"%!PS-AdobeFont-1.0: Test\n\
+            /FontMatrix [0.001 0 0 0.001 0 0] readonly def\ncurrentfile eexec\n"
+            .to_vec();
+        out.extend(encrypt(&private, EEXEC_KEY, &PAD));
+        out
     }
 
     /// A minimal but genuine Type 1 program: one glyph, a square, placed by
@@ -1433,21 +1760,6 @@ mod tests {
     fn font_with_square() -> Vec<u8> {
         // hsbw 50 600, rmoveto 0 0, then a 500-unit box, closepath, endchar.
         let mut cs: Vec<u8> = Vec::new();
-        let num = |v: i32, out: &mut Vec<u8>| {
-            // The one-byte form covers -107..=107, which is all this needs
-            // except the larger values below.
-            if (-107..=107).contains(&v) {
-                out.push((v + 139) as u8);
-            } else if (108..=1131).contains(&v) {
-                let v = v - 108;
-                out.push((v / 256 + 247) as u8);
-                out.push((v % 256) as u8);
-            } else {
-                out.push(255);
-                out.extend_from_slice(&v.to_be_bytes());
-            }
-        };
-
         num(50, &mut cs);
         num(600, &mut cs);
         cs.push(13); // hsbw
@@ -1463,7 +1775,7 @@ mod tests {
         cs.push(9); // closepath
         cs.push(14); // endchar
 
-        let encrypted = encrypt(&cs, CHARSTRING_KEY, 4);
+        let encrypted = encrypt(&cs, CHARSTRING_KEY, &PAD);
 
         let mut private = Vec::new();
         private.extend_from_slice(b"dup /Private 8 dict dup begin\n/lenIV 4 def\n");
@@ -1478,7 +1790,7 @@ mod tests {
         out.extend_from_slice(b"/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n");
         out.extend_from_slice(b"/Encoding 256 array\ndup 65 /square put\nreadonly def\n");
         out.extend_from_slice(b"currentfile eexec\n");
-        out.extend_from_slice(&encrypt(&private, EEXEC_KEY, 4));
+        out.extend_from_slice(&encrypt(&private, EEXEC_KEY, &PAD));
         out
     }
 
@@ -1653,7 +1965,7 @@ mod tests {
             format!("/CharStrings {} dict dup begin\n", charstrings.len()).as_bytes(),
         );
         for (name, charstring) in charstrings {
-            let encrypted = encrypt(charstring, CHARSTRING_KEY, 4);
+            let encrypted = encrypt(charstring, CHARSTRING_KEY, &PAD);
             private.extend_from_slice(format!("/{name} {} RD ", encrypted.len()).as_bytes());
             private.extend_from_slice(&encrypted);
             private.extend_from_slice(b" ND\n");
@@ -1666,7 +1978,7 @@ mod tests {
         out.extend_from_slice(b"/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n");
         out.extend_from_slice(b"/Encoding 256 array\ndup 65 /square put\nreadonly def\n");
         out.extend_from_slice(b"currentfile eexec\n");
-        out.extend_from_slice(&encrypt(&private, EEXEC_KEY, 4));
+        out.extend_from_slice(&encrypt(&private, EEXEC_KEY, &PAD));
         out
     }
 
@@ -1732,6 +2044,27 @@ mod tests {
         blended(&masters.curve_a, &mut cs);
         blended(&masters.curve_b, &mut cs);
         cs.push(8); // rrcurveto
+        cs.push(9); // closepath
+        cs.push(14); // endchar
+        cs
+    }
+
+    /// A box drawn from `(x, 0)` by `side` units, as a charstring after
+    /// `hsbw`.
+    fn box_charstring(sbx: i32, width: i32, side: i32) -> Vec<u8> {
+        let mut cs = Vec::new();
+        num(sbx, &mut cs);
+        num(width, &mut cs);
+        cs.push(13); // hsbw
+        num(0, &mut cs);
+        num(0, &mut cs);
+        cs.push(21); // rmoveto
+        num(side, &mut cs);
+        cs.push(6); // hlineto
+        num(side, &mut cs);
+        cs.push(7); // vlineto
+        num(-side, &mut cs);
+        cs.push(6); // hlineto
         cs.push(9); // closepath
         cs.push(14); // endchar
         cs
@@ -2242,5 +2575,185 @@ mod tests {
             &[("square", square_charstring(&four_masters()))],
         );
         std::fs::write(path, program).expect("the seed is written");
+    }
+
+    /// Chapter 6's `seac` composes two StandardEncoding glyphs, and a
+    /// component is drawn as its own charstring. A `seac` naming itself — `A`
+    /// is StandardEncoding code 65 — recursed until the stack ran out; it now
+    /// draws its base as the base's own charstring, which composes nothing.
+    #[test]
+    fn a_seac_that_names_itself_is_drawn_and_not_followed() {
+        let mut seac = Vec::new();
+        num(0, &mut seac);
+        num(600, &mut seac);
+        seac.push(13); // hsbw
+        for v in [0, 100, 200, 65, 65] {
+            num(v, &mut seac);
+        }
+        seac.extend([12, 6]); // seac: asb adx ady bchar achar
+        let looping = program(&[(b"A", seac)], &[]);
+        let font = Type1::parse(&looping).expect("it parses");
+        let outline = font.outline(0).expect("it composes");
+        assert!(
+            outline.is_empty(),
+            "the components are `A` itself, whose own charstring draws nothing"
+        );
+
+        // A well-formed accented glyph still composes both components.
+        let mut aacute = Vec::new();
+        num(0, &mut aacute);
+        num(600, &mut aacute);
+        aacute.push(13);
+        for v in [0, 100, 200, 65, 194] {
+            num(v, &mut aacute);
+        }
+        aacute.extend([12, 6]);
+        let accented = program(
+            &[
+                (b"A".as_slice(), box_charstring(0, 600, 500)),
+                (b"acute".as_slice(), box_charstring(0, 300, 50)),
+                (b"Aacute".as_slice(), aacute),
+            ],
+            &[],
+        );
+        let font = Type1::parse(&accented).expect("it parses");
+        let base = font.outline(0).expect("A").segments;
+        let accent = font.outline(1).expect("acute").segments;
+        let composed = font.outline(2).expect("Aacute").segments;
+        assert_eq!(composed.len(), base.len() + accent.len());
+        assert_eq!(composed[..base.len()], base[..]);
+        assert_eq!(
+            composed[base.len()..].to_vec(),
+            accent
+                .iter()
+                .map(|s| shift(*s, 100.0, 200.0))
+                .collect::<Vec<_>>(),
+            "the accent moved by (adx, ady)"
+        );
+    }
+
+    /// A negative subroutine length ends the array, as a length past the
+    /// section does: the entries before it are read, and nothing overflows.
+    #[test]
+    fn a_negative_subroutine_length_ends_the_array() {
+        let mut private = b"/Subrs 2 array\ndup 0 3 RD ".to_vec();
+        private.extend(encrypt(&[11], CHARSTRING_KEY, &[]));
+        private.extend_from_slice(b"xx NP\ndup 1 -5 RD xxxxx NP\nND\n");
+        let scan = scan_subrs(&private);
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].key, Key::Subr(0));
+        let subrs = read_subrs(&private, 0, &mut 0);
+        assert_eq!(subrs.len(), 1);
+    }
+
+    /// The scanner's spans are where the entries are: `dup`'s `d` or the
+    /// name's `/`, the length's first digit, the `RD` token and the bytes.
+    #[test]
+    fn the_scanner_keeps_where_each_entry_is() {
+        let private = b"/Subrs 1 array\ndup 0 2 -| ab |\nND\n/CharStrings 1 dict dup begin\n/one 3 RD xyz ND\nend\n";
+        let subrs = scan_subrs(private);
+        assert_eq!(subrs.entries.len(), 1);
+        let entry = &subrs.entries[0];
+        assert_eq!(&private[entry.start..entry.start + 3], b"dup");
+        assert_eq!(private[entry.length], b'2');
+        assert_eq!(&private[entry.rd.clone()], b"-|");
+        assert_eq!(&private[entry.data.clone()], b"ab");
+
+        let glyphs = scan_charstrings(private);
+        assert_eq!(glyphs.entries.len(), 1);
+        let entry = &glyphs.entries[0];
+        assert_eq!(entry.key, Key::Glyph(b"one".to_vec()));
+        assert_eq!(&private[entry.start..entry.start + 4], b"/one");
+        assert_eq!(private[entry.length], b'3');
+        assert_eq!(&private[entry.rd.clone()], b"RD");
+        assert_eq!(&private[entry.data.clone()], b"xyz");
+    }
+
+    /// An index past the 65 535 the reader stores is passed over on every
+    /// target, a 32-bit one included, rather than folded onto a small index.
+    #[test]
+    fn a_subroutine_index_past_65535_is_passed_over() {
+        let mut private = b"/Subrs 1 array\ndup 4294967301 1 RD ".to_vec();
+        private.push(0);
+        private.extend_from_slice(b" NP\ndup 2 1 RD ");
+        private.push(0);
+        private.extend_from_slice(b" NP\nND\n");
+        let subrs = read_subrs(&private, 0, &mut 0);
+        assert_eq!(subrs.len(), 3, "index 2 is stored and the huge one is not");
+    }
+
+    /// A traced run records the subroutines it calls, the hint replacements
+    /// it asks for and the bounds it meets; a drawing run records nothing.
+    #[test]
+    fn a_trace_records_calls_hint_replacements_and_bounds() {
+        // Subroutine 4 calls subroutine 5; the glyph asks for hint
+        // replacement with subroutine 6, calls 4, and calls 9, which is not
+        // there.
+        let mut sub4 = Vec::new();
+        num(5, &mut sub4);
+        sub4.push(10);
+        sub4.push(11);
+        let sub5 = vec![11u8];
+        let sub6 = vec![11u8];
+        let mut glyph = Vec::new();
+        num(0, &mut glyph);
+        num(500, &mut glyph);
+        glyph.push(13);
+        for v in [6, 1, 3] {
+            num(v, &mut glyph);
+        }
+        glyph.extend([12, 16, 12, 17]); // callothersubr pop
+        glyph.push(10); // callsubr 3, the conventional answer
+        num(4, &mut glyph);
+        glyph.push(10);
+        num(9, &mut glyph);
+        glyph.push(10);
+        glyph.push(14);
+        let calling = program(
+            &[(b"g", glyph)],
+            &[(3, vec![11]), (4, sub4), (5, sub5), (6, sub6)],
+        );
+        let font = Type1::parse(&calling).expect("it parses");
+        let (trace, steps) = font.trace_glyph(0).expect("the glyph is there");
+        assert!(steps > 0);
+        assert_eq!(trace.called, [3, 4, 5, 9].into_iter().collect());
+        assert_eq!(trace.hints, [6].into_iter().collect());
+        assert_eq!(
+            trace.bound,
+            Some(Bound::Missing),
+            "subroutine 9 is not there"
+        );
+
+        // A subroutine that calls itself meets the depth cap.
+        let mut recursive = Vec::new();
+        num(0, &mut recursive);
+        recursive.push(10);
+        recursive.push(11);
+        let mut glyph = Vec::new();
+        num(0, &mut glyph);
+        glyph.push(10);
+        glyph.push(14);
+        let recursing = program(&[(b"g", glyph)], &[(0, recursive)]);
+        let font = Type1::parse(&recursing).expect("it parses");
+        let (trace, _) = font.trace_glyph(0).expect("the glyph is there");
+        assert_eq!(trace.bound, Some(Bound::Depth));
+
+        // Forty-nine operands overflow the stack.
+        let mut glyph = Vec::new();
+        for _ in 0..49 {
+            num(1, &mut glyph);
+        }
+        glyph.push(14);
+        let overflowing = program(&[(b"g", glyph)], &[]);
+        let font = Type1::parse(&overflowing).expect("it parses");
+        let (trace, _) = font.trace_glyph(0).expect("the glyph is there");
+        assert_eq!(trace.bound, Some(Bound::Stack));
+
+        // And a charstring longer than the budget spends it.
+        let glyph = vec![9u8; MAX_OPS as usize + 1];
+        let overflowing = program(&[(b"g", glyph)], &[]);
+        let font = Type1::parse(&overflowing).expect("it parses");
+        let (trace, _) = font.trace_glyph(0).expect("the glyph is there");
+        assert_eq!(trace.bound, Some(Bound::Budget));
     }
 }

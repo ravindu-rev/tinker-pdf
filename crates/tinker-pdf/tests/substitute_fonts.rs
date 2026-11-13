@@ -318,24 +318,10 @@ fn an_embedded_font_is_not_replaced() {
 }
 
 /// Adobe's stream cipher, encrypting, so a test can build a Type 1 program
-/// the way a font tool would.
+/// the way a font tool would: `tinker_pdf_font::type1`'s own, after `pad`
+/// lead bytes a reader discards.
 fn t1_encrypt(plain: &[u8], key: u16, pad: usize) -> Vec<u8> {
-    const C1: u16 = 52_845;
-    const C2: u16 = 22_719;
-
-    let mut r = key;
-    let mut out = Vec::new();
-    let mut input = vec![0x55u8; pad];
-    input.extend_from_slice(plain);
-
-    for byte in input {
-        let cipher = byte ^ (r >> 8) as u8;
-        r = (u16::from(cipher).wrapping_add(r))
-            .wrapping_mul(C1)
-            .wrapping_add(C2);
-        out.push(cipher);
-    }
-    out
+    tinker_pdf_font::type1::encrypt(plain, key, &vec![0x55u8; pad])
 }
 
 /// A Type 1 program whose glyph `A` is a filled 600-unit box.

@@ -751,6 +751,7 @@ const FUZZ_GEN_MARKUP: &str = include_str!("../../../fuzz/src/markup.rs");
 const FONT_OUTLINE: &str = include_str!("../../tinker-pdf-font/src/outline.rs");
 const FONT_CFF_SUBSET: &str = include_str!("../../tinker-pdf-font/src/cff_subset.rs");
 const FONT_HINT_VM: &str = include_str!("../../tinker-pdf-font/src/hint/vm.rs");
+const FONT_TYPE1: &str = include_str!("../../tinker-pdf-font/src/type1.rs");
 const ARCHIVE_BZIP2: &str = include_str!("../../tinker-pdf-archive/src/bzip2.rs");
 
 /// One bound, as its own ledger publishes it.
@@ -4792,6 +4793,50 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                 outline(),
             ],
             vec![OUTLINE_CAP],
+        ),
+        written(
+            "type1_subset",
+            vec![
+                buffer(
+                    Input,
+                    4,
+                    2,
+                    "the program read, and its subset read back: each a decrypted eexec \
+                     section and its decrypted charstrings",
+                ),
+                buffer(
+                    Input,
+                    3,
+                    1,
+                    "the subset's private section in plaintext, its ciphertext and the \
+                     program it is written into, each at most the program and a byte",
+                ),
+                buffer(
+                    Input,
+                    16,
+                    1,
+                    "the entries the two scans find and the edits made of them, an entry \
+                     ten bytes of the program at least (estimate)",
+                ),
+                buffer(
+                    Value(1 << 16),
+                    48,
+                    2,
+                    "a trace's called subroutines and the set reached, at the 65 536 \
+                     indices the reader stores (estimate)",
+                ),
+                outline(),
+                buffer(
+                    Value(1 << 16),
+                    segment,
+                    1,
+                    "the subset's outline of the glyph compared with the program's",
+                ),
+            ],
+            vec![
+                (FONT_TYPE1, "const MAX_SUBRS: usize = 65_536;"),
+                OUTLINE_CAP,
+            ],
         ),
         written(
             "type42",

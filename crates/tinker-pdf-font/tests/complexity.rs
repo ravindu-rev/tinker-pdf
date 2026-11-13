@@ -642,22 +642,10 @@ fn more_subroutine_calls_cost_work_linear_in_their_count() {
 // Type 1.
 // ---------------------------------------------------------------------------
 
-/// Adobe's cipher in the encrypting direction, after `pad` leading bytes.
+/// Adobe's cipher in the encrypting direction, after `pad` leading bytes:
+/// `tinker_pdf_font::type1`'s own.
 fn encrypt(plain: &[u8], key: u16, pad: usize) -> Vec<u8> {
-    const C1: u16 = 52_845;
-    const C2: u16 = 22_719;
-    let mut r = key;
-    let mut out = Vec::new();
-    let mut input = vec![0x55u8; pad];
-    input.extend_from_slice(plain);
-    for byte in input {
-        let cipher = byte ^ (r >> 8) as u8;
-        r = (u16::from(cipher).wrapping_add(r))
-            .wrapping_mul(C1)
-            .wrapping_add(C2);
-        out.push(cipher);
-    }
-    out
+    tinker_pdf_font::type1::encrypt(plain, key, &vec![0x55u8; pad])
 }
 
 /// A Type 1 charstring: a width, one line, the end.

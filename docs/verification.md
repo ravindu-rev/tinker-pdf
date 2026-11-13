@@ -114,14 +114,15 @@ missing or not an ELF file, whose seed archive does not read back through
 options file does not set the sessions' timeout. The service's own check of
 a build runs the targets and decides nothing here (ruling 13).
 
-`cff_subset` is the one target that fuzzes a **writer**. Its assertion is
-not "it did not panic": whatever the subsetter emits must parse with this
-repository's own `Cff::parse`, every glyph asked for must still be at the
-id it was asked for, and subsetting twice must produce the same bytes. A
-subsetter that renumbered subroutine calls wrongly around the 107 / 1131 /
-32768 bias thresholds produces a *valid* font that draws the wrong glyphs,
-and no other check in the pipeline would see it — the embed path takes the
-bytes and writes them into a `/FontFile3`.
+`cff_subset` and `type1_subset` fuzz **writers**. Their assertion is not
+"it did not panic": whatever the subsetter emits must parse with this
+repository's own reader, every glyph asked for must still be there — a CFF's
+at the id it was asked for, a Type 1 program's under its own name — and
+subsetting twice must produce the same bytes; a Type 1 subset's three segment
+lengths must add up to it. A subsetter that renumbered subroutine calls wrongly
+around the 107 / 1131 / 32768 bias thresholds produces a *valid* font that
+draws the wrong glyphs, and no other check in the pipeline would see it — the
+embed path takes the bytes and writes them into a `/FontFile3`.
 
 ### The roster, and whether the seeds reach the code
 
@@ -324,10 +325,10 @@ validation is for. `render_tile` holds ruling 5 over generated pages: every
 region it draws is the whole render's rectangle there, byte for byte, but for
 the pages that may draw two images, which RC-21's image run leaves out.
 
-`cff_subset` is the strongest target and still not exempt: it fuzzes a
-*writer*, and its round trip goes through **this repository's own** parser, so
-a misreading of the CFF specification shared by writer and reader round-trips
-perfectly and draws the wrong glyphs everywhere else.
+`cff_subset` and `type1_subset` are the strongest targets and still not
+exempt: each fuzzes a *writer*, and its round trip goes through **this
+repository's own** parser, so a misreading of the format shared by writer and
+reader round-trips perfectly and draws the wrong glyphs everywhere else.
 
 `brotli` asserts only self-consistency, and it is the one case where the
 missing check **cannot** be supplied from anywhere in the tree:

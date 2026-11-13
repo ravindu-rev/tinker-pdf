@@ -18,10 +18,13 @@
 //!
 //! CFF is a different job and lives in [`crate::cff_subset`] — its
 //! charstrings, its two subroutine INDEXes and the DICT offsets pointing at
-//! all three have to be rebuilt together. [`subset`] is still the one door:
-//! it looks at what the bytes are and hands an `OpenType/CFF` face or a bare
-//! CFF program to that. `post` glyph names are dropped wholesale rather than
-//! subsetted.
+//! all three have to be rebuilt together. [`subset`] is still the one door
+//! for an sfnt or a CFF: it looks at what the bytes are and hands an
+//! `OpenType/CFF` face or a bare CFF program to that. A Type 1 program has a
+//! door of its own, [`crate::type1_subset::subset_type1`], because its
+//! answer carries the three segment lengths a `/FontFile` stream states and
+//! the names of the glyphs it keeps. `post` glyph names are dropped
+//! wholesale rather than subsetted.
 
 use std::collections::{BTreeMap, BTreeSet};
 

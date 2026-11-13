@@ -172,9 +172,11 @@ which is neither white space nor a hexadecimal digit. Nothing random enters,
 so the same program and glyphs give the same bytes on every target (ruling
 4).
 
-**The three segments** (Table 125). The fixed-content portion is the input's
-own: from the first `cleartomark` after the encrypted portion back through the
-run of zeros and white space before it, and everything after it — chapter
+**The three segments** (Table 125). The input's encrypted portion runs at
+least one byte past `closefile`, since eexec decrypts the delimiter that ends
+the token before it stops. The fixed-content portion is the input's own: from
+the first `cleartomark` after that byte back through the run of zeros and
+white space before it, and everything after it — chapter
 2.3's 512 zeros, `cleartomark`, and whatever the program appends, such as a
 `{restore}if` that closes a `save` its clear text opened. A program with no
 `cleartomark` there has none (Table 125: a `Length3` of 0, the 512 zeros and

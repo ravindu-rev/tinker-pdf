@@ -36,14 +36,14 @@
 //! result is the one the input describes, so an answer that is well-formed
 //! and *wrong* passes exactly as a correct one does.
 //!
-//! Those are unusually strong for a fuzz target — this is the one target here
-//! that fuzzes a *writer*, and a round trip through a parser is real
-//! evidence. The residual is that the parser is **this repository's own**: a
-//! misreading of the CFF specification shared by the writer and the reader
-//! would round-trip perfectly and produce a font that draws the wrong glyphs
-//! everywhere else. `crates/tinker-pdf/tests/cff_subset_census.rs` is what
-//! covers that, by checking a rebuilt face against what a conformant consumer
-//! accepts.
+//! Those are unusually strong for a fuzz target — this and `type1_subset` are
+//! the targets here that fuzz a *writer*, and a round trip through a parser
+//! is real evidence. The residual is that the parser is **this repository's
+//! own**: a misreading of the CFF specification shared by the writer and the
+//! reader would round-trip perfectly and produce a font that draws the wrong
+//! glyphs everywhere else. `crates/tinker-pdf/tests/cff_subset_census.rs` is
+//! what covers that, by checking a rebuilt face against what a conformant
+//! consumer accepts.
 //!
 #![no_main]
 use libfuzzer_sys::fuzz_target;

@@ -1,7 +1,7 @@
-//! Seven committed font corpora, replayed on stable, measured for *reach*.
+//! Eight committed font corpora, replayed on stable, measured for *reach*.
 //!
-//! `woff_seeds.rs` does the same for `fuzz/corpus/woff`. These seven share a
-//! file because they share a shape: six of the seven targets open with
+//! `woff_seeds.rs` does the same for `fuzz/corpus/woff`. These eight share a
+//! file because they share a shape: seven of the eight targets open with
 //! `let Some(x) = X::parse(data) else { return; }`, or `type42`'s `let
 //! Ok(…)`, so a seed that does not parse makes the whole target a no-op and
 //! the fuzzer spends its budget mutating something that was never a font.
@@ -37,8 +37,12 @@
 
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeSet;
+
 use tinker_pdf_font::hint::{Error as HintError, Program, Unhinted};
-use tinker_pdf_font::{cmap, substitute_glyph, BuiltInEncoding, Cff, Sfnt, Type1, Type42};
+use tinker_pdf_font::{
+    cmap, subset_type1, substitute_glyph, BuiltInEncoding, Cff, Sfnt, Type1, Type42,
+};
 
 /// The `truetype_hinting` target's input and its run: the target's own file,
 /// so the seeds are written with its encoder and replayed through its run.
@@ -340,6 +344,31 @@ fn the_type42_seeds_reach_the_face() {
         }
     }
     report("type42", files.len(), reached, &missed);
+}
+
+#[test]
+fn the_type1_subset_seeds_reach_the_subsetter() {
+    let Some(files) = seeds("type1_subset") else {
+        println!("type1_subset-seeds: SKIPPED (no fuzz/corpus/type1_subset)");
+        return;
+    };
+    let (mut reached, mut missed) = (0, Vec::new());
+    for (label, data) in &files {
+        // The target's first selection is the first glyph alone. A seed the
+        // subsetter declines there reaches a refusal and writes nothing, which
+        // is the writer path this corpus exists to drive.
+        match subset_type1(data, &BTreeSet::from([0])) {
+            Ok(subset) => {
+                reached += 1;
+                assert!(
+                    Type1::parse(&subset.program).is_some(),
+                    "{label}: a subset its own reader refuses"
+                );
+            }
+            Err(_) => missed.push(label.clone()),
+        }
+    }
+    report("type1_subset", files.len(), reached, &missed);
 }
 
 #[test]

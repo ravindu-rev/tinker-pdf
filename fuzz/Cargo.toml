@@ -161,6 +161,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "type1_subset"
+path = "fuzz_targets/type1_subset.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "cmap"
 path = "fuzz_targets/cmap.rs"
 test = false

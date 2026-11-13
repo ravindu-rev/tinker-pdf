@@ -180,8 +180,37 @@ than cut.
 bytes a PDF embeds: eexec decryption, the second decryption layer around each
 charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
 side bearing, `seac` accent composition, and `flex` through the
-`callothersubr`/`pop` callback protocol. Glyphs are addressed by name, via
-the encoding the font dictionary specifies or the program's built-in one.
+`callothersubr`/`pop` callback protocol. A `seac` component is drawn as its
+own charstring and never composed again, so a `seac` that names itself
+draws rather than recursing. Glyphs are addressed by name, via the encoding
+the font dictionary specifies or the program's built-in one. The cipher is
+public, both ways (`type1::encrypt`, `type1::decrypt`, with `EEXEC_KEY` and
+`CHARSTRING_KEY`), and every test that builds a program builds it with it.
+
+**Cutting a Type 1 program** ([design](../design/subsetting.md)).
+`tinker_pdf_font::subset_type1(program, glyphs)` keeps the glyphs asked for
+— indices in the order `Type1::parse` reads the charstrings — with `.notdef`
+and every `seac` component, and every subroutine they reach: those their
+charstrings run, followed through every call, subroutines 0 to 3, and each
+`subr#` a hint replacement hands OtherSubrs entry 3 with what it calls. It
+reads the program through the reader's own scanner, which keeps where each
+`/Subrs` and `/CharStrings` entry sits, and writes the clear text byte for
+byte; the private section with every other charstring deleted and every
+subroutine nobody reaches rewritten in place as a one-byte `return` at its own
+number, in the program's own `RD` spelling, so no `callsubr` operand moves;
+the kept entries as the ciphertext they were; and the input's own trailer. Both
+cipher layers are applied with zero lead bytes, so the same program and glyphs
+give the same bytes everywhere, and the encrypted portion is binary. It
+answers the program, ISO 32000-2 Table 125's three lengths — clear text,
+encrypted portion, trailer — and the kept glyphs' names, after outlining and
+advancing every kept glyph in both programs; or a `Type1Refusal` naming what
+it would not guess: a PFB container, a hexadecimal encrypted portion, a
+`/lenIV` outside 0 to 16, a synthetic or hybrid program, no `closefile`,
+overlapping entries, a name or a subroutine index given twice, more than the
+20 000 charstrings the reader reads, a kept glyph that calls a subroutine the
+program does not define or meets one of the reader's bounds (ten levels of
+calls, 100 000 operators, 48 operands), and a subset that draws a kept glyph
+otherwise.
 
 **A multiple-master program** (the Type 1 Font Format Supplement's section 3;
 [design](../design/type42-and-multiple-master.md)) is read with its
@@ -1994,8 +2023,20 @@ corpora already vendored here. So every name stays on the list.
   the committed WOFF fixtures, the `name` reading, the candidate list
   against the design's table, and the committed record, `cjk_coverage.tsv`,
   whole and adding up (`the_committed_census_is_whole`).
+- `crates/tinker-pdf-font/src/type1_subset/tests.rs` — programs built byte by
+  byte through the crate's own cipher, whose `type1.rs` tests hold it to
+  chapter 7.3's worked example: every kept glyph outlining and advancing as
+  before under its own name, a `seac` glyph's components, subroutines kept at
+  their numbers and the unreached ones `return`, a hint replacement's
+  subroutine and what it calls, the clear text, encrypted portion and trailer
+  (a `{restore}if` after `cleartomark` among it, and none at all), both cipher
+  layers' zero lead bytes at `lenIV` 0, 2 and 4, the program's own `RD`
+  spellings, the same bytes twice whatever lead bytes the input chose, every
+  refusal by name, and every truncation and corruption declined without a
+  panic.
 - Fuzzing: the `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`,
-  `type42` and `woff` targets exercise this feature (ruling 1).
+  `type1_subset`, `type42` and `woff` targets exercise this feature
+  (ruling 1).
 - Determinism: the `text` render fingerprint in
   `crates/tinker-pdf/tests/determinism.rs` embeds a synthetic six-glyph face
   built in the test itself and pins glyph rasterisation bit-for-bit across

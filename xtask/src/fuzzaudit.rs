@@ -278,6 +278,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "type1",
         "a Type 1 font may be PFB-framed or bare PostScript",
     ),
+    (
+        "type1_subset",
+        "fuzzes a writer: the body is a Type 1 program, which may be bare PostScript",
+    ),
     ("xml", "XML is text"),
     (
         "xml_structured",
