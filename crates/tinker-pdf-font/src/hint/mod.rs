@@ -39,7 +39,7 @@ pub mod state;
 pub mod storage;
 pub mod vm;
 
-pub use glyph::{AtSize, Face, Hinted, Unhinted};
+pub use glyph::{AtSize, Face, Hinted, Unhinted, MAX_POINTS};
 pub use state::{Dropout, GraphicsState, Point, Round, Vector, Zone};
 pub use storage::Size;
 pub use vm::{Error, Limits, MaxProfile, Program, Vm};

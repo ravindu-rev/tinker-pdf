@@ -409,8 +409,9 @@ size and runs its `prep`, and `AtSize::glyph` hints one glyph, answering a
 `Hinted` — the outline, the four phantom points in 26.6, the dropout state
 the programs left, whether a program ran and its steps — or why the glyph is
 `Unhinted`: no TrueType profile (no version 1.0 `maxp`), a size the face does
-not hint at, a glyph whose data does not read, or a program that failed,
-named with its error and its steps for the caller to report. A `cfg(test)`
+not hint at, a glyph whose data does not read, a composite of more points
+than a glyph holds, or a program that failed, named with its error and its
+steps for the caller to report. A `cfg(test)`
 count of each program's runs holds each handle to running its program once.
 
 **A face** is read once: `maxp`'s limits, `head`'s units per em and flags,
@@ -463,7 +464,24 @@ program, where `WE_HAVE_INSTRUCTIONS` gives one, runs over the assembled points
 and four phantom points of its own. A component under a scale or a 2×2 is
 assembled from its scaled points without its own program, which measured an
 untransformed outline — this engine's choice. `glyf.rs`'s depth of 8 and
-budget of 256 components bound the walk as they bound the unhinted one.
+budget of 256 components bound the walk as they bound the unhinted one, and
+a composite's first 64 records are read, as there. The assembled points stand
+at their hinted positions over their original ones, as the composite's
+program reads them (`Zone::with_positions`): an offset moves both, rounded to
+the grid in the hinted position alone, and a point match moves the
+component's hinted point onto the hinted point already placed and its
+original onto the original — where either point is not there, no offset, as
+`glyf.rs` reads such a record. A transformed component's points go through
+its 2×2 as `glyf.rs` places them, each coordinate rounded half away from zero,
+and with no program run anywhere under it. A component's phantom points taken
+by `USE_MY_METRICS` are its hinted ones, not moved by its offset, as
+`glyf::phantom_points_at` takes them; without it the composite's are its own
+metrics', scaled. A component whose data does not read adds no point, as it
+draws none; a failure in a component's program leaves the whole composite
+unhinted; and a composite whose components assemble more than 65 536 points,
+the most a simple glyph's sixteen-bit contour ends number, is unhinted
+(`Unhinted::TooManyPoints`), so no hostile composite holds more points than
+one glyph can.
 
 ### `gasp` and `head`
 

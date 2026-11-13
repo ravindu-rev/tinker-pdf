@@ -56,6 +56,54 @@ pub(super) fn simple_glyph(contours: &[&[P]], program: &[u8]) -> Vec<u8> {
     g
 }
 
+/// `ARGS_ARE_XY_VALUES`: a record's arguments are an offset.
+const XY: u16 = 0x0002;
+/// `ROUND_XY_TO_GRID`.
+const ROUND: u16 = 0x0004;
+/// `USE_MY_METRICS`.
+const METRICS: u16 = 0x0200;
+
+/// One component record of a test composite: its flags, the glyph it draws,
+/// its two arguments, and its 2×2 in F2Dot14 — one scale, an x and a y
+/// scale, or four entries, or none.
+type Record<'r> = (u16, u16, i16, i16, &'r [i16]);
+
+/// A composite glyph's `glyf` entry: `numberOfContours` of −1, a zero box,
+/// its records — the arguments always words, `MORE_COMPONENTS` on all but the
+/// last, the scale flag its 2×2's length names — and, where it has one, its
+/// own program after the last, which then sets `WE_HAVE_INSTRUCTIONS`.
+pub(super) fn composite_glyph(records: &[Record<'_>], program: &[u8]) -> Vec<u8> {
+    let mut g = Vec::new();
+    g.extend((-1i16).to_be_bytes());
+    g.extend([0u8; 8]);
+    for (i, &(flags, glyph, first, second, transform)) in records.iter().enumerate() {
+        let mut flags = flags | 0x0001;
+        if i + 1 < records.len() {
+            flags |= 0x0020;
+        } else if !program.is_empty() {
+            flags |= 0x0100;
+        }
+        flags |= match transform.len() {
+            1 => 0x0008,
+            2 => 0x0040,
+            4 => 0x0080,
+            _ => 0,
+        };
+        g.extend(flags.to_be_bytes());
+        g.extend(glyph.to_be_bytes());
+        g.extend(first.to_be_bytes());
+        g.extend(second.to_be_bytes());
+        for v in transform {
+            g.extend(v.to_be_bytes());
+        }
+    }
+    if !program.is_empty() {
+        g.extend((program.len() as u16).to_be_bytes());
+        g.extend(program);
+    }
+    g
+}
+
 /// A test face: its glyphs, each glyph's advance and left side bearing, and
 /// the tables a hinter reads.
 pub(super) struct TestFace {
@@ -756,16 +804,18 @@ fn a_glyph_that_cannot_be_hinted_says_why() {
         hint(&face, 7, 768).map(|_| ()),
         Err(Unhinted::UnreadableGlyph)
     );
-    // A composite: numberOfContours of −1, glyph 0 at an offset.
-    let mut composite = Vec::new();
-    composite.extend((-1i16).to_be_bytes());
-    composite.extend([0u8; 8]);
-    composite.extend(0x0003u16.to_be_bytes()); // ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES
-    composite.extend(0u16.to_be_bytes());
-    composite.extend(10i16.to_be_bytes());
-    composite.extend(20i16.to_be_bytes());
-    let face = TestFace::of(vec![simple_glyph(&[&TRIANGLE], &[]), composite]);
-    assert_eq!(hint(&face, 1, 768).map(|_| ()), Err(Unhinted::Composite));
+    // A composite hints: glyph 0 at an offset of (10, 20), (3.75, 7.5) at
+    // 12 pixels, so (4, 8), and no program anywhere.
+    let face = TestFace::of(vec![
+        simple_glyph(&[&TRIANGLE], &[]),
+        composite_glyph(&[(XY, 0, 10, 20, &[])], &[]),
+    ]);
+    let hinted = hint(&face, 1, 768).expect("a composite hints");
+    assert_eq!(
+        hinted.outline.segments,
+        polygon(&[(px(42), px(8)), (px(379), px(8)), (px(210), px(533))])
+    );
+    assert!(!hinted.ran_program);
     // A glyph cut short before its points end.
     let mut cut = simple_glyph(&[&TRIANGLE], &[]);
     cut.truncate(cut.len() - 3);
@@ -774,4 +824,281 @@ fn a_glyph_that_cannot_be_hinted_says_why() {
         hint(&face, 0, 768).map(|_| ()),
         Err(Unhinted::UnreadableGlyph)
     );
+}
+
+// ---- FT-04b.10: composites ----------------------------------------------------
+
+/// Glyph 0 of the composite tests: [`TRIANGLE`], its program rounding points
+/// 0 and 1 to the grid across — at 12 pixels, 38 to 64 and 375 to 384.
+fn rounded_triangle() -> Vec<u8> {
+    simple_glyph(
+        &[&TRIANGLE],
+        &program(&[
+            &[op::SVTCA + 1],
+            &push(&[0]),
+            &[op::MDAP + 1],
+            &push(&[1]),
+            &[op::MDAP + 1],
+        ]),
+    )
+}
+
+/// The square of the composite tests: (0, 0), (400, 0), (400, 400) and (0,
+/// 400), its program rounding point 2 to the grid up — at 12 pixels, 150 to
+/// 128.
+const SQUARE: [P; 4] = [
+    (0, 0, true),
+    (400, 0, true),
+    (400, 400, true),
+    (0, 400, true),
+];
+
+fn rounded_square() -> Vec<u8> {
+    simple_glyph(
+        &[&SQUARE],
+        &program(&[&[op::SVTCA], &push(&[2]), &[op::MDAP + 1]]),
+    )
+}
+
+#[test]
+fn a_composite_hints_its_components_then_itself() {
+    // Glyph 2: the triangle at (10, 20), then the square at (1 100, 70)
+    // rounded to the grid, then its own program, which moves its point 3, the
+    // square's first, half a pixel across.
+    let composite = composite_glyph(
+        &[(XY, 0, 10, 20, &[]), (XY | ROUND, 1, 1_100, 70, &[])],
+        &program(&[&[op::SVTCA + 1], &push(&[3, 32]), &[op::SHPIX]]),
+    );
+    let face = TestFace::of(vec![rounded_triangle(), rounded_square(), composite]);
+    runs_since();
+    let hinted = hint(&face, 2, 768).expect("the composite hints");
+    // At 12 pixels a font unit is 0.375 sixty-fourths.
+    // - The triangle hinted is (64, 0), (384, 0) and (206, 525); its offset
+    //   (3.75, 7.5) is (4, 8), not rounded: (68, 8), (388, 8), (210, 533).
+    // - The square hinted is (0, 0), (150, 0), (150, 128) and (0, 150); its
+    //   offset (412.5, 26.25) is (413, 26), rounded to the grid (384, 0):
+    //   (384, 0), (534, 0), (534, 128), (384, 150).
+    // - The composite's program moves point 3, (384, 0), by 32: (416, 0).
+    let mut expected = polygon(&[(px(68), px(8)), (px(388), px(8)), (px(210), px(533))]);
+    expected.extend(polygon(&[
+        (px(416), px(0)),
+        (px(534), px(0)),
+        (px(534), px(128)),
+        (px(384), px(150)),
+    ]));
+    assert_eq!(hinted.outline.segments, expected);
+    assert!(hinted.ran_program);
+    assert_eq!(
+        runs_since(),
+        [1, 1, 3],
+        "fpgm and prep once each in `hint`'s set-up, then three glyph programs: \
+         each component's and the composite's"
+    );
+    // Five instructions, three, and three with SHPIX's one point.
+    assert_eq!(hinted.steps, 5 + 3 + 4);
+    // The composite's metrics are its own: 1 200 units, 450 at 12 pixels.
+    assert_eq!(hinted.phantom[1].x - hinted.phantom[0].x, 450);
+
+    // Nested: glyph 3 draws glyph 2 at no offset, so the same points.
+    let mut face = face;
+    face.glyphs
+        .push(composite_glyph(&[(XY, 2, 0, 0, &[])], &[]));
+    face.metrics.push((1_200, 0));
+    let nested = hint(&face, 3, 768).expect("the nested composite hints");
+    assert_eq!(nested.outline.segments, expected);
+    assert!(nested.ran_program);
+}
+
+#[test]
+fn point_matching_places_a_component_as_specified() {
+    // Glyph 2: the square, then the triangle with its point 0 moved onto the
+    // square's point 2; its own program moves point 6, the triangle's last,
+    // across by point 4's original coordinate, which GC[1] reads.
+    let composite = composite_glyph(
+        &[(XY, 1, 0, 0, &[]), (0, 0, 2, 0, &[])],
+        &program(&[&[op::SVTCA + 1], &push(&[6, 4]), &[op::GC + 1, op::SHPIX]]),
+    );
+    let face = TestFace::of(vec![rounded_triangle(), rounded_square(), composite]);
+    let hinted = hint(&face, 2, 768).expect("the composite hints");
+    // The square hinted: (0, 0), (150, 0), (150, 128), (0, 150). The triangle
+    // hinted, (64, 0), (384, 0), (206, 525), moves so its point 0 is on the
+    // square's hinted point 2: by (86, 128), to (150, 128), (470, 128), (292,
+    // 653). Its original, (38, 0), (375, 0), (206, 525), moves so its point 0
+    // is on the square's original point 2, (150, 150): by (112, 150), so
+    // point 4's original x is 150, and point 6 moves from 292 to 442.
+    let mut expected = polygon(&[
+        (px(0), px(0)),
+        (px(150), px(0)),
+        (px(150), px(128)),
+        (px(0), px(150)),
+    ]);
+    expected.extend(polygon(&[
+        (px(150), px(128)),
+        (px(470), px(128)),
+        (px(442), px(653)),
+    ]));
+    assert_eq!(hinted.outline.segments, expected);
+
+    // A point the composite has not placed, or the component does not have,
+    // places it at no offset, as `glyf` reads such a record.
+    for (parent, child) in [(99, 0), (2, 99)] {
+        let composite = composite_glyph(&[(XY, 1, 0, 0, &[]), (0, 0, parent, child, &[])], &[]);
+        let face = TestFace::of(vec![rounded_triangle(), rounded_square(), composite]);
+        let hinted = hint(&face, 2, 768).expect("the composite hints");
+        assert_eq!(
+            hinted.outline.segments[6..],
+            polygon(&[(px(64), px(0)), (px(384), px(0)), (px(206), px(525))])[..],
+            "points {parent} and {child}"
+        );
+    }
+}
+
+#[test]
+fn a_scaled_component_takes_its_scaled_points_with_no_program() {
+    // The rounded triangle at half its size: its program does not run, so its
+    // points are its scaled ones, (38, 0), (375, 0), (206, 525), halved and
+    // rounded half away from zero: (19, 0), (188, 0), (103, 263).
+    let composite = composite_glyph(&[(XY, 0, 0, 0, &[8_192])], &[]);
+    let face = TestFace::of(vec![rounded_triangle(), composite]);
+    runs_since();
+    let hinted = hint(&face, 1, 768).expect("the composite hints");
+    assert_eq!(
+        hinted.outline.segments,
+        polygon(&[(px(19), px(0)), (px(188), px(0)), (px(103), px(263))])
+    );
+    assert!(!hinted.ran_program);
+    assert_eq!(runs_since(), [1, 1, 0], "no glyph program ran");
+    // A 2×2: a quarter turn, x' = −y and y' = x.
+    let composite = composite_glyph(&[(XY, 0, 0, 0, &[0, 16_384, -16_384, 0])], &[]);
+    let face = TestFace::of(vec![rounded_triangle(), composite]);
+    let hinted = hint(&face, 1, 768).expect("the composite hints");
+    assert_eq!(
+        hinted.outline.segments,
+        polygon(&[(px(0), px(38)), (px(0), px(375)), (px(-525), px(206))])
+    );
+}
+
+#[test]
+fn use_my_metrics_takes_the_components_hinted_phantom_points() {
+    // The square is 800 units wide, 300 sixty-fourths at 12 pixels; its own
+    // program rounds its advance point, phantom point 5, to the grid: 320.
+    let square = simple_glyph(
+        &[&SQUARE],
+        &program(&[&[op::SVTCA + 1], &push(&[5]), &[op::MDAP + 1]]),
+    );
+    let composite = composite_glyph(&[(XY, 0, 0, 0, &[]), (XY | METRICS, 1, 500, 0, &[])], &[]);
+    let mut face = TestFace::of(vec![rounded_triangle(), square, composite]);
+    face.metrics[1] = (800, 0);
+    let hinted = hint(&face, 2, 768).expect("the composite hints");
+    assert_eq!(
+        (hinted.phantom[0].x, hinted.phantom[1].x),
+        (0, 320),
+        "the square's phantom points, hinted, and not moved by its offset"
+    );
+    // Without the flag, the composite's own: 1 200 units, 450.
+    let composite = composite_glyph(&[(XY, 0, 0, 0, &[]), (XY, 1, 500, 0, &[])], &[]);
+    let mut face = TestFace::of(vec![rounded_triangle(), rounded_square(), composite]);
+    face.metrics[1] = (800, 0);
+    let hinted = hint(&face, 2, 768).expect("the composite hints");
+    assert_eq!(hinted.phantom[1].x - hinted.phantom[0].x, 450);
+}
+
+#[test]
+fn a_component_that_fails_leaves_the_composite_unhinted() {
+    let divides = simple_glyph(&[&TRIANGLE], &program(&[&push(&[1, 0]), &[op::DIV]]));
+    let composite = composite_glyph(&[(XY, 1, 0, 0, &[]), (XY, 0, 0, 0, &[])], &[]);
+    let face = TestFace::of(vec![divides, rounded_square(), composite]);
+    assert!(matches!(
+        hint(&face, 2, 768),
+        Err(Unhinted::Failed {
+            program: Program::Glyph,
+            error: Error::DivideByZero,
+            ..
+        })
+    ));
+    // A component that does not read adds nothing: glyph 7 is past `loca`.
+    let composite = composite_glyph(&[(XY, 7, 0, 0, &[]), (XY, 1, 0, 0, &[])], &[]);
+    let face = TestFace::of(vec![rounded_triangle(), rounded_square(), composite]);
+    let hinted = hint(&face, 2, 768).expect("the composite hints");
+    assert_eq!(
+        hinted.outline.segments,
+        polygon(&[
+            (px(0), px(0)),
+            (px(150), px(0)),
+            (px(150), px(128)),
+            (px(0), px(150))
+        ])
+    );
+}
+
+#[test]
+fn the_walk_keeps_glyfs_depth_and_component_budgets() {
+    let contours = |segments: &[Segment]| {
+        segments
+            .iter()
+            .filter(|s| matches!(s, Segment::MoveTo { .. }))
+            .count()
+    };
+    // A chain: glyph k draws glyph k − 1, glyph 0 the triangle. `glyf` draws
+    // the triangle up to eight levels down and nothing past, and so does the
+    // hinter.
+    let mut glyphs = vec![rounded_triangle()];
+    for k in 1..12u16 {
+        glyphs.push(composite_glyph(&[(XY, k - 1, 0, 0, &[])], &[]));
+    }
+    let face = TestFace::of(glyphs);
+    let bytes = face.bytes();
+    let sfnt = Sfnt::parse(&bytes).expect("parses");
+    let at = Face::new(&sfnt, None)
+        .and_then(|face| face.at_size(768, 768, false, None))
+        .expect("set up");
+    for glyph in 0..12u16 {
+        let hinted = at.glyph(&sfnt, glyph, None).expect("hinted");
+        let drawn = crate::glyf::outline(&sfnt, glyph).expect("an outline");
+        assert_eq!(
+            contours(&hinted.outline.segments),
+            contours(&drawn.segments),
+            "glyph {glyph}"
+        );
+        assert_eq!(
+            contours(&hinted.outline.segments),
+            usize::from(glyph <= 8),
+            "glyph {glyph}"
+        );
+    }
+    // A composite of 64 records each drawing a composite of 64 triangles
+    // asks for 4 161 glyphs; the budget of 256 draws as many as `glyf` does.
+    let fan: Vec<Record<'_>> = (0..64).map(|_| (XY, 0, 0, 0, &[][..])).collect();
+    let outer: Vec<Record<'_>> = (0..64).map(|_| (XY, 1, 0, 0, &[][..])).collect();
+    let face = TestFace::of(vec![
+        simple_glyph(&[&TRIANGLE], &[]),
+        composite_glyph(&fan, &[]),
+        composite_glyph(&outer, &[]),
+    ]);
+    let bytes = face.bytes();
+    let sfnt = Sfnt::parse(&bytes).expect("parses");
+    let at = Face::new(&sfnt, None)
+        .and_then(|face| face.at_size(768, 768, false, None))
+        .expect("set up");
+    let hinted = at.glyph(&sfnt, 2, None).expect("hinted");
+    let drawn = crate::glyf::outline(&sfnt, 2).expect("an outline");
+    assert_eq!(
+        contours(&hinted.outline.segments),
+        contours(&drawn.segments)
+    );
+    assert!(contours(&drawn.segments) < 256, "the budget held");
+
+    // Two components of 40 000 points each pass the 65 536 a zone holds.
+    let many: Vec<P> = (0..40_000)
+        .map(|i| ((i % 200) as i16, (i / 200) as i16, true))
+        .collect();
+    let face = TestFace::of(vec![
+        simple_glyph(&[&many], &[]),
+        composite_glyph(&[(XY, 0, 0, 0, &[]), (XY, 0, 0, 0, &[])], &[]),
+    ]);
+    assert_eq!(
+        hint(&face, 1, 768).map(|_| ()),
+        Err(Unhinted::TooManyPoints)
+    );
+    assert!(hint(&face, 0, 768).is_ok(), "one of them hints");
 }

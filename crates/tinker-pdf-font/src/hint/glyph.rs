@@ -4,13 +4,17 @@
 //! glyph's points scaled to the size in 26.6 with its four phantom points,
 //! its program run over them from a copy of the size's state, and the
 //! hinted points read back into an [`Outline`] through `glyf`'s own contour
-//! reading ([`Hinted`]).
+//! reading ([`Hinted`]). A composite hints each component in turn with its
+//! own program, places it by its offset, rounded to the grid where it asks,
+//! or by matching a point of it to one already placed, takes its metrics
+//! from the component that asks, and then runs its own program over the
+//! points assembled, inside `glyf`'s depth and component budgets.
 //!
 //! A face whose `fpgm` breaks a rule is unhinted at every size, a size whose
-//! `prep` does at that size, and a glyph whose program does is that glyph
-//! alone: each answers [`Unhinted::Failed`], naming the program and the
-//! error, for the caller to report, and the glyph is drawn from the outline
-//! its font states. Nothing is retried leniently.
+//! `prep` does at that size, and a glyph whose program does — a component's
+//! among them — is that glyph alone: each answers [`Unhinted::Failed`],
+//! naming the program and the error, for the caller to report, and the glyph
+//! is drawn from the outline its font states. Nothing is retried leniently.
 
 use std::sync::Arc;
 
@@ -42,6 +46,11 @@ const LEAST_PPEM: i32 = fixed::ONE;
 /// renderer's path route, and is not hinted (*When a glyph is hinted*).
 const MOST_PPEM: i32 = 1_024 * fixed::ONE;
 
+/// The most contour points a composite assembles: as many as a simple glyph's
+/// sixteen-bit contour ends can number, and as `maxp`'s
+/// `maxCompositePoints` can declare.
+pub const MAX_POINTS: usize = 1 << 16;
+
 /// Why a glyph is drawn from the outline its font states rather than
 /// hinted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,9 +66,9 @@ pub enum Unhinted {
     /// The glyph's data does not read as a glyph: past `loca`, or ending
     /// before its points do.
     UnreadableGlyph,
-    /// A composite glyph, drawn from its components' outlines as the font
-    /// states them.
-    Composite,
+    /// A composite whose components assemble more than [`MAX_POINTS`]
+    /// points, the most a glyph's zone holds.
+    TooManyPoints,
     /// A program broke a rule or a bound of the interpreter
     /// (`docs/design/hinting.md`, "Failure"): the face's `fpgm`, which leaves
     /// it unhinted at every size; the size's `prep`, which leaves the size;
@@ -80,7 +89,9 @@ impl core::fmt::Display for Unhinted {
             Unhinted::NoProfile => write!(f, "the face has no TrueType profile"),
             Unhinted::NotAtThisSize => write!(f, "the face is not hinted at this size"),
             Unhinted::UnreadableGlyph => write!(f, "the glyph's data does not read"),
-            Unhinted::Composite => write!(f, "a composite glyph"),
+            Unhinted::TooManyPoints => {
+                write!(f, "the composite assembles more than {MAX_POINTS} points")
+            }
             Unhinted::Failed { program, error, .. } => {
                 let which = match program {
                     Program::Font => "the font program",
@@ -365,63 +376,35 @@ impl AtSize {
         self.vm.cvt()
     }
 
-    /// Glyph `glyph` of `sfnt`, the face this was made from, hinted: its
-    /// points and its four phantom points scaled to the size in 26.6 as the
-    /// control values are, each both current and original, and its program
-    /// run over them as a glyph program from a copy of the size's state,
-    /// unless it carries none or the control value program's `INSTCTRL`
-    /// inhibits grid-fitting, which leaves it its scaled points. The points
-    /// then read back into an outline through `glyf`'s contour reading, by
-    /// the on-curve flags as the program left them.
+    /// Glyph `glyph` of `sfnt`, the face this was made from, hinted: a
+    /// simple glyph's points and its four phantom points scaled to the size in
+    /// 26.6 as the control values are, each both current and original, and its
+    /// program run over them as a glyph program from a copy of the size's
+    /// state, unless it carries none or the control value program's `INSTCTRL`
+    /// inhibits grid-fitting, which leaves it its scaled points; a composite
+    /// assembled from its components, each hinted with its own program and
+    /// placed by its offset or by point matching, its metrics taken from the
+    /// component that asks, and then its own program run over the points
+    /// assembled (`docs/design/hinting.md`, "The pipeline"). The points
+    /// then read back into an outline through `glyf`'s contour reading, by the
+    /// on-curve flags as the programs left them.
     ///
     /// # Errors
     ///
     /// [`Unhinted::UnreadableGlyph`] for a glyph `glyf` does not read,
-    /// [`Unhinted::Composite`] for a composite, and [`Unhinted::Failed`] for a
-    /// program that breaks a rule, which leaves the glyph unhinted.
+    /// [`Unhinted::TooManyPoints`] for a composite past [`MAX_POINTS`], and
+    /// [`Unhinted::Failed`] for a program that breaks a rule, the glyph's own
+    /// or a component's, which leaves the glyph unhinted.
     pub fn glyph(
         &self,
         sfnt: &Sfnt,
         glyph: u16,
         stop: Option<&dyn Fn() -> bool>,
     ) -> Result<Hinted, Unhinted> {
-        if glyf::components(sfnt, glyph).is_some() {
-            return Err(Unhinted::Composite);
-        }
-        let simple = glyf::simple_glyph(sfnt, glyph).ok_or(Unhinted::UnreadableGlyph)?;
-        let size = self.vm.size();
-        let points: Vec<Point> = simple
-            .points
-            .iter()
-            .map(|&[x, y]| Point {
-                x: size.scale(x),
-                y: size.scale(y),
-            })
-            .collect();
-        let count = simple.contour_points();
-        let on_curve: Vec<bool> = (0..points.len())
-            .map(|i| simple.flags.get(i).is_some_and(|flag| flag & 1 != 0))
-            .collect();
-        let ends: Vec<usize> = simple.contours().iter().map(|&(_, end)| end).collect();
-        let zone = Zone::glyph(&points, &on_curve, &ends).ok_or(Unhinted::UnreadableGlyph)?;
-        let mut vm = self.vm.clone();
-        vm.set_graphics_state(self.glyph_state);
-        vm.set_glyph(zone);
-        let ran_program =
-            !simple.instructions.is_empty() && self.glyph_state.instruct_control & 1 == 0;
-        let mut steps = 0u64;
-        if ran_program {
-            counted(Program::Glyph);
-            let result = vm.run(simple.instructions, Program::Glyph, stop);
-            steps = u64::from(vm.steps());
-            result.map_err(|error| Unhinted::Failed {
-                program: Program::Glyph,
-                error,
-                steps,
-            })?;
-        }
-        let hinted = &vm.zones[1];
-        let positions: Vec<(f64, f64)> = hinted.current[..count]
+        let mut budget = glyf::MAX_COMPONENTS;
+        let glyph = self.assemble(sfnt, glyph, 0, &mut budget, true, stop)?;
+        let positions: Vec<(f64, f64)> = glyph
+            .current
             .iter()
             .map(|p| {
                 (
@@ -430,16 +413,274 @@ impl AtSize {
                 )
             })
             .collect();
-        let on_curve: Vec<bool> = (0..count).map(|i| hinted.on_curve(i)).collect();
-        let outline = glyf::outline_of(&ends, &on_curve, &positions);
-        let phantom = [0, 1, 2, 3].map(|k| hinted.current[count + k]);
-        let dropout = vm.graphics_state().dropout(size.pixels_per_em());
+        let outline = glyf::outline_of(&glyph.ends, &glyph.on_curve, &positions);
         Ok(Hinted {
             outline,
-            phantom,
-            dropout,
-            ran_program,
-            steps,
+            phantom: glyph.phantom,
+            dropout: glyph.dropout,
+            ran_program: glyph.ran,
+            steps: glyph.steps,
         })
+    }
+
+    /// Glyph `glyph`'s points, `depth` composites down with `budget`
+    /// components left of `glyf`'s 256, its programs run where `hint` says.
+    ///
+    /// Past `glyf`'s depth of 8, or with the budget spent, a glyph adds no
+    /// points, as it draws none in `glyf`'s own reading. A simple glyph is
+    /// [`AtSize::simple`]'s. A composite takes its records in order, at most
+    /// 64 of them: each component assembled one level down — hinted, unless
+    /// it stands under a scale or a 2×2, which this engine assembles from its
+    /// scaled points with no program anywhere under it, since its programs
+    /// measured an outline the transform has changed — then transformed by
+    /// its 2×2, each coordinate rounded half away from zero, and placed: by
+    /// its offset, scaled as the points are and, where `ROUND_XY_TO_GRID` is
+    /// set, rounded to the grid on each axis in its hinted position; or,
+    /// where `ARGS_ARE_XY_VALUES` is clear, by moving its point the second
+    /// argument numbers onto the point already placed the first numbers, its
+    /// hinted position onto the hinted one and its original onto the
+    /// original — with no offset where either point is not there, as `glyf`
+    /// reads such a record. A component that does not read adds nothing. The
+    /// composite's phantom points are its own metrics', scaled, or the hinted
+    /// phantom points of the last component carrying `USE_MY_METRICS`, not
+    /// moved by its offset, as `glyf` takes them. Where it is hinted and
+    /// carries a program, that runs last, over the assembled points standing
+    /// at their hinted positions over their original ones and its four
+    /// phantom points, untouched, as a glyph program.
+    fn assemble(
+        &self,
+        sfnt: &Sfnt,
+        glyph: u16,
+        depth: u32,
+        budget: &mut u32,
+        hint: bool,
+        stop: Option<&dyn Fn() -> bool>,
+    ) -> Result<Assembled, Unhinted> {
+        if depth > glyf::MAX_COMPONENT_DEPTH || *budget == 0 {
+            return Ok(Assembled::default());
+        }
+        *budget -= 1;
+        let Some(composite) = glyf::composite_glyph(sfnt, glyph) else {
+            return self.simple(sfnt, glyph, hint, stop);
+        };
+        let size = self.vm.size();
+        let scaled = |[x, y]: [i32; 2]| Point {
+            x: size.scale(x),
+            y: size.scale(y),
+        };
+        let own = glyf::phantom_points(sfnt, glyph).map(scaled);
+        let mut out = Assembled {
+            phantom: own,
+            phantom_original: own,
+            dropout: self.glyph_state.dropout(size.pixels_per_em()),
+            ..Assembled::default()
+        };
+        let mut metrics = None;
+        for component in composite.components.iter().take(glyf::MAX_RECORDS as usize) {
+            let transformed = component.transform != glyf::Component::IDENTITY;
+            let part = match self.assemble(
+                sfnt,
+                component.glyph,
+                depth + 1,
+                budget,
+                hint && !transformed,
+                stop,
+            ) {
+                Ok(part) => part,
+                Err(Unhinted::UnreadableGlyph) => Assembled::default(),
+                Err(other) => return Err(other),
+            };
+            let part = if transformed {
+                part.transformed(component.transform)
+            } else {
+                part
+            };
+            let (current, original) = if component.offset_is_xy() {
+                let [x, y] = component.arguments;
+                let at = (size.scale(x), size.scale(y));
+                let hinted = if component.flags & glyf::Component::ROUND_XY_TO_GRID != 0 {
+                    (fixed::round(at.0), fixed::round(at.1))
+                } else {
+                    at
+                };
+                (hinted, at)
+            } else {
+                // The first argument numbers a point already placed, the
+                // second a point of the component.
+                let [parent, child] = component
+                    .arguments
+                    .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+                let onto = |to: Option<&Point>, from: Option<&Point>| match (to, from) {
+                    (Some(to), Some(from)) => {
+                        (to.x.wrapping_sub(from.x), to.y.wrapping_sub(from.y))
+                    }
+                    _ => (0, 0),
+                };
+                (
+                    onto(out.current.get(parent), part.current.get(child)),
+                    onto(out.original.get(parent), part.original.get(child)),
+                )
+            };
+            if component.flags & glyf::Component::USE_MY_METRICS != 0 {
+                metrics = Some((part.phantom, part.phantom_original));
+            }
+            if out.current.len() + part.current.len() > MAX_POINTS {
+                return Err(Unhinted::TooManyPoints);
+            }
+            out.append(part, current, original);
+            if *budget == 0 {
+                break;
+            }
+        }
+        if let Some((phantom, original)) = metrics {
+            out.phantom = phantom;
+            out.phantom_original = original;
+        }
+        if hint && !composite.instructions.is_empty() && self.glyph_state.instruct_control & 1 == 0
+        {
+            self.run_over(&mut out, composite.instructions, stop)?;
+        }
+        Ok(out)
+    }
+
+    /// A simple glyph's points, or one with no outline's four phantom points:
+    /// scaled, and its program run over them where `hint` says and it carries
+    /// one, as [`AtSize::glyph`] describes.
+    fn simple(
+        &self,
+        sfnt: &Sfnt,
+        glyph: u16,
+        hint: bool,
+        stop: Option<&dyn Fn() -> bool>,
+    ) -> Result<Assembled, Unhinted> {
+        let simple = glyf::simple_glyph(sfnt, glyph).ok_or(Unhinted::UnreadableGlyph)?;
+        let size = self.vm.size();
+        let count = simple.contour_points();
+        let points: Vec<Point> = simple
+            .points
+            .iter()
+            .map(|&[x, y]| Point {
+                x: size.scale(x),
+                y: size.scale(y),
+            })
+            .collect();
+        let mut phantom = [Point::default(); 4];
+        for (slot, point) in phantom.iter_mut().zip(&points[count..]) {
+            *slot = *point;
+        }
+        let mut out = Assembled {
+            current: points[..count].to_vec(),
+            original: points[..count].to_vec(),
+            on_curve: simple.flags.iter().map(|flag| flag & 1 != 0).collect(),
+            ends: simple.contours().iter().map(|&(_, end)| end).collect(),
+            phantom,
+            phantom_original: phantom,
+            dropout: self.glyph_state.dropout(size.pixels_per_em()),
+            ran: false,
+            steps: 0,
+        };
+        if hint && !simple.instructions.is_empty() && self.glyph_state.instruct_control & 1 == 0 {
+            self.run_over(&mut out, simple.instructions, stop)?;
+        }
+        Ok(out)
+    }
+
+    /// Runs `code` as a glyph program over `glyph`'s points and its four
+    /// phantom points, from a copy of the size's state, and takes back where
+    /// it left them, their on-curve flags and the dropout state.
+    fn run_over(
+        &self,
+        glyph: &mut Assembled,
+        code: &[u8],
+        stop: Option<&dyn Fn() -> bool>,
+    ) -> Result<(), Unhinted> {
+        let count = glyph.current.len();
+        let mut current = glyph.current.clone();
+        current.extend(glyph.phantom);
+        let mut original = glyph.original.clone();
+        original.extend(glyph.phantom_original);
+        let mut on_curve = glyph.on_curve.clone();
+        on_curve.extend([false; 4]);
+        let zone = Zone::with_positions(&current, &original, &on_curve, &glyph.ends)
+            .ok_or(Unhinted::UnreadableGlyph)?;
+        let mut vm = self.vm.clone();
+        vm.set_graphics_state(self.glyph_state);
+        vm.set_glyph(zone);
+        counted(Program::Glyph);
+        let result = vm.run(code, Program::Glyph, stop);
+        glyph.steps = glyph.steps.saturating_add(u64::from(vm.steps()));
+        result.map_err(|error| Unhinted::Failed {
+            program: Program::Glyph,
+            error,
+            steps: glyph.steps,
+        })?;
+        let hinted = &vm.zones[1];
+        glyph.current.copy_from_slice(&hinted.current[..count]);
+        for (i, on) in glyph.on_curve.iter_mut().enumerate() {
+            *on = hinted.on_curve(i);
+        }
+        for (k, slot) in glyph.phantom.iter_mut().enumerate() {
+            *slot = hinted.current[count + k];
+        }
+        glyph.dropout = vm.graphics_state().dropout(self.vm.size().pixels_per_em());
+        glyph.ran = true;
+        Ok(())
+    }
+}
+
+/// A glyph's points as [`AtSize::assemble`] gathers them: each contour
+/// point's hinted and original positions in 26.6, its on-curve flag, each
+/// contour's last point, the four phantom points hinted and original, the
+/// dropout state the glyph's own program left or, where it ran none, the
+/// size's, whether a program ran over any of them, its own or a
+/// component's, and the steps every run took.
+#[derive(Clone, Debug, Default)]
+struct Assembled {
+    current: Vec<Point>,
+    original: Vec<Point>,
+    on_curve: Vec<bool>,
+    ends: Vec<usize>,
+    phantom: [Point; 4],
+    phantom_original: [Point; 4],
+    dropout: Option<Dropout>,
+    ran: bool,
+    steps: u64,
+}
+
+impl Assembled {
+    /// The points under a component's 2×2, F2Dot14 `[xscale, scale01,
+    /// scale10, yscale]`: `x' = xscale · x + scale10 · y` and `y' = scale01 ·
+    /// x + yscale · y`, as `glyf` places such a component, each coordinate
+    /// rounded half away from zero and wrapped. The phantom points stay, as
+    /// `glyf` takes a component's metrics untransformed.
+    fn transformed(mut self, [a, b, c, d]: [i16; 4]) -> Assembled {
+        let map = |p: &mut Point| {
+            let (x, y) = (i64::from(p.x), i64::from(p.y));
+            let (a, b, c, d) = (i64::from(a), i64::from(b), i64::from(c), i64::from(d));
+            p.x = fixed::round_div(a * x + c * y, 16_384) as i32;
+            p.y = fixed::round_div(b * x + d * y, 16_384) as i32;
+        };
+        self.current.iter_mut().for_each(map);
+        self.original.iter_mut().for_each(map);
+        self
+    }
+
+    /// `part` after the points gathered so far, moved by `current` where it
+    /// stands hinted and by `original` where it stood, its contours renumbered
+    /// after them.
+    fn append(&mut self, part: Assembled, current: (i32, i32), original: (i32, i32)) {
+        let base = self.current.len();
+        let moved = |p: &Point, (dx, dy): (i32, i32)| Point {
+            x: p.x.wrapping_add(dx),
+            y: p.y.wrapping_add(dy),
+        };
+        self.current
+            .extend(part.current.iter().map(|p| moved(p, current)));
+        self.original
+            .extend(part.original.iter().map(|p| moved(p, original)));
+        self.on_curve.extend(part.on_curve);
+        self.ends.extend(part.ends.iter().map(|end| base + end));
+        self.ran |= part.ran;
+        self.steps = self.steps.saturating_add(part.steps);
     }
 }

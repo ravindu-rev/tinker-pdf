@@ -29,8 +29,9 @@ use crate::sfnt::Sfnt;
 use crate::variation::gvar::Gvar;
 use crate::variation::{Fixed, Location, VariationError};
 
-/// How deep a composite glyph may nest before recursion is refused.
-const MAX_COMPONENT_DEPTH: u32 = 8;
+/// How deep a composite glyph may nest before recursion is refused. The
+/// hinter's walk of a composite is held to it as this reading is.
+pub(crate) const MAX_COMPONENT_DEPTH: u32 = 8;
 
 /// How many component glyphs one outline may draw in total.
 ///
@@ -38,10 +39,10 @@ const MAX_COMPONENT_DEPTH: u32 = 8;
 /// components, each referring back to itself, stays within eight levels while
 /// asking for 64^8 glyphs. The budget bounds the *work*, which is the thing
 /// that actually has to be finite.
-const MAX_COMPONENTS: u32 = 256;
+pub(crate) const MAX_COMPONENTS: u32 = 256;
 
 /// How many records of one composite are drawn.
-const MAX_RECORDS: u32 = 64;
+pub(crate) const MAX_RECORDS: u32 = 64;
 
 const TAG_GLYF: u32 = 0x676C_7966;
 const TAG_HHEA: u32 = 0x6868_6561;
@@ -271,6 +272,8 @@ impl Component {
     pub const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
     /// `ARGS_ARE_XY_VALUES`: the arguments are an offset.
     pub const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+    /// `ROUND_XY_TO_GRID`: a hinted offset is rounded to the grid.
+    pub const ROUND_XY_TO_GRID: u16 = 0x0004;
     /// `WE_HAVE_A_SCALE`.
     pub const WE_HAVE_A_SCALE: u16 = 0x0008;
     /// `MORE_COMPONENTS`.
@@ -279,8 +282,15 @@ impl Component {
     pub const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
     /// `WE_HAVE_A_TWO_BY_TWO`.
     pub const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+    /// `WE_HAVE_INSTRUCTIONS`, on the last record: the composite's own
+    /// program follows the records.
+    pub const WE_HAVE_INSTRUCTIONS: u16 = 0x0100;
     /// `USE_MY_METRICS`: the composite's metrics are this component's.
     pub const USE_MY_METRICS: u16 = 0x0200;
+
+    /// The identity 2×2, `[16384, 0, 0, 16384]` in F2Dot14: a record with no
+    /// scale.
+    pub const IDENTITY: [i16; 4] = [16_384, 0, 0, 16_384];
 
     /// Whether the arguments are an offset, rather than points to match.
     #[must_use]
@@ -365,13 +375,53 @@ fn all_components(data: &[u8]) -> Vec<Component> {
 /// composite, past the end of `loca`, or in a face with no `glyf`.
 #[must_use]
 pub fn components(sfnt: &Sfnt, glyph: u16) -> Option<Vec<Component>> {
+    composite_glyph(sfnt, glyph).map(|composite| composite.components)
+}
+
+/// A composite glyph as its `glyf` entry states it: its component records
+/// in order, and the program that follows the last of them where that record
+/// sets `WE_HAVE_INSTRUCTIONS` — its length a uint16 and then its bytes, cut
+/// to the bytes the entry holds — or none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompositeGlyph<'a> {
+    /// The records, as [`components`] reads them.
+    pub components: Vec<Component>,
+    /// The composite's own instructions, which a hinter runs over the
+    /// assembled points; empty where it carries none.
+    pub instructions: &'a [u8],
+}
+
+/// A composite glyph's records and its own program; `None` as for
+/// [`components`].
+#[must_use]
+pub fn composite_glyph<'a>(sfnt: &Sfnt<'a>, glyph: u16) -> Option<CompositeGlyph<'a>> {
     let glyf = sfnt.table(TAG_GLYF)?;
     let (start, end) = glyph_range(sfnt, glyph)?;
     let data = glyf.get(start..end)?;
     if i16_at(data, 0)? >= 0 {
         return None;
     }
-    Some(all_components(data))
+    let mut components = Vec::new();
+    let mut at = 10usize;
+    let mut instructions: &'a [u8] = &[];
+    while let Some((component, next)) = read_component(data, at) {
+        components.push(component);
+        at = next;
+        if component.flags & Component::MORE_COMPONENTS == 0 {
+            if component.flags & Component::WE_HAVE_INSTRUCTIONS != 0 {
+                let length = usize::from(be16(data, at).unwrap_or(0));
+                let program = at + 2;
+                instructions = data
+                    .get(program..program.saturating_add(length).min(data.len()))
+                    .unwrap_or_default();
+            }
+            break;
+        }
+    }
+    Some(CompositeGlyph {
+        components,
+        instructions,
+    })
 }
 
 /// Reads one glyph's outline in font units.
