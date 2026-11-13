@@ -288,6 +288,7 @@ pub fn read(language: &str, style: &str, body: &str) -> Reading {
         texts.push(t);
         overprint += drawn_over(&page.text_with(&TextOptions {
             content_order: true,
+            ..Default::default()
         }));
     }
     let segs = segments(body);

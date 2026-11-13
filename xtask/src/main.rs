@@ -973,6 +973,11 @@ const ALLOWED: &[(&str, &[&str])] = &[
             // producer positioned every glyph and re-shaping them would be
             // wrong — and `docs/features/fonts.md` keeps that row.
             "tinker-pdf-shape",
+            // Row P-15. `src/parallel.rs`'s page walks run their pages on the
+            // engine's own pool, `Parallelism::Serial` unless a caller asks
+            // (ruling 23's answer to H-16). The edge goes down into a leaf with
+            // nothing under it, which ruling 8 allows without argument.
+            "tinker-pdf-pool",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.

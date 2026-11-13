@@ -22,7 +22,17 @@ use tinker_pdf_render::RenderCounts;
 /// The tally for one operation: a fresh one when the caller asked, none when
 /// not.
 pub(crate) fn tally(asked: bool) -> Option<Arc<Work>> {
-    asked.then(|| Arc::new(Work::new()))
+    asked.then(|| Arc::new(begin()))
+}
+
+/// A fresh tally for one counted operation — every door's, whether it was
+/// asked for by a switch or is a counted sibling. Made inside a page walk's
+/// part, the first one counts the part into itself: where the page ran
+/// (`crate::parallel`).
+pub(crate) fn begin() -> Work {
+    let work = Work::new();
+    crate::parallel::count_part(&work);
+    work
 }
 
 /// Counts one step of `counter`, when the operation is counting.

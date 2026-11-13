@@ -198,6 +198,13 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a8_the_png_path_holds_at_most_one_image_of_scratch",
     },
+    // MS-01's A9 guard, its page half: every page walk on 2, 3, 4 and 7
+    // threads is the serial walk, pixels, warnings and text, on every target,
+    // `wasm32-wasip1` walking on the caller.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads",
+    },
     // MS-08's counted guard: the requests page one of the linearized fixture
     // and of its unlinearized twin makes, measured once and held on every
     // target beside the row's ceilings.

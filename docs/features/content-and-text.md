@@ -540,7 +540,18 @@ mask's content rather than paint it.
 Everything is on the facade (ruling 11): `Page::text()` returns a
 `TextPage` of `blocks` → `lines` → `chars`, plus `warnings`, every line in
 logical order (ruling 14); `Page::text_with(&TextOptions)` is the same with
-`content_order` as the opt-out to the content stream's order. `TextPage`
+`content_order` as the opt-out to the content stream's order.
+`Document::text_pages(pages, &options, each)` reads each of `pages` as
+`Page::text_with` reads it and hands `each` the page's index and its text,
+`None` for a page the tree will not hand back, in the order `pages` names
+them: on the calling thread with `TextOptions::parallelism` at its default,
+`Parallelism::Serial`, and with `Threads(n)` on at most `n` threads of the
+engine's own pool, each page read on its thread as it is read alone, so each
+page's text, warnings included, is its serial text
+([rendering](rendering.md)'s page walks; `Document::walk_pages` is the walk
+for a caller that wants each page's `text_counted` stats, which say where the
+page was read). `Page::text_with` reads on the calling thread whatever
+`parallelism` says. `TextPage`
 offers `plain_text()` (one line per line), `lines()` (flattened), and
 `search(needle)` — literal, case-insensitive, one `Quad` per match, mapped
 back to the glyphs it covers. `Quad` carries four corners and
@@ -582,8 +593,9 @@ extraction at the form's start; each listed image's samples, and its soft
 mask's, are decoded once; and an ICC profile or a lookup table two listed
 images share is decoded once. Nothing is drawn, so no glyph is shown, no
 outline is read and no program is decoded. Each is a
-counted sibling rather than a flag because `TextOptions` is written out whole
-by its callers and `Page::images` takes nothing to ask with; the design is in
+counted sibling rather than a flag because `TextOptions` says how the text is
+ordered and what threads a walk of it spends, and nothing about counting, and
+`Page::images` takes nothing to ask with; the design is in
 [performance](../design/performance.md).
 
 ```rust

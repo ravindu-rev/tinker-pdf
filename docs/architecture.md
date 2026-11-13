@@ -300,35 +300,43 @@ Mutation is an exclusive copy-on-write `DocumentEditor`
 new and borrowed `Arc`s while every open reader keeps its consistent
 snapshot alive. Readers never observe a half-applied edit and never dangle.
 
-On wasm32 the same types compile single-threaded; the library spawns no
-threads and owns no global mutable state beyond once-cells, so threading is
-entirely the embedder's business on every target.
+On wasm32 the same types compile single-threaded.
 
-**The decision that follows from that: the pools live outside the facade,
-and there is no threading API on `tinker-pdf`.** No `render_all`, no job
-count, no feature flag, no runtime — the library's whole contribution to
-concurrency is that `Document` is `Send + Sync`, that `Document::page`
-returns an *owned* `Page` (it clones an `Arc` rather than borrowing, so a
-worker holding a page borrows nothing and a pool over page indices needs no
-lifetime work), and that `FontProvider` is `Send + Sync` too. Given those
-three, a pool is a dozen lines of `std::thread::scope` in the caller — and
-the same dozen lines in here would be code that cannot exist on wasm32 and
-that every embedder with an executor of its own would have to be talked out
-of. Ruling 11 says the facade is the only public surface; this is that
-surface staying small where the alternative is a second scheduler. A pool
-on the facade, serial by default, is [ROADMAP](ROADMAP.md) row P-15.
+**The engine's own pool, serial unless asked.** Every operation that can use
+threads takes a `Parallelism` in its options — the page walks,
+`Document::render_pages` and `Document::text_pages` and the
+`Document::walk_pages` both are — and it is `Serial` by default, so no
+caller's behaviour changes unless it asks. `Threads(n)` runs the operation's
+independent parts on at most `n` threads that the call starts in a scope and
+joins before it returns: no persistent runtime, no global pool, no thread
+outliving its call. The pool is `tinker-pdf-pool`, a PDF-free leaf on
+`std::thread::scope` under `#![forbid(unsafe_code)]` (ruling 23, H-16).
+Results go to pre-sized slots and are joined in index order, so no output
+depends on the thread count or on which thread finished first, and guard A9
+holds every page walk byte-identical to its serial run at 2, 3, 4 and 7
+threads, warnings included. On wasm32 no thread starts and the same work runs
+on the caller, with the same result. The library owns no global mutable state
+beyond once-cells; a worker marks itself in a thread-local, so that a pooled
+operation inside another runs on the worker it is on. An embedder with an
+executor of its own keeps `Serial` and schedules pages itself: `Document` is
+`Send + Sync`, `Document::page` returns an *owned* `Page` (it clones an `Arc`
+rather than borrowing, so a worker holding a page borrows nothing and a pool
+over page indices needs no lifetime work), and `FontProvider` is
+`Send + Sync`. The design is [design/parallelism.md](design/parallelism.md).
 
 Three things exercise the claim:
 
 - `crates/tinker-pdf/tests/tinker_parity.rs`'s
   `one_document_is_read_and_rendered_by_several_threads_at_once` shares
-  **one** `&Document` across four scoped threads — `Sync`, not the `Send`
-  that a clone per thread would have shown — and each walks every page,
-  reading its text and rendering it, against the serial answer page by page.
-- `crates/tinker-pdf/examples/parallel.rs` is those dozen lines, as an
-  embedder would write them, checking every page from the pool byte for byte
-  against the same page drawn serially. The gates run it.
-- `tpdf render --jobs N` is the same pool in the command-line tool, with the
+  **one** `&Document` across four scoped threads of the caller's own —
+  `Sync`, not the `Send` that a clone per thread would have shown — and each
+  walks every page, reading its text and rendering it, against the serial
+  answer page by page.
+- `crates/tinker-pdf/examples/parallel.rs` renders every page through
+  `Document::render_pages` with `Threads(n)` and checks each against the
+  same page drawn serially, byte for byte and warning for warning. The gates
+  run it.
+- `tpdf render --jobs N` is a pool of the command-line tool's own, with the
   property that makes it usable: results are buffered per page and printed
   in page order after the join, so `--jobs 8` and `--jobs 1` write the same
   bytes. The flag changes the clock and nothing else, and defaults to 1.

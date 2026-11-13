@@ -308,13 +308,16 @@ const ROSTER: &[Guard] = &[
             "P-04.5",
         )
     },
-    owed(
-        "A9",
-        "page-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads",
-        "a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads",
-        "P-15",
-        "P-15.3",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A9",
+            "page-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads",
+            "a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads",
+            "P-15",
+            "P-15.3",
+        )
+    },
     owed(
         "A9",
         "band-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads",
@@ -1937,4 +1940,315 @@ fn a8_the_png_path_holds_at_most_one_image_of_scratch() {
             png.len()
         );
     }
+}
+
+// ---- A9: a page walk is the serial walk ----------------------------------------
+
+/// A9's text document: five pages of 200 by 100 points. Page 0 is a line in
+/// the embedded face; page 1 three lines at two sizes over a fill; page 2 a
+/// line whose second half is shown in `/F9`, a font its resources do not
+/// hold, so that its render and its text both warn; page 3 is empty; page 4
+/// draws text clipped to a rectangle and under a stroke. 1 the catalog, 2 the
+/// page tree, 3 to 5 the face, then each page and its content from 6.
+fn a9_text_document() -> Vec<u8> {
+    let contents = [
+        "BT /F1 12 Tf 10 50 Td (Walked, page one) Tj ET",
+        concat!(
+            "0.85 0.9 1 rg 5 5 190 90 re f 0 g BT /F1 9 Tf 10 80 Td (A line) Tj ",
+            "0 -11 Td (and another) Tj /F1 16 Tf 0 -24 Td (larger) Tj ET"
+        ),
+        "BT /F1 12 Tf 10 50 Td (Found) Tj /F9 12 Tf ( lost) Tj ET",
+        "",
+        concat!(
+            "q 20 20 120 40 re W n BT /F1 30 Tf 10 30 Td (Clipped text) Tj ET Q ",
+            "0.7 0.1 0.2 RG 3 w 15 15 m 185 85 l S"
+        ),
+    ];
+    let kids: Vec<String> = (0..contents.len())
+        .map(|at| format!("{} 0 R", 6 + 2 * at))
+        .collect();
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object(&format!(
+            "<< /Type /Pages /Count {} /Kids [{}] >>",
+            contents.len(),
+            kids.join(" ")
+        )),
+    ];
+    objects.extend(face(3));
+    for (at, content) in contents.iter().enumerate() {
+        objects.push(object(&format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
+             /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+            7 + 2 * at
+        )));
+        objects.push(deflated("", content.as_bytes()));
+    }
+    pdf(&objects)
+}
+
+/// Bytes from a linear congruential generator, the same on every target.
+fn a9_noise(count: usize, seed: u32) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(17);
+    (0..count)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// `bytes` as `ASCIIHexDecode` text, end-of-data marker included.
+fn a9_hex(bytes: &[u8]) -> String {
+    let mut out: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    out.push('>');
+    out
+}
+
+/// A9's image document: five pages of 100 by 100 points. Page 0 draws a
+/// Flate RGB image magnified at an offset; page 1 the same image twice, a
+/// one-bit image and an image mask in a fill colour; page 2 an image under an
+/// 8-bit `/SMask` of another size, over a fill; page 3 an RGB inline image
+/// and an inline mask; page 4 an image no decoder here reads, which draws the
+/// placeholder and is named, and a Flate image cut short, which draws what
+/// decoded and is named as damaged. 1 the catalog, 2 the page tree, 3 to 7
+/// the pages, 8 to 12 their contents, then the images from 13.
+fn a9_image_document() -> Vec<u8> {
+    let rgb = a9_noise(16 * 12 * 3, 9);
+    let grey = a9_noise(8 * 6, 10);
+    let bilevel = render_support::bilevel_samples();
+    let (bw, bh) = (
+        render_support::BILEVEL_WIDTH,
+        render_support::BILEVEL_HEIGHT,
+    );
+    let mut cut = tinker_pdf_filters::zlib_compress(&a9_noise(16 * 12 * 3, 11));
+    cut.truncate(cut.len() * 2 / 3);
+    let rgb_dict = "/Type /XObject /Subtype /Image /Width 16 /Height 12 \
+                    /ColorSpace /DeviceRGB /BitsPerComponent 8";
+    let inline_rgb = a9_hex(&a9_noise(4 * 3 * 3, 12));
+    let inline_mask = a9_hex(&[0b1010_0110, 0b0101_1001]);
+    let contents = [
+        "q 70.3 0 0 52.7 10.4 12.6 cm /Im0 Do Q".to_string(),
+        concat!(
+            "q 31 0 0 23 5 5 cm /Im0 Do Q q 8 0 0 6 50 40 cm /Im0 Do Q ",
+            "q 42 0 0 30 5 60 cm /Im1 Do Q 0.8 0.1 0.25 rg q 14 0 0 10 60 70 cm /Im2 Do Q"
+        )
+        .to_string(),
+        "0.9 0.9 0.2 rg 0 0 100 100 re f q 60 0 0 45 15 20 cm /Im3 Do Q".to_string(),
+        format!(
+            "q 40 0 0 30 10 10 cm BI /W 4 /H 3 /CS /RGB /BPC 8 /F /AHx ID {inline_rgb} EI Q \
+             0.1 0.6 0.3 rg q 30 0 0 20 55 60 cm BI /W 8 /H 2 /IM true /F /AHx \
+             ID {inline_mask} EI Q"
+        ),
+        "q 30 0 0 30 10 10 cm /Im4 Do Q q 40 0 0 30 50 50 cm /Im5 Do Q".to_string(),
+    ];
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 5 /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] >>"),
+    ];
+    for at in 0..contents.len() {
+        objects.push(object(&format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+             /Resources << /XObject << /Im0 13 0 R /Im1 14 0 R /Im2 15 0 R /Im3 16 0 R \
+             /Im4 18 0 R /Im5 19 0 R >> >> /Contents {} 0 R >>",
+            8 + at
+        )));
+    }
+    for content in &contents {
+        objects.push(deflated("", content.as_bytes()));
+    }
+    // 13 to 19.
+    objects.push(deflated(rgb_dict, &rgb));
+    objects.push(stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width {bw} /Height {bh} \
+             /ColorSpace /DeviceGray /BitsPerComponent 1"
+        ),
+        &bilevel,
+    ));
+    objects.push(stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width {bw} /Height {bh} \
+             /ImageMask true /BitsPerComponent 1"
+        ),
+        &bilevel,
+    ));
+    objects.push(deflated(&format!("{rgb_dict} /SMask 17 0 R"), &rgb));
+    objects.push(deflated(
+        "/Type /XObject /Subtype /Image /Width 8 /Height 6 \
+         /ColorSpace /DeviceGray /BitsPerComponent 8",
+        &grey,
+    ));
+    objects.push(stream(
+        "/Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceGray \
+         /BitsPerComponent 1 /Filter /JBIG2Decode",
+        b"no JBIG2 segment here",
+    ));
+    objects.push(stream(&format!("{rgb_dict} /Filter /FlateDecode"), &cut));
+    pdf(&objects)
+}
+
+/// A9's annotated document: three pages of 120 by 90 points, each with a
+/// line in the embedded face. Page 0 carries a square whose normal
+/// appearance strokes a box and a hidden one (`/F 2`) that draws nothing;
+/// page 1 a check box whose `/AS` picks its `/On` appearance of two; page 2 a
+/// square with no appearance, which the engine draws from its `/C`, `/IC` and
+/// `/BS`. 1 the catalog, 2 the page tree, 3 to 5 the pages, 6 to 8 their
+/// contents, 9 to 11 the face, then the annotations and their appearances
+/// from 12.
+fn a9_annotated_document() -> Vec<u8> {
+    let appearance = |content: &str| {
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 40 30]",
+            content.as_bytes(),
+        )
+    };
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [14 0 R] >> >>"),
+        object("<< /Type /Pages /Count 3 /Kids [3 0 R 4 0 R 5 0 R] >>"),
+    ];
+    for (at, annots) in ["[12 0 R 17 0 R]", "[14 0 R]", "[18 0 R]"]
+        .iter()
+        .enumerate()
+    {
+        objects.push(object(&format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 90] \
+             /Resources << /Font << /F1 9 0 R >> >> /Contents {} 0 R /Annots {annots} >>",
+            6 + at
+        )));
+    }
+    for at in 0..3 {
+        objects.push(deflated(
+            "",
+            format!("BT /F1 10 Tf 8 70 Td (Annotated page {}) Tj ET", at + 1).as_bytes(),
+        ));
+    }
+    objects.extend(face(9));
+    // 12: a square with an appearance, and 13 the appearance.
+    objects.push(object(
+        "<< /Type /Annot /Subtype /Square /Rect [20 10 60 40] /F 4 /AP << /N 13 0 R >> >>",
+    ));
+    objects.push(appearance("1 0 0 RG 2 w 2 2 36 26 re S"));
+    // 14: a check box, its widget merged with its field, and 15 and 16 its
+    // two states.
+    objects.push(object(
+        "<< /Type /Annot /Subtype /Widget /FT /Btn /T (box) /V /On /AS /On /F 4 \
+         /Rect [30 15 70 45] /AP << /N << /On 15 0 R /Off 16 0 R >> >> >>",
+    ));
+    objects.push(appearance("0 0.6 0.2 rg 4 4 32 22 re f"));
+    objects.push(appearance("0 G 1 w 4 4 32 22 re S"));
+    // 17: a hidden square over the first, with the same appearance.
+    objects.push(object(
+        "<< /Type /Annot /Subtype /Square /Rect [50 20 90 50] /F 2 /AP << /N 13 0 R >> >>",
+    ));
+    // 18: a square with no appearance of its own.
+    objects.push(object(
+        "<< /Type /Annot /Subtype /Square /Rect [15 10 95 55] /F 4 /C [0 0 1] \
+         /IC [1 1 0] /BS << /W 2 >> >>",
+    ));
+    pdf(&objects)
+}
+
+/// What a rendered page is compared by: its size, its pixels and its
+/// warnings.
+type A9Drawn = (u32, u32, Vec<u8>, Vec<tinker_pdf::RenderWarning>);
+
+fn a9_drawn(bitmap: &tinker_pdf::Bitmap) -> A9Drawn {
+    (
+        bitmap.width,
+        bitmap.height,
+        bitmap.data.clone(),
+        bitmap.warnings.clone(),
+    )
+}
+
+/// **A9, the page half: every page walk is the serial walk.**
+///
+/// Every page of a text, an image and an annotated document, rendered
+/// through `Document::render_pages` and read through `Document::text_pages`
+/// on 2, 3, 4 and 7 threads, at 72 dpi with annotations and at 150 dpi
+/// without them: each bitmap is the page's serial render — size, pixels and
+/// warnings, the ones a missing font, a codec this build lacks and a damaged
+/// image earn among them — and each page's text the serial text, its warnings
+/// included, in page order. The same in the default and `bundled-fonts`
+/// builds, and on `wasm32-wasip1`, where the walk runs on the caller.
+#[test]
+fn a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads() {
+    use tinker_pdf::Parallelism;
+
+    let documents = [
+        ("text", a9_text_document()),
+        ("image", a9_image_document()),
+        ("annotated", a9_annotated_document()),
+    ];
+    let option_sets = [
+        RenderOptions::default(),
+        RenderOptions {
+            annotations: false,
+            ..RenderOptions::at_dpi(150.0)
+        },
+    ];
+    let (mut compared, mut warned) = (0usize, 0usize);
+    for (name, bytes) in documents {
+        let document = Document::open(bytes).expect("the A9 document opens");
+        let pages = document.page_count();
+        assert!(pages >= 3, "{name}: {pages} pages");
+        let serial_text: Vec<String> = (0..pages)
+            .map(|index| format!("{:?}", document.page(index).expect("a page").text()))
+            .collect();
+        for options in &option_sets {
+            let serial: Vec<A9Drawn> = (0..pages)
+                .map(|index| a9_drawn(&document.page(index).expect("a page").render(options)))
+                .collect();
+            warned += serial.iter().filter(|page| !page.3.is_empty()).count();
+            for threads in [2usize, 3, 4, 7] {
+                let walked = RenderOptions {
+                    parallelism: Parallelism::Threads(threads),
+                    ..options.clone()
+                };
+                let mut rendered = Vec::new();
+                document.render_pages(0..pages, &walked, |index, bitmap| {
+                    rendered.push((index, bitmap.as_ref().map(a9_drawn)));
+                });
+                assert_eq!(rendered.len(), pages as usize, "{name} on {threads}");
+                for (at, (index, bitmap)) in rendered.iter().enumerate() {
+                    assert_eq!(*index as usize, at, "{name} on {threads}: page order");
+                    let bitmap = bitmap.as_ref().expect("every page renders");
+                    assert!(
+                        *bitmap == serial[at],
+                        "{name} on {threads} threads at scale {}: page {at} parts from its \
+                         serial render ({:?} walked, {:?} serially)",
+                        options.scale,
+                        bitmap.3,
+                        serial[at].3
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        for threads in [2usize, 3, 4, 7] {
+            let walked = TextOptions {
+                parallelism: Parallelism::Threads(threads),
+                ..TextOptions::default()
+            };
+            let mut read = Vec::new();
+            document.text_pages(0..pages, &walked, |index, text| {
+                read.push((index, text.map(|text| format!("{text:?}"))));
+            });
+            let expected: Vec<(u32, Option<String>)> = serial_text
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (index as u32, Some(text.clone())))
+                .collect();
+            assert_eq!(read, expected, "{name} on {threads}: the serial text");
+        }
+    }
+    assert!(
+        warned >= 4,
+        "the warnings compared include real ones: {warned}"
+    );
+    println!(
+        "guard-a9-pages: RAN {compared} walked pages, each byte-identical to its serial \
+         render with the same warnings, {warned} of the serial renders warning"
+    );
 }

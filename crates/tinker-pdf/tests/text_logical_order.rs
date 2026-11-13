@@ -175,6 +175,7 @@ fn content_order_is_the_order_the_stream_drew() {
     let drawn = page
         .text_with(&TextOptions {
             content_order: true,
+            ..Default::default()
         })
         .plain_text();
     assert_eq!(drawn.trim_end(), reversed(SHALOM));
@@ -624,6 +625,7 @@ fn no_left_to_right_page_moves() {
             let logical = page.text();
             let stream = page.text_with(&TextOptions {
                 content_order: true,
+                ..Default::default()
             });
             let ours = logical.lines();
             let theirs = stream.lines();
@@ -808,6 +810,7 @@ fn a_line_a_span_states_whole_reads_as_its_text() {
     assert_eq!(text.search(SHALOM).len(), 1, "the stated word is found");
     let stream = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     assert_eq!(
         stream.plain_text().trim_end(),

@@ -72,6 +72,11 @@ tinker-pdf-svg = { workspace = true }
 # declaring it once, here, with a use behind it today, is what
 # `tinker-pdf-pki/Cargo.toml` says about its own edge to `tinker-pdf-crypto`.
 tinker-pdf-pki = { workspace = true }
+# Row P-15: `src/parallel.rs`'s page walks run on the engine's own pool,
+# `Parallelism::Serial` by default (ruling 23's answer to H-16). The edge goes
+# down into a leaf with nothing under it, which ruling 8 allows without
+# argument, and the pool learns nothing of what it schedules.
+tinker-pdf-pool = { workspace = true }
 
 [dev-dependencies]
 # A third-party crate, exempt tooling by name in `Cargo.toml`'s header rule

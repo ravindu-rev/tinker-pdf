@@ -246,6 +246,7 @@ fn a_standard_14_mark_is_measured_at_no_advance() {
     let page = doc.page(0).expect("a page");
     let drawn = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     for c in drawn.lines().iter().flat_map(|line| line.chars.iter()) {
         let (x0, _, x1, _) = c.quad.bounds();
@@ -288,6 +289,7 @@ fn drawn_at(doc: &Document, text: &str) -> f64 {
     let page = doc.page(0).expect("a page");
     let drawn = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     drawn
         .lines()
@@ -402,6 +404,7 @@ fn drawn_text(doc: &Document) -> String {
     let page = doc.page(0).expect("a page");
     page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     })
     .lines()
     .iter()
@@ -423,6 +426,7 @@ fn marks_ride_on_their_letters(doc: &Document) {
     let page = doc.page(0).expect("a page");
     let drawn = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     for line in drawn.lines() {
         let mut base: Option<&tinker_pdf::TextChar> = None;
@@ -717,6 +721,7 @@ fn overprinted(doc: &Document) -> Vec<String> {
     let page = doc.page(0).expect("a page");
     let drawn = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let mut boxes: Vec<(i64, f64, f64, f64, &str)> = drawn
         .lines()
@@ -1188,6 +1193,7 @@ fn drawn_lines(doc: &Document) -> Vec<String> {
     let page = doc.page(0).expect("a page");
     page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     })
     .lines()
     .iter()
@@ -1411,6 +1417,7 @@ fn a_standard_14_right_to_left_line_at_exactly_half_an_em_reads_whole() {
         let starts: Vec<f64> = page
             .text_with(&TextOptions {
                 content_order: true,
+                ..Default::default()
             })
             .lines()
             .iter()
@@ -4715,6 +4722,7 @@ fn span_of(book: &[u8], letters: &str) -> Option<(f64, f64)> {
     let doc = Document::open(book.to_vec()).expect("the book opens");
     let drawn = doc.page(0).expect("a page").text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let mut span: Option<(f64, f64)> = None;
     for c in drawn.lines().iter().flat_map(|line| line.chars.iter()) {

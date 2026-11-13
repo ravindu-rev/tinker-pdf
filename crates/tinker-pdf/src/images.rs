@@ -385,7 +385,7 @@ impl Page {
     /// with. The list is the one [`Page::images`] returns, to the byte.
     #[must_use]
     pub fn images_counted(&self) -> (Vec<PageImage>, Stats) {
-        let work = Arc::new(Work::new());
+        let work = Arc::new(crate::stats::begin());
         let images = self.images_in(Some(&work));
         (images, work.stats())
     }

@@ -1,9 +1,8 @@
 # Parallelism
 
-The engine spawns no thread today: `Document` is `Send + Sync`,
-`Document::page` hands back an owned `Page`, and a caller who wants several
-cores writes a pool over page indices itself ([architecture](../architecture.md),
-"Concurrency"). Tier P's targets ask for more than a caller's pool can give —
+`Document` is `Send + Sync` and `Document::page` hands back an owned `Page`,
+so a caller who wants several cores can write a pool over page indices
+itself ([architecture](../architecture.md), "Concurrency"). Tier P's targets ask for more than a caller's pool can give —
 one page drawn in bands on four threads, a save that compresses its streams
 side by side, JPEG 2000 code-blocks decoded at once — and ruling 23's answer
 to H-16 admits it: the engine's own pool, on the facade, behind

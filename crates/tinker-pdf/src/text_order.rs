@@ -123,6 +123,8 @@ use tinker_pdf_shape::bidi::{
 };
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 
+use crate::Parallelism;
+
 /// How [`crate::Page::text_with`] orders a page's lines.
 ///
 /// `Default` is [`crate::Page::text`]'s behaviour, to the byte.
@@ -135,6 +137,16 @@ pub struct TextOptions {
     /// matching operators, a diff of two producers' output — and for nothing
     /// that reads the text as text.
     pub content_order: bool,
+    /// The threads a text extraction may spend. [`Parallelism::Serial`] by
+    /// default.
+    ///
+    /// Spent on the pages of [`crate::Document::text_pages`], each page read
+    /// on a thread of the engine's own pool that the call starts and joins,
+    /// the pages handed back in page order: each is the one
+    /// [`crate::Page::text_with`] returns serially, warnings included. A page
+    /// read by [`crate::Page::text_with`] is read on the calling thread
+    /// whatever this says.
+    pub parallelism: Parallelism,
 }
 
 /// What a page says of the direction its lines are read in (ISO 32000-2

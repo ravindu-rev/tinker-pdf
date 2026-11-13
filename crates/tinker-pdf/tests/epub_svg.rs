@@ -1270,6 +1270,7 @@ fn a_standard_14_mark_in_svg_text_is_drawn_inside_its_letter() {
     assert_eq!(page.text().plain_text().trim(), "cafe\u{301}s");
     let drawn = page.text_with(&tinker_pdf::TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let chars: Vec<_> = drawn
         .lines()

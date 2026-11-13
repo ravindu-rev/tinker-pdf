@@ -42,6 +42,7 @@ mod observe;
 pub mod ocr;
 mod optional;
 mod output_intents;
+mod parallel;
 pub mod pdfa;
 pub mod pdfua;
 pub mod pdfx;
@@ -226,14 +227,15 @@ pub use display::DisplayList;
 /// Images a page draws, with their samples before any colour conversion and
 /// the space they are in, behind [`Page::images`].
 pub use images::{ImageMask, ImageSpace, PageImage, SampleCodec};
+/// What an operation counted, when it was asked to: [`Bitmap::stats`], for a
+/// render whose [`RenderOptions::stats`] was on.
+pub use parallel::Parallelism;
 /// Why [`Bitmap::from_png`] would not read a file: the decoder's own reason,
 /// named rather than collapsed, because "not a PNG" and "a colour type Table
 /// 11.1 does not permit" are different answers to show a person.
 pub use png_read::PngReadError;
 /// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
 pub use render_part::{NotDrawn, RenderPartError};
-/// What an operation counted, when it was asked to: [`Bitmap::stats`], for a
-/// render whose [`RenderOptions::stats`] was on.
 pub use stats::Stats;
 /// A page written as SVG 1.1: [`Page::to_svg`], and what it could not say.
 pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
@@ -730,6 +732,17 @@ pub struct RenderOptions {
     /// that did not ask pays one untaken branch at each place that would
     /// count, beside the two additions a glyph the renderer makes either way.
     pub stats: bool,
+    /// The threads a render may spend. [`Parallelism::Serial`] by default.
+    ///
+    /// Spent on the pages of [`Document::render_pages`], each page rendered
+    /// on a thread of the engine's own pool that the call starts and joins,
+    /// the bitmaps handed back in page order: each is the one
+    /// [`Page::render`] returns serially, byte for byte, warnings included.
+    /// A page rendered by [`Page::render`] or [`DisplayList::render`] draws
+    /// on the calling thread whatever this says. No caller's behaviour
+    /// changes unless it asks; on wasm32 no thread starts and the same work
+    /// runs on the caller.
+    pub parallelism: Parallelism,
 }
 
 impl Default for RenderOptions {
@@ -745,6 +758,7 @@ impl Default for RenderOptions {
             transparent: false,
             premultiplied: false,
             stats: false,
+            parallelism: Parallelism::Serial,
         }
     }
 }
@@ -880,7 +894,7 @@ impl Bitmap {
     /// counts are zero.
     #[must_use]
     pub fn to_png_counted(&self) -> (Option<Vec<u8>>, Stats) {
-        let work = stats::Work::new();
+        let work = stats::begin();
         let png = self.png(Some(&work), 0);
         (png, work.stats())
     }
@@ -1831,7 +1845,7 @@ impl Document {
     /// alone.
     #[must_use]
     pub fn page_count_counted(&self) -> (u32, Stats) {
-        let work = stats::Work::new();
+        let work = stats::begin();
         let count = cos_pages::count_counted(&self.inner, Some(&work));
         (count, work.stats())
     }
@@ -1867,7 +1881,7 @@ impl Document {
     /// threads may read at once.
     #[must_use]
     pub fn page_counted(&self, index: u32) -> (Option<Page>, Stats) {
-        let work = stats::Work::new();
+        let work = stats::begin();
         let page = self.page_at(index, Some(&work));
         (page, work.stats())
     }
@@ -2122,7 +2136,7 @@ impl Document {
     /// for the same groups.
     #[must_use]
     pub fn validate_pdfa_counted(&self, groups: PdfACoverage) -> (PdfAVerdict, Stats) {
-        let work = Arc::new(stats::Work::new());
+        let work = Arc::new(stats::begin());
         let verdict = pdfa::validate(self, groups, Some(&work));
         (verdict, work.stats())
     }
@@ -2152,7 +2166,7 @@ impl Document {
     /// reaching it did ([`Stats`]).
     #[must_use]
     pub fn validate_pdfua_counted(&self, groups: PdfUaCoverage) -> (PdfUaVerdict, Stats) {
-        let work = Arc::new(stats::Work::new());
+        let work = Arc::new(stats::begin());
         let verdict = pdfua::validate(self, groups, Some(&work));
         (verdict, work.stats())
     }
@@ -2185,7 +2199,7 @@ impl Document {
     /// reaching it did ([`Stats`]).
     #[must_use]
     pub fn validate_pdfx_counted(&self, groups: PdfXCoverage) -> (PdfXVerdict, Stats) {
-        let work = Arc::new(stats::Work::new());
+        let work = Arc::new(stats::begin());
         let verdict = pdfx::validate(self, groups, Some(&work));
         (verdict, work.stats())
     }
@@ -2693,12 +2707,13 @@ impl Page {
     /// lookup of its font's dictionary each glyph made, and each form's scope
     /// asked for.
     ///
-    /// A counted sibling rather than a flag, because [`TextOptions`] is
-    /// written out whole by its callers. The text is the one
-    /// [`Page::text_with`] returns for the same options, to the byte.
+    /// A counted sibling rather than a switch on [`TextOptions`], which says
+    /// how the text is ordered and what threads a walk of it spends and
+    /// nothing about counting. The text is the one [`Page::text_with`]
+    /// returns for the same options, to the byte.
     #[must_use]
     pub fn text_counted(&self, options: &TextOptions) -> (TextPage, Stats) {
-        let work = Arc::new(stats::Work::new());
+        let work = Arc::new(stats::begin());
         let page = self.text_ordered(options, Some(&work));
         (page, work.stats())
     }

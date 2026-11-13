@@ -775,8 +775,9 @@ default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
 light), `antialias` (on; off makes every pixel of every shape whole or
 empty), `transparent` (off; on starts a page whose format has alpha with
-nothing painted rather than white), `premultiplied` (off) and `stats` (off;
-on counts the render's work, below) — and returns a `Bitmap`: `width`,
+nothing painted rather than white), `premultiplied` (off), `stats` (off;
+on counts the render's work, below) and `parallelism` (`Parallelism::Serial`;
+the threads a page walk spends, below) — and returns a `Bitmap`: `width`,
 `height`, `format`, `stride`, `data`, `warnings`, the `Vec<RenderWarning>`
 that carries every named degradation, `premultiplied`, which says whether
 `data` is, and `stats`, what the render counted when it was asked to.
@@ -842,10 +843,15 @@ with `most_decodes_of_one_stream`, the most runs any one stream had,
 of several that tie), and `bytes_decoded`, the bytes the runs returned
 ([filters](filters.md)); `jpeg_held`, the most bytes a JPEG decode held
 at once beside the image it decoded into — its coefficients, its planes and
-its strip; and, from `Bitmap::to_png_counted`, `png_image_scratch` and
-`png_peak`, maxima of the bytes a PNG write held.
-`Stats::work()` totals the step counts, which leaves out those maxima and that
-quantity, and two `Stats` add with `+`, a maximum keeping the larger. Every
+its strip; from `Bitmap::to_png_counted`, `png_image_scratch` and
+`png_peak`, maxima of the bytes a PNG write held; and
+`pool_items_on_workers` and `pool_items_on_caller`, where a page of a page walk
+ran — on one of the pool's workers or on the caller — counted into the first
+counted operation the page makes, its render or its counted text, and never
+into a page rendered outside a walk. `Stats::work()` totals the step counts,
+which leaves out those maxima, that quantity and the two pool counts — where
+a part ran is no step, so a walked page totals what the page rendered alone
+does — and two `Stats` add with `+`, a maximum keeping the larger. Every
 render door counts the same way: `Page::render`, `Page::render_form` (the
 scope it reads the form's name in included), `Page::render_annotation` (both
 of the appearance's scopes) and `DisplayList::render`, which counts through
@@ -860,6 +866,29 @@ no tally at all, so it pays one untaken branch a counting site, and the
 renderer's two additions a glyph, which it makes either way. The design is in
 [performance](../design/performance.md); the C ABI and the bindings do not
 carry the stats ([bindings](bindings.md)).
+
+**Page walks.** `Document::render_pages(pages, &options, each)` renders each
+of `pages` as `options` asks and hands `each` the page's index and its bitmap,
+`None` for a page the tree will not hand back, in the order `pages` names
+them, on the calling thread. With `RenderOptions::parallelism` at its default,
+`Parallelism::Serial`, every page renders on the caller, in order; with
+`Threads(n)` the pages render on at most `n` threads of the engine's own pool
+(`tinker-pdf-pool`), started in a scope for the call and joined before it
+returns, never more than the pages and never more than 256. Each page is one
+operation, rendered on its thread as `Page::render` renders it, serially
+whatever the options say, so each bitmap is the serial page byte for byte,
+its warnings included; the walk shares the one `Document` by reference and
+takes each page through `Document::page`. Worker `k` renders the `k`th page of
+each wave of `n`, and each wave is handed to `each` before the next starts, so
+at most `n` bitmaps are alive at once. A worker that will not start — every
+worker on wasm32, a host at its thread limit — leaves its pages to the caller,
+with the same output. `Document::walk_pages(pages, parallelism, work, each)`
+is the walk both page walks are, for a caller whose page is more than one
+door: `work` runs for each page on its thread and `each` takes what it
+returned, in page order; called on one of the pool's workers, a walk runs on
+that worker. `Page::render` and `DisplayList::render` draw on the calling
+thread whatever `parallelism` says. The design is
+[parallelism](../design/parallelism.md).
 
 `Page::display_list()` returns a `DisplayList` — the page interpreted once —
 whose `render(&RenderOptions)` returns what `Page::render` returns for the
@@ -1031,6 +1060,15 @@ defect to hide in.
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
   `annotation_appearances.rs` — each asserting pixels, not absence of error.
+- Page walks: `crates/tinker-pdf/tests/guards.rs`'s
+  `a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads` holds every page
+  of a text, an image and an annotated document walked on 2, 3, 4 and 7
+  threads to its serial render — pixels and warnings — and its serial text;
+  `crates/tinker-pdf/tests/parallelism.rs` reads where each page ran from its
+  stats (`a_page_walk_on_four_threads_runs_no_page_on_the_caller`), proves
+  four workers are four threads at a barrier, and holds a walk to the order
+  its pages were named in, one wave alive at once, a walk inside a walk on its
+  worker and a cancelled walk to the pages' own renders.
 - Counted work: `crates/tinker-pdf/tests/stats.rs`.
   `render_stats_are_none_unless_asked` over the page, a tile, a display list,
   a form and an annotation; `render_stats_count_what_a_generated_page_draws`,

@@ -364,6 +364,7 @@ fn a_right_to_left_line_in_two_faces_is_drawn_right_to_left() {
     let drawn = page
         .text_with(&TextOptions {
             content_order: true,
+            ..Default::default()
         })
         .plain_text();
     let reversed: String = SPLIT_LINE.chars().rev().collect();
@@ -747,6 +748,7 @@ fn a_mark_takes_no_letter_spacing_of_its_own_in_a_shaped_run() {
     assert_eq!(page.text().plain_text(), "A\u{301}Bz\n");
     let drawn = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let starts = |text: &str| -> f64 {
         drawn
@@ -1049,6 +1051,7 @@ fn a_styled_letter_in_a_mixed_line_overprints_nothing() {
     let page = doc.page(0).expect("a page");
     let text = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let boxes: Vec<(String, f64, f64)> = text
         .lines()
@@ -1117,6 +1120,7 @@ fn a_word_spaced_right_to_left_run_draws_its_words_right_to_left() {
     let page = doc.page(0).expect("a page");
     let text = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let chars: Vec<(String, f64, f64)> = text
         .lines()
@@ -1328,6 +1332,7 @@ fn drawn_left_to_right(doc: &Document) -> Vec<(String, f64)> {
     let page = doc.page(0).expect("a page");
     let text = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let mut glyphs: Vec<(String, f64)> = text
         .lines()
@@ -1616,6 +1621,7 @@ fn the_line_breaker_measures_a_kerned_pair_across_a_span() {
     let page = doc.page(0).expect("a page");
     let text = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let baselines: Vec<f64> = text
         .lines()
@@ -1703,6 +1709,7 @@ fn a_paragraph_set_on_one_line_opens_as_one_line() {
     // that they share one baseline.
     let text = doc.page(0).expect("a page").text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     assert_eq!(
         text.lines().len(),
@@ -1879,6 +1886,7 @@ fn page_lines(doc: &Document, index: u32) -> Vec<Vec<(String, f64)>> {
     let page = doc.page(index).expect("a page");
     let text = page.text_with(&TextOptions {
         content_order: true,
+        ..Default::default()
     });
     let mut lines: Vec<(f64, Vec<(String, f64)>)> = Vec::new();
     for c in text

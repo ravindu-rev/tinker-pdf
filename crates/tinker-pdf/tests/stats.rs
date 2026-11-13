@@ -1122,6 +1122,7 @@ fn text_stats_count_font_resolutions() {
     let page = document.page(index).expect("a page");
     let content_order = TextOptions {
         content_order: true,
+        ..Default::default()
     };
     for options in [TextOptions::default(), content_order] {
         let (text, stats) = page.text_counted(&options);

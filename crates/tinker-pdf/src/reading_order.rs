@@ -512,7 +512,7 @@ impl Document {
         pages: std::ops::Range<u32>,
         options: &InferenceOptions,
     ) -> (Vec<InferredOrder>, Stats) {
-        let work = Arc::new(Work::new());
+        let work = Arc::new(crate::stats::begin());
         let orders = InferredPages::new(self, pages, options, Some(Arc::clone(&work)))
             .map(|(_, order)| order)
             .collect();

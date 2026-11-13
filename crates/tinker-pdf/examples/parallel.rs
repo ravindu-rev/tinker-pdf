@@ -1,38 +1,28 @@
-//! Render every page on a pool of threads this program owns, and prove the
-//! pool changed nothing.
+//! Render every page on the engine's own pool, and prove the pool changed
+//! nothing.
 //!
-//! The engine spawns no thread, on any target — that is a policy, not an
-//! omission, and it is why the same types compile single-threaded for wasm32.
-//! What it offers a threaded caller instead is three properties: `Document` is
-//! `Send + Sync`; `Document::page` hands back an *owned* `Page`, cloning an
-//! `Arc` rather than borrowing, so a worker holding a page borrows nothing;
-//! and `FontProvider` is `Send + Sync` too. Given those, a pool over page
-//! indices is a dozen lines of `std::thread::scope` in the embedder, with no
-//! lifetime work and no library support at all. Those dozen lines are this
-//! file.
+//! `Document::render_pages` renders each page as `RenderOptions` asks on the
+//! threads its `parallelism` names — `Parallelism::Serial` unless a caller asks
+//! — and hands the bitmaps back in page order on the calling thread. The pool
+//! is the engine's: threads started in a scope for the call and joined before
+//! it returns, no global runtime, and on wasm32, where no thread starts, the
+//! same pages drawn on the caller. The walk shares the one document by
+//! reference across its workers, and each worker takes its pages through
+//! `Document::page`, which hands back an owned `Page`.
 //!
-//! Two things worth copying. The document is shared by reference and never
-//! cloned per thread: a clone each would prove only that a `Document` can be
-//! *sent*, and the property being relied on is that one can be *shared*. And
-//! the pages come back sorted by index rather than in completion order,
-//! because a result that depends on which worker finished first is not a
-//! result — `tpdf render --jobs N` protects its stdout the same way.
-//!
-//! Then it checks the claim rather than asserting it: every page drawn on the
-//! pool is compared byte for byte with the same page drawn serially. A
-//! concurrency guarantee that nothing compares against is a guarantee nothing
-//! has tested.
+//! Then it checks the claim rather than asserting it: every page the walk drew
+//! is compared byte for byte with the same page drawn serially. A concurrency
+//! guarantee that nothing compares against is a guarantee nothing has tested.
 //!
 //! Run: `cargo run -p tinker-pdf --example parallel [-- file.pdf]`
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 use std::time::Instant;
 
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::{Document, Parallelism, RenderOptions};
 
-/// What a rendered page is compared by: its size and its pixels.
-type Drawn = Option<(u32, u32, Vec<u8>)>;
+/// What a rendered page is compared by: its size, its pixels and its
+/// warnings.
+type Drawn = Option<(u32, u32, Vec<u8>, Vec<tinker_pdf::RenderWarning>)>;
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| {
@@ -59,55 +49,42 @@ fn main() {
     // Low, because this is a demonstration of where the threads live and not
     // a benchmark, and a fixture that takes a second per page teaches nothing
     // extra.
-    let options = RenderOptions::at_dpi(72.0);
+    let serial_options = RenderOptions::at_dpi(72.0);
 
     // A page the tree will not hand back is `None` rather than a panic, in
     // both passes: an example runs against whatever file it is given, and
     // ruling 1 says a damaged one is a result, not a crash.
-    let draw = |index: u32| -> Drawn {
-        let bitmap = doc.page(index)?.render(&options);
-        Some((bitmap.width, bitmap.height, bitmap.data))
+    let drawn = |bitmap: Option<tinker_pdf::Bitmap>| -> Drawn {
+        bitmap.map(|bitmap| (bitmap.width, bitmap.height, bitmap.data, bitmap.warnings))
     };
 
     // The serial answer first, so that there is something for the pool to be
     // identical to.
     let clock = Instant::now();
-    let serial: Vec<Drawn> = (0..pages).map(draw).collect();
+    let serial: Vec<Drawn> = (0..pages)
+        .map(|index| drawn(doc.page(index).map(|page| page.render(&serial_options))))
+        .collect();
     let serial_ms = clock.elapsed().as_millis();
 
-    // Never more workers than pages: eight threads over six pages is two
-    // threads whose whole life is starting and stopping.
-    let jobs = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .min(pages as usize);
+    // The walk never starts more workers than pages, so asking for every core
+    // costs nothing on a short document.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let walked_options = RenderOptions {
+        parallelism: Parallelism::Threads(threads),
+        ..serial_options.clone()
+    };
+    let started = Parallelism::Threads(threads).workers(pages as usize);
 
-    let next = AtomicUsize::new(0);
-    let drawn: Mutex<Vec<(usize, Drawn)>> = Mutex::new(Vec::with_capacity(pages as usize));
     let clock = Instant::now();
-    std::thread::scope(|scope| {
-        for _ in 0..jobs {
-            // `&doc` — one document, shared. Cloning it per thread would
-            // compile just as well and quietly stop exercising `Sync`.
-            let (draw, next, drawn) = (&draw, &next, &drawn);
-            scope.spawn(move || loop {
-                let slot = next.fetch_add(1, Ordering::Relaxed);
-                if slot >= pages as usize {
-                    return;
-                }
-                let page = draw(slot as u32);
-                drawn.lock().expect("the results lock").push((slot, page));
-            });
-        }
+    let mut parallel: Vec<Drawn> = Vec::with_capacity(pages as usize);
+    doc.render_pages(0..pages, &walked_options, |_, bitmap| {
+        parallel.push(drawn(bitmap));
     });
     let parallel_ms = clock.elapsed().as_millis();
 
-    let mut parallel = drawn.into_inner().expect("the results lock");
-    parallel.sort_by_key(|(slot, _)| *slot);
-    let parallel: Vec<Drawn> = parallel.into_iter().map(|(_, page)| page).collect();
-
     println!("document  {path}");
     println!("pages     {pages}");
-    println!("threads   {jobs}");
+    println!("threads   {started}");
     println!("serial    {serial_ms} ms");
     println!("parallel  {parallel_ms} ms");
 
@@ -120,13 +97,13 @@ fn main() {
             .map(|(index, _)| index as u32 + 1)
             .collect();
         eprintln!(
-            "pages {differing:?} came back different from the pool, which would be \
-             a bug in the engine rather than in this example"
+            "pages {differing:?} came back different from the engine's page walk, which \
+             would be a bug in the engine rather than in this example"
         );
         std::process::exit(1);
     }
     println!(
-        "checked   every page byte-identical to the serial render, so the pool \
-         changed the clock and nothing else"
+        "checked   every page byte-identical to the serial render, warnings included, so \
+         the pool changed the clock and nothing else"
     );
 }

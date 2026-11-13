@@ -46,11 +46,12 @@ fn lowest(one: Option<ObjRef>, other: Option<ObjRef>) -> Option<ObjRef> {
 /// What one operation counted: the value a door hands back when asked.
 ///
 /// Every field is public, and each but [`Stats::most_decoded_stream`] a `u64`:
-/// a count of steps of one kind, but for three maxima, the stream one was
-/// reached on, and one quantity, which say so. **It is `#[non_exhaustive]`** so
-/// that a counter a later row adds — masks rasterised, threads run — is an
-/// addition rather than a break: read a field by name, total the steps with
-/// [`Stats::work`], and sum two with `+`.
+/// a count of steps of one kind, but for four maxima, the stream one was
+/// reached on, one quantity, and two counts of where a pooled operation's
+/// parts ran, which say so. **It is `#[non_exhaustive]`** so that a counter a
+/// later row adds — masks rasterised, threads run — is an addition rather
+/// than a break: read a field by name, total the steps with [`Stats::work`],
+/// and sum two with `+`.
 ///
 /// A count is what the operation did, not what it was worth: a cache lookup
 /// counts whether or not the entry it found held anything, and a glyph shown
@@ -300,6 +301,22 @@ pub struct Stats {
     /// a value (`JpegHeld`), and added by the facade's image path, which
     /// writes each strip into the image and holds nothing else beside it.
     pub jpeg_held: u64,
+    /// Parts of a pooled operation that ran on one of the pool's worker
+    /// threads (`tinker_pdf_pool::on_worker`): a page of a page walk, counted
+    /// into that page's own operation, whose bitmap or text it is. Where a
+    /// part ran rather than a step it took, so [`Stats::work`] leaves it out;
+    /// with every worker started, every part is a worker's, whichever worker
+    /// took it.
+    ///
+    /// Counted by the facade's page walk.
+    pub pool_items_on_workers: u64,
+    /// Parts of a pooled operation that ran on the caller's own thread: every
+    /// part of one run `Serial`, and the share of a worker that would not
+    /// start — every part on wasm32. Left out of [`Stats::work`] as
+    /// `pool_items_on_workers` is.
+    ///
+    /// Counted with `pool_items_on_workers`.
+    pub pool_items_on_caller: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -370,6 +387,10 @@ pub enum Counter {
     OperatorsRun,
     /// [`Stats::shading_functions_evaluated`].
     ShadingFunctionsEvaluated,
+    /// [`Stats::pool_items_on_workers`].
+    PoolItemsOnWorkers,
+    /// [`Stats::pool_items_on_caller`].
+    PoolItemsOnCaller,
 }
 
 impl Stats {
@@ -380,7 +401,10 @@ impl Stats {
     /// `bytes_decoded`, `png_image_scratch`, `png_peak` and `jpeg_held` —
     /// because a byte total grows with the page and would hide a step count
     /// that grows with the document. `bytes_scanned` is in: each of its
-    /// bytes is a step the repair scan took, not output.
+    /// bytes is a step the repair scan took, not output. The two pool
+    /// counts are out too: they say on which thread a part ran, and the
+    /// part's own steps are counted where they were taken, so a page walked
+    /// on a pool totals what the same page rendered alone does.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -455,6 +479,8 @@ impl Stats {
             Counter::ContentTokensRead => &mut self.content_tokens_read,
             Counter::OperatorsRun => &mut self.operators_run,
             Counter::ShadingFunctionsEvaluated => &mut self.shading_functions_evaluated,
+            Counter::PoolItemsOnWorkers => &mut self.pool_items_on_workers,
+            Counter::PoolItemsOnCaller => &mut self.pool_items_on_caller,
         }
     }
 }
@@ -547,6 +573,12 @@ impl Add for Stats {
                 .shading_functions_evaluated
                 .saturating_add(other.shading_functions_evaluated),
             jpeg_held: self.jpeg_held.max(other.jpeg_held),
+            pool_items_on_workers: self
+                .pool_items_on_workers
+                .saturating_add(other.pool_items_on_workers),
+            pool_items_on_caller: self
+                .pool_items_on_caller
+                .saturating_add(other.pool_items_on_caller),
         }
     }
 }
@@ -659,7 +691,8 @@ impl Work {
 mod tests {
     use super::*;
 
-    /// Every counter, so a test of one property covers them all.
+    /// Every counter of a step, so a test of one property covers them all;
+    /// [`PLACES`] holds the two that count where a part ran.
     const ALL: [Counter; 31] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
@@ -693,6 +726,37 @@ mod tests {
         Counter::OperatorsRun,
         Counter::ShadingFunctionsEvaluated,
     ];
+
+    /// The counters of where a pooled operation's parts ran.
+    const PLACES: [Counter; 2] = [Counter::PoolItemsOnWorkers, Counter::PoolItemsOnCaller];
+
+    /// Each pool count counts into its own field and sums as a count does,
+    /// and into no total of steps: a part's steps are counted where it took
+    /// them.
+    #[test]
+    fn a_pooled_part_counts_where_it_ran_and_no_step() {
+        for (index, counter) in PLACES.into_iter().enumerate() {
+            let work = Work::new();
+            let n = index as u64 + 3;
+            work.add(counter, n);
+            let mut expected = Stats::default();
+            *expected.slot(counter) = n;
+            let stats = work.stats();
+            assert_eq!(stats, expected, "{counter:?} counted somewhere else");
+            assert_eq!(stats.work(), 0, "{counter:?} counted as a step");
+            let mut doubled = stats + stats;
+            assert_eq!(*doubled.slot(counter), 2 * n, "{counter:?} sums");
+        }
+        let work = Work::new();
+        work.add(Counter::GlyphsShown, 5);
+        work.add(Counter::PoolItemsOnWorkers, 1);
+        let stats = work.stats();
+        assert_eq!(
+            (stats.pool_items_on_workers, stats.pool_items_on_caller),
+            (1, 0)
+        );
+        assert_eq!(stats.work(), 5, "the glyphs alone are steps");
+    }
 
     #[test]
     fn each_counter_counts_into_its_own_field_and_into_the_total() {
