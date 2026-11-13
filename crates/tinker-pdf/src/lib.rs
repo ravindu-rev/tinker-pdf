@@ -918,8 +918,9 @@ pub struct RenderOptions {
     /// reads the clauses.
     pub usage: Option<Usage>,
     /// What the render says about the document's layers: which
-    /// optional-content configuration's states it draws ([`LayerOptions`]).
-    /// The default draws `/D`'s, the render every page has always drawn.
+    /// optional-content configuration's states it draws, and the groups it
+    /// turns on or off over them ([`LayerOptions`]). The default draws `/D`'s
+    /// as they are, the render every page has always drawn.
     pub layers: LayerOptions,
     /// The threads a render may spend. [`Parallelism::Serial`] by default.
     ///
@@ -1066,6 +1067,27 @@ pub struct LayerOptions {
     /// renders as `/D` and is reported as
     /// [`RenderWarning::UnreadableLayerConfiguration`].
     pub configuration: Option<usize>,
+    /// Groups the render turns on (`true`) or off (`false`), each by the
+    /// reference [`Document::layers`] hands out, applied in order after the
+    /// configuration and its auto-state, so a later override of a group wins
+    /// over an earlier one. Empty by default, which changes nothing.
+    ///
+    /// Turning a group on turns off every other member of each of the
+    /// configuration's `/RBGroups` collections the group is in, "If one
+    /// group is turned ON, all others shall be turned OFF" (Table 99) — a
+    /// configuration other than `/D` that has no `/RBGroups` takes `/D`'s —
+    /// and turning one off changes nothing else. The collections constrain
+    /// the overrides alone: a configuration whose own `/ON` turns two members
+    /// on shows both.
+    ///
+    /// An override of a group the configuration's `/Locked` lists is refused
+    /// — the group keeps its state — and so is a radio-button consequence
+    /// that would turn a locked group off; each is reported once a render as
+    /// [`RenderWarning::LockedLayer`], by the group's `/Name`. The locks are
+    /// the chosen configuration's own, an empty array by default. An override
+    /// of a reference `/OCProperties /OCGs` does not list changes nothing, as
+    /// it names no group of the document's (8.11.4.2).
+    pub overrides: Vec<(ObjRef, bool)>,
 }
 
 impl RenderOptions {
@@ -2900,6 +2922,10 @@ pub(crate) struct Met {
     /// The configuration the render named where it is none the document has
     /// (`RenderOptions::layers`), so `/D` was drawn.
     pub(crate) unreadable_configuration: Option<usize>,
+    /// The locked groups the render's overrides would have changed, each
+    /// once, labelled as `RenderWarning::LockedLayer` names them, in the
+    /// order the overrides met them.
+    pub(crate) locked: Vec<String>,
 }
 
 impl Met {
@@ -2956,6 +2982,11 @@ impl Met {
         }
         if let Some(index) = self.unreadable_configuration {
             warnings.push(RenderWarning::UnreadableLayerConfiguration { index });
+        }
+        for layer in &self.locked {
+            warnings.push(RenderWarning::LockedLayer {
+                layer: layer.clone(),
+            });
         }
         if let Some((requested, applied)) = self.scaled_down {
             warnings.push(RenderWarning::PageScaledDown { requested, applied });
@@ -3238,6 +3269,21 @@ impl Page {
             .filter(|&index| !optional::configuration_readable(&self.doc, index))
     }
 
+    /// The locked groups `options`' overrides would have changed, which the
+    /// render reports, read off the render's one binding of its states. A
+    /// render with no overrides has none to report, and asks the binding
+    /// nothing, so one whose scopes never asked binds nothing.
+    pub(crate) fn locked_layers(
+        &self,
+        options: &RenderOptions,
+        resources: &resources::PageResources,
+    ) -> Vec<String> {
+        if options.layers.overrides.is_empty() {
+            return Vec::new();
+        }
+        resources.operation().optional(&self.doc).refused().to_vec()
+    }
+
     /// **The one pipeline every render of this page goes through** — the page
     /// itself, a form on it ([`Page::render_form`]) and one of its annotations
     /// ([`Page::render_annotation`]) — differing only in what `paint` draws and
@@ -3313,6 +3359,7 @@ impl Page {
             resources,
             draws,
             self.unreadable_configuration(options),
+            self.locked_layers(options, resources),
             paint,
         )
     }
@@ -3668,7 +3715,8 @@ impl Drawn for resources::PageResources {
 /// bitmap in the format handed back with what the render met. What the
 /// renderer drew is counted where `draws` says it is the render's;
 /// `unreadable` is the optional-content configuration the render named where
-/// the document has none such, so `/D`'s states were drawn.
+/// the document has none such, so `/D`'s states were drawn, and `locked` the
+/// locked groups the render's overrides would have changed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_sheet<S: Drawn>(
     sheet: Sheet,
@@ -3678,6 +3726,7 @@ pub(crate) fn draw_sheet<S: Drawn>(
     source: &S,
     draws: stats::Draws,
     unreadable: Option<usize>,
+    locked: Vec<String>,
     paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_, S>, &S),
 ) -> Layer {
     let View {
@@ -3765,6 +3814,7 @@ pub(crate) fn draw_sheet<S: Drawn>(
             .filter(|requested| *requested != view)
             .map(|requested| (requested, view)),
         unreadable_configuration: unreadable,
+        locked,
     };
 
     // Back to something a caller can read. A page group composited over

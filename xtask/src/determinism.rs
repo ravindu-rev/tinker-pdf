@@ -140,6 +140,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/render_options.rs",
         test: "placed_annotation_output_is_pinned",
     },
+    // A render whose override turns a group of a radio-button collection on
+    // past a locked member (RC-14.3).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/render_options.rs",
+        test: "overridden_layer_output_is_pinned",
+    },
     // The bitmap toolbox's every operation over one golden: the maps, the
     // reductions, scale, subsample and conversion (RC-09.6).
     Fingerprint {

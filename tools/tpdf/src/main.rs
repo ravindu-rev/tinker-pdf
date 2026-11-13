@@ -3597,6 +3597,7 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
         W::ApproximatedGroupBlend => "ApproximatedGroupBlend".to_string(),
         W::Cancelled => "Cancelled".to_string(),
         W::RegionClamped { .. } => "RegionClamped".to_string(),
+        W::LockedLayer { .. } => "LockedLayer".to_string(),
     }
 }
 

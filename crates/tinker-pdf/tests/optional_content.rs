@@ -9,7 +9,7 @@
 //! that hides content correctly for the wrong reason is exactly the failure
 //! this gap exists to prevent.
 
-use tinker_pdf::{Bitmap, Document, LayerOptions, RenderOptions, RenderWarning, Usage};
+use tinker_pdf::{Bitmap, Document, LayerOptions, ObjRef, RenderOptions, RenderWarning, Usage};
 
 /// A 40x40 page with one optional content group at 5 0 R, called
 /// "Construction lines".
@@ -910,6 +910,70 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
     renders_as_its_twin(&bytes, print, true, "a /Usage that is no dictionary");
 }
 
+/// A page whose group 5 marks content in every scope a render opens: a form's
+/// own content, a form whose `/OC` names it, a tiling pattern's cell and an
+/// annotation's appearance, beside an unmarked band; the catalog's `/D` is
+/// `d`, and the group's `/Usage` turns it off in print. The annotation's `/F`
+/// sets Print, so a print render draws it (12.5.3).
+fn every_scope_page(d: &str) -> Vec<u8> {
+    let properties = "/Properties << /MC0 5 0 R >>";
+    let marked = "/OC /MC0 BDC 1 0 0 rg 0 0 10 10 re f EMC";
+    let content = "0 1 0 rg 0 30 40 10 re f\n\
+                   q 1 0 0 1 0 0 cm /Fm Do Q\n\
+                   q 1 0 0 1 12 0 cm /Hid Do Q\n\
+                   /Pattern cs /P0 scn 24 0 10 10 re f";
+    let form = |extra: &str| {
+        format!(
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] {extra} \
+             /Resources << {properties} >> /Length {} >>\nstream\n{marked}\nendstream",
+            marked.len()
+        )
+    };
+    let cell = format!(
+        "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 \
+         /Resources << {properties} >> /Length {} >>\nstream\n{marked}\nendstream",
+        marked.len()
+    );
+    let shown = "1 0 0 rg 0 0 10 10 re f";
+    let objects = format!(
+        "6 0 obj\n{}\nendobj\n\
+         7 0 obj\n{}\nendobj\n\
+         8 0 obj\n{cell}\nendobj\n\
+         9 0 obj\n<< /Type /Annot /Subtype /Square /F 4 /Rect [30 12 40 22] /AP << /N 10 0 R >> >>\nendobj\n\
+         10 0 obj\n{}\nendobj\n",
+        form(""),
+        format!(
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /OC 5 0 R /Length {} >>\nstream\n{shown}\nendstream",
+            shown.len()
+        ),
+        form(""),
+    );
+    let mut bytes = with_usage(
+        d,
+        "/Print << /PrintState /OFF >>",
+        &format!("{properties} /XObject << /Fm 6 0 R /Hid 7 0 R >> /Pattern << /P0 8 0 R >>"),
+        content,
+        &objects,
+    );
+    // The page carries the annotation.
+    let at = bytes
+        .windows(b"/Contents 4 0 R".len())
+        .position(|window| window == b"/Contents 4 0 R")
+        .expect("the page dictionary");
+    bytes.splice(at..at, b"/Annots [9 0 R] ".iter().copied());
+    bytes
+}
+
+/// Where [`every_scope_page`] draws each scope's marked content: user y 0 to
+/// 10 is rows 30 to 40, and the annotation's `/Rect`, 12 to 22 up, rows 18 to
+/// 28.
+const EVERY_SCOPE: [(&str, u32, u32); 4] = [
+    ("the form's marked content", 5, 35),
+    ("the form the group hides", 17, 35),
+    ("the tiling cell's marked content", 29, 35),
+    ("the appearance's marked content", 35, 23),
+];
+
 /// **A usage's states reach every scope a render opens** (RC-13.2): a
 /// form's own content marking the group, a form whose `/OC` names it, a
 /// tiling pattern's cell marking it and an annotation's appearance marking
@@ -920,67 +984,14 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
 /// it (12.5.3) and its appearance's scope is read.
 #[test]
 fn a_usages_states_reach_every_scope_a_render_opens() {
-    let properties = "/Properties << /MC0 5 0 R >>";
-    let marked = "/OC /MC0 BDC 1 0 0 rg 0 0 10 10 re f EMC";
-    let page = |d: &str| {
-        let content = "0 1 0 rg 0 30 40 10 re f\n\
-                       q 1 0 0 1 0 0 cm /Fm Do Q\n\
-                       q 1 0 0 1 12 0 cm /Hid Do Q\n\
-                       /Pattern cs /P0 scn 24 0 10 10 re f";
-        let form = |extra: &str| {
-            format!(
-                "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] {extra} \
-                 /Resources << {properties} >> /Length {} >>\nstream\n{marked}\nendstream",
-                marked.len()
-            )
-        };
-        let cell = format!(
-            "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 \
-             /Resources << {properties} >> /Length {} >>\nstream\n{marked}\nendstream",
-            marked.len()
-        );
-        let shown = "1 0 0 rg 0 0 10 10 re f";
-        let objects = format!(
-            "6 0 obj\n{}\nendobj\n\
-             7 0 obj\n{}\nendobj\n\
-             8 0 obj\n{cell}\nendobj\n\
-             9 0 obj\n<< /Type /Annot /Subtype /Square /F 4 /Rect [30 12 40 22] /AP << /N 10 0 R >> >>\nendobj\n\
-             10 0 obj\n{}\nendobj\n",
-            form(""),
-            format!(
-                "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /OC 5 0 R /Length {} >>\nstream\n{shown}\nendstream",
-                shown.len()
-            ),
-            form(""),
-        );
-        let mut bytes = with_usage(
-            d,
-            "/Print << /PrintState /OFF >>",
-            &format!("{properties} /XObject << /Fm 6 0 R /Hid 7 0 R >> /Pattern << /P0 8 0 R >>"),
-            content,
-            &objects,
-        );
-        // The page carries the annotation.
-        let at = bytes
-            .windows(b"/Contents 4 0 R".len())
-            .position(|window| window == b"/Contents 4 0 R")
-            .expect("the page dictionary");
-        bytes.splice(at..at, b"/Annots [9 0 R] ".iter().copied());
-        bytes
-    };
+    let page = every_scope_page;
     let original = page("/ON [5 0 R] /AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>]");
     let printed = render_for(&original, Some(Usage::Print));
-    // The page's foot is the bottom of the picture: user y 0 to 10 is rows
-    // 30 to 40, and the annotation's /Rect, 12 to 22 up, rows 18 to 28.
+    // The page's foot is the bottom of the picture.
     for (x, y) in [(5, 5), (35, 5)] {
         assert_eq!(pixel(&printed, x, y), vec![0, 255, 0], "the unmarked band");
     }
-    for (what, x, y) in [
-        ("the form's marked content", 5, 35),
-        ("the form the group hides", 17, 35),
-        ("the tiling cell's marked content", 29, 35),
-        ("the appearance's marked content", 35, 23),
-    ] {
+    for (what, x, y) in EVERY_SCOPE {
         assert_eq!(
             pixel(&printed, x, y),
             vec![255, 255, 255],
@@ -993,12 +1004,7 @@ fn a_usages_states_reach_every_scope_a_render_opens() {
         "every scope against the /D twin",
     );
     let viewed = render_for(&original, Some(Usage::View));
-    for (what, x, y) in [
-        ("the form's marked content", 5, 35),
-        ("the form the group hides", 17, 35),
-        ("the tiling cell's marked content", 29, 35),
-        ("the appearance's marked content", 35, 23),
-    ] {
+    for (what, x, y) in EVERY_SCOPE {
         assert_eq!(
             pixel(&viewed, x, y),
             vec![255, 0, 0],
@@ -1076,7 +1082,10 @@ const PRINT_OFF: [&str; 3] = [
 fn under(configuration: Option<usize>, usage: Option<Usage>) -> RenderOptions {
     RenderOptions {
         usage,
-        layers: LayerOptions { configuration },
+        layers: LayerOptions {
+            configuration,
+            ..LayerOptions::default()
+        },
         ..RenderOptions::default()
     }
 }
@@ -1205,4 +1214,521 @@ fn an_intent_the_configuration_does_not_hold_has_no_effect() {
         vec![255, 255, 255],
         "B is hidden under /D"
     );
+}
+
+// ---- A render's overrides (RC-14.3) -------------------------------------------
+
+/// The page [`radio`] builds: an unmarked green band, then a band in each of
+/// groups 5 "A", 6 "B" and 7 "C", which `/OCGs` lists, and one in group 8
+/// "U", which it does not.
+const RADIO_BANDS: &str = "0 1 0 rg 0 0 8 40 re f\n\
+                           /OC /A BDC 1 0 0 rg 8 0 8 40 re f EMC\n\
+                           /OC /B BDC 0 0 1 rg 16 0 8 40 re f EMC\n\
+                           /OC /C BDC 1 1 0 rg 24 0 8 40 re f EMC\n\
+                           /OC /U BDC 1 0 1 rg 32 0 8 40 re f EMC";
+
+/// A 40x40 page drawing [`RADIO_BANDS`]. `/OCGs` lists groups 5 "A", 6 "B"
+/// and 7 "C", which carry `groups`' entries beside their `/Type` and `/Name`,
+/// and 9, a group with no `/Name` that marks nothing; group 8 "U" marks its
+/// band and is not listed. The catalog's `/D` is `d`, and its `/Configs`
+/// holds `configs` where there are any.
+fn radio(groups: [&str; 3], d: &str, configs: &str) -> Vec<u8> {
+    let configs = if configs.is_empty() {
+        String::new()
+    } else {
+        format!("/Configs [{configs}]")
+    };
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R 7 0 R 9 0 R] \
+/D << {d} >> {configs} >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /Properties << /A 5 0 R /B 6 0 R /C 7 0 R /U 8 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{RADIO_BANDS}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (A) {} >>\nendobj\n\
+6 0 obj\n<< /Type /OCG /Name (B) {} >>\nendobj\n\
+7 0 obj\n<< /Type /OCG /Name (C) {} >>\nendobj\n\
+8 0 obj\n<< /Type /OCG /Name (U) >>\nendobj\n\
+9 0 obj\n<< /Type /OCG >>\nendobj\n\
+trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
+        RADIO_BANDS.len(),
+        groups[0],
+        groups[1],
+        groups[2],
+    )
+    .into_bytes()
+}
+
+/// `/D`'s body writing groups 5, 6, 7 and 9 in `states`, and nothing else:
+/// no `/RBGroups`, no `/Locked`, no `/AS`.
+fn radio_d(states: [bool; 4]) -> String {
+    let on: Vec<&str> = ["5 0 R", "6 0 R", "7 0 R", "9 0 R"]
+        .into_iter()
+        .zip(states)
+        .filter_map(|(group, on)| on.then_some(group))
+        .collect();
+    format!("/BaseState /OFF /ON [{}]", on.join(" "))
+}
+
+/// The options rendering `configuration` for `usage` with `overrides`, each
+/// group by its object number.
+fn overriding(
+    configuration: Option<usize>,
+    usage: Option<Usage>,
+    overrides: &[(u32, bool)],
+) -> RenderOptions {
+    RenderOptions {
+        usage,
+        layers: LayerOptions {
+            configuration,
+            overrides: overrides
+                .iter()
+                .map(|&(num, on)| (ObjRef::new(num, 0), on))
+                .collect(),
+        },
+        ..RenderOptions::default()
+    }
+}
+
+/// Holds a render to its twin's pixels, and to its twin's warnings followed by
+/// `more`, in order: what a render reports of its configuration and its
+/// refused overrides, which the twin, choosing and overriding nothing, does
+/// not.
+#[track_caller]
+fn same_render_and(got: &Bitmap, twin: &Bitmap, more: &[RenderWarning], what: &str) {
+    assert_eq!((got.width, got.height), (twin.width, twin.height), "{what}");
+    assert!(got.data == twin.data, "{what}: the pixels differ");
+    let mut warnings = twin.warnings.clone();
+    warnings.extend(more.iter().cloned());
+    assert_eq!(got.warnings, warnings, "{what}: the warnings differ");
+}
+
+/// **Overrides, radio buttons and locks render as their `/D` twins** (RC-14.3,
+/// `docs/design/optional-content-config.md`): each row's overrides, applied in
+/// order after the configuration and its auto-state, give the states a page
+/// whose `/D` is written as them draws — directly, from a display list
+/// recorded under the same options, and from one recorded under `/D` — and
+/// each override a lock refuses is reported once by the group's `/Name`, or by
+/// its reference where it has none. Turning a group on turns off the other
+/// members of every `/RBGroups` collection it is in, in either order and in
+/// two collections at once, and turning one off changes nothing else; the
+/// collections constrain overrides and not a configuration's own `/ON`; a
+/// locked group keeps its state whatever an override asks, and a locked
+/// member of a collection is not turned off; an override of a group `/OCGs`
+/// does not list — locked or not, or no object at all — changes nothing; a
+/// configuration other than `/D` takes `/D`'s `/RBGroups` where it has none and
+/// never its `/Locked`; and a `/RBGroups` or `/Locked` this build cannot read
+/// constrains nothing.
+#[test]
+fn overrides_radio_buttons_and_locks_render_as_their_d_twins() {
+    let print_off = ["/Usage << /Print << /PrintState /OFF >> >>", "", ""];
+    // (what, groups' entries, /D, /Configs, configuration, usage, overrides,
+    // A B C 9 as drawn, the locked groups reported)
+    type Case<'a> = (
+        &'a str,
+        [&'a str; 3],
+        &'a str,
+        &'a str,
+        Option<usize>,
+        Option<Usage>,
+        &'a [(u32, bool)],
+        [bool; 4],
+        &'a [&'a str],
+    );
+    let none = ["", "", ""];
+    let inherits = "<< /Name (Inherits) >> << /RBGroups [] /Locked [5 0 R] >>";
+    let cases: &[Case] = &[
+        (
+            "one override on and one off",
+            none,
+            "/OFF [5 0 R]",
+            "",
+            None,
+            None,
+            &[(5, true), (7, false)],
+            [true, true, false, true],
+            &[],
+        ),
+        (
+            "a later override of a group wins",
+            none,
+            "",
+            "",
+            None,
+            None,
+            &[(6, false), (7, false), (6, true)],
+            [true, true, false, true],
+            &[],
+        ),
+        (
+            "two overrides into one radio-button group, A then B",
+            none,
+            "/OFF [5 0 R 6 0 R] /RBGroups [[5 0 R 6 0 R 7 0 R]]",
+            "",
+            None,
+            None,
+            &[(5, true), (6, true)],
+            [false, true, false, true],
+            &[],
+        ),
+        (
+            "two overrides into one radio-button group, B then A",
+            none,
+            "/OFF [5 0 R 6 0 R] /RBGroups [[5 0 R 6 0 R 7 0 R]]",
+            "",
+            None,
+            None,
+            &[(6, true), (5, true)],
+            [true, false, false, true],
+            &[],
+        ),
+        (
+            "turning a member off turns no other on",
+            none,
+            "/OFF [6 0 R 7 0 R] /RBGroups [[5 0 R 6 0 R 7 0 R]]",
+            "",
+            None,
+            None,
+            &[(5, false)],
+            [false, false, false, true],
+            &[],
+        ),
+        (
+            "a group in two radio-button groups, turned on",
+            none,
+            "/RBGroups [[5 0 R 6 0 R] [6 0 R 7 0 R]]",
+            "",
+            None,
+            None,
+            &[(6, true)],
+            [false, true, false, true],
+            &[],
+        ),
+        (
+            "a member of one of the two, turned on",
+            none,
+            "/RBGroups [[5 0 R 6 0 R] [6 0 R 7 0 R]]",
+            "",
+            None,
+            None,
+            &[(5, true)],
+            [true, false, true, true],
+            &[],
+        ),
+        (
+            "a collection reached by reference, a member listed twice",
+            none,
+            "/RBGroups [10 0 R]",
+            "",
+            None,
+            None,
+            &[(7, true)],
+            [false, false, true, true],
+            &[],
+        ),
+        (
+            "a configuration whose /ON turns two members on shows both",
+            none,
+            "",
+            "<< /BaseState /OFF /ON [5 0 R 6 0 R] /RBGroups [[5 0 R 6 0 R]] >>",
+            Some(0),
+            None,
+            &[(7, true)],
+            [true, true, true, false],
+            &[],
+        ),
+        (
+            "until an override turns one of them on",
+            none,
+            "",
+            "<< /BaseState /OFF /ON [5 0 R 6 0 R] /RBGroups [[5 0 R 6 0 R]] >>",
+            Some(0),
+            None,
+            &[(6, true)],
+            [false, true, false, false],
+            &[],
+        ),
+        (
+            "a locked group overridden on",
+            none,
+            "/OFF [6 0 R] /Locked [6 0 R]",
+            "",
+            None,
+            None,
+            &[(6, true)],
+            [true, false, true, true],
+            &["B"],
+        ),
+        (
+            "a locked group overridden to the state it has",
+            none,
+            "/OFF [6 0 R] /Locked [6 0 R]",
+            "",
+            None,
+            None,
+            &[(6, false)],
+            [true, false, true, true],
+            &["B"],
+        ),
+        (
+            "a locked group overridden twice, beside another override",
+            none,
+            "/OFF [6 0 R] /Locked [6 0 R]",
+            "",
+            None,
+            None,
+            &[(6, true), (5, false), (6, false)],
+            [false, false, true, true],
+            &["B"],
+        ),
+        (
+            "a locked member of a radio-button group stays on",
+            none,
+            "/RBGroups [[5 0 R 6 0 R 7 0 R]] /Locked [6 0 R]",
+            "",
+            None,
+            None,
+            &[(5, true)],
+            [true, true, false, true],
+            &["B"],
+        ),
+        (
+            "a locked member already off is no change",
+            none,
+            "/OFF [6 0 R] /RBGroups [[5 0 R 6 0 R]] /Locked [6 0 R]",
+            "",
+            None,
+            None,
+            &[(5, true)],
+            [true, false, true, true],
+            &[],
+        ),
+        (
+            "two locked groups, each reported once in the order met",
+            none,
+            "/RBGroups [[5 0 R 6 0 R 7 0 R]] /Locked [7 0 R 6 0 R]",
+            "",
+            None,
+            None,
+            &[(7, false), (5, true), (6, false)],
+            [true, true, true, true],
+            &["C", "B"],
+        ),
+        (
+            "a locked group with no /Name is reported by its reference",
+            none,
+            "/Locked [9 0 R]",
+            "",
+            None,
+            None,
+            &[(9, false)],
+            [true, true, true, true],
+            &["9 0 R"],
+        ),
+        (
+            "an unlisted group",
+            none,
+            "",
+            "",
+            None,
+            None,
+            &[(8, false)],
+            [true, true, true, true],
+            &[],
+        ),
+        (
+            "an unlisted group a configuration locks",
+            none,
+            "/Locked [8 0 R]",
+            "",
+            None,
+            None,
+            &[(8, true)],
+            [true, true, true, true],
+            &[],
+        ),
+        (
+            "a reference to no object",
+            none,
+            "/RBGroups [[5 0 R 99 0 R]]",
+            "",
+            None,
+            None,
+            &[(99, true), (5, true)],
+            [true, true, true, true],
+            &[],
+        ),
+        (
+            "a configuration takes /D's radio buttons and not its locks",
+            none,
+            "/RBGroups [[5 0 R 6 0 R]] /Locked [7 0 R]",
+            inherits,
+            Some(0),
+            None,
+            &[(5, true), (7, false)],
+            [true, false, false, true],
+            &[],
+        ),
+        (
+            "its own empty radio buttons and its own locks",
+            none,
+            "/RBGroups [[5 0 R 6 0 R]] /Locked [7 0 R]",
+            inherits,
+            Some(1),
+            None,
+            &[(5, false), (6, true)],
+            [true, true, true, true],
+            &["A"],
+        ),
+        (
+            "and /D's own, under /D",
+            none,
+            "/RBGroups [[5 0 R 6 0 R]] /Locked [7 0 R]",
+            inherits,
+            None,
+            None,
+            &[(5, true), (7, false)],
+            [true, false, true, true],
+            &["C"],
+        ),
+        (
+            "an unreadable configuration takes /D's locks",
+            none,
+            "/Locked [7 0 R]",
+            inherits,
+            Some(7),
+            None,
+            &[(7, false)],
+            [true, true, true, true],
+            &["C"],
+        ),
+        (
+            "a /RBGroups and a /Locked that are no arrays",
+            none,
+            "/RBGroups 5 /Locked (x)",
+            "",
+            None,
+            None,
+            &[(5, true), (6, false)],
+            [true, false, true, true],
+            &[],
+        ),
+        (
+            "radio-button entries that are no collections",
+            none,
+            "/RBGroups [5 0 R [5 0 R] (x) [6 0 R 6 0 R]]",
+            "",
+            None,
+            None,
+            &[(5, true), (6, true)],
+            [true, true, true, true],
+            &[],
+        ),
+        (
+            "an override after the auto-state, in print",
+            print_off,
+            "/AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>]",
+            "",
+            None,
+            Some(Usage::Print),
+            &[(5, true)],
+            [true, true, true, true],
+            &[],
+        ),
+        (
+            "the auto-state with no override, in print",
+            print_off,
+            "/AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>]",
+            "",
+            None,
+            Some(Usage::Print),
+            &[(6, false)],
+            [false, false, true, true],
+            &[],
+        ),
+    ];
+    for (what, groups, d, configs, configuration, usage, overrides, drawn, locked) in cases {
+        let mut bytes = radio(*groups, d, configs);
+        // Object 10, the collection `/RBGroups [10 0 R]` reaches by
+        // reference, C listed in it twice.
+        let at = bytes
+            .windows(b"trailer".len())
+            .position(|window| window == b"trailer")
+            .expect("the trailer");
+        bytes.splice(
+            at..at,
+            b"10 0 obj\n[7 0 R 5 0 R 6 0 R 7 0 R]\nendobj\n"
+                .iter()
+                .copied(),
+        );
+        let document = Document::open(bytes).expect("it opens");
+        let page = document.page(0).expect("a page");
+        let twin = render_for(&radio(none, &radio_d(*drawn), ""), None);
+        let options = overriding(*configuration, *usage, overrides);
+        // A configuration the listing holds no dictionary at renders as `/D`
+        // and is reported first.
+        let listing = document.layer_configurations();
+        let mut more: Vec<RenderWarning> = configuration
+            .filter(|index| !listing.get(*index).is_some_and(Option::is_some))
+            .map(|index| RenderWarning::UnreadableLayerConfiguration { index })
+            .into_iter()
+            .collect();
+        more.extend(locked.iter().map(|layer| RenderWarning::LockedLayer {
+            layer: (*layer).to_string(),
+        }));
+        same_render_and(
+            &page.render(&options),
+            &twin,
+            &more,
+            &format!("{what}, directly"),
+        );
+        same_render_and(
+            &page
+                .display_list_with(*usage, &options.layers)
+                .render(&options),
+            &twin,
+            &more,
+            &format!("{what}, from its own list"),
+        );
+        same_render_and(
+            &page.display_list_for(*usage).render(&options),
+            &twin,
+            &more,
+            &format!("{what}, from a list under /D"),
+        );
+    }
+}
+
+/// **An override reaches every scope a render opens** (RC-14.3): the one
+/// binding of the render's states, overrides and all, is what a form's own
+/// content, a form whose `/OC` names the group, a tiling cell and an
+/// annotation's appearance read, so each hides where an override turns the
+/// group off and draws where one turns it on, as the page whose `/D` says so.
+#[test]
+fn an_override_reaches_every_scope_a_render_opens() {
+    for (d, on, twin) in [
+        ("/ON [5 0 R]", false, "/OFF [5 0 R]"),
+        ("/OFF [5 0 R]", true, "/ON [5 0 R]"),
+    ] {
+        let document = Document::open(every_scope_page(d)).expect("it opens");
+        let page = document.page(0).expect("a page");
+        let options = overriding(None, None, &[(5, on)]);
+        let got = page.render(&options);
+        for (what, x, y) in EVERY_SCOPE {
+            let want = if on {
+                vec![255, 0, 0]
+            } else {
+                vec![255, 255, 255]
+            };
+            assert_eq!(pixel(&got, x, y), want, "{what}: overridden {on}");
+        }
+        let twin = render_for(&every_scope_page(twin), None);
+        same_render(&got, &twin, &format!("every scope overridden {on}"));
+        same_render(
+            &page.display_list().render(&options),
+            &twin,
+            &format!("every scope overridden {on}, from a list under /D"),
+        );
+    }
 }

@@ -6,11 +6,12 @@
 //! it opens the file with no further instruction, an entry of its `/Configs`
 //! another set a render may choose (8.11.4.3), the chosen configuration's
 //! `/AS` entries how a view, a print or an export adjusts that (ISO 32000-2
-//! 8.11.4.4), for a render that names its usage, and its `/Intent` which
-//! groups count at all (8.11.2.3); that is the whole of what this module
-//! answers, once a render (`docs/design/render-usage.md`,
-//! `docs/design/optional-content-config.md`). Toggling a layer afterwards is
-//! a separate feature, and nothing here mutates.
+//! 8.11.4.4), for a render that names its usage, a render's own overrides
+//! which groups it turns on or off over them, under the configuration's
+//! `/RBGroups` and `/Locked`, and its `/Intent` which groups count at all
+//! (8.11.2.3); that is the whole of what this module answers, once a render
+//! (`docs/design/render-usage.md`, `docs/design/optional-content-config.md`).
+//! Nothing here mutates the document.
 //!
 //! # Everything not understood is visible
 //!
@@ -29,7 +30,7 @@ use tinker_pdf_content::Layer;
 use tinker_pdf_cos::{decode_text_string, CosDocument, Dict, ObjRef, Object};
 
 use crate::resources::{read_key, read_resolved};
-use crate::Usage;
+use crate::{LayerOptions, Usage};
 
 /// How deep a `/VE` visibility expression may nest before it is refused
 /// (8.11.2.3).
@@ -48,15 +49,16 @@ pub(crate) const MAX_CONFIGURATIONS: usize = MAX_OPERANDS;
 
 /// The states a render's optional-content configuration gives the document's
 /// groups — `/D`'s or a chosen entry of `/Configs` — resolved once, for one
-/// usage or for none.
+/// usage or for none, with the render's overrides over them.
 ///
 /// Built at bind time from the catalog, not consulted per operator: the
-/// answer for a given group cannot change during a render, whose usage and
-/// configuration are fixed before it starts and which no layer-toggle API
-/// reaches. Two bindings that are equal answer every question alike, which is
-/// what lets a display list recorded under one configuration replay a render
-/// of another whose states are the same.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// answer for a given group cannot change during a render, whose usage,
+/// configuration and overrides are fixed before it starts. Two bindings that
+/// are equal answer every question alike — equality is the states and the
+/// listing, not what a render reports of its overrides — which is what lets
+/// a display list recorded under one configuration replay a render of another
+/// whose states are the same.
+#[derive(Debug, Default)]
 pub(crate) struct OptionalContent {
     /// Every group the configuration has an opinion about, and that opinion.
     ///
@@ -74,7 +76,22 @@ pub(crate) struct OptionalContent {
     /// words of state and the alternative is a second walk of the catalog
     /// that could disagree with this one.
     listed: Vec<ObjRef>,
+    /// The locked groups the render's overrides would have changed, each
+    /// once, by the label `RenderWarning::LockedLayer` reports, in the order
+    /// the overrides met them: what the render reports, and no question of
+    /// visibility.
+    refused: Vec<String>,
 }
+
+impl PartialEq for OptionalContent {
+    /// The states and the listing: what every question a scope asks is
+    /// answered from.
+    fn eq(&self, other: &OptionalContent) -> bool {
+        self.states == other.states && self.listed == other.listed
+    }
+}
+
+impl Eq for OptionalContent {}
 
 impl OptionalContent {
     /// Reads the catalog's `/OCProperties` `/D` configuration (8.11.4.3): the
@@ -91,27 +108,30 @@ impl OptionalContent {
     /// `/Event` is the usage's (ISO 32000-2 8.11.4.4,
     /// `docs/design/render-usage.md`). With no usage, the initial states.
     pub(crate) fn bind_for(doc: &CosDocument, usage: Option<Usage>) -> OptionalContent {
-        OptionalContent::bind_with(doc, usage, None)
+        OptionalContent::bind_with(doc, usage, &LayerOptions::default())
     }
 
-    /// [`OptionalContent::bind_for`] in the configuration a render names:
-    /// `None` for `/D`, `Some(i)` for the `i`th entry of `/Configs`, an index
-    /// past them, or an entry that is no dictionary, binding `/D`'s
-    /// (`docs/design/optional-content-config.md`). The states are built in
-    /// one order: `/D`'s initial states — `/BaseState` over every group
-    /// `/OCGs` lists, then its `/ON`, then its `/OFF` (8.11.4.5) — then the
-    /// chosen configuration over them, its `/BaseState` `/ON` or `/OFF`
-    /// setting every listed group and `/Unchanged` leaving each as `/D` set
-    /// it, then its own `/ON` and `/OFF` (Table 99); then the chosen
-    /// configuration's own `/AS` entries for `usage` — a configuration with
-    /// none adjusts nothing, as Table 99 gives `/AS` no default — and last its
-    /// `/Intent` decides which groups count at all (8.11.2.3): a group none of
-    /// whose intents the configuration's set holds has no effect, and reads as
-    /// one the configuration never mentioned does, visible.
+    /// [`OptionalContent::bind_for`] under the layer options a render names
+    /// (`docs/design/optional-content-config.md`): its configuration — `None`
+    /// for `/D`, `Some(i)` for the `i`th entry of `/Configs`, an index past
+    /// them, or an entry that is no dictionary, binding `/D`'s — and its
+    /// overrides. The states are built in one order: `/D`'s initial states —
+    /// `/BaseState` over every group `/OCGs` lists, then its `/ON`, then its
+    /// `/OFF` (8.11.4.5) — then the chosen configuration over them, its
+    /// `/BaseState` `/ON` or `/OFF` setting every listed group and
+    /// `/Unchanged` leaving each as `/D` set it, then its own `/ON` and `/OFF`
+    /// (Table 99); then the chosen configuration's own `/AS` entries for
+    /// `usage` — a configuration with none adjusts nothing, as Table 99 gives
+    /// `/AS` no default; then the render's overrides, in order, under the
+    /// configuration's `/RBGroups` and `/Locked` ([`apply_overrides`]); and
+    /// last its `/Intent` decides which groups count at all (8.11.2.3): a
+    /// group none of whose intents the configuration's set holds has no
+    /// effect, and reads as one the configuration never mentioned does,
+    /// visible.
     pub(crate) fn bind_with(
         doc: &CosDocument,
         usage: Option<Usage>,
-        configuration: Option<usize>,
+        layers: &LayerOptions,
     ) -> OptionalContent {
         #[cfg(test)]
         binds::counted();
@@ -157,7 +177,9 @@ impl OptionalContent {
         // opened, so `/Unchanged` leaves each group as `/D` set it; a
         // `/BaseState` that is missing or none of the three names is `/ON`,
         // its default; `/OFF` is applied after `/ON`, as `/D`'s is.
-        let chosen = configuration.and_then(|index| configuration_at(doc, properties, index));
+        let chosen = layers
+            .configuration
+            .and_then(|index| configuration_at(doc, properties, index));
         if let Some(chosen) = &chosen {
             let base = chosen
                 .get_name(doc.intern(b"BaseState"))
@@ -190,6 +212,34 @@ impl OptionalContent {
             }
         }
 
+        // The render's own changes, last of the four (RC-14.3).
+        let refused = if layers.overrides.is_empty() {
+            Vec::new()
+        } else {
+            // Table 99: a configuration other than `/D` without `/RBGroups`
+            // takes `/D`'s; `/Locked`'s default is an empty array, never
+            // `/D`'s. A null value is an absent one (7.3.9).
+            let inherits = chosen.as_ref().is_some_and(|chosen| {
+                read_key(doc, chosen, b"RBGroups", |value| {
+                    matches!(value, Object::Null)
+                })
+            });
+            let collections = radio_collections(doc, if inherits { &default } else { applied });
+            let locked: BTreeSet<ObjRef> = refs_of(doc, applied, b"Locked").into_iter().collect();
+            apply_overrides(
+                &layers.overrides,
+                &Constraints {
+                    listed: all.iter().copied().collect(),
+                    locked,
+                    collections,
+                },
+                &mut states,
+            )
+            .into_iter()
+            .map(|group| group_label(doc, group))
+            .collect()
+        };
+
         // 8.11.2.3: "If there is no match, the group shall have no effect on
         // visibility", and an empty set of intents uses no group at all.
         let intents = configuration_intents(doc, applied);
@@ -198,7 +248,15 @@ impl OptionalContent {
         OptionalContent {
             states,
             listed: all,
+            refused,
         }
+    }
+
+    /// The locked groups the render's overrides would have changed, each once
+    /// and in the order they were met, as `RenderWarning::LockedLayer` names
+    /// them: a group's `/Name`, or its reference where it has none.
+    pub(crate) fn refused(&self) -> &[String] {
+        &self.refused
     }
 
     /// The groups `/OCProperties /OCGs` names, in the catalog's own order.
@@ -392,6 +450,117 @@ impl OptionalContent {
             _ => None,
         }
     }
+}
+
+/// What a configuration says about the changes a render may make (Table
+/// 99): the groups `/OCGs` lists, which alone an override reaches; the
+/// groups `/Locked` lists; and the `/RBGroups` collections.
+struct Constraints {
+    /// `/OCProperties /OCGs`: "all the optional content groups in the
+    /// document" (8.11.4.2). A reference outside it names none of them.
+    listed: BTreeSet<ObjRef>,
+    /// The chosen configuration's `/Locked`.
+    locked: BTreeSet<ObjRef>,
+    /// The radio-button collections, each its groups in order, once each.
+    collections: Vec<Vec<ObjRef>>,
+}
+
+/// Applies `overrides` to `states` in order (RC-14.3, 8.11.4.3 Table 99),
+/// and returns the locked groups an override or its consequence would have
+/// changed, each once, in the order met.
+///
+/// An override of a group `/OCGs` does not list changes nothing. One of a
+/// locked group is refused whatever it asks — "The state of a locked group
+/// cannot be changed through the user interface", and a render's change is
+/// the caller's — so the group keeps its state and nothing follows from it.
+/// Any other sets its group's state, and one turning a group on then turns
+/// off every other listed member of each collection holding it that is on:
+/// "If one group is turned ON, all others shall be turned OFF. However,
+/// turning a group from ON to OFF does not force any other group to be
+/// turned ON." A member that is locked is not turned off, and is refused as
+/// an override of it is. The collections constrain the overrides alone, so a
+/// configuration whose own `/ON` shows two members of one shows both until
+/// an override turns one of them on.
+fn apply_overrides(
+    overrides: &[(ObjRef, bool)],
+    constraints: &Constraints,
+    states: &mut BTreeMap<ObjRef, bool>,
+) -> Vec<ObjRef> {
+    let mut refused = Vec::new();
+    let refuse = |group: ObjRef, refused: &mut Vec<ObjRef>| {
+        if !refused.contains(&group) {
+            refused.push(group);
+        }
+    };
+    for &(group, on) in overrides {
+        if !constraints.listed.contains(&group) {
+            continue;
+        }
+        if constraints.locked.contains(&group) {
+            refuse(group, &mut refused);
+            continue;
+        }
+        states.insert(group, on);
+        if !on {
+            continue;
+        }
+        for collection in &constraints.collections {
+            if !collection.contains(&group) {
+                continue;
+            }
+            for &member in collection {
+                if member == group
+                    || !constraints.listed.contains(&member)
+                    || states.get(&member) != Some(&true)
+                {
+                    continue;
+                }
+                if constraints.locked.contains(&member) {
+                    refuse(member, &mut refused);
+                } else {
+                    states.insert(member, false);
+                }
+            }
+        }
+    }
+    refused
+}
+
+/// A configuration's `/RBGroups` (Table 99): each array of it a collection of
+/// the groups it references, read [`MAX_OPERANDS`] collections in and as many
+/// members of each, an array reached by reference read where it lies; an
+/// entry that is no array, a member that is no reference and a value that is
+/// no array are passed over, so what this build cannot read constrains
+/// nothing.
+fn radio_collections(doc: &CosDocument, configuration: &Dict) -> Vec<Vec<ObjRef>> {
+    read_key(doc, configuration, b"RBGroups", |value| {
+        let Some(entries) = value.as_array() else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .take(MAX_OPERANDS)
+            .filter_map(|entry| read_resolved(doc, entry, |entry| entry.as_array().map(collect)))
+            .filter(|collection| collection.len() > 1)
+            .collect()
+    })
+}
+
+/// What `RenderWarning::LockedLayer` calls the group at `reference`: its
+/// `/Name` decoded as a text string (8.11.2.1), or the reference itself,
+/// `12 0 R`, where it has no `/Name` or an empty one.
+fn group_label(doc: &CosDocument, reference: ObjRef) -> String {
+    doc.get(reference)
+        .ok()
+        .and_then(|object| {
+            object.as_dict().and_then(|dict| {
+                read_key(doc, dict, b"Name", |name| {
+                    name.as_string().map(|s| decode_text_string(&s.bytes))
+                })
+            })
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| reference.to_string())
 }
 
 /// Entry `index` of `/OCProperties /Configs`, a configuration dictionary
@@ -1042,6 +1211,14 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n"
         oc.group_state(ObjRef { num, gen: 0 })
     }
 
+    /// The layer options naming `configuration` and nothing else.
+    fn configured(configuration: Option<usize>) -> crate::LayerOptions {
+        crate::LayerOptions {
+            configuration,
+            ..crate::LayerOptions::default()
+        }
+    }
+
     /// The usages a render can name, and none.
     const USAGES: [Option<Usage>; 4] = [
         None,
@@ -1345,12 +1522,12 @@ trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
             (Some(9), true, false),
             (Some(usize::MAX), true, false),
         ] {
-            let oc = OptionalContent::bind_with(&doc, None, configuration);
+            let oc = OptionalContent::bind_with(&doc, None, &configured(configuration));
             assert_eq!(state(&oc, 10), Some(alpha), "{configuration:?}: Alpha");
             assert_eq!(state(&oc, 11), Some(beta), "{configuration:?}: Beta");
         }
         assert_eq!(
-            OptionalContent::bind_with(&doc, None, Some(3)),
+            OptionalContent::bind_with(&doc, None, &configured(Some(3))),
             OptionalContent::bind(&doc),
             "an unreadable configuration binds /D's states"
         );
@@ -1387,18 +1564,13 @@ trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
         let doc = crate::Document::open(bytes.into_bytes()).expect("it opens");
         let page = doc.page(0).expect("a page");
         let configuration = |configuration| crate::RenderOptions {
-            layers: crate::LayerOptions { configuration },
+            layers: configured(configuration),
             ..crate::RenderOptions::default()
         };
         binds::take();
         let direct = page.render(&configuration(Some(0)));
         assert_eq!(binds::take(), 1, "a direct render naming a configuration");
-        let list = page.display_list_with(
-            None,
-            &crate::LayerOptions {
-                configuration: Some(0),
-            },
-        );
+        let list = page.display_list_with(None, &configured(Some(0)));
         assert_eq!(binds::take(), 1, "the list's recording");
         let replayed = list.render(&configuration(Some(0)));
         assert_eq!(binds::take(), 1, "its replay, for the cell it draws");
@@ -1414,5 +1586,82 @@ trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
         let alike = d_list.render(&configuration(Some(1)));
         assert_eq!(binds::take(), 1, "states alike, a replay");
         assert!(alike.data == page.render(&configuration(None)).data);
+    }
+
+    /// The layer options naming `configuration` and turning each of
+    /// `overrides`' groups, by object number, on or off.
+    fn overriding(configuration: Option<usize>, overrides: &[(u32, bool)]) -> crate::LayerOptions {
+        crate::LayerOptions {
+            configuration,
+            overrides: overrides
+                .iter()
+                .map(|&(num, on)| (ObjRef { num, gen: 0 }, on))
+                .collect(),
+        }
+    }
+
+    /// **Overrides apply last, in order, under the configuration's radio
+    /// buttons and locks** (RC-14.3, 8.11.4.3 Table 99): under `/D`, turning
+    /// Alpha on turns Beta off and leaves 12, locked, on, refused by its
+    /// reference since it has no `/Name`; under a configuration with no
+    /// `/RBGroups` of its own, `/D`'s collection constrains and `/D`'s lock does
+    /// not; under one with an empty collection list and a lock of its own,
+    /// nothing is turned off and the locked Alpha is refused by its `/Name`,
+    /// once however often it is asked; a group `/OCGs` does not list is
+    /// passed over. What a binding refused is no part of its equality, and
+    /// the collections do not constrain a configuration's own `/ON`.
+    #[test]
+    fn overrides_apply_in_order_under_radio_buttons_and_locks() {
+        let doc = document(
+            "/OCProperties << /OCGs [10 0 R 11 0 R 12 0 R] \
+             /D << /RBGroups [[10 0 R 11 0 R 12 0 R]] /Locked [12 0 R] >> \
+             /Configs [<< /BaseState /OFF >> << /RBGroups [] /Locked [10 0 R] >>] >>",
+            "12 0 obj\n<< /Type /OCG >>\nendobj\n",
+        );
+        let bound = |configuration, overrides: &[(u32, bool)]| {
+            OptionalContent::bind_with(&doc, None, &overriding(configuration, overrides))
+        };
+        let states = |oc: &OptionalContent| (state(oc, 10), state(oc, 11), state(oc, 12));
+
+        let oc = bound(None, &[(10, true)]);
+        assert_eq!(states(&oc), (Some(true), Some(false), Some(true)), "/D");
+        assert_eq!(oc.refused(), ["12 0 R"], "the lock, by reference");
+
+        let oc = bound(Some(0), &[(12, true), (11, true)]);
+        assert_eq!(
+            states(&oc),
+            (Some(false), Some(true), Some(false)),
+            "/D's collection, and not /D's lock"
+        );
+        assert!(oc.refused().is_empty());
+
+        let oc = bound(Some(1), &[(10, false), (11, true), (13, false), (10, true)]);
+        assert_eq!(
+            states(&oc),
+            (Some(true), Some(true), Some(true)),
+            "its own empty collections and its own lock"
+        );
+        assert_eq!(oc.refused(), ["Alpha"], "once, by /Name");
+        assert_eq!(state(&oc, 13), None, "an unlisted group is passed over");
+
+        assert_eq!(bound(None, &[]), OptionalContent::bind(&doc));
+        assert!(bound(None, &[]).refused().is_empty());
+        assert_eq!(
+            bound(None, &[(12, false)]),
+            OptionalContent::bind(&doc),
+            "a refused override binds the states it found"
+        );
+
+        let doc = document(
+            "/OCProperties << /OCGs [10 0 R 11 0 R] \
+             /D << /RBGroups [[10 0 R 11 0 R]] >> >>",
+            "",
+        );
+        let oc = OptionalContent::bind(&doc);
+        assert_eq!(
+            (state(&oc, 10), state(&oc, 11)),
+            (Some(true), Some(true)),
+            "/D's own states show both members"
+        );
     }
 }

@@ -199,6 +199,9 @@ impl CommandStream {
             &source,
             crate::stats::Draws::Counted,
             None,
+            // A stream is drawn in the states it was written in, and a
+            // render of it overrides no group.
+            Vec::new(),
             |renderer, source| self.replay_onto(options, renderer, source),
         )
         .into_bitmap()

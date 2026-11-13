@@ -980,7 +980,8 @@ mask a render that is not cancelled rasterised to the end
 
 **Optional content** (8.11). The render's configuration — the catalog's
 `/OCProperties` `/D`, or the entry of `/Configs` `RenderOptions::layers`
-chooses — is resolved once a render, by the render's operation, and every
+chooses — and the overrides it names are resolved once a render, by the
+render's operation, and every
 scope the render opens — the page's, each form's, each tiling cell's and each
 annotation appearance's — reads that one binding (`optional.rs`'s
 `one_render_binds_one_configuration` and
@@ -1064,6 +1065,32 @@ with that binding either way, and draws the direct way otherwise; `to_svg`
 from a list recorded under another configuration interprets the page again
 (`optional_content.rs`'s `each_configuration_renders_as_its_d_twin` and
 `an_intent_the_configuration_does_not_hold_has_no_effect`).
+
+**A render overrides groups** (8.11.4.3,
+[design](../design/optional-content-config.md)). `LayerOptions::overrides`,
+empty by default, lists groups — the references `Document::layers` reports —
+each turned on or off, applied in order after the configuration and its
+auto-state and before its `/Intent` is read, so a later override of a group
+wins over an earlier one. Turning a group on turns off every other member of
+each of the configuration's `/RBGroups` collections that holds it — a
+configuration other than `/D` with no `/RBGroups` takes `/D`'s — and turning
+one off changes nothing else; the collections constrain the overrides alone,
+so a configuration whose own `/ON` turns two members of one on shows both
+until an override turns one of them on. A group the configuration's `/Locked`
+lists keeps its state whatever an override asks, and a locked member of a
+collection is not turned off; each is reported once a render as
+`RenderWarning::LockedLayer { layer }`, by the group's `/Name` or by its
+reference, `12 0 R`, where it has none. The locks are the chosen
+configuration's own, never `/D`'s, and an unreadable configuration draws
+`/D`'s with `/D`'s locks. An override of a reference `/OCGs` does not list
+changes nothing, and a `/RBGroups` or `/Locked` this build cannot read
+constrains nothing. The overridden states reach every scope a render opens,
+a form's kept drawing is keyed by them with the configuration, and a display
+list replays a render whose overrides come to its own states
+(`optional_content.rs`'s
+`overrides_radio_buttons_and_locks_render_as_their_d_twins` and
+`an_override_reaches_every_scope_a_render_opens`, `render_options.rs`'s
+`overridden_layer_output_is_pinned`).
 
 **Which annotations draw** is their flags' and their `/OC`'s to say, for the
 render's usage (12.5.3 Table 167, [design](../design/render-usage.md)): one
@@ -1775,7 +1802,8 @@ The facade is the whole public surface (ruling 11): `Page::render` takes a
 `magnification` (1; the viewer's zoom, which `/NoZoom` reads),
 `content`, `widgets` and `other_annotations` (each on; the parts drawn, below
 `annotations`), `layers` (a `LayerOptions`; the optional-content
-configuration drawn, `/D` by default), `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
+configuration drawn, `/D` by default, and the groups the render turns on or
+off, none by default), `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
 checked between operations and scanline bands), `annotations` (on by
 default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
@@ -2344,6 +2372,7 @@ under it, so the copy holds every canvas the walk closes onto.
 | A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it; and a JPEG's or JPEG 2000 image's `/ColorSpace` with another number of components than its samples, refused, the image drawn in the codec's own colour | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`; for such an image, `name` the image's (`inline` for an inline one) and `reason` `ImageSpaceComponents`; once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way | [rulings](../rulings.md) |
 | Content, or an annotation by its `/OC`, in a layer the render's optional-content states turn off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
 | A render naming an optional-content configuration the document does not have: an index past `/Configs` or 256 entries, or of an entry that is no dictionary | `RenderWarning::UnreadableLayerConfiguration { index }`, the page drawn in `/D`'s states | A page in `/D`'s states looks like a page in any other, so the caller is told its choice was not the one drawn (ruling 10) | [design/optional-content-config.md](../design/optional-content-config.md) |
+| A render's override of a group the configuration's `/Locked` lists, or one turning on a group whose `/RBGroups` collection holds a locked group that is on | `RenderWarning::LockedLayer { layer }`, once a render, by the group's `/Name` or its reference; the locked group keeps its state | "The state of a locked group cannot be changed through the user interface" (Table 99), and a render's override is the caller's change; the page is drawn with the lock kept and the caller told which group refused (ruling 10) | [design/optional-content-config.md](../design/optional-content-config.md) |
 | A form, a soft mask's group or a Type 3 glyph procedure that names itself while it runs, directly or through the others, drawn once | `RenderWarning::RecursiveContent`, and `SvgWarning::Render` of it from `to_svg` | A cycle has no last run; refused at its first repeat by the stream's identity, the page is what every reader can draw, where the depth cap ended a branching cycle only after two or more runs to the sixteenth | [content and text](content-and-text.md) |
 | Nested runs past the interpreter's budget for nested content — 4 MiB, and 4 096 bytes for every byte of content the page reaches — past which no stream that has already run is run again | `RenderWarning::NestedBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group; every stream the page holds still runs once, so what is passed over is repeats of content already drawn | [content and text](content-and-text.md) |
 | More than 2 000 transparency-group buffers on one page, or more than 2 000 groups and soft masks' groups run in one stream, past which the interpreter runs no more of either | `RenderWarning::GroupBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A budget, not a depth: branching group and soft-mask recursion stays inside any depth cap, and every reading of the page — text, images, SVG — is bounded by the same walk | [rulings](../rulings.md) |

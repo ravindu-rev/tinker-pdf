@@ -206,10 +206,10 @@ impl Page {
         self.display_list_with(usage, &LayerOptions::default())
     }
 
-    /// [`Page::display_list_for`], recorded under the configuration `layers`
+    /// [`Page::display_list_for`], recorded under the layer options `layers`
     /// names (8.11.4.3, `docs/design/optional-content-config.md`): the calls
-    /// carry that configuration's states for `usage`, so a viewer that keeps
-    /// one configuration keeps replaying. A render naming `usage` replays the
+    /// carry the states its configuration and its overrides give for
+    /// `usage`, so a viewer that keeps one set of layers keeps replaying. A render naming `usage` replays the
     /// list where the states its own layer options give are the list's —
     /// those options themselves, or another configuration that comes to the
     /// same states — and draws the direct way otherwise; [`Page::to_svg`]
@@ -389,7 +389,18 @@ impl DisplayList {
                 None => self.page.render(&serial),
             };
         }
-        let shared = compared.map(|(op, _)| op.states(&self.page.doc));
+        // A render that overrides groups binds its states once however it
+        // draws: they hold what its overrides were refused, which every band
+        // of it reports alike.
+        let shared = compared
+            .map(|(op, _)| op.states(&self.page.doc))
+            .or_else(|| {
+                (!options.layers.overrides.is_empty()).then(|| {
+                    self.page
+                        .render_operation(&serial, self.usage)
+                        .states(&self.page.doc)
+                })
+            });
         if let Some(bitmap) = self.render_in_bands(options, shared.as_ref()) {
             return bitmap;
         }
@@ -756,7 +767,7 @@ impl DisplayList {
     /// The layer options the list was recorded under
     /// ([`Page::display_list_with`]), the default for
     /// [`Page::display_list`]'s and [`Page::display_list_for`]'s: the
-    /// configuration whose states its calls carry.
+    /// configuration and overrides whose states its calls carry.
     #[must_use]
     pub fn layers(&self) -> &LayerOptions {
         &self.layers
@@ -1017,10 +1028,15 @@ fn merged(
         reduced,
         scaled_down,
         clamped,
-        // Every band names the one configuration.
+        // Every band names the one configuration, and reads the one binding
+        // of its overrides.
         unreadable_configuration: parts
             .iter()
             .find_map(|part| part.met.unreadable_configuration),
+        locked: parts
+            .first()
+            .map(|part| part.met.locked.clone())
+            .unwrap_or_default(),
     }
     .warnings()
 }
@@ -2002,6 +2018,7 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
                 scaled_down: None,
                 clamped: None,
                 unreadable_configuration: None,
+                locked: Vec::new(),
             },
             stamps: Stamps {
                 met,

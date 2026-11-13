@@ -87,6 +87,24 @@ fuzz_target!(|data: &[u8]| {
         let _ = page.render(&RenderOptions {
             layers: tinker_pdf::LayerOptions {
                 configuration: Some(index),
+                ..tinker_pdf::LayerOptions::default()
+            },
+            ..RenderOptions::at_dpi(12.0)
+        });
+    }
+    // Every group the input lists turned the other way, in `/OCGs` order,
+    // under `/D` and the first configuration: the `/RBGroups` collections
+    // and `/Locked` lists the input shapes, read for each override.
+    let overrides: Vec<_> = doc
+        .layers()
+        .into_iter()
+        .map(|group| (group.reference, !group.visible))
+        .collect();
+    for configuration in [None, Some(0)] {
+        let _ = page.render(&RenderOptions {
+            layers: tinker_pdf::LayerOptions {
+                configuration,
+                overrides: overrides.clone(),
             },
             ..RenderOptions::at_dpi(12.0)
         });

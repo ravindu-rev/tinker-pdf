@@ -341,7 +341,8 @@ sequence stays innermost and each `EMC` closes the scope it was written for.
 state in `/D` — out of both `/ON` and `/OFF`, then into whichever disagrees
 with `/BaseState` — replacing an indirect `/D` or `/OCProperties` at its own
 number. The reference is the one `layers()` reports, so a caller lists, picks
-and toggles through one vocabulary. Under a part 1 archival profile a layer is
+and toggles through one vocabulary — in the file through the editor, or for
+one render through `LayerOptions::overrides` ([rendering](rendering.md)). Under a part 1 archival profile a layer is
 refused with `ArchivalRefusal::OptionalContent` (ISO 19005-1 6.1.13).
 
 ### Annotations

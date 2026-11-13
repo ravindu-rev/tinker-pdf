@@ -1152,12 +1152,14 @@ pub(crate) struct Operation {
     usage: Option<Usage>,
     /// What the render says about the document's layers
     /// (`crate::RenderOptions::layers`): the configuration whose states it
-    /// draws. The default, `/D`, for every operation that is not a render.
+    /// draws, and the groups it turns on or off. The default, `/D`'s states
+    /// as they are, for every operation that is not a render.
     layers: LayerOptions,
     /// The optional-content states every scope the operation opens reads,
     /// bound by the first that asks (ISO 32000-2 8.11.4.4): the chosen
-    /// configuration's states over `/D`'s initial ones, and its `/AS` entries
-    /// for `usage` over them (`docs/design/optional-content-config.md`).
+    /// configuration's states over `/D`'s initial ones, its `/AS` entries
+    /// for `usage` over them, and the render's overrides last
+    /// (`docs/design/optional-content-config.md`).
     /// Shared by every clone, so the page's scope, each form's, each tiling
     /// cell's and each appearance's read one binding.
     optional: Arc<OnceLock<OptionalContent>>,
@@ -1197,8 +1199,8 @@ impl Operation {
         }
     }
 
-    /// This operation, binding the states of the configuration `layers`
-    /// names rather than `/D`'s.
+    /// This operation, binding the states `layers` gives — its
+    /// configuration's and its overrides — rather than `/D`'s.
     pub(crate) fn with_layers(self, layers: LayerOptions) -> Operation {
         Operation { layers, ..self }
     }
@@ -1233,11 +1235,11 @@ impl Operation {
     /// after.
     pub(crate) fn optional(&self, doc: &CosDocument) -> &OptionalContent {
         self.optional
-            .get_or_init(|| OptionalContent::bind_with(doc, self.usage, self.layers.configuration))
+            .get_or_init(|| OptionalContent::bind_with(doc, self.usage, &self.layers))
     }
 
-    /// The configuration the operation binds the states of: the layer
-    /// options a form's kept drawing is keyed by beside the usage.
+    /// The layer options the operation binds the states of: what a form's
+    /// kept drawing is keyed by beside the usage.
     pub(crate) fn layers(&self) -> &LayerOptions {
         &self.layers
     }

@@ -361,6 +361,20 @@ pub enum RenderWarning {
         /// The index the render named.
         index: usize,
     },
+    /// The render asked to turn an optional-content group the configuration
+    /// locks on or off, or turned on a group whose radio-button collection
+    /// holds a locked group that was on (8.11.4.3, `/Locked`), and the locked
+    /// group kept its state.
+    ///
+    /// "The state of a locked group cannot be changed through the user
+    /// interface", and a render's own change of a group is the caller's, the
+    /// interface's part: the page is drawn with the lock kept (ruling 2), and
+    /// the caller is told which group it was (ruling 10), once a render.
+    LockedLayer {
+        /// The group's `/Name` (8.11.2.1), or its reference, `12 0 R`, where it
+        /// has none.
+        layer: String,
+    },
 }
 
 /// What a pattern name paints with (8.7.3).

@@ -2078,6 +2078,90 @@ fn placed_annotation_output_is_pinned() {
     );
 }
 
+// ---- a render's overrides (RC-14.3) -----------------------------------------
+
+/// The pinned render of [`overridden_layer_output_is_pinned`]: its name and
+/// its committed hash. A run's output, recorded from the first target's run
+/// and held on every target after it; one two targets disagree on is a
+/// determinism bug, never an edit of this table.
+const OVERRIDDEN_LAYER_OUTPUT: [(&str, &str); 1] = [(
+    "three bands of one radio-button collection, the first turned on past the locked third",
+    "",
+)];
+
+/// A 60x40 page: an unmarked grey bar under three bands, each marked with an
+/// optional-content group of its own — 5 "A", 6 "B" and 7 "C" — which `/D`
+/// holds in one `/RBGroups` collection, A off and C `/Locked`.
+fn layered_page() -> Vec<u8> {
+    let content = "0.5 g 0 0 60 6 re f\n\
+                   /OC /A BDC 1 0 0 rg 0 6 20 34 re f EMC\n\
+                   /OC /B BDC 0 0 1 rg 20 6 20 34 re f EMC\n\
+                   /OC /C BDC 0 0.6 0 rg 40 6 20 34 re f EMC";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R 7 0 R] \
+/D << /OFF [5 0 R] /RBGroups [[5 0 R 6 0 R 7 0 R]] /Locked [7 0 R] >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 40]\n\
+   /Resources << /Properties << /A 5 0 R /B 6 0 R /C 7 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (A) >>\nendobj\n\
+6 0 obj\n<< /Type /OCG /Name (B) >>\nendobj\n\
+7 0 obj\n<< /Type /OCG /Name (C) >>\nendobj\n\
+trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// **An overridden render's fingerprint** (RC-14.3): [`layered_page`] at 2x
+/// with A overridden on, which turns B, the other member of A's collection
+/// that is on, off and leaves C, locked, on — B hidden and C refused, each
+/// reported — hashed as `determinism.rs` hashes a page, to its committed
+/// value. The page draws no text, so one value serves both builds.
+#[test]
+fn overridden_layer_output_is_pinned() {
+    let bitmap = render(
+        layered_page(),
+        &RenderOptions {
+            scale: 2.0,
+            layers: tinker_pdf::LayerOptions {
+                overrides: vec![(tinker_pdf::ObjRef::new(5, 0), true)],
+                ..tinker_pdf::LayerOptions::default()
+            },
+            ..RenderOptions::default()
+        },
+    );
+    let [(name, want)] = OVERRIDDEN_LAYER_OUTPUT;
+    assert_eq!(
+        bitmap.warnings,
+        vec![
+            tinker_pdf::RenderWarning::HiddenOptionalContent {
+                layer: "B".to_string()
+            },
+            tinker_pdf::RenderWarning::LockedLayer {
+                layer: "C".to_string()
+            },
+        ],
+        "{name}: B hidden and C's lock reported"
+    );
+    // The bar's 1 440 pixels and two bands' 5 440; the floor is under half.
+    let drawn = painted(&bitmap);
+    assert!(
+        drawn >= 3_000,
+        "{name}: painted {drawn} pixels, fewer than 3000: it is measuring less than it claims"
+    );
+    let actual = fingerprint(&bitmap);
+    assert_eq!(
+        actual, want,
+        "the `{name}` render moved.\n\n\
+         If two targets disagree, this is a determinism bug: find the arithmetic that \
+         is not target-stable and do not update the value.\n\
+         If the table was committed empty, or this is a deliberate rendering change \
+         said in its commit, paste:\n\n    (\"{name}\", \"{actual}\"),"
+    );
+}
+
 // ---- levels and rules (RC-11.5) ---------------------------------------------
 
 /// **`antialias` keeps its meaning** (RC-11.5): off, both levels read as 0
