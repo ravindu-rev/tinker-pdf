@@ -50,7 +50,7 @@ use super::passes::Schedule;
 use super::tier2::{CodeBlock, Orientation, Segment, Tile};
 use super::wavelet::Needs;
 use super::{Refusal, MAX_JPX_WORK};
-use crate::mq::{MqContexts, MqDecoder};
+use crate::mq::{MqContexts, MqDecoder, MqRun};
 
 // --- the nineteen contexts (T.800 Annex D) ------------------------------
 
@@ -969,25 +969,70 @@ enum Source<'a> {
     Raw(RawBits<'a>),
 }
 
-/// Everything one code-block decode needs that is not the block itself.
-struct Coder<'a, 'b> {
-    source: Source<'a>,
-    contexts: &'b mut MqContexts,
+/// Where a coding pass's decisions come from: a run of its segment's MQ
+/// decoder, its registers held in locals for the pass, or D.6's raw reader.
+///
+/// The passes are written once over this, so an arithmetic pass carries no
+/// branch on which of the two it is reading at any decision.
+trait Decisions {
+    /// One decision in `context`, or a raw pass's next bit.
+    fn decide(&mut self, contexts: &mut MqContexts, context: usize) -> u8;
+
+    /// The sign of a coefficient that has just become significant where a
+    /// raw pass reads it straight from the stream, or `None` where it is
+    /// D.2.2's context and XOR bit.
+    fn raw_sign(&mut self) -> Option<bool>;
+}
+
+impl Decisions for MqRun<'_, '_> {
+    #[inline(always)]
+    fn decide(&mut self, contexts: &mut MqContexts, context: usize) -> u8 {
+        self.decode_at(contexts, context)
+    }
+
+    #[inline(always)]
+    fn raw_sign(&mut self) -> Option<bool> {
+        None
+    }
+}
+
+impl Decisions for RawBits<'_> {
+    /// D.6: "the bits that would have been returned from the arithmetic
+    /// coder are instead returned directly from the bit stream". The context
+    /// is computed and discarded rather than not computed, because a raw pass
+    /// leaves the context states untouched and the next arithmetic pass must
+    /// find them as the last arithmetic pass left them.
+    #[inline]
+    fn decide(&mut self, _: &mut MqContexts, _: usize) -> u8 {
+        self.bit()
+    }
+
+    #[inline]
+    fn raw_sign(&mut self) -> Option<bool> {
+        Some(self.bit() == 1)
+    }
+}
+
+/// Everything one coding pass needs that is not the block itself.
+struct Coder<'s, 'c, D> {
+    source: &'s mut D,
+    contexts: &'c mut MqContexts,
     segmentation_symbols: bool,
 }
 
-impl Coder<'_, '_> {
+impl<D: Decisions> Coder<'_, '_, D> {
     fn decode(&mut self, context: usize) -> u8 {
-        match &mut self.source {
-            Source::Mq(mq) => mq.decode_at(self.contexts, context),
-            // D.6: "the bits that would have been returned from the
-            // arithmetic coder are instead returned directly from the bit
-            // stream". The context is computed and discarded rather than not
-            // computed, because a raw pass leaves the context states
-            // untouched and the next arithmetic pass must find them as the
-            // last arithmetic pass left them.
-            Source::Raw(raw) => raw.bit(),
+        self.source.decide(self.contexts, context)
+    }
+
+    /// Runs `pass` on the plane `plane` of `block`.
+    fn pass(&mut self, pass: Pass, block: &mut Packed, plane: u32) -> Result<(), Refusal> {
+        match pass {
+            Pass::Significance => self.significance_pass(block, plane),
+            Pass::Refinement => self.refinement_pass(block, plane),
+            Pass::Cleanup => self.cleanup_pass(block, plane)?,
         }
+        Ok(())
     }
 
     /// D.2.2: the sign of row `r` of the column at `i`, which has just
@@ -999,8 +1044,8 @@ impl Coder<'_, '_> {
     /// Running the XOR bit over a raw sign inverts roughly half the signs of
     /// every bypassed pass, which is a picture rather than an error.
     fn sign(&mut self, block: &Packed, i: usize, r: usize) -> bool {
-        if let Source::Raw(raw) = &mut self.source {
-            return raw.bit() == 1;
+        if let Some(sign) = self.source.raw_sign() {
+            return sign;
         }
         let (context, xorbit) = block.sign_at(i, r);
         (self.decode(context) ^ xorbit) == 1
@@ -1270,25 +1315,32 @@ pub(crate) fn decode_code_block_observed(
         // The kind is taken from the segment's first pass. The passes in one
         // segment are all of a kind — see [`Source`] — so any of them would
         // answer, and the first is the one that exists whatever the count.
-        let source = if Schedule::new(style.bypass, style.terminate_all).raw(i) {
+        let mut source = if Schedule::new(style.bypass, style.terminate_all).raw(i) {
             Source::Raw(RawBits::new(&segment.bytes))
         } else {
             Source::Mq(MqDecoder::new(&segment.bytes))
         };
-        let mut coder = Coder {
-            source,
-            contexts: &mut *contexts,
-            segmentation_symbols: style.segmentation_symbols,
-        };
+        let segmentation_symbols = style.segmentation_symbols;
         for _ in 0..segment.passes {
             if i >= passes {
                 break;
             }
             let (pass, plane) = pass_at(i, planes);
-            match pass {
-                Pass::Significance => coder.significance_pass(&mut block, plane),
-                Pass::Refinement => coder.refinement_pass(&mut block, plane),
-                Pass::Cleanup => coder.cleanup_pass(&mut block, plane)?,
+            match &mut source {
+                // The decoder's registers held in locals for the pass, and
+                // written back when it ends.
+                Source::Mq(mq) => Coder {
+                    source: &mut mq.run(),
+                    contexts: &mut *contexts,
+                    segmentation_symbols,
+                }
+                .pass(pass, &mut block, plane)?,
+                Source::Raw(raw) => Coder {
+                    source: raw,
+                    contexts: &mut *contexts,
+                    segmentation_symbols,
+                }
+                .pass(pass, &mut block, plane)?,
             }
             if style.reset_contexts {
                 // Table A.19 bit 1: back to Table D.7's states at every pass
@@ -1296,7 +1348,7 @@ pub(crate) fn decode_code_block_observed(
                 // reset — that is `TERMALL`, a different bit and a different
                 // question, and conflating the two decodes the second pass of
                 // every block as noise.
-                coder.contexts.reset();
+                contexts.reset();
             }
             after_pass(i, &block);
             i += 1;

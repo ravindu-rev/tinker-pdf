@@ -48,7 +48,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::mq::{MqContexts, MqDecoder};
+use crate::mq::{MqContexts, MqDecoder, MqRun};
 use crate::{Capability, FilterError, Warning};
 
 mod encode;
@@ -4787,14 +4787,25 @@ fn decode_refinement_into(
     let mut rolled = RolledRefinement::new(template);
     let mut ltp = 0u8;
     for y in 0..into.height {
+        // The coder's registers held in locals for the row, and written back
+        // when it ends.
+        let mut run = coder.run();
         if tpgron {
             // 6.3.5.6: one decision per row toggling "this row is typical",
             // which is the refinement analogue of TPGDON and is why refining a
             // picture that barely changed costs almost nothing.
-            ltp ^= coder.decode_at(contexts, template.typical);
+            ltp ^= run.decode_at(contexts, template.typical);
         }
         if ltp == 1 {
-            decode_typical_row(coder, contexts, &mut rolled, reference, (dx, dy), y, into);
+            decode_typical_row(
+                &mut run,
+                contexts,
+                &mut rolled,
+                reference,
+                (dx, dy),
+                y,
+                into,
+            );
             continue;
         }
         let sy = y as i32;
@@ -4802,7 +4813,7 @@ fn decode_refinement_into(
         for x in 0..into.width {
             let sx = x as i32;
             let cx = rolled.context(into, reference, (dx, dy), sx, sy);
-            let pixel = u32::from(coder.decode_at(contexts, cx));
+            let pixel = u32::from(run.decode_at(contexts, cx));
             into.set(x, y, pixel);
             rolled.advance(into, reference, (dx, dy), sx, sy, pixel);
         }
@@ -4828,7 +4839,7 @@ fn decode_refinement_into(
 /// so they are back in step at the end of every skipped run; the target's row
 /// above is read as a word only once a word has such a pixel.
 fn decode_typical_row(
-    coder: &mut MqDecoder<'_>,
+    coder: &mut MqRun<'_, '_>,
     contexts: &mut MqContexts,
     rolled: &mut RolledRefinement,
     reference: &Bitmap,
@@ -5218,10 +5229,13 @@ fn decode_generic_into(
     let mut ltp = 0u8;
 
     for y in 0..into.height {
+        // The coder's registers held in locals for the row, and written back
+        // when it ends.
+        let mut run = coder.run();
         if tpgdon {
             // 6.2.5.7: one decision per row against a context the standard
             // fixes, toggling "this row is the same as the last one".
-            ltp ^= coder.decode_at(contexts, tpgdon_context(template));
+            ltp ^= run.decode_at(contexts, tpgdon_context(template));
             if ltp == 1 {
                 if y > 0 {
                     into.copy_row(y - 1, y);
@@ -5241,7 +5255,7 @@ fn decode_generic_into(
                 0
             } else {
                 let cx = rolled.at(into, at, x as i32, y as i32);
-                u32::from(coder.decode_at(contexts, cx))
+                u32::from(run.decode_at(contexts, cx))
             };
             if gathering {
                 gathered = (gathered << 1) | pixel;

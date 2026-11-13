@@ -33,8 +33,20 @@
 //! Ruling 1. There is no input this can panic on and none it can loop on:
 //! reading past the end of the data yields `0xFF`, which is what the marker
 //! convention of E.3.4 asks for and what makes `BYTEIN` stop advancing; the
-//! renormalisation loop shifts a register that is provably non-zero, so it
-//! terminates in at most fifteen iterations, and carries a hard bound anyway.
+//! renormalisation shifts a register that is provably non-zero by its leading
+//! zeros, at most fifteen of them, and stops after sixteen even were it zero.
+//!
+//! # In registers
+//!
+//! E.3's registers are a value the decoder holds, and a caller about to make
+//! a run of decisions — a JPEG 2000 coding pass, a JBIG2 row — takes them
+//! into locals for the run and writes them back once (`MqDecoder::run`).
+//! RENORMD shifts by a leading-zero count, as many bits at a step as the byte
+//! being read has left, so it runs `BYTEIN` exactly where E.3.3's
+//! bit-at-a-time flowchart runs it and takes at most one step more than the
+//! bytes it reads. E.3's flowcharts themselves, register for register, stay in the
+//! tests as the reference the register form is held to decision for
+//! decision.
 
 /// One row of T.88 Table E.1: the LPS probability estimate, where the state
 /// moves on each renormalisation, and whether the sense of the MPS flips.
@@ -255,120 +267,149 @@ impl MqContexts {
 }
 
 /// The MQ decoder over one span of bytes (T.88 E.3).
+///
+/// Its registers are a value, `Registers`, so that a caller about to make a
+/// run of decisions — a JPEG 2000 coding pass, a JBIG2 row — takes them into
+/// locals for the run (`MqDecoder::run`) and writes them back once, rather
+/// than reading and writing them through the decoder at every decision.
+/// [`MqDecoder::decode`] and [`MqDecoder::decode_at`] decide on them where
+/// they are, a decision at a time, by the same code.
 pub struct MqDecoder<'a> {
     data: &'a [u8],
-    /// `BP` in E.3: the byte the coder is reading.
+    registers: Registers,
+}
+
+/// E.3's registers, with the decisions counted beside them.
+#[derive(Clone, Copy, Debug)]
+struct Registers {
+    /// `BP` in E.3: the byte the coder is reading. At most the data's length:
+    /// it moves only past a byte that is not a marker's first, and past the
+    /// end every byte reads as a marker's.
     bp: usize,
     /// `C`, whole. `C >> 16` is the figures' `Chigh`.
     c: u32,
     /// `A`, the interval.
     a: u32,
-    /// `CT`, the count of bits left in the current byte.
-    ct: i32,
+    /// `CT`, the count of bits left in the current byte: 0 to 8.
+    ct: u32,
     /// Decisions made since [`MqDecoder::take_decisions`] last emptied it.
     ///
     /// Not a register of the coder: E.3 has no such count, and nothing in
-    /// [`MqDecoder::decode`] reads it. It is here because an adaptive coder's
+    /// [`Registers::decide`] reads it. It is here because an adaptive coder's
     /// decisions per byte are not bounded by anything a caller can see — a
     /// context that has walked to Table E.1's smallest `Qe` spends about one
     /// bit per 32 768 decisions, and past a marker it spends no data at all —
     /// so a caller that has to bound its own work has to count decisions
     /// rather than bytes. See `MAX_JBIG2_WORK_MULTIPLE`.
     decisions: u64,
+    /// What the renormalisations did, for
+    /// `a_renormalisation_shifts_once_per_byte_it_reads`.
+    #[cfg(test)]
+    renorms: RenormTally,
 }
 
-impl<'a> MqDecoder<'a> {
-    /// `INITDEC` (T.88 E.3.5).
-    #[must_use]
-    pub fn new(data: &'a [u8]) -> MqDecoder<'a> {
-        let mut d = MqDecoder {
-            data,
-            bp: 0,
-            c: 0,
-            a: 0,
-            ct: 0,
-            decisions: 0,
-        };
-        d.c = u32::from(d.byte_at(0)) << 16;
-        d.byte_in();
-        d.c <<= 7;
-        d.ct -= 7;
-        d.a = 0x8000;
-        d
-    }
+/// The renormalisations a decoder made, counted: how many, the shift steps
+/// and the `BYTEIN`s they took, and the most steps any one took beyond its
+/// `BYTEIN`s.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RenormTally {
+    pub(crate) renorms: u64,
+    pub(crate) steps: u64,
+    pub(crate) byte_ins: u64,
+    /// The bits shifted, which E.3.3's flowchart shifts one at a time.
+    pub(crate) bits: u64,
+    pub(crate) most_steps_beyond_byte_ins: u32,
+}
 
-    /// How far into the data the coder has read.
-    ///
-    /// A segment can hold a region's coded data followed by more segments, so
-    /// a caller that has to carry on parsing needs this. It saturates at the
-    /// end of the data, because past the end the coder stops advancing.
-    #[must_use]
-    pub fn position(&self) -> usize {
-        self.bp.min(self.data.len())
-    }
+/// The byte at `at`, or `0xFF` past the end.
+///
+/// E.3.4 treats `0xFF` followed by a value above `0x8F` as a marker and feeds
+/// 1-bits forever without consuming anything. Reading the end of the data as
+/// `0xFF` puts a truncated stream on exactly that path, so it terminates
+/// instead of running off the buffer — which is the whole of this decoder's
+/// truncation policy.
+fn byte_at(data: &[u8], at: usize) -> u8 {
+    data.get(at).copied().unwrap_or(0xFF)
+}
 
-    /// How many decisions this coder has made since the last call, and starts
-    /// counting again from zero.
-    ///
-    /// Emptied rather than read so that a coder shared between two loops — a
-    /// symbol dictionary and the text region it aggregates a symbol with, over
-    /// one decoder (6.5.8.2.1) — is charged once whichever of them asks.
-    pub fn take_decisions(&mut self) -> u64 {
-        std::mem::take(&mut self.decisions)
-    }
-
-    /// The byte at `at`, or `0xFF` past the end.
-    ///
-    /// E.3.4 treats `0xFF` followed by a value above `0x8F` as a marker and
-    /// feeds 1-bits forever without consuming anything. Reading the end of
-    /// the data as `0xFF` puts a truncated stream on exactly that path, so it
-    /// terminates instead of running off the buffer — which is the whole of
-    /// this decoder's truncation policy.
-    fn byte_at(&self, at: usize) -> u8 {
-        self.data.get(at).copied().unwrap_or(0xFF)
-    }
-
+impl Registers {
     /// `BYTEIN` (T.88 E.3.4).
-    fn byte_in(&mut self) {
-        if self.byte_at(self.bp) == 0xFF {
-            if self.byte_at(self.bp + 1) > 0x8F {
+    #[inline]
+    fn byte_in(&mut self, data: &[u8]) {
+        if byte_at(data, self.bp) == 0xFF {
+            if byte_at(data, self.bp + 1) > 0x8F {
                 // A marker. The coder feeds 1-bits and never moves past it.
                 self.c = self.c.wrapping_add(0xFF00);
                 self.ct = 8;
             } else {
                 self.bp += 1;
-                self.c = self.c.wrapping_add(u32::from(self.byte_at(self.bp)) << 9);
+                self.c = self.c.wrapping_add(u32::from(byte_at(data, self.bp)) << 9);
                 self.ct = 7;
             }
         } else {
             self.bp += 1;
-            self.c = self.c.wrapping_add(u32::from(self.byte_at(self.bp)) << 8);
+            self.c = self.c.wrapping_add(u32::from(byte_at(data, self.bp)) << 8);
             self.ct = 8;
         }
     }
 
-    /// `RENORMD` (T.88 E.3.3).
-    fn renorm(&mut self) {
-        // `A` is never zero here — it is either `A - Qe` with `A >= 0x8000`
-        // and `Qe <= 0x5601`, or `Qe` itself, which is at least 1 — so the
-        // loop shifts a set bit into 0x8000 within fifteen turns. The bound
-        // is belt and braces for ruling 1: an unreachable state must still
-        // not hang.
-        for _ in 0..32 {
+    /// `RENORMD` (T.88 E.3.3), a step for each byte it reads rather than a
+    /// turn for each bit.
+    ///
+    /// E.3.3 shifts `A` and `C` left a bit at a time until `A`'s bit 15 is
+    /// set, running `BYTEIN` before a shift whenever `CT` has run out. `A` is
+    /// below `0x8000` and above zero here — it is either `A - Qe` with
+    /// `A >= 0x8000` and `Qe <= 0x5601`, or `Qe` itself, which is at least 1 —
+    /// so the shifts it takes are its leading zeros below bit 16, one to
+    /// fifteen, and a step shifts as many of them as `CT` has bits left, so
+    /// `BYTEIN` runs exactly where the bit-at-a-time loop runs it and each
+    /// step after the first follows one. The count also ends the loop where
+    /// `A` were zero, which cannot happen, after sixteen shifts: an
+    /// unreachable state must still not hang (ruling 1).
+    #[inline]
+    fn renorm(&mut self, data: &[u8]) {
+        let mut shifts = self.a.leading_zeros().saturating_sub(16);
+        #[cfg(test)]
+        let mut tally = (0u32, 0u32, shifts);
+        loop {
             if self.ct == 0 {
-                self.byte_in();
+                self.byte_in(data);
+                #[cfg(test)]
+                {
+                    tally.1 += 1;
+                }
             }
-            self.a <<= 1;
-            self.c <<= 1;
-            self.ct -= 1;
-            if self.a & 0x8000 != 0 {
+            let step = shifts.min(self.ct);
+            self.a <<= step;
+            self.c <<= step;
+            self.ct -= step;
+            shifts -= step;
+            #[cfg(test)]
+            {
+                tally.0 += 1;
+            }
+            if shifts == 0 {
                 break;
             }
+        }
+        #[cfg(test)]
+        {
+            let (steps, byte_ins, bits) = tally;
+            let r = &mut self.renorms;
+            r.renorms += 1;
+            r.steps += u64::from(steps);
+            r.byte_ins += u64::from(byte_ins);
+            r.bits += u64::from(bits);
+            r.most_steps_beyond_byte_ins = r
+                .most_steps_beyond_byte_ins
+                .max(steps.saturating_sub(byte_ins));
         }
     }
 
     /// `DECODE` (T.88 E.3.2): one decision against one context.
-    pub fn decode(&mut self, cx: &mut MqContext) -> u8 {
+    #[inline(always)]
+    fn decide(&mut self, data: &[u8], cx: &mut MqContext) -> u8 {
         self.decisions = self.decisions.saturating_add(1);
         // `index` is only ever written from the table's own NMPS/NLPS
         // columns, so this cannot miss; a corrupt state would decode as the
@@ -401,7 +442,7 @@ impl<'a> MqDecoder<'a> {
                 d
             };
             self.a = qe;
-            self.renorm();
+            self.renorm(data);
             d
         } else {
             self.c -= qe << 16;
@@ -420,26 +461,121 @@ impl<'a> MqDecoder<'a> {
                 cx.index = nmps;
                 cx.mps
             };
-            self.renorm();
+            self.renorm(data);
             d
         }
+    }
+
+    /// One decision against `contexts[index]`, or against a context in the
+    /// initial state for an index past the end, which then adapts nothing.
+    #[inline(always)]
+    fn decide_at(&mut self, data: &[u8], contexts: &mut MqContexts, index: usize) -> u8 {
+        let mut scratch = MqContext::default();
+        let cx = contexts.states.get_mut(index).unwrap_or(&mut scratch);
+        self.decide(data, cx)
+    }
+}
+
+impl<'a> MqDecoder<'a> {
+    /// `INITDEC` (T.88 E.3.5).
+    #[must_use]
+    pub fn new(data: &'a [u8]) -> MqDecoder<'a> {
+        let mut registers = Registers {
+            bp: 0,
+            c: u32::from(byte_at(data, 0)) << 16,
+            a: 0,
+            ct: 0,
+            decisions: 0,
+            #[cfg(test)]
+            renorms: RenormTally::default(),
+        };
+        registers.byte_in(data);
+        registers.c <<= 7;
+        // `BYTEIN` left seven or eight.
+        registers.ct -= 7;
+        registers.a = 0x8000;
+        MqDecoder { data, registers }
+    }
+
+    /// How far into the data the coder has read.
+    ///
+    /// A segment can hold a region's coded data followed by more segments, so
+    /// a caller that has to carry on parsing needs this. It saturates at the
+    /// end of the data, because past the end the coder stops advancing.
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.registers.bp.min(self.data.len())
+    }
+
+    /// How many decisions this coder has made since the last call, and starts
+    /// counting again from zero.
+    ///
+    /// Emptied rather than read so that a coder shared between two loops — a
+    /// symbol dictionary and the text region it aggregates a symbol with, over
+    /// one decoder (6.5.8.2.1) — is charged once whichever of them asks.
+    pub fn take_decisions(&mut self) -> u64 {
+        std::mem::take(&mut self.registers.decisions)
+    }
+
+    /// `DECODE` (T.88 E.3.2): one decision against one context.
+    pub fn decode(&mut self, cx: &mut MqContext) -> u8 {
+        self.registers.decide(self.data, cx)
     }
 
     /// One decision against `contexts[index]`.
     ///
     /// An index past the end cannot come from a template — the array is sized
     /// `1 << template bits` and the template forms fewer bits than that — so
-    /// it is a caller error rather than a data condition. It yields 0 and
-    /// leaves the coder untouched rather than panicking (ruling 1).
+    /// it is a caller error rather than a data condition. It yields the
+    /// decision of a context in the initial state, and adapts no context of
+    /// the array, rather than panicking (ruling 1).
     pub fn decode_at(&mut self, contexts: &mut MqContexts, index: usize) -> u8 {
-        let mut scratch = MqContext::default();
-        let cx = contexts.states.get_mut(index).unwrap_or(&mut scratch);
-        let mut state = *cx;
-        let d = self.decode(&mut state);
-        if let Some(slot) = contexts.states.get_mut(index) {
-            *slot = state;
+        self.registers.decide_at(self.data, contexts, index)
+    }
+
+    /// A run of decisions on this decoder's registers held in locals: the
+    /// run decides as the decoder would, decision for decision and with the
+    /// same count, and writes the registers back when it is dropped.
+    pub(crate) fn run(&mut self) -> MqRun<'_, 'a> {
+        MqRun {
+            data: self.data,
+            registers: self.registers,
+            decoder: self,
         }
-        d
+    }
+
+    /// What the renormalisations have done so far.
+    #[cfg(test)]
+    pub(crate) fn renorm_tally(&self) -> RenormTally {
+        self.registers.renorms
+    }
+}
+
+/// [`MqDecoder`]'s registers taken into a run of decisions — a JPEG 2000
+/// coding pass, a JBIG2 row — and written back to it once, when the run is
+/// dropped.
+///
+/// A, C, CT and the byte position are a local value for as long as the run
+/// lasts, so a pass's every decision works on them where they are rather than
+/// through the decoder; the run is the decoder for its length, since it holds
+/// the decoder borrowed.
+pub(crate) struct MqRun<'r, 'a> {
+    data: &'a [u8],
+    registers: Registers,
+    decoder: &'r mut MqDecoder<'a>,
+}
+
+impl MqRun<'_, '_> {
+    /// [`MqDecoder::decode_at`] on the run's registers.
+    #[inline(always)]
+    pub(crate) fn decode_at(&mut self, contexts: &mut MqContexts, index: usize) -> u8 {
+        self.registers.decide_at(self.data, contexts, index)
+    }
+}
+
+impl Drop for MqRun<'_, '_> {
+    fn drop(&mut self) {
+        self.decoder.registers = self.registers;
     }
 }
 
@@ -856,5 +992,365 @@ mod tests {
             out[bit / 8] |= decoder.decode_at(&mut contexts, 0) << (7 - (bit % 8));
         }
         assert_eq!(out, H2_DECODED);
+    }
+
+    // --- the register form against E.3's flowcharts (P-10.6) ------------
+
+    /// The decoder as E.3's flowcharts draw it, register for register:
+    /// `A`, `C`, `CT` and `BP` read and written through the struct at every
+    /// decision, and RENORMD a bit at a time. The decoder this module ships
+    /// is held to it decision for decision.
+    struct StructDecoder<'a> {
+        data: &'a [u8],
+        bp: usize,
+        c: u32,
+        a: u32,
+        ct: i32,
+        decisions: u64,
+        /// The single-bit shifts RENORMD has made.
+        shifts: u64,
+    }
+
+    impl<'a> StructDecoder<'a> {
+        /// `INITDEC` (T.88 E.3.5).
+        fn new(data: &'a [u8]) -> StructDecoder<'a> {
+            let mut d = StructDecoder {
+                data,
+                bp: 0,
+                c: 0,
+                a: 0,
+                ct: 0,
+                decisions: 0,
+                shifts: 0,
+            };
+            d.c = u32::from(d.byte_at(0)) << 16;
+            d.byte_in();
+            d.c <<= 7;
+            d.ct -= 7;
+            d.a = 0x8000;
+            d
+        }
+
+        fn position(&self) -> usize {
+            self.bp.min(self.data.len())
+        }
+
+        fn take_decisions(&mut self) -> u64 {
+            std::mem::take(&mut self.decisions)
+        }
+
+        fn byte_at(&self, at: usize) -> u8 {
+            self.data.get(at).copied().unwrap_or(0xFF)
+        }
+
+        /// `BYTEIN` (T.88 E.3.4).
+        fn byte_in(&mut self) {
+            if self.byte_at(self.bp) == 0xFF {
+                if self.byte_at(self.bp + 1) > 0x8F {
+                    self.c = self.c.wrapping_add(0xFF00);
+                    self.ct = 8;
+                } else {
+                    self.bp += 1;
+                    self.c = self.c.wrapping_add(u32::from(self.byte_at(self.bp)) << 9);
+                    self.ct = 7;
+                }
+            } else {
+                self.bp += 1;
+                self.c = self.c.wrapping_add(u32::from(self.byte_at(self.bp)) << 8);
+                self.ct = 8;
+            }
+        }
+
+        /// `RENORMD` (T.88 E.3.3), a bit at a time.
+        fn renorm(&mut self) {
+            for _ in 0..32 {
+                if self.ct == 0 {
+                    self.byte_in();
+                }
+                self.a <<= 1;
+                self.c <<= 1;
+                self.ct -= 1;
+                self.shifts += 1;
+                if self.a & 0x8000 != 0 {
+                    break;
+                }
+            }
+        }
+
+        /// `DECODE` (T.88 E.3.2).
+        fn decode(&mut self, cx: &mut MqContext) -> u8 {
+            self.decisions = self.decisions.saturating_add(1);
+            let Some(&QeRow {
+                qe,
+                nmps,
+                nlps,
+                switch,
+            }) = QE.get(cx.index as usize)
+            else {
+                return cx.mps;
+            };
+            let qe = u32::from(qe);
+            self.a = self.a.wrapping_sub(qe);
+            if (self.c >> 16) < qe {
+                let d = if self.a < qe {
+                    cx.index = nmps;
+                    cx.mps
+                } else {
+                    let d = 1 - cx.mps;
+                    if switch {
+                        cx.mps = d;
+                    }
+                    cx.index = nlps;
+                    d
+                };
+                self.a = qe;
+                self.renorm();
+                d
+            } else {
+                self.c -= qe << 16;
+                if self.a & 0x8000 != 0 {
+                    return cx.mps;
+                }
+                let d = if self.a < qe {
+                    let d = 1 - cx.mps;
+                    if switch {
+                        cx.mps = d;
+                    }
+                    cx.index = nlps;
+                    d
+                } else {
+                    cx.index = nmps;
+                    cx.mps
+                };
+                self.renorm();
+                d
+            }
+        }
+
+        fn decode_at(&mut self, contexts: &mut MqContexts, index: usize) -> u8 {
+            let mut scratch = MqContext::default();
+            let cx = contexts.states.get_mut(index).unwrap_or(&mut scratch);
+            let mut state = *cx;
+            let d = self.decode(&mut state);
+            if let Some(slot) = contexts.states.get_mut(index) {
+                *slot = state;
+            }
+            d
+        }
+    }
+
+    /// SplitMix64, so the noise is the same on every target.
+    fn next(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// The streams the two decoders are held to each other over: Annex
+    /// H.2's; nothing at all, one byte, a lone `0xFF` and a run of them;
+    /// noise; noise with a marker — `0xFF` and a byte above `0x8F` — part way
+    /// through, which E.3.4 feeds 1-bits at from there on; noise with `0xFF`s
+    /// that stuff the byte after them rather than end it, `0x8F` and below;
+    /// and each noise stream cut short at a seeded length, so the decoders run
+    /// on past the end of their data.
+    fn streams() -> Vec<Vec<u8>> {
+        let mut seed = 0x4D51_2E33;
+        let mut out = vec![
+            H2_ENCODED.to_vec(),
+            Vec::new(),
+            vec![0x00],
+            vec![0xFF],
+            vec![0xFF; 9],
+            vec![0x7F, 0xFF, 0x8F, 0xFF, 0x90],
+        ];
+        for length in [3usize, 16, 97, 400, 2048] {
+            let noise: Vec<u8> = (0..length).map(|_| next(&mut seed) as u8).collect();
+            let at = (next(&mut seed) as usize) % length;
+            let mut marked = noise[..at].to_vec();
+            marked.extend([0xFF, 0x90 + (next(&mut seed) % 0x70) as u8]);
+            marked.extend_from_slice(&noise[at..]);
+            let mut stuffed = noise.clone();
+            for i in (0..length).step_by(5) {
+                stuffed[i] = 0xFF;
+                if let Some(after) = stuffed.get_mut(i + 1) {
+                    *after %= 0x90;
+                }
+            }
+            let cut = noise[..(next(&mut seed) as usize) % length].to_vec();
+            out.extend([noise, marked, stuffed, cut]);
+        }
+        out
+    }
+
+    /// The context set the two decoders decide against, the three states
+    /// T.800 Table D.7 fixes among them, so contexts start apart as well as
+    /// together.
+    fn contexts_for_noise() -> MqContexts {
+        let mut contexts = MqContexts::new(19);
+        contexts.set_state(0, 4, 0);
+        contexts.set_state(17, 3, 0);
+        contexts.set_state(18, 46, 0);
+        contexts
+    }
+
+    /// **The register decoder decides as E.3's flowcharts do**, decision for
+    /// decision.
+    ///
+    /// Over every stream above, the shipped decoder — through runs of seeded
+    /// lengths, empty ones among them, between single decisions made on the
+    /// decoder itself through `decode_at` and `decode` — and [`StructDecoder`]
+    /// make the same decision every time, against contexts chosen by the same
+    /// seed (and now and then one past the end, which is a decision against
+    /// an initial-state context). After each run the two have read as far,
+    /// and at the end they have counted the same decisions — the count
+    /// JBIG2's work budget is charged — and left every context in the same
+    /// state.
+    #[test]
+    fn register_and_struct_decoders_agree_on_every_decision() {
+        let mut seed = 0x5245_4753;
+        let mut decisions = 0u64;
+        for (n, data) in streams().iter().enumerate() {
+            let mut shipped = MqDecoder::new(data);
+            let mut reference = StructDecoder::new(data);
+            let (mut ours, mut theirs) = (contexts_for_noise(), contexts_for_noise());
+            let mut lone = (MqContext::default(), MqContext::default());
+            let index = |seed: &mut u64| {
+                let roll = next(seed);
+                if roll % 61 == 0 {
+                    99
+                } else {
+                    (roll % 19) as usize
+                }
+            };
+            let mut made = 0;
+            while made < 6000 {
+                let length = (next(&mut seed) % 40) as usize;
+                {
+                    let mut run = shipped.run();
+                    for _ in 0..length {
+                        let at = index(&mut seed);
+                        assert_eq!(
+                            run.decode_at(&mut ours, at),
+                            reference.decode_at(&mut theirs, at),
+                            "stream {n}: decision {made} in a run, context {at}"
+                        );
+                        made += 1;
+                    }
+                }
+                assert_eq!(
+                    shipped.position(),
+                    reference.position(),
+                    "stream {n}: after decision {made}"
+                );
+                let at = index(&mut seed);
+                assert_eq!(
+                    shipped.decode_at(&mut ours, at),
+                    reference.decode_at(&mut theirs, at),
+                    "stream {n}: decision {made} on the decoder, context {at}"
+                );
+                assert_eq!(
+                    shipped.decode(&mut lone.0),
+                    reference.decode(&mut lone.1),
+                    "stream {n}: decision {} on a lone context",
+                    made + 1
+                );
+                made += 2;
+            }
+            assert_eq!(lone.0, lone.1, "stream {n}: the lone context");
+            for i in 0..ours.len() {
+                assert_eq!(ours.state(i), theirs.state(i), "stream {n}: context {i}");
+            }
+            let counted = shipped.take_decisions();
+            assert_eq!(counted, reference.take_decisions(), "stream {n}");
+            assert_eq!(counted, made, "stream {n}: every decision counted once");
+            assert_eq!(shipped.take_decisions(), 0, "stream {n}: and emptied");
+            decisions += counted;
+        }
+        assert!(decisions > 100_000, "only {decisions} decisions compared");
+    }
+
+    /// Annex H.2's 256 decisions come back through runs too: in runs of one,
+    /// of seven, and in one run of all of them.
+    #[test]
+    fn annex_h2_through_runs() {
+        for length in [1usize, 7, 256] {
+            let mut decoder = MqDecoder::new(&H2_ENCODED);
+            let mut contexts = MqContexts::new(1);
+            let mut out = [0u8; 32];
+            let mut bit = 0usize;
+            while bit < 256 {
+                let mut run = decoder.run();
+                for _ in 0..length.min(256 - bit) {
+                    out[bit / 8] |= run.decode_at(&mut contexts, 0) << (7 - (bit % 8));
+                    bit += 1;
+                }
+            }
+            assert_eq!(out, H2_DECODED, "runs of {length}");
+            assert_eq!(decoder.take_decisions(), 256, "runs of {length}");
+        }
+    }
+
+    /// **A renormalisation takes a step for each byte it reads, and one
+    /// more.**
+    ///
+    /// E.3.3's flowchart shifts `A` and `C` one bit at a time, and the
+    /// register form shifts as many bits a step as the byte being read has
+    /// left. Over every stream above, no RENORMD took more steps than one
+    /// beyond the `BYTEIN`s it made, the bits the steps shifted are exactly
+    /// the single shifts [`StructDecoder`] made over the same decisions, and
+    /// some renormalisations ran past a byte, so the case of two steps or
+    /// three ran as well as the case of one.
+    #[test]
+    fn a_renormalisation_shifts_once_per_byte_it_reads() {
+        let mut seed = 0x5348_4946;
+        let mut total = RenormTally::default();
+        let mut shifts = 0u64;
+        for (n, data) in streams().iter().enumerate() {
+            let mut shipped = MqDecoder::new(data);
+            let mut reference = StructDecoder::new(data);
+            let (mut ours, mut theirs) = (contexts_for_noise(), contexts_for_noise());
+            for _ in 0..200 {
+                let mut run = shipped.run();
+                for _ in 0..30 {
+                    let at = (next(&mut seed) % 19) as usize;
+                    assert_eq!(
+                        run.decode_at(&mut ours, at),
+                        reference.decode_at(&mut theirs, at),
+                        "stream {n}"
+                    );
+                }
+            }
+            let tally = shipped.renorm_tally();
+            assert!(
+                tally.most_steps_beyond_byte_ins <= 1,
+                "stream {n}: a renormalisation took {} steps beyond its BYTEINs",
+                tally.most_steps_beyond_byte_ins
+            );
+            assert!(
+                tally.steps <= tally.renorms + tally.byte_ins,
+                "stream {n}: {tally:?}"
+            );
+            assert_eq!(
+                tally.bits, reference.shifts,
+                "stream {n}: the bits shifted are the flowchart's"
+            );
+            total.renorms += tally.renorms;
+            total.steps += tally.steps;
+            total.byte_ins += tally.byte_ins;
+            total.bits += tally.bits;
+            shifts += reference.shifts;
+        }
+        assert!(total.renorms > 10_000, "{total:?}");
+        assert!(
+            total.steps > total.renorms,
+            "no renormalisation ran past a byte: {total:?}"
+        );
+        assert!(
+            total.bits > total.steps,
+            "every step shifted one bit, which is the flowchart's loop: {total:?}"
+        );
+        assert_eq!(total.bits, shifts);
     }
 }

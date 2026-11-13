@@ -193,7 +193,11 @@ the way they do with any other image.
 The MQ arithmetic coder (T.88 Annex E) lives in its own module, `mq.rs`, shared
 with the JPEG 2000 tier-1 coder — T.88 Annex E and T.800 Annex C are the same
 coder — with `MqContexts::set_state` covering the one place the two callers
-differ (T.88 E.3.6 against T.800 Table D.7). Around it: clause 7 segment
+differ (T.88 E.3.6 against T.800 Table D.7). A JBIG2 row and a JPEG 2000
+coding pass take the coder's registers into locals for their length and
+write them back once, and its renormalisation shifts by a leading-zero
+count, a step for each byte it reads, deciding exactly as E.3's flowcharts,
+which its tests keep as the reference. Around it: clause 7 segment
 headers with their referred-to lists, the embedded organisation of D.3 with
 `/JBIG2Globals` read first, generic regions under templates 0–3 with AT pixels
 and typical prediction (TPGDON, 6.2.5.7), and MMR (6.2.6) through the same T.6

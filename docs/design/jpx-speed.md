@@ -103,14 +103,19 @@ header).
 
 ### The MQ decoder in registers (P-10.6)
 
-`MqDecoder` (`crates/tinker-pdf-filters/src/mq.rs`) reads A, C, CT and the
-byte position through `self` at every decision. The register form loads them
-into locals for a whole coding pass — a JBIG2 row likewise — and writes them
-back once; renormalises with a leading-zero count instead of the shift loop;
-and runs BYTEIN only when CT runs out. Its API and its decision count do not
-change: `take_decisions` feeds JBIG2's work budget, so the register decoder
-counts exactly the decisions the struct decoder does, and JBIG2 and JPEG 2000
-share it as before. The struct decoder stays, test-only, as the reference.
+`MqDecoder` (`crates/tinker-pdf-filters/src/mq.rs`) keeps A, C, CT, the byte
+position and the decision count as one value, and `MqDecoder::run` takes that
+value into a run's locals for a whole coding pass — a JBIG2 row likewise —
+which writes it back once, when the run is dropped. Tier-1's passes are
+written once over a source of decisions, an MQ run or D.6's raw reader, so an
+arithmetic pass carries no branch on which it reads. RENORMD shifts by A's
+leading-zero count, as many bits a step as the byte being read has left, so
+it runs BYTEIN only when CT runs out — exactly where E.3.3's bit-at-a-time
+flowchart runs it — and takes at most one step more than the bytes it reads.
+Its API and its decision count do not change: `take_decisions` feeds JBIG2's
+work budget, so a run counts exactly the decisions the struct decoder does,
+and JBIG2 and JPEG 2000 share it as before. The struct decoder, E.3's
+flowcharts register for register, stays in `mq.rs`'s tests as the reference.
 
 ### Row-blocked lifting (P-10.7)
 
