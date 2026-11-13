@@ -99,9 +99,9 @@ pub use bmp_embed::bmp_image;
 pub use build::{
     is_language_tag, is_standard_namespace, is_standard_structure_type, jpeg_shape, subset_tag,
     ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, BlendMode, CalculatorOp,
-    CieSpace, CompressedImage, DeviceNAttributes, DeviceSpace, DocumentBuilder, EmbeddedWhole,
-    ExtGState, FileRelationship, FormXObject, Function, Glyph, ImageColorSpace, ImageData,
-    ImageFilter, LayerId, LayoutWritingMode, MaskKind, NamespaceId, NewAssociatedFile,
+    CieSpace, ColourGlyph, CompressedImage, DeviceNAttributes, DeviceSpace, DocumentBuilder,
+    EmbeddedWhole, ExtGState, FileRelationship, FormXObject, Function, Glyph, ImageColorSpace,
+    ImageData, ImageFilter, LayerId, LayoutWritingMode, MaskKind, NamespaceId, NewAssociatedFile,
     NewOutputIntent, OutlineEntry, PageBuilder, PieceText, PlacedGlyph, Shading, ShadingPattern,
     SoftMask, StateMask, SubsetRefusal, TableAttributes, TableScope, Tag, Target, TextPiece,
     TilingPattern, TilingType, TransparencyGroup, MATHML_NAMESPACE, PDF_1_7_NAMESPACE,

@@ -191,9 +191,9 @@ pub use tinker_pdf_cos::{
     OutlineItem, Script, ScriptSummary, Trapped, Warning, WarningKind,
 };
 pub use tinker_pdf_cos::{
-    BlendMode, CieSpace, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, PieceText,
-    PlacedGlyph, Shading, ShadingPattern, StateMask, TextPiece, TilingPattern, TilingType,
-    TransparencyGroup,
+    BlendMode, CieSpace, ColourGlyph, DeviceSpace, ExtGState, FormXObject, Function, Glyph,
+    MaskKind, PieceText, PlacedGlyph, Shading, ShadingPattern, StateMask, TextPiece, TilingPattern,
+    TilingType, TransparencyGroup,
 };
 /// Streaming open: where a document's bytes come from when they are not all
 /// in hand (`docs/design/streaming-open.md`).

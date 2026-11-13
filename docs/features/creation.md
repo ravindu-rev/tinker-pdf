@@ -85,6 +85,35 @@ the glyphs the document draws — `glyf`/`loca` rebuilt, composite components
 followed, the 9.6.4 subset name tag written — so a line of Latin text set in
 a CJK face costs kilobytes rather than the whole face.
 
+**Colour glyphs.** `add_colour_font(resource, name, units_per_em)` registers
+a colour face, written as Type 3 fonts (9.6.4;
+[design](../design/colour-fonts.md), *The PDF object*), and
+`add_colour_glyph(font, &ColourGlyph)` one glyph's procedure: its advance,
+its box and its drawing operators, all in the face's font units and naming
+resources already registered. Each procedure is `wx 0 d0` and the glyph's
+form — an isolated, non-knockout transparency group with no `/CS`, under the
+document's resources as they were when the glyph was added, so the text's
+alpha, blend mode and soft mask apply to the glyph as one object; a plain
+form under a profile that forbids transparency; and nothing past the width
+for a glyph that draws nothing. Every font is `/FontMatrix [0.001 0 0 0.001 0
+0]`, which a file states exactly, and each form's `/Matrix` takes the face's
+units into it, so an em of 2048 is not drawn at the six-decimal `0.000488`.
+`colour_glyph_run(out, font, size, matrix, &[PlacedGlyph])` writes a run into
+a stream the caller assembles, as `glyph_run` writes a composite font's: each
+glyph at the caller's position by a `TJ` adjustment worked from the width
+`/Widths` states, a rise as `Ts`, and each glyph's text recorded, the first
+non-empty one standing. A glyph's code is given the first time a run draws it
+— 0 to 31 and 33 to 255, never 32, which 9.3.3 word-spaces — and a run that
+needs a code when its face's fonts are full spills into a new font,
+registered then under the face's name, a full stop and the font's place
+(`C0.1`), selected with `Tf` where the run reaches it. At `finish` each font
+gets `/CharProcs` and `/Encoding` for its codes, `/Widths` (0 at 32), a
+`/FontBBox` around every glyph's box, a symbolic descriptor and a one-byte
+`/ToUnicode`, so the run extracts and is found as a composite run is
+(FT-06.2's Type 3 text). A run naming a glyph with no procedure, a face never
+registered, no glyphs, or a size, matrix or placement that is not a number is
+refused having written nothing.
+
 **Images.** `add_image(resource, &ImageData)` with four shapes: `Jpeg`
 (bytes placed verbatim, never re-encoded — recompression is generational
 loss the caller cannot undo), `Rgb8` and `Gray8` (raw samples, deflated by
@@ -277,7 +306,7 @@ let pdf: Vec<u8> = b.finish();
 `DocumentBuilder`, `PageBuilder`, `ImageData`, `DeviceSpace`, `CieSpace`, `ExtGState`,
 `TransparencyGroup`, `FormXObject`, `Function`, `CalculatorOp`,
 `DeviceNAttributes`, `LayerId`, `Shading`, `ShadingPattern`,
-`TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`,
+`TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `ColourGlyph`, `BlendMode`, `MaskKind`,
 `StateMask`,
 `Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade.
 The HTML half is `FromHtml` (`from_html`, `from_html_with`, `from_markdown`), `PageBox`
@@ -425,6 +454,15 @@ outside any `/AF` sequence, and the call answers `false`
   markup.
 - `crates/tinker-pdf/tests/png_passthrough.rs` asserts a PNG's IDAT reaches
   the page untouched and decodes identically.
+- `crates/tinker-pdf/tests/colour_fonts.rs` writes colour glyphs and reads
+  them back: three rectangles' procedures as one run extract their text —
+  a ligature's two letters among it — at the placed positions and paint
+  their colours there; the font is clean to the strict validator and is the
+  object the design settles, field by field, a plain form under a part 1
+  profile; three hundred glyphs in one run spill into a second font and
+  round-trip in order; a glyph that draws nothing is its width alone, the
+  first text a glyph is drawn with stands, a rise is drawn and read off the
+  baseline, and every refusal writes nothing.
 - `crates/tinker-pdf-cos/tests/page_operations.rs` covers embedded and
   subset fonts: subsetting is asserted by glyph count
   (`the_glyphs_that_were_drawn_survive_subsetting`), by the 9.6.4 tag

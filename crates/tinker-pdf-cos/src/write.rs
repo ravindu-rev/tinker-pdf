@@ -239,7 +239,7 @@ pub(crate) fn write_name(out: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 /// Formats a real number without an exponent, which PDF does not allow.
-fn write_real(out: &mut Vec<u8>, value: f64) {
+pub(crate) fn write_real(out: &mut Vec<u8>, value: f64) {
     if !value.is_finite() {
         out.extend_from_slice(b"0");
         return;

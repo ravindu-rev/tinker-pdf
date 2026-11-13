@@ -360,12 +360,17 @@ a face carrying both, so the choice is a function of the face.
 
 A colour face is written as **Type 3 fonts** (ISO 32000-2 9.6.4), one per
 face, palette and `StrikeChoice`, as many as its codes need (a simple font has
-256; FT-06.10's run writer spills into the next). `/FontMatrix` is
-`[1/unitsPerEm 0 0 1/unitsPerEm 0 0]`, so a procedure is written in font units;
-`/Widths` are `hmtx`'s advances, which COLR's *Metrics and boundedness* and the
-`SVG ` chapter's *Glyph semantics* keep the colour glyph's; `/ToUnicode` maps
-each code to the text the run recorded for it, which FT-06.2 makes Type 3
-text extract and search as a CID run's does.
+256 codes, of which the writer gives 255, never 32, which 9.3.3 applies the
+word spacing to; FT-06.10's run writer spills into the next). `/FontMatrix` is
+`[0.001 0 0 0.001 0 0]`, which a file states exactly, and each glyph's form
+takes the face's units into that glyph space by its `/Matrix`,
+`1000/unitsPerEm`, so the form is written in font units: `1/unitsPerEm`
+itself, a real written to six decimals, is `0.000488` for an em of 2048, and
+would scale every glyph and every advance by its error. `/Widths` are
+`hmtx`'s advances in those thousandths, which COLR's *Metrics and
+boundedness* and the `SVG ` chapter's *Glyph semantics* keep the colour
+glyph's; `/ToUnicode` maps each code to the text the run recorded for it,
+which FT-06.2 makes Type 3 text extract and search as a CID run's does.
 
 Each glyph procedure is `wx 0 d0` — 9.6.4's Table 111: "the glyph description
 specifies both its shape and its colour" — and then draws a **form XObject
@@ -376,9 +381,10 @@ initial drawing surface", and what makes the glyph one object to the text:
 the graphics state's alpha, blend mode and soft mask apply to the group's
 result as a whole (11.6.6), so translucent text fades a colour glyph without
 its lower layers showing through its upper ones. A glyph written twice is one
-form drawn twice. A glyph whose paints need no transparency is drawn into the
-procedure directly when a profile forbids transparency (below), which is the
-same picture wherever the text's alpha is one.
+form drawn twice. A glyph whose paints need no transparency is drawn through a
+form with no `/Group` when a profile forbids transparency (below), which is
+the same picture wherever the text's alpha is one, and a glyph that draws
+nothing is its width alone.
 
 ### Each paint's construct
 
@@ -433,7 +439,7 @@ introduces some with `ArchivalRefusal::Transparency`. Under such a profile a
 glyph whose graph needs a group, a soft mask, an alpha below one or a blend
 mode other than `Normal` is refused by name and written as its outline; one
 that needs none — opaque solids, layers, transforms, clips and opaque
-gradients — is drawn into its procedure directly.
+gradients — is drawn through its form with no `/Group`.
 
 ### Bitmaps in a PDF
 

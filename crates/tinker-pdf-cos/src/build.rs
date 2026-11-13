@@ -1321,6 +1321,86 @@ pub struct PlacedGlyph<'a> {
     pub rise: f64,
 }
 
+/// One colour glyph's procedure, for [`DocumentBuilder::add_colour_glyph`]
+/// (`docs/design/colour-fonts.md`, *The PDF object*).
+///
+/// Everything is in the face's own font units, `unitsPerEm` to the em: the
+/// advance `hmtx` gives the glyph, the box it draws inside and the operators
+/// that draw it. The operators name only resources already registered with
+/// the builder: the glyph's form takes the document's resources at the moment
+/// it is added, as [`DocumentBuilder::add_form`] does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColourGlyph<'a> {
+    /// The glyph index in the face.
+    pub id: u16,
+    /// Its advance, in font units: what `/Widths` and `d0` state, and what a
+    /// run's pen moves by.
+    pub advance: f64,
+    /// `[x0 y0 x1 y1]`, in font units: the glyph's clip box, or the bounds of
+    /// what [`ColourGlyph::content`] draws — its form's `/BBox`, which clips
+    /// it. Read only where the content is not empty.
+    pub bbox: [f64; 4],
+    /// The operators that draw it, as a form's content, starting from the
+    /// graphics state the text is shown in. Empty for a glyph that draws
+    /// nothing — a space — whose procedure is its width alone.
+    pub content: &'a [u8],
+}
+
+/// How many codes one of a colour face's Type 3 fonts gives its glyphs: every
+/// single-byte code but 32, which 9.3.3 applies the word spacing to whatever
+/// glyph a simple font draws there.
+const COLOUR_CODES: usize = 255;
+
+/// The code the `k`th glyph a colour face's Type 3 font is given takes: 0 to
+/// 31, then 33 to 255.
+fn colour_code(k: usize) -> Option<u8> {
+    if k >= COLOUR_CODES {
+        return None;
+    }
+    let k = u8::try_from(k).ok()?;
+    Some(if k < 32 { k } else { k + 1 })
+}
+
+/// A colour face registered with [`DocumentBuilder::add_colour_font`]: its
+/// glyphs' procedures, and the Type 3 fonts its runs' codes fill.
+struct ColourFont {
+    resource: Vec<u8>,
+    /// The `/FontName` its font descriptors state.
+    name: Vec<u8>,
+    units_per_em: u16,
+    glyphs: BTreeMap<u16, ColourProcedure>,
+    /// Each Type 3 font the face's codes fill, in order: the first under the
+    /// face's own resource name, each later one under a name of its own.
+    parts: Vec<ColourPart>,
+    /// The font and the code each glyph a run drew was given.
+    codes: BTreeMap<u16, (usize, u8)>,
+    /// The text each glyph a run drew stands for: the first non-empty text
+    /// it was drawn with, as `/ToUnicode` is one function of the code.
+    texts: BTreeMap<u16, String>,
+}
+
+/// One glyph's procedure, as the face holds it until `finish` writes the
+/// glyphs its runs drew.
+struct ColourProcedure {
+    /// Its advance in the 1000-unit glyph space `/FontMatrix` scales, as the
+    /// file will state it.
+    width: f64,
+    /// Its form's `/BBox`, in font units; `None` for a glyph that draws
+    /// nothing.
+    bbox: Option<[f64; 4]>,
+    content: Vec<u8>,
+    /// The document's resources when the glyph was added.
+    resources: Dict,
+}
+
+/// One Type 3 font of a colour face.
+struct ColourPart {
+    resource: Vec<u8>,
+    font_ref: ObjRef,
+    /// The glyphs given codes in it, in code order.
+    glyphs: Vec<u16>,
+}
+
 /// The resources one page, form or pattern may name.
 ///
 /// Held as one value rather than as six fields because a form XObject and a
@@ -2052,6 +2132,13 @@ fn subset_smaller_than(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Vec<u8>
 /// zero-entry section and a CMap that maps nothing is worse than no CMap: a
 /// reader that finds one stops looking for another answer.
 fn to_unicode_cmap(mapping: &BTreeMap<u16, String>) -> Option<Vec<u8>> {
+    to_unicode_cmap_in(mapping, 2)
+}
+
+/// [`to_unicode_cmap`] over codes of `bytes` bytes: two for a composite font
+/// under `/Identity-H`, one for a simple font's string, whose codespace
+/// `<00> <FF>` says so to a reader that only has this stream.
+fn to_unicode_cmap_in(mapping: &BTreeMap<u16, String>, bytes: usize) -> Option<Vec<u8>> {
     let entries: Vec<(u16, Vec<u16>)> = mapping
         .iter()
         .filter(|(_, text)| !text.is_empty())
@@ -2068,13 +2155,19 @@ fn to_unicode_cmap(mapping: &BTreeMap<u16, String>) -> Option<Vec<u8>> {
         b"/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n",
     );
     out.extend_from_slice(b"/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n");
-    // The codespace is the whole of `/Identity-H`'s two-byte space, which is
-    // what says a code is two bytes to a reader that only has this stream.
-    out.extend_from_slice(b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+    // The codespace is the whole of the codes' space — `/Identity-H`'s two
+    // bytes for a composite font — which is what says how wide a code is to
+    // a reader that only has this stream.
+    if bytes == 1 {
+        out.extend_from_slice(b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n");
+    } else {
+        out.extend_from_slice(b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+    }
+    let digits = 2 * bytes;
     for chunk in entries.chunks(BFCHAR_PER_SECTION) {
         out.extend_from_slice(format!("{} beginbfchar\n", chunk.len()).as_bytes());
         for (id, units) in chunk {
-            out.extend_from_slice(format!("<{id:04X}> <").as_bytes());
+            out.extend_from_slice(format!("<{id:0digits$X}> <").as_bytes());
             for unit in units {
                 out.extend_from_slice(format!("{unit:04X}").as_bytes());
             }
@@ -5172,6 +5265,9 @@ pub struct DocumentBuilder {
     /// this builder does not own. Merged with every page's own record at
     /// `finish`; see that method for why the record is the document's.
     drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>>,
+    /// Colour faces, written as Type 3 fonts at `finish`, once the glyphs
+    /// their runs drew and the codes those took are known.
+    colour_fonts: Vec<ColourFont>,
     subset_fonts: bool,
     /// Fonts written whole because a subset could not be built, gathered at
     /// `finish` and handed back by `finish_reporting`.
@@ -5254,6 +5350,7 @@ impl DocumentBuilder {
             embedded: Vec::new(),
             cid_fonts: Vec::new(),
             drawn: BTreeMap::new(),
+            colour_fonts: Vec::new(),
             subset_fonts: true,
             embedded_whole: Vec::new(),
             info: Dict::new(),
@@ -6014,6 +6111,264 @@ impl DocumentBuilder {
         }
         out.extend_from_slice(b"ET\n");
         true
+    }
+
+    /// Registers a **colour face**, whose glyphs are procedures the caller
+    /// draws, written as Type 3 fonts (9.6.4;
+    /// `docs/design/colour-fonts.md`, *The PDF object*).
+    ///
+    /// `units_per_em` is the face's `head` figure, the units every
+    /// [`ColourGlyph`] is stated in, and `name` the `/FontName` its font
+    /// descriptors carry. The glyphs are added with
+    /// [`DocumentBuilder::add_colour_glyph`] and drawn with
+    /// [`DocumentBuilder::colour_glyph_run`], which gives each glyph a code
+    /// the first time a run draws it: a simple font has single-byte codes, so
+    /// a face whose runs draw more glyphs than one font holds spills into
+    /// another, registered under a name of its own as the run that needs it
+    /// is written.
+    ///
+    /// Every font is `/FontMatrix [0.001 0 0 0.001 0 0]`, which a file states
+    /// exactly, and each glyph's form maps the face's units into it by its
+    /// `/Matrix`: `1/unitsPerEm` as a six-decimal real is not the number for
+    /// an em of 2048, and the error would scale every glyph and every advance.
+    ///
+    /// Returns false, registering nothing, for an empty resource or name, an
+    /// em of no units, and a resource name a font is already registered
+    /// under.
+    pub fn add_colour_font(&mut self, resource: &[u8], name: &[u8], units_per_em: u16) -> bool {
+        if resource.is_empty()
+            || name.is_empty()
+            || units_per_em == 0
+            || holds(&self.resources.fonts, resource)
+        {
+            return false;
+        }
+        let font_ref = self.allocate();
+        self.colour_fonts.push(ColourFont {
+            resource: resource.to_vec(),
+            name: name.to_vec(),
+            units_per_em,
+            glyphs: BTreeMap::new(),
+            parts: vec![ColourPart {
+                resource: resource.to_vec(),
+                font_ref,
+                glyphs: Vec::new(),
+            }],
+            codes: BTreeMap::new(),
+            texts: BTreeMap::new(),
+        });
+        self.resources.fonts.push((resource.to_vec(), font_ref));
+        true
+    }
+
+    /// Adds one glyph's procedure to the colour face registered under `font`.
+    ///
+    /// The procedure is `wx 0 d0` — 9.6.4's Table 111, a glyph that "specifies
+    /// both its shape and its colour" — and then the glyph's form, an
+    /// isolated, non-knockout transparency group (11.6.6) holding
+    /// [`ColourGlyph::content`] under the document's resources as they are
+    /// now, so the text's alpha, blend mode and soft mask apply to the glyph
+    /// as one object. Under an [`ArchivalProfile`] that forbids transparency
+    /// the form carries no `/Group`, which draws the same picture wherever
+    /// the text's alpha is one; content needing transparency cannot be
+    /// registered there in the first place. A glyph a run draws twice is one
+    /// procedure and one form.
+    ///
+    /// Returns false, adding nothing, when `font` is no colour face, when the
+    /// glyph has a procedure already, when the advance is not a number, and
+    /// when the content is not empty and its box encloses no area.
+    pub fn add_colour_glyph(&mut self, font: &[u8], glyph: &ColourGlyph<'_>) -> bool {
+        let resources = self.resources.dict(&self.names);
+        let Some(face) = self.colour_fonts.iter_mut().find(|f| f.resource == font) else {
+            return false;
+        };
+        if face.glyphs.contains_key(&glyph.id) || !glyph.advance.is_finite() {
+            return false;
+        }
+        let bbox = if glyph.content.is_empty() {
+            None
+        } else if is_box(&glyph.bbox) {
+            Some(glyph.bbox)
+        } else {
+            return false;
+        };
+        let width =
+            crate::write::written_real(glyph.advance * 1000.0 / f64::from(face.units_per_em));
+        face.glyphs.insert(
+            glyph.id,
+            ColourProcedure {
+                width,
+                bbox,
+                content: glyph.content.to_vec(),
+                resources,
+            },
+        );
+        true
+    }
+
+    /// Whether the colour face registered under `font` has a procedure for
+    /// glyph `id`.
+    #[must_use]
+    pub fn has_colour_glyph(&self, font: &[u8], id: u16) -> bool {
+        self.colour_fonts
+            .iter()
+            .any(|face| face.resource == font && face.glyphs.contains_key(&id))
+    }
+
+    /// Writes one run of a colour face's glyphs into a content stream the
+    /// caller is assembling, as [`DocumentBuilder::glyph_run`] writes a
+    /// composite font's: each glyph at the caller's position, the `TJ`
+    /// adjustment between where the pen is and where the caller put it worked
+    /// out from the advance `/Widths` states, a rise as `Ts`, and each
+    /// glyph's text recorded for `/ToUnicode`, the first non-empty text a
+    /// glyph is drawn with standing.
+    ///
+    /// A glyph's code is given the first time a run draws it, in the face's
+    /// last Type 3 font while that has a code left, and otherwise in a new
+    /// font registered now under a name of its own — the face's name and the
+    /// font's place after a full stop — so a run whose glyphs lie in several
+    /// fonts selects each with `Tf` as it reaches it, and a page begun after
+    /// this call names every font it needs.
+    ///
+    /// Returns false, having written nothing, when `font` is no colour face,
+    /// when there are no glyphs, when a glyph has no procedure, or when the
+    /// size, the matrix or a placement is not a number a content stream can
+    /// carry.
+    pub fn colour_glyph_run(
+        &mut self,
+        out: &mut Vec<u8>,
+        font: &[u8],
+        size: f64,
+        matrix: [f64; 6],
+        glyphs: &[PlacedGlyph<'_>],
+    ) -> bool {
+        let Some(at) = self.colour_fonts.iter().position(|f| f.resource == font) else {
+            return false;
+        };
+        if glyphs.is_empty() || !size.is_finite() || size <= 0.0 || !all_finite(&matrix) {
+            return false;
+        }
+        if !glyphs.iter().all(|g| g.x.is_finite() && g.rise.is_finite()) {
+            return false;
+        }
+        if !glyphs
+            .iter()
+            .all(|g| self.colour_fonts[at].glyphs.contains_key(&g.glyph.id))
+        {
+            return false;
+        }
+
+        // The codes, in the order the glyphs are first drawn.
+        for placed in glyphs {
+            let id = placed.glyph.id;
+            if self.colour_fonts[at].codes.contains_key(&id) {
+                continue;
+            }
+            let full = self.colour_fonts[at]
+                .parts
+                .last()
+                .is_none_or(|part| part.glyphs.len() >= COLOUR_CODES);
+            if full {
+                let place = self.colour_fonts[at].parts.len();
+                let resource = self.spilled_font_name(font, place);
+                let font_ref = self.allocate();
+                self.resources.fonts.push((resource.clone(), font_ref));
+                self.colour_fonts[at].parts.push(ColourPart {
+                    resource,
+                    font_ref,
+                    glyphs: Vec::new(),
+                });
+            }
+            let face = &mut self.colour_fonts[at];
+            let part = face.parts.len() - 1;
+            let Some(code) = colour_code(face.parts[part].glyphs.len()) else {
+                continue;
+            };
+            face.parts[part].glyphs.push(id);
+            face.codes.insert(id, (part, code));
+        }
+
+        let face = &mut self.colour_fonts[at];
+        for placed in glyphs {
+            let text = face.texts.entry(placed.glyph.id).or_default();
+            if text.is_empty() && !placed.glyph.text.is_empty() {
+                *text = placed.glyph.text.to_string();
+            }
+        }
+
+        let face = &self.colour_fonts[at];
+        out.extend_from_slice(b"BT ");
+        let mut current: Option<usize> = None;
+        let mut pen = 0.0f64;
+        let mut rise = 0.0f64;
+        let mut open = false;
+        for placed in glyphs {
+            let id = placed.glyph.id;
+            let (Some(&(part, code)), Some(procedure)) =
+                (face.codes.get(&id), face.glyphs.get(&id))
+            else {
+                continue;
+            };
+            if current != Some(part) {
+                close_array(out, &mut open);
+                let Some(selected) = face.parts.get(part) else {
+                    continue;
+                };
+                crate::write::write_name(out, &selected.resource);
+                out.extend_from_slice(format!(" {} Tf", number(size)).as_bytes());
+                if current.is_none() {
+                    for value in matrix {
+                        out.push(b' ');
+                        out.extend_from_slice(number(value).as_bytes());
+                    }
+                    out.extend_from_slice(b" Tm");
+                }
+                out.push(b'\n');
+                current = Some(part);
+            }
+            if placed.rise != rise {
+                close_array(out, &mut open);
+                rise = placed.rise;
+                out.extend_from_slice(format!("{} Ts\n", number(rise)).as_bytes());
+            }
+            if !open {
+                out.push(b'[');
+                open = true;
+            }
+            // 9.4.3, as `glyph_run` reads it: the number that puts this glyph
+            // at `x` is the gap between the pen and `x`, negated, in
+            // thousandths of the font size.
+            let adjust = (pen - placed.x) * 1000.0 / size;
+            if number(adjust) != "0" {
+                if out.last() == Some(&b'>') {
+                    out.push(b' ');
+                }
+                out.extend_from_slice(number(adjust).as_bytes());
+                out.push(b' ');
+            }
+            out.extend_from_slice(format!("<{code:02X}>").as_bytes());
+            // 9.4.4: the displacement is the `/Widths` entry through the
+            // 0.001 of `/FontMatrix`, times the size.
+            pen = placed.x + procedure.width / 1000.0 * size;
+        }
+        close_array(out, &mut open);
+        if rise != 0.0 {
+            out.extend_from_slice(b"0 Ts\n");
+        }
+        out.extend_from_slice(b"ET\n");
+        true
+    }
+
+    /// The resource name the colour face `base`'s font at `place` takes: the
+    /// face's name, a full stop and the place, lengthened while a font is
+    /// already registered under it.
+    fn spilled_font_name(&self, base: &[u8], place: usize) -> Vec<u8> {
+        let mut name = base.to_vec();
+        name.extend_from_slice(format!(".{place}").as_bytes());
+        while holds(&self.resources.fonts, &name) {
+            name.extend_from_slice(format!(".{place}").as_bytes());
+        }
+        name
     }
 
     /// Registers a graphics state under a resource name (Table 58).
@@ -7303,6 +7658,233 @@ impl DocumentBuilder {
         self.objects.insert(font.font_ref.num, Object::Dict(dict));
     }
 
+    /// Writes each colour face's Type 3 fonts (9.6.4): every font its runs'
+    /// codes filled — and a face's first even where no run drew from it, since
+    /// a page may name it — with the procedures of the glyphs drawn in it.
+    fn write_colour_fonts(&mut self) {
+        let faces = std::mem::take(&mut self.colour_fonts);
+        for face in &faces {
+            for part in &face.parts {
+                self.write_colour_part(face, part);
+            }
+        }
+    }
+
+    /// One of a colour face's Type 3 fonts: `/CharProcs` of the glyphs its
+    /// codes were given, `/Encoding` naming them by code, `/Widths` in the
+    /// 1000-unit glyph space `/FontMatrix` scales, the forms the procedures
+    /// draw as its `/Resources`, a descriptor and `/ToUnicode`.
+    fn write_colour_part(&mut self, face: &ColourFont, part: &ColourPart) {
+        let scale = 1000.0 / f64::from(face.units_per_em);
+        let matrix = (scale != 1.0).then_some([scale, 0.0, 0.0, scale, 0.0, 0.0]);
+        let mut char_procs = Dict::new();
+        let mut forms = Dict::new();
+        let mut differences = Vec::new();
+        let mut widths = Vec::new();
+        let mut texts: BTreeMap<u16, String> = BTreeMap::new();
+        let mut font_box: Option<[f64; 4]> = None;
+        let mut first: Option<u8> = None;
+        let mut previous: Option<u8> = None;
+        for (k, id) in part.glyphs.iter().enumerate() {
+            let (Some(code), Some(procedure)) = (colour_code(k), face.glyphs.get(id)) else {
+                continue;
+            };
+            let name = format!("g{id}");
+            // 9.6.5.1: a number in `/Differences` starts a run of codes, so a
+            // run is restarted wherever a code does not follow the last.
+            if previous.and_then(|p| p.checked_add(1)) != Some(code) {
+                differences.push(Object::Int(i64::from(code)));
+            }
+            differences.push(Object::Name(self.names.intern(name.as_bytes())));
+            // A code passed over — 32 — has no glyph and a width of 0.
+            if let Some(previous) = previous {
+                for _ in u16::from(previous) + 1..u16::from(code) {
+                    widths.push(Object::Int(0));
+                }
+            }
+            widths.push(Object::Real(procedure.width));
+            first.get_or_insert(code);
+            previous = Some(code);
+
+            // Table 111: `d0`'s width is the one `/Widths` states, written
+            // the same way.
+            let mut content = Vec::new();
+            crate::write::write_real(&mut content, procedure.width);
+            content.extend_from_slice(b" 0 d0\n");
+            if let Some(bbox) = procedure.bbox {
+                let form = self.write_colour_form(procedure, bbox, matrix);
+                forms.insert(self.names.intern(name.as_bytes()), Object::Ref(form));
+                crate::write::write_name(&mut content, name.as_bytes());
+                content.extend_from_slice(b" Do\n");
+                let marks = bbox.map(|v| v * scale);
+                font_box = Some(match font_box {
+                    None => marks,
+                    Some(held) => [
+                        held[0].min(marks[0]),
+                        held[1].min(marks[1]),
+                        held[2].max(marks[2]),
+                        held[3].max(marks[3]),
+                    ],
+                });
+            }
+            let procedure_ref = self.allocate();
+            self.objects.insert_stream(
+                procedure_ref.num,
+                StreamData {
+                    dict: Dict::new(),
+                    data: content,
+                },
+            );
+            char_procs.insert(
+                self.names.intern(name.as_bytes()),
+                Object::Ref(procedure_ref),
+            );
+            if let Some(text) = face.texts.get(id).filter(|text| !text.is_empty()) {
+                texts.insert(u16::from(code), text.clone());
+            }
+        }
+        if widths.is_empty() {
+            widths.push(Object::Int(0));
+        }
+
+        let widths_ref = self.allocate();
+        self.objects.insert(widths_ref.num, Object::Array(widths));
+
+        let mut descriptor = Dict::new();
+        descriptor.insert(
+            Name::TYPE,
+            Object::Name(self.names.intern(b"FontDescriptor")),
+        );
+        descriptor.insert(
+            self.names.intern(b"FontName"),
+            Object::Name(self.names.intern(&face.name)),
+        );
+        // 9.8.2 Table 123 bit 3: symbolic, the glyphs being named by the
+        // font's own `/Differences` and no standard encoding.
+        descriptor.insert(self.names.intern(b"Flags"), Object::Int(4));
+        descriptor.insert(self.names.intern(b"ItalicAngle"), Object::Int(0));
+        let descriptor_ref = self.allocate();
+        self.objects
+            .insert(descriptor_ref.num, Object::Dict(descriptor));
+
+        let mut encoding = Dict::new();
+        encoding.insert(Name::TYPE, Object::Name(self.names.intern(b"Encoding")));
+        encoding.insert(
+            self.names.intern(b"Differences"),
+            Object::Array(differences),
+        );
+        let mut resources = Dict::new();
+        if !forms.is_empty() {
+            resources.insert(self.names.intern(b"XObject"), Object::Dict(forms));
+        }
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
+        dict.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(b"Type3")),
+        );
+        // Table 110: the box of every mark the glyphs make, accurate since it
+        // is not all zeros — or all zeros where no glyph makes one.
+        dict.insert(
+            self.names.intern(b"FontBBox"),
+            Object::Array(
+                font_box
+                    .unwrap_or([0.0; 4])
+                    .iter()
+                    .map(|v| Object::Real(*v))
+                    .collect(),
+            ),
+        );
+        dict.insert(
+            self.names.intern(b"FontMatrix"),
+            Object::Array(
+                [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]
+                    .iter()
+                    .map(|v| Object::Real(*v))
+                    .collect(),
+            ),
+        );
+        dict.insert(self.names.intern(b"CharProcs"), Object::Dict(char_procs));
+        dict.insert(self.names.intern(b"Encoding"), Object::Dict(encoding));
+        dict.insert(
+            self.names.intern(b"FirstChar"),
+            Object::Int(i64::from(first.unwrap_or(0))),
+        );
+        dict.insert(
+            self.names.intern(b"LastChar"),
+            Object::Int(i64::from(previous.unwrap_or(0))),
+        );
+        dict.insert(self.names.intern(b"Widths"), Object::Ref(widths_ref));
+        dict.insert(
+            self.names.intern(b"FontDescriptor"),
+            Object::Ref(descriptor_ref),
+        );
+        dict.insert(Name::RESOURCES, Object::Dict(resources));
+        // No `/ToUnicode` where no glyph stood for anything, for
+        // `write_cid_font_objects`'s reason.
+        if let Some(cmap) = to_unicode_cmap_in(&texts, 1) {
+            let to_unicode_ref = self.allocate();
+            self.objects.insert_stream(
+                to_unicode_ref.num,
+                StreamData {
+                    dict: Dict::new(),
+                    data: cmap,
+                },
+            );
+            dict.insert(self.names.intern(b"ToUnicode"), Object::Ref(to_unicode_ref));
+        }
+        self.objects.insert(part.font_ref.num, Object::Dict(dict));
+    }
+
+    /// A colour glyph's form: its content in font units under the `/Matrix`
+    /// that takes them into the font's 1000-unit glyph space, clipped to its
+    /// box, as an isolated, non-knockout transparency group (11.6.6) with no
+    /// `/CS`, so it blends in the space of what it is painted into — or, under
+    /// a profile that forbids transparency, as a plain form.
+    fn write_colour_form(
+        &mut self,
+        procedure: &ColourProcedure,
+        bbox: [f64; 4],
+        matrix: Option<[f64; 6]>,
+    ) -> ObjRef {
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"XObject")));
+        dict.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(b"Form")),
+        );
+        dict.insert(
+            self.names.intern(b"BBox"),
+            Object::Array(bbox.iter().map(|v| Object::Real(*v)).collect()),
+        );
+        if let Some(matrix) = matrix {
+            dict.insert(
+                self.names.intern(b"Matrix"),
+                Object::Array(matrix.iter().map(|v| Object::Real(*v)).collect()),
+            );
+        }
+        if !self.forbids_transparency() {
+            let mut group = Dict::new();
+            group.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(b"Transparency")),
+            );
+            group.insert(self.names.intern(b"I"), Object::Bool(true));
+            dict.insert(self.names.intern(b"Group"), Object::Dict(group));
+        }
+        dict.insert(Name::RESOURCES, Object::Dict(procedure.resources.clone()));
+        let reference = self.allocate();
+        self.objects.insert_stream(
+            reference.num,
+            StreamData {
+                dict,
+                data: procedure.content.clone(),
+            },
+        );
+        reference
+    }
+
     /// Registers an image under a resource name.
     ///
     /// Returns false when the data does not describe an image of the size it
@@ -8374,6 +8956,7 @@ impl DocumentBuilder {
         }
         self.write_embedded_fonts(&used);
         self.write_cid_fonts(&drawn);
+        self.write_colour_fonts();
 
         // 14.7.4.4: the `/ParentTree` entry for each page, and the elements
         // that claim each of its marked-content ids. Filled as the pages are
@@ -12734,6 +13317,52 @@ mod graphics_tests {
             !text.contains("<0003>"),
             "the piece left out was recorded: {text}"
         );
+    }
+
+    /// A colour face's codes: 0 to 31, then 33 to 255, and none past them —
+    /// 32 never, which 9.3.3 word-spaces in a simple font.
+    #[test]
+    fn colour_codes_pass_over_32_and_stop_at_255() {
+        let codes: Vec<u8> = (0..COLOUR_CODES).filter_map(colour_code).collect();
+        assert_eq!(codes.len(), 255);
+        assert_eq!(codes[..32], (0..32).collect::<Vec<u8>>()[..]);
+        assert_eq!(codes[32..], (33..=255).collect::<Vec<u8>>()[..]);
+        assert!(!codes.contains(&32));
+        assert_eq!(colour_code(COLOUR_CODES), None);
+        assert_eq!(colour_code(usize::MAX), None);
+    }
+
+    /// The `/ToUnicode` of a simple font's one-byte codes says so in its
+    /// codespace and its codes, and the two-byte one a composite font takes
+    /// is the same text it always was.
+    #[test]
+    fn a_one_byte_to_unicode_cmap_states_a_one_byte_codespace() {
+        let mapping: BTreeMap<u16, String> = BTreeMap::from([
+            (0, "A".to_string()),
+            (33, "fi".to_string()),
+            (7, String::new()),
+        ]);
+        let one =
+            String::from_utf8(to_unicode_cmap_in(&mapping, 1).expect("a CMap")).expect("text");
+        assert!(
+            one.contains("1 begincodespacerange\n<00> <FF>\nendcodespacerange\n"),
+            "{one}"
+        );
+        assert!(
+            one.contains("2 beginbfchar\n<00> <0041>\n<21> <00660069>\nendbfchar\n"),
+            "{one}"
+        );
+        let two = String::from_utf8(to_unicode_cmap(&mapping).expect("a CMap")).expect("text");
+        assert_eq!(
+            two,
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+             /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+             2 beginbfchar\n<0000> <0041>\n<0021> <00660069>\nendbfchar\n\
+             endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+        );
+        assert_eq!(to_unicode_cmap_in(&BTreeMap::new(), 1), None);
     }
 
     /// `/ToUnicode` takes many glyphs to one character **and** one glyph to
