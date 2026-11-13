@@ -178,8 +178,9 @@ alternative — handing raw tables to `tinker-pdf-render` to interpret —
 moves ICC vocabulary into the renderer and splits ruling 4's obligations
 across two crates. The renderer calls `ColorSpace::to_rgb`.
 
-**Compilation, then integer evaluation.** `Transform::compile(&Profile)` runs
-once per profile and produces: per-channel curves sampled to 4 096-entry
+**Compilation, then integer evaluation.** `Transform::compile(&Profile,
+Intent)` compiles a profile's transform for one rendering intent and produces:
+per-channel curves sampled to 4 096-entry
 tables (`CURVE_ENTRIES`), a 3×3 matrix in s15.16 fixed point (ICC's own
 `s15Fixed16Number`, so matrix-based profiles are *natively* fixed point) that
 is the profile's columns already multiplied by XYZ-to-sRGB, and for LUT
@@ -193,8 +194,12 @@ v2's legacy 16-bit Lab encoding, which goes through the `finv` machinery
 `lab_to_rgb` owns. A grey profile compiles its one curve to a luminance the
 three sRGB channels share.
 
-**Wiring.** `ColorSpace::Icc { transform: Arc<Transform>, components }` is
-built by the `ICCBased` arm from the stream bytes and `/N`, and any profile
+**Wiring.** `ColorSpace::Icc { transforms: Arc<Transforms>, components }` is
+built by the `ICCBased` arm from the stream bytes and `/N`. `Transforms` holds
+the profile and its transforms, one an intent: relative colorimetric's is
+compiled with it, and each other intent's the first time
+`ColorSpace::to_rgb_in` asks for it ([Rendering
+intents](#rendering-intents-8658)). Any profile
 the parser declines keeps the `Approximated` fallback, its refusal (bad
 signature, unsupported tag, dimension over bounds) a typed `IccError`. Rows in
 `crates/tinker-pdf/tests/bounds_ledger.rs` hold the maximum accepted profile
@@ -271,10 +276,13 @@ K-01 keeps the intent in the graphics state: `ri` and an ExtGState's `/RI`
 set `StoredParameters::rendering_intent`
 (`crates/tinker-pdf-content/src/state.rs`), `q` and `Q` save and restore it
 with the rest of the state, and a name 8.6.5.8 does not list is kept as
-`RenderingIntent::Unrecognised`. No conversion reads it, an image's `/Intent`
-is not read, and every ICC colour converts through the one transform
-`Profile::parse` built — for a LUT profile, from the first of `A2B1`, `A2B0`
-and `A2B2` the profile carries. How often the corpus names an intent is not
+`RenderingIntent::Unrecognised`. The colour crate converts in any intent:
+`Profile::parse` keeps each `A2B*` table a profile carries and
+`ColorSpace::to_rgb_in` converts through the one an `icc::Conversion`'s
+intent selects, by the table below. No conversion the facade makes passes an
+intent yet, so every ICC colour converts in relative colorimetric — for a LUT
+profile through the first of `A2B1`, `A2B0` and `A2B2` it carries — and an
+image's `/Intent` is not read. How often the corpus names an intent is not
 measured: the count `Profile::parse`'s comment gives is of an ExtGState
 `/RenderingIntent`, a key the graphics state parameter dictionary does not
 have; its key is `/RI`. This section is the design RC-01's steps build, read
@@ -439,9 +447,9 @@ what this design keys by intent by the whole value.
 #### What compiling per intent costs
 
 - **Parsing.** `Profile::parse` reads the tag table as it does today, and
-  the table the default intent selects; it keeps where each other `A2B*` tag
-  lies and reads one when an intent first selects it. A page that sets no
-  intent parses what it parses today.
+  the table the default intent selects; it keeps a copy of each other `A2B*`
+  element's bytes and reads one when an intent first selects it. A page that
+  sets no intent parses what it parses today.
 - **Compiling.** A space's transforms are kept together, each compiled the
   first time an intent selects its table, and shared by every conversion
   through that space and every page whose resources compile the profile. A

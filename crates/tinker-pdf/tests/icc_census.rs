@@ -263,7 +263,7 @@ fn census_of_the_corpus_icc_profiles() {
 #[test]
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn what_the_parser_makes_of_the_corpus_profiles() {
-    use tinker_pdf_color::icc::{IccError, Profile as IccProfile, Transform};
+    use tinker_pdf_color::icc::{IccError, Intent, Profile as IccProfile, Transform};
 
     let Some(root) = corpus_root() else {
         println!("icc-reality: SKIPPED (no corpus; set TINKER_CORPUS)");
@@ -313,7 +313,7 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
     for bytes in &streams {
         match IccProfile::parse(bytes) {
             Ok(profile) => {
-                if Transform::compile(&profile).is_some() {
+                if Transform::compile(&profile, Intent::RelativeColorimetric).is_some() {
                     compiled += 1;
                 } else {
                     parsed_no_transform += 1;
@@ -526,7 +526,7 @@ fn census_of_the_lut_profiles() {
 #[test]
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn what_the_lookup_tables_make_of_ink() {
-    use tinker_pdf_color::icc::{Profile as IccProfile, Transform};
+    use tinker_pdf_color::icc::{Intent, Profile as IccProfile, Transform};
 
     let Some(root) = corpus_root() else {
         println!("lut-reality: SKIPPED (no corpus; set TINKER_CORPUS)");
@@ -578,7 +578,7 @@ fn what_the_lookup_tables_make_of_ink() {
         let Ok(profile) = IccProfile::parse(bytes) else {
             continue;
         };
-        let Some(transform) = Transform::compile(&profile) else {
+        let Some(transform) = Transform::compile(&profile, Intent::RelativeColorimetric) else {
             continue;
         };
         judged += 1;

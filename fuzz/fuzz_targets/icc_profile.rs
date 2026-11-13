@@ -12,10 +12,10 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** The three
-//! calls below are discarded. A profile whose tag table was read at the wrong
-//! offsets, or whose curve came back with the wrong points, passes as long as
-//! the arithmetic did not overflow. So a run that returned the *wrong* answer
+//! **Only that the code did not panic, hang, or exhaust memory.** What the
+//! calls below return is discarded. A profile whose tag table was read at the
+//! wrong offsets, or whose curve came back with the wrong points, passes as
+//! long as the arithmetic did not overflow. So a run that returned the *wrong* answer
 //! passes this target exactly as a correct one does, and a green `cargo fuzz`
 //! here is evidence about ruling 1 and about nothing else.
 //!
@@ -29,17 +29,32 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_color::icc::{Profile, Transform};
+use tinker_pdf_color::icc::{Intent, Profile, Transform, Transforms};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(profile) = Profile::parse(data) else {
         return;
     };
-    let Some(transform) = Transform::compile(&profile) else {
+    // Every intent's transform, each compiled on its own and through the set
+    // a colour space carries: an intent reads a table relative colorimetric's
+    // parse did not, so a hostile `A2B0` or `A2B2` is reached only here.
+    for intent in Intent::ALL {
+        if let Some(transform) = Transform::compile(&profile, intent) {
+            apply_all(&transform);
+        }
+    }
+    let Some(transforms) = Transforms::compile(profile) else {
         return;
     };
-    // A compiled transform must answer for any components a content stream
-    // could name, including the ones outside 0..1 that `scn` is free to write.
+    for intent in Intent::ALL {
+        apply_all(transforms.get(intent));
+    }
+});
+
+/// A compiled transform must answer for any components a content stream
+/// could name, including the ones outside 0..1 that `scn` is free to write,
+/// and for the wrong number of them, which a malformed `/N` produces.
+fn apply_all(transform: &Transform) {
     for components in [
         [0.0, 0.0, 0.0],
         [1.0, 1.0, 1.0],
@@ -49,7 +64,6 @@ fuzz_target!(|data: &[u8]| {
     ] {
         let _ = transform.apply(&components);
     }
-    // And for the wrong number of them, which a malformed `/N` produces.
     let _ = transform.apply(&[]);
     let _ = transform.apply(&[0.5]);
-});
+}

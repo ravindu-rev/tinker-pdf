@@ -20,9 +20,8 @@
 //! A second census asked what sits *at* those tags, since `A2B0` names four
 //! different structures: **409 `mft2`, 6 `mft1`, 3 `mAB `**, and 408 of the
 //! 415 v2 tables take four channels to three. So one structure is 99.3 % of
-//! them, and v4's `mAB ` — curves on both sides of the grid, each stage
-//! carrying its own offset — is refused by name rather than built for three
-//! tags.
+//! them; v4's `mAB ` — curves on both sides of the grid, each stage carrying
+//! its own offset — reads beside it.
 //!
 //! All three models together compile **2 744 of the corpus's 2 750 profiles,
 //! 99.8 %**.
@@ -61,7 +60,68 @@
 //! reconstructed from the format's structure with some confidence, where a
 //! JBIG2 context template could not.
 
+use std::sync::{Arc, OnceLock};
+
 use crate::{ColorSpace, XYZ_D50_TO_SRGB};
+
+/// A rendering intent: ICC.1's four (6.1), the ones a transform is compiled
+/// for.
+///
+/// PDF names the same four (8.6.5.8, Table 69) and reads a name it does not
+/// recognise as relative colorimetric, which is why the default is that one
+/// and why this type has no fifth value: the caller that reads a document's
+/// name settles it before it gets here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Intent {
+    /// Perceptual: `A2B0`.
+    Perceptual,
+    /// Media-relative colorimetric: `A2B1`, and PDF's initial intent.
+    #[default]
+    RelativeColorimetric,
+    /// Saturation: `A2B2`.
+    Saturation,
+    /// ICC-absolute colorimetric: relative colorimetric's table, the
+    /// connection-space value scaled by the media white (6.2.3).
+    AbsoluteColorimetric,
+}
+
+impl Intent {
+    /// Every intent, in ICC.1's order of their tags.
+    pub const ALL: [Intent; 4] = [
+        Intent::Perceptual,
+        Intent::RelativeColorimetric,
+        Intent::Saturation,
+        Intent::AbsoluteColorimetric,
+    ];
+
+    /// The `A2B*` tags, by number, this intent converts through, in the
+    /// order it tries them (`docs/design/icc.md`, "The table each intent
+    /// compiles"): ICC.1 8.10.2's b), the tag designated for the intent, and
+    /// c), `A2B0`; then the profile's other tables in the order the parser
+    /// has always read them, so no intent refuses a profile another accepts.
+    /// Relative colorimetric's order is that order itself, which is why a
+    /// page that names no intent converts as it always has.
+    const fn order(self) -> [usize; 3] {
+        match self {
+            Intent::Perceptual => [0, 1, 2],
+            Intent::RelativeColorimetric | Intent::AbsoluteColorimetric => [1, 0, 2],
+            Intent::Saturation => [2, 0, 1],
+        }
+    }
+}
+
+/// How a colour is converted through a profile: the one parameter every
+/// conversion of an ICC colour takes (`docs/design/icc.md`, "The one
+/// conversion parameter").
+///
+/// Its default is relative colorimetric, PDF's initial intent, so a caller
+/// that names nothing converts as every conversion did before intents were
+/// read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Conversion {
+    /// The rendering intent the colour converts in.
+    pub intent: Intent,
+}
 
 /// Why a profile could not be read.
 ///
@@ -127,7 +187,7 @@ pub const MAX_ICC_TAGS: u32 = 1024;
 ///
 /// | | Bytes |
 /// | --- | --- |
-/// | The most any fixture in this repository spends | 392 |
+/// | The most any fixture in this repository spends | 882 |
 /// | A 200-page comic archive | 0 |
 /// | The largest profile in the corpus: a printer profile carrying a full set of lookup tables | 718 672 |
 /// | A 300-page reflowable book | 0 |
@@ -366,14 +426,133 @@ pub enum Model {
         /// `wtpt`, as `[X, Y, Z]`.
         white: [f64; 3],
     },
-    /// A sampled lookup table: `mft1` or `mft2` at an `A2B*` tag.
+    /// Sampled lookup tables — `mft1`, `mft2` or v4's `mAB ` — at the
+    /// profile's `A2B*` tags, one for each intent it carries one for.
     ///
     /// What a printer profile carries, because the relation between ink and
     /// light is not a matrix and no curve makes it one. The census found 409
     /// `mft2` and 6 `mft1` against 3 of v4's `mAB `, and 408 of the 415 take
-    /// four channels to three — so this one structure is 99.3 % of the corpus's
-    /// lookup tables and `mAB ` is refused by name.
-    Lut(Lut),
+    /// four channels to three.
+    Lut(Tables),
+}
+
+/// The `A2B*` tables a profile carries, each read when an intent first
+/// converts through it.
+///
+/// The table relative colorimetric converts through is read by
+/// [`Profile::parse`], as the one table the parser always read was, so a
+/// profile whose table does not read is refused there and a page that names
+/// no intent reads no more than it did. Tags that name one element — the same
+/// offset and size, which ICC.1 8.2 lets every intent share — are one table,
+/// read once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tables {
+    /// For `A2B0`, `A2B1` and `A2B2`, which of `tables` the tag names, or
+    /// `None` where the profile does not carry it.
+    slots: [Option<usize>; 3],
+    /// One a distinct element, in the order the tags first name them.
+    tables: Vec<Table>,
+    /// Whether the connection space is `Lab` rather than `XYZ`.
+    lab: bool,
+}
+
+impl Tables {
+    /// The tables at the elements `places` names — `A2B0`, `A2B1` and
+    /// `A2B2`'s offset and size in `bytes`, where the profile carries them —
+    /// with relative colorimetric's read now.
+    fn read(
+        places: [Option<(usize, usize)>; 3],
+        bytes: &[u8],
+        lab: bool,
+    ) -> Result<Tables, IccError> {
+        let mut elements: Vec<(usize, usize)> = Vec::new();
+        let mut slots = [None; 3];
+        for (slot, place) in slots.iter_mut().zip(places) {
+            if let Some(place) = place {
+                let index = match elements.iter().position(|&element| element == place) {
+                    Some(index) => index,
+                    None => {
+                        elements.push(place);
+                        elements.len() - 1
+                    }
+                };
+                *slot = Some(index);
+            }
+        }
+        let default = Intent::RelativeColorimetric
+            .order()
+            .into_iter()
+            .find_map(|tag| slots[tag])
+            .ok_or(IccError::MissingTags)?;
+        let mut tables = Vec::with_capacity(elements.len());
+        for (index, (offset, size)) in elements.into_iter().enumerate() {
+            let data = offset
+                .checked_add(size)
+                .and_then(|end| bytes.get(offset..end))
+                .ok_or(IccError::TagOutOfBounds)?;
+            tables.push(if index == default {
+                Table {
+                    bytes: None,
+                    read: OnceLock::from(Some(Arc::new(read_lut(data, lab)?))),
+                }
+            } else {
+                Table {
+                    bytes: Some(data.to_vec()),
+                    read: OnceLock::new(),
+                }
+            });
+        }
+        Ok(Tables { slots, tables, lab })
+    }
+
+    /// The table `intent` converts through: the first of [`Intent::order`]'s
+    /// tags the profile carries whose table reads, read now if no intent has
+    /// read it yet. A table that does not read is passed over, as ICC.1 8.10.2
+    /// passes over a tag the CMM does not support, and relative colorimetric's
+    /// was read by [`Profile::parse`], so every intent finds one.
+    fn select(&self, intent: Intent) -> Option<Arc<Lut>> {
+        intent
+            .order()
+            .into_iter()
+            .filter_map(|tag| self.slots[tag])
+            .find_map(|index| self.tables.get(index)?.lut(self.lab))
+    }
+}
+
+/// One distinct `A2B*` element: its bytes, until they are read, and what
+/// reading them gave, kept from the first read.
+#[derive(Clone, Debug)]
+struct Table {
+    /// The element's bytes; `None` for the table [`Profile::parse`] read.
+    bytes: Option<Vec<u8>>,
+    /// The table, or `None` where its bytes do not read as one.
+    read: OnceLock<Option<Arc<Lut>>>,
+}
+
+impl Table {
+    fn lut(&self, lab: bool) -> Option<Arc<Lut>> {
+        self.read
+            .get_or_init(|| {
+                self.bytes
+                    .as_deref()
+                    .and_then(|bytes| read_lut(bytes, lab).ok())
+                    .map(Arc::new)
+            })
+            .clone()
+    }
+}
+
+/// Two tables are one where their bytes are, or, for the ones the parser
+/// read, where what it read is: whether another intent has read a table yet
+/// is not a property of the profile.
+impl PartialEq for Table {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.bytes, &other.bytes) {
+            (Some(ours), Some(theirs)) => ours == theirs,
+            (None, None) => self.read.get() == other.read.get(),
+            _ => false,
+        }
+    }
 }
 
 /// `mft1` and `mft2`: three stages of table with a grid between them.
@@ -674,43 +853,37 @@ impl Profile {
                 .map(|(_, offset, size)| &bytes[*offset..*offset + *size])
         };
 
-        // A profile whose only route to the connection space is a lookup table
-        // is refused by name rather than half-read.
         let has_matrix =
             find(b"rXYZ").is_some() && find(b"gXYZ").is_some() && find(b"bXYZ").is_some();
         let has_grey = find(b"kTRC").is_some();
 
-        // A lookup table first, where there is one: a profile carrying both is
-        // carrying the table for the case the matrix cannot express, and the
-        // census says every such profile in the corpus is a printer's.
+        // The lookup tables only where there is no matrix and no grey curve.
+        // A profile carrying both is read by its matrix or its curve, for every
+        // intent; ICC.1 8.10.2 would read its tables first, and taking that
+        // order is the owner's (`docs/design/icc.md`, "The table each intent
+        // compiles").
         if !has_matrix && !has_grey {
             let lab = &pcs == b"Lab ";
             if !lab && &pcs != b"XYZ " {
                 return Err(IccError::UnsupportedPcs);
             }
-            // A2B1 first, and not arbitrarily: ISO 32000-1 8.6.5.8 makes
-            // `RelativeColorimetric` the default rendering intent, and A2B1 is
-            // the tag that holds it. A2B0 (perceptual) and A2B2 (saturation)
-            // are the fallbacks for a profile that carries only one table,
-            // which is ordinary.
-            //
-            // Selecting between them by the intent in force is not built, and
-            // the corpus says why: **no file sets an ExtGState
-            // `/RenderingIntent` at all**, and five carry the `ri` operator.
-            // Choosing the default correctly is the whole of what the corpus
-            // asks for (ruling 3).
-            let tag = find(b"A2B1")
-                .or_else(|| find(b"A2B0"))
-                .or_else(|| find(b"A2B2"));
-            let Some(tag) = tag else {
-                return Err(IccError::MissingTags);
+            // Each intent's table, by ICC.1 8.10.2 (`Intent::order`), and
+            // relative colorimetric's read now: 8.6.5.8 makes it the initial
+            // intent, and a profile whose table for it does not read is
+            // refused here, whatever intent a page later asks for.
+            let place = |want: &[u8; 4]| {
+                tags.iter()
+                    .find(|(s, _, _)| s == want)
+                    .map(|&(_, offset, size)| (offset, size))
             };
+            let tables =
+                Tables::read([place(b"A2B0"), place(b"A2B1"), place(b"A2B2")], bytes, lab)?;
             return Ok(Profile {
                 space,
                 pcs,
                 class,
                 version,
-                model: Model::Lut(read_lut(tag, lab)?),
+                model: Model::Lut(tables),
             });
         }
         // A matrix profile's columns *are* XYZ by construction, so one
@@ -768,6 +941,8 @@ impl Profile {
 /// curve stages carry their own entry counts or are fixed at 256 — so they are
 /// read by one function with a flag rather than two that drift apart.
 fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
+    #[cfg(test)]
+    tests::TABLE_READS.with(|reads| reads.set(reads.get() + 1));
     let reader = Reader { bytes: data };
     let wide = match reader.sig(0).ok_or(IccError::MalformedTag)? {
         s if &s == b"mft2" => true,
@@ -1160,8 +1335,10 @@ pub struct Transform {
     matrix: [[i32; 3]; 3],
     /// How many components go in.
     inputs: usize,
-    /// A sampled table, where the profile carries one instead of a matrix.
-    lut: Option<Lut>,
+    /// A sampled table, where the profile carries one instead of a matrix:
+    /// shared with the profile's [`Tables`] and with every other intent that
+    /// converts through it.
+    lut: Option<Arc<Lut>>,
 }
 
 /// Entries in a compiled tone curve.
@@ -1176,10 +1353,15 @@ pub const CURVE_ENTRIES: usize = 4096;
 const ONE: i64 = 1 << 16;
 
 impl Transform {
-    /// Compiles a profile into a transform, or `None` for a model that has no
-    /// closed form here.
+    /// Compiles a profile into its transform for `intent`, or `None` for a
+    /// model that has no closed form here.
+    ///
+    /// A lookup-table profile converts through the table `intent` selects
+    /// ([`Intent::order`]). A matrix/TRC or grey profile has one transform,
+    /// which ICC.1's Table 25 calls colorimetric, and compiles it alike for
+    /// every intent.
     #[must_use]
-    pub fn compile(profile: &Profile) -> Option<Transform> {
+    pub fn compile(profile: &Profile, intent: Intent) -> Option<Transform> {
         match &profile.model {
             Model::MatrixTrc { columns, curves } => {
                 // The profile's columns are the device primaries in XYZ, so
@@ -1205,12 +1387,15 @@ impl Transform {
             // A table is already the transform: there is nothing to compile,
             // because its curves arrived sampled and its grid is the matrix's
             // replacement rather than a factor of it.
-            Model::Lut(lut) => Some(Transform {
-                curves: Vec::new(),
-                matrix: [[0; 3]; 3],
-                inputs: lut.inputs,
-                lut: Some(lut.clone()),
-            }),
+            Model::Lut(tables) => {
+                let lut = tables.select(intent)?;
+                Some(Transform {
+                    curves: Vec::new(),
+                    matrix: [[0; 3]; 3],
+                    inputs: lut.inputs,
+                    lut: Some(lut),
+                })
+            }
             Model::Grey { lab, curve, .. } => {
                 // A grey profile's single curve makes a luminance, and the
                 // three sRGB channels are that luminance: the white point does
@@ -1292,6 +1477,83 @@ impl Transform {
     }
 }
 
+/// A profile's transforms, one for each intent, each compiled the first time
+/// a conversion asks for it (`docs/design/icc.md`, "What compiling per intent
+/// costs").
+///
+/// Relative colorimetric's is compiled with the set: it is 8.6.5.8's initial
+/// intent, the one every conversion that names none takes, so a profile used
+/// in no other intent compiles exactly the one transform it always did. A
+/// matrix/TRC or grey profile serves perceptual and saturation from that same
+/// transform; a lookup-table profile compiles one for each intent asked for,
+/// sharing the table where two intents select one.
+#[derive(Debug)]
+pub struct Transforms {
+    profile: Profile,
+    relative: Arc<Transform>,
+    /// Perceptual, saturation and absolute colorimetric's, in that order.
+    others: [OnceLock<Arc<Transform>>; 3],
+}
+
+impl Transforms {
+    /// The profile's transforms, or `None` where it has no relative
+    /// colorimetric one, which leaves it with none at all.
+    #[must_use]
+    pub fn compile(profile: Profile) -> Option<Transforms> {
+        let relative = Arc::new(Transform::compile(&profile, Intent::RelativeColorimetric)?);
+        Some(Transforms {
+            profile,
+            relative,
+            others: [OnceLock::new(), OnceLock::new(), OnceLock::new()],
+        })
+    }
+
+    /// The transform `intent` converts through, compiled now if no colour has
+    /// asked for it yet.
+    #[must_use]
+    pub fn get(&self, intent: Intent) -> &Transform {
+        let slot = match intent {
+            Intent::RelativeColorimetric => return &self.relative,
+            Intent::Perceptual => 0,
+            Intent::Saturation => 1,
+            Intent::AbsoluteColorimetric => 2,
+        };
+        let shares =
+            !matches!(self.profile.model, Model::Lut(_)) && intent != Intent::AbsoluteColorimetric;
+        self.others[slot].get_or_init(|| {
+            if shares {
+                return Arc::clone(&self.relative);
+            }
+            // Every intent's order ends in every table the profile carries,
+            // relative colorimetric's among them, so this compiles; were it
+            // not to, relative colorimetric's is the answer 8.6.5.8 gives.
+            Transform::compile(&self.profile, intent)
+                .map_or_else(|| Arc::clone(&self.relative), Arc::new)
+        })
+    }
+
+    /// How many components the transforms take.
+    #[must_use]
+    pub fn inputs(&self) -> usize {
+        self.relative.inputs()
+    }
+
+    /// The profile the transforms were compiled from.
+    #[must_use]
+    pub fn profile(&self) -> &Profile {
+        &self.profile
+    }
+}
+
+/// Two sets of transforms are one where their profiles are: what has been
+/// compiled so far follows from the profile and from which intents have been
+/// asked for, which is not a property of the colour space.
+impl PartialEq for Transforms {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile == other.profile
+    }
+}
+
 /// A curve, sampled into [`CURVE_ENTRIES`] 16-bit linear values.
 fn compile_curve(curve: &Curve) -> Vec<u16> {
     (0..CURVE_ENTRIES)
@@ -1350,8 +1612,14 @@ pub fn approximated(components: usize) -> ColorSpace {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    std::thread_local! {
+        /// Every lookup table this thread has read out of a tag's bytes, so a
+        /// test can say how many reads compiling an intent cost.
+        pub(super) static TABLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     /// sRGB's own primaries, chromatically adapted to D50 — which is what an
     /// sRGB ICC profile stores, because ICC.1 puts the connection space there.
@@ -1477,7 +1745,14 @@ mod tests {
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 6] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 7] = [
+            // Three lookup tables, one an intent, each a different grid: the
+            // seed that reaches every intent's own table.
+            (
+                "lut-three-intents",
+                three_intents_profile(),
+                Reaches::Transform,
+            ),
             // Three-component matrix/TRC, the commonest profile there is.
             ("srgb-para-curve", srgb_profile(), Reaches::Transform),
             // The other curve encoding: `curv` with a single gamma word,
@@ -1524,7 +1799,15 @@ mod tests {
         for (name, bytes, reaches) in &seeds {
             let got = Profile::parse(bytes);
             match reaches {
-                Reaches::Transform => assert!(got.is_ok(), "{name}: {got:?}"),
+                Reaches::Transform => {
+                    let profile = got.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                    for intent in Intent::ALL {
+                        assert!(
+                            Transform::compile(&profile, intent).is_some(),
+                            "{name}: no {intent:?} transform"
+                        );
+                    }
+                }
                 Reaches::Refusal(expected) => {
                     assert_eq!(got.err().as_ref(), Some(expected), "{name}");
                 }
@@ -1885,7 +2168,8 @@ mod tests {
     #[test]
     fn an_srgb_profile_transforms_to_itself() {
         let profile = Profile::parse(&srgb_profile()).expect("an sRGB profile");
-        let transform = Transform::compile(&profile).expect("a matrix transform");
+        let transform =
+            Transform::compile(&profile, Intent::RelativeColorimetric).expect("a matrix transform");
 
         let mut worst = 0i32;
         for step in 0..=32u32 {
@@ -1923,7 +2207,8 @@ mod tests {
             &[(*b"kTRC", gamma(1.0)), (*b"wtpt", xyz(0.9642, 1.0, 0.8249))],
         );
         let parsed = Profile::parse(&profile).expect("a grey profile");
-        let transform = Transform::compile(&parsed).expect("a grey transform");
+        let transform =
+            Transform::compile(&parsed, Intent::RelativeColorimetric).expect("a grey transform");
         assert_eq!(transform.inputs(), 1);
 
         for value in [0.0, 0.25, 0.5, 0.75, 1.0] {
@@ -2049,7 +2334,7 @@ mod tests {
     #[test]
     fn the_columns_are_what_the_matrix_is_built_from() {
         let full = Profile::parse(&srgb_profile()).expect("a profile");
-        let bright = Transform::compile(&full).expect("a transform");
+        let bright = Transform::compile(&full, Intent::RelativeColorimetric).expect("a transform");
 
         let dimmed_bytes = build(
             b"RGB ",
@@ -2067,8 +2352,11 @@ mod tests {
                 (*b"wtpt", xyz(0.9642, 1.0, 0.8249)),
             ],
         );
-        let dimmed = Transform::compile(&Profile::parse(&dimmed_bytes).expect("a profile"))
-            .expect("a transform");
+        let dimmed = Transform::compile(
+            &Profile::parse(&dimmed_bytes).expect("a profile"),
+            Intent::RelativeColorimetric,
+        )
+        .expect("a transform");
 
         let (_, bright_g, _) = bright.apply(&[0.0, 1.0, 0.0]);
         let (_, dim_g, _) = dimmed.apply(&[0.0, 1.0, 0.0]);
@@ -2136,9 +2424,12 @@ mod tests {
     fn a_lookup_table_interpolates_between_its_grid_points() {
         let tag = mft2(1, 2, &[[0, 0, 0], [65535, 65535, 65535]]);
         let profile = Profile::parse(&lut_profile(b"GRAY", b"XYZ ", tag)).expect("a LUT profile");
-        let Model::Lut(lut) = &profile.model else {
+        let Model::Lut(tables) = &profile.model else {
             panic!("expected a LUT model");
         };
+        let lut = tables
+            .select(Intent::RelativeColorimetric)
+            .expect("relative colorimetric's table");
         for (input, want) in [(0.0, 0.0), (0.25, 0.25), (0.5, 0.5), (1.0, 1.0)] {
             let got = lut.evaluate(&[input])[0];
             assert!(
@@ -2167,9 +2458,12 @@ mod tests {
             &[[q(0), 0, 0], [q(1), 0, 0], [q(2), 0, 0], [q(3), 0, 0]],
         );
         let profile = Profile::parse(&lut_profile(b"GRAY", b"XYZ ", tag)).expect("a LUT profile");
-        let Model::Lut(lut) = &profile.model else {
+        let Model::Lut(tables) = &profile.model else {
             panic!("expected a LUT model");
         };
+        let lut = tables
+            .select(Intent::RelativeColorimetric)
+            .expect("relative colorimetric's table");
         let at = |a: f64, b: f64| lut.evaluate(&[a, b])[0];
         let near = |got: f64, want: f64| (got - want).abs() < 0.01;
 
@@ -2199,12 +2493,16 @@ mod tests {
         let clut: Vec<[u16; 3]> = (0..entries).map(|_| [32768, 16384, 8192]).collect();
         let tag = mft2(4, grid, &clut);
         let profile = Profile::parse(&lut_profile(b"CMYK", b"XYZ ", tag)).expect("a LUT profile");
-        let transform = Transform::compile(&profile).expect("a transform");
+        let transform =
+            Transform::compile(&profile, Intent::RelativeColorimetric).expect("a transform");
         assert_eq!(transform.inputs(), 4);
 
-        let Model::Lut(lut) = &profile.model else {
+        let Model::Lut(tables) = &profile.model else {
             panic!("expected a LUT model");
         };
+        let lut = tables
+            .select(Intent::RelativeColorimetric)
+            .expect("relative colorimetric's table");
         for corner in [
             [0.0, 0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0, 1.0],
@@ -2216,8 +2514,9 @@ mod tests {
         }
     }
 
-    /// v4's `mAB ` is refused by name: three tags in the corpus against 415,
-    /// and a different structure rather than a variation of this one.
+    /// v4's `mAB ` reads, a different structure from `mft2` rather than a
+    /// variation of it, and its inverse, `mBA `, which an `A2B*` tag never
+    /// holds, is refused by name.
     #[test]
     fn a_v4_lookup_table_reads_and_its_inverse_is_refused_by_name() {
         // An `mAB ` with every offset zero declares no B curves, and B is the
@@ -2244,7 +2543,8 @@ mod tests {
         // plain three-curve conversion this way rather than as matrix/TRC.
         let profile = Profile::parse(&lut_profile(b"RGB ", b"XYZ ", mab_b_curves_only()))
             .expect("B curves alone are a transform");
-        let transform = Transform::compile(&profile).expect("and it compiles");
+        let transform =
+            Transform::compile(&profile, Intent::RelativeColorimetric).expect("and it compiles");
         // The curves below are the identity, so the connection space value is
         // the input and white stays white.
         let white = transform.apply(&[1.0, 1.0, 1.0]);
@@ -2301,6 +2601,364 @@ mod tests {
             matches!(parsed, Err(IccError::TooLarge)),
             "expected TooLarge, got {parsed:?}"
         );
+    }
+
+    // ---- rendering intents ---------------------------------------------------
+
+    /// Table `table`'s value at grid node `node`, channel `channel`, in
+    /// [`three_intents_profile`]: a multiple of eight, so the average of any
+    /// two, four or eight nodes is a whole number and a grid read halfway
+    /// between nodes has one right answer.
+    fn intent_node(table: usize, node: usize, channel: usize) -> u16 {
+        (8 * ((node * 97 + channel * 31 + table * 1201) % 8192)) as u16
+    }
+
+    /// An RGB profile carrying three `mft2` tables over three-point grids at
+    /// `A2B0`, `A2B1` and `A2B2`, each a different grid: the profile in which
+    /// every intent has its own answer.
+    pub(crate) fn three_intents_profile() -> Vec<u8> {
+        let table = |t: usize| {
+            let clut: Vec<[u16; 3]> = (0..27)
+                .map(|node| [0, 1, 2].map(|channel| intent_node(t, node, channel)))
+                .collect();
+            mft2(3, 3, &clut)
+        };
+        build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"A2B0", table(0)),
+                (*b"A2B1", table(1)),
+                (*b"A2B2", table(2)),
+            ],
+        )
+    }
+
+    /// The connection-space value, as 16-bit integers, that `table`'s grid
+    /// gives `x`, recomputed by multilinear interpolation over its three
+    /// three-point axes; `x`'s components are quarters, so every position is
+    /// a node or halfway between two.
+    fn multilinear(table: usize, x: [f64; 3]) -> [u32; 3] {
+        let positions = x.map(|v| v * 2.0);
+        let mut sum = [0.0f64; 3];
+        for corner in 0..8usize {
+            let mut weight = 1.0;
+            let mut node = 0;
+            for (axis, &position) in positions.iter().enumerate() {
+                let low = position.floor().min(1.0);
+                let fraction = position - low;
+                let high = corner & (1 << (2 - axis)) != 0;
+                weight *= if high { fraction } else { 1.0 - fraction };
+                node = node * 3 + low as usize + usize::from(high);
+            }
+            for (channel, slot) in sum.iter_mut().enumerate() {
+                *slot += weight * f64::from(intent_node(table, node, channel));
+            }
+        }
+        sum.map(|v| v.round() as u32)
+    }
+
+    /// The connection-space value `transform` gives `x`, as 16-bit integers.
+    fn pcs_of(transform: &Transform, x: [f64; 3]) -> [u32; 3] {
+        let lut = transform.lut.as_ref().expect("a lookup-table transform");
+        lut.evaluate(&x).map(|v| (v * 65535.0).round() as u32)
+    }
+
+    /// Every component a quarter: nodes and the points halfway between them.
+    fn quarters() -> Vec<[f64; 3]> {
+        let steps = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let mut out = Vec::new();
+        for r in steps {
+            for g in steps {
+                for b in steps {
+                    out.push([r, g, b]);
+                }
+            }
+        }
+        out
+    }
+
+    /// **Each intent compiles its own table.** A profile carrying three
+    /// different `mft2` grids at `A2B0`, `A2B1` and `A2B2` answers
+    /// perceptual through the first, relative and absolute colorimetric
+    /// through the second and saturation through the third: at every input of
+    /// quarters, each intent's transform gives the connection-space value the
+    /// test recomputes from that table's grid by multilinear interpolation,
+    /// and the set of transforms a colour space carries converts in each
+    /// intent as that intent's transform does. The three tables part at some
+    /// input, so no intent can pass by reading another's.
+    #[test]
+    fn each_intent_compiles_its_own_table() {
+        let profile = Profile::parse(&three_intents_profile()).expect("three tables");
+        let transforms =
+            Transforms::compile(profile.clone()).expect("relative colorimetric's transform");
+        for (intent, table) in [
+            (Intent::Perceptual, 0),
+            (Intent::RelativeColorimetric, 1),
+            (Intent::Saturation, 2),
+            (Intent::AbsoluteColorimetric, 1),
+        ] {
+            let transform = Transform::compile(&profile, intent).expect("a transform");
+            for x in quarters() {
+                assert_eq!(
+                    pcs_of(&transform, x),
+                    multilinear(table, x),
+                    "{intent:?} at {x:?}"
+                );
+                assert_eq!(
+                    transforms.get(intent).apply(&x),
+                    transform.apply(&x),
+                    "{intent:?} at {x:?}: the space's transform"
+                );
+            }
+        }
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            assert!(
+                quarters()
+                    .into_iter()
+                    .any(|x| multilinear(a, x) != multilinear(b, x)),
+                "tables {a} and {b} are one grid"
+            );
+        }
+    }
+
+    /// A profile carrying, of `A2B0`, `A2B1` and `A2B2`, the ones `present`
+    /// marks, each a table whose every node is `fallback_value(t)`; and, where
+    /// `broken` names one, that tag's data a table that does not read.
+    fn tables_present(present: [bool; 3], broken: Option<usize>) -> Vec<u8> {
+        let mut tags = Vec::new();
+        for (t, &here) in present.iter().enumerate() {
+            if !here {
+                continue;
+            }
+            let signature = [*b"A2B0", *b"A2B1", *b"A2B2"][t];
+            let data = if broken == Some(t) {
+                // The inverse direction's signature, which an `A2B*` tag
+                // never holds.
+                let mut inverse = b"mBA ".to_vec();
+                inverse.extend_from_slice(&[0; 28]);
+                inverse
+            } else {
+                mft2(3, 2, &[[fallback_value(t); 3]; 8])
+            };
+            tags.push((signature, data));
+        }
+        build(b"RGB ", b"XYZ ", &tags)
+    }
+
+    /// The value every node of [`tables_present`]'s table `t` holds.
+    fn fallback_value(t: usize) -> u16 {
+        8_000 * (t as u16 + 1)
+    }
+
+    /// The tag a transform converts through, told by its constant value.
+    fn table_of(transform: &Transform) -> usize {
+        let value = pcs_of(transform, [0.3, 0.6, 0.9])[0];
+        (0..3)
+            .find(|&t| u32::from(fallback_value(t)) == value)
+            .unwrap_or_else(|| panic!("{value} is no table's"))
+    }
+
+    /// **An absent intent table falls back as ICC.1 says.** For every set of
+    /// `A2B*` tags a profile may carry, each intent converts through the
+    /// first tag of its row of `docs/design/icc.md`'s table the profile
+    /// carries: perceptual `A2B0`, `A2B1`, `A2B2`; relative and absolute
+    /// colorimetric `A2B1`, `A2B0`, `A2B2`; saturation `A2B2`, `A2B0`,
+    /// `A2B1` — 8.10.2's b) and c), then the parser's order. A table that does
+    /// not read is passed over as 8.10.2 passes over an unsupported tag,
+    /// unless it is relative colorimetric's, which refuses the profile as it
+    /// always did. A matrix/TRC and a grey profile convert alike in every
+    /// intent, perceptual and saturation through relative colorimetric's own
+    /// transform.
+    #[test]
+    fn an_absent_intent_table_falls_back_as_icc_1_says() {
+        let rows = [
+            (Intent::Perceptual, [0, 1, 2]),
+            (Intent::RelativeColorimetric, [1, 0, 2]),
+            (Intent::Saturation, [2, 0, 1]),
+            (Intent::AbsoluteColorimetric, [1, 0, 2]),
+        ];
+        for set in 1..8usize {
+            let present = [set & 1 != 0, set & 2 != 0, set & 4 != 0];
+            let profile = Profile::parse(&tables_present(present, None))
+                .unwrap_or_else(|e| panic!("{present:?}: {e:?}"));
+            let transforms = Transforms::compile(profile.clone()).expect("a transform");
+            for (intent, order) in rows {
+                let expected = order
+                    .into_iter()
+                    .find(|&t| present[t])
+                    .expect("a tag is present");
+                let transform = Transform::compile(&profile, intent).expect("a transform");
+                assert_eq!(table_of(&transform), expected, "{present:?}, {intent:?}");
+                assert_eq!(
+                    table_of(transforms.get(intent)),
+                    expected,
+                    "{present:?}, {intent:?}: the space's"
+                );
+            }
+        }
+
+        // A broken `A2B0` is passed over by perceptual, whose next is `A2B1`.
+        let profile = Profile::parse(&tables_present([true, true, true], Some(0)))
+            .expect("relative colorimetric's table reads");
+        for (intent, expected) in [
+            (Intent::Perceptual, 1),
+            (Intent::RelativeColorimetric, 1),
+            (Intent::Saturation, 2),
+        ] {
+            let transform = Transform::compile(&profile, intent).expect("a transform");
+            assert_eq!(table_of(&transform), expected, "{intent:?}");
+        }
+        // A broken `A2B2` is passed over by saturation, whose next is `A2B0`.
+        let profile = Profile::parse(&tables_present([true, true, true], Some(2)))
+            .expect("relative colorimetric's table reads");
+        let transform = Transform::compile(&profile, Intent::Saturation).expect("a transform");
+        assert_eq!(table_of(&transform), 0);
+        // Relative colorimetric's table broken refuses the profile, with
+        // another table beside it or without.
+        for present in [[true, true, true], [false, true, false]] {
+            assert_eq!(
+                Profile::parse(&tables_present(present, Some(1))),
+                Err(IccError::NeedsLut),
+                "{present:?}"
+            );
+        }
+        // And with no `A2B1`, `A2B0` is relative colorimetric's.
+        assert_eq!(
+            Profile::parse(&tables_present([true, false, true], Some(0))),
+            Err(IccError::NeedsLut)
+        );
+
+        // A matrix/TRC and a grey profile: one transform for every intent but
+        // absolute colorimetric, which compiles alike.
+        for bytes in [matrix_profile(), grey(b"XYZ ", 2.2)] {
+            let profile = Profile::parse(&bytes).expect("a profile");
+            let relative =
+                Transform::compile(&profile, Intent::RelativeColorimetric).expect("a transform");
+            for intent in Intent::ALL {
+                assert_eq!(
+                    Transform::compile(&profile, intent).as_ref(),
+                    Some(&relative),
+                    "{intent:?}"
+                );
+            }
+            let transforms = Transforms::compile(profile).expect("a transform");
+            for intent in [Intent::Perceptual, Intent::Saturation] {
+                assert!(
+                    std::ptr::eq(
+                        transforms.get(intent),
+                        transforms.get(Intent::RelativeColorimetric)
+                    ),
+                    "{intent:?} compiled a transform of its own"
+                );
+            }
+            assert_eq!(
+                transforms.get(Intent::AbsoluteColorimetric),
+                &relative,
+                "absolute colorimetric"
+            );
+        }
+    }
+
+    /// A profile whose tag table names `entries` — each a signature and the
+    /// index of the element in `elements` it points at — so two tags can name
+    /// one element, at one offset and with one size.
+    fn build_sharing(
+        space: &[u8; 4],
+        pcs: &[u8; 4],
+        entries: &[([u8; 4], usize)],
+        elements: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let mut header = vec![0u8; 128];
+        header[12..16].copy_from_slice(b"mntr");
+        header[16..20].copy_from_slice(space);
+        header[20..24].copy_from_slice(pcs);
+        header[36..40].copy_from_slice(b"acsp");
+        header[8..12].copy_from_slice(&0x0200_0000u32.to_be_bytes());
+        let start = 132 + entries.len() * 12;
+        let mut offsets = Vec::new();
+        let mut body = Vec::new();
+        for element in elements {
+            offsets.push(start + body.len());
+            body.extend_from_slice(element);
+        }
+        let mut out = header;
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (signature, element) in entries {
+            out.extend_from_slice(signature);
+            out.extend_from_slice(&(offsets[*element] as u32).to_be_bytes());
+            out.extend_from_slice(&(elements[*element].len() as u32).to_be_bytes());
+        }
+        out.extend_from_slice(&body);
+        let size = out.len() as u32;
+        out[0..4].copy_from_slice(&size.to_be_bytes());
+        out
+    }
+
+    /// The tables read since the count was last zeroed, zeroing it.
+    fn tables_read() -> u64 {
+        TABLE_READS.with(|reads| reads.replace(0))
+    }
+
+    /// **Tags sharing an offset are read once.** `A2B0` and `A2B1` naming one
+    /// element and `A2B2` another make two tables: parsing reads relative
+    /// colorimetric's, and no other; perceptual then converts through the
+    /// table already read, saturation reads the second, and nothing is read
+    /// again however often an intent asks. A profile carrying three distinct
+    /// tables parses one of them, so a page that names no intent reads what it
+    /// always read.
+    #[test]
+    fn tags_sharing_an_offset_are_read_once() {
+        let grid = |value: u16| mft2(3, 2, &[[value; 3]; 8]);
+        let bytes = build_sharing(
+            b"RGB ",
+            b"XYZ ",
+            &[(*b"A2B0", 0), (*b"A2B1", 0), (*b"A2B2", 1)],
+            &[grid(9_000), grid(27_000)],
+        );
+        tables_read();
+        let profile = Profile::parse(&bytes).expect("two tables");
+        assert_eq!(
+            tables_read(),
+            1,
+            "parsing reads relative colorimetric's table"
+        );
+        let Model::Lut(tables) = &profile.model else {
+            panic!("expected lookup tables");
+        };
+        assert_eq!(tables.tables.len(), 2, "two elements, two tables");
+        assert_eq!(tables.slots, [Some(0), Some(0), Some(1)]);
+
+        let transforms = Transforms::compile(profile).expect("a transform");
+        assert_eq!(
+            tables_read(),
+            0,
+            "compiling relative colorimetric reads nothing"
+        );
+        let perceptual = pcs_of(transforms.get(Intent::Perceptual), [0.5; 3]);
+        let relative = pcs_of(transforms.get(Intent::RelativeColorimetric), [0.5; 3]);
+        assert_eq!(perceptual, relative, "one element, one table");
+        assert_eq!(perceptual, [9_000; 3]);
+        assert_eq!(
+            tables_read(),
+            0,
+            "perceptual's table is relative's, read already"
+        );
+        assert_eq!(
+            pcs_of(transforms.get(Intent::Saturation), [0.5; 3]),
+            [27_000; 3]
+        );
+        assert_eq!(tables_read(), 1, "saturation reads its own");
+        for _ in 0..3 {
+            for intent in Intent::ALL {
+                let _ = transforms.get(intent).apply(&[0.2, 0.4, 0.6]);
+            }
+        }
+        assert_eq!(tables_read(), 0, "nothing is read twice");
+
+        // Three distinct tables: parsing reads one.
+        let _ = Profile::parse(&three_intents_profile()).expect("three tables");
+        assert_eq!(tables_read(), 1, "a profile parses one table");
     }
 
     // ---- the price of an integer grid --------------------------------------
@@ -2758,7 +3416,8 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
         let mut rows = String::new();
         for (name, bytes) in &profiles {
             let profile = Profile::parse(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-            let transform = Transform::compile(&profile).unwrap_or_else(|| panic!("{name}"));
+            let transform = Transform::compile(&profile, Intent::RelativeColorimetric)
+                .unwrap_or_else(|| panic!("{name}"));
             let inputs = transform.inputs();
             let samples = sweep(inputs);
             let direct: Vec<[u8; 3]> = samples

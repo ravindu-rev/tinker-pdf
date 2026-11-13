@@ -35,7 +35,12 @@ curves, a grid whose axes may each carry their own point count, M curves, a
 matrix and B curves, run in that order although the header lists their
 offsets in the reverse. A grey profile whose connection space is `Lab` rather
 than `XYZ` reads as well: its one curve gives lightness instead of luminance,
-and the two differ by 8.6.5.4's cube root.
+and the two differ by 8.6.5.4's cube root. A profile carrying a table for more
+than one rendering intent keeps each, and compiles one the first time an
+intent selects it, by ICC.1 8.10.2's precedence (`docs/design/icc.md`); every
+conversion the renderer makes takes relative colorimetric, 8.6.5.8's initial
+intent, through `A2B1`, or where the profile carries none, through `A2B0`
+and then `A2B2`.
 
 A profile that contradicts itself — a monitor profile whose data space is
 `LAB` carrying the `rXYZ` columns a matrix applies to linear RGB; one naming a

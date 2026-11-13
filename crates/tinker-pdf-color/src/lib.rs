@@ -67,7 +67,8 @@ pub enum ColorSpace {
         /// The tint transform.
         tint: Box<Function>,
     },
-    /// An ICC space whose profile was read, with the transform it compiled to.
+    /// An ICC space whose profile was read, with the transforms it compiles
+    /// to, one for each rendering intent.
     ///
     /// The profile's own rendering rather than 8.6.5.5's alternate-space
     /// approximation. `Arc` because a transform carries three 4 096-entry
@@ -75,8 +76,8 @@ pub enum ColorSpace {
     /// `cs` operators; compiling it once per resource dictionary and sharing it
     /// is the difference between reading a profile and reading it repeatedly.
     Icc {
-        /// The compiled transform.
-        transform: std::sync::Arc<icc::Transform>,
+        /// The compiled transforms.
+        transforms: std::sync::Arc<icc::Transforms>,
         /// How many components the space takes, which is `/N` and is what
         /// every caller that sizes a buffer asks for.
         components: usize,
@@ -193,12 +194,27 @@ impl ColorSpace {
         }
     }
 
-    /// Converts components to 8-bit sRGB.
+    /// Converts components to 8-bit sRGB, an ICC colour in relative
+    /// colorimetric, 8.6.5.8's initial intent.
     ///
     /// Out-of-range components clamp rather than wrap: a content stream may
     /// name any number, and a wrapped one turns black into white.
     #[must_use]
     pub fn to_rgb(&self, components: &[f64]) -> (u8, u8, u8) {
+        self.to_rgb_in(components, icc::Conversion::default())
+    }
+
+    /// [`ColorSpace::to_rgb`], an ICC colour converted as `conversion` says.
+    ///
+    /// An ICC space converts through its transform for the conversion's
+    /// intent. A space that holds one — an `/Indexed` base, a `/Separation`
+    /// or `/DeviceN` alternate, an uncoloured pattern's underlying space —
+    /// passes the conversion to it; every other space converts as `to_rgb`
+    /// converts it, since no rendering intent changes a device colour or a
+    /// CIE-based space's closed form (`docs/design/icc.md`, "Where each
+    /// conversion takes its intent").
+    #[must_use]
+    pub fn to_rgb_in(&self, components: &[f64], conversion: icc::Conversion) -> (u8, u8, u8) {
         let at = |i: usize| components.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
 
         match self {
@@ -228,13 +244,13 @@ impl ColorSpace {
                 let entry: Vec<f64> = (0..n)
                     .map(|i| lookup.get(start + i).map_or(0.0, |&b| f64::from(b) / 255.0))
                     .collect();
-                base.to_rgb(&entry)
+                base.to_rgb_in(&entry, conversion)
             }
             ColorSpace::Separation {
                 alternate, tint, ..
             } => {
                 let converted = tint.eval(components);
-                alternate.to_rgb(&converted)
+                alternate.to_rgb_in(&converted, conversion)
             }
             ColorSpace::CalGray { white, gamma } => {
                 // 8.6.5.2: A^G scales the white point. `at` clamps to 0..1,
@@ -271,7 +287,9 @@ impl ColorSpace {
             }
             // The profile's own transform, which is what this whole module
             // exists to make possible.
-            ColorSpace::Icc { transform, .. } => transform.apply(components),
+            ColorSpace::Icc { transforms, .. } => {
+                transforms.get(conversion.intent).apply(components)
+            }
             ColorSpace::Approximated { components: n } => match n {
                 1 => ColorSpace::DeviceGray.to_rgb(components),
                 4 => ColorSpace::DeviceCmyk.to_rgb(components),
@@ -283,7 +301,7 @@ impl ColorSpace {
             // operands in the underlying space, and they are the only colour a
             // `PaintType 2` pattern will ever have.
             ColorSpace::Pattern { base } => match base {
-                Some(base) => base.to_rgb(components),
+                Some(base) => base.to_rgb_in(components, conversion),
                 None => (0, 0, 0),
             },
         }
@@ -295,14 +313,26 @@ impl ColorSpace {
     /// buffer of its own.
     #[must_use]
     pub fn to_rgb_with(&self, components: &[f64], scratch: &mut Vec<f64>) -> (u8, u8, u8) {
+        self.to_rgb_with_in(components, scratch, icc::Conversion::default())
+    }
+
+    /// [`ColorSpace::to_rgb_with`], an ICC colour converted as `conversion`
+    /// says, as [`ColorSpace::to_rgb_in`] converts it.
+    #[must_use]
+    pub fn to_rgb_with_in(
+        &self,
+        components: &[f64],
+        scratch: &mut Vec<f64>,
+        conversion: icc::Conversion,
+    ) -> (u8, u8, u8) {
         match self {
             ColorSpace::Separation {
                 alternate, tint, ..
             } => {
                 tint.eval_into(components, scratch);
-                alternate.to_rgb(scratch)
+                alternate.to_rgb_in(scratch, conversion)
             }
-            other => other.to_rgb(components),
+            other => other.to_rgb_in(components, conversion),
         }
     }
 }
@@ -665,6 +695,113 @@ mod tests {
                 ColorSpace::DeviceRgb.to_rgb_with(&[a, 0.5, 1.0 - a], &mut scratch),
                 ColorSpace::DeviceRgb.to_rgb(&[a, 0.5, 1.0 - a])
             );
+        }
+    }
+
+    /// **An ICC space converts in the intent it is asked for**, and so does
+    /// every space that holds one: an `/Indexed` palette over it, a
+    /// `/Separation` alternate through `to_rgb_in` and `to_rgb_with_in`, and
+    /// an uncoloured pattern's underlying space. `to_rgb` is relative
+    /// colorimetric, and the intents part, since the profile carries a table
+    /// of its own for each.
+    #[test]
+    fn an_icc_space_converts_in_the_intent_it_is_asked_for() {
+        let profile =
+            icc::Profile::parse(&icc::tests::three_intents_profile()).expect("three tables");
+        let transforms =
+            std::sync::Arc::new(icc::Transforms::compile(profile).expect("a transform"));
+        let space = ColorSpace::Icc {
+            transforms: std::sync::Arc::clone(&transforms),
+            components: 3,
+        };
+        let in_intent = |intent| icc::Conversion { intent };
+        let colours = [[0.0, 0.25, 1.0], [0.5, 0.5, 0.5], [0.75, 0.0, 0.25]];
+        for components in colours {
+            assert_eq!(
+                space.to_rgb(&components),
+                space.to_rgb_in(&components, icc::Conversion::default()),
+                "{components:?}"
+            );
+            assert_eq!(
+                space.to_rgb(&components),
+                transforms
+                    .get(icc::Intent::RelativeColorimetric)
+                    .apply(&components)
+            );
+            for intent in icc::Intent::ALL {
+                assert_eq!(
+                    space.to_rgb_in(&components, in_intent(intent)),
+                    transforms.get(intent).apply(&components),
+                    "{intent:?} at {components:?}"
+                );
+            }
+        }
+        assert!(
+            colours.iter().any(|c| {
+                space.to_rgb_in(c, in_intent(icc::Intent::Perceptual))
+                    != space.to_rgb_in(c, in_intent(icc::Intent::Saturation))
+            }),
+            "the intents convert alike"
+        );
+
+        // The spaces that hold one pass the intent to it.
+        let palette: Vec<u8> = colours
+            .iter()
+            .flat_map(|c| c.map(|v| (v * 255.0).round() as u8))
+            .collect();
+        let indexed = ColorSpace::Indexed {
+            base: Box::new(space.clone()),
+            lookup: palette,
+            high: 2,
+        };
+        let separation = ColorSpace::Separation {
+            components: 3,
+            alternate: Box::new(space.clone()),
+            tint: Box::new(separation_tint()),
+        };
+        let pattern = ColorSpace::Pattern {
+            base: Some(Box::new(space.clone())),
+        };
+        let mut scratch = Vec::new();
+        for intent in icc::Intent::ALL {
+            let conversion = in_intent(intent);
+            for (index, components) in colours.iter().enumerate() {
+                let entry = components.map(|v| f64::from((v * 255.0).round() as u8) / 255.0);
+                assert_eq!(
+                    indexed.to_rgb_in(&[index as f64], conversion),
+                    space.to_rgb_in(&entry, conversion),
+                    "indexed, {intent:?}"
+                );
+                let through_tint = space.to_rgb_in(&separation_tint().eval(components), conversion);
+                assert_eq!(
+                    separation.to_rgb_in(components, conversion),
+                    through_tint,
+                    "separation, {intent:?}"
+                );
+                assert_eq!(
+                    separation.to_rgb_with_in(components, &mut scratch, conversion),
+                    through_tint,
+                    "separation through a kept buffer, {intent:?}"
+                );
+                assert_eq!(
+                    pattern.to_rgb_in(components, conversion),
+                    space.to_rgb_in(components, conversion),
+                    "pattern, {intent:?}"
+                );
+            }
+        }
+    }
+
+    /// The tint transform of
+    /// [`an_icc_space_converts_in_the_intent_it_is_asked_for`]'s separation:
+    /// its first ink into the profile's three components, the first as it is,
+    /// the second over half the range and the third held at a half.
+    fn separation_tint() -> Function {
+        Function::Exponential {
+            domain: (0.0, 1.0),
+            c0: vec![0.0, 0.25, 0.5],
+            c1: vec![1.0, 0.75, 0.5],
+            n: 1.0,
         }
     }
 

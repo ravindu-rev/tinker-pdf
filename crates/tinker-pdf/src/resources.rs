@@ -399,7 +399,7 @@ type FunctionCache = HashMap<(ObjRef, Option<u32>), Option<Arc<Function>>>;
 ///
 /// The `None` is cached as deliberately as the `Some`: a profile that will
 /// not parse must be refused once rather than re-read at every `cs`.
-type IccCache = HashMap<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transform>>>;
+type IccCache = HashMap<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transforms>>>;
 
 /// Which glyph of an embedded program a code selects, and on whose authority.
 ///
@@ -1600,20 +1600,21 @@ impl PageResources {
         }
     }
 
-    /// The compiled transform for an `ICCBased` profile stream, or `None`
-    /// where the profile cannot be made into one.
+    /// The compiled transforms for an `ICCBased` profile stream, one for each
+    /// rendering intent, or `None` where the profile cannot be made into one.
     ///
-    /// `None` covers three different things, and deliberately does not
-    /// distinguish them here: a stream that will not decode, a profile
-    /// `Profile::parse` refuses by name, and a profile whose model has no
-    /// closed form yet — the `A2B*` lookup tables, which are 140 of the
-    /// corpus's 2 750. All three land on 8.6.5.5's alternate-space reading,
-    /// which is what the caller was doing before profiles were read at all, so
-    /// none of them costs a page anything it had.
+    /// `None` covers two different things, and deliberately does not
+    /// distinguish them here: a stream that will not decode, and a profile
+    /// `Profile::parse` refuses by name. Both land on 8.6.5.5's
+    /// alternate-space reading, which is what the caller was doing before
+    /// profiles were read at all, so neither costs a page anything it had.
+    /// Relative colorimetric's transform is compiled here; another intent's
+    /// is compiled the first time a conversion asks for it, and kept with the
+    /// rest (`docs/design/icc.md`, "What compiling per intent costs").
     fn icc_transform(
         &self,
         reference: tinker_pdf_cos::ObjRef,
-    ) -> Option<Arc<tinker_pdf_color::icc::Transform>> {
+    ) -> Option<Arc<tinker_pdf_color::icc::Transforms>> {
         let key = (reference.num, reference.gen);
         if let Ok(cache) = self.caches.icc.lock() {
             if let Some(found) = cache.get(&key) {
@@ -1626,8 +1627,7 @@ impl PageResources {
             .decoded(reference)
             .ok()
             .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
-            .as_ref()
-            .and_then(tinker_pdf_color::icc::Transform::compile)
+            .and_then(tinker_pdf_color::icc::Transforms::compile)
             .map(Arc::new);
         if let Ok(mut cache) = self.caches.icc.lock() {
             cache.insert(key, compiled.clone());
@@ -2166,9 +2166,9 @@ impl PageResources {
                 // number: a page naming the same space at a thousand `cs`
                 // operators compiles it once.
                 if let Some(reference) = reference {
-                    if let Some(transform) = self.icc_transform(reference) {
+                    if let Some(transforms) = self.icc_transform(reference) {
                         return Some(ColorSpace::Icc {
-                            transform,
+                            transforms,
                             components,
                         });
                     }

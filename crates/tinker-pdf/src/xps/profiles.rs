@@ -231,7 +231,9 @@ impl Profiles {
         let profile = bytes.to_vec();
         let transform = icc::Profile::parse(bytes)
             .ok()
-            .and_then(|profile| icc::Transform::compile(&profile))
+            .and_then(|profile| {
+                icc::Transform::compile(&profile, icc::Intent::RelativeColorimetric)
+            })
             .filter(|transform| transform.inputs() == usize::from(channels));
 
         let resource = format!("CS{}", self.next).into_bytes();
@@ -276,7 +278,7 @@ fn device_n(
     }
     let transform = icc::Profile::parse(bytes)
         .ok()
-        .and_then(|profile| icc::Transform::compile(&profile))
+        .and_then(|profile| icc::Transform::compile(&profile, icc::Intent::RelativeColorimetric))
         .filter(|transform| transform.inputs() == usize::from(channels))
         .ok_or(XpsElementDefect::ColourProfileChannels)?;
     let n = usize::from(channels);
