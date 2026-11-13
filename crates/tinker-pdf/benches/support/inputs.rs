@@ -390,13 +390,15 @@ fn fixed<const B: usize>(part: &[u8], what: &str) -> [u8; B] {
 
 /// Every pixel format the facade has, which a stored bitmap names by its
 /// `Debug` name.
-const FORMATS: [PixelFormat; 6] = [
+const FORMATS: [PixelFormat; 8] = [
     PixelFormat::Gray8,
     PixelFormat::GrayA8,
     PixelFormat::Rgb8,
     PixelFormat::Rgba8,
     PixelFormat::CmykA8,
     PixelFormat::LabA8,
+    PixelFormat::Bgr8,
+    PixelFormat::Bgra8,
 ];
 
 /// A bitmap of `data`, with no warnings and no statistics, as a caller

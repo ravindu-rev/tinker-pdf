@@ -241,9 +241,15 @@ hard. `Mask::uniform` carries a soft mask's value outside the region its
 group covered, where the answer is the luminosity of `/BC` alone (11.6.5.2)
 — which is not zero unless `/BC` is black.
 
-**Compositing.** A `Canvas` stores pixels in one of six formats (`Gray8`,
-`GrayA8`, `Rgb8`, `Rgba8`, `CmykA8`, `LabA8`) and composites in integer
-arithmetic throughout. `CmykA8` is the one **subtractive** format — its components are
+**Compositing.** A `Canvas` stores pixels in one of eight formats (`Gray8`,
+`GrayA8`, `Rgb8`, `Rgba8`, `Bgr8`, `Bgra8`, `CmykA8`, `LabA8`) and composites in integer
+arithmetic throughout. `Bgr8` and `Bgra8` are `Rgb8`'s and `Rgba8`'s light
+blue first, the orders a host's surfaces store: a page composites red first
+and is reordered once at the end, and a canvas made in a blue-first order
+composites right too — the separable modes are per channel, and `blend`
+hands the non-separable ones, which reason about red, green and blue, the
+channels in that order (`a_bgr_canvas_composites_as_the_rgb_canvas_reordered`,
+every mode). `CmykA8` is the one **subtractive** format — its components are
 quantities of ink — and it exists for transparency groups that declare
 `/DeviceCMYK`, whose blends the specification says happen over ink rather than
 over light ([rendering](rendering.md)). A page comes back in it only when a

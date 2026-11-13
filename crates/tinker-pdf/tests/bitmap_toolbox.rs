@@ -2,7 +2,7 @@
 //!
 //! Every reviewed raster golden in `tests/goldens/` and `tests/goldens/surfaces/`
 //! is read through `golden_support`'s PPM reader — the goldens are never
-//! rewritten here (H-133) — and laid out in each of the six pixel formats,
+//! rewritten here (H-133) — and laid out in each of the eight pixel formats,
 //! and, where the format has an alpha, with an alpha plane this file lays on,
 //! straight and premultiplied. Each map and each reduction runs over every one
 //! of those, and every byte and every answer is held to the closed form the
@@ -22,13 +22,15 @@ use std::path::Path;
 use tinker_pdf::{Bitmap, Color, PixelFormat};
 use tinker_pdf_raster::canvas::{cmyk_to_rgb, lab_bytes, lab_to_rgb, rgb_to_cmyk};
 
-const FORMATS: [PixelFormat; 6] = [
+const FORMATS: [PixelFormat; 8] = [
     PixelFormat::Gray8,
     PixelFormat::GrayA8,
     PixelFormat::Rgb8,
     PixelFormat::Rgba8,
     PixelFormat::CmykA8,
     PixelFormat::LabA8,
+    PixelFormat::Bgr8,
+    PixelFormat::Bgra8,
 ];
 
 // ---- the inputs -------------------------------------------------------------------
@@ -77,7 +79,11 @@ fn alpha(x: u32, y: u32) -> u8 {
 fn colours(format: PixelFormat) -> usize {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => 1,
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::LabA8 => 3,
+        PixelFormat::Rgb8
+        | PixelFormat::Rgba8
+        | PixelFormat::Bgr8
+        | PixelFormat::Bgra8
+        | PixelFormat::LabA8 => 3,
         PixelFormat::CmykA8 => 4,
     }
 }
@@ -95,10 +101,11 @@ fn straighten(c: u8, a: u8) -> u8 {
     ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8
 }
 
-/// A golden laid out in `format`: a grey of its luma, its RGB, an ink of its
-/// complement over a black ink that runs across it so rich and plain inks
-/// both occur, its RGB bytes read as Lab bytes — any bytes are a Lab bitmap —
-/// and the alpha plane where the format has one, premultiplied when asked.
+/// A golden laid out in `format`: a grey of its luma, its RGB, red first or
+/// blue first, an ink of its complement over a black ink that runs across it
+/// so rich and plain inks both occur, its RGB bytes read as Lab bytes — any
+/// bytes are a Lab bitmap — and the alpha plane where the format has one,
+/// premultiplied when asked.
 fn variant(golden: &Bitmap, format: PixelFormat, premultiplied: bool) -> Bitmap {
     let (width, height) = (golden.width, golden.height);
     let mut data = Vec::new();
@@ -112,6 +119,8 @@ fn variant(golden: &Bitmap, format: PixelFormat, premultiplied: bool) -> Bitmap 
                 PixelFormat::GrayA8 => vec![luma(r, g, b), a],
                 PixelFormat::Rgb8 => vec![r, g, b],
                 PixelFormat::Rgba8 | PixelFormat::LabA8 => vec![r, g, b, a],
+                PixelFormat::Bgr8 => vec![b, g, r],
+                PixelFormat::Bgra8 => vec![b, g, r, a],
                 PixelFormat::CmykA8 => {
                     vec![255 - r, 255 - g, 255 - b, ((x + 3 * y) % 256) as u8, a]
                 }
@@ -157,6 +166,7 @@ fn srgb(format: PixelFormat, px: &[u8]) -> (u8, u8, u8) {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => (px[0], px[0], px[0]),
         PixelFormat::Rgb8 | PixelFormat::Rgba8 => (px[0], px[1], px[2]),
+        PixelFormat::Bgr8 | PixelFormat::Bgra8 => (px[2], px[1], px[0]),
         PixelFormat::CmykA8 => cmyk_to_rgb(px[0], px[1], px[2], px[3]),
         PixelFormat::LabA8 => lab_to_rgb(px[0], px[1], px[2]),
     }
@@ -167,6 +177,7 @@ fn write(format: PixelFormat, px: &mut [u8], (r, g, b): (u8, u8, u8)) {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => px[0] = luma(r, g, b),
         PixelFormat::Rgb8 | PixelFormat::Rgba8 => px[..3].copy_from_slice(&[r, g, b]),
+        PixelFormat::Bgr8 | PixelFormat::Bgra8 => px[..3].copy_from_slice(&[b, g, r]),
         PixelFormat::CmykA8 => {
             let (c, m, y, k) = rgb_to_cmyk(r, g, b);
             px[..4].copy_from_slice(&[c, m, y, k]);
@@ -243,7 +254,7 @@ fn gamma_pixel(table: &[u8; 256], format: PixelFormat, px: &mut [u8]) {
     let t = |v: u8| table[usize::from(v)];
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 | PixelFormat::LabA8 => px[0] = t(px[0]),
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 => {
+        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Bgr8 | PixelFormat::Bgra8 => {
             for v in &mut px[..3] {
                 *v = t(*v);
             }
@@ -267,7 +278,11 @@ fn invert_pixel(format: PixelFormat, px: &mut [u8]) {
 fn invert_luminance_pixel(format: PixelFormat, px: &mut [u8]) {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 | PixelFormat::LabA8 => px[0] = 255 - px[0],
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::CmykA8 => {
+        PixelFormat::Rgb8
+        | PixelFormat::Rgba8
+        | PixelFormat::Bgr8
+        | PixelFormat::Bgra8
+        | PixelFormat::CmykA8 => {
             let (r, g, b) = srgb(format, px);
             let y = i32::from(luma(r, g, b));
             let turn = |c: u8| (i32::from(c) + 255 - 2 * y).clamp(0, 255) as u8;
@@ -302,7 +317,11 @@ fn tint_pixel(format: PixelFormat, px: &mut [u8]) {
 fn grayscale_pixel(format: PixelFormat, px: &mut [u8]) {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => {}
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::CmykA8 => {
+        PixelFormat::Rgb8
+        | PixelFormat::Rgba8
+        | PixelFormat::Bgr8
+        | PixelFormat::Bgra8
+        | PixelFormat::CmykA8 => {
             let (r, g, b) = srgb(format, px);
             let y = luma(r, g, b);
             write(format, px, (y, y, y));
@@ -476,6 +495,10 @@ fn bilevel(golden: &Bitmap, format: PixelFormat) -> Bitmap {
             (PixelFormat::Rgb8, false) => vec![255, 255, 255],
             (PixelFormat::Rgba8, true) => vec![0, 0, 0, 255],
             (PixelFormat::Rgba8, false) => vec![255, 255, 255, 255],
+            (PixelFormat::Bgr8, true) => vec![0, 0, 0],
+            (PixelFormat::Bgr8, false) => vec![255, 255, 255],
+            (PixelFormat::Bgra8, true) => vec![0, 0, 0, 255],
+            (PixelFormat::Bgra8, false) => vec![255, 255, 255, 255],
             (PixelFormat::CmykA8, true) if y % 2 == 1 => vec![255, 255, 255, 255, 255],
             (PixelFormat::CmykA8, true) => vec![0, 0, 0, 255, 255],
             (PixelFormat::CmykA8, false) => vec![0, 0, 0, 0, 255],
@@ -719,6 +742,7 @@ fn the_ends_of_every_map_are_where_the_design_puts_them() {
         PixelFormat::Rgba8,
         PixelFormat::CmykA8,
         PixelFormat::LabA8,
+        PixelFormat::Bgra8,
     ] {
         let nothing = vec![0u8; format.components()];
         for (map, apply, _) in &maps() {

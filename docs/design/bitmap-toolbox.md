@@ -19,9 +19,9 @@ test computes byte for byte, and places every one of them in
   test, each an answer about the whole bitmap.
 - **Scale and subsample**: a bitmap resized to any width and height, and
   sampled by whole factors.
-- **Conversion** between the pixel formats a `Bitmap` can hold: the six today
-  (`Gray8`, `GrayA8`, `Rgb8`, `Rgba8`, `CmykA8`, `LabA8`) and the two RC-06.2
-  adds (`Bgr8`, `Bgra8`), every ordered pair of the eight.
+- **Conversion** between the eight pixel formats a `Bitmap` can hold
+  (`Gray8`, `GrayA8`, `Rgb8`, `Rgba8`, `CmykA8`, `LabA8`, `Bgr8`, `Bgra8`),
+  every ordered pair of them.
 - **Forced colours**, with and without fill-to-stroke: a render option under
   which a page is drawn in two colours by the coverage of what it paints.
 - What every one of them does with **alpha**, with **premultiplied** colour,
@@ -253,7 +253,7 @@ a tile of a forced-colour page is the page's subregion byte for byte.
    `each_map_is_its_closed_form_over_a_committed_render` and
    `each_count_and_test_is_its_closed_form_over_a_committed_render`: over every
    reviewed golden in `tests/goldens/`, read through `golden_support`'s PPM
-   reader, in every one of the six formats, and over each with an alpha plane
+   reader, in every one of the eight formats, and over each with an alpha plane
    the test lays on, straight and premultiplied, every byte and answer equals
    the closed form computed in the test — gamma at exponents of one half, one
    and two, whose powers the test computes exactly in integers, `round(sqrt(255

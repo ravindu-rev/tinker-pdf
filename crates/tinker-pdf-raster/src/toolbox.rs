@@ -69,7 +69,11 @@ impl Layout {
 fn colours(format: PixelFormat) -> usize {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => 1,
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::LabA8 => 3,
+        PixelFormat::Rgb8
+        | PixelFormat::Rgba8
+        | PixelFormat::Bgr8
+        | PixelFormat::Bgra8
+        | PixelFormat::LabA8 => 3,
         PixelFormat::CmykA8 => 4,
     }
 }
@@ -160,7 +164,8 @@ fn map_straight(layout: &Layout, data: &mut [u8], mut f: impl FnMut(&mut [u8])) 
 
 /// A pixel's colour as sRGB, and its alpha — 255 for a format with none —
 /// decoded exactly as [`crate::Canvas::pixel`] decodes one: a grey replicated,
-/// RGB as it is, ink through 8.6.4.4's relation, Lab through `tinker-pdf-color`.
+/// RGB as it is, a blue-first pixel read in its order, ink through 8.6.4.4's
+/// relation, Lab through `tinker-pdf-color`.
 #[must_use]
 pub fn decode(format: PixelFormat, px: &[u8]) -> Option<Color> {
     Some(match format {
@@ -182,6 +187,13 @@ pub fn decode(format: PixelFormat, px: &[u8]) -> Option<Color> {
             r: *px.first()?,
             g: *px.get(1)?,
             b: *px.get(2)?,
+            a: *px.get(3)?,
+        },
+        PixelFormat::Bgr8 => Color::rgb(*px.get(2)?, *px.get(1)?, *px.first()?),
+        PixelFormat::Bgra8 => Color {
+            r: *px.get(2)?,
+            g: *px.get(1)?,
+            b: *px.first()?,
             a: *px.get(3)?,
         },
         PixelFormat::CmykA8 => {
@@ -206,13 +218,15 @@ pub fn decode(format: PixelFormat, px: &[u8]) -> Option<Color> {
 }
 
 /// A colour's components in a format's bytes, its alpha left out, exactly as
-/// a canvas of that format is filled with it: grey by [`Color::luma`], ink by
-/// the maximum-undercolour-removal inverse, Lab by [`lab_bytes`].
+/// a canvas of that format is filled with it: grey by [`Color::luma`], a
+/// blue-first format blue first, ink by the maximum-undercolour-removal
+/// inverse, Lab by [`lab_bytes`].
 #[must_use]
 pub fn encode(format: PixelFormat, color: Color) -> ([u8; 4], usize) {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => ([color.luma(), 0, 0, 0], 1),
         PixelFormat::Rgb8 | PixelFormat::Rgba8 => ([color.r, color.g, color.b, 0], 3),
+        PixelFormat::Bgr8 | PixelFormat::Bgra8 => ([color.b, color.g, color.r, 0], 3),
         PixelFormat::CmykA8 => {
             let (c, m, y, k) = rgb_to_cmyk(color.r, color.g, color.b);
             ([c, m, y, k], 4)
@@ -275,7 +289,7 @@ pub fn gamma(layout: &Layout, data: &mut [u8], gamma: f64) -> bool {
                 *v = tone(*v);
             }
         }
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 => {
+        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Bgr8 | PixelFormat::Bgra8 => {
             for v in pixel.iter_mut().take(3) {
                 *v = tone(*v);
             }
@@ -317,7 +331,11 @@ pub fn invert_luminance(layout: &Layout, data: &mut [u8]) -> bool {
                 *v = 255 - *v;
             }
         }
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::CmykA8 => {
+        PixelFormat::Rgb8
+        | PixelFormat::Rgba8
+        | PixelFormat::Bgr8
+        | PixelFormat::Bgra8
+        | PixelFormat::CmykA8 => {
             let Some(color) = decode(format, pixel) else {
                 return;
             };
@@ -364,7 +382,11 @@ pub fn grayscale(layout: &Layout, data: &mut [u8]) -> bool {
     let format = layout.format;
     map_straight(layout, data, |pixel| match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => {}
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::CmykA8 => {
+        PixelFormat::Rgb8
+        | PixelFormat::Rgba8
+        | PixelFormat::Bgr8
+        | PixelFormat::Bgra8
+        | PixelFormat::CmykA8 => {
             let y = lightness(format, pixel);
             write_colour(format, pixel, Color::rgb(y, y, y));
         }
@@ -443,13 +465,15 @@ mod tests {
     use super::*;
     use crate::canvas::Canvas;
 
-    const FORMATS: [PixelFormat; 6] = [
+    const FORMATS: [PixelFormat; 8] = [
         PixelFormat::Gray8,
         PixelFormat::GrayA8,
         PixelFormat::Rgb8,
         PixelFormat::Rgba8,
         PixelFormat::CmykA8,
         PixelFormat::LabA8,
+        PixelFormat::Bgr8,
+        PixelFormat::Bgra8,
     ];
 
     /// Colours over the cube: every corner and a lattice through it, at

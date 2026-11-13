@@ -927,8 +927,9 @@ impl Bitmap {
     ///
     /// PNG has five colour types — 0 grey, 2 truecolour, 3 indexed, 4 grey
     /// with alpha, 6 truecolour with alpha — and **no CMYK and no Lab**. Four
-    /// of the six [`PixelFormat`]s are one of those layouts already and are
-    /// written byte for byte. The other two are converted here, and the
+    /// of the eight [`PixelFormat`]s are one of those layouts already and are
+    /// written byte for byte, and two are those layouts blue first, written
+    /// red first as PNG stores them. The other two are converted here, and the
     /// conversion is the point rather than a detail:
     ///
     /// | `PixelFormat` | Colour type | What happens |
@@ -937,6 +938,8 @@ impl Bitmap {
     /// | `Rgb8` | 2 | the bytes, unchanged |
     /// | `GrayA8` | 4 | the bytes, unchanged |
     /// | `Rgba8` | 6 | the bytes, unchanged |
+    /// | `Bgr8` | 2 | reordered red first: the `Rgb8` render's file |
+    /// | `Bgra8` | 6 | reordered red first, alpha kept: the `Rgba8` render's file |
     /// | `CmykA8` | 6 | 8.6.4.4's device relation, ink to light; alpha kept |
     /// | `LabA8` | 6 | `L*a*b*` decoded back to sRGB; alpha kept |
     ///
@@ -949,7 +952,7 @@ impl Bitmap {
     /// *and* sets [`RenderOptions::allow_cmyk`]. It is constructible besides —
     /// the fields are public, and a transparency group compositing over ink
     /// (11.6.6) is a real buffer of this shape — so this method has to be
-    /// total over all six, and writing four components under colour type 6
+    /// total over all eight, and writing four components under colour type 6
     /// would put cyan, magenta and yellow into a file labelled RGB. An ink page
     /// written here is the light it stands for, byte for byte what the same
     /// render without `allow_cmyk` would have returned.
@@ -986,9 +989,9 @@ impl Bitmap {
     /// buffers sized from the image, and `png_peak`, the most held at once
     /// with the file. A bitmap in one of the four layouts PNG has is written
     /// with none of the first, its rows streamed into the file; a
-    /// premultiplied one holds its straightened copy, and a `CmykA8` or
-    /// `LabA8` one its RGBA copy. Beside `None`, nothing was written and the
-    /// counts are zero.
+    /// premultiplied one holds its straightened copy, a `Bgr8` or `Bgra8` one
+    /// its copy reordered red first, and a `CmykA8` or `LabA8` one its RGBA
+    /// copy. Beside `None`, nothing was written and the counts are zero.
     #[must_use]
     pub fn to_png_counted(&self) -> (Option<Vec<u8>>, Stats) {
         let work = stats::begin();
@@ -1025,6 +1028,23 @@ impl Bitmap {
             PixelFormat::GrayA8 => (direct(PngColour::GreyAlpha), copies),
             PixelFormat::Rgb8 => (direct(PngColour::Rgb), copies),
             PixelFormat::Rgba8 => (direct(PngColour::Rgba), copies),
+            // Light in another order: PNG's is red first, so a copy reordered.
+            PixelFormat::Bgr8 | PixelFormat::Bgra8 => {
+                converted = self.red_first()?;
+                let colour = if self.format.has_alpha() {
+                    PngColour::Rgba
+                } else {
+                    PngColour::Rgb
+                };
+                let source = PngSource {
+                    width: self.width,
+                    height: self.height,
+                    colour,
+                    stride: self.width as usize * self.format.components(),
+                    data: &converted,
+                };
+                (source, copies + converted.capacity())
+            }
             PixelFormat::CmykA8 | PixelFormat::LabA8 => {
                 converted = self.to_rgba()?;
                 let source = PngSource {
@@ -1114,6 +1134,30 @@ impl Bitmap {
             premultiplied: false,
             stats: None,
         })
+    }
+
+    /// A blue-first bitmap's rows packed red first, its alpha kept where it
+    /// was: what PNG's colour types 2 and 6 store.
+    ///
+    /// `None` when the buffer is shorter than the rows it promises, the same
+    /// condition [`Bitmap::to_png`] answers `None` for.
+    fn red_first(&self) -> Option<Vec<u8>> {
+        let components = self.format.components();
+        let row_bytes = (self.width as usize).checked_mul(components)?;
+        let mut out = Vec::with_capacity(row_bytes.checked_mul(self.height as usize)?);
+        for y in 0..self.height as usize {
+            let at = y.checked_mul(self.stride)?;
+            let row = self.data.get(at..at.checked_add(row_bytes)?)?;
+            for pixel in row.chunks_exact(components) {
+                let (Some(b), Some(g), Some(r)) = (pixel.first(), pixel.get(1), pixel.get(2))
+                else {
+                    return None;
+                };
+                out.extend_from_slice(&[*r, *g, *b]);
+                out.extend_from_slice(pixel.get(3..).unwrap_or_default());
+            }
+        }
+        Some(out)
     }
 
     /// The two formats PNG cannot carry, as straight RGBA.
@@ -2788,9 +2832,11 @@ impl Page {
         // is composited and then converted to the output device's space, which
         // is exactly those two steps.
         let page_space = resources.page_group_space(&self.inner);
+        // A blue-first order is an output order: the page composites red
+        // first and is reordered by the `extract` below.
         let canvas_format = page_space
             .map(tinker_pdf_render::group_format)
-            .unwrap_or(options.format);
+            .unwrap_or_else(|| tinker_pdf_render::canvas_format(options.format));
         // What the caller is handed, decided before the canvas exists: a page
         // may start with nothing on it only if the format it comes back in can
         // say so. A transparent canvas converted to `Rgb8` at the end would

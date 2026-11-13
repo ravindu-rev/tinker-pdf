@@ -1513,6 +1513,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
             PixelFormat::CmykA8 => PixelFormat::CmykA8,
             PixelFormat::LabA8 => PixelFormat::LabA8,
+            // A page never composites in a blue-first order (`canvas_format`),
+            // but a caller handing this renderer such a canvas gets buffers in
+            // its order, which the canvas composites right.
+            PixelFormat::Bgr8 | PixelFormat::Bgra8 => PixelFormat::Bgra8,
         }
     }
 
@@ -4422,6 +4426,9 @@ pub fn group_format(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
 /// ink, and it is a second, explicit field rather than a reading of this one,
 /// so that a caller has to say they know the bytes are ink.
 ///
+/// `Bgr8` and `Bgra8` store light, blue first, and come back as asked; they
+/// are composited red first ([`canvas_format`]) and reordered at the end.
+///
 /// *`LabA8` was let through until September 2026*, while its own documentation
 /// and this function's both said a page never came back in it: the `match`
 /// named `CmykA8` alone, so `format: LabA8` handed a caller four bytes of
@@ -4431,6 +4438,29 @@ pub fn page_format(format: PixelFormat) -> PixelFormat {
     match format {
         PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
         other => other,
+    }
+}
+
+/// The format a page asked for in `format` composites in.
+///
+/// The blue-first orders are **output orders**: a page asked for in `Bgr8` or
+/// `Bgra8` composites in `Rgb8` or `Rgba8` and is reordered once, at the end,
+/// by `Canvas::extract` (`docs/design/output-pixel-models.md`). So every
+/// buffer a render opens — a group's, a soft mask's, a tiling cell's, a
+/// mesh's, an image run's — keeps the formats it has, and nothing in the
+/// renderer meets a second channel order. Every other format composites as
+/// itself, as it always has.
+#[must_use]
+pub fn canvas_format(format: PixelFormat) -> PixelFormat {
+    match format {
+        PixelFormat::Bgr8 => PixelFormat::Rgb8,
+        PixelFormat::Bgra8 => PixelFormat::Rgba8,
+        PixelFormat::Gray8
+        | PixelFormat::GrayA8
+        | PixelFormat::Rgb8
+        | PixelFormat::Rgba8
+        | PixelFormat::CmykA8
+        | PixelFormat::LabA8 => format,
     }
 }
 
@@ -4451,15 +4481,57 @@ mod tests {
             PixelFormat::Rgba8,
             PixelFormat::CmykA8,
             PixelFormat::LabA8,
+            PixelFormat::Bgr8,
+            PixelFormat::Bgra8,
         ] {
+            // The blue-first orders store light, in another order: a page
+            // comes back in them as asked.
             let expected = match format {
                 PixelFormat::Gray8
                 | PixelFormat::GrayA8
                 | PixelFormat::Rgb8
-                | PixelFormat::Rgba8 => format,
+                | PixelFormat::Rgba8
+                | PixelFormat::Bgr8
+                | PixelFormat::Bgra8 => format,
                 PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
             };
             assert_eq!(page_format(format), expected, "{format:?}");
+        }
+    }
+
+    /// **A blue-first request composites red-first**, and every other
+    /// format composites as itself — exhaustive for the reason the test above
+    /// is: a format added to the rasterizer does not compile here until it is
+    /// placed. The composite format stores the same light as the asked one,
+    /// with as many components and alpha alike, so the one reorder at the end
+    /// is all that parts them.
+    #[test]
+    fn a_blue_first_request_composites_red_first() {
+        for format in [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::CmykA8,
+            PixelFormat::LabA8,
+            PixelFormat::Bgr8,
+            PixelFormat::Bgra8,
+        ] {
+            let expected = match format {
+                PixelFormat::Bgr8 => PixelFormat::Rgb8,
+                PixelFormat::Bgra8 => PixelFormat::Rgba8,
+                PixelFormat::Gray8
+                | PixelFormat::GrayA8
+                | PixelFormat::Rgb8
+                | PixelFormat::Rgba8
+                | PixelFormat::CmykA8
+                | PixelFormat::LabA8 => format,
+            };
+            let composited = canvas_format(format);
+            assert_eq!(composited, expected, "{format:?}");
+            assert!(!composited.is_blue_first(), "{format:?}");
+            assert_eq!(composited.components(), format.components(), "{format:?}");
+            assert_eq!(composited.has_alpha(), format.has_alpha(), "{format:?}");
         }
     }
 

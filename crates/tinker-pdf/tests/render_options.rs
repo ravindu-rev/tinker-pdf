@@ -633,6 +633,102 @@ fn the_default_is_unchanged() {
     }
 }
 
+// ---- the blue-first output orders --------------------------------------------
+
+/// `pixels`, `from` components a pixel, as `to` components blue first: red
+/// and blue exchanged, alpha kept when `to` has room for it and dropped when
+/// it has not.
+fn blue_first(pixels: &[u8], from: usize, to: usize) -> Vec<u8> {
+    pixels
+        .chunks_exact(from)
+        .flat_map(|pixel| {
+            let mut out = vec![pixel[2], pixel[1], pixel[0]];
+            out.extend_from_slice(&pixel[3..to]);
+            out
+        })
+        .collect()
+}
+
+/// **`Bgr8` and `Bgra8` are the `Rgba8` render reordered**, byte for byte:
+/// on the blend grid — twelve modes, four of them non-separable, whose
+/// formulas see the channel order — and on a text page whose grey text and
+/// translucent shape put partial pixels everywhere, with `transparent` and
+/// `premultiplied` each on and off. `Bgra8` is the `Rgba8` render under the
+/// same options with red and blue exchanged; `Bgr8` has no alpha, so like
+/// `Rgb8` it is on white whatever `transparent` says, and it is the opaque
+/// `Rgba8` render reordered with its alpha dropped. `to_png` of each writes the
+/// `Rgb8` or `Rgba8` render's file, and a display list's render is the page's.
+#[test]
+fn bgr_and_bgra_are_the_rgba8_render_reordered() {
+    for (name, page) in [
+        ("blend grid", blend_grid_page()),
+        ("text page", layer_page()),
+    ] {
+        let doc = Document::open(page).expect("the page opens");
+        let page = doc.page(0).expect("a page");
+        let list = page.display_list();
+        for transparent in [false, true] {
+            for premultiplied in [false, true] {
+                let options = |format: PixelFormat| RenderOptions {
+                    format,
+                    transparent,
+                    premultiplied,
+                    ..RenderOptions::default()
+                };
+                let what =
+                    format!("{name}, transparent {transparent}, premultiplied {premultiplied}");
+                let rgba = page.render(&options(PixelFormat::Rgba8));
+                let opaque = page.render(&RenderOptions {
+                    format: PixelFormat::Rgba8,
+                    ..RenderOptions::default()
+                });
+                let rgb = page.render(&options(PixelFormat::Rgb8));
+
+                let bgra = page.render(&options(PixelFormat::Bgra8));
+                assert_eq!(bgra.format, PixelFormat::Bgra8, "{what}");
+                assert_eq!(
+                    (bgra.width, bgra.height),
+                    (rgba.width, rgba.height),
+                    "{what}"
+                );
+                assert_eq!(bgra.premultiplied, rgba.premultiplied, "{what}");
+                assert_eq!(bgra.data, blue_first(&rgba.data, 4, 4), "{what}: Bgra8");
+                assert_eq!(bgra.to_png(), rgba.to_png(), "{what}: Bgra8's file");
+
+                let bgr = page.render(&options(PixelFormat::Bgr8));
+                assert_eq!(bgr.format, PixelFormat::Bgr8, "{what}");
+                assert!(
+                    !bgr.premultiplied,
+                    "{what}: Bgr8 has no alpha to multiply by"
+                );
+                assert_eq!(bgr.data, blue_first(&opaque.data, 4, 3), "{what}: Bgr8");
+                assert_eq!(
+                    bgr.data,
+                    blue_first(&rgb.data, 3, 3),
+                    "{what}: Bgr8 against Rgb8"
+                );
+                assert_eq!(bgr.to_png(), rgb.to_png(), "{what}: Bgr8's file");
+
+                for format in [PixelFormat::Bgr8, PixelFormat::Bgra8] {
+                    assert_eq!(
+                        list.render(&options(format)).data,
+                        page.render(&options(format)).data,
+                        "{what}: a display list's {format:?} is the page's"
+                    );
+                }
+            }
+        }
+        // The orders really are different bytes: a page with colour on it is
+        // not its own reordering.
+        let rgb = page.render(&RenderOptions::default());
+        let bgr = page.render(&RenderOptions {
+            format: PixelFormat::Bgr8,
+            ..RenderOptions::default()
+        });
+        assert_ne!(bgr.data, rgb.data, "{name}: the order did not change");
+    }
+}
+
 // ---- a page with nothing under it, and premultiplied alpha -------------------
 
 /// One pixel of a four- or two-component bitmap.

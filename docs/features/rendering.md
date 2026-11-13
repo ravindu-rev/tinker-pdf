@@ -447,6 +447,19 @@ the light render does not paint the default inside such a group.
 instead is one change to the first. It follows that `Bitmap::to_png` writes
 such an ink page as 8.6.4.4's light, which is not that page's light render.
 
+**Blue-first output orders.** `format: PixelFormat::Bgr8` or `Bgra8` hands
+the page back blue, green, red and, for `Bgra8`, alpha last — the orders a
+host's surfaces store. They are output orders: the page composites in `Rgb8`
+or `Rgba8` (`tinker_pdf_render::canvas_format`) and the finished canvas is
+reordered once by `Canvas::extract`, so every group, mask, cell and image run
+keeps the format it has and no blend meets a second channel order;
+`page_format` hands each back as itself. `transparent` and `premultiplied`
+apply to `Bgra8` as to `Rgba8` and not to `Bgr8`, which like `Rgb8` is on
+white; a region is the page's rectangle in the same order. Every byte is the
+`Rgba8` render's pixel with red and blue exchanged, the alpha dropped for
+`Bgr8` (`bgr_and_bgra_are_the_rgba8_render_reordered`,
+`bgra_tiles_are_the_bgra_page`). The C ABI keeps its four formats.
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and
@@ -1079,11 +1092,14 @@ writing holds no buffer the size of the image. `Bitmap::to_png_counted` is
 the counted door: the file, and a `Stats` whose `png_image_scratch` is the
 most bytes the write held at once in buffers sized from the image — none for
 the four formats PNG has, the straightened copy of a premultiplied bitmap, the
-RGBA copy of a `CmykA8` or `LabA8` one — and whose `png_peak` is the most held
+copy of a `Bgr8` or `Bgra8` one reordered red first, the RGBA copy of a
+`CmykA8` or `LabA8` one — and whose `png_peak` is the most held
 at once with the file (guard A8, [performance](../design/performance.md)). It is
-**total over all six `PixelFormat`s**, which matters because a
+**total over all eight `PixelFormat`s**, which matters because a
 page comes back in two of them and the fields are public: `Gray8`, `Rgb8`,
-`GrayA8` and `Rgba8` are colour types 0, 2, 4 and 6 byte for byte, and the two
+`GrayA8` and `Rgba8` are colour types 0, 2, 4 and 6 byte for byte, `Bgr8` and
+`Bgra8` are colour types 2 and 6 written red first, so each file is the
+`Rgb8` or `Rgba8` render's, and the two
 PNG has no colour type for are converted rather than relabelled — `CmykA8`
 through 8.6.4.4's device relation and `LabA8` back out of `L*a*b*`, both
 keeping their alpha and both landing on type 6. Writing ink under a label
@@ -1266,7 +1282,7 @@ defect to hide in.
   there by its own; `with_anti_aliasing_off_a_shading_is_wholly_covered_or_not_at_all`
   does the same for a mesh, a clipped `sh`, a shading pattern and a tiling
   pattern whose cell is drawn by a renderer of its own.
-- Output: `png_output.rs` holds `Bitmap::to_png` over all six formats, and
+- Output: `png_output.rs` holds `Bitmap::to_png` over all eight formats, and
   `png_input.rs` holds `Bitmap::from_png` — the round trip over every page
   format, 16-bit rounding at the samples where truncation would differ, every
   decoded layout, both refusals, and a fixed-seed campaign of random and
@@ -1274,7 +1290,7 @@ defect to hide in.
   refusal more than five hundred times each.
 - The bitmap toolbox: `crates/tinker-pdf/tests/bitmap_toolbox.rs` holds every
   map and every reduction to its closed form over every reviewed raster
-  golden, read through `golden_support`'s PPM reader, in each of the six
+  golden, read through `golden_support`'s PPM reader, in each of the eight
   formats, with an alpha plane the test lays on, straight and premultiplied,
   computing each byte from the design's formula and the canvas's colour
   relations; gamma at exponents of a half, one and two, whose powers it

@@ -51,6 +51,19 @@ pub enum PixelFormat {
     /// It exists for a group that declares `/Lab` as its `/Group /CS`. It is
     /// not offered as a page format: see `Page::render`.
     LabA8,
+    /// Blue, green and red: `Rgb8`'s light in the order a host's surfaces
+    /// store it.
+    ///
+    /// An **output order**. A page asked for in it composites in `Rgb8` and is
+    /// reordered once at the end (`Canvas::extract`), so no buffer the
+    /// renderer opens holds a second channel order. A canvas made in it
+    /// composites right all the same: the separable modes are per channel,
+    /// and the non-separable ones (11.3.5.3), which reason about red, green
+    /// and blue, are handed the channels in that order — see `blend`.
+    Bgr8,
+    /// Blue, green, red and alpha: `Rgba8` in a host's order, alpha last as
+    /// there. An output order, as [`PixelFormat::Bgr8`] is.
+    Bgra8,
 }
 
 impl PixelFormat {
@@ -64,6 +77,8 @@ impl PixelFormat {
             PixelFormat::Rgba8 => 4,
             PixelFormat::CmykA8 => 5,
             PixelFormat::LabA8 => 4,
+            PixelFormat::Bgr8 => 3,
+            PixelFormat::Bgra8 => 4,
         }
     }
 
@@ -79,10 +94,31 @@ impl PixelFormat {
         // painting its own colours, and a non-isolated group counting its
         // backdrop twice. Four wrong pictures, no error.
         match self {
-            PixelFormat::GrayA8 | PixelFormat::Rgba8 | PixelFormat::CmykA8 | PixelFormat::LabA8 => {
-                true
-            }
-            PixelFormat::Gray8 | PixelFormat::Rgb8 => false,
+            PixelFormat::GrayA8
+            | PixelFormat::Rgba8
+            | PixelFormat::CmykA8
+            | PixelFormat::LabA8
+            | PixelFormat::Bgra8 => true,
+            PixelFormat::Gray8 | PixelFormat::Rgb8 | PixelFormat::Bgr8 => false,
+        }
+    }
+
+    /// Whether the three colour channels are stored blue first: where a
+    /// reader of red, green and blue finds each.
+    ///
+    /// A `match` for `has_alpha`'s reason: a format added later must say
+    /// which order it stores, or `blend` hands a non-separable mode its
+    /// channels in the wrong one.
+    #[must_use]
+    pub const fn is_blue_first(self) -> bool {
+        match self {
+            PixelFormat::Bgr8 | PixelFormat::Bgra8 => true,
+            PixelFormat::Gray8
+            | PixelFormat::GrayA8
+            | PixelFormat::Rgb8
+            | PixelFormat::Rgba8
+            | PixelFormat::CmykA8
+            | PixelFormat::LabA8 => false,
         }
     }
 }
@@ -351,6 +387,8 @@ impl Canvas {
                 let (l, a, b) = lab_bytes(color);
                 [l, a, b, color.a, 0]
             }
+            PixelFormat::Bgr8 => [color.b, color.g, color.r, 0, 0],
+            PixelFormat::Bgra8 => [color.b, color.g, color.r, color.a, 0],
         }
     }
 
@@ -521,8 +559,8 @@ impl Canvas {
         let row_of: fn(&mut [u8], &[u8], &[u8; 5], &[u8], PixelFormat) = match format {
             PixelFormat::Gray8 => opaque_row::<1, false>,
             PixelFormat::GrayA8 => opaque_row::<2, true>,
-            PixelFormat::Rgb8 => opaque_row::<3, false>,
-            PixelFormat::Rgba8 | PixelFormat::LabA8 => opaque_row::<4, true>,
+            PixelFormat::Rgb8 | PixelFormat::Bgr8 => opaque_row::<3, false>,
+            PixelFormat::Rgba8 | PixelFormat::Bgra8 | PixelFormat::LabA8 => opaque_row::<4, true>,
             PixelFormat::CmykA8 => opaque_row::<5, true>,
         };
         for (index, row) in (y0..y1).enumerate() {
@@ -1108,6 +1146,13 @@ impl Canvas {
                     a: *px.get(3)?,
                 }
             }
+            PixelFormat::Bgr8 => Color::rgb(*px.get(2)?, *px.get(1)?, *px.first()?),
+            PixelFormat::Bgra8 => Color {
+                r: *px.get(2)?,
+                g: *px.get(1)?,
+                b: *px.first()?,
+                a: *px.get(3)?,
+            },
         })
     }
 }
@@ -1505,7 +1550,11 @@ fn level_of(opacity: f64) -> u32 {
 fn color_channels(format: PixelFormat) -> usize {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => 1,
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::LabA8 => 3,
+        PixelFormat::Rgb8
+        | PixelFormat::Rgba8
+        | PixelFormat::LabA8
+        | PixelFormat::Bgr8
+        | PixelFormat::Bgra8 => 3,
         PixelFormat::CmykA8 => 4,
     }
 }
@@ -1650,17 +1699,21 @@ fn blend(
         let pick = |slot: Option<&u8>, first: Option<&u8>| -> u32 {
             u32::from(*if channels == 1 { first } else { slot }.unwrap_or(&0))
         };
-        let cb = [
-            pick(dst.first(), dst.first()),
-            pick(dst.get(1), dst.first()),
-            pick(dst.get(2), dst.first()),
-        ];
-        let cs = [
-            pick(source.first(), source.first()),
-            pick(source.get(1), source.first()),
-            pick(source.get(2), source.first()),
-        ];
+        // Where red, green and blue are stored. The clause's functions read
+        // the three in that order — `Lum` weighs them 0.3, 0.59 and 0.11 — so
+        // a blue-first pixel is handed over red first and its answer written
+        // back blue first. The permutation is its own inverse, so `order[i]`
+        // is both the slot holding colour `i` and the colour slot `i` holds.
+        let order: [usize; 3] = if format.is_blue_first() {
+            [2, 1, 0]
+        } else {
+            [0, 1, 2]
+        };
+        let cb = order.map(|at| pick(dst.get(at), dst.first()));
+        let cs = order.map(|at| pick(source.get(at), source.first()));
         let mixed = mode.apply_nonseparable(cb, cs);
+        let cs = order.map(|at| cs.get(at).copied().unwrap_or(0));
+        let mixed = order.map(|at| mixed.get(at).copied().unwrap_or(0));
         // Bounded by `channels`, like the separable loop above it. The bound is
         // redundant today — this branch only runs when `channels` is already 3
         // and `blended` is three wide — and it is here because the *next* thing
@@ -1836,6 +1889,8 @@ mod tests {
             PixelFormat::GrayA8,
             PixelFormat::Rgb8,
             PixelFormat::Rgba8,
+            PixelFormat::Bgr8,
+            PixelFormat::Bgra8,
         ] {
             for colour in colours {
                 let canvas = Canvas::new(1, 1, format, colour);
@@ -2016,6 +2071,8 @@ mod tests {
             PixelFormat::GrayA8,
             PixelFormat::Rgb8,
             PixelFormat::Rgba8,
+            PixelFormat::Bgr8,
+            PixelFormat::Bgra8,
         ] {
             let mut canvas = Canvas::new(4, 3, format, Color::rgb(10, 20, 30));
             canvas.blend_pixel(1, 1, Color::rgb(200, 60, 20), 1.0);
@@ -2034,6 +2091,143 @@ mod tests {
             assert_eq!(copy.data, canvas.data, "{format:?}");
         }
     }
+
+    /// The two blue-first orders, extracted from a red-first canvas, are its
+    /// colours with red and blue exchanged and alpha where it was, and
+    /// extracting them back gives the red-first bytes: the reorder a page
+    /// asked for in `Bgr8` or `Bgra8` is made by, and nothing else.
+    #[test]
+    fn a_blue_first_extract_is_the_same_colours_reordered() {
+        let mut canvas = Canvas::new(4, 3, PixelFormat::Rgba8, Color::TRANSPARENT);
+        canvas.blend_pixel(1, 1, Color::rgb(200, 60, 20), 1.0);
+        canvas.blend_pixel(
+            2,
+            2,
+            Color {
+                r: 10,
+                g: 90,
+                b: 240,
+                a: 128,
+            },
+            1.0,
+        );
+        canvas.blend_pixel(3, 0, Color::rgb(1, 2, 3), 0.5);
+        for (blue_first, red_first) in [
+            (PixelFormat::Bgra8, PixelFormat::Rgba8),
+            (PixelFormat::Bgr8, PixelFormat::Rgb8),
+        ] {
+            let ordered = canvas.extract((0, 0), 4, 3, blue_first);
+            let straight = canvas.extract((0, 0), 4, 3, red_first);
+            let n = red_first.components();
+            assert_eq!(ordered.format.components(), n, "{blue_first:?}");
+            assert_eq!(ordered.format.has_alpha(), red_first.has_alpha());
+            for (b, s) in ordered
+                .data
+                .chunks_exact(n)
+                .zip(straight.data.chunks_exact(n))
+            {
+                assert_eq!([b[2], b[1], b[0]], [s[0], s[1], s[2]], "{blue_first:?}");
+                assert_eq!(b[3..], s[3..], "{blue_first:?}: the alpha moved");
+            }
+            let back = ordered.extract((0, 0), 4, 3, red_first);
+            assert_eq!(
+                back.data, straight.data,
+                "{blue_first:?} back to {red_first:?}"
+            );
+            for y in 0..3 {
+                for x in 0..4 {
+                    assert_eq!(ordered.pixel(x, y), straight.pixel(x, y));
+                }
+            }
+        }
+    }
+
+    /// **A blue-first canvas composites as the red-first one does,
+    /// reordered**, under every blend mode: through a mask, a sampled pixel and
+    /// a composite of another canvas, at full and half alpha, over an opaque
+    /// backdrop and a transparent one. The separable modes are per channel and
+    /// cannot see an order; the non-separable ones (11.3.5.3) can, because
+    /// `Lum` weighs red, green and blue unequally, and every colour here has
+    /// unequal red and blue, so a pixel handed over in its stored order would
+    /// part from the red-first canvas there.
+    #[test]
+    fn a_bgr_canvas_composites_as_the_rgb_canvas_reordered() {
+        let modes = [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::HardLight,
+            BlendMode::SoftLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ];
+        let reordered = |data: &[u8], n: usize| -> Vec<u8> {
+            data.chunks_exact(n)
+                .flat_map(|pixel| {
+                    let mut pixel = pixel.to_vec();
+                    pixel.swap(0, 2);
+                    pixel
+                })
+                .collect()
+        };
+        let mask = square_mask(2.3, 1.7, 9.4, 8.2, 12);
+        let paint = Color {
+            r: 200,
+            g: 70,
+            b: 20,
+            a: 230,
+        };
+        let sampled = Color {
+            r: 15,
+            g: 240,
+            b: 90,
+            a: 200,
+        };
+        let mut source = Canvas::new(5, 5, PixelFormat::Rgba8, Color::TRANSPARENT);
+        source.fill_mask(
+            &square_mask(0.4, 0.6, 3.7, 3.1, 5),
+            Color::rgb(90, 10, 250),
+            1.0,
+        );
+        let backdrop = Color::rgb(30, 160, 220);
+        for (red_first, blue_first, starts) in [
+            (PixelFormat::Rgb8, PixelFormat::Bgr8, backdrop),
+            (PixelFormat::Rgba8, PixelFormat::Bgra8, backdrop),
+            (PixelFormat::Rgba8, PixelFormat::Bgra8, Color::TRANSPARENT),
+        ] {
+            for mode in modes {
+                for alpha in [1.0, 0.5] {
+                    let mut rgb = Canvas::new(12, 12, red_first, starts);
+                    let mut bgr = Canvas::new(12, 12, blue_first, starts);
+                    for canvas in [&mut rgb, &mut bgr] {
+                        canvas.fill_mask_with(&mask, paint, alpha, mode);
+                        canvas.blend_pixel_with(3, 4, sampled, alpha, mode);
+                        canvas.composite(&source, (6, 5), alpha, mode, None, None);
+                    }
+                    let n = red_first.components();
+                    assert_eq!(
+                        bgr.data,
+                        reordered(&rgb.data, n),
+                        "{blue_first:?} over {starts:?}, {mode:?} at {alpha}"
+                    );
+                    for y in 0..12 {
+                        for x in 0..12 {
+                            assert_eq!(bgr.pixel(x, y), rgb.pixel(x, y), "({x}, {y})");
+                        }
+                    }
+                }
+            }
+        }
+    }
     use super::*;
     use crate::fill::fill;
     use crate::geom::{FillRule, Path};
@@ -2045,12 +2239,14 @@ mod tests {
     }
 
     /// The formats an opaque Normal fill can be taken on: all but ink.
-    const OPAQUE_FORMATS: [PixelFormat; 5] = [
+    const OPAQUE_FORMATS: [PixelFormat; 7] = [
         PixelFormat::Gray8,
         PixelFormat::GrayA8,
         PixelFormat::Rgb8,
         PixelFormat::Rgba8,
         PixelFormat::LabA8,
+        PixelFormat::Bgr8,
+        PixelFormat::Bgra8,
     ];
 
     /// **The opaque Normal path is `blend`, byte for byte, wherever it is

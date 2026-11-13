@@ -60,11 +60,15 @@ fn decode(bitmap: &Bitmap) -> tinker_pdf_filters::PngImage {
 /// component count that follows from it, and the dimensions.
 #[test]
 fn every_pixel_format_maps_onto_a_colour_type_png_actually_has() {
-    const MAPPING: [(PixelFormat, u8, PngColour); 6] = [
+    const MAPPING: [(PixelFormat, u8, PngColour); 8] = [
         (PixelFormat::Gray8, 0, PngColour::Grey),
         (PixelFormat::Rgb8, 2, PngColour::Rgb),
         (PixelFormat::GrayA8, 4, PngColour::GreyAlpha),
         (PixelFormat::Rgba8, 6, PngColour::Rgba),
+        // Light blue first, written red first: alpha decides the type, as for
+        // the two red-first layouts.
+        (PixelFormat::Bgr8, 2, PngColour::Rgb),
+        (PixelFormat::Bgra8, 6, PngColour::Rgba),
         // The two PNG has no type for. Both keep their alpha, so both land on
         // 6 rather than on 2.
         (PixelFormat::CmykA8, 6, PngColour::Rgba),
@@ -112,6 +116,58 @@ fn the_four_formats_png_already_has_are_not_touched() {
         let bitmap = packed(4, 3, format, data.clone());
         assert_eq!(decode(&bitmap).data, data, "{format:?}");
     }
+}
+
+/// **The blue-first orders are light written red first**: the file a `Bgr8`
+/// or `Bgra8` bitmap writes is, byte for byte, the file its `Rgb8` or `Rgba8`
+/// twin — the same pixels with red and blue exchanged — writes, alpha where it
+/// was; a padded stride writes only the pixels, a premultiplied one is
+/// straightened first, and a buffer short of its rows is not a picture.
+#[test]
+fn the_blue_first_orders_are_written_red_first() {
+    for (blue_first, red_first) in [
+        (PixelFormat::Bgr8, PixelFormat::Rgb8),
+        (PixelFormat::Bgra8, PixelFormat::Rgba8),
+    ] {
+        let n = blue_first.components();
+        let data: Vec<u8> = (0..(4 * 3 * n) as u32)
+            .map(|i| (i.wrapping_mul(53) ^ 0x5A) as u8)
+            .collect();
+        let swapped: Vec<u8> = data
+            .chunks_exact(n)
+            .flat_map(|pixel| {
+                let mut pixel = pixel.to_vec();
+                pixel.swap(0, 2);
+                pixel
+            })
+            .collect();
+        let bitmap = packed(4, 3, blue_first, data.clone());
+        let twin = packed(4, 3, red_first, swapped.clone());
+        assert_eq!(bitmap.to_png(), twin.to_png(), "{blue_first:?}");
+        assert_eq!(decode(&bitmap).data, swapped, "{blue_first:?}");
+
+        let mut padded_data = Vec::new();
+        for row in data.chunks_exact(4 * n) {
+            padded_data.extend_from_slice(row);
+            padded_data.extend_from_slice(&[0xFE, 0xFD, 0xFC]);
+        }
+        let padded = Bitmap {
+            stride: 4 * n + 3,
+            data: padded_data,
+            ..packed(4, 3, blue_first, Vec::new())
+        };
+        assert_eq!(padded.to_png(), twin.to_png(), "{blue_first:?}, padded");
+
+        let short = packed(4, 3, blue_first, data[..data.len() - 1].to_vec());
+        assert_eq!(short.to_png(), None, "{blue_first:?}: a row short");
+    }
+
+    let mut premultiplied = packed(2, 1, PixelFormat::Bgra8, vec![0, 0, 128, 128, 0, 0, 0, 0]);
+    premultiplied.premultiplied = true;
+    assert_eq!(
+        decode(&premultiplied).data,
+        vec![255, 0, 0, 128, 0, 0, 0, 0]
+    );
 }
 
 /// **Alpha is not dropped.** An `Rgba8` bitmap whose alpha varies across the

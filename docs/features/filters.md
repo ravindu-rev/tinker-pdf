@@ -940,10 +940,11 @@ counterpart on the facade, and the shape is a projection rather than a
 re-export: ruling 11 keeps
 `tinker_pdf` the public surface for a *document*, and what a caller has is a
 rendered page, so `tinker_pdf::Bitmap::to_png` maps a `PixelFormat` onto one of
-PNG's colour types and calls this. Two of the six formats have no colour type
-to map onto and are converted there rather than here — `CmykA8` through
+PNG's colour types and calls this. Two of the eight formats have no colour
+type to map onto and are converted there rather than here — `CmykA8` through
 8.6.4.4's device relation and `LabA8` back out of `L*a*b*` — because this crate
-holds no PDF colour and ruling 8 keeps it that way. `tinker_pdf::Bitmap::from_png`
+holds no PDF colour and ruling 8 keeps it that way; the two blue-first ones,
+`Bgr8` and `Bgra8`, are reordered there to PNG's red first. `tinker_pdf::Bitmap::from_png`
 is the inverse projection: each of the four decoded layouts is one
 `PixelFormat`, sixteen bits round to eight there rather than here, and a raster
 this decoder returns incomplete — a degradation, correctly, for a comic page —

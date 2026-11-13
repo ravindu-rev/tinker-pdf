@@ -351,6 +351,36 @@ fn every_tile_is_byte_equal_to_the_page_under_it() {
     }
 }
 
+/// **A blue-first page tiles as the page does**: every fixture, at the three
+/// tile sizes, in `Bgra8` and in `Bgr8`, each tile the page's rectangle in that
+/// order byte for byte. The order is made once, at the end, per pixel, from
+/// the canvas a tile and the page both composite red first, so there is
+/// nothing a tile could decide differently; this holds it.
+#[test]
+fn bgra_tiles_are_the_bgra_page() {
+    for format in [
+        tinker_pdf::PixelFormat::Bgra8,
+        tinker_pdf::PixelFormat::Bgr8,
+    ] {
+        let options = RenderOptions {
+            format,
+            ..RenderOptions::default()
+        };
+        for fixture in fixtures() {
+            with_page(&fixture, |page| {
+                for tile in [64u32, 37, 23] {
+                    tiles_are_the_page(
+                        page,
+                        &options,
+                        tile,
+                        &format!("{} in {format:?}", fixture.name),
+                    );
+                }
+            });
+        }
+    }
+}
+
 /// **The same guard at scales other than 1**, where the page's pixel grid and
 /// its point grid are no longer the same lattice.
 ///
