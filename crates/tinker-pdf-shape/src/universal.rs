@@ -730,7 +730,9 @@ pub(crate) enum ClusterType {
     /// Hieroglyphs and their joiners, segments and modifiers.
     Hieroglyph,
     /// A cluster that starts with a mark (`General_Category` `Mn` or `Mc`):
-    /// one mark with no base, which takes a dotted circle (FT-08.7).
+    /// one mark with no base, which stands on the face's dotted circle where
+    /// the published grammar cut it (`crate::shape`'s
+    /// `Shaper::insert_dotted_circles`).
     Broken,
 }
 

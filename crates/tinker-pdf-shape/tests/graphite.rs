@@ -5642,6 +5642,7 @@ fn drawn(glyph: u16, cluster: u32, advance: i32, x: i32, y: i32) -> ShapedGlyph 
         y_advance: 0,
         x_offset: x,
         y_offset: y,
+        inserted: false,
     }
 }
 

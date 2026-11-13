@@ -223,7 +223,10 @@ pub enum Warning {
         table: Table,
     },
     /// [`Limits::max_glyphs`] would have been exceeded by a substitution, so
-    /// the substitution did not happen.
+    /// the substitution did not happen — or by a dotted circle the shaper
+    /// puts under a broken cluster's mark before `GSUB` runs, named under
+    /// `GSUB`, whose buffer it is, so that cluster and the run's later broken
+    /// ones went without.
     GlyphBudgetExceeded {
         /// Which table was running.
         table: Table,

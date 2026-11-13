@@ -214,6 +214,7 @@ impl Face {
             y_advance: -metrics.advance,
             x_offset: -metrics.origin_x,
             y_offset: -metrics.origin_y,
+            inserted: false,
         }
     }
 

@@ -226,3 +226,169 @@ fn the_document_a_shaped_run_produced_is_structurally_clean() {
         document(&arabic_face(), SALAM, BaseDirection::RightToLeft),
     );
 }
+
+/// FT-08.7: Balinese `KA ULU TALING` — `SHBALI-1/14`'s text — whose pre-base
+/// vowel, typed after a whole cluster, is a broken cluster of its own.
+const BROKEN: &str = "\u{1B13}\u{1B36}\u{1B3E}";
+
+/// The span an inserted glyph is drawn in: one whose replacement text is
+/// empty (ISO 32000-2 14.9.4).
+const SILENT: &[u8] = b"/Span <</ActualText ()>> BDC";
+
+/// The content stream `write_run` writes for `text` in `face`.
+fn written(face: &Face, text: &str) -> Vec<u8> {
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("a valid sfnt");
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"C0", b"Fixture", &program));
+    let mut content = Vec::new();
+    assert!(
+        write_run(
+            &mut builder,
+            &mut content,
+            &Run {
+                font: b"C0",
+                shaper: Shaper::new(&sfnt),
+                size: 12.0,
+                matrix: [1.0, 0.0, 0.0, 1.0, 20.0, 40.0],
+                text,
+                direction: BaseDirection::LeftToRight,
+                colour: None,
+            },
+        ),
+        "the run was written"
+    );
+    content
+}
+
+/// How many times `needle` occurs in `haystack`.
+fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+/// A broken cluster is drawn on the face's dotted circle and extracts as it
+/// was typed: the circle is among the glyphs written, standing for no text,
+/// and the vowel it stands under keeps its own, so the page's text is the
+/// three characters typed and no U+25CC.
+#[test]
+fn a_broken_cluster_round_trips_without_its_dotted_circle() {
+    let face = Face::new("Fixture Balinese", "\u{1B13}\u{1B36}\u{1B3E}\u{25CC}");
+    let circle = face.glyph_of('\u{25CC}').expect("the face maps U+25CC");
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("a valid sfnt");
+    let (_, runs) = Shaper::new(&sfnt).shape_text(BROKEN, BaseDirection::LeftToRight);
+    let placed: Vec<_> = runs
+        .iter()
+        .flat_map(|run| place(BROKEN, run, 12.0))
+        .collect();
+    let drawn: Vec<(u16, &str)> = placed
+        .iter()
+        .map(|glyph| (glyph.id, glyph.text.as_str()))
+        .collect();
+    assert_eq!(
+        drawn.iter().filter(|(id, _)| *id == circle).count(),
+        1,
+        "the broken cluster was not drawn on one circle: {drawn:?}"
+    );
+    assert!(
+        drawn.contains(&(circle, "")),
+        "the circle claimed text of its own: {drawn:?}"
+    );
+    assert_eq!(
+        drawn.iter().map(|(_, text)| *text).collect::<String>(),
+        BROKEN,
+        "the glyphs do not stand for the text typed, once: {drawn:?}"
+    );
+    // The circle is drawn inside a span that states nothing, once.
+    let content = written(&face, BROKEN);
+    assert_eq!(occurrences(&content, SILENT), 1);
+    assert_eq!(occurrences(&content, b"EMC"), 1);
+
+    let bytes = document(&face, BROKEN, BaseDirection::LeftToRight);
+    let document = authored("a broken Balinese cluster", bytes);
+    let text = document.page(0).expect("a page").text().plain_text();
+    assert!(
+        text.contains(BROKEN),
+        "the run did not extract back to the string it was built from: {text:?}"
+    );
+    assert!(
+        !text.contains('\u{25CC}'),
+        "the inserted circle reached the extracted text: {text:?}"
+    );
+}
+
+/// The same text in a face that does not map U+25CC is drawn as it stands:
+/// three glyphs, each standing for its own character.
+#[test]
+fn a_broken_cluster_in_a_face_without_a_dotted_circle_is_drawn_as_typed() {
+    let face = Face::new("Fixture Balinese", BROKEN);
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("a valid sfnt");
+    let (_, runs) = Shaper::new(&sfnt).shape_text(BROKEN, BaseDirection::LeftToRight);
+    let placed: Vec<_> = runs
+        .iter()
+        .flat_map(|run| place(BROKEN, run, 12.0))
+        .collect();
+    assert_eq!(
+        placed
+            .iter()
+            .map(|glyph| glyph.text.as_str())
+            .collect::<Vec<_>>(),
+        ["\u{1B13}", "\u{1B36}", "\u{1B3E}"]
+    );
+    assert!(placed.iter().all(|glyph| !glyph.inserted));
+    // No glyph inserted, no span: the run is one text object, as it was.
+    let content = written(&face, BROKEN);
+    assert_eq!(occurrences(&content, b"BDC"), 0);
+    assert_eq!(occurrences(&content, b"BT"), 1);
+    let text = authored(
+        "a broken Balinese cluster without a circle",
+        document(&face, BROKEN, BaseDirection::LeftToRight),
+    )
+    .page(0)
+    .expect("a page")
+    .text()
+    .plain_text();
+    assert!(text.contains(BROKEN), "{text:?}");
+}
+
+/// A typed U+25CC maps the circle's glyph to the character in `/ToUnicode`,
+/// and a circle the shaper inserts in the same face still reads as nothing:
+/// `◌ULU ULU` — a typed circle bearing a vowel sign, a space, and the same
+/// vowel sign with no base — extracts as typed, with one U+25CC.
+#[test]
+fn a_typed_dotted_circle_beside_an_inserted_one_extracts_once() {
+    const TYPED: &str = "\u{25CC}\u{1B36} \u{1B36}";
+    let face = Face::new("Fixture Balinese", "\u{1B36}\u{25CC} ");
+    let circle = face.glyph_of('\u{25CC}').expect("the face maps U+25CC");
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("a valid sfnt");
+    let (_, runs) = Shaper::new(&sfnt).shape_text(TYPED, BaseDirection::LeftToRight);
+    let placed: Vec<_> = runs
+        .iter()
+        .flat_map(|run| place(TYPED, run, 12.0))
+        .collect();
+    assert_eq!(
+        placed
+            .iter()
+            .filter(|glyph| glyph.id == circle)
+            .map(|glyph| (glyph.text.as_str(), glyph.inserted))
+            .collect::<Vec<_>>(),
+        [("\u{25CC}", false), ("", true)],
+        "one typed circle and one inserted"
+    );
+    assert_eq!(occurrences(&written(&face, TYPED), SILENT), 1);
+    let text = authored(
+        "a typed dotted circle beside an inserted one",
+        document(&face, TYPED, BaseDirection::LeftToRight),
+    )
+    .page(0)
+    .expect("a page")
+    .text()
+    .plain_text();
+    assert!(text.contains(TYPED), "{text:?}");
+    assert_eq!(text.matches('\u{25CC}').count(), 1, "{text:?}");
+}

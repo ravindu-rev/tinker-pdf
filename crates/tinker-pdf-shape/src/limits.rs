@@ -90,7 +90,9 @@ pub struct Limits {
     /// adds up to 62 at each transition of a machine, and a chain of them is
     /// text-rendering-tests `MORX-34`'s billion laughs; it is held to the same
     /// ceiling, an insertion past it refused and named
-    /// ([`crate::Warning::InsertionBudgetExceeded`]).
+    /// ([`crate::Warning::InsertionBudgetExceeded`]). The one glyph the shaper
+    /// adds itself, the dotted circle under a broken cluster's mark, is spent
+    /// from it too, before `GSUB` runs.
     ///
     /// **It is not a cap on the shaped run's length**, and the distinction is
     /// worth stating because a reader has already got it wrong. `Shaper::shape`

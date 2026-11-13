@@ -276,12 +276,23 @@ fn ligate(runner: &mut Runner<'_, '_>, buffer: &mut Buffer, positions: &[usize],
         .map(|at| buffer.props(*at).num_comps)
         .fold(0u16, u16::saturating_add);
     let lig_id = if all_marks { 0 } else { buffer.next_lig_id() };
+    // A ligature stands for what its components stood for, so it is a glyph
+    // the shaper inserted only where every component was: a dotted circle a
+    // face's `ccmp` joins to its mark draws the mark, and takes its text.
+    let inserted = positions.iter().all(|at| {
+        buffer
+            .glyph(*at)
+            .is_some_and(|component| component.inserted)
+    });
 
     let mut last_num_comps = buffer.props(first).num_comps;
     let mut last_lig_id = buffer.props(first).lig_id;
     let mut so_far = last_num_comps;
 
     buffer.set_glyph(first, glyph);
+    if let Some(slot) = buffer.glyph_mut(first) {
+        slot.inserted = inserted;
+    }
     runner.reclassify(
         buffer,
         first,

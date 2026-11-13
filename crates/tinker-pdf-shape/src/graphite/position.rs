@@ -316,6 +316,7 @@ pub fn place(slots: &Slots<'_>, right_to_left: bool) -> (Vec<ShapedGlyph>, Vec<R
             y_advance: 0,
             x_offset: clamp(geometry.x[at] - pen),
             y_offset: clamp(geometry.y[at]),
+            inserted: false,
         });
         if !right_to_left {
             pen += advance;

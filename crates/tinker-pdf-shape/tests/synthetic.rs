@@ -1208,3 +1208,184 @@ fn a_confined_feature_does_not_reach_across_a_cluster() {
         [1, 2]
     );
 }
+
+// --- dotted circles, end to end on faces this file builds -----------------
+
+/// Each glyph of `text` shaped through the face `cmap` and `gsub` describe,
+/// at `limits`: its index, its cluster and whether the shaper inserted it,
+/// and whether any run said a glyph was refused for the ceiling.
+fn circled(
+    cmap: &[(char, u16)],
+    gsub: Option<Vec<u8>>,
+    limits: Limits,
+    text: &str,
+) -> (Vec<(u16, u32, bool)>, bool) {
+    use tinker_pdf_font::Sfnt;
+    use tinker_pdf_shape::bidi::BaseDirection;
+    use tinker_pdf_shape::Shaper;
+
+    let mut face = column_face::Face::new(8, cmap);
+    face.gsub = gsub;
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("an assembled face");
+    let (_, runs) = Shaper::new(&sfnt)
+        .with_limits(limits)
+        .shape_text(text, BaseDirection::LeftToRight);
+    let glyphs = runs
+        .iter()
+        .flat_map(|run| run.glyphs())
+        .map(|glyph| (glyph.glyph, glyph.cluster, glyph.inserted))
+        .collect();
+    let refused = runs.iter().any(|run| {
+        run.warnings()
+            .contains(&Warning::GlyphBudgetExceeded { table: Table::Gsub })
+    });
+    (glyphs, refused)
+}
+
+/// Balinese `KA`, `ULU`, `TALING` and a space, and U+25CC, as glyphs 1 to 5.
+const BALINESE_AND_CIRCLE: [(char, u16); 5] = [
+    ('\u{1B13}', 1),
+    ('\u{1B36}', 2),
+    ('\u{1B3E}', 3),
+    ('\u{25CC}', 4),
+    (' ', 5),
+];
+
+/// A `GSUB` that declares Balinese and has no lookup: what a face needs for
+/// the stages, and with them the reordering pause, to run at all.
+fn no_lookups() -> Option<Vec<u8>> {
+    Some(column_face::layout_table(&[*b"bali"], &[], &[]))
+}
+
+/// FT-08.7: a cluster the published grammar calls broken stands on the
+/// face's dotted circle, put in front of its mark as its base, carrying the
+/// mark's cluster offset and marked inserted; a cluster with a base of its
+/// own takes none (`docs/design/shaping.md`, *Dotted circles*).
+#[test]
+fn a_broken_cluster_stands_on_the_faces_dotted_circle() {
+    let shaped = |text: &str| circled(&BALINESE_AND_CIRCLE, no_lookups(), Limits::DEFAULT, text).0;
+    // A mark with nothing before it.
+    assert_eq!(shaped("\u{1B36}"), [(4, 0, true), (2, 0, false)]);
+    // Two, each a broken cluster of its own and each on its own circle.
+    assert_eq!(
+        shaped("\u{1B36}\u{1B36}"),
+        [(4, 0, true), (2, 0, false), (4, 3, true), (2, 3, false)]
+    );
+    // `SHBALI-1/14`'s text: the pre-base vowel after a whole cluster is a
+    // broken one, and the reordering pause puts it in front of its circle,
+    // the two sharing the vowel's offset.
+    assert_eq!(
+        shaped("\u{1B13}\u{1B36}\u{1B3E}"),
+        [(1, 0, false), (2, 3, false), (3, 6, false), (4, 6, true)]
+    );
+    // After a space, which is a cluster of its own and no base.
+    assert_eq!(
+        shaped("\u{1B13} \u{1B36}"),
+        [(1, 0, false), (5, 3, false), (4, 4, true), (2, 4, false)]
+    );
+    // A mark on its base is a whole cluster, and takes none.
+    assert_eq!(shaped("\u{1B13}\u{1B36}"), [(1, 0, false), (2, 3, false)]);
+}
+
+/// A face that does not map U+25CC gets no circle, and the mark is drawn as
+/// it stands.
+#[test]
+fn a_face_without_a_dotted_circle_draws_the_mark_as_it_stands() {
+    let cmap = [('\u{1B13}', 1), ('\u{1B36}', 2), ('\u{1B3E}', 3)];
+    let shaped = |text: &str| circled(&cmap, None, Limits::DEFAULT, text).0;
+    assert_eq!(shaped("\u{1B36}"), [(2, 0, false)]);
+    assert_eq!(
+        shaped("\u{1B13}\u{1B36}\u{1B3E}"),
+        [(1, 0, false), (2, 3, false), (3, 6, false)]
+    );
+}
+
+/// Only a cluster the published grammar cut takes a circle: a Tai Tham run
+/// keeps milestone 5's cluster, a Kannada one waits for its own model
+/// (FT-08.11), and a Latin run is in no cluster at all, whatever marks they
+/// hold and however the face maps U+25CC.
+#[test]
+fn only_a_cluster_the_published_grammar_breaks_takes_a_dotted_circle() {
+    let cmap = [
+        ('\u{1A63}', 1),
+        ('\u{0CBE}', 2),
+        ('a', 3),
+        ('\u{0301}', 6),
+        ('\u{25CC}', 4),
+    ];
+    let shaped = |text: &str| circled(&cmap, None, Limits::DEFAULT, text).0;
+    // TAI THAM VOWEL SIGN AA, a broken cluster to milestone 5's model too.
+    assert_eq!(shaped("\u{1A63}"), [(1, 0, false)]);
+    // KANNADA VOWEL SIGN AA.
+    assert_eq!(shaped("\u{0CBE}"), [(2, 0, false)]);
+    // A combining acute after a Latin letter.
+    assert_eq!(shaped("a\u{0301}"), [(3, 0, false), (6, 1, false)]);
+}
+
+/// The circle is a glyph like any other to the face's lookups: substituted,
+/// it is still the one the shaper inserted, and joined to its mark by a
+/// ligature it is the mark, which stands for the mark's text.
+#[test]
+fn a_dotted_circle_joined_to_its_mark_stands_for_the_mark() {
+    let ccmp = |lookup: Vec<u8>| {
+        Some(column_face::layout_table(
+            &[*b"bali"],
+            &[(*b"ccmp", vec![0])],
+            &[lookup],
+        ))
+    };
+    let ligature = column_face::lookup(4, 0, &[column_face::ligature_subst(4, &[2], 6)]);
+    assert_eq!(
+        circled(
+            &BALINESE_AND_CIRCLE,
+            ccmp(ligature),
+            Limits::DEFAULT,
+            "\u{1B36}"
+        )
+        .0,
+        [(6, 0, false)]
+    );
+    let single = column_face::lookup(1, 0, &[column_face::single_subst(&[(4, 7)])]);
+    assert_eq!(
+        circled(
+            &BALINESE_AND_CIRCLE,
+            ccmp(single),
+            Limits::DEFAULT,
+            "\u{1B36}"
+        )
+        .0,
+        [(7, 0, true), (2, 0, false)]
+    );
+}
+
+/// The circles are spent from `Limits::max_glyphs`, the ceiling `GSUB`'s own
+/// growth is: once the buffer has reached it a broken cluster goes without,
+/// and the run says so, as it does of a substitution refused there.
+#[test]
+fn the_dotted_circles_are_spent_from_the_glyph_ceiling() {
+    let at = |max_glyphs: usize| {
+        circled(
+            &BALINESE_AND_CIRCLE,
+            None,
+            Limits {
+                max_glyphs,
+                ..Limits::DEFAULT
+            },
+            "\u{1B36}\u{1B36}",
+        )
+    };
+    let glyphs = |shaped: &(Vec<(u16, u32, bool)>, bool)| -> Vec<u16> {
+        shaped.0.iter().map(|(glyph, _, _)| *glyph).collect()
+    };
+    // Room for both.
+    let both = at(4);
+    assert_eq!((glyphs(&both), both.1), (vec![4, 2, 4, 2], false));
+    // Room for one: the first broken cluster takes it and the second goes
+    // without.
+    let one = at(3);
+    assert_eq!((glyphs(&one), one.1), (vec![4, 2, 2], true));
+    // A ceiling below the run's own length leaves room for none.
+    let none = at(1);
+    assert_eq!((glyphs(&none), none.1), (vec![2, 2], true));
+}

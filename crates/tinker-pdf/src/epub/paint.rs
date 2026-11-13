@@ -5282,6 +5282,7 @@ fn shaped_glyphs(
                 text: stands_for.to_string(),
                 x: pen - start + letter_spacing * spaced as f64 + widened + scale(glyph.x_offset),
                 rise: scale(glyph.y_offset),
+                inserted: glyph.inserted,
             });
             pen += scale(glyph.x_advance);
             let spaces = stands_for.chars().filter(|c| *c == ' ').count();
@@ -7377,15 +7378,18 @@ fn draw_shaped(
             // here: `letter-spacing` is already in the glyph positions, and a
             // `Tc` on top of them would be charged twice.
             page.raw(b"0 Tc 0 Tw");
-            let placed: Vec<tinker_pdf_cos::build::PlacedGlyph<'_>> =
-                shaped.glyphs.iter().map(Placed::as_glyph).collect();
+            // Through the one writer `shaping::write_run` uses, so a dotted
+            // circle the shaper inserted is drawn inside a span that states
+            // nothing (`crate::shaping::draw`).
             let mut bytes = Vec::new();
-            if builder.glyph_run(
+            if crate::shaping::draw(
+                builder,
                 &mut bytes,
                 &face.resource,
                 size,
                 [1.0, 0.0, 0.0, 1.0, frame.x(x), baseline],
-                &placed,
+                &shaped.glyphs,
+                false,
             ) {
                 page.raw(&bytes);
             } else {

@@ -1299,6 +1299,17 @@ impl<'a> Shaper<'a> {
         for table in self.aat_not_run.into_iter().flatten() {
             warnings.push(Warning::TableNotRun { table });
         }
+        // A broken cluster's mark stands on the face's dotted circle, put in
+        // before `GSUB` so the face's lookups see a base and its mark; only
+        // where the published grammar cut the clusters (`docs/design/
+        // shaping.md`, *The cluster grammar*), and never for a face its AAT
+        // chain shapes, which takes its text as typed. See
+        // [`Shaper::insert_dotted_circles`].
+        if opentype && plan == Plan::Universal && universal::takes_published_grammar(run.script) {
+            self.insert_dotted_circles(&mut buffer, limits, &mut warnings);
+            #[cfg(test)]
+            crate::trace::stage("dotted circles", &buffer);
+        }
         if let Some((morx, feat)) = chain {
             self.run_chain(&morx, feat.as_ref(), &mut buffer, &limits, &mut warnings);
         } else if let Some(gsub) = self.layout.gsub() {
@@ -1567,7 +1578,9 @@ impl<'a> Shaper<'a> {
     ///
     /// Which clusters there are is the run script's question: the published
     /// grammar's for a script the Universal Shaping Engine lists, milestone
-    /// 5's for the rest ([`universal::clusters`]).
+    /// 5's for the rest ([`universal::clusters`]). Each glyph carries its
+    /// cluster's type with its number, which is what
+    /// [`Shaper::insert_dotted_circles`] reads.
     fn mark_syllables(
         &self,
         characters: &[(char, u32)],
@@ -1576,16 +1589,15 @@ impl<'a> Shaper<'a> {
         script: Script,
     ) {
         let letters: Vec<char> = characters.iter().map(|(c, _)| *c).collect();
-        let syllables: Vec<u16> = universal::clusters(&letters, script)
-            .into_iter()
-            .map(|(number, _)| number)
-            .collect();
+        let clusters = universal::clusters(&letters, script);
+        let syllables: Vec<u16> = clusters.iter().map(|(number, _)| *number).collect();
         let categories: Vec<universal::Category> =
             letters.iter().map(|c| universal::category(*c)).collect();
         let rphf = repha_positions(&syllables, &categories);
         for (at, index) in from.iter().enumerate() {
-            if let Some(syllable) = syllables.get(*index) {
+            if let Some((syllable, kind)) = clusters.get(*index) {
                 buffer.set_syllable(at, *syllable);
+                buffer.set_cluster_type(at, *kind);
             }
             if let Some(category) = categories.get(*index) {
                 buffer.set_category(at, *category);
@@ -1594,6 +1606,60 @@ impl<'a> Shaper<'a> {
                 buffer.set_mask(at, Buffer::GLOBAL | MASK_RPHF);
             }
         }
+    }
+
+    /// Stands each broken cluster's mark on the face's dotted circle:
+    /// *Defective clusters* and *Handling invalid combining marks*, a mark
+    /// with no base "positioned on a dotted circle" (`docs/design/shaping.md`,
+    /// *Dotted circles*).
+    ///
+    /// The face's U+25CC glyph goes in front of the first glyph of each
+    /// cluster the published grammar calls broken, as that cluster's base and
+    /// before `GSUB`, so the face's lookups see a base and its mark as they
+    /// would for a typed U+25CC, and the reordering pause puts a pre-base
+    /// vowel in front of it. It carries the mark's cluster offset, its
+    /// syllable and the cluster model's category for U+25CC, and is
+    /// [`ShapedGlyph::inserted`], so the text a consumer rebuilds for the
+    /// cluster is the text typed. A face that does not map U+25CC gets none,
+    /// and the mark is drawn as it stands.
+    ///
+    /// Each circle is spent from [`Limits::max_glyphs`], the ceiling `GSUB`'s
+    /// own growth is spent from, so a text of nothing but marks cannot grow a
+    /// run past it: once the buffer has reached the ceiling the run's later
+    /// broken clusters take none, and [`Warning::GlyphBudgetExceeded`] says
+    /// so under `GSUB`, whose buffer it is.
+    fn insert_dotted_circles(
+        &self,
+        buffer: &mut Buffer,
+        limits: Limits,
+        warnings: &mut Vec<Warning>,
+    ) {
+        let Some(circle) = self
+            .face
+            .glyph_for_char(DOTTED_CIRCLE)
+            .filter(|glyph| *glyph != 0)
+        else {
+            return;
+        };
+        let mut room = limits.max_glyphs.saturating_sub(buffer.len());
+        let mut before = Vec::new();
+        for at in 0..buffer.len() {
+            let props = buffer.props(at);
+            let starts = props.cluster_type == universal::ClusterType::Broken
+                && at
+                    .checked_sub(1)
+                    .is_none_or(|previous| buffer.props(previous).syllable != props.syllable);
+            if !starts {
+                continue;
+            }
+            if room == 0 {
+                warnings.push(Warning::GlyphBudgetExceeded { table: Table::Gsub });
+                break;
+            }
+            room -= 1;
+            before.push(at);
+        }
+        buffer.insert_before(&before, circle, universal::category(DOTTED_CIRCLE));
     }
 
     /// Puts each glyph in the joining form its character is in.
@@ -1968,6 +2034,11 @@ const USE_REORDER_AFTER: usize = 3;
 /// is what stops this and [`USE_REORDER_AFTER`] drifting off the array they
 /// index.
 const USE_RPHF_STAGE: usize = 1;
+
+/// U+25CC DOTTED CIRCLE, which a broken cluster's mark stands on: the base
+/// *Handling invalid combining marks* puts under a mark with none of its own
+/// (`Shaper::insert_dotted_circles`).
+const DOTTED_CIRCLE: char = '\u{25CC}';
 
 /// Where `rphf` may fire, as a flag per character.
 ///
@@ -2448,6 +2519,11 @@ mod tests {
     const URDU: &str = "\u{646}\u{633}\u{62a}\u{639}\u{644}\u{6cc}\u{642} \u{62e}\u{637} \
                         \u{641}\u{646} \u{642}\u{627}\u{646}\u{648}\u{646} \u{6a9}\u{644}";
 
+    /// The Balinese face text-rendering-tests `SHBALI` shapes against, whose
+    /// `cmap` gives U+25CC gid128.
+    const BALINESE_FACE: &[u8] =
+        include_bytes!("../data/text-rendering-tests/fonts/NotoSansBalinese-Regular.ttf");
+
     /// A Kannada face, and Kannada with a reph and a conjunct.
     const KANNADA_FACE: &[u8] =
         include_bytes!("../data/text-rendering-tests/fonts/NotoSansKannada-Regular.ttf");
@@ -2633,6 +2709,52 @@ mod tests {
         for plan in [Plan::Default, Plan::Joining, Plan::AsAsked] {
             assert!(plan.confines(0), "{plan:?}");
         }
+    }
+
+    /// FT-08.7: `SHBALI-1/14` and `/15` type a pre-base vowel after a whole
+    /// cluster, which the published grammar cuts as a broken cluster of its
+    /// own, and their fixtures draw the vowel in front of the face's dotted
+    /// circle, gid128. The circle is the run's one inserted glyph and shares
+    /// the vowel's offset, so the run still stands for the text typed.
+    #[test]
+    fn a_broken_balinese_cluster_stands_on_the_faces_dotted_circle() {
+        let face = Sfnt::parse(BALINESE_FACE).expect("the face parses");
+        assert_eq!(face.glyph_for_char('\u{25CC}'), Some(128));
+        for (text, expected) in [
+            ("\u{1B13}\u{1B36}\u{1B3E}", [23u16, 58, 66, 128]),
+            ("\u{1B13}\u{1B38}\u{1B3E}", [23, 60, 66, 128]),
+        ] {
+            let (_, runs) = Shaper::new(&face).shape_text(text, BaseDirection::LeftToRight);
+            let glyphs: Vec<ShapedGlyph> = runs
+                .iter()
+                .flat_map(|run| run.glyphs().iter().copied())
+                .collect();
+            assert_eq!(
+                glyphs.iter().map(|glyph| glyph.glyph).collect::<Vec<_>>(),
+                expected,
+                "{text:?}"
+            );
+            assert_eq!(
+                glyphs.iter().map(|glyph| glyph.cluster).collect::<Vec<_>>(),
+                [0, 3, 6, 6],
+                "{text:?}"
+            );
+            assert_eq!(
+                glyphs
+                    .iter()
+                    .map(|glyph| glyph.inserted)
+                    .collect::<Vec<_>>(),
+                [false, false, false, true],
+                "{text:?}"
+            );
+        }
+        // The same vowel on a base of its own takes no circle.
+        let (_, runs) =
+            Shaper::new(&face).shape_text("\u{1B13}\u{1B3E}", BaseDirection::LeftToRight);
+        assert!(runs
+            .iter()
+            .flat_map(|run| run.glyphs())
+            .all(|glyph| !glyph.inserted && glyph.glyph != 128));
     }
 
     /// Where `rphf` is offered a position, over the four shapes that matter.

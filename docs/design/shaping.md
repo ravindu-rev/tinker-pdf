@@ -122,10 +122,12 @@ re-shapes only the two runs at the boundary, never the paragraph.
 
 **The output type.** `ShapedRun { glyphs: Vec<ShapedGlyph>, direction }`,
 where `ShapedGlyph { glyph: u16, cluster: u32, x_advance: i32, y_advance:
-i32, x_offset: i32, y_offset: i32 }` in font design units, with
-`units_per_em` beside it. Scaling to points happens in the consumer as
-`units × size / upem` — multiplication and division are correctly rounded
-by IEEE 754, which ruling 4 states is the deterministic side of the line.
+i32, x_offset: i32, y_offset: i32, inserted: bool }` in font design units,
+with `units_per_em` beside it; `inserted` marks a glyph no character asked
+for, the dotted circle of *Dotted circles*, which stands for no text.
+Scaling to points happens in the consumer as `units × size / upem` —
+multiplication and division are correctly rounded by IEEE 754, which ruling
+4 states is the deterministic side of the line.
 Malformed lookups produce a typed warning and an unshaped fallback run
 (rulings 1, 2, 10): never a panic, never a silent empty.
 
@@ -922,9 +924,21 @@ the face's lookups then see a base and its mark, as they would for a typed
 U+25CC — and the reordering pause puts a pre-base vowel in front of it, as
 `SHBALI-1/14` draws `TALING` before the circle. The inserted glyph carries the
 cluster of the mark it stands under, so the text a consumer rebuilds for the
-cluster is the text typed, and it is marked inserted so a consumer gives it
-no text of its own. A face that does not map U+25CC gets none, and the mark
-is drawn as it stands. This reverses a decision milestone 5 recorded (below).
+cluster is the text typed, and it is marked inserted (`ShapedGlyph::inserted`)
+so a consumer gives it no text of its own: `tinker_pdf::shaping`'s
+`cluster_texts` gives a cluster's text to its first glyph that is not
+inserted, a ligature is inserted only where every glyph it joined was, and
+the writer the facade and the EPUB painter share draws each inserted glyph
+inside a `/Span` whose `/ActualText` is empty (14.9.4), because no
+`/ToUnicode` entry reads as nothing — a code it leaves out is one a reader
+may read as a character of its choosing (9.10.2), and one a typed U+25CC
+maps reads as that. A face that does not map U+25CC gets none, and the mark
+is drawn as it stands.
+Each circle is spent from `Limits::max_glyphs`, the ceiling `GSUB`'s own
+growth is spent from, so a text of nothing but marks cannot double a run past
+it: once the buffer reaches the ceiling a broken cluster takes none, and
+`Warning::GlyphBudgetExceeded` says so under `GSUB`. This reverses a decision
+milestone 5 recorded (below).
 
 #### Default-ignorables (FT-08.8)
 
@@ -1059,8 +1073,8 @@ loses no passing case, so it is **not** applied: FT-08.16 records the gap in
   text still chooses the plan's family (joining, Brahmic, default).
 - **"This crate never inserts a glyph the text did not ask for"**
   ([features/fonts.md](../features/fonts.md)). FT-08.7 inserts U+25CC into a
-  broken cluster, carrying the cluster's text and no text of its own, so that
-  extraction gives back what was typed.
+  broken cluster, carrying the cluster's offset and no text of its own, so
+  that extraction gives back what was typed.
 
 ### Milestones
 
@@ -1136,7 +1150,7 @@ loses no passing case, so it is **not** applied: FT-08.16 records the gap in
 | A change of model moves the shaping fingerprint | Every `SHAPING` move is H-144's to review, against the cases the step names as moving it |
 | A case the face cannot produce reads as a defect still to fix | H-146: nothing is declined; such a case stays in `TRIAGE` and `PASSING`'s shortfall, with the trace's reason |
 | A second model costs time on every Brahmic run | FT-08.18 measures both models against P-26's targets in the timing phase |
-| An inserted dotted circle reaches extracted text | It carries its cluster's offset and no text of its own; `shaped_creation.rs` extracts the typed text in both builds |
+| An inserted dotted circle reaches extracted text | It carries its cluster's offset and no text of its own, and is drawn inside a span whose `/ActualText` is empty; `shaped_creation.rs` extracts the typed text in both builds, beside a typed U+25CC too |
 | The 31-character cut splits a cluster a reader would not | It is the specification's practical maximum; no case in either corpus comes near it |
 
 ## AAT shaping

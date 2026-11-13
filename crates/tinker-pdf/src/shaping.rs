@@ -14,8 +14,8 @@
 //! glyph indices say nothing about either. `tinker-pdf-shape` keeps a byte
 //! offset on every glyph and keeps them monotonic for exactly this moment.
 //!
-//! Two rules turn that into `/ToUnicode`, and the second is the one that is
-//! easy to get wrong:
+//! Three rules turn that into `/ToUnicode`, and the last two are the ones
+//! that are easy to get wrong:
 //!
 //! - **A glyph stands for the text from its own cluster to the next
 //!   *different* one.** A ligature's cluster is the smallest of the glyphs it
@@ -24,6 +24,14 @@
 //!   rest take nothing.** A decomposition — one character that became a base
 //!   and two marks — would otherwise put the character into the extracted text
 //!   three times, and a reader would find `naïve` spelled `naïïïve`.
+//! - **A glyph the shaper inserted takes nothing**, and the first glyph of
+//!   its cluster that it did not insert takes the text in its place
+//!   (`tinker_pdf_shape::ShapedGlyph::inserted`). The dotted circle under a
+//!   broken cluster's mark is drawn and is not typed: given the mark's text,
+//!   it would map the circle's glyph to whichever mark it stood under first,
+//!   and every broken cluster after that would extract as that one. It is
+//!   drawn inside a span that states nothing ([`draw`]), because no entry in
+//!   `/ToUnicode` reads as nothing.
 //!
 //! # What is drawn is what was measured
 //!
@@ -67,6 +75,11 @@ pub struct Placed {
     pub x: f64,
     /// Its origin off the baseline — 9.4.3's `Ts`.
     pub rise: f64,
+    /// Whether the shaper inserted this glyph rather than mapping it from a
+    /// character (`tinker_pdf_shape::ShapedGlyph::inserted`): a dotted circle
+    /// under a broken cluster's mark, drawn and standing for no text, which
+    /// [`draw`] writes inside a span that says so.
+    pub inserted: bool,
 }
 
 impl Placed {
@@ -87,7 +100,7 @@ impl Placed {
 /// The text each glyph of one shaped run stands for, in the run's own
 /// **logical** order, one entry per glyph.
 ///
-/// The two rules in this module's header, in one place. It is one place on
+/// The three rules in this module's header, in one place. It is one place on
 /// purpose: `epub/paint.rs` draws shaped runs too, and a second copy of a rule
 /// this delicate is a copy that eventually learns something the first one did
 /// not — the "one extractor, not two" discipline that
@@ -100,26 +113,33 @@ impl Placed {
 #[must_use]
 pub fn cluster_texts<'a>(text: &'a str, run: &ShapedRun) -> Vec<&'a str> {
     let glyphs = run.glyphs();
-    let mut out = Vec::with_capacity(glyphs.len());
-    for (at, glyph) in glyphs.iter().enumerate() {
-        // A glyph stands for the text from its own cluster to the next
-        // *different* one — a ligature's cluster is the smallest of the glyphs
-        // it replaced, so `ffi` comes back whole — and nothing at all if an
-        // earlier glyph of the same cluster already took it, which is what
-        // stops a decomposed `ï` from extracting as three characters.
-        let first = at == 0 || glyphs[at.saturating_sub(1)].cluster != glyph.cluster;
+    let mut out = vec![""; glyphs.len()];
+    let mut start = 0usize;
+    while let Some(glyph) = glyphs.get(start) {
+        // One cluster is the stretch of glyphs sharing its offset. It stands
+        // for the text from that offset to the next *different* one — a
+        // ligature's cluster is the smallest of the glyphs it replaced, so
+        // `ffi` comes back whole — and one glyph of it takes that text, which
+        // is what stops a decomposed `ï` from extracting as three characters.
+        let end = glyphs
+            .get(start..)
+            .and_then(|rest| rest.iter().position(|next| next.cluster != glyph.cluster))
+            .map_or(glyphs.len(), |length| start.saturating_add(length));
         let from = usize::try_from(glyph.cluster).unwrap_or(0);
-        let to = glyphs[at.saturating_add(1)..]
-            .iter()
-            .find(|next| next.cluster != glyph.cluster)
-            .map_or(run.text().end, |next| {
-                usize::try_from(next.cluster).unwrap_or(from)
-            });
-        out.push(if first {
-            text.get(from..to.max(from)).unwrap_or("")
-        } else {
-            ""
+        let to = glyphs.get(end).map_or(run.text().end, |next| {
+            usize::try_from(next.cluster).unwrap_or(from)
         });
+        // The first glyph the shaper did not insert takes it: a dotted
+        // circle in front of its mark is drawn, and typed by no one. A
+        // cluster of nothing but inserted glyphs gives it to its first, so
+        // no text a run stands for is lost.
+        let taker = (start..end)
+            .find(|at| glyphs.get(*at).is_some_and(|glyph| !glyph.inserted))
+            .unwrap_or(start);
+        if let Some(slot) = out.get_mut(taker) {
+            *slot = text.get(from..to.max(from)).unwrap_or("");
+        }
+        start = end.max(start.saturating_add(1));
     }
     out
 }
@@ -147,6 +167,7 @@ pub fn place(text: &str, run: &ShapedRun, size: f64) -> Vec<Placed> {
             text: texts.get(at).copied().unwrap_or("").to_string(),
             x: pen + scale(glyph.x_offset),
             rise: scale(glyph.y_offset),
+            inserted: glyph.inserted,
         });
         pen += scale(glyph.x_advance);
     }
@@ -252,6 +273,7 @@ pub fn write_run(builder: &mut DocumentBuilder, out: &mut Vec<u8>, run: &Run<'_>
                 text: slot.text.clone(),
                 x: pen + scale(glyph.x_offset),
                 rise: slot.rise,
+                inserted: slot.inserted,
             });
             pen += scale(glyph.x_advance);
         }
@@ -259,16 +281,80 @@ pub fn write_run(builder: &mut DocumentBuilder, out: &mut Vec<u8>, run: &Run<'_>
     if placed.is_empty() {
         return false;
     }
-    let borrowed: Vec<PlacedGlyph<'_>> = placed.iter().map(Placed::as_glyph).collect();
-    match colour {
-        Some(face) => {
-            // Every glyph's procedure first, so the run names none the
-            // builder lacks; a run refused for one writes nothing.
-            if !face.add_glyphs(builder, font, placed.iter().map(|glyph| glyph.id)) {
-                return false;
-            }
-            builder.colour_glyph_run(out, font, size, matrix, &borrowed)
+    if let Some(face) = colour {
+        // Every glyph's procedure first, so the run names none the builder
+        // lacks; a run refused for one writes nothing.
+        if !face.add_glyphs(builder, font, placed.iter().map(|glyph| glyph.id)) {
+            return false;
         }
-        None => builder.glyph_run(out, font, size, matrix, &borrowed),
     }
+    draw(builder, out, font, size, matrix, &placed, colour.is_some())
+}
+
+/// Writes `placed` — one line's glyphs, in drawing order — as a composite
+/// font's text through [`DocumentBuilder::glyph_run`], or, `colour`, a colour
+/// face's through `DocumentBuilder::colour_glyph_run`, its glyphs' procedures
+/// already added.
+///
+/// # A glyph the shaper inserted is drawn inside a span that states nothing
+///
+/// A dotted circle stands for no text, and `/ToUnicode` cannot say so: a code
+/// it does not map is one a reader may read as a character of its own
+/// choosing (ISO 32000-2 9.10.2), and a code it maps — because the document
+/// also draws a typed U+25CC in the face — reads as that character. So each
+/// stretch of glyphs the shaper inserted is written inside
+/// `/Span <</ActualText ()>> BDC … EMC`, a span whose replacement text is
+/// empty (14.9.4), and a reader reads nothing where the circle is drawn. The
+/// glyphs around it are written as before, each stretch its own text object
+/// at the same matrix, so every glyph is where the line put it.
+///
+/// A line with no inserted glyph is one call, written byte for byte as it
+/// was. Returns false, having written nothing, for the reasons the call
+/// returns false, the checks made before any stretch is written.
+pub(crate) fn draw(
+    builder: &mut DocumentBuilder,
+    out: &mut Vec<u8>,
+    font: &[u8],
+    size: f64,
+    matrix: [f64; 6],
+    placed: &[Placed],
+    colour: bool,
+) -> bool {
+    let run = |builder: &mut DocumentBuilder, out: &mut Vec<u8>, glyphs: &[Placed]| {
+        let borrowed: Vec<PlacedGlyph<'_>> = glyphs.iter().map(Placed::as_glyph).collect();
+        if colour {
+            builder.colour_glyph_run(out, font, size, matrix, &borrowed)
+        } else {
+            builder.glyph_run(out, font, size, matrix, &borrowed)
+        }
+    };
+    if !placed.iter().any(|glyph| glyph.inserted) {
+        return run(builder, out, placed);
+    }
+    // What the call refuses for the whole line, refused before any stretch
+    // is written, so a refusal writes nothing.
+    let drawable = size.is_finite()
+        && size > 0.0
+        && matrix.iter().all(|value| value.is_finite())
+        && placed
+            .iter()
+            .all(|glyph| glyph.x.is_finite() && glyph.rise.is_finite());
+    if !drawable {
+        return false;
+    }
+    let mut written = Vec::new();
+    for stretch in placed.chunk_by(|one, next| one.inserted == next.inserted) {
+        let silent = stretch.first().is_some_and(|glyph| glyph.inserted);
+        if silent {
+            written.extend_from_slice(b"/Span <</ActualText ()>> BDC\n");
+        }
+        if !run(builder, &mut written, stretch) {
+            return false;
+        }
+        if silent {
+            written.extend_from_slice(b"EMC\n");
+        }
+    }
+    out.extend_from_slice(&written);
+    true
 }

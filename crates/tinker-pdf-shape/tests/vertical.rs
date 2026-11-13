@@ -923,6 +923,7 @@ fn a_mark_attaches_to_its_base_in_a_column() {
         y_advance: 0,
         x_offset: base.x_offset + (900 - 300),
         y_offset: base.y_offset - base.y_advance + (800 - 900),
+        inserted: false,
     };
     assert_eq!(runs[0].glyphs(), &[base, mark]);
 

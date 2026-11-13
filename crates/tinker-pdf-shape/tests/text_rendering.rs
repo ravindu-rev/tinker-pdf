@@ -794,8 +794,6 @@ const MAX_DELTA: i32 = 1;
 /// - **Canonical ordering.** The decomposition above is not NFD: the
 ///   `Canonical_Combining_Class` sort is not applied. No case here is known to
 ///   need it, which is why it is a gap rather than a cause.
-/// - **Dotted circles.** USE inserts one into a cluster its grammar calls
-///   broken; this crate never inserts a glyph the text did not ask for.
 /// - The syllable rule, stated as a simplification in `crate::universal`. Its
 ///   categories are USE's own classes; the grammar that reads them is
 ///   `docs/design/shaping.md`'s *The cluster grammar*, and the `set` column

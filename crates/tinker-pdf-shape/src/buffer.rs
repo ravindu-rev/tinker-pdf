@@ -29,12 +29,13 @@
 //! its host's compiler chose to fold the additions in.
 
 use crate::gdef::GlyphClass;
-use crate::universal::Category;
+use crate::universal::{Category, ClusterType};
 
 /// One positioned glyph.
 ///
-/// The six fields `docs/design/shaping.md` names, in font design units. A
-/// consumer scales them by `size / units_per_em`; nothing here does.
+/// The fields `docs/design/shaping.md` names: six numbers in font design
+/// units, which a consumer scales by `size / units_per_em` and nothing here
+/// does, and whether the shaper inserted the glyph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ShapedGlyph {
     /// The glyph index in the face this run was shaped against.
@@ -51,6 +52,19 @@ pub struct ShapedGlyph {
     pub x_offset: i32,
     /// Where this glyph is drawn relative to the pen, vertically.
     pub y_offset: i32,
+    /// Whether the shaper put this glyph in where no character asked for
+    /// one: the dotted circle a broken cluster's mark stands on
+    /// (`docs/design/shaping.md`, *Dotted circles*). A glyph the face's own
+    /// tables add — a multiple substitution's, or an AAT insertion
+    /// subtable's ([`Buffer::insertion`]) — is the face drawing a character
+    /// it was given, and is not one.
+    ///
+    /// Such a glyph carries the cluster of the character it stands beside and
+    /// stands for **no text of its own**, so a consumer rebuilding the text
+    /// of a cluster gives it none and gives the cluster's text to a glyph of
+    /// it that is not inserted. A ligature is inserted only where every
+    /// glyph it joined was: a circle a face joins to its mark draws the mark.
+    pub inserted: bool,
 }
 
 /// Which way the run is set.
@@ -131,8 +145,9 @@ pub enum Insertion {
 /// output.
 ///
 /// Kept in a parallel vector rather than in [`ShapedGlyph`], because the
-/// output type is fixed by the design doc at six integers and because none of
-/// this means anything once the run is over.
+/// output type is the design doc's -- six integers and whether the shaper
+/// inserted the glyph -- and none of this means anything once the run is
+/// over.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Props {
     /// The GDEF glyph class, as it stands *now*. It is not simply a lookup in
@@ -160,6 +175,9 @@ pub(crate) struct Props {
     /// Which cluster of a Brahmic script this glyph belongs to, or zero. See
     /// [`Buffer::set_syllable`].
     pub(crate) syllable: u16,
+    /// What kind of cluster that is, as the cluster model cut it. See
+    /// [`Buffer::set_cluster_type`].
+    pub(crate) cluster_type: ClusterType,
     /// What the Universal Shaping Engine's cluster model calls this glyph.
     ///
     /// Set from the *character* before any lookup runs and carried on the
@@ -372,6 +390,61 @@ impl Buffer {
         if let Some(props) = self.props.get_mut(at) {
             props.syllable = syllable;
         }
+    }
+
+    /// Records what kind of cluster the glyph at `at` belongs to, read off
+    /// its character with the cluster's number ([`Buffer::set_syllable`]) and
+    /// carried on the glyph from then on, as the category is.
+    ///
+    /// A broken cluster is the one kind anything reads: `crate::shape` puts
+    /// the face's dotted circle in front of each one before `GSUB` runs
+    /// ([`Buffer::insert_before`]).
+    pub(crate) fn set_cluster_type(&mut self, at: usize, kind: ClusterType) {
+        if let Some(props) = self.props.get_mut(at) {
+            props.cluster_type = kind;
+        }
+    }
+
+    /// Puts `glyph` in front of each glyph `before` names, as the base of that
+    /// glyph's cluster: it takes the cluster offset, the syllable and the
+    /// cluster type of the glyph it stands before, `category` for the cluster
+    /// model, every feature the whole run asked for, and
+    /// [`ShapedGlyph::inserted`], since no character asked for it.
+    ///
+    /// `before` is in ascending order, each position the glyph's place before
+    /// any insertion, and a position past the end or named twice is one
+    /// insertion or none. The buffer is rebuilt once, in one pass, so a run of
+    /// a hundred thousand broken clusters costs a hundred thousand times what
+    /// one does and not the square of it (ruling 1).
+    pub(crate) fn insert_before(&mut self, before: &[usize], glyph: u16, category: Category) {
+        if before.is_empty() {
+            return;
+        }
+        let grown = self.glyphs.len().saturating_add(before.len());
+        let mut glyphs = Vec::with_capacity(grown);
+        let mut props = Vec::with_capacity(grown);
+        let mut wanted = before.iter().copied().peekable();
+        for (at, (shaped, beside)) in self.glyphs.iter().zip(&self.props).enumerate() {
+            if wanted.peek() == Some(&at) {
+                glyphs.push(ShapedGlyph {
+                    glyph,
+                    cluster: shaped.cluster,
+                    inserted: true,
+                    ..ShapedGlyph::default()
+                });
+                props.push(Props {
+                    syllable: beside.syllable,
+                    cluster_type: beside.cluster_type,
+                    category,
+                    ..Props::new()
+                });
+            }
+            while wanted.next_if(|position| *position <= at).is_some() {}
+            glyphs.push(*shaped);
+            props.push(*beside);
+        }
+        self.glyphs = glyphs;
+        self.props = props;
     }
 
     /// Records what the cluster model calls the glyph at `at`.
@@ -1075,5 +1148,65 @@ mod tests {
         assert!(!Direction::LeftToRight.is_vertical());
         assert!(!Direction::RightToLeft.is_forward());
         assert!(!Direction::RightToLeft.is_vertical());
+    }
+
+    /// FT-08.7: a base inserted in front of a glyph takes that glyph's
+    /// cluster offset, syllable and cluster type, the category it is given
+    /// and every feature the run asked for, is marked inserted, and leaves
+    /// every other glyph and its props where they were, in one pass however
+    /// many are asked for.
+    #[test]
+    fn a_base_inserted_before_a_glyph_takes_its_cluster_and_syllable() {
+        use super::{Category, ClusterType};
+
+        let mut buffer = Buffer::from_glyphs(&[1, 2, 3]);
+        for (at, syllable) in [(0usize, 1u16), (1, 2), (2, 2)] {
+            buffer.set_syllable(at, syllable);
+        }
+        buffer.set_cluster_type(1, ClusterType::Broken);
+        buffer.set_cluster_type(2, ClusterType::Broken);
+        buffer.set_category(1, Category::VAbv);
+        buffer.set_mask(1, Buffer::GLOBAL | 8);
+        // Ascending, one position named twice and one past the end.
+        buffer.insert_before(&[1, 1, 7], 9, Category::B);
+        let shaped: Vec<(u16, u32, bool)> = buffer
+            .glyphs()
+            .iter()
+            .map(|glyph| (glyph.glyph, glyph.cluster, glyph.inserted))
+            .collect();
+        assert_eq!(
+            shaped,
+            [(1, 0, false), (9, 1, true), (2, 1, false), (3, 2, false)]
+        );
+        let circle = buffer.props(1);
+        assert_eq!(circle.syllable, 2);
+        assert_eq!(circle.cluster_type, ClusterType::Broken);
+        assert_eq!(circle.category, Category::B);
+        assert_eq!(
+            circle.mask,
+            Buffer::GLOBAL,
+            "the circle took the mark's mask"
+        );
+        // The mark it stands before kept everything it had.
+        assert_eq!(buffer.props_category(2), Some(Category::VAbv));
+        assert_eq!(buffer.props_mask(2), Buffer::GLOBAL | 8);
+        assert!(buffer.props_mut(3).is_some() && buffer.props_mut(4).is_none());
+
+        // Nothing asked for, nothing changed.
+        let before = buffer.glyphs().to_vec();
+        buffer.insert_before(&[], 9, Category::B);
+        assert_eq!(buffer.glyphs(), before.as_slice());
+
+        // At the very front, and before every glyph at once.
+        let mut buffer = Buffer::from_glyphs(&[4, 5]);
+        buffer.insert_before(&[0, 1], 6, Category::B);
+        assert_eq!(
+            buffer
+                .glyphs()
+                .iter()
+                .map(|glyph| (glyph.glyph, glyph.cluster, glyph.inserted))
+                .collect::<Vec<_>>(),
+            [(6, 0, true), (4, 0, false), (6, 1, true), (5, 1, false)]
+        );
     }
 }

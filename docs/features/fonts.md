@@ -1230,6 +1230,15 @@ What it does:
   before any advance is filled, because a face may give one an outline and a
   width. `rphf` is offered only where the syllable has a base for the repha to
   sit on, so a word-final `RA` and halant is a dead consonant and not a reph.
+  A cluster the published grammar calls broken stands on the face's dotted
+  circle: its U+25CC glyph, put in front of the cluster's mark before `GSUB`
+  as the cluster's base, so the face's lookups and the reordering pause treat
+  it as they treat a typed one. The circle carries the mark's cluster offset
+  and is marked `ShapedGlyph::inserted`, a glyph that stands for no text; a
+  face that does not map U+25CC gets none, Tai Tham and the scripts the
+  specification does not list get none, and each circle is spent from
+  `Limits::max_glyphs`, so past the ceiling a broken cluster goes without and
+  the run's `GlyphBudgetExceeded` says so.
   The table below says how much of it is adjudicated.
 - **Plans and coverage indexes kept per face.** A caller that keeps a
   `tinker_pdf_shape::Plans` beside a face and makes its shapers with it
@@ -1506,6 +1515,16 @@ What it does:
   cluster to its first. An Arabic string built that way extracts back to
   itself, in reading order, through the `/ToUnicode` the writer wrote, across
   a ligature, and the document is clean under the strict structural validator.
+  A glyph the shaper inserted stands for nothing: the first glyph of its
+  cluster it did not insert takes the cluster's text, and the inserted one is
+  drawn inside `/Span <</ActualText ()>> BDC … EMC`, a span whose replacement
+  text is empty, because `/ToUnicode` cannot map a code to nothing — a code
+  it leaves out is one a reader may read as a character of its choosing, and
+  one a typed U+25CC in the same face maps reads as that. So a broken
+  Balinese cluster drawn on its dotted circle extracts as typed, with no
+  U+25CC, beside a typed one or not, and a line with no inserted glyph is
+  written byte for byte as before. The EPUB painter draws through the same
+  writer.
 - **Colour glyphs into a document.** `tinker_pdf::colour_glyphs::ColourFace`
   reads a face's `COLR` and `CPAL` once, under the `PaletteChoice` its caller
   names — a `COLR` with no `CPAL` is no colour table — and `register` makes it
@@ -1828,9 +1847,6 @@ What it does **not** do, each named so it is a backlog and not a mystery:
   [design/shaping.md](../design/shaping.md)'s *The traced rows* holds the
   trace, and `TRIAGE` in `crates/tinker-pdf-shape/tests/text_rendering.rs`
   the case list.
-- **Dotted circles.** USE inserts one into a cluster that its grammar calls
-  broken. This crate never inserts a glyph the text did not ask for, so a
-  malformed cluster renders as its parts.
 - **`Default_Ignorable_Code_Point`.** Only `ZWJ` and `ZWNJ` are deleted, by
   `Indic_Syllabic_Category`, which this crate already parses. The wider
   property — soft hyphen, word joiner, the Mongolian free variation selectors
