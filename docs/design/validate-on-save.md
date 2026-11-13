@@ -68,14 +68,14 @@ The crate graph decides it, through three constraints that are each
 enforced:
 
 1. A `tinker-pdf-cos` test cannot reach the facade. `cargo xtask dag` holds
-   every crate to `ALLOWED` (`xtask/src/main.rs:767`), and
+   every crate to `ALLOWED` (`xtask/src/main.rs:783`), and
    `internal_dependencies` counts a dev-dependency as an edge
    (`xtask/src/version.rs:373-382`), so the cos crate may not take
    `tinker-pdf` even for its tests — and the profile validators are the
-   facade's (`crates/tinker-pdf/src/lib.rs:2060-2157`).
+   facade's (`crates/tinker-pdf/src/lib.rs:2093-2190`).
 2. The C ABI and the CLI reach the facade and nothing under it:
-   `("tinker-pdf-ffi", &["tinker-pdf"])` (`xtask/src/main.rs:938`) and
-   `TOOLS` (`xtask/src/main.rs:967`), ruling 11. Their test modules can name
+   `("tinker-pdf-ffi", &["tinker-pdf"])` (`xtask/src/main.rs:954`) and
+   `TOOLS` (`xtask/src/main.rs:983`), ruling 11. Their test modules can name
    `tinker_pdf` and not `tinker_pdf_cos`.
 3. A crate's own `src` test modules cannot name the crate they are in:
    inside `tinker-pdf-cos`, `tinker_pdf_cos::` does not resolve, and inside
@@ -133,7 +133,7 @@ How each tree reaches it:
   document cites in either file moved to make room for it.
 
 A packaged crate's tests therefore name a file outside the package. That is
-already so — `crates/tinker-pdf/tests/pubsec_write.rs:36` takes
+already so — `crates/tinker-pdf/tests/pubsec_write.rs:39` takes
 `testdata/simple-text.pdf` by `include_bytes!` — and publishing builds the
 library, not its tests.
 
@@ -143,14 +143,14 @@ The cos reading opens with `CosDocument::open` and calls
 `tinker_pdf_cos::validate` (`crates/tinker-pdf-cos/src/validate.rs:771`).
 The facade reading opens with `Document::open` and calls
 `Document::validate`, which is `tinker_pdf_cos::validate` over the
-document's `inner` (`crates/tinker-pdf/src/lib.rs:1715-1717`), and `inner`
+document's `inner` (`crates/tinker-pdf/src/lib.rs:1748-1750`), and `inner`
 is `CosDocument::open(bytes)` whenever the bytes are read as a PDF
-(`lib.rs:1458`). `Document::open` converts what it does not read as one — a
-container signature at a fixed position (`lib.rs:1433-1437`), a standalone
-SVG, image, HTML or FB2 file (`lib.rs:1444-1456`) — and `standalone::sniff`
+(`lib.rs:1491`). `Document::open` converts what it does not read as one — a
+container signature at a fixed position (`lib.rs:1466-1470`), a standalone
+SVG, image, HTML or FB2 file (`lib.rs:1477-1489`) — and `standalone::sniff`
 answers `None` for any bytes whose header window holds `%PDF-`
 (`crates/tinker-pdf/src/standalone.rs:184-191`). The facade reading fails a
-document whose `Document::archive()` (`lib.rs:1640`) is `Some`, so it
+document whose `Document::archive()` (`lib.rs:1673`) is `Some`, so it
 validates the bytes it was handed, read as a PDF, or nothing. One function
 over one parse, in every tree.
 
@@ -159,12 +159,12 @@ over one parse, in every tree.
 A door takes the bytes with a label, or `Locked { bytes, key }`, where `key`
 is `Key::Password` or `Key::Recipient` — the two ways a document is opened
 (`CosDocument::authenticate` and `authenticate_with_recipient`,
-`crates/tinker-pdf-cos/src/doc.rs:1171` and `:1196`, and the facade's at
-`lib.rs:1752` and `:1995`). `validate` wants an authenticated document,
+`crates/tinker-pdf-cos/src/doc.rs:1211` and `:1236`, and the facade's at
+`lib.rs:1785` and `:2028`). `validate` wants an authenticated document,
 because a stream it cannot decrypt reads as one that does not decode
 (`validate.rs:764-771`). An encrypted document handed over with no key is
 tried with the empty user password, which `Document::open` leaves untried
-on purpose (`lib.rs:1773-1777`); if that fails, the door fails and says the
+on purpose (`lib.rs:1806-1810`); if that fails, the door fails and says the
 key is missing. Bytes that do not open fail the
 door. A door never changes what it is handed: it opens its own copy, so no
 fingerprint and no pinned page moves when a test starts calling it.
@@ -314,7 +314,7 @@ is not a unit, nothing under `xtask/`, `fuzz/`, `bindings/`, `benches/` or
 `examples/` is a unit of its own, and no doc comment is read.
 
 **Reading a unit.** Comments are dropped before matching, as
-`check_oracles` drops them (`xtask/src/main.rs:1285-1290`), but by a lexer
+`check_oracles` drops them (`xtask/src/main.rs:1301-1306`), but by a lexer
 that knows string and character literals: `line.split("//")` cuts a line
 at the `//` of a URL inside a literal, and an inline module's extent needs
 its braces counted outside literals. A writer named in a comment or inside
@@ -339,11 +339,11 @@ bytes: `DocumentBuilder::finish`, `finish_reporting` and `finish_archival`
 `DocumentEditor::save` and `save_sealed`
 (`crates/tinker-pdf-cos/src/edit/save.rs:265`, `:297`); `save_signed` and
 `save_timestamped` (`crates/tinker-pdf-cos/src/edit/signing.rs:38`, `:97`);
-`tinker_pdf::write::save` (`crates/tinker-pdf/src/write.rs:337`);
+`tinker_pdf::write::save` (`crates/tinker-pdf/src/write.rs:351`);
 `write::incremental_update` and `linearize::linearize`
-(`crates/tinker-pdf-cos/src/write.rs:810`,
+(`crates/tinker-pdf-cos/src/write.rs:824`,
 `crates/tinker-pdf-cos/src/linearize.rs:144`); `tpdf_editor_save` and
-`tpdf_builder_finish` (`crates/tinker-pdf-ffi/src/lib.rs:2794`, `:4509`);
+`tpdf_builder_finish` (`crates/tinker-pdf-ffi/src/lib.rs:2822`, `:4537`);
 and the CLI's commands, which all write through `save_to`
 (`tools/tpdf/src/writing.rs:556`). The pairings keep a name that is not a
 writer from counting: `corrupt.rs`'s hand-built `b.finish("/Root 1 0 R")`
@@ -351,7 +351,7 @@ writer from counting: `corrupt.rs`'s hand-built `b.finish("/Root 1 0 R")`
 sit in units that name no `DocumentBuilder`. A conversion writes inside
 `Document::open`, a name every reading test shares, so a conversion is
 recognised by what only a conversion test names: Markdown's own entry
-point (`Document::open_markdown`, `lib.rs:1502`), the synthesised document's
+point (`Document::open_markdown`, `lib.rs:1535`), the synthesised document's
 report, and the modules that build EPUB, XPS and comic containers.
 `.archive()` is also the name of the XPS and EPUB package readers' accessor
 for their ZIP (`crates/tinker-pdf/src/xps/opc.rs:855`,
@@ -371,7 +371,7 @@ point it matched and its line:
 
 - a unit that writes, does not call the helper, and is not pending fails;
 - a pending unit that calls the helper fails until it is taken off the
-  list — `SPAWNERS`' second direction (`xtask/src/main.rs:1308-1316`), for
+  list — `SPAWNERS`' second direction (`xtask/src/main.rs:1324-1332`), for
   its reason: an allowance that outlives its need is how the next one gets
   in;
 - a pending entry that names no unit, or a unit that no longer writes,
@@ -398,7 +398,7 @@ it in those two readings and nowhere else:
 
 - each reading runs it at the document's declared version: the later of the
   header's and the catalog's `/Version`, as `outline::version_string` reads
-  it (`crates/tinker-pdf-cos/src/outline.rs:294`) and `Document::pdf_version`
+  it (`crates/tinker-pdf-cos/src/outline.rs:295`) and `Document::pdf_version`
   returns it — the version read the way the engine already reads it;
 - its findings become a third verdict of items, not owned, whose class is
   the finding's kind and its object path and whose exact key is the kind.
@@ -486,8 +486,8 @@ path is outside the agreement.
    list.
 4. **K-03.5, the conversions.** Each file the step names holds what it
    synthesises by `synthesised`, and its file-local check goes, among them
-   `valid` in `epub_validated.rs:133`, `xps_validated.rs:49` and
-   `cbz_validated.rs:42`. Exit: the same two commands, with those files off
+   `valid` in `epub_validated.rs`, `xps_validated.rs` and
+   `cbz_validated.rs`. Exit: the same two commands, with those files off
    the pending list.
 5. **K-03.6, saves of a changed document.** The editor's, the signer's, the
    sealer's, encryption's, the redactor's and the recoder's tests, and the
@@ -502,7 +502,7 @@ path is outside the agreement.
    and `src` modules, `strict_validator.rs` through `expecting` in place of
    its `verdict` and `refused` (`strict_validator.rs:120`, `:132`); the C
    ABI's `src` test modules, their `validate().is_empty()` checks gone; the
-   CLI's test modules, `assert_clean` (`tools/tpdf/src/writing.rs:963`) gone;
+   CLI's test modules, `assert_clean` (`tools/tpdf/src/writing.rs:964`) gone;
    `PENDING` emptied and deleted; `README.md` and `docs/verification.md` say
    the rule holds by test. Exit: `written.rs`'s
    `a_new_writing_test_without_the_helper_fails`; `cargo xtask check`;
