@@ -3,8 +3,9 @@
 //! The harness, the sampling and the rules every name here keeps are
 //! `support/mod.rs`'s; `baseline.json`'s `fonts` list names these operations
 //! in this order. Each input is asserted before its operation is timed: every
-//! paragraph shapes to glyphs and no `.notdef`, every face has its glyph
-//! count, and every glyph of every program yields an outline.
+//! paragraph shapes to glyphs and no `.notdef`, the column to runs standing
+//! upright and sideways, every face has its glyph count, and every glyph of
+//! every program yields an outline.
 
 mod support;
 
@@ -45,6 +46,54 @@ fn assert_shapes(face: &Sfnt<'_>, plans: &Plans, text: &str, script: &str) {
         !glyphs.contains(&0),
         "the {script} paragraph shapes to no .notdef"
     );
+}
+
+/// One call of the column operation: `text` shaped as a column through the
+/// face's kept [`Plans`], as a caller setting a paragraph vertically shapes
+/// it — its runs cut by orientation, each upright one top to bottom with the
+/// vertical plan and metrics, each sideways one along a line.
+#[cfg(not(tinker_planning_baseline))]
+fn shape_column(face: &Sfnt<'_>, plans: &Plans, text: &str) -> Vec<ShapedRun> {
+    Shaper::new(face)
+        .with_plans(plans)
+        .shape_text_vertical(text, BaseDirection::Auto)
+        .1
+}
+
+/// The planning baseline has no column: its arm shapes the paragraph along a
+/// line through the same face in its place.
+#[cfg(tinker_planning_baseline)]
+fn shape_column(face: &Sfnt<'_>, plans: &Plans, text: &str) -> Vec<ShapedRun> {
+    shape(face, plans, text)
+}
+
+/// The vertical paragraph shaped as a column holds glyphs, none of them
+/// `.notdef`, and runs that stand upright and runs that stand sideways.
+fn assert_column(face: &Sfnt<'_>, plans: &Plans, text: &str) {
+    assert_eq!(text.chars().count(), 1000, "the vertical paragraph");
+    let runs = shape_column(face, plans, text);
+    let glyphs: Vec<u16> = runs
+        .iter()
+        .flat_map(|run| run.glyphs().iter().map(|glyph| glyph.glyph))
+        .collect();
+    assert!(
+        !glyphs.is_empty(),
+        "the vertical paragraph shapes to glyphs"
+    );
+    assert!(
+        !glyphs.contains(&0),
+        "the vertical paragraph shapes to no .notdef"
+    );
+    #[cfg(not(tinker_planning_baseline))]
+    for stands in [
+        tinker_pdf_shape::Orientation::Upright,
+        tinker_pdf_shape::Orientation::Sideways,
+    ] {
+        assert!(
+            runs.iter().any(|run| run.orientation() == stands),
+            "the vertical paragraph has a run standing {stands:?}"
+        );
+    }
 }
 
 /// A TrueType face's glyph count, `maxp`'s `numGlyphs`.
@@ -122,6 +171,7 @@ fn fonts(c: &mut Criterion) {
             inputs::shape_face("devanagari/NotoSansDevanagari-Regular.ttf")
         })
     });
+    let column = LazyCell::new(|| face("column-face.ttf", inputs::column_face));
     let cff = LazyCell::new(|| inputs::store().set("cff-programs.bundle", inputs::cff_programs));
 
     let mut group = Group::new(c, "fonts");
@@ -160,6 +210,21 @@ fn fonts(c: &mut Criterion) {
         op.iter(move || {
             for _ in 0..8 {
                 black_box(shape(&face, &plans, &devanagari_text));
+            }
+        });
+    });
+    // A column of mixed orientation (FT-07b.9a), beside the paragraphs along
+    // a line: upright ideographs and kana with the comma's and the stop's
+    // vertical forms and a `vkrn` pair, Latin words and a number sideways,
+    // through a face generated with its vertical metrics.
+    group.operation("shape a vertical paragraph", |op| {
+        let face = Sfnt::parse(&column).expect("the column face parses");
+        let column_text = inputs::store().text("vertical-1000.txt", inputs::vertical_paragraph);
+        let plans = Plans::new();
+        assert_column(&face, &plans, &column_text);
+        op.iter(move || {
+            for _ in 0..50 {
+                black_box(shape_column(&face, &plans, &column_text));
             }
         });
     });

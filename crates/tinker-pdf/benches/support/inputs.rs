@@ -2518,3 +2518,311 @@ pub fn arabic_paragraph() -> String {
 pub fn devanagari_paragraph() -> String {
     thousand(&HINDI, Some('।'), 3)
 }
+
+/// What [`vertical_paragraph`] draws from: Japanese words, which a column sets
+/// upright and runs together; the ideographic comma and full stop, upright in
+/// their vertical forms; Latin words and a number between spaces, which a
+/// column sets sideways; and full-width digits, upright.
+const COLUMN_WORDS: [&str; 26] = [
+    "縦書き",
+    "日本語",
+    "文字",
+    "組版",
+    "漢字",
+    "東京",
+    "学校",
+    "時間",
+    "ひらがな",
+    "カタカナ",
+    "です",
+    "ます",
+    "の",
+    "は",
+    "を",
+    "スト",
+    "、",
+    "。",
+    "、",
+    "。",
+    " PDF ",
+    " fine ",
+    " office ",
+    " 2026 ",
+    "１２３",
+    "縦組",
+];
+
+/// 1 000 characters of a vertical paragraph of mixed orientation, from
+/// [`COLUMN_WORDS`] run together, every character of it one
+/// [`column_face`] maps.
+pub fn vertical_paragraph() -> String {
+    let mut seeded = Seeded::new(4);
+    let mut text = String::new();
+    while text.chars().count() < 1000 {
+        text.push_str(COLUMN_WORDS[seeded.below(COLUMN_WORDS.len())]);
+    }
+    text.chars().take(1000).collect()
+}
+
+/// Big-endian `u16`s.
+fn be16s(values: &[u16]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect()
+}
+
+/// An OpenType Layout header, with `slots[i]` patched to the offset of
+/// `parts[i]`, which follow it in order.
+fn assembled(mut head: Vec<u8>, slots: &[usize], parts: &[Vec<u8>]) -> Vec<u8> {
+    let mut body: Vec<u8> = Vec::new();
+    for (slot, part) in slots.iter().zip(parts) {
+        let offset = u16::try_from(head.len() + body.len()).expect("a table under 64 KB");
+        head[*slot..*slot + 2].copy_from_slice(&offset.to_be_bytes());
+        body.extend_from_slice(part);
+    }
+    head.extend(body);
+    head
+}
+
+/// Coverage format 1 over `glyphs`, sorted.
+fn covering(glyphs: &[u16]) -> Vec<u8> {
+    let mut sorted = glyphs.to_vec();
+    sorted.sort_unstable();
+    let mut out = be16s(&[1, u16::try_from(sorted.len()).expect("a small coverage")]);
+    out.extend(be16s(&sorted));
+    out
+}
+
+/// One lookup of `kind` with its one subtable.
+fn one_lookup(kind: u16, subtable: Vec<u8>) -> Vec<u8> {
+    assembled(be16s(&[kind, 0, 1, 0]), &[6], &[subtable])
+}
+
+/// A `GSUB` or `GPOS` whose scripts' default language systems each name
+/// every feature, and each feature its lookup, by index.
+fn layout(scripts: &[[u8; 4]], features: &[([u8; 4], u16)], lookups: &[Vec<u8>]) -> Vec<u8> {
+    let count = u16::try_from(features.len()).expect("a small feature list");
+    let mut lang_sys = be16s(&[0, 0xFFFF, count]);
+    lang_sys.extend(be16s(&(0..count).collect::<Vec<u16>>()));
+    let script = assembled(be16s(&[0, 0]), &[0], &[lang_sys]);
+    let mut script_head = be16s(&[u16::try_from(scripts.len()).expect("a small script list")]);
+    let mut script_slots = Vec::new();
+    for tag in scripts {
+        script_head.extend_from_slice(tag);
+        script_slots.push(script_head.len());
+        script_head.extend(be16s(&[0]));
+    }
+    let script_list = assembled(script_head, &script_slots, &vec![script; scripts.len()]);
+
+    let mut feature_head = be16s(&[count]);
+    let mut feature_slots = Vec::new();
+    let mut feature_tables = Vec::new();
+    for (tag, index) in features {
+        feature_head.extend_from_slice(tag);
+        feature_slots.push(feature_head.len());
+        feature_head.extend(be16s(&[0]));
+        feature_tables.push(be16s(&[0, 1, *index]));
+    }
+    let feature_list = assembled(feature_head, &feature_slots, &feature_tables);
+
+    let mut list_head = be16s(&[u16::try_from(lookups.len()).expect("a small lookup list")]);
+    list_head.extend(vec![0u8; lookups.len() * 2]);
+    let slots: Vec<usize> = (0..lookups.len()).map(|i| 2 + i * 2).collect();
+    let lookup_list = assembled(list_head, &slots, lookups);
+
+    assembled(
+        be16s(&[1, 0, 0, 0, 0]),
+        &[4, 6, 8],
+        &[script_list, feature_list, lookup_list],
+    )
+}
+
+/// A face for [`vertical_paragraph`] set as a column, generated as every
+/// input here is: a `glyf` box, an `hmtx` advance and a `vmtx` advance and
+/// top side bearing for each character the paragraph holds, all by formula;
+/// a `vert` form for the comma and the full stop; `vkrn` between `ス` and
+/// `ト`; and, for the sideways runs, `liga` for `fi` and `kern` between `P`
+/// and `D`. Every number is an integer, so every target writes the same
+/// bytes.
+pub fn column_face() -> Vec<u8> {
+    let mut chars: Vec<char> = COLUMN_WORDS.iter().flat_map(|word| word.chars()).collect();
+    chars.sort_unstable();
+    chars.dedup();
+    let glyph_of = |c: char| -> u16 {
+        let at = chars.binary_search(&c).expect("a character the words hold");
+        u16::try_from(at + 1).expect("a small face")
+    };
+    let mapped = u16::try_from(chars.len()).expect("a small face");
+    // After the characters: the comma's and the stop's vertical forms, and
+    // the `fi` ligature.
+    let (comma, stop, fi) = (mapped + 1, mapped + 2, mapped + 3);
+    let glyphs = mapped + 4;
+
+    // Each glyph's horizontal advance, its box, and its vertical advance and
+    // top side bearing, by what it stands for.
+    let shape = |glyph: u16| -> (u16, [i16; 4], u16, i16) {
+        let c = (1..=mapped)
+            .contains(&glyph)
+            .then(|| chars[usize::from(glyph - 1)]);
+        let step = i16::try_from(glyph % 7).expect("under seven") * 10;
+        match c {
+            Some(' ') => (250, [0, 0, 0, 0], 1000, 0),
+            Some('、' | '。') => (1000, [80, -60, 380, 240], 1000, 600),
+            Some(c) if c.is_ascii_alphanumeric() => {
+                let width = 480 + u16::try_from(glyph % 9).expect("under nine") * 15;
+                let right = i16::try_from(width).expect("under 1000") - 40;
+                (width, [40, 0, right, 700 + step], 1000, 100 + step)
+            }
+            Some(_) => (
+                1000,
+                [60, -80, 940, 820 + step],
+                1000 + u16::try_from(step).expect("small"),
+                80 + step,
+            ),
+            None if glyph == comma || glyph == stop => (1000, [620, 560, 920, 860], 1000, 140),
+            None if glyph == fi => (900, [40, 0, 860, 700], 1000, 100),
+            None => (500, [50, 0, 450, 700], 1000, 100),
+        }
+    };
+
+    let mut hmtx = Vec::new();
+    let mut vmtx = Vec::new();
+    let mut glyf = Vec::new();
+    let mut loca = Vec::new();
+    for glyph in 0..glyphs {
+        let (advance, [x0, y0, x1, y1], height, bearing) = shape(glyph);
+        hmtx.extend(be16s(&[advance, 0]));
+        vmtx.extend_from_slice(&height.to_be_bytes());
+        vmtx.extend_from_slice(&bearing.to_be_bytes());
+        loca.extend_from_slice(
+            &u32::try_from(glyf.len())
+                .expect("a small glyf")
+                .to_be_bytes(),
+        );
+        if x1 > x0 && y1 > y0 {
+            // One contour of four on-curve points, word deltas.
+            for value in [1i16, x0, y0, x1, y1] {
+                glyf.extend_from_slice(&value.to_be_bytes());
+            }
+            glyf.extend(be16s(&[3, 0]));
+            glyf.extend_from_slice(&[0x01; 4]);
+            for dx in [x0, x1 - x0, 0, x0 - x1] {
+                glyf.extend_from_slice(&dx.to_be_bytes());
+            }
+            for dy in [y0, 0, y1 - y0, 0] {
+                glyf.extend_from_slice(&dy.to_be_bytes());
+            }
+        }
+    }
+    loca.extend_from_slice(
+        &u32::try_from(glyf.len())
+            .expect("a small glyf")
+            .to_be_bytes(),
+    );
+
+    let mut head = vec![0u8; 54];
+    head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+    head[50..52].copy_from_slice(&1i16.to_be_bytes());
+    let mut hhea = vec![0u8; 36];
+    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    hhea[34..36].copy_from_slice(&glyphs.to_be_bytes());
+    let mut vhea = vec![0u8; 36];
+    vhea[0..4].copy_from_slice(&0x0001_1000u32.to_be_bytes());
+    vhea[34..36].copy_from_slice(&glyphs.to_be_bytes());
+    let mut maxp = 0x0000_5000u32.to_be_bytes().to_vec();
+    maxp.extend_from_slice(&glyphs.to_be_bytes());
+
+    let groups = u32::try_from(chars.len()).expect("a small cmap");
+    let mut cmap = be16s(&[0, 1, 3, 10]);
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend(be16s(&[12, 0]));
+    cmap.extend_from_slice(&(16 + groups * 12).to_be_bytes());
+    cmap.extend_from_slice(&0u32.to_be_bytes());
+    cmap.extend_from_slice(&groups.to_be_bytes());
+    for c in &chars {
+        let code = u32::from(*c);
+        cmap.extend_from_slice(&code.to_be_bytes());
+        cmap.extend_from_slice(&code.to_be_bytes());
+        cmap.extend_from_slice(&u32::from(glyph_of(*c)).to_be_bytes());
+    }
+
+    let scripts = [*b"DFLT", *b"hani", *b"kana", *b"latn"];
+    // SingleSubstFormat2: the comma and the stop to their vertical forms.
+    let mut forms = [(glyph_of('、'), comma), (glyph_of('。'), stop)];
+    forms.sort_unstable();
+    let mut vert = be16s(&[2, 0, 2, forms[0].1, forms[1].1]);
+    vert = assembled(vert, &[2], &[covering(&[forms[0].0, forms[1].0])]);
+    // LigatureSubstFormat1: `f` then `i`.
+    let ligature = be16s(&[fi, 2, glyph_of('i')]);
+    let set = assembled(be16s(&[1, 0]), &[2], &[ligature]);
+    let liga = assembled(
+        be16s(&[1, 0, 1, 0]),
+        &[2, 6],
+        &[covering(&[glyph_of('f')]), set],
+    );
+    let gsub = layout(
+        &scripts,
+        &[(*b"vert", 0), (*b"liga", 1)],
+        &[one_lookup(1, vert), one_lookup(4, liga)],
+    );
+    // PairPosFormat1, one pair each: `ス` then `ト` a YAdvance of −150 down
+    // a column, and `P` then `D` an XAdvance of −40 along a line.
+    let pair = |first: u16, second: u16, format: u16, value: i16| {
+        let mut set = be16s(&[1, second]);
+        set.extend_from_slice(&value.to_be_bytes());
+        assembled(
+            be16s(&[1, 0, format, 0, 1, 0]),
+            &[2, 10],
+            &[covering(&[first]), set],
+        )
+    };
+    let gpos = layout(
+        &scripts,
+        &[(*b"vkrn", 0), (*b"kern", 1)],
+        &[
+            one_lookup(2, pair(glyph_of('ス'), glyph_of('ト'), 0x0008, -150)),
+            one_lookup(2, pair(glyph_of('P'), glyph_of('D'), 0x0004, -40)),
+        ],
+    );
+
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = vec![
+        (*b"GPOS", gpos),
+        (*b"GSUB", gsub),
+        (*b"cmap", cmap),
+        (*b"glyf", glyf),
+        (*b"head", head),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"loca", loca),
+        (*b"maxp", maxp),
+        (*b"vhea", vhea),
+        (*b"vmtx", vmtx),
+    ];
+    tables.sort_by_key(|(tag, _)| *tag);
+    let mut out = 0x0001_0000u32.to_be_bytes().to_vec();
+    out.extend(be16s(&[
+        u16::try_from(tables.len()).expect("a small directory"),
+        0,
+        0,
+        0,
+    ]));
+    let mut offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, table) in &tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&u32::try_from(offset).expect("a small face").to_be_bytes());
+        out.extend_from_slice(
+            &u32::try_from(table.len())
+                .expect("a small table")
+                .to_be_bytes(),
+        );
+        offset += table.len();
+        body.extend_from_slice(table);
+    }
+    out.extend(body);
+    out
+}

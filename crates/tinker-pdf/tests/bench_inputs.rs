@@ -392,3 +392,60 @@ fn every_group_file_has_a_committed_list() {
         }
     }
 }
+
+/// **The column face shapes its paragraph as a column** (FT-07b.9a): the
+/// paragraph `shape a vertical paragraph` times is a thousand characters,
+/// every one of them a glyph of the face generated for it; set as a column it
+/// stands runs upright — its ideographs, kana and full-width digits — and
+/// sideways — its Latin words and number — with no `.notdef` and no metric
+/// synthesized, its comma and stop in their vertical forms wherever they stand
+/// upright; and both generators write the same bytes every time.
+#[test]
+fn the_column_face_shapes_its_paragraph_as_a_column() {
+    use tinker_pdf_shape::bidi::BaseDirection;
+    use tinker_pdf_shape::{Orientation, Shaper};
+
+    let text = inputs::vertical_paragraph();
+    assert_eq!(text.chars().count(), 1000);
+    assert_eq!(text, inputs::vertical_paragraph(), "seeded");
+    let bytes = inputs::column_face();
+    assert_eq!(bytes, inputs::column_face(), "by formula");
+    let face = tinker_pdf_font::Sfnt::parse(&bytes).expect("the face parses");
+    for c in text.chars() {
+        assert!(
+            face.glyph_for_char(c).is_some_and(|glyph| glyph != 0),
+            "{c:?} is a glyph of the face"
+        );
+    }
+
+    let runs = Shaper::new(&face)
+        .shape_text_vertical(&text, BaseDirection::Auto)
+        .1;
+    for stands in [Orientation::Upright, Orientation::Sideways] {
+        assert!(
+            runs.iter().any(|run| run.orientation() == stands),
+            "a run standing {stands:?}"
+        );
+    }
+    assert!(
+        runs.iter()
+            .flat_map(|run| run.glyphs())
+            .all(|glyph| glyph.glyph != 0),
+        "no .notdef"
+    );
+    assert!(
+        runs.iter().all(|run| run.warnings().is_empty()),
+        "the face carries every metric a column reads"
+    );
+    for c in ['、', '。'] {
+        assert!(text.contains(c), "the paragraph holds {c}");
+        let horizontal = face.glyph_for_char(c).expect("a glyph of the face");
+        assert!(
+            runs.iter()
+                .filter(|run| run.orientation() == Orientation::Upright)
+                .flat_map(|run| run.glyphs())
+                .all(|glyph| glyph.glyph != horizontal),
+            "{c} stands upright in its vertical form"
+        );
+    }
+}

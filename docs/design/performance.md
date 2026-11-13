@@ -941,7 +941,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 175 operations over inputs the benches
+each, MS-09's `threads` among them: 176 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1446,6 +1446,7 @@ caller makes one (`crates/tinker-pdf-shape/src/shape.rs:270`, `:426`;
 | `fonts/shape 1000 characters of Latin` | none · 125 calls | Liberation Serif Regular | not measured → ≤ 0.2; calibrated | ×125 | built |
 | `fonts/shape 1000 characters of Arabic` | none · 50 calls | `TestShapeAran.ttf` | not measured → ≤ 0.5; calibrated | ×50 | built |
 | `fonts/shape 1000 characters of Devanagari` | none · 8 calls | the vendored face | not measured → ≤ 0.6; calibrated | ×8 | built |
+| `fonts/shape a vertical paragraph` | none · 50 calls | `vertical_paragraph()`, 1 000 characters run together from Japanese words, the ideographic comma and stop, full-width digits and Latin words and a number between spaces, set as a column through `column_face()`, generated with its `vmtx` metrics, `glyf` tops, `vert`, `vkrn`, `liga` and `kern`, through a kept `Plans`; held before it is timed to shape to no `.notdef` and to stand runs upright and sideways; the planning baseline, which has no column, shapes the paragraph along a line in its place | not in tier P's table; floor 1 | untimed | built |
 
 The 192 programs that parse as plain CFF hold 18 529 glyphs, and every one
 outlines; the 193rd, `fuzz/corpus/sfnt/opentype-cff.otf`, is a fuzz seed
