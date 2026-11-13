@@ -24,9 +24,11 @@ open of this design — the refused profiles — is listed in the
   `mft2`, v4's `mAB `) read from a profile's `A2B*` tags, compiled into a
   profile→PCS→destination pipeline. `chad` is not read (see
   [Three decisions](#three-decisions-and-why)).
-- **Rendering intents** (8.6.5.8): `/Intent` on the `ICCBased` stream, the
-  `ri` operator and `/RenderingIntent` in ExtGState select nothing; the
-  transform takes the default intent ([Rendering intents](#rendering-intents)).
+- **Rendering intents** (8.6.5.8): the `ri` operator, an ExtGState's `/RI`
+  and an image's `/Intent` select which of a profile's transforms converts a
+  colour, by ICC.1's precedence of tags, and absolute colorimetric scales by
+  the profile's media white
+  ([Rendering intents](#rendering-intents-8658)).
 - **Determinism under ruling 4** ([rulings.md](../rulings.md)): transform
   *evaluation* is integer and fixed-point only; anything transcendental
   happens once at table-construction time via `tinker-pdf-math`.
@@ -262,6 +264,243 @@ cargo test -p tinker-pdf-color --release -- --ignored the_grid_prices_the_design
   nodes is read back through every form and must be `apply`'s answer
   exactly, so a grid built or read wrongly fails rather than reporting a
   price.
+
+### Rendering intents (8.6.5.8)
+
+K-01 keeps the intent in the graphics state: `ri` and an ExtGState's `/RI`
+set `StoredParameters::rendering_intent`
+(`crates/tinker-pdf-content/src/state.rs`), `q` and `Q` save and restore it
+with the rest of the state, and a name 8.6.5.8 does not list is kept as
+`RenderingIntent::Unrecognised`. No conversion reads it, an image's `/Intent`
+is not read, and every ICC colour converts through the one transform
+`Profile::parse` built — for a LUT profile, from the first of `A2B1`, `A2B0`
+and `A2B2` the profile carries. How often the corpus names an intent is not
+measured: the count `Profile::parse`'s comment gives is of an ExtGState
+`/RenderingIntent`, a key the graphics state parameter dictionary does not
+have; its key is `/RI`. This section is the design RC-01's steps build, read
+from ISO 32000-2 and from ICC.1:2010 (ISO 15076-1:2010), the edition Table 66
+names for PDF 1.7 and 2.0.
+
+#### What the two standards say
+
+- **Where an intent is named** (8.6.5.8): by `ri` (Table 56), by an
+  ExtGState's `/RI` (Table 57) and by an image dictionary's `/Intent`
+  (Table 87), each a name. Table 69's four — `AbsoluteColorimetric`,
+  `RelativeColorimetric`, `Saturation` and `Perceptual` — shall be
+  recognised, and a processor that does not recognise a name uses
+  `RelativeColorimetric`. The graphics state starts at
+  `RelativeColorimetric` (Table 51).
+- **Not on the profile's stream.** Table 65, the entries an `ICCBased`
+  stream adds, holds `/N`, `/Alternate`, `/Range` and `/Metadata` and no
+  intent. 8.6.5.5 has a reader ignore the intent a profile's header records,
+  take the intent from PDF's own parameter, and use only a profile's `AToB`
+  information for a source colour.
+- **An image's own intent** (Table 87) is the one "used in rendering any
+  image that is not an image mask": it is ignored where `/ImageMask` is
+  true, and its default is the current intent of the graphics state. An
+  inline image carries it under its full name (Table 91).
+- **When it is read** (11.7.5.3): when the conversion is made. An elementary
+  object converts in the intent in effect at its painting operation; a
+  transparency group whose space is CIE-based, painted into a parent of
+  another space, in the intent in effect at its `Do`.
+- **Which tag serves an intent** (ICC.1 8.10.2), for an input, display,
+  output or colour space profile: a) the `DToB` tag designated for the
+  intent, where it is present and supported, a tag holding an element the
+  CMM does not support counting as unsupported; b) else the `AToB` tag
+  designated for it; c) else `AToB0`; d) else the tone curves and matrix
+  columns, or `grayTRC`. Table 25 designates `AToB0` perceptual, `AToB1`
+  colorimetric and `AToB2` saturation, and 9.1 has `AToB1` serve both
+  colorimetric intents; `DToB0` to `DToB3` are perceptual, media-relative
+  colorimetric, saturation and ICC-absolute colorimetric (6.2.3, 9.2). Table
+  25 calls a TRC/matrix or `grayTRC` model colorimetric in an input or a
+  display profile and leaves it undefined in an output one. 8.2 lets one
+  tag's data serve every intent, and the media-relative tag serve
+  ICC-absolute colorimetry.
+- **ICC-absolute colorimetric** (6.2.3, 6.3.2.2): `DToB3` where it is
+  present, the media white unused; otherwise generated from the
+  media-relative transform, its PCS value scaled by the source's
+  `mediaWhitePointTag` over the PCS white — `Xa = Xmw / Xi × Xr`, and alike
+  for `Y` and `Z` (equations 4 to 6) — and brought to the destination by the
+  inverse ratio of the destination's own (equations 1 to 3). The PCS white is
+  D50, `(0.9642, 1.0000, 0.8249)` (6.3.4.3); a display profile's
+  `mediaWhitePointTag` is the PCS white (9.2.34), and every profile but a
+  DeviceLink carries one (8.2).
+- **A grey profile's PCS value** (F.2) is its curve's output times the PCS
+  white, in XYZ or in Lab.
+
+#### The table each intent compiles
+
+| Intent | 8.10.2 a), from RC-01.4 | b) | c) | then | Media white |
+| --- | --- | --- | --- | --- | --- |
+| `Perceptual` | `D2B0` | `A2B0` | — | `A2B1`, `A2B2` | — |
+| `RelativeColorimetric` | `D2B1` | `A2B1` | `A2B0` | `A2B2` | — |
+| `Saturation` | `D2B2` | `A2B2` | `A2B0` | `A2B1` | — |
+| `AbsoluteColorimetric` | `D2B3` | `A2B1` | `A2B0` | `A2B2` | scaled, except through `D2B3` |
+
+- **Read across, first present wins.** The last column of tags is this
+  design's, not ICC.1's: a profile that carries none of the tags 8.10.2
+  names for an intent, and no curves, is read through its other tables in
+  the order `Profile::parse` reads them today, so no intent refuses a profile
+  the engine renders today. `RelativeColorimetric`'s row is today's order
+  exactly, which is why a page that sets no intent converts as it does today.
+- **Absolute colorimetric is relative colorimetric's table, scaled**, where
+  no `D2B3` is read: 6.2.3 generates it from the media-relative transform,
+  and 8.10.2 b) for it is `AToB1`. `D2B1` is not in its row: 8.10.2 names
+  only `DToB3` for the absolute intent.
+- **A tag the engine cannot read is passed over, not refused**: a `D2B*` tag
+  holding an element this build does not read is unsupported in 8.10.2 a)'s
+  sense, and the intent falls to its `A2B*` tag. Before RC-01.4 every `D2B*`
+  tag is passed over.
+- **Tags at one offset are one table** (8.2): read once, compiled once, and
+  shared by every intent that selects it.
+- **Matrix/TRC and grey profiles** (8.10.2 d)) serve `Perceptual`,
+  `RelativeColorimetric` and `Saturation` from one transform, whatever the
+  profile's class, and `AbsoluteColorimetric` from that transform with the
+  media white folded in.
+- **A profile carrying a matrix or a `grayTRC` beside `A2B*` tables** is read
+  by its matrix or its curve, for every intent, as `Profile::parse` reads it
+  today. 8.10.2 puts its tables first (b) and c) before d)); taking that
+  order would move every such profile on every page, whatever intent the page
+  sets, so it is the owner's to take and this design does not.
+
+#### Absolute colorimetric against the engine's output
+
+The engine's destination is sRGB through `XYZ_D50_TO_SRGB`
+(`crates/tinker-pdf-color/src/lib.rs`), which takes the PCS white to sRGB's
+white: its media white is the PCS white, as 9.2.34 has a display's be, so
+equations 1 to 3 are the identity on the destination's side and the whole of
+the intent is the source's scaling. With `s = (Xmw / Xi, Ymw / Yi, Zmw / Zi)`:
+
+- **Matrix/TRC**: the scaling is folded into the s15.16 matrix once —
+  `XYZ_D50_TO_SRGB × diag(s) × columns` — so a pixel costs what a relative
+  one does.
+- **Grey**: F.2's PCS value, the curve's `Y` on the PCS white (under Lab,
+  `L*` with `a* = b* = 0`, the same white), scaled, is `Y × wtpt`. A grey
+  profile whose media white is not D50 draws its greys in the medium's tint
+  under this intent, through `XYZ_D50_TO_SRGB`; under the others it stays
+  achromatic, as today.
+- **A table** (`mft1`, `mft2`, `mAB `, and a `D2B*` other than `D2B3`): the
+  PCS value it gives — XYZ, or legacy 16-bit Lab taken to XYZ by the
+  conversion `lab_to_rgb` already makes — scaled per channel, then to sRGB as
+  the relative path does.
+- **The PCS white is 6.3.4.3's**, taken as the s15Fixed16 numbers a
+  profile's `XYZType` tags carry (`0x0000F6D6`, `0x00010000`, `0x0000D32D`),
+  so a `wtpt` of D50 scales by exactly one and absolute colorimetric is
+  relative colorimetric bit for bit.
+- **A profile with no `wtpt`, or one with a component that is not positive**,
+  is taken to have the PCS white for its media white: 8.2 requires the tag,
+  an `ICCBased` space's profile cannot be a DeviceLink (Table 67's classes),
+  and taking the PCS white adds no colour the profile does not state. Its
+  absolute colorimetric is its relative colorimetric.
+
+#### Where each conversion takes its intent
+
+| Conversion | Intent |
+| --- | --- |
+| A flat colour in an ICC space or under an ICC default — fill, stroke, glyph, stencil mask, an uncoloured pattern's colour | the state's, at the painting operator (11.7.5.3) |
+| An image XObject or inline image, not an image mask | its `/Intent` where that is a name, `RelativeColorimetric` for a name 8.6.5.8 does not list; the state's at `Do` or `EI` where the entry is absent or not a name |
+| A shading — `sh`, a shading pattern's fill, a mesh's vertices | the state's, at the painting operator |
+| An `Indexed` base, a `Separation` or `DeviceN` alternate, a `[/Pattern base]` base, each in an ICC space | the intent of the conversion it serves |
+| A transparency group's space at its boundaries | none: groups convert by device relations (Stage 1), and no profile runs there for 11.7.5.3's `Do` intent to select |
+| A luminosity soft mask's `/BC` | `RelativeColorimetric`: the backdrop is neither an elementary object nor a group, which is all 11.7.5.3 names |
+| `CalGray`, `CalRGB`, `Lab` | none: each is a closed form with no table per intent, and its white point is the diffuse white its components are relative to (8.6.5.2 to 8.6.5.4), adapted to the output's white, so its absolute colorimetric is its relative |
+| A device space with no default | none: 8.6.5.8 converts CIE-based colours |
+
+- **A colour set before the intent changed paints in the intent at the
+  paint** (11.7.5.3). The interpreter resolves a colour to light when it is
+  set (`sc`, `scn`, `g`, …), so it keeps beside the fill and the stroke
+  colour the space each was set in and its components, and an intent that
+  changes — by `ri` or by a `gs` with `/RI` — re-resolves both through
+  `FontSource::resolve_color` in the new intent. `Q` restores a colour with
+  the intent it was resolved in; setting the intent in force again resolves
+  nothing.
+- **An unrecognised name is `RelativeColorimetric`** wherever it is read: the
+  state keeps `RenderingIntent::Unrecognised` (K-01), and the conversion
+  reads it as `RelativeColorimetric`. `ri` with an operand that is not a
+  name, and an `/RI` that is not one, change nothing (K-01).
+- **An image's `/Intent` overrides the state's for that image only**, and an
+  image mask's is never read: its samples are a stencil painted in the fill
+  colour, which converts in the state's intent like any flat colour.
+
+#### The one conversion parameter
+
+`tinker_pdf_color::icc::Intent` is ICC.1's four (6.1), its default
+`RelativeColorimetric`, and `tinker_pdf_color::icc::Conversion` carries it:
+the one value every site that converts an ICC colour takes,
+`ColorSpace::to_rgb_in(components, conversion)` among them, while `to_rgb`
+converts in `Conversion::default()`. A space that is not ICC-based reads it
+only to pass it to the ICC space it holds — an `Indexed` base, a
+`Separation` alternate, a pattern's base. The facade maps the content
+crate's `RenderingIntent` to `icc::Intent`, `Unrecognised` to
+`RelativeColorimetric`, so the leaf keeps no PDF name for an intent. RC-02
+adds black-point compensation to `Conversion` as a second field, and keys
+what this design keys by intent by the whole value.
+
+#### What compiling per intent costs
+
+- **Parsing.** `Profile::parse` reads the tag table as it does today, and
+  the table the default intent selects; it keeps where each other `A2B*` tag
+  lies and reads one when an intent first selects it. A page that sets no
+  intent parses what it parses today.
+- **Compiling.** A space's transforms are kept together, each compiled the
+  first time an intent selects its table, and shared by every conversion
+  through that space and every page whose resources compile the profile. A
+  profile used in one intent compiles one transform, as today. A LUT profile
+  used in all four compiles at most three — one a distinct table — with
+  absolute colorimetric's scaling applied after the relative table's
+  evaluation; a matrix/TRC or grey profile at most two, the second only for
+  absolute colorimetric with a media white other than D50.
+- **Memory.** A LUT transform holds its grid, at most `MAX_CLUT_ENTRIES`
+  16-bit entries, so a profile used in three intents holds at most three
+  times what it holds today; a matrix/TRC transform is three 4 096-entry
+  curves and a matrix, and its absolute twin shares the curves.
+- **Caches key on the intent's table.** The facade's ICC cache keeps a
+  profile's transforms beside each other, so an intent changing finds the
+  profile already parsed; the decoded-image cache keys an image on the
+  intent it converted in, since one image drawn under two intents is two
+  conversions (RC-01.6).
+
+#### The steps and their exit tests
+
+- **RC-01.2**: `Transform::compile` takes an `icc::Intent` and
+  `Profile::parse` keeps each `A2B*` table by the table above.
+  `each_intent_compiles_its_own_table` (a profile carrying three different
+  `mft2` grids answers each intent with its own, recomputed in the test by
+  multilinear interpolation), `an_absent_intent_table_falls_back_as_icc_1_says`
+  (each row of the table above with the tags its intent names absent),
+  `tags_sharing_an_offset_are_read_once`, `write_the_fuzz_seeds` asserting
+  the new `lut-three-intents.icc` seed reaches a transform, and the
+  `icc_profile` fuzz target compiling every intent.
+- **RC-01.3**: absolute colorimetric.
+  `absolute_colorimetric_scales_by_the_media_white`: for a matrix/TRC, a grey
+  and an `mft2` profile, under XYZ and Lab connection spaces, each with a
+  `wtpt` other than D50, the absolute transform's sRGB equals the relative
+  one's PCS value scaled in closed form and converted in the test; a `wtpt`
+  of D50 makes the two intents equal byte for byte; a profile with no `wtpt`
+  converts as above.
+- **RC-01.4**: the `D2B*` tags, by the a) column of the table above.
+  `a_d2b_tag_converts_by_its_element_pipeline`,
+  `an_unread_element_is_refused_by_name` (and its intent falls to its
+  `A2B*` tag), `an_impossible_element_count_is_refused_before_it_is_allocated`,
+  and the `d2b-elements.icc` seed in `write_the_fuzz_seeds`.
+- **RC-01.5**: flat colours. `rendering_intents.rs`'s
+  `each_intent_paints_its_recomputed_transform` (a fill, a stroke and a
+  glyph in `ICCBased` spaces over a LUT profile with three distinct tables
+  and a matrix/TRC profile, each with a non-D50 `wtpt`),
+  `ri_and_extgstate_ri_are_twins` (through `Q` and an intent changed after
+  `scn`), and an unrecognised name painting `RelativeColorimetric`, in both
+  builds.
+- **RC-01.6**: images. `an_images_intent_selects_its_transform` (an image
+  XObject and an inline image, per `/Intent`),
+  `an_image_intent_and_ri_are_twins` (rendered and written to SVG), and one
+  image drawn under two intents decoding once per intent.
+- **RC-01.7**: shadings. `each_intent_shades_its_recomputed_transform` (an
+  axial, a function-based and a mesh shading), the twin of a constant-colour
+  axial shading's interior and the flat fill in the same intent, and a page
+  painting a fill, an image and a shading under each intent among
+  `determinism.rs`'s fingerprints.
+- **RC-01.8**: the speed row `render an ICC page under each rendering intent
+  at 150 dpi`, RC-01.7's page under all four intents, in MS-04's set.
 
 ### Default colour spaces (8.6.5.6)
 
@@ -613,19 +852,15 @@ RGB, the families the encoder and the decoder's fixtures have.
 10. K-02.3: extraction reports the space the samples are in.
 11. K-02.4: the census, by scope.
 12. K-02.5: the census's first figures.
-
-### Rendering intents
-
-`/Intent` on the `ICCBased` stream, the `ri` operator and ExtGState
-`/RenderingIntent` select nothing, and `ri` is parsed and discarded. An intent
-only changes an answer at all for a LUT profile carrying more than one `A2B*`
-table, and the transform takes 8.6.5.8's default, `RelativeColorimetric` —
-which is `A2B1`, which is what the parser reaches for first. Every intent is
-[ROADMAP](../ROADMAP.md) row RC-01.
-
-The wrinkle: an intent is graphics state and a transform is compiled per
-colour space, so a space would need one compiled transform per intent rather
-than one. That is the reason it is not a two-line change.
+13. RC-01.2: an intent selects its table in `tinker-pdf-color`
+    ([Rendering intents](#rendering-intents-8658)).
+14. RC-01.3: absolute colorimetric, by the media white.
+15. RC-01.4: `D2B*` tags, before the `A2B*` tag of their intent.
+16. RC-01.5: the intent in force reaches every flat colour.
+17. RC-01.6: images in their intent, `/Intent` read.
+18. RC-01.7: shadings and meshes in the intent in force, and the intent page
+    among the fingerprints.
+19. RC-01.8: the intent page's speed row in the benchmark set.
 
 ### Three decisions, and why
 
@@ -677,6 +912,9 @@ time and shift every colour. It is read by profiles that need to recover the
   its default: an ink render keeps a `k` colour's own components under
   `/DefaultCMYK`. Milestone 12's corpus run depends on MS-11, as K-02.5
   lists it.
+- K-01's stored intent, `StoredParameters::rendering_intent` in
+  `crates/tinker-pdf-content/src/state.rs`, for milestones 16 to 18, which
+  read it.
 
 ## Risks
 
@@ -693,3 +931,7 @@ time and shift every colour. It is read by profiles that need to recover the
 | The device operators, the most frequent in a content stream, start paying for the seam | A scope's defaults are read once and the interpreter branches on a field it holds |
 | H-135 is decided for conversion | One change to `resolve_ink`; `an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk` names the contract it holds, so the change shows where it lands |
 | A twin comparison passes with nothing applied and is taken for proof | Every twin is paired with the page without its default, which it must not equal |
+| An intent converts through a table the profile's author did not make for it | Only the last column of the intent table is this design's, and it is reached only where ICC.1 names nothing the profile carries; `an_absent_intent_table_falls_back_as_icc_1_says` pins every row |
+| A colour set before `ri` keeps the old intent's light | An intent change re-resolves the fill and stroke colours from the space and components kept beside them; `ri_and_extgstate_ri_are_twins` changes the intent after `scn` |
+| Compiling per intent multiplies what a profile costs | A table is read and compiled on first use, one transform a distinct table; a page that sets no intent parses and compiles what it does today |
+| A profile carrying a matrix or `grayTRC` and `A2B*` tables converts by its matrix, where ICC.1 8.10.2 converts by its tables | Stated as this design's departure, with the owner deciding whether to follow 8.10.2; until then every such profile renders as it does today, whatever the intent |
