@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use super::fixed;
 use super::flow::Definitions;
+use super::state::{GraphicsState, Zone};
 use super::storage::Size;
 
 /// The steps one run may take: a run of `fpgm`, of `prep`, or of a glyph's or
@@ -203,6 +204,14 @@ pub enum Error {
     StorageIndex(i32),
     /// A control value table entry the `cvt ` table does not have.
     CvtIndex(i32),
+    /// A zone number other than 0, the twilight zone, and 1, the glyph's.
+    ZoneIndex(i32),
+    /// A point its zone does not have.
+    PointIndex(i32),
+    /// `SLOOP` of a count below one.
+    LoopCount(i32),
+    /// `SROUND` or `S45ROUND` of the reserved period, bits 7 and 6 set.
+    ReservedPeriod(i32),
 }
 
 impl core::fmt::Display for Error {
@@ -231,6 +240,10 @@ impl core::fmt::Display for Error {
             Error::CallDepth => write!(f, "calls nested past {CALL_DEPTH}"),
             Error::StorageIndex(n) => write!(f, "storage location {n} is past maxStorage"),
             Error::CvtIndex(n) => write!(f, "control value {n} is past the cvt table"),
+            Error::ZoneIndex(n) => write!(f, "zone {n} is neither 0 nor 1"),
+            Error::PointIndex(n) => write!(f, "point {n} is past its zone"),
+            Error::LoopCount(n) => write!(f, "SLOOP of {n}"),
+            Error::ReservedPeriod(n) => write!(f, "round state {n:#x} has the reserved period"),
         }
     }
 }
@@ -262,14 +275,17 @@ pub struct Vm {
     pub(super) cvt: Vec<i32>,
     /// The size the programs hint at.
     pub(super) size: Size,
-    /// The flags `INSTCTRL` sets: bit 0 inhibits grid-fitting, bit 1 ignores
-    /// the control value program's settings, bit 2 is native ClearType.
-    pub(super) instruct_control: u8,
+    /// The graphics state.
+    pub(super) gs: GraphicsState,
+    /// Zone 0, the twilight zone, and zone 1, the glyph's.
+    pub(super) zones: [Zone; 2],
 }
 
 impl Vm {
     /// A machine for a face with these limits: its stack empty, nothing
-    /// defined, its storage area zeros, no control value table, and no size.
+    /// defined, its storage area zeros, no control value table, no size, the
+    /// graphics state at its defaults, its twilight points at the origin and
+    /// no glyph.
     #[must_use]
     pub fn new(limits: Limits) -> Vm {
         Vm {
@@ -283,8 +299,32 @@ impl Vm {
             storage: vec![0; limits.storage],
             cvt: Vec::new(),
             size: Size::default(),
-            instruct_control: 0,
+            gs: GraphicsState::default(),
+            zones: [Zone::twilight(limits.twilight), Zone::default()],
         }
+    }
+
+    /// The graphics state, as the last run left it.
+    #[must_use]
+    pub fn graphics_state(&self) -> &GraphicsState {
+        &self.gs
+    }
+
+    /// Sets the graphics state the next run starts from.
+    pub fn set_graphics_state(&mut self, state: GraphicsState) {
+        self.gs = state;
+    }
+
+    /// Zone 0, the twilight zone, or zone 1, the glyph's; `None` for any
+    /// other number.
+    #[must_use]
+    pub fn zone(&self, number: usize) -> Option<&Zone> {
+        self.zones.get(number)
+    }
+
+    /// Sets zone 1, the glyph whose points the next run moves.
+    pub fn set_glyph(&mut self, zone: Zone) {
+        self.zones[1] = zone;
     }
 
     /// The limits the machine was made with.
@@ -335,7 +375,7 @@ impl Vm {
     /// the control value program's settings, bit 2 asks for native ClearType.
     #[must_use]
     pub fn instruct_control(&self) -> u8 {
-        self.instruct_control
+        self.gs.instruct_control
     }
 
     /// Runs `code` as `program` from an empty stack, asking `stop` once in
@@ -458,6 +498,26 @@ impl Vm {
             0x43 | 0x42 | 0x45 | 0x44 | 0x70 | 0x4B | 0x4C | 0x88 | 0x8E => {
                 self.storage_or_engine(op)?;
             }
+            // The vectors, the reference points, the zone pointers, the loop,
+            // the round states and ROUND, NROUND, ODD and EVEN, the distance
+            // and delta settings, and the scan converter's.
+            0x00..=0x0E
+            | 0x10..=0x1A
+            | 0x1D..=0x1F
+            | 0x3D
+            | 0x4D
+            | 0x4E
+            | 0x56
+            | 0x57
+            | 0x5E
+            | 0x5F
+            | 0x68..=0x6F
+            | 0x76
+            | 0x77
+            | 0x7A
+            | 0x7C..=0x7E
+            | 0x85..=0x87
+            | 0x8D => self.set_state(op)?,
             _ => self.undefined(op, stop)?,
         }
         Ok(at + 1)

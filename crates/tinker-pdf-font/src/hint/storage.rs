@@ -162,10 +162,7 @@ impl Vm {
         }
         let flag = 1u8 << (selector - 1);
         let set = value & i32::from(flag) != 0;
-        self.instruct_control = if set {
-            self.instruct_control | flag
-        } else {
-            self.instruct_control & !flag
-        };
+        let flags = self.gs.instruct_control;
+        self.gs.instruct_control = if set { flags | flag } else { flags & !flag };
     }
 }

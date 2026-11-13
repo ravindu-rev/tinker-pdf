@@ -21,12 +21,15 @@
 //! - `flow`: `IF` and the jumps, function and instruction definitions.
 //! - [`storage`]: the storage area, the control value table, and the
 //!   answers a program asks of its engine, at a [`Size`].
+//! - [`state`]: the zones and their points, and the graphics state.
 
 pub mod fixed;
 mod flow;
+pub mod state;
 pub mod storage;
 pub mod vm;
 
+pub use state::{Dropout, GraphicsState, Point, Round, Vector, Zone};
 pub use storage::Size;
 pub use vm::{Error, Limits, MaxProfile, Program, Vm};
 

@@ -220,8 +220,15 @@ family.
   difference `(dx, dy)` in 26.6 scaled to length 16 384: each component
   `round(16 384 · d / sqrt(dx² + dy²))`, the sum and the root in `f64` on
   integers below 2^53, which IEEE 754 rounds the same way on every target. A
-  difference of zero sets the vector to the x axis, this engine's choice.
-  `SPVFS` and `SFVFS` take their two components as given.
+  difference of zero sets the vector to the x axis, this engine's choice. The
+  vector points from the point popped first, in the zone `zp2` points at,
+  toward the second, in `zp1`'s, as both specifications have it, and a flag
+  of 1 turns it a quarter counter-clockwise, `(x, y)` to `(−y, x)`.
+  `SDPVTL` sets the dual vector from the two points' original positions and
+  the projection vector from their current ones; every other instruction
+  that sets the projection vector sets the dual vector to it. `SPVFS` and
+  `SFVFS` take their two components as given, each the low 16 bits of its
+  value.
 - **A projection** of a 26.6 difference on a 2.14 vector is
   `(dx · vx + dy · vy) / 16 384` in 64 bits, rounded half away from zero.
 - **A move** of a point by a distance `d` measured along the projection
@@ -266,6 +273,27 @@ in one glyph rather than a setting of the font.
 **Engine compensation** for `ROUND`, `NROUND`, `MDRP` and `MIRP`'s grey, black
 and white distances is zero for all three, this engine's choice; distance type
 3, which fonts must not use, is read as grey.
+
+**Rounding.** Each round state is a period, a phase and a threshold, the
+predefined ones as Apple's manual tabulates them (chapter 2, table 19): `RTG`
+1, 0, 1/2; `RTHG` 1, 1/2, 1/2; `RTDG` 1/2, 0, 1/4; `RDTG` 1, 0, 0; `RUTG` 1,
+0, 63/64; `ROFF` no rounding. A value at or above zero rounds by *SROUND*'s
+steps — subtract the phase, add the threshold, truncate to the next lowest
+multiple of the period, add the phase back — and one that became negative
+takes the positive round value closest to zero, the phase; a negative value
+rounds as its magnitude does, negated, since "rounding is symmetric about
+zero" (Apple's manual, `ROUND[ab]`). `SROUND` and `S45ROUND` decode their
+value's low byte by the OpenType tables: the period gridPeriod/2, gridPeriod
+or gridPeriod·2, the fourth code reserved and an error; the phase 0,
+period/4, period/2 or gridPeriod·3/4, the last as the OpenType table gives it
+where Apple's reads period·3/4 (the two agree at a period of one grid); the
+threshold the period less 1/64 for code 0, "largest-number-smaller-than-
+period", and the period times (t − 4)/8 for code t. `SROUND`'s gridPeriod is
+one pixel; `S45ROUND`'s is √2/2 pixels, as the OpenType text states (Apple's
+manual gives √2), so its periods are √2/4, √2/2 and √2 pixels, each to the
+nearest 64th — 23, 45 and 91 — and its gridPeriod 45, every part taken half
+away from zero to a 64th. `ODD` and `EVEN` test the whole pixel at or below
+the rounded value.
 
 ### The pipeline
 
@@ -363,7 +391,7 @@ a panic and never a wait:
 | Call depth | 64: `CALL`, `LOOPCALL` and a dispatch to an `IDEF` nest no deeper |
 | The instruction stream | a push that runs past its program's end, a jump outside it, an `IF` with no `EIF` or a definition with no `ENDF` |
 | Where definitions may stand | `FDEF` and `IDEF` in a glyph program or inside a definition, and `ENDF` outside one |
-| What instructions name | an undefined function, an `IDEF` of a value that is no opcode, an opcode with no instruction and no `IDEF`, a zero `DIV`, an orthogonal freedom vector at a move, `IUP` in zone 0 |
+| What instructions name | an undefined function, an `IDEF` of a value that is no opcode, an opcode with no instruction and no `IDEF`, a zero `DIV`, a loop count below one ("Setting the loop variable to zero is an error"), `SROUND`'s reserved period, an orthogonal freedom vector at a move, `IUP` in zone 0 |
 
 `IDEF` affects only undefined opcodes and is ignored for a defined one, as
 the specification says: the 37 opcodes the instruction set summary assigns
@@ -414,7 +442,9 @@ turns into the lower pixel on the page. Dropout control is on for a size
 where `SCANCTRL`'s flags say so at its whole pixels per em: bit 8 with the
 threshold in bits 0 to 7 (`0xFF` every size, `0` none), bit 11 off above the
 threshold; bits 9, 10, 12 and 13 ask about rotation and stretching, which a
-hinted glyph never has. The state the size's programs leave travels with the
+hinted glyph never has, so bits 12 and 13 turn it off; bits 14 and 15 are
+reserved and read as nothing. A `SCANTYPE` mode outside 0, 1, 4 and 5 is
+rules 1 and 2 alone. The state the size's programs leave travels with the
 outline as `SizedOutline::dropout`, and `tinker-pdf-raster`'s hardening of a
 glyph's coverage applies it; every other shape hardens as before.
 
