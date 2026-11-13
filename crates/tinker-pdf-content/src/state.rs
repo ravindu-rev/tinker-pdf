@@ -221,8 +221,8 @@ impl Default for TextState {
 ///
 /// The interpreter does not know colour spaces — resolving `/CS` names against
 /// a resource dictionary is the caller's job, through
-/// [`crate::ColorResolver`] — but it does track which components are current,
-/// and hands over the RGB they mean.
+/// [`crate::FontSource::resolve_color`] — but it does track which components
+/// are current, and hands over the RGB they mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb {
     /// Red.
@@ -241,6 +241,54 @@ impl Rgb {
 impl Default for Rgb {
     fn default() -> Self {
         Rgb::BLACK
+    }
+}
+
+/// A colour at sixteen bits a channel, beside the bytes an [`Rgb`] holds
+/// (`docs/design/sixteen-bit.md`, ruling 23): each channel's top byte is the
+/// byte the same colour resolves to, bit for bit, and its low byte refines
+/// it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rgb16 {
+    /// Red.
+    pub r: u16,
+    /// Green.
+    pub g: u16,
+    /// Blue.
+    pub b: u16,
+}
+
+impl Rgb16 {
+    /// Opaque black.
+    pub const BLACK: Rgb16 = Rgb16 { r: 0, g: 0, b: 0 };
+
+    /// `color` at sixteen bits with nothing finer to take: each byte `v` as
+    /// `257·v`, `v` in its top byte and again in its low one — the same value
+    /// over 65 535 as `v` over 255.
+    #[must_use]
+    pub const fn widen(color: Rgb) -> Rgb16 {
+        Rgb16 {
+            r: color.r as u16 * 257,
+            g: color.g as u16 * 257,
+            b: color.b as u16 * 257,
+        }
+    }
+
+    /// The bytes this colour tops out at: each channel's top byte.
+    #[must_use]
+    pub const fn top(self) -> Rgb {
+        Rgb {
+            r: (self.r >> 8) as u8,
+            g: (self.g >> 8) as u8,
+            b: (self.b >> 8) as u8,
+        }
+    }
+}
+
+impl From<[u16; 3]> for Rgb16 {
+    /// Red, green and blue, in that order, as the colour crate answers them.
+    fn from([r, g, b]: [u16; 3]) -> Rgb16 {
+        Rgb16 { r, g, b }
     }
 }
 
@@ -739,6 +787,16 @@ pub struct GraphicsState {
     pub fill_color: Rgb,
     /// The stroking colour.
     pub stroke_color: Rgb,
+    /// The non-stroking colour at sixteen bits a channel
+    /// (`docs/design/sixteen-bit.md`): the light
+    /// [`GraphicsState::fill_color`] is the bytes of, each channel's top byte
+    /// that colour's byte and its low byte a refinement of it. Set with the
+    /// colour by every operator that sets it, and by every writer of
+    /// `fill_color` beside it; a colour whose resources answer only bytes is
+    /// those bytes widened ([`Rgb16::widen`]).
+    pub fill_wide: Rgb16,
+    /// The same for the stroking colour.
+    pub stroke_wide: Rgb16,
     /// The non-stroking colour's own DeviceCMYK components, as bytes, when it
     /// was set in DeviceCMYK — `k`, or `sc`/`scn` in a space that resolves to
     /// it — and `None` for a colour set any other way.
@@ -833,6 +891,8 @@ impl GraphicsState {
             stroke_alpha: 1.0,
             fill_color: Rgb::BLACK,
             stroke_color: Rgb::BLACK,
+            fill_wide: Rgb16::BLACK,
+            stroke_wide: Rgb16::BLACK,
             // 8.6.8: the initial space is DeviceGray, so there is no ink, and
             // it names no colorant.
             fill_ink: None,

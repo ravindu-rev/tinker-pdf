@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::interpret::{Group, MaskGroup};
-use crate::state::{ColorFamily, ColorantTints, GraphicsState, Rgb};
+use crate::state::{ColorFamily, ColorantTints, GraphicsState, Rgb, Rgb16};
 
 /// The ink of forced black: `K` alone, at full (8.6.4.4's `0 0 0 1 k`), never a
 /// rich black.
@@ -159,14 +159,15 @@ impl Black {
 
 /// `state` with its paint forced black, and nothing else changed: the fill
 /// and stroke colours what `0 0 0 1 k` sets where no default space remaps
-/// DeviceCMYK — light's black, the `K` plate alone, DeviceCMYK's family, no
-/// pattern, no named colour space, no source for a rendering intent to
-/// resolve again, and `colorants` what each paints by colorant: [`Culled`]
-/// hands DeviceCMYK's four process colorants at the `K` plate alone where its
-/// device composites colorants, which is what `k` carries there, and `None`
-/// where it does not. The alphas, the blend mode, the transform, the text
-/// state, the line parameters and the stored parameters are the state's own,
-/// so a forced mark still fades by its constant alpha.
+/// DeviceCMYK — light's black as bytes and at sixteen bits, the `K` plate
+/// alone, DeviceCMYK's family, no pattern, no named colour space, no source
+/// for a rendering intent to resolve again, and `colorants` what each paints
+/// by colorant: [`Culled`] hands DeviceCMYK's four process colorants at the
+/// `K` plate alone where its device composites colorants, which is what `k`
+/// carries there, and `None` where it does not. The alphas, the blend mode,
+/// the transform, the text state, the line parameters and the stored
+/// parameters are the state's own, so a forced mark still fades by its
+/// constant alpha.
 #[must_use]
 pub fn forced_black(
     state: &GraphicsState,
@@ -175,6 +176,8 @@ pub fn forced_black(
     GraphicsState {
         fill_color: Rgb::BLACK,
         stroke_color: Rgb::BLACK,
+        fill_wide: Rgb16::BLACK,
+        stroke_wide: Rgb16::BLACK,
         fill_ink: Some(BLACK_INK),
         stroke_ink: Some(BLACK_INK),
         fill_family: ColorFamily::Cmyk,
@@ -841,6 +844,8 @@ mod tests {
         GraphicsState {
             fill_color: original.fill_color,
             stroke_color: original.stroke_color,
+            fill_wide: original.fill_wide,
+            stroke_wide: original.stroke_wide,
             fill_ink: original.fill_ink,
             stroke_ink: original.stroke_ink,
             fill_family: original.fill_family,

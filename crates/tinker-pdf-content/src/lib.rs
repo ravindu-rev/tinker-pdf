@@ -35,7 +35,7 @@ pub use search::{fold_diacritics, SearchOptions};
 pub use serialize::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
 pub use state::{
     BlackPointCompensation, BlendMode, ColorFamily, ColorSource, ColorantKind, ColorantTint,
-    ColorantTints, GraphicsState, Halftone, LineCap, LineJoin, Matrix, RenderingIntent, Rgb,
+    ColorantTints, GraphicsState, Halftone, LineCap, LineJoin, Matrix, RenderingIntent, Rgb, Rgb16,
     SpotFunction, StoredParameters, TextRenderMode, TextState, Transfer,
 };
 pub use text::{

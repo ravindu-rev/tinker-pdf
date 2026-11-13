@@ -91,6 +91,24 @@ read once when interpretation starts; a `RecordingDevice` answers it as
 resources are asked nothing, so a light render pays nothing for them
 (`a_colour_carries_the_colorants_its_space_answers`).
 
+**A colour carries sixteen bits beside its bytes**
+(`docs/design/sixteen-bit.md`, ruling 23). The state keeps `fill_wide` and
+`stroke_wide`, an `Rgb16` each: the colour's light at sixteen bits a
+channel, its top bytes `fill_color`'s and `stroke_color`'s bytes, bit for
+bit, and its low bytes refining them. `g`, `rg`, `k` and components read by
+count convert at sixteen bits through the colour crate's device relations
+(`ColorSpace::to_rgb16`), held to the bytes they set; a named space, a
+device space under a default and an uncoloured pattern's underlying space
+resolve through `FontSource::resolve_color_wide`, which answers the bytes
+and the light from one evaluation — the facade's `PageResources` through
+`ColorSpace::to_rgb16_in` — and whose default widens `resolve_color`'s
+bytes, each `v` as `257·v`, so resources that answer only bytes keep
+working. An intent changing after the colour was set resolves both again,
+`Q` restores both, forced colours force both black, and a form's recording
+is kept by its invoking colours at both widths. The bytes are what every
+8-bit reader takes; the ink and the colorant tints stay bytes
+(`a_resolved_colour_keeps_sixteen_bits_and_its_eight_bit_bytes`).
+
 **Recursion.** `Do` runs a form XObject with its `/Matrix` composed onto the
 CTM and its content clipped to `/BBox` (8.10.2); a transparency group is
 offered to the device, and only if accepted are the alphas and blend mode

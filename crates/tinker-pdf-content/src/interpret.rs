@@ -10,13 +10,13 @@ use crate::record::{Answers, Event, RecordingDevice};
 use crate::replay::replay;
 use crate::state::{
     BlackPointCompensation, BlendMode, ColorFamily, ColorSource, ColorantTints, GraphicsState,
-    Halftone, LineCap, LineJoin, Matrix, RenderingIntent, Rgb, TextRenderMode, Transfer,
+    Halftone, LineCap, LineJoin, Matrix, RenderingIntent, Rgb, Rgb16, TextRenderMode, Transfer,
 };
 use crate::tokenizer::{Token, Tokenizer};
 use core::mem;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use tinker_pdf_color::Function;
+use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_cos::decode_text_string;
 use tinker_pdf_cos::{Counter, Work};
 
@@ -354,11 +354,12 @@ impl DeviceDefaults {
     }
 }
 
-/// A colour as the seam resolves it: its light, its DeviceCMYK components
-/// where it has them, what it was resolved from, and what it paints by
-/// colorant where the device asked.
+/// A colour as the seam resolves it: its light, as bytes and at sixteen
+/// bits, its DeviceCMYK components where it has them, what it was resolved
+/// from, and what it paints by colorant where the device asked.
 type Resolved = (
     Rgb,
+    Rgb16,
     Option<[u8; 4]>,
     Option<Arc<ColorSource>>,
     Option<Arc<ColorantTints>>,
@@ -506,7 +507,8 @@ pub trait FontSource {
     /// names another — so a colour paints in the intent in force at the
     /// painting operator (11.7.5.3). A space no intent changes, which is
     /// every space but one converted through an ICC profile, answers alike in
-    /// each.
+    /// each. The interpreter asks through [`FontSource::resolve_color_wide`],
+    /// whose default asks this.
     fn resolve_color(
         &self,
         space: &[u8],
@@ -515,6 +517,26 @@ pub trait FontSource {
     ) -> Option<Rgb> {
         let _ = (space, components, intent);
         None
+    }
+
+    /// [`FontSource::resolve_color`] at sixteen bits a channel: the colour's
+    /// bytes and its 16-bit light together, the light's top bytes the bytes
+    /// (`docs/design/sixteen-bit.md`). The interpreter asks this wherever it
+    /// resolves a colour through the seam, and keeps the light beside the
+    /// bytes ([`GraphicsState::fill_wide`]).
+    ///
+    /// The default widens what `resolve_color` answers ([`Rgb16::widen`]): a
+    /// correct 16-bit colour that refines nothing, so a source that answers
+    /// only bytes keeps working. A source that can evaluate a colour at
+    /// sixteen bits answers both from one evaluation.
+    fn resolve_color_wide(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: RenderingIntent,
+    ) -> Option<(Rgb, Rgb16)> {
+        self.resolve_color(space, components, intent)
+            .map(|color| (color, Rgb16::widen(color)))
     }
 
     /// The components themselves, as bytes, when the named space **is**
@@ -661,18 +683,19 @@ pub trait FontSource {
 /// computes").
 ///
 /// The state is everything the interpreter carries into a form and does not
-/// reset there: the whole graphics state — the transform, the colours and
-/// their spaces' names, what each paints by colorant, the pen, the text state
-/// and its font's name, the alphas, the blend mode and the stored parameters
-/// — the text and line matrices, the current point and the subpath's start,
-/// a clip waiting for a path, the operands left on the stack before `Do`, how
-/// deep the form is and the streams running around it, which device spaces
-/// the scope in force remaps, and whether the device composites colorants,
-/// since a drawing recorded for one carries them in every state and one
-/// recorded for any other carries none. Every number is its bits, so two invocations are one key
-/// exactly when nothing a form could read differs. A state holding a
-/// function or a halftone (`StoredParameters`' transfer, generation,
-/// removal and halftone) has no key, and its forms are interpreted.
+/// reset there: the whole graphics state — the transform, the colours as
+/// bytes and at sixteen bits and their spaces' names, what each paints by
+/// colorant, the pen, the text state and its font's name, the alphas, the
+/// blend mode and the stored parameters — the text and line matrices, the
+/// current point and the subpath's start, a clip waiting for a path, the
+/// operands left on the stack before `Do`, how deep the form is and the
+/// streams running around it, which device spaces the scope in force remaps,
+/// and whether the device composites colorants, since a drawing recorded for
+/// one carries them in every state and one recorded for any other carries
+/// none. Every number is its bits, so two invocations are one key exactly
+/// when nothing a form could read differs. A state holding a function or a
+/// halftone (`StoredParameters`' transfer, generation, removal and halftone)
+/// has no key, and its forms are interpreted.
 ///
 /// What it does not hold is the scope: a form that brings no resources of
 /// its own resolves its names in the invoking scope, which only the source
@@ -935,6 +958,8 @@ impl Exact {
             stroke_alpha,
             fill_color,
             stroke_color,
+            fill_wide,
+            stroke_wide,
             fill_ink,
             stroke_ink,
             fill_family,
@@ -983,6 +1008,13 @@ impl Exact {
         self.num(*stroke_alpha);
         for colour in [fill_color, stroke_color] {
             self.0.extend_from_slice(&[colour.r, colour.g, colour.b]);
+        }
+        // The same colours at sixteen bits, which a form drawing at that
+        // width reads as its inherited colour.
+        for colour in [fill_wide, stroke_wide] {
+            for channel in [colour.r, colour.g, colour.b] {
+                self.0.extend_from_slice(&channel.to_be_bytes());
+            }
         }
         for ink in [fill_ink, stroke_ink] {
             match ink {
@@ -2417,16 +2449,17 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     } else {
                         ColorFamily::Gray
                     };
-                    let (color, ink, source, colorants) = remapped.unwrap_or_else(|| {
+                    let (color, wide, ink, source, colorants) = remapped.unwrap_or_else(|| {
                         let value = to_byte(v);
                         let color = Rgb {
                             r: value,
                             g: value,
                             b: value,
                         };
-                        (color, None, None, None)
+                        let wide = device_wide(&ColorSpace::DeviceGray, &[v]);
+                        (color, wide, None, None, None)
                     });
-                    self.set_device_color(op == b"g", color, ink, source, family, colorants);
+                    self.set_device_color(op == b"g", color, wide, ink, source, family, colorants);
                 }
             }
             b"rg" | b"RG" => {
@@ -2441,15 +2474,16 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     } else {
                         ColorFamily::Rgb
                     };
-                    let (color, ink, source, colorants) = remapped.unwrap_or_else(|| {
+                    let (color, wide, ink, source, colorants) = remapped.unwrap_or_else(|| {
                         let color = Rgb {
                             r: to_byte(r),
                             g: to_byte(g),
                             b: to_byte(b),
                         };
-                        (color, None, None, None)
+                        let wide = device_wide(&ColorSpace::DeviceRgb, &[r, g, b]);
+                        (color, wide, None, None, None)
                     });
-                    self.set_device_color(op == b"rg", color, ink, source, family, colorants);
+                    self.set_device_color(op == b"rg", color, wide, ink, source, family, colorants);
                 }
             }
             b"k" | b"K" => {
@@ -2466,16 +2500,17 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     } else {
                         ColorFamily::Cmyk
                     };
-                    let (color, ink, source, colorants) = remapped.unwrap_or_else(|| {
+                    let (color, wide, ink, source, colorants) = remapped.unwrap_or_else(|| {
                         let ink = [to_byte(c), to_byte(m), to_byte(y), to_byte(k)];
                         (
                             cmyk_to_rgb(c, m, y, k),
+                            device_wide(&ColorSpace::DeviceCmyk, &[c, m, y, k]),
                             Some(ink),
                             None,
                             self.device_cmyk_colorants(ink),
                         )
                     });
-                    self.set_device_color(op == b"k", color, ink, source, family, colorants);
+                    self.set_device_color(op == b"k", color, wide, ink, source, family, colorants);
                 }
             }
             b"cs" | b"CS" => {
@@ -2492,7 +2527,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 let intent = self.intent();
                 let resolved = components
                     .as_ref()
-                    .and_then(|c| self.fonts.resolve_color(&space, c, intent));
+                    .and_then(|c| self.fonts.resolve_color_wide(&space, c, intent));
                 let ink = components
                     .as_ref()
                     .and_then(|c| self.fonts.resolve_ink(&space, c));
@@ -2509,11 +2544,12 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                         components,
                     })
                 });
-                let initial = resolved.unwrap_or(Rgb::BLACK);
+                let (initial, wide) = resolved.unwrap_or((Rgb::BLACK, Rgb16::BLACK));
                 let family = self.fonts.color_family(&space);
                 self.set_color(
                     fill,
                     initial,
+                    wide,
                     Some(space),
                     ink,
                     source,
@@ -2550,9 +2586,9 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     // take.
                     if !components.is_empty() {
                         let intent = self.intent();
-                        if let Some(color) = space
+                        if let Some((color, wide)) = space
                             .as_ref()
-                            .and_then(|s| self.fonts.resolve_color(s, &components, intent))
+                            .and_then(|s| self.fonts.resolve_color_wide(s, &components, intent))
                         {
                             // An uncoloured pattern paints the colorants its
                             // components give in the underlying space.
@@ -2563,7 +2599,16 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                                 family: None,
                                 components,
                             });
-                            self.set_color(fill, color, None, None, Some(source), None, colorants);
+                            self.set_color(
+                                fill,
+                                color,
+                                wide,
+                                None,
+                                None,
+                                Some(source),
+                                None,
+                                colorants,
+                            );
                         }
                     }
                     self.set_pattern(fill, name);
@@ -2579,7 +2624,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 let (resolved, ink, source, colorants) = match &space {
                     Some(space) => {
                         let intent = self.intent();
-                        let color = self.fonts.resolve_color(space, &components, intent);
+                        let color = self.fonts.resolve_color_wide(space, &components, intent);
                         let ink = self.fonts.resolve_ink(space, &components);
                         let colorants = self.colorants_of(space, &components);
                         let source = Arc::new(ColorSource {
@@ -2604,8 +2649,8 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                             family = Some(ColorFamily::by_count(components.len()));
                         }
                         match remapped {
-                            Some((color, ink, source, colorants)) => {
-                                (Some(color), ink, source, colorants)
+                            Some((color, wide, ink, source, colorants)) => {
+                                (Some((color, wide)), ink, source, colorants)
                             }
                             None => {
                                 let ink = match components[..] {
@@ -2614,8 +2659,9 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                                     }
                                     _ => None,
                                 };
+                                let wide = components_to_wide(&components);
                                 (
-                                    Some(components_to_rgb(&components)),
+                                    Some((components_to_rgb(&components), wide)),
                                     ink,
                                     None,
                                     ink.and_then(|ink| self.device_cmyk_colorants(ink)),
@@ -2624,8 +2670,8 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                         }
                     }
                 };
-                if let Some(color) = resolved {
-                    self.set_color(fill, color, space, ink, source, family, colorants);
+                if let Some((color, wide)) = resolved {
+                    self.set_color(fill, color, wide, space, ink, source, family, colorants);
                 }
             }
 
@@ -2973,16 +3019,16 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
     #[cold]
     #[inline(never)]
     fn remapped(&self, space: &'static [u8], components: Vec<f64>) -> Option<Resolved> {
-        let color = self
+        let (color, wide) = self
             .fonts
-            .resolve_color(space, &components, self.intent())?;
+            .resolve_color_wide(space, &components, self.intent())?;
         let ink = self.fonts.resolve_ink(space, &components);
         let colorants = self.colorants_of(space, &components);
         let source = Arc::new(ColorSource {
             family: Some(space),
             components,
         });
-        Some((color, ink, Some(source), colorants))
+        Some((color, wide, ink, Some(source), colorants))
     }
 
     /// What the seam answers for a colour of `space` by colorant, in the
@@ -3033,7 +3079,10 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 (None, Some(named)) => named,
                 (None, None) => continue,
             };
-            let Some(color) = self.fonts.resolve_color(space, &source.components, intent) else {
+            let Some((color, wide)) =
+                self.fonts
+                    .resolve_color_wide(space, &source.components, intent)
+            else {
                 continue;
             };
             // The process ink a colour paints through a light alternate is
@@ -3045,11 +3094,13 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             };
             if fill {
                 self.gs.fill_color = color;
+                self.gs.fill_wide = wide;
                 if let Some(colorants) = colorants {
                     self.gs.fill_colorants = colorants;
                 }
             } else {
                 self.gs.stroke_color = color;
+                self.gs.stroke_wide = wide;
                 if let Some(colorants) = colorants {
                     self.gs.stroke_colorants = colorants;
                 }
@@ -3071,12 +3122,22 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         &mut self,
         fill: bool,
         color: Rgb,
+        wide: Rgb16,
         ink: Option<[u8; 4]>,
         source: Option<Arc<ColorSource>>,
         family: ColorFamily,
         colorants: Option<Arc<ColorantTints>>,
     ) {
-        self.set_color(fill, color, None, ink, source, Some(family), colorants);
+        self.set_color(
+            fill,
+            color,
+            wide,
+            None,
+            ink,
+            source,
+            Some(family),
+            colorants,
+        );
         if fill {
             self.gs.fill_space = None;
         } else {
@@ -3084,16 +3145,17 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         }
     }
 
-    /// Applies a colour to the fill or stroke slot, with its DeviceCMYK
-    /// components when it has them, what it was resolved from where the
-    /// seam resolved it, its family where the operator says one (`None`
-    /// keeps the slot's), and what it paints by colorant where the device
-    /// asked.
+    /// Applies a colour to the fill or stroke slot, as bytes and at sixteen
+    /// bits, with its DeviceCMYK components when it has them, what it was
+    /// resolved from where the seam resolved it, its family where the
+    /// operator says one (`None` keeps the slot's), and what it paints by
+    /// colorant where the device asked.
     #[allow(clippy::too_many_arguments)]
     fn set_color(
         &mut self,
         fill: bool,
         color: Rgb,
+        wide: Rgb16,
         space: Option<Vec<u8>>,
         ink: Option<[u8; 4]>,
         source: Option<Arc<ColorSource>>,
@@ -3102,6 +3164,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
     ) {
         if fill {
             self.gs.fill_color = color;
+            self.gs.fill_wide = wide;
             self.gs.fill_ink = ink;
             self.gs.fill_colorants = colorants;
             self.gs.fill_pattern = None;
@@ -3114,6 +3177,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             }
         } else {
             self.gs.stroke_color = color;
+            self.gs.stroke_wide = wide;
             self.gs.stroke_ink = ink;
             self.gs.stroke_colorants = colorants;
             self.gs.stroke_pattern = None;
@@ -3952,6 +4016,24 @@ fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> Rgb {
         g: to_byte((1.0 - m.clamp(0.0, 1.0)) * (1.0 - k)),
         b: to_byte((1.0 - y.clamp(0.0, 1.0)) * (1.0 - k)),
     }
+}
+
+/// A device colour at sixteen bits a channel (`docs/design/sixteen-bit.md`):
+/// the colour crate's relation for `space`, whose top bytes are the bytes
+/// [`to_byte`] and [`cmyk_to_rgb`] give the same components.
+fn device_wide(space: &ColorSpace, components: &[f64]) -> Rgb16 {
+    Rgb16::from(space.to_rgb16(components))
+}
+
+/// [`components_to_rgb`] at sixteen bits a channel, the components read by
+/// their count as it reads them.
+fn components_to_wide(components: &[f64]) -> Rgb16 {
+    let space = match components.len() {
+        1 => ColorSpace::DeviceGray,
+        4 => ColorSpace::DeviceCmyk,
+        _ => ColorSpace::DeviceRgb,
+    };
+    device_wide(&space, components)
 }
 
 /// Reads components as a device colour, by how many there are.
@@ -5412,6 +5494,209 @@ mod tests {
         assert_eq!(states[2].fill_color, Rgb::BLACK, "to black, not white");
         assert_eq!(states[3].stroke_ink, Some([128, 0, 0, 0]), "`SC`");
         assert_eq!(states[4].stroke_ink, None, "`G` is light");
+    }
+
+    /// `x`, in `0..=1`, at sixteen bits by the relation ruling 23 settles,
+    /// computed here from its definition (`docs/design/sixteen-bit.md`):
+    /// `round(65 535·x)` held to `256·v ..= 256·v + 255`, `v` the byte
+    /// `round(255·x)`.
+    fn relation16(x: f64) -> u16 {
+        let byte = (x * 255.0).round() as u32;
+        let wide = (x * 65_535.0).round() as u32;
+        wide.clamp(256 * byte, 256 * byte + 255) as u16
+    }
+
+    /// Resources that answer a colour at sixteen bits, as the facade's do:
+    /// `/Wide` a three-component space whose colour is its components
+    /// reversed in relative colorimetric and halved in any other intent,
+    /// `/WidePattern` an uncoloured pattern space over it, and DeviceGray by
+    /// name, inverted, where the scope remaps it. Each answers its bytes and
+    /// its 16-bit light from one reading, the light's top bytes the bytes.
+    struct WideSpaces {
+        defaults: DeviceDefaults,
+    }
+
+    impl WideSpaces {
+        /// What the resources answer `components` of `space` with in
+        /// `intent`, as the values the bytes and the light are rounded from.
+        fn values(space: &[u8], components: &[f64], intent: RenderingIntent) -> Option<[f64; 3]> {
+            let at = |i: usize| components.get(i).copied().unwrap_or(0.0);
+            match space {
+                b"Wide" | b"WidePattern" => {
+                    let scale = if intent == RenderingIntent::RelativeColorimetric {
+                        1.0
+                    } else {
+                        0.5
+                    };
+                    Some([at(2) * scale, at(1) * scale, at(0) * scale])
+                }
+                b"DeviceGray" => Some([1.0 - at(0); 3]),
+                _ => None,
+            }
+        }
+    }
+
+    impl FontSource for WideSpaces {
+        fn decode(&self, _font: &[u8], _bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            Vec::new()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn color_components(&self, space: &[u8]) -> Option<usize> {
+            matches!(space, b"Wide" | b"WidePattern").then_some(3)
+        }
+        fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+            matches!(space, b"Wide" | b"WidePattern").then(|| vec![0.0; 3])
+        }
+        fn resolve_color(
+            &self,
+            space: &[u8],
+            components: &[f64],
+            intent: RenderingIntent,
+        ) -> Option<Rgb> {
+            let [r, g, b] = WideSpaces::values(space, components, intent)?.map(to_byte);
+            Some(Rgb { r, g, b })
+        }
+        fn resolve_color_wide(
+            &self,
+            space: &[u8],
+            components: &[f64],
+            intent: RenderingIntent,
+        ) -> Option<(Rgb, Rgb16)> {
+            let values = WideSpaces::values(space, components, intent)?;
+            let [r, g, b] = values.map(to_byte);
+            Some((Rgb { r, g, b }, Rgb16::from(values.map(relation16))))
+        }
+        fn device_defaults(&self) -> DeviceDefaults {
+            self.defaults
+        }
+    }
+
+    /// The fill colour, both widths, of every fill's state and the stroke
+    /// colour of every stroke's, in order.
+    fn wide_colours<F: FontSource>(
+        src: &[u8],
+        fonts: &F,
+    ) -> (Vec<(Rgb, Rgb16)>, Vec<(Rgb, Rgb16)>) {
+        let mut d = RecordingDevice::new();
+        interpret(src, Matrix::IDENTITY, &mut d, fonts);
+        let fills = d
+            .of_kind(EventKind::FillPath)
+            .filter_map(Event::state)
+            .map(|state| (state.fill_color, state.fill_wide))
+            .collect();
+        let strokes = d
+            .of_kind(EventKind::StrokePath)
+            .filter_map(Event::state)
+            .map(|state| (state.stroke_color, state.stroke_wide))
+            .collect();
+        (fills, strokes)
+    }
+
+    /// A colour as the test expects it: the bytes `to_byte` gives `values`,
+    /// as the interpreter has always recorded them, and the light at
+    /// sixteen bits by the relation.
+    fn expected(values: [f64; 3]) -> (Rgb, Rgb16) {
+        let [r, g, b] = values.map(to_byte);
+        (Rgb { r, g, b }, Rgb16::from(values.map(relation16)))
+    }
+
+    /// **A resolved colour keeps sixteen bits and its 8-bit bytes**
+    /// (`docs/design/sixteen-bit.md`, "Resolved colour"). `g`, `RG`, `k`,
+    /// `sc` read by count, and `cs`/`scn` and `CS`/`SCN` through resources
+    /// that answer at sixteen bits each record the bytes they record without
+    /// it and, beside them, the 16-bit light the test computes from the
+    /// components: grey and RGB the components themselves, CMYK 8.6.4.4's
+    /// complement, a named space the resources' answer — a component on
+    /// which the two roundings part, 0.1981, held to its byte at 13 056. A
+    /// rendering intent changing resolves the light again with the bytes, an
+    /// uncoloured pattern's components keep theirs, `Q` restores both, a
+    /// device operator in a scope that remaps its space takes the default's,
+    /// and resources that answer only bytes give those bytes widened.
+    #[test]
+    fn a_resolved_colour_keeps_sixteen_bits_and_its_eight_bit_bytes() {
+        let wide = WideSpaces {
+            defaults: DeviceDefaults::NONE,
+        };
+        let (fills, strokes) = wide_colours(
+            b"0.1981 g 0.2 0.5 0.8019 RG 0 0 10 10 re f 0 0 m 10 10 l S \
+              0.1 0.2 0.3 0.4 k 0 0 10 10 re f \
+              0.2 0.5 0.8019 sc 0 0 10 10 re f \
+              /Wide cs 0.3 0.6 0.9 scn 0 0 10 10 re f \
+              /Perceptual ri 0 0 10 10 re f \
+              /Wide CS 0.3 0.6 0.9 SCN 0 0 m 10 10 l S \
+              /RelativeColorimetric ri /WidePattern cs 0.3 0.6 0.9 /P scn 0 0 10 10 re f \
+              q 0.7 g Q 0 0 10 10 re f",
+            &wide,
+        );
+        assert_eq!(fills.len(), 7);
+        assert_eq!(strokes.len(), 2);
+
+        assert_eq!(
+            fills[0],
+            (
+                Rgb {
+                    r: 51,
+                    g: 51,
+                    b: 51
+                },
+                Rgb16::from([13_056; 3])
+            ),
+            "`g` at 0.1981, held to its byte"
+        );
+        assert_eq!(fills[0], expected([0.1981; 3]), "`g`");
+        assert_eq!(strokes[0], expected([0.2, 0.5, 0.8019]), "`RG`");
+        let (c, m, y, k) = (0.1, 0.2, 0.3, 0.4);
+        assert_eq!(
+            fills[1],
+            expected([
+                (1.0 - c) * (1.0 - k),
+                (1.0 - m) * (1.0 - k),
+                (1.0 - y) * (1.0 - k)
+            ]),
+            "`k`"
+        );
+        assert_eq!(fills[2], expected([0.2, 0.5, 0.8019]), "`sc` read by count");
+        assert_eq!(fills[3], expected([0.9, 0.6, 0.3]), "`scn` in /Wide");
+        let halved = [0.9 * 0.5, 0.6 * 0.5, 0.3 * 0.5];
+        assert_eq!(
+            fills[4],
+            expected(halved),
+            "resolved again in the perceptual intent"
+        );
+        assert_eq!(strokes[1], expected(halved), "`SCN` in /Wide, perceptual");
+        assert_eq!(
+            fills[5],
+            expected([0.9, 0.6, 0.3]),
+            "an uncoloured pattern's components"
+        );
+        assert_eq!(fills[6], fills[5], "`Q` restores both widths");
+        for (color, wide) in fills.iter().chain(&strokes) {
+            assert_eq!(wide.top(), *color, "the light tops out at the bytes");
+        }
+
+        // A device operator in a scope that remaps its space takes the
+        // default's answer at both widths.
+        let remapping = WideSpaces {
+            defaults: DeviceDefaults {
+                gray: true,
+                rgb: false,
+                cmyk: false,
+            },
+        };
+        let (fills, _) = wide_colours(b"0.25 g 0 0 10 10 re f", &remapping);
+        assert_eq!(fills, vec![expected([0.75; 3])], "`g` under a /DefaultGray");
+
+        // Resources that answer only bytes give them widened: a correct
+        // 16-bit colour that refines nothing.
+        let (fills, _) = wide_colours(b"/DeviceCMYK cs 0.5 0 0 0 sc 0 0 10 10 re f", &CmykSpaces);
+        let bytes = cmyk_to_rgb(0.5, 0.0, 0.0, 0.0);
+        assert_eq!(
+            fills,
+            vec![(bytes, Rgb16::widen(bytes))],
+            "bytes alone, widened"
+        );
     }
 
     /// Resources that name colorants, as the facade's will: `/Spot` a

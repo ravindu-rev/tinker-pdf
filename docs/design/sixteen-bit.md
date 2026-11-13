@@ -279,13 +279,18 @@ exactly as the byte does.
 The interpreter carries a 16-bit colour beside each 8-bit one (RC-07.10):
 `GraphicsState` keeps `fill_color` and `stroke_color` as they are, every
 8-bit reader takes the bytes it takes today, and `fill_wide` and
-`stroke_wide` hold the 16-bit light; the document's own ink and a colour's
-colorant tints carry their 16-bit counterparts the same way. `FontSource`
-gains `resolve_color_wide`, answering a colour's bytes and its 16-bit light
-together; its default widens `resolve_color`'s answer, a correct 16-bit
-colour that refines nothing, so a test source that overrides only
-`resolve_color` keeps working, and the facade's `PageResources` overrides it
-through `to_rgb16_in`, evaluating each colour once.
+`stroke_wide` hold the 16-bit light, an `Rgb16` each, set beside the bytes
+by every writer of them — the colour operators, a rendering intent
+changing, `Q`, forced colours — and written into a form's recording key.
+`FontSource` gains `resolve_color_wide`, answering a colour's bytes and its
+16-bit light together; its default widens `resolve_color`'s answer, a
+correct 16-bit colour that refines nothing, so a test source that overrides
+only `resolve_color` keeps working, and the facade's `PageResources`
+overrides it through `to_rgb16_in`, evaluating each colour once. The
+document's own ink and a colour's colorant tints stay bytes: a 16-bit ink or
+plates canvas takes them by `widen`, so their top bytes are today's and
+their low bytes refine nothing, a flat ink keeping the 8-bit level its bytes
+give it.
 
 ### The page, the facade, and the output until FO-05
 

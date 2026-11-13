@@ -1989,6 +1989,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let mut forced = state.clone();
         forced.fill_color = tinker_pdf_content::Rgb::BLACK;
         forced.stroke_color = tinker_pdf_content::Rgb::BLACK;
+        forced.fill_wide = tinker_pdf_content::Rgb16::BLACK;
+        forced.stroke_wide = tinker_pdf_content::Rgb16::BLACK;
         forced.fill_ink = None;
         forced.stroke_ink = None;
         forced.fill_alpha = 1.0;

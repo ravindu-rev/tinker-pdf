@@ -1095,6 +1095,15 @@ impl FontSource for Recorded {
         self.inner.resolve_color(space, components, intent)
     }
 
+    fn resolve_color_wide(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: tinker_pdf_content::RenderingIntent,
+    ) -> Option<(tinker_pdf_content::Rgb, tinker_pdf_content::Rgb16)> {
+        self.inner.resolve_color_wide(space, components, intent)
+    }
+
     fn ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {
         let answer = self.inner.ext_g_state(name);
         // 11.6.5.2: the group is content the page draws, and this walk's

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tinker_pdf_color::{ColorSpace, Colorant, Colorants, Function, Process};
 use tinker_pdf_content::{
     ColorantKind, ColorantTint, ColorantTints, Device, DeviceDefaults, FontSource, Layer,
-    MarkedProps, Matrix, PathSegment, Rgb,
+    MarkedProps, Matrix, PathSegment, Rgb, Rgb16,
 };
 use tinker_pdf_cos::{
     decode_text_string, font as cos_font, limits, pages as cos_pages, Cached, CosDocument,
@@ -2318,6 +2318,43 @@ impl PageResources {
         Some((stream, reference))
     }
 
+    /// A colour of `space` converted by `convert` through the space as
+    /// painted, in `intent`: what [`FontSource::resolve_color`] answers as
+    /// bytes and [`FontSource::resolve_color_wide`] at sixteen bits, from one
+    /// reading of the space.
+    ///
+    /// 8.6.5.6: the light is the space as painted. A device space named
+    /// directly — `g`, `rg` and `k` in a scope that remaps them, and
+    /// `/DeviceRGB cs … sc` — converts through the default where it lies, so
+    /// the most frequent colour operators copy nothing. An ICC space, or one
+    /// holding one, converts in the intent in force, its transform for that
+    /// intent compiled once a profile and kept with the rest.
+    fn painted_color<R>(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: tinker_pdf_content::RenderingIntent,
+        convert: impl Fn(&ColorSpace, &[f64], tinker_pdf_color::icc::Conversion) -> R,
+    ) -> Option<R> {
+        let conversion = conversion(intent);
+        let device = match space {
+            b"DeviceGray" => Some(ColorSpace::DeviceGray),
+            b"DeviceRGB" => Some(ColorSpace::DeviceRgb),
+            b"DeviceCMYK" => Some(ColorSpace::DeviceCmyk),
+            _ => None,
+        };
+        match device {
+            Some(device) => Some(match self.defaults().for_device(&device) {
+                Some(default) => convert(default, components, conversion),
+                // A device space converts alike in every intent.
+                None => convert(&device, components, conversion),
+            }),
+            None => self.named_space(space, Answer::Painted, |space| {
+                convert(space, components, conversion)
+            }),
+        }
+    }
+
     /// `read` of the colour space a resource name selects (8.6.6), as
     /// `answer` reads it, or `None` for a name that selects none. As painted,
     /// a device space this scope remaps is its default (8.6.5.6); as
@@ -3267,29 +3304,22 @@ impl FontSource for PageResources {
         components: &[f64],
         intent: tinker_pdf_content::RenderingIntent,
     ) -> Option<Rgb> {
-        // 8.6.5.6: the light is the space as painted. A device space named
-        // directly — `g`, `rg` and `k` in a scope that remaps them, and
-        // `/DeviceRGB cs … sc` — converts through the default where it lies,
-        // so the most frequent colour operators copy nothing. An ICC space,
-        // or one holding one, converts in the intent in force, its transform
-        // for that intent compiled once a profile and kept with the rest.
-        let conversion = conversion(intent);
-        let device = match space {
-            b"DeviceGray" => Some(ColorSpace::DeviceGray),
-            b"DeviceRGB" => Some(ColorSpace::DeviceRgb),
-            b"DeviceCMYK" => Some(ColorSpace::DeviceCmyk),
-            _ => None,
-        };
-        let (r, g, b) = match device {
-            Some(device) => match self.defaults().for_device(&device) {
-                Some(default) => default.to_rgb_in(components, conversion),
-                None => device.to_rgb(components),
-            },
-            None => self.named_space(space, Answer::Painted, |space| {
-                space.to_rgb_in(components, conversion)
-            })?,
-        };
+        let (r, g, b) = self.painted_color(space, components, intent, ColorSpace::to_rgb_in)?;
         Some(Rgb { r, g, b })
+    }
+
+    fn resolve_color_wide(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: tinker_pdf_content::RenderingIntent,
+    ) -> Option<(Rgb, Rgb16)> {
+        // One evaluation: the colour crate's 16-bit answer tops out at the
+        // bytes `to_rgb_in` gives, so the bytes are its top bytes
+        // (`docs/design/sixteen-bit.md`, "Resolved colour").
+        let wide =
+            Rgb16::from(self.painted_color(space, components, intent, ColorSpace::to_rgb16_in)?);
+        Some((wide.top(), wide))
     }
 
     fn color_components(&self, space: &[u8]) -> Option<usize> {

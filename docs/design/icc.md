@@ -311,8 +311,9 @@ with the rest of the state, and a name 8.6.5.8 does not list is kept as
 matrix/TRC or grey model, and `ColorSpace::to_rgb_in` converts through the
 one an `icc::Conversion`'s intent selects, by the table below. A flat colour
 converts in the intent in force at its painting operator: the interpreter
-passes the state's intent through `FontSource::resolve_color`, and the
-facade maps it to an `icc::Conversion` (`resources::conversion`). An image
+passes the state's intent through `FontSource::resolve_color_wide`, which
+answers `resolve_color`'s bytes with their 16-bit light, and the facade maps
+it to an `icc::Conversion` (`resources::conversion`). An image
 and a shading convert in relative colorimetric — through the first of
 `D2B1`, `A2B1`, `A2B0`, the model and `A2B2` the profile carries — and an
 image's `/Intent` is not read. How often
@@ -519,8 +520,8 @@ the intent is the source's scaling. With `s = (Xmw / Xi, Ymw / Yi, Zmw / Zi)`:
   colour the space each was set in and its components
   (`GraphicsState::fill_source` and `stroke_source`, a shared
   `ColorSource`), and an intent that changes — by `ri` or by a `gs` with
-  `/RI` — re-resolves both through `FontSource::resolve_color` in the new
-  intent. A colour a device operator converts in place keeps its light, and
+  `/RI` — re-resolves both through `FontSource::resolve_color_wide` in the
+  new intent, the bytes and the 16-bit light together. A colour a device operator converts in place keeps its light, and
   an uncoloured pattern's keeps its pattern. `Q` restores a colour with the
   intent it was resolved in; setting the intent in force again resolves
   nothing.
@@ -937,7 +938,7 @@ any default. Beside it, it reports the space its samples are in:
   sources behave as with no defaults, and `subset.rs`'s `Recorded` forwards it
   as it forwards the rest of the colour seam. With none remapped, `g`, `rg`
   and `k` convert in place behind one branch on a field the interpreter
-  holds; with one, that operator resolves through `resolve_color` and
+  holds; with one, that operator resolves through `resolve_color_wide` and
   `resolve_ink` under the device space's own name, the way
   `/DeviceGray cs … sc` resolves.
 
