@@ -170,10 +170,7 @@ impl Color {
     /// which is what makes a grey round-trip through it unchanged.
     #[must_use]
     pub fn luminosity(self) -> u8 {
-        let value =
-            (u32::from(self.r) * 300 + u32::from(self.g) * 590 + u32::from(self.b) * 110 + 500)
-                / 1000;
-        value.min(255) as u8
+        luminosity(self.r, self.g, self.b)
     }
 
     /// The grey this colour reads as, by the usual luma weights.
@@ -222,6 +219,13 @@ impl InkTables {
             self.black.get(k).copied().unwrap_or(0),
         )
     }
+}
+
+/// [`Color::luminosity`] of three bytes: 0.3, 0.59 and 0.11 as integer
+/// weights summing to 1 000, rounded.
+fn luminosity(r: u8, g: u8, b: u8) -> u8 {
+    let value = (u32::from(r) * 300 + u32::from(g) * 590 + u32::from(b) * 110 + 500) / 1000;
+    value.min(255) as u8
 }
 
 /// What a rendered buffer is read as when it becomes a mask (11.6.5.2).
@@ -503,10 +507,14 @@ impl Canvas {
         // returns zero and every pixel is skipped, so walking the page was
         // always the same answer at the price of the page: a comma on A4 at
         // 300 dpi visited 8.4 million pixels to composite about two hundred.
+        // A mask reading a value outside itself reaches the whole canvas, and
+        // only `at` reads that value, so it never takes the opaque path, which
+        // slices the mask's own rows.
         let rect = mask.overlap_at(self.origin, self.width, self.height);
         if mode == BlendMode::Normal
             && color_alpha == 255
             && alpha == 255
+            && mask.outside == 0
             && self.backdrop.is_none()
             && self.format != PixelFormat::CmykA8
         {
@@ -1104,28 +1112,39 @@ impl Canvas {
     /// Reads this buffer as a coverage mask over device pixels (11.6.5.2).
     ///
     /// `at` is where the buffer's top-left sits in device space, so the mask
-    /// comes back addressed the way a clip is. `transfer` is `/TR`,
-    /// pre-sampled to 256 entries — a function evaluated per pixel would be
-    /// ruinous and would put a `libm` call on a pixel path (ruling 4).
+    /// comes back addressed the way a clip is, reading zero outside itself.
+    /// `transfer` is `/TR`, pre-sampled to 256 entries — a function evaluated
+    /// per pixel would be ruinous and would put a `libm` call on a pixel path
+    /// (ruling 4).
+    ///
+    /// **Row by row, in integer** ([`mask_value`]): each pixel's value is the
+    /// one [`Canvas::pixel`] and [`Color::luminosity`] give, read off its
+    /// bytes without making a `Color` of them. A grey is its own luminosity,
+    /// the weights summing to 1 000; an RGB pixel takes the weights directly;
+    /// an ink pixel goes through [`cmyk_to_rgb`], which is integer; an alpha
+    /// mask reads the alpha byte, and a format with none reads 255. A
+    /// [`PixelFormat::LabA8`] pixel reaches light only through [`lab_to_rgb`],
+    /// and keeps that read. `to_mask_reads_every_format_as_pixel_does` holds
+    /// each format to the long way round.
     #[must_use]
     pub fn to_mask(&self, at: (i32, i32), kind: MaskKind, transfer: Option<&[u8; 256]>) -> Mask {
         let mut mask = Mask::empty(at.0, at.1, self.width, self.height);
-        for row in 0..self.height {
-            for col in 0..self.width {
-                let Some(color) = self.pixel(col, row) else {
-                    continue;
-                };
-                let value = match kind {
-                    MaskKind::Luminosity => color.luminosity(),
-                    MaskKind::Alpha => color.a,
-                };
-                let value = transfer.map_or(value, |lut| {
-                    lut.get(value as usize).copied().unwrap_or(value)
+        let components = self.format.components();
+        let width = self.width as usize;
+        if width == 0 {
+            return mask;
+        }
+        let read = mask_value(kind, self.format);
+        for (row, out) in mask.data.chunks_exact_mut(width).enumerate() {
+            let start = row * self.stride;
+            let Some(pixels) = self.data.get(start..start + width * components) else {
+                continue;
+            };
+            for (slot, pixel) in out.iter_mut().zip(pixels.chunks_exact(components)) {
+                let value = read(pixel);
+                *slot = transfer.map_or(value, |lut| {
+                    lut.get(usize::from(value)).copied().unwrap_or(value)
                 });
-                let index = (row as usize) * (self.width as usize) + (col as usize);
-                if let Some(slot) = mask.data.get_mut(index) {
-                    *slot = value;
-                }
             }
         }
         mask
@@ -1222,6 +1241,47 @@ impl Canvas {
                 a: *px.get(3)?,
             },
         })
+    }
+}
+
+/// How [`Canvas::to_mask`] reads one pixel of `format`'s bytes as `kind`: the
+/// value [`Canvas::pixel`] and [`Color::luminosity`] give, chosen once for the
+/// whole buffer.
+fn mask_value(kind: MaskKind, format: PixelFormat) -> fn(&[u8]) -> u8 {
+    fn byte(pixel: &[u8], at: usize) -> u8 {
+        pixel.get(at).copied().unwrap_or(0)
+    }
+    match (kind, format) {
+        // `pixel` gives a format without alpha a whole alpha.
+        (MaskKind::Alpha, PixelFormat::Gray8 | PixelFormat::Rgb8 | PixelFormat::Bgr8) => |_| 255,
+        (MaskKind::Alpha, PixelFormat::GrayA8) => |pixel| byte(pixel, 1),
+        (MaskKind::Alpha, PixelFormat::Rgba8 | PixelFormat::Bgra8 | PixelFormat::LabA8) => {
+            |pixel| byte(pixel, 3)
+        }
+        (MaskKind::Alpha, PixelFormat::CmykA8) => |pixel| byte(pixel, 4),
+        // A grey `v` reads as `(v, v, v)`, whose luminosity is
+        // `(1000 v + 500) / 1000`, which is `v`.
+        (MaskKind::Luminosity, PixelFormat::Gray8 | PixelFormat::GrayA8) => |pixel| byte(pixel, 0),
+        (MaskKind::Luminosity, PixelFormat::Rgb8 | PixelFormat::Rgba8) => {
+            |pixel| luminosity(byte(pixel, 0), byte(pixel, 1), byte(pixel, 2))
+        }
+        // An output order: blue first.
+        (MaskKind::Luminosity, PixelFormat::Bgr8 | PixelFormat::Bgra8) => {
+            |pixel| luminosity(byte(pixel, 2), byte(pixel, 1), byte(pixel, 0))
+        }
+        (MaskKind::Luminosity, PixelFormat::CmykA8) => |pixel| {
+            let (r, g, b) = cmyk_to_rgb(
+                byte(pixel, 0),
+                byte(pixel, 1),
+                byte(pixel, 2),
+                byte(pixel, 3),
+            );
+            luminosity(r, g, b)
+        },
+        (MaskKind::Luminosity, PixelFormat::LabA8) => |pixel| {
+            let (r, g, b) = lab_to_rgb(byte(pixel, 0), byte(pixel, 1), byte(pixel, 2));
+            luminosity(r, g, b)
+        },
     }
 }
 
@@ -2503,6 +2563,7 @@ mod tests {
                     width,
                     height,
                     data,
+                    outside: 0,
                 };
                 let mut source = [0u8; 5];
                 for byte in &mut source {
@@ -2741,6 +2802,7 @@ mod tests {
                         width,
                         height: 2,
                         data,
+                        outside: 0,
                     };
                     let mut source = [0u8; 5];
                     for byte in &mut source {
@@ -3095,6 +3157,7 @@ mod tests {
             width: 2,
             height: 1,
             data: vec![255, 0],
+            outside: 0,
         };
 
         let mut canvas = Canvas::new(10, 6, PixelFormat::Rgb8, Color::WHITE);
@@ -3183,6 +3246,142 @@ mod tests {
         let shifted = buffer.to_mask((0, 0), MaskKind::Luminosity, Some(&invert));
         assert_eq!(shifted.at(0, 0), 0, "the transfer function is applied");
         assert_eq!(shifted.at(1, 0), 255);
+    }
+
+    /// `to_mask` the long way round: a `Color` from `pixel` for every pixel,
+    /// read as the kind asks and through the transfer table.
+    fn mask_by_pixel(
+        canvas: &Canvas,
+        at: (i32, i32),
+        kind: MaskKind,
+        transfer: Option<&[u8; 256]>,
+    ) -> Mask {
+        let mut mask = Mask::empty(at.0, at.1, canvas.width, canvas.height);
+        for row in 0..canvas.height {
+            for col in 0..canvas.width {
+                let color = canvas.pixel(col, row).expect("a pixel");
+                let value = match kind {
+                    MaskKind::Luminosity => color.luminosity(),
+                    MaskKind::Alpha => color.a,
+                };
+                let value = transfer.map_or(value, |lut| lut[usize::from(value)]);
+                mask.data[(row * canvas.width + col) as usize] = value;
+            }
+        }
+        mask
+    }
+
+    /// A `width` by `height` canvas of `format` whose pixel `(x, y)` holds
+    /// the bytes `bytes(x, y)` gives, its alpha included.
+    fn canvas_of(
+        format: PixelFormat,
+        width: u32,
+        height: u32,
+        bytes: impl Fn(u32, u32) -> [u8; 5],
+    ) -> Canvas {
+        let mut canvas = Canvas::new(width, height, format, Color::TRANSPARENT);
+        let components = format.components();
+        for row in 0..height {
+            for col in 0..width {
+                let base = (row as usize) * canvas.stride + (col as usize) * components;
+                canvas.data[base..base + components]
+                    .copy_from_slice(&bytes(col, row)[..components]);
+            }
+        }
+        canvas
+    }
+
+    /// **`to_mask` reads every format as `pixel` does** (P-25.2): the row
+    /// reader, in integer, gives each pixel the value `Canvas::pixel` and
+    /// `Color::luminosity` give it.
+    ///
+    /// Exhaustive over every value each reading depends on: every grey and
+    /// every grey and alpha pair; every RGB triple, in either order of the
+    /// channels, with an alpha that runs through all 256 levels across them;
+    /// every pair of two inks and black
+    /// at every black, the third ink running through every level, which
+    /// meets every ink at every black and every two inks together; and for
+    /// Lab, which reads through `lab_to_rgb`'s floats as `pixel` does, every
+    /// pair of its three bytes. Each format is read as luminosity everywhere,
+    /// and as alpha, through a table that permutes every level and on a buffer
+    /// standing away from the origin, over a slice of it that holds every alpha
+    /// byte — the alpha reading depends on that byte alone, and the table and
+    /// the position on nothing of the format.
+    #[test]
+    fn to_mask_reads_every_format_as_pixel_does() {
+        let mut permute = [0u8; 256];
+        for (value, slot) in permute.iter_mut().enumerate() {
+            *slot = (value * 167 + 13) as u8;
+        }
+        let every: [((i32, i32), MaskKind, Option<&[u8; 256]>); 4] = [
+            ((0, 0), MaskKind::Luminosity, None),
+            ((0, 0), MaskKind::Alpha, None),
+            ((-37, 1_000_003), MaskKind::Luminosity, Some(&permute)),
+            ((-37, 1_000_003), MaskKind::Alpha, Some(&permute)),
+        ];
+        let mut checked = 0u64;
+        let mut check = |canvas: &Canvas, what: &str, every_way: bool| {
+            let ways = if every_way { &every[..] } else { &every[..1] };
+            for &(at, kind, transfer) in ways {
+                let got = canvas.to_mask(at, kind, transfer);
+                let want = mask_by_pixel(canvas, at, kind, transfer);
+                assert_eq!(
+                    (got.x0, got.y0, got.width, got.height, got.outside),
+                    (want.x0, want.y0, want.width, want.height, 0),
+                    "{what}: where the mask stands"
+                );
+                assert!(
+                    got.data == want.data,
+                    "{what}, {kind:?}, a table: {}: the pixels differ",
+                    transfer.is_some()
+                );
+            }
+            checked += u64::from(canvas.width) * u64::from(canvas.height);
+        };
+
+        let grey = canvas_of(PixelFormat::Gray8, 256, 1, |x, _| [x as u8, 0, 0, 0, 0]);
+        check(&grey, "Gray8", true);
+        let grey_alpha = canvas_of(PixelFormat::GrayA8, 256, 256, |x, y| {
+            [x as u8, y as u8, 0, 0, 0]
+        });
+        check(&grey_alpha, "GrayA8", true);
+        for red in 0..=255u8 {
+            let every_way = red == 0 || red == 200;
+            let rgb = canvas_of(PixelFormat::Rgb8, 256, 256, |x, y| {
+                [red, x as u8, y as u8, 0, 0]
+            });
+            check(&rgb, &format!("Rgb8, red {red}"), every_way);
+            let rgba = canvas_of(PixelFormat::Rgba8, 256, 256, |x, y| {
+                [red, x as u8, y as u8, (x as u8) ^ (y as u8) ^ red, 0]
+            });
+            check(&rgba, &format!("Rgba8, red {red}"), every_way);
+            let bgr = canvas_of(PixelFormat::Bgr8, 256, 256, |x, y| {
+                [x as u8, y as u8, red, 0, 0]
+            });
+            check(&bgr, &format!("Bgr8, red {red}"), every_way);
+            let bgra = canvas_of(PixelFormat::Bgra8, 256, 256, |x, y| {
+                [x as u8, y as u8, red, (x as u8) ^ (y as u8) ^ red, 0]
+            });
+            check(&bgra, &format!("Bgra8, red {red}"), every_way);
+        }
+        for black in 0..=255u8 {
+            let ink = canvas_of(PixelFormat::CmykA8, 256, 256, |x, y| {
+                let (c, m) = (x as u8, y as u8);
+                [c, m, c ^ m ^ black, black, c.wrapping_add(m)]
+            });
+            check(&ink, &format!("CmykA8, black {black}"), black % 85 == 0);
+        }
+        let lab = canvas_of(PixelFormat::LabA8, 256, 256, |x, y| {
+            let (l, a) = (x as u8, y as u8);
+            [l, a, l ^ a, a.wrapping_sub(l), 0]
+        });
+        check(&lab, "LabA8", true);
+
+        assert_eq!(
+            checked,
+            256 + 65_536 + 4 * 256 * 65_536 + 256 * 65_536 + 65_536,
+            "every pixel of every buffer was read"
+        );
     }
 
     /// 11.4.7.2's removal, checked against the arithmetic it is derived from

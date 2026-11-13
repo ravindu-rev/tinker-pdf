@@ -110,10 +110,11 @@ pub(crate) fn jpeg_transformed(work: Option<&Work>, samples: u64) {
 }
 
 /// Adds what a renderer counted — its glyphs shown, its outlines painted,
-/// its glyph masks rasterised and found in its cache, and its shading
-/// functions evaluated — to the operation's tally, when it is counting.
-/// The renderer has no edge to the tally's crate and hands its counts back
-/// as a value instead.
+/// its glyph masks rasterised and found in its cache, its shading functions
+/// evaluated, and the pixels its group buffers and soft masks held beside the
+/// regions they were held to — to the operation's tally, when it is
+/// counting. The renderer has no edge to the tally's crate and hands its
+/// counts back as a value instead.
 pub(crate) fn add_render(work: Option<&Work>, counts: RenderCounts) {
     if let Some(work) = work {
         work.add(Counter::GlyphsShown, counts.glyphs_shown);
@@ -124,5 +125,9 @@ pub(crate) fn add_render(work: Option<&Work>, counts: RenderCounts) {
             Counter::ShadingFunctionsEvaluated,
             counts.shading_functions_evaluated,
         );
+        work.add(Counter::GroupBufferPixels, counts.group_buffer_pixels);
+        work.add(Counter::GroupBoundPixels, counts.group_bound_pixels);
+        work.add(Counter::SoftMaskPixels, counts.soft_mask_pixels);
+        work.add(Counter::SoftMaskBoundPixels, counts.soft_mask_bound_pixels);
     }
 }

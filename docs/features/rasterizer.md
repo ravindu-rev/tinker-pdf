@@ -237,9 +237,27 @@ coverage.
 **Clipping.** A clip is a `Mask` like any other, and a clip stack composes by
 multiplication: `Mask::intersect_in_place` multiplies coverages, which is
 what keeps a clipped anti-aliased edge looking right rather than doubly
-hard. `Mask::uniform` carries a soft mask's value outside the region its
-group covered, where the answer is the luminosity of `/BC` alone (11.6.5.2)
-— which is not zero unless `/BC` is black.
+hard. **A mask reads `Mask::outside` beyond its rectangle**: zero for every
+clip, every paint's coverage and every mask `Canvas::to_mask` returns, and
+for a soft mask the luminosity of `/BC` alone, the answer outside the region
+its group covered (11.6.5.2) — which is not zero unless `/BC` is black. So a
+pale soft mask is its group's box and one value, never a field the size of the
+canvas. Every consumer reads it: `Mask::at` returns it; `Mask::overlap_at`
+reaches the whole canvas for a mask whose outside value is not zero; the
+product of two masks reads the product of their outside values, over the
+rectangle the two share when both read zero outside, over the one that reads
+zero's own when only one does — a clip times a soft mask — and over the
+smallest rectangle holding both when neither does; `intersect_in_place` keeps
+its receiver's rectangle, a paint's coverage reading zero outside; `harden`
+hardens the outside value too, and `quantise` reduces it to its level;
+`Fragments::would_overlap` walks a run's whole
+rectangle under such a mask; and the opaque composite, which reads a mask's
+rows as slices, is never taken for one. `Canvas::to_mask` reads a buffer back
+row by row in integer, each format's bytes as `Canvas::pixel` and
+`Color::luminosity` read them — a grey is its own luminosity, RGB takes the
+weights directly, a blue-first buffer the same weights over its bytes in
+their order, ink goes through `cmyk_to_rgb` — and a `LabA8` buffer through
+`lab_to_rgb`, as `pixel` does.
 
 **Compositing.** A `Canvas` stores pixels in one of eight formats (`Gray8`,
 `GrayA8`, `Rgb8`, `Rgba8`, `Bgr8`, `Bgra8`, `CmykA8`, `LabA8`) and composites in integer
@@ -598,7 +616,16 @@ tiny pattern over a long line cannot generate millions of pieces.
   (`mul255_in_sixteen_bits_is_mul255`), and rows of every count of blocks and
   every tail to the general blend, with the general blends counted to the
   covered pixels that are not opaque
-  (`the_row_walk_takes_every_block_and_tail_as_the_general_blend`).
+  (`the_row_walk_takes_every_block_and_tail_as_the_general_blend`); holds
+  `to_mask` to `pixel` read the long way round, over every value each format's
+  reading depends on (`to_mask_reads_every_format_as_pixel_does`); and
+  `fill.rs` holds every consumer of a mask that reads a value outside itself —
+  `at`, `overlap_at`, both products, `harden`, a run's overlap and the
+  canvas's fill, composite and knockout restore — to the same consumer of a
+  field the size of the canvas holding the same values, on canvases at the
+  origin and away from it and over boxes inside, hanging off, wholly off and
+  of no pixels (`every_mask_consumer_reads_the_outside_value`,
+  `a_product_of_two_masks_reading_outside_themselves_holds_both`).
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
   the render fingerprints `text`, `curves`, `shading`, `blend`, `pattern`,
   `image`, `transparency`, `tiling`, `mesh` and `strokes` exercise this crate

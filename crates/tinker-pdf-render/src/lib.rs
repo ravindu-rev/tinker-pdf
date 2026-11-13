@@ -853,8 +853,8 @@ struct MaskFrame {
     /// For `/Luminosity` that is the luminosity of `/BC` alone, because the
     /// group painted nothing out there and 11.6.5.2 composites it against a
     /// fully opaque `/BC` backdrop. It is zero only when `/BC` is black --
-    /// which is the default, and is why the bounding-box-sized mask is the
-    /// common case and the page-sized one the exception.
+    /// which is the default -- and for `/Alpha`. The installed mask carries it
+    /// as its `Mask::outside`, beside the box it was read from.
     outside: u8,
     /// `/TR`, pre-sampled.
     transfer: Option<[u8; 256]>,
@@ -901,8 +901,10 @@ struct MaskFrame {
 /// answer.
 const MAX_IMAGE_RUN_PIXELS: u64 = MAX_PAGE_PIXELS / 4;
 
-/// A mask's identity: where it is and whose coverage it holds.
-type MaskId = (i32, i32, u32, u32, usize);
+/// A mask's identity: where it is, whose coverage it holds and what it reads
+/// outside itself — two masks of no pixels hold no coverage of their own to
+/// tell them apart by.
+type MaskId = (i32, i32, u32, u32, usize, u8);
 
 /// A run of consecutive image draws, accumulated before any of it is
 /// composited.
@@ -918,8 +920,9 @@ struct ImageRun {
     /// A run survives `q`, `Q` and a form boundary, because none of those
     /// draws anything — but any of them can put a *different* clip in force,
     /// and a run composited under the wrong one would paint through it. Each
-    /// mask is identified by its rectangle and the address of its coverage,
-    /// which is cheap and cannot collide while the mask is alive.
+    /// mask is identified by its rectangle, the address of its coverage and
+    /// the value it reads outside itself, which is cheap and cannot collide
+    /// while the mask is alive.
     masks: (Option<MaskId>, Option<MaskId>),
     /// The ink every draw in the run painted, when the canvas composites
     /// ink: a stencil's fill colour's own components (8.9.6.2), handed to
@@ -991,6 +994,28 @@ pub struct RenderCounts {
     pub glyph_masks_rasterised: u64,
     /// Filled glyphs drawn from a mask this renderer's cache held.
     pub glyph_mask_hits: u64,
+    /// Pixels of the buffers a transparency group or a soft-mask group
+    /// allocated for its own pixels while it was open
+    /// (`docs/design/performance.md`, P-25): its canvas, a non-isolated
+    /// group's copy of its backdrop and a knockout group's snapshot of its
+    /// initial state, each counted where it is allocated as its width times
+    /// its height. A quantity rather than a count of steps.
+    pub group_buffer_pixels: u64,
+    /// Pixels of the regions those groups opened over, once a group: the
+    /// rectangle each one's canvas is allocated over. What
+    /// `group_buffer_pixels` is held to.
+    pub group_bound_pixels: u64,
+    /// Pixels of the soft masks this renderer installed: each mask a
+    /// soft-mask group's buffer was read back as, its width times its height.
+    pub soft_mask_pixels: u64,
+    /// Pixels of the regions of the soft-mask groups those masks were read
+    /// from, once a mask installed. What `soft_mask_pixels` is held to.
+    pub soft_mask_bound_pixels: u64,
+}
+
+/// A canvas's pixels, counted as `RenderCounts` counts a buffer.
+fn pixels_of(canvas: &Canvas) -> u64 {
+    u64::from(canvas.width) * u64::from(canvas.height)
 }
 
 /// The device's own flattening tolerance, in device pixels: what a curve is
@@ -1621,6 +1646,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 mask.width,
                 mask.height,
                 mask.data.as_ptr() as usize,
+                mask.outside,
             )
         };
         (self.clip.as_ref().map(id), self.soft.as_ref().map(id))
@@ -2109,6 +2135,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             None => Self::alpha_format(self.canvas.format),
         };
         let mut buffer = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(x0, y0);
+        self.count_group_buffer(&buffer);
+        self.counts.group_bound_pixels = self
+            .counts
+            .group_bound_pixels
+            .saturating_add(pixels_of(&buffer));
         // 11.4.4: an isolated group composites against nothing, so its buffer
         // starts empty; a non-isolated one starts with the backdrop composited
         // in, which is what lets a blend mode inside it see through to the
@@ -2119,10 +2150,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // toward whatever was underneath, which is a plausible image.
         if !group.isolated {
             let backdrop = self.canvas.extract((x0, y0), width, height, format);
+            self.count_group_buffer(&backdrop);
             buffer.adopt_backdrop(backdrop);
         }
 
         let initial = group.knockout.then(|| buffer.snapshot());
+        if let Some(initial) = &initial {
+            self.count_group_buffer(initial);
+        }
         // 11.7.5.2's conditions at the `Do`, and 11.7.5.3's functions for a
         // group whose result is RGB light reaching an ink parent.
         let opaque = state.fill_alpha >= 1.0
@@ -2163,6 +2198,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // the same frame, so it is untouched.
         self.groups.push(frame);
         true
+    }
+
+    /// Counts a buffer a group allocated for its own pixels while it is open
+    /// ([`RenderCounts::group_buffer_pixels`]).
+    fn count_group_buffer(&mut self, buffer: &Canvas) {
+        self.counts.group_buffer_pixels = self
+            .counts
+            .group_buffer_pixels
+            .saturating_add(pixels_of(buffer));
     }
 
     /// Whether the innermost open group is a knockout one (11.4.5).
@@ -2298,8 +2342,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             (MaskKind::Alpha, Color::TRANSPARENT)
         };
         // What the mask reads outside the group's box: the backdrop alone,
-        // through `/TR`. Zero for `/Alpha`, and zero for the `/BC` default,
-        // which is why the common mask costs its bounding box.
+        // through `/TR`. Zero for `/Alpha`, and zero for the `/BC` default.
         let outside = {
             let raw = match kind {
                 // The identical function `to_mask` uses inside the box. Two
@@ -2316,6 +2359,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
         let format = Self::alpha_format(self.canvas.format);
         let buffer = Canvas::new(width, height, format, background).at_origin(x0, y0);
+        self.count_group_buffer(&buffer);
+        self.counts.group_bound_pixels = self
+            .counts
+            .group_bound_pixels
+            .saturating_add(pixels_of(&buffer));
 
         let frame = MaskFrame {
             parent: std::mem::replace(&mut self.canvas, buffer),
@@ -2355,20 +2403,26 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // The mask's own buffer on the page, before the parent's is restored.
         let inner_bounds = mem::replace(&mut self.frame, frame.frame);
 
-        let inner = buffer.to_mask(frame.at, frame.kind, frame.transfer.as_ref());
-        // A `Mask` reads zero outside its own rectangle, which is exactly
-        // right when the backdrop is black and exactly wrong otherwise: with
-        // a pale `/BC` the whole page outside the group's box is *unmasked*,
-        // and a bounding-box-sized mask would hide it. So the field is only
-        // paid for when the file asks for one.
-        self.soft = Some(if frame.outside == 0 {
-            inner
-        } else {
-            let (ox, oy, width, height) = self.device();
-            let mut field = Mask::uniform(ox, oy, width, height, frame.outside);
-            field.overwrite(&inner);
-            field
-        });
+        // The group's box, read back, and beyond it the backdrop's value
+        // (11.6.5.2). With a pale `/BC` the page outside the box is
+        // *unmasked*, by that value, and a mask reading zero there would hide
+        // it; carried as the mask's outside value rather than as a field of it
+        // the size of the canvas, so a pale mask costs its box as a black one
+        // does (`docs/design/performance.md`, P-25).
+        let mask = buffer
+            .to_mask(frame.at, frame.kind, frame.transfer.as_ref())
+            .with_outside(frame.outside);
+        self.counts.soft_mask_pixels = self
+            .counts
+            .soft_mask_pixels
+            .saturating_add(u64::from(mask.width) * u64::from(mask.height));
+        self.counts.soft_mask_bound_pixels = self
+            .counts
+            .soft_mask_bound_pixels
+            .saturating_add(pixels_of(&buffer));
+        self.soft = Some(mask);
+        // A mask reading a value outside its box confines no paint, so on the
+        // whole page its rectangle is the whole frame (`Bounds::limit_of`).
         self.soft_bounds = Some(if frame.outside == 0 {
             inner_bounds
         } else {
@@ -3294,8 +3348,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             bottom: top + i64::from(local.height),
         };
         let mut region = placed.meet(Bounds::of_rect(self.device()));
-        for limit in [self.clip.as_ref(), soft].into_iter().flatten() {
-            region = region.meet(Bounds::of_mask(limit));
+        for limit in [self.clip.as_ref(), soft]
+            .into_iter()
+            .flatten()
+            .filter_map(Bounds::limit_of)
+        {
+            region = region.meet(limit);
         }
         let (x0, y0, width, height) = region.rect();
         let mut mask = Mask::empty(x0, y0, width, height);
@@ -3760,6 +3818,14 @@ impl Bounds {
         Bounds::of_rect((mask.x0, mask.y0, mask.width, mask.height))
     }
 
+    /// The rectangle a mask confines a paint to: its own, or none for a mask
+    /// that reads a value other than zero outside itself — a soft mask whose
+    /// `/BC` is pale, which leaves every pixel of the canvas some coverage
+    /// (11.6.5.2).
+    fn limit_of(mask: &Mask) -> Option<Bounds> {
+        (mask.outside == 0).then(|| Bounds::of_mask(mask))
+    }
+
     /// Where the two overlap: empty, never negative, when they do not.
     fn meet(self, other: Bounds) -> Bounds {
         let left = self.left.max(other.left);
@@ -3875,11 +3941,13 @@ fn region_within(
 
 /// The device pixels a shape can put ink on: its bounding box, `bounds` as
 /// [`Path::bounds`] gives it, widened by [`SLACK`], clipped to the canvas and
-/// to the clip's own rectangle.
+/// to the rectangles the clip and the soft mask confine a paint to
+/// ([`Bounds::limit_of`]).
 ///
 /// Clipping to the clip's rectangle is safe for the same reason the whole
 /// change is: a clip reports zero coverage outside itself, and coverage
-/// multiplies, so nothing outside it could ever have been painted.
+/// multiplies, so nothing outside it could ever have been painted. A soft
+/// mask that reads a value outside itself confines nothing.
 ///
 /// A shape with no points at all — which is what a text object that selected
 /// a clipping mode and drew nothing produces — yields an empty region, and an
@@ -3893,7 +3961,10 @@ fn paint_region(
 ) -> (i32, i32, u32, u32) {
     region_within(
         bounds,
-        &[clip.map(Bounds::of_mask), soft.map(Bounds::of_mask)],
+        &[
+            clip.and_then(Bounds::limit_of),
+            soft.and_then(Bounds::limit_of),
+        ],
         Bounds::of_rect(canvas),
     )
     .rect()
@@ -8203,6 +8274,10 @@ mod tests {
     /// call, through clips and `q`/`Q`, a group under a clip and one under
     /// none, soft masks with a black and a pale backdrop, `/SMask /None`, a
     /// text clip that clips everything away, and a clip wholly off the page.
+    /// A mask's rectangle is the one it confines a paint to: its own, and for
+    /// a mask that reads a value outside itself — the pale backdrop's — the
+    /// whole canvas, every pixel of which it leaves some coverage
+    /// (`Bounds::limit_of`).
     ///
     /// This is the invariant that makes a tile's decisions the page's
     /// (ruling 5): the rectangles are computed from device coordinates alone,
@@ -8225,9 +8300,12 @@ mod tests {
                 r.clip.as_ref().map(Bounds::of_mask),
                 "{step}: the clip's rectangle"
             );
+            assert_eq!(r.clip.as_ref().map_or(0, |clip| clip.outside), 0, "{step}");
             assert_eq!(
                 r.soft_bounds,
-                r.soft.as_ref().map(Bounds::of_mask),
+                r.soft
+                    .as_ref()
+                    .map(|soft| Bounds::limit_of(soft).unwrap_or(r.frame)),
                 "{step}: the soft mask's rectangle"
             );
         }
@@ -8293,6 +8371,14 @@ mod tests {
         check(&r, "a pale-backdrop mask group off the page's edge");
         r.end_soft_mask();
         check(&r, "the pale-backdrop mask installed");
+        let pale = r.soft.as_ref().expect("the pale mask is in force");
+        assert_ne!(pale.outside, 0, "it reads its backdrop outside its box");
+        assert!(
+            u64::from(pale.width) * u64::from(pale.height) < pixels_of(&r.canvas),
+            "and it is kept at its box: {}x{}",
+            pale.width,
+            pale.height
+        );
         assert!(r.begin_group(group(true), &state));
         check(&r, "an isolated group under no clip");
         r.end_group();
@@ -8310,6 +8396,149 @@ mod tests {
         r.text_clip_requested = true;
         r.end_text();
         check(&r, "a text clip that clips everything away");
+    }
+
+    /// A rectangle in user space, as path segments.
+    fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<PathSegment> {
+        vec![
+            PathSegment::MoveTo { x: x0, y: y0 },
+            PathSegment::LineTo { x: x1, y: y0 },
+            PathSegment::LineTo { x: x1, y: y1 },
+            PathSegment::LineTo { x: x0, y: y1 },
+            PathSegment::Close,
+        ]
+    }
+
+    /// A luminosity mask group whose backdrop is `backdrop`, with no `/TR`.
+    fn luminosity_mask(backdrop: Option<tinker_pdf_content::Rgb>) -> tinker_pdf_content::MaskGroup {
+        tinker_pdf_content::MaskGroup {
+            form: tinker_pdf_content::Form {
+                content: Vec::new(),
+                matrix: Matrix::IDENTITY,
+                bbox: None,
+                group: None,
+                stream: 0,
+            },
+            luminosity: true,
+            backdrop,
+            transfer: None,
+        }
+    }
+
+    /// The graphics state with a fill colour of `grey`.
+    fn filled(grey: u8) -> GraphicsState {
+        let mut state = GraphicsState::default();
+        state.fill_color = tinker_pdf_content::Rgb {
+            r: grey,
+            g: grey,
+            b: grey,
+        };
+        state
+    }
+
+    /// **A soft mask with a pale backdrop is kept at its box and masks the
+    /// page beyond it by its backdrop's value** (P-25.2).
+    ///
+    /// A luminosity mask whose `/BC` is grey 200, its box the middle of a
+    /// 60 by 40 page and its group painting the box's left half white, then a
+    /// black fill over the whole page: the mask in force is the box's
+    /// region, not the canvas, and reads 200 outside it; the fill is black
+    /// where the group painted white, and black at 200 levels over white —
+    /// 55 — in the box's right half and everywhere outside the box. The
+    /// counts say the same: the installed mask's pixels are its group's
+    /// region's, and the mask group's buffer is that region too. Whole and in
+    /// a tile that the box misses, which installs a mask of no pixels that
+    /// still reads 200 everywhere, and in one that it straddles.
+    #[test]
+    fn a_pale_soft_mask_is_kept_at_its_box_and_masks_the_page_beyond_it() {
+        let pale = Some(tinker_pdf_content::Rgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        });
+        let draw = |canvas: Canvas| {
+            let mut r =
+                Renderer::new(canvas, page_transform(40.0, 1.0), &NoGlyphs).with_page_size(60, 40);
+            let plain = GraphicsState::default();
+            assert!(r.begin_soft_mask(
+                &luminosity_mask(pale),
+                &rect_path(15.0, 10.0, 45.0, 30.0),
+                &plain
+            ));
+            r.fill_path(&rect_path(15.0, 10.0, 30.0, 30.0), &filled(255), false);
+            r.end_soft_mask();
+            let soft = r.soft.clone().expect("the mask is in force");
+            r.fill_path(&rect_path(0.0, 0.0, 60.0, 40.0), &filled(0), false);
+            let (canvas, _, counts) = r.finish_counted();
+            (canvas, soft, counts)
+        };
+
+        let (page, soft, counts) = draw(Canvas::new(60, 40, PixelFormat::Rgb8, Color::WHITE));
+        // The box is 15..45 by 10..30 on the page, its rows flipped, widened
+        // by the slack every region carries.
+        let region = paint_region(Some((15.0, 10.0, 45.0, 30.0)), None, None, (0, 0, 60, 40));
+        assert_eq!(
+            (soft.x0, soft.y0, soft.width, soft.height),
+            region,
+            "the mask is its box's region"
+        );
+        assert_eq!(soft.outside, 200, "and reads the backdrop beyond it");
+        let area = u64::from(region.2) * u64::from(region.3);
+        assert!(area < 60 * 40, "a box smaller than the page");
+        assert_eq!(
+            (counts.soft_mask_pixels, counts.soft_mask_bound_pixels),
+            (area, area)
+        );
+        assert_eq!(
+            (counts.group_buffer_pixels, counts.group_bound_pixels),
+            (area, area)
+        );
+        let grey = |canvas: &Canvas, x: i32, y: i32| {
+            let (x, y) = canvas.local(x, y).expect("on the canvas");
+            canvas.pixel(x, y).expect("a pixel").r
+        };
+        assert_eq!(grey(&page, 20, 20), 0, "where the group painted white");
+        assert_eq!(
+            grey(&page, 40, 20),
+            55,
+            "in the box, where it painted nothing"
+        );
+        for (x, y) in [(2, 2), (57, 37), (5, 20), (50, 20), (30, 3), (30, 36)] {
+            assert_eq!(grey(&page, x, y), 55, "outside the box at ({x}, {y})");
+        }
+
+        // Tiles: one the box misses, one it straddles, each the page's pixels.
+        for (x, y, width, height) in [(0, 0, 12, 7), (25, 5, 30, 20)] {
+            let tile = Canvas::new(width, height, PixelFormat::Rgb8, Color::WHITE).at_origin(x, y);
+            let (tile, soft, counts) = draw(tile);
+            for row in 0..height {
+                for col in 0..width {
+                    let (px, py) = (x + col as i32, y + row as i32);
+                    assert_eq!(
+                        tile.pixel(col, row),
+                        page.pixel(px as u32, py as u32),
+                        "the tile at ({x}, {y}), pixel ({px}, {py})"
+                    );
+                }
+            }
+            assert_eq!(soft.outside, 200, "the tile at ({x}, {y})");
+            let clipped = Bounds::of_rect(region).within(Bounds::of_rect((x, y, width, height)));
+            assert_eq!(
+                Bounds::of_mask(&soft),
+                clipped,
+                "the tile at ({x}, {y}): the box clipped to the tile"
+            );
+            assert_eq!(
+                counts.soft_mask_pixels,
+                clipped.area(),
+                "the tile at ({x}, {y})"
+            );
+            assert_eq!(
+                counts.soft_mask_bound_pixels,
+                clipped.area(),
+                "the tile at ({x}, {y})"
+            );
+        }
     }
 }
 

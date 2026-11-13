@@ -233,6 +233,10 @@ already carries it.
 | `text_forms_built` | a page's text folded and joined in one of a search's four folds, its offset table with it (P-24) | `tinker-pdf-content`'s search, through `TextPage::search_counted` | built |
 | `word_boundaries_computed` | a form's lines' UAX #29 boundaries computed, for a whole-word search (P-24) | the same | built |
 | `search_steps` | a step of a search's matcher or mapping: a byte of a line's kept text read, a fall back of its automaton, an entry of its needle's failure table, a word boundary or a glyph a cursor moved past (P-24) | the same | built |
+| `group_buffer_pixels` | a pixel of a buffer a transparency group or a soft mask's group allocated for its own pixels while it was open, counted at the allocation — a quantity (P-25) | the renderer | built |
+| `group_bound_pixels` | a pixel of the region such a group opened over, once a group — a quantity | the renderer | built |
+| `soft_mask_pixels` | a pixel of a soft mask the renderer installed — a quantity | the renderer | built |
+| `soft_mask_bound_pixels` | a pixel of the region of the group such a mask was read from, once a mask — a quantity | the renderer | built |
 
 `work()` sums every counter that counts a step taken, and leaves out maxima and
 quantities — `most_decodes_of_one_stream`, `bytes_decoded`, and every byte or
@@ -4489,7 +4493,7 @@ whatever the restore left, which `blend` does too.
    the region; `fill.rs` `every_mask_consumer_reads_the_outside_value` (new),
    each rule above against a canvas-sized field holding the same values;
    `canvas.rs` `to_mask_reads_every_format_as_pixel_does` (new), exhaustive
-   over each format's bytes; `soft_mask_clips.rs`, `transparency_groups.rs`,
+   over every value each format's reading depends on; `soft_mask_clips.rs`, `transparency_groups.rs`,
    `render_regions.rs`'s transparency tiles, the `transparency.ppm` golden and
    the `transparency` fingerprint unchanged on the four targets.
 3. **P-25.3: group backdrops at their clipped bounds, once.** Exit:

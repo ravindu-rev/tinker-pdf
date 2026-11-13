@@ -104,15 +104,22 @@ impl Fragments {
     /// 255 because each was rounded up independently. [`SLACK`] is what
     /// separates that from an image genuinely drawn over another, which must
     /// end the run — adding it would show both pictures at once.
+    ///
+    /// The walk is the shape's own rectangle, in device pixels wherever they
+    /// are; a shape that reads a value other than zero outside itself covers
+    /// the run's whole rectangle too, and the walk is that one.
     #[must_use]
     pub fn would_overlap(&self, shape: &Mask) -> bool {
         /// Coverage levels of overshoot that are rounding rather than overlap.
         const SLACK: u32 = 24;
 
-        // The shape's own rectangle, in device pixels wherever they are.
-        let (x0, y0) = (shape.x0, shape.y0);
-        let x1 = x0.saturating_add(i32::try_from(shape.width).unwrap_or(i32::MAX));
-        let y1 = y0.saturating_add(i32::try_from(shape.height).unwrap_or(i32::MAX));
+        let (x0, y0, width, height) = if shape.outside == 0 {
+            (shape.x0, shape.y0, shape.width, shape.height)
+        } else {
+            (self.x0, self.y0, self.width, self.height)
+        };
+        let x1 = x0.saturating_add(i32::try_from(width).unwrap_or(i32::MAX));
+        let y1 = y0.saturating_add(i32::try_from(height).unwrap_or(i32::MAX));
         for y in y0..y1 {
             for x in x0..x1 {
                 let covered = u32::from(shape.at(x, y));

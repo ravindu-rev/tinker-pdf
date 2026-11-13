@@ -49,7 +49,8 @@ const SAMPLES: i32 = 16;
 /// fill is checked whatever part of the region the shape starts in.
 const STOP_EVERY: usize = 16;
 
-/// A coverage mask over a rectangular region.
+/// A coverage mask over a rectangular region, and the value it reads outside
+/// that region.
 #[derive(Clone, Debug)]
 pub struct Mask {
     /// Left edge in device pixels.
@@ -62,10 +63,25 @@ pub struct Mask {
     pub height: u32,
     /// Coverage, 0 to 255, row-major.
     pub data: Vec<u8>,
+    /// What the mask reads at every device pixel outside its rectangle.
+    ///
+    /// Zero for every clip, every paint's coverage and every mask
+    /// [`crate::Canvas::to_mask`] returns: a shape covers nothing past its
+    /// own bounds. A soft mask is the one mask that reads something else
+    /// there (11.6.5.2): outside the region its group painted, a luminosity
+    /// mask is the luminosity of `/BC` alone, which is not zero unless `/BC`
+    /// is black. Carried as one value rather than as a field of it the size
+    /// of the canvas, so a mask whose backdrop is pale costs its box and not
+    /// the page (`docs/design/performance.md`, P-25).
+    ///
+    /// Every consumer reads it: [`Mask::at`] returns it, [`Mask::overlap_at`]
+    /// reaches the whole canvas when it is not zero, the products keep it,
+    /// and a reader of `data` by index stays inside the rectangle.
+    pub outside: u8,
 }
 
 impl Mask {
-    /// An all-zero mask.
+    /// An all-zero mask, reading zero outside itself too.
     #[must_use]
     pub fn empty(x0: i32, y0: i32, width: u32, height: u32) -> Mask {
         let len = (width as usize).saturating_mul(height as usize);
@@ -75,16 +91,13 @@ impl Mask {
             width,
             height,
             data: vec![0; len],
+            outside: 0,
         }
     }
 
-    /// A mask holding one value everywhere in its rectangle.
-    ///
-    /// What a soft mask needs outside the region its group covered (11.6.5.2):
-    /// there the result is the luminosity of `/BC` alone, which is *not* zero
-    /// unless `/BC` is black. A mask reports zero outside itself, so a
-    /// bounding-box-sized soft mask would silently mean "`/BC` is black"
-    /// whatever the file said.
+    /// A mask holding one value everywhere in its rectangle, and zero outside
+    /// it: a rectangle of coverage, such as the whole of a canvas `sh` paints
+    /// with no clip in force.
     #[must_use]
     pub fn uniform(x0: i32, y0: i32, width: u32, height: u32, value: u8) -> Mask {
         let len = (width as usize).saturating_mul(height as usize);
@@ -94,40 +107,30 @@ impl Mask {
             width,
             height,
             data: vec![value; len],
+            outside: 0,
         }
     }
 
-    /// Copies `other`'s coverage over this mask's, where the two overlap.
+    /// The same mask, reading `outside` beyond its rectangle.
     ///
-    /// A *replacement*, not the multiply [`Mask::intersect_in_place`] does:
-    /// the caller placing a rendered soft-mask group inside its `/BC` field
-    /// wants the group's answer there, not the product of the two.
-    pub fn overwrite(&mut self, other: &Mask) {
-        for row in 0..self.height {
-            let y = self.y0.saturating_add(row as i32);
-            if y < other.y0 || i64::from(y) >= i64::from(other.y0) + i64::from(other.height) {
-                continue;
-            }
-            let base = (row as usize) * (self.width as usize);
-            for col in 0..self.width {
-                let x = self.x0.saturating_add(col as i32);
-                if x < other.x0 || i64::from(x) >= i64::from(other.x0) + i64::from(other.width) {
-                    continue;
-                }
-                if let Some(slot) = self.data.get_mut(base + col as usize) {
-                    *slot = other.at(x, y);
-                }
-            }
-        }
+    /// What a soft mask is (11.6.5.2): the buffer its group drew, read back
+    /// over the group's box, and beyond the box the luminosity of `/BC`
+    /// through `/TR` — the value [`Mask::outside`] holds.
+    #[must_use]
+    pub fn with_outside(mut self, outside: u8) -> Mask {
+        self.outside = outside;
+        self
     }
 
-    /// The canvas pixels this mask can put coverage on: its own rectangle,
-    /// clamped to a canvas of `width` by `height`, as `(x0, y0, x1, y1)` with
-    /// the far edges exclusive.
+    /// The canvas pixels this mask can put coverage on, clamped to a canvas of
+    /// `width` by `height`, as `(x0, y0, x1, y1)` with the far edges
+    /// exclusive: its own rectangle, or the whole canvas when it reads a value
+    /// other than zero outside itself.
     ///
-    /// A mask reports zero outside itself, so a consumer that walks the whole
-    /// canvas computes the same answer as one that walks this — it just pays
-    /// the page for a comma. Every consumer walks this.
+    /// A mask reading zero outside itself is zero everywhere this does not
+    /// reach, so a consumer that walks the whole canvas computes the same
+    /// answer as one that walks this — it just pays the page for a comma.
+    /// Every consumer walks this.
     #[must_use]
     pub fn overlap(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
         self.overlap_at((0, 0), width, height)
@@ -138,9 +141,14 @@ impl Mask {
     /// device pixel `(origin.0 + x, origin.1 + y)` is canvas pixel `(x, y)`.
     ///
     /// The mask stays in device pixels and the canvas says where it is, which
-    /// is what keeps a tile's arithmetic in the page's frame (ruling 5).
+    /// is what keeps a tile's arithmetic in the page's frame (ruling 5). A
+    /// mask whose [`Mask::outside`] is not zero reaches every pixel of every
+    /// canvas, wherever its rectangle stands.
     #[must_use]
     pub fn overlap_at(&self, origin: (i32, i32), width: u32, height: u32) -> (u32, u32, u32, u32) {
+        if self.outside != 0 {
+            return (0, 0, width, height);
+        }
         let clamp = |value: i64, limit: u32| value.clamp(0, i64::from(limit)) as u32;
         let (left, top) = (
             i64::from(self.x0) - i64::from(origin.0),
@@ -153,14 +161,14 @@ impl Mask {
         (x0, y0, x1.max(x0), y1.max(y0))
     }
 
-    /// Coverage at a device pixel, zero outside the mask.
+    /// Coverage at a device pixel: [`Mask::outside`] beyond the mask's
+    /// rectangle.
     #[must_use]
     pub fn at(&self, x: i32, y: i32) -> u8 {
-        let (Some(col), Some(row)) = (x.checked_sub(self.x0), y.checked_sub(self.y0)) else {
-            return 0;
-        };
-        if col < 0 || row < 0 || col as u32 >= self.width || row as u32 >= self.height {
-            return 0;
+        let col = i64::from(x) - i64::from(self.x0);
+        let row = i64::from(y) - i64::from(self.y0);
+        if col < 0 || row < 0 || col >= i64::from(self.width) || row >= i64::from(self.height) {
+            return self.outside;
         }
         let index = (row as usize) * (self.width as usize) + (col as usize);
         self.data.get(index).copied().unwrap_or(0)
@@ -185,10 +193,15 @@ impl Mask {
     ///
     /// The price is the one every such threshold pays: a feature narrower than
     /// half a pixel can vanish where it straddles a pixel edge.
+    ///
+    /// [`Mask::outside`] is hardened with the rest, so the mask reads one
+    /// threshold everywhere it is asked.
     pub fn harden(&mut self) {
+        let hard = |value: u8| if value >= 128 { 255 } else { 0 };
         for value in &mut self.data {
-            *value = if *value >= 128 { 255 } else { 0 };
+            *value = hard(*value);
         }
+        self.outside = hard(self.outside);
     }
 
     /// Every pixel's coverage reduced to `bits` bits
@@ -202,7 +215,8 @@ impl Mask {
     /// is never a whole number and a half and the second division has no tie.
     /// At one bit that is `harden`'s threshold at half, and at eight the
     /// identity. A function of one pixel's coverage, so a tile and the page
-    /// under it still agree (ruling 5).
+    /// under it still agree (ruling 5). [`Mask::outside`] is reduced with the
+    /// rest, as `harden` hardens it.
     pub fn quantise(&mut self, bits: u8) {
         match bits {
             0 => self.harden(),
@@ -211,6 +225,7 @@ impl Mask {
                 for value in &mut self.data {
                     *value = table[usize::from(*value)];
                 }
+                self.outside = table[usize::from(self.outside)];
             }
             _ => {}
         }
@@ -220,16 +235,29 @@ impl Mask {
     ///
     /// How clipping composes: a clip stack is the product of its masks, and
     /// multiplying is what makes a clipped anti-aliased edge look right rather
-    /// than doubly-hard.
+    /// than doubly-hard. The product reads the product of the two
+    /// [`Mask::outside`] values outside its rectangle, which is:
     ///
-    /// The result covers only the rectangle the two have in common, because
-    /// the product is zero everywhere else by construction — one of the two
-    /// factors is outside itself there and reports zero. A larger mask would
-    /// carry the same answer at a cost proportional to the page.
+    /// - where both read zero outside themselves, the rectangle the two have
+    ///   in common, because the product is zero everywhere else by
+    ///   construction — one of the two factors is outside itself there and
+    ///   reads zero. A larger mask would carry the same answer at a cost
+    ///   proportional to the page;
+    /// - where one of them reads zero outside itself — a clip times a soft
+    ///   mask — that one's own rectangle, outside which the product is zero
+    ///   and inside which the other is read, beyond its own rectangle too;
+    /// - where neither does, the smallest rectangle holding both, outside
+    ///   which each reads its own outside value.
     #[must_use]
     pub fn intersect(&self, other: &Mask) -> Mask {
-        let (x0, y0, width, height) = common_rect(self, other);
-        let mut out = Mask::empty(x0, y0, width, height);
+        let (x0, y0, width, height) = match (self.outside, other.outside) {
+            (0, 0) => common_rect(self, other),
+            (0, _) => (self.x0, self.y0, self.width, self.height),
+            (_, 0) => (other.x0, other.y0, other.width, other.height),
+            _ => joint_rect(self, other),
+        };
+        let mut out =
+            Mask::empty(x0, y0, width, height).with_outside(product(self.outside, other.outside));
         for row in 0..height {
             let y = y0.saturating_add(row as i32);
             for col in 0..width {
@@ -251,8 +279,18 @@ impl Mask {
     /// allocation, for the caller that already knows its mask is no larger
     /// than the clip it is about to be multiplied by — which is every paint,
     /// since a paint asks for the region its path and the clip have in common
-    /// before it rasterizes anything.
+    /// before it rasterizes anything. `other` is read at every pixel of this
+    /// mask's rectangle, its [`Mask::outside`] beyond its own, and a mask
+    /// reading zero outside itself keeps doing so: the product is zero there.
+    ///
+    /// A mask that reads a value other than zero outside itself has a product
+    /// that may reach past its rectangle, so it becomes [`Mask::intersect`]'s
+    /// product instead.
     pub fn intersect_in_place(&mut self, other: &Mask) {
+        if self.outside != 0 {
+            *self = self.intersect(other);
+            return;
+        }
         for row in 0..self.height {
             let y = self.y0.saturating_add(row as i32);
             let base = (row as usize) * (self.width as usize);
@@ -300,6 +338,30 @@ fn common_rect(a: &Mask, b: &Mask) -> (i32, i32, u32, u32) {
     let height = (ay1.min(by1) - y0).max(0);
     // Both origins came from an `i32`, so the maximum of the two still fits.
     (x0 as i32, y0 as i32, width as u32, height as u32)
+}
+
+/// The smallest rectangle holding both masks' rectangles, as `(x0, y0, width,
+/// height)`: a rectangle of no pixels holds nothing and is passed over, so two
+/// of them give the first one's corner and no pixels.
+fn joint_rect(a: &Mask, b: &Mask) -> (i32, i32, u32, u32) {
+    let blank = |mask: &Mask| mask.width == 0 || mask.height == 0;
+    match (blank(a), blank(b)) {
+        (true, true) => (a.x0, a.y0, 0, 0),
+        (true, false) => (b.x0, b.y0, b.width, b.height),
+        (false, true) => (a.x0, a.y0, a.width, a.height),
+        (false, false) => {
+            let x0 = i64::from(a.x0).min(i64::from(b.x0));
+            let y0 = i64::from(a.y0).min(i64::from(b.y0));
+            let x1 =
+                (i64::from(a.x0) + i64::from(a.width)).max(i64::from(b.x0) + i64::from(b.width));
+            let y1 =
+                (i64::from(a.y0) + i64::from(a.height)).max(i64::from(b.y0) + i64::from(b.height));
+            // Both origins came from an `i32`, so the minimum of the two fits;
+            // the extent is clamped to what a `u32` holds.
+            let extent = |lo: i64, hi: i64| (hi - lo).clamp(0, i64::from(u32::MAX)) as u32;
+            (x0 as i32, y0 as i32, extent(x0, x1), extent(y0, y1))
+        }
+    }
 }
 
 /// Sub-steps an edge's x carries below the 1/256 the spans are measured in,
@@ -1621,6 +1683,7 @@ mod tests {
                 width: 16,
                 height: 16,
                 data: all.clone(),
+                outside: 0,
             };
             mask.quantise(bits);
             assert_eq!(
@@ -1636,6 +1699,7 @@ mod tests {
             width: 16,
             height: 16,
             data: all.clone(),
+            outside: 0,
         };
         hard.harden();
         assert_eq!(at(0), hard.data, "level 0 is harden");
@@ -1858,10 +1922,341 @@ mod tests {
             width: u32::MAX,
             height: u32::MAX,
             data: Vec::new(),
+            outside: 0,
         };
         // Its columns are past the right edge and its rows cover everything,
         // so the x range is empty and the y range is the canvas.
         assert_eq!(huge.overlap(10, 10), (10, 0, 10, 10));
+
+        // A mask reading a value outside itself reaches the whole canvas,
+        // wherever its rectangle is: inside, hanging off, wholly off, empty.
+        for mask in [
+            Mask::empty(3, 4, 5, 6),
+            Mask::empty(-3, 4, 5, 6),
+            Mask::empty(500, 500, 5, 6),
+            Mask::empty(-50, -50, 0, 0),
+        ] {
+            let pale = mask.with_outside(51);
+            assert_eq!(pale.overlap(100, 100), (0, 0, 100, 100), "{pale:?}");
+            assert_eq!(
+                pale.overlap_at((-7, 9), 30, 20),
+                (0, 0, 30, 20),
+                "{pale:?} on a canvas away from the origin"
+            );
+        }
+    }
+
+    /// A canvas-sized field equal to `mask` at every pixel of a `width` by
+    /// `height` canvas standing at `origin`, reading zero outside itself: a
+    /// pale soft mask spelled without an outside value
+    /// (`docs/design/performance.md`, P-25).
+    fn field_of(mask: &Mask, origin: (i32, i32), width: u32, height: u32) -> Mask {
+        let mut field = Mask::empty(origin.0, origin.1, width, height);
+        for row in 0..height {
+            for col in 0..width {
+                let (x, y) = (origin.0 + col as i32, origin.1 + row as i32);
+                field.data[(row * width + col) as usize] = mask.at(x, y);
+            }
+        }
+        field
+    }
+
+    /// A mask over `(x0, y0, width, height)` whose pixels differ, reading
+    /// `outside` beyond itself.
+    fn varied(x0: i32, y0: i32, width: u32, height: u32, outside: u8, seed: u32) -> Mask {
+        let mut mask = Mask::empty(x0, y0, width, height).with_outside(outside);
+        for (index, value) in mask.data.iter_mut().enumerate() {
+            *value = match (index as u32 * 7 + seed) % 5 {
+                0 => 0,
+                1 => 255,
+                _ => ((index as u32 * 53 + seed * 31) % 256) as u8,
+            };
+        }
+        mask
+    }
+
+    /// **Every consumer of a mask reads its outside value as a canvas-sized
+    /// field holding the same values would read** (P-25.2).
+    ///
+    /// A soft mask whose `/BC` is pale reads the backdrop's luminosity outside
+    /// its group's box, as the box and that value. A field the size of the
+    /// canvas, the box written into a sea of that value and reading zero
+    /// beyond the canvas, reads the same at every pixel of the canvas, and
+    /// each rule `docs/design/performance.md`'s P-25 states is held here
+    /// against that field, on canvases standing at the origin and away from
+    /// it (a tile of a page) and over boxes inside the canvas, hanging off two
+    /// of its edges, wholly off it and of no pixels at all:
+    ///
+    /// - `at` reads the field's value at every canvas pixel, and `overlap_at`
+    ///   reaches the canvas the field covers;
+    /// - `intersect` of a clip and the mask — either way round — reads the
+    ///   clip times the field at every pixel and keeps the clip's rectangle and
+    ///   zero outside it; of two pale masks, the two fields' product, the
+    ///   product of the two outsides beyond the smallest rectangle holding
+    ///   both;
+    /// - `intersect_in_place` of a paint's coverage by the mask is the
+    ///   coverage times the field, byte for byte, keeping zero outside; of a
+    ///   pale mask by a clip, the product `intersect` gives;
+    /// - `harden` hardens the outside value with the rest;
+    /// - `Fragments::would_overlap` gives a run inside the canvas the field's
+    ///   answer, whatever coverage the run holds;
+    /// - `Canvas::fill_mask_inked`, `Canvas::composite` and
+    ///   `Canvas::knock_out` write through the mask exactly the bytes they
+    ///   write through the field, in every format, under `Normal` and
+    ///   `Multiply`, at a whole and a partial alpha — the opaque path, which
+    ///   slices the mask's rows, is never taken for a mask that reads outside
+    ///   itself;
+    /// - and a mask reading zero outside itself, every clip, reads zero there
+    ///   still.
+    #[test]
+    fn every_mask_consumer_reads_the_outside_value() {
+        use crate::blend::BlendMode;
+        use crate::canvas::{Canvas, Color, PixelFormat};
+        use crate::fragments::Fragments;
+
+        let canvases = [((0, 0), 40u32, 30u32), ((-6, 11), 33, 21)];
+        let boxes = [
+            (5, 14, 17, 9),
+            (-9, 8, 20, 30),
+            (30, 35, 25, 9),
+            (200, -80, 6, 6),
+            (12, 16, 0, 0),
+        ];
+        let formats = [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::CmykA8,
+            PixelFormat::LabA8,
+        ];
+        let mut cases = 0;
+        for &(origin, width, height) in &canvases {
+            let canvas_pixels = |each: &mut dyn FnMut(i32, i32)| {
+                for row in 0..height as i32 {
+                    for col in 0..width as i32 {
+                        each(origin.0 + col, origin.1 + row);
+                    }
+                }
+            };
+            for (index, &(bx, by, bw, bh)) in boxes.iter().enumerate() {
+                for outside in [1u8, 51, 128, 254, 255] {
+                    let mask = varied(bx, by, bw, bh, outside, index as u32 + 3);
+                    let field = field_of(&mask, origin, width, height);
+                    let what =
+                        format!("box {:?} reading {outside} on {origin:?}", (bx, by, bw, bh));
+
+                    canvas_pixels(&mut |x, y| {
+                        assert_eq!(mask.at(x, y), field.at(x, y), "{what}: at ({x}, {y})");
+                    });
+                    assert_eq!(
+                        mask.overlap_at(origin, width, height),
+                        field.overlap_at(origin, width, height),
+                        "{what}: the pixels it reaches"
+                    );
+
+                    // A clip times the mask, and the mask times a clip.
+                    let clip = varied(origin.0 + 3, origin.1 + 2, 21, 13, 0, 9);
+                    let want = clip.intersect(&field);
+                    for got in [clip.intersect(&mask), mask.intersect(&clip)] {
+                        assert_eq!(
+                            got.outside, 0,
+                            "{what}: a clip's product reads zero outside"
+                        );
+                        assert_eq!(
+                            (got.x0, got.y0, got.width, got.height),
+                            (clip.x0, clip.y0, clip.width, clip.height),
+                            "{what}: a clip's product keeps the clip's rectangle"
+                        );
+                        canvas_pixels(&mut |x, y| {
+                            assert_eq!(
+                                got.at(x, y),
+                                want.at(x, y),
+                                "{what}: clipped at ({x}, {y})"
+                            );
+                        });
+                    }
+
+                    // Two pale masks: the product of the fields, and the
+                    // product of the outsides beyond both.
+                    let other = varied(origin.0 + 15, origin.1 - 4, 9, 22, 200, 5);
+                    let both = mask.intersect(&other);
+                    let want = field.intersect(&field_of(&other, origin, width, height));
+                    canvas_pixels(&mut |x, y| {
+                        assert_eq!(
+                            both.at(x, y),
+                            want.at(x, y),
+                            "{what}: two masks at ({x}, {y})"
+                        );
+                    });
+                    assert_eq!(
+                        both.outside,
+                        product(outside, 200),
+                        "{what}: the outsides multiply"
+                    );
+                    assert_eq!(both.at(i32::MIN, i32::MAX), product(outside, 200));
+
+                    // A paint's coverage times the mask, in place.
+                    let mut paint = varied(origin.0 + 1, origin.1 + 1, width - 2, height - 2, 0, 1);
+                    let mut by_field = paint.clone();
+                    paint.intersect_in_place(&mask);
+                    by_field.intersect_in_place(&field);
+                    assert_eq!(paint.data, by_field.data, "{what}: a paint's coverage");
+                    assert_eq!(paint.outside, 0, "{what}: a paint reads zero outside still");
+                    // And the mask times a clip, in place: `intersect`'s product.
+                    let mut pale = mask.clone();
+                    pale.intersect_in_place(&clip);
+                    let clipped = mask.intersect(&clip);
+                    assert_eq!(
+                        (
+                            pale.x0,
+                            pale.y0,
+                            pale.width,
+                            pale.height,
+                            &pale.data,
+                            pale.outside
+                        ),
+                        (
+                            clipped.x0,
+                            clipped.y0,
+                            clipped.width,
+                            clipped.height,
+                            &clipped.data,
+                            clipped.outside
+                        ),
+                        "{what}: a pale mask clipped in place"
+                    );
+
+                    // Hardened, both read one threshold everywhere.
+                    let (mut hard, mut hard_field) = (mask.clone(), field.clone());
+                    hard.harden();
+                    hard_field.harden();
+                    canvas_pixels(&mut |x, y| {
+                        assert_eq!(
+                            hard.at(x, y),
+                            hard_field.at(x, y),
+                            "{what}: hard at ({x}, {y})"
+                        );
+                    });
+
+                    // A run of images inside the canvas asks the same question of
+                    // either: whether the mask lands on coverage it holds.
+                    for held in [30u8, 100, 230] {
+                        let mut run = Fragments::new(origin.0 + 2, origin.1 + 3, 19, 14);
+                        for row in 0..14 {
+                            for col in (row % 3..19).step_by(3) {
+                                run.add(origin.0 + 2 + col, origin.1 + 3 + row, Color::WHITE, held);
+                            }
+                        }
+                        assert_eq!(
+                            run.would_overlap(&mask),
+                            run.would_overlap(&field),
+                            "{what}: a run holding {held}"
+                        );
+                    }
+
+                    // The canvas's own consumers.
+                    for format in formats {
+                        let colour = Color::rgb(200, 60, 20);
+                        let backdrop = Color {
+                            r: 30,
+                            g: 140,
+                            b: 210,
+                            a: 160,
+                        };
+                        let canvas = Canvas::new(width, height, format, backdrop)
+                            .at_origin(origin.0, origin.1);
+                        for mode in [BlendMode::Normal, BlendMode::Multiply] {
+                            for alpha in [1.0, 0.6] {
+                                let case = format!("{what}, {format:?}, {mode:?}, alpha {alpha}");
+                                let (mut through, mut by_field) = (canvas.clone(), canvas.clone());
+                                through.fill_mask_inked(&mask, colour, None, alpha, mode);
+                                by_field.fill_mask_inked(&field, colour, None, alpha, mode);
+                                assert_eq!(through.data, by_field.data, "{case}: a fill");
+
+                                let mut cell = Canvas::new(13, 9, format, Color::TRANSPARENT);
+                                cell.fill_mask(&varied(0, 0, 13, 9, 0, 4), colour, 1.0);
+                                let at = (origin.0 + 4, origin.1 + 3);
+                                let (mut through, mut by_field) = (canvas.clone(), canvas.clone());
+                                through.composite(&cell, at, alpha, mode, Some(&mask), None);
+                                by_field.composite(&cell, at, alpha, mode, Some(&field), None);
+                                assert_eq!(through.data, by_field.data, "{case}: a composite");
+                                cases += 1;
+                            }
+                        }
+                        if format.has_alpha() {
+                            let initial = Canvas::new(width, height, format, Color::TRANSPARENT)
+                                .at_origin(origin.0, origin.1);
+                            let (mut through, mut by_field) = (canvas.clone(), canvas.clone());
+                            through.knock_out(&initial, &mask);
+                            by_field.knock_out(&initial, &field);
+                            assert_eq!(
+                                through.data, by_field.data,
+                                "{what}, {format:?}: a knockout"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            cases,
+            canvases.len() * boxes.len() * 5 * formats.len() * 4,
+            "every case ran"
+        );
+
+        // A mask reading zero outside itself reads zero there still.
+        let clip = varied(2, 3, 4, 5, 0, 2);
+        for (x, y) in [
+            (1, 3),
+            (6, 3),
+            (2, 2),
+            (2, 8),
+            (i32::MIN, i32::MAX),
+            (i32::MAX, i32::MIN),
+        ] {
+            assert_eq!(clip.at(x, y), 0, "at ({x}, {y})");
+        }
+    }
+
+    /// The product of two masks that both read a value outside themselves
+    /// stands over the smallest rectangle holding both, reads the product of
+    /// the two outsides beyond it and the product of the two everywhere
+    /// inside; a mask of no pixels holds nothing, so the product takes the
+    /// other's rectangle, and two of them hold no pixels at the first one's
+    /// corner.
+    #[test]
+    fn a_product_of_two_masks_reading_outside_themselves_holds_both() {
+        let a = varied(2, 3, 4, 5, 100, 6);
+        let b = varied(10, -4, 3, 2, 255, 7);
+        let both = a.intersect(&b);
+        assert_eq!((both.x0, both.y0, both.width, both.height), (2, -4, 11, 12));
+        assert_eq!(both.outside, product(100, 255));
+        for y in -8..14 {
+            for x in -3..18 {
+                assert_eq!(
+                    both.at(x, y),
+                    product(a.at(x, y), b.at(x, y)),
+                    "at ({x}, {y})"
+                );
+            }
+        }
+
+        let blank = Mask::empty(40, 40, 0, 0).with_outside(9);
+        for (one, two) in [(&a, &blank), (&blank, &a)] {
+            let held = one.intersect(two);
+            assert_eq!((held.x0, held.y0, held.width, held.height), (2, 3, 4, 5));
+            assert_eq!(held.outside, product(100, 9));
+            for y in 0..10 {
+                for x in 0..8 {
+                    assert_eq!(held.at(x, y), product(a.at(x, y), 9), "at ({x}, {y})");
+                }
+            }
+        }
+        let none = blank.intersect(&Mask::empty(-7, 1, 3, 0).with_outside(77));
+        assert_eq!((none.x0, none.y0, none.width, none.height), (40, 40, 0, 0));
+        assert!(none.data.is_empty());
+        assert_eq!(none.at(0, 0), product(9, 77));
     }
 
     /// Ruling 4's claim under the cells, checked rather than assumed: the

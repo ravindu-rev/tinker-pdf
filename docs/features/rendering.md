@@ -473,7 +473,11 @@ both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with `/BC` read in the
 mask group's own `/Group /CS` and defaulting to black (fully masked, the
 default that does not invert every drop shadow), and `/TR` read as written —
 so a sampled or a calculator function, a stream, is reached through its
-reference — and sampled to 256 entries. An absent `/SMask` key leaves the mask in force where `/None`
+reference — and sampled to 256 entries. A soft mask is kept at its group's
+box, beside the value it reads outside it — `/BC`'s luminosity through `/TR`,
+zero for black and for `/Alpha` — so a pale backdrop costs the box as a black
+one does, and a tile holds the box clipped to the tile with the same value
+outside (`group_buffers.rs`). An absent `/SMask` key leaves the mask in force where `/None`
 removes it (11.6.5.1); `q`/`Q` save and restore the mask beside the clip
 (8.5.4). A clip is the path times the clip in force and nothing else — a
 mask in force is not multiplied into it, so a group painted under a mask is
@@ -893,7 +897,14 @@ glyph drawn from a mask rasterised for it and each drawn from a mask the
 render's cache held, and `shading_functions_evaluated`, every evaluation of a
 shading's function for a colour — once a table entry where a sweep reads the
 function through a `ColorTable`, once a colour asked of it otherwise — all
-counted by the renderer, a tiling pattern's cell included;
+counted by the renderer, a tiling pattern's cell included, as are four
+quantities: `group_buffer_pixels`, the pixels of every buffer a transparency
+group or a soft mask's group allocated for its own pixels while it was open —
+its canvas, a non-isolated group's copy of its backdrop and a knockout group's
+snapshot of its initial state — and `group_bound_pixels`, the pixels of the
+regions those groups opened over, once a group; and `soft_mask_pixels` and
+`soft_mask_bound_pixels`, the pixels of every soft mask installed and of the
+region of the group it was read from, once a mask;
 `font_dictionaries_resolved`, each font a resource scope reads — once for
 each name its content selects a font by, the first time the scope is asked
 about the name, and kept for every render over the scope: a font a scope
@@ -1320,6 +1331,14 @@ defect to hide in.
   the page, every tile of a lattice over it, two replays, the form and the
   annotation with stats on and off, byte for byte and warning for warning at
   two scales. Each runs in the default and the `bundled-fonts` builds.
+- What groups and soft masks hold: `crates/tinker-pdf/tests/group_buffers.rs`.
+  `a_soft_mask_is_kept_at_its_box` holds the committed transparency
+  fixture's pale-backdrop luminosity mask at 150 dpi, whole and in each
+  quarter of the page and a strip that misses it, to at most 1.1 times the
+  pixels of its group's region, and that region to the box the page states
+  clipped to the tile; `every_kind_of_soft_mask_is_kept_at_its_box` does the
+  same for a pale, a black and an alpha mask at two scales; and each tile is
+  the page's pixels under it.
 - What a scope reads once: `crates/tinker-pdf/tests/resource_work.rs`'s
   `a_scope_parses_each_named_space_and_state_once`, a page of a thousand
   `cs`, `scn`, `sh` and `gs` operators whose render reads each colour space
