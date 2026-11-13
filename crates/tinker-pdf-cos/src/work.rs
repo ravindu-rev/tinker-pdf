@@ -329,6 +329,17 @@ pub struct Stats {
     /// Counted by `tinker-pdf-render`'s renderer, a tiling pattern's cell
     /// included, and added to the operation's tally by the facade.
     pub shading_functions_evaluated: u64,
+    /// A colour an image's converter asked of its colour space's conversion
+    /// (`ColorSpace::to_rgb`): once for each entry of a table it filled and
+    /// each pixel no copy, table, row path or remembered colour answered
+    /// (`docs/design/icc.md`, P-22, "The per-image converter"). A converter
+    /// chosen once an image asks at most its table's entries, whatever the
+    /// image's pixels — none for an 8-bit DeviceRGB or ICC image, at most
+    /// `2^bpc` for one component of up to eight bits.
+    ///
+    /// Counted by the facade's sample loops, a stream's, an inline image's, a
+    /// JPEG's strips and a JPEG 2000 image's samples alike.
+    pub image_colours_converted: u64,
     /// A page's text folded and joined in one of the four folds a search
     /// reads it in, its table of offsets back to the glyphs with it: once a
     /// page and fold, at the first search that asks for the fold, which every
@@ -588,6 +599,8 @@ pub enum Counter {
     OperatorsRun,
     /// [`Stats::shading_functions_evaluated`].
     ShadingFunctionsEvaluated,
+    /// [`Stats::image_colours_converted`].
+    ImageColoursConverted,
     /// [`Stats::stream_seal_passes`].
     StreamSealPasses,
     /// [`Stats::pool_items_on_workers`].
@@ -693,6 +706,7 @@ impl Stats {
             self.content_tokens_read,
             self.operators_run,
             self.shading_functions_evaluated,
+            self.image_colours_converted,
             self.text_forms_built,
             self.word_boundaries_computed,
             self.search_steps,
@@ -741,6 +755,7 @@ impl Stats {
             Counter::ContentTokensRead => &mut self.content_tokens_read,
             Counter::OperatorsRun => &mut self.operators_run,
             Counter::ShadingFunctionsEvaluated => &mut self.shading_functions_evaluated,
+            Counter::ImageColoursConverted => &mut self.image_colours_converted,
             Counter::StreamSealPasses => &mut self.stream_seal_passes,
             Counter::PoolItemsOnWorkers => &mut self.pool_items_on_workers,
             Counter::PoolItemsOnCaller => &mut self.pool_items_on_caller,
@@ -862,6 +877,9 @@ impl Add for Stats {
             shading_functions_evaluated: self
                 .shading_functions_evaluated
                 .saturating_add(other.shading_functions_evaluated),
+            image_colours_converted: self
+                .image_colours_converted
+                .saturating_add(other.image_colours_converted),
             stream_seal_passes: self
                 .stream_seal_passes
                 .saturating_add(other.stream_seal_passes),
@@ -1065,7 +1083,7 @@ mod tests {
 
     /// Every counter of a step, so a test of one property covers them all;
     /// [`PLACES`] holds the two that count where a part ran.
-    const ALL: [Counter; 40] = [
+    const ALL: [Counter; 41] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::GlyphMasksRasterised,
@@ -1102,6 +1120,7 @@ mod tests {
         Counter::ContentTokensRead,
         Counter::OperatorsRun,
         Counter::ShadingFunctionsEvaluated,
+        Counter::ImageColoursConverted,
         Counter::TextFormsBuilt,
         Counter::WordBoundariesComputed,
         Counter::SearchSteps,

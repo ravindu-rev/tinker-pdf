@@ -273,6 +273,17 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/jpx_images.rs",
         test: "a_jpx_image_drawn_at_a_quarter_decodes_two_levels_fewer",
     },
+    // P-22's converter guard: the colours an image asks of its space's
+    // conversion do not grow with its pixels, and what it allocates does not
+    // grow with its colours (A10), on every target.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/image_conversion.rs",
+        test: "a_converter_is_chosen_once_per_image",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/image_conversion.rs",
+        test: "an_image_converts_in_allocations_flat_in_its_colours",
+    },
     // MS-01's A8 guard: the PNG path's whole-image scratch, none, and its
     // peak with the file at most 1.2 x the image.
     Fingerprint {

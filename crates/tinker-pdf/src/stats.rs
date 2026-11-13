@@ -118,6 +118,15 @@ pub(crate) fn jpeg_held(work: Option<&Work>, bytes: usize) {
     }
 }
 
+/// Adds the colours an image's converter asked of its space's conversion
+/// ([`Stats::image_colours_converted`]), when the operation is counting and
+/// there are any.
+pub(crate) fn colours_converted(work: Option<&Work>, colours: u64) {
+    if let (Some(work), true) = (work, colours > 0) {
+        work.add(Counter::ImageColoursConverted, colours);
+    }
+}
+
 /// Adds the samples a JPEG decode's inverse transforms output, when the
 /// operation is counting.
 pub(crate) fn jpeg_transformed(work: Option<&Work>, samples: u64) {

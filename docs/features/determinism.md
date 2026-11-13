@@ -289,8 +289,10 @@ forced-colour and placed-annotation output and levels, rules and widths;
 toolbox outputs; the shaper's two fingerprints; and the guard suite's
 roster of guards and the work counts it pins (`guards.rs`), which CI's tests
 run in each build they test and the local `wasm32-wasip1` run under wasmtime,
-beside `guard_allocations.rs`; and the requests page one costs over a streamed
-open, linearized and not (`streaming_open.rs`). `cargo xtask
+beside `guard_allocations.rs`; the colours an image's converter asks of its
+space's conversion and what it allocates for them (`image_conversion.rs`);
+and the requests page one costs over a streamed open, linearized and not
+(`streaming_open.rs`). `cargo xtask
 determinism`, part of `cargo xtask check` — which the gates run, and
 `release.yml`'s preflight before anything is built — holds each to be a
 `#[test]` in its file with no `#[ignore]`. A row that lands a fingerprint adds

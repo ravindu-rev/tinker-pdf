@@ -2726,6 +2726,10 @@ impl Clone for Transform {
     }
 }
 
+/// The most inputs [`Transform::convert_row`] reads a pixel through a buffer
+/// on the stack for: ICC.1's colour spaces have at most fifteen channels.
+const MAX_ROW_INPUTS: usize = 16;
+
 /// What [`Transform::convert_row`] reads a byte through, one set a
 /// transform (`docs/design/icc.md`, P-22, "The row path").
 enum RowTables {
@@ -2949,7 +2953,9 @@ impl Transform {
     /// Converts every whole pixel of `samples` — [`Transform::inputs`] bytes
     /// a pixel, each component its byte over 255 — onto the end of `rgb`,
     /// three bytes a pixel, each the colour [`Transform::apply`] gives the
-    /// same components.
+    /// same components. Nothing is allocated but the room `rgb` makes for
+    /// the row, so an image converted a strip at a time allocates no more
+    /// for its strips than for one.
     ///
     /// The 8-bit row path (`docs/design/icc.md`, P-22, "The row path"): a
     /// transform read through a grid over three or four inputs locates each
@@ -3027,12 +3033,24 @@ impl Transform {
                 }
             }
             RowTables::Pixels => {
-                let mut components = vec![0.0f64; inputs];
+                // ICC.1's colour spaces have at most fifteen channels, so a
+                // pixel's components fit a buffer on the stack, and a row
+                // allocates nothing however often it is converted; a
+                // transform over more inputs than that keeps one of its own.
+                let mut held = [0.0f64; MAX_ROW_INPUTS];
+                let mut wide = Vec::new();
+                let components: &mut [f64] = match held.get_mut(..inputs) {
+                    Some(components) => components,
+                    None => {
+                        wide.resize(inputs, 0.0);
+                        &mut wide
+                    }
+                };
                 for pixel in samples.chunks_exact(inputs) {
                     for (slot, &byte) in components.iter_mut().zip(pixel) {
                         *slot = f64::from(byte) / 255.0;
                     }
-                    let (r, g, b) = self.apply(&components);
+                    let (r, g, b) = self.apply(components);
                     rgb.extend_from_slice(&[r, g, b]);
                 }
             }

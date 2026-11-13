@@ -1616,19 +1616,26 @@ pixel, straight onto the end of a buffer of sRGB bytes:
 
 #### The per-image converter
 
-P-22.6 chooses one converter an image, by its space, depth and `/Decode`,
-where the sample loops call `to_rgb` per pixel today:
+P-22.6 chooses one converter an image, by its space, depth and `/Decode` and
+whether a colour key reads it, in the sample loops of a stream, an inline
+image, a JPEG's strips and a JPEG 2000 image's samples (`resources.rs`'s
+`Converter`), each arm asked in this order:
 
 | Image | Converter |
 | --- | --- |
-| 8-bit DeviceRGB, and DeviceGray, `/Decode` absent or `[0 1]` | a copy, a grey replicated to three (P-08's identity path) |
-| Any one-component space at up to 8 bits, DeviceGray among them | a table of at most 2^bpc colours, built through `to_rgb` |
-| 8-bit DeviceCMYK, `/Decode` absent or `[0 1]` | one table of 8.6.4.4's `(1 − c)(1 − k)`, 256 × 256 bytes built through `to_rgb`, read for each of C, M and Y against K |
-| 8-bit ICC, `/Decode` absent or `[0 1]`, no colour key | the row path |
-| Everything else | `to_rgb` over one reused buffer, with `Remembered` |
+| 8-bit DeviceRGB or DeviceGray, or a refused profile approximated as either, `/Decode` absent or `[0 1]`, no colour key | a copy, a grey replicated to three (P-08's identity path) |
+| 8-bit ICC, `/Decode` absent or `[0 1]`, no colour key, a transform over the space's components | the row path |
+| Any one-component space at up to 8 bits, DeviceGray among them, any `/Decode` | a table of 2^bpc colours, an entry filled through `to_rgb` the first time a sample holds its value |
+| 8-bit DeviceCMYK, or a profile approximated as it, `/Decode` absent or `[0 1]`, and a CMYK JPEG in its own colour | one table of 8.6.4.4's `(1 − x)(1 − k)`, 256 × 256 bytes read for each of C, M and Y against K, an entry filled by the `to_rgb` of the pixel that first asks for it, which fills its three at once |
+| Everything else | `to_rgb` over buffers the image keeps — its components, and a tint transform's outputs (`ColorSpace::to_rgb_with_in`) — with `Remembered` |
 
-A table built through `to_rgb` is each device pixel's byte by construction,
-and the row path is `apply`'s, so the converter moves no pixel.
+A table filled through `to_rgb` is each device pixel's byte by construction —
+DeviceCMYK's channels are each one relation of their ink and black, so an
+entry is that relation's byte whichever pixel filled it — and the row path is
+`apply`'s, so the converter moves no pixel. Filled as the pixels first ask, a
+table costs an image no more conversions than its pixels and none more than
+its entries, so a small image pays nothing for a table it does not read.
+`Stats::image_colours_converted` counts what each converter asks.
 
 #### The document cache: its key and its charge
 

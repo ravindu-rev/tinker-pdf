@@ -1425,7 +1425,9 @@ fn jpeg_components(color: JpegColor) -> u8 {
 /// (8.9.3). Each value is read through `decode`, or Table 90's default, and
 /// each pixel through [`ColorSpace::to_rgb_in`] as `conversion` says, exactly
 /// as the sample loop reads a stream's — so a codec's samples and the same
-/// samples written as a stream in the same space draw the same bytes.
+/// samples written as a stream in the same space draw the same bytes — by the
+/// converter the image's space, depth and `/Decode` choose ([`Converter`]),
+/// what it asks of the conversion counted into `work`.
 fn samples_in_space(
     space: &ColorSpace,
     samples: &[u8],
@@ -1433,9 +1435,12 @@ fn samples_in_space(
     bpc: u32,
     decode: &[(f64, f64)],
     conversion: icc::Conversion,
+    work: Option<&Work>,
 ) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(pixels.saturating_mul(3));
-    SpaceSamples::new(space, bpc, decode, conversion).extend(space, samples, pixels, &mut rgb);
+    let mut converter = SpaceSamples::new(space, bpc, decode, conversion);
+    converter.extend(space, samples, pixels, &mut rgb);
+    converter.count_into(work);
     rgb
 }
 
@@ -1464,6 +1469,9 @@ struct SampleLayout<'a> {
     /// How a sample's colour converts: in the rendering intent the image's
     /// colours take (8.6.5.8, Table 89), which only an ICC space reads.
     conversion: icc::Conversion,
+    /// The tally the colours the loop converts are counted into
+    /// ([`crate::Stats::image_colours_converted`]), when the operation counts.
+    work: Option<&'a Work>,
 }
 
 /// An image's samples as RGB, three bytes a sample, with an alpha byte a
@@ -1537,7 +1545,9 @@ fn identity_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<Vec<u8>> {
 /// colour through `ColorSpace::to_rgb`, a mask's paint as that component
 /// below one half (8.9.6.2), and a colour key's test, which is on the raw bit
 /// (8.9.6.4). So the two outcomes are worked out once, by those same
-/// expressions, for [`one_bit_pixels`] and [`two_colour_pixels`] alike.
+/// expressions, for [`one_bit_pixels`] and [`two_colour_pixels`] alike: the
+/// two colours an image's table of `2^bpc` holds (`docs/design/icc.md`,
+/// P-22, "The per-image converter"), counted into the layout's tally.
 fn one_bit_outcomes(layout: &SampleLayout<'_>) -> Option<[([u8; 3], u8); 2]> {
     let SampleLayout {
         bpc,
@@ -1547,10 +1557,14 @@ fn one_bit_outcomes(layout: &SampleLayout<'_>) -> Option<[([u8; 3], u8); 2]> {
         mask,
         color_key,
         conversion,
+        work,
         ..
     } = *layout;
     if bpc != 1 || n != 1 {
         return None;
+    }
+    if !mask {
+        stats::colours_converted(work, 2);
     }
     let outcome = |bit: u32| -> ([u8; 3], u8) {
         let value = component(space, decode, 0, bit, 1.0);
@@ -1658,8 +1672,9 @@ static BIT_SAMPLES: [[u8; 8]; 256] = {
 /// colour's alpha of zero; one that selects both keeps the RGB form, the
 /// form's rule in `docs/design/image-edges.md` (P-08).
 fn two_colour_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<TwoColourSamples> {
-    let [(zero, zero_alpha), (one, one_alpha)] = one_bit_outcomes(layout)?;
     // A mask reads no colour key, so only an image's key can select both.
+    // Asked before the outcomes are worked out, so an image held as RGB
+    // converts its two colours once, in the expansion that holds it.
     let keys_both = !layout.mask
         && layout.color_key.is_some_and(|ranges| {
             let (lo, hi) = ranges.first().copied().unwrap_or((1, 0));
@@ -1668,6 +1683,7 @@ fn two_colour_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<TwoColour
     if keys_both {
         return None;
     }
+    let [(zero, zero_alpha), (one, one_alpha)] = one_bit_outcomes(layout)?;
 
     let (width, height) = (layout.width as usize, layout.height as usize);
     let row_bytes = width.div_ceil(8);
@@ -1724,10 +1740,14 @@ fn decoded_pixels(
 }
 
 /// The sample loop, a sample at a time: each component read through
-/// [`read_bits`], scaled and decoded by [`component`], tested against the
-/// colour key on its raw value, and the sample converted by
-/// `ColorSpace::to_rgb_in` in the layout's conversion — or, for a mask,
-/// painted where its component is below one half.
+/// [`read_bits`] and tested against the colour key on its raw value, and the
+/// sample's colour asked of the image's converter ([`Converter`]), chosen
+/// once for the image by its space, depth and `/Decode` — or, for a mask,
+/// painted where its component is below one half. An image of 8 or 16 bits
+/// that no mask or colour key reads is converted as one run of samples
+/// ([`Converter::extend`]), its rows being whole bytes with nothing between
+/// them (8.9.3). What the converter asks of the space's conversion is
+/// counted into the layout's tally.
 fn general_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) {
     let SampleLayout {
         width,
@@ -1739,23 +1759,28 @@ fn general_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) 
         mask,
         color_key,
         conversion,
+        work,
     } = *layout;
-    let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
+    let pixels = (width as usize).saturating_mul(height as usize);
+    let mut rgb = Vec::with_capacity(pixels.saturating_mul(3));
     let mut alpha = Vec::new();
     let row_bits = (width as usize) * n * (bpc as usize);
     let row_bytes = row_bits.div_ceil(8);
     let max = ((1u32 << bpc.min(16)) - 1) as f64;
-    let mut remembered = if mask {
-        None
-    } else {
-        Remembered::for_image(space, n, bpc)
-    };
-    let mut components = Vec::with_capacity(n);
+    let mut converter = Converter::new(space, n, bpc, decode, conversion, color_key.is_some());
+    // Samples of whole bytes run on from row to row with nothing between
+    // them (8.9.3), so an image no mask or colour key reads a sample at a
+    // time converts as one run.
+    if !mask && color_key.is_none() && bpc % 8 == 0 {
+        converter.extend(space, decode, data, pixels, &mut rgb);
+        converter.count_into(work);
+        return (rgb, alpha);
+    }
+    let mut values = Vec::with_capacity(n);
 
     for y in 0..height as usize {
         for x in 0..width as usize {
-            components.clear();
-            let mut samples = 0u128;
+            values.clear();
             // "Shall be masked ... if min_i <= sample_i <= max_i for *all*
             // i" — one component outside its range paints the pixel, which
             // is why this starts true and is narrowed rather than widened.
@@ -1763,28 +1788,23 @@ fn general_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) 
             for c in 0..n {
                 let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
                 let value = read_bits(data, bit, bpc);
-                samples = Remembered::key(samples, c, value);
                 if let Some(ranges) = color_key {
                     // An absent range can never match, so a short array
                     // masks nothing rather than everything.
                     let (lo, hi) = ranges.get(c).copied().unwrap_or((1, 0));
                     keyed &= value >= lo && value <= hi;
                 }
-                components.push(component(space, decode, c, value, max));
+                values.push(value);
             }
 
             if mask {
                 // A zero sample paints, a one does not (8.9.6.2).
-                let paints = components.first().copied().unwrap_or(0.0) < 0.5;
+                let first = values.first().copied().unwrap_or(0);
+                let paints = component(space, decode, 0, first, max) < 0.5;
                 rgb.extend_from_slice(&[0, 0, 0]);
                 alpha.push(if paints { 255 } else { 0 });
             } else {
-                let (r, g, b) = match remembered.as_mut() {
-                    Some(table) => {
-                        table.convert(samples, || converted(space, &components, conversion))
-                    }
-                    None => converted(space, &components, conversion),
-                };
+                let (r, g, b) = converter.colour(space, decode, &values);
                 rgb.extend_from_slice(&[r, g, b]);
                 if color_key.is_some() {
                     alpha.push(if keyed { 0 } else { 255 });
@@ -1792,6 +1812,7 @@ fn general_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) 
             }
         }
     }
+    converter.count_into(work);
     (rgb, alpha)
 }
 
@@ -1817,13 +1838,13 @@ fn component(space: &ColorSpace, decode: &[(f64, f64)], c: usize, value: u32, ma
 
 #[cfg(test)]
 thread_local! {
-    /// Samples the sample loop has converted through `ColorSpace::to_rgb` on
-    /// this thread: what `an_eight_bit_device_image_converts_by_identity`
-    /// counts.
+    /// Colours the sample loops have converted through `ColorSpace::to_rgb`
+    /// on this thread: what `an_eight_bit_device_image_converts_by_identity`
+    /// and the converter's tests count.
     static SAMPLE_CONVERSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// `space.to_rgb_in(components, conversion)` for the sample loop, counted
+/// `space.to_rgb_in(components, conversion)` for the sample loops, counted
 /// under `cfg(test)`.
 fn converted(space: &ColorSpace, components: &[f64], conversion: icc::Conversion) -> (u8, u8, u8) {
     #[cfg(test)]
@@ -1831,23 +1852,380 @@ fn converted(space: &ColorSpace, components: &[f64], conversion: icc::Conversion
     space.to_rgb_in(components, conversion)
 }
 
-/// [`samples_in_space`] a run of pixels at a time, for a codec that hands its
-/// samples out in strips: the remembered colours last across the runs, which
-/// come in the image's order, so every pixel's colour is the one a single
-/// call over the whole image gives.
-struct SpaceSamples<'d> {
-    /// Values a pixel, `bpc` bits each.
+/// [`converted`] through `scratch`, which the caller keeps: a `/Separation`
+/// or `/DeviceN` space evaluates its tint transform there rather than into a
+/// buffer of its own (`ColorSpace::to_rgb_with_in`), the same colour.
+fn converted_with(
+    space: &ColorSpace,
+    components: &[f64],
+    scratch: &mut Vec<f64>,
+    conversion: icc::Conversion,
+) -> (u8, u8, u8) {
+    #[cfg(test)]
+    SAMPLE_CONVERSIONS.with(|count| count.set(count.get() + 1));
+    space.to_rgb_with_in(components, scratch, conversion)
+}
+
+/// An entry of a converter's table that holds no colour yet: no colour packs
+/// to it, since a colour fills only the low 24 bits.
+const UNFILLED: u32 = u32::MAX;
+
+/// An entry of the DeviceCMYK table that holds no byte yet.
+const UNFILLED_BYTE: u16 = u16::MAX;
+
+/// The DeviceCMYK table's entries: one for each byte of an ink against each
+/// byte of black.
+const CMYK_PAIRS: usize = 1 << 16;
+
+/// How one image's samples become RGB (`docs/design/icc.md`, P-22, "The
+/// per-image converter"): chosen once an image, by its space, its depth, its
+/// `/Decode` and whether a colour key reads its samples, where the sample
+/// loops once converted every pixel through [`ColorSpace::to_rgb_in`].
+///
+/// Every arm gives a pixel the colour `to_rgb_in` gives the components the
+/// loop reads from its samples ([`component`]), so the converter moves no
+/// pixel; only what the conversion costs does. A table's entry is filled
+/// through `to_rgb_in` the first time a sample asks for it, so an image of
+/// few pixels asks no more of the conversion than its pixels did, and none
+/// asks more than its table holds. What it asks is counted
+/// ([`Converter::count_into`]).
+struct Converter {
+    /// Values a pixel.
     n: usize,
+    /// Bits a value.
     bpc: u32,
     /// The largest value a sample holds.
     max: f64,
-    indexed: bool,
-    decode: &'d [(f64, f64)],
     /// How a pixel's colour converts: in the intent the image's colours take.
     conversion: icc::Conversion,
-    remembered: Option<Remembered>,
-    /// One pixel's values, read through `/Decode`.
-    components: Vec<f64>,
+    arm: Arm,
+    /// What the converter has asked of the space's conversion.
+    converted: u64,
+    /// One pixel's raw values, a buffer [`Converter::extend`] keeps.
+    values: Vec<u32>,
+}
+
+/// A [`Converter`]'s way with the image's samples.
+enum Arm {
+    /// The samples are the colour: 8-bit DeviceGray, replicated to three, or
+    /// DeviceRGB — or a refused profile approximated as one of them — with
+    /// every `/Decode` pair `[0 1]` or absent and no colour key, so the loop
+    /// would read a sample `v` as `v / 255` and `to_rgb` round it back to `v`
+    /// (P-08's identity path).
+    Copy {
+        /// One component, replicated.
+        grey: bool,
+    },
+    /// An 8-bit ICC space with `/Decode` absent or `[0 1]` and no colour key,
+    /// whose transform takes the space's components: the transform's row path
+    /// (`icc::Transform::convert_row`), which converts bytes as
+    /// `icc::Transform::apply` converts them, through tables a transform builds
+    /// once, and asks no conversion of the converter at all. A pixel asked
+    /// alone is read through two buffers the image keeps: its bytes and its
+    /// colour.
+    Row { pixel: Vec<u8>, out: Vec<u8> },
+    /// One component of at most 8 bits, whatever its space and `/Decode`: the
+    /// colour of each of its `2^bpc` values, packed `0x00RRGGBB`, filled the
+    /// first time a sample holds the value.
+    Values(Vec<u32>),
+    /// 8-bit DeviceCMYK, or a profile approximated as it, with `/Decode`
+    /// absent or `[0 1]`: 8.6.4.4's `(1 − x)(1 − k)` as a byte for each ink
+    /// byte `x` against each black byte `k`, at `x · 256 + k`, read for each of
+    /// C, M and Y against K. `to_rgb` gives each channel by that one relation
+    /// of its ink and black alone, so a pixel's conversion fills its three
+    /// entries at once, and an entry is that relation's byte whichever ink
+    /// filled it.
+    Cmyk(Vec<u16>),
+    /// Everything else: the components read through `/Decode` into one
+    /// buffer the image keeps, converted through a second it keeps for a tint
+    /// transform's outputs, with what was converted remembered where a
+    /// conversion is dear ([`Remembered`]).
+    General {
+        remembered: Option<Remembered>,
+        components: Vec<f64>,
+        scratch: Vec<f64>,
+    },
+}
+
+impl Converter {
+    /// The converter for an image of `n` values of `bpc` bits a pixel in
+    /// `space` under `decode`, its colours converted as `conversion` says,
+    /// `keyed` where a colour key reads its samples (8.9.6.4).
+    fn new(
+        space: &ColorSpace,
+        n: usize,
+        bpc: u32,
+        decode: &[(f64, f64)],
+        conversion: icc::Conversion,
+        keyed: bool,
+    ) -> Converter {
+        Converter {
+            n,
+            bpc,
+            max: ((1u32 << bpc.min(16)) - 1) as f64,
+            conversion,
+            arm: Arm::choose(space, n, bpc, decode, keyed),
+            converted: 0,
+            values: Vec::with_capacity(n),
+        }
+    }
+
+    /// Adds what the converter has asked of the space's conversion to `work`,
+    /// once: the count is taken as it is added.
+    fn count_into(&mut self, work: Option<&Work>) {
+        stats::colours_converted(work, std::mem::take(&mut self.converted));
+    }
+
+    /// The colour of one pixel whose raw values are `values`, `n` of them,
+    /// in `space`, the space the converter was chosen for, under `decode`.
+    fn colour(
+        &mut self,
+        space: &ColorSpace,
+        decode: &[(f64, f64)],
+        values: &[u32],
+    ) -> (u8, u8, u8) {
+        let value = |c: usize| values.get(c).copied().unwrap_or(0);
+        let (max, conversion) = (self.max, self.conversion);
+        match &mut self.arm {
+            Arm::Copy { grey: true } => {
+                let v = byte_of(value(0));
+                (v, v, v)
+            }
+            Arm::Copy { grey: false } => (byte_of(value(0)), byte_of(value(1)), byte_of(value(2))),
+            Arm::Row { pixel, out } => {
+                // The row path over the one pixel: its bytes, its colour.
+                pixel.clear();
+                pixel.extend((0..self.n).map(|c| byte_of(value(c))));
+                out.clear();
+                if let ColorSpace::Icc { transforms, .. } = space {
+                    transforms.get(conversion.intent).convert_row(pixel, out);
+                }
+                match out[..] {
+                    [r, g, b, ..] => (r, g, b),
+                    _ => (0, 0, 0),
+                }
+            }
+            Arm::Values(colours) => {
+                let at = usize::try_from(value(0)).unwrap_or(usize::MAX);
+                match colours.get(at).copied() {
+                    Some(packed) if packed != UNFILLED => unpack(packed),
+                    _ => {
+                        let colour = converted(
+                            space,
+                            &[component(space, decode, 0, value(0), max)],
+                            conversion,
+                        );
+                        self.converted += 1;
+                        if let Some(slot) = colours.get_mut(at) {
+                            *slot = pack(colour);
+                        }
+                        colour
+                    }
+                }
+            }
+            Arm::Cmyk(light) => {
+                let k = value(3) & 0xFF;
+                let at = |x: u32| (((x & 0xFF) << 8) | k) as usize;
+                let held = [0, 1, 2].map(|c| light.get(at(value(c))).copied());
+                if let [Some(r), Some(g), Some(b)] = held {
+                    if r != UNFILLED_BYTE && g != UNFILLED_BYTE && b != UNFILLED_BYTE {
+                        return (r as u8, g as u8, b as u8);
+                    }
+                }
+                let components = [0, 1, 2, 3].map(|c| f64::from(value(c) & 0xFF) / 255.0);
+                let (r, g, b) = converted(space, &components, conversion);
+                self.converted += 1;
+                for (c, channel) in [r, g, b].into_iter().enumerate() {
+                    if let Some(slot) = light.get_mut(at(value(c))) {
+                        *slot = u16::from(channel);
+                    }
+                }
+                (r, g, b)
+            }
+            Arm::General {
+                remembered,
+                components,
+                scratch,
+            } => {
+                components.clear();
+                let mut key = 0u128;
+                for c in 0..self.n {
+                    key = Remembered::key(key, c, value(c));
+                    components.push(component(space, decode, c, value(c), max));
+                }
+                match remembered.as_mut() {
+                    Some(table) => {
+                        let mut fresh = false;
+                        let colour = table.convert(key, || {
+                            fresh = true;
+                            converted_with(space, components, scratch, conversion)
+                        });
+                        self.converted += u64::from(fresh);
+                        colour
+                    }
+                    None => {
+                        self.converted += 1;
+                        converted_with(space, components, scratch, conversion)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Converts the first `pixels` pixels of `samples` — `n` values of `bpc`
+    /// bits a pixel, interleaved with nothing between them, a value the run
+    /// stops short of zero, as [`read_bits`] reads it — in `space` under
+    /// `decode`, onto the end of `rgb`.
+    fn extend(
+        &mut self,
+        space: &ColorSpace,
+        decode: &[(f64, f64)],
+        samples: &[u8],
+        pixels: usize,
+        rgb: &mut Vec<u8>,
+    ) {
+        let n = self.n.max(1);
+        rgb.reserve(pixels.saturating_mul(3));
+        let wanted = pixels.saturating_mul(n);
+        let intent = self.conversion.intent;
+        match self.arm {
+            Arm::Copy { grey } if self.bpc == 8 => {
+                let held = samples.get(..wanted).unwrap_or(samples);
+                if grey {
+                    for &v in held {
+                        rgb.extend_from_slice(&[v, v, v]);
+                    }
+                    rgb.resize(rgb.len() + (wanted - held.len()) * 3, 0);
+                } else {
+                    let start = rgb.len();
+                    rgb.extend_from_slice(held);
+                    rgb.resize(start + wanted, 0);
+                }
+                return;
+            }
+            Arm::Row { ref mut pixel, .. } if self.bpc == 8 => {
+                if let ColorSpace::Icc { transforms, .. } = space {
+                    let transform = transforms.get(intent);
+                    let held = samples.get(..wanted).unwrap_or(samples);
+                    let whole = held.len() / n * n;
+                    transform.convert_row(&held[..whole], rgb);
+                    let mut left = pixels - whole / n;
+                    // The pixel the run stops inside, its missing values
+                    // zero, and every pixel after it, which is all zeros and
+                    // so one colour, converted once.
+                    let partial = &held[whole..];
+                    if left > 0 && !partial.is_empty() {
+                        pixel.clear();
+                        pixel.extend_from_slice(partial);
+                        pixel.resize(n, 0);
+                        transform.convert_row(pixel, rgb);
+                        left -= 1;
+                    }
+                    if left > 0 {
+                        pixel.clear();
+                        pixel.resize(n, 0);
+                        let start = rgb.len();
+                        transform.convert_row(pixel, rgb);
+                        if let Some(&[r, g, b]) = rgb.get(start..start + 3) {
+                            for _ in 1..left {
+                                rgb.extend_from_slice(&[r, g, b]);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            _ => {}
+        }
+        // The pixel's values, in a buffer the converter keeps across its
+        // runs, so a strip's conversion allocates nothing.
+        let mut values = std::mem::take(&mut self.values);
+        for pixel in 0..pixels {
+            values.clear();
+            for c in 0..n {
+                let at = pixel * n + c;
+                values.push(match self.bpc {
+                    8 => u32::from(samples.get(at).copied().unwrap_or(0)),
+                    bpc => read_bits(samples, at * bpc as usize, bpc),
+                });
+            }
+            let (r, g, b) = self.colour(space, decode, &values);
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+        self.values = values;
+    }
+}
+
+impl Arm {
+    /// The arm for an image of `n` values of `bpc` bits a pixel in `space`
+    /// under `decode`, `keyed` where a colour key reads its samples.
+    fn choose(space: &ColorSpace, n: usize, bpc: u32, decode: &[(f64, f64)], keyed: bool) -> Arm {
+        // Every `/Decode` pair the components read `[0 1]` or absent, so a
+        // sample `v` of eight bits reads as `v / 255` exactly.
+        let plain = decode
+            .iter()
+            .take(n)
+            .all(|&(low, high)| low == 0.0 && high == 1.0);
+        let eight = bpc == 8;
+        // The device space a space converts as: a refused profile is
+        // approximated by its component count as that device space
+        // (`ColorSpace::to_rgb_in`).
+        let device = match space {
+            ColorSpace::DeviceGray | ColorSpace::Approximated { components: 1 } => Some(1),
+            ColorSpace::DeviceRgb | ColorSpace::Approximated { components: 3 } => Some(3),
+            ColorSpace::DeviceCmyk | ColorSpace::Approximated { components: 4 } => Some(4),
+            _ => None,
+        };
+        let ours = device == Some(n);
+        if ours && eight && plain && !keyed && n != 4 {
+            return Arm::Copy { grey: n == 1 };
+        }
+        if let ColorSpace::Icc { transforms, .. } = space {
+            if eight && plain && !keyed && transforms.inputs() == n {
+                return Arm::Row {
+                    pixel: Vec::with_capacity(n),
+                    out: Vec::with_capacity(3),
+                };
+            }
+        }
+        if n == 1 && bpc <= 8 {
+            return Arm::Values(vec![UNFILLED; 1usize << bpc.max(1)]);
+        }
+        if ours && eight && plain && n == 4 {
+            return Arm::Cmyk(vec![UNFILLED_BYTE; CMYK_PAIRS]);
+        }
+        Arm::General {
+            remembered: Remembered::for_image(space, n, bpc),
+            components: Vec::with_capacity(n),
+            scratch: Vec::new(),
+        }
+    }
+}
+
+/// A value of at most eight bits as the byte it is: the copy's and the row
+/// path's sample.
+fn byte_of(value: u32) -> u8 {
+    u8::try_from(value).unwrap_or(u8::MAX)
+}
+
+/// A colour packed into a table's entry, `0x00RRGGBB`.
+fn pack((r, g, b): (u8, u8, u8)) -> u32 {
+    (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+}
+
+/// The colour a table's entry holds.
+fn unpack(packed: u32) -> (u8, u8, u8) {
+    let [_, r, g, b] = packed.to_be_bytes();
+    (r, g, b)
+}
+
+/// [`samples_in_space`] a run of pixels at a time, for a codec that hands its
+/// samples out in strips: the converter lasts across the runs, which come in
+/// the image's order, so every pixel's colour is the one a single call over
+/// the whole image gives.
+struct SpaceSamples<'d> {
+    decode: &'d [(f64, f64)],
+    converter: Converter,
 }
 
 impl<'d> SpaceSamples<'d> {
@@ -1857,62 +2235,22 @@ impl<'d> SpaceSamples<'d> {
         decode: &'d [(f64, f64)],
         conversion: icc::Conversion,
     ) -> SpaceSamples<'d> {
-        let n = space.components();
         SpaceSamples {
-            n,
-            bpc,
-            max: ((1u32 << bpc.min(16)) - 1) as f64,
-            indexed: matches!(space, ColorSpace::Indexed { .. }),
             decode,
-            conversion,
-            remembered: Remembered::for_image(space, n, bpc),
-            components: Vec::with_capacity(n),
+            converter: Converter::new(space, space.components(), bpc, decode, conversion, false),
         }
     }
 
     /// Converts the first `pixels` pixels of `samples` in `space`, the space
     /// [`SpaceSamples::new`] was made for, onto the end of `rgb`.
     fn extend(&mut self, space: &ColorSpace, samples: &[u8], pixels: usize, rgb: &mut Vec<u8>) {
-        let (n, bpc, max, indexed) = (self.n, self.bpc, self.max, self.indexed);
-        let conversion = self.conversion;
-        rgb.reserve(pixels.saturating_mul(3));
-        for pixel in 0..pixels {
-            self.components.clear();
-            let mut key = 0u128;
-            for c in 0..n {
-                let at = pixel * n + c;
-                let value = match bpc {
-                    8 => u32::from(samples.get(at).copied().unwrap_or(0)),
-                    _ => read_bits(samples, at * bpc as usize, bpc),
-                };
-                key = Remembered::key(key, c, value);
-                // An indexed space's component is the index itself, and its
-                // `/Decode` maps the index range rather than a fraction of one.
-                let raw = if indexed {
-                    f64::from(value)
-                } else {
-                    f64::from(value) / max
-                };
-                self.components.push(
-                    match self
-                        .decode
-                        .get(c)
-                        .copied()
-                        .or_else(|| default_decode(space, c))
-                    {
-                        Some((dmin, dmax)) if indexed => dmin + raw * (dmax - dmin) / max.max(1.0),
-                        Some((dmin, dmax)) => dmin + raw * (dmax - dmin),
-                        None => raw,
-                    },
-                );
-            }
-            let components = &self.components;
-            let (r, g, b) = match self.remembered.as_mut() {
-                Some(table) => table.convert(key, || space.to_rgb_in(components, conversion)),
-                None => space.to_rgb_in(components, conversion),
-            };
-            rgb.extend_from_slice(&[r, g, b]);
-        }
+        self.converter
+            .extend(space, self.decode, samples, pixels, rgb);
+    }
+
+    /// [`Converter::count_into`].
+    fn count_into(&mut self, work: Option<&Work>) {
+        self.converter.count_into(work);
     }
 }
 
@@ -1932,9 +2270,25 @@ struct JpegInto<'r, 'd> {
     /// The space the samples are drawn in, when it is not the codec's own
     /// colour, and its converter.
     space: Option<(ColorSpace, SpaceSamples<'d>)>,
+    /// A CMYK JPEG's converter where it is drawn in its own colour, which is
+    /// DeviceCMYK's (8.6.4.4) with no `/Decode`, that applying to the
+    /// converted strip instead.
+    own: Option<Converter>,
     color: JpegColor,
     width: usize,
     rgb: Vec<u8>,
+}
+
+impl JpegInto<'_, '_> {
+    /// Adds what the strips' converters asked of a conversion to `work`.
+    fn count_into(&mut self, work: Option<&Work>) {
+        if let Some((_, converter)) = self.space.as_mut() {
+            converter.count_into(work);
+        }
+        if let Some(own) = self.own.as_mut() {
+            own.count_into(work);
+        }
+    }
 }
 
 impl JpegSink for JpegInto<'_, '_> {
@@ -1951,6 +2305,18 @@ impl JpegSink for JpegInto<'_, '_> {
                 let converter = SpaceSamples::new(&space, 8, self.decode, self.conversion);
                 (space, converter)
             });
+        self.own = (self.space.is_none()
+            && matches!(layout.color, JpegColor::Cmyk | JpegColor::CmykInverted))
+        .then(|| {
+            Converter::new(
+                &ColorSpace::DeviceCmyk,
+                4,
+                8,
+                &[],
+                icc::Conversion::default(),
+                false,
+            )
+        });
     }
 
     fn strip(&mut self, _: u32, rows: u32, data: &[u8]) {
@@ -1963,7 +2329,12 @@ impl JpegSink for JpegInto<'_, '_> {
             // strip instead.
             None => {
                 let start = self.rgb.len();
-                jpeg_rgb(self.color, data, pixels, &mut self.rgb);
+                match self.own.as_mut() {
+                    Some(own) => {
+                        own.extend(&ColorSpace::DeviceCmyk, &[], data, pixels, &mut self.rgb);
+                    }
+                    None => jpeg_rgb(self.color, data, pixels, &mut self.rgb),
+                }
                 invert_if_decode_reverses(
                     self.decode,
                     self.rgb.get_mut(start..).unwrap_or_default(),
@@ -6531,6 +6902,7 @@ impl PageResources {
             decode,
             conversion,
             space: None,
+            own: None,
             color: JpegColor::Gray,
             width: 0,
             rgb: Vec::new(),
@@ -6540,9 +6912,12 @@ impl PageResources {
         // frame, so it is sized by the bytes rather than by what the
         // dictionary says they hold.
         let choose = |width: u32, height: u32| jpeg_scale_within((width, height), request, room);
-        let frame = jpeg_decode_strips_sized(raw, JPEG_CEILING, &choose, &mut into)
-            .map_err(|e| format!("{e:?}"))?;
+        let decoded = jpeg_decode_strips_sized(raw, JPEG_CEILING, &choose, &mut into);
         let work = self.op.work.as_deref();
+        // What the strips' converters asked of a conversion, whether or not
+        // the decode reached its end.
+        into.count_into(work);
+        let frame = decoded.map_err(|e| format!("{e:?}"))?;
         stats::jpeg_held(work, frame.held.total());
         stats::jpeg_transformed(work, frame.transformed);
         let layout = frame.layout;
@@ -6736,7 +7111,15 @@ impl PageResources {
             // codestream is read at its own precision.
             Some(space) => {
                 let bits = if image.precision > 8 { 16 } else { 8 };
-                samples_in_space(&space, &image.samples, count, bits, &[], conversion)
+                samples_in_space(
+                    &space,
+                    &image.samples,
+                    count,
+                    bits,
+                    &[],
+                    conversion,
+                    self.op.work.as_deref(),
+                )
             }
             None => Self::jpx_own_colour(&image, count)?,
         };
@@ -7087,6 +7470,7 @@ impl PageResources {
                 mask: is_mask,
                 color_key: color_key.as_deref(),
                 conversion,
+                work: self.op.work.as_deref(),
             },
             form,
         );
@@ -7416,6 +7800,7 @@ impl PageResources {
                 mask: is_mask,
                 color_key: None,
                 conversion,
+                work: self.op.work.as_deref(),
             },
             SampleForm::TwoColour,
         );
@@ -8828,7 +9213,7 @@ mod tests {
         expand_inline_abbreviations, jpeg_scale, jpeg_scale_within, jpx_discard, jpx_skip, Answer,
         Asked, Contents, Frame, JpxFrame, PageResources, Remembered, Room, SourceWindow,
     };
-    use tinker_pdf_color::{ColorSpace, Colorant};
+    use tinker_pdf_color::{ColorSpace, Colorant, Colorants};
     use tinker_pdf_content::{ColorantKind, FontSource};
     use tinker_pdf_cos::{Name, ObjRef, Object};
     use tinker_pdf_filters::JpegScale;
@@ -9336,6 +9721,475 @@ mod tests {
         assert!(Remembered::for_image(&lab, 9, 8).is_none());
     }
 
+    /// An ICC profile of `class` over `space` holding `tags`, written as
+    /// ICC.1 7.2 and 7.3 lay a profile out.
+    fn profile_bytes(class: &[u8; 4], space: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let start = 128 + 4 + 12 * tags.len();
+        let mut data = Vec::new();
+        let mut entries = Vec::new();
+        for (signature, body) in tags {
+            while (start + data.len()) % 4 != 0 {
+                data.push(0);
+            }
+            entries.push((*signature, start + data.len(), body.len()));
+            data.extend_from_slice(body);
+        }
+        while (start + data.len()) % 4 != 0 {
+            data.push(0);
+        }
+        let mut profile = vec![0u8; 128];
+        profile[0..4].copy_from_slice(&((start + data.len()) as u32).to_be_bytes());
+        profile[8..12].copy_from_slice(&0x0240_0000u32.to_be_bytes());
+        profile[12..16].copy_from_slice(class);
+        profile[16..20].copy_from_slice(space);
+        profile[20..24].copy_from_slice(b"XYZ ");
+        profile[36..40].copy_from_slice(b"acsp");
+        profile.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+        for (signature, offset, len) in entries {
+            profile.extend_from_slice(&signature);
+            profile.extend_from_slice(&(offset as u32).to_be_bytes());
+            profile.extend_from_slice(&(len as u32).to_be_bytes());
+        }
+        profile.extend_from_slice(&data);
+        profile
+    }
+
+    /// An `XYZ ` tag of one value, in s15Fixed16Numbers (ICC.1 4.6).
+    fn xyz(x: f64, y: f64, z: f64) -> Vec<u8> {
+        let mut tag = b"XYZ \0\0\0\0".to_vec();
+        for value in [x, y, z] {
+            tag.extend_from_slice(&(((value * 65536.0).round() as i32) as u32).to_be_bytes());
+        }
+        tag
+    }
+
+    /// A `curv` tag of one gamma.
+    fn gamma(gamma: f64) -> Vec<u8> {
+        let mut tag = b"curv\0\0\0\0".to_vec();
+        tag.extend_from_slice(&1u32.to_be_bytes());
+        tag.extend_from_slice(&((gamma * 256.0).round() as u16).to_be_bytes());
+        tag
+    }
+
+    /// The ICC space of a matrix/TRC RGB profile, gamma 1.8, compiled.
+    fn icc_rgb() -> ColorSpace {
+        let bytes = profile_bytes(
+            b"mntr",
+            b"RGB ",
+            &[
+                (*b"rXYZ", xyz(0.436_065, 0.222_488, 0.013_916)),
+                (*b"gXYZ", xyz(0.385_147, 0.716_873, 0.097_076)),
+                (*b"bXYZ", xyz(0.143_066, 0.060_607, 0.714_096)),
+                (*b"rTRC", gamma(1.8)),
+                (*b"gTRC", gamma(1.8)),
+                (*b"bTRC", gamma(1.8)),
+                (*b"wtpt", xyz(0.9642, 1.0, 0.8249)),
+            ],
+        );
+        let profile = tinker_pdf_color::icc::Profile::parse(&bytes).expect("the profile reads");
+        let transforms =
+            tinker_pdf_color::icc::Transforms::compile(profile).expect("the profile compiles");
+        ColorSpace::Icc {
+            transforms: std::sync::Arc::new(transforms),
+            components: 3,
+        }
+    }
+
+    /// A `/Separation` space over DeviceRGB, white to a blue along `t`.
+    fn spot() -> ColorSpace {
+        ColorSpace::Separation {
+            components: 1,
+            alternate: Box::new(ColorSpace::DeviceRgb),
+            tint: Box::new(tinker_pdf_color::Function::Exponential {
+                domain: (0.0, 1.0),
+                c0: vec![1.0, 1.0, 1.0],
+                c1: vec![0.2, 0.4, 0.9],
+                n: 1.0,
+            }),
+            colorants: Colorants::default(),
+        }
+    }
+
+    /// **A converter is chosen by space, depth, `/Decode` and colour key**
+    /// (`docs/design/icc.md`, P-22, "The per-image converter"): a copy for
+    /// 8-bit DeviceGray and DeviceRGB, and a refused profile approximated as
+    /// either, under `/Decode` absent or `[0 1]` and no key; the row path for
+    /// an 8-bit ICC space under the same, whose transform takes the space's
+    /// components; a table of `2^bpc` values for one component of up to eight
+    /// bits, whatever its space and `/Decode`; DeviceCMYK's table for 8-bit
+    /// DeviceCMYK under `/Decode` absent or `[0 1]`, a key or none; and the
+    /// general arm for everything else — sixteen bits, more components, a
+    /// `/Decode` the copy and the tables cannot fold in, `/Lab`.
+    #[test]
+    fn a_converter_is_chosen_by_space_depth_decode_and_key() {
+        use super::{Arm, Converter};
+        let choose = |space: &ColorSpace, n: usize, bpc: u32, decode: &[(f64, f64)], keyed| {
+            match Converter::new(space, n, bpc, decode, Default::default(), keyed).arm {
+                Arm::Copy { grey: true } => "copy grey",
+                Arm::Copy { grey: false } => "copy",
+                Arm::Row { .. } => "row",
+                Arm::Values(table) => {
+                    assert_eq!(table.len(), 1 << bpc.max(1), "a value a table entry");
+                    "values"
+                }
+                Arm::Cmyk(table) => {
+                    assert_eq!(table.len(), 1 << 16, "an entry an ink and black byte");
+                    "cmyk"
+                }
+                Arm::General { .. } => "general",
+            }
+        };
+        let none: &[(f64, f64)] = &[];
+        let written = [(0.0, 1.0); 4];
+        let inverted = [(1.0, 0.0); 4];
+        let lab = ColorSpace::Lab {
+            range: [-100.0, 100.0, -100.0, 100.0],
+        };
+        let indexed = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::DeviceRgb),
+            lookup: vec![0; 768],
+            high: 255,
+        };
+        let icc = icc_rgb();
+        for (space, n, bpc, decode, keyed, want) in [
+            (ColorSpace::DeviceGray, 1, 8, none, false, "copy grey"),
+            (
+                ColorSpace::DeviceGray,
+                1,
+                8,
+                &written[..1],
+                false,
+                "copy grey",
+            ),
+            (ColorSpace::DeviceRgb, 3, 8, none, false, "copy"),
+            (ColorSpace::DeviceRgb, 3, 8, &written[..3], false, "copy"),
+            (
+                ColorSpace::Approximated { components: 3 },
+                3,
+                8,
+                none,
+                false,
+                "copy",
+            ),
+            (
+                ColorSpace::Approximated { components: 1 },
+                1,
+                8,
+                none,
+                false,
+                "copy grey",
+            ),
+            (ColorSpace::DeviceGray, 1, 8, none, true, "values"),
+            (
+                ColorSpace::DeviceGray,
+                1,
+                8,
+                &inverted[..1],
+                false,
+                "values",
+            ),
+            (ColorSpace::DeviceGray, 1, 4, none, false, "values"),
+            (ColorSpace::DeviceGray, 1, 1, none, false, "values"),
+            (ColorSpace::DeviceGray, 1, 16, none, false, "general"),
+            (ColorSpace::DeviceRgb, 3, 8, none, true, "general"),
+            (
+                ColorSpace::DeviceRgb,
+                3,
+                8,
+                &inverted[..3],
+                false,
+                "general",
+            ),
+            (ColorSpace::DeviceRgb, 3, 16, none, false, "general"),
+            (icc.clone(), 3, 8, none, false, "row"),
+            (icc.clone(), 3, 8, &written[..3], false, "row"),
+            (icc.clone(), 3, 8, none, true, "general"),
+            (icc.clone(), 3, 8, &inverted[..3], false, "general"),
+            (icc.clone(), 3, 16, none, false, "general"),
+            (icc.clone(), 4, 8, none, false, "general"),
+            (ColorSpace::DeviceCmyk, 4, 8, none, false, "cmyk"),
+            (ColorSpace::DeviceCmyk, 4, 8, &written[..], true, "cmyk"),
+            (
+                ColorSpace::Approximated { components: 4 },
+                4,
+                8,
+                none,
+                false,
+                "cmyk",
+            ),
+            (
+                ColorSpace::DeviceCmyk,
+                4,
+                8,
+                &inverted[..],
+                false,
+                "general",
+            ),
+            (ColorSpace::DeviceCmyk, 4, 16, none, false, "general"),
+            (ColorSpace::DeviceCmyk, 4, 4, none, false, "general"),
+            (indexed.clone(), 1, 8, none, false, "values"),
+            (indexed, 1, 2, none, false, "values"),
+            (spot(), 1, 8, none, false, "values"),
+            (spot(), 1, 8, &inverted[..1], true, "values"),
+            (lab, 3, 8, none, false, "general"),
+        ] {
+            assert_eq!(
+                choose(&space, n, bpc, decode, keyed),
+                want,
+                "{space:?} at {bpc} bits under {decode:?}, keyed {keyed}"
+            );
+        }
+    }
+
+    /// The colour the sample loop gives the raw `values` of a pixel in
+    /// `space` at `bpc` bits under `decode`: each component read by
+    /// [`super::component`] and the pixel by `ColorSpace::to_rgb_in`, the
+    /// conversion every arm stands in for.
+    fn by_to_rgb(
+        space: &ColorSpace,
+        bpc: u32,
+        decode: &[(f64, f64)],
+        values: &[u32],
+    ) -> (u8, u8, u8) {
+        let max = ((1u32 << bpc) - 1) as f64;
+        let components: Vec<f64> = values
+            .iter()
+            .enumerate()
+            .map(|(c, &value)| super::component(space, decode, c, value, max))
+            .collect();
+        space.to_rgb_in(&components, Default::default())
+    }
+
+    /// **Every arm gives each pixel the colour `to_rgb` gives it, and asks at
+    /// most what its table holds.** Each one-component space's every value at
+    /// 1, 2, 4 and 8 bits under three `/Decode`s, a value a pixel twice over;
+    /// DeviceCMYK's every pair of an ink byte and a black byte in each of C,
+    /// M and Y; the copies' every byte in every channel; the row path over a
+    /// run of every byte in each channel; and the general arm over a `/Lab`
+    /// image at sixteen bits — each pixel, run a pixel at a time and whole,
+    /// equal to [`by_to_rgb`]. A table arm asks at most its entries of the
+    /// conversion however many times its pixels repeat them, the copy and the
+    /// row path none, and the general arm once a pixel no remembered colour
+    /// answers.
+    #[test]
+    fn every_arm_converts_as_to_rgb_does() {
+        use super::{Converter, SAMPLE_CONVERSIONS};
+        let conversions = || SAMPLE_CONVERSIONS.with(std::cell::Cell::get);
+        let runs = |space: &ColorSpace,
+                    bpc: u32,
+                    decode: &[(f64, f64)],
+                    pixels: &[Vec<u32>],
+                    most: usize| {
+            let n = space.components();
+            // The values packed as a run of `bpc`-bit samples, nothing
+            // between them.
+            let mut samples = vec![0u8; (pixels.len() * n * bpc as usize).div_ceil(8)];
+            for (at, value) in pixels.iter().flatten().enumerate() {
+                for bit in 0..bpc {
+                    if (value >> (bpc - 1 - bit)) & 1 == 1 {
+                        let index = at * bpc as usize + bit as usize;
+                        samples[index / 8] |= 0x80 >> (index % 8);
+                    }
+                }
+            }
+            let want: Vec<u8> = pixels
+                .iter()
+                .flat_map(|values| {
+                    let (r, g, b) = by_to_rgb(space, bpc, decode, values);
+                    [r, g, b]
+                })
+                .collect();
+            let mut alone = Converter::new(space, n, bpc, decode, Default::default(), false);
+            let before = conversions();
+            let one_at_a_time: Vec<u8> = pixels
+                .iter()
+                .flat_map(|values| {
+                    let (r, g, b) = alone.colour(space, decode, values);
+                    [r, g, b]
+                })
+                .collect();
+            let asked = conversions() - before;
+            assert!(
+                one_at_a_time == want,
+                "{space:?} at {bpc} bits under {decode:?}, a pixel at a time"
+            );
+            assert_eq!(asked as u64, alone.converted, "{space:?}: counted as asked");
+            assert!(
+                asked <= most,
+                "{space:?} at {bpc} bits: asked {asked}, at most {most}"
+            );
+            let mut whole = Converter::new(space, n, bpc, decode, Default::default(), false);
+            let mut rgb = Vec::new();
+            whole.extend(space, decode, &samples, pixels.len(), &mut rgb);
+            assert!(
+                rgb == want,
+                "{space:?} at {bpc} bits under {decode:?}, whole"
+            );
+            assert!(whole.converted as usize <= most);
+        };
+
+        let one = |bpc: u32| -> Vec<Vec<u32>> {
+            let values = 1u32 << bpc;
+            (0..2 * values).map(|v| vec![v % values]).collect()
+        };
+        let indexed = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::DeviceRgb),
+            lookup: (0..768u32).map(|i| (i * 37 % 256) as u8).collect(),
+            high: 255,
+        };
+        for space in [ColorSpace::DeviceGray, spot(), indexed] {
+            for bpc in [1u32, 2, 4, 8] {
+                for decode in [&[][..], &[(1.0, 0.0)][..], &[(0.25, 0.75)][..]] {
+                    runs(&space, bpc, decode, &one(bpc), 1 << bpc);
+                }
+            }
+        }
+
+        let pairs: Vec<Vec<u32>> = (0..1u32 << 16)
+            .map(|at| {
+                let (x, k) = (at >> 8, at & 0xFF);
+                vec![x, 255 - x, (x * 7) % 256, k]
+            })
+            .collect();
+        runs(&ColorSpace::DeviceCmyk, 8, &[], &pairs, 1 << 16);
+        let mut twice = pairs.clone();
+        twice.extend(pairs.iter().cloned());
+        runs(
+            &ColorSpace::DeviceCmyk,
+            8,
+            &[(0.0, 1.0); 4],
+            &twice,
+            1 << 16,
+        );
+
+        let grey: Vec<Vec<u32>> = (0..256).map(|v| vec![v]).collect();
+        let colours: Vec<Vec<u32>> = (0..256).map(|v| vec![v, (v * 3) % 256, 255 - v]).collect();
+        runs(&ColorSpace::DeviceGray, 8, &[], &grey, 0);
+        runs(&ColorSpace::DeviceRgb, 8, &[], &colours, 0);
+        runs(&icc_rgb(), 8, &[], &colours, 0);
+
+        let lab = ColorSpace::Lab {
+            range: [-100.0, 100.0, -100.0, 100.0],
+        };
+        let deep: Vec<Vec<u32>> = (0..300u32)
+            .map(|v| vec![v * 211 % 65_536, v * 97 % 65_536, 65_535 - v * 13])
+            .collect();
+        runs(&lab, 16, &[], &deep, deep.len());
+    }
+
+    /// **A run the stream stops short of converts its missing samples as
+    /// zeros**, as `read_bits` reads past a stream's end: the copies, the row
+    /// path and a table arm over a run that ends inside a pixel and long
+    /// before the last, each the colour [`by_to_rgb`] gives the pixel's values
+    /// with the missing ones zero, and a copy of the zero pixel's colour for
+    /// every pixel after.
+    #[test]
+    fn a_short_run_converts_its_missing_samples_as_zeros() {
+        use super::Converter;
+        let icc = icc_rgb();
+        for (space, run) in [
+            (ColorSpace::DeviceGray, vec![9u8, 200, 77]),
+            (ColorSpace::DeviceRgb, vec![9, 200, 77, 31, 5]),
+            (icc.clone(), vec![9, 200, 77, 31, 5]),
+            (ColorSpace::DeviceCmyk, vec![9, 200, 77, 31, 5, 250]),
+            (spot(), vec![9, 200, 77]),
+        ] {
+            let n = space.components();
+            let pixels = 12;
+            let mut converter = Converter::new(&space, n, 8, &[], Default::default(), false);
+            let mut rgb = Vec::new();
+            converter.extend(&space, &[], &run, pixels, &mut rgb);
+            let want: Vec<u8> = (0..pixels)
+                .flat_map(|pixel| {
+                    let values: Vec<u32> = (0..n)
+                        .map(|c| u32::from(run.get(pixel * n + c).copied().unwrap_or(0)))
+                        .collect();
+                    let (r, g, b) = by_to_rgb(&space, 8, &[], &values);
+                    [r, g, b]
+                })
+                .collect();
+            assert!(rgb == want, "{space:?}: {rgb:?} against {want:?}");
+            let mut none = Vec::new();
+            converter.extend(&space, &[], &[], 0, &mut none);
+            assert!(none.is_empty(), "{space:?}: no pixel, no colour");
+        }
+    }
+
+    /// **A CMYK JPEG drawn in its own colour converts through DeviceCMYK's
+    /// table**: strips handed to the image's sink one MCU row at a time, as
+    /// the decoder hands them, come out as `to_rgb` gives each pixel's inks,
+    /// the strips sharing one table, so what the image asks of the conversion
+    /// is counted once across them and is at most the table's entries; an RGB
+    /// JPEG's strips are copied and ask nothing.
+    #[test]
+    fn a_cmyk_jpeg_in_its_own_colour_converts_through_one_table() {
+        use super::{JpegInto, Work};
+        use tinker_pdf_filters::{JpegColor, JpegLayout, JpegScale, JpegSink};
+
+        let resources = resources_of("");
+        let (width, height) = (256u32, 64u32);
+        let inks = |x: u32, y: u32| [x, (x + y) % 256, (x * y) % 256, (y * 4) % 256];
+        for color in [JpegColor::Cmyk, JpegColor::CmykInverted, JpegColor::Rgb] {
+            let n = if color == JpegColor::Rgb { 3 } else { 4 };
+            let mut into = JpegInto {
+                resources: &resources,
+                named: None,
+                name: b"Im0",
+                decode: &[],
+                conversion: Default::default(),
+                space: None,
+                own: None,
+                color: JpegColor::Gray,
+                width: 0,
+                rgb: Vec::new(),
+            };
+            into.begin(JpegLayout {
+                width,
+                height,
+                color,
+                precision: 8,
+                scale: JpegScale::Full,
+                full_width: width,
+                full_height: height,
+            });
+            for strip in 0..height / 16 {
+                let mut data = Vec::new();
+                for y in strip * 16..strip * 16 + 16 {
+                    for x in 0..width {
+                        data.extend(inks(x, y)[..n].iter().map(|&v| v as u8));
+                    }
+                }
+                into.strip(strip * 16, 16, &data);
+            }
+            let work = Work::new();
+            into.count_into(Some(&work));
+            let asked = work.stats().image_colours_converted;
+            for y in 0..height {
+                for x in 0..width {
+                    let at = ((y * width + x) * 3) as usize;
+                    let ink = inks(x, y);
+                    let want = if n == 4 {
+                        let unit = |v: u32| f64::from(v) / 255.0;
+                        ColorSpace::DeviceCmyk.to_rgb(&ink.map(unit))
+                    } else {
+                        (ink[0] as u8, ink[1] as u8, ink[2] as u8)
+                    };
+                    assert_eq!(
+                        (into.rgb[at], into.rgb[at + 1], into.rgb[at + 2]),
+                        want,
+                        "{color:?} at ({x}, {y})"
+                    );
+                }
+            }
+            if n == 4 {
+                assert!(asked > 0 && asked <= 1 << 16, "{color:?}: {asked} asked");
+                assert!(asked <= u64::from(width * height));
+            } else {
+                assert_eq!(asked, 0, "an RGB JPEG is copied");
+            }
+        }
+    }
+
     /// **An 8-bit DeviceGray or DeviceRGB image is its own samples.**
     ///
     /// Every one of the 256 values, through both spaces, with `/Decode`
@@ -9372,6 +10226,7 @@ mod tests {
                     mask: false,
                     color_key: None,
                     conversion: tinker_pdf_color::icc::Conversion::default(),
+                    work: None,
                 };
                 let before = conversions();
                 let (pixels, alpha) = image_pixels(samples, &layout);
@@ -9407,6 +10262,7 @@ mod tests {
             mask: false,
             color_key: None,
             conversion: tinker_pdf_color::icc::Conversion::default(),
+            work: None,
         };
         let short = &rgb[..100];
         assert_eq!(image_pixels(short, &layout), general_pixels(short, &layout));
@@ -9479,6 +10335,7 @@ mod tests {
                                 mask,
                                 color_key,
                                 conversion: tinker_pdf_color::icc::Conversion::default(),
+                                work: None,
                             };
                             let before = bits_read();
                             let table = image_pixels(&bytes, &layout);
@@ -9546,6 +10403,7 @@ mod tests {
                                 mask,
                                 color_key,
                                 conversion: tinker_pdf_color::icc::Conversion::default(),
+                                work: None,
                             };
                             let what = format!(
                                 "width {width}, {space:?}, /Decode {decode:?}, mask {mask}, \
@@ -9612,6 +10470,7 @@ mod tests {
                 mask: false,
                 color_key: None,
                 conversion: tinker_pdf_color::icc::Conversion::default(),
+                work: None,
             };
             assert!(
                 two_colour_pixels(&bytes, &layout).is_none(),

@@ -278,9 +278,10 @@ returns to the bit, and allocates nothing once the buffer has grown: a
 table's sums are taken in it, and a calculator's operand stack runs in it
 above what an array's earlier members wrote, out of the program's reach, with
 eight waiting `{ … }` procedures held in place
-(`eval_into_starts_afresh_and_a_type_4_member_keeps_to_its_own_stack`). An image in any space other
-than the device spaces converts each colour once, remembered by its samples
-in a table of 4 096 slots that never answers one colour for another
+(`eval_into_starts_afresh_and_a_type_4_member_keeps_to_its_own_stack`). An image no table of its
+converter stands for (*Images*, below), in any space other than the device
+spaces, converts each colour once, remembered by its samples in a table of
+4 096 slots that never answers one colour for another
 (`an_images_repeated_colour_is_converted_once`,
 `a_device_n_images_pixels_are_each_their_own_tint`). A picture of a million
 distinct colours costs a million evaluations, which is the clause's price, as
@@ -392,7 +393,31 @@ through a 256-entry table of eight samples
 (`one_bit_samples_expand_through_the_table`); `Page::to_svg` writes a
 two-colour image's PNG as its RGB expansion
 (`a_two_colour_image_is_written_as_its_rgb_expansion`). Every other image is
-read a sample at a time through its space.
+read a sample at a time, and its colours asked of a converter chosen once for
+the image by its space, its depth, its `/Decode` and whether a colour key reads
+it (`docs/design/icc.md`, P-22, "The per-image converter"): an 8-bit ICC image
+with `/Decode` absent or `[0 1]` and no colour key converts through its
+transform's row path, which converts bytes as the transform converts
+components, through tables the transform builds once; an image of one
+component of up to eight bits, whatever its space and `/Decode`, reads a
+table of its `2^bpc` values' colours, each converted through its space the
+first time a sample holds it; an 8-bit DeviceCMYK image under `/Decode` absent
+or `[0 1]`, and a CMYK JPEG drawn in its own colour a strip at a time, reads a
+table of 8.6.4.4's `(1 − x)(1 − k)` for each ink byte against each black
+byte, each entry filled by the conversion of the pixel that first asks for
+it; and every other image converts each pixel through its space, its
+components and a tint transform's outputs in buffers it keeps, remembering
+its colours where a conversion is dear (below). A JPEG's and a JPEG 2000
+image's samples drawn in the dictionary's space take the same converter, and
+a refused profile approximated as a device space takes that space's. Each
+arm's colour is the one its space's conversion gives the sample, so the
+converter moves no pixel; what an image asks of the conversion is counted,
+`Stats::image_colours_converted`, and does not grow with its pixels — none for
+an 8-bit DeviceRGB or ICC image, at most 65 536 for an 8-bit DeviceCMYK one
+and `2^bpc` for one component (`image_conversion.rs`'s
+`a_converter_is_chosen_once_per_image`,
+`each_device_arm_draws_what_to_rgb_gives_each_input`) — nor what it allocates
+with its colours (`an_image_converts_in_allocations_flat_in_its_colours`).
 
 **JPEG and JPEG 2000 images** are drawn in the `/ColorSpace` their
 dictionary names (8.9.5) — a codestream's own colour specification gives way
@@ -1565,7 +1590,10 @@ names and never selects is not read, a glyph asks the font its scope read
 whether it is a Type 3 font, and a substitute is asked for from the
 dictionary read;
 `images_decoded`, an image XObject's decode on a cache miss and every inline
-image's; and a `_hits` and a `_misses` for each of the five caches a page's
+image's; `image_colours_converted`, each colour an image's converter asked of
+its space's conversion — a table entry filled, or a pixel no copy, table, row
+path or remembered colour answered; and a `_hits` and a `_misses` for each of
+the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
 `form_scope`, an image the document's cache keeps counted as `image` and a
 transform as `icc_transform` too;

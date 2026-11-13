@@ -332,7 +332,7 @@ impl Counted {
 
     /// Every step counter of MS-01's `Stats` — the ones `Stats::work` sums.
     fn stats(&mut self, stats: &Stats) {
-        let steps: [(&'static str, u64); 32] = [
+        let steps: [(&'static str, u64); 33] = [
             ("glyphs shown", stats.glyphs_shown),
             ("outlines filled", stats.outlines_filled),
             ("glyph masks rasterised", stats.glyph_masks_rasterised),
@@ -371,6 +371,7 @@ impl Counted {
                 "shading functions evaluated",
                 stats.shading_functions_evaluated,
             ),
+            ("image colours converted", stats.image_colours_converted),
         ];
         debug_assert_eq!(
             steps.iter().map(|(_, value)| value).sum::<u64>(),
