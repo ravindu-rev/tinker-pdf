@@ -198,12 +198,13 @@ exception list is a check that has been talked out of firing. `svg` has a
 replay of its own in `crates/tinker-pdf-svg/src/tests.rs`.
 
 `cff_charstrings`, `content_stream`, `cos_syntax`, `crypt`, `crypt_ciphers`,
-`form_script`, `glyf_outlines`, `jpx_codestream`, `layout`, `render_page` and
-`signatures` are structured generators: the body is carved into fields rather
-than parsed as a format, so every seed reaches the code by construction and
-there is no reachability question of this shape to ask. The seeds of
-`cff_charstrings`, `content_stream`, `cos_syntax`, `glyf_outlines` and
-`jpx_codestream` are choice sequences their
+`form_script`, `glyf_outlines`, `html_structured`, `jpx_codestream`, `layout`,
+`render_page`, `signatures` and `xml_structured` are structured generators: the
+body is carved into fields rather than parsed as a format, so every seed
+reaches the code by construction and there is no reachability question of this
+shape to ask. The seeds of `cff_charstrings`, `content_stream`, `cos_syntax`,
+`glyf_outlines`, `html_structured`, `jpx_codestream` and `xml_structured` are
+choice sequences their
 generators' `write_the_fuzz_seeds` write, each named for the feature it
 reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
 `cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
@@ -282,6 +283,11 @@ and one with a field broken is refused by a name of that field. Its arithmetic
 coder reads back through the engine's MQ decoder, and a context the two form
 apart shows as a segmentation symbol that is not `1010`, but nothing there says
 a decoded sample is right; `jpx_reference.rs` is what does.
+`xml_structured` holds the XML reader to documents it reads back element for
+element and character for character in both document type modes, with each
+declaration and each defect refused as itself; `html_structured` holds the
+HTML tree builder to soup it must build into a tree inside its bounds. Whether
+that tree is the standard's is `html5lib.rs`'s.
 
 `cff_subset` is the strongest target and still not exempt: it fuzzes a
 *writer*, and its round trip goes through **this repository's own** parser, so

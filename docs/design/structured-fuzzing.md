@@ -281,25 +281,37 @@ symbol that is not `1010`.
 
 ### XML and HTML: `xml_structured` and `html_structured`
 
-One generated element tree — names with and without a prefix, attributes,
-namespace declarations, text, CDATA sections, comments, processing
-instructions, and entity and character references — is written two ways, as
-two targets:
+`fuzz/src/markup.rs` generates one element tree — names with and without a
+prefix, attributes in no namespace, a bound one and `xml`'s, prefix and
+default namespace declarations, text with the five predefined entities,
+character references and CR LF line ends, CDATA sections, comments and
+processing instructions — and writes it two ways, as two targets. Its element
+names are HTML's, chosen for the insertion modes they open, so one tree is an
+ordinary XML document and a soup the tree builder has work to do on.
 
 - `xml_structured` writes it well formed, or near well formed with one defect
   the generator names — an undeclared prefix, an end tag that closes the wrong
   element, a duplicate attribute, a bare `&` — and may put a document type
-  declaration before the root, which the reader must refuse to parse. For
-  every well-formed document without one, the reader's count of start events
-  equals the tree's element count, and nothing is refused.
+  declaration before the root: bare, with an external identifier, or with an
+  internal subset. In both `Doctype` modes a well-formed document without one
+  reads back as written: every element by its qualified name, its attributes in
+  order with their values as §3.3.3 normalises them, the character data with
+  references resolved and line ends normalised, every comment and instruction,
+  and nothing refused, so the reader's count of start events is the tree's
+  element count. `Refuse` refuses a declaration before the root opens;
+  `SkipExternalId` refuses an internal subset so and reads past the others.
+  A defect is refused as the error that names it.
 - `html_structured` writes it as tag soup aimed at the tree builder's
-  insertion modes: end tags left out or misplaced, formatting elements
-  mis-nested (the adoption agency), table content outside a cell (foster
-  parenting), `template` and `select`. Every input builds a tree whose parent
-  and child links agree — each child names its parent, and each node is reached
-  once — within `Limits::max_tokens`, which counts every node the builder
-  makes. `MAX_DOM_NODES` is the cascade's cap, and binds only a tree a
-  stylesheet is cascaded over.
+  insertion modes: end tags left out or stray, formatting elements mis-nested
+  (the adoption agency), text and elements straight inside a table (foster
+  parenting), `template`, `select`, foreign content with CDATA, raw-text
+  elements with markup inside, attributes quoted three ways and repeated, and
+  references with and without their semicolons, parsed under four bounds the
+  input chooses. Every input builds a tree whose parent and child links agree —
+  each child names its parent, and each node is reached once — within
+  `Limits::max_tokens`, which counts every node the builder makes, and parsing
+  is deterministic. `MAX_DOM_NODES` is the cascade's cap, and binds only a tree
+  a stylesheet is cascaded over.
 
 ### CSS: `css_structured`
 

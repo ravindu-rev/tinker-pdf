@@ -23,6 +23,7 @@ form_script	611	257	512
 gif	341	9	512
 glyf_outlines	511	33	512
 html	1619	257	512
+html_structured	827	129	512
 icc_profile	611	257	512
 inflate	327	3	512
 jbig2	379	17	512
@@ -54,5 +55,6 @@ type1	340	9	512
 webp	377	25	512
 woff	329	3	512
 xml	899	257	512
+xml_structured	467	65	512
 zip_archive	1187	257	512
 zstd	341	9	512

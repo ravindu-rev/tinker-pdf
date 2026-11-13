@@ -212,6 +212,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "html",
         "HTML is text, and tag soup need not begin with any one tag",
     ),
+    (
+        "html_structured",
+        "a structured generator: the body chooses an element tree and the soup it is written as",
+    ),
     ("inflate", "a raw DEFLATE stream begins with a bit field"),
     ("jbig2", "an embedded JBIG2 stream has no file header"),
     (
@@ -253,6 +257,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "a Type 1 font may be PFB-framed or bare PostScript",
     ),
     ("xml", "XML is text"),
+    (
+        "xml_structured",
+        "a structured generator: the body chooses an element tree and the XML it is written as",
+    ),
 ];
 
 /// The header `fuzz/limits.tsv` opens with, its columns in order.

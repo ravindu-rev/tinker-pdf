@@ -722,6 +722,7 @@ const FUZZ_GEN_CONTENT: &str = include_str!("../../../fuzz/src/content.rs");
 const FUZZ_GEN_COS: &str = include_str!("../../../fuzz/src/cos.rs");
 const FUZZ_GEN_GLYF: &str = include_str!("../../../fuzz/src/glyf.rs");
 const FUZZ_GEN_JPX: &str = include_str!("../../../fuzz/src/jpx.rs");
+const FUZZ_GEN_MARKUP: &str = include_str!("../../../fuzz/src/markup.rs");
 const FONT_OUTLINE: &str = include_str!("../../tinker-pdf-font/src/outline.rs");
 const FONT_CFF_SUBSET: &str = include_str!("../../tinker-pdf-font/src/cff_subset.rs");
 const ARCHIVE_BZIP2: &str = include_str!("../../tinker-pdf-archive/src/bzip2.rs");
@@ -3839,6 +3840,44 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                 ),
             ],
         ),
+        written(
+            "html_structured",
+            vec![
+                buffer(
+                    Value(1 << 18),
+                    1,
+                    1,
+                    "the generated soup, under 256 KiB at its generator's caps: forty \
+                     elements of four attributes and five children, every run of text at \
+                     most twelve characters (estimate)",
+                ),
+                buffer(
+                    Value(1 << 18),
+                    PARSED,
+                    1,
+                    "the tree the soup is written from (estimate)",
+                ),
+                buffer(
+                    Value(1 << 18),
+                    PARSED,
+                    2,
+                    "the document built, and the second parse it is compared with",
+                ),
+                buffer(
+                    Row("MAX_HTML_CLONE_BYTES"),
+                    1,
+                    2,
+                    "the attribute bytes the formatting elements' clones copy, in each parse",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_MARKUP, "pub const MAX_ELEMENTS: usize = 40;"),
+                (FUZZ_GEN_MARKUP, "pub const MAX_DEPTH: usize = 8;"),
+                (FUZZ_GEN_MARKUP, "pub const MAX_CHILDREN: usize = 5;"),
+                (FUZZ_GEN_MARKUP, "pub const MAX_ATTRIBUTES: usize = 4;"),
+                (FUZZ_GEN_MARKUP, "pub const MAX_RUN: usize = 12;"),
+            ],
+        ),
         path(
             "icc_profile",
             vec![buffer(Input, PARSED, 1, "the profile's tags and tables")],
@@ -4237,6 +4276,40 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                 2,
                 "the events the walk collects, and the reader's own",
             )],
+        ),
+        written(
+            "xml_structured",
+            vec![
+                buffer(
+                    Value(1 << 18),
+                    1,
+                    1,
+                    "the generated document, under 256 KiB at its generator's caps: forty \
+                     elements of four attributes, two declarations and five children, every \
+                     run of text at most twelve characters (estimate)",
+                ),
+                buffer(
+                    Value(1 << 18),
+                    PARSED,
+                    1,
+                    "the tree it is written from, and the reading the generator expects of \
+                     it (estimate)",
+                ),
+                buffer(
+                    Value(1 << 18),
+                    PARSED,
+                    1,
+                    "the events one mode reads, and what it collects of them; the two \
+                     modes read one after another",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_MARKUP, "pub const MAX_ELEMENTS: usize = 40;"),
+                (FUZZ_GEN_MARKUP, "pub const MAX_DEPTH: usize = 8;"),
+                (FUZZ_GEN_MARKUP, "pub const MAX_CHILDREN: usize = 5;"),
+                (FUZZ_GEN_MARKUP, "pub const MAX_ATTRIBUTES: usize = 4;"),
+                (FUZZ_GEN_MARKUP, "pub const MAX_RUN: usize = 12;"),
+            ],
         ),
         path(
             "zip_archive",

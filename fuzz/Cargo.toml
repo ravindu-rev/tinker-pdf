@@ -385,3 +385,15 @@ name = "jpx_codestream"
 path = "fuzz_targets/jpx_codestream.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "xml_structured"
+path = "fuzz_targets/xml_structured.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "html_structured"
+path = "fuzz_targets/html_structured.rs"
+test = false
+doc = false

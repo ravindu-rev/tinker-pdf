@@ -13,6 +13,7 @@ pub mod content;
 pub mod cos;
 pub mod glyf;
 pub mod jpx;
+pub mod markup;
 
 /// A target's input, read front to back as a sequence of decisions.
 ///
