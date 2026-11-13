@@ -40,6 +40,9 @@
 
 #![deny(clippy::float_arithmetic)]
 
+pub mod cvar;
+pub mod tuple;
+
 use crate::sfnt::Sfnt;
 
 /// A four-byte table or axis tag, as the bytes it is: `*b"wght"`.
@@ -962,6 +965,43 @@ pub enum VariationError {
         /// How many the face has.
         count: u16,
     },
+    /// `gvar`'s shared tuple records run past the table's end.
+    SharedTuplesPastEnd {
+        /// The count it declares.
+        count: u16,
+    },
+    /// A tuple variation store's header, or a `TupleVariationHeader`, runs
+    /// past the store.
+    TupleHeadersPastEnd,
+    /// A tuple variation table names a shared tuple past the shared tuples —
+    /// every index, in `cvar`, which has none and embeds every peak.
+    SharedTupleIndex {
+        /// The index named.
+        index: u16,
+        /// How many shared tuples there are.
+        count: u16,
+    },
+    /// A tuple variation table's serialized data runs past the store.
+    TupleDataPastEnd {
+        /// The table, by index.
+        tuple: u16,
+    },
+    /// A tuple variation table with no private point numbers in a store with
+    /// no shared ones.
+    NoPointNumbers {
+        /// The table, by index.
+        tuple: u16,
+    },
+    /// Packed point numbers end before their count is read.
+    PointsPastEnd,
+    /// A run of packed point numbers holds more than the count has left.
+    PointRunsOverrun,
+    /// Packed point numbers add up past 65 535.
+    PointNumberOverflow,
+    /// Packed deltas end before their count is read.
+    DeltasPastEnd,
+    /// A run of packed deltas holds more than the count has left.
+    DeltaRunsOverrun,
 }
 
 /// A tag as the four characters it is, for a message.
@@ -1032,6 +1072,35 @@ impl core::fmt::Display for VariationError {
                 f,
                 "named instance {index} was asked for and the face has {count}"
             ),
+            VariationError::SharedTuplesPastEnd { count } => {
+                write!(f, "gvar's {count} shared tuples run past the table's end")
+            }
+            VariationError::TupleHeadersPastEnd => {
+                write!(f, "a tuple variation store's headers run past its end")
+            }
+            VariationError::SharedTupleIndex { index, count } => write!(
+                f,
+                "a tuple variation table names shared tuple {index} of {count}"
+            ),
+            VariationError::TupleDataPastEnd { tuple } => write!(
+                f,
+                "tuple variation table {tuple}'s data runs past the store's end"
+            ),
+            VariationError::NoPointNumbers { tuple } => write!(
+                f,
+                "tuple variation table {tuple} has no point numbers, private or shared"
+            ),
+            VariationError::PointsPastEnd => write!(f, "packed point numbers end early"),
+            VariationError::PointRunsOverrun => {
+                write!(f, "a run of packed point numbers passes its count")
+            }
+            VariationError::PointNumberOverflow => {
+                write!(f, "packed point numbers add up past 65535")
+            }
+            VariationError::DeltasPastEnd => write!(f, "packed deltas end early"),
+            VariationError::DeltaRunsOverrun => {
+                write!(f, "a run of packed deltas passes its count")
+            }
         }
     }
 }

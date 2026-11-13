@@ -275,6 +275,231 @@ pub fn identity_map() -> Vec<(i16, i16)> {
     vec![(-16_384, -16_384), (0, 0), (16_384, 16_384)]
 }
 
+// ---- The tuple variation store and cvar ------------------------------------
+
+/// Point numbers as a test states them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Points {
+    /// Every item: the count byte zero.
+    All,
+    /// The items listed, in increasing order.
+    Listed(Vec<u16>),
+}
+
+/// Packs point numbers (common formats, 'Packed "Point" Numbers'): the count
+/// in one byte below 128 and in two, the high bit set, from 128 — and an
+/// empty list in two, since one zero byte would mean every point — then runs
+/// of at most 128 differences, each run of bytes while the differences fit a
+/// byte and of words while they do not.
+pub fn pack_points(points: &Points) -> Vec<u8> {
+    let numbers = match points {
+        Points::All => return vec![0],
+        Points::Listed(numbers) => numbers,
+    };
+    let mut out = Vec::new();
+    let count = numbers.len();
+    if count == 0 || count >= 128 {
+        push16(
+            &mut out,
+            0x8000 | u16::try_from(count).expect("a 15-bit count"),
+        );
+    } else {
+        out.push(u8::try_from(count).expect("small"));
+    }
+    let mut last = 0u16;
+    let differences: Vec<u16> = numbers
+        .iter()
+        .map(|n| {
+            let difference = n - last;
+            last = *n;
+            difference
+        })
+        .collect();
+    let mut at = 0;
+    while at < differences.len() {
+        let words = differences[at] > 255;
+        let mut end = at;
+        while end < differences.len() && end - at < 128 && (differences[end] > 255) == words {
+            end += 1;
+        }
+        let length = u8::try_from(end - at - 1).expect("at most 127");
+        out.push(length | if words { 0x80 } else { 0 });
+        for difference in &differences[at..end] {
+            if words {
+                push16(&mut out, *difference);
+            } else {
+                out.push(u8::try_from(*difference).expect("a byte"));
+            }
+        }
+        at = end;
+    }
+    out
+}
+
+/// Packs deltas (common formats, 'Packed Deltas'): runs of at most 64, each
+/// of zeros, of bytes while the values fit a signed byte, or of words.
+pub fn pack_deltas(deltas: &[i32]) -> Vec<u8> {
+    let kind = |value: i32| {
+        if value == 0 {
+            0
+        } else if (-128..=127).contains(&value) {
+            1
+        } else {
+            2
+        }
+    };
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < deltas.len() {
+        let run_kind = kind(deltas[at]);
+        let mut end = at;
+        while end < deltas.len() && end - at < 64 && kind(deltas[end]) == run_kind {
+            end += 1;
+        }
+        let length = u8::try_from(end - at - 1).expect("at most 63");
+        match run_kind {
+            0 => out.push(0x80 | length),
+            1 => {
+                out.push(length);
+                for value in &deltas[at..end] {
+                    out.push(i8::try_from(*value).expect("a byte") as u8);
+                }
+            }
+            _ => {
+                out.push(0x40 | length);
+                for value in &deltas[at..end] {
+                    push_i16(&mut out, i16::try_from(*value).expect("a word"));
+                }
+            }
+        }
+        at = end;
+    }
+    out
+}
+
+/// One tuple variation table as a test states it.
+#[derive(Clone, Debug)]
+pub struct TupleSpec {
+    /// The peak, one 2.14 coordinate an axis.
+    pub peak: Vec<i16>,
+    /// An intermediate region's start and end.
+    pub intermediate: Option<(Vec<i16>, Vec<i16>)>,
+    /// A shared tuple's index to take the peak from instead of embedding it.
+    pub shared_peak: Option<u16>,
+    /// Private point numbers; `None` takes the store's shared ones.
+    pub points: Option<Points>,
+    /// The deltas, one an item listed — in `gvar`, the X deltas then the Y.
+    pub deltas: Vec<i32>,
+}
+
+impl TupleSpec {
+    /// A table with an embedded peak and no intermediate region.
+    pub fn new(peak: &[i16], points: Option<Points>, deltas: &[i32]) -> TupleSpec {
+        TupleSpec {
+            peak: peak.to_vec(),
+            intermediate: None,
+            shared_peak: None,
+            points,
+            deltas: deltas.to_vec(),
+        }
+    }
+
+    /// This table with an intermediate region.
+    pub fn between(mut self, start: &[i16], end: &[i16]) -> TupleSpec {
+        self.intermediate = Some((start.to_vec(), end.to_vec()));
+        self
+    }
+
+    /// The region this table states, an axis at a time.
+    pub fn region(&self) -> Vec<(i16, i16, i16)> {
+        match &self.intermediate {
+            Some((start, end)) => self
+                .peak
+                .iter()
+                .zip(start.iter().zip(end))
+                .map(|(peak, (start, end))| (*start, *peak, *end))
+                .collect(),
+            None => self.peak.iter().map(|p| spec::implied(*p)).collect(),
+        }
+    }
+}
+
+/// A tuple variation store (common formats, 'Tuple Variation Store Header',
+/// 'TupleVariationHeader', 'Serialized Data'): the packed count, the data
+/// offset — measured from `base` bytes before the store, `cvar`'s version —
+/// the headers, the shared point numbers and each table's data.
+pub fn tuple_store(base: usize, shared_points: Option<&Points>, tuples: &[TupleSpec]) -> Vec<u8> {
+    let mut headers = Vec::new();
+    let mut data = Vec::new();
+    if let Some(points) = shared_points {
+        data.extend(pack_points(points));
+    }
+    for tuple in tuples {
+        let mut serialized = Vec::new();
+        if let Some(points) = &tuple.points {
+            serialized.extend(pack_points(points));
+        }
+        serialized.extend(pack_deltas(&tuple.deltas));
+        let mut index = match tuple.shared_peak {
+            Some(shared) => shared & 0x0FFF,
+            None => 0x8000,
+        };
+        if tuple.intermediate.is_some() {
+            index |= 0x4000;
+        }
+        if tuple.points.is_some() {
+            index |= 0x2000;
+        }
+        push16(
+            &mut headers,
+            u16::try_from(serialized.len()).expect("small"),
+        );
+        push16(&mut headers, index);
+        if tuple.shared_peak.is_none() {
+            for coordinate in &tuple.peak {
+                push_i16(&mut headers, *coordinate);
+            }
+        }
+        if let Some((start, end)) = &tuple.intermediate {
+            for coordinate in start.iter().chain(end) {
+                push_i16(&mut headers, *coordinate);
+            }
+        }
+        data.extend(serialized);
+    }
+    let mut out = Vec::new();
+    let count = u16::try_from(tuples.len()).expect("few");
+    push16(
+        &mut out,
+        count | if shared_points.is_some() { 0x8000 } else { 0 },
+    );
+    push16(
+        &mut out,
+        u16::try_from(base + 4 + headers.len()).expect("small"),
+    );
+    out.extend(headers);
+    out.extend(data);
+    out
+}
+
+/// A `cvar` table: version 1.0 and one tuple variation store.
+pub fn cvar(shared_points: Option<&Points>, tuples: &[TupleSpec]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push16(&mut out, 1);
+    push16(&mut out, 0);
+    out.extend(tuple_store(4, shared_points, tuples));
+    out
+}
+
+/// A `cvt ` table of FWORDs.
+pub fn cvt(values: &[i16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in values {
+        push_i16(&mut out, *value);
+    }
+    out
+}
+
 // ---- The specification's arithmetic, a second time -------------------------
 
 /// The overview chapter's normalisation and interpolation, transcribed from
@@ -441,5 +666,53 @@ pub mod spec {
     /// A 16.16 value rounded to whole units, a half rounding up.
     pub fn round_units(value: i64) -> i64 {
         nearest(i128::from(value), 65_536) as i64
+    }
+
+    /// The `cvt ` values at 2.14 coordinates, in 16.16, as the `cvar` and
+    /// overview chapters compute them from the tables a test stated: each
+    /// default plus, for every table, its region's scalar times its delta for
+    /// each index it lists, an index past the `cvt ` moving nothing.
+    pub fn cvt_at(
+        defaults: &[i16],
+        shared_points: Option<&super::Points>,
+        tuples: &[super::TupleSpec],
+        coordinates: &[i16],
+    ) -> Vec<i64> {
+        let mut values: Vec<i64> = defaults.iter().map(|v| i64::from(*v) * 65_536).collect();
+        for tuple in tuples {
+            let scalar = region_scalar(&tuple.region(), coordinates);
+            let points = tuple
+                .points
+                .as_ref()
+                .or(shared_points)
+                .expect("private or shared points");
+            let indices: Vec<usize> = match points {
+                super::Points::All => (0..defaults.len()).collect(),
+                super::Points::Listed(numbers) => numbers.iter().map(|n| usize::from(*n)).collect(),
+            };
+            assert_eq!(indices.len(), tuple.deltas.len(), "a delta an index");
+            for (index, delta) in indices.into_iter().zip(&tuple.deltas) {
+                if let Some(value) = values.get_mut(index) {
+                    *value += scalar * i64::from(*delta);
+                }
+            }
+        }
+        values
+    }
+
+    /// The overview's normalisation of user values on axes stated as
+    /// `(min, default, max)`, with no `avar`.
+    pub fn location(axes: &[(f64, f64, f64)], user: &[f64]) -> Vec<i16> {
+        axes.iter()
+            .zip(user)
+            .map(|((min, default, max), value)| {
+                to_f2dot14(default_normalised(
+                    user_fixed(*min),
+                    user_fixed(*default),
+                    user_fixed(*max),
+                    user_fixed(*value),
+                ))
+            })
+            .collect()
     }
 }

@@ -10,12 +10,17 @@
 
 mod variable_support;
 
+use tinker_pdf_font::variation::cvar::{cvt_at, Cvar};
+use tinker_pdf_font::variation::tuple::{
+    unpack_deltas, unpack_points, PointNumbers, SharedTuples, TupleStore,
+};
 use tinker_pdf_font::variation::{
     AxisValueMap, DesignSpace, Fixed, Instance, Location, UserCoordinate, VariationError, MAX_AXES,
 };
 use tinker_pdf_font::Sfnt;
 use variable_support::{
-    avar, f2dot14, fvar, fvar_with_sizes, identity_map, spec, AxisSpec, Face, InstanceSpec,
+    avar, cvar, cvt, f2dot14, fvar, fvar_with_sizes, identity_map, pack_deltas, pack_points, spec,
+    tuple_store, AxisSpec, Face, InstanceSpec, Points, TupleSpec,
 };
 
 // ---- The design space (FT-05.2) --------------------------------------------
@@ -706,4 +711,496 @@ fn test_gpos_four_reads_as_a_second_reader_decodes_it() {
         let location = space.location(&Instance::Named(index)).expect("a location");
         assert_eq!(location.coordinates(), expected, "named instance {index}");
     }
+}
+
+// ---- The tuple variation store and cvar (FT-05.3) ----------------------------
+
+/// The `cvt ` the cvar tests vary: ten FWORDs, the ends of the range among
+/// them.
+fn cvt_defaults() -> Vec<i16> {
+    vec![120, -40, 0, 700, 1_500, -1_500, 33, 32_767, -32_768, 5]
+}
+
+/// The shared point numbers several tables take.
+fn shared_points() -> Points {
+    Points::Listed(vec![0, 3, 4, 7, 9])
+}
+
+/// Tables of every shape a region takes: a peak at the weight's maximum with
+/// the width's peak zero; one at its minimum, moving every entry; a corner;
+/// an intermediate region; a peak at the width's minimum. Private points
+/// repeat a number and name one past the `cvt `; words and bytes and zeros
+/// all appear among the deltas.
+fn cvar_tuples() -> Vec<TupleSpec> {
+    vec![
+        TupleSpec::new(&[16_384, 0], None, &[10, -20, 30, 400, -5]),
+        TupleSpec::new(
+            &[-16_384, 0],
+            Some(Points::All),
+            &[3, 6, 9, 12, 15, 18, 21, -24, 27, 0],
+        ),
+        TupleSpec::new(
+            &[8_192, 16_384],
+            Some(Points::Listed(vec![1, 1, 2, 12])),
+            &[7, 8, -9, 1_000],
+        ),
+        TupleSpec::new(
+            &[8_192, -8_192],
+            Some(Points::Listed(vec![5, 6])),
+            &[-300, 250],
+        )
+        .between(&[4_096, -16_384], &[16_384, 0]),
+        TupleSpec::new(&[0, -16_384], None, &[1_000, -1_000, 2, 3, 0]),
+    ]
+}
+
+fn cvar_face() -> Vec<u8> {
+    Face::truetype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"cvt ", cvt(&cvt_defaults()))
+        .with(*b"cvar", cvar(Some(&shared_points()), &cvar_tuples()))
+        .build()
+}
+
+/// The axes the cvar tests normalise against, as `(min, default, max)`.
+fn axis_ranges() -> Vec<(f64, f64, f64)> {
+    two_axes()
+        .iter()
+        .map(|axis| (axis.min, axis.default, axis.max))
+        .collect()
+}
+
+#[test]
+fn a_tuples_scalar_is_the_product_of_its_axis_factors() {
+    let table = cvar(Some(&shared_points()), &cvar_tuples());
+    let parsed = Cvar::parse(&table, 2).expect("a cvar");
+    let tuples = parsed.store().tuples().expect("its tables");
+    assert_eq!(tuples.len(), 5);
+    let grid = [
+        -16_384, -12_288, -8_192, -6_000, -4_096, -1, 0, 1, 4_096, 6_000, 8_192, 12_288, 16_384,
+    ];
+    for (tuple, stated) in tuples.iter().zip(cvar_tuples()) {
+        let region: Vec<(i16, i16, i16)> = tuple
+            .region()
+            .iter()
+            .map(|axis| (axis.start, axis.peak, axis.end))
+            .collect();
+        assert_eq!(region, stated.region(), "the region the table states");
+        for weight in grid {
+            for width in grid {
+                let location = Location::new(vec![weight, width]);
+                assert_eq!(
+                    tuple.scalar(&location).bits(),
+                    spec::region_scalar(&stated.region(), &[weight, width]),
+                    "peak {:?} at ({weight}, {width})",
+                    stated.peak
+                );
+            }
+        }
+    }
+    let at = |w: i16, d: i16| Location::new(vec![w, d]);
+    // A zero peak ignores its axis: the weight's maximum moves fully at any
+    // width.
+    assert_eq!(tuples[0].scalar(&at(16_384, -16_384)), Fixed::ONE);
+    assert_eq!(
+        tuples[0].scalar(&at(8_192, 16_384)),
+        Fixed::from_bits(32_768)
+    );
+    // Out of the region on one axis is out of it altogether.
+    assert_eq!(tuples[0].scalar(&at(-1, 0)), Fixed::ZERO);
+    assert_eq!(tuples[2].scalar(&at(8_192, -1)), Fixed::ZERO);
+    // A corner: the product of two halves is a quarter.
+    assert_eq!(
+        tuples[2].scalar(&at(4_096, 8_192)),
+        Fixed::from_bits(16_384)
+    );
+    // The intermediate region: rising on the weight, falling on the width.
+    assert_eq!(
+        tuples[3].intermediate().map(|(start, _)| start.to_vec()),
+        Some(vec![4_096, -16_384])
+    );
+    assert_eq!(
+        tuples[3].scalar(&at(6_144, -8_192)),
+        Fixed::from_bits(32_768)
+    );
+    assert_eq!(
+        tuples[3].scalar(&at(8_192, -4_096)),
+        Fixed::from_bits(32_768)
+    );
+    assert_eq!(
+        tuples[3].scalar(&at(4_096, -8_192)),
+        Fixed::ZERO,
+        "at its start"
+    );
+    assert_eq!(
+        tuples[3].scalar(&at(16_384, -8_192)),
+        Fixed::ZERO,
+        "at its end"
+    );
+}
+
+#[test]
+fn packed_point_numbers_and_deltas_decode_in_every_run_form() {
+    // Point numbers: byte runs, word runs and the two mixed, a one-byte and
+    // a two-byte count, a repeated number, and runs cut at 128.
+    let lists: Vec<Vec<u16>> = vec![
+        vec![0],
+        vec![1, 2, 3, 200, 455],
+        vec![300, 301, 1_000, 1_001, 60_000],
+        vec![4, 4, 4, 9],
+        (0..129).collect(),
+        (0..300).map(|n| n * 3).collect(),
+        (0..140).map(|n| n * 300).collect(),
+        Vec::new(),
+    ];
+    for numbers in lists {
+        let packed = pack_points(&Points::Listed(numbers.clone()));
+        let (points, used) = unpack_points(&packed).expect("decodes");
+        assert_eq!(points, PointNumbers::Listed(numbers.clone()), "{numbers:?}");
+        assert_eq!(used, packed.len(), "and stops where they end");
+        // Followed by other data, they still stop where they end.
+        let mut longer = packed.clone();
+        longer.extend_from_slice(&[0xAB, 0xCD]);
+        assert_eq!(unpack_points(&longer).expect("decodes").1, packed.len());
+    }
+    assert_eq!(
+        unpack_points(&pack_points(&Points::All)),
+        Ok((PointNumbers::All, 1))
+    );
+
+    // Deltas: zeros, bytes at both ends of their range, words at both ends
+    // of theirs and just past a byte's, runs cut at 64, and the mixture.
+    let streams: Vec<Vec<i32>> = vec![
+        vec![0; 65],
+        vec![-128, 127, 1, -1],
+        vec![128, -129, 32_767, -32_768],
+        (0..200).map(|n| (n % 7) - 3).collect(),
+        (0..150).map(|n| n * 211 - 15_000).collect(),
+        vec![0, 0, 5, 0, -300, 300, 0, 0, 0, 12],
+    ];
+    for deltas in streams {
+        let packed = pack_deltas(&deltas);
+        let (decoded, used) = unpack_deltas(&packed, deltas.len()).expect("decodes");
+        assert_eq!(decoded, deltas);
+        assert_eq!(used, packed.len());
+    }
+    // The chapter's own example.
+    let example = [
+        0x03, 0x0A, 0x97, 0x00, 0xC6, 0x87, 0x41, 0x10, 0x22, 0xFB, 0x34,
+    ];
+    let (decoded, _) = unpack_deltas(&example, 14).expect("the example");
+    assert_eq!(
+        decoded,
+        vec![10, -105, 0, -58, 0, 0, 0, 0, 0, 0, 0, 0, 4_130, -1_228]
+    );
+
+    // And through a store: one table at its peak moves each entry by exactly
+    // its packed delta.
+    let deltas: Vec<i32> = vec![-128, 127, 0, 32_767, -32_768, 300, 0, 0, -1, 9];
+    let table = cvar(
+        None,
+        &[TupleSpec::new(&[16_384, 0], Some(Points::All), &deltas)],
+    );
+    let parsed = Cvar::parse(&table, 2).expect("a cvar");
+    let defaults = vec![0i16; 10];
+    let values = parsed
+        .apply(&cvt(&defaults), &Location::new(vec![16_384, 0]))
+        .expect("values");
+    let moved: Vec<i64> = values.iter().map(|v| v.bits() / 65_536).collect();
+    assert_eq!(
+        moved,
+        deltas.iter().map(|d| i64::from(*d)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_all_points_form_covers_every_point() {
+    let defaults = cvt_defaults();
+    let deltas: Vec<i32> = (0..10).map(|n| n * 2 + 1).collect();
+    // Once as private points, once as the shared ones two tables take.
+    for (shared, tuples) in [
+        (
+            None,
+            vec![TupleSpec::new(&[16_384, 0], Some(Points::All), &deltas)],
+        ),
+        (
+            Some(Points::All),
+            vec![
+                TupleSpec::new(&[16_384, 0], None, &deltas),
+                TupleSpec::new(&[0, 16_384], None, &deltas),
+            ],
+        ),
+    ] {
+        let table = cvar(shared.as_ref(), &tuples);
+        let parsed = Cvar::parse(&table, 2).expect("a cvar");
+        let stored = parsed.store().tuples().expect("tables");
+        assert!(stored.iter().all(|t| *t.points() == PointNumbers::All));
+        for coordinates in [[16_384, 0], [8_192, 0], [16_384, 16_384], [4_096, 12_288]] {
+            let values = parsed
+                .apply(&cvt(&defaults), &Location::new(coordinates.to_vec()))
+                .expect("values");
+            let expected = spec::cvt_at(&defaults, shared.as_ref(), &tuples, &coordinates);
+            assert_eq!(
+                values.iter().map(|v| v.bits()).collect::<Vec<_>>(),
+                expected
+            );
+            if coordinates == [16_384, 0] {
+                for (index, value) in values.iter().enumerate() {
+                    assert_ne!(
+                        value.bits(),
+                        i64::from(defaults[index]) * 65_536,
+                        "entry {index} moved"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_cvt_at_an_instance_is_the_default_plus_the_scaled_deltas() {
+    let face = cvar_face();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let ranges = axis_ranges();
+    let check = |instance: &Instance, user: [f64; 2]| {
+        let coordinates = spec::location(&ranges, &user);
+        let location = space.location(instance).expect("a location");
+        assert_eq!(location.coordinates(), coordinates);
+        let values = cvt_at(&sfnt, &space, &location).expect("the cvt");
+        let expected = spec::cvt_at(
+            &cvt_defaults(),
+            Some(&shared_points()),
+            &cvar_tuples(),
+            &coordinates,
+        );
+        assert_eq!(
+            values.iter().map(|v| v.bits()).collect::<Vec<_>>(),
+            expected,
+            "at {user:?}"
+        );
+    };
+    // Every named instance.
+    for (index, stated) in six_instances().iter().enumerate() {
+        let index = u16::try_from(index).expect("few");
+        let user = [stated.coordinates[0], stated.coordinates[1]];
+        check(&Instance::Named(index), user);
+    }
+    // And coordinates no instance names, on and off 2.14's grid.
+    for weight in [
+        100.0, 150.0, 250.0, 333.25, 400.0, 555.5, 650.0, 800.0, 900.0,
+    ] {
+        for width in [50.0, 62.5, 80.0, 100.0, 133.333, 200.0] {
+            let instance = Instance::User(vec![
+                UserCoordinate::new(*b"wght", weight),
+                UserCoordinate::new(*b"wdth", width),
+            ]);
+            check(&instance, [weight, width]);
+        }
+    }
+    // The default instance is the defaults.
+    let values = cvt_at(&sfnt, &space, &space.default_location()).expect("the cvt");
+    let defaults: Vec<i64> = cvt_defaults()
+        .iter()
+        .map(|v| i64::from(*v) * 65_536)
+        .collect();
+    assert_eq!(
+        values.iter().map(|v| v.bits()).collect::<Vec<_>>(),
+        defaults
+    );
+}
+
+#[test]
+fn a_face_without_cvar_or_variation_keeps_its_cvt() {
+    let defaults: Vec<i64> = cvt_defaults()
+        .iter()
+        .map(|v| i64::from(*v) * 65_536)
+        .collect();
+    // No cvar.
+    let face = Face::truetype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"cvt ", cvt(&cvt_defaults()))
+        .build();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let location = Location::new(vec![16_384, 16_384]);
+    let values = cvt_at(&sfnt, &space, &location).expect("the cvt");
+    assert_eq!(
+        values.iter().map(|v| v.bits()).collect::<Vec<_>>(),
+        defaults
+    );
+    // A cvar in a face that does not vary is ignored, as the fvar chapter
+    // has it.
+    let face = Face::truetype()
+        .with(*b"cvt ", cvt(&cvt_defaults()))
+        .with(*b"cvar", vec![0xFF; 6])
+        .build();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("no axes");
+    let values = cvt_at(&sfnt, &space, &location).expect("the cvt");
+    assert_eq!(
+        values.iter().map(|v| v.bits()).collect::<Vec<_>>(),
+        defaults
+    );
+    // No cvt at all: nothing to vary.
+    let face = Face::truetype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"cvar", cvar(Some(&shared_points()), &cvar_tuples()))
+        .build();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    assert_eq!(cvt_at(&sfnt, &space, &location), Ok(Vec::new()));
+}
+
+#[test]
+fn hostile_tuple_stores_are_refused_by_name() {
+    let location = Location::new(vec![16_384, 0]);
+    let cvt_bytes = cvt(&cvt_defaults());
+    let apply = |table: &[u8]| -> Result<Vec<Fixed>, VariationError> {
+        Cvar::parse(table, 2)?.apply(&cvt_bytes, &location)
+    };
+    let good = cvar(Some(&shared_points()), &cvar_tuples());
+    assert!(apply(&good).is_ok());
+
+    assert_eq!(
+        apply(&good[..3]).err(),
+        Some(VariationError::HeaderPastEnd { table: *b"cvar" })
+    );
+    let mut version = good.clone();
+    version[0..2].copy_from_slice(&3u16.to_be_bytes());
+    assert_eq!(
+        apply(&version).err(),
+        Some(VariationError::UnknownVersion {
+            table: *b"cvar",
+            major: 3,
+            minor: 0
+        })
+    );
+    assert_eq!(
+        apply(&good[..6]).err(),
+        Some(VariationError::TupleHeadersPastEnd)
+    );
+    let mut offset = good.clone();
+    offset[6..8].copy_from_slice(&0x7FFFu16.to_be_bytes());
+    assert_eq!(
+        apply(&offset).err(),
+        Some(VariationError::TupleHeadersPastEnd)
+    );
+
+    // A peak cvar does not embed names a shared tuple, of which it has none.
+    let mut not_embedded = TupleSpec::new(&[16_384, 0], Some(Points::All), &[1; 10]);
+    not_embedded.shared_peak = Some(3);
+    assert_eq!(
+        apply(&cvar(None, &[not_embedded])).err(),
+        Some(VariationError::SharedTupleIndex { index: 3, count: 0 })
+    );
+    // A table with no points of its own in a store with no shared ones.
+    assert_eq!(
+        apply(&cvar(None, &[TupleSpec::new(&[16_384, 0], None, &[1, 2])])).err(),
+        Some(VariationError::NoPointNumbers { tuple: 0 })
+    );
+    // A data size past the store's end.
+    let mut oversized = cvar(
+        None,
+        &[TupleSpec::new(&[16_384, 0], Some(Points::All), &[1; 10])],
+    );
+    oversized[8..10].copy_from_slice(&0x0FFFu16.to_be_bytes());
+    assert_eq!(
+        apply(&oversized).err(),
+        Some(VariationError::TupleDataPastEnd { tuple: 0 })
+    );
+    // Deltas fewer than their points, and a run past their count.
+    let short = cvar(
+        None,
+        &[TupleSpec::new(
+            &[16_384, 0],
+            Some(Points::Listed(vec![0, 1, 2])),
+            &[1, 2],
+        )],
+    );
+    assert_eq!(apply(&short).err(), Some(VariationError::DeltasPastEnd));
+    let long = cvar(
+        None,
+        &[TupleSpec::new(
+            &[16_384, 0],
+            Some(Points::Listed(vec![0])),
+            &[1, 2, 3],
+        )],
+    );
+    assert_eq!(apply(&long).err(), Some(VariationError::DeltaRunsOverrun));
+    // Shared points that do not decode: the flag set over a store whose
+    // serialized data is a two-byte count with no runs after it.
+    let mut table = vec![0, 1, 0, 0];
+    table.extend(tuple_store(
+        4,
+        None,
+        &[TupleSpec::new(&[16_384, 0], Some(Points::All), &[])],
+    ));
+    table[4..6].copy_from_slice(&0x8001u16.to_be_bytes());
+    let data_at = usize::from(u16::from_be_bytes([table[6], table[7]]));
+    table.truncate(data_at);
+    table.extend_from_slice(&[0x80, 0x05]);
+    assert_eq!(apply(&table).err(), Some(VariationError::PointsPastEnd));
+    // The refusal is the table's, whatever the location: a table whose
+    // scalar is zero is decoded all the same.
+    assert_eq!(
+        Cvar::parse(&long, 2)
+            .expect("parses")
+            .apply(&cvt_bytes, &Location::new(vec![-16_384, 0]))
+            .err(),
+        Some(VariationError::DeltaRunsOverrun)
+    );
+}
+
+#[test]
+fn every_truncation_and_byte_change_of_a_cvar_is_read_or_refused_without_panicking() {
+    let good = cvar(Some(&shared_points()), &cvar_tuples());
+    let cvt_bytes = cvt(&cvt_defaults());
+    let location = Location::new(vec![8_192, -4_096]);
+    for cut in 0..=good.len() {
+        if let Ok(parsed) = Cvar::parse(&good[..cut], 2) {
+            let _ = parsed.apply(&cvt_bytes, &location);
+        }
+    }
+    for at in 0..good.len() {
+        for value in [0x00, 0x01, 0x7F, 0x80, 0xC0, 0xFF] {
+            let mut bytes = good.clone();
+            bytes[at] = value;
+            if let Ok(parsed) = Cvar::parse(&bytes, 2) {
+                let _ = parsed.apply(&cvt_bytes, &location);
+                let _ = parsed.apply(&cvt_bytes[..7], &location);
+            }
+        }
+    }
+}
+
+#[test]
+fn gvars_shared_tuples_give_a_peak_by_index() {
+    // A shared tuple array that does not fit its count is refused.
+    assert_eq!(
+        SharedTuples::new(&[0; 7], 2, 2).err(),
+        Some(VariationError::SharedTuplesPastEnd { count: 2 })
+    );
+    let shared = SharedTuples::new(&[0x40, 0, 0xC0, 0], 1, 2).expect("one tuple");
+    assert_eq!(shared.len(), 1);
+    assert_eq!(shared.get(0), Some(vec![16_384, -16_384]));
+    assert_eq!(shared.get(1), None);
+    let mut by_index = TupleSpec::new(&[], Some(Points::All), &[5; 10]);
+    by_index.shared_peak = Some(0);
+    let mut past = TupleSpec::new(&[], Some(Points::All), &[5; 10]);
+    past.shared_peak = Some(1);
+    let store_bytes = tuple_store(0, None, &[by_index]);
+    let store = TupleStore::parse(&store_bytes, 0, 2, shared).expect("a store");
+    let tuples = store.tuples().expect("one table");
+    assert_eq!(tuples[0].peak(), [16_384, -16_384]);
+    assert_eq!(
+        tuples[0].scalar(&Location::new(vec![8_192, -8_192])),
+        Fixed::from_bits(16_384)
+    );
+    let store_bytes = tuple_store(0, None, &[past]);
+    let store = TupleStore::parse(&store_bytes, 0, 2, shared).expect("a store");
+    assert_eq!(
+        store.tuples().err(),
+        Some(VariationError::SharedTupleIndex { index: 1, count: 1 })
+    );
 }

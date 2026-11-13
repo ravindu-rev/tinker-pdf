@@ -382,7 +382,26 @@ refused by name (`VariationError`): more than 64 axes, an axis record under
 twenty bytes, axes, named instances or a segment map past the table's end, an
 instance record too small for its coordinates, an axis whose default lies
 outside its range, an `avar` whose axis count is not `fvar`'s, and a version
-neither chapter defines. Reading a design space varies no outline or metric by
+neither chapter defines.
+
+`variation::tuple` reads the tuple variation store `gvar` and `cvar` share:
+each table's peak, embedded or one of `gvar`'s shared tuples, its
+intermediate start and end, its private or the store's shared point numbers —
+a first byte of zero meaning every item — and its packed deltas, one stream
+of zeros, bytes and words. A table's scalar is the product of its axes'
+scalars in `fvar`'s order, each a 16.16 value the overview's pseudo-code
+gives — one for an axis whose peak is zero or whose region is not valid for
+it, zero outside its start and end — and each product rounded as the
+normalisation rounds. `variation::cvar::cvt_at` gives a face's `cvt ` values
+at a `Location` in 16.16: each FWORD plus every table's scalar times its delta
+for that index, an index past the `cvt ` moving nothing; a face with no
+`cvar`, or one that does not vary, keeps its values. Every table's deltas are
+decoded wherever its scalar is zero too, so a store is refused or read the
+same at every location. Refused by name: a header or a table's data past the
+store, a shared tuple index past the shared tuples — every index in `cvar`,
+which must embed its peaks — a table with no point numbers of its own in a
+store with none shared, and point numbers or deltas that end early, run past
+their count or add up past 65 535. The varied `cvt ` reaches no page by
 itself.
 
 ## API
@@ -1199,7 +1218,14 @@ corpora already vendored here. So every name stays on the list.
   two axes and thirty-six named instances, each instance's location as the
   specification computes it. `src/variation.rs`'s unit tests hold the
   conversion, each rounding and every branch of the region scalar's
-  pseudo-code, and the overview's own normalisation and `avar` examples.
+  pseudo-code, and the overview's own normalisation and `avar` examples. The
+  tuple store's tests: each table's scalar against the specification's over a
+  grid of locations (peak, intermediate, out-of-region and zero-peak axes),
+  point numbers and deltas in every run form a packer in the test writes and
+  the chapter's own examples, the all-points form, private and shared points,
+  `gvar`'s shared tuples by index, the `cvt ` at every named instance and at
+  coordinates no instance names equal to the defaults plus the deltas the
+  test scales, and every refusal by name.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it
