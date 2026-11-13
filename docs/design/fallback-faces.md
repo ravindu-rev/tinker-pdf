@@ -261,8 +261,10 @@ reference, which is what the seam reads as an embedded program. A font that
 embeds a program, an `Identity` ordering, another registry and a simple font
 are not `cjk`. The record's version does not move, since the runner reads
 every `cap` line by its name, whatever the name. `corpus-run` counts, per
-capability, the files that rendered with something reported, which is the
-figure FT-01's exit falls from.
+capability, the files that rendered with something reported, prints them
+beside the capability table and records them in each bar as
+`degraded_capabilities`, held as `degraded` is: the `cjk` count is the figure
+FT-01's exit falls from.
 
 ## Milestones
 

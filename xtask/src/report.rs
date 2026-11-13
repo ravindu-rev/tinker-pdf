@@ -83,6 +83,29 @@ impl CorpusReport {
         out
     }
 
+    /// How many of the files carrying each capability rendered with
+    /// something reported: [`CorpusReport::degraded`], cut by what the files'
+    /// objects need, so a row whose capability has its own files — FT-01's
+    /// `cjk` — can say whether its work lowered their figure.
+    ///
+    /// Every capability [`CorpusReport::capabilities`] counts has an entry,
+    /// at zero where none of its files reported anything, so a bar records
+    /// each one's figure beside its file count and a later run can be held
+    /// to it.
+    pub fn degraded_capabilities(&self) -> BTreeMap<String, u64> {
+        let mut out: BTreeMap<String, u64> = self
+            .capabilities()
+            .into_keys()
+            .map(|capability| (capability, 0))
+            .collect();
+        for file in self.files.iter().filter(|file| file.degraded()) {
+            for capability in &file.capabilities {
+                *out.entry(capability.clone()).or_default() += 1;
+            }
+        }
+        out
+    }
+
     /// How many files the strict pass ran on (ruling 13).
     ///
     /// A file is eligible when this engine read it cleanly and could rewrite
@@ -631,6 +654,15 @@ impl Run {
                 ),
             ),
             (
+                "degraded_capabilities",
+                Json::object(
+                    corpus
+                        .degraded_capabilities()
+                        .into_iter()
+                        .map(|(k, v)| (k, Json::count(v))),
+                ),
+            ),
+            (
                 "warnings",
                 Json::object(
                     corpus
@@ -675,6 +707,17 @@ impl Run {
                         Json::object(
                             corpus
                                 .capabilities()
+                                .into_iter()
+                                .map(|(k, v)| (k, Json::count(v))),
+                        ),
+                    ),
+                    // FT-01.6: the second axis per capability, a count beside
+                    // the capability's own, which is its denominator.
+                    (
+                        "degraded_capabilities",
+                        Json::object(
+                            corpus
+                                .degraded_capabilities()
                                 .into_iter()
                                 .map(|(k, v)| (k, Json::count(v))),
                         ),
@@ -990,7 +1033,8 @@ impl Run {
         )
     }
 
-    pub fn capability_table(&self) -> String {
+    /// Every capability any corpus's files carry, sorted.
+    fn capability_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for corpus in &self.corpora {
             for name in corpus.capabilities().keys() {
@@ -1000,6 +1044,11 @@ impl Run {
             }
         }
         names.sort();
+        names
+    }
+
+    pub fn capability_table(&self) -> String {
+        let names = self.capability_names();
 
         let mut out = String::from("| Corpus | Files |");
         for name in &names {
@@ -1036,6 +1085,61 @@ impl Run {
                 (count as f64) * 100.0 / (all as f64)
             };
             out.push_str(&format!(" **{count}** ({share:.1}%) |"));
+        }
+        out.push('\n');
+        out
+    }
+
+    /// **The files that rendered with something reported, by capability**
+    /// (FT-01.6), printed beside [`Run::capability_table`] in its layout: per
+    /// corpus, its degraded files and, for each capability, how many of the
+    /// files carrying it are among them, as `degraded of carrying`; then a
+    /// total row with each capability's share. Empty where no file carries a
+    /// capability, since a table of nothing is noise in a run's log.
+    pub fn degraded_capability_table(&self) -> String {
+        let names = self.capability_names();
+        if names.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::from("| Corpus | Degraded |");
+        for name in &names {
+            out.push_str(&format!(" {name} |"));
+        }
+        out.push_str("\n| --- | ---: |");
+        for _ in &names {
+            out.push_str(" ---: |");
+        }
+        out.push('\n');
+
+        let mut totals: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        let mut all = 0u64;
+        for corpus in &self.corpora {
+            let carrying = corpus.capabilities();
+            let degraded = corpus.degraded_capabilities();
+            all += corpus.degraded();
+            out.push_str(&format!("| `{}` | {} |", corpus.name, corpus.degraded()));
+            for name in &names {
+                let count = degraded.get(name).copied().unwrap_or(0);
+                let of = carrying.get(name).copied().unwrap_or(0);
+                let total = totals.entry(name.clone()).or_default();
+                total.0 += count;
+                total.1 += of;
+                out.push_str(&format!(" {count} of {of} |"));
+            }
+            out.push('\n');
+        }
+        out.push_str(&format!("| **all** | **{all}** |"));
+        for name in &names {
+            let (count, of) = totals.get(name).copied().unwrap_or((0, 0));
+            // For reading, as the capability table's share is: what a bar
+            // holds is the two counts, cross-multiplied.
+            let share = if of == 0 {
+                0.0
+            } else {
+                (count as f64) * 100.0 / (of as f64)
+            };
+            out.push_str(&format!(" **{count} of {of}** ({share:.1}%) |"));
         }
         out.push('\n');
         out
@@ -1260,6 +1364,85 @@ mod tests {
         let hits = run().corpora[0].capabilities();
         assert_eq!(hits["jbig2"], 1);
         assert_eq!(hits["jpx"], 1);
+    }
+
+    /// **Degraded files are counted per capability** (FT-01.6): of the files
+    /// carrying each capability, those that rendered with something
+    /// reported, a file counted once under each capability it carries and a
+    /// capability none of whose files reported anything counted at zero. The
+    /// counts go in both documents and in a table beside the capability
+    /// table, each cell `degraded of carrying`, with a total row giving each
+    /// capability's share; a run whose files carry nothing prints no table.
+    #[test]
+    fn degraded_files_are_counted_per_capability() {
+        let mut measured = run();
+        let files = &mut measured.corpora[0].files;
+        files.push(file(
+            "f.pdf",
+            Outcome::Passed,
+            &["render:UnreadableFont"],
+            &["cjk", "iccbased"],
+        ));
+        files.push(file("g.pdf", Outcome::Passed, &[], &["cjk"]));
+        files.push(file(
+            "h.pdf",
+            Outcome::Passed,
+            &["cos:RepairedXref"],
+            &["cjk", "jbig2"],
+        ));
+
+        let corpus = &measured.corpora[0];
+        let degraded = corpus.degraded_capabilities();
+        assert_eq!(degraded["cjk"], 2, "f and h, and not g");
+        assert_eq!(degraded["jbig2"], 2, "b and h");
+        assert_eq!(degraded["iccbased"], 1);
+        assert_eq!(degraded["jpx"], 0, "c carries it and reported nothing");
+        assert_eq!(
+            degraded.keys().collect::<Vec<_>>(),
+            corpus.capabilities().keys().collect::<Vec<_>>(),
+            "an entry for every capability"
+        );
+        assert_eq!(corpus.degraded(), 3, "b, f and h, each once");
+
+        let table = measured.degraded_capability_table();
+        assert!(
+            table.contains("| Corpus | Degraded | cjk | iccbased | jbig2 | jpx |"),
+            "{table}"
+        );
+        assert!(
+            table.contains("| `synthetic` | 3 | 2 of 3 | 1 of 1 | 2 of 2 | 0 of 1 |"),
+            "{table}"
+        );
+        assert!(
+            table.contains("| **all** | **3** | **2 of 3** (66.7%) |"),
+            "{table}"
+        );
+
+        for text in [
+            measured.to_report_json().to_pretty(),
+            measured.to_ratchet_json("n").to_pretty(),
+        ] {
+            let json = crate::json::parse(&text).expect("the document reads");
+            let counts = json
+                .get("corpora")
+                .and_then(Json::as_array)
+                .and_then(|corpora| corpora.first())
+                .and_then(|corpus| {
+                    corpus
+                        .get("degraded_capabilities")
+                        .or_else(|| corpus.get("summary")?.get("degraded_capabilities"))
+                })
+                .expect("the counts per capability");
+            assert_eq!(counts.get("cjk").and_then(Json::as_u64), Some(2), "{text}");
+            assert_eq!(counts.get("jpx").and_then(Json::as_u64), Some(0), "{text}");
+        }
+
+        let mut plain = run();
+        for file in &mut plain.corpora[0].files {
+            file.capabilities.clear();
+        }
+        assert!(plain.corpora[0].degraded_capabilities().is_empty());
+        assert_eq!(plain.degraded_capability_table(), "");
     }
 
     /// The peak is a per-file number in the report and a per-corpus **maximum**

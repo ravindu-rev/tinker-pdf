@@ -519,7 +519,15 @@ The first axis is the pass rate: files whose every page rendered. The second —
 files rendering *with something reported* — is measured without font faces,
 and two more bars say what that costs: `corpus/ratchet-fonts.json` is the same
 files with a synthesised face supplied, and `corpus/ratchet-bundled.json` the
-same files with the Liberation faces the `bundled-fonts` feature ships.
+same files with the Liberation faces the `bundled-fonts` feature ships. A rise
+in it fails a run only under `corpus-run --strict`, and is a note otherwise.
+The second axis is counted per capability too: of the files whose objects need
+each capability `tpdf probe` names (`cap` lines), how many rendered with
+something reported, printed beside the capability table and recorded in a bar
+as `degraded_capabilities`, beside `capabilities`, which is each count's
+denominator. Each is held as the corpus's own share is, cross-multiplied, a
+rise named with its capability; a bar recorded before the counts holds
+nothing per capability and every other axis as before.
 
 The synthetic face is one this repository writes for itself (`cargo xtask
 synth-face`) — every glyph from 32 up a filled box — so it answers *was a face

@@ -511,6 +511,15 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
     println!();
     print!("{}", run.capability_table());
+    // Beside it, the files of each capability that rendered with something
+    // reported (FT-01.6), which a bar holds as it holds `degraded`.
+    let degraded = run.degraded_capability_table();
+    if !degraded.is_empty() {
+        println!();
+        println!("Files rendered with something reported, of the files carrying each capability:");
+        println!();
+        print!("{degraded}");
+    }
     // Only when there is something to attribute: `producer_table` returns an
     // empty string for a run where everything passed.
     let attribution = run.producer_table();

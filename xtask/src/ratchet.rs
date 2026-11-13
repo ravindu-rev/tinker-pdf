@@ -36,7 +36,9 @@
 //! leniency it previously performed in silence makes this number go up, and
 //! that is an improvement in exactly the property ruling 10 is about. Failing
 //! on it would put a standing incentive on not reporting. `--strict` turns it
-//! into a failure for anyone who wants that trade.
+//! into a failure for anyone who wants that trade. The same rate is held per
+//! capability, over the files carrying each, on the same terms
+//! ([`Bar::degraded_capabilities`]).
 //!
 //! ## What is refused rather than compared
 //!
@@ -118,6 +120,17 @@ pub struct Bar {
     /// Empty is an improvement rather than a refusal, for [`Bar::tagged`]'s
     /// reason.
     pub capabilities: BTreeMap<String, u64>,
+    /// How many of the files carrying each capability rendered with something
+    /// reported when the bar was recorded (FT-01.6), or `None` in a bar
+    /// recorded before the counts existed, which compares on every other axis
+    /// as it did.
+    ///
+    /// Held as [`Bar::degraded`] is, as a share, here of the capability's own
+    /// files in [`Bar::capabilities`], cross-multiplied: a share that rises is
+    /// named with its capability, and is a regression only under `--strict`,
+    /// so a row whose work is for a capability's files — a fallback face for
+    /// FT-01's `cjk` — can say whether it lowered their figure.
+    pub degraded_capabilities: Option<BTreeMap<String, u64>>,
     /// The five runs' time figures, or `None` where none were measured for
     /// this corpus.
     pub time: Option<TimeBar>,
@@ -814,6 +827,49 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                     "{}: `{capability}` is newly counted at {count}",
                     bar.name
                 ));
+            }
+        }
+
+        // The second axis by capability (FT-01.6): of the files carrying
+        // each, how many rendered with something reported, held as
+        // `degraded` is — a share of the capability's own files,
+        // cross-multiplied, and a rise a regression only under `--strict`. A
+        // bar recorded before the counts holds nothing here.
+        if let Some(before) = &bar.degraded_capabilities {
+            let now_degraded = corpus.degraded_capabilities();
+            for (capability, degraded_before) in before {
+                let carrying_before = bar.capabilities.get(capability).copied().unwrap_or(0);
+                let carrying = now_capabilities.get(capability).copied().unwrap_or(0);
+                let degraded = now_degraded.get(capability).copied().unwrap_or(0);
+                let left = u128::from(degraded) * u128::from(carrying_before);
+                let right = u128::from(*degraded_before) * u128::from(carrying);
+                let share = format!(
+                    "{}: {degraded}/{carrying} files carrying `{capability}` rendered with warnings",
+                    bar.name
+                );
+                if left > right {
+                    let message = format!("{share}, up from {degraded_before}/{carrying_before}");
+                    if strict {
+                        out.regressions.push(message);
+                    } else {
+                        out.notes
+                            .push(format!("{message} (not a failure; --strict)"));
+                    }
+                } else if left < right {
+                    out.improvements.push(format!(
+                        "{share}, down from {degraded_before}/{carrying_before}"
+                    ));
+                }
+            }
+            for (capability, degraded) in &now_degraded {
+                if !before.contains_key(capability) {
+                    out.notes.push(format!(
+                        "{}: {degraded}/{} files carrying `{capability}` rendered with \
+                         warnings, newly counted",
+                        bar.name,
+                        now_capabilities.get(capability).copied().unwrap_or(0)
+                    ));
+                }
             }
         }
 
@@ -1559,6 +1615,36 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
                 capabilities.insert(capability.clone(), count);
             }
         }
+        // Absent in a bar recorded before the counts per capability, which
+        // compares on every other axis as it did (FT-01.6).
+        let degraded_capabilities = match entry.get("degraded_capabilities") {
+            None => None,
+            Some(object) => {
+                let Json::Object(members) = object else {
+                    return Err(format!(
+                        "`{name}`'s `degraded_capabilities` is not an object"
+                    ));
+                };
+                let mut counts = BTreeMap::new();
+                for (capability, value) in members {
+                    let count = value.as_u64().ok_or_else(|| {
+                        format!(
+                            "`{name}`'s `degraded_capabilities.{capability}` is not a whole number"
+                        )
+                    })?;
+                    let carrying = capabilities.get(capability).copied().unwrap_or(0);
+                    if count > carrying || count > degraded {
+                        return Err(format!(
+                            "`{name}` says {count} of the files carrying `{capability}` \
+                             rendered with warnings, where {carrying} carry it and \
+                             {degraded} rendered with warnings in all"
+                        ));
+                    }
+                    counts.insert(capability.clone(), count);
+                }
+                Some(counts)
+            }
+        };
 
         let mut outcomes: BTreeMap<String, u64> = BTreeMap::new();
         if let Some(object) = entry.get("outcomes") {
@@ -1688,6 +1774,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             broke_on,
             tagged,
             capabilities,
+            degraded_capabilities,
             peak,
             peak_unheld,
             time,
@@ -1947,6 +2034,7 @@ mod tests {
                 broke_on: BTreeMap::new(),
                 tagged: None,
                 capabilities: BTreeMap::new(),
+                degraded_capabilities: None,
                 peak: None,
                 peak_unheld: None,
                 time: None,
@@ -3243,6 +3331,146 @@ mod tests {
             "{:?}",
             out.improvements
         );
+    }
+
+    /// `run("pdfjs", 10, 0, degraded)` with its first `carrying` files
+    /// carrying `cjk`.
+    fn cjk_run(degraded: u64, carrying: usize) -> Run {
+        let mut now = run("pdfjs", 10, 0, degraded);
+        for file in now.corpora[0].files.iter_mut().take(carrying) {
+            file.capabilities.insert("cjk".to_string());
+        }
+        now
+    }
+
+    /// **A capability whose degraded share rises is named** (FT-01.6). A bar
+    /// whose four `cjk` files had one render with something reported, against
+    /// a run where two of the four do: a note naming the capability and both
+    /// shares, a regression under `--strict`, as the corpus's own share is
+    /// held. The same share over twice the files is no rise, a lower share is
+    /// an improvement, and a capability the bar has no count for is noted as
+    /// newly counted.
+    #[test]
+    fn a_capability_whose_degraded_share_rises_is_named() {
+        let mut committed = bar("pdfjs", 10, 10, 1);
+        committed.bars[0].capabilities.insert("cjk".to_string(), 4);
+        committed.bars[0].degraded_capabilities = Some(BTreeMap::from([("cjk".to_string(), 1)]));
+        let rise = "pdfjs: 2/4 files carrying `cjk` rendered with warnings, up from 1/4";
+
+        let out = compare(&committed, &cjk_run(2, 4), false);
+        assert!(!out.failed(), "a rise is a note without --strict: {out:#?}");
+        assert!(
+            out.notes
+                .iter()
+                .any(|note| note.starts_with(rise) && note.contains("--strict")),
+            "{:?}",
+            out.notes
+        );
+        let out = compare(&committed, &cjk_run(2, 4), true);
+        assert!(
+            out.regressions.iter().any(|regression| regression == rise),
+            "{:?}",
+            out.regressions
+        );
+
+        let same = compare(&committed, &cjk_run(2, 8), true);
+        assert!(
+            !same
+                .regressions
+                .iter()
+                .chain(&same.improvements)
+                .chain(&same.notes)
+                .any(|line| line.contains("files carrying `cjk`")),
+            "2 of 8 is 1 of 4: {same:#?}"
+        );
+
+        let fall = compare(&committed, &cjk_run(0, 4), true);
+        assert!(!fall.failed(), "{:?}", fall.regressions);
+        assert!(
+            fall.improvements.iter().any(|line| line
+                == "pdfjs: 0/4 files carrying `cjk` rendered with warnings, down from 1/4"),
+            "{:?}",
+            fall.improvements
+        );
+
+        let mut newly = cjk_run(1, 4);
+        newly.corpora[0].files[0]
+            .capabilities
+            .insert("jbig2".to_string());
+        let out = compare(&committed, &newly, true);
+        assert!(
+            out.notes.iter().any(|note| note
+                == "pdfjs: 1/1 files carrying `jbig2` rendered with warnings, newly counted"),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// **A bar without capability counts still reads** (FT-01.6): a bar
+    /// written before the counts per capability parses, holds nothing per
+    /// capability — every one of its `cjk` files rendering with something
+    /// reported moves nothing here — and still holds every other axis, the
+    /// corpus's own share among them. A bar written with them reads them back,
+    /// and one whose count passes its capability's files, or is no object, is
+    /// refused.
+    #[test]
+    fn a_bar_without_capability_counts_still_reads() {
+        let text = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"pdfjs","total":10,"passed":10,"degraded":1,
+            "strict_eligible":10,"strict_clean":10,"capabilities":{"cjk":4}}]}"#;
+        let committed = parse(text).expect("a bar without the counts reads");
+        assert_eq!(committed.bars[0].degraded_capabilities, None);
+        assert_eq!(committed.bars[0].capabilities.get("cjk"), Some(&4));
+
+        let out = compare(&committed, &cjk_run(4, 4), true);
+        assert!(
+            !out.regressions
+                .iter()
+                .chain(&out.improvements)
+                .chain(&out.notes)
+                .any(|line| line.contains("files carrying")),
+            "{out:#?}"
+        );
+        assert!(
+            out.regressions
+                .iter()
+                .any(|line| line == "pdfjs: 4/10 rendered with warnings, up from 1/10"),
+            "the corpus's own share is still held: {:?}",
+            out.regressions
+        );
+        assert!(
+            !compare(&committed, &cjk_run(1, 4), true).failed(),
+            "a run as good as the bar holds"
+        );
+
+        let written = cjk_run(3, 4).to_ratchet_json("n").to_pretty();
+        let back = parse(&written).expect("a bar with the counts reads");
+        assert_eq!(
+            back.bars[0].degraded_capabilities,
+            Some(BTreeMap::from([("cjk".to_string(), 3)]))
+        );
+
+        let past = text.replace(
+            r#""capabilities":{"cjk":4}"#,
+            r#""capabilities":{"cjk":4},"degraded_capabilities":{"cjk":5}"#,
+        );
+        assert!(
+            parse(&past).is_err_and(|why| why.contains("`cjk`")),
+            "a count past the capability's files"
+        );
+        let unlisted = text.replace(
+            r#""capabilities":{"cjk":4}"#,
+            r#""capabilities":{"cjk":4},"degraded_capabilities":{"jpx":1}"#,
+        );
+        assert!(
+            parse(&unlisted).is_err(),
+            "a count for a capability the bar does not carry"
+        );
+        let shapeless = text.replace(
+            r#""capabilities":{"cjk":4}"#,
+            r#""capabilities":{"cjk":4},"degraded_capabilities":3"#,
+        );
+        assert!(parse(&shapeless).is_err(), "no object");
     }
 
     /// A bar recorded before this axis existed compares against nothing.
