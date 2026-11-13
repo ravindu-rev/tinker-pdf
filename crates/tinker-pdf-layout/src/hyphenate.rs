@@ -33,7 +33,7 @@
 //!
 //! # The table, and its walk
 //!
-//! [`compile`] holds the format, the one `build.rs` writes and
+//! `hyphenate/compile.rs` holds the format, the one `build.rs` writes and
 //! [`Dictionary::parse`] builds at run time. Looking a word up walks the
 //! exception path once and otherwise the patterns from each of `.word.`'s
 //! positions, and no walk from one position follows more edges than the
@@ -71,8 +71,75 @@ fn looked_up() {
     LOOKUPS.with(|n| n.set(n.get() + 1));
 }
 
+/// One table this build carries: the vendored dictionary it was compiled
+/// from, and the language tag it is found by.
+#[derive(Debug)]
+pub struct Table {
+    /// The tag the dictionary's tree and file are named by: `en-gb` for
+    /// `data/hyphenation-en-gb/hyph-en-gb.tex`.
+    pub name: &'static str,
+    /// The language tag a content language is looked up against: `en-GB`.
+    pub language: &'static str,
+    /// The compiled dictionary.
+    pub dictionary: &'static Dictionary,
+}
+
+// The registry `build.rs` writes under the feature: one `static` for each
+// vendored dictionary over its four arrays, and `TABLES`.
+#[cfg(feature = "hyphenation")]
+include!(concat!(env!("OUT_DIR"), "/hyphenation.rs"));
+
+/// A build without the `hyphenation` feature carries no table.
+#[cfg(not(feature = "hyphenation"))]
+static TABLES: &[Table] = &[];
+
+/// Every table this build carries, in the order `docs/design/hyphenation.md`
+/// lists them: the eight vendored dictionaries under the `hyphenation`
+/// feature, and none without it.
+#[must_use]
+pub fn tables() -> &'static [Table] {
+    TABLES
+}
+
+/// The dictionary for a content language, or `None` where this build has no
+/// table for it.
+///
+/// RFC 4647 §3.4's lookup: the tag is compared with each table's language,
+/// ASCII-case-insensitively (RFC 5646 §2.1.1), and truncated from the end —
+/// a single-letter subtag going with the subtag after it — until one matches
+/// or nothing is left. `en-GB-oxendict` finds `en-GB`'s table and `pt-BR`
+/// `pt`'s; `en` and `en-US` find none.
+#[must_use]
+pub fn dictionary(language: &str) -> Option<&'static Dictionary> {
+    lookup(language, TABLES).map(|table| table.dictionary)
+}
+
+/// [`dictionary`]'s lookup, over any list of tables.
+fn lookup<'t>(language: &str, tables: &'t [Table]) -> Option<&'t Table> {
+    let mut range = language;
+    while !range.is_empty() {
+        if let Some(table) = tables
+            .iter()
+            .find(|table| table.language.eq_ignore_ascii_case(range))
+        {
+            return Some(table);
+        }
+        let cut = range.rfind('-')?;
+        range = range.get(..cut).unwrap_or("");
+        // RFC 4647 §3.4: a singleton is removed with the subtag after it, so
+        // a range is never left ending in one.
+        while let Some(cut) = range.rfind('-') {
+            if range.len() - cut - 1 != 1 {
+                break;
+            }
+            range = range.get(..cut).unwrap_or("");
+        }
+    }
+    None
+}
+
 /// A compiled hyphenation dictionary: its patterns and exceptions as one trie
-/// in [`compile`]'s four arrays, and its minimums.
+/// in `hyphenate/compile.rs`'s four arrays, and its minimums.
 ///
 /// The arrays are borrowed where the build compiled them into the binary and
 /// owned where [`Dictionary::parse`] built them, one type either way, so a
@@ -130,7 +197,7 @@ impl Dictionary {
 
     /// A dictionary over arrays compiled into the binary: what the registry
     /// `build.rs` writes is made of.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "hyphenation"))]
     pub(crate) const fn from_static(
         (alphabet, nodes, offsets, values): (
             &'static [u8],
@@ -765,6 +832,76 @@ mod tests {
         }
         check(&"ab".repeat(MAX_HYPHENATED_WORD / 2));
         check(&"ABBA".repeat(MAX_HYPHENATED_WORD / 4));
+    }
+
+    /// **A content language finds its table by RFC 4647 §3.4's lookup**:
+    /// case-insensitively, truncated from the end, a singleton going with the
+    /// subtag after it — and only by truncation, so a language never finds a
+    /// table for a longer tag, a region its tag does not name, or a
+    /// separator BCP 47 does not use.
+    #[test]
+    fn a_language_finds_its_table_by_truncation() {
+        let leak = |patterns: &str| -> &'static Dictionary {
+            Box::leak(Box::new(dictionary(patterns, "", (1, 1))))
+        };
+        let tables = [
+            Table {
+                name: "en-gb",
+                language: "en-GB",
+                dictionary: leak("1ba"),
+            },
+            Table {
+                name: "pt",
+                language: "pt",
+                dictionary: leak("1ab"),
+            },
+        ];
+        let found = |tag: &str| lookup(tag, &tables).map(|table| table.name);
+        assert_eq!(found("en-GB"), Some("en-gb"));
+        assert_eq!(found("EN-gb"), Some("en-gb"), "case-insensitively");
+        assert_eq!(found("en-GB-oxendict"), Some("en-gb"));
+        assert_eq!(found("en-GB-x-house"), Some("en-gb"), "the singleton too");
+        assert_eq!(found("pt-BR"), Some("pt"));
+        assert_eq!(found("pt-Latn-BR"), Some("pt"));
+        assert_eq!(found("en"), None, "never a longer tag");
+        assert_eq!(found("en-US"), None, "nor another region");
+        assert_eq!(found("en_GB"), None, "an underscore is not a separator");
+        assert_eq!(found("x-pt"), None, "private use is not Portuguese");
+        assert_eq!(found(""), None);
+        assert_eq!(found("-"), None);
+    }
+
+    /// **The registry is the feature's**: the eight tables under
+    /// `hyphenation`, each found by its own language, and none without it.
+    #[test]
+    fn the_registry_is_the_features() {
+        if cfg!(feature = "hyphenation") {
+            let names: Vec<(&str, &str)> = tables()
+                .iter()
+                .map(|table| (table.name, table.language))
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    ("af", "af"),
+                    ("cu", "cu"),
+                    ("en-gb", "en-GB"),
+                    ("ga", "ga"),
+                    ("nl", "nl"),
+                    ("pl", "pl"),
+                    ("pt", "pt"),
+                    ("sk", "sk"),
+                ]
+            );
+            for table in tables() {
+                let found = super::dictionary(table.language).expect("its own language");
+                assert!(std::ptr::eq(found, table.dictionary), "{}", table.name);
+            }
+        } else {
+            assert!(tables().is_empty());
+        }
+        assert!(super::dictionary("en-US").is_none());
+        assert!(super::dictionary("de").is_none());
     }
 
     /// One look-up counted for each word asked about, whatever it answers.

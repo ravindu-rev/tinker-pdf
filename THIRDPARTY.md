@@ -37,6 +37,14 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-xml/data/encoding-indexes` | The WHATWG Encoding Standard's single-byte indexes and label table, from [whatwg/encoding](https://github.com/whatwg/encoding) at `a985b62` (2026-05-21) | `BSD-3-Clause` |
 | `crates/tinker-pdf-xml/data/html-entities` | HTML's named character references, `entities/out/entities.json` from [whatwg/html-build](https://github.com/whatwg/html-build) at `283a353` (fetched 2026-10-03) | `BSD-3-Clause` |
 | `crates/tinker-pdf-xml/data/html5lib-tests` | [html5lib/html5lib-tests](https://github.com/html5lib/html5lib-tests) `tree-construction/`, `tokenizer/` and `encoding/` at `9329e64` (2026-06-22), the last commit holding the tree-construction tests | `MIT` |
+| `crates/tinker-pdf-layout/data/hyphenation-af` | Afrikaans hyphenation patterns, `hyph-af.tex` of the hyph-utf8 collection, [hyphenation/tex-hyphen](https://github.com/hyphenation/tex-hyphen) at `5684c0f` (fetched 2026-11-13) | `MIT` |
+| `crates/tinker-pdf-layout/data/hyphenation-cu` | Church Slavonic hyphenation patterns, `hyph-cu.tex` of the same collection at the same commit | `MIT` |
+| `crates/tinker-pdf-layout/data/hyphenation-en-gb` | British English hyphenation patterns, `hyph-en-gb.tex` of the same collection at the same commit | `MIT` |
+| `crates/tinker-pdf-layout/data/hyphenation-ga` | Irish hyphenation patterns, `hyph-ga.tex` of the same collection at the same commit, taken under the MIT choice its header offers beside GPL-2.0-or-later | `MIT` |
+| `crates/tinker-pdf-layout/data/hyphenation-nl` | Dutch hyphenation patterns, `hyph-nl.tex` of the same collection at the same commit | `MIT` |
+| `crates/tinker-pdf-layout/data/hyphenation-pl` | Polish hyphenation patterns, `hyph-pl.tex` of the same collection at the same commit, taken under the MIT choice its header offers beside a public-domain notice | `MIT` |
+| `crates/tinker-pdf-layout/data/hyphenation-pt` | Portuguese hyphenation patterns, `hyph-pt.tex` of the same collection at the same commit | `BSD-3-Clause` |
+| `crates/tinker-pdf-layout/data/hyphenation-sk` | Slovak hyphenation patterns, `hyph-sk.tex` of the same collection at the same commit | `MIT` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -390,6 +398,52 @@ not be used in advertising or otherwise to promote the sale, use or other
 dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 ```
+
+### `crates/tinker-pdf-layout/data/hyphenation-*`
+
+Eight hyphenation dictionaries for `hyphens: auto`, each the pattern file of
+one language from the **hyph-utf8** collection the TeX hyphenation project
+publishes in [hyphenation/tex-hyphen](https://github.com/hyphenation/tex-hyphen),
+at commit `5684c0f51c0b81133db2efbe60a408b4155a3ff5` (2026-02-24, fetched
+2026-11-13), from `hyph-utf8/tex/generic/hyph-utf8/patterns/tex/hyph-<tag>.tex`:
+`https://raw.githubusercontent.com/hyphenation/tex-hyphen/5684c0f51c0b81133db2efbe60a408b4155a3ff5/hyph-utf8/tex/generic/hyph-utf8/patterns/tex/hyph-<tag>.tex`.
+Each file is vendored byte for byte — its git blob is the commit's — in a tree
+of its own, because each language's dictionary is its own authors' work under
+its own licence. `build.rs` compiles each, under the `hyphenation` feature
+alone, into the static tables `tinker_pdf_layout::hyphenate` looks words up in
+(`docs/design/hyphenation.md`); nothing under `data/` is opened at run time,
+and the raw files never reach a released binary.
+
+| Tree | File | SHA-256 | Licence its header states | Taken under |
+| --- | --- | --- | --- | --- |
+| `hyphenation-af` | `hyph-af.tex`, Afrikaans, © 2013 Tilla Fick and Chris Swanepoel | `a5de62ec8e5fd38251de838d8ebbdc44b21c76d30e9b486005fbfa641a93abe6` | MIT | `MIT` |
+| `hyphenation-cu` | `hyph-cu.tex`, Church Slavonic, © 2016 Aleksandr Andreev, Mike Kroutikov | `f4636573f2e35ac367159d286bf4b8f65fb68d3bc2712b3e763ad53d498a56ca` | MIT | `MIT` |
+| `hyphenation-en-gb` | `hyph-en-gb.tex`, British English, © 1992, 1996, 2005, 2016 Dominik Wujastyk, Graham Toal | `e95bb4ab350f620c41c231c4785d7bdb4f91949d3e631b30e08b3ead3c340a52` | MIT | `MIT` |
+| `hyphenation-ga` | `hyph-ga.tex`, Irish, © 2004–2015 Kevin P. Scannell | `7856cb341fd978b910c3807aa6918b39791e2f507d803253daccb5c71bbc02c6` | GPL-2.0-or-later or MIT, the reader's choice | `MIT` |
+| `hyphenation-nl` | `hyph-nl.tex`, Dutch, © 1996 Piet Tutelaers | `d21499bfbee53e4d50e867ef92a41fd28b65725d7c91c980e4f8f02889bf6b2a` | MIT, named with its URL | `MIT` |
+| `hyphenation-pl` | `hyph-pl.tex`, Polish, © 1987–1995 Hanna Kołodziejska, Bogusław Jackowski, Marek Ryćko | `83ddbbd21bc06a44bc4f4a4c49c38782e809cff5f026b764c044daa29e818843` | MIT or a public-domain notice, the reader's choice | `MIT` |
+| `hyphenation-pt` | `hyph-pt.tex`, Portuguese, © 1987, 1994, 1996, 2015 Pedro J. de Rezende, 1996, 2015 J. Joao Dias Almeida, 2024 Leonardo Araujo and Aline Benevides | `c110a39e501db372d1d755e1c64464321a2efa7d8e9617f66001000389b941f2` | BSD 3-clause | `BSD-3-Clause` |
+| `hyphenation-sk` | `hyph-sk.tex`, Slovak, © 1992 Jana Chlebíková | `55b51962da5ad3f48ff62007006ecb7768bf2665e407c920e968d08b10b40369` | MIT, named with its URL | `MIT` |
+
+**The licence is inside the file.** The collection ships no licence file of
+its own: each pattern file states its copyright and licence in its header's
+comments, and that header is vendored with it unmodified. `LICENSE` beside
+each file is that statement taken out of the comments — the header's
+copyright line and its licence text, the comment markers and indentation
+removed — so `cargo xtask vendor`'s rule that a tree carries its licence
+beside the data is kept. Where the header offers a choice, `LICENSE` holds the
+licence the tree is taken under; where it names the MIT licence with its URL
+and no text (`hyph-nl.tex`, `hyph-sk.tex`), `LICENSE` holds that licence's
+text, the one the collection's other headers carry, under the file's own
+copyright line.
+
+These eight are every dictionary of the collection that carries a licence
+`deny.toml` admits **and** publishes hyphenated words its patterns can be held
+to — its exception list, which `tests/hyphenation_words.rs` reads from the
+vendored file. The design lists every other language of the collection with
+its licence and the reason it is not here (ruling 18): the American English
+patterns, for one, state an all-permissive notice (`FSFAP`) the allowlist does
+not admit, and are not committed.
 
 ### `crates/tinker-pdf-shape/data/aots`
 

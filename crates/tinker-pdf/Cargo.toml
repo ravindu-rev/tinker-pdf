@@ -26,6 +26,11 @@ cmap-predefined = [
 # carry 4.2 MB of ours. When it is on, the bundled set is asked *after* the
 # host's provider, so turning it on can only add answers.
 bundled-fonts = ["tinker-pdf-font/bundled-fonts"]
+# The eight vendored hyphenation dictionaries `hyphens: auto` breaks words by
+# (`tinker_pdf_layout::hyphenate`, docs/design/hyphenation.md). Off by default
+# for ruling 19's reason: they are locale data, an opt-in profile's; without
+# them `auto` is set as `manual` and counted.
+hyphenation = ["tinker-pdf-layout/hyphenation"]
 
 [dependencies]
 tinker-pdf-cos = { workspace = true }

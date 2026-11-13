@@ -1,7 +1,7 @@
 //! The pattern-file reader and the trie builder.
 //!
 //! One reader for both of its callers: `build.rs` compiles the vendored
-//! dictionaries with it, and [`super::Dictionary::parse`] reads a pattern
+//! dictionaries with it, and `Dictionary::parse` reads a pattern
 //! file with it at run time, so the tables a build carries and the ones a test
 //! builds cannot be read two ways. `build.rs` includes this file **by path**,
 //! which is why nothing here names anything outside it but the standard
@@ -151,7 +151,7 @@ pub enum PatternError {
     },
     /// No minimums: the header states none and the caller gave none.
     NoMinimums,
-    /// More letters than [`MAX_LETTERS`].
+    /// More letters than a dictionary's symbols name: 254.
     TooManyLetters {
         /// How many the patterns and exceptions use.
         letters: usize,

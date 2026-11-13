@@ -217,7 +217,10 @@ reader a test parses with at run time is the one the build compiles with:
   holds a digit or a `.`, or when its word was listed already.
 - The header's `hyphenmins` block gives the minimums from its `typesetting`
   entry; a vendored file without one fails the build.
-- Under the cargo feature, `build.rs` compiles each vendored file, writes its
+- Each vendored file is a tree of its own,
+  `crates/tinker-pdf-layout/data/hyphenation-<tag>/hyph-<tag>.tex` with its
+  `LICENSE`, since each language's dictionary is its own authors' under its
+  own licence. Under the cargo feature, `build.rs` compiles each, writes its
   four arrays to `OUT_DIR` and a registry that includes them with
   `include_bytes!`. Nothing under `data/` is opened at run time, and without
   the feature the dictionaries are neither compiled nor carried.

@@ -15,6 +15,15 @@ description = "Layout, hand-rolled: css-box-3's box model with margin collapsing
 # the default on a machine that has built here.
 exclude = ["target/"]
 
+[features]
+# The eight vendored hyphenation dictionaries (`data/hyphenation-*`,
+# THIRDPARTY.md), compiled by `build.rs` into `hyphenate`'s tables for
+# `hyphens: auto` (`docs/design/hyphenation.md`). Off by default: ruling 19
+# puts locale data beyond the default wasm profile in an opt-in one, and the
+# default build reads no dictionary and carries none.
+default = []
+hyphenation = []
+
 [dependencies]
 # The one internal edge, and the sixth DAG amendment argues it in
 # `xtask/src/main.rs`. Layout matches on the **cascade's** computed style

@@ -219,15 +219,21 @@ book's, measures nothing and is not drawn where no line breaks at it; a line
 that breaks at one is measured with room for a hyphen and draws one there
 (`TextRun::hyphenated`, `paint::hyphenate`); and `none` takes the break
 away, and shows no hyphen where `overflow-wrap` breaks a word just after
-one. `auto` asks for a hyphenation dictionary this build does not carry and
-is refused by value. The hyphenator such a dictionary is read with is
+one. `auto` is refused by value. The hyphenator it asks for is
 `tinker_pdf_layout::hyphenate`: Liang's patterns and exception list compiled
 into one trie, each gap taking the highest level any matching pattern gives
 it and its odd levels the word's points, none inside the dictionary's
 minimums and none before a combining mark, a word with a letter the
 dictionary does not know, or longer than
 `tinker_pdf_layout::limits::MAX_HYPHENATED_WORD`, getting none
-([design/hyphenation.md](../design/hyphenation.md)).
+([design/hyphenation.md](../design/hyphenation.md)). The `hyphenation`
+feature, off by default, compiles eight vendored dictionaries into it —
+Afrikaans, Church Slavonic, British English, Irish, Dutch, Polish,
+Portuguese and Slovak, every one of the published collection whose licence
+the allowlist admits and which publishes hyphenated words
+(`THIRDPARTY.md`) — each found by a content language through RFC 4647's
+lookup (`hyphenate::dictionary`), so `en-GB-oxendict` finds British English
+and `en-US` nothing.
 
 **`direction` and `unicode-bidi`** (`css-writing-modes-3` §2) decide the
 line, not each line's first letter: every run carries its block's direction
