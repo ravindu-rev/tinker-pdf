@@ -687,48 +687,6 @@ fn a_font_a_type3_font_names_is_left_and_named() {
     );
 }
 
-/// A composite font is left, named, by the pass as it embeds simple fonts.
-#[test]
-fn a_composite_font_is_left_and_named() {
-    let source = pdf(&[
-        object("<< /Type /Catalog /Pages 2 0 R >>"),
-        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
-        object(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 80] \
-             /Resources << /Font << /F0 4 0 R >> >> /Contents 7 0 R >>",
-        ),
-        object(
-            "<< /Type /Font /Subtype /Type0 /BaseFont /KozMinPr6N-Regular \
-             /Encoding /Identity-H /DescendantFonts [5 0 R] >>",
-        ),
-        object(
-            "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /KozMinPr6N-Regular \
-             /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> \
-             /FontDescriptor 6 0 R /DW 1000 >>",
-        ),
-        object(
-            "<< /Type /FontDescriptor /FontName /KozMinPr6N-Regular /Flags 4 \
-             /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 \
-             /CapHeight 740 /StemV 80 >>",
-        ),
-        stream("", b"BT /F0 24 Tf 12 30 Td <0022> Tj ET"),
-    ]);
-    let report = report_of(&embedded(
-        &source,
-        &provider(sans().truetype()),
-        FontPolicy::Keep,
-    ));
-    assert!(report.embedded.is_empty());
-    assert_eq!(
-        report.left,
-        [LeftFont {
-            font: Some(ObjRef::new(4, 0)),
-            base_font: "KozMinPr6N-Regular".to_string(),
-            reason: LeftReason::Composite,
-        }]
-    );
-}
-
 /// The embedded font's program, as the output holds it.
 fn embedded_program(document: &Document) -> Vec<u8> {
     document
@@ -1229,4 +1187,281 @@ fn a_cff_face_drawn_by_name_is_written_with_its_names() {
     let after = drawn(&rewritten);
     assert_eq!(after.fingerprint, before.fingerprint, "it draws as it did");
     assert_eq!(after.text, before.text, "and reads as it did");
+}
+
+// ---- composite fonts (FT-12.6) ----------------------------------------------
+
+/// A page showing `cids` through `Identity-H` under a composite font, object
+/// 4, whose descendant CIDFont, object 5, of the `Adobe`-`ordering`
+/// collection, embeds nothing — its descriptor is object 6 — and lays CID 35
+/// out half an em wide and every other CID a whole one.
+fn cid_page(ordering: &str, cids: &[u16]) -> Vec<u8> {
+    let codes: String = cids.iter().map(|cid| format!("{cid:04X}")).collect();
+    pdf(&[
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 80] \
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 7 0 R >>",
+        ),
+        object(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /KozMinPr6N-Regular \
+             /Encoding /Identity-H /DescendantFonts [5 0 R] >>",
+        ),
+        object(&format!(
+            "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /KozMinPr6N-Regular \
+             /CIDSystemInfo << /Registry (Adobe) /Ordering ({ordering}) /Supplement 6 >> \
+             /FontDescriptor 6 0 R /DW 1000 /W [35 [500]] >>"
+        )),
+        object(
+            "<< /Type /FontDescriptor /FontName /KozMinPr6N-Regular /Flags 4 \
+             /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 \
+             /CapHeight 740 /StemV 80 >>",
+        ),
+        stream(
+            "",
+            format!("BT /F0 24 Tf 12 30 Td <{codes}> Tj ET").as_bytes(),
+        ),
+    ])
+}
+
+/// The CIDs Adobe-Japan1 gives `A`, `B` and `C`.
+const JAPAN1_ABC: [u16; 3] = [34, 35, 36];
+
+/// A face of `A`, `B` and `C`, each glyph a whole em wide, which
+/// [`Face::cid_cff`] keys by [`JAPAN1_ABC`].
+fn mincho() -> Face {
+    Face::covering("TinkerMincho-Regular", "ABC", 1000)
+}
+
+/// **The row's exit** (FT-12.6): a composite font whose face is a CID-keyed
+/// CFF of its own collection — bare, and an `OpenType/CFF` face's `CFF `
+/// table — is embedded under a new descendant `/CIDFontType0`, draws and
+/// reads as the provider face drew it with no provider at all, and passes the
+/// PDF/A font rules as FT-12.5 holds them.
+#[test]
+fn a_composite_font_with_a_face_of_its_collection_draws_as_before() {
+    let source = cid_page("Japan1", &[34, 35, 36, 35]);
+    for (label, program) in [
+        (
+            "a bare CID-keyed CFF",
+            mincho().cid_cff("Adobe", "Japan1", 6, &JAPAN1_ABC),
+        ),
+        (
+            "an OpenType/CFF face",
+            mincho().opentype_cid_cff("Adobe", "Japan1", 6, &JAPAN1_ABC),
+        ),
+    ] {
+        let provider = provider(program);
+        let before = drawn(&opened_with(&source, &provider));
+        assert!(
+            before.ink > 0 && !before.warnings.contains(&RenderWarning::UnreadableFont),
+            "{label}: the face draws every CID: {:?}",
+            before.warnings
+        );
+
+        let saved = embedded(&source, &provider, FontPolicy::Subset);
+        let report = report_of(&saved);
+        assert_eq!(report.left, [], "{label}");
+        assert_eq!(report.embedded.len(), 1, "{label}: {report:?}");
+        let written = &report.embedded[0];
+        assert_eq!(written.font, ObjRef::new(4, 0), "{label}");
+        assert_eq!(written.format, EmbeddedFormat::CidFontType0C, "{label}");
+        assert_eq!(written.glyphs, 3, "{label}: three CIDs drawn");
+        // CID 35 is laid out half an em wide, and its glyph is a whole one.
+        assert_eq!(
+            report.warnings,
+            [EmbedWarning::WidthMismatch {
+                font: ObjRef::new(4, 0),
+                code: 35,
+                dictionary: 500.0,
+                program: 1000.0,
+            }],
+            "{label}"
+        );
+
+        let rewritten = written_support::rewritten(label, &source, &saved.bytes);
+        let after = drawn(&rewritten);
+        assert_eq!(
+            after.fingerprint, before.fingerprint,
+            "{label}: the rewritten page draws as the provider face drew it"
+        );
+        assert!(
+            !after.warnings.contains(&RenderWarning::UnreadableFont),
+            "{label}: and nothing is missing: {:?}",
+            after.warnings
+        );
+        assert_eq!(after.text, before.text, "{label}: and it reads as it did");
+
+        // The objects as written.
+        let doc = tinker_pdf_cos::CosDocument::open(saved.bytes.clone()).expect("it opens");
+        let dict_at = |reference: ObjRef| {
+            doc.get(reference)
+                .expect("the object")
+                .as_dict()
+                .cloned()
+                .expect("a dictionary")
+        };
+        let name = |dict: &tinker_pdf_cos::Dict, key: &[u8]| {
+            dict.get_name(doc.intern(key))
+                .and_then(|name| doc.name_bytes(name))
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default()
+        };
+        let type0 = dict_at(ObjRef::new(4, 0));
+        let descendants = doc.resolve_key(&type0, doc.intern(b"DescendantFonts"));
+        let descendant_at = descendants
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|first| first.as_objref())
+            .expect("the descendant, by reference");
+        assert_ne!(
+            descendant_at,
+            ObjRef::new(5, 0),
+            "{label}: a new descendant, so one another Type 0 font shared keeps its own"
+        );
+        let descendant = dict_at(descendant_at);
+        assert_eq!(name(&descendant, b"Subtype"), "CIDFontType0", "{label}");
+        let cid_font_name = name(&descendant, b"BaseFont");
+        assert_eq!(
+            cid_font_name.get(6..),
+            Some("+TinkerMincho-Regular"),
+            "{label}: 9.9.2's tag and the program's CIDFontName (Table 115)"
+        );
+        assert_eq!(
+            name(&type0, b"BaseFont"),
+            format!("{cid_font_name}-Identity-H"),
+            "{label}: Table 119: the descendant's name, a hyphen and the CMap's"
+        );
+        assert_eq!(written.base_font, format!("{cid_font_name}-Identity-H"));
+        assert_eq!(
+            name(&type0, b"Encoding"),
+            "Identity-H",
+            "{label}: the document's CMap"
+        );
+        assert!(
+            !descendant.contains_key(doc.intern(b"CIDToGIDMap")),
+            "{label}: a CIDFontType2's, and this is none"
+        );
+        for key in [&b"CIDSystemInfo"[..], b"W", b"DW"] {
+            assert!(
+                descendant.contains_key(doc.intern(key)),
+                "{label}: the document's /{}",
+                String::from_utf8_lossy(key)
+            );
+        }
+        let descriptor = doc.resolve_key(&descendant, doc.intern(b"FontDescriptor"));
+        let descriptor = descriptor.as_dict().expect("a descriptor");
+        assert_eq!(
+            name(descriptor, b"FontName"),
+            cid_font_name,
+            "{label}: 9.8.1"
+        );
+        let file = descriptor
+            .get_ref(doc.intern(b"FontFile3"))
+            .expect("a /FontFile3");
+        let stream_dict = doc
+            .get(file)
+            .expect("the program")
+            .as_stream()
+            .map(|stream| stream.dict.clone())
+            .expect("a stream");
+        assert_eq!(name(&stream_dict, b"Subtype"), "CIDFontType0C", "{label}");
+        let program = doc.stream_decoded(file).expect("it decodes");
+        let cff = tinker_pdf_font::Cff::parse(&program).expect("a CFF");
+        assert!(cff.is_cid(), "{label}");
+        assert_eq!(
+            cff.registry_ordering(),
+            Some(("Adobe", "Japan1")),
+            "{label}"
+        );
+        for (glyph, cid) in (1u16..).zip(JAPAN1_ABC) {
+            assert_eq!(
+                cff.gid_for_cid(u32::from(cid)),
+                Some(glyph),
+                "{label}: CID {cid} keeps its glyph"
+            );
+        }
+        assert_eq!(
+            cff.advance(2),
+            Some(500.0),
+            "{label}: CID 35's glyph advances by its /W"
+        );
+
+        for (part, level) in FLAVOURS {
+            let findings = font_findings(&saved.bytes, part, level);
+            assert!(
+                findings.is_empty(),
+                "{label}, PDF/A-{part}{}: {findings:#?}",
+                level.unwrap_or("")
+            );
+        }
+    }
+}
+
+/// A composite font is left, named, wherever its face does not state the
+/// font's CIDs' glyphs itself — a TrueType face, a CFF and an `OpenType/CFF`
+/// face keyed by glyph names, a CID-keyed face of another collection, and a
+/// face of the `Identity` collection — and a face of its collection that
+/// lacks a drawn CID leaves it as a missing glyph.
+#[test]
+fn a_composite_font_whose_face_is_not_of_its_collection_is_left_and_named() {
+    let japan1 = cid_page("Japan1", &[34, 35]);
+    let cases = [
+        (
+            "a TrueType face",
+            japan1.clone(),
+            sans().truetype(),
+            LeftReason::NotOfItsCollection,
+        ),
+        (
+            "a CFF keyed by glyph names",
+            japan1.clone(),
+            mincho().cff(),
+            LeftReason::NotOfItsCollection,
+        ),
+        (
+            "an OpenType/CFF face keyed by glyph names",
+            japan1.clone(),
+            mincho().opentype_cff(),
+            LeftReason::NotOfItsCollection,
+        ),
+        (
+            "a face of another collection",
+            japan1,
+            mincho().cid_cff("Adobe", "GB1", 5, &JAPAN1_ABC),
+            LeftReason::NotOfItsCollection,
+        ),
+        (
+            "a face of the Identity collection",
+            cid_page("Identity", &[34, 35]),
+            mincho().cid_cff("Adobe", "Identity", 0, &JAPAN1_ABC),
+            LeftReason::NotOfItsCollection,
+        ),
+        (
+            "a face of the collection without CID 37",
+            cid_page("Japan1", &[34, 37]),
+            mincho().cid_cff("Adobe", "Japan1", 6, &JAPAN1_ABC),
+            LeftReason::NoGlyph { code: 37 },
+        ),
+    ];
+    for (label, source, program, reason) in cases {
+        let saved = embedded(&source, &provider(program), FontPolicy::Keep);
+        let report = report_of(&saved);
+        assert!(report.embedded.is_empty(), "{label}: {report:?}");
+        assert_eq!(
+            report.left,
+            [LeftFont {
+                font: Some(ObjRef::new(4, 0)),
+                base_font: "KozMinPr6N-Regular".to_string(),
+                reason,
+            }],
+            "{label}"
+        );
+        let output = Document::open(saved.bytes).expect("it opens");
+        assert!(
+            output.fonts().iter().all(|font| !font.is_embedded()),
+            "{label}: and nothing of it was written"
+        );
+    }
 }

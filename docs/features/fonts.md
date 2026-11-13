@@ -486,9 +486,14 @@ place of the face's own — so a font drawn by glyph name, Symbol and
 ZapfDingbats, is read by the glyph it drew; a CFF face keeps the font's
 encoding where its names reach the glyphs drawn, `/Differences` naming any
 code they do not; and each gets a `/ToUnicode` stating the text the document
-read, and keeps its `/Widths`. A face whose advances differ from `/Widths` is
-warned of code by code, and the embedded program's advances set to the
-dictionary's —
+read, and keeps its `/Widths`. A composite font whose descendant names no
+program is embedded only under a CID-keyed CFF of its own `/CIDSystemInfo`
+collection, other than `Identity`, that states each drawn CID's glyph
+through its charset — the first reading a substituted face is drawn by — as
+`/FontFile3 /CIDFontType0C` under a new descendant `/CIDFontType0`, its
+CMap, `/W` and `/ToUnicode` the document's. A face whose advances differ
+from `/Widths` or `/W` is warned of code by code, and the embedded program's
+advances set to the dictionary's —
 `tinker_pdf_font::subset_with` cuts a face and sets its advances in one call,
 `hmtx` for a `glyf` face, widened where a glyph past `numberOfHMetrics` or
 the last full entry changes, and a charstring's width operand for a CFF,
@@ -497,7 +502,8 @@ width stated behind a subroutine call declines the cut. A
 code the face has no glyph for, a face whose `OS/2` `fsType` forbids embedding
 or a subset, a cut whose advances still miss a drawn code's width by more
 than ISO 19005's thousandth of an em, a TrueType font with a drawn code that
-reads as no text, and a composite font leave the font as it was, named;
+reads as no text, and a composite font under any other face leave the font
+as it was, named;
 [writing](writing.md) has the report. `tinker_pdf_font::face_facts` reads what
 a face states of itself for the descriptor — its PostScript name (`name` ID 6,
 or a CFF's Name INDEX), `fsType`, `sFamilyClass`, box, ascent, descent, cap

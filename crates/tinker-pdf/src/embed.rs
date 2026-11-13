@@ -32,6 +32,19 @@
 //! transaction back and leaves the font, named. Nothing a code reads as is
 //! assumed to have survived; it is read again.
 //!
+//! # Composite fonts
+//!
+//! A CID means one glyph in every face keyed by the font's character
+//! collection (9.7.4.2), and a face of any other kind is drawn under a
+//! composite font through a character, which is an approximation of that
+//! glyph. So a composite font is embedded only where its answer is a
+//! CID-keyed CFF whose `ROS` is the font's `/CIDSystemInfo` collection, not
+//! `Identity`, and every drawn code's glyph is the one that face's charset
+//! states for the code's CID (`Route::Keyed`): under a new descendant
+//! `/CIDFontType0` with `/FontFile3 /Subtype /CIDFontType0C`, the Type 0
+//! dictionary pointed at it, its encoding CMap, `/W` and `/ToUnicode` the
+//! document's. Every other composite font is left, named.
+//!
 //! # What is left, and named
 //!
 //! Every font the walk shows a code through and that embeds no program is in
@@ -151,7 +164,8 @@ pub struct EmbeddedFont {
     /// The font dictionary.
     pub font: ObjRef,
     /// `/BaseFont` as the pass wrote it: 9.9.2's subset tag and the face's
-    /// PostScript name.
+    /// PostScript name — for a composite font, the Type 0 font's, which
+    /// Table 119 makes its descendant's, a hyphen and its CMap's name.
     pub base_font: String,
     /// The stream the embedded program is in.
     pub program: ObjRef,
@@ -173,6 +187,9 @@ pub enum EmbeddedFormat {
     TrueType,
     /// A CFF program, `/FontFile3 /Subtype /Type1C`, under `/Subtype /Type1`.
     Type1C,
+    /// A CID-keyed CFF program, `/FontFile3 /Subtype /CIDFontType0C`, under a
+    /// composite font's descendant `/Subtype /CIDFontType0`.
+    CidFontType0C,
 }
 
 /// One font the pass left unembedded, and why (ruling 10).
@@ -201,10 +218,11 @@ impl core::fmt::Display for LeftFont {
 pub enum LeftReason {
     /// The provider answered `None` for it.
     Declined,
-    /// The provider's answer is not a TrueType program, an `OpenType/CFF`
-    /// face or a bare CFF program for a simple font that this build reads: a
-    /// Type 1 program, a `CFF2` face, a WOFF file, a CID-keyed CFF answering
-    /// a simple font, or bytes neither parser reads.
+    /// The provider's answer is no program this build embeds for the font:
+    /// for a simple font not a TrueType program, an `OpenType/CFF` face or a
+    /// bare CFF program — a Type 1 program, a `CFF2` face, a WOFF file, a
+    /// CID-keyed CFF — and for either kind an `OTTO` face with no `CFF `
+    /// table, or bytes neither parser reads.
     Unreadable,
     /// The face's `OS/2` `fsType` asks for restricted-licence embedding or
     /// for bitmap embedding only (9.9.1).
@@ -227,8 +245,9 @@ pub enum LeftReason {
     TooManyCodes,
     /// The face's reading reaches no glyph but `.notdef` for this code, or
     /// reaches one only by the glyph number the code gives — a face with
-    /// nothing to be read by: embedding would make the missing glyph
-    /// permanent, where a reader with a better face draws it.
+    /// nothing to be read by — or, under a composite font, the face's
+    /// charset states no glyph for the code's CID: embedding would make the
+    /// missing glyph permanent, where a reader with a better face draws it.
     NoGlyph {
         /// The first such code.
         code: u32,
@@ -261,8 +280,14 @@ pub enum LeftReason {
         /// The first such code.
         code: u32,
     },
-    /// A composite font: the pass embeds simple fonts.
-    Composite,
+    /// A composite font whose face does not state its CIDs' glyphs itself:
+    /// the answer is no CID-keyed CFF — a TrueType face, read by character,
+    /// among them — or is keyed by another character collection than the
+    /// font's `/CIDSystemInfo`, or the font's collection is `Identity`, whose
+    /// CIDs no two faces share, or it names none. Embedded, the glyph such a
+    /// face was drawn with by approximation would be the font's own in every
+    /// reader (`docs/design/font-embedding.md`).
+    NotOfItsCollection,
 }
 
 impl core::fmt::Display for LeftReason {
@@ -301,7 +326,9 @@ impl core::fmt::Display for LeftReason {
             LeftReason::WidthsDisagree { code } => {
                 write!(f, "code {code}'s glyph cannot advance by its width")
             }
-            LeftReason::Composite => f.write_str("it is a composite font"),
+            LeftReason::NotOfItsCollection => {
+                f.write_str("the face is not keyed by the font's character collection")
+            }
         }
     }
 }
@@ -427,14 +454,18 @@ pub(crate) fn apply(
                 .overflow
                 .contains(&font)
                 .then_some(LeftReason::TooManyCodes)
-        })
-        .or_else(|| (kind == Kind::Composite).then_some(LeftReason::Composite));
+        });
         let outcome = match early {
             Some(reason) => Err(reason),
             None => {
                 // The request as the renderer read it, through the view.
                 let request = FontRequest::read(&view, seen);
-                embed_simple(editor, font, &dict, codes, &request, &*provider)
+                match kind {
+                    Kind::Simple => embed_simple(editor, font, &dict, codes, &request, &*provider),
+                    Kind::Composite => {
+                        embed_composite(editor, font, &dict, codes, &request, &*provider)
+                    }
+                }
             }
         };
         match outcome {
@@ -724,6 +755,196 @@ fn embed_simple(
         .map(|embedded| (embedded, warnings))
 }
 
+/// Embeds the provider's face for one composite font, with the width
+/// mismatches it met, or says why not: only a CID-keyed CFF of the font's
+/// own character collection, each drawn code's glyph the one its charset
+/// states for the code's CID (module docs, "Composite fonts").
+fn embed_composite(
+    editor: &mut DocumentEditor,
+    font: ObjRef,
+    dict: &Dict,
+    codes: &BTreeSet<u32>,
+    request: &FontRequest,
+    provider: &dyn FontProvider,
+) -> Result<(EmbeddedFont, Vec<EmbedWarning>), LeftReason> {
+    let face = provider.substitute(request).ok_or(LeftReason::Declined)?;
+    let program = keyed_program(&face)?;
+    let cff = Cff::parse(program).ok_or(LeftReason::Unreadable)?;
+    let facts = tinker_pdf_font::face_facts(&face).unwrap_or_default();
+    licence(facts.fs_type)?;
+
+    // 9.7.4.2: a CID is interpreted uniformly in every program of its
+    // collection, and `Identity` is a collection of one font's glyphs.
+    let original = cos_font::read_in(&*editor, dict);
+    let collection = original
+        .character_collection()
+        .ok_or(LeftReason::NotOfItsCollection)?;
+    let keyed_by = cff.registry_ordering();
+    if keyed_by != Some((collection.registry.as_str(), collection.ordering.as_str()))
+        || collection.ordering == "Identity"
+    {
+        return Err(LeftReason::NotOfItsCollection);
+    }
+    let descendant = editor
+        .resolve_key(dict, Name::DESCENDANT_FONTS)
+        .as_array()
+        .and_then(|descendants| descendants.first())
+        .map(|first| editor.resolve(first))
+        .and_then(|descendant| descendant.as_dict().cloned())
+        .ok_or(LeftReason::NotOfItsCollection)?;
+
+    // What the face drew for each code, read as the renderer reads a
+    // substituted face: by the CID, through the charset, and by nothing else.
+    let sfnt = Sfnt::parse(&face);
+    let mut chosen: BTreeMap<u32, u16> = BTreeMap::new();
+    for &code in codes {
+        let drew = resources::substitute_choice(&face, sfnt.as_ref(), Some(&cff), &original, code);
+        if drew.route != Route::Keyed || drew.glyph == 0 {
+            return Err(LeftReason::NoGlyph { code });
+        }
+        chosen.insert(code, drew.glyph);
+    }
+
+    let glyphs: BTreeSet<u16> = chosen.values().copied().collect();
+    let (warnings, advances) = widths(font, &original, program, &chosen);
+    let cut = tinker_pdf_font::subset_with(
+        program,
+        &glyphs,
+        &tinker_pdf_font::Reshape {
+            advances,
+            cmap: None,
+        },
+    )
+    .ok_or(LeftReason::NotSubsettable)?;
+    metrics_hold(&original, &cut, &chosen)?;
+
+    // Table 115: a CIDFontType0's `/BaseFont` is its program's CIDFontName,
+    // the CFF's own Name INDEX entry; Table 119: the Type 0 font's is that, a
+    // hyphen and the CMap's name.
+    let mut name = subset_tag(&cut);
+    name.extend(
+        tinker_pdf_font::face_facts(program)
+            .and_then(|own| own.postscript_name)
+            .map_or_else(
+                || stem(&facts, &base_font_of(&*editor, &descendant)),
+                String::into_bytes,
+            ),
+    );
+    let mut type0_name = name.clone();
+    if let Some(cmap) = cmap_name(&*editor, dict) {
+        type0_name.push(b'-');
+        type0_name.extend_from_slice(&cmap);
+    }
+
+    editor
+        .transaction(|editor| {
+            let program = editor.allocate();
+            let mut stream = Dict::new();
+            stream.insert(Name::SUBTYPE, Object::Name(editor.intern(b"CIDFontType0C")));
+            editor.put_stream(
+                program,
+                StreamData {
+                    dict: stream,
+                    data: cut.clone(),
+                },
+            );
+
+            let cid_font_name = editor.intern(&name);
+            let descriptor = editor.allocate();
+            let written = descriptor_for(
+                &*editor,
+                &descendant,
+                &facts,
+                request,
+                cid_font_name,
+                (Name::FONT_FILE3, program),
+                // A collection's glyphs are not the standard Latin set.
+                true,
+            );
+            editor.put(descriptor, Object::Dict(written));
+
+            // A new descendant, so a descendant two Type 0 fonts share does
+            // not take one's cut for the other; no `/CIDToGIDMap`, which is a
+            // CIDFontType2's (Table 115).
+            let cid_font = editor.allocate();
+            let cid_to_gid = editor.intern(b"CIDToGIDMap");
+            let mut rewritten_descendant = Dict::new();
+            for (key, value) in descendant.iter() {
+                if *key != cid_to_gid {
+                    rewritten_descendant.insert(*key, value.clone());
+                }
+            }
+            rewritten_descendant
+                .insert(Name::SUBTYPE, Object::Name(editor.intern(b"CIDFontType0")));
+            rewritten_descendant.insert(Name::BASE_FONT, Object::Name(cid_font_name));
+            rewritten_descendant.insert(Name::FONT_DESCRIPTOR, Object::Ref(descriptor));
+            editor.put(cid_font, Object::Dict(rewritten_descendant));
+
+            let mut rewritten = dict.clone();
+            rewritten.insert(
+                Name::DESCENDANT_FONTS,
+                Object::Array(vec![Object::Ref(cid_font)]),
+            );
+            rewritten.insert(Name::BASE_FONT, Object::Name(editor.intern(&type0_name)));
+            editor.put(font, Object::Dict(rewritten.clone()));
+
+            // `cff_glyph` reads a composite font's code by its CID, through
+            // the charset, as the renderer reads an embedded one.
+            let read = cos_font::read_in(&*editor, &rewritten);
+            read_back(&read, &original, &cut, Format::Cff, &chosen)?;
+
+            Ok(EmbeddedFont {
+                font,
+                base_font: String::from_utf8_lossy(&type0_name).into_owned(),
+                program,
+                format: EmbeddedFormat::CidFontType0C,
+                face: face.len(),
+                bytes: cut.len(),
+                glyphs: glyphs.len(),
+            })
+        })
+        .map(|embedded| (embedded, warnings))
+}
+
+/// The CID-keyed CFF a composite font's answer carries — bare, or an `OTTO`
+/// face's `CFF ` table — or why there is none: a face that is not CID-keyed,
+/// a TrueType face among them, states no CID's glyph, and bytes no parser
+/// reads are unreadable.
+fn keyed_program(face: &[u8]) -> Result<&[u8], LeftReason> {
+    let program = match Sfnt::parse(face) {
+        Some(sfnt) if sfnt.table(GLYF).is_some() => return Err(LeftReason::NotOfItsCollection),
+        Some(sfnt) => sfnt.table(CFF).ok_or(LeftReason::Unreadable)?,
+        None => face,
+    };
+    match Cff::parse(program) {
+        Some(cff) if cff.is_cid() => Ok(program),
+        Some(_) => Err(LeftReason::NotOfItsCollection),
+        None => Err(LeftReason::Unreadable),
+    }
+}
+
+/// The CMap name Table 119 names a Type 0 font over a CIDFontType0 by: its
+/// `/Encoding`, a predefined CMap's name, or an embedded CMap's `/CMapName`.
+/// `None` where it states none, or one a font name could not carry: bytes
+/// outside printable ASCII, a delimiter, or the plus sign 9.9.2's tag ends
+/// with.
+fn cmap_name<R: Resolve + ?Sized>(doc: &R, type0: &Dict) -> Option<Vec<u8>> {
+    let encoding = doc.resolve_key(type0, Name::ENCODING);
+    let name = match encoding.as_ref() {
+        Object::Name(name) => *name,
+        Object::Stream(stream) => stream.dict.get_name(doc.intern(b"CMapName"))?,
+        // The editor hands a stream it wrote back as its dictionary.
+        Object::Dict(dict) => dict.get_name(doc.intern(b"CMapName"))?,
+        _ => return None,
+    };
+    let bytes = doc.name_bytes(name)?.to_vec();
+    let printable = !bytes.is_empty()
+        && bytes
+            .iter()
+            .all(|byte| (0x21..=0x7E).contains(byte) && !b"[](){}<>/%#+".contains(byte));
+    printable.then_some(bytes)
+}
+
 /// How a font's `/Encoding` is written.
 #[derive(Clone, Debug, PartialEq)]
 enum EncodingPlan {
@@ -793,21 +1014,25 @@ fn cff_encoding(
 
 /// An encoding dictionary's `/Differences` as a code's name each (9.6.6.1):
 /// a number restarts the count, and each name takes the next code.
-fn differences_of(editor: &DocumentEditor, encoding: &Dict) -> BTreeMap<u32, Name> {
+///
+/// Read exactly as `tinker_pdf_cos::font` reads them, so that what is carried
+/// forward is what the font was drawn and read by: the count starts at zero,
+/// a real number restarts it at its integer part, a number no code can be
+/// leaves it where it was, and anything else in the array is passed over.
+fn differences_of<R: Resolve + ?Sized>(doc: &R, encoding: &Dict) -> BTreeMap<u32, Name> {
     let mut out = BTreeMap::new();
-    let array = editor.resolve_key(encoding, Name::DIFFERENCES);
+    let array = doc.resolve_key(encoding, Name::DIFFERENCES);
     let Some(items) = array.as_array() else {
         return out;
     };
-    let mut code: Option<u32> = None;
+    let mut code = 0u32;
     for item in items {
-        match editor.resolve(item).as_ref() {
-            Object::Int(n) => code = u32::try_from(*n).ok(),
+        match item {
+            Object::Int(n) => code = u32::try_from(*n).unwrap_or(code),
+            Object::Real(r) => code = r.max(0.0) as u32,
             Object::Name(name) => {
-                if let Some(at) = code {
-                    out.insert(at, *name);
-                    code = at.checked_add(1);
-                }
+                out.insert(code, *name);
+                code = code.saturating_add(1);
             }
             _ => {}
         }

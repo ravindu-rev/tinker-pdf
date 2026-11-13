@@ -438,8 +438,20 @@ they drew. A CFF font keeps its symbolic flag as it had it, Symbol and
 ZapfDingbats symbolic, and its `/Encoding` where the names that encoding
 gives reach the glyphs drawn; otherwise it gains `/Differences` naming each
 code that does not by the name the face's charset gives its glyph. Every
-font gets a new `/ToUnicode` stating each drawn code's text as the document
-read it, in place of its own.
+simple font gets a new `/ToUnicode` stating each drawn code's text as the
+document read it, in place of its own. A composite font is embedded only
+where the answer is a CID-keyed CFF — bare, or an `OpenType/CFF` face's
+`CFF ` table — whose `ROS` is the font's `/CIDSystemInfo` collection, not
+`Identity`, and every drawn code's glyph is the one that charset states for
+the code's CID, since a CID means one glyph in every face of its collection
+(9.7.4.2) and any other face is drawn under the font through a character,
+an approximation embedding would make permanent. Its descendant is written
+anew as a `/CIDFontType0` over `/FontFile3 /Subtype /CIDFontType0C`, with no
+`/CIDToGIDMap`, named by the program's CIDFontName behind the tag (Table
+115), and the Type 0 font is pointed at it and named by that name, a hyphen
+and its CMap's name (Table 119); the encoding CMap, `/W`, `/DW` and
+`/ToUnicode` are the document's, and the program's advances are set to `/W`
+as a simple font's are to `/Widths`.
 Before a font's objects commit, the font is read back through the editor and
 each drawn code asked what a reader of the new file asks — its glyph, through
 the embedded program's mapping and the renderer's own functions, its width
@@ -470,7 +482,7 @@ each `LeftFont` with its `LeftReason` — `Declined`, `Unreadable`, `EmbeddingFo
 `SubsettingForbidden` (the face's `OS/2` `fsType`, 9.9.1), `NotAnObject`,
 `FieldResource`, `Type3Resource`, `TooManyCodes`, `NoGlyph { code }`,
 `DrawsOtherwise { code }`, `NotSubsettable`, `NoText { code }`,
-`WidthsDisagree { code }` and `Composite`. A font that
+`WidthsDisagree { code }` and `NotOfItsCollection`. A font that
 embeds a program, and a Type 3 font, is no candidate and is not reported. An
 incremental save appends the new programs with the dictionaries that name
 them, and the original file, which embedded none, keeps nothing of the
@@ -557,7 +569,7 @@ of the page before the edit, by the rectangle the edit changed
 | Embedding a missing font whose face reaches a drawn code only as `.notdef`, or only by the code as a glyph number | `LeftReason::NoGlyph { code }` | embedding would make the missing glyph permanent, where a reader with a better face draws it (`a_code_the_face_has_no_glyph_for_leaves_the_font`) | 9.6.6.4 |
 | Embedding a missing font that is written directly into a resource dictionary, that a form field's `/DA` may draw with, or that a Type 3 font's own `/Resources` names | `LeftReason::NotAnObject`, `FieldResource`, `Type3Resource` | there is no object to address; a field may draw any character; the codes are credited to another font | 12.7.3.3, 9.6.5 |
 | Embedding a missing font whose cut still advances a drawn code otherwise than its width, or a TrueType font with a drawn code that reads as no text | `LeftReason::WidthsDisagree { code }`, `LeftReason::NoText { code }` | embedded, the font would fail ISO 19005's metrics clause, or state no text for a code where only its `/ToUnicode` can (`a_face_that_cannot_meet_a_clause_is_left_and_named`) | ISO 19005-1 6.3.6, 6.3.8 |
-| Embedding a missing composite font | `LeftReason::Composite` | the pass embeds simple fonts; a composite font is [ROADMAP](../ROADMAP.md) FT-12 | 9.7 |
+| Embedding a missing composite font whose face is not a CID-keyed CFF of the font's own character collection, or whose collection is `Identity` | `LeftReason::NotOfItsCollection` | any other face is drawn under the font through a character, and embedding it would make that approximation of each CID the font's own in every reader (`a_composite_font_whose_face_is_not_of_its_collection_is_left_and_named`) | 9.7.4.2 |
 
 ## Verified
 
@@ -720,11 +732,18 @@ holds Symbol and ZapfDingbats to their fingerprints and text;
 a glyph at two widths and a face of sixteen units per em;
 `the_new_faces_are_cut_whatever_the_font_policy` holds
 `FontPolicy::Keep` and `Subset` to one cut and the font pass's report to the
-document's own programs; and the rest reach every `LeftReason` a simple font
-can — a declined request, the three `fsType` refusals beside the permissions
-that embed, a code the face has no glyph for, a face with no `cmap`, a font
-written into the resources, one a field's `/DA` names, one a Type 3 font's
-`/Resources` names and a composite font — and
+document's own programs;
+`a_composite_font_with_a_face_of_its_collection_draws_as_before` embeds a
+composite font under a bare and an `OpenType/CFF` CID-keyed face of its
+collection, holds the page to its fingerprint and text, reads the new
+descendant, descriptor and program back and finds nothing under a font clause
+at any part and level, and
+`a_composite_font_whose_face_is_not_of_its_collection_is_left_and_named`
+leaves it under every other face; and the rest reach every other
+`LeftReason` — a declined request, the three `fsType` refusals beside the
+permissions that embed, a code the face has no glyph for, a face with no
+`cmap`, a font written into the resources, one a field's `/DA` names and one
+a Type 3 font's `/Resources` names — and
 `a_save_that_asks_for_nothing_embeds_nothing` holds a save of a document
 missing no program to the bytes of one that did not ask.
 

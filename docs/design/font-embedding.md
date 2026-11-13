@@ -232,9 +232,12 @@ key follows the outlines, and the `/Subtype` follows the key.
   document's `/BaseFont` with any tag taken off, else `Embedded`, so a tag
   always stands before a name. The tag is
   `tinker_pdf_cos::subset_tag` of the cut program, the function every subset
-  this engine writes is named by. `/BaseFont`, the descriptor's `/FontName`
-  and a composite font's descendant's `/BaseFont` take the one name, as the
-  font pass renames a subset (9.8.1, 9.7.6).
+  this engine writes is named by. `/BaseFont` and the descriptor's
+  `/FontName` take the one name (9.8.1). Under a composite font the name is
+  the descendant's `/BaseFont`, and its stem the program's CIDFontName — the
+  CFF's own Name INDEX entry, first — as Table 115 asks of a CIDFontType0;
+  the Type 0 font's `/BaseFont` is that name, a hyphen and its CMap's name, as
+  Table 119 recommends, where the CMap's name is one a font name can carry.
 - **`/Widths` is kept**: the pen moves by the dictionary, and the dictionary
   does not change. A font that has none — the standard 14, which 9.6.2.2 lets
   omit it — gains `/FirstChar` and `/LastChar` spanning the drawn codes and a
@@ -313,7 +316,7 @@ ISO 19005 constrains fonts used for rendering, and these are the clauses
 | Subsets (6.3.5, 6.2.11.4.2, 6.2.10.4.1) | 9.9.2's tag; part 1 a `/CharSet` on a Type 1 subset and a `/CIDSet` on a CIDFont subset, parts 2 and 3 each only true where present | the tag; neither `/CharSet` nor `/CIDSet` |
 | Metrics (6.3.6, 6.2.11.5, 6.2.10.5) | each drawn code's dictionary width the program's advance, within a thousandth of an em | the advances set, and checked after the cut |
 | Encodings (6.3.7, 6.2.11.6, 6.2.10.6) | a symbolic TrueType font: no `/Encoding`, and its `cmap` one subtable (part 1) or one subtable or a (3,0) one (parts 2 to 4); a non-symbolic one `/WinAnsiEncoding` or `/MacRomanEncoding`, with `/Differences` held as `pdfa/fonts.rs` reads each part | every TrueType font in the symbolic form below |
-| Unicode (6.3.8, 6.2.11.7, 6.2.10.7) | levels A and U and part 4: a `/ToUnicode`, or a predefined encoding, or a published collection | a `/ToUnicode` on every simple font it embeds |
+| Unicode (6.3.8, 6.2.11.7, 6.2.10.7) | levels A and U and part 4: a `/ToUnicode`, or a predefined encoding, or a published collection | a `/ToUnicode` on every simple font it embeds; a composite font's `/ToUnicode`, CMap and collection are the document's, judged as they were |
 | CIDFonts (6.3.3, 6.2.11.3, 6.2.10.3) | a complete `/CIDSystemInfo`; a `/CIDToGIDMap` on a CIDFontType2; the CMap's rules | a CIDFontType0, which needs no map; the collection and the CMap are the document's and are judged as they were |
 
 **Every TrueType font the pass embeds takes the symbolic form**, which is the
@@ -382,8 +385,11 @@ each drawn CID's glyph itself**: the answer, bare or an `OTTO` face's `CFF `
 table, is CID-keyed, its `ROS` names the font's registry and ordering, and
 every drawn code's glyph came from the first route. Its descendant is written
 anew as a `/CIDFontType0` with `/FontFile3 /Subtype /CIDFontType0C`, its
-`/CIDToGIDMap` dropped, and the Type 0 dictionary pointed at it, so a
-descendant two Type 0 fonts share does not take one's cut for the other.
+`/CIDToGIDMap` dropped — Table 115 gives one to a CIDFontType2 alone — and
+the Type 0 dictionary pointed at it, so a descendant two Type 0 fonts share
+does not take one's cut for the other. Its new descriptor is symbolic: a
+collection's glyphs are not the standard Latin set 9.8.2's nonsymbolic flag
+names.
 `/W` and `/DW` are kept and measured as `/Widths` is, and the advances set as
 a CFF's are, in each glyph's own Private DICT. The encoding CMap and any
 `/ToUnicode` are the document's, so the text reads as it did and none is
@@ -425,8 +431,7 @@ reason and a new one is a compile error where it is handled: `Declined`,
 `Unreadable`, `EmbeddingForbidden`, `SubsettingForbidden`, `NotAnObject`,
 `FieldResource`, `Type3Resource`, `TooManyCodes`, `NoGlyph { code }`,
 `DrawsOtherwise { code }`, `NotSubsettable`, `NoText { code }`,
-`WidthsDisagree { code }` and `NotOfItsCollection`. Until FT-12.6 lands, a composite font is left as
-`Composite`, which that step replaces.
+`WidthsDisagree { code }` and `NotOfItsCollection`.
 
 **The same bytes on every target** (ruling 4). The faces are the provider's
 bytes; the fonts are taken in object order, each object allocated in turn; the

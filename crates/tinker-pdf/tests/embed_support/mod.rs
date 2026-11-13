@@ -234,6 +234,96 @@ impl Face {
         sfnt(0x4F54_544F, tables)
     }
 
+    /// The face as a bare CID-keyed CFF program of the `registry`-`ordering`
+    /// collection at `supplement` (Adobe Technical Note 5176): `ROS` naming
+    /// the two through the String INDEX, glyph `n + 1` CID `cids[n]` in a
+    /// format 0 charset, and every glyph in the one Font DICT of the FDArray,
+    /// through a format 3 FDSelect, whose Private DICT holds a
+    /// `nominalWidthX` of zero; each charstring states its width. The Top
+    /// DICT has no Private DICT of its own, as a CID-keyed font's has none.
+    pub fn cid_cff(
+        &self,
+        registry: &str,
+        ordering: &str,
+        supplement: i32,
+        cids: &[u16],
+    ) -> Vec<u8> {
+        assert_eq!(cids.len(), self.glyphs.len(), "a CID for every glyph");
+        let header = [1u8, 0, 4, 4];
+        let names = index(&[self.name.as_bytes().to_vec()]);
+        let strings = index(&[registry.as_bytes().to_vec(), ordering.as_bytes().to_vec()]);
+        let globals = index(&[]);
+        let mut charset = vec![0u8];
+        for cid in cids {
+            charset.extend_from_slice(&cid.to_be_bytes());
+        }
+        let count = self.glyphs.len() as u16 + 1;
+        // One range from glyph 0 in Font DICT 0, then the sentinel.
+        let mut fd_select = vec![3u8, 0, 1, 0, 0, 0];
+        fd_select.extend_from_slice(&count.to_be_bytes());
+        let mut charstrings = vec![vec![14u8]];
+        for glyph in &self.glyphs {
+            charstrings.push(box_charstring(glyph));
+        }
+        let charstrings = index(&charstrings);
+        let mut private = dict_entry(20, &[0]);
+        private.extend(dict_entry(21, &[0]));
+        let (wide, tall) = (i32::from(self.widest()), i32::from(self.tallest()));
+        let top = |charset_at: i32, fd_select_at: i32, charstrings_at: i32, fd_array_at: i32| {
+            let mut out = dict_entry(0x0C1E, &[391, 392, supplement]);
+            out.extend(dict_entry(5, &[0, 0, wide, tall]));
+            out.extend(dict_entry(15, &[charset_at]));
+            out.extend(dict_entry(17, &[charstrings_at]));
+            out.extend(dict_entry(0x0C24, &[fd_array_at]));
+            out.extend(dict_entry(0x0C25, &[fd_select_at]));
+            out
+        };
+        // Every operand is in the five-byte form, so the Top DICT's length
+        // does not change when its offsets do.
+        let top_len = index(&[top(0, 0, 0, 0)]).len();
+        let charset_at = header.len() + names.len() + top_len + strings.len() + globals.len();
+        let fd_select_at = charset_at + charset.len();
+        let charstrings_at = fd_select_at + fd_select.len();
+        let private_at = charstrings_at + charstrings.len();
+        let fd_array_at = private_at + private.len();
+        let tops = index(&[top(
+            charset_at as i32,
+            fd_select_at as i32,
+            charstrings_at as i32,
+            fd_array_at as i32,
+        )]);
+        let fd_array = index(&[dict_entry(18, &[private.len() as i32, private_at as i32])]);
+        let mut out = header.to_vec();
+        for part in [
+            &names,
+            &tops,
+            &strings,
+            &globals,
+            &charset,
+            &fd_select,
+            &charstrings,
+            &private,
+            &fd_array,
+        ] {
+            out.extend_from_slice(part);
+        }
+        out
+    }
+
+    /// [`Face::cid_cff`] in an `OTTO` directory beside the tables an sfnt
+    /// states its metrics in, its `cmap` among them.
+    pub fn opentype_cid_cff(
+        &self,
+        registry: &str,
+        ordering: &str,
+        supplement: i32,
+        cids: &[u16],
+    ) -> Vec<u8> {
+        let mut tables = self.metrics_tables(0);
+        tables.push((*b"CFF ", self.cid_cff(registry, ordering, supplement, cids)));
+        sfnt(0x4F54_544F, tables)
+    }
+
     /// The tables every form of the face shares.
     fn metrics_tables(&self, long_loca: u16) -> Vec<([u8; 4], Vec<u8>)> {
         let count = self.glyphs.len() as u16 + 1;

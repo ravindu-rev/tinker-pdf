@@ -297,3 +297,143 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
     }
     assert_eq!(written.get_ref(Name::FONT_FILE3), Some(ObjRef::new(41, 0)));
 }
+
+/// A composite font's answer is a CID-keyed CFF or no answer: a `glyf` face
+/// states no CID, and is named so; an `OTTO` face with no `CFF ` table, or
+/// one that does not parse, and bytes no parser reads are unreadable. The
+/// CID-keyed and name-keyed CFFs are `tests/embed_missing.rs`'s.
+#[test]
+fn a_composite_answer_is_a_cid_keyed_cff_or_named() {
+    let truetype = directory(0x0001_0000, &[b"glyf", b"head", b"loca"]);
+    assert_eq!(
+        keyed_program(&truetype),
+        Err(LeftReason::NotOfItsCollection)
+    );
+    for unreadable in [
+        directory(0x4F54_544F, &[b"head", b"hhea"]),
+        directory(0x4F54_544F, &[b"CFF ", b"head"]),
+        b"%!PS-AdobeFont-1.0: Helvetica".to_vec(),
+        Vec::new(),
+    ] {
+        assert_eq!(
+            keyed_program(&unreadable),
+            Err(LeftReason::Unreadable),
+            "{} bytes",
+            unreadable.len()
+        );
+    }
+}
+
+/// The CMap name a Type 0 font is named by (Table 119): a predefined CMap's
+/// name, an embedded CMap's `/CMapName`, and nothing where there is none or
+/// where a font name could not carry it.
+#[test]
+fn a_type0_font_is_named_by_a_cmap_name_a_font_name_can_carry() {
+    let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+3 0 obj\n<< /Type /Font /Subtype /Type0 /Encoding /Identity-H >>\nendobj\n\
+4 0 obj\n<< /Type /Font /Subtype /Type0 /Encoding 5 0 R >>\nendobj\n\
+5 0 obj\n<< /Type /CMap /CMapName /Tinker-Custom-H /Length 4 >>\nstream\nabcd\nendstream\nendobj\n\
+6 0 obj\n<< /Type /Font /Subtype /Type0 /Encoding 7 0 R >>\nendobj\n\
+7 0 obj\n<< /Type /CMap /Length 4 >>\nstream\nabcd\nendstream\nendobj\n\
+8 0 obj\n<< /Type /Font /Subtype /Type0 /Encoding /Not+A-Name >>\nendobj\n\
+9 0 obj\n<< /Type /Font /Subtype /Type0 >>\nendobj\n\
+trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n";
+    let doc = CosDocument::open(bytes).expect("it opens");
+    for (num, expected, what) in [
+        (3, Some(&b"Identity-H"[..]), "a predefined CMap"),
+        (
+            4,
+            Some(&b"Tinker-Custom-H"[..]),
+            "an embedded CMap's /CMapName",
+        ),
+        (6, None, "an embedded CMap with no /CMapName"),
+        (8, None, "a name with 9.9.2's plus sign in it"),
+        (9, None, "no /Encoding"),
+    ] {
+        assert_eq!(
+            cmap_name(&doc, &font_at(&doc, num)).as_deref(),
+            expected,
+            "{what}"
+        );
+    }
+}
+
+/// `/Differences` read as `tinker_pdf_cos::font` reads them, which is what
+/// the font was drawn by: names before any number from code 0, a real
+/// number restarting the count at its integer part, a negative one leaving
+/// it where it was.
+#[test]
+fn differences_are_read_as_the_font_was() {
+    let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Tinker /Encoding 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Type /Encoding /Differences [/zero 65 /A /B 10.0 /ten -1 /eleven 200 /x] >>\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
+    let doc = CosDocument::open(bytes).expect("it opens");
+    let read = differences_of(&doc, &font_at(&doc, 4));
+    let named: Vec<(u32, String)> = read
+        .iter()
+        .map(|(code, name)| {
+            let bytes = doc.name_bytes(*name).expect("a name");
+            (*code, String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .collect();
+    let expected = [
+        (0, "zero"),
+        (10, "ten"),
+        (11, "eleven"),
+        (65, "A"),
+        (66, "B"),
+        (200, "x"),
+    ];
+    assert_eq!(
+        named,
+        expected.map(|(code, name)| (code, name.to_string())),
+        "the reading"
+    );
+    // And the font's own reading names each code alike.
+    let font = cos_font::read_in(&doc, &font_at(&doc, 3));
+    for (code, name) in expected {
+        assert_eq!(font.glyph_name(code), Some(name), "code {code}");
+    }
+}
+
+/// The `/ToUnicode` the pass writes (9.10.3): a one-byte codespace, each
+/// code with a text in a `bfchar` entry of its UTF-16BE units, a hundred
+/// entries a section; nothing at all where no code has a text, a code past
+/// a byte having no place in that codespace.
+#[test]
+fn the_to_unicode_states_each_text_in_utf16() {
+    assert_eq!(to_unicode(&BTreeMap::new()), None);
+    assert_eq!(
+        to_unicode(&BTreeMap::from([(0x0100, "A".to_string())])),
+        None,
+        "a code past a byte"
+    );
+
+    let texts = BTreeMap::from([
+        (0x41, "A".to_string()),
+        (0x42, "fi".to_string()),
+        (0x43, "\u{1D400}".to_string()),
+        (0x44, String::new()),
+    ]);
+    let written = String::from_utf8(to_unicode(&texts).expect("a CMap")).expect("ASCII");
+    assert_eq!(
+        written,
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+         1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+         3 beginbfchar\n<41> <0041>\n<42> <00660069>\n<43> <D835DC00>\nendbfchar\n\
+         endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+    );
+
+    let many: BTreeMap<u32, String> = (0u32..150).map(|code| (code, "a".to_string())).collect();
+    let written = String::from_utf8(to_unicode(&many).expect("a CMap")).expect("ASCII");
+    assert_eq!(written.matches("100 beginbfchar\n").count(), 1);
+    assert_eq!(written.matches("50 beginbfchar\n").count(), 1);
+    assert_eq!(written.matches("endbfchar\n").count(), 2);
+}
