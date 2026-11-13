@@ -47,14 +47,19 @@ read the same nodes. A table over any other input count, a matrix/TRC
 profile and a grey one convert through their pipeline. A profile carrying a
 table for more than one rendering intent keeps each, and compiles one the
 first time an intent selects it, by ICC.1 8.10.2's precedence
-(`docs/design/icc.md`); every conversion the renderer makes takes relative
-colorimetric, 8.6.5.8's initial intent, through `A2B1`, or where the profile
-carries none, through `A2B0` and then `A2B2`.
+(`docs/design/icc.md`). A profile may carry tables and a matrix/TRC or grey
+model both, and 8.10.2 puts the tables first: an intent converts through the
+model only where the profile carries neither the `A2B*` tag designated for
+it nor `A2B0`. Every conversion the renderer makes takes relative
+colorimetric, 8.6.5.8's initial intent, through the first of `A2B1`,
+`A2B0`, the model and `A2B2` the profile carries.
 
-A profile that contradicts itself — a monitor profile whose data space is
+A table that does not read is passed over to the next of those, and so is a
+model that contradicts its profile — a monitor profile whose data space is
 `LAB` carrying the `rXYZ` columns a matrix applies to linear RGB; one naming a
 three-channel space no registry defines; a CMYK printer profile with a single
-`kTRC` and no matrix, one curve for four channels of ink — is
+`kTRC` and no matrix, one curve for four channels of ink — so such a profile
+converts through its tables. One with no table it can convert through is
 `ColorSpace::Approximated`, read by component count, which is the
 alternate-space reading 8.6.5.5 permits.
 
@@ -1166,7 +1171,7 @@ defect to hide in.
 | A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what, name }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is not vectors there. A `<pattern>` would be exact for a tiling pattern; the writer does not emit one | — |
 | A page whose recording would hold more than `MAX_DISPLAY_LIST_BYTES` (64 MiB) | `DisplayList::is_retained()` is false | Not a warning, because nothing is drawn differently: the list keeps no calls and every render and SVG is a direct one, the same output at a direct render's cost. A fan of forms makes a short file record without bound, which a direct render's one canvas never does | `bounds_ledger.rs` |
 | A page whose SVG would pass `MAX_SVG_BYTES` (256 MiB) of elements, or the smaller `SvgOptions::max_bytes` | `SvgWarning::Truncated { limit }` | Markup grows with what the page does rather than with what the file holds, so it has a budget a render's one canvas does not need; what fits is written, the document is well-formed and ends there, and the replay stops | `bounds_ledger.rs` |
-| An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading | [ROADMAP](../ROADMAP.md) |
+| An ICC profile whose data space and tags contradict each other, carrying no `A2B*` table that reads | `ColorSpace::Approximated`, stated on the type | `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. A table beside such a model is what the profile converts through; without one, the fallback is 8.6.5.5's alternate-space reading | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
 

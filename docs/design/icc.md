@@ -289,15 +289,15 @@ set `StoredParameters::rendering_intent`
 (`crates/tinker-pdf-content/src/state.rs`), `q` and `Q` save and restore it
 with the rest of the state, and a name 8.6.5.8 does not list is kept as
 `RenderingIntent::Unrecognised`. The colour crate converts in any intent:
-`Profile::parse` keeps each `A2B*` table a profile carries and
-`ColorSpace::to_rgb_in` converts through the one an `icc::Conversion`'s
-intent selects, by the table below. No conversion the facade makes passes an
-intent yet, so every ICC colour converts in relative colorimetric — for a LUT
-profile through the first of `A2B1`, `A2B0` and `A2B2` it carries — and an
-image's `/Intent` is not read. How often the corpus names an intent is not
-measured: the count `Profile::parse`'s comment gives is of an ExtGState
-`/RenderingIntent`, a key the graphics state parameter dictionary does not
-have; its key is `/RI`. This section is the design RC-01's steps build, read
+`Profile::parse` keeps each `A2B*` table a profile carries beside its
+matrix/TRC or grey model, and `ColorSpace::to_rgb_in` converts through the
+one an `icc::Conversion`'s intent selects, by the table below. No conversion
+the facade makes passes an intent yet, so every ICC colour converts in
+relative colorimetric — through the first of `A2B1`, `A2B0`, the model and
+`A2B2` the profile carries — and an image's `/Intent` is not read. How often
+the corpus names an intent is not measured; an ExtGState names one by
+`/RI`, the graphics state parameter dictionary having no `/RenderingIntent`
+key. This section is the design RC-01's steps build, read
 from ISO 32000-2 and from ICC.1:2010 (ISO 15076-1:2010), the edition Table 66
 names for PDF 1.7 and 2.0.
 
@@ -350,19 +350,21 @@ names for PDF 1.7 and 2.0.
 
 #### The table each intent compiles
 
-| Intent | 8.10.2 a), from RC-01.4 | b) | c) | then | Media white |
-| --- | --- | --- | --- | --- | --- |
-| `Perceptual` | `D2B0` | `A2B0` | — | `A2B1`, `A2B2` | — |
-| `RelativeColorimetric` | `D2B1` | `A2B1` | `A2B0` | `A2B2` | — |
-| `Saturation` | `D2B2` | `A2B2` | `A2B0` | `A2B1` | — |
-| `AbsoluteColorimetric` | `D2B3` | `A2B1` | `A2B0` | `A2B2` | scaled, except through `D2B3` |
+| Intent | 8.10.2 a), from RC-01.4 | b) | c) | d) | then | Media white |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Perceptual` | `D2B0` | `A2B0` | — | the model | `A2B1`, `A2B2` | — |
+| `RelativeColorimetric` | `D2B1` | `A2B1` | `A2B0` | the model | `A2B2` | — |
+| `Saturation` | `D2B2` | `A2B2` | `A2B0` | the model | `A2B1` | — |
+| `AbsoluteColorimetric` | `D2B3` | `A2B1` | `A2B0` | the model | `A2B2` | scaled, except through `D2B3` |
+
+"The model" is d)'s tone curves and colorant columns, or its `grayTRC`: a
+profile's matrix/TRC or grey model.
 
 - **Read across, first present wins.** The last column of tags is this
   design's, not ICC.1's: a profile that carries none of the tags 8.10.2
-  names for an intent, and no curves, is read through its other tables in
-  the order `Profile::parse` reads them today, so no intent refuses a profile
-  the engine renders today. `RelativeColorimetric`'s row is today's order
-  exactly, which is why a page that sets no intent converts as it does today.
+  names for an intent, and no model that reads, is read through its other
+  tables in the order `Profile::parse` reads them, so no intent refuses a
+  profile another intent converts.
 - **Absolute colorimetric is relative colorimetric's table, scaled**, where
   no `D2B3` is read: 6.2.3 generates it from the media-relative transform,
   and 8.10.2 b) for it is `AToB1`. `D2B1` is not in its row: 8.10.2 names
@@ -370,18 +372,30 @@ names for PDF 1.7 and 2.0.
 - **A tag the engine cannot read is passed over, not refused**: a `D2B*` tag
   holding an element this build does not read is unsupported in 8.10.2 a)'s
   sense, and the intent falls to its `A2B*` tag. Before RC-01.4 every `D2B*`
-  tag is passed over.
+  tag is passed over. So is an `A2B*` table that does not read, and so is a
+  model that contradicts the profile's header — colorant columns over a data
+  space that is not RGB, a `grayTRC` for one that is not grey, a connection
+  space the model cannot reach — which the next source in the row serves.
+- **A profile is refused only where relative colorimetric finds nothing.**
+  `Profile::parse` finds `RelativeColorimetric`'s source, 8.6.5.8's initial
+  intent, and refuses a profile with none, by its model's reason where it
+  carries one. A profile carrying no model is refused for the first table
+  that row names when that table does not read — in a profile of tables
+  alone, a damaged table is a damaged profile — and one carrying a model is
+  never refused for its tables.
 - **Tags at one offset are one table** (8.2): read once, compiled once, and
   shared by every intent that selects it.
-- **Matrix/TRC and grey profiles** (8.10.2 d)) serve `Perceptual`,
-  `RelativeColorimetric` and `Saturation` from one transform, whatever the
-  profile's class, and `AbsoluteColorimetric` from that transform with the
-  media white folded in.
-- **A profile carrying a matrix or a `grayTRC` beside `A2B*` tables** is read
-  by its matrix or its curve, for every intent, as `Profile::parse` reads it
-  today. 8.10.2 puts its tables first (b) and c) before d)); taking that
-  order would move every such profile on every page, whatever intent the page
-  sets, so it is the owner's to take and this design does not.
+- **Matrix/TRC and grey profiles** (8.10.2 d)) serve every intent that
+  reaches the model from one transform, whatever the profile's class, and
+  `AbsoluteColorimetric` from that transform with the media white folded in.
+- **A profile carrying a matrix or a `grayTRC` beside `A2B*` tables converts
+  through its tables first**, as 8.10.2 orders them: b) and c) before d), for
+  every intent, so the model serves only an intent for which the profile
+  carries neither its own `A2B*` tag nor `A2B0` — perceptual and saturation
+  beside an `A2B1` alone, for one. Every page painting through such a profile
+  renders through its tables, not through its model; the owner took that
+  (ruling 23, the RC-01.9 row), and RC-01.9b counts the corpus profiles it
+  moves (`icc_census.rs`).
 
 #### Absolute colorimetric against the engine's output
 
@@ -458,21 +472,24 @@ what this design keys by intent by the whole value.
 
 #### What compiling per intent costs
 
-- **Parsing.** `Profile::parse` reads the tag table as it does today, and
-  the table the default intent selects; it keeps a copy of each other `A2B*`
-  element's bytes and reads one when an intent first selects it. A page that
-  sets no intent parses what it parses today.
+- **Parsing.** `Profile::parse` reads the tag table, the model where the
+  profile carries one, and the tables relative colorimetric's row reaches
+  until one reads; it keeps a copy of each other `A2B*` element's bytes and
+  reads one when an intent first selects it. A page that sets no intent reads
+  no table it does not convert through.
 - **Compiling.** A space's transforms are kept together, each compiled the
-  first time an intent selects its table, and shared by every conversion
+  first time an intent selects its source, and shared by every conversion
   through that space and every page whose resources compile the profile. A
-  profile used in one intent compiles one transform, as today. A LUT profile
-  used in all four compiles at most three — one a distinct table — with
-  absolute colorimetric's scaling applied after the relative table's
-  evaluation; a matrix/TRC or grey profile at most two, the second only for
-  absolute colorimetric with a media white other than D50.
+  profile used in one intent compiles one transform. The others compile one
+  transform a distinct source, sharing the transform of an intent that
+  converts through the same table or the same model: a profile used in all
+  four compiles one for each distinct table it converts through and one for
+  its model, and absolute colorimetric one of its own where the media white
+  is not D50, its scaling applied after a table's evaluation or folded into
+  the model's matrix.
 - **Memory.** A LUT transform holds its grid, at most `MAX_CLUT_ENTRIES`
   16-bit entries, so a profile used in three intents holds at most three
-  times what it holds today; a matrix/TRC transform is three 4 096-entry
+  times what one intent holds; a matrix/TRC transform is three 4 096-entry
   curves and a matrix, and its absolute twin shares the curves.
 - **Caches key on the intent's table.** The facade's ICC cache keeps a
   profile's transforms beside each other, so an intent changing finds the
@@ -521,6 +538,17 @@ what this design keys by intent by the whole value.
   `determinism.rs`'s fingerprints.
 - **RC-01.8**: the speed row `render an ICC page under each rendering intent
   at 150 dpi`, RC-01.7's page under all four intents, in MS-04's set.
+- **RC-01.9**: a model beside tables, in 8.10.2's order.
+  `a_profile_carrying_a_model_and_tables_reads_its_tables_first` (a
+  matrix/TRC and a grey profile under each connection space, carrying each
+  set of `A2B*` tables, every intent through b), c) or d)),
+  `a_table_that_does_not_read_is_passed_over_to_the_model`,
+  `a_profile_whose_matrix_contradicts_its_space_reads_through_its_table` (the
+  census's three shapes, each with a table, converting as the table says),
+  `intents_sharing_a_source_share_one_transform`, and the
+  `model-and-table.icc` and `contradicting-model-and-table.icc` seeds in
+  `write_the_fuzz_seeds`. RC-01.9b counts the corpus profiles carrying both
+  in a local run of `icc_census.rs`.
 
 ### Default colour spaces (8.6.5.6)
 
@@ -881,6 +909,9 @@ RGB, the families the encoder and the decoder's fixtures have.
 18. RC-01.7: shadings and meshes in the intent in force, and the intent page
     among the fingerprints.
 19. RC-01.8: the intent page's speed row in the benchmark set.
+20. RC-01.9: a profile carrying a model beside `A2B*` tables converts
+    through its tables first, as 8.10.2 orders them, and one whose model
+    contradicts its header through its tables.
 
 ### Three decisions, and why
 
@@ -953,8 +984,8 @@ time and shift every colour. It is read by profiles that need to recover the
 | A twin comparison passes with nothing applied and is taken for proof | Every twin is paired with the page without its default, which it must not equal |
 | An intent converts through a table the profile's author did not make for it | Only the last column of the intent table is this design's, and it is reached only where ICC.1 names nothing the profile carries; `an_absent_intent_table_falls_back_as_icc_1_says` pins every row |
 | A colour set before `ri` keeps the old intent's light | An intent change re-resolves the fill and stroke colours from the space and components kept beside them; `ri_and_extgstate_ri_are_twins` changes the intent after `scn` |
-| Compiling per intent multiplies what a profile costs | A table is read and compiled on first use, one transform a distinct table; a page that sets no intent parses and compiles what it does today |
-| A profile carrying a matrix or `grayTRC` and `A2B*` tables converts by its matrix, where ICC.1 8.10.2 converts by its tables | Stated as this design's departure, with the owner deciding whether to follow 8.10.2; until then every such profile renders as it does today, whatever the intent |
+| Compiling per intent multiplies what a profile costs | A table is read and compiled on first use, one transform a distinct source; a page that sets no intent reads and compiles only what relative colorimetric converts through |
+| A profile carrying a matrix or `grayTRC` and `A2B*` tables that disagree, whose pages render through the tables where its model would paint otherwise | ICC.1 8.10.2's order, which the owner took (ruling 23, RC-01.9); `a_profile_carrying_a_model_and_tables_reads_its_tables_first` and `a_table_that_does_not_read_is_passed_over_to_the_model` pin each order case, and RC-01.9b counts the corpus profiles that carry both |
 
 ## P-22 — Colour conversion throughput
 

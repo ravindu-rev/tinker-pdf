@@ -1870,7 +1870,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_TAGS",
             cap: MAX_ICC_TAGS as u128,
             published: "1 024",
-            // The busiest of the seven `.icc` seeds `fuzz/corpus/icc_profile/`
+            // The busiest of the nine `.icc` seeds `fuzz/corpus/icc_profile/`
             // commits, which the `icc_profile` target hands straight to
             // `Profile::parse`. No `.pdf` or `.xps` fixture in this repository
             // embeds a profile at all — measured, not assumed.
@@ -1907,7 +1907,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_BYTES",
             cap: MAX_ICC_BYTES as u128,
             published: "2 MiB",
-            // `lut-three-intents.icc`, the largest of the seven committed
+            // `lut-three-intents.icc`, the largest of the nine committed
             // seeds: three lookup tables, one an intent.
             fixtures: 882,
             comic: 0,

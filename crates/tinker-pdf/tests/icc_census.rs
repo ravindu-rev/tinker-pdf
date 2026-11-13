@@ -68,6 +68,23 @@ impl Profile {
             .copied()
             .collect()
     }
+
+    /// The `A2B*` tags it carries, which a source colour converts through.
+    fn a2b_tags(&self) -> Vec<&str> {
+        self.lut_tags()
+            .into_iter()
+            .filter(|tag| tag.starts_with("A2B"))
+            .collect()
+    }
+
+    /// Whether it carries a model — the matrix/TRC tags, or a grey `kTRC` —
+    /// beside `A2B*` tables: the profiles ICC.1 8.10.2 converts through their
+    /// tables first, and the model only for an intent whose tables it does
+    /// not carry (`docs/design/icc.md`, "The table each intent compiles").
+    fn carries_a_model_and_tables(&self) -> bool {
+        let grey = self.tags.iter().any(|have| have == "kTRC");
+        (self.is_matrix_trc() || grey) && !self.a2b_tags().is_empty()
+    }
 }
 
 /// Reads a profile's header and tag table. Bytes only — see the module note.
@@ -225,6 +242,47 @@ fn census_of_the_corpus_icc_profiles() {
     println!("profiles that are neither             {neither:>6}");
     println!("files whose profiles are all matrix   {matrix_trc_files:>6}");
     println!("files carrying any LUT profile        {lut_only_files:>6}");
+
+    // The profiles whose rendering ICC.1 8.10.2's order moved: a model and
+    // tables both, converted through the tables an intent names before the
+    // model. Which `A2B*` tags they carry says which intents moved — all of
+    // them where `A2B0` is there, and only the intents whose own tag is
+    // otherwise. Roadmap step RC-01.9b commits the count.
+    let both: Vec<&Profile> = all
+        .iter()
+        .filter(|profile| profile.carries_a_model_and_tables())
+        .collect();
+    let mut by_tables: BTreeMap<String, u32> = BTreeMap::new();
+    let mut by_kind: BTreeMap<String, u32> = BTreeMap::new();
+    for profile in &both {
+        *by_tables.entry(profile.a2b_tags().join(" ")).or_default() += 1;
+        let model = if profile.is_matrix_trc() {
+            "matrix/TRC"
+        } else {
+            "grey"
+        };
+        let kind = format!(
+            "{} v{} {} -> {}, {model}",
+            profile.class,
+            profile.version >> 24,
+            profile.space,
+            profile.pcs
+        );
+        *by_kind.entry(kind).or_default() += 1;
+    }
+    println!("\n--- a model beside tables (ICC.1 8.10.2) ---");
+    println!(
+        "profiles carrying a model and A2B* tables  {:>6}",
+        both.len()
+    );
+    println!("by the A2B* tags they carry:");
+    for (tables, count) in &by_tables {
+        println!("  {count:>6}  {tables}");
+    }
+    println!("by class, version, spaces and model:");
+    for (kind, count) in &by_kind {
+        println!("  {count:>6}  {kind}");
+    }
 
     let show = |name: &str, map: &BTreeMap<String, u32>| {
         println!("\n{name}:");
