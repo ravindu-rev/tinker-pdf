@@ -102,6 +102,16 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "the_first_party_srgb_profile_is_one_byte_string_on_every_target",
     },
+    // Every transform RC-20 reads, by what it answers over a fixed grid of
+    // inputs, and a page drawn through version 5 profiles (RC-20.14).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "icc_transforms_are_stable_across_targets",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "a_v5_profiled_page_renders_the_same_on_every_target",
+    },
     // The archival packet's hash.
     Fingerprint {
         file: "crates/tinker-pdf/tests/pdfa_writer.rs",

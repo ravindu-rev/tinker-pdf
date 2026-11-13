@@ -2,7 +2,10 @@
 //! images and fills through a profile that compiles: a matrix/TRC RGB
 //! display profile and a version 2 CMYK printer profile of one `mft2` table.
 //! Each figure in them is stated beside it, so a test reads what it draws
-//! from here and from nothing outside the repository.
+//! from here and from nothing outside the repository. [`transforms`] holds
+//! the profiles of every other kind the engine reads — out of the connection
+//! space, device links, the gamut tag, named colours and version 5's
+//! elements — that the determinism fingerprints are taken over.
 //!
 //! # Why the allow
 //!
@@ -13,6 +16,8 @@
     dead_code,
     reason = "shared by the binaries that draw through a profile; each uses a part"
 )]
+
+pub mod transforms;
 
 /// A profile of `class` over the data colour space `space`, its PCS XYZ,
 /// holding `tags` in their order, each four-byte aligned: the 128-byte

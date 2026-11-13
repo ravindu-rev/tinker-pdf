@@ -64,6 +64,10 @@ use tinker_pdf::{
     Bitmap, CacheLimits, CommandStream, Document, DocumentBuilder, OpenOptions, PixelRegion,
     RenderOptions, RenderWarning, SimpleFontProvider, SvgOptions, SvgWarning,
 };
+use tinker_pdf_color::icc::{Intent, Link, Output, Profile, Transform};
+
+mod icc_support;
+use icc_support::transforms;
 
 mod type1_support;
 
@@ -3595,6 +3599,577 @@ fn the_first_party_srgb_profile_is_one_byte_string_on_every_target() {
         sha(&changed),
         sha(profile),
         "one byte of `desc` is another profile"
+    );
+}
+
+// ---- the ICC transforms (RC-20) --------------------------------------------
+
+/// What a set of fingerprinted transforms answered, as the bytes its
+/// fingerprint hashes: each section named and ended by a NUL, then its
+/// answers, every number big-endian.
+#[derive(Default)]
+struct Answers(Vec<u8>);
+
+impl Answers {
+    /// A section's name, or any other text, ended by a NUL.
+    fn text(&mut self, text: &str) {
+        self.0.extend_from_slice(text.as_bytes());
+        self.0.push(0);
+    }
+
+    /// A count.
+    fn count(&mut self, value: usize) {
+        self.0.extend_from_slice(&(value as u64).to_be_bytes());
+    }
+
+    /// Sixteen-bit values: device channels, or sRGB at sixteen bits.
+    fn words(&mut self, values: &[u16]) {
+        for value in values {
+            self.0.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+
+    /// Real numbers, by their bits.
+    fn reals(&mut self, values: &[f64]) {
+        for value in values {
+            self.0.extend_from_slice(&value.to_bits().to_be_bytes());
+        }
+    }
+
+    /// The SHA-256 of everything recorded, in hex.
+    fn fingerprint(&self) -> String {
+        sha(&self.0)
+    }
+}
+
+/// The device components a transform into the connection space is
+/// fingerprinted at: each of `channels` axes stepped evenly from 0 to 1 — in
+/// fortieths for one channel, in tenths for two or three, in sixths for
+/// four or more — the first axis slowest. Most of them fall between a grid's
+/// nodes, so a grid's interpolation is in the answers beside its nodes.
+fn device_grid(channels: usize) -> Vec<Vec<f64>> {
+    let steps = match channels {
+        1 => 40,
+        2 | 3 => 10,
+        _ => 6,
+    };
+    let points = steps + 1;
+    let count = (0..channels).fold(1usize, |count, _| count * points);
+    (0..count)
+        .map(|index| {
+            let mut rest = index;
+            let mut components = vec![0.0; channels];
+            for slot in components.iter_mut().rev() {
+                *slot = (rest % points) as f64 / steps as f64;
+                rest /= points;
+            }
+            components
+        })
+        .collect()
+}
+
+/// The connection-space values a transform out of it is fingerprinted at,
+/// in the profile's own connection space: under Lab, `L*` from 0 to 100 in
+/// eighths and `a*` and `b*` from −128 to 128 in steps of 32; under XYZ,
+/// each of `X`, `Y` and `Z` from 0 to 1.25 in steps of 5/32, past the PCS
+/// white. Lab's first point, `L*` 0 and `a*` and `b*` −128, is the corner a
+/// table's first grid node stands at.
+fn connection_grid(lab: bool) -> Vec<[f64; 3]> {
+    let axis = |lightness: bool, step: usize| {
+        let step = step as f64;
+        match (lab, lightness) {
+            (true, true) => 12.5 * step,
+            (true, false) => -128.0 + 32.0 * step,
+            (false, _) => 0.156_25 * step,
+        }
+    };
+    let mut grid = Vec::with_capacity(9 * 9 * 9);
+    for first in 0..9 {
+        for second in 0..9 {
+            for third in 0..9 {
+                grid.push([axis(true, first), axis(false, second), axis(false, third)]);
+            }
+        }
+    }
+    grid
+}
+
+/// `bytes` parsed, or a panic naming the profile: a fingerprint of a profile
+/// the parser refused would be a fingerprint of the refusal.
+fn parsed(name: &str, bytes: &[u8]) -> Profile {
+    Profile::parse(bytes)
+        .unwrap_or_else(|error| panic!("the {name} profile does not parse: {error:?}"))
+}
+
+/// Each intent's transform of `profile` into sRGB, at sixteen bits a
+/// channel, at every point of [`device_grid`].
+fn forward_answers(answers: &mut Answers, name: &str, profile: &Profile) {
+    let channels = profile.channels().map_or(0, usize::from);
+    assert!(
+        channels > 0,
+        "the {name} profile's data space has a channel count"
+    );
+    let grid = device_grid(channels);
+    for intent in Intent::ALL {
+        let transform = Transform::compile(profile, intent)
+            .unwrap_or_else(|| panic!("the {name} profile has no {intent:?} transform"));
+        answers.text(&format!("{name} into sRGB, {intent:?}"));
+        for components in &grid {
+            answers.words(&transform.apply16(components));
+        }
+    }
+}
+
+/// Each intent's transform of `profile` out of the connection space
+/// (`icc::Output`) at every point of [`connection_grid`]: how many device
+/// channels it gives, and each value's.
+fn output_answers(answers: &mut Answers, name: &str, profile: &Profile) {
+    let grid = connection_grid(&profile.pcs == b"Lab ");
+    for intent in Intent::ALL {
+        let output = Output::compile(profile, intent).unwrap_or_else(|error| {
+            panic!("the {name} profile has no {intent:?} transform out of the connection space: {error:?}")
+        });
+        answers.text(&format!("{name} out of the connection space, {intent:?}"));
+        answers.count(output.channels());
+        for &pcs in &grid {
+            answers.words(output.apply(pcs).channels());
+        }
+    }
+}
+
+/// Each intent's answer from `profile`'s gamut tag at every point of
+/// [`connection_grid`]: in, out, or none. The tag is held to answering both
+/// ways over the grid, so the fingerprint is of its table and not of its
+/// absence.
+fn gamut_answers(answers: &mut Answers, name: &str, profile: &Profile) {
+    let grid = connection_grid(&profile.pcs == b"Lab ");
+    for intent in Intent::ALL {
+        let output = Output::compile(profile, intent).unwrap_or_else(|error| {
+            panic!("the {name} profile has no {intent:?} transform out of the connection space: {error:?}")
+        });
+        let verdicts: Vec<Option<bool>> = grid.iter().map(|&pcs| output.in_gamut(pcs)).collect();
+        let inside = verdicts.iter().filter(|&&v| v == Some(true)).count();
+        let outside = verdicts.iter().filter(|&&v| v == Some(false)).count();
+        assert!(
+            inside > 0 && outside > 0,
+            "the {name} profile's gamut tag answers {inside} in and {outside} out of \
+             {} under {intent:?}, where its table has corners of both",
+            verdicts.len()
+        );
+        answers.text(&format!("{name} in gamut, {intent:?}"));
+        for verdict in verdicts {
+            answers.0.push(match verdict {
+                None => 0,
+                Some(true) => 1,
+                Some(false) => 2,
+            });
+        }
+    }
+}
+
+/// Every colour `profile`'s `ncl2` names (`icc::NamedColours`): the tag's
+/// prefix, suffix, vendor flag and device-coordinate count, then each
+/// colour's name, connection-space coordinates, device coordinates and sRGB
+/// at sixteen bits.
+fn named_answers(answers: &mut Answers, name: &str, profile: &Profile) {
+    let named = profile
+        .named
+        .as_ref()
+        .unwrap_or_else(|| panic!("the {name} profile names no colours"));
+    assert!(!named.is_empty(), "the {name} profile names no colours");
+    answers.text(&format!("{name} named colours"));
+    answers.text(named.prefix());
+    answers.text(named.suffix());
+    answers.0.extend_from_slice(&named.vendor().to_be_bytes());
+    answers.count(named.device_channels());
+    for colour in named.iter() {
+        answers.text(colour.name());
+        answers.reals(&colour.pcs());
+        answers.0.push(u8::from(colour.lab()));
+        answers.words(colour.device());
+        answers.words(&colour.to_rgb16());
+    }
+}
+
+/// `profile`'s device link (`icc::Link`) at every point of [`device_grid`]
+/// over its inputs: the space it gives, its channel counts, and each colour's
+/// device values.
+fn link_answers(answers: &mut Answers, name: &str, profile: &Profile) {
+    let link = Link::compile(profile)
+        .unwrap_or_else(|error| panic!("the {name} profile is no device link: {error:?}"));
+    answers.text(&format!("{name} linked"));
+    answers.0.extend_from_slice(&link.output_space());
+    answers.count(link.inputs());
+    answers.count(link.channels());
+    for components in device_grid(link.inputs()) {
+        answers.words(link.apply(&components).channels());
+    }
+}
+
+/// The models inverted (`transforms::model_profiles`), with the transforms
+/// into sRGB they invert.
+fn models_answers() -> Answers {
+    let mut answers = Answers::default();
+    for (index, bytes) in transforms::model_profiles().iter().enumerate() {
+        let name = format!("model {index}");
+        let profile = parsed(&name, bytes);
+        forward_answers(&mut answers, &name, &profile);
+        output_answers(&mut answers, &name, &profile);
+    }
+    answers
+}
+
+/// The version 2 tables both ways (`transforms::lut_profiles`), `bump` added
+/// to the first entry of one `B2A0` grid.
+fn lut_answers(bump: u16) -> Answers {
+    let mut answers = Answers::default();
+    for (index, bytes) in transforms::lut_profiles(bump).iter().enumerate() {
+        let name = format!("lut {index}");
+        let profile = parsed(&name, bytes);
+        forward_answers(&mut answers, &name, &profile);
+        output_answers(&mut answers, &name, &profile);
+    }
+    answers
+}
+
+/// Version 4's `mAB ` in and `mBA ` out (`transforms::mba_profile`).
+fn mba_answers() -> Answers {
+    let mut answers = Answers::default();
+    let profile = parsed("mba", &transforms::mba_profile());
+    forward_answers(&mut answers, "mba", &profile);
+    output_answers(&mut answers, "mba", &profile);
+    answers
+}
+
+/// The device links (`transforms::link_profiles`).
+fn links_answers() -> Answers {
+    let mut answers = Answers::default();
+    for (index, bytes) in transforms::link_profiles().iter().enumerate() {
+        let name = format!("link {index}");
+        link_answers(&mut answers, &name, &parsed(&name, bytes));
+    }
+    answers
+}
+
+/// The gamut tag (`transforms::gamut_profile`).
+fn gamut_tag_answers() -> Answers {
+    let mut answers = Answers::default();
+    let profile = parsed("gamut", &transforms::gamut_profile());
+    gamut_answers(&mut answers, "gamut", &profile);
+    answers
+}
+
+/// The named colours (`transforms::named_profiles`).
+fn named_colour_answers() -> Answers {
+    let mut answers = Answers::default();
+    for (index, bytes) in transforms::named_profiles().iter().enumerate() {
+        let name = format!("named {index}");
+        named_answers(&mut answers, &name, &parsed(&name, bytes));
+    }
+    answers
+}
+
+/// Multi-process elements both ways: a model's `D2B0` and `B2D0` beside it
+/// (`transforms::elements_beside_a_model_profile`), and a version 5
+/// profile's `A2B0` and `B2A0` (`transforms::v5_elements_profile`).
+fn multi_process_answers() -> Answers {
+    let mut answers = Answers::default();
+    for (name, bytes) in [
+        (
+            "beside a model",
+            transforms::elements_beside_a_model_profile(),
+        ),
+        ("version 5", transforms::v5_elements_profile()),
+    ] {
+        let profile = parsed(name, &bytes);
+        forward_answers(&mut answers, name, &profile);
+        output_answers(&mut answers, name, &profile);
+    }
+    answers
+}
+
+/// The calculator both ways (`transforms::calculator_profile`).
+fn calculator_answers() -> Answers {
+    let mut answers = Answers::default();
+    let profile = parsed("calculator", &transforms::calculator_profile());
+    forward_answers(&mut answers, "calculator", &profile);
+    output_answers(&mut answers, "calculator", &profile);
+    answers
+}
+
+/// The spectral connection space both ways (`transforms::spectral_profile`):
+/// spectra reduced against the profile's own observer on the way in, and its
+/// viewing conditions connected through its `s2cp` on the way out.
+fn spectral_answers() -> Answers {
+    let mut answers = Answers::default();
+    let profile = parsed("spectral", &transforms::spectral_profile());
+    forward_answers(&mut answers, "spectral", &profile);
+    output_answers(&mut answers, "spectral", &profile);
+    answers
+}
+
+/// Each set of transforms [`icc_transforms_are_stable_across_targets`]
+/// fingerprints, by name, with what it answered.
+fn icc_transform_sets() -> Vec<(&'static str, Answers)> {
+    vec![
+        ("output_models", models_answers()),
+        ("output_lut", lut_answers(0)),
+        ("output_mba", mba_answers()),
+        ("link", links_answers()),
+        ("gamut", gamut_tag_answers()),
+        ("named", named_colour_answers()),
+        ("multi_process", multi_process_answers()),
+        ("calculator", calculator_answers()),
+        ("spectral", spectral_answers()),
+    ]
+}
+
+/// The committed fingerprint of each set of [`icc_transform_sets`], by name
+/// (RC-20.14).
+///
+/// Each value is a run's output, recorded from `cargo test` on the first
+/// target it runs on, which prints the lines to paste, and held there on
+/// every other; a value two targets disagree on is a determinism bug, never a
+/// table edit.
+const ICC_TRANSFORMS: &[(&str, &str)] = &[
+    // A matrix/TRC profile's three curve types inverted, and a grey
+    // profile's under XYZ and under Lab, each intent's way in and out.
+    ("output_models", ""),
+    // `mft2` and `mft1` out of Lab, one table an intent, and `mft2` out of
+    // XYZ through its matrix.
+    ("output_lut", ""),
+    // An `mAB ` in and an `mBA ` of all five stages out.
+    ("output_mba", ""),
+    // A link through its `D2B0`, and one through its `A2B0`.
+    ("link", ""),
+    // A gamut tag's in and out under each intent.
+    ("gamut", ""),
+    // Named colours over Lab and over XYZ.
+    ("named", ""),
+    // `D2B0` and `B2D0` beside a model, and a version 5 profile's elements
+    // both ways.
+    ("multi_process", ""),
+    // A calculator element in, sampled calculator curves out.
+    ("calculator", ""),
+    // Reflectance spectra reduced in, and the viewing conditions connected
+    // both ways.
+    ("spectral", ""),
+];
+
+/// **Every transform RC-20 reads answers the same on every target**: the
+/// way out of the connection space through a model inverted, through
+/// `mft1`, `mft2` and `mBA ` tables and through multi-process elements; a
+/// device link; a gamut tag; named colours; and version 5's elements, its
+/// calculator and its spectral connection space — each set's every answer
+/// over a fixed grid of inputs, under every intent, hashed
+/// (`docs/features/determinism.md`). The profiles are built in
+/// `icc_support/transforms.rs` from sums and products alone, so they are the
+/// same bytes on every target. `tinker-pdf-color` has no edge to a hash, so
+/// the hashing is this file's, as its other fingerprints are.
+///
+/// The second half shows the hash sees one level: one entry of one compiled
+/// table — the first node of an `mft2` `B2A0` grid — raised by one, the
+/// device value at that node is one higher and the set's hash is another.
+#[test]
+fn icc_transforms_are_stable_across_targets() {
+    let corner = [0.0, -128.0, -128.0];
+    let first_entry = |bump: u16| {
+        let profile = parsed("lut", &transforms::lut_profiles(bump)[0]);
+        Output::compile(&profile, Intent::Perceptual)
+            .expect("perceptual converts out of the connection space through B2A0")
+            .apply(corner)
+            .channels()[0]
+    };
+    assert_eq!(
+        first_entry(1),
+        first_entry(0) + 1,
+        "the device value at the B2A0 grid's first node is that node's entry"
+    );
+
+    let sets = icc_transform_sets();
+    let lut = sets
+        .iter()
+        .find(|(name, _)| *name == "output_lut")
+        .map(|(_, answers)| answers.fingerprint())
+        .expect("the tables are fingerprinted");
+    assert_ne!(
+        lut_answers(1).fingerprint(),
+        lut,
+        "one level of one table entry is another fingerprint"
+    );
+
+    assert_eq!(
+        sets.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        ICC_TRANSFORMS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        "every set has a fingerprint, or the test passes by not looking"
+    );
+    let mut wrong = Vec::new();
+    for (name, answers) in &sets {
+        let actual = answers.fingerprint();
+        let want = ICC_TRANSFORMS
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, hash)| *hash)
+            .unwrap_or_default();
+        if actual != want {
+            wrong.push(format!("    (\"{name}\", \"{actual}\"),"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the ICC transforms do not answer what their committed fingerprints \
+         say.\n\nIf two targets disagree, this is a determinism bug — find the \
+         arithmetic that is not target-stable, do not update the table.\n\
+         If a transform changed deliberately, read what moved first, then \
+         paste these in:\n\n{}\n",
+        wrong.join("\n")
+    );
+}
+
+/// **Three pictures through version 5 profiles** (ICC.2), on one 120 x 40
+/// page: 4 x 4 RGB samples in each of the spaces `spaces` names, side by
+/// side, each sample ten pixels square at whole-pixel offsets and magnified
+/// without `/Interpolate`, so every pixel is one sample's converted colour.
+/// Objects 8, 9 and 10 are [`transforms::v5_elements_profile`],
+/// [`transforms::calculator_profile`] and [`transforms::spectral_profile`],
+/// which the spaces may name or not.
+fn v5_page_in(spaces: [&str; 3]) -> Vec<u8> {
+    let content = "q 40 0 0 40 0 0 cm /Im0 Do Q\n\
+                   q 40 0 0 40 40 0 cm /Im1 Do Q\n\
+                   q 40 0 0 40 80 0 cm /Im2 Do Q";
+    // Each picture's sixteen samples stepped through the byte range at three
+    // rates, starting at its own place, so no two pictures and no two
+    // samples are one colour, and none is white.
+    let image = |picture: u32, space: &str| {
+        let samples: Vec<u8> = (0..16u32)
+            .flat_map(|i| {
+                let i = i + 7 * picture;
+                [(i * 61) % 256, (i * 29 + 90) % 256, (i * 113 + 30) % 256]
+            })
+            .map(|value| value as u8)
+            .collect();
+        let samples = hex(&samples);
+        format!(
+            "<< /Type /XObject /Subtype /Image /Width 4 /Height 4\n\
+   /ColorSpace {space} /BitsPerComponent 8 /Filter /ASCIIHexDecode\n\
+   /Length {} >>\nstream\n{samples}\nendstream",
+            samples.len()
+        )
+    };
+    let mut bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 40]\n\
+   /Resources << /XObject << /Im0 5 0 R /Im1 6 0 R /Im2 7 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n{}\nendobj\n\
+6 0 obj\n{}\nendobj\n\
+7 0 obj\n{}\nendobj\n",
+        content.len(),
+        image(0, spaces[0]),
+        image(1, spaces[1]),
+        image(2, spaces[2]),
+    )
+    .into_bytes();
+    for (number, profile) in [
+        (8, transforms::v5_elements_profile()),
+        (9, transforms::calculator_profile()),
+        (10, transforms::spectral_profile()),
+    ] {
+        bytes.extend_from_slice(
+            format!(
+                "{number} 0 obj\n<< /N 3 /Length {} >>\nstream\n",
+                profile.len()
+            )
+            .as_bytes(),
+        );
+        bytes.extend_from_slice(&profile);
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+    bytes.extend_from_slice(b"trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n");
+    bytes
+}
+
+/// The version 5 page: [`v5_page_in`] through the multi-process, the
+/// calculator and the spectral profile, one a picture.
+fn v5_page() -> Vec<u8> {
+    v5_page_in([
+        "[/ICCBased 8 0 R]",
+        "[/ICCBased 9 0 R]",
+        "[/ICCBased 10 0 R]",
+    ])
+}
+
+/// The committed fingerprint of [`v5_page`], rendered at the default
+/// options, as [`hashed`] hashes a page (RC-20.14).
+///
+/// A run's output, recorded from `cargo test` on the first target it runs
+/// on, which prints the value to paste, and held there on every other.
+const V5_PAGE: &str = "";
+
+/// **A page drawn through version 5 profiles renders the same on every
+/// target** (RC-20.14): [`v5_page`]'s three pictures, each through its own
+/// profile's `A2B0` or `D2B0` — multi-process elements, a calculator, spectra
+/// reduced against the profile's observer — read through the transform's
+/// grid on the image's row path, hashed as a page is.
+///
+/// Each picture is first held to differ from the same samples drawn as
+/// `/DeviceRGB`, which is how a picture whose profile the parser refused
+/// would draw: a page converting through its component count alone would be
+/// stable too, and its fingerprint would say nothing about version 5.
+#[test]
+fn a_v5_profiled_page_renders_the_same_on_every_target() {
+    let fixture = Fixture {
+        name: "v5",
+        build: v5_page,
+        open: Open::Closed,
+        // Every one of the page's 4 800 pixels is painted, none white.
+        least_ink: 2_400,
+    };
+    let (document, at) = opened(&fixture);
+    let options = RenderOptions::default();
+    let bitmap = document.page(at).expect("a page").render(&options);
+    let twin = Document::open(v5_page_in(["/DeviceRGB"; 3]))
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&options);
+    assert_eq!(
+        (bitmap.width, bitmap.height, bitmap.stride),
+        (twin.width, twin.height, twin.stride),
+        "the page and its twin are one size"
+    );
+    let components = bitmap.components();
+    let width = bitmap.width as usize;
+    for (picture, what) in ["multi-process", "calculator", "spectral"]
+        .into_iter()
+        .enumerate()
+    {
+        let columns = width * picture / 3..width * (picture + 1) / 3;
+        let differs = (0..bitmap.height as usize).any(|row| {
+            columns.clone().any(|column| {
+                let at = row * bitmap.stride + column * components;
+                bitmap.data[at..at + components] != twin.data[at..at + components]
+            })
+        });
+        assert!(
+            differs,
+            "the {what} picture draws as /DeviceRGB does, which is how a picture \
+             whose profile the parser refused would draw"
+        );
+    }
+    let actual = hashed(&fixture, &bitmap);
+    assert_eq!(
+        actual, V5_PAGE,
+        "the version 5 page does not render to its committed fingerprint. If \
+         two targets disagree, this is a determinism bug; if this is a \
+         deliberate rendering change, compare the page first, then paste:\n\n\
+         const V5_PAGE: &str = \"{actual}\";\n"
     );
 }
 

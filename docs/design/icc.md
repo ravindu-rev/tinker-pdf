@@ -267,7 +267,12 @@ volume, and the corpus census counts tags and bytes.
   bit-identical contract across targets: `default_spaces`, a page under CIE and
   `ICCBased` default spaces, and `icc`, whose pictures and fill convert through
   an `mft2` table into Lab, a matrix/TRC profile and a grey one, beside a
-  `/DeviceCMYK` control.
+  `/DeviceCMYK` control; `icc_transforms_are_stable_across_targets`, every
+  transform [ICC engine completion](#icc-engine-completion-rc-20) reads
+  hashed by what it answers over a fixed grid of inputs under each intent,
+  one level of one table entry shown to move its hash; and
+  `a_v5_profiled_page_renders_the_same_on_every_target`, three pictures
+  through version 5 profiles.
 
 ### The price of an integer grid
 
@@ -1416,7 +1421,7 @@ reads them in a local run over the fetched corpora and raises the floor.
     `a_spectral_profile_integrates_against_its_own_observer`.
 11. RC-20.13, landed: the record catches up with the parser: the crate doc,
     the PDF/A notes and these milestones marked.
-12. RC-20.14: fingerprints. `determinism.rs`'s
+12. RC-20.14, landed: fingerprints. `determinism.rs`'s
     `icc_transforms_are_stable_across_targets` and
     `a_v5_profiled_page_renders_the_same_on_every_target`.
 13. RC-20.15a: the speed row `an ICC-based image to sRGB through a v5

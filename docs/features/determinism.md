@@ -270,6 +270,33 @@ the render fingerprints hold the target's: four IEEE operations and
 differs between build hosts is a determinism bug in `build.rs`, never a table
 edit, and a one-byte change to the profile's description fails it.
 
+**The ICC transforms are pinned by what they answer.**
+`icc_transforms_are_stable_across_targets` builds profiles of every kind
+`tinker-pdf-color`'s ICC reader converts through
+([rendering](rendering.md)), byte by byte in
+`crates/tinker-pdf/tests/icc_support/transforms.rs` from sums and products
+alone: the models inverted out of the connection space — a matrix/TRC
+profile's parametric, gamma and sampled curves, and grey under XYZ and Lab —
+`mft1`, `mft2` and `mBA ` tables out of it, device links through a `D2B0` and
+an `A2B0`, a gamut tag, named colours over Lab and XYZ, multi-process
+elements both ways beside a model and in a version 5 profile, a version 5
+calculator and a spectral connection space. Each set is hashed over
+everything it answers under every intent at a fixed grid of inputs — each
+transform into sRGB at sixteen bits over device values stepped in fortieths,
+tenths or sixths, each transform out of the connection space's device values
+over Lab and XYZ stepped in eighths, each gamut verdict, each named colour's
+name, coordinates and sRGB, and each link's device values — to its own
+committed value (`ICC_TRANSFORMS`); the hashing is the test's, since the
+colour crate has no edge to a hash. The second half raises the first entry of
+one `B2A0` grid by one level, and holds the device value at that node to have
+moved by one and the set's hash to be another.
+`a_v5_profiled_page_renders_the_same_on_every_target` draws three pictures
+through version 5 profiles — multi-process elements, a calculator, spectra
+reduced against the profile's own observer — each first held to differ from
+the same samples drawn as `/DeviceRGB`, which is how a picture whose profile
+the parser refused would draw, and holds the page's render to `V5_PAGE`. A
+hash two targets disagree on is a determinism bug, never a table edit.
+
 Three fixtures carry guarantees of different kinds: one is synthesised
 rather than parsed, so it pins the writer and parser to each other; one is
 a package a third-party serialiser wrote, so it can disagree with this
@@ -308,7 +335,8 @@ not green".
 **The determinism roster** (`xtask/src/determinism.rs`) names them:
 `determinism.rs`'s render fingerprints and the same pages drawn in bands, the
 patched page's, its SVG output's hashes, its three synthesised documents' byte
-hashes, the first-party sRGB profile's bytes, its display list's replay of
+hashes, the first-party sRGB profile's bytes, the ICC transforms' answers and
+the version 5 page, its display list's replay of
 every fingerprinted page and the same pages drawn through a warm and a
 starved document cache, and under a warm and a starved budget stated at open,
 and the `icc` and `tiling` pages twice through one document, the second
