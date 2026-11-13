@@ -294,9 +294,16 @@ a tinted stencil, directly or through a run's
 back into ink, which matters because light has one ink for each colour and
 a document's rich black is four; every other format ignores them.
 `Canvas::composite` blits one canvas onto another (11.3.6), bounded by the
-source's rectangle, and a canvas can carry the initial backdrop of a
-non-isolated transparency group (11.4.4) so that 11.4.7.2's removal step has
-the alpha it needs.
+source's rectangle. A transparency group's buffer holds the canvas it will be
+composited onto while the group is open, moved in rather than copied:
+`adopt_backdrop` for a non-isolated group (11.4.4), which composites its
+backdrop's colour in from it and reads its alpha there at every pixel a paint
+composites, and `hold_parent` for an isolated one, which reads nothing of it;
+`release_parent` hands it back, `remove_backdrop` takes 11.4.7.2's backdrop
+out reading the same pixels again, and `knock_out` puts 11.4.5's initial state
+back — transparent, or the parent's colour at no alpha — with no snapshot of
+it kept. Each read is at the same device pixel of the parent, in its own
+format where it shares the buffer's, so an ink backdrop is the document's ink.
 
 *The opaque composite.* Under `Normal`, with the colour's alpha and the
 state's both whole, onto a canvas that holds no initial backdrop and is not
@@ -625,7 +632,14 @@ tiny pattern over a long line cannot generate millions of pieces.
   field the size of the canvas holding the same values, on canvases at the
   origin and away from it and over boxes inside, hanging off, wholly off and
   of no pixels (`every_mask_consumer_reads_the_outside_value`,
-  `a_product_of_two_masks_reading_outside_themselves_holds_both`).
+  `a_product_of_two_masks_reading_outside_themselves_holds_both`);
+  `canvas.rs` holds a group's backdrop read from its parent to a copy of the
+  parent's rectangle — adoption, `a0` at every pixel, the knockout restore
+  and the removal — for every parent format under every group format, over
+  buffers inside the parent, all of it and hanging off it
+  (`a_group_reads_its_backdrop_from_its_parent_as_a_copy_would_hold_it`), and
+  a copy past a canvas's right edge to nothing there
+  (`a_copy_past_a_canvas_s_right_edge_reads_nothing_there`).
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
   the render fingerprints `text`, `curves`, `shading`, `blend`, `pattern`,
   `image`, `transparency`, `tiling`, `mesh` and `strokes` exercise this crate

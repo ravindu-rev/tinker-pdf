@@ -369,11 +369,10 @@ pub struct Stats {
     pub pool_items_on_caller: u64,
     /// Pixels of the buffers transparency groups and soft masks' groups
     /// allocated for their own pixels while they were open — each one's
-    /// canvas, a non-isolated group's copy of its backdrop and a knockout
-    /// group's snapshot of its initial state — counted at each allocation as
-    /// its width times its height (`docs/design/performance.md`, P-25). A
-    /// quantity rather than a count of steps, so [`Stats::work`] leaves it
-    /// out.
+    /// canvas, counted at its allocation as its width times its height
+    /// (`docs/design/performance.md`, P-25); the parent canvas a group reads
+    /// its backdrop from is not one. A quantity rather than a count of steps,
+    /// so [`Stats::work`] leaves it out.
     ///
     /// Counted by `tinker-pdf-render`'s renderer, a tiling pattern's cell
     /// included, and added to the operation's tally by the facade.

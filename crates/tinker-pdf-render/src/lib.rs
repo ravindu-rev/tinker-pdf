@@ -793,10 +793,12 @@ struct Held {
 }
 
 /// A transparency group being rendered: everything the parent needs back.
+///
+/// The parent canvas itself is not here: the group's buffer holds it while
+/// the group is open (`Canvas::adopt_backdrop`, `Canvas::hold_parent`), and
+/// hands it back first thing at close (`Canvas::release_parent`).
 struct GroupFrame {
-    /// The canvas the group will be composited onto.
-    parent: Canvas,
-    /// Where the group's buffer sits on it, in the parent's device pixels.
+    /// Where the group's buffer sits on its parent, in device pixels.
     at: (i32, i32),
     /// `ca` at the `Do`, which applies to the group's result (11.6.6).
     alpha: f64,
@@ -816,13 +818,12 @@ struct GroupFrame {
     clip_bounds: Option<Bounds>,
     soft_bounds: Option<Bounds>,
     frame: Bounds,
-    /// `/K`: the buffer as it started, so that each element can be composited
-    /// against it rather than against the elements before it (11.4.5).
-    ///
-    /// `None` for every ordinary group, which is what keeps the second buffer
-    /// off the common path — a knockout group pays for it and nothing else
-    /// does.
-    initial: Option<Canvas>,
+    /// `/K`: each element composites against the buffer as it started rather
+    /// than against the elements before it (11.4.5). The buffer reads that
+    /// state where it lies — nothing for an isolated group, its parent's
+    /// colour at no alpha for a non-isolated one — so a knockout group keeps
+    /// no second buffer (`Canvas::knock_out`).
+    knockout: bool,
     /// Whether the group was invoked fully opaque — `ca` 1, `Normal`, no soft
     /// mask at the `Do` — which 11.7.5.2 asks of every group enclosing an
     /// object before the object counts as fully opaque.
@@ -838,6 +839,10 @@ struct GroupFrame {
     /// this the stale entry is popped later by a `Q` from outside the group
     /// and installs a clip in the wrong coordinate space.
     clip_depth: usize,
+    /// How many soft masks' groups were open when the group opened: one
+    /// opened inside it and never closed is closed before it is, so that the
+    /// canvas it closes over is its own buffer, holding its parent.
+    masks_open: usize,
 }
 
 /// A soft-mask group being rendered (11.6.5.2).
@@ -866,6 +871,10 @@ struct MaskFrame {
     soft_bounds: Option<Bounds>,
     frame: Bounds,
     clip_depth: usize,
+    /// How many transparency groups were open when the mask's group opened:
+    /// one opened inside it and never closed is closed before it is, so that
+    /// the canvas it closes over is its own buffer.
+    groups_open: usize,
 }
 
 /// The most pixels a run of images may be held over: a quarter of a page.
@@ -996,10 +1005,11 @@ pub struct RenderCounts {
     pub glyph_mask_hits: u64,
     /// Pixels of the buffers a transparency group or a soft-mask group
     /// allocated for its own pixels while it was open
-    /// (`docs/design/performance.md`, P-25): its canvas, a non-isolated
-    /// group's copy of its backdrop and a knockout group's snapshot of its
-    /// initial state, each counted where it is allocated as its width times
-    /// its height. A quantity rather than a count of steps.
+    /// (`docs/design/performance.md`, P-25): its canvas, counted where it is
+    /// allocated as its width times its height. A group reads its backdrop
+    /// and its initial state from the parent canvas it holds, which was
+    /// allocated before it opened and is not counted. A quantity rather than
+    /// a count of steps.
     pub group_buffer_pixels: u64,
     /// Pixels of the regions those groups opened over, once a group: the
     /// rectangle each one's canvas is allocated over. What
@@ -2022,12 +2032,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // Before anything reads the canvas: a page whose last operation was an
         // image would otherwise hand back a canvas the run never reached.
         self.flush_run();
-        // A group that was opened and never closed would otherwise hand the
-        // caller the *group's* buffer as the page. The interpreter balances
-        // its own calls, but `Renderer` is public and this is the one failure
-        // that turns a page into a fragment rather than into wrong pixels.
+        // A group or a soft mask's group that was opened and never closed
+        // would otherwise hand the caller its buffer as the page — and a
+        // group's buffer holds the page itself until it closes. The
+        // interpreter balances its own calls, but `Renderer` is public and
+        // this is the one failure that turns a page into a fragment rather
+        // than into wrong pixels. Each closes what was opened inside it first.
         while !self.groups.is_empty() {
             self.close_group();
+        }
+        while !self.mask_frames.is_empty() {
+            self.close_soft_mask();
         }
         if self.missing_fonts > 0 {
             self.warnings.push(RenderWarning::UnreadableFont);
@@ -2134,29 +2149,31 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             Some(space) => Self::group_format_of(space),
             None => Self::alpha_format(self.canvas.format),
         };
-        let mut buffer = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(x0, y0);
+        let buffer = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(x0, y0);
         self.count_group_buffer(&buffer);
         self.counts.group_bound_pixels = self
             .counts
             .group_bound_pixels
             .saturating_add(pixels_of(&buffer));
+        // The buffer becomes the canvas everything paints into, and the canvas
+        // it will be composited onto moves into it until the group closes: a
+        // move of the canvas, never of its pixels. Nothing paints into the
+        // parent while the group is open, so its own pixels are the backdrop.
+        //
         // 11.4.4: an isolated group composites against nothing, so its buffer
-        // starts empty; a non-isolated one starts with the backdrop composited
-        // in, which is what lets a blend mode inside it see through to the
-        // page. The backdrop is then taken out again at close (11.4.7.2), or
-        // it is counted twice — once because the group started from it and
-        // once because the group is composited back onto it. That failure
-        // renders as a group that is *weaker* than it should be, pulled
-        // toward whatever was underneath, which is a plausible image.
-        if !group.isolated {
-            let backdrop = self.canvas.extract((x0, y0), width, height, format);
-            self.count_group_buffer(&backdrop);
-            buffer.adopt_backdrop(backdrop);
-        }
-
-        let initial = group.knockout.then(|| buffer.snapshot());
-        if let Some(initial) = &initial {
-            self.count_group_buffer(initial);
+        // starts empty and reads nothing of its parent; a non-isolated one
+        // starts with the backdrop composited in, which is what lets a blend
+        // mode inside it see through to the page. The backdrop is then taken
+        // out again at close (11.4.7.2), or it is counted twice — once because
+        // the group started from it and once because the group is composited
+        // back onto it. That failure renders as a group that is *weaker* than
+        // it should be, pulled toward whatever was underneath, which is a
+        // plausible image.
+        let parent = std::mem::replace(&mut self.canvas, buffer);
+        if group.isolated {
+            self.canvas.hold_parent(parent);
+        } else {
+            self.canvas.adopt_backdrop(parent);
         }
         // 11.7.5.2's conditions at the `Do`, and 11.7.5.3's functions for a
         // group whose result is RGB light reaching an ink parent.
@@ -2170,7 +2187,6 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         };
 
         let frame = GroupFrame {
-            parent: std::mem::replace(&mut self.canvas, buffer),
             at: (x0, y0),
             alpha: state.fill_alpha,
             blend: blend_mode(state.blend),
@@ -2179,10 +2195,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             clip_bounds: self.clip_bounds,
             soft_bounds: self.soft_bounds.take(),
             frame: self.frame,
-            initial,
+            knockout: group.knockout,
             opaque,
             removal,
             clip_depth: self.clip_stack.len(),
+            masks_open: self.mask_frames.len(),
         };
         // The buffer a whole-page render would have made: the clip's
         // rectangle on the page, within the parent's.
@@ -2211,9 +2228,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
     /// Whether the innermost open group is a knockout one (11.4.5).
     fn in_knockout(&self) -> bool {
-        self.groups
-            .last()
-            .is_some_and(|frame| frame.initial.is_some())
+        self.groups.last().is_some_and(|frame| frame.knockout)
     }
 
     /// Discards what earlier elements left where this one is about to paint
@@ -2224,35 +2239,44 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// composite is what makes "each element" mean an operator: a fill, a
     /// stroke, a glyph, an image, a shading, or a nested group's result.
     fn knockout_restore(&mut self, mask: &Mask) {
-        let Some(frame) = self.groups.last_mut() else {
-            return;
-        };
-        // Moved out and put back, because the restore needs the canvas and
-        // the frame at once and they are two fields of the same `self`.
-        let Some(initial) = frame.initial.take() else {
-            return;
-        };
-        self.canvas.knock_out(&initial, mask);
-        if let Some(frame) = self.groups.last_mut() {
-            frame.initial = Some(initial);
+        if self.in_knockout() {
+            self.canvas.knock_out(mask);
         }
     }
 
     /// Closes the innermost group and composites it onto its parent.
     ///
-    /// Restoring comes before compositing, unconditionally, so a cancelled
-    /// render still hands back the page rather than the group's buffer.
+    /// Taking the parent back out of the buffer comes before compositing,
+    /// unconditionally, so a cancelled render still hands back the page
+    /// rather than the group's buffer; and a soft mask's group opened inside
+    /// this one and never closed is closed first, so that the canvas this
+    /// closes over is this group's buffer, holding its parent.
     fn close_group(&mut self) {
+        let Some(masks_open) = self.groups.last().map(|frame| frame.masks_open) else {
+            return;
+        };
+        while self.mask_frames.len() > masks_open {
+            self.close_soft_mask();
+        }
         let Some(frame) = self.groups.pop() else {
             return;
         };
         self.admission.end_group();
         self.clip_stack.truncate(frame.clip_depth);
-        let mut buffer = std::mem::replace(&mut self.canvas, frame.parent);
         self.clip = frame.clip;
         self.clip_bounds = frame.clip_bounds;
         self.frame = frame.frame;
         let soft = frame.soft;
+        let Some(parent) = self.canvas.release_parent() else {
+            // Every open group's buffer holds its parent, and whatever was
+            // opened inside it has just been closed, so this has nothing to
+            // composite onto only if that stopped holding: the state the frame
+            // kept goes back, and the canvas stays as it stands.
+            self.soft = soft;
+            self.soft_bounds = frame.soft_bounds;
+            return;
+        };
+        let mut buffer = std::mem::replace(&mut self.canvas, parent);
 
         // 11.3.5.3 over a subtractive buffer: reported once per group rather
         // than once per pixel, which is what makes it a leniency record and not
@@ -2265,8 +2289,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             }
         }
 
-        // 11.4.7.2. A no-op on an isolated group, which kept no backdrop.
-        buffer.remove_backdrop();
+        // 11.4.7.2, `a0` and `C0` read from the parent, which nothing has
+        // painted into since the group adopted it. A no-op on an isolated
+        // group, which has no backdrop.
+        buffer.remove_backdrop(&self.canvas);
 
         // 11.4.5: a nested group is one element of whatever encloses it, and
         // its shape is its own accumulated alpha. This is the only element
@@ -2377,6 +2403,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             soft_bounds: self.soft_bounds.take(),
             frame: self.frame,
             clip_depth: self.clip_stack.len(),
+            groups_open: self.groups.len(),
         };
         // The buffer a whole-page render would have made, from the same
         // arithmetic as the one above.
@@ -2391,7 +2418,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     }
 
     /// Closes the innermost soft-mask group and installs what it drew.
+    ///
+    /// A transparency group opened inside the mask's group and never closed
+    /// is closed first, so that the canvas this closes over is the mask's
+    /// buffer.
     fn close_soft_mask(&mut self) {
+        let Some(groups_open) = self.mask_frames.last().map(|frame| frame.groups_open) else {
+            return;
+        };
+        while self.groups.len() > groups_open {
+            self.close_group();
+        }
         let Some(frame) = self.mask_frames.pop() else {
             return;
         };
@@ -8538,6 +8575,140 @@ mod tests {
                 clipped.area(),
                 "the tile at ({x}, {y})"
             );
+        }
+    }
+
+    /// What a renderer is asked to do, step by step, for
+    /// [`a_group_left_open_hands_back_the_page`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Step {
+        /// Open a transparency group, isolated or not, over the clip in force.
+        Group(bool),
+        /// Close the innermost group.
+        EndGroup,
+        /// Open a luminosity soft mask's group over a box.
+        Mask,
+        /// Close the innermost soft mask's group.
+        EndMask,
+        /// Set the cancellation token.
+        Cancel,
+    }
+
+    /// A grey page, a clip, then `steps`, each opening step followed by a
+    /// fill at half alpha inside what it opened, and then `finish`.
+    fn drawn_with(steps: &[Step]) -> (Canvas, Vec<RenderWarning>) {
+        let canvas = Canvas::new(40, 30, PixelFormat::Rgb8, Color::WHITE);
+        let cancel = CancelToken::new();
+        let mut r =
+            Renderer::new(canvas, page_transform(30.0, 1.0), &NoGlyphs).with_cancel(cancel.clone());
+        let plain = GraphicsState::default();
+        r.fill_path(&rect_path(0.0, 0.0, 40.0, 30.0), &filled(128), false);
+        r.save_state();
+        r.clip_path(&rect_path(4.0, 3.0, 34.0, 27.0), &plain, false);
+        let mut half = filled(20);
+        half.fill_alpha = 0.5;
+        for (at, step) in steps.iter().enumerate() {
+            let shift = at as f64 * 3.0;
+            match step {
+                Step::Group(isolated) => {
+                    let group = tinker_pdf_content::Group {
+                        isolated: *isolated,
+                        knockout: false,
+                        space: None,
+                    };
+                    assert!(r.begin_group(group, &plain), "{steps:?}: the group opens");
+                }
+                Step::Mask => {
+                    assert!(
+                        r.begin_soft_mask(
+                            &luminosity_mask(None),
+                            &rect_path(2.0, 2.0, 38.0, 28.0),
+                            &plain
+                        ),
+                        "{steps:?}: the mask opens"
+                    );
+                }
+                Step::EndGroup => r.end_group(),
+                Step::EndMask => r.end_soft_mask(),
+                Step::Cancel => cancel.cancel(),
+            }
+            if matches!(step, Step::Group(_) | Step::Mask) {
+                r.fill_path(
+                    &rect_path(8.0 + shift, 6.0, 22.0 + shift, 20.0),
+                    &half,
+                    false,
+                );
+            }
+        }
+        r.finish()
+    }
+
+    /// **A group left open hands back the page** (P-25.3): a group's buffer
+    /// holds the page while the group is open, and a renderer finished inside
+    /// a non-isolated group, an isolated one, two nested, a soft mask's group
+    /// inside a group and a group inside a soft mask's group hands back the
+    /// page — its size, its frame and the pixels closing each in turn would
+    /// have left. A render cancelled inside a group, left open or closed,
+    /// hands back the page with what was painted before it and nothing of
+    /// the group, and says it was cancelled.
+    #[test]
+    fn a_group_left_open_hands_back_the_page() {
+        use Step::{Cancel, EndGroup, EndMask, Group, Mask};
+        let opened: [&[Step]; 6] = [
+            &[Group(false)],
+            &[Group(true)],
+            &[Group(false), Group(true)],
+            &[Group(true), Group(false)],
+            &[Group(false), Mask],
+            &[Mask, Group(false)],
+        ];
+        for steps in opened {
+            // Each opened thing closed, innermost first.
+            let mut closing = steps.to_vec();
+            for step in steps.iter().rev() {
+                closing.push(if *step == Mask { EndMask } else { EndGroup });
+            }
+            let (closed, closed_warnings) = drawn_with(&closing);
+            let (open, warnings) = drawn_with(steps);
+            assert_eq!(
+                (open.width, open.height, open.format, open.origin()),
+                (40, 30, PixelFormat::Rgb8, (0, 0)),
+                "{steps:?}: the page, not a buffer"
+            );
+            assert!(
+                open.data == closed.data,
+                "{steps:?}: the pixels closing would leave"
+            );
+            assert_eq!(warnings, closed_warnings, "{steps:?}");
+            assert!(!warnings.contains(&RenderWarning::Cancelled), "{steps:?}");
+            if steps.first() != Some(&Mask) {
+                assert_ne!(
+                    open.pixel(12, 15),
+                    Some(Color::rgb(128, 128, 128)),
+                    "{steps:?}: the group was composited"
+                );
+            }
+        }
+
+        let grey = Canvas::new(40, 30, PixelFormat::Rgb8, Color::rgb(128, 128, 128));
+        for isolated in [false, true] {
+            for steps in [
+                vec![Group(isolated), Cancel],
+                vec![Group(isolated), Cancel, EndGroup],
+                vec![Group(isolated), Group(!isolated), Cancel],
+            ] {
+                let (page, warnings) = drawn_with(&steps);
+                assert_eq!(
+                    (page.width, page.height, page.origin()),
+                    (40, 30, (0, 0)),
+                    "{steps:?}: the page"
+                );
+                assert!(
+                    page.data == grey.data,
+                    "{steps:?}: what was painted before the group, and nothing of it"
+                );
+                assert!(warnings.contains(&RenderWarning::Cancelled), "{steps:?}");
+            }
         }
     }
 }

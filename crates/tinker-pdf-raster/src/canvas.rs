@@ -272,7 +272,19 @@ pub struct Canvas {
     /// which cannot round. `(0, 0)` for a canvas that is the whole page, which
     /// is every canvas that existed before this field did.
     origin: (i32, i32),
-    /// The initial backdrop of a *non-isolated* transparency group (11.4.4).
+    /// The canvas a transparency group's buffer will be composited onto, held
+    /// by the buffer while the group is open (11.4.4).
+    ///
+    /// **A move, never a copy.** While a group is open nothing paints into the
+    /// canvas beneath it — every paint goes to the group's buffer, and a
+    /// nested group's buffer stands in for that one in turn — so the parent's
+    /// own pixels are the backdrop the group reads, at the same device pixels,
+    /// for as long as it is open. [`Canvas::release_parent`] hands it back.
+    ///
+    /// `None` on every canvas that is not an open group's buffer.
+    parent: Option<Box<Canvas>>,
+    /// Whether `parent` is this buffer's initial backdrop: a *non-isolated*
+    /// group's (11.4.4), which reads it.
     ///
     /// A non-isolated group starts with its backdrop composited in, so that a
     /// blend mode inside the group can see through to what was underneath.
@@ -281,12 +293,17 @@ pub struct Canvas {
     /// channel must carry the group's *own* accumulated alpha, because
     /// 11.4.7.2's removal step is `C = Cn + (Cn - C0)·(a0/agn - a0)` and `agn`
     /// is that own alpha. The two are not recoverable from one another once
-    /// the backdrop is opaque — `agn` divides out — so the backdrop is kept.
+    /// the backdrop is opaque — `agn` divides out — so the backdrop is read
+    /// again where it lies: `a0` is the parent's alpha at each composited
+    /// pixel ([`Canvas::backdrop_alpha`]), and `C0` its colour, in this
+    /// buffer's format, at adoption and at removal.
     ///
-    /// `None` on every ordinary canvas and on every isolated group, where the
-    /// backdrop's alpha is zero and all of the arithmetic below collapses to
-    /// what it was.
-    backdrop: Option<Box<Canvas>>,
+    /// False on every ordinary canvas and on every isolated group, which
+    /// holds its parent and reads nothing of it: its backdrop's alpha is zero
+    /// and all of the arithmetic below collapses to what it would be with
+    /// none. It stays set once the parent is released, until
+    /// [`Canvas::remove_backdrop`] has taken the backdrop out.
+    backdrop: bool,
     /// Whether a non-separable blend mode has been applied over a subtractive
     /// buffer, which 11.3.5.3 cannot do without a round trip through light.
     ///
@@ -323,7 +340,8 @@ impl Canvas {
             stride,
             data: vec![0; len],
             origin: (0, 0),
-            backdrop: None,
+            parent: None,
+            backdrop: false,
             approximated_blends: 0,
             ink_tables: None,
         };
@@ -398,7 +416,12 @@ impl Canvas {
     /// that reason.
     ///
     /// `a_same_format_copy_is_the_bytes_it_started_as` pins the equivalence.
+    /// A pixel off `src` is `None` either way: the same-format read would
+    /// otherwise take a column past the right edge from the next row.
     fn source_from(&self, src: &Canvas, sx: u32, sy: u32) -> Option<([u8; 5], u32)> {
+        if sx >= src.width || sy >= src.height {
+            return None;
+        }
         if src.format == self.format {
             let components = src.format.components();
             let base = (sy as usize) * src.stride + (sx as usize) * components;
@@ -420,13 +443,20 @@ impl Canvas {
     /// consumer already slices to `components()`, so the spare byte is never
     /// read and never reaches `data`.
     fn encode(&self, color: Color) -> [u8; 5] {
+        self.encode_by(color, self.ink_tables.as_deref())
+    }
+
+    /// [`Canvas::encode`] with `tables` the black generation and undercolour
+    /// removal an ink format turns light into ink by, `None` for maximum
+    /// removal.
+    fn encode_by(&self, color: Color, tables: Option<&InkTables>) -> [u8; 5] {
         match self.format {
             PixelFormat::Gray8 => [color.luma(), 0, 0, 0, 0],
             PixelFormat::GrayA8 => [color.luma(), color.a, 0, 0, 0],
             PixelFormat::Rgb8 => [color.r, color.g, color.b, 0, 0],
             PixelFormat::Rgba8 => [color.r, color.g, color.b, color.a, 0],
             PixelFormat::CmykA8 => {
-                let (c, m, y, k) = match &self.ink_tables {
+                let (c, m, y, k) = match tables {
                     Some(tables) => tables.ink(color.r, color.g, color.b),
                     None => rgb_to_cmyk(color.r, color.g, color.b),
                 };
@@ -515,7 +545,7 @@ impl Canvas {
             && color_alpha == 255
             && alpha == 255
             && mask.outside == 0
-            && self.backdrop.is_none()
+            && !self.backdrop
             && self.format != PixelFormat::CmykA8
         {
             self.fill_opaque(mask, &source, rect);
@@ -734,12 +764,26 @@ impl Canvas {
         );
     }
 
-    /// How opaque the initial backdrop is at a pixel, zero without one.
+    /// How opaque the initial backdrop is at a pixel, `a0`: the parent's
+    /// alpha at the same device pixel, in the parent's own format — an alpha
+    /// needs no conversion, so this is one byte, or 255 for a format that
+    /// carries none. Zero without a backdrop, and off the parent, where there
+    /// is nothing to blend against.
     fn backdrop_alpha(&self, x: u32, y: u32) -> u32 {
-        let Some(backdrop) = &self.backdrop else {
+        if !self.backdrop {
             return 0;
-        };
-        backdrop.alpha_at(x, y)
+        }
+        self.beneath(x, y)
+            .map_or(0, |(parent, px, py)| parent.alpha_at(px, py))
+    }
+
+    /// The parent this buffer holds, and its own pixel under this buffer's
+    /// pixel `(x, y)`: the same device pixel. `None` without a parent, and
+    /// off it.
+    fn beneath(&self, x: u32, y: u32) -> Option<(&Canvas, u32, u32)> {
+        let parent = self.parent.as_deref()?;
+        let (px, py) = under(self.origin, parent, x, y)?;
+        Some((parent, px, py))
     }
 
     /// The stored alpha at a pixel, 255 in a format that carries none.
@@ -944,65 +988,83 @@ impl Canvas {
         out
     }
 
-    /// Starts this buffer from `backdrop`, and remembers it (11.4.4).
+    /// Starts this group's buffer from its parent, the canvas it will be
+    /// composited onto, and holds the parent until
+    /// [`Canvas::release_parent`] (11.4.4).
     ///
     /// What a **non-isolated** group does: the backdrop is composited in so
     /// that a blend mode inside the group sees through to it. The alpha
     /// channel is deliberately left at zero — it is the group's *own*
     /// accumulation from here on, and 11.4.7.2 needs it separate from the
     /// backdrop's in order to take the backdrop out again.
-    pub fn adopt_backdrop(&mut self, backdrop: Canvas) {
-        // Format as well as size. Today the two cannot differ — a group buffer
-        // takes its format from the canvas it will composite onto — but that
-        // is an invariant of the *caller*, not of this method, and it is
-        // exactly the invariant a group buffer in its own colour space breaks.
-        // Mismatched formats here would walk one stride with the other's
-        // channel count and read colour out of alignment: a picture, not a
-        // panic.
-        if backdrop.width != self.width
-            || backdrop.height != self.height
-            || backdrop.format != self.format
-            || backdrop.origin != self.origin
-        {
-            return;
-        }
-        // The backdrop's own bytes, through `source_from`'s same-format path —
-        // the formats are equal, checked above. Going through `pixel` and
-        // `encode` instead re-derived an ink buffer's ink from its light, and
-        // an ink page holds ink that light has no spelling for: a rich black
-        // the document chose came back as pure K, and a blend inside the group
-        // saw a backdrop the page never had.
+    ///
+    /// **The parent is moved in, never copied**, and read where it lies:
+    /// this buffer's pixel `(x, y)` is device pixel `origin + (x, y)`, which
+    /// is the parent's own pixel there. `C0` is the parent's pixel in this
+    /// buffer's format through `source_from` — the bytes straight across in
+    /// the same format, so an ink page's rich black is the backdrop as the
+    /// document chose it, and the conversion `pixel` and `encode` make in
+    /// another — and `a0` its alpha. A pixel of the buffer off the parent
+    /// stays transparent: there is no backdrop out there to blend against.
+    pub fn adopt_backdrop(&mut self, parent: Canvas) {
         let channels = color_channels(self.format);
+        let components = self.format.components();
         for row in 0..self.height {
             for col in 0..self.width {
-                let Some((pixel, _)) = self.source_from(&backdrop, col, row) else {
+                let Some((px, py)) = under(self.origin, &parent, col, row) else {
                     continue;
                 };
-                let components = self.format.components();
+                let Some(pixel) = self.backdrop_word(&parent, px, py) else {
+                    continue;
+                };
                 let base = (row as usize) * self.stride + (col as usize) * components;
                 for (i, slot) in self.data.iter_mut().skip(base).take(channels).enumerate() {
                     *slot = pixel.get(i).copied().unwrap_or(0);
                 }
             }
         }
-        self.backdrop = Some(Box::new(backdrop));
+        self.parent = Some(Box::new(parent));
+        self.backdrop = true;
+    }
+
+    /// Holds an **isolated** group's parent, the canvas it will be
+    /// composited onto, until [`Canvas::release_parent`], and reads nothing
+    /// of it: 11.4.4's backdrop alpha is zero, and the buffer starts as it
+    /// was made.
+    pub fn hold_parent(&mut self, parent: Canvas) {
+        self.parent = Some(Box::new(parent));
+        self.backdrop = false;
+    }
+
+    /// Hands back the parent [`Canvas::adopt_backdrop`] or
+    /// [`Canvas::hold_parent`] moved in, `None` for a canvas holding none.
+    ///
+    /// A non-isolated group's buffer still knows it has a backdrop to take
+    /// out, which [`Canvas::remove_backdrop`] reads from the parent handed to
+    /// it; nothing is painted into the buffer in between.
+    pub fn release_parent(&mut self) -> Option<Canvas> {
+        self.parent.take().map(|parent| *parent)
     }
 
     /// Takes the initial backdrop back out of a non-isolated group's result
-    /// (11.4.7.2).
+    /// (11.4.7.2), reading it from `parent`, the canvas the buffer adopted it
+    /// from and [`Canvas::release_parent`] handed back.
     ///
     /// `C = Cn + (Cn - C0)·(a0/agn - a0)`. Without it the backdrop is counted
     /// twice — once because the group started from it and once because the
     /// group is composited back onto it — and the page comes out *darker*
     /// rather than broken, which is a plausible image and therefore the worst
-    /// kind of wrong.
+    /// kind of wrong. `a0` and `C0` are read as adoption read them, at the
+    /// same device pixels of the same parent, which nothing has painted into
+    /// since: the same bytes.
     ///
-    /// Nothing happens on an isolated group, which has no stored backdrop and
-    /// for which `a0` is zero and the correction vanishes anyway.
-    pub fn remove_backdrop(&mut self) {
-        let Some(backdrop) = self.backdrop.take() else {
+    /// Nothing happens on an isolated group, which has no backdrop and for
+    /// which `a0` is zero and the correction vanishes anyway, nor a second
+    /// time.
+    pub fn remove_backdrop(&mut self, parent: &Canvas) {
+        if !core::mem::take(&mut self.backdrop) {
             return;
-        };
+        }
         if !self.format.has_alpha() {
             return;
         }
@@ -1012,7 +1074,10 @@ impl Canvas {
         for row in 0..self.height {
             for col in 0..self.width {
                 let own = self.alpha_at(col, row);
-                let initial = backdrop.alpha_at(col, row);
+                let Some((px, py)) = under(self.origin, parent, col, row) else {
+                    continue;
+                };
+                let initial = parent.alpha_at(px, py);
                 if own == 0 || initial == 0 {
                     continue;
                 }
@@ -1021,10 +1086,10 @@ impl Canvas {
                 // painted, which is the known instability of the removal step
                 // and is why every channel clamps.
                 let factor = (i64::from(initial) * 255 / i64::from(own)) - i64::from(initial);
-                // `C0` is the backdrop's own bytes, as `adopt_backdrop` copied
-                // them in: the backdrop is in this buffer's format, so this is
-                // `source_from`'s same-format read and no trip through light.
-                let Some((base0, _)) = self.source_from(&backdrop, col, row) else {
+                // `C0` in this buffer's format, as `adopt_backdrop` wrote it:
+                // the parent's own bytes when the two share a format, so no
+                // trip through light.
+                let Some(base0) = self.backdrop_word(parent, px, py) else {
                     continue;
                 };
                 let base = (row as usize) * self.stride + (col as usize) * components;
@@ -1041,28 +1106,44 @@ impl Canvas {
         }
     }
 
-    /// A copy of this canvas's pixels, without any stored initial backdrop.
-    ///
-    /// What 11.4.5 keeps: the state a knockout group's buffer starts in, so
-    /// that each element can be composited against it rather than against the
-    /// elements before it. The backdrop is deliberately not carried over —
-    /// this copy is only ever read from.
-    #[must_use]
-    pub fn snapshot(&self) -> Canvas {
-        Canvas {
-            width: self.width,
-            height: self.height,
-            format: self.format,
-            stride: self.stride,
-            data: self.data.clone(),
-            origin: self.origin,
-            backdrop: None,
-            approximated_blends: 0,
-            ink_tables: None,
+    /// `C0`, the parent's pixel `(px, py)` in this buffer's format: its bytes
+    /// straight across in the same format, and otherwise the conversion
+    /// `pixel` and `encode` make, by maximum undercolour removal into ink —
+    /// what a copy of the parent in this format holds, whatever black
+    /// generation a paint holds on this buffer while it paints.
+    fn backdrop_word(&self, parent: &Canvas, px: u32, py: u32) -> Option<[u8; 5]> {
+        if parent.format == self.format {
+            return self.source_from(parent, px, py).map(|(word, _)| word);
         }
+        parent
+            .pixel(px, py)
+            .map(|color| self.encode_by(color, None))
     }
 
-    /// Puts `initial` back where `mask` covers (11.4.5).
+    /// The state a group's buffer started in at its pixel `(x, y)`, as the
+    /// bytes it stores: a non-isolated group's backdrop colour, `C0` at no
+    /// alpha, as adoption wrote it, and otherwise the buffer as it was made,
+    /// transparent — `clear`, `Color::TRANSPARENT` in this format.
+    fn initial_state(&self, x: u32, y: u32, clear: &[u8; 5]) -> [u8; 5] {
+        if !self.backdrop {
+            return *clear;
+        }
+        let Some(mut word) = self
+            .beneath(x, y)
+            .and_then(|(parent, px, py)| self.backdrop_word(parent, px, py))
+        else {
+            return *clear;
+        };
+        if self.format.has_alpha() {
+            if let Some(alpha) = word.get_mut(color_channels(self.format)) {
+                *alpha = 0;
+            }
+        }
+        word
+    }
+
+    /// Puts the state this group's buffer started in back where `mask`
+    /// covers (11.4.5).
     ///
     /// A knockout group's elements do not accumulate: each one composites
     /// against the group's *initial* backdrop, so whatever earlier elements
@@ -1071,18 +1152,15 @@ impl Canvas {
     /// two, which is the usual approximation — the spec separates an object's
     /// shape from its alpha and this engine, like the buffers it inherits,
     /// carries only the one number.
-    pub fn knock_out(&mut self, initial: &Canvas, mask: &Mask) {
-        // See `adopt_backdrop`: the format check is the same insurance against
-        // the same coming change. `initial` is a `snapshot` of this buffer
-        // today, so it cannot differ — which is precisely why nothing would
-        // notice if it started to.
-        if initial.width != self.width
-            || initial.height != self.height
-            || initial.format != self.format
-        {
-            return;
-        }
+    ///
+    /// **The initial state is a function, not a snapshot**: an isolated
+    /// group starts transparent, and a non-isolated one with its backdrop's
+    /// colour at no alpha, read from the parent it holds, so a knockout
+    /// group keeps no second buffer.
+    pub fn knock_out(&mut self, mask: &Mask) {
         let components = self.format.components();
+        // The bytes `Canvas::new` cleared the buffer to, with no tables.
+        let clear = self.encode_by(Color::TRANSPARENT, None);
         let (x0, y0, x1, y1) = mask.overlap_at(self.origin, self.width, self.height);
         let (ox, oy) = self.origin;
         for row in y0..y1 {
@@ -1093,15 +1171,13 @@ impl Canvas {
                 if coverage == 0 {
                     continue;
                 }
+                let initial = self.initial_state(col, row, &clear);
                 let base = (row as usize) * self.stride + (col as usize) * components;
-                for i in 0..components {
-                    let (Some(from), Some(slot)) = (
-                        initial.data.get(base + i).copied(),
-                        self.data.get_mut(base + i),
-                    ) else {
+                for (i, from) in initial.iter().enumerate().take(components) {
+                    let Some(slot) = self.data.get_mut(base + i) else {
                         continue;
                     };
-                    *slot = (mul255(u32::from(from), coverage)
+                    *slot = (mul255(u32::from(*from), coverage)
                         + mul255(u32::from(*slot), 255 - coverage))
                     .min(255) as u8;
                 }
@@ -1117,7 +1193,7 @@ impl Canvas {
     /// per pixel would be ruinous and would put a `libm` call on a pixel path
     /// (ruling 4).
     ///
-    /// **Row by row, in integer** ([`mask_value`]): each pixel's value is the
+    /// **Row by row, in integer** (`mask_value`): each pixel's value is the
     /// one [`Canvas::pixel`] and [`Color::luminosity`] give, read off its
     /// bytes without making a `Color` of them. A grey is its own luminosity,
     /// the weights summing to 1 000; an RGB pixel takes the weights directly;
@@ -1242,6 +1318,14 @@ impl Canvas {
             },
         })
     }
+}
+
+/// The pixel of `parent` under pixel `(x, y)` of a canvas standing at
+/// device pixel `origin`: the same device pixel, in the parent's own indices,
+/// or `None` off the parent.
+fn under(origin: (i32, i32), parent: &Canvas, x: u32, y: u32) -> Option<(u32, u32)> {
+    let device = |at: i32, by: u32| i32::try_from(i64::from(at) + i64::from(by)).ok();
+    parent.local(device(origin.0, x)?, device(origin.1, y)?)
 }
 
 /// How [`Canvas::to_mask`] reads one pixel of `format`'s bytes as `kind`: the
@@ -2902,7 +2986,7 @@ mod tests {
         );
 
         let mut group = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
-        group.adopt_backdrop(page.extract((0, 0), 4, 4, PixelFormat::CmykA8));
+        group.adopt_backdrop(page);
         assert_eq!(
             group.data[..5],
             [255, 255, 255, 255, 0],
@@ -2913,7 +2997,13 @@ mod tests {
         // own colour, magenta, whatever it was painted over.
         let magenta = Color::rgb(255, 0, 255);
         group.fill_mask_inked(&mask, magenta, Some([0, 255, 0, 0]), 0.5, BlendMode::Normal);
-        group.remove_backdrop();
+        let page = group.release_parent().expect("the group holds its page");
+        group.remove_backdrop(&page);
+        assert_eq!(
+            page.data[..5],
+            [255, 255, 255, 255, 255],
+            "the page is its own"
+        );
         let own = &group.data[..4];
         assert!(
             own.iter()
@@ -3409,7 +3499,10 @@ mod tests {
             "and its alpha is the group's own, not the union: {mixed:?}"
         );
 
-        group.remove_backdrop();
+        let backdrop = group
+            .release_parent()
+            .expect("the group holds its backdrop");
+        group.remove_backdrop(&backdrop);
         let own = group.pixel(0, 0).expect("a pixel");
         assert!(
             own.r > 245 && own.g < 10 && own.b < 10,
@@ -3428,14 +3521,266 @@ mod tests {
     }
 
     /// An isolated group has no backdrop, so removal is a no-op and every
-    /// existing arithmetic path is untouched.
+    /// existing arithmetic path is untouched: it holds its parent, reads
+    /// nothing of it, and hands it back as it was. A canvas that holds no
+    /// parent hands back none.
     #[test]
     fn an_isolated_group_has_nothing_to_remove() {
+        let parent = Canvas::new(2, 2, PixelFormat::Rgba8, Color::rgb(9, 99, 199));
         let mut group = Canvas::new(2, 2, PixelFormat::Rgba8, Color::TRANSPARENT);
+        group.hold_parent(parent.clone());
+        assert_eq!(
+            group.data,
+            Canvas::new(2, 2, PixelFormat::Rgba8, Color::TRANSPARENT).data,
+            "nothing adopted"
+        );
         group.blend_pixel(0, 0, Color::rgb(10, 200, 30), 0.4);
         let before = group.data.clone();
-        group.remove_backdrop();
+        let held = group.release_parent().expect("the group holds its parent");
+        assert_eq!(held.data, parent.data, "handed back as it was");
+        group.remove_backdrop(&held);
         assert_eq!(group.data, before, "no backdrop, no correction");
+        assert!(group.release_parent().is_none(), "and it holds nothing now");
+        let mut plain = Canvas::new(2, 2, PixelFormat::Rgb8, Color::WHITE);
+        assert!(plain.release_parent().is_none(), "a canvas holds no parent");
+    }
+
+    /// 11.4.7.2's removal over a backdrop held as `copy` — the parent's
+    /// rectangle under `buffer`, in its format, standing where it does: the
+    /// arithmetic `remove_backdrop` makes, spelled over the copy's own bytes.
+    fn removed_against(buffer: &Canvas, copy: &Canvas) -> Vec<u8> {
+        let mut out = buffer.data.clone();
+        let channels = color_channels(buffer.format);
+        let components = buffer.format.components();
+        for row in 0..buffer.height {
+            for col in 0..buffer.width {
+                let own = buffer.alpha_at(col, row);
+                let initial = copy.alpha_at(col, row);
+                if own == 0 || initial == 0 {
+                    continue;
+                }
+                let factor = (i64::from(initial) * 255 / i64::from(own)) - i64::from(initial);
+                let base = (row as usize) * buffer.stride + (col as usize) * components;
+                for i in 0..channels {
+                    let cn = i64::from(out[base + i]);
+                    let c0 = i64::from(copy.data[base + i]);
+                    out[base + i] = (cn + (cn - c0) * factor / 255).clamp(0, 255) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    /// 11.4.5's restore against `snapshot`, the bytes `buffer` started in: the
+    /// arithmetic `knock_out` makes, spelled over a kept copy of them.
+    fn knocked_against(buffer: &Canvas, snapshot: &[u8], mask: &Mask) -> Vec<u8> {
+        let mut out = buffer.data.clone();
+        let components = buffer.format.components();
+        let (ox, oy) = buffer.origin();
+        for row in 0..buffer.height {
+            for col in 0..buffer.width {
+                let coverage = u32::from(mask.at(ox + col as i32, oy + row as i32));
+                if coverage == 0 {
+                    continue;
+                }
+                let base = (row as usize) * buffer.stride + (col as usize) * components;
+                for i in 0..components {
+                    let (from, slot) = (u32::from(snapshot[base + i]), u32::from(out[base + i]));
+                    out[base + i] =
+                        (mul255(from, coverage) + mul255(slot, 255 - coverage)).min(255) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    /// **A group reads its backdrop from its parent as a copy of it would
+    /// hold it** (P-25.3).
+    ///
+    /// The parent moves into the group's buffer and is read where it lies,
+    /// with no copy kept. Held here against a copy the parent would give —
+    /// `extract` of the buffer's rectangle in the buffer's format — for every
+    /// parent format under every group format, over parents whose pixels and
+    /// alphas are all different, and buffers inside the parent, the whole of
+    /// it and hanging off its corner: adoption writes the copy's colour at no
+    /// alpha; `a0`, read at every composited pixel, is the copy's alpha; a
+    /// knockout restore puts back the bytes the buffer started in; removal
+    /// takes the copy's backdrop out; and the parent comes back as it went
+    /// in. An isolated group holds its parent and reads nothing of it.
+    #[test]
+    fn a_group_reads_its_backdrop_from_its_parent_as_a_copy_would_hold_it() {
+        let mut state = 0x5eed_1e55_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let parents = [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::CmykA8,
+            PixelFormat::LabA8,
+        ];
+        let groups = [
+            PixelFormat::GrayA8,
+            PixelFormat::Rgba8,
+            PixelFormat::CmykA8,
+            PixelFormat::LabA8,
+        ];
+        let places = [((0, 10), 11u32, 9u32), ((-5, 7), 30, 20), ((20, 20), 12, 9)];
+        let mut cases = 0;
+        for parent_format in parents {
+            let mut parent = Canvas::new(30, 20, parent_format, Color::WHITE).at_origin(-5, 7);
+            let channels = color_channels(parent_format);
+            for pixel in parent.data.chunks_exact_mut(parent_format.components()) {
+                for byte in pixel.iter_mut() {
+                    *byte = next() as u8;
+                }
+                if parent_format.has_alpha() {
+                    pixel[channels] = match next() % 4 {
+                        0 => 0,
+                        1 => 255,
+                        _ => next() as u8,
+                    };
+                }
+            }
+            for format in groups {
+                for &(origin, width, height) in &places {
+                    let what = format!("a {format:?} group at {origin:?} over {parent_format:?}");
+                    let copy = parent.extract(origin, width, height, format);
+                    let made = Canvas::new(width, height, format, Color::TRANSPARENT)
+                        .at_origin(origin.0, origin.1);
+                    let group_channels = color_channels(format);
+                    let components = format.components();
+
+                    let mut group = made.clone();
+                    group.adopt_backdrop(parent.clone());
+                    let mut adopted = made.data.clone();
+                    for (pixel, held) in adopted
+                        .chunks_exact_mut(components)
+                        .zip(copy.data.chunks_exact(components))
+                    {
+                        pixel[..group_channels].copy_from_slice(&held[..group_channels]);
+                    }
+                    assert_eq!(group.data, adopted, "{what}: the copy's colour at no alpha");
+                    for row in 0..height {
+                        for col in 0..width {
+                            assert_eq!(
+                                group.backdrop_alpha(col, row),
+                                copy.alpha_at(col, row),
+                                "{what}: a0 at ({col}, {row})"
+                            );
+                        }
+                    }
+
+                    // Paint, knock out where a mask covers, paint again.
+                    let snapshot = group.data.clone();
+                    let mut cover = Mask::empty(origin.0 + 1, origin.1 + 1, width, height);
+                    for value in &mut cover.data {
+                        *value = match next() % 3 {
+                            0 => 0,
+                            1 => 255,
+                            _ => next() as u8,
+                        };
+                    }
+                    let colour = Color {
+                        r: next() as u8,
+                        g: next() as u8,
+                        b: next() as u8,
+                        a: 255,
+                    };
+                    group.fill_mask_inked(&cover, colour, None, 0.6, BlendMode::Multiply);
+                    let knocked = knocked_against(&group, &snapshot, &cover);
+                    group.knock_out(&cover);
+                    assert_eq!(group.data, knocked, "{what}: the knockout's initial state");
+                    group.fill_mask_inked(&cover, colour, None, 0.35, BlendMode::Screen);
+
+                    let held = group.release_parent().expect("the group holds its parent");
+                    assert!(
+                        held.data == parent.data,
+                        "{what}: the parent comes back as it went in"
+                    );
+                    assert_eq!(held.origin(), parent.origin(), "{what}");
+                    let removed = removed_against(&group, &copy);
+                    group.remove_backdrop(&held);
+                    assert_eq!(group.data, removed, "{what}: the backdrop taken out");
+                    let again = group.data.clone();
+                    group.remove_backdrop(&held);
+                    assert_eq!(group.data, again, "{what}: and only once");
+
+                    // Isolated: held, read for nothing.
+                    let mut isolated = made.clone();
+                    isolated.hold_parent(parent.clone());
+                    assert_eq!(
+                        isolated.data, made.data,
+                        "{what}, isolated: nothing adopted"
+                    );
+                    for row in 0..height {
+                        for col in 0..width {
+                            assert_eq!(isolated.backdrop_alpha(col, row), 0, "{what}, isolated");
+                        }
+                    }
+                    let snapshot = isolated.data.clone();
+                    isolated.fill_mask_inked(&cover, colour, None, 0.6, BlendMode::Multiply);
+                    let knocked = knocked_against(&isolated, &snapshot, &cover);
+                    isolated.knock_out(&cover);
+                    assert_eq!(isolated.data, knocked, "{what}, isolated: back to nothing");
+                    let held = isolated.release_parent().expect("held");
+                    let painted = isolated.data.clone();
+                    isolated.remove_backdrop(&held);
+                    assert_eq!(
+                        isolated.data, painted,
+                        "{what}, isolated: nothing to remove"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(
+            cases,
+            parents.len() * groups.len() * places.len(),
+            "every case ran"
+        );
+    }
+
+    /// A pixel off a canvas is no pixel of it, in its own format as in
+    /// another, wherever the column falls: `extract` gives a rectangle
+    /// hanging off a canvas's right edge transparent there, not the next
+    /// row's pixels.
+    #[test]
+    fn a_copy_past_a_canvas_s_right_edge_reads_nothing_there() {
+        for format in [PixelFormat::Rgba8, PixelFormat::GrayA8, PixelFormat::Rgb8] {
+            let mut canvas = Canvas::new(4, 3, format, Color::WHITE);
+            for (index, byte) in canvas.data.iter_mut().enumerate() {
+                *byte = (index * 29 + 7) as u8;
+            }
+            for target in [format, PixelFormat::Rgba8] {
+                let copy = canvas.extract((2, 0), 4, 3, target);
+                let clear = Canvas::new(1, 1, target, Color::TRANSPARENT);
+                for row in 0..3 {
+                    for col in 2..4 {
+                        assert_eq!(
+                            copy.pixel(col, row),
+                            clear.pixel(0, 0),
+                            "{format:?} as {target:?}: column {} of a 4-wide canvas",
+                            col + 2
+                        );
+                    }
+                    for col in 0..2 {
+                        let mut expected = Canvas::new(1, 1, target, Color::TRANSPARENT);
+                        let (word, _) = expected
+                            .source_from(&canvas, col + 2, row)
+                            .expect("on the canvas");
+                        let components = target.components();
+                        expected.data.copy_from_slice(&word[..components]);
+                        assert_eq!(copy.pixel(col, row), expected.pixel(0, 0), "{format:?}");
+                    }
+                }
+            }
+        }
     }
 
     /// 8.7.3.3: recolouring keeps the shape and replaces the ink. A pixel the

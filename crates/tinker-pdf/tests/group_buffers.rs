@@ -304,3 +304,245 @@ fn every_kind_of_soft_mask_is_kept_at_its_box() {
         }
     }
 }
+
+/// The fixture's groups' boxes: `/Grp`, non-isolated under `Multiply`;
+/// `/Knock`, isolated and knockout; and the soft mask's group, whose buffer
+/// is a group buffer too.
+const FIXTURE_GROUPS: [[f64; 4]; 3] = [
+    [0.0, 0.0, 58.0, 56.0],
+    [58.0, 0.0, 118.0, 56.0],
+    [10.0, 30.0, 110.0, 76.0],
+];
+
+/// The resources the generated pages of groups share: the forms `/G1` to
+/// `/G4` at objects 5 to 8, and the states their content sets.
+const GROUP_RESOURCES: &str = "<< /XObject << /G1 5 0 R /G2 6 0 R /G3 7 0 R /G4 8 0 R >> \
+     /ExtGState << /Mul << /BM /Multiply /ca 0.8 >> /Scr << /BM /Screen >> \
+     /Half << /ca 0.5 >> >> >>";
+
+/// A form XObject over `bbox`, a transparency group isolated or not and
+/// knockout or not, drawing `content`.
+fn group_form(bbox: [f64; 4], isolated: bool, knockout: bool, content: &str) -> String {
+    let [x0, y0, x1, y1] = bbox;
+    stream(
+        &format!(
+            "/Type /XObject /Subtype /Form /BBox [{x0} {y0} {x1} {y1}] \
+             /Group << /S /Transparency /I {isolated} /K {knockout} >>"
+        ),
+        content,
+    )
+}
+
+/// A page of groups: its name, its bytes, its height in points, and the boxes
+/// its groups' regions stand over — each group's `/BBox` within the boxes of
+/// the groups that enclose it, in default user space.
+struct Grouped {
+    name: &'static str,
+    bytes: Vec<u8>,
+    height: f64,
+    boxes: Vec<[f64; 4]>,
+}
+
+/// Two overlapping rectangles at half alpha, the first's corner at `(x, y)`:
+/// what each generated group draws, so that its backdrop and its knockout
+/// both show.
+fn two_at(x: f64, y: f64) -> String {
+    format!(
+        "/Half gs 0.1 0.3 0.9 rg {x} {y} 40 30 re f 0.8 0.1 0.2 rg {} {} 40 30 re f",
+        x + 20.0,
+        y + 12.0
+    )
+}
+
+/// A form no page draws, filling the slot `at` of [`GROUP_RESOURCES`].
+fn unused(at: usize) -> String {
+    group_form(
+        [0.0, 0.0, 1.0, 1.0],
+        true,
+        false,
+        &format!("0 g 0 0 1 1 re f % object {at}"),
+    )
+}
+
+/// A 200 by 120 page over a yellow backdrop, drawing `content` with
+/// [`GROUP_RESOURCES`] and `forms` as objects 5 to 8.
+fn grouped_page(
+    name: &'static str,
+    page_extra: &str,
+    content: &str,
+    forms: [String; 4],
+    boxes: Vec<[f64; 4]>,
+) -> Grouped {
+    let content = format!("0.9 0.8 0.1 rg 0 0 200 120 re f\n{content}");
+    Grouped {
+        name,
+        bytes: page_document(200.0, 120.0, page_extra, GROUP_RESOURCES, &content, &forms),
+        height: 120.0,
+        boxes,
+    }
+}
+
+/// The generated pages `group_buffers_hold_their_clipped_bounds_once` reads:
+/// a non-isolated group under a blend mode; an isolated and a non-isolated
+/// knockout group; groups nested three deep, the innermost reaching past both
+/// boxes around it and past the page; and a page that declares a page group,
+/// which is the page's own canvas and no buffer, holding a non-isolated group.
+fn grouped_pages() -> Vec<Grouped> {
+    vec![
+        grouped_page(
+            "a non-isolated group under a blend mode",
+            "",
+            "q /Mul gs /G1 Do Q",
+            [
+                group_form([20.0, 20.0, 120.0, 80.0], false, false, &two_at(30.0, 30.0)),
+                unused(6),
+                unused(7),
+                unused(8),
+            ],
+            vec![[20.0, 20.0, 120.0, 80.0]],
+        ),
+        grouped_page(
+            "an isolated and a non-isolated knockout group",
+            "",
+            "q /G1 Do Q q /Mul gs /G2 Do Q",
+            [
+                group_form([10.0, 10.0, 90.0, 70.0], true, true, &two_at(15.0, 15.0)),
+                group_form(
+                    [100.0, 30.0, 190.0, 110.0],
+                    false,
+                    true,
+                    &two_at(110.0, 40.0),
+                ),
+                unused(7),
+                unused(8),
+            ],
+            vec![[10.0, 10.0, 90.0, 70.0], [100.0, 30.0, 190.0, 110.0]],
+        ),
+        grouped_page(
+            "groups nested three deep",
+            "",
+            "q /Mul gs /G1 Do Q",
+            [
+                group_form(
+                    [10.0, 10.0, 190.0, 110.0],
+                    false,
+                    false,
+                    &format!("{} /G2 Do", two_at(15.0, 15.0)),
+                ),
+                group_form(
+                    [30.0, 20.0, 150.0, 100.0],
+                    true,
+                    true,
+                    "0.9 0.1 0.1 rg 40 30 50 50 re f /G3 Do",
+                ),
+                group_form(
+                    [60.0, -10.0, 220.0, 60.0],
+                    false,
+                    false,
+                    "/Scr gs 0.1 0.1 0.9 rg 70 -5 140 40 re f",
+                ),
+                unused(8),
+            ],
+            vec![
+                [10.0, 10.0, 190.0, 110.0],
+                [30.0, 20.0, 150.0, 100.0],
+                [60.0, 20.0, 150.0, 60.0],
+            ],
+        ),
+        grouped_page(
+            "a page group holding a non-isolated group",
+            "/Group << /S /Transparency /CS /DeviceGray /I true >>",
+            "q /Mul gs /G4 Do Q",
+            [
+                unused(5),
+                unused(6),
+                unused(7),
+                group_form([40.0, 30.0, 160.0, 90.0], false, false, &two_at(50.0, 40.0)),
+            ],
+            vec![[40.0, 30.0, 160.0, 90.0]],
+        ),
+    ]
+}
+
+/// Holds a render's group-buffer pixels to at most 1.1 times their bound, and
+/// the bound to `boxes`, the boxes the page states, rounded either way and
+/// clipped to `region`.
+#[track_caller]
+fn group_buffers_within_their_bound(
+    stats: &Stats,
+    boxes: &[[f64; 4]],
+    height: f64,
+    scale: f64,
+    region: PixelRegion,
+    what: &str,
+) {
+    let (inner, outer) = boxes.iter().fold((0, 0), |(inner, outer), bbox| {
+        let (i, o) = box_pixels(*bbox, height, scale, region);
+        (inner + i, outer + o)
+    });
+    assert!(
+        (inner..=outer).contains(&stats.group_bound_pixels),
+        "{what}: the groups' regions hold {} pixels, where their boxes hold {inner} to {outer}",
+        stats.group_bound_pixels
+    );
+    assert!(
+        stats.group_buffer_pixels * 10 <= stats.group_bound_pixels * 11,
+        "{what}: {} group-buffer pixels against a bound of {}",
+        stats.group_buffer_pixels,
+        stats.group_bound_pixels
+    );
+}
+
+/// **Group buffers hold their clipped bounds once** (P-25.3): a group's
+/// buffer is its region and nothing else — no copy of its backdrop for a
+/// non-isolated group, no snapshot of its initial state for a knockout one,
+/// the canvas beneath read where it lies — over the committed transparency
+/// fixture and generated pages of a non-isolated group under a blend mode, an
+/// isolated and a non-isolated knockout group, groups nested three deep and a
+/// page group, at 72 and 150 dpi, whole and in each quarter of the page:
+/// group-buffer pixels at most 1.1 times the groups' regions, the regions the
+/// boxes the page states clipped to what is drawn, and each tile the page's
+/// pixels under it.
+#[test]
+fn group_buffers_hold_their_clipped_bounds_once() {
+    let mut pages = vec![Grouped {
+        name: "the committed transparency fixture",
+        bytes: TRANSPARENCY.to_vec(),
+        height: FIXTURE_HEIGHT,
+        boxes: FIXTURE_GROUPS.to_vec(),
+    }];
+    pages.extend(grouped_pages());
+    for grouped in &pages {
+        let document = Document::open(grouped.bytes.clone()).expect("the page opens");
+        let page = document.page(0).expect("a page");
+        for dpi in [72.0, 150.0] {
+            let options = RenderOptions::at_dpi(dpi);
+            let scale = dpi / 72.0;
+            let (whole, stats) = counted(&page, &options, None);
+            let full = PixelRegion::new(0, 0, whole.width, whole.height);
+            let what = format!("{}, {dpi} dpi, the whole page", grouped.name);
+            assert!(stats.group_bound_pixels > 0, "{what}: groups were opened");
+            group_buffers_within_their_bound(
+                &stats,
+                &grouped.boxes,
+                grouped.height,
+                scale,
+                full,
+                &what,
+            );
+            for region in quarters(whole.width, whole.height) {
+                let what = format!("{}, {dpi} dpi, {region:?}", grouped.name);
+                let (tile, stats) = counted(&page, &options, Some(region));
+                tile_is_the_page(&tile, &whole, region, &what);
+                group_buffers_within_their_bound(
+                    &stats,
+                    &grouped.boxes,
+                    grouped.height,
+                    scale,
+                    region,
+                    &what,
+                );
+            }
+        }
+    }
+}

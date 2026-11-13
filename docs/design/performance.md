@@ -4368,7 +4368,9 @@ canvas at the tip.
 snapshot is taken straight after adoption, so it is fully transparent in an
 isolated group and, in a non-isolated one, the parent's colour in the group's
 format at zero alpha — exactly what `adopt_backdrop` wrote. `knock_out` reads
-it that way: every channel zero, or `C0` from the parent with its alpha zero.
+it that way: the buffer's transparent start, `Color::TRANSPARENT` in its format
+— which is not every byte zero for ink, where it is black ink at no alpha, or
+for Lab — or `C0` from the parent with its alpha zero.
 `GroupFrame::initial` becomes a `knockout` flag, which `in_knockout` reads.
 
 Ruling 5 holds by the same fact that makes the copy redundant. A tile's group

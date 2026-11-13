@@ -363,7 +363,14 @@ name, so `Page::render` announces it instead of the interpreter.
 
 **Transparency.** `/Group /S /Transparency` on a form XObject composites as
 a unit (11.6.6), with isolation (11.4.4), knockout (11.4.5) and backdrop
-removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. `/CS` is read and
+removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. A group's
+buffer is the clip's overlap with the canvas, held once: while the group is
+open the canvas beneath it moves into the buffer, nothing paints into it, and
+a non-isolated group reads its backdrop there where it lies — its alpha at
+each pixel it composites, its colour at adoption and again at removal — as a
+knockout group reads its initial state, so neither keeps a copy; the buffer
+hands the canvas back before anything else at close, a cancelled render and
+a group left open at the end of one included (`group_buffers.rs`). `/CS` is read and
 **honoured** — on a form's group and on the **page's own** group (11.4.7),
 which reaches no `Do` and so is read off the page dictionary.
 
@@ -900,8 +907,7 @@ function through a `ColorTable`, once a colour asked of it otherwise — all
 counted by the renderer, a tiling pattern's cell included, as are four
 quantities: `group_buffer_pixels`, the pixels of every buffer a transparency
 group or a soft mask's group allocated for its own pixels while it was open —
-its canvas, a non-isolated group's copy of its backdrop and a knockout group's
-snapshot of its initial state — and `group_bound_pixels`, the pixels of the
+its canvas, and nothing else — and `group_bound_pixels`, the pixels of the
 regions those groups opened over, once a group; and `soft_mask_pixels` and
 `soft_mask_bound_pixels`, the pixels of every soft mask installed and of the
 region of the group it was read from, once a mask;
@@ -1337,8 +1343,16 @@ defect to hide in.
   quarter of the page and a strip that misses it, to at most 1.1 times the
   pixels of its group's region, and that region to the box the page states
   clipped to the tile; `every_kind_of_soft_mask_is_kept_at_its_box` does the
-  same for a pale, a black and an alpha mask at two scales; and each tile is
-  the page's pixels under it.
+  same for a pale, a black and an alpha mask at two scales;
+  `group_buffers_hold_their_clipped_bounds_once` holds the buffers groups and
+  soft masks' groups allocate to at most 1.1 times their regions, and the
+  regions to the boxes the page states, over the transparency fixture and
+  pages of a non-isolated group under a blend mode, an isolated and a
+  non-isolated knockout group, groups nested three deep and a page group, at
+  two scales, whole and in quarters; and each tile is the page's pixels under
+  it. `tinker-pdf-render`'s `a_group_left_open_hands_back_the_page` finishes
+  renderers inside groups and soft masks' groups, nested either way, and
+  cancels one inside a group, each handing back the page.
 - What a scope reads once: `crates/tinker-pdf/tests/resource_work.rs`'s
   `a_scope_parses_each_named_space_and_state_once`, a page of a thousand
   `cs`, `scn`, `sh` and `gs` operators whose render reads each colour space

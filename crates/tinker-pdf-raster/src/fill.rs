@@ -2185,11 +2185,9 @@ mod tests {
                             }
                         }
                         if format.has_alpha() {
-                            let initial = Canvas::new(width, height, format, Color::TRANSPARENT)
-                                .at_origin(origin.0, origin.1);
                             let (mut through, mut by_field) = (canvas.clone(), canvas.clone());
-                            through.knock_out(&initial, &mask);
-                            by_field.knock_out(&initial, &field);
+                            through.knock_out(&mask);
+                            by_field.knock_out(&field);
                             assert_eq!(
                                 through.data, by_field.data,
                                 "{what}, {format:?}: a knockout"
