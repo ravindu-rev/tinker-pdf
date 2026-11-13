@@ -289,7 +289,7 @@ let crl = document.cos().stream_decoded(store.crls[0]);
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| Private-key operations of any kind | none offered — `Signer` returns finished CMS | no key parsing, key generation or signing arithmetic, so the engine holds no key material; signing with a private key in the engine is a roadmap row | [ROADMAP](../ROADMAP.md) SG-01…SG-09, SG-23 |
+| Signing a document with a key the engine holds | none offered — `Signer` returns finished CMS | `tinker-pdf-crypto` holds an RSA private key and runs its private operation, blinded and fault-checked on the constant-time path, but no signature scheme, key import or CMS `SignedData` is built on it yet, and key generation is a roadmap row too | [ROADMAP](../ROADMAP.md) SG-01…SG-09, SG-23 |
 | A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them; trust lists the host supplies are a roadmap row | [ROADMAP](../ROADMAP.md) SG-14 |
 | Deciding whether a certificate is expired, unasked | validity reported; judged only against a caller-supplied instant | ruling 4 bans a clock, and "expired" is a claim about *now* — a library that invents one answers differently on different days | [rulings](../rulings.md) ruling 4 |
 | CRL and OCSP fetching | embedded revocation data surfaced, not evaluated | the engine performs no I/O, so fetching stays the host's; parsing and evaluating what the host supplies is a roadmap row | [ROADMAP](../ROADMAP.md) SG-10 |

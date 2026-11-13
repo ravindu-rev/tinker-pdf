@@ -124,23 +124,38 @@ impl<const N: usize> Uint<N> {
     #[must_use]
     pub fn from_be_bytes(bytes: &[u8]) -> Option<Self> {
         let mut out = Self::zero();
+        if out.read_be_bytes(bytes) {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    /// [`Uint::from_be_bytes`] into an existing value, so that a secret is
+    /// read straight into the heap memory that holds it rather than built on
+    /// the stack and moved. Returns false, with the value half-written, when
+    /// the bytes are too wide; the caller drops it.
+    pub(crate) fn read_be_bytes(&mut self, bytes: &[u8]) -> bool {
+        for limb in &mut self.limbs {
+            *limb = 0;
+        }
         let mut limb = 0usize;
         let mut shift = 0u32;
         for &byte in bytes.iter().rev() {
             if limb >= N {
                 if byte != 0 {
-                    return None;
+                    return false;
                 }
                 continue;
             }
-            out.set_limb(limb, out.limb(limb) | (u64::from(byte) << shift));
+            self.set_limb(limb, self.limb(limb) | (u64::from(byte) << shift));
             shift += 8;
             if shift == 64 {
                 shift = 0;
                 limb += 1;
             }
         }
-        Some(out)
+        true
     }
 
     /// Writes the value big-endian into `out`, zero-padded on the left to
@@ -338,6 +353,11 @@ impl<const N: usize> Modulus<N> {
     #[must_use]
     pub fn bits(&self) -> usize {
         self.bits
+    }
+
+    /// The limbs the modulus occupies — the width every loop over it runs.
+    pub(crate) fn limbs(&self) -> usize {
+        self.used
     }
 
     /// The modulus's byte length — RFC 8017's `k`.
@@ -736,34 +756,16 @@ impl<const N: usize> Modulus<N> {
         tally!(limb_products, limb_products);
     }
 
-    /// The product's last step, branch-free (rule 4): `t - m` is computed
-    /// every time, and `t` or `t - m` is kept by mask.
-    ///
-    /// CIOS leaves `t` below `2m` over `used + 1` limbs. It needs reducing
-    /// when its carry limb is set, or when the low limbs are at least `m` —
-    /// which is when `t - m` does not borrow. The borrow is only known once
-    /// the whole difference is, so the difference is taken twice: once for
-    /// the borrow, and once to keep its limbs or not. Limbs above the modulus
-    /// are cleared, which is [`Modulus::narrow`]'s job on the public path.
+    /// The product's last step, branch-free (rule 4): CIOS leaves `t` below
+    /// `2m` over `used + 1` limbs, and [`reduce_once`] takes `m` off it or
+    /// not by mask. Limbs above the modulus are cleared, which is
+    /// [`Modulus::narrow`]'s job on the public path.
     fn finish_secret(&self, t: &[u64; MAX_LIMBS + 2], out: &mut Uint<N>) {
         let s = self.used;
-        let mut borrow = 0u64;
-        for j in 0..s {
-            borrow = subtract_limb(read(t, j), self.m.limb(j), borrow).1;
+        for j in 0..N {
+            out.set_limb(j, if j < s { read(t, j) } else { 0 });
         }
-        let take = mask(nonzero(read(t, s)) | (borrow ^ 1));
-
-        let mut borrow = 0u64;
-        for j in 0..s {
-            let limb = read(t, j);
-            let (difference, next) = subtract_limb(limb, self.m.limb(j), borrow);
-            borrow = next;
-            out.set_limb(j, select(take, difference, limb));
-        }
-        for j in s..N {
-            out.set_limb(j, 0);
-        }
-        tally!(selects, s as u64);
+        reduce_once(out, &self.m, s, read(t, s));
         tally!(products, 1);
     }
 
@@ -876,6 +878,510 @@ fn select_entry<const N: usize>(table: &[Uint<N>; 16], index: u64, used: usize, 
         tally!(table_reads, 1);
         tally!(selects, 1);
         tally!(branches, 1);
+    }
+}
+
+/// Takes `m` off a value below `2m` held as `x`'s low `used` limbs and a
+/// `carry` limb, or not, by mask (rule 4).
+///
+/// It needs reducing when the carry is set, or when the low limbs are at
+/// least `m` — which is when `x - m` does not borrow. The borrow is only known
+/// once the whole difference is, so the difference is taken twice: once for
+/// the borrow, and once to keep its limbs or not. When the carry is set the
+/// low limbs are below `m` and the difference wraps to exactly
+/// `2^(64·used) + x - m`, the answer.
+fn reduce_once<const N: usize>(x: &mut Uint<N>, m: &Uint<N>, used: usize, carry: u64) {
+    let mut borrow = 0u64;
+    for j in 0..used {
+        borrow = subtract_limb(x.limb(j), m.limb(j), borrow).1;
+    }
+    let take = mask(nonzero(carry) | (borrow ^ 1));
+    let mut borrow = 0u64;
+    for j in 0..used {
+        let limb = x.limb(j);
+        let (difference, next) = subtract_limb(limb, m.limb(j), borrow);
+        borrow = next;
+        x.set_limb(j, select(take, difference, limb));
+    }
+    tally!(selects, used as u64);
+}
+
+/// `out = value << bits` for `bits` below 64, every limb written; bits pushed
+/// past the top limb are lost, as [`Uint::shl_small`]'s are.
+fn shift_left_into<const N: usize>(value: &Uint<N>, bits: u32, out: &mut Uint<N>) {
+    if bits == 0 || bits >= 64 {
+        out.limbs = value.limbs;
+        return;
+    }
+    let mut carry = 0u64;
+    for i in 0..N {
+        let limb = value.limb(i);
+        out.set_limb(i, (limb << bits) | carry);
+        carry = limb >> (64 - bits);
+    }
+}
+
+/// `out = a - b` over the low `limbs` limbs, the rest of `out` cleared, and
+/// the borrow out of the top, as 0 or 1.
+fn subtract_into<const N: usize>(a: &Uint<N>, b: &Uint<N>, out: &mut Uint<N>, limbs: usize) -> u64 {
+    let mut borrow = 0u64;
+    for j in 0..N {
+        if j < limbs {
+            let (difference, next) = subtract_limb(a.limb(j), b.limb(j), borrow);
+            out.set_limb(j, difference);
+            borrow = next;
+        } else {
+            out.set_limb(j, 0);
+        }
+    }
+    borrow
+}
+
+/// `R^2 mod m` for a secret `m`, without a branch on it.
+///
+/// [`radix_mod`]'s steps, each conditional subtraction made every time and
+/// kept by mask, and then `64 · used` doublings each reduced by
+/// [`reduce_once`]. How many halving steps there are is the number of
+/// leading zeros in `m`'s top limb, which its bit length fixes: the length is
+/// public on this path, as every exponentiation's window count makes it.
+fn r2_secret<const N: usize>(m: &Uint<N>, used: usize, out: &mut Uint<N>) {
+    let mut work = Scratch::<N>::new();
+    let [shifted, difference, ..] = &mut work.values;
+    let z = m.limb(used.saturating_sub(1)).leading_zeros();
+
+    shift_left_into(m, z, shifted);
+    let mut borrow = 0u64;
+    for j in 0..N {
+        if j < used {
+            let (limb, next) = subtract_limb(0, shifted.limb(j), borrow);
+            out.set_limb(j, limb);
+            borrow = next;
+        } else {
+            out.set_limb(j, 0);
+        }
+    }
+    for i in (0..z).rev() {
+        shift_left_into(m, i, shifted);
+        let borrow = subtract_into(out, shifted, difference, used);
+        let keep = mask(borrow ^ 1);
+        for j in 0..used {
+            out.set_limb(j, select(keep, difference.limb(j), out.limb(j)));
+        }
+    }
+
+    for _ in 0..64 * used {
+        let mut carry = 0u64;
+        for j in 0..used {
+            let limb = out.limb(j);
+            out.set_limb(j, (limb << 1) | carry);
+            carry = limb >> 63;
+        }
+        reduce_once(out, m, used, carry);
+    }
+}
+
+/// Working values for the constant-time helpers below, wiped on drop as the
+/// exponentiation's workspace is.
+struct Scratch<const N: usize> {
+    values: [Uint<N>; 4],
+    t: [u64; MAX_LIMBS + 2],
+}
+
+impl<const N: usize> Scratch<N> {
+    fn new() -> Self {
+        Self {
+            values: [Uint::zero(); 4],
+            t: [0; MAX_LIMBS + 2],
+        }
+    }
+}
+
+impl<const N: usize> Drop for Scratch<N> {
+    fn drop(&mut self) {
+        for value in &mut self.values {
+            wipe(&mut value.limbs);
+        }
+        wipe(&mut self.t);
+    }
+}
+
+impl<const N: usize> Modulus<N> {
+    /// `out = a · b · R^-1 mod m`, the Montgomery product, on the
+    /// constant-time path: `a` any value below `R`, `b` below `m`.
+    pub(crate) fn montgomery_secret(&self, a: &Uint<N>, b: &Uint<N>, out: &mut Uint<N>) {
+        let mut work = Scratch::<N>::new();
+        self.product_secret(a, b, out, &mut work.t);
+    }
+
+    /// `x = x² · R^-1 mod m` in place, on the constant-time path.
+    pub(crate) fn square_secret(&self, x: &mut Uint<N>) {
+        let mut work = Scratch::<N>::new();
+        self.square_assign_secret(x, &mut work.t);
+    }
+
+    /// `out = a · R mod m`: into Montgomery form, for any `a` below `R`.
+    pub(crate) fn to_montgomery_secret(&self, a: &Uint<N>, out: &mut Uint<N>) {
+        self.montgomery_secret(a, &self.r2, out);
+    }
+
+    /// `out = a · b mod m` for ordinary operands — `a` below `R`, `b` below
+    /// `m` — as two Montgomery products: `a · R`, then `(a · R) · b · R^-1`.
+    pub(crate) fn mul_mod_secret(&self, a: &Uint<N>, b: &Uint<N>, out: &mut Uint<N>) {
+        let mut work = Scratch::<N>::new();
+        let Scratch { values, t } = &mut work;
+        let [a_montgomery, ..] = values;
+        self.product_secret(a, &self.r2, a_montgomery, t);
+        self.product_secret(a_montgomery, b, out, t);
+    }
+
+    /// `out = (a + b) mod m` for `a` and `b` below `m`, on the constant-time
+    /// path.
+    pub(crate) fn add_secret(&self, a: &Uint<N>, b: &Uint<N>, out: &mut Uint<N>) {
+        let s = self.used;
+        let mut carry = 0u64;
+        for j in 0..N {
+            if j < s {
+                let sum = u128::from(a.limb(j)) + u128::from(b.limb(j)) + u128::from(carry);
+                out.set_limb(j, sum as u64);
+                carry = (sum >> 64) as u64;
+            } else {
+                out.set_limb(j, 0);
+            }
+        }
+        reduce_once(out, &self.m, s, carry);
+    }
+
+    /// `out = (a - b) mod m` for `a` and `b` below `m`, on the constant-time
+    /// path: the difference, and `m` added back under a mask of its borrow.
+    pub(crate) fn sub_secret(&self, a: &Uint<N>, b: &Uint<N>, out: &mut Uint<N>) {
+        let s = self.used;
+        let borrow = subtract_into(a, b, out, s);
+        let add = mask(borrow);
+        let mut carry = 0u64;
+        for j in 0..s {
+            let sum =
+                u128::from(out.limb(j)) + u128::from(self.m.limb(j) & add) + u128::from(carry);
+            out.set_limb(j, sum as u64);
+            carry = (sum >> 64) as u64;
+        }
+    }
+
+    /// `out = value mod m` for a `value` of `value_limbs` limbs — a count the
+    /// caller states and that is public — on the constant-time path.
+    ///
+    /// Horner's rule over chunks of the modulus's own width, from the top: in
+    /// Montgomery form a partial result `A · R` becomes `(A · R + c) · R` by
+    /// one product with `R^2` and the chunk `c`'s own product with `R^2`,
+    /// added. Each chunk is below `R`, which is all a product asks of it, so
+    /// a value any number of times wider than the modulus reduces in as many
+    /// steps — an RSA representative under each prime, a half under the
+    /// other prime — with no comparison of the value against anything.
+    pub(crate) fn reduce_secret(&self, value: &Uint<N>, value_limbs: usize, out: &mut Uint<N>) {
+        let s = self.used;
+        let mut work = Scratch::<N>::new();
+        let Scratch { values, t } = &mut work;
+        let [accumulator, shifted, chunk_montgomery, chunk] = values;
+        let chunks = value_limbs.div_ceil(s.max(1)).max(1);
+        for index in (0..chunks).rev() {
+            for j in 0..N {
+                chunk.set_limb(j, if j < s { value.limb(index * s + j) } else { 0 });
+            }
+            self.product_secret(accumulator, &self.r2, shifted, t);
+            self.product_secret(chunk, &self.r2, chunk_montgomery, t);
+            self.add_secret(shifted, chunk_montgomery, accumulator);
+        }
+        self.product_secret(accumulator, &Uint::from_u64(1), out, t);
+    }
+
+    /// `base^exponent mod m` with a secret base and a **public** exponent —
+    /// RSA's `e`, raising a blinding factor or checking a signature — by
+    /// square and multiply over the exponent's bits, every product the
+    /// constant-time one. The branches are on the exponent, which every
+    /// verifier holds.
+    pub(crate) fn pow_secret_base(&self, base: &Uint<N>, exponent: &Uint<N>, out: &mut Uint<N>) {
+        let mut work = Scratch::<N>::new();
+        let Scratch { values, t } = &mut work;
+        let [base_montgomery, accumulator, ..] = values;
+        self.product_secret(base, &self.r2, base_montgomery, t);
+        self.product_secret(&Uint::from_u64(1), &self.r2, accumulator, t);
+        for i in (0..exponent.bits()).rev() {
+            self.square_assign_secret(accumulator, t);
+            if exponent.bit(i) {
+                self.product_assign_secret(accumulator, base_montgomery, t);
+            }
+        }
+        self.product_secret(accumulator, &Uint::from_u64(1), out, t);
+    }
+}
+
+/// Whether `a == b`, every limb read whatever the limbs hold. The answer is
+/// the one thing the caller learns, and it is what the caller acts on.
+pub(crate) fn equal_secret<const N: usize>(a: &Uint<N>, b: &Uint<N>) -> bool {
+    let mut difference = 0u64;
+    for j in 0..N {
+        difference |= a.limb(j) ^ b.limb(j);
+    }
+    nonzero(difference) == 0
+}
+
+/// Whether `a < b`: the borrow out of `a - b`, every limb read.
+pub(crate) fn less_secret<const N: usize>(a: &Uint<N>, b: &Uint<N>) -> bool {
+    let mut borrow = 0u64;
+    for j in 0..N {
+        borrow = subtract_limb(a.limb(j), b.limb(j), borrow).1;
+    }
+    borrow == 1
+}
+
+/// `out = a - small` over every limb; `a` must be at least `small`.
+pub(crate) fn subtract_small_secret<const N: usize>(a: &Uint<N>, small: u64, out: &mut Uint<N>) {
+    let mut borrow = 0u64;
+    for j in 0..N {
+        let subtrahend = if j == 0 { small } else { 0 };
+        let (difference, next) = subtract_limb(a.limb(j), subtrahend, borrow);
+        out.set_limb(j, difference);
+        borrow = next;
+    }
+}
+
+/// Whether `a · b == c` exactly, by a full schoolbook product over every limb
+/// of both: what an RSA key's `p · q = n` check asks, without a branch on
+/// either prime.
+pub(crate) fn product_equals<const N: usize>(a: &Uint<N>, b: &Uint<N>, c: &Uint<N>) -> bool {
+    let mut wide = [0u64; 2 * MAX_LIMBS];
+    for i in 0..N {
+        let ai = u128::from(a.limb(i));
+        let mut carry = 0u64;
+        for j in 0..N {
+            let sum =
+                u128::from(read(&wide, i + j)) + ai * u128::from(b.limb(j)) + u128::from(carry);
+            write(&mut wide, i + j, sum as u64);
+            carry = (sum >> 64) as u64;
+        }
+        write(&mut wide, i + N, carry);
+    }
+    let mut difference = 0u64;
+    for (k, &limb) in wide.iter().enumerate() {
+        difference |= limb ^ c.limb(k);
+    }
+    wipe(&mut wide);
+    nonzero(difference) == 0
+}
+
+// ---- Secret values ---------------------------------------------------------
+
+/// A secret number: `N` limbs in one heap allocation, zeroised when it is
+/// dropped and never printed (`docs/design/signing.md`, *Key material*).
+///
+/// Rust moves a stack value by copying its bytes and leaves the old ones in
+/// place, so a secret is never a stack value that moves: the limbs sit behind
+/// a `Box`, and moving a `Secret` moves the pointer. It is neither `Copy` nor
+/// `Clone`; [`Secret::duplicate`] is the explicit copy, and itself a
+/// `Secret`. `Debug` writes `[redacted]`.
+pub struct Secret<const N: usize> {
+    value: Box<Uint<N>>,
+}
+
+impl<const N: usize> Secret<N> {
+    /// Zero, on the heap: the shape every secret starts in before it is
+    /// written in place.
+    #[must_use]
+    pub fn zero() -> Self {
+        Self {
+            value: Box::new(Uint::zero()),
+        }
+    }
+
+    /// Reads big-endian bytes straight into the heap allocation, or `None`
+    /// when they are too wide for `N` limbs. The caller's bytes stay the
+    /// caller's to wipe.
+    #[must_use]
+    pub fn from_be_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut secret = Self::zero();
+        if secret.value.read_be_bytes(bytes) {
+            Some(secret)
+        } else {
+            None
+        }
+    }
+
+    /// The number.
+    #[must_use]
+    pub fn value(&self) -> &Uint<N> {
+        &self.value
+    }
+
+    /// The number, to be written in place.
+    pub(crate) fn value_mut(&mut self) -> &mut Uint<N> {
+        &mut self.value
+    }
+
+    /// A second `Secret` holding the same number, in its own allocation.
+    #[must_use]
+    pub fn duplicate(&self) -> Self {
+        let mut copy = Self::zero();
+        copy.value.limbs = self.value.limbs;
+        copy
+    }
+}
+
+impl<const N: usize> Drop for Secret<N> {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        let held = !self.value.is_zero();
+        wipe(&mut self.value.limbs);
+        #[cfg(test)]
+        dropped::record(held, self.value.is_zero());
+    }
+}
+
+impl<const N: usize> core::fmt::Debug for Secret<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+/// An odd modulus that is itself secret — an RSA prime — with its Montgomery
+/// constants, all on the heap, computed on the constant-time path, wiped on
+/// drop and never printed.
+pub struct SecretModulus<const N: usize> {
+    modulus: Box<Modulus<N>>,
+}
+
+impl<const N: usize> SecretModulus<N> {
+    /// Precomputes for a secret `m`, straight into the heap, or refuses it as
+    /// [`Modulus::new`] does: even, below 3, or wider than [`MAX_LIMBS`].
+    ///
+    /// The refusal is the one thing that depends on `m`'s value rather than
+    /// its length, and it says only that `m` is not a modulus. `R^2 mod m` is
+    /// computed without a branch on `m` ([`r2_secret`]).
+    #[must_use]
+    pub fn new(m: &Secret<N>) -> Option<Self> {
+        let value = m.value();
+        let bits = value.bits();
+        if N > MAX_LIMBS || !value.is_odd() || bits < 2 {
+            return None;
+        }
+        let used = bits.div_ceil(64);
+        let mut modulus = Box::new(Modulus {
+            m: Uint::zero(),
+            used,
+            bits,
+            n0inv: 0,
+            r2: Uint::zero(),
+        });
+        {
+            let Modulus {
+                m: held, n0inv, r2, ..
+            } = &mut *modulus;
+            held.limbs = value.limbs;
+            *n0inv = montgomery_n0inv(held.limb(0));
+            r2_secret(held, used, r2);
+        }
+        Some(Self { modulus })
+    }
+
+    /// The modulus, for the constant-time path's operations — and only those:
+    /// the public path's [`Modulus::pow`] and [`Modulus::mul`] branch on
+    /// values, and this modulus is one.
+    pub(crate) fn modulus(&self) -> &Modulus<N> {
+        &self.modulus
+    }
+}
+
+impl<const N: usize> Drop for SecretModulus<N> {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        let held = !self.modulus.m.is_zero();
+        let modulus = &mut *self.modulus;
+        wipe(&mut modulus.m.limbs);
+        wipe(&mut modulus.r2.limbs);
+        wipe(core::slice::from_mut(&mut modulus.n0inv));
+        #[cfg(test)]
+        dropped::record(
+            held,
+            modulus.m.is_zero() && modulus.r2.is_zero() && modulus.n0inv == 0,
+        );
+    }
+}
+
+impl<const N: usize> core::fmt::Debug for SecretModulus<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+/// Secret octets on the heap — a blinding factor's draw, a salt drawn from
+/// the caller's source — wiped when dropped and never printed.
+pub(crate) struct SecretBytes {
+    bytes: Vec<u8>,
+}
+
+impl SecretBytes {
+    /// `len` zero octets.
+    pub(crate) fn new(len: usize) -> Self {
+        Self {
+            bytes: vec![0; len],
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        let held = self.bytes.iter().any(|&byte| byte != 0);
+        for byte in self.bytes.iter_mut() {
+            *byte = 0;
+        }
+        let _ = core::hint::black_box(&mut self.bytes[..]);
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        dropped::record(held, self.bytes.iter().all(|&byte| byte == 0));
+    }
+}
+
+impl core::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+/// The test-only hook in every secret's `Drop`: what each dropped secret held
+/// before its wipe, and whether it read zero after (`docs/design/signing.md`,
+/// milestone 3). The crates forbid `unsafe`, so freed memory cannot be read
+/// back; this reads the limbs at the last moment they are still the secret's.
+#[cfg(test)]
+pub(crate) mod dropped {
+    use std::cell::RefCell;
+
+    /// One dropped secret.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Wiped {
+        /// It held something other than zero before the wipe.
+        pub(crate) held: bool,
+        /// Every limb, constant and octet read zero after it.
+        pub(crate) zero: bool,
+    }
+
+    thread_local! {
+        static LOG: RefCell<Vec<Wiped>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record(held: bool, zero: bool) {
+        LOG.with(|log| log.borrow_mut().push(Wiped { held, zero }));
+    }
+
+    /// This thread's drops since the last call.
+    pub(crate) fn take() -> Vec<Wiped> {
+        LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
     }
 }
 
@@ -1501,5 +2007,198 @@ mod tests {
         let mut limbs = [u64::MAX, 1, 0x0123_4567_89ab_cdef];
         wipe(&mut limbs);
         assert_eq!(limbs, [0, 0, 0]);
+    }
+
+    fn secret_of<const N: usize>(value: &Uint<N>) -> Secret<N> {
+        let mut secret = Secret::zero();
+        secret.value_mut().limbs = value.limbs;
+        secret
+    }
+
+    /// A secret modulus's constants, computed without a branch on it, are the
+    /// public path's: the same `R^2`, the same `-m^-1`, the same widths. The
+    /// moduli cover a top limb with no leading zeros (no halving steps), one
+    /// with sixty-three, and random widths inside a wider type.
+    #[test]
+    fn a_secret_modulus_has_the_public_constants() {
+        let mut draws = Draws(0x7365_6372_6574);
+        let mut moduli: Vec<Uint<9>> = vec![
+            Uint::from_u64(3),
+            Uint::from_u64(0xffff_ffff_ffff_fffb),
+            pattern(128, u64::MAX),
+        ];
+        let mut short_top = Uint::<9>::from_u64(1);
+        short_top.set_limb(1, 1);
+        moduli.push(short_top);
+        for bits in [65usize, 127, 300, 512, 575] {
+            moduli.push(odd_modulus(&mut draws, bits));
+        }
+        for m in moduli {
+            let public = Modulus::new(m).expect("odd and above 2");
+            let secret = SecretModulus::new(&secret_of(&m)).expect("the same modulus");
+            let held = secret.modulus();
+            assert_eq!(held.m, public.m);
+            assert_eq!((held.used, held.bits), (public.used, public.bits), "{m:?}");
+            assert_eq!(held.n0inv, public.n0inv, "{m:?}");
+            assert_eq!(held.r2, public.r2, "R^2 for {m:?}");
+        }
+        assert!(SecretModulus::new(&secret_of(&Uint::<9>::from_u64(1024))).is_none());
+        assert!(SecretModulus::new(&secret_of(&Uint::<9>::from_u64(1))).is_none());
+        assert!(SecretModulus::new(&Secret::<9>::zero()).is_none());
+    }
+
+    /// The constant-time reduction against the public one, for values one,
+    /// two and many times the modulus's width — the shape a representative
+    /// under one prime takes — and for values already below it.
+    #[test]
+    fn the_secret_reduction_agrees_with_the_public_one() {
+        let mut draws = Draws(0x7265_6475_6365);
+        for bits in [64usize, 100, 128, 190] {
+            let m = odd_modulus::<9>(&mut draws, bits);
+            let modulus = Modulus::new(m).expect("odd");
+            for width in [1usize, 2, 3, 5, 9] {
+                for _ in 0..6 {
+                    let value = drawn::<9>(&mut draws, 64 * width);
+                    let mut out = Uint::<9>::from_u64(u64::MAX);
+                    modulus.reduce_secret(&value, width, &mut out);
+                    assert_eq!(
+                        out,
+                        modulus.reduce(&value),
+                        "{bits}-bit modulus, {width} limbs"
+                    );
+                }
+            }
+            let below = drawn::<9>(&mut draws, bits - 1);
+            let mut out = Uint::<9>::zero();
+            modulus.reduce_secret(&below, 9, &mut out);
+            assert_eq!(out, below);
+            modulus.reduce_secret(&m, 9, &mut out);
+            assert!(out.is_zero(), "m reduces to zero");
+        }
+    }
+
+    #[test]
+    fn secret_addition_subtraction_and_products_agree_with_u128() {
+        for m in [
+            0xffff_ffff_ffff_fffbu128,
+            0x0123_4567_89ab_cdef_fedc_ba98_7654_3211,
+        ] {
+            let modulus = Modulus::new(from_u128(m)).expect("odd");
+            for a in SAMPLES {
+                for b in SAMPLES {
+                    let (a, b) = (a % m, b % m);
+                    let (x, y) = (from_u128(a), from_u128(b));
+                    let mut out = Uint::<2>::zero();
+                    modulus.add_secret(&x, &y, &mut out);
+                    assert_eq!(as_u128(&out), (a + b) % m, "{a:x} + {b:x}");
+                    modulus.sub_secret(&x, &y, &mut out);
+                    assert_eq!(as_u128(&out), (a + m - b) % m, "{a:x} - {b:x}");
+                    modulus.mul_mod_secret(&x, &y, &mut out);
+                    assert_eq!(as_u128(&out), mulmod(a, b, m), "{a:x} * {b:x}");
+                    modulus.montgomery_secret(&x, &y, &mut out);
+                    assert_eq!(out, modulus.mul(&x, &y));
+                    let mut square = x;
+                    modulus.square_secret(&mut square);
+                    assert_eq!(square, modulus.mul(&x, &x));
+                    modulus.to_montgomery_secret(&x, &mut out);
+                    assert_eq!(out, modulus.to_montgomery(&x));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_secret_base_under_a_public_exponent_agrees_with_pow() {
+        let m = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3211u128;
+        let modulus = Modulus::new(from_u128(m)).expect("odd");
+        for base in SAMPLES {
+            for exponent in [0u64, 1, 2, 3, 17, 65537, 0x260445] {
+                let base = from_u128(base % m);
+                let exponent = Uint::<2>::from_u64(exponent);
+                let mut out = Uint::<2>::zero();
+                modulus.pow_secret_base(&base, &exponent, &mut out);
+                assert_eq!(out, modulus.pow(&base, &exponent));
+            }
+        }
+    }
+
+    #[test]
+    fn the_secret_comparisons_agree_with_ord() {
+        for a in SAMPLES {
+            for b in SAMPLES {
+                let (x, y) = (from_u128(a), from_u128(b));
+                assert_eq!(equal_secret(&x, &y), a == b, "{a:x} == {b:x}");
+                assert_eq!(less_secret(&x, &y), a < b, "{a:x} < {b:x}");
+            }
+            if a >= 2 {
+                let mut out = Uint::<2>::zero();
+                subtract_small_secret(&from_u128(a), 2, &mut out);
+                assert_eq!(as_u128(&out), a - 2);
+            }
+        }
+    }
+
+    /// `a · b == c` is recognised exactly: products of one- and two-limb
+    /// values against `u128`, and every product one off refused.
+    #[test]
+    fn an_exact_product_is_recognised() {
+        for a in [1u128, 3, 0xffff_ffff_ffff_ffff, 0x1234_5678_9abc_def1] {
+            for b in [1u128, 5, 0xffff_ffff_ffff_fffb, 0xfedc_ba98_7654_3211] {
+                let product = a * b;
+                let (x, y) = (from_u128(a), from_u128(b));
+                assert!(product_equals(&x, &y, &from_u128(product)), "{a:x} * {b:x}");
+                assert!(!product_equals(&x, &y, &from_u128(product + 1)));
+                assert!(!product_equals(&x, &y, &from_u128(product - 1)));
+            }
+        }
+        // A product wider than the type is held to the type's own limbs only
+        // if its top half is zero: 2^127 · 2 needs a third limb.
+        let half = from_u128(1u128 << 127);
+        assert!(!product_equals(&half, &Uint::from_u64(2), &Uint::zero()));
+    }
+
+    /// Every kind of secret is wiped when it drops: what the hook in each
+    /// `Drop` reads is a value before and zeros after. Nothing prints.
+    #[test]
+    fn every_secret_is_wiped_when_dropped_and_prints_as_redacted() {
+        let value = from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3211);
+        let _ = dropped::take();
+        let secret = secret_of(&value);
+        let copy = secret.duplicate();
+        assert_eq!(copy.value(), &value);
+        let modulus = SecretModulus::new(&secret).expect("odd");
+        let mut bytes = SecretBytes::new(4);
+        bytes.as_mut_slice().copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(bytes.as_slice(), &[1, 2, 3, 4]);
+        assert_eq!(format!("{secret:?}"), "[redacted]");
+        assert_eq!(format!("{modulus:?}"), "[redacted]");
+        assert_eq!(format!("{bytes:?}"), "[redacted]");
+        drop((secret, copy, modulus, bytes));
+        let wiped = dropped::take();
+        assert_eq!(wiped.len(), 4, "{wiped:?}");
+        assert!(wiped.iter().all(|wiped| *wiped
+            == dropped::Wiped {
+                held: true,
+                zero: true
+            }));
+    }
+
+    /// A secret is read in place, and refused rather than truncated when it
+    /// is too wide, as a public value is.
+    #[test]
+    fn a_secret_reads_its_bytes_in_place() {
+        let secret = Secret::<2>::from_be_bytes(&[0, 0, 1, 2]).expect("fits");
+        assert_eq!(secret.value(), &Uint::from_u64(0x0102));
+        let mut wide = [0u8; 17];
+        wide[0] = 1;
+        assert!(Secret::<2>::from_be_bytes(&wide).is_none());
+        let mut value = Uint::<2>::from_u64(7);
+        assert!(value.read_be_bytes(&[0xff; 16]));
+        assert_eq!(as_u128(&value), u128::MAX);
+        assert!(value.read_be_bytes(&[]));
+        assert!(
+            value.is_zero(),
+            "an empty string is zero, and clears what was there"
+        );
     }
 }

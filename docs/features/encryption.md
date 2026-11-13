@@ -320,7 +320,24 @@ on (`docs/design/signing.md`) to the public path's answers and to repeated
 multiplication in `u128`, and its operation counts — Montgomery products,
 limb products, window-table reads, masked selections and loop iterations —
 equal over exponents of every shape and bases of every size under one
-modulus (`the_private_path_counts_alike_over_every_exponent`).
+modulus (`the_private_path_counts_alike_over_every_exponent`), and the
+secret moduli, reductions, sums, differences and comparisons beside it to
+the public path and to `u128`.
+
+`rsa.rs` holds the RSA private operation (`RsaPrivateKey`, by the Chinese
+remainder theorem) to every key the committed vectors publish — CAVP
+`SigVer15`'s fifteen, whose CRT parts the test computes from `d`, `p` and
+`q`, and `pss-vect.txt`'s ten, 1 024 to 4 096 bits — by recovering each of
+their 135 published signatures from the representative it was made from
+(`crt_equals_the_plain_private_operation_on_every_vector_key`, which also
+holds each key to `c^d mod n` without the halves). Blinded runs equal
+unblinded ones under three sources and across two refreshes and the
+squarings between; a half miscomputed mid-operation and a key with a wrong
+`dP` are refused before a result leaves; a key that has signed reads zero in
+all nine of its secrets through the hook in each `Drop`, and so does every
+secret an operation leaves behind; a source that cannot fill, or whose draws
+are zero, never below `n` or a factor of `n`, is refused; a poisoned lock is
+refused; and every construction check refuses by name.
 
 The signature-generation vectors RSA signing is held to are committed beside
 the verification ones: NIST CAVP's `SigGen15` and `SigGenPSS` files and their

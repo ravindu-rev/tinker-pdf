@@ -1,15 +1,44 @@
-//! RSA with a **public key**: signature verification (RFC 8017 §8.2.2 and
-//! §8.1.2), and RSAES-PKCS1-v1_5 encryption (§7.2.1).
+//! RSA: with a **public key**, signature verification (RFC 8017 §8.2.2 and
+//! §8.1.2) and RSAES-PKCS1-v1_5 encryption (§7.2.1); with a **private key**,
+//! the private operation those signatures are made with (§5.2.1).
 //!
-//! Public-key operations and nothing else. There is no key generation, no
-//! signing, no decryption, no private-key operation and no key-file parsing
-//! here. A PDF signature arrives as a certificate's public key and a blob of
-//! bytes, and this module answers one question about them; a public-key
+//! A PDF signature arrives as a certificate's public key and a blob of bytes,
+//! and the public side answers one question about them; a public-key
 //! encrypted document seals its file key to a recipient's certificate, which
 //! is the same public key used the other way round. `tinker-pdf-pki` does the
 //! DER; this module takes `(n, e)` as big-endian integers, and a digest that
 //! [`crate::sha1`] or [`crate::sha2`] already computed or a message and the
-//! caller's padding.
+//! caller's padding. There is no key generation and no key-file parsing: a
+//! private key arrives as its numbers ([`RsaPrivateComponents`]).
+//!
+//! # The private key
+//!
+//! [`RsaPrivateKey`] holds RFC 8017 §3.2's second representation and runs
+//! the private operation by it (`docs/design/signing.md`, *RSA signing*):
+//! `m1 = c^dP mod p` and `m2 = c^dQ mod q`, each the constant-time path's
+//! fixed-window exponentiation at its prime's width, joined by Garner's
+//! `h = qInv · (m1 - m2) mod p` and `s = m2 + q · h`. Every operation on a
+//! secret — the reductions under each prime, the exponentiations, the
+//! recombination, the blinding — runs on that path ([`crate::bignum`], *Two
+//! paths*), and the key's secrets live in [`crate::bignum::Secret`]s, wiped
+//! when it drops.
+//!
+//! **Blinded by the caller's entropy.** Before the exponentiations `c` is
+//! multiplied by `r^e` and after them `s` by `r^-1`, for an `r` drawn from
+//! the caller's [`crate::EntropySource`] uniform in `[1, n)`, so the values
+//! the private exponents meet are unrelated to anything an observer chose
+//! (Kocher, 1996). The pair is drawn on the key's first private operation and
+//! on every thirty-second after it, each draw paying for one inverse — by
+//! Fermat under each prime, joined by Garner — and squared in between, which
+//! keeps it a pair for `r²`. A drawn `r` that is zero, not below `n` or
+//! shares a factor with `n` is drawn again; a source that cannot fill is a
+//! refusal, and no private operation runs unblinded.
+//!
+//! **A fault does not leave.** A miscomputed half reveals a prime to anyone
+//! holding the faulty signature and a correct one (Boneh, DeMillo and Lipton,
+//! 1997), so every result is raised to `e` and compared with `c` before it is
+//! returned, and one that fails is [`RsaRefusal::FaultDetected`], carrying
+//! nothing of it.
 //!
 //! # The whole encoding is compared, and that is the point
 //!
@@ -73,8 +102,14 @@
 //!   under such a key; forgetting the second accepts a block with garbage in
 //!   bits the encoding does not have.
 
-use crate::bignum::{Modulus, Uint, MAX_LIMBS};
+use std::sync::Mutex;
+
+use crate::bignum::{
+    equal_secret, less_secret, product_equals, subtract_small_secret, Modulus, Secret, SecretBytes,
+    SecretModulus, Uint, MAX_LIMBS,
+};
 use crate::handler::constant_time_eq;
+use crate::EntropySource;
 use crate::{sha1::sha1, sha2};
 
 /// Limbs behind an RSA modulus: 4096 bits, the widest key this verifies.
@@ -182,14 +217,17 @@ impl DigestValue {
     }
 }
 
-/// Why a key or a signature was refused.
+/// Why a key, a signature or a private operation was refused.
 ///
 /// Typed rather than a bare `false`, because a caller reporting on a signature
 /// has to distinguish "this key is not one I can work with" from "this
 /// signature does not verify" — the first is a gap in the engine and the
-/// second is a fact about the document. Naming the reason leaks nothing: every
-/// input here is public, and the module performs no private-key operation for
-/// a timing or error oracle to attack.
+/// second is a fact about the document. Naming the reason leaks nothing. On
+/// the public side every input is public. On the private side a refusal names
+/// a key whose parts do not make a key, a request the scheme cannot encode, or
+/// a caller's source that could not blind, each decided before the private
+/// operation runs, or a fault found after it — and none carries a value the
+/// operation computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RsaRefusal {
     /// The modulus is wider than 4096 bits.
@@ -232,6 +270,45 @@ pub enum RsaRefusal {
     /// contains a zero octet, which would end `PS` early and change what the
     /// recipient reads as the message (§7.2.1 step 2b).
     PaddingUnusable,
+    /// A private key whose parts do not make a key, naming the check that
+    /// found it (RFC 8017 §3.2).
+    KeyCheckFailed(KeyCheck),
+    /// A message representative not below the modulus: RSASP1's "message
+    /// representative out of range" (RFC 8017 §5.2.1 step 1).
+    MessageRepresentativeOutOfRange,
+    /// The caller's entropy source could not fill a buffer. A private
+    /// operation is never run unblinded for want of one.
+    EntropyUnavailable,
+    /// The caller's entropy source filled every buffer, and draw after draw
+    /// was zero, not below the modulus or shared a factor with it: a source
+    /// that is not random cannot blind.
+    EntropyUnusable,
+    /// The lock that holds a key's blinding pair was poisoned by a thread
+    /// that panicked holding it. The pair is not trusted, and no operation
+    /// runs without one.
+    KeyLockPoisoned,
+    /// The result failed the check made with the public exponent before it
+    /// leaves: the arithmetic went wrong somewhere, and a faulty RSA
+    /// signature can reveal a prime. Nothing of it is returned.
+    FaultDetected,
+}
+
+/// The check an RSA private key failed when it was built.
+///
+/// Each is a property that can be checked without trusting the key, and none
+/// says more than that the parts do not make one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyCheck {
+    /// A prime is even, below 3, or wider than 4 096 bits.
+    PrimeUnusable,
+    /// `p · q` is not `n`.
+    PrimesDoNotMakeModulus,
+    /// `d` is not in `[1, n)`.
+    PrivateExponentOutOfRange,
+    /// `dP` is not in `[1, p)`, or `dQ` not in `[1, q)`.
+    CrtExponentOutOfRange,
+    /// `qInv` is not below `p`, or `qInv · q` is not 1 modulo `p`.
+    CoefficientMismatch,
 }
 
 /// RSASSA-PSS's three choices (RFC 8017 §8.1 and A.2.3): the digest that
@@ -531,6 +608,410 @@ impl RsaPublicKey {
             return Err(RsaRefusal::ModulusTooWide);
         }
         Ok(out)
+    }
+}
+
+/// How many private operations one blinding pair serves before a fresh one is
+/// drawn: the key's first, and every thirty-second after it.
+const BLINDING_REFRESH: u32 = 32;
+
+/// How many draws a blinding factor gets before the source is called
+/// unusable. A draw is refused when it is zero, not below `n`, or shares a
+/// factor with `n`, and an honest source is refused for the second less than
+/// half the time, so 128 refusals in a row is a source that is not random.
+const BLINDING_DRAWS: usize = 128;
+
+/// An RSA private key's parts — RFC 8017 §3.2's second representation, as
+/// big-endian octet strings, in the order and under the names PKCS#1's
+/// `RSAPrivateKey` (A.1.2) gives them.
+///
+/// Borrowed rather than owned: [`RsaPrivateKey::new`] reads each part
+/// straight into memory of its own, and the caller's bytes stay the caller's
+/// to wipe. There is deliberately no `Debug`.
+#[derive(Clone, Copy)]
+pub struct RsaPrivateComponents<'a> {
+    /// `n`.
+    pub modulus: &'a [u8],
+    /// `e`.
+    pub public_exponent: &'a [u8],
+    /// `d`.
+    pub private_exponent: &'a [u8],
+    /// `p`.
+    pub prime1: &'a [u8],
+    /// `q`.
+    pub prime2: &'a [u8],
+    /// `dP = d mod (p - 1)`.
+    pub exponent1: &'a [u8],
+    /// `dQ = d mod (q - 1)`.
+    pub exponent2: &'a [u8],
+    /// `qInv = q^-1 mod p`.
+    pub coefficient: &'a [u8],
+}
+
+/// `r^e` and `r^-1` modulo `n`, each in Montgomery form, for one blinding
+/// factor `r` that is not itself kept.
+struct BlindingPair {
+    forward: Secret<RSA_LIMBS>,
+    inverse: Secret<RSA_LIMBS>,
+}
+
+impl BlindingPair {
+    fn duplicate(&self) -> Self {
+        Self {
+            forward: self.forward.duplicate(),
+            inverse: self.inverse.duplicate(),
+        }
+    }
+}
+
+/// A key's blinding state, behind its lock: the pair, if one has been drawn,
+/// and how many operations have used it.
+struct Blinding {
+    pair: Option<BlindingPair>,
+    uses: u32,
+}
+
+/// An RSA private key, on the constant-time path (`docs/design/signing.md`,
+/// *The RSA private key*).
+///
+/// The public `n` and `e`; `d`, `dP` and `dQ` each a [`Secret`], `p` and `q`
+/// each a [`SecretModulus`] with its Montgomery constants; `qInv` held in
+/// Montgomery form under `p` and `q` in Montgomery form under `n`, which is
+/// what the recombination multiplies by; and the blinding pair behind a lock,
+/// so threads signing with one key never share a factor. Every secret is
+/// wiped when the key drops, and `Debug` prints the key's size and nothing
+/// else.
+pub struct RsaPrivateKey {
+    public: RsaPublicKey,
+    d: Secret<RSA_LIMBS>,
+    p: SecretModulus<RSA_LIMBS>,
+    q: SecretModulus<RSA_LIMBS>,
+    dp: Secret<RSA_LIMBS>,
+    dq: Secret<RSA_LIMBS>,
+    q_inv_montgomery: Secret<RSA_LIMBS>,
+    q_montgomery: Secret<RSA_LIMBS>,
+    blinding: Mutex<Blinding>,
+}
+
+impl RsaPrivateKey {
+    /// Builds a key from its parts, or refuses it.
+    ///
+    /// It checks what can be checked without trusting the key: `n` and `e` as
+    /// [`RsaPublicKey::new`] does; both primes odd, at least 3 and within
+    /// 4 096 bits; `p · q = n` exactly; `d` in `[1, n)`; `dP` and `dQ` in
+    /// `[1, p)` and `[1, q)`; and `qInv` below `p` with `qInv · q ≡ 1 (mod
+    /// p)`. Each comparison reads every limb of its operands; a refusal names
+    /// the check ([`KeyCheck`]). A `dP` or `dQ` that is in range and wrong
+    /// passes these checks and is caught by the check every result takes
+    /// before it leaves.
+    ///
+    /// # Errors
+    ///
+    /// [`RsaRefusal::ModulusTooWide`], [`RsaRefusal::ModulusUnusable`],
+    /// [`RsaRefusal::ExponentUnusable`], or [`RsaRefusal::KeyCheckFailed`]
+    /// naming the check.
+    pub fn new(components: &RsaPrivateComponents<'_>) -> Result<Self, RsaRefusal> {
+        let refused = RsaRefusal::KeyCheckFailed;
+        let public = RsaPublicKey::new(components.modulus, components.public_exponent)?;
+        let d = Secret::from_be_bytes(components.private_exponent)
+            .ok_or(refused(KeyCheck::PrivateExponentOutOfRange))?;
+        let p_value =
+            Secret::from_be_bytes(components.prime1).ok_or(refused(KeyCheck::PrimeUnusable))?;
+        let q_value =
+            Secret::from_be_bytes(components.prime2).ok_or(refused(KeyCheck::PrimeUnusable))?;
+        let dp = Secret::from_be_bytes(components.exponent1)
+            .ok_or(refused(KeyCheck::CrtExponentOutOfRange))?;
+        let dq = Secret::from_be_bytes(components.exponent2)
+            .ok_or(refused(KeyCheck::CrtExponentOutOfRange))?;
+        let q_inv = Secret::from_be_bytes(components.coefficient)
+            .ok_or(refused(KeyCheck::CoefficientMismatch))?;
+
+        let p = SecretModulus::new(&p_value).ok_or(refused(KeyCheck::PrimeUnusable))?;
+        let q = SecretModulus::new(&q_value).ok_or(refused(KeyCheck::PrimeUnusable))?;
+        let n = &public.modulus;
+        if !product_equals(p_value.value(), q_value.value(), n.value()) {
+            return Err(refused(KeyCheck::PrimesDoNotMakeModulus));
+        }
+        let zero = Uint::zero();
+        if equal_secret(dp.value(), &zero)
+            || !less_secret(dp.value(), p_value.value())
+            || equal_secret(dq.value(), &zero)
+            || !less_secret(dq.value(), q_value.value())
+        {
+            return Err(refused(KeyCheck::CrtExponentOutOfRange));
+        }
+        if !less_secret(q_inv.value(), p_value.value()) {
+            return Err(refused(KeyCheck::CoefficientMismatch));
+        }
+        let under_p = p.modulus();
+        let mut q_mod_p = Secret::zero();
+        under_p.reduce_secret(q_value.value(), q.modulus().limbs(), q_mod_p.value_mut());
+        let mut product = Secret::zero();
+        under_p.mul_mod_secret(q_inv.value(), q_mod_p.value(), product.value_mut());
+        if !equal_secret(product.value(), &Uint::from_u64(1)) {
+            return Err(refused(KeyCheck::CoefficientMismatch));
+        }
+
+        let mut q_inv_montgomery = Secret::zero();
+        under_p.to_montgomery_secret(q_inv.value(), q_inv_montgomery.value_mut());
+        let mut q_montgomery = Secret::zero();
+        n.to_montgomery_secret(q_value.value(), q_montgomery.value_mut());
+        let key = Self {
+            public,
+            d,
+            p,
+            q,
+            dp,
+            dq,
+            q_inv_montgomery,
+            q_montgomery,
+            blinding: Mutex::new(Blinding {
+                pair: None,
+                uses: 0,
+            }),
+        };
+        if equal_secret(key.d.value(), &zero)
+            || !less_secret(key.d.value(), key.public.modulus.value())
+        {
+            return Err(refused(KeyCheck::PrivateExponentOutOfRange));
+        }
+        Ok(key)
+    }
+
+    /// The public half: what a verifier holds.
+    #[must_use]
+    pub fn public_key(&self) -> &RsaPublicKey {
+        &self.public
+    }
+
+    /// The modulus's bit length, the key's size.
+    #[must_use]
+    pub fn modulus_bits(&self) -> usize {
+        self.public.modulus_bits()
+    }
+
+    /// RSASP1 (RFC 8017 §5.2.1) on a message representative below `n`: `k`
+    /// octets, blinded by the caller's entropy and checked with the public
+    /// exponent before they leave. The signature schemes are its callers.
+    ///
+    /// # Errors
+    ///
+    /// [`RsaRefusal::MessageRepresentativeOutOfRange`],
+    /// [`RsaRefusal::EntropyUnavailable`], [`RsaRefusal::EntropyUnusable`],
+    /// [`RsaRefusal::KeyLockPoisoned`] or [`RsaRefusal::FaultDetected`].
+    pub(crate) fn private_operation(
+        &self,
+        representative: &Uint<RSA_LIMBS>,
+        entropy: &mut dyn EntropySource,
+    ) -> Result<Vec<u8>, RsaRefusal> {
+        // The representative is public — an encoding of a digest — so this
+        // is the one comparison here that may stop early.
+        if representative >= self.public.modulus.value() {
+            return Err(RsaRefusal::MessageRepresentativeOutOfRange);
+        }
+        let pair = self.blinding_pair(entropy)?;
+        self.private_operation_with(representative, &pair)
+    }
+
+    /// The private operation under one blinding pair: §5.2.1 step 2b with the
+    /// blinding around it and the fault check after it.
+    fn private_operation_with(
+        &self,
+        representative: &Uint<RSA_LIMBS>,
+        pair: &BlindingPair,
+    ) -> Result<Vec<u8>, RsaRefusal> {
+        let n = &self.public.modulus;
+        let p = self.p.modulus();
+        let q = self.q.modulus();
+
+        // c · r^e mod n: the pair's forward half is r^e · R, so one product.
+        let mut blinded = Secret::<RSA_LIMBS>::zero();
+        n.montgomery_secret(representative, pair.forward.value(), blinded.value_mut());
+
+        // Step 2b ii: the two halves, each at its prime's width.
+        let mut residue = Secret::zero();
+        let mut m1 = Secret::zero();
+        p.reduce_secret(blinded.value(), n.limbs(), residue.value_mut());
+        p.pow_secret(residue.value(), self.dp.value(), m1.value_mut());
+        #[cfg(test)]
+        fault::strike(&mut m1);
+        let mut m2 = Secret::zero();
+        q.reduce_secret(blinded.value(), n.limbs(), residue.value_mut());
+        q.pow_secret(residue.value(), self.dq.value(), m2.value_mut());
+
+        // Steps 2b iv and v, then the unblinding by r^-1 · R.
+        let mut joined = Secret::zero();
+        self.recombine(&m1, &m2, &mut joined);
+        let mut signature = Secret::zero();
+        n.montgomery_secret(joined.value(), pair.inverse.value(), signature.value_mut());
+
+        // The fault check: s^e mod n is the representative, or nothing leaves.
+        let mut check = Secret::zero();
+        n.pow_secret_base(signature.value(), &self.public.exponent, check.value_mut());
+        if !equal_secret(check.value(), representative) {
+            return Err(RsaRefusal::FaultDetected);
+        }
+        let mut out = vec![0u8; n.byte_len()];
+        if !signature.value().to_be_bytes(&mut out) {
+            // Unreachable: the result is below n, which fits k octets.
+            return Err(RsaRefusal::FaultDetected);
+        }
+        Ok(out)
+    }
+
+    /// Garner's recombination (RFC 8017 §5.2.1 step 2b iv and v):
+    /// `h = qInv · (m1 - m2) mod p` and `out = m2 + q · h`, below `n`, on the
+    /// constant-time path. It joins the private operation's halves, and the
+    /// blinding factor's two Fermat inverses.
+    fn recombine(
+        &self,
+        m1: &Secret<RSA_LIMBS>,
+        m2: &Secret<RSA_LIMBS>,
+        out: &mut Secret<RSA_LIMBS>,
+    ) {
+        let n = &self.public.modulus;
+        let p = self.p.modulus();
+        let mut m2_mod_p = Secret::zero();
+        p.reduce_secret(m2.value(), self.q.modulus().limbs(), m2_mod_p.value_mut());
+        let mut difference = Secret::zero();
+        p.sub_secret(m1.value(), m2_mod_p.value(), difference.value_mut());
+        // qInv is held as qInv · R under p: one product is qInv · difference.
+        let mut h = Secret::zero();
+        p.montgomery_secret(
+            self.q_inv_montgomery.value(),
+            difference.value(),
+            h.value_mut(),
+        );
+        // q as q · R under n: one product is q · h, below n since h < p.
+        let mut qh = Secret::zero();
+        n.montgomery_secret(self.q_montgomery.value(), h.value(), qh.value_mut());
+        n.add_secret(qh.value(), m2.value(), out.value_mut());
+    }
+
+    /// The pair this operation is blinded by: drawn fresh on the key's first
+    /// operation and every [`BLINDING_REFRESH`]th after it, squared in
+    /// between — `(r^e)² = (r²)^e` and `(r^-1)² = (r²)^-1`, so it stays a
+    /// pair — and copied out, so the lock is not held while the key computes.
+    fn blinding_pair(&self, entropy: &mut dyn EntropySource) -> Result<BlindingPair, RsaRefusal> {
+        let mut guard = self
+            .blinding
+            .lock()
+            .map_err(|_| RsaRefusal::KeyLockPoisoned)?;
+        let state = &mut *guard;
+        let refresh = state.uses % BLINDING_REFRESH == 0;
+        let pair = match &mut state.pair {
+            Some(pair) if !refresh => {
+                let n = &self.public.modulus;
+                n.square_secret(pair.forward.value_mut());
+                n.square_secret(pair.inverse.value_mut());
+                pair.duplicate()
+            }
+            slot => {
+                let fresh = self.draw_pair(entropy)?;
+                let copy = fresh.duplicate();
+                *slot = Some(fresh);
+                copy
+            }
+        };
+        state.uses = state.uses.wrapping_add(1);
+        Ok(pair)
+    }
+
+    /// Draws `r` uniform in `[1, n)` from the caller's source — `k` octets,
+    /// cut to `n`'s bit length, drawn again when zero or not below `n` — and
+    /// returns `(r^e · R, r^-1 · R)`, drawing again when `r` shares a factor
+    /// with `n` and so has no inverse.
+    fn draw_pair(&self, entropy: &mut dyn EntropySource) -> Result<BlindingPair, RsaRefusal> {
+        let n = &self.public.modulus;
+        let k = n.byte_len();
+        let unused = 8 * k - n.bits();
+        let mut bytes = SecretBytes::new(k);
+        let mut r = Secret::<RSA_LIMBS>::zero();
+        let mut inverse = Secret::zero();
+        let mut product = Secret::zero();
+        for _ in 0..BLINDING_DRAWS {
+            if !entropy.fill(bytes.as_mut_slice()) {
+                return Err(RsaRefusal::EntropyUnavailable);
+            }
+            if let Some(first) = bytes.as_mut_slice().first_mut() {
+                *first &= 0xffu8 >> unused;
+            }
+            if !r.value_mut().read_be_bytes(bytes.as_slice()) {
+                continue;
+            }
+            if equal_secret(r.value(), &Uint::zero()) || !less_secret(r.value(), n.value()) {
+                continue;
+            }
+            self.inverse(&r, &mut inverse);
+            n.mul_mod_secret(r.value(), inverse.value(), product.value_mut());
+            if !equal_secret(product.value(), &Uint::from_u64(1)) {
+                continue;
+            }
+            let mut power = Secret::zero();
+            n.pow_secret_base(r.value(), &self.public.exponent, power.value_mut());
+            let mut forward = Secret::zero();
+            n.to_montgomery_secret(power.value(), forward.value_mut());
+            let mut inverse_montgomery = Secret::zero();
+            n.to_montgomery_secret(inverse.value(), inverse_montgomery.value_mut());
+            return Ok(BlindingPair {
+                forward,
+                inverse: inverse_montgomery,
+            });
+        }
+        Err(RsaRefusal::EntropyUnusable)
+    }
+
+    /// `out = r^-1 mod n`, by Fermat's little theorem under each prime —
+    /// `r^(p-2) mod p` and `r^(q-2) mod q`, secret exponents on the
+    /// constant-time path — joined by [`RsaPrivateKey::recombine`]. When `r`
+    /// shares a factor with `n` the result is not an inverse, and the caller
+    /// checks that it is.
+    fn inverse(&self, r: &Secret<RSA_LIMBS>, out: &mut Secret<RSA_LIMBS>) {
+        let n_limbs = self.public.modulus.limbs();
+        let mut residue = Secret::zero();
+        let mut exponent = Secret::zero();
+        let mut under_p = Secret::zero();
+        let mut under_q = Secret::zero();
+        for (prime, result) in [(&self.p, &mut under_p), (&self.q, &mut under_q)] {
+            let modulus = prime.modulus();
+            modulus.reduce_secret(r.value(), n_limbs, residue.value_mut());
+            subtract_small_secret(modulus.value(), 2, exponent.value_mut());
+            modulus.pow_secret(residue.value(), exponent.value(), result.value_mut());
+        }
+        self.recombine(&under_p, &under_q, out);
+    }
+}
+
+impl core::fmt::Debug for RsaPrivateKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RsaPrivateKey")
+            .field("modulus_bits", &self.public.modulus_bits())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A test's way to miscompute one half of the next private operation on its
+/// thread, so that the check before release has a fault to find.
+#[cfg(test)]
+mod fault {
+    use crate::bignum::{Secret, Uint};
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The next private operation on this thread gets its first half wrong.
+    pub(super) fn arm() {
+        ARMED.with(|armed| armed.set(true));
+    }
+
+    /// When armed, the half becomes the half plus one, once.
+    pub(super) fn strike<const N: usize>(half: &mut Secret<N>) {
+        if ARMED.with(|armed| armed.replace(false)) {
+            let wrong = half.value().add_carry(&Uint::from_u64(1)).0;
+            *half.value_mut() = wrong;
+        }
     }
 }
 
@@ -1264,6 +1745,9 @@ mod tests {
     struct PssExample {
         modulus: Vec<u8>,
         exponent: Vec<u8>,
+        /// The private key's parts, in the order the file's "Private key"
+        /// section prints them: `d`, `p`, `q`, `dP`, `dQ`, `qInv`.
+        private: [Vec<u8>; 6],
         /// (message, salt, signature)
         signatures: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     }
@@ -1289,6 +1773,13 @@ mod tests {
             match label {
                 "Modulus" if example.modulus.is_empty() => example.modulus = value,
                 "Exponent" if example.exponent.is_empty() => example.exponent = value,
+                // The private section's own "Exponent" is d.
+                "Exponent" => example.private[0] = value,
+                "Prime 1" => example.private[1] = value,
+                "Prime 2" => example.private[2] = value,
+                "Prime exponent 1" => example.private[3] = value,
+                "Prime exponent 2" => example.private[4] = value,
+                "Coefficient" => example.private[5] = value,
                 "Message to be signed" => message = value,
                 "Salt" => salt = value,
                 "Signature" => {
@@ -1313,6 +1804,7 @@ mod tests {
                     examples.push(PssExample {
                         modulus: Vec::new(),
                         exponent: Vec::new(),
+                        private: Default::default(),
                         signatures: Vec::new(),
                     });
                 } else if let Some(name) = rest.strip_suffix(':') {
@@ -1760,5 +2252,600 @@ mod tests {
                 "salt {salt_length} under a 1024-bit key"
             );
         }
+    }
+
+    // ---- The private key ---------------------------------------------------
+
+    use crate::bignum::dropped;
+
+    /// A deterministic stand-in for a host's source: SHA-256 over a seed and
+    /// a counter, as many blocks as a buffer asks for. Any source serves —
+    /// blinding moves no result — and a fixed one makes a failure repeatable.
+    struct Stream {
+        seed: u64,
+        counter: u64,
+    }
+
+    impl Stream {
+        fn new(seed: u64) -> Self {
+            Self { seed, counter: 0 }
+        }
+    }
+
+    impl EntropySource for Stream {
+        fn fill(&mut self, out: &mut [u8]) -> bool {
+            for chunk in out.chunks_mut(32) {
+                let mut input = [0u8; 16];
+                input[..8].copy_from_slice(&self.seed.to_be_bytes());
+                input[8..].copy_from_slice(&self.counter.to_be_bytes());
+                let block = sha2::sha256(&input);
+                chunk.copy_from_slice(&block[..chunk.len()]);
+                self.counter += 1;
+            }
+            true
+        }
+    }
+
+    /// A source with nothing to give.
+    struct Exhausted;
+
+    impl EntropySource for Exhausted {
+        fn fill(&mut self, _: &mut [u8]) -> bool {
+            false
+        }
+    }
+
+    /// A source that gives the same bytes, right-aligned in zeros, for its
+    /// first `times` draws — or for ever, with no `then` — and after them
+    /// hands over to `then`.
+    struct Fixed {
+        bytes: Vec<u8>,
+        times: usize,
+        then: Option<Stream>,
+    }
+
+    impl EntropySource for Fixed {
+        fn fill(&mut self, out: &mut [u8]) -> bool {
+            if self.times == 0 {
+                if let Some(stream) = &mut self.then {
+                    return stream.fill(out);
+                }
+            } else {
+                self.times -= 1;
+            }
+            for byte in out.iter_mut() {
+                *byte = 0;
+            }
+            let start = out.len().saturating_sub(self.bytes.len());
+            let tail = self.bytes.len() - (out.len() - start);
+            out[start..].copy_from_slice(&self.bytes[tail..]);
+            true
+        }
+    }
+
+    /// `value mod modulus` one bit at a time, for any modulus: the CRT
+    /// exponents are reduced modulo `p - 1`, which Montgomery cannot take.
+    fn remainder(value: &Uint<RSA_LIMBS>, modulus: &Uint<RSA_LIMBS>) -> Uint<RSA_LIMBS> {
+        let mut remainder = Uint::<RSA_LIMBS>::zero();
+        for i in (0..value.bits()).rev() {
+            let (doubled, carried) = remainder.add_carry(&remainder);
+            let mut next = doubled;
+            if value.bit(i) {
+                next = next.add_carry(&Uint::from_u64(1)).0;
+            }
+            remainder = if carried || next >= *modulus {
+                next.sub_borrow(modulus).0
+            } else {
+                next
+            };
+        }
+        remainder
+    }
+
+    /// A value's big-endian octets, without leading zeros.
+    fn be(value: &Uint<RSA_LIMBS>) -> Vec<u8> {
+        let mut bytes = vec![0u8; MAX_RSA_BYTES];
+        assert!(value.to_be_bytes(&mut bytes));
+        let zeros = bytes.iter().take_while(|&&byte| byte == 0).count();
+        bytes.split_off(zeros.min(MAX_RSA_BYTES - 1))
+    }
+
+    fn uint(bytes: &[u8]) -> Uint<RSA_LIMBS> {
+        Uint::from_be_bytes(bytes).expect("fits 4096 bits")
+    }
+
+    /// One published key, its eight parts as octets, and the signatures the
+    /// file says it made.
+    struct VectorKey {
+        parts: [Vec<u8>; 8],
+        signatures: Vec<Vec<u8>>,
+    }
+
+    impl VectorKey {
+        fn components(&self) -> RsaPrivateComponents<'_> {
+            let [n, e, d, p, q, dp, dq, q_inv] = &self.parts;
+            RsaPrivateComponents {
+                modulus: n,
+                public_exponent: e,
+                private_exponent: d,
+                prime1: p,
+                prime2: q,
+                exponent1: dp,
+                exponent2: dq,
+                coefficient: q_inv,
+            }
+        }
+
+        fn key(&self) -> RsaPrivateKey {
+            RsaPrivateKey::new(&self.components()).expect("a published key is a key")
+        }
+    }
+
+    /// The fifteen keys of CAVP's `SigVer15` file: `n`, `p` and `q` under
+    /// each `[mod = …]`, `e` and `d` per vector — three exponent pairs a
+    /// modulus — with the signatures of its `Result = P` vectors. The file
+    /// publishes no CRT parts, so they are computed here from `d`, `p` and
+    /// `q`: `dP` and `dQ` by long division, `qInv` by Fermat under `p`.
+    fn sigver15_keys() -> Vec<VectorKey> {
+        const VECTORS: &str = include_str!("../tests/data/cavp/rsa_sigver15.rsp");
+        let mut keys: Vec<VectorKey> = Vec::new();
+        let (mut n, mut p, mut q) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut e, mut d, mut signature) = (Vec::new(), Vec::new(), Vec::new());
+        for line in VECTORS.lines() {
+            let Some((name, value)) = line.trim().split_once(" = ") else {
+                continue;
+            };
+            match name {
+                "n" => n = unhex(value),
+                "p" => p = unhex(value),
+                "q" => q = unhex(value),
+                "e" => e = unhex(value),
+                "d" => d = unhex(value),
+                "S" => signature = unhex(value),
+                "Result" if value.starts_with('P') => {
+                    let (p_u, q_u, d_u) = (uint(&p), uint(&q), uint(&d));
+                    let one = Uint::from_u64(1);
+                    let dp = remainder(&d_u, &p_u.sub_borrow(&one).0);
+                    let dq = remainder(&d_u, &q_u.sub_borrow(&one).0);
+                    let q_inv = Modulus::new(p_u)
+                        .and_then(|modulus| modulus.inverse_prime(&q_u))
+                        .expect("q is invertible under the prime p");
+                    let parts = [
+                        n.clone(),
+                        e.clone(),
+                        d.clone(),
+                        p.clone(),
+                        q.clone(),
+                        be(&dp),
+                        be(&dq),
+                        be(&q_inv),
+                    ];
+                    match keys.iter_mut().find(|key| key.parts == parts) {
+                        Some(key) => key.signatures.push(signature.clone()),
+                        None => keys.push(VectorKey {
+                            parts,
+                            signatures: vec![signature.clone()],
+                        }),
+                    }
+                }
+                _ => {}
+            }
+        }
+        keys
+    }
+
+    /// The ten keys of RSA Laboratories' `pss-vect.txt`, every part
+    /// published, with their six signatures each.
+    fn pss_vector_keys() -> Vec<VectorKey> {
+        pss_examples()
+            .into_iter()
+            .map(|example| {
+                let [d, p, q, dp, dq, q_inv] = example.private;
+                VectorKey {
+                    parts: [example.modulus, example.exponent, d, p, q, dp, dq, q_inv],
+                    signatures: example
+                        .signatures
+                        .into_iter()
+                        .map(|(_, _, signature)| signature)
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// The message representative a published signature was made from:
+    /// `s^e mod n`, by the public path.
+    fn representative(key: &RsaPrivateKey, signature: &[u8]) -> Uint<RSA_LIMBS> {
+        key.public
+            .modulus
+            .pow(&uint(signature), &key.public.exponent)
+    }
+
+    impl RsaPrivateKey {
+        /// `c^d mod n` by the first representation: no halves, no blinding,
+        /// the exponentiation the constant-time path's at `n`'s width.
+        fn private_operation_plain(&self, representative: &Uint<RSA_LIMBS>) -> Vec<u8> {
+            let mut s = Secret::<RSA_LIMBS>::zero();
+            self.public
+                .modulus
+                .pow_secret(representative, self.d.value(), s.value_mut());
+            let mut out = vec![0u8; self.public.modulus.byte_len()];
+            assert!(s.value().to_be_bytes(&mut out));
+            out
+        }
+
+        /// The pair for `r = 1`, Montgomery's one twice: blinding by it moves
+        /// nothing, which is what an unblinded run is.
+        fn unblinded_pair(&self) -> BlindingPair {
+            let mut forward = Secret::zero();
+            self.public
+                .modulus
+                .to_montgomery_secret(&Uint::from_u64(1), forward.value_mut());
+            BlindingPair {
+                inverse: forward.duplicate(),
+                forward,
+            }
+        }
+    }
+
+    /// SG-01.4's first exit, on every key the committed vectors publish: the
+    /// fifteen of CAVP's `SigVer15` and the ten of `pss-vect.txt`, 1 024 to
+    /// 4 096 bits, seven of them a few bits past a whole octet.
+    ///
+    /// For each of the 135 published signatures `s`, the representative it
+    /// was made from is `s^e mod n`, and the CRT private operation on it gives
+    /// `s` back octet for octet: published data, not the engine agreeing with
+    /// itself. Then once a key, the plain `c^d mod n` agrees with the CRT
+    /// result, and `0`, `1` and `n - 1` come back as themselves, `d` being
+    /// odd.
+    #[test]
+    fn crt_equals_the_plain_private_operation_on_every_vector_key() {
+        let mut entropy = Stream::new(0x5347_2d30_312e_34);
+        let sigver = sigver15_keys();
+        let pss = pss_vector_keys();
+        assert_eq!(sigver.len(), 15, "five moduli, three exponent pairs each");
+        assert_eq!(pss.len(), 10);
+        let mut published = 0usize;
+        let mut bits = Vec::new();
+        for vector in sigver.iter().chain(&pss) {
+            let key = vector.key();
+            bits.push(key.modulus_bits());
+            for signature in &vector.signatures {
+                let c = representative(&key, signature);
+                assert_eq!(
+                    key.private_operation(&c, &mut entropy).as_ref(),
+                    Ok(signature),
+                    "a {}-bit key",
+                    key.modulus_bits()
+                );
+                published += 1;
+            }
+            let first = vector.signatures.first().expect("a signature a key");
+            let c = representative(&key, first);
+            assert_eq!(
+                key.private_operation(&c, &mut entropy),
+                Ok(key.private_operation_plain(&c)),
+                "a {}-bit key",
+                key.modulus_bits()
+            );
+            let (n_minus_one, _) = key.public.modulus.value().sub_borrow(&Uint::from_u64(1));
+            for c in [Uint::zero(), Uint::from_u64(1), n_minus_one] {
+                let mut expected = vec![0u8; key.public.modulus.byte_len()];
+                assert!(c.to_be_bytes(&mut expected));
+                assert_eq!(key.private_operation(&c, &mut entropy), Ok(expected));
+            }
+        }
+        assert_eq!(published, 75 + 60);
+        bits.sort_unstable();
+        bits.dedup();
+        assert_eq!(
+            bits,
+            [1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1536, 2048, 3072, 4096]
+        );
+    }
+
+    /// SG-01.4's second exit: blinding moves nothing. Every published
+    /// signature of one key comes out the same blinded by three different
+    /// sources as unblinded, and seventy operations in a row on one key from
+    /// one source — a draw, thirty-one squarings, a draw, thirty-one more, a
+    /// third draw — each give the unblinded result.
+    #[test]
+    fn a_blinded_run_equals_an_unblinded_one() {
+        let vector = pss_vector_keys().remove(1);
+        let key = vector.key();
+        let unblinded = key.unblinded_pair();
+        for signature in &vector.signatures {
+            let c = representative(&key, signature);
+            let plain = key.private_operation_with(&c, &unblinded);
+            assert_eq!(plain.as_ref(), Ok(signature));
+            for seed in 1..4 {
+                assert_eq!(key.private_operation(&c, &mut Stream::new(seed)), plain);
+            }
+        }
+
+        let key = vector.key();
+        let c = representative(&key, vector.signatures.first().expect("a signature"));
+        let expected = key.private_operation_with(&c, &unblinded);
+        let mut entropy = Stream::new(99);
+        for operation in 0..70 {
+            assert_eq!(
+                key.private_operation(&c, &mut entropy),
+                expected,
+                "operation {operation}"
+            );
+        }
+        let uses = key.blinding.lock().map(|state| state.uses).unwrap_or(0);
+        assert_eq!(uses, 70);
+    }
+
+    /// SG-01.4's fault check: a half miscomputed in the middle of an
+    /// operation is refused, and the key goes on signing correctly after it;
+    /// and a key whose `dP` is in range and wrong — which no check at
+    /// construction can see — is refused on every operation, never once
+    /// returning its faulty result.
+    #[test]
+    fn a_fault_in_a_half_is_refused_before_it_leaves() {
+        let vector = pss_vector_keys().remove(0);
+        let key = vector.key();
+        let signature = vector.signatures.first().expect("a signature");
+        let c = representative(&key, signature);
+        let mut entropy = Stream::new(5);
+
+        fault::arm();
+        assert_eq!(
+            key.private_operation(&c, &mut entropy),
+            Err(RsaRefusal::FaultDetected)
+        );
+        assert_eq!(
+            key.private_operation(&c, &mut entropy).as_ref(),
+            Ok(signature)
+        );
+
+        let mut parts = vector.parts.clone();
+        if let Some(last) = parts[5].last_mut() {
+            *last ^= 0x02;
+        }
+        let broken = VectorKey {
+            parts,
+            signatures: Vec::new(),
+        };
+        let key = broken.key();
+        for signature in &vector.signatures {
+            let c = representative(&key, signature);
+            assert_eq!(
+                key.private_operation(&c, &mut entropy),
+                Err(RsaRefusal::FaultDetected)
+            );
+        }
+    }
+
+    /// SG-01.4's zeroisation exit: dropping a key that has signed wipes all
+    /// nine of its secrets — `d`, `dP`, `dQ`, `qInv` and `q` in their
+    /// Montgomery forms, the two primes with their constants, and the
+    /// blinding pair's two halves — each read, through the hook in its
+    /// `Drop`, holding a value before the wipe and zero after it. Every
+    /// secret an operation makes along the way is wiped the same way when it
+    /// goes.
+    #[test]
+    fn a_private_key_is_zeroised_when_dropped() {
+        let vector = pss_vector_keys().remove(0);
+        let key = vector.key();
+        let c = representative(&key, vector.signatures.first().expect("a signature"));
+
+        let _ = dropped::take();
+        assert!(key.private_operation(&c, &mut Stream::new(3)).is_ok());
+        let temporaries = dropped::take();
+        assert!(
+            temporaries.len() > 10,
+            "the blinding draw and the halves leave secrets to wipe"
+        );
+        assert!(temporaries.iter().all(|wiped| wiped.zero));
+
+        drop(key);
+        let wiped = dropped::take();
+        assert_eq!(wiped.len(), 9, "{wiped:?}");
+        assert!(wiped.iter().all(|wiped| wiped.held), "{wiped:?}");
+        assert!(wiped.iter().all(|wiped| wiped.zero), "{wiped:?}");
+    }
+
+    /// Nothing secret prints: the key shows its size, and every secret shows
+    /// `[redacted]`.
+    #[test]
+    fn a_private_key_prints_its_size_and_nothing_else() {
+        let vector = pss_vector_keys().remove(0);
+        let key = vector.key();
+        assert_eq!(
+            format!("{key:?}"),
+            "RsaPrivateKey { modulus_bits: 1024, .. }"
+        );
+        assert_eq!(format!("{:?}", key.d), "[redacted]");
+        assert_eq!(format!("{:?}", key.p), "[redacted]");
+        assert_eq!(format!("{key:#?}").matches("[redacted]").count(), 0);
+    }
+
+    /// A source that cannot fill is refused before anything is computed, and
+    /// so is one whose draws can never blind: all zeros, all ones (never
+    /// below `n`), and a prime of the key itself (a factor of `n`, so no
+    /// inverse). A source that gives a factor twice and then good bytes
+    /// blinds on the third draw. After each refusal the key still signs.
+    #[test]
+    fn entropy_that_cannot_blind_is_refused() {
+        let vector = pss_vector_keys().remove(0);
+        let key = vector.key();
+        let signature = vector.signatures.first().expect("a signature");
+        let c = representative(&key, signature);
+        let k = key.public.modulus.byte_len();
+        let p = vector.parts[3].clone();
+
+        assert_eq!(
+            key.private_operation(&c, &mut Exhausted),
+            Err(RsaRefusal::EntropyUnavailable)
+        );
+        for (bytes, what) in [
+            (Vec::new(), "all zeros"),
+            (vec![0xff; k], "all ones"),
+            (p.clone(), "the prime p"),
+        ] {
+            let mut source = Fixed {
+                bytes,
+                times: 0,
+                then: None,
+            };
+            assert_eq!(
+                key.private_operation(&c, &mut source),
+                Err(RsaRefusal::EntropyUnusable),
+                "{what}"
+            );
+        }
+        let mut source = Fixed {
+            bytes: p,
+            times: 2,
+            then: Some(Stream::new(11)),
+        };
+        assert_eq!(
+            key.private_operation(&c, &mut source).as_ref(),
+            Ok(signature)
+        );
+        assert_eq!(source.times, 0, "both factors were drawn and refused");
+        assert_eq!(
+            key.private_operation(&c, &mut Stream::new(12)).as_ref(),
+            Ok(signature)
+        );
+    }
+
+    /// A lock poisoned by a thread that panicked holding it is a refusal, not
+    /// an unblinded operation.
+    #[test]
+    fn a_poisoned_blinding_lock_is_refused() {
+        let vector = pss_vector_keys().remove(0);
+        let key = vector.key();
+        let c = representative(&key, vector.signatures.first().expect("a signature"));
+        let died = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _held = key.blinding.lock();
+                    panic!("a thread that dies holding the key's lock");
+                })
+                .join()
+        });
+        assert!(died.is_err());
+        assert_eq!(
+            key.private_operation(&c, &mut Stream::new(1)),
+            Err(RsaRefusal::KeyLockPoisoned)
+        );
+    }
+
+    /// A representative at or past `n` is RSASP1's own refusal, made before
+    /// the source is drawn from.
+    #[test]
+    fn a_representative_not_below_the_modulus_is_refused() {
+        let vector = pss_vector_keys().remove(0);
+        let key = vector.key();
+        let n = *key.public.modulus.value();
+        for c in [n, n.add_carry(&Uint::from_u64(1)).0] {
+            assert_eq!(
+                key.private_operation(&c, &mut Exhausted),
+                Err(RsaRefusal::MessageRepresentativeOutOfRange)
+            );
+        }
+    }
+
+    /// Every check at construction refuses by name: the public half's own
+    /// refusals, and each [`KeyCheck`].
+    #[test]
+    fn a_key_whose_parts_disagree_is_refused_by_name() {
+        let vector = pss_vector_keys().remove(0);
+        let built = |edit: &dyn Fn(&mut [Vec<u8>; 8])| {
+            let mut parts = vector.parts.clone();
+            edit(&mut parts);
+            RsaPrivateKey::new(
+                &VectorKey {
+                    parts,
+                    signatures: Vec::new(),
+                }
+                .components(),
+            )
+            .map(|key| key.modulus_bits())
+        };
+        let refused = RsaRefusal::KeyCheckFailed;
+        assert_eq!(built(&|_| {}), Ok(1024));
+
+        let p = uint(&vector.parts[3]);
+        let two = Uint::from_u64(2);
+
+        assert_eq!(
+            built(&|parts| parts[0] = vec![0xff; 600]),
+            Err(RsaRefusal::ModulusTooWide)
+        );
+        assert_eq!(
+            built(&|parts| parts[1] = vec![1]),
+            Err(RsaRefusal::ExponentUnusable)
+        );
+        // An even p, a p of one, a p wider than any modulus.
+        assert_eq!(
+            built(&|parts| parts[3] = be(&p.add_carry(&Uint::from_u64(1)).0)),
+            Err(refused(KeyCheck::PrimeUnusable))
+        );
+        assert_eq!(
+            built(&|parts| parts[3] = vec![1]),
+            Err(refused(KeyCheck::PrimeUnusable))
+        );
+        assert_eq!(
+            built(&|parts| parts[4] = vec![0xff; 600]),
+            Err(refused(KeyCheck::PrimeUnusable))
+        );
+        // Odd primes whose product is not n.
+        assert_eq!(
+            built(&|parts| parts[3] = be(&p.add_carry(&two).0)),
+            Err(refused(KeyCheck::PrimesDoNotMakeModulus))
+        );
+        // dP of zero and of p; dQ of q.
+        assert_eq!(
+            built(&|parts| parts[5] = vec![0]),
+            Err(refused(KeyCheck::CrtExponentOutOfRange))
+        );
+        assert_eq!(
+            built(&|parts| parts[5] = vector.parts[3].clone()),
+            Err(refused(KeyCheck::CrtExponentOutOfRange))
+        );
+        assert_eq!(
+            built(&|parts| parts[6] = vector.parts[4].clone()),
+            Err(refused(KeyCheck::CrtExponentOutOfRange))
+        );
+        // qInv plus one, and qInv as large as p.
+        let q_inv = uint(&vector.parts[7]);
+        assert_eq!(
+            built(&|parts| parts[7] = be(&q_inv.add_carry(&Uint::from_u64(1)).0)),
+            Err(refused(KeyCheck::CoefficientMismatch))
+        );
+        assert_eq!(
+            built(&|parts| parts[7] = vector.parts[3].clone()),
+            Err(refused(KeyCheck::CoefficientMismatch))
+        );
+        // d of zero, of n, and past n.
+        assert_eq!(
+            built(&|parts| parts[2] = vec![0]),
+            Err(refused(KeyCheck::PrivateExponentOutOfRange))
+        );
+        assert_eq!(
+            built(&|parts| parts[2] = vector.parts[0].clone()),
+            Err(refused(KeyCheck::PrivateExponentOutOfRange))
+        );
+        assert_eq!(
+            built(&|parts| parts[2] = vec![0xff; 600]),
+            Err(refused(KeyCheck::PrivateExponentOutOfRange))
+        );
+        // p and q swapped: dP no longer fits under its prime, or qInv is no
+        // longer q's inverse — whichever the sizes reach first.
+        let swapped = built(&|parts| parts.swap(3, 4));
+        assert!(
+            matches!(
+                swapped,
+                Err(RsaRefusal::KeyCheckFailed(
+                    KeyCheck::CrtExponentOutOfRange | KeyCheck::CoefficientMismatch
+                ))
+            ),
+            "{swapped:?}"
+        );
     }
 }

@@ -9,11 +9,12 @@
 //!
 //! # On trusting this
 //!
-//! Implementing MD5, RC4, SHA-2, AES, DES and now RSA and ECDSA verification
-//! by hand is unusual and deserves the scrutiny it invites. The honest
-//! framing, also recorded in `SECURITY.md`: the scope is document decryption,
-//! encryption-on-save (to a password or to a recipient's public key) and
-//! signature *verification*, not a protocol;
+//! Implementing MD5, RC4, SHA-2, AES, DES, RSA and ECDSA verification and the
+//! RSA private operation by hand is unusual and deserves the scrutiny it
+//! invites. The honest framing, also recorded in `SECURITY.md`: the scope is
+//! document decryption, encryption-on-save (to a password or to a recipient's
+//! public key), signature verification and the private operation signing
+//! stands on, not a protocol;
 //! correctness is gated on published vectors (FIPS 197, FIPS 180-4, FIPS 46-3,
 //! RFC 6229, RFC 1321, and NIST CAVP for Triple DES, for SHA-224, SHA-512/224
 //! and SHA-512/256, and for the two signature schemes) as merge requirements
@@ -23,24 +24,27 @@
 //! "printing denied" is asking, not enforcing. Nothing here changes that, and
 //! no caller should treat PDF permissions as a security boundary.
 //!
-//! # No private keys, ever
+//! # Public keys, and the one private key
 //!
-//! [`rsa`] and [`ecdsa`] verify, and [`rsa`] also encrypts to a public key
-//! (RSAES-PKCS1-v1_5, for a public-key encrypted save); neither does anything
-//! with a private key. There is no signing, no decryption, no key generation
-//! and no key-file parsing, which is what lets [`bignum`]'s public path skip
-//! the constant-time obligations a private-key implementation could not skip:
-//! every key those two modules touch is published, in the document being
-//! checked or in a recipient's certificate. **Encryption carries one secret
-//! through that arithmetic**, the content key it seals: the exponent is
-//! public, but a Montgomery product's final subtraction depends on the value,
-//! so the time a seal takes is not independent of the key it seals. Each
-//! seal is one operation on a fresh key under fresh padding, which is not
-//! the repeated-operation shape timing attacks on RSA need; a host for whom
-//! that is not enough should seal elsewhere. Signing does not extend the
-//! public path: [`bignum`] has a second, constant-time path for secret
-//! operands ([`bignum::Modulus::pow_secret`]), which is what signing stands
-//! on (`docs/design/signing.md`).
+//! [`ecdsa`] verifies, and [`rsa`] verifies and encrypts to a public key
+//! (RSAES-PKCS1-v1_5, for a public-key encrypted save). Every key those touch
+//! is published, in the document being checked or in a recipient's
+//! certificate, which is what lets [`bignum`]'s public path skip the
+//! constant-time obligations a private key could not. **Encryption carries
+//! one secret through that arithmetic**, the content key it seals: the
+//! exponent is public, but a Montgomery product's final subtraction depends
+//! on the value, so the time a seal takes is not independent of the key it
+//! seals. Each seal is one operation on a fresh key under fresh padding,
+//! which is not the repeated-operation shape timing attacks on RSA need; a
+//! host for whom that is not enough should seal elsewhere.
+//!
+//! [`rsa::RsaPrivateKey`] is the one private key: the private operation by
+//! the Chinese remainder theorem, blinded with the caller's entropy and
+//! checked with the public exponent before a result leaves, on [`bignum`]'s
+//! second, constant-time path ([`bignum::Modulus::pow_secret`]), its secrets
+//! in [`bignum::Secret`]s wiped when it drops (`docs/design/signing.md`).
+//! There is no key generation and no key-file parsing: a key arrives as its
+//! numbers.
 
 #![forbid(unsafe_code)]
 
@@ -57,7 +61,10 @@ pub mod sha2;
 
 pub use ecdsa::{Curve, EcPublicKey, EcdsaRefusal};
 pub use handler::{authenticate, AuthOutcome, CryptMethod, FileKey, HandlerNote, HandlerParams};
-pub use rsa::{DigestAlgorithm, PssParameters, RsaPublicKey, RsaRefusal};
+pub use rsa::{
+    DigestAlgorithm, KeyCheck, PssParameters, RsaPrivateComponents, RsaPrivateKey, RsaPublicKey,
+    RsaRefusal,
+};
 
 /// A document's permission flags (7.6.4.2, Table 22).
 ///
