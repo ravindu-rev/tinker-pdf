@@ -242,6 +242,18 @@ same engine and the same answers — `streaming_determinism.rs` renders every
 fixture from a buffer, from a slice source and from one that answers a single
 byte at a time, and compares the pixels and the warnings.
 
+**Opening over an original and its update.** `CosDocument::open_appended`
+opens a document whose bytes are an original and the incremental section
+appended to it — `DocumentEditor::save_update` writes one — without joining
+them: the document `CosDocument::open` gives the joined bytes, fact for fact.
+Both are in hand, so it opens as a buffer opens: the chain walked, every entry
+probed against its header and the ladder decided at open, nothing fetched and
+nothing declared. A read inside either is that one's bytes, borrowed whole as
+a buffer is; only a read across the seam is copied, and only its own range;
+and the operations that need every byte as one slice — `bytes()`, a
+signature's byte range, `stream_raw_encrypted`, the repair scanner — join the
+two once and keep the join.
+
 **Annex F, from the head.** A linearized file whose `/L` is the length of the
 file opens from its head alone: the first-page cross-reference section is
 parsed where it sits, `/O` names page one's page object so the page tree — whose
@@ -288,7 +300,9 @@ and a `FontProvider` arrive early enough to decide pagination), `sniff(bytes)`
 second dependency. On `CosDocument`: `get`, `resolve`, `trailer`,
 `revisions`, `xref`, and the tiers `stream_raw_encrypted` / `stream_raw` /
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an
-image codec).
+image codec); `open_appended(original, update)`, the open over an original
+and its update section; and `prefix()`, the length and last line ending an
+update written after the document needs.
 
 `CosDocument::open_counted(bytes, &Work)` and `CosDocument::get_counted(r,
 &Work)` are `open` and `get` counting what the parser read into MS-01's tally
@@ -452,6 +466,16 @@ The tests that cover opening ([verification](../verification.md)):
 - **`crates/tinker-pdf-cos/tests/document.rs`, `object_grammar.rs`,
   `proptest_lexer.rs`, `proptest_document.rs`** — the grammar, the store and
   property-tested round-trips for string and name escaping.
+- **`crates/tinker-pdf-cos/tests/reopen.rs`** — a document over an original
+  and its update section held to the document over the two joined, fact for
+  fact — every entry, object, stream, page, revision and warning — over a
+  classic table, object streams, an encrypted base, a hybrid-reference file,
+  a base with no line ending at its end, a patched and a rescanned base, and a
+  second update over the first (`two_segments_read_as_their_concatenation`);
+  `source.rs` holds every window, transient read and header of segments cut
+  every way to the joined bytes, and counts what opening and reading over two
+  segments copies: nothing joined before a whole-file read, and only the reads
+  across the seam gathered (`opening_over_two_segments_copies_neither`).
 - **`crates/tinker-pdf/tests/hostile_input.rs`** — real fixtures put through
   seeded deterministic damage on every `cargo test`, asserting only that
   nothing panics and nothing hangs (ruling 1, on stable, so it cannot be

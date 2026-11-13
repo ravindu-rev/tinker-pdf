@@ -428,6 +428,32 @@ impl CosDocument {
         CosDocument::open_backing(Backing::chunked(source), None)
     }
 
+    /// Opens `original` followed by `update`, an incremental section written
+    /// after it, **without joining them**: the document [`CosDocument::open`]
+    /// gives the concatenated bytes, object for object, read from the two
+    /// where they lie.
+    ///
+    /// Both are in hand, so this opens as a buffer opens — the
+    /// cross-reference chain walked, every entry probed against its header
+    /// and the ladder decided at open, no fetch declared — and only the
+    /// operations that need every byte as one slice ([`CosDocument::bytes`],
+    /// a signature's byte range, the repair scanner) join them, once. A read
+    /// inside either is that one's bytes, and only a read across the seam is
+    /// copied, its own range alone (`docs/design/performance.md`, P-17).
+    /// [`crate::DocumentEditor::save_update`] writes such a section.
+    ///
+    /// # Errors
+    /// As [`CosDocument::open`].
+    pub fn open_appended(
+        original: impl Into<Arc<[u8]>>,
+        update: impl Into<Arc<[u8]>>,
+    ) -> Result<CosDocument, OpenError> {
+        CosDocument::open_backing(
+            Backing::segments(vec![original.into(), update.into()]),
+            None,
+        )
+    }
+
     fn open_backing(backing: Backing, work: Option<&Work>) -> Result<CosDocument, OpenError> {
         let mut sink = WarningSink::new();
         let opened = CosDocument::open_into(backing, &mut sink, work);
@@ -461,11 +487,11 @@ impl CosDocument {
         // section of the `/Prev` chain (7.5.4, 7.5.6, 7.5.8) as its own. A
         // document already in hand hands the walker the whole buffer for every
         // window, so it takes the path it always took at the cost it always
-        // had.
-        let held = if streamed {
-            None
-        } else {
-            backing.materialise().ok()
+        // had. Segments are in hand too, and are walked through windows that
+        // borrow each one whole, so they are never joined for an open.
+        let held = match &backing {
+            Backing::Whole(bytes) => Some(Arc::clone(bytes)),
+            Backing::Chunked(_) | Backing::Segments(_) => None,
         };
         let view = match &held {
             Some(buffer) => Bytes::Whole(buffer),
@@ -501,24 +527,30 @@ impl CosDocument {
         let usable = built.sections > 0 && !table.is_empty() && root_locatable(&table, &trailer);
         let mut failures = Vec::new();
         let mut offset_entries = 0usize;
-        match (&held, usable) {
-            (Some(buffer), true) => {
-                let validation = validate(buffer, &mut table, shift);
+        // Deferred on a streamed source, and only there. The eager pass
+        // probes every type-1 offset against its `N G obj` header, which
+        // means reading a byte near every object in the file -- the one
+        // open-time step that touches everywhere, and the one thing a
+        // streaming open cannot afford. Nothing is lost from safety:
+        // `parse_at` re-checks the header of every object at load, so an
+        // entry that lies is still caught, at first use rather than at open.
+        // What is lost is that `ladder_level` starts out provisional, which
+        // `CosDocument::complete_validation` is how a caller gets back the
+        // eager answer. Segments are probed where each header lies.
+        if usable {
+            let validation = match (&held, &backing) {
+                (Some(buffer), _) => Some(validate(buffer, &mut table, shift)),
+                (None, Backing::Segments(segments)) => {
+                    Some(validate_with(backing.len(), &mut table, shift, |at| {
+                        segments.header_at(at)
+                    }))
+                }
+                (None, _) => None,
+            };
+            if let Some(validation) = validation {
                 failures = validation.failures;
                 offset_entries = validation.offsets;
             }
-            // Deferred on a streamed source, and only there. The eager pass
-            // probes every type-1 offset against its `N G obj` header, which
-            // means reading a byte near every object in the file -- the one
-            // open-time step that touches everywhere, and the one thing a
-            // streaming open cannot afford. Nothing is lost from safety:
-            // `parse_at` re-checks the header of every object at load, so an
-            // entry that lies is still caught, at first use rather than at
-            // open. What is lost is that `ladder_level` starts out provisional,
-            // which `CosDocument::complete_validation` is how a caller gets
-            // back the eager answer.
-            (None, _) => {}
-            (Some(_), false) => {}
         }
 
         // Level 3 when the tables never worked, or when so many entries lie
@@ -2456,6 +2488,20 @@ struct Validation {
 /// alone, not by which objects a caller happened to read first, or "it opened
 /// cleanly" would depend on the reader's access pattern.
 fn validate(buffer: &[u8], table: &mut XrefTable, shift: u64) -> Validation {
+    validate_with(buffer.len() as u64, table, shift, |at| {
+        xref::object_header_at(buffer, at)
+    })
+}
+
+/// [`validate`] over a document of `len` bytes whose header at an offset
+/// `header_at` reads: the same probes in the same order, wherever the bytes
+/// lie.
+fn validate_with(
+    len: u64,
+    table: &mut XrefTable,
+    shift: u64,
+    mut header_at: impl FnMut(u64) -> Option<ObjRef>,
+) -> Validation {
     let mut failures = Vec::new();
     let mut fixes = Vec::new();
     let mut offsets = 0usize;
@@ -2464,13 +2510,9 @@ fn validate(buffer: &[u8], table: &mut XrefTable, shift: u64) -> Validation {
             continue;
         };
         offsets += 1;
-        let found = xref::offset_candidates(buffer.len() as u64, offset, shift)
+        let found = xref::offset_candidates(len, offset, shift)
             .into_iter()
-            .find_map(|at| {
-                xref::object_header_at(buffer, at)
-                    .filter(|h| h.num == num)
-                    .map(|h| (at, h.gen))
-            });
+            .find_map(|at| header_at(at).filter(|h| h.num == num).map(|h| (at, h.gen)));
         match found {
             // The header is the authority on the generation: a table that
             // disagrees with it is the thing being repaired.

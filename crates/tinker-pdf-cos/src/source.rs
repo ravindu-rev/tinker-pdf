@@ -318,21 +318,168 @@ impl<S: ByteSource> ByteSource for ShreddedSource<S> {
 /// budget nobody could check.
 pub const CHUNK_SIZE: u64 = 4096;
 
-/// Where a document's bytes live: all of them, or a cache over a source.
+/// Where a document's bytes live: all of them, a cache over a source, or the
+/// segments of a document and the updates appended to it.
 ///
 /// The whole-buffer arm is today's contract and costs nothing new. The chunked
 /// arm fetches fixed aligned chunks, each fetched once and kept, so repeated
 /// small reads coalesce, and the chunks a read lacks in a row are fetched with
 /// one read; until something needs every byte: then it holds the whole
 /// document once, in place of its chunks, and cuts every later read from it.
-/// Which arm a document has changes which ranges are fetched and never a
-/// value, which is the invariant the determinism suite runs over a shredded
-/// source to prove.
+/// The segmented arm holds every byte as it was handed in, an original and
+/// each section appended to it, and joins them only for an operation that
+/// needs every byte. Which arm a document has changes which ranges are fetched
+/// or copied and never a value, which is the invariant the determinism suite
+/// runs over a shredded source to prove, and `reopen.rs` over segments.
 pub(crate) enum Backing {
     /// Every byte, in hand.
     Whole(Arc<[u8]>),
     /// A chunk cache over a source that may not have them all yet.
     Chunked(ChunkCache),
+    /// Every byte, in hand as segments.
+    Segments(Segments),
+}
+
+/// A document's bytes as segments, all in hand: an original, then each
+/// update appended to it, in order, each shared as it was handed in.
+///
+/// A read inside one segment is that segment's bytes, borrowed as a buffer's
+/// read borrows the buffer ([`Bytes::Segmented`]); a read across a seam
+/// gathers its own range and nothing more; and an operation that needs every
+/// byte joins the segments once and keeps the join, as a chunk cache keeps its
+/// whole. One segment is its own whole and is never copied.
+pub(crate) struct Segments {
+    /// Each segment, with the offset in the document it starts at. None is
+    /// empty, so each byte of the document is in exactly one.
+    parts: Vec<(u64, Arc<[u8]>)>,
+    /// How many bytes they hold together.
+    len: u64,
+    /// The segments joined, once something has needed every byte.
+    whole: OnceLock<Arc<[u8]>>,
+    /// What joining has cost, for the guard.
+    #[cfg(test)]
+    pub(crate) copied: SeamCopies,
+}
+
+/// The bytes a segmented backing copied to put segments together, counted
+/// for `opening_over_two_segments_copies_neither`.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct SeamCopies {
+    /// Bytes gathered into a read that crossed a seam.
+    pub(crate) gathered: std::sync::atomic::AtomicU64,
+    /// Bytes copied into the whole document.
+    pub(crate) joined: std::sync::atomic::AtomicU64,
+}
+
+impl Segments {
+    fn new(parts: Vec<Arc<[u8]>>) -> Segments {
+        let mut at = 0u64;
+        let parts = parts
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let start = at;
+                at = at.saturating_add(part.len() as u64);
+                (start, part)
+            })
+            .collect();
+        Segments {
+            parts,
+            len: at,
+            whole: OnceLock::new(),
+            #[cfg(test)]
+            copied: SeamCopies::default(),
+        }
+    }
+
+    /// The segment holding byte `at`, with its start: the last one for an
+    /// offset at or past the end, and none for a document with no bytes.
+    fn holding(&self, at: u64) -> Option<(u64, &Arc<[u8]>)> {
+        let index = self.parts.partition_point(|(start, _)| *start <= at);
+        self.parts
+            .get(index.checked_sub(1)?)
+            .map(|(start, part)| (*start, part))
+    }
+
+    /// The bytes of `start..end`, which lies inside the document, copied out:
+    /// from the one segment that holds them, or gathered across the seams
+    /// between the ones that do.
+    fn copy(&self, start: u64, end: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(usize::try_from(end.saturating_sub(start)).unwrap_or(0));
+        let mut at = start;
+        let mut pieces = 0u32;
+        while at < end {
+            let Some((first, part)) = self.holding(at) else {
+                break;
+            };
+            let from = usize::try_from(at - first).unwrap_or(usize::MAX);
+            let to = usize::try_from(end.saturating_sub(first))
+                .unwrap_or(usize::MAX)
+                .min(part.len());
+            let Some(bytes) = part.get(from..to).filter(|bytes| !bytes.is_empty()) else {
+                break;
+            };
+            out.extend_from_slice(bytes);
+            at = first.saturating_add(to as u64);
+            pieces += 1;
+        }
+        #[cfg(test)]
+        if pieces > 1 {
+            self.copied
+                .gathered
+                .fetch_add(out.len() as u64, Ordering::Relaxed);
+        }
+        let _ = pieces;
+        out
+    }
+
+    /// Every byte: the one segment, or the segments joined once.
+    fn materialise(&self) -> Arc<[u8]> {
+        let whole = self.whole.get_or_init(|| match self.parts.as_slice() {
+            [] => Arc::from(&[][..]),
+            [(_, only)] => Arc::clone(only),
+            parts => {
+                let mut joined = Vec::with_capacity(usize::try_from(self.len).unwrap_or(0));
+                for (_, part) in parts {
+                    joined.extend_from_slice(part);
+                }
+                #[cfg(test)]
+                self.copied
+                    .joined
+                    .fetch_add(joined.len() as u64, Ordering::Relaxed);
+                Arc::from(joined)
+            }
+        });
+        Arc::clone(whole)
+    }
+
+    /// The `N G obj` header at `at`, as [`crate::xref::object_header_at`]
+    /// finds it in the joined bytes.
+    ///
+    /// Lexed in the segment that holds `at`; only a lexing that runs into a
+    /// seam is lexed again over a window gathered across it, grown until the
+    /// lexing stops inside what is held or the document ends — nothing the
+    /// lexer decides turns on a byte past where it stops, so a stop inside a
+    /// segment is the joined bytes' decision.
+    pub(crate) fn header_at(&self, at: u64) -> Option<crate::ObjRef> {
+        let (start, part) = self.holding(at)?;
+        let (header, stop) = crate::xref::object_header_within(part, at.saturating_sub(start));
+        let last = start.saturating_add(part.len() as u64) >= self.len;
+        if stop < part.len() as u64 || last {
+            return header;
+        }
+        let mut want = crate::limits::HEADER_PROBE_WINDOW;
+        loop {
+            let end = at.saturating_add(want).min(self.len);
+            let held = self.copy(at, end);
+            let (header, stop) = crate::xref::object_header_within(&held, 0);
+            if stop < held.len() as u64 || end >= self.len {
+                return header;
+            }
+            want = want.saturating_mul(2);
+        }
+    }
 }
 
 /// Fixed-granularity chunks over a [`ByteSource`].
@@ -369,11 +516,18 @@ impl Backing {
         })
     }
 
+    /// Segments in hand, in document order: an original and the updates
+    /// appended to it, each kept as it is.
+    pub(crate) fn segments(parts: Vec<Arc<[u8]>>) -> Backing {
+        Backing::Segments(Segments::new(parts))
+    }
+
     /// How many bytes the document has.
     pub(crate) fn len(&self) -> u64 {
         match self {
             Backing::Whole(bytes) => bytes.len() as u64,
             Backing::Chunked(cache) => cache.len,
+            Backing::Segments(segments) => segments.len,
         }
     }
 
@@ -386,7 +540,7 @@ impl Backing {
     /// operation on a streamed document has to declare (ruling 10).
     pub(crate) fn whole_fetched(&self) -> bool {
         match self {
-            Backing::Whole(_) => true,
+            Backing::Whole(_) | Backing::Segments(_) => true,
             Backing::Chunked(cache) => cache.fetched_whole.load(Ordering::Acquire),
         }
     }
@@ -396,6 +550,11 @@ impl Backing {
         match self {
             Backing::Whole(bytes) => Ok(Arc::from(clamped(bytes, &range))),
             Backing::Chunked(cache) => cache.window(range),
+            Backing::Segments(segments) => {
+                let start = range.start.min(segments.len);
+                let end = range.end.min(segments.len).max(start);
+                Ok(Arc::from(segments.copy(start, end)))
+            }
         }
     }
 
@@ -404,6 +563,7 @@ impl Backing {
         match self {
             Backing::Whole(bytes) => Ok(Arc::clone(bytes)),
             Backing::Chunked(cache) => cache.materialise(),
+            Backing::Segments(segments) => Ok(segments.materialise()),
         }
     }
 
@@ -427,6 +587,11 @@ impl Backing {
                 let mut bytes = Vec::new();
                 cache.gather(start, end, &mut bytes)?;
                 Ok(bytes)
+            }
+            Backing::Segments(segments) => {
+                let start = range.start.min(segments.len);
+                let end = range.end.min(segments.len).max(start);
+                Ok(segments.copy(start, end))
             }
         }
     }
@@ -452,17 +617,35 @@ impl Backing {
                 let whole = cache.whole.get().map_or(0, |bytes| bytes.len() as u64);
                 chunks.saturating_add(whole)
             }
+            Backing::Segments(segments) => {
+                let joined = match segments.parts.as_slice() {
+                    [] | [_] => 0,
+                    _ => segments.whole.get().map_or(0, |bytes| bytes.len() as u64),
+                };
+                segments.len.saturating_add(joined)
+            }
+        }
+    }
+
+    /// The segments, for the guard to read what joining them cost.
+    #[cfg(test)]
+    pub(crate) fn segmented(&self) -> Option<&Segments> {
+        match self {
+            Backing::Segments(segments) => Some(segments),
+            _ => None,
         }
     }
 
     /// This backing as bytes a windowed reader can walk.
     ///
     /// The whole-buffer arm borrows rather than copies, which is what keeps a
-    /// document opened from bytes at exactly the cost it always had.
+    /// document opened from bytes at exactly the cost it always had; the
+    /// segmented arm borrows each segment the same way.
     pub(crate) fn view(&self) -> Bytes<'_> {
         match self {
             Backing::Whole(bytes) => Bytes::Whole(bytes),
             Backing::Chunked(_) => Bytes::Streamed(self),
+            Backing::Segments(segments) => Bytes::Segmented(segments),
         }
     }
 
@@ -471,11 +654,15 @@ impl Backing {
     /// The shape `CosDocument::bytes` needs, which cannot return a result
     /// without changing a signature ruling 12's parity tests compare. A caller
     /// that needs to tell an empty document from bytes that were never fetched
-    /// asks [`Backing::whole_fetched`].
+    /// asks [`Backing::whole_fetched`]. Segments are joined for it, once.
     pub(crate) fn whole(&self) -> &[u8] {
         match self {
             Backing::Whole(bytes) => bytes,
             Backing::Chunked(cache) => cache.whole_slice(),
+            Backing::Segments(segments) => {
+                segments.materialise();
+                segments.whole.get().map_or(&[], |bytes| bytes)
+            }
         }
     }
 }
@@ -685,6 +872,10 @@ pub(crate) enum Bytes<'a> {
     Whole(&'a [u8]),
     /// A chunk cache, which pays for what the walk asks for.
     Streamed(&'a Backing),
+    /// Every byte, in hand as segments: a window inside one is that segment,
+    /// borrowed whole as the whole-buffer arm borrows the buffer, and one
+    /// across a seam is gathered.
+    Segmented(&'a Segments),
 }
 
 /// Bytes covering part of a document, and the offset they start at.
@@ -728,6 +919,7 @@ impl Bytes<'_> {
         match self {
             Bytes::Whole(buf) => buf.len() as u64,
             Bytes::Streamed(backing) => backing.len(),
+            Bytes::Segmented(segments) => segments.len,
         }
     }
 
@@ -735,7 +927,12 @@ impl Bytes<'_> {
     /// are not available.
     ///
     /// The whole-buffer arm ignores `want` and hands back everything, which is
-    /// what keeps that path free of any new cost or any new behaviour.
+    /// what keeps that path free of any new cost or any new behaviour. The
+    /// segmented arm hands back the segment holding `at`, whole, when it holds
+    /// the `want` bytes from there — so a read that ends inside a segment sees
+    /// what it would in the joined bytes, with nothing copied — and gathers
+    /// `want` bytes from `at` across the seams when it does not, so a read
+    /// that grows its window past a segment's end reaches the bytes after it.
     pub(crate) fn window(&self, at: u64, want: u64) -> Option<Window<'_>> {
         match self {
             Bytes::Whole(buf) => Some(Window {
@@ -748,6 +945,25 @@ impl Bytes<'_> {
                 Some(Window {
                     base: at,
                     held: Held::Owned(bytes),
+                })
+            }
+            Bytes::Segmented(segments) => {
+                let Some((start, part)) = segments.holding(at) else {
+                    return Some(Window {
+                        base: 0,
+                        held: Held::Borrowed(&[]),
+                    });
+                };
+                let end = at.saturating_add(want).min(segments.len);
+                if end <= start.saturating_add(part.len() as u64) {
+                    return Some(Window {
+                        base: start,
+                        held: Held::Borrowed(part),
+                    });
+                }
+                Some(Window {
+                    base: at,
+                    held: Held::Owned(Arc::from(segments.copy(at, end))),
                 })
             }
         }
@@ -1187,5 +1403,189 @@ mod tests {
             "from the dropped chunk's start"
         );
         assert_eq!(backing.retained(), 4 * C);
+    }
+
+    // ---- segments --------------------------------------------------------
+
+    #[path = "../../../tests/written_support/mod.rs"]
+    mod written_support;
+
+    /// **A segmented backing reads as the joined bytes.** Over segments cut
+    /// every way — not at all, after one byte, a run of one-byte segments, one
+    /// large, empty ones between, every few bytes — every window, transient
+    /// read and walker's window, at every offset up to past the end and at
+    /// every length, inside one segment or across one seam or several, holds
+    /// what the joined bytes hold there; every header lexed across a seam is
+    /// the joined bytes' header; and the whole is the joined bytes.
+    #[test]
+    fn windows_over_segments_are_the_joined_bytes() {
+        let text: Vec<u8> =
+            b"%PDF-1.7\n1 0 obj\n<< /A 1 >>\nendobj\n12 0 obj\n42\nendobj\n%%EOF\n".repeat(3);
+        let cuts: [Vec<usize>; 6] = [
+            vec![],
+            vec![1],
+            vec![5, 6, 7],
+            vec![40],
+            vec![17, 17, 30, 31, 95],
+            (1..text.len()).step_by(9).collect(),
+        ];
+        let whole = Backing::whole_buffer(Arc::from(text.as_slice()));
+        let len = text.len() as u64;
+        for cut in cuts {
+            let mut parts: Vec<Arc<[u8]>> = Vec::new();
+            let mut from = 0usize;
+            for &to in &cut {
+                parts.push(Arc::from(&text[from..to]));
+                parts.push(Arc::from(&[][..]));
+                from = to;
+            }
+            parts.push(Arc::from(&text[from..]));
+            let segmented = Backing::segments(parts);
+            assert_eq!(segmented.len(), len, "{cut:?}");
+            assert!(!segmented.is_streamed() && segmented.whole_fetched());
+
+            for start in 0..=len + 2 {
+                for width in [0u64, 1, 2, 3, 8, 13, 40, 200] {
+                    let range = start..start + width;
+                    assert_eq!(
+                        segmented.window(range.clone()).ok().as_deref(),
+                        whole.window(range.clone()).ok().as_deref(),
+                        "the window {range:?} over {cut:?}"
+                    );
+                    assert_eq!(
+                        segmented.read_transient(range.clone()).ok(),
+                        whole.read_transient(range.clone()).ok(),
+                        "the transient read {range:?} over {cut:?}"
+                    );
+                    let view = segmented.view();
+                    let window = view.window(start, width).expect("every byte is in hand");
+                    match window.local(start) {
+                        Some(local) => {
+                            let held = window.bytes().get(local as usize..).unwrap_or_default();
+                            let want = (width as usize).min(text.len() - start as usize);
+                            assert!(
+                                held.len() >= want,
+                                "the walker's window {range:?} over {cut:?} holds {} of {want}",
+                                held.len()
+                            );
+                            assert_eq!(
+                                held,
+                                &text[start as usize..start as usize + held.len()],
+                                "the walker's window {range:?} over {cut:?}"
+                            );
+                        }
+                        None => assert!(start > len, "{range:?} over {cut:?}"),
+                    }
+                }
+                if let Backing::Segments(segments) = &segmented {
+                    assert_eq!(
+                        segments.header_at(start),
+                        crate::xref::object_header_at(&text, start),
+                        "the header at {start} over {cut:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                segmented.materialise().ok().as_deref(),
+                Some(text.as_slice())
+            );
+            assert_eq!(segmented.whole(), text.as_slice());
+        }
+
+        let none = Backing::segments(vec![Arc::from(&[][..]), Arc::from(&[][..])]);
+        assert_eq!(none.len(), 0);
+        assert_eq!(none.window(0..10).ok().as_deref(), Some(&[][..]));
+        assert_eq!(none.whole(), &[][..]);
+        assert!(none
+            .view()
+            .window(0, 4)
+            .is_some_and(|w| w.bytes().is_empty()));
+    }
+
+    /// **Opening over two segments copies neither.** A document opened over
+    /// an original and the update appended to it, and read whole — every
+    /// object, every stream raw and decoded, every page's content — joins no
+    /// byte of the two before a whole-file read and gathers only the reads
+    /// that straddle the seam: the tail `startxref` is looked for in, and the
+    /// search past the original's trailer for its `%%EOF`, each at most a
+    /// window, together a sliver of the original. A whole-file read then joins
+    /// them once, to the joined bytes, and a second joins nothing more.
+    #[test]
+    fn opening_over_two_segments_copies_neither() {
+        use crate::write::{WriteMode, WriteOptions};
+
+        let mut builder = crate::DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        for i in 0..300 {
+            builder.add_page(200.0, 100.0, |page| {
+                page.text(b"F0", 12.0, 10.0, 50.0, &format!("page {i}"));
+            });
+        }
+        let original: Arc<[u8]> = builder.finish().into();
+        written_support::authored("three hundred pages", Arc::clone(&original));
+        let base = Arc::new(crate::CosDocument::open(Arc::clone(&original)).expect("it opens"));
+        let mut editor = crate::DocumentEditor::new(Arc::clone(&base));
+        assert!(editor.rotate_page(7, 90));
+        let update: Arc<[u8]> = editor
+            .save_update(&WriteOptions {
+                mode: WriteMode::Incremental,
+                ..WriteOptions::default()
+            })
+            .into();
+        let joined = [&original[..], &update[..]].concat();
+        written_support::authored("three hundred pages and an update", joined.clone());
+
+        let doc = crate::CosDocument::open_appended(Arc::clone(&original), Arc::clone(&update))
+            .expect("it opens over two segments");
+        let Some(segments) = doc.buffer.segmented() else {
+            panic!("a segmented backing");
+        };
+        for (num, _) in doc.xref().iter() {
+            let r = crate::ObjRef::new(num, 0);
+            let object = doc.get(r).expect("it loads");
+            if object.as_stream().is_some() {
+                let _ = doc.stream_raw(r);
+                let _ = doc.stream_decoded(r);
+            }
+        }
+        let pages = crate::pages::collect(&doc);
+        assert_eq!(pages.len(), 300);
+        for page in &pages {
+            assert!(!crate::pages::content_bytes(&doc, page).is_empty());
+        }
+        assert_eq!(pages[7].rotation, 90, "the update is read");
+
+        let gathered = segments.copied.gathered.load(Ordering::Relaxed);
+        assert_eq!(
+            segments.copied.joined.load(Ordering::Relaxed),
+            0,
+            "nothing is joined before a whole-file read"
+        );
+        assert!(
+            gathered <= crate::limits::STARTXREF_SCAN as u64 + crate::limits::XREF_SECTION_WINDOW,
+            "only the reads across the seam are gathered: {gathered} bytes"
+        );
+        assert!(
+            gathered * 8 < original.len() as u64,
+            "a sliver of the original: {gathered} of {} bytes",
+            original.len()
+        );
+
+        assert!(
+            doc.bytes() == joined.as_slice(),
+            "a whole-file read is the joined bytes"
+        );
+        assert_eq!(
+            segments.copied.joined.load(Ordering::Relaxed),
+            joined.len() as u64,
+            "joined once"
+        );
+        let _ = doc.bytes();
+        assert_eq!(
+            segments.copied.joined.load(Ordering::Relaxed),
+            joined.len() as u64,
+            "and not again"
+        );
+        assert_eq!(doc.buffer.retained(), 2 * joined.len() as u64);
     }
 }

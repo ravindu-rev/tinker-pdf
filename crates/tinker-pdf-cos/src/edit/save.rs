@@ -287,8 +287,11 @@ impl DocumentEditor {
     /// the document's own bytes is read or copied to write it — its length
     /// and its last byte are all an update needs ([`CosDocument::prefix`]),
     /// so a streamed document is not fetched for it.
+    /// [`CosDocument::open_appended`] opens the document's bytes and these
+    /// together without joining them.
     ///
     /// [`CosDocument::prefix`]: crate::CosDocument::prefix
+    /// [`CosDocument::open_appended`]: crate::CosDocument::open_appended
     #[must_use]
     pub fn save_update(&self, options: &WriteOptions) -> Vec<u8> {
         let set = self.changed_set();
