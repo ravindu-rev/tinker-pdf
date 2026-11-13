@@ -139,6 +139,17 @@ page renders through every kind its document keeps, and so that it cannot
 stop exercising the cache unnoticed the warm second renders must find
 something kept between them and the starved ones nothing.
 
+**A patched page is the page.**
+`a_patched_render_reproduces_the_edited_pages_fingerprint` appends an
+annotation edit fixed in the test — a square's appearance redrawn, a second
+annotation moved onto it, a third added — to a page of shapes and an image
+under two annotations, patches the page over its render before the edit by the
+rectangle the edit changed (`Appended::patch`, [rendering](rendering.md)), and
+renders it whole: the patch takes the page rather than rendering it whole, and
+both bitmaps hash, as the table's pages hash, to one committed value of their
+own, `PATCHED_PAGE`, on every target the roster runs on. It is the edited
+page's alone, so it joins no table and moves no other fingerprint.
+
 **The SVG writer's output** is pinned beside the render fingerprints:
 `svg_output_is_stable_across_targets` writes every page of the table with the
 default `SvgOptions` and holds the SHA-256 of its markup to a committed value.
@@ -191,10 +202,10 @@ file. That is
 not green".
 
 **The determinism roster** (`xtask/src/determinism.rs`) names them:
-`determinism.rs`'s render fingerprints and the same pages drawn in bands, its
-SVG output's hashes, its three synthesised documents' byte hashes, its
-display list's replay of every fingerprinted page and the same pages drawn
-through a warm and a starved document cache;
+`determinism.rs`'s render fingerprints and the same pages drawn in bands, the
+patched page's, its SVG output's hashes, its three synthesised documents' byte
+hashes, its display list's replay of every fingerprinted page and the same
+pages drawn through a warm and a starved document cache;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, and
 hard-edged output; the shaper's two fingerprints; and the guard suite's

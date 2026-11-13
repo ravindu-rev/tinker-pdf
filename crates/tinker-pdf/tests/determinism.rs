@@ -3943,6 +3943,203 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     );
 }
 
+/// A PDF of `objects`, numbered from 1 in order, with a cross-reference table,
+/// so that it opens without repair and an update over it is read alone.
+fn classic(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// A stream object's body: `dict`'s entries, its `/Length`, and `data`.
+fn stream_object(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\nendstream");
+    out
+}
+
+/// **The page the patched render's fingerprint is of, before its edit**
+/// (P-17.7): a 200 x 120 page of a wash, a box, two diagonals and a 2 x 2
+/// image, under two square annotations with appearances of their own —
+/// object 5, red over `[30 20 90 70]`, its appearance object 6, and object 7,
+/// a green diamond over `[110 40 170 100]`, its appearance object 8. Shapes
+/// and samples only, so both builds draw it alike.
+fn annotated_page() -> Vec<u8> {
+    classic(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 120]\n\
+          /Resources << /XObject << /Im 9 0 R >> >> /Contents 4 0 R /Annots [5 0 R 7 0 R] >>"
+            .to_vec(),
+        stream_object(
+            "",
+            b"0.95 0.9 0.6 rg 10 10 180 100 re f\n\
+              0.3 0.5 0.9 rg 60 40 80 40 re f\n\
+              0 0 0 RG 1.5 w 0 0 m 200 120 l S 0 120 m 200 0 l S\n\
+              q 30 0 0 20 150 15 cm /Im Do Q",
+        ),
+        b"<< /Type /Annot /Subtype /Square /Rect [30 20 90 70] /F 4 /AP << /N 6 0 R >> >>".to_vec(),
+        stream_object(
+            "/Type /XObject /Subtype /Form /BBox [0 0 60 50]",
+            b"0.8 0.1 0.1 rg 0 0 60 50 re f 0 0 0 RG 2 w 4 4 52 42 re S",
+        ),
+        b"<< /Type /Annot /Subtype /Square /Rect [110 40 170 100] /F 4 /AP << /N 8 0 R >> >>"
+            .to_vec(),
+        stream_object(
+            "/Type /XObject /Subtype /Form /BBox [0 0 60 60]",
+            b"0.1 0.6 0.2 rg 0 0 60 60 re f 0 0 1 RG 3 w 30 5 m 55 30 l 30 55 l 5 30 l h S",
+        ),
+        stream_object(
+            "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+            b"FF000000FF000000FFFFFFFF>",
+        ),
+    ])
+}
+
+/// **The edit the patched render's fingerprint is of**, fixed here: the red
+/// square's appearance redrawn blue where it is, the green diamond moved 30 pt
+/// left and 15 pt down onto the square's corner, and a purple square, its
+/// appearance synthesized, added over `[140 10 190 50]` — a recolouring, a
+/// move and an addition, every kind of rectangle a patch is made of.
+fn edit_annotations(editor: &mut tinker_pdf::DocumentEditor, document: &Document) {
+    use tinker_pdf::{Dict, ObjRef, Object};
+    use tinker_pdf_cos::{annot, Name, Rect, StreamData};
+
+    let look = ObjRef::new(6, 0);
+    let mut dict = Dict::new();
+    if let Some(Object::Stream(stream)) = editor.get(look) {
+        for (key, value) in stream.dict.iter() {
+            if *key != Name::LENGTH {
+                dict.insert(*key, value.clone());
+            }
+        }
+    }
+    editor.put_stream(
+        look,
+        StreamData {
+            dict,
+            data: b"0.1 0.2 0.9 rg 0 0 60 50 re f 1 1 1 RG 2 w 4 4 52 42 re S".to_vec(),
+        },
+    );
+
+    let diamond = ObjRef::new(7, 0);
+    if let Some(Object::Dict(mut dict)) = editor.get(diamond) {
+        dict.insert(
+            editor.intern(b"Rect"),
+            Object::Array(
+                [80.0, 25.0, 140.0, 85.0]
+                    .into_iter()
+                    .map(Object::Real)
+                    .collect(),
+            ),
+        );
+        editor.put(diamond, Object::Dict(dict));
+    }
+
+    let square = annot::square(
+        document.cos(),
+        Rect {
+            x0: 140.0,
+            y0: 10.0,
+            x1: 190.0,
+            y1: 50.0,
+        },
+        annot::Color {
+            r: 0.5,
+            g: 0.0,
+            b: 0.5,
+        },
+        3.0,
+    );
+    editor.add_annotation(0, square).expect("the page is there");
+}
+
+/// The committed fingerprint of [`annotated_page`] after [`edit_annotations`],
+/// rendered at the default options, as [`hashed`] hashes a page (P-17.7).
+///
+/// A run's output, recorded from `cargo test` on the first target it runs
+/// on, which prints the value to paste, and held there on every other.
+const PATCHED_PAGE: &str = "";
+
+/// **A patched render reproduces the edited page's fingerprint** (P-17.7).
+/// [`annotated_page`], edited by [`edit_annotations`] and appended
+/// (`write::append`), is rendered both ways: patched over its render before
+/// the edit by the rectangle the edit changed (`Appended::patch`), and whole.
+/// The patch takes the page rather than rendering it whole, and both bitmaps
+/// hash to the one committed fingerprint, on every target.
+#[test]
+fn a_patched_render_reproduces_the_edited_pages_fingerprint() {
+    use tinker_pdf::write::{append, AppendOptions};
+
+    let original = annotated_page();
+    let document = Document::open(original.clone()).expect("it opens");
+    let options = RenderOptions::default();
+    let mut previous = document.page(0).expect("a page").render(&options);
+    assert!(previous.warnings.is_empty(), "{:?}", previous.warnings);
+
+    let mut editor = document.editor();
+    edit_annotations(&mut editor, &document);
+    let appended = append(&document, &editor, &AppendOptions::default()).expect("it appends");
+    written_support::rewritten(
+        "the patched page's update",
+        original.clone(),
+        [&original[..], &appended.update[..]].concat(),
+    );
+    let patch = appended
+        .patch(0, &mut previous, &options)
+        .expect("the edited page");
+    assert_eq!(patch.fallback, None, "the page is patched, not drawn whole");
+    let region = patch.region.expect("the edit changed pixels");
+    assert!(
+        u64::from(region.width) * u64::from(region.height) < 200 * 120,
+        "{region:?} is less than the page"
+    );
+    let whole = appended
+        .document
+        .page(0)
+        .expect("the edited page")
+        .render(&options);
+
+    // The wash alone paints 18 000 of the page's 24 000 pixels.
+    let fixture = Fixture {
+        name: "patched",
+        build: annotated_page,
+        open: Open::Closed,
+        least_ink: 9_000,
+    };
+    let (patched, full) = (hashed(&fixture, &previous), hashed(&fixture, &whole));
+    assert_eq!(patched, full, "the patch is the full render after the edit");
+    assert_eq!(
+        full, PATCHED_PAGE,
+        "the edited page does not render to its committed fingerprint. If two \
+         targets disagree, this is a determinism bug; if this is a deliberate \
+         rendering change, compare the page first, then paste:\n\n\
+         const PATCHED_PAGE: &str = \"{full}\";\n"
+    );
+}
+
 /// What `builder` writes, held to the validate-on-save helper as a document
 /// this engine wrote from nothing it did not write.
 #[track_caller]

@@ -64,6 +64,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "parallel_and_banded_renders_are_the_fingerprints",
     },
+    // An annotation edit appended and its page patched by the rectangle it
+    // changed, and the same page rendered whole, at one fingerprint.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "a_patched_render_reproduces_the_edited_pages_fingerprint",
+    },
     // The SVG writer's output for every fingerprinted page.
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",
