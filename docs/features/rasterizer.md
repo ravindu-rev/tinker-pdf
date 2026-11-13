@@ -167,9 +167,9 @@ hard. `Mask::uniform` carries a soft mask's value outside the region its
 group covered, where the answer is the luminosity of `/BC` alone (11.6.5.2)
 — which is not zero unless `/BC` is black.
 
-**Compositing.** A `Canvas` stores pixels in one of five formats (`Gray8`,
-`GrayA8`, `Rgb8`, `Rgba8`, `CmykA8`) and composites in integer arithmetic
-throughout. `CmykA8` is the one **subtractive** format — its components are
+**Compositing.** A `Canvas` stores pixels in one of six formats (`Gray8`,
+`GrayA8`, `Rgb8`, `Rgba8`, `CmykA8`, `LabA8`) and composites in integer
+arithmetic throughout. `CmykA8` is the one **subtractive** format — its components are
 quantities of ink — and it exists for transparency groups that declare
 `/DeviceCMYK`, whose blends the specification says happen over ink rather than
 over light ([rendering](rendering.md)). A page comes back in it only when a
@@ -194,6 +194,18 @@ a document's rich black is four; every other format ignores them.
 source's rectangle, and a canvas can carry the initial backdrop of a
 non-isolated transparency group (11.4.4) so that 11.4.7.2's removal step has
 the alpha it needs.
+
+*The opaque composite.* Under `Normal`, with the colour's alpha and the
+state's both whole, onto a canvas that holds no initial backdrop and is not
+ink, `fill_mask_inked` takes a path of its own, reading the mask's rows as
+slices. Over an opaque pixel — any pixel of `Gray8` or `Rgb8`, and one whose
+alpha byte is 255 in a format with alpha — the general blend collapses to
+`min(mul255(cs, c) + mul255(cb, 255 − c), 255)` a colour channel at coverage
+`c`, the alpha staying whole: a pixel of full coverage is the encoded colour,
+and a run of them in a format without alpha is one slice copy from a row of
+that colour the canvas keeps. A pixel that is not opaque, and every other
+case — an alpha below 255, another mode, the ink canvas, a non-isolated
+group's backdrop — goes through the general blend, whose rounding they need.
 
 **A canvas is a rectangle of a page.** `Canvas::origin` is the device pixel
 its top-left is — `(0, 0)` for a canvas that is the whole page, a tile's
@@ -385,7 +397,12 @@ tiny pattern over a long line cannot generate millions of pieces.
   largest step, a 2:1 checkerboard averaging to uniform 128, and an image
   wholly off the canvas costing nothing; `mesh.rs`
   proves shared edges leave no seam; `canvas.rs` covers formats, backdrops
-  and bounded compositing.
+  and bounded compositing, holds the opaque composite to the general blend
+  byte for byte — exhaustively over coverage, source and destination channel
+  on every format it is taken on, and over whole fills
+  (`the_opaque_path_is_the_general_blend_where_it_applies`) — and counts the
+  general blends an opaque Normal fill onto an opaque canvas makes, none
+  (`an_opaque_normal_fill_calls_no_general_blend`).
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
   the render fingerprints `text`, `curves`, `shading`, `blend`, `pattern`,
   `image`, `transparency`, `tiling`, `mesh` and `strokes` exercise this crate
