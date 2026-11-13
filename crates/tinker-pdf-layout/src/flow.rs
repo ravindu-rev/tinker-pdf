@@ -68,22 +68,25 @@ use tinker_pdf_css::property::{
     AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
     ColumnSpan, ColumnWidth, Direction, Display, Float, Hyphens, Inset, LengthPercentage,
     ListStylePosition, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside,
-    Position, Side, Sides, Size, TableLayout, TextAlign, UnicodeBidi, VerticalAlign, ZIndex,
+    Position, Side, Sides, Size, TableLayout, TextAlign, TextJustify, UnicodeBidi, VerticalAlign,
+    ZIndex,
 };
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
 use crate::hyphenate::{self, Dictionary};
 use crate::limits::MAX_EMBEDDING_DEPTH;
-use crate::metrics::{FirstStrong, FontRequest, Metrics, Neighbour, ShapingContext, CONTEXT_BYTES};
+use crate::metrics::{
+    FirstStrong, FontRequest, Metrics, Neighbour, Shaper, ShapingContext, CONTEXT_BYTES,
+};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
 use crate::uax14;
 use crate::unicode;
 use crate::{
-    BoxNode, Budget, Content, Embedding, EmbeddingKind, Intrinsic, Limits, Options, Refusal,
-    TextRun, Warning,
+    BoxNode, Budget, Content, Embedding, EmbeddingKind, Intrinsic, Justified, Limits, Options,
+    Refusal, TextRun, Warning,
 };
 
 /// Slack for the comparisons a float's geometry needs, in points.
@@ -4690,6 +4693,7 @@ impl<M: Metrics> Builder<'_, M> {
                         painted: style.visible,
                         letter_spacing: 0.0,
                         word_spacing: 0.0,
+                        justified: None,
                         generated: true,
                         // The item's, for the painter; see `arm_marker`.
                         anchor: node.anchor,
@@ -5339,9 +5343,46 @@ impl<M: Metrics> Builder<'_, M> {
         } else {
             text
         };
-        match self.metrics.shaper() {
+        match self.shaper() {
             Some(shaper) => shaper.shape_in(text, font, false, context).advance,
             None => self.metrics.measure(text, font),
+        }
+    }
+
+    /// The one place the provider is asked whether it shapes: a run is
+    /// measured, and justified, by the shaper or by `Metrics`, never by both
+    /// (`metrics::Shaper`, "One path owns a run").
+    fn shaper(&self) -> Option<&dyn Shaper> {
+        self.metrics.shaper()
+    }
+
+    /// What a run's shaper takes of `width` points of a justified line's
+    /// slack ([`Shaper::justify`]), asked with the text, face and context the
+    /// run was measured in — soft hyphens dropped, as [`Self::advance_in`]
+    /// drops them — and held to `0..=width`; nothing where the provider does
+    /// not shape.
+    fn justify_in(
+        &self,
+        text: &str,
+        font: &FontRequest<'_>,
+        context: &ShapingContext<'_>,
+        width: f64,
+    ) -> f64 {
+        let visible;
+        let text = if text.contains(SOFT_HYPHEN) {
+            visible = text.replace(SOFT_HYPHEN, "");
+            visible.as_str()
+        } else {
+            text
+        };
+        let Some(shaper) = self.shaper() else {
+            return 0.0;
+        };
+        let taken = shaper.justify(text, font, false, context, width);
+        if taken.is_finite() {
+            taken.clamp(0.0, width.max(0.0))
+        } else {
+            0.0
         }
     }
 
@@ -5419,6 +5460,12 @@ impl<M: Metrics> Builder<'_, M> {
         // in the same pass that gives the runs theirs.
         let mut boxes: Vec<(usize, InlineBox)> = Vec::new();
         let mut width = 0.0;
+        // Beside each run: whether its spaces are justification
+        // opportunities (`css-text-3` §6.4, any `text-justify` but `none`);
+        // and, for a painted run under `inter-character`, where its text is,
+        // so that its shaper can be offered the slack.
+        let mut spaced: Vec<bool> = Vec::new();
+        let mut offers: Vec<(usize, usize, usize, usize, bool)> = Vec::new();
         // The spans the line holds, found as [`Builder::measure`] finds a
         // range's: a walk over every span of the context, once a line, was a
         // paragraph's pieces times its lines.
@@ -5522,6 +5569,7 @@ impl<M: Metrics> Builder<'_, M> {
                     painted: false,
                     letter_spacing: 0.0,
                     word_spacing: 0.0,
+                    justified: None,
                     generated: true,
                     anchor: pieces[*index].anchor,
                     order: pieces[*index].order,
@@ -5537,6 +5585,8 @@ impl<M: Metrics> Builder<'_, M> {
                     },
                 ));
                 runs.push(unit);
+                // Holds no space, and takes the line's extra as a run does.
+                spaced.push(true);
                 width += atomic.width;
                 continue;
             }
@@ -5584,10 +5634,15 @@ impl<M: Metrics> Builder<'_, M> {
                 painted: style.visible,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
+                justified: None,
                 generated: pieces[*index].generated,
                 anchor: pieces[*index].anchor,
                 order: pieces[*index].order,
             });
+            spaced.push(style.text_justify != TextJustify::None);
+            if style.text_justify == TextJustify::InterCharacter && style.visible {
+                offers.push((runs.len() - 1, span_at, lo, hi, ends_hyphenated));
+            }
             width += advance;
         }
 
@@ -5614,11 +5669,45 @@ impl<M: Metrics> Builder<'_, M> {
 
         // §6's alignment. Justification distributes the slack over the spaces
         // rather than over the characters, which is what a text engine does and
-        // what `Tw` in a content stream can express.
-        let slack = (available - width).max(0.0);
+        // what `Tw` in a content stream can express — once each run whose
+        // `text-justify` is `inter-character` has been offered what is left of
+        // it, from the line's logical end, for its shaper to take by changing
+        // the run's glyphs (`docs/design/shaping.md`, *Justification*). The
+        // run's width takes what its shaper took, and the run records the
+        // offer so that the painter draws what was measured.
+        let mut slack = (available - width).max(0.0);
+        if container.text_align == TextAlign::Justify && justify {
+            for &(at, span_at, lo, hi, hyphenated_here) in offers.iter().rev() {
+                if slack <= 0.0 {
+                    break;
+                }
+                let style = &pieces[spans[span_at].2].style;
+                let context = context_of(content, spans, pieces, span_at, lo..hi, start..end);
+                let mut text = content[lo..hi].to_string();
+                if hyphenated_here {
+                    text.push(HYPHEN);
+                }
+                let taken = self.justify_in(&text, &style.font(), &context, slack);
+                if taken > 0.0 {
+                    if let Some(run) = runs.get_mut(at) {
+                        run.width += taken;
+                        run.justified = Some(Justified {
+                            offered: slack,
+                            taken,
+                        });
+                    }
+                    slack -= taken;
+                }
+            }
+        }
+        // `css-text-3` §6.4: a run whose `text-justify` is `none` offers no
+        // justification opportunity, so its spaces take none of the slack,
+        // and a line none of whose runs offers one is set at its start.
         let spaces: usize = runs
             .iter()
-            .map(|run| run.text.chars().filter(|c| *c == ' ').count())
+            .zip(&spaced)
+            .filter(|(_, open)| **open)
+            .map(|(run, _)| run.text.chars().filter(|c| *c == ' ').count())
             .sum();
         let mut extra_per_space = 0.0;
         // `css-text-3` §7.1: `start` and `end` are the block container's
@@ -5644,11 +5733,13 @@ impl<M: Metrics> Builder<'_, M> {
             }
         };
         offset += x;
-        for run in &mut runs {
+        for (run, open) in runs.iter_mut().zip(&spaced) {
             run.x = offset;
-            let count = run.text.chars().filter(|c| *c == ' ').count() as f64;
-            run.width += extra_per_space * count;
-            run.word_spacing += extra_per_space;
+            if *open {
+                let count = run.text.chars().filter(|c| *c == ' ').count() as f64;
+                run.width += extra_per_space * count;
+                run.word_spacing += extra_per_space;
+            }
             offset += run.width;
         }
 

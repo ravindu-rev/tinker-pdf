@@ -1859,6 +1859,7 @@ fn note_nodes(nodes: &[Node], fonts: &mut Fonts<'_>) {
             painted: true,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            justified: None,
             // **Not generated.** 14.8.2.2's artifact marking is for content the
             // source did not contain, and every character here is in the
             // document — an SVG label extracts as text, exactly as a paragraph

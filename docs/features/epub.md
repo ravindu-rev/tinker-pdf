@@ -301,11 +301,20 @@ the space and `!` that end a right-to-left paragraph are drawn `! ` and not
 ` !`.
 
 **`text-justify`** (`css-text-3` §6.4) is read at `auto`, its initial value,
-`none` and `inter-word`, and inherited into layout's style.
-`inter-character`, and `distribute`, which computes to it, ask for a joining
-run's elongation by its face's `JSTF` and by kashida
+`none` and `inter-word`, and inherited: a justified line takes its slack in
+the spaces of its runs whose value is not `none`, `auto` and `inter-word`
+alike, and a line none of whose runs offers a space is set at its start.
+Layout asks a run whose value is `inter-character` first: the line offers
+each such run what is left of its slack, from the line's logical end, through
+`tinker_pdf_layout::metrics::Shaper::justify`, in the context it was measured
+in; what the provider's shaper takes is added to the run's width and
+recorded on it (`TextRun::justified`), and the rest goes to the spaces. A
+provider that does not answer declines, and its lines are justified over
+their spaces. `inter-character`, and `distribute`, which computes to it, ask
+for a joining run's elongation by its face's `JSTF` and by kashida
 ([design/shaping.md](../design/shaping.md), *Justification*), which no
-provider here performs, and are refused by value.
+provider here performs, and are refused by value, so no book's line is
+offered to a shaper.
 
 **The standard 14.** A run in one of the standard 14 is unshaped and one
 glyph per character, and keeps `PageBuilder::glyphs`; a piece of one that

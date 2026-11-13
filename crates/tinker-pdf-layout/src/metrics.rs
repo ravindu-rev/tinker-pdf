@@ -260,6 +260,33 @@ pub trait Shaper {
         let _ = context;
         self.shape(text, font, rtl)
     }
+
+    /// Justifies one run of a justified line: how many of `width` points of
+    /// the line's slack the shaper takes by changing the run's glyphs — its
+    /// face's `JSTF` suggestions, then kashida (`docs/design/shaping.md`,
+    /// *Justification*) — rather than leaving them to the line's spaces.
+    ///
+    /// Asked only of a run whose `text-justify` is `inter-character`, with
+    /// the text, face, direction and context it was measured in, and the
+    /// slack the line still has; the line's runs are asked from its logical
+    /// end, and what none of them takes goes to the spaces. The answer is held
+    /// to `0.0..=width` by the caller. The painter asks again with the same
+    /// arguments, so a provider answers alike each time it is asked the same
+    /// question and draws the glyphs that answer gives.
+    ///
+    /// The default declines: zero, so a provider that does not justify by
+    /// glyphs leaves every line justified over its spaces, as before.
+    fn justify(
+        &self,
+        text: &str,
+        font: &FontRequest<'_>,
+        rtl: bool,
+        context: &ShapingContext<'_>,
+        width: f64,
+    ) -> f64 {
+        let _ = (text, font, rtl, context, width);
+        0.0
+    }
 }
 
 /// Where advance widths and line heights come from.

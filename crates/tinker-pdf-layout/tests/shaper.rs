@@ -23,12 +23,12 @@
 use std::cell::{Cell, RefCell};
 
 use tinker_pdf_css::cascade::ComputedStyle;
-use tinker_pdf_css::property::{Display, Visibility};
+use tinker_pdf_css::property::{Display, TextAlign, TextJustify, Visibility};
 use tinker_pdf_layout::metrics::{
     FixedPitch, FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, ShapingContext, Vertical,
     CONTEXT_BYTES,
 };
-use tinker_pdf_layout::{layout, BoxNode, CellSpan, Content, Limits, Options};
+use tinker_pdf_layout::{layout, BoxNode, CellSpan, Content, Justified, Limits, Options, TextRun};
 
 /// A provider that can only shape, and treats being asked for a character's
 /// advance as the defect it would be.
@@ -501,4 +501,364 @@ fn a_shaper_is_handed_the_near_end_of_a_neighbour_and_never_all_of_it() {
         provider.calls.get()
     );
     assert_eq!(provider.far.get(), 0, "a neighbour was not its near end");
+}
+
+// ---- a justified line offers its slack to the shaper -----------------------
+
+/// A provider whose every glyph is half an em wide and which, asked to
+/// justify, takes `answer` of what a run holding `marker` is offered,
+/// recording every offer. Its `Metrics::advance` and `measure` panic, so a
+/// line justified through it is a line no run of which was measured twice.
+struct Justifies {
+    marker: char,
+    answer: fn(f64) -> f64,
+    offers: RefCell<Vec<(String, f64)>>,
+}
+
+impl Justifies {
+    fn new(marker: char, answer: fn(f64) -> f64) -> Self {
+        Justifies {
+            marker,
+            answer,
+            offers: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Shaper for Justifies {
+    fn shape(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText {
+        let glyphs: Vec<PlacedGlyph> = text
+            .char_indices()
+            .map(|(at, _)| PlacedGlyph {
+                glyph: 1,
+                cluster: u32::try_from(at).unwrap_or(0),
+                x_advance: font.size / 2.0,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            })
+            .collect();
+        let advance = glyphs.len() as f64 * font.size / 2.0;
+        ShapedText {
+            glyphs,
+            advance,
+            rtl,
+        }
+    }
+
+    fn justify(
+        &self,
+        text: &str,
+        _font: &FontRequest<'_>,
+        _rtl: bool,
+        _context: &ShapingContext<'_>,
+        width: f64,
+    ) -> f64 {
+        self.offers.borrow_mut().push((text.to_string(), width));
+        if text.contains(self.marker) {
+            (self.answer)(width)
+        } else {
+            0.0
+        }
+    }
+}
+
+impl Metrics for Justifies {
+    fn advance(&self, ch: char, _font: &FontRequest<'_>) -> f64 {
+        panic!("{ch:?} was measured a character at a time as well as through the shaper")
+    }
+
+    fn measure(&self, text: &str, _font: &FontRequest<'_>) -> f64 {
+        panic!("{text:?} was measured through Metrics as well as through the shaper")
+    }
+
+    fn vertical(&self, font: &FontRequest<'_>) -> Vertical {
+        Vertical {
+            ascent: font.size * 0.8,
+            descent: font.size * 0.2,
+        }
+    }
+
+    fn shaper(&self) -> Option<&dyn Shaper> {
+        Some(self)
+    }
+}
+
+/// A justified paragraph of inline runs at ten points, each with its own
+/// `text-justify`. At five points a character and 110 points a line, the
+/// first line of [`justified_parts`] holds `aaaa aaaa b#bb bbbb` — 95 points
+/// and 15 of slack — and the rest is the last line, which is not justified.
+fn justified_tree(parts: &[(&str, TextJustify)]) -> BoxNode {
+    let mut style = ComputedStyle::initial();
+    style.display = Display::Block;
+    style.text_align = TextAlign::Justify;
+    let children = parts
+        .iter()
+        .map(|(text, justify)| {
+            let mut inline = ComputedStyle::initial();
+            inline.font_size = 10.0;
+            inline.text_justify = *justify;
+            BoxNode {
+                style: inline,
+                content: Content::Text((*text).into()),
+                anchor: None,
+                span: CellSpan::ONE,
+                marker: None,
+            }
+        })
+        .collect();
+    BoxNode {
+        style,
+        content: Content::Children(children),
+        anchor: None,
+        span: CellSpan::ONE,
+        marker: None,
+    }
+}
+
+/// The three runs, the middle one's `text-justify` given.
+fn justified_parts(middle: TextJustify) -> [(&'static str, TextJustify); 3] {
+    [
+        ("aaaa aaaa ", TextJustify::Auto),
+        ("b#bb bbbb ", middle),
+        ("cccc cccc cccc", TextJustify::Auto),
+    ]
+}
+
+/// The first line's runs: the runs on the first page whose baseline is the
+/// first run's.
+fn first_line(laid: &tinker_pdf_layout::Layout) -> Vec<TextRun> {
+    let runs = &laid.pages[0].runs;
+    let baseline = runs[0].y;
+    runs.iter()
+        .filter(|run| (run.y - baseline).abs() < 1e-9)
+        .take_while(|run| !run.text.starts_with('c'))
+        .cloned()
+        .collect()
+}
+
+fn lay<M: Metrics>(tree: &BoxNode, provider: &M) -> tinker_pdf_layout::Layout {
+    layout(
+        tree,
+        provider,
+        &Options::new(110.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect("the paragraph lays out")
+}
+
+/// **A justified line offers its slack to the shaper first**
+/// (`docs/design/shaping.md`, *Justification*): the run under
+/// `inter-character` is offered the line's fifteen points of slack, its
+/// shaper takes half, the run's width takes what was taken and records the
+/// offer, and the rest is spread over the line's three spaces as before. The
+/// last line is offered nothing.
+#[test]
+fn a_justified_line_offers_its_slack_to_the_shaper_first() {
+    let provider = Justifies::new('#', |width| width / 2.0);
+    let laid = lay(
+        &justified_tree(&justified_parts(TextJustify::InterCharacter)),
+        &provider,
+    );
+    assert_eq!(laid.text(), "aaaa aaaa b#bb bbbb cccc cccc cccc");
+    assert_eq!(
+        *provider.offers.borrow(),
+        vec![("b#bb bbbb".to_string(), 15.0)],
+        "one offer: the inter-character run, with the whole slack"
+    );
+    let line = first_line(&laid);
+    assert_eq!(line.len(), 2);
+    let (a, b) = (&line[0], &line[1]);
+    assert_eq!(a.justified, None, "an auto run is not offered");
+    assert_eq!(
+        b.justified,
+        Some(Justified {
+            offered: 15.0,
+            taken: 7.5
+        })
+    );
+    // 7.5 points over three spaces: two in the first run, one in the second.
+    assert!((a.word_spacing - 2.5).abs() < 1e-9, "{}", a.word_spacing);
+    assert!((b.word_spacing - 2.5).abs() < 1e-9, "{}", b.word_spacing);
+    assert!((a.width - 55.0).abs() < 1e-9, "{}", a.width);
+    assert!((b.width - (45.0 + 7.5 + 2.5)).abs() < 1e-9, "{}", b.width);
+    assert!(
+        (a.width + b.width - 110.0).abs() < 1e-9,
+        "the line is filled"
+    );
+    assert!((b.x - (a.x + a.width)).abs() < 1e-9);
+}
+
+/// **A shaper that declines leaves the line justified by its spaces**: the
+/// default answer, and an answer of nothing, set the line exactly as the
+/// same paragraph under `auto` sets it.
+#[test]
+fn a_shaper_that_declines_leaves_the_line_justified_by_its_spaces() {
+    let auto = lay(
+        &justified_tree(&justified_parts(TextJustify::Auto)),
+        &Justifies::new('#', |width| width),
+    );
+    let declining = Justifies::new('#', |_| 0.0);
+    let declined = lay(
+        &justified_tree(&justified_parts(TextJustify::InterCharacter)),
+        &declining,
+    );
+    assert_eq!(declining.offers.borrow().len(), 1, "it was asked");
+    assert_eq!(declined.pages[0].runs, auto.pages[0].runs);
+    // `OnlyShapes` never heard of justification: the trait's default.
+    let silent = lay(
+        &justified_tree(&justified_parts(TextJustify::InterCharacter)),
+        &OnlyShapes::default(),
+    );
+    let auto_silent = lay(
+        &justified_tree(&justified_parts(TextJustify::Auto)),
+        &OnlyShapes::default(),
+    );
+    assert_eq!(silent.pages[0].runs, auto_silent.pages[0].runs);
+    assert!(silent.pages[0]
+        .runs
+        .iter()
+        .all(|run| run.justified.is_none()));
+    // And a provider that is no shaper justifies over the spaces too.
+    let fixed = layout(
+        &justified_tree(&justified_parts(TextJustify::InterCharacter)),
+        &FixedPitch::COURIER,
+        &Options::new(110.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect("lays out");
+    assert!(fixed.pages[0]
+        .runs
+        .iter()
+        .all(|run| run.justified.is_none()));
+}
+
+/// **A justified run is measured by one path**: the provider's `advance`
+/// and `measure` panic, and a shaper that takes the whole slack still sets
+/// the line — filled by the shaper alone, its spaces given nothing.
+#[test]
+fn a_justified_run_is_measured_by_one_path() {
+    let provider = Justifies::new('#', |width| width);
+    let laid = lay(
+        &justified_tree(&justified_parts(TextJustify::InterCharacter)),
+        &provider,
+    );
+    let line = first_line(&laid);
+    assert_eq!(
+        line[1].justified,
+        Some(Justified {
+            offered: 15.0,
+            taken: 15.0
+        })
+    );
+    assert!(line.iter().all(|run| run.word_spacing.abs() < 1e-12));
+    assert!((line[0].width + line[1].width - 110.0).abs() < 1e-9);
+}
+
+/// The runs of a line are offered **from its logical end**, each what the
+/// runs after it left: two `inter-character` runs whose shaper takes half of
+/// each offer.
+#[test]
+fn a_lines_runs_are_offered_from_its_end() {
+    let provider = Justifies::new('#', |width| width / 2.0);
+    let laid = lay(
+        &justified_tree(&[
+            ("a#aa aaaa ", TextJustify::InterCharacter),
+            ("b#bb bbbb ", TextJustify::InterCharacter),
+            ("cccc cccc cccc", TextJustify::Auto),
+        ]),
+        &provider,
+    );
+    assert_eq!(
+        *provider.offers.borrow(),
+        vec![
+            ("b#bb bbbb".to_string(), 15.0),
+            ("a#aa aaaa ".to_string(), 7.5)
+        ]
+    );
+    let line = first_line(&laid);
+    assert_eq!(
+        line[0].justified,
+        Some(Justified {
+            offered: 7.5,
+            taken: 3.75
+        })
+    );
+    assert_eq!(
+        line[1].justified,
+        Some(Justified {
+            offered: 15.0,
+            taken: 7.5
+        })
+    );
+    assert!((line[0].width + line[1].width - 110.0).abs() < 1e-9);
+}
+
+/// An answer outside the offer is held to it: more than offered is the
+/// offer, and a negative or non-finite answer is nothing.
+#[test]
+fn an_answer_outside_the_offer_is_held_to_it() {
+    let greedy = Justifies::new('#', |width| width * 3.0);
+    let laid = lay(
+        &justified_tree(&justified_parts(TextJustify::InterCharacter)),
+        &greedy,
+    );
+    assert_eq!(
+        first_line(&laid)[1].justified,
+        Some(Justified {
+            offered: 15.0,
+            taken: 15.0
+        })
+    );
+    let auto = lay(
+        &justified_tree(&justified_parts(TextJustify::Auto)),
+        &Justifies::new('#', |width| width),
+    );
+    let answers: [fn(f64) -> f64; 3] = [|_| -4.0, |_| f64::NAN, |_| f64::INFINITY];
+    for answer in answers {
+        let provider = Justifies::new('#', answer);
+        let laid = lay(
+            &justified_tree(&justified_parts(TextJustify::InterCharacter)),
+            &provider,
+        );
+        assert_eq!(laid.pages[0].runs, auto.pages[0].runs);
+    }
+}
+
+/// **`text-justify: none` offers no opportunity**: its run's spaces take
+/// none of the slack, which the other runs' spaces take; and a line none of
+/// whose runs offers one is set at its start, its slack left at its end.
+#[test]
+fn text_justify_none_takes_none_of_the_slack() {
+    let provider = Justifies::new('#', |width| width);
+    let laid = lay(
+        &justified_tree(&[
+            ("aaaa aaaa ", TextJustify::None),
+            ("b#bb bbbb ", TextJustify::InterWord),
+            ("cccc cccc cccc", TextJustify::Auto),
+        ]),
+        &provider,
+    );
+    assert!(
+        provider.offers.borrow().is_empty(),
+        "inter-word is never offered"
+    );
+    let line = first_line(&laid);
+    assert!(line[0].word_spacing.abs() < 1e-12, "none: no extra");
+    // The second run's one space takes all fifteen points.
+    assert!((line[1].word_spacing - 15.0).abs() < 1e-9);
+    assert!((line[0].width + line[1].width - 110.0).abs() < 1e-9);
+
+    let laid = lay(
+        &justified_tree(&[
+            ("aaaa aaaa ", TextJustify::None),
+            ("b#bb bbbb ", TextJustify::None),
+            ("cccc cccc cccc", TextJustify::None),
+        ]),
+        &provider,
+    );
+    let line = first_line(&laid);
+    assert!(line.iter().all(|run| run.word_spacing.abs() < 1e-12));
+    assert!(line[0].x.abs() < 1e-9, "set at its start");
+    assert!((line[0].width + line[1].width - 95.0).abs() < 1e-9);
 }

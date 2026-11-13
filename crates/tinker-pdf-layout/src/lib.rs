@@ -632,6 +632,18 @@ pub struct AtomicFragment {
     pub unit: TextRun,
 }
 
+/// What a justified line's shaper took of the slack offered to one run, in
+/// points ([`TextRun::justified`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Justified {
+    /// The slack the line had left when it offered this run: the width the
+    /// painter offers again.
+    pub offered: f64,
+    /// What the shaper took of it — more than zero, and no more than
+    /// `offered` — which the run's width includes.
+    pub taken: f64,
+}
+
 /// One run of text, positioned.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextRun {
@@ -758,6 +770,15 @@ pub struct TextRun {
     pub letter_spacing: f64,
     /// The extra advance applied at each space in this run.
     pub word_spacing: f64,
+    /// What this run's shaper took of a justified line's slack, where it
+    /// took any: the run's `text-justify` was `inter-character`, the line
+    /// offered the run its slack, and the provider's
+    /// [`metrics::Shaper::justify`] answered (`docs/design/shaping.md`,
+    /// *Justification*). The run's `width` includes what was taken; the
+    /// painter asks the same question with the same offer, in the same
+    /// context, and draws the glyphs the answer gives. `None` for every
+    /// other run, which is drawn as shaped.
+    pub justified: Option<Justified>,
     /// Whether this run is content the **source did not contain** — a list
     /// marker, at this milestone.
     ///
