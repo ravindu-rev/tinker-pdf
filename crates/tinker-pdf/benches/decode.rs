@@ -8,7 +8,9 @@
 //! runner (`docs/design/performance.md`): the JPEG decodes at a quarter of a
 //! scan's pixels, the 9/7 codestream at a sixteenth and the lossless 5/3 one
 //! at a sixty-fourth, and the shorter decodes repeated inside an iteration,
-//! their unit counting every call.
+//! their unit counting every call. The quarter-scale JPEG decode counts the
+//! stream's pixels, as the full-size decode the planning baseline runs in its
+//! place does.
 
 mod support;
 
@@ -21,6 +23,8 @@ use tinker_pdf_filters::{
     ccitt_decode, deflate, inflate_raw, jbig2_decode, jpeg_decode, jpx_decode, lzw_decode,
     CcittParams, Jbig2Params, Limits,
 };
+#[cfg(not(tinker_planning_baseline))]
+use tinker_pdf_filters::{jpeg_decode_strips, JpegError, JpegLayout, JpegScale, JpegSink};
 
 /// The ceiling every decode here is handed: well above the largest output,
 /// an RGB page at 300 dpi.
@@ -52,6 +56,47 @@ fn jbig2_params(width: u32, height: u32) -> Jbig2Params<'static> {
         width,
         height,
     }
+}
+
+/// A strip decode's image gathered whole, as a caller that holds the
+/// reduced image gathers it.
+#[cfg(not(tinker_planning_baseline))]
+#[derive(Default)]
+struct Gathered {
+    width: u32,
+    height: u32,
+    samples: Vec<u8>,
+}
+
+#[cfg(not(tinker_planning_baseline))]
+impl JpegSink for Gathered {
+    fn begin(&mut self, layout: JpegLayout) {
+        self.width = layout.width;
+        self.height = layout.height;
+        let samples = layout.width as usize * layout.height as usize * layout.color.components();
+        self.samples = Vec::with_capacity(samples);
+    }
+
+    fn strip(&mut self, _: u32, _: u32, data: &[u8]) {
+        self.samples.extend_from_slice(data);
+    }
+}
+
+/// `jpeg` decoded at a quarter of its size each way, gathered into one
+/// image: its width, height and samples.
+#[cfg(not(tinker_planning_baseline))]
+fn jpeg_at_a_quarter(jpeg: &[u8]) -> Result<(u32, u32, Vec<u8>), JpegError> {
+    let mut gathered = Gathered::default();
+    jpeg_decode_strips(jpeg, CEILING, JpegScale::Quarter, &mut gathered)?;
+    Ok((gathered.width, gathered.height, gathered.samples))
+}
+
+/// The planning baseline has no reduced decode: its arm runs the full-size
+/// decode the gate pairs the operation with (`baseline.json`'s
+/// `paired_with`).
+#[cfg(tinker_planning_baseline)]
+fn jpeg_at_a_quarter(jpeg: &[u8]) -> Result<(u32, u32, Vec<u8>), tinker_pdf_filters::JpegError> {
+    jpeg_decode(jpeg, CEILING).map(|image| (image.width, image.height, image.data))
 }
 
 fn decode(c: &mut Criterion) {
@@ -203,6 +248,27 @@ fn decode(c: &mut Criterion) {
     group.operation("progressive JPEG 1240x1754", |op| {
         op.per(Per::Pixels(area(jpeg_size)));
         op.iter(|| black_box(jpeg_decode(&progressive, CEILING)));
+    });
+    group.operation("JPEG decode at quarter scale", |op| {
+        let (baseline, _) = &*baseline;
+        let (width, height, samples) =
+            jpeg_at_a_quarter(baseline).expect("the JPEG decodes at a quarter");
+        assert_eq!(samples.len(), 3 * width as usize * height as usize);
+        if !cfg!(tinker_planning_baseline) {
+            // A quarter of the stream each way, rounded up (P-09.1's
+            // geometry): 310 x 439.
+            assert_eq!(
+                (width, height),
+                (jpeg_size.0.div_ceil(4), jpeg_size.1.div_ceil(4)),
+                "the quarter-scale image is a quarter of the stream each way"
+            );
+        }
+        op.per(Per::Pixels(2 * area(jpeg_size)));
+        op.iter(move || {
+            for _ in 0..2 {
+                let _ = black_box(jpeg_at_a_quarter(baseline));
+            }
+        });
     });
     group.operation("irreversible JPEG 2000 620x877", |op| {
         op.per(Per::Pixels(area(irreversible_size)));

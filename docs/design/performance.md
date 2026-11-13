@@ -708,8 +708,9 @@ operation is held to what tier P's Gate column gives it
   row raises.
 - **paired with another operation**, where `61adcde` cannot express the
   head's: that build runs, under the head's id, the operation the Gate column
-  names — the full-size decode for a quarter-scale one (MS-04, "What later
-  rows add") — and the ratio is held to 1 ÷ the factor as a floor is.
+  names — the full-size decode for the quarter-scale one,
+  `decode/JPEG decode at quarter scale` — and the ratio is held to 1 ÷ the
+  factor as a floor is.
 - **calibrated**, where `61adcde` lacks the capability altogether: the head's
   figure over `61adcde`'s `calibration/text of 5 dense pages` in the same
   round, against the target over 37.6 ms (`P.md:43-48`), so 0.5 ms reads as
@@ -1277,6 +1278,7 @@ size the set.
 | `decode/LZW decode page-like data` | bytes out · 5 × 6 528 600 | `lzw(page_like())` | not measured → ≥ 200 MB/s (≤ 32.6 a call); calibrated | ×5 | built |
 | `decode/baseline JPEG 1240x1754` | pixels · 1240×1754 | `baseline_jpeg_part(2)` | 111.5 → 15, rescaled from 2480×3508's 446 → 60; 7.43× | in | built |
 | `decode/progressive JPEG 1240x1754` | pixels · 1240×1754 | `data/progressive-1240x1754.jpg` | 114.5 → 30, rescaled from 2480×3508's 458 → 120; 3.81× | in | built |
+| `decode/JPEG decode at quarter scale` | pixels · 2 × 1240×1754, the stream's | `baseline_jpeg_part(2)` decoded at 1/4 through `jpeg_decode_strips` and gathered into one image; the planning baseline runs `jpeg_decode` at full size in its place | not available → ≤ 5, rescaled from 2480×3508's 20; 22.3×, paired with the baseline's full-size decode, at floor 1 until P-09.11 | ×2 | built |
 | `decode/irreversible JPEG 2000 620x877` | pixels · 620×877 | `data/irreversible-620x877.jp2` | 160 → 62.5, rescaled from 2480×3508's 2 566 → 1 000; 2.56× | in | built |
 | `decode/reversible JPEG 2000 310x438` | pixels · 310×438 | `data/reversible-310x438.jp2` | 102 → 42.2, rescaled from 2480×3508's 6 516 → 2 700; 2.41× | in | built |
 | `decode/decode the JBIG2 generic page` | pixels · `scan()`'s | `jbig2_generic_encode(scan())` (`jbig2/encode.rs:251`) | 255 → 60; 4.25× | in | built |
@@ -1670,7 +1672,6 @@ the set's are. Tier P's table and the Item name these:
 | FJ-16, FJ-16.1 | `scripts/a 500-field calculation cascade`, `scripts/500 field appearances regenerated` | scripts | calibrated, ≤ 20 and ≤ 25 ms |
 | OC-17, OC-17.2 | `ocr/OCR a 300-dpi Latin page on one thread`, `ocr/OCR a 300-dpi Chinese page on one thread` | OCR, creating `ocr.rs` | calibrated, ≤ 1.5 and ≤ 4 s: above the window at their targets |
 | SG-02, SG-02.7 | `sign/ECDSA P-256 signature`, `sign/ECDSA P-384 signature`, `sign/ECDSA P-521 signature`, `sign/ECDSA Brainpool P-256 signature` | sign | calibrated, ≤ 0.5, 1.2, 2.5 and 1 ms; `calls` 50, 21, 10 and 25 |
-| P-09, P-09.9 | `decode/JPEG decode at quarter scale` | decode | 22.3×, paired with the baseline's full-size decode; `calls` 2 |
 | P-10, P-10.4 | `decode/irreversible JPEG 2000, two levels discarded`, `decode/reversible JPEG 2000, two levels discarded`, and a window decode of each | decode | 25.6× and 36.2×, paired with the baseline's full decode; the windows recorded ungated (H-77) |
 | P-10, P-10.12 | `decode/irreversible JPEG 2000 620x877 on 4 threads` | decode | 7.33×, paired with the baseline's one-thread decode |
 | MS-08, MS-08.4 | `open/first page of the 60-page linearized fixture over a slow link` | open | counted; the time follows from MS-08.3's counts, never slept |
