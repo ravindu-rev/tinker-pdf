@@ -38,6 +38,7 @@ use crate::jpx::colour::{self, ICT_B_CB, ICT_G_CB, ICT_G_CR, ICT_R_CR};
 use crate::jpx::wavelet::{into_samples, ladder, level_shift, Fixed, QC};
 use crate::jpx::{jpx_decode, tier1, tier2, JpxColour, Refusal, MAX_JPX_PRECISION};
 use crate::Limits;
+use tinker_pdf_pool::Parallelism;
 
 // --- T.800 G.2.2, as decimals ---------------------------------------------
 //
@@ -248,11 +249,29 @@ fn the_fixed_point_ict_tracks_an_f64_reference_of_g22() {
             let mut fixed = Vec::new();
             let mut reference = Vec::new();
             for c in 0..3 {
-                fixed
-                    .push(ladder::<Fixed>(&stream, tile, c, 0, None, &mut clamped).expect("fixed"));
+                fixed.push(
+                    ladder::<Fixed>(
+                        &stream,
+                        tile,
+                        c,
+                        0,
+                        None,
+                        &Parallelism::Serial,
+                        &mut clamped,
+                    )
+                    .expect("fixed"),
+                );
                 reference.push(
-                    ladder::<Reference>(&stream, tile, c, 0, None, &mut clamped)
-                        .expect("reference"),
+                    ladder::<Reference>(
+                        &stream,
+                        tile,
+                        c,
+                        0,
+                        None,
+                        &Parallelism::Serial,
+                        &mut clamped,
+                    )
+                    .expect("reference"),
                 );
             }
             assert!(!clamped, "{name} should not reach E.1's clamp");

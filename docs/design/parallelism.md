@@ -176,6 +176,7 @@ no global mutable state beyond once-cells.
 | Stream compression on save (P-15.5) | streams | `map` | each stream deflates alone; objects are serialised and encrypted in object order after |
 | Bands of one page (P-15.7) | bands | `map` | each band is the page's own region (ruling 5), cut where no image run can span it |
 | JPEG 2000 code-blocks (P-10.10) | code-blocks | `map` | each block decodes alone into its slot; the work budget is charged in index order first |
+| JPEG 2000 tiles, components and synthesis (P-10.11) | tiles, components no transform joins, a level's rows and blocks of columns | `map`, `Executor::run` | each part writes its own slice of a plane or of the window's rows; results and refusals join in index order, and no part is begun past one that refused |
 
 ### The page walk
 
@@ -419,10 +420,12 @@ that `filters` depends on nothing names `pool`, which does not depend on
 anything. `jpx_decode_on` is the door: the decoder charges its work budget
 for every block in index order before any block is decoded, so a refusal
 names the same block at every thread count, and joins results in index
-order ([jpx-speed](jpx-speed.md)). The facade hands it the render's
-`Parallelism` (`Operation`), so a page drawn whole on the caller with threads
-decodes its blocks on them, and a band, drawn on a worker, decodes on that
-worker.
+order ([jpx-speed](jpx-speed.md)). Its tiles, the components no transform
+joins and each level's rows and blocks of columns go to the same executor,
+each writing a slice of its own and joined in index order. The facade hands
+it the render's `Parallelism` (`Operation`), so a page drawn whole on the
+caller with threads decodes on them, and a band, drawn on a worker, decodes
+on that worker.
 
 ### wasm
 

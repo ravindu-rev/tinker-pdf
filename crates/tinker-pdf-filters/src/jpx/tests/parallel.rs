@@ -1,13 +1,16 @@
-//! Code-blocks on a pool (P-10.10): a decode that hands tier-1's blocks to an
-//! executor is the serial decode at every thread count — the same samples,
-//! the same counts, the same warnings and, where it refuses, the same refusal
-//! of the same block with the same budget left
-//! (`docs/design/jpx-speed.md`, "Code-blocks and synthesis on P-15's pool").
+//! Code-blocks, tiles, components and synthesis on a pool (P-10.10,
+//! P-10.11): a decode that hands tier-1's blocks, its tiles, the components
+//! no transform joins and each synthesis's rows and columns to an executor is
+//! the serial decode at every thread count — the same samples, the same
+//! counts, the same warnings and, where it refuses, the same refusal of the
+//! same block with the same budget left (`docs/design/jpx-speed.md`,
+//! "Code-blocks and synthesis on P-15's pool").
 //!
 //! The executor here is the test's own, scoped threads with a fixed share
 //! each ([`Spread`]), so the decoder is driven through the seam a caller
 //! fills (`tinker_pdf_pool::Executor`) and never through the facade's pool,
-//! and which thread ran which block is a fact the test can count.
+//! and which thread ran which job, and what the job did there, is a fact the
+//! test can count.
 
 use std::sync::Mutex;
 use std::thread::{self, ThreadId};
@@ -15,20 +18,35 @@ use std::thread::{self, ThreadId};
 use super::writer::{coded, At, Spec};
 use crate::jpx::codestream::parse;
 use crate::jpx::tier2::{self, Orientation, Tile};
-use crate::jpx::{jpx_decode_on, jpx_decode_request, tier1, JpxRequest, JpxWindow, Refusal};
+use crate::jpx::{
+    jpx_decode_on, jpx_decode_request, tier1, wavelet, JpxRequest, JpxWindow, Refusal,
+};
 use crate::{Limits, Warning};
 use tinker_pdf_pool::Executor;
 
-/// The test's own executor: `threads` scoped threads, thread `k` running
-/// jobs `k`, `k + threads`, … in order, each job recorded with the thread
-/// that ran it.
-struct Spread {
+/// One job a [`Spread`] ran: its index in its call, the thread that ran it,
+/// and what it did on that thread — the code-blocks it decoded, and the rows
+/// and the columns its synthesis lifted.
+#[derive(Clone, Debug)]
+pub(super) struct Ran {
+    pub(super) job: usize,
+    pub(super) thread: ThreadId,
+    pub(super) blocks: u64,
+    pub(super) rows: u64,
+    pub(super) columns: u64,
+}
+
+/// The test's own executor: `threads` scoped threads a call, or as many as
+/// the call has jobs where that is fewer, thread `k` running jobs `k`,
+/// `k + threads`, … in order, each job recorded with the thread that ran it
+/// and what it did there.
+pub(super) struct Spread {
     threads: usize,
-    ran: Mutex<Vec<(usize, ThreadId)>>,
+    pub(super) ran: Mutex<Vec<Ran>>,
 }
 
 impl Spread {
-    fn new(threads: usize) -> Spread {
+    pub(super) fn new(threads: usize) -> Spread {
         Spread {
             threads,
             ran: Mutex::new(Vec::new()),
@@ -38,16 +56,26 @@ impl Spread {
 
 impl Executor for Spread {
     fn run(&self, len: usize, job: &(dyn Fn(usize) + Sync)) {
+        let threads = self.threads.min(len);
         thread::scope(|scope| {
-            for k in 0..self.threads {
+            for k in 0..threads {
                 scope.spawn(move || {
                     let mut i = k;
                     while i < len {
+                        let blocks = tier1::blocks_decoded();
+                        let lifted = wavelet::lifted();
                         job(i);
+                        let now = wavelet::lifted();
                         if let Ok(mut ran) = self.ran.lock() {
-                            ran.push((i, thread::current().id()));
+                            ran.push(Ran {
+                                job: i,
+                                thread: thread::current().id(),
+                                blocks: tier1::blocks_decoded() - blocks,
+                                rows: now.0 - lifted.0,
+                                columns: now.1 - lifted.1,
+                            });
                         }
-                        i += self.threads;
+                        i += threads;
                     }
                 });
             }
@@ -168,7 +196,9 @@ fn total_charge(bytes: &[u8]) -> u64 {
 /// codestream under `tests/jpx/` decoded whole, and writer-made codestreams
 /// of many tiles and blocks — both filters, G.2's transform, segmentation
 /// symbols — whole, with levels dropped and over a window, give the serial
-/// decode's samples, counts and warnings at every thread count. A budget
+/// decode's samples, counts and warnings at every thread count, the tiles,
+/// the components and each synthesis's rows and columns on the same threads
+/// as the blocks. A budget
 /// spent part way through tier-1 refuses the same block with the same budget
 /// left and the same blocks decoded before it; and damaged codestreams under
 /// segmentation symbols, which refuse at a block whose D.5 symbol has
@@ -292,9 +322,11 @@ fn code_blocks_on_2_3_4_and_7_threads_are_the_serial_decode() {
 
 /// **A decode on four workers shares its code-blocks among them.** The
 /// writer-made codestream of many tiles and blocks decoded on four threads of
-/// the test's own: one job a decoded block, as many jobs as the decode says it
-/// decoded, each run once, and every one of the four threads — none of them
-/// the caller — ran some.
+/// the test's own: tier-1's jobs — the ones that decoded a block, among the
+/// tiles, components and synthesis jobs the decode hands the same threads —
+/// are one decoded block a job, as many as the decode says it decoded, each
+/// run once, and every one of the four threads — none of them the caller —
+/// ran some.
 #[test]
 fn a_decode_on_four_workers_shares_its_code_blocks() {
     let bytes = coded(&many_blocks(&[(8, false, 1, 1); 3], true, 0), &noise);
@@ -309,17 +341,22 @@ fn a_decode_on_four_workers_shares_its_code_blocks() {
     )
     .expect("it decodes");
     let ran = spread.ran.into_inner().expect("the record");
+    let blocks: Vec<&Ran> = ran.iter().filter(|job| job.blocks > 0).collect();
+    assert!(
+        blocks.iter().all(|job| job.blocks == 1),
+        "one decoded block a job"
+    );
     assert_eq!(
-        ran.len() as u64,
+        blocks.len() as u64,
         counts.code_blocks_decoded,
         "one job a block"
     );
-    let mut jobs: Vec<usize> = ran.iter().map(|(job, _)| *job).collect();
+    let mut jobs: Vec<usize> = blocks.iter().map(|job| job.job).collect();
     jobs.sort_unstable();
     jobs.dedup();
-    assert_eq!(jobs.len(), ran.len(), "each block decoded once");
+    assert_eq!(jobs.len(), blocks.len(), "each block decoded once");
     let caller = thread::current().id();
-    let mut workers: Vec<ThreadId> = ran.iter().map(|(_, thread)| *thread).collect();
+    let mut workers: Vec<ThreadId> = blocks.iter().map(|job| job.thread).collect();
     workers.sort_unstable_by_key(|thread| format!("{thread:?}"));
     workers.dedup();
     assert_eq!(workers.len(), 4, "every worker took some");

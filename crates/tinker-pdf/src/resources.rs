@@ -962,8 +962,9 @@ pub(crate) struct Operation {
     /// everything the render's own, as it always was.
     cache: Option<Arc<DocumentCache>>,
     /// The threads a decode the operation makes may hand its independent
-    /// parts to — a JPEG 2000 codestream's code-blocks
-    /// (`docs/design/parallelism.md`, "JPEG 2000: P-10's seam") — which is
+    /// parts to — a JPEG 2000 codestream's code-blocks, tiles, components and
+    /// wavelet levels (`docs/design/parallelism.md`, "JPEG 2000: P-10's
+    /// seam") — which is
     /// the caller's `RenderOptions::parallelism` for a render that asks, and
     /// `Serial` for every other operation. A decode made on one of the
     /// pool's workers runs its parts there, whatever this says.
@@ -6150,8 +6151,9 @@ impl PageResources {
             });
         let (discard, window) = frame.map_or((0, None), |frame| frame.ask(request));
         let mut warnings = Vec::new();
-        // The code-blocks on the threads the operation may spend, serially
-        // unless its caller asked for them.
+        // The decode's parts — code-blocks, tiles, components, wavelet
+        // levels — on the threads the operation may spend, serially unless
+        // its caller asked for them.
         let decoded = Self::jpx_samples(
             raw,
             &tinker_pdf_filters::JpxRequest {
@@ -6407,8 +6409,8 @@ impl PageResources {
     ///
     /// The one decode both [`Self::jpx_image`] and [`crate::Page::images`]
     /// make, under the one ceiling: asked for what `request` names — the
-    /// whole image for `Page::images` — its code-blocks on `executor`, with
-    /// what the decode did counted beside it.
+    /// whole image for `Page::images` — its independent parts on
+    /// `executor`, with what the decode did counted beside it.
     fn jpx_samples(
         raw: &[u8],
         request: &tinker_pdf_filters::JpxRequest,

@@ -26,14 +26,17 @@
 //! stop.
 
 use std::ops::Range;
+use std::thread::{self, ThreadId};
 
+use super::parallel::{Ran, Spread};
 use crate::jpx::codestream::Roi;
 use crate::jpx::wavelet::{
     into_samples, ladder, level_shift, line_at_a_time, lines_copied, maxshift, mul_q24,
-    synthesise_97, Arith, Exact, Fixed, Realigned, ALPHA, BETA, DELTA, GAMMA, K, MAX_PRODUCT,
-    PLANE_BOUND, Q, QC, TWO_OVER_K,
+    synthesise_97, synthesise_on, synthesise_split, Arith, Exact, Fixed, Realigned, ALPHA, BETA,
+    DELTA, GAMMA, K, MAX_PRODUCT, PLANE_BOUND, Q, QC, TWO_OVER_K,
 };
 use crate::jpx::{boxes, codestream, tier1, tier2};
+use tinker_pdf_pool::Parallelism;
 
 // --- T.800 Table F.4, as decimals -----------------------------------------
 //
@@ -78,17 +81,28 @@ impl Arith for Reference {
         }
     }
 
-    /// A line at a time, each line through [`reference_97`]: F.3.4 as the
-    /// standard draws it.
-    fn synthesise_2d(
-        samples: &mut [Self],
-        width: usize,
-        rows: Range<usize>,
-        cols: Range<usize>,
-        out: Range<usize>,
-        i0: (u32, u32),
-    ) {
-        line_at_a_time(samples, width, rows, cols, out, i0);
+    /// Each row through [`reference_97`]: F.3.4's HOR_SR as the standard
+    /// draws it.
+    fn horizontal(rows: &mut [&mut [Self]], i0: u32) {
+        for line in rows.iter_mut() {
+            Self::synthesise(line, i0);
+        }
+    }
+
+    /// Each column copied out, through [`reference_97`] and back: F.3.4's
+    /// VER_SR as the standard draws it.
+    fn vertical(rows: &mut [&mut [Self]], i0: u32) {
+        let across = rows.iter().map(|line| line.len()).min().unwrap_or(0);
+        let mut column = vec![Reference::default(); rows.len()];
+        for x in 0..across {
+            for (at, line) in column.iter_mut().zip(rows.iter()) {
+                *at = line[x];
+            }
+            Self::synthesise(&mut column, i0);
+            for (&at, line) in column.iter().zip(rows.iter_mut()) {
+                line[x] = at;
+            }
+        }
     }
 
     fn sample(self) -> i32 {
@@ -289,7 +303,7 @@ fn the_lifting_stays_inside_the_i64_product_bound() {
                 })
                 .collect();
             let mut lined = plane.clone();
-            Fixed::synthesise_2d(&mut plane, w, 0..h, 0..w, 0..w, i0);
+            synthesise_on(&mut plane, w, 0..h, 0..w, 0..w, i0, &Parallelism::Serial);
             line_at_a_time(&mut lined, w, 0..h, 0..w, 0..w, i0);
             assert_eq!(plane, lined, "{w}x{h} at {i0:?}");
         }
@@ -336,10 +350,28 @@ fn the_fixed_point_97_tracks_an_f64_reference_of_f382() {
         for tile in &tiles {
             let mut clamped = false;
             let mut fixed = into_samples(
-                ladder::<Fixed>(&stream, tile, 0, 0, None, &mut clamped).expect("fixed"),
+                ladder::<Fixed>(
+                    &stream,
+                    tile,
+                    0,
+                    0,
+                    None,
+                    &Parallelism::Serial,
+                    &mut clamped,
+                )
+                .expect("fixed"),
             );
             let mut reference = into_samples(
-                ladder::<Reference>(&stream, tile, 0, 0, None, &mut clamped).expect("reference"),
+                ladder::<Reference>(
+                    &stream,
+                    tile,
+                    0,
+                    0,
+                    None,
+                    &Parallelism::Serial,
+                    &mut clamped,
+                )
+                .expect("reference"),
             );
             assert!(!clamped, "{name} should not reach E.1's clamp");
             level_shift(&mut fixed, precision, signed);
@@ -598,7 +630,15 @@ fn agree<A: Arith + PartialEq + std::fmt::Debug>(
 ) {
     let mut blocked = samples.to_vec();
     let mut lined = samples.to_vec();
-    A::synthesise_2d(&mut blocked, w, rows.clone(), cols.clone(), out.clone(), i0);
+    synthesise_on(
+        &mut blocked,
+        w,
+        rows.clone(),
+        cols.clone(),
+        out.clone(),
+        i0,
+        &Parallelism::Serial,
+    );
     line_at_a_time(&mut lined, w, rows.clone(), cols.clone(), out.clone(), i0);
     assert_eq!(
         blocked, lined,
@@ -682,8 +722,15 @@ fn a_synthesis_copies_no_line_into_scratch() {
         tier1::decode_tiles(&stream, &mut tiles, 0, None).expect("tier-1 runs");
         for tile in &tiles {
             let mut clamped = false;
-            crate::jpx::wavelet::reconstruct_tile(&stream, tile, 0, None, &mut clamped)
-                .unwrap_or_else(|e| panic!("{path:?}: {e:?}"));
+            crate::jpx::wavelet::reconstruct_tile(
+                &stream,
+                tile,
+                0,
+                None,
+                &Parallelism::Serial,
+                &mut clamped,
+            )
+            .unwrap_or_else(|e| panic!("{path:?}: {e:?}"));
         }
         reconstructed += 1;
     }
@@ -699,11 +746,11 @@ fn a_synthesis_copies_no_line_into_scratch() {
                 let mut exact: Vec<Exact> = (0..w * h)
                     .map(|_| Exact::dyadic(noise(&mut seed, 1 << 14), 0))
                     .collect();
-                Exact::synthesise_2d(&mut exact, w, 0..h, 0..w, 0..w, i0);
+                synthesise_on(&mut exact, w, 0..h, 0..w, 0..w, i0, &Parallelism::Serial);
                 let mut fixed: Vec<Fixed> = (0..w * h)
                     .map(|_| Fixed::dyadic(noise(&mut seed, 1 << 24), -12))
                     .collect();
-                Fixed::synthesise_2d(&mut fixed, w, 0..h, 0..w, 0..w, i0);
+                synthesise_on(&mut fixed, w, 0..h, 0..w, 0..w, i0, &Parallelism::Serial);
             }
         }
     }
@@ -719,6 +766,244 @@ fn a_synthesis_copies_no_line_into_scratch() {
         .map(|_| Fixed::dyadic(noise(&mut seed, PLANE_BOUND), -12))
         .collect();
     wide[0] = Fixed::dyadic(PLANE_BOUND, -12);
-    Fixed::synthesise_2d(&mut wide, 9, 0..1, 0..9, 0..9, (0, 0));
+    synthesise_on(&mut wide, 9, 0..1, 0..9, 0..9, (0, 0), &Parallelism::Serial);
     assert_eq!(lines_copied(), before + 1, "the widened row is counted");
+}
+
+// --- synthesis on the pool (P-10.11) --------------------------------------
+
+/// How the every-shape comparison cuts a synthesis, as rows to a job of the
+/// horizontal pass and columns to a block of the vertical one: a row and a
+/// column, the finest cut there is, and two coarser ones.
+const CUTS: [(usize, usize); 3] = [(1, 1), (2, 3), (3, 2)];
+
+/// `samples`, a plane `w` samples to a row, synthesised over `window` from
+/// `i0` on `threads` threads of the test's own — cut as `cut` says, or as a
+/// decode cuts it — and serially: the two agree sample for sample.
+fn pooled<A: Arith + PartialEq>(
+    samples: &[A],
+    w: usize,
+    (rows, cols, out): &(Range<usize>, Range<usize>, Range<usize>),
+    i0: (u32, u32),
+    cut: Option<(usize, usize)>,
+    threads: usize,
+) {
+    let mut serial = samples.to_vec();
+    synthesise_on(
+        &mut serial,
+        w,
+        rows.clone(),
+        cols.clone(),
+        out.clone(),
+        i0,
+        &Parallelism::Serial,
+    );
+    let mut pooled = samples.to_vec();
+    let spread = Spread::new(threads);
+    match cut {
+        Some(cut) => synthesise_split(
+            &mut pooled,
+            w,
+            (rows.clone(), cols.clone(), out.clone()),
+            i0,
+            cut,
+            &spread,
+        ),
+        None => synthesise_on(
+            &mut pooled,
+            w,
+            rows.clone(),
+            cols.clone(),
+            out.clone(),
+            i0,
+            &spread,
+        ),
+    }
+    assert!(
+        pooled == serial,
+        "{threads} threads, cut {cut:?}: {w} wide, rows {rows:?}, columns {cols:?}, \
+         out {out:?}, i0 {i0:?}"
+    );
+}
+
+/// **A synthesis on 2, 3, 4 and 7 workers is the serial synthesis.**
+///
+/// Planes of every width and height in [`SIZES`] — one-row and one-column
+/// ones among them — with their first sample at absolute indices of both
+/// parities, synthesised whole and over seeded sub-rectangles a window's
+/// synthesis lifts, in both arithmetics: the 5/3, and the 9/7 inside the
+/// in-place bound, at the plane's own bound, where a job widens its rows and
+/// its strips, and past it in every third row or column alone, where a job
+/// of a few rows or columns lifts in place a pass the whole plane's samples
+/// would widen. Each is cut a row and a column to a job, or coarser, and
+/// run on 2, 3, 4 and 7 threads of the test's own; and planes a decode cuts
+/// into many jobs of its own size — a single row and a single column among
+/// them, cut only one way — are run as a decode runs them. Every sample
+/// equals the serial synthesis's.
+#[test]
+fn synthesis_on_2_3_4_and_7_workers_is_the_serial_synthesis() {
+    let workers = [2usize, 3, 4, 7];
+    let mut seed = 0x5031_3131;
+    let mut compared = 0u64;
+    let shapes = SIZES
+        .iter()
+        .flat_map(|&w| SIZES.iter().map(move |&h| (w, h)));
+    for (shape, (w, h)) in shapes.enumerate() {
+        let cut = CUTS[shape % CUTS.len()];
+        for origin in [(0u32, 0u32), (1, 1)] {
+            for window in windows(w, h, &mut seed) {
+                let i0 = (
+                    origin.0 + window.1.start as u32,
+                    origin.1 + window.0.start as u32,
+                );
+                let exact: Vec<Exact> = (0..w * h)
+                    .map(|_| Exact::dyadic(noise(&mut seed, 1 << 18), 0))
+                    .collect();
+                // The 9/7 inside the in-place bound, at the plane's own
+                // bound, and with every third row, then every third column,
+                // past it: a job of a few rows or columns then lifts in place
+                // where the whole pass would widen.
+                let past = |by: usize| -> i64 {
+                    if by % 3 == 0 {
+                        PLANE_BOUND
+                    } else {
+                        1 << 22
+                    }
+                };
+                let fixed: Vec<Vec<Fixed>> = (0..4)
+                    .map(|kind| {
+                        (0..w * h)
+                            .map(|at| {
+                                let bound = match kind {
+                                    0 => 1i64 << 20,
+                                    1 => PLANE_BOUND,
+                                    2 => past(at / w),
+                                    _ => past(at % w),
+                                };
+                                Fixed::dyadic(noise(&mut seed, bound), -12)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                for threads in workers {
+                    pooled(&exact, w, &window, i0, Some(cut), threads);
+                    for plane in &fixed {
+                        pooled(plane, w, &window, i0, Some(cut), threads);
+                    }
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        compared,
+        (SIZES.len() * SIZES.len() * 2 * 4 * workers.len()) as u64
+    );
+
+    // Planes a decode's own cut makes many jobs of, the 9/7 inside the
+    // in-place bound and past it.
+    for (w, h) in [
+        (1031usize, 777usize),
+        (700, 70),
+        (70, 700),
+        (40_000, 1),
+        (1, 40_000),
+    ] {
+        let whole = (0..h, 0..w, 0..w);
+        let exact: Vec<Exact> = (0..w * h)
+            .map(|_| Exact::dyadic(noise(&mut seed, 1 << 14), 0))
+            .collect();
+        let fixed: Vec<Fixed> = (0..w * h)
+            .map(|_| Fixed::dyadic(noise(&mut seed, 1 << 24), -12))
+            .collect();
+        let wide: Vec<Fixed> = (0..w * h)
+            .map(|_| Fixed::dyadic(noise(&mut seed, PLANE_BOUND), -12))
+            .collect();
+        for threads in workers {
+            for i0 in [(0u32, 0u32), (1, 1)] {
+                pooled(&exact, w, &whole, i0, None, threads);
+                pooled(&fixed, w, &whole, i0, None, threads);
+                pooled(&wide, w, &whole, i0, None, threads);
+            }
+        }
+    }
+}
+
+/// `samples`, a plane `w` by `h`, synthesised whole on four threads of the
+/// test's own: the serial synthesis's samples, each row lifted once by the
+/// horizontal pass and each column once by the vertical one, and of each
+/// pass's four threads — none of them the caller — every one lifted some:
+/// some rows, and some blocks of columns.
+fn shares<A: Arith + PartialEq>(samples: &[A], w: usize, h: usize, label: &str) {
+    let mut serial = samples.to_vec();
+    synthesise_on(
+        &mut serial,
+        w,
+        0..h,
+        0..w,
+        0..w,
+        (0, 0),
+        &Parallelism::Serial,
+    );
+    let spread = Spread::new(4);
+    let mut pooled = samples.to_vec();
+    synthesise_on(&mut pooled, w, 0..h, 0..w, 0..w, (0, 0), &spread);
+    assert!(pooled == serial, "{label}: the serial synthesis");
+
+    let ran = spread.ran.into_inner().expect("the record");
+    assert_eq!(
+        ran.iter().map(|job| job.rows).sum::<u64>(),
+        h as u64,
+        "{label}: each row lifted once"
+    );
+    assert_eq!(
+        ran.iter().map(|job| job.columns).sum::<u64>(),
+        w as u64,
+        "{label}: each column lifted once"
+    );
+    let caller = thread::current().id();
+    let passes: [(&str, fn(&Ran) -> u64); 2] = [
+        ("rows", |job| job.rows),
+        ("blocks of columns", |job| u64::from(job.columns > 0)),
+    ];
+    for (pass, count) in passes {
+        let mut workers: Vec<(ThreadId, u64)> = Vec::new();
+        for job in &ran {
+            let n = count(job);
+            if n == 0 {
+                continue;
+            }
+            match workers.iter_mut().find(|(thread, _)| *thread == job.thread) {
+                Some((_, total)) => *total += n,
+                None => workers.push((job.thread, n)),
+            }
+        }
+        assert_eq!(workers.len(), 4, "{label}: four workers lifted {pass}");
+        assert!(
+            workers
+                .iter()
+                .all(|&(thread, total)| thread != caller && total > 0),
+            "{label}: every worker took some {pass}, and none is the caller"
+        );
+    }
+}
+
+/// **A synthesis on four workers shares its rows.** A plane a decode cuts
+/// into many jobs, 1 031 by 777, synthesised whole on four threads of the
+/// test's own in both arithmetics: the serial synthesis's samples, the
+/// horizontal pass's rows and the vertical pass's columns each lifted once,
+/// and every one of each pass's four workers lifted some rows and some
+/// blocks of columns.
+#[test]
+fn a_synthesis_on_four_workers_shares_its_rows() {
+    let (w, h) = (1031usize, 777usize);
+    let mut seed = 0x5348_4152;
+    let exact: Vec<Exact> = (0..w * h)
+        .map(|_| Exact::dyadic(noise(&mut seed, 1 << 14), 0))
+        .collect();
+    let fixed: Vec<Fixed> = (0..w * h)
+        .map(|_| Fixed::dyadic(noise(&mut seed, 1 << 24), -12))
+        .collect();
+    shares(&exact, w, h, "5/3");
+    shares(&fixed, w, h, "9/7");
 }

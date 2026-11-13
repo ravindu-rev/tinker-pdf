@@ -1498,6 +1498,25 @@ pub(crate) fn decode_tiles_within(
     (decoded, work)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The code-blocks this thread has decoded for a decode's tier-1.
+    static BLOCKS_DECODED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one code-block decoded on this thread.
+#[cfg(test)]
+fn count_block() {
+    BLOCKS_DECODED.with(|decoded| decoded.set(decoded.get() + 1));
+}
+
+/// The code-blocks this thread has decoded so far: what `tests::parallel`
+/// reads around each job it runs, to tell tier-1's jobs from the rest.
+#[cfg(test)]
+pub(crate) fn blocks_decoded() -> u64 {
+    BLOCKS_DECODED.with(std::cell::Cell::get)
+}
+
 /// One code-block a decode lists for tier-1, by where it is: its tile,
 /// component, resolution, band, precinct and its own place in the precinct,
 /// with what decoding it needs to know of its band and its tile-component,
@@ -1520,7 +1539,9 @@ struct Listed {
 /// 2. **The listed blocks decoded on `executor`**, each into a slot of its
 ///    own with MQ contexts of its own, from no budget, since each was charged
 ///    in the walk. A block a discard or a window drops is never listed, so it
-///    never reaches a worker.
+///    never reaches a worker, and a block is not begun once one listed before
+///    it has refused ([`super::map_in_turn`]), since nothing after a refusal
+///    is read back.
 /// 3. **The slots read back in index order**: the first block whose decode
 ///    refused gives the refusal, as a decode one block after another would
 ///    have stopped there — the budget then as it stood once that block was
@@ -1590,13 +1611,15 @@ fn decode_within(
     }
 
     let shared: &[Tile] = tiles;
-    let slots = tinker_pdf_pool::map(executor, listed.len(), |i| {
+    let decode = |i: usize| {
         let Some(entry) = listed.get(i) else {
             return Ok(Decoded::default());
         };
         let Some(block) = block_at(shared, entry.at) else {
             return Ok(Decoded::default());
         };
+        #[cfg(test)]
+        count_block();
         // D.2 resets the contexts at every block, so a block's own are the
         // state one array reset between blocks would hold; and the walk has
         // charged it, so it decodes from a budget of its own.
@@ -1612,10 +1635,22 @@ fn decode_within(
             &mut contexts,
             &mut charged,
         )
-    });
+    };
+    let slots = super::map_in_turn(executor, listed.len(), &decode, Result::is_err);
+    // Up to the first refusal, which ends the reading back; a slot left
+    // empty only ever follows one.
+    let mut results = Vec::with_capacity(slots.len());
+    for (i, slot) in slots.into_iter().enumerate() {
+        let result = slot.unwrap_or_else(|| decode(i));
+        let refused = result.is_err();
+        results.push(result);
+        if refused {
+            break;
+        }
+    }
 
     let mut decoded = 0u64;
-    for (entry, slot) in listed.iter().zip(slots) {
+    for (entry, slot) in listed.iter().zip(results) {
         match slot {
             Ok(result) => {
                 if let Some(block) = block_at_mut(tiles, entry.at) {

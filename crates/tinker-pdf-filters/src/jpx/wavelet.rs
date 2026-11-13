@@ -84,6 +84,8 @@ use super::colour;
 use super::tier2::{CodeBlock, Orientation, Subband, Tile, TileComponent};
 use super::Refusal;
 use std::ops::Range;
+use std::sync::{Mutex, PoisonError};
+use tinker_pdf_pool::Executor;
 
 // --- the fixed-point format ---------------------------------------------
 
@@ -189,12 +191,16 @@ impl<T: Copy + Default> Plane<T> {
 
 /// The arithmetic one tile-component is reconstructed in.
 ///
-/// Four methods, which is exactly what the 5/3 and the 9/7 disagree about.
+/// Five methods, which is exactly what the 5/3 and the 9/7 disagree about.
 /// Everything else — B.5's subband geometry, F.3.3's interleave, the walk up
-/// the resolution ladder — is shared, and is shared deliberately: it is the
-/// part gate 1 already pins byte-identically against `opj_decompress`, and a
-/// second copy written for the 9/7 would be a second copy outside that gate.
-pub(crate) trait Arith: Copy + Default {
+/// the resolution ladder, the cutting of a synthesis into jobs — is shared,
+/// and is shared deliberately: it is the part gate 1 already pins
+/// byte-identically against `opj_decompress`, and a second copy written for
+/// the 9/7 would be a second copy outside that gate.
+///
+/// `Send`, because a synthesis hands a plane's rows and columns to the
+/// decode's executor ([`synthesise_on`]).
+pub(crate) trait Arith: Copy + Default + Send {
     /// A dequantised coefficient, given exactly as `m * 2^e`.
     ///
     /// E.1's step size and E.1.1.2's reconstruction offset are both dyadic
@@ -208,24 +214,20 @@ pub(crate) trait Arith: Copy + Default {
     /// sits at index `i0` of the subband coordinate system — so `i0`'s parity
     /// is what says which end the low band starts on: the line at a time
     /// [`line_at_a_time`] lifts, which the tests hold the shipped
-    /// [`Arith::synthesise_2d`] to.
+    /// [`synthesise_on`] to.
     #[cfg(test)]
     fn synthesise(line: &mut [Self], i0: u32);
 
-    /// F.3.4's 2D synthesis of one resolution step over a plane's samples,
-    /// `width` to a row: HOR_SR over the columns `cols` of the rows `rows`,
-    /// each row's first sample at absolute index `i0.0`, then VER_SR over the
-    /// columns `out` of the same rows, each column's first sample at absolute
-    /// index `i0.1` — so the windowed synthesis lifts the sub-lines it always
-    /// has (`synthesise_2d`).
-    fn synthesise_2d(
-        samples: &mut [Self],
-        width: usize,
-        rows: Range<usize>,
-        cols: Range<usize>,
-        out: Range<usize>,
-        i0: (u32, u32),
-    );
+    /// F.3.4's HOR_SR over each of `rows`, the samples one row of a plane
+    /// holds of the columns a synthesis reads, each row's first sample at
+    /// absolute index `i0`: the rows one job of [`synthesise_on`] lifts.
+    fn horizontal(rows: &mut [&mut [Self]], i0: u32);
+
+    /// F.3.4's VER_SR down every column of a block of rows: `rows[j]` holds
+    /// row `j`'s samples of the block's columns, every row as many, and row
+    /// 0 sits at absolute index `i0` of each column — the block of columns
+    /// one job of [`synthesise_on`] lifts.
+    fn vertical(rows: &mut [&mut [Self]], i0: u32);
 
     /// The integer sample this coefficient reconstructs to, before G.1's
     /// level shift.
@@ -272,37 +274,32 @@ impl Arith for Exact {
         }
     }
 
-    fn synthesise_2d(
-        samples: &mut [Self],
-        width: usize,
-        rows: Range<usize>,
-        cols: Range<usize>,
-        out: Range<usize>,
-        (xi0, yi0): (u32, u32),
-    ) {
-        // HOR_SR: each row lifted in place along its own samples.
-        for y in rows.clone() {
-            let line = &mut samples[y * width..][cols.clone()];
+    fn horizontal(rows: &mut [&mut [Self]], i0: u32) {
+        // Each row lifted in place along its own samples.
+        let (low, high) = parities(i0);
+        for line in rows.iter_mut() {
+            let line: &mut [Self] = line;
             if line.len() < 2 {
-                lone(line, xi0, |Exact(v)| Exact(v / 2));
+                lone(line, i0, |Exact(v)| Exact(v / 2));
                 continue;
             }
-            let (low, high) = parities(xi0);
             step_line(line, low, low_53);
             step_line(line, high, high_53);
         }
-        // VER_SR: each lifting step over the whole rows of the block.
+    }
+
+    fn vertical(rows: &mut [&mut [Self]], i0: u32) {
+        // Each lifting step over the whole rows of the block.
         if rows.len() < 2 {
-            for y in rows {
-                lone(&mut samples[y * width..][out.clone()], yi0, |Exact(v)| {
-                    Exact(v / 2)
-                });
+            for line in rows.iter_mut() {
+                let line: &mut [Self] = line;
+                lone(line, i0, |Exact(v)| Exact(v / 2));
             }
             return;
         }
-        let (low, high) = parities(yi0);
-        step_rows(samples, width, rows.clone(), out.clone(), low, low_53);
-        step_rows(samples, width, rows, out, high, high_53);
+        let (low, high) = parities(i0);
+        step_rows(rows, low, low_53);
+        step_rows(rows, high, high_53);
     }
 
     fn sample(self) -> i32 {
@@ -334,94 +331,79 @@ impl Arith for Fixed {
         }
     }
 
-    /// The 9/7's two passes, each over the plane's own `i32` samples where
-    /// the samples it reads are small enough that no intermediate leaves an
-    /// `i32` ([`IN_PLACE_BOUND`], thirty-two times an 8-bit picture's range),
-    /// and in `i64` rows otherwise: the running value grows 4.59 bits inside a
-    /// pass (the four steps multiply the bound by 24.08 in total) and from a
-    /// sample near [`PLANE_BOUND`] does not fit the plane's own format
-    /// mid-flight. Keeping the plane at `i32` is what holds a 4096x4096
-    /// four-component tile at 268 MB of scratch rather than 536. Either way
-    /// every product is the same `i64` at Q36, rounded by [`mul_q24`] in the
-    /// same order, and each pass ends clamped to [`PLANE_BOUND`], as the
-    /// overflow proof in this module's header has it.
-    fn synthesise_2d(
-        samples: &mut [Self],
-        width: usize,
-        rows: Range<usize>,
-        cols: Range<usize>,
-        out: Range<usize>,
-        (xi0, yi0): (u32, u32),
-    ) {
-        // HOR_SR.
-        if magnitude(samples, width, rows.clone(), cols.clone()) <= IN_PLACE_BOUND {
-            for y in rows.clone() {
-                let line = &mut samples[y * width..][cols.clone()];
-                lift_97(line, xi0, |Fixed(v)| i64::from(v), narrow);
-                clamp_fixed(line);
-            }
-        } else {
-            let mut wide = Vec::with_capacity(cols.len());
-            for y in rows.clone() {
-                let line = &mut samples[y * width..][cols.clone()];
-                wide.clear();
-                wide.extend(line.iter().map(|&Fixed(v)| i64::from(v)));
-                #[cfg(test)]
-                count_line_copies(1);
-                lift_97(&mut wide, xi0, |v| v, |v| v);
-                for (dst, &v) in line.iter_mut().zip(&wide) {
-                    *dst = Fixed(clamp_plane(v));
-                }
-            }
-        }
-
-        // VER_SR.
-        if rows.len() < 2 {
-            for y in rows {
-                let line = &mut samples[y * width..][out.clone()];
-                lone(line, yi0, |Fixed(v)| Fixed(v / 2));
+    /// The 9/7's horizontal pass over one job's rows, over the plane's own
+    /// `i32` samples where the samples the job reads are small enough that no
+    /// intermediate leaves an `i32` ([`IN_PLACE_BOUND`], thirty-two times an
+    /// 8-bit picture's range), and in `i64` rows otherwise: the running value
+    /// grows 4.59 bits inside a pass (the four steps multiply the bound by
+    /// 24.08 in total) and from a sample near [`PLANE_BOUND`] does not fit
+    /// the plane's own format mid-flight. Keeping the plane at `i32` is what
+    /// holds a 4096x4096 four-component tile at 268 MB of scratch rather than
+    /// 536. Either way every product is the same `i64` at Q36, rounded by
+    /// [`mul_q24`] in the same order, and each pass ends clamped to
+    /// [`PLANE_BOUND`], as the overflow proof in this module's header has it
+    /// — so which way a job lifts moves no sample, and the jobs of one pass
+    /// may each choose their own.
+    fn horizontal(rows: &mut [&mut [Self]], i0: u32) {
+        if magnitude(rows) <= IN_PLACE_BOUND {
+            for line in rows.iter_mut() {
+                let line: &mut [Self] = line;
+                lift_97(line, i0, |Fixed(v)| i64::from(v), narrow);
                 clamp_fixed(line);
             }
             return;
         }
-        if magnitude(samples, width, rows.clone(), out.clone()) <= IN_PLACE_BOUND {
-            lift_97_rows(
-                samples,
-                width,
-                rows.clone(),
-                out.clone(),
-                yi0,
-                |Fixed(v)| i64::from(v),
-                narrow,
-            );
-            for y in rows {
-                clamp_fixed(&mut samples[y * width..][out.clone()]);
+        let mut wide = Vec::new();
+        for line in rows.iter_mut() {
+            wide.clear();
+            wide.extend(line.iter().map(|&Fixed(v)| i64::from(v)));
+            #[cfg(test)]
+            count_line_copies(1);
+            lift_97(&mut wide, i0, |v| v, |v| v);
+            for (dst, &v) in line.iter_mut().zip(&wide) {
+                *dst = Fixed(clamp_plane(v));
+            }
+        }
+    }
+
+    /// The 9/7's vertical pass over one job's block of columns, in place or
+    /// widened as [`Fixed::horizontal`] chooses, the widened columns in
+    /// strips of [`STRIP`].
+    fn vertical(rows: &mut [&mut [Self]], i0: u32) {
+        if rows.len() < 2 {
+            for line in rows.iter_mut() {
+                let line: &mut [Self] = line;
+                lone(line, i0, |Fixed(v)| Fixed(v / 2));
+                clamp_fixed(line);
+            }
+            return;
+        }
+        if magnitude(rows) <= IN_PLACE_BOUND {
+            lift_97_rows(rows, i0, |Fixed(v)| i64::from(v), narrow);
+            for line in rows.iter_mut() {
+                clamp_fixed(line);
             }
             return;
         }
         // Past the bound, the columns in strips of `STRIP`, each strip's
         // rows widened into one block and lifted there, whole row by whole
         // row as above.
-        let height = rows.len();
-        let mut block: Vec<i64> = Vec::with_capacity(height * STRIP.min(out.len()));
-        let mut start = out.start;
-        while start < out.end {
-            let strip = start..(start + STRIP).min(out.end);
+        let across_all = rows.iter().map(|line| line.len()).min().unwrap_or(0);
+        let mut block: Vec<i64> = Vec::with_capacity(rows.len() * STRIP.min(across_all));
+        let mut start = 0;
+        while start < across_all {
+            let strip = start..(start + STRIP).min(across_all);
             let across = strip.len();
             block.clear();
-            for y in rows.clone() {
-                block.extend(
-                    samples[y * width..][strip.clone()]
-                        .iter()
-                        .map(|&Fixed(v)| i64::from(v)),
-                );
+            for line in rows.iter() {
+                block.extend(line[strip.clone()].iter().map(|&Fixed(v)| i64::from(v)));
             }
             #[cfg(test)]
             count_line_copies(across as u64);
-            lift_97_rows(&mut block, across, 0..height, 0..across, yi0, |v| v, |v| v);
-            for (k, y) in rows.clone().enumerate() {
-                let line = &mut samples[y * width..][strip.clone()];
-                for (dst, &v) in line.iter_mut().zip(&block[k * across..(k + 1) * across]) {
+            let mut widened: Vec<&mut [i64]> = block.chunks_mut(across).collect();
+            lift_97_rows(&mut widened, i0, |v| v, |v| v);
+            for (line, lifted) in rows.iter_mut().zip(block.chunks(across)) {
+                for (dst, &v) in line[strip.clone()].iter_mut().zip(lifted) {
                     *dst = Fixed(clamp_plane(v));
                 }
             }
@@ -497,26 +479,29 @@ pub(crate) fn mul_q24(v: i64, c: i64) -> i64 {
 // --- row-blocked lifting (F.3.8) ------------------------------------------
 //
 // A pass lifts the plane's samples where they lie: HOR_SR along each row, and
-// VER_SR a whole row at a time, each lifting step updating every row of one
-// parity from the rows beside it, so every step's inner loop runs along
-// contiguous samples. F.3.7's symmetric extension is taken at a line's two
-// ends by index; no line is copied out and back, and the 5/3 allocates
-// nothing. The 9/7 keeps the standard's order exactly — the scaling, then
-// delta, gamma, beta and alpha — every product in `i64` at Q36 rounded by
-// `mul_q24`, so each intermediate is the one a line at a time computes.
+// VER_SR a whole row of a block of columns at a time, each lifting step
+// updating every row of one parity from the rows beside it, so every step's
+// inner loop runs along contiguous samples. F.3.7's symmetric extension is
+// taken at a line's two ends by index; no line is copied out and back, and
+// the 5/3 needs no scratch beyond the lists of rows that cut a pass into
+// jobs (`synthesise_on`). The 9/7 keeps the standard's order exactly — the
+// scaling, then delta, gamma, beta and alpha — every product in `i64` at Q36
+// rounded by `mul_q24`, so each intermediate is the one a line at a time
+// computes.
 
-/// The magnitude, in Q12, up to which a 9/7 pass lifts the plane's own `i32`
+/// The magnitude, in Q12, up to which a 9/7 job lifts the plane's own `i32`
 /// samples in place.
 ///
 /// The overflow proof in this module's header, run from a smaller start: the
 /// scaling multiplies a magnitude by at most 1.6258 and the four lifting steps
 /// by 24.08 together, and each of the five rounds by at most one, so from
 /// `2^25` no intermediate passes `39.15 * 2^25 + 5`, about `2^30.3`, inside
-/// `i32`'s `2^31`. A pass whose samples reach past it lifts in `i64` instead.
+/// `i32`'s `2^31`. A job whose samples reach past it lifts in `i64` instead.
 const IN_PLACE_BOUND: u32 = 1 << 25;
 
-/// The columns a 9/7 vertical pass past [`IN_PLACE_BOUND`] lifts at a time,
-/// whole rows of them widened into one `i64` block.
+/// The columns a 9/7 vertical job past [`IN_PLACE_BOUND`] lifts at a time,
+/// whole rows of them widened into one `i64` block; and the unit a vertical
+/// pass's blocks of columns are cut in ([`synthesise_on`]).
 const STRIP: usize = 64;
 
 /// Where a line's two bands start, for a line whose first sample sits at
@@ -562,62 +547,41 @@ fn step_line<T: Copy>(line: &mut [T], first: usize, step: impl Fn(T, T, T) -> T)
     }
 }
 
-/// Row `target` of a plane `width` samples to a row, to be written, and rows
-/// `above` and `below`, neither of them `target`, to be read: each over the
-/// columns `cols`.
-fn three_rows<T>(
-    samples: &mut [T],
-    width: usize,
+/// Row `target` of a block of rows, to be written, and rows `above` and
+/// `below`, neither of them `target`, to be read.
+fn three_rows<'a, T>(
+    rows: &'a mut [&mut [T]],
     (target, above, below): (usize, usize, usize),
-    cols: Range<usize>,
-) -> (&mut [T], &[T], &[T]) {
-    let (before, from) = samples.split_at_mut(target * width);
-    let (row, after) = from.split_at_mut(width);
-    let above = row_of(before, after, (target, above), width, cols.clone());
-    let below = row_of(before, after, (target, below), width, cols.clone());
-    (&mut row[cols], above, below)
+) -> (&'a mut [T], &'a [T], &'a [T]) {
+    let (before, from) = rows.split_at_mut(target);
+    let (row, after) = from.split_at_mut(1);
+    let (before, after): (&'a [&mut [T]], &'a [&mut [T]]) = (before, after);
+    // Row `r`, which is not `target`: `before` holds the rows above it and
+    // `after` the rows below.
+    let read = move |r: usize| -> &'a [T] {
+        if r < target {
+            &*before[r]
+        } else {
+            &*after[r - target - 1]
+        }
+    };
+    (&mut *row[0], read(above), read(below))
 }
 
-/// Row `r` of a plane split around row `target`, which `r` is not: `before`
-/// holds the rows above `target` and `after` the rows below it.
-fn row_of<'a, T>(
-    before: &'a [T],
-    after: &'a [T],
-    (target, r): (usize, usize),
-    width: usize,
-    cols: Range<usize>,
-) -> &'a [T] {
-    if r < target {
-        &before[r * width..][cols]
-    } else {
-        &after[(r - target - 1) * width..][cols]
-    }
-}
-
-/// One lifting step down the columns `cols` of the rows `rows`, two or more
-/// of them, of a plane `width` samples to a row: every other row from the
-/// block's row `first` on, each from the rows above and below it, with F.3.7's
-/// symmetric extension taken at the block's first and last rows by index. So
-/// a step streams whole rows.
-fn step_rows<T: Copy>(
-    samples: &mut [T],
-    width: usize,
-    rows: Range<usize>,
-    cols: Range<usize>,
-    first: usize,
-    step: impl Fn(T, T, T) -> T,
-) {
+/// One lifting step down the columns of a block of rows, two or more of
+/// them: every other row from the block's row `first` on, each from the rows
+/// above and below it, with F.3.7's symmetric extension taken at the block's
+/// first and last rows by index. So a step streams whole rows.
+fn step_rows<T: Copy>(rows: &mut [&mut [T]], first: usize, step: impl Fn(T, T, T) -> T) {
     let m = rows.len();
+    if m < 2 {
+        return;
+    }
     let mut j = first;
     while j < m {
         let above = if j == 0 { 1 } else { j - 1 };
         let below = if j + 1 == m { m - 2 } else { j + 1 };
-        let (row, above, below) = three_rows(
-            samples,
-            width,
-            (rows.start + j, rows.start + above, rows.start + below),
-            cols.clone(),
-        );
+        let (row, above, below) = three_rows(rows, (j, above, below));
         for ((v, &a), &b) in row.iter_mut().zip(above).zip(below) {
             *v = step(*v, a, b);
         }
@@ -674,66 +638,42 @@ fn lift_97<T: Copy>(
     step_line(line, high, lifting(ALPHA));
 }
 
-/// [`lift_97`] down the columns `cols` of the rows `rows`, two or more of
-/// them, whose first sits at absolute index `i0`: the scaling a row at a
-/// time, a low-band row by `K` and a high-band one by `2/K`, then each
-/// lifting step over whole rows.
+/// [`lift_97`] down the columns of a block of rows, two or more of them,
+/// whose first sits at absolute index `i0`: the scaling a row at a time, a
+/// low-band row by `K` and a high-band one by `2/K`, then each lifting step
+/// over whole rows.
 fn lift_97_rows<T: Copy>(
-    samples: &mut [T],
-    width: usize,
-    rows: Range<usize>,
-    cols: Range<usize>,
+    rows: &mut [&mut [T]],
     i0: u32,
     wide: impl Fn(T) -> i64 + Copy,
     narrow: impl Fn(i64) -> T + Copy,
 ) {
     let (low, high) = parities(i0);
-    for (j, y) in rows.clone().enumerate() {
+    for (j, line) in rows.iter_mut().enumerate() {
         let c = if j % 2 == low { K } else { TWO_OVER_K };
-        for v in &mut samples[y * width..][cols.clone()] {
+        for v in line.iter_mut() {
             *v = narrow(mul_q24(wide(*v), c));
         }
     }
     let lifting =
         move |c: i64| move |x: T, a: T, b: T| narrow(wide(x) + mul_q24(wide(a) + wide(b), c));
-    step_rows(
-        samples,
-        width,
-        rows.clone(),
-        cols.clone(),
-        low,
-        lifting(-DELTA),
-    );
-    step_rows(
-        samples,
-        width,
-        rows.clone(),
-        cols.clone(),
-        high,
-        lifting(-GAMMA),
-    );
-    step_rows(
-        samples,
-        width,
-        rows.clone(),
-        cols.clone(),
-        low,
-        lifting(BETA),
-    );
-    step_rows(samples, width, rows, cols, high, lifting(ALPHA));
+    step_rows(rows, low, lifting(-DELTA));
+    step_rows(rows, high, lifting(-GAMMA));
+    step_rows(rows, low, lifting(BETA));
+    step_rows(rows, high, lifting(ALPHA));
 }
 
-/// The largest magnitude among the columns `cols` of the rows `rows`.
-fn magnitude(samples: &[Fixed], width: usize, rows: Range<usize>, cols: Range<usize>) -> u32 {
-    rows.map(|y| {
-        samples[y * width..][cols.clone()]
-            .iter()
-            .map(|&Fixed(v)| v.unsigned_abs())
-            .max()
-            .unwrap_or(0)
-    })
-    .max()
-    .unwrap_or(0)
+/// The largest magnitude among a block of rows' samples.
+fn magnitude(rows: &[&mut [Fixed]]) -> u32 {
+    rows.iter()
+        .map(|line| {
+            line.iter()
+                .map(|&Fixed(v)| v.unsigned_abs())
+                .max()
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// An `i64` intermediate back into the plane's `i32`, which a pass that began
@@ -1297,6 +1237,150 @@ fn dequantise<A: Arith>(
     }
 }
 
+// --- synthesis on the pool (P-10.11) --------------------------------------
+//
+// HOR_SR lifts each row on its own and VER_SR each column, so within one
+// resolution step the rows are independent of one another, and once the
+// horizontal pass is done so are the columns. A synthesis cuts the rows into
+// jobs of whole rows and then the columns into blocks of whole columns, each
+// job a pre-sized slice of the plane that no other job touches, and hands
+// them to the decode's executor (`docs/design/jpx-speed.md`, "Code-blocks and
+// synthesis on P-15's pool"). Nothing a job computes reads what another
+// writes, so the plane is the serial synthesis's at every thread count and
+// however it is cut.
+
+/// The samples a synthesis job lifts at the least: a pass over fewer is one
+/// job, lifted on the caller, and a larger one is cut into jobs of about this
+/// many — whole rows for the horizontal pass, and whole columns, in
+/// multiples of [`STRIP`], for the vertical one.
+const JOB_SAMPLES: usize = 1 << 15;
+
+/// F.3.4's 2D synthesis of one resolution step over a plane's samples,
+/// `width` to a row, on `executor`: HOR_SR over the columns `cols` of the
+/// rows `rows`, each row's first sample at absolute index `i0.0`, then VER_SR
+/// over the columns `out` of the same rows, each column's first sample at
+/// absolute index `i0.1` — so the windowed synthesis lifts the sub-lines it
+/// always has (`synthesise_2d`). The horizontal pass goes to the executor in
+/// jobs of whole rows and the vertical one in blocks of whole columns, each
+/// about [`JOB_SAMPLES`] samples ([`synthesise_split`]).
+pub(crate) fn synthesise_on<A: Arith>(
+    samples: &mut [A],
+    width: usize,
+    rows: Range<usize>,
+    cols: Range<usize>,
+    out: Range<usize>,
+    i0: (u32, u32),
+    executor: &dyn Executor,
+) {
+    let per_job = (
+        JOB_SAMPLES.div_ceil(cols.len().max(1)),
+        JOB_SAMPLES.div_ceil(rows.len().max(1)).div_ceil(STRIP) * STRIP,
+    );
+    synthesise_split(samples, width, (rows, cols, out), i0, per_job, executor);
+}
+
+/// [`synthesise_on`], cut as `per_job` says: `per_job.0` rows to a job of
+/// the horizontal pass and `per_job.1` columns to a block of the vertical
+/// one, the last of each taking what is left. The horizontal pass's jobs all
+/// end before the vertical pass's begin, each job's rows behind a lock only
+/// it takes.
+pub(crate) fn synthesise_split<A: Arith>(
+    samples: &mut [A],
+    width: usize,
+    (rows, cols, out): (Range<usize>, Range<usize>, Range<usize>),
+    (xi0, yi0): (u32, u32),
+    (per_row_job, per_column_job): (usize, usize),
+    executor: &dyn Executor,
+) {
+    if width == 0 || rows.is_empty() {
+        return;
+    }
+    // HOR_SR: each row's `cols`, whole rows to a job.
+    let mut lines: Vec<&mut [A]> = samples
+        .chunks_mut(width)
+        .skip(rows.start)
+        .take(rows.len())
+        .filter_map(|row| row.get_mut(cols.clone()))
+        .collect();
+    share(
+        executor,
+        lines.chunks_mut(per_row_job.max(1)).collect(),
+        &|job| {
+            #[cfg(test)]
+            count_lifted(job.len() as u64, 0);
+            A::horizontal(job, xi0);
+        },
+    );
+    // VER_SR: every row's `out`, cut into blocks of whole columns, a block
+    // to a job.
+    let per_column_job = per_column_job.max(1);
+    let mut blocks: Vec<Vec<&mut [A]>> = (0..out.len().div_ceil(per_column_job))
+        .map(|_| Vec::with_capacity(rows.len()))
+        .collect();
+    for row in samples.chunks_mut(width).skip(rows.start).take(rows.len()) {
+        if let Some(row) = row.get_mut(out.clone()) {
+            for (block, piece) in blocks.iter_mut().zip(row.chunks_mut(per_column_job)) {
+                block.push(piece);
+            }
+        }
+    }
+    share(
+        executor,
+        blocks.iter_mut().map(Vec::as_mut_slice).collect(),
+        &|job| {
+            #[cfg(test)]
+            count_lifted(0, job.first().map_or(0, |line| line.len() as u64));
+            A::vertical(job, yi0);
+        },
+    );
+}
+
+/// `lift` over each of `jobs` on `executor`, each job's rows behind a lock
+/// of its own that only its own job takes; a pass of one job is lifted on
+/// the caller.
+fn share<A: Send>(
+    executor: &dyn Executor,
+    mut jobs: Vec<&mut [&mut [A]]>,
+    lift: &(dyn Fn(&mut [&mut [A]]) + Sync),
+) {
+    if jobs.len() <= 1 {
+        for job in &mut jobs {
+            lift(job);
+        }
+        return;
+    }
+    let slots: Vec<Mutex<&mut [&mut [A]]>> = jobs.into_iter().map(Mutex::new).collect();
+    executor.run(slots.len(), &|k| {
+        if let Some(slot) = slots.get(k) {
+            let mut job = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            lift(&mut job);
+        }
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What the synthesis jobs this thread has run lifted: the rows of the
+    /// horizontal passes' jobs, and the columns of the vertical passes'.
+    static LIFTED: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Counts a job of `rows` rows of a horizontal pass, or of `columns`
+/// columns of a vertical one.
+#[cfg(test)]
+fn count_lifted(rows: u64, columns: u64) {
+    LIFTED.with(|lifted| {
+        let (r, c) = lifted.get();
+        lifted.set((r + rows, c + columns));
+    });
+}
+
+/// The rows and the columns this thread's synthesis jobs have lifted so far.
+#[cfg(test)]
+pub(crate) fn lifted() -> (u64, u64) {
+    LIFTED.with(std::cell::Cell::get)
+}
+
 // --- the ladder (F.3.3 and F.3.4) -----------------------------------------
 
 /// F.3.4's 2D synthesis for one resolution step, over what the decode needs
@@ -1306,17 +1390,24 @@ fn dequantise<A: Arith>(
 /// Rows first, then columns — F.3.4's HOR_SR followed by VER_SR. Every row
 /// the column pass reads is lifted, along the columns `read` spans; then each
 /// of `out`'s columns is lifted along the rows `read` spans, a whole row of
-/// them at each lifting step ([`Arith::synthesise_2d`]). A sub-line is
-/// lifted with its first sample's own absolute index as `i0`, so its
-/// parities are the whole line's. A value within the filter's reach of a
-/// sub-line's end that is not the resolution's own end comes out wrong —
-/// the symmetric extension reflects at the wrong place — and is never read:
-/// `read` is `out` widened by that reach, and a sample of `out` depends on
-/// nothing outside it (`Needs::of`). With nothing windowed, `read` and `out`
-/// are the whole grid and this is the whole-plane synthesis. Both rectangles
-/// lie inside the grid by construction, and are held to the plane besides,
-/// so no sample outside it is ever reached (ruling 1).
-fn synthesise_2d<A: Arith>(plane: &mut Plane<A>, x0: u32, y0: u32, read: Rect, out: Rect) {
+/// them at each lifting step, the rows and then the columns in jobs on
+/// `executor` ([`synthesise_on`]). A sub-line is lifted with its first
+/// sample's own absolute index as `i0`, so its parities are the whole
+/// line's. A value within the filter's reach of a sub-line's end that is not
+/// the resolution's own end comes out wrong — the symmetric extension
+/// reflects at the wrong place — and is never read: `read` is `out` widened
+/// by that reach, and a sample of `out` depends on nothing outside it
+/// (`Needs::of`). With nothing windowed, `read` and `out` are the whole grid
+/// and this is the whole-plane synthesis. Both rectangles lie inside the
+/// grid by construction, and are held to the plane besides, so no sample
+/// outside it is ever reached (ruling 1).
+fn synthesise_2d<A: Arith>(
+    plane: &mut Plane<A>,
+    (x0, y0): (u32, u32),
+    read: Rect,
+    out: Rect,
+    executor: &dyn Executor,
+) {
     if read.is_empty() || out.is_empty() {
         return;
     }
@@ -1328,13 +1419,14 @@ fn synthesise_2d<A: Arith>(plane: &mut Plane<A>, x0: u32, y0: u32, read: Rect, o
     let rows = span(read.y0, read.y1, y0, height);
     let cols = span(read.x0, read.x1, x0, width);
     let outs = span(out.x0, out.x1, x0, width);
-    A::synthesise_2d(
+    synthesise_on(
         &mut plane.samples,
         width,
         rows,
         cols,
         outs,
         (read.x0, read.y0),
+        executor,
     );
 }
 
@@ -1579,6 +1671,7 @@ pub(crate) fn ladder<A: Arith>(
     component: usize,
     discard: u8,
     needs: Option<&Needs>,
+    executor: &dyn Executor,
     clamped: &mut bool,
 ) -> Result<Plane<A>, Refusal> {
     let tc = tile
@@ -1683,10 +1776,10 @@ pub(crate) fn ladder<A: Arith>(
             }
             synthesise_2d(
                 &mut next,
-                resolution.x0,
-                resolution.y0,
+                (resolution.x0, resolution.y0),
                 needs.read.get(r).copied().unwrap_or_default(),
                 needs.out.get(r).copied().unwrap_or_default(),
+                executor,
             );
         }
         plane = next;
@@ -1759,24 +1852,53 @@ fn arithmetic(stream: &Codestream<'_>, tile: u16, component: usize) -> Result<bo
 /// `clamped` records whether E.1's clamp ever fired, which the caller turns
 /// into a warning: a stream whose declared step size asks for a magnitude the
 /// format cannot hold has been altered to fit, and ruling 10 wants that
-/// recorded rather than silently absorbed.
+/// recorded rather than silently absorbed. Each level's synthesis runs its
+/// rows and columns on `executor`.
 pub(crate) fn reconstruct(
     stream: &Codestream<'_>,
     tile: &Tile,
     component: usize,
     discard: u8,
     needs: Option<&Needs>,
+    executor: &dyn Executor,
     clamped: &mut bool,
 ) -> Result<Plane, Refusal> {
     if arithmetic(stream, tile.index, component)? {
         Ok(into_samples(ladder::<Exact>(
-            stream, tile, component, discard, needs, clamped,
+            stream, tile, component, discard, needs, executor, clamped,
         )?))
     } else {
         Ok(into_samples(ladder::<Fixed>(
-            stream, tile, component, discard, needs, clamped,
+            stream, tile, component, discard, needs, executor, clamped,
         )?))
     }
+}
+
+/// Parts `0..len`, each made by `make` with a clamp flag of its own,
+/// concurrently on `executor` ([`super::map_in_turn`]), and joined in index
+/// order as one loop making them in turn would have met them: each one's
+/// clamp recorded up to the first refusal, which is the answer, and nothing
+/// of what was made after it — so the planes, the refusal and E.1's warning
+/// are the serial decode's whichever finished first.
+fn apart<T: Send>(
+    executor: &dyn Executor,
+    len: usize,
+    make: impl Fn(usize, &mut bool) -> Result<T, Refusal> + Sync,
+    clamped: &mut bool,
+) -> Result<Vec<T>, Refusal> {
+    let make = |i: usize| {
+        let mut own = false;
+        let made = make(i, &mut own);
+        (made, own)
+    };
+    let slots = super::map_in_turn(executor, len, &make, |(made, _)| made.is_err());
+    let mut parts = Vec::with_capacity(len);
+    for (i, slot) in slots.into_iter().enumerate() {
+        let (made, own) = slot.unwrap_or_else(|| make(i));
+        *clamped |= own;
+        parts.push(made?);
+    }
+    Ok(parts)
 }
 
 /// Whether tile `tile`'s component `component` is coded with the reversible
@@ -1820,12 +1942,17 @@ fn transformed<A: Arith>(
     tile: &Tile,
     discard: u8,
     needs: Option<&[Needs]>,
+    executor: &dyn Executor,
     clamped: &mut bool,
 ) -> Result<Vec<Plane>, Refusal> {
+    // The three in turn, each level's rows and columns on `executor`: the
+    // transform joins them.
     let mut planes = Vec::with_capacity(3);
     for c in 0..3 {
         let need = needs.and_then(|needs| needs.get(c));
-        planes.push(ladder::<A>(stream, tile, c, discard, need, clamped)?);
+        planes.push(ladder::<A>(
+            stream, tile, c, discard, need, executor, clamped,
+        )?);
     }
     // G.2 over the samples the decode reads: one rectangle, since the three
     // planes share their grid, or all of them where the components' needs
@@ -1851,19 +1978,34 @@ fn transformed<A: Arith>(
 /// planes at once, and a caller that reconstructed them one at a time would
 /// have to hold them anyway and would be free to apply the transform in the
 /// wrong place.
+///
+/// The components no transform joins are reconstructed [`apart`],
+/// concurrently on `executor` and joined in index order; the three G.2 joins
+/// are reconstructed in turn, each level's rows and columns on `executor`.
 pub(crate) fn reconstruct_tile(
     stream: &Codestream<'_>,
     tile: &Tile,
     discard: u8,
     needs: Option<&[Needs]>,
+    executor: &dyn Executor,
     clamped: &mut bool,
 ) -> Result<Vec<Plane>, Refusal> {
     let count = stream.siz.components.len();
     let need = |c: usize| needs.and_then(|needs| needs.get(c));
+    // Components `from` to the last, each on its own.
+    let rest = |from: usize, clamped: &mut bool| {
+        apart(
+            executor,
+            count.saturating_sub(from),
+            |k, own| {
+                let c = from + k;
+                reconstruct(stream, tile, c, discard, need(c), executor, own)
+            },
+            clamped,
+        )
+    };
     if !stream.cod_for(tile.index).mct {
-        return (0..count)
-            .map(|c| reconstruct(stream, tile, c, discard, need(c), clamped))
-            .collect();
+        return rest(0, clamped);
     }
     if count < 3 {
         return Err(Refusal::Structure(
@@ -1883,13 +2025,11 @@ pub(crate) fn reconstruct_tile(
         }
     }
     let mut planes = if reversible {
-        transformed::<Exact>(stream, tile, discard, needs, clamped)?
+        transformed::<Exact>(stream, tile, discard, needs, executor, clamped)?
     } else {
-        transformed::<Fixed>(stream, tile, discard, needs, clamped)?
+        transformed::<Fixed>(stream, tile, discard, needs, executor, clamped)?
     };
-    for c in 3..count {
-        planes.push(reconstruct(stream, tile, c, discard, need(c), clamped)?);
-    }
+    planes.extend(rest(3, clamped)?);
     Ok(planes)
 }
 

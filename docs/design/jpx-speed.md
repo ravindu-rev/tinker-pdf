@@ -119,30 +119,33 @@ flowcharts register for register, stays in `mq.rs`'s tests as the reference.
 
 ### Row-blocked lifting (P-10.7)
 
-Each arithmetic's `Arith::synthesise_2d` lifts the plane where it lies: the
-horizontal pass in place along each row, and the vertical pass over the
-block of whole rows, each lifting step updating every row of one parity from
-the two rows beside it, so the inner loop runs along contiguous memory for
-every step and the compiler can vectorise it. The symmetric extension
-(F.3.7's mirror) is applied at the two ends of a line, or of the block, by
-index, not through `mirror` at every sample, and no line is copied out and
-back. The 5/3 lifts its `i32` samples with wrapping arithmetic, so a sum of
-two coefficients only a hostile stream asks for wraps alike on every target
-rather than panicking, and allocates nothing. The 9/7 keeps its order of
-operations exactly — the scaling, then delta, gamma, beta and alpha, each
-product formed in `i64` and rounded by `mul_q24` — so every intermediate is
-the one a line at a time computes, and each pass ends clamped into the plane
-bound as `Fixed`'s synthesis clamps it; the overflow proof in `wavelet.rs`'s
-header still holds, step for step. A 9/7 pass lifts the plane's own `i32`
-samples where every sample it reads is within `2^25` at Q12 — 8 192 sample
-units, thirty-two times an 8-bit picture's range — from which that proof
-leaves no intermediate past `i32`, and every committed codestream's decode
-lifts so; otherwise in `i64`: each row widened for the horizontal pass, and
-the vertical pass over strips of 64 columns, whole rows of each widened into
-one block. The windowed synthesis P-10.3 lands keeps its rows and columns. The
-line-at-a-time synthesis, each line copied into a scratch and every
-neighbour read through `mirror`, stays in the tests as the reference the
-row-blocked lifting is held to.
+Each arithmetic lifts the plane where it lies, through two methods of
+`Arith`: `horizontal`, in place along each row of a job's rows, and
+`vertical`, over a block of whole rows of a job's columns, each lifting step
+updating every row of one parity from the two rows beside it, so the inner
+loop runs along contiguous memory for every step and the compiler can
+vectorise it. The symmetric extension (F.3.7's mirror) is applied at the two
+ends of a line, or of the block, by index, not through `mirror` at every
+sample, and no line is copied out and back. The 5/3 lifts its `i32` samples
+with wrapping arithmetic, so a sum of two coefficients only a hostile stream
+asks for wraps alike on every target rather than panicking, and needs no
+scratch beyond the lists of rows that cut a pass into jobs. The 9/7 keeps
+its order of operations exactly — the scaling, then delta, gamma, beta and
+alpha, each product formed in `i64` and rounded by `mul_q24` — so every
+intermediate is the one a line at a time computes, and each pass ends
+clamped into the plane bound as `Fixed`'s synthesis clamps it; the overflow
+proof in `wavelet.rs`'s header still holds, step for step. A 9/7 job lifts
+the plane's own `i32` samples where every sample it reads is within `2^25`
+at Q12 — 8 192 sample units, thirty-two times an 8-bit picture's range —
+from which that proof leaves no intermediate past `i32`, and every committed
+codestream's decode lifts so; otherwise in `i64`: each of its rows widened
+for the horizontal pass, and its columns in strips of 64, whole rows of each
+widened into one block, for the vertical one. Which way a job lifts moves no
+sample, so the jobs of one pass each choose their own. The windowed
+synthesis P-10.3 lands keeps its rows and columns. The line-at-a-time
+synthesis, each line copied into a scratch and every neighbour read through
+`mirror`, stays in the tests as the reference the row-blocked lifting is
+held to.
 
 ### The decode request (P-10.2, P-10.3)
 
@@ -330,13 +333,34 @@ walk stopped at after it gives its own. Serial unless the caller's
 `Parallelism` asks for threads: `jpx_decode_on` takes the executor, and
 `jpx_decode_request` is it on the caller.
 
-**Synthesis.** A horizontal pass's rows and a vertical pass's blocks of rows
-are independent within a level, and so are tiles, and components where no
-multiple-component transform joins them; each writes a pre-sized slice of
-its plane, joined in index order. The levels of one tile-component stay in
-order, since each reads the one below. At the 9/7's single-thread target,
-four threads within the target need most of the decode on the pool, which is
-why synthesis joins tier-1 there.
+**Synthesis.** Within one level a horizontal pass's rows are independent of
+one another, and once that pass is done so are the vertical pass's columns:
+`wavelet::synthesise_on` cuts the rows into jobs of whole rows and then the
+columns into blocks of whole columns, each job about 32 768 samples, the
+blocks in multiples of 64 columns, so a level smaller than one job is lifted
+on the caller. Each job lifts a pre-sized slice of the plane — its own rows,
+or its own pieces of every row — behind a lock only it takes, and nothing a
+job computes reads what another writes, so the plane is the serial
+synthesis's however the pass is cut and at every thread count. The levels of
+one tile-component stay in order, since each reads the one below.
+
+Tiles are independent too, and so are components no multiple-component
+transform joins. The decode draws its tiles concurrently, each reconstructed,
+level-shifted and written into its own part of the window's rows, each row
+behind a lock of its own; a tile reconstructs its components concurrently
+where no transform joins them, and the three G.2 joins in turn, each level's
+rows and columns on the pool. Each part's result — a tile's counts, a
+component's plane, E.1's clamp and a refusal — sits in a slot of its own and
+is joined in index order, as a loop making the parts in turn would meet them:
+the first refusal is the answer, E.1's warning is the parts' before it and
+its own, and a part is not begun once one before it has refused, so the
+serial decode stops where a loop does and a pooled one at most finishes the
+parts already under way. Tier-1 likewise begins no code-block past one that
+refused. On threads of the engine's pool a part on a worker runs everything
+it holds on that worker, so whichever of tiles, components and a level's rows
+first has more than one part takes the threads. At the 9/7's single-thread
+target, four threads within the target need most of the decode on the pool,
+which is why synthesis joins tier-1 there.
 
 ### Guard A7's JPX half
 

@@ -92,6 +92,8 @@ pub(crate) mod tier2;
 pub(crate) mod wavelet;
 
 use crate::{Capability, FilterError, Limits, Warning};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use tinker_pdf_pool::{Executor, Parallelism};
 
 // --- the budget ---------------------------------------------------------
@@ -630,17 +632,20 @@ pub fn jpx_decode_request(
 }
 
 /// [`jpx_decode_request`], the decode's independent parts handed to
-/// `executor`: tier-1's code-blocks, each decoded into a slot of its own and
-/// read back in index order (`docs/design/parallelism.md`, "JPEG 2000: P-10's
-/// seam").
+/// `executor`: tier-1's code-blocks, each decoded into a slot of its own; the
+/// tiles, each reconstructed and written into its own part of the image; the
+/// components no multiple-component transform joins; and each wavelet
+/// level's rows and blocks of columns — every result read back in index order
+/// (`docs/design/parallelism.md`, "JPEG 2000: P-10's seam").
 ///
 /// The executor is the engine's pool — [`Parallelism`] is one, and
-/// `Parallelism::Serial` decodes every block on the caller as
+/// `Parallelism::Serial` decodes every part on the caller as
 /// [`jpx_decode_request`] does — or a caller's own threads; nothing of a
 /// caller crosses but the trait (ruling 8). The image, the counts, the
 /// warnings and a refusal are the serial decode's at every thread count: the
 /// work budget is charged for every block in index order before any is
-/// decoded, so a refusal names the same block whatever ran it.
+/// decoded, so a refusal names the same block whatever ran it, and no part
+/// is begun past one that refused.
 ///
 /// # Errors
 ///
@@ -958,77 +963,46 @@ fn decode_inner(
     let mut samples = vec![0u8; pixels * stride * wide];
     let mut opacity = plan.opacity.map(|_| vec![0u8; pixels * wide]);
 
-    for (t, tile) in tiles.iter().enumerate() {
-        // Under a window, what reconstructing the whole tile would refuse is
-        // refused first, in the tile's place: a window reconstructs only what
-        // it reads, and refuses where the decode of the whole image does.
-        if needs.is_some() {
-            wavelet::check_tile(&stream, tile, discard)?;
-        }
-        // A tile the window misses is neither synthesised nor written.
-        let need: Option<&Vec<wavelet::Needs>> = match &needs {
-            None => None,
-            Some(needs) => match needs.get(t) {
-                Some(Some(need)) => Some(need),
-                _ => continue,
-            },
+    // Every tile on its own, concurrently on `executor`: each is
+    // reconstructed, level-shifted and written into its own part of the
+    // window's rows, which no other tile's bounds share, so the image is the
+    // serial decode's whichever tile finished first. What each did is joined
+    // below in index order.
+    let drawing = Drawing {
+        stream: &stream,
+        discard,
+        needs: needs.as_deref(),
+        grid: &grid,
+        window,
+        plan: &plan,
+        palette,
+        precision,
+        executor,
+        colour: rows_of(&mut samples, (width as usize) * stride * wide),
+        opacity: opacity
+            .as_mut()
+            .map(|opacity| rows_of(opacity, (width as usize) * wide)),
+    };
+    let draw = |t: usize| {
+        let mut own = false;
+        let drawn = match tiles.get(t) {
+            Some(tile) => drawing.tile(t, tile, &mut own),
+            None => Ok(None),
         };
-        // Every component of the tile at once, because G.2's transform reads
-        // three planes and applying it one plane at a time is not a thing
-        // that can be done.
-        let mut planes =
-            wavelet::reconstruct_tile(&stream, tile, discard, need.map(Vec::as_slice), clamped)?;
-        counts.levels_synthesised += wavelet::levels_synthesised(tile, discard);
-        let reconstructed = planes
-            .iter()
-            .map(|plane| plane.samples.len())
-            .fold(0usize, usize::saturating_add);
-        *steps = steps.saturating_add(u64::try_from(reconstructed).unwrap_or(u64::MAX));
-        for (c, plane) in planes.iter_mut().enumerate() {
-            let component = &stream.siz.components[c];
-            // G.1, and *after* G.2 rather than before it — which is what
-            // `reconstruct_tile` having already run makes true here. Over
-            // the samples the window reads, or every sample.
-            let region = need.and_then(|need| need.get(c)).map(wavelet::Needs::top);
-            wavelet::level_shift_in(plane, component.precision, component.signed, region);
-        }
-        let bounds = window.and(&grid.tile(stream.siz.tile_bounds(u32::from(tile.index))));
-        if bounds.is_empty() {
-            continue;
-        }
-        for (k, channel) in plan.colour.iter().enumerate() {
-            blit(
-                &planes,
-                &stream.siz,
-                &window,
-                bounds,
-                *channel,
-                palette,
-                Blit {
-                    out: &mut samples,
-                    stride,
-                    at: k,
-                    precision,
-                },
-            );
-        }
-        if let (Some(channel), Some(out)) = (plan.opacity, opacity.as_mut()) {
-            blit(
-                &planes,
-                &stream.siz,
-                &window,
-                bounds,
-                channel,
-                palette,
-                Blit {
-                    out,
-                    stride: 1,
-                    at: 0,
-                    precision,
-                },
-            );
+        (drawn, own)
+    };
+    let slots = map_in_turn(executor, tiles.len(), &draw, |(drawn, _)| drawn.is_err());
+    // As one loop drawing the tiles in turn would have met them: each tile's
+    // clamp and its counts up to the first refusal, which is the answer.
+    for (t, slot) in slots.into_iter().enumerate() {
+        let (drawn, own) = slot.unwrap_or_else(|| draw(t));
+        *clamped |= own;
+        if let Some(drawn) = drawn? {
+            counts.levels_synthesised += drawn.levels;
+            *steps = steps.saturating_add(drawn.samples);
         }
     }
+    drop(drawing);
 
     let returned = samples
         .len()
@@ -1182,10 +1156,173 @@ fn reduce(v: u32, d: u8) -> u32 {
     u64::from(v).div_ceil(divisor) as u32
 }
 
+/// [`tinker_pdf_pool::map`] over parts a decode reads back in index order
+/// only up to the first that failed: `make` for each of `0..len` on
+/// `executor`, each into a slot of its own — except that a part is not begun
+/// once one before it has failed, by `failed`, and its slot is `None`. No
+/// join reaches such a slot, since the failure before it ends the join; a
+/// join makes it on the caller all the same if one does. On the caller,
+/// which makes the parts in turn, that is exactly the work of a loop that
+/// stops at the first failure, and on threads it is that and the parts past
+/// the failure already under way when it came.
+pub(crate) fn map_in_turn<R: Send>(
+    executor: &dyn Executor,
+    len: usize,
+    make: impl Fn(usize) -> R + Sync,
+    failed: impl Fn(&R) -> bool + Sync,
+) -> Vec<Option<R>> {
+    let first = AtomicUsize::new(usize::MAX);
+    tinker_pdf_pool::map(executor, len, |i| {
+        if first.load(Ordering::Relaxed) < i {
+            return None;
+        }
+        let made = make(i);
+        if failed(&made) {
+            first.fetch_min(i, Ordering::Relaxed);
+        }
+        Some(made)
+    })
+}
+
+/// What every tile of one decode is drawn with: the decode's own reading of
+/// the codestream, and the window's rows, each behind a lock of its own,
+/// which the tiles the decode draws concurrently each write their own part
+/// of.
+struct Drawing<'a, 'b> {
+    stream: &'a codestream::Codestream<'b>,
+    discard: u8,
+    /// What each tile needs of each component under a window, `None` for a
+    /// tile the window misses; `None` for no window.
+    needs: Option<&'a [Option<Vec<wavelet::Needs>>]>,
+    grid: &'a Grid,
+    window: wavelet::Rect,
+    plan: &'a colour::Plan,
+    palette: Option<&'a boxes::Palette>,
+    /// The output precision, 8 or 16.
+    precision: u8,
+    executor: &'a dyn Executor,
+    /// The window's rows of colour samples, every channel of a pixel
+    /// together.
+    colour: Vec<Mutex<&'a mut [u8]>>,
+    /// The window's rows of opacity samples, where `cdef` typed one.
+    opacity: Option<Vec<Mutex<&'a mut [u8]>>>,
+}
+
+/// What drawing one tile did, for the decode's counts.
+struct Drawn {
+    /// The inverse-wavelet levels its components were synthesised through.
+    levels: u64,
+    /// The samples its reconstructed planes hold.
+    samples: u64,
+}
+
+impl Drawing<'_, '_> {
+    /// Tile `t`, `tile`, reconstructed, level-shifted and written into its
+    /// part of the window's rows — or `None` for a tile the window misses,
+    /// which is neither synthesised nor written. `clamped` records whether
+    /// E.1's clamp fired in it.
+    fn tile(
+        &self,
+        t: usize,
+        tile: &tier2::Tile,
+        clamped: &mut bool,
+    ) -> Result<Option<Drawn>, Refusal> {
+        // Under a window, what reconstructing the whole tile would refuse is
+        // refused first, in the tile's place: a window reconstructs only what
+        // it reads, and refuses where the decode of the whole image does.
+        if self.needs.is_some() {
+            wavelet::check_tile(self.stream, tile, self.discard)?;
+        }
+        let need: Option<&Vec<wavelet::Needs>> = match self.needs {
+            None => None,
+            Some(needs) => match needs.get(t) {
+                Some(Some(need)) => Some(need),
+                _ => return Ok(None),
+            },
+        };
+        // Every component of the tile at once, because G.2's transform reads
+        // three planes and applying it one plane at a time is not a thing
+        // that can be done.
+        let mut planes = wavelet::reconstruct_tile(
+            self.stream,
+            tile,
+            self.discard,
+            need.map(Vec::as_slice),
+            self.executor,
+            clamped,
+        )?;
+        let reconstructed = planes
+            .iter()
+            .map(|plane| plane.samples.len())
+            .fold(0usize, usize::saturating_add);
+        let drawn = Drawn {
+            levels: wavelet::levels_synthesised(tile, self.discard),
+            samples: u64::try_from(reconstructed).unwrap_or(u64::MAX),
+        };
+        for (c, plane) in planes.iter_mut().enumerate() {
+            let component = &self.stream.siz.components[c];
+            // G.1, and *after* G.2 rather than before it — which is what
+            // `reconstruct_tile` having already run makes true here. Over
+            // the samples the window reads, or every sample.
+            let region = need.and_then(|need| need.get(c)).map(wavelet::Needs::top);
+            wavelet::level_shift_in(plane, component.precision, component.signed, region);
+        }
+        let siz = &self.stream.siz;
+        let bounds = self
+            .window
+            .and(&self.grid.tile(siz.tile_bounds(u32::from(tile.index))));
+        if bounds.is_empty() {
+            return Ok(Some(drawn));
+        }
+        for (k, channel) in self.plan.colour.iter().enumerate() {
+            blit(
+                &planes,
+                siz,
+                &self.window,
+                bounds,
+                *channel,
+                self.palette,
+                Blit {
+                    rows: &self.colour,
+                    stride: self.plan.colour.len(),
+                    at: k,
+                    precision: self.precision,
+                },
+            );
+        }
+        if let (Some(channel), Some(rows)) = (self.plan.opacity, self.opacity.as_deref()) {
+            blit(
+                &planes,
+                siz,
+                &self.window,
+                bounds,
+                channel,
+                self.palette,
+                Blit {
+                    rows,
+                    stride: 1,
+                    at: 0,
+                    precision: self.precision,
+                },
+            );
+        }
+        Ok(Some(drawn))
+    }
+}
+
+/// `buffer`'s rows of `row` bytes, each behind a lock of its own.
+fn rows_of(buffer: &mut [u8], row: usize) -> Vec<Mutex<&mut [u8]>> {
+    if row == 0 {
+        return Vec::new();
+    }
+    buffer.chunks_mut(row).map(Mutex::new).collect()
+}
+
 /// Where one channel's samples are going.
-struct Blit<'a> {
-    out: &'a mut [u8],
-    /// Channels per pixel in `out`.
+struct Blit<'a, 'b> {
+    /// The window's rows, each behind a lock of its own.
+    rows: &'a [Mutex<&'b mut [u8]>],
+    /// Channels per pixel in a row.
     stride: usize,
     /// This channel's index within a pixel.
     at: usize,
@@ -1276,7 +1413,7 @@ fn blit(
     bounds: wavelet::Rect,
     channel: colour::Channel,
     palette: Option<&boxes::Palette>,
-    to: Blit<'_>,
+    to: Blit<'_, '_>,
 ) {
     let (Some(plane), Some(component)) = (
         planes.get(channel.component),
@@ -1299,6 +1436,12 @@ fn blit(
         if py >= height {
             continue;
         }
+        let Some(row) = to.rows.get(py as usize) else {
+            continue;
+        };
+        // This tile's part of the row is its own; the lock is what lets a
+        // tile drawn beside it write the rest of the row meanwhile.
+        let mut row = row.lock().unwrap_or_else(PoisonError::into_inner);
         let cy = (y / dy).saturating_sub(plane.y0).min(plane.height - 1);
         for x in bounds.x0..bounds.x1 {
             let Some(px) = x.checked_sub(window.x0) else {
@@ -1309,13 +1452,13 @@ fn blit(
             }
             let cx = (x / dx).saturating_sub(plane.x0).min(plane.width - 1);
             let value = channel.lookup(palette, plane.at(cx, cy));
-            let index = ((py as usize) * (width as usize) + (px as usize)) * to.stride + to.at;
+            let index = (px as usize) * to.stride + to.at;
             let value = normalise(value, channel.precision, to.precision, channel.signed);
             if to.precision > 8 {
-                to.out[index * 2] = (value >> 8) as u8;
-                to.out[index * 2 + 1] = (value & 0xFF) as u8;
+                row[index * 2] = (value >> 8) as u8;
+                row[index * 2 + 1] = (value & 0xFF) as u8;
             } else {
-                to.out[index] = value as u8;
+                row[index] = value as u8;
             }
         }
     }

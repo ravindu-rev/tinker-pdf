@@ -976,12 +976,15 @@ before the first strip, so a decode that hands one out succeeds;
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `JpxImage`) — `jpx_decode_request` the same decode asked for a
 `JpxRequest`, returning the image and a `JpxCounts`, and `jpx_decode_on` the
-same handing its code-blocks to an executor (`tinker_pdf_pool::Executor`, the
-engine's pool or a caller's own threads), each decoded into a slot of its own
-with MQ contexts of its own and read back in index order, the work budget
-charged for every block in index order before any is decoded, so the image,
-the counts, the warnings and a refusal are the serial decode's at every
-thread count — with `jpx_header`
+same handing its independent parts to an executor (`tinker_pdf_pool::Executor`,
+the engine's pool or a caller's own threads): its code-blocks, each decoded
+into a slot of its own with MQ contexts of its own, the work budget charged
+for every block in index order before any is decoded; its tiles, each
+reconstructed and written into its own part of the image; the components no
+multiple-component transform joins; and each wavelet level's rows and blocks
+of columns. Every part's result is read back in index order and no part is
+begun past one that refused, so the image, the counts, the warnings and a
+refusal are the serial decode's at every thread count — with `jpx_header`
 beside it: every stage of that decode before
 tier-2 and none after, returning a `JpxHeader` — the geometry, output channel
 count, precision, stated colour and opacity a decode would produce, and the

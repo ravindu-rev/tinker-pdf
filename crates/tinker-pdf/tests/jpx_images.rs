@@ -1095,14 +1095,15 @@ fn each_window_of_a_jpx_image_is_cached_apart() {
     assert_eq!((stats.image_misses, stats.image_hits), (0, 1), "found");
 }
 
-// ---- Code-blocks on the pool (P-10.10) ---------------------------------------
+// ---- The decode on the pool (P-10.10, P-10.11) -------------------------------
 
 /// **A JPEG 2000 page on 2, 3, 4 and 7 threads is the serial page**, its
 /// pixels and its warnings: the codestream drawn at a quarter beside a
 /// clipped one, which the pool draws in bands, each band decoding on its
 /// worker; and two of it abutting in one run of images down the whole page,
 /// which leaves no row to cut at, so the page is drawn whole on the caller and
-/// its decodes hand their code-blocks to the threads.
+/// its decodes hand their code-blocks, tiles, components and wavelet levels
+/// to the threads.
 #[test]
 fn a_jpx_page_on_2_3_4_and_7_threads_is_the_serial_page() {
     let jpx = committed("irreversible-620x877.jp2");
