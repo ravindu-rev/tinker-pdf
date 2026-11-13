@@ -17,13 +17,14 @@
 
 use tinker_pdf::{
     ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, CalculatorOp, CompressedImage,
-    DeviceNAttributes, DeviceSpace, Document, DocumentBuilder, Function, ImageColorSpace,
-    ImageData,
+    DeviceNAttributes, DeviceSpace, DocumentBuilder, Function, ImageColorSpace, ImageData,
 };
 
 mod pdfa_support;
 mod render_support;
-use render_support::{byte, ink, pixel, render};
+use render_support::{byte, ink, pixel, render_document};
+mod written_support;
+use written_support::authored;
 
 /// The page every fixture draws on, in points and — at the default 72 dpi —
 /// in pixels.
@@ -105,17 +106,14 @@ fn two_inks_at(a: f64, b: f64) -> [f64; 3] {
     [1.0 - a, 1.0 - b, 1.0 - (a + b) * 0.5]
 }
 
-/// Opens a built document, asserts the strict validator has nothing to say
-/// about it, and renders its first page.
+/// Holds a built document to the validate-on-save helper and renders its
+/// first page.
 ///
 /// `least` is the ink floor: every fixture here paints at least one full-ink
 /// shape, and a page that drew nothing would compare equal to nothing.
 #[track_caller]
 fn drawn(bytes: Vec<u8>, least: usize) -> tinker_pdf::Bitmap {
-    let document = Document::open(bytes.clone()).expect("the built document opens");
-    let defects = document.validate();
-    assert!(defects.is_empty(), "the strict validator: {defects:?}");
-    let bitmap = render(bytes);
+    let bitmap = render_document(&authored("a page of tints", bytes));
     let painted = ink(&bitmap);
     assert!(
         painted >= least,
@@ -455,7 +453,10 @@ fn an_archival_device_n_describes_every_spot_colour_it_names() {
         assert!(page.set_fill_tint(b"CS2", &[0.5, 0.0]));
         page.raw(b"30 10 20 20 re f");
     });
-    builder.finish_archival().expect("the profile is satisfied");
+    authored(
+        "an archival device n describes every spot colour it names",
+        builder.finish_archival().expect("the profile is satisfied"),
+    );
 
     // Without a profile the clause does not apply.
     let mut plain = DocumentBuilder::new();
@@ -509,7 +510,10 @@ fn an_archival_document_refuses_a_second_separation_of_one_ink_that_disagrees() 
         assert!(page.set_fill_tint(b"S4", &[1.0]));
         page.raw(b"30 10 20 20 re f");
     });
-    builder.finish_archival().expect("the profile is satisfied");
+    authored(
+        "an archival document refuses a second separation of one ink that disagrees",
+        builder.finish_archival().expect("the profile is satisfied"),
+    );
 
     // Part 1 has no such clause, and no profile has no clauses: the second
     // spelling is written by both.

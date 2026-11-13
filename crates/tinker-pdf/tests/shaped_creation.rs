@@ -22,11 +22,13 @@ mod epub_support;
 
 use epub_support::typeface::{Face, Ligature};
 use tinker_pdf::shaping::{place, write_run, Run};
-use tinker_pdf::Document;
 use tinker_pdf_cos::build::DocumentBuilder;
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::bidi::BaseDirection;
 use tinker_pdf_shape::Shaper;
+
+mod written_support;
+use written_support::authored;
 
 /// `سلام` — four Arabic letters, of which the middle two are the lam-alef
 /// pair every Arabic face joins.
@@ -79,7 +81,7 @@ fn document(face: &Face, text: &str, direction: BaseDirection) -> Vec<u8> {
 #[test]
 fn an_arabic_string_built_through_the_builder_extracts_back_to_itself() {
     let bytes = document(&arabic_face(), SALAM, BaseDirection::RightToLeft);
-    let document = Document::open(bytes).expect("the document opens");
+    let document = authored("an Arabic run", bytes);
     let page = document.page(0).expect("a page");
     let text = page.text().plain_text();
     assert!(
@@ -161,14 +163,12 @@ fn glyphs_that_share_a_cluster_do_not_each_claim_its_text() {
     );
 }
 
-/// The strict structural validator, on the output.
+/// The validate-on-save helper, on the output: the strict validator finds
+/// nothing in a document built from a shaped run.
 #[test]
 fn the_document_a_shaped_run_produced_is_structurally_clean() {
-    let bytes = document(&arabic_face(), SALAM, BaseDirection::RightToLeft);
-    let document = Document::open(bytes).expect("the document opens");
-    let defects = document.validate();
-    assert!(
-        defects.is_empty(),
-        "a document built from a shaped run should be clean: {defects:?}"
+    authored(
+        "a document built from a shaped run",
+        document(&arabic_face(), SALAM, BaseDirection::RightToLeft),
     );
 }

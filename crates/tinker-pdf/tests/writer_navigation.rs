@@ -29,20 +29,24 @@ use tinker_pdf::{Document, WriteMode, WriteOptions};
 use tinker_pdf_cos::dest::{Action, DestKind, Destination};
 use tinker_pdf_cos::{DocumentBuilder, OutlineEntry, Target};
 
+mod written_support;
+use written_support::authored;
+
 /// Builds a document, saves it, and opens it through the facade.
 ///
 /// The save is a real one — `DocumentEditor::save`, the same path a caller
 /// takes — so what is read back is a file rather than a builder's own tables.
+/// Both are held to the validate-on-save helper.
+#[track_caller]
 fn round_trip(build: impl FnOnce(&mut DocumentBuilder)) -> Document {
     let mut builder = DocumentBuilder::new();
     build(&mut builder);
-    let bytes = builder.finish();
-    let document = Document::open(bytes).expect("the builder's own output opens");
+    let document = authored("the builder's own output", builder.finish());
     let saved = document.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
-    Document::open(saved).expect("and it survives a rewrite")
+    authored("its rewrite", saved)
 }
 
 /// Three pages, so a destination can name one that is not the first.
@@ -364,6 +368,7 @@ fn the_outlines_open_flag_is_the_sign_of_its_count_in_both_directions() {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    authored("the rewrite, saved again", &saved);
     let text = String::from_utf8_lossy(&saved);
     assert!(
         text.contains("/Count 2"),
@@ -412,6 +417,7 @@ fn an_empty_outline_clears_one_that_was_already_set() {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    authored("the rewrite, saved again", &saved);
     let text = String::from_utf8_lossy(&saved);
     assert!(
         !text.contains("/Outlines"),
@@ -590,11 +596,6 @@ fn a_named_link_and_outline_entry_read_back_as_names_that_resolve() {
         resolve(&document, b"nowhere").is_none(),
         "and a name nobody registered resolves to nothing"
     );
-    assert!(
-        document.validate().is_empty(),
-        "the strict validator is clean: {:?}",
-        document.validate()
-    );
 }
 
 /// A name nothing registers, and one registered for a page that never
@@ -624,7 +625,10 @@ fn a_dangling_name_is_refused_at_write_time_by_name() {
         "both dangling names, sorted, and not the one that resolves"
     );
 
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored(
+        "a dangling name is refused at write time by name",
+        builder.finish(),
+    );
     let links = document.page(0).expect("the page").links();
     assert_eq!(links.len(), 1, "the dangling link is not written at all");
     assert_eq!(
@@ -642,7 +646,6 @@ fn a_dangling_name_is_refused_at_write_time_by_name() {
         resolve(&document, b"late").is_none(),
         "no tree entry for it"
     );
-    assert!(document.validate().is_empty(), "{:?}", document.validate());
 }
 
 /// A name registered twice, an empty name and an unwritable view are refused
@@ -666,7 +669,7 @@ fn a_name_that_cannot_be_one_is_refused() {
     builder.add_page(200.0, 300.0, |page| {
         assert!(!page.link(0.0, 0.0, 10.0, 10.0, &Target::Named(Vec::new())));
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored("a name that cannot be one is refused", builder.finish());
     assert!(document.page(0).expect("the page").links().is_empty());
     match resolve(&document, b"once") {
         Some(Destination::Explicit { kind, .. }) => {
@@ -712,7 +715,12 @@ fn the_editor_adds_a_named_destination_beside_the_ones_already_there() {
     let without_tree = plain.finish();
 
     for (bytes, had) in [(with_tree, true), (without_tree, false)] {
-        let document = Document::open(bytes).expect("it opens");
+        let label = if had {
+            "a tree of names"
+        } else {
+            "no tree of names"
+        };
+        let document = authored(label, bytes);
         let mut editor = document.editor();
         assert!(editor.add_named_destination(b"new", 1, DestKind::FitB));
         assert!(
@@ -724,7 +732,7 @@ fn the_editor_adds_a_named_destination_beside_the_ones_already_there() {
             mode: WriteMode::Incremental,
             ..WriteOptions::default()
         });
-        let reopened = Document::open(saved).expect("the update opens");
+        let reopened = authored(&format!("{label}, and one more name added"), saved);
         match resolve(&reopened, b"new") {
             Some(Destination::Explicit {
                 page_index, kind, ..
@@ -741,6 +749,5 @@ fn the_editor_adds_a_named_destination_beside_the_ones_already_there() {
             (false, None) => {}
             (_, other) => panic!("old: expected it only where it was, got {other:?}"),
         }
-        assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
     }
 }

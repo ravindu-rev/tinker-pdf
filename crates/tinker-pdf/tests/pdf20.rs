@@ -8,23 +8,15 @@
 //! fixture written by hand is the shape such a source shows.
 
 mod pdfa_support;
+mod written_support;
 
 use pdfa_support::{cmyk_like, srgb_like};
 use tinker_pdf::{
     ArchivalLevel, ArchivalPart, ArchivalProfile, Document, DocumentBuilder, NewOutputIntent,
-    ObjRef, OutputIntent, Tier,
+    ObjRef, OutputIntent,
 };
 use tinker_pdf_cos::DeviceSpace;
-
-/// The strict structural validator finds nothing (ruling 13's third axis).
-fn structurally_clean(doc: &Document) {
-    let defects: Vec<_> = doc
-        .validate()
-        .into_iter()
-        .filter(|defect| defect.kind.tier() == Tier::Structure)
-        .collect();
-    assert!(defects.is_empty(), "{defects:?}");
-}
+use written_support::authored;
 
 // ---- page-level output intents --------------------------------------------
 
@@ -59,8 +51,10 @@ fn a_page_level_output_intent_is_written_and_read_back() {
     builder.add_page(200.0, 200.0, |page| {
         page.text(b"F1", 12.0, 20.0, 150.0, "the catalog's");
     });
-    let doc = Document::open(builder.finish()).expect("opens");
-    structurally_clean(&doc);
+    let doc = authored(
+        "a page level output intent is written and read back",
+        builder.finish(),
+    );
 
     assert!(doc.output_intents().is_empty(), "the catalog states none");
     let first = doc.page(0).expect("page 1").output_intents();
@@ -110,7 +104,10 @@ fn a_page_level_output_intent_is_refused_where_it_cannot_be_written() {
     old.add_page(100.0, 100.0, |page| {
         assert!(!page.output_intent(eci(srgb_like())));
     });
-    let doc = Document::open(old.finish()).expect("opens");
+    let doc = authored(
+        "a page level output intent is refused where it cannot be written, before PDF 2.0",
+        old.finish(),
+    );
     assert!(doc.page(0).expect("a page").output_intents().is_empty());
 
     // An archival profile writes the catalog's intent and judges every
@@ -146,7 +143,10 @@ fn a_page_level_output_intent_is_refused_where_it_cannot_be_written() {
             "no profile is fine"
         );
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "a page level output intent is refused where it cannot be written",
+        builder.finish(),
+    );
     let read = doc.page(0).expect("a page").output_intents();
     assert_eq!(read.len(), 1, "only the one accepted");
     assert_eq!(read[0].destination_profile, None);
@@ -250,7 +250,10 @@ fn an_archival_documents_catalog_intent_reads_back() {
         language: None,
     });
     builder.add_page(100.0, 100.0, |page| page.fill_rect(1.0, 1.0, 2.0, 2.0, 0.0));
-    let doc = Document::open(builder.finish_archival().expect("written")).expect("opens");
+    let doc = authored(
+        "an archival documents catalog intent reads back",
+        builder.finish_archival().expect("written"),
+    );
     let intents = doc.output_intents();
     assert_eq!(intents.len(), 1);
     assert_eq!(intents[0].subtype.as_deref(), Some("GTS_PDFA1"));
@@ -357,8 +360,10 @@ fn associated_files_are_written_on_the_catalog_a_page_and_an_element_and_read_ba
         ));
         page.tagged_with(&formula, |_| {});
     });
-    let doc = Document::open(builder.finish()).expect("opens");
-    structurally_clean(&doc);
+    let doc = authored(
+        "associated files are written on the catalog a page and an element and read back",
+        builder.finish(),
+    );
 
     let catalog = doc.associated_files();
     assert_eq!(catalog.len(), 1);
@@ -479,7 +484,10 @@ fn an_associated_file_is_refused_where_it_cannot_be_written() {
     );
     let bytes = old.finish();
     assert!(!bytes.windows(14).any(|window| window == b"AFRelationship"));
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "an associated file is refused where it cannot be written, before PDF 2.0",
+        bytes,
+    );
     assert_eq!(
         elements(&doc).len(),
         2,
@@ -523,7 +531,10 @@ fn a_part_3_document_carries_an_associated_file_and_validates() {
         page.fill_rect(10.0, 10.0, 50.0, 50.0, 0.5);
     });
     assert!(builder.refusals().is_empty(), "{:?}", builder.refusals());
-    let doc = Document::open(builder.finish_archival().expect("written")).expect("opens");
+    let doc = authored(
+        "a part 3 document carries an associated file and validates",
+        builder.finish_archival().expect("written"),
+    );
     assert_eq!(doc.pdf_version(), "PDF 1.7", "part 3 is on 1.7");
     assert_eq!(doc.associated_files().len(), 1);
     let verdict = doc.validate_pdfa();
@@ -600,7 +611,10 @@ fn an_element_carried_over_a_page_break_holds_its_file_once() {
     second.text(b"F1", 12.0, 20.0, 50.0, "second half");
     assert!(second.close_tag());
     builder.push_page(second);
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "an element carried over a page break holds its file once",
+        builder.finish(),
+    );
     let paragraphs: Vec<StructElement> = elements(&doc)
         .into_iter()
         .filter(|element| element.standard_type == "P")
@@ -635,7 +649,7 @@ fn keyed_halves_keep_the_first_halfs_files() {
             page.text(b"F1", 12.0, 20.0, 50.0, "second half");
         });
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored("keyed halves keep the first halfs files", builder.finish());
     let paragraphs: Vec<StructElement> = elements(&doc)
         .into_iter()
         .filter(|element| element.standard_type == "P")
@@ -873,8 +887,10 @@ fn associated_files_are_written_on_an_annotation_a_form_and_the_structure_root_a
             "a link this page does not have"
         );
     });
-    let doc = Document::open(builder.finish()).expect("opens");
-    structurally_clean(&doc);
+    let doc = authored(
+        "associated files are written on an annotation a form and the structure root and read back",
+        builder.finish(),
+    );
 
     let page = doc.page(0).expect("a page");
     let annotations = page.annotation_associated_files();
@@ -979,8 +995,10 @@ fn a_marked_content_sequence_is_associated_through_its_named_property_list() {
         !bytes.windows(9).any(|w| w == b"empty.txt"),
         "an empty sequence's files are not written"
     );
-    let doc = Document::open(bytes).expect("opens");
-    structurally_clean(&doc);
+    let doc = authored(
+        "a marked content sequence is associated through its named property list",
+        bytes,
+    );
 
     let page = doc.page(0).expect("a page");
     let listed = page.marked_content_associated_files();
@@ -1055,8 +1073,7 @@ fn a_sequence_nested_in_another_keeps_its_own_files() {
         !bytes.windows(10).any(|w| w == b"unused.txt"),
         "an empty sequence's files are not written"
     );
-    let doc = Document::open(bytes).expect("opens");
-    structurally_clean(&doc);
+    let doc = authored("a sequence nested in another keeps its own files", bytes);
 
     let listed = doc
         .page(0)
@@ -1194,7 +1211,10 @@ fn the_new_holders_are_refused_where_an_associated_file_cannot_be_written() {
     let bytes = old.finish();
     assert!(!bytes.windows(14).any(|w| w == b"AFRelationship"));
     assert!(!bytes.windows(4).any(|w| w == b"MCAF"));
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "the new holders are refused where an associated file cannot be written, before PDF 2.0",
+        bytes,
+    );
     let page = doc.page(0).expect("a page");
     assert!(page.text().plain_text().contains("still drawn"));
     assert!(page.marked_content_associated_files().sequences.is_empty());

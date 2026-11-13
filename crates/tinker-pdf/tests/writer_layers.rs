@@ -15,6 +15,8 @@ use tinker_pdf::{
 mod pdfa_support;
 mod render_support;
 use render_support::{curvy_font, pixel, render};
+mod written_support;
+use written_support::authored;
 
 const PAGE: f64 = 60.0;
 
@@ -42,7 +44,10 @@ fn layers_lists_each_written_group_with_its_name_and_default() {
                 assert!(page.optional(layer, |page| page.fill_rect(0.0, 0.0, 1.0, 1.0, 0.0)));
             }
         });
-        let document = Document::open(builder.finish()).expect("it opens");
+        let document = authored(
+            &format!("three layers in PDF {}.{}", version.0, version.1),
+            builder.finish(),
+        );
         let listed: Vec<(String, bool)> = document
             .layers()
             .into_iter()
@@ -59,7 +64,6 @@ fn layers_lists_each_written_group_with_its_name_and_default() {
             version.0,
             version.1
         );
-        assert!(document.validate().is_empty(), "{:?}", document.validate());
     }
 }
 
@@ -92,7 +96,7 @@ fn a_hidden_layer_is_not_painted_until_the_editor_shows_it() {
     );
     assert_eq!(at(&before, 45.0, 30.0), BLUE, "the shown layer is");
 
-    let document = Document::open(bytes).expect("it opens");
+    let document = authored("a hidden layer and a shown one", bytes);
     let layers = document.layers();
     let mut editor = document.editor();
     assert!(editor.set_layer_visible(layers[0].reference, true));
@@ -102,10 +106,9 @@ fn a_hidden_layer_is_not_painted_until_the_editor_shows_it() {
         ..WriteOptions::default()
     });
 
-    let reopened = Document::open(saved.clone()).expect("the update opens");
+    let reopened = authored("the two layers toggled by an update", &saved);
     let visible: Vec<bool> = reopened.layers().iter().map(|g| g.visible).collect();
     assert_eq!(visible, [true, false], "the configuration was toggled");
-    assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
     let after = render(saved);
     assert_eq!(
         at(&after, 15.0, 30.0),
@@ -140,8 +143,10 @@ fn nested_tagged_and_optional_content_reads_in_order_and_validates() {
             page.tagged(b"H1", |page| page.text(b"F1", 10.0, 5.0, 40.0, "GH"));
         }));
     });
-    let document = Document::open(builder.finish()).expect("it opens");
-    assert!(document.validate().is_empty(), "{:?}", document.validate());
+    let document = authored(
+        "tagged content in a layer and a layer in tagged content",
+        builder.finish(),
+    );
 
     let page = document.page(0).expect("a page");
     let structured = page.structured_text().expect("the document is tagged");
@@ -190,7 +195,7 @@ fn part_one_refuses_a_layer_and_part_two_a_keeps_one_and_conforms() {
     });
     assert!(two.refusals().is_empty(), "{:?}", two.refusals());
     let bytes = two.finish_archival().expect("the profile is satisfiable");
-    let document = Document::open(bytes).expect("it opens");
+    let document = authored("a PDF/A-2A document with a layer", bytes);
     let verdict = document.validate_pdfa();
     assert!(verdict.coverage.is_complete());
     assert_eq!(verdict.findings.len(), 0, "{:#?}", verdict.findings);
@@ -198,7 +203,6 @@ fn part_one_refuses_a_layer_and_part_two_a_keeps_one_and_conforms() {
         verdict.flavour.map(|f| f.to_string()),
         Some("PDF/A-2A".to_string())
     );
-    assert!(document.validate().is_empty(), "{:?}", document.validate());
 }
 
 /// An element whose child sits in a hidden layer: the child is hidden and
@@ -228,8 +232,7 @@ fn an_element_in_a_hidden_layer_inside_a_visible_element_is_hidden() {
         });
     });
     let bytes = builder.finish();
-    let document = Document::open(bytes.clone()).expect("it opens");
-    assert!(document.validate().is_empty(), "{:?}", document.validate());
+    authored("a tagged child in a hidden layer", &bytes);
     let bitmap = render(bytes);
     assert_eq!(at(&bitmap, 10.0, 30.0), BLUE, "the element's first piece");
     assert_eq!(
@@ -299,7 +302,7 @@ fn a_layer_closure_closes_what_it_opened_and_nothing_outside_it() {
         assert!(page.close_tag(), "the P, after the layer");
         assert!(!page.close_tag(), "nothing else is open");
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored("an element opened outside a layer", builder.finish());
     let (open, close) = sequences(&page_content(&document));
     assert_eq!(open, close, "every sequence opened is closed once");
     let page = document.page(0).expect("a page");
@@ -337,7 +340,7 @@ fn a_layer_closure_closes_what_it_opened_and_nothing_outside_it() {
         assert!(!page.close_tag(), "the layer closed the Figure");
     });
     let bytes = builder.finish();
-    let document = Document::open(bytes.clone()).expect("it opens");
+    let document = authored("an element opened inside a hidden layer", &bytes);
     let (open, close) = sequences(&page_content(&document));
     assert_eq!(open, close, "every sequence opened is closed once");
     let bitmap = render(bytes);

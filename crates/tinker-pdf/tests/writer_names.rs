@@ -24,6 +24,8 @@ use tinker_pdf::{
 mod pdfa_support;
 mod render_support;
 use render_support::{curvy_font, ink, render, same_picture};
+mod written_support;
+use written_support::authored;
 
 /// The awkward name: a space, a `#`, a `/` and a byte past 0x7F.
 const ODD: &[u8] = b"R a#/\xE9";
@@ -58,8 +60,9 @@ fn resource_named(bytes: &[u8], category: &[u8], name: &[u8]) -> bool {
     )
 }
 
-/// Builds one document under [`ODD`] and one under [`PLAIN`] and holds the
-/// first to the three claims in the module header.
+/// Builds one document under [`ODD`] and one under [`PLAIN`], holds both to
+/// the validate-on-save helper, and holds the first to the three claims in the
+/// module header.
 ///
 /// `least` is the ink floor: a pair of pages that both draw nothing are the
 /// same picture, which is exactly the failure this file exists to catch.
@@ -72,6 +75,8 @@ fn draws_under_either_name(
 ) {
     let odd = build(ODD);
     let plain = build(PLAIN);
+    authored(&format!("{what}, under an awkward name"), &odd);
+    authored(&format!("{what}, under a plain name"), &plain);
 
     let stream = content(&odd);
     assert!(

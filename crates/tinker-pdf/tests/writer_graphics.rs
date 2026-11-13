@@ -28,14 +28,16 @@
 use std::collections::BTreeMap;
 
 use tinker_pdf::{
-    Bitmap, BlendMode, CompressedImage, DeviceSpace, Document, DocumentBuilder, ExtGState,
-    FormXObject, Function, Glyph, ImageColorSpace, ImageData, MaskKind, PlacedGlyph, Shading,
-    StateMask, TilingPattern, TilingType, TransparencyGroup,
+    Bitmap, BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, ExtGState, FormXObject,
+    Function, Glyph, ImageColorSpace, ImageData, MaskKind, PlacedGlyph, Shading, StateMask,
+    TilingPattern, TilingType, TransparencyGroup,
 };
 
 mod pdfa_support;
 mod render_support;
-use render_support::{render, same_picture};
+use render_support::{render, render_document, same_picture};
+mod written_support;
+use written_support::authored;
 
 // ---- the two ways a picture gets made -----------------------------------
 
@@ -95,7 +97,14 @@ fn an_alpha_from_the_builder_draws_what_a_hand_written_one_draws() {
         "0 0 0 rg q /GS0 gs 10 10 40 40 re f Q",
         "",
     );
-    same_picture(render(builder.finish()), render(written), "a fill alpha");
+    same_picture(
+        render_document(&authored(
+            "an alpha from the builder draws what a hand written one draws",
+            builder.finish(),
+        )),
+        render(written),
+        "a fill alpha",
+    );
 }
 
 /// `/ca` and `/CA` reach **different pixels**, and swapping them swaps the
@@ -127,7 +136,10 @@ fn fill_alpha_and_stroke_alpha_reach_different_pixels() {
             page.raw(b"5 5 25 25 re f");
             page.raw(b"10 w 5 45 m 55 45 l S");
         });
-        render(builder.finish())
+        render_document(&authored(
+            "fill alpha and stroke alpha reach different pixels",
+            builder.finish(),
+        ))
     };
 
     let faded_fill = draw(0.25, 1.0);
@@ -181,7 +193,14 @@ fn a_blend_mode_from_the_builder_draws_what_a_hand_written_one_draws() {
          q /GS0 gs 0.8 0.4 0.8 rg 10 10 40 40 re f Q",
         "",
     );
-    same_picture(render(builder.finish()), render(written), "a blend mode");
+    same_picture(
+        render_document(&authored(
+            "a blend mode from the builder draws what a hand written one draws",
+            builder.finish(),
+        )),
+        render(written),
+        "a blend mode",
+    );
 }
 
 /// A luminosity soft mask from the builder fades what a hand-written one
@@ -232,7 +251,10 @@ fn a_luminosity_soft_mask_from_the_builder_draws_what_a_hand_written_one_draws()
            /Resources << >> /Length 18 >>\nstream\n1 g 0 0 30 60 re f\nendstream\nendobj\n",
     );
 
-    let built = render(builder.finish());
+    let built = render_document(&authored(
+        "a luminosity soft mask from the builder draws what a hand written one draws",
+        builder.finish(),
+    ));
     // Before comparing, the picture has to be one: a mask that did nothing
     // would make both halves black and pass a comparison against a
     // hand-written twin that did nothing either.
@@ -295,7 +317,10 @@ fn a_soft_mask_of_none_turns_an_inherited_mask_off() {
             assert!(page.set_ext_gstate(if stop { b"GOff" } else { b"GQuiet" }));
             page.raw(b"0 0 60 60 re f");
         });
-        render(builder.finish())
+        render_document(&authored(
+            "a soft mask of none turns an inherited mask off",
+            builder.finish(),
+        ))
     };
 
     let stopped = at(&build(true), 45.0, 30.0);
@@ -348,7 +373,10 @@ fn an_isolated_group_from_the_builder_ignores_the_page_and_a_joined_one_does_not
             page.raw(b"0 0 60 60 re f");
             assert!(page.form(b"Fm0"));
         });
-        render(builder.finish())
+        render_document(&authored(
+            "an isolated group from the builder ignores the page and a joined one does not",
+            builder.finish(),
+        ))
     };
 
     let isolated = build(true);
@@ -407,7 +435,10 @@ fn a_knockout_group_replaces_what_it_overlaps_and_a_normal_one_stacks_on_it() {
         builder.add_page(60.0, 60.0, |page| {
             assert!(page.form(b"Fm0"));
         });
-        render(builder.finish())
+        render_document(&authored(
+            "a knockout group replaces what it overlaps and a normal one stacks on it",
+            builder.finish(),
+        ))
     };
 
     let knocked = at(&build(true), 30.0, 30.0);
@@ -464,7 +495,10 @@ fn an_axial_shading_from_the_builder_draws_what_a_hand_written_one_draws() {
         "",
     );
 
-    let built = render(builder.finish());
+    let built = render_document(&authored(
+        "an axial shading from the builder draws what a hand written one draws",
+        builder.finish(),
+    ));
     let middle = at(&built, 30.0, 30.0);
     assert!(
         middle.0 > 90 && middle.0 < 170 && middle.2 > 90 && middle.2 < 170,
@@ -510,7 +544,10 @@ fn a_radial_shading_from_the_builder_draws_what_a_hand_written_one_draws() {
         "",
     );
 
-    let built = render(builder.finish());
+    let built = render_document(&authored(
+        "a radial shading from the builder draws what a hand written one draws",
+        builder.finish(),
+    ));
     let centre = at(&built, 30.0, 30.0);
     let edge = at(&built, 30.0, 57.0);
     assert!(
@@ -568,7 +605,10 @@ fn a_stitching_functions_bounds_decide_where_its_middle_colour_lands() {
             assert!(page.shading(b"Sh0"));
             page.raw(b"Q");
         });
-        render(builder.finish())
+        render_document(&authored(
+            "a stitching functions bounds decide where its middle colour lands",
+            builder.finish(),
+        ))
     };
 
     let early = draw(0.25);
@@ -628,7 +668,10 @@ fn a_tiling_pattern_from_the_builder_draws_what_a_hand_written_one_draws() {
         ),
     );
 
-    let built = render(builder.finish());
+    let built = render_document(&authored(
+        "a tiling pattern from the builder draws what a hand written one draws",
+        builder.finish(),
+    ));
     // The steps are twice the cell, so the tiling leaves gaps -- which is what
     // says the steps were read rather than derived from the box.
     let inked = at(&built, 2.0, 2.0);
@@ -781,8 +824,14 @@ fn a_composite_font_addresses_a_glyph_by_index_and_a_simple_font_cannot() {
         page.text(b"F0", 40.0, 10.0, 10.0, "A");
     });
 
-    let indexed = render(by_index.finish());
-    let charwise = render(by_character.finish());
+    let indexed = render_document(&authored(
+        "a composite font addresses a glyph by index and a simple font cannot, by index",
+        by_index.finish(),
+    ));
+    let charwise = render_document(&authored(
+        "a composite font addresses a glyph by index and a simple font cannot, by character",
+        by_character.finish(),
+    ));
 
     // Glyph 1 occupies 0..300 units of the em and glyph 2 occupies 400..700,
     // so at forty points from (10, 10) they land at 10..22 and 26..38.
@@ -840,7 +889,10 @@ fn page_text_comes_back_through_the_to_unicode_the_writer_wrote() {
         ));
     });
 
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored(
+        "page text comes back through the to unicode the writer wrote",
+        builder.finish(),
+    );
     let page = document.page(0).expect("a page");
     let text = page.text().plain_text();
     assert!(
@@ -882,7 +934,10 @@ fn a_composite_run_positions_its_glyphs_from_the_widths_the_font_states() {
         ));
     });
 
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored(
+        "a composite run positions its glyphs from the widths the font states",
+        builder.finish(),
+    );
     let page = document.page(0).expect("a page");
     let extracted = page.text();
     let quads: Vec<(f64, f64)> = extracted
@@ -949,7 +1004,10 @@ fn a_run_puts_its_rise_back_before_the_next_one_starts() {
     ));
     builder.add_page(60.0, 60.0, |page| page.raw(&content));
 
-    let drawn = render(builder.finish());
+    let drawn = render_document(&authored(
+        "a run puts its rise back before the next one starts",
+        builder.finish(),
+    ));
     // Glyph 1 fills the bottom-left three tenths of the em, so at thirty
     // points from (5, 10) it inks 5..14 across and 10..19 up — and the risen
     // copy is twenty points higher, at 30..39.
@@ -1086,7 +1144,14 @@ fn an_icc_fill_from_the_builder_draws_what_a_hand_written_one_draws() {
         profile_object(&profile),
     );
 
-    same_picture(render(builder.finish()), render(written), "an ICC fill");
+    same_picture(
+        render_document(&authored(
+            "an icc fill from the builder draws what a hand written one draws",
+            builder.finish(),
+        )),
+        render(written),
+        "an ICC fill",
+    );
 }
 
 /// **The operand count comes from the space, not from the caller.**
@@ -1108,7 +1173,10 @@ fn the_icc_operand_count_comes_from_the_space_and_not_from_the_caller() {
             assert!(page.set_fill_icc(b"CS0", &components));
             page.raw(b"10 10 40 40 re f");
         });
-        render(builder.finish())
+        render_document(&authored(
+            "the icc operand count comes from the space and not from the caller",
+            builder.finish(),
+        ))
     };
 
     // A fourth operand is dropped rather than written.
@@ -1152,7 +1220,7 @@ fn operators(components: &[f64]) -> String {
     builder.add_page(60.0, 60.0, move |page| {
         assert!(page.set_fill_icc(b"CS0", &components));
     });
-    let doc = Document::open(builder.finish()).expect("the built document opens");
+    let doc = authored("operators", builder.finish());
     let cos = doc.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
@@ -1176,7 +1244,10 @@ fn an_icc_space_the_document_never_registered_is_refused() {
 
     // Drawn in the default fill colour, which is black: the refused calls
     // wrote nothing at all rather than half an operator.
-    let bitmap = render(builder.finish());
+    let bitmap = render_document(&authored(
+        "an icc space the document never registered is refused",
+        builder.finish(),
+    ));
     assert_eq!(at(&bitmap, 30.0, 30.0), (0, 0, 0));
 }
 
@@ -1209,7 +1280,10 @@ fn an_icc_stroke_is_written_in_table_74s_capitals() {
         profile_object(&profile),
     );
 
-    let built = render(builder.finish());
+    let built = render_document(&authored(
+        "an icc stroke is written in table 74s capitals",
+        builder.finish(),
+    ));
     // Red on the border, and the interior untouched: a `stroke_rect` fills
     // nothing, so a build that set the fill colour instead would leave the
     // border at the default black.
@@ -1285,8 +1359,11 @@ fn an_image_in_an_icc_space_draws_what_a_hand_written_one_draws() {
         objects,
     );
 
-    let built = builder.finish();
-    let picture = render(built.clone());
+    let built = authored(
+        "an image in an icc space draws what a hand written one draws",
+        builder.finish(),
+    );
+    let picture = render_document(&built);
     // The four samples, one a quadrant, in the colours they name — which is
     // the assertion the comparison below cannot make on its own, since two
     // documents drawing the same wrong picture agree.
@@ -1326,8 +1403,7 @@ fn an_image_in_an_icc_space_draws_what_a_hand_written_one_draws() {
         3,
         "an ICC image has as many components as its space declares"
     );
-    let doc = Document::open(built).expect("the built document opens");
-    let cos = doc.cos();
+    let cos = built.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
     let content =

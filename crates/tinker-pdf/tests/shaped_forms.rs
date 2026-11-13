@@ -109,6 +109,7 @@
 //! [`an_arabic_value_fills_a_field_with_joined_forms_in_visual_order`] did.
 
 mod epub_support;
+mod written_support;
 
 use std::sync::Arc;
 
@@ -116,6 +117,7 @@ use epub_support::typeface::{Face, Form, Joining, Ligature, Placement};
 use tinker_pdf_cos::{
     CosDocument, DocumentEditor, ObjRef, ProgramKey, WarningKind, WriteMode, WriteOptions,
 };
+use written_support::{authored, rewritten};
 
 /// Three dual-joining Arabic letters: beh, hah, meem. Every one of them joins
 /// on both sides, so the word takes an initial, a medial and a final form and
@@ -358,11 +360,12 @@ fn form_document(fixture: &Fixture<'_>) -> Arc<CosDocument> {
     // Hand-written bytes carry no cross-reference table, so they open through
     // the repair scanner; a rewrite puts the same object graph inside a
     // well-formed file, which is what the fill path then edits.
-    let raw = Arc::new(CosDocument::open(pdf).expect("the fixture opens"));
+    let raw = Arc::new(CosDocument::open(pdf.clone()).expect("the fixture opens"));
     let written = DocumentEditor::new(raw).save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    rewritten("the hand-written form, rewritten", &pdf, &written);
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -379,6 +382,11 @@ fn filled(doc: &Arc<CosDocument>, value: &str) -> (Arc<CosDocument>, String) {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    rewritten(
+        &format!("the form filled with {value:?}"),
+        doc.bytes(),
+        &saved,
+    );
     let saved = Arc::new(CosDocument::open(saved).expect("the filled document reopens"));
     let widget = ObjRef { num: 10, gen: 0 };
     let form = saved
@@ -1111,11 +1119,16 @@ fn simple_form_document(program: &[u8]) -> Arc<CosDocument> {
    /Subtype /Widget /Type /Annot >>\nendobj\n",
     );
     pdf.extend_from_slice(b"trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n");
-    let raw = Arc::new(CosDocument::open(pdf).expect("the fixture opens"));
+    let raw = Arc::new(CosDocument::open(pdf.clone()).expect("the fixture opens"));
     let written = DocumentEditor::new(raw).save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    rewritten(
+        "the hand-written simple-font form, rewritten",
+        &pdf,
+        &written,
+    );
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -1284,11 +1297,7 @@ fn the_filled_document_is_clean_under_the_strict_validator() {
     ] {
         let doc = form_document(&fixture);
         let (saved, _) = filled(&doc, WORD);
-        let problems = tinker_pdf_cos::validate(&saved);
-        assert!(
-            problems.is_empty(),
-            "the filled document is not structurally clean: {problems:?}"
-        );
+        authored("the filled document", saved.bytes());
     }
 }
 

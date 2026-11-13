@@ -40,6 +40,8 @@ use tinker_pdf::{
 
 mod render_support;
 use render_support::curvy_font;
+mod written_support;
+use written_support::rewritten;
 
 fn testdata(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -169,7 +171,8 @@ fn inked(bitmap: &tinker_pdf::Bitmap, page_height: f64, r: Rect) -> usize {
 #[test]
 fn every_kind_is_created_found_filled_saved_reopened_and_read_back() {
     for fixture in ["simple-text.pdf", "form-fields.pdf"] {
-        let document = Document::open(testdata(fixture)).expect("the fixture opens");
+        let input = testdata(fixture);
+        let document = Document::open(input.clone()).expect("the fixture opens");
         let before = document.form_fields().len();
         let mut editor = document.editor();
 
@@ -214,8 +217,11 @@ fn every_kind_is_created_found_filled_saved_reopened_and_read_back() {
         }
 
         for (label, options) in [("incremental", incremental()), ("rewrite", rewrite())] {
-            let saved = editor.save(&options);
-            let reopened = Document::open(saved).expect("the saved file reopens");
+            let reopened = rewritten(
+                &format!("{fixture} with four fields, {label}"),
+                &input,
+                editor.save(&options),
+            );
 
             assert_eq!(
                 value_of(&reopened, "applicant"),
@@ -237,13 +243,6 @@ fn every_kind_is_created_found_filled_saved_reopened_and_read_back() {
                 FieldValue::Text("Japan".to_string()),
                 "{fixture} {label}"
             );
-
-            let defects = reopened.validate();
-            assert!(
-                defects.is_empty(),
-                "{fixture} {label}: the strict validator finds nothing: {:?}",
-                defects.iter().map(|d| d.kind.as_str()).collect::<Vec<_>>()
-            );
         }
     }
 }
@@ -263,23 +262,22 @@ fn every_kind_is_created_found_filled_saved_reopened_and_read_back() {
 /// correctly placed and invisible.
 #[test]
 fn a_created_field_draws_what_it_holds() {
-    let document = Document::open(testdata("simple-text.pdf")).expect("opens");
+    let input = testdata("simple-text.pdf");
+    let document = Document::open(input.clone()).expect("opens");
     let mut editor = document.editor();
     for spec in four_kinds() {
         editor.add_field(&spec).expect("created");
     }
 
     let face: Arc<dyn FontProvider> = Arc::new(SimpleFontProvider::new(curvy_font()));
-    let render = |bytes: Vec<u8>| {
-        let document = Document::open(bytes)
-            .expect("reopens")
-            .with_fonts(Arc::clone(&face));
+    let render = |label: &str, bytes: Vec<u8>| {
+        let document = rewritten(label, &input, bytes).with_fonts(Arc::clone(&face));
         let page = document.page(0).expect("a page");
         let height = page.size().1;
         (page.render(&RenderOptions::default()), height)
     };
 
-    let (empty, height) = render(editor.save(&incremental()));
+    let (empty, height) = render("four empty fields", editor.save(&incremental()));
     assert_eq!(
         inked(&empty, height, rect(50.0, 400.0, 300.0, 425.0)),
         0,
@@ -297,7 +295,7 @@ fn a_created_field_draws_what_it_holds() {
     for (name, value) in FILLS {
         editor.fill_field(name, value).expect("filled");
     }
-    let (filled, height) = render(editor.save(&incremental()));
+    let (filled, height) = render("four filled fields", editor.save(&incremental()));
     assert!(
         inked(&filled, height, rect(50.0, 400.0, 300.0, 425.0)) > 20,
         "the text is drawn"
@@ -324,7 +322,8 @@ fn a_created_field_draws_what_it_holds() {
 /// reset (12.7.5.3) returns to.
 #[test]
 fn initial_values_are_the_defaults_a_reset_returns_to() {
-    let document = Document::open(testdata("simple-text.pdf")).expect("opens");
+    let input = testdata("simple-text.pdf");
+    let document = Document::open(input.clone()).expect("opens");
     let mut editor = document.editor();
     let specs = [
         NewField::new(
@@ -413,15 +412,19 @@ fn initial_values_are_the_defaults_a_reset_returns_to() {
     assert_eq!(read(&editor, "pick").0, FieldValue::State("b".into()));
     assert_eq!(read(&editor, "list").0, FieldValue::Text("two".into()));
 
-    let reopened = Document::open(editor.save(&incremental())).expect("reopens");
-    assert!(reopened.validate().is_empty(), "clean across three pages");
+    rewritten(
+        "fields with initial values, reset",
+        &input,
+        editor.save(&incremental()),
+    );
 }
 
 /// A dotted name is a hierarchy (12.7.3.2): the ancestors are created once
 /// and joined after that, and the qualified name reads back whole.
 #[test]
 fn a_dotted_name_creates_its_ancestors_once() {
-    let document = Document::open(testdata("form-fields.pdf")).expect("opens");
+    let input = testdata("form-fields.pdf");
+    let document = Document::open(input.clone()).expect("opens");
     let roots_before = document.form_fields().len();
     let mut editor = document.editor();
     for (name, y) in [("person.name.first", 100.0), ("person.name.last", 130.0)] {
@@ -442,7 +445,7 @@ fn a_dotted_name_creates_its_ancestors_once() {
     assert!(names.contains(&"person.name.last".to_string()));
     assert_eq!(names.len(), roots_before + 2);
 
-    let reopened = Document::open(editor.save(&incremental())).expect("reopens");
+    let reopened = rewritten("two dotted names", &input, editor.save(&incremental()));
     assert_eq!(
         value_of(&reopened, "person.name.last"),
         FieldValue::Text("person.name.last".to_string())
@@ -458,7 +461,6 @@ fn a_dotted_name_creates_its_ancestors_once() {
         5,
         "the fixture's four roots and one person"
     );
-    assert!(reopened.validate().is_empty());
 
     // A field beneath a terminal field is refused, and so is its twin.
     let mut editor = reopened.editor();
@@ -655,12 +657,17 @@ fn a_field_that_cannot_be_made_is_refused_and_writes_nothing() {
 #[test]
 fn the_default_font_is_joined_or_added_once() {
     // `form-fields.pdf`'s `/DR /Font /Helv` is object 4.
-    let document = Document::open(testdata("form-fields.pdf")).expect("opens");
+    let input = testdata("form-fields.pdf");
+    let document = Document::open(input.clone()).expect("opens");
     let mut editor = document.editor();
     for spec in four_kinds() {
         editor.add_field(&spec).expect("created");
     }
-    let reopened = Document::open(editor.save(&incremental())).expect("reopens");
+    let reopened = rewritten(
+        "four fields beside a form's own font",
+        &input,
+        editor.save(&incremental()),
+    );
     let cos = reopened.cos();
     let form = cos.resolve_key(&cos.catalog().expect("catalog"), cos.intern(b"AcroForm"));
     let dr = cos.resolve_key(form.as_dict().expect("form"), cos.intern(b"DR"));
@@ -673,12 +680,17 @@ fn the_default_font_is_joined_or_added_once() {
         "the file's own /Helv, joined"
     );
 
-    let document = Document::open(testdata("simple-text.pdf")).expect("opens");
+    let input = testdata("simple-text.pdf");
+    let document = Document::open(input.clone()).expect("opens");
     let mut editor = document.editor();
     for spec in four_kinds() {
         editor.add_field(&spec).expect("created");
     }
-    let reopened = Document::open(editor.save(&incremental())).expect("reopens");
+    let reopened = rewritten(
+        "four fields in a file with no form",
+        &input,
+        editor.save(&incremental()),
+    );
     let cos = reopened.cos();
     let form = cos.resolve_key(&cos.catalog().expect("catalog"), cos.intern(b"AcroForm"));
     let dr = cos.resolve_key(form.as_dict().expect("form"), cos.intern(b"DR"));

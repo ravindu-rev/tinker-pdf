@@ -22,11 +22,13 @@
 //! fully covered and opaque.
 
 use tinker_pdf::{
-    CieSpace, CompressedImage, Document, DocumentBuilder, ImageColorSpace, ImageData, ImageSpace,
+    CieSpace, CompressedImage, DocumentBuilder, ImageColorSpace, ImageData, ImageSpace,
 };
 
 mod render_support;
-use render_support::{pixel, render};
+use render_support::{pixel, render_document};
+mod written_support;
+use written_support::authored;
 
 /// The page every fixture draws on, in points and pixels.
 const PAGE: f64 = 60.0;
@@ -167,7 +169,10 @@ fn a_cie_colour_fills_and_strokes_to_its_clauses_arithmetic() {
         assert!(page.set_stroke_cie(b"L", &[65.0, -30.0, 40.0]));
         page.raw(b"40 30 m 60 30 l S");
     });
-    let bitmap = render(builder.finish());
+    let bitmap = render_document(&authored(
+        "a cie colour fills and strokes to its clauses arithmetic",
+        builder.finish(),
+    ));
 
     // 8.6.5.2: X = XW A^G and so on, so `A = 0.5` at G = 1.8 is a grey of
     // Y = 0.5^1.8 relative to the D65 white.
@@ -246,9 +251,10 @@ fn a_cie_image_is_read_back_in_its_space_and_drawn_to_its_clauses_arithmetic() {
         page.image(b"ImR", 0.0, 20.0, 40.0, 20.0);
         page.image(b"ImL", 0.0, 0.0, 40.0, 20.0);
     });
-    let bytes = builder.finish();
-
-    let document = Document::open(bytes.clone()).expect("it opens");
+    let document = authored(
+        "a cie image is read back in its space and drawn to its clauses arithmetic",
+        builder.finish(),
+    );
     let spaces: Vec<Option<ImageSpace>> = document
         .page(0)
         .expect("a page")
@@ -279,7 +285,7 @@ fn a_cie_image_is_read_back_in_its_space_and_drawn_to_its_clauses_arithmetic() {
         "each image names its space, read back as written"
     );
 
-    let bitmap = render(bytes);
+    let bitmap = render_document(&document);
     let s = |v: u8| f64::from(v) / 255.0;
     for (index, sample) in grey_samples.iter().enumerate() {
         near(

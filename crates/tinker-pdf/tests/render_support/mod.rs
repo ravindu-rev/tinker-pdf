@@ -46,8 +46,13 @@ pub const SIZE: f64 = 16.0;
 
 /// The first page of a document, rendered with the default options.
 pub fn render(bytes: Vec<u8>) -> Bitmap {
-    Document::open(bytes)
-        .expect("the document opens")
+    render_document(&Document::open(bytes).expect("the document opens"))
+}
+
+/// The first page of a document already open — the one a validate-on-save
+/// door hands back — rendered with the default options.
+pub fn render_document(document: &Document) -> Bitmap {
+    document
         .page(0)
         .expect("a page")
         .render(&RenderOptions::default())

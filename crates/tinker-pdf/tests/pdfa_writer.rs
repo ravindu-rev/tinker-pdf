@@ -13,11 +13,12 @@
 //! shows it with the same rule.
 //!
 //! What is genuinely independent is the second gate every fixture goes
-//! through: `tinker_pdf_cos::validate`, the strict structural validator, which
-//! reads the bytes rather than the object graph and was written for the writer
-//! rather than for PDF/A. A file that satisfies the conformance rules and not
-//! that one is a file with a defect the conformance rules had no opinion
-//! about, and there is one such gate per fixture here.
+//! through: the validate-on-save helper holds each one to its claim and to
+//! `tinker_pdf_cos::validate`, the strict structural validator, which reads the
+//! bytes rather than the object graph and was written for the writer rather
+//! than for PDF/A. A file that satisfies the conformance rules and not that one
+//! is a file with a defect the conformance rules had no opinion about, and
+//! there is one such gate per fixture here.
 //!
 //! # Injections, counted, of the workspace's 3 613 tests
 //!
@@ -39,13 +40,15 @@
 //! group that stopped running would take that test's evidence with it.
 
 mod pdfa_support;
+mod written_support;
 
 use pdfa_support::{cmyk_like, srgb_like};
 use tinker_pdf::{
-    ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, BlendMode, Document,
-    DocumentBuilder, ExtGState, FindingKind, StateMask,
+    ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, BlendMode, DocumentBuilder,
+    ExtGState, FindingKind, StateMask,
 };
 use tinker_pdf_cos::{DeviceSpace, FormXObject, MaskKind, TransparencyGroup};
+use written_support::{authored, expecting, Expected};
 
 // ---- a font program the builder will embed --------------------------------
 
@@ -207,30 +210,11 @@ fn built(profile: ArchivalProfile) -> Vec<u8> {
         .expect("the profile is satisfiable")
 }
 
-/// Every conformance finding a full validation reports, and the strict
-/// structural validator's structure-tier defects.
-fn judged(bytes: &[u8]) -> (Vec<FindingKind>, Vec<String>) {
-    let document = Document::open(bytes.to_vec()).expect("the built document opens");
-    let verdict = document.validate_pdfa();
-    assert!(
-        verdict.coverage.is_complete(),
-        "a writer fixture judged by an incomplete validator proves nothing"
-    );
-    let structural: Vec<String> = tinker_pdf_cos::validate(document.cos())
-        .into_iter()
-        .filter(|defect| defect.kind.tier() == tinker_pdf_cos::Tier::Structure)
-        .map(|defect| format!("{:?}", defect.kind))
-        .collect();
-    (
-        verdict.findings.into_iter().map(|f| f.kind).collect(),
-        structural,
-    )
-}
-
 // ---- the fixtures ---------------------------------------------------------
 
-/// Every flavour the writer can claim, built and validated with zero findings,
-/// and clean under the strict structural validator too.
+/// Every flavour the writer can claim, built and held to the validate-on-save
+/// helper: zero findings under its claim, and clean under the strict validator
+/// too.
 #[test]
 fn every_flavour_the_writer_claims_validates_with_no_findings() {
     for (part, level) in [
@@ -242,19 +226,9 @@ fn every_flavour_the_writer_claims_validates_with_no_findings() {
         (ArchivalPart::Four, Some(ArchivalLevel::E)),
         (ArchivalPart::Four, Some(ArchivalLevel::F)),
     ] {
-        let bytes = built(rgb_profile(part, level));
-        let (findings, structural) = judged(&bytes);
-        assert_eq!(
-            findings,
-            Vec::<FindingKind>::new(),
-            "part {} level {level:?}",
-            part.number()
-        );
-        assert_eq!(
-            structural,
-            Vec::<String>::new(),
-            "the strict structural validator, part {}",
-            part.number()
+        authored(
+            &format!("part {} level {level:?}", part.number()),
+            built(rgb_profile(part, level)),
         );
     }
 }
@@ -272,7 +246,13 @@ fn the_same_document_built_without_a_profile_does_not_conform() {
         page.set_fill_rgb(1.0, 0.0, 0.0);
         page.text(b"F1", 12.0, 20.0, 100.0, "ABC");
     });
-    let (findings, _) = judged(&builder.finish());
+    let document = authored("the fixture built with no profile", builder.finish());
+    let findings: Vec<FindingKind> = document
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|f| f.kind)
+        .collect();
     assert!(
         findings.contains(&FindingKind::MetadataMissing),
         "no packet, so no claim: {findings:#?}"
@@ -289,8 +269,7 @@ fn the_generated_packet_says_what_the_profile_said() {
         (ArchivalPart::Four, None, "PDF/A-4"),
         (ArchivalPart::Four, Some(ArchivalLevel::E), "PDF/A-4E"),
     ] {
-        let bytes = built(rgb_profile(part, level));
-        let document = Document::open(bytes).expect("opens");
+        let document = authored(expected, built(rgb_profile(part, level)));
         assert_eq!(
             document.validate_pdfa().flavour.map(|f| f.to_string()),
             Some(expected.to_string())
@@ -317,9 +296,7 @@ fn the_info_dictionary_and_the_packet_agree_and_a_changed_one_does_not() {
         page.text(b"F1", 12.0, 20.0, 100.0, "ABC");
     });
     let bytes = builder.finish_archival().expect("satisfiable");
-    let (findings, structural) = judged(&bytes);
-    assert_eq!(findings, Vec::<FindingKind>::new());
-    assert_eq!(structural, Vec::<String>::new());
+    authored("the /Info dictionary and the packet, agreeing", &bytes);
 
     // The twin: the `/Info` title alone, changed in the file's bytes. The
     // packet still says `Marmalade` and the dictionary no longer does, which
@@ -330,12 +307,12 @@ fn the_info_dictionary_and_the_packet_agree_and_a_changed_one_does_not() {
     edited[at + 2] = b'a';
     edited[at + 3] = b'r';
     edited[at + 4] = b'z';
-    let (findings, _) = judged(&edited);
-    assert!(
-        findings.contains(&FindingKind::InfoXmpMismatch {
-            key: "Title".to_string()
-        }),
-        "{findings:#?}"
+    expecting(
+        "the /Info title changed alone",
+        &edited,
+        &[Expected::PdfA(FindingKind::InfoXmpMismatch {
+            key: "Title".to_string(),
+        })],
     );
 }
 
@@ -355,6 +332,8 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn two_builds_of_one_profiled_document_are_byte_identical() {
     let first = built(rgb_profile(ArchivalPart::Two, Some(ArchivalLevel::B)));
     let second = built(rgb_profile(ArchivalPart::Two, Some(ArchivalLevel::B)));
+    authored("the first build", &first);
+    authored("the second build", &second);
     assert_eq!(first, second, "a profiled document is byte-deterministic");
     assert!(
         !first.windows(9).any(|w| w == b"xmp:Metad"),
@@ -381,6 +360,7 @@ fn two_builds_of_one_profiled_document_are_byte_identical() {
 #[test]
 fn the_archival_fixture_hashes_the_same_on_every_target() {
     let bytes = built(rgb_profile(ArchivalPart::Two, Some(ArchivalLevel::B)));
+    authored("the archival fixture", &bytes);
     let digest: String = tinker_pdf_crypto::sha2::sha256(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -410,10 +390,7 @@ fn level_a_is_written_when_the_pages_are_tagged_and_refused_when_they_are_not() 
     let bytes = builder
         .finish_archival()
         .expect("a tagged page satisfies A");
-    let (findings, structural) = judged(&bytes);
-    assert_eq!(findings, Vec::<FindingKind>::new());
-    assert_eq!(structural, Vec::<String>::new());
-    let document = Document::open(bytes).expect("opens");
+    let document = authored("a tagged page at level A", bytes);
     assert_eq!(
         document.validate_pdfa().flavour.map(|f| f.to_string()),
         Some("PDF/A-2A".to_string())
@@ -476,15 +453,14 @@ fn a_level_a_document_tagged_with_a_type_nobody_defines_is_reported_by_its_own_v
         });
     });
     let bytes = builder.finish_archival().expect("the writer emits it");
-    let (findings, structural) = judged(&bytes);
-    assert_eq!(
-        findings,
-        vec![FindingKind::StructureTypeNotStandard {
+    expecting(
+        "a level A page tagged Chapitre",
+        &bytes,
+        &[Expected::PdfA(FindingKind::StructureTypeNotStandard {
             declared: "Chapitre".to_string(),
             mapped: "Chapitre".to_string(),
-        }]
+        })],
     );
-    assert_eq!(structural, Vec::<String>::new());
 
     // The twin, one token away: the same document tagged `/P`, which is a
     // standard type, is reported by nothing.
@@ -495,8 +471,10 @@ fn a_level_a_document_tagged_with_a_type_nobody_defines_is_reported_by_its_own_v
             page.text(b"F1", 12.0, 20.0, 100.0, "ABC");
         });
     });
-    let bytes = builder.finish_archival().expect("satisfiable");
-    assert_eq!(judged(&bytes).0, Vec::<FindingKind>::new());
+    authored(
+        "a level A page tagged P",
+        builder.finish_archival().expect("satisfiable"),
+    );
 
     // The third: `Chapitre` again, with the `/RoleMap` saying it is a `/Sect`
     // (14.7.3). Level A's rule reads the type after the role map, and finds
@@ -509,8 +487,10 @@ fn a_level_a_document_tagged_with_a_type_nobody_defines_is_reported_by_its_own_v
             page.text(b"F1", 12.0, 20.0, 100.0, "ABC");
         });
     });
-    let bytes = builder.finish_archival().expect("satisfiable");
-    assert_eq!(judged(&bytes), (Vec::<FindingKind>::new(), Vec::new()));
+    authored(
+        "a level A page tagged Chapitre, role-mapped to Sect",
+        builder.finish_archival().expect("satisfiable"),
+    );
 }
 
 /// A level the part does not define, and a part 1-to-3 profile with none, are
@@ -531,7 +511,10 @@ fn a_level_the_part_does_not_define_is_refused() {
 
     // The near-miss: part 4 is the one part where no level is correct.
     let builder = DocumentBuilder::archival(rgb_profile(ArchivalPart::Four, None));
-    assert!(builder.finish_archival().is_ok());
+    authored(
+        "part 4 with no level",
+        builder.finish_archival().expect("part 4 takes no level"),
+    );
 }
 
 /// An output intent with no profile bytes is refused, which is the API half of

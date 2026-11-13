@@ -13,24 +13,16 @@
 //! the facade — the dependency runs the other way, and ruling 8 keeps it
 //! there. So the writer's own tests assert bytes and these assert meaning.
 
-use tinker_pdf::{Document, DocumentBuilder, StructKid, Tier};
+use tinker_pdf::{Document, DocumentBuilder, StructKid};
 
-/// The strict structural validator (ruling 13's third axis), on a document
-/// this builder produced.
-///
-/// The reader's own round trip says the tree means what it should. This says
-/// the file holds up to ISO 32000 read strictly, which is a different claim:
-/// a `/K` array of the right shape can still sit in a document whose offsets
-/// or extents are wrong, and the round trip would never notice.
-fn structurally_clean(bytes: Vec<u8>) {
-    let doc = Document::open(bytes).expect("the document opens");
-    let defects: Vec<_> = doc
-        .validate()
-        .into_iter()
-        .filter(|defect| defect.kind.tier() == Tier::Structure)
-        .collect();
-    assert!(defects.is_empty(), "{defects:?}");
-}
+// Every document a test here builds is held to the validate-on-save helper:
+// the reader's own round trip says the tree means what it should, and the
+// helper says the file holds up to ISO 32000 read strictly, which is a
+// different claim — a `/K` array of the right shape can still sit in a
+// document whose offsets or extents are wrong, and the round trip would never
+// notice.
+mod written_support;
+use written_support::{authored, expecting};
 
 /// The milestone's exit criterion: two paragraphs in, two paragraphs out,
 /// both marked-content ids matched to their element and nothing orphaned.
@@ -47,9 +39,10 @@ fn a_two_paragraph_document_round_trips_with_no_orphans() {
         });
     });
 
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("the document opens");
+    let doc = authored(
+        "a two paragraph document round trips with no orphans",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("it carries a structure tree");
     assert!(tree.marked, "/MarkInfo /Marked is written");
     assert!(
@@ -99,7 +92,10 @@ fn text_after_a_nested_element_reads_after_it() {
         });
     });
 
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "text after a nested element reads after it",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     let page = doc.page(0).expect("one page");
     let structured = tree.text_for_page(0, &page.text());
@@ -127,7 +123,10 @@ fn an_element_that_draws_nothing_is_not_written() {
         page.tagged(b"Figure", |_| {});
     });
 
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "an element that draws nothing is not written",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     let StructKid::Element(document) = &tree.kids[0] else {
         panic!("the root kid is an element");
@@ -149,7 +148,10 @@ fn untagged_content_beside_tagged_content_is_counted_not_claimed() {
         });
     });
 
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "untagged content beside tagged content is counted not claimed",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     let page = doc.page(0).expect("one page");
     let structured = tree.text_for_page(0, &page.text());
@@ -170,7 +172,10 @@ fn a_tag_that_needs_escaping_survives_the_round_trip() {
         });
     });
 
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "a tag that needs escaping survives the round trip",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     let StructKid::Element(document) = &tree.kids[0] else {
         panic!("the root kid is an element");
@@ -195,9 +200,7 @@ fn each_page_gets_its_own_parent_tree_key() {
         });
     }
 
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored("each page gets its own parent tree key", builder.finish());
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     for (index, expected) in ["one", "two"].iter().enumerate() {
@@ -231,7 +234,9 @@ fn an_untagged_document_gains_nothing() {
             String::from_utf8_lossy(key)
         );
     }
-    assert!(Document::open(bytes).expect("opens").structure().is_none());
+    assert!(authored("an untagged document gains nothing", bytes)
+        .structure()
+        .is_none());
 }
 
 // ---- the general tagging API (`Tag`, `open_tag`, `close_tag`) --------------
@@ -284,9 +289,10 @@ fn the_accessibility_properties_are_written_and_read_back() {
                 |page| page.text(b"F1", 12.0, 20.0, 150.0, "fish"),
             );
         });
-        let bytes = builder.finish();
-        structurally_clean(bytes.clone());
-        let doc = Document::open(bytes).expect("opens");
+        let doc = authored(
+            "the accessibility properties are written and read back",
+            builder.finish(),
+        );
 
         let figure = only(&doc, "Figure");
         assert_eq!(
@@ -335,9 +341,10 @@ fn an_empty_element_that_says_something_is_kept() {
         page.tagged_with(&Tag::new(b"Div"), |_| {});
     });
 
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "an empty element that says something is kept",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     let StructKid::Element(document) = &tree.kids[0] else {
@@ -386,9 +393,10 @@ fn an_element_opened_on_one_page_and_closed_on_the_next_is_one_element() {
         assert!(!page.close_tag(), "nothing is left open");
     });
 
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "an element opened on one page and closed on the next is one element",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
 
@@ -439,7 +447,10 @@ fn a_closure_closes_what_it_opened_and_nothing_outside_it() {
         page.text(b"F1", 12.0, 20.0, 120.0, "outside");
     });
 
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "a closure closes what it opened and nothing outside it",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     let div = only(&doc, "Div");
     assert!(
@@ -483,7 +494,10 @@ fn opens_past_the_depth_cap_are_refused_and_still_paired() {
         }
         assert!(!page.close_tag());
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "opens past the depth cap are refused and still paired",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     assert_eq!(tree.element_count(), depth + 1, "the Divs and the Document");
@@ -501,7 +515,10 @@ fn the_documents_language_is_written_on_the_catalog() {
     builder.add_page(300.0, 200.0, |page| {
         page.tagged(b"P", |page| page.text(b"F1", 12.0, 20.0, 150.0, "colour"));
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "the documents language is written on the catalog",
+        builder.finish(),
+    );
     let cos = doc.cos();
     let catalog = cos.catalog().expect("a catalog");
     let lang = cos.resolve_key(&catalog, cos.intern(b"Lang"));
@@ -600,9 +617,10 @@ fn a_link_element_holds_its_annotation_and_the_annotation_names_it_back() {
         ));
     });
 
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "a link element holds its annotation and the annotation names it back",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
 
@@ -657,9 +675,10 @@ fn a_keyed_link_holds_its_annotations_on_both_pages() {
             }
         });
     }
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "a keyed link holds its annotations on both pages",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     let link = only(&doc, "Link");
@@ -701,9 +720,10 @@ fn a_link_with_no_text_still_holds_its_annotation() {
             ));
         });
     });
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "a link with no text still holds its annotation",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     let link = only(&doc, "Link");
@@ -734,7 +754,10 @@ fn a_link_that_is_not_written_leaves_no_object_reference() {
             ));
         });
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "a link that is not written leaves no object reference",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     assert_eq!(tree.object_count(), 0);
@@ -802,9 +825,10 @@ fn table_attributes_are_written_and_each_header_resolves() {
     let mut builder = DocumentBuilder::new();
     a_table(&mut builder);
     assert!(builder.duplicate_element_ids().is_empty());
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "table attributes are written and each header resolves",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
 
@@ -897,9 +921,10 @@ fn a_writing_mode_is_written_alone_and_beside_table_attributes() {
             }
         });
     }
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "a writing mode is written alone and beside table attributes",
+        builder.finish(),
+    );
     let header = only(&doc, "TH");
     assert_eq!(
         header.table.as_ref().and_then(|t| t.scope),
@@ -974,9 +999,10 @@ fn a_stated_span_holds_whole_sequences_of_the_elements_drawn_in_it() {
             page.text(b"F1", 12.0, 20.0, 170.0, "nepo tfel");
         });
     });
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "a stated span holds whole sequences of the elements drawn in it",
+        builder.finish(),
+    );
     let first = doc.page(0).expect("a page").text();
     assert_eq!(first.stated, ["two one"]);
     assert_eq!(first.plain_text(), "before\ntwo one\nafter\nnoted\n");
@@ -1012,7 +1038,10 @@ fn an_identifier_given_twice_is_kept_by_the_first_element_and_reported() {
         });
     }
     assert_eq!(builder.duplicate_element_ids(), [b"twice".to_vec()]);
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "an identifier given twice is kept by the first element and reported",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     let paragraphs: Vec<Option<Vec<u8>>> = elements(&doc)
         .into_iter()
@@ -1032,8 +1061,10 @@ fn a_table_attribute_outside_table_349_is_ignored_by_name() {
     let mut builder = DocumentBuilder::new();
     a_table(&mut builder);
     let mut bytes = builder.finish();
+    authored("a table, before its attributes are damaged", &bytes);
     // Equal-length rewrites, so every offset in the cross-reference table
-    // still holds: a scope that is not a scope, and a span of zero.
+    // still holds: a scope that is not a scope, and a span of zero — damage
+    // the strict validator has no rule for, so none is expected of it.
     for (from, to) in [
         (&b"/Scope /Column"[..], &b"/Scope /Colum2"[..]),
         (b"/ColSpan 2", b"/ColSpan 0"),
@@ -1044,7 +1075,7 @@ fn a_table_attribute_outside_table_349_is_ignored_by_name() {
             .expect("the attribute is in the file");
         bytes[at..at + from.len()].copy_from_slice(to);
     }
-    let doc = Document::open(bytes).expect("opens");
+    let doc = expecting("a table attribute outside Table 349", bytes, &[]);
     let tree = doc.structure().expect("a tree");
     let ignored: Vec<String> = tree
         .warnings
@@ -1091,7 +1122,10 @@ fn continue_at_lets_an_element_drawn_elsewhere_read_in_the_middle() {
         });
         assert!(!page.continue_at(30), "no element is open");
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "continue at lets an element drawn elsewhere read in the middle",
+        builder.finish(),
+    );
     let paragraph = only(&doc, "P");
     let shape: Vec<&str> = paragraph
         .kids
@@ -1121,9 +1155,10 @@ fn a_custom_type_is_written_as_itself_and_read_through_the_role_map() {
             page.tagged(b"aside", |page| page.text(b"F1", 12.0, 20.0, 150.0, "x"));
         });
     });
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "a custom type is written as itself and read through the role map",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     let chapter = only(&doc, "Sect");
@@ -1159,7 +1194,10 @@ fn a_role_map_entry_a_reader_could_not_use_is_refused() {
     builder.add_page(300.0, 200.0, |page| {
         page.tagged(b"a", |page| page.text(b"F1", 12.0, 20.0, 150.0, "x"));
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "a role map entry a reader could not use is refused",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "no loop reached the file");
     assert_eq!(only(&doc, "P").raw_type, "a");
@@ -1176,6 +1214,7 @@ fn a_role_map_without_a_tree_is_not_written() {
         page.text(b"F1", 12.0, 20.0, 150.0, "plain");
     });
     let bytes = builder.finish();
+    authored("a role map without a tree is not written", &bytes);
     assert!(!bytes.windows(7).any(|window| window == b"RoleMap"));
 }
 
@@ -1243,9 +1282,10 @@ fn a_namespaced_element_is_read_through_its_namespaces_role_map() {
             });
         });
     });
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "a namespaced element is read through its namespaces role map",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     assert_eq!(
@@ -1366,9 +1406,10 @@ fn namespaces_are_pdf_2_0_and_their_role_maps_obey_the_ua_2_rules() {
         // An element in a namespace and empty says nothing about content.
         page.tagged_with(&Tag::new(b"empty").namespace(own), |_| {});
     });
-    let bytes = builder.finish();
-    structurally_clean(bytes.clone());
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "namespaces are pdf 2 0 and their role maps obey the ua 2 rules",
+        builder.finish(),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(
         tree.warnings.is_empty(),
@@ -1397,7 +1438,10 @@ fn namespaces_are_written_only_with_a_tree_that_has_them() {
     });
     let bytes = builder.finish();
     assert!(!bytes.windows(9).any(|window| window == b"Namespace"));
-    let doc = Document::open(bytes).expect("opens");
+    let doc = authored(
+        "namespaces are written only with a tree that has them, PDF 1.7",
+        bytes,
+    );
     assert!(doc.structure().expect("a tree").namespaces.is_empty());
 
     let mut builder = DocumentBuilder::with_version(2, 0);
@@ -1407,6 +1451,10 @@ fn namespaces_are_written_only_with_a_tree_that_has_them() {
         page.text(b"F1", 12.0, 20.0, 150.0, "untagged");
     });
     let bytes = builder.finish();
+    authored(
+        "namespaces are written only with a tree that has them, PDF 2.0 and untagged",
+        &bytes,
+    );
     assert!(!bytes.windows(9).any(|window| window == b"Namespace"));
 }
 
@@ -1455,7 +1503,10 @@ fn a_role_map_stops_at_the_entries_a_reader_keeps() {
             page.text(b"F1", 12.0, 20.0, 90.0, "d")
         });
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "a role map stops at the entries a reader keeps",
+        builder.finish(),
+    );
     let read: Vec<(String, String, Option<String>)> = elements(&doc)
         .into_iter()
         .filter(|element| element.raw_type.starts_with('c'))
@@ -1494,7 +1545,10 @@ fn a_parent_tree_past_one_leaf_is_written_as_a_balanced_tree() {
             });
         });
     }
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "a parent tree past one leaf is written as a balanced tree",
+        builder.finish(),
+    );
     let cos = doc.cos();
     let root = cos
         .catalog()

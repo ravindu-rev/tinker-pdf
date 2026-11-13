@@ -33,6 +33,17 @@ and its row is narrowed to it.
   opens with `25٪`, on a page that does not state its text, reads
   `25 ٪يوم`, where its paragraph would keep the sign with its number. FT-37
   resolves a paragraph across its lines.
+- **A PNG passed through with less data than its header promises.**
+  `crates/tinker-pdf-cos/src/png_embed.rs` places a non-interlaced PNG's
+  IDAT without inflating it, so the PDF the standalone opener or a comic
+  archive synthesises from a PNG whose IDAT inflates short of its rows holds
+  an image stream that decodes only with a repair, and the strict validator
+  reports `repaired-while-reading` (`filter: short predictor row`).
+  `crates/tinker-pdf/tests/hostile_input.rs`'s 2 x 2 PNG, whose IDAT
+  inflates to 4 of the 14 bytes its header promises, shows it once the
+  standalone sweep holds what it synthesises to the validate-on-save helper;
+  K-03.4 is narrowed to that file. Checking the IDAT before it is placed
+  inflates every pass-through PNG, which is the owner's price.
 
 ## Where the steps are
 
