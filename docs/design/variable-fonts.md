@@ -44,7 +44,8 @@ books.
   features by region and moving GPOS values, anchors and ligature carets by
   `GDEF`'s item variation store are FT-07a's, which depends on this row and
   reuses its numeric model and its item variation store as they stand.
-- **Multiple-master Type 1** (FT-10). Its blend design is not OpenType's.
+- **Multiple-master Type 1** (FT-10). Its blend design is not OpenType's;
+  [type42-and-multiple-master](type42-and-multiple-master.md) is its design.
 - **An instance chosen for a host-supplied face from its request's weight.**
   A substituted face drawn bolder is FT-14's weight emulation.
 - **`STAT`.** It names styles for a menu; nothing drawn or written reads it.
