@@ -4559,6 +4559,14 @@ pub unsafe extern "C" fn tpdf_builder_finish(
     TpdfStatus::Ok
 }
 
+// The validate-on-save helper's facade reading, compiled once for this crate's
+// own test modules, each of which holds what it writes through
+// `crate::written_support` (`docs/design/validate-on-save.md`). The C ABI
+// reaches the facade and nothing under it, which is what the reading names.
+#[cfg(test)]
+#[path = "../../tinker-pdf/tests/written_support/mod.rs"]
+mod written_support;
+
 #[cfg(test)]
 mod tests {
 
@@ -4779,6 +4787,7 @@ endobj
         assert_eq!(status, TpdfStatus::BadArgument);
     }
     use super::*;
+    use crate::written_support::{authored, rewritten, Key, Locked};
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> Vec<u8> {
@@ -4974,6 +4983,11 @@ endobj
             .editor()
             .save_signed(&incremental(), &first)
             .expect("the first signature");
+        rewritten(
+            "simple-text.pdf, signed once",
+            &fixture("simple-text.pdf"),
+            &once,
+        );
 
         // No `/Location` on this one, so an absent string has a case too. And
         // no certification: 12.8.2.2 lets only the first signature certify.
@@ -4986,11 +5000,13 @@ endobj
         second.reserve = 2048;
         second.name = Some("Another Signer".to_string());
 
-        Document::open(once)
+        let twice = Document::open(once.clone())
             .expect("the once-signed file opens")
             .editor()
             .save_signed(&incremental(), &second)
-            .expect("the second signature")
+            .expect("the second signature");
+        rewritten("simple-text.pdf, signed twice", &once, &twice);
+        twice
     }
 
     fn open_bytes(bytes: &[u8]) -> *mut TpdfDocument {
@@ -5011,7 +5027,9 @@ endobj
         for _ in 0..1_000 {
             builder.add_page(100.0, 100.0, |_| {});
         }
-        let doc = open_bytes(&builder.finish());
+        let bytes = builder.finish();
+        authored("a thousand blank pages", &bytes);
+        let doc = open_bytes(&bytes);
         let pages = unsafe { tpdf_document_page_count(doc) };
         assert_eq!(pages, 1_000);
         for index in 0..pages {
@@ -5919,6 +5937,11 @@ endobj
         );
         let bytes = take_buffer(buffer);
         unsafe { tpdf_editor_free(editor) };
+        rewritten(
+            "the form fixture, filled and saved through the C ABI",
+            &fixture("form-fields.pdf"),
+            &bytes,
+        );
         (bytes, messages)
     }
 
@@ -5940,6 +5963,11 @@ endobj
             mode: WriteMode::Incremental,
             ..WriteOptions::default()
         });
+        rewritten(
+            "the form fixture, filled and saved through the facade",
+            &fixture("form-fields.pdf"),
+            &bytes,
+        );
         (bytes, messages)
     }
 
@@ -5984,12 +6012,11 @@ endobj
         // And the artefact is a document this engine reads back, at the
         // ladder's top rung: ruling 13 makes the check that the bytes are
         // right a first-party one, and this is that check on the C ABI's own
-        // output.
-        let reopened = Document::open(saved).expect("the C ABI's output opens");
-        assert!(
-            reopened.validate().is_empty(),
-            "and the strict validator finds nothing in it: {:?}",
-            reopened.validate()
+        // output, held as an update of the fixture it was opened over.
+        rewritten(
+            "the form fixture, updated through the C ABI",
+            &original,
+            saved,
         );
     }
 
@@ -6147,13 +6174,20 @@ endobj
         unsafe { tpdf_document_free(doc) };
 
         let options = incremental_options();
+        let original = fixture("form-fields.pdf");
         let save = || {
             let mut buffer: *mut TpdfBuffer = ptr::null_mut();
             assert_eq!(
                 unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
                 TpdfStatus::Ok
             );
-            take_buffer(buffer)
+            let bytes = take_buffer(buffer);
+            rewritten(
+                "the form fixture, saved around a checkpoint",
+                &original,
+                &bytes,
+            );
+            bytes
         };
 
         assert_eq!(
@@ -6334,9 +6368,19 @@ endobj
         );
         let through_abi = take_buffer(buffer);
         unsafe { tpdf_editor_free(editor) };
+        rewritten(
+            "simple-text.pdf, rewritten through the C ABI with its defaults",
+            &fixture("simple-text.pdf"),
+            &through_abi,
+        );
 
         let document = Document::open(fixture("simple-text.pdf")).expect("it opens");
         let through_facade = document.editor().save(&WriteOptions::default());
+        rewritten(
+            "simple-text.pdf, rewritten through the facade with its defaults",
+            &fixture("simple-text.pdf"),
+            &through_facade,
+        );
         assert_eq!(through_abi, through_facade);
     }
 
@@ -6388,6 +6432,14 @@ endobj
         );
         let through_abi = take_buffer(buffer);
         unsafe { tpdf_editor_free(editor) };
+        rewritten(
+            "simple-text.pdf, encrypted through the C ABI",
+            &fixture("simple-text.pdf"),
+            Locked {
+                bytes: through_abi.clone(),
+                key: Key::Password("open-sesame"),
+            },
+        );
 
         let mut fixed = [0u8; TPDF_ENTROPY_LEN];
         fixed.copy_from_slice(&entropy);
@@ -6441,6 +6493,14 @@ endobj
         );
         let bytes = take_buffer(buffer);
         unsafe { tpdf_editor_free(editor) };
+        rewritten(
+            "simple-text.pdf, encrypted with no owner password",
+            &fixture("simple-text.pdf"),
+            Locked {
+                bytes: bytes.clone(),
+                key: Key::Password("open-sesame"),
+            },
+        );
 
         let locked = Document::open(bytes.clone()).expect("it opens");
         assert!(locked.authenticate("").is_err(), "the empty password fails");
@@ -6736,6 +6796,7 @@ endobj
         );
         let bytes = take_buffer(buffer);
         unsafe { tpdf_builder_free(builder) };
+        authored("the build script, through the C ABI", &bytes);
         bytes
     }
 
@@ -6778,7 +6839,9 @@ endobj
                 })
                 .collect()
         ));
-        builder.finish()
+        let bytes = builder.finish();
+        authored("the build script, through the facade", &bytes);
+        bytes
     }
 
     /// The milestone's own exit criterion: **byte-equal**.
@@ -6795,13 +6858,8 @@ endobj
 
         // And it is a document rather than merely a matching pile of bytes.
         // Ruling 13: the check that the output is right is this engine's own.
-        let document = Document::open(through_abi).expect("the built document opens");
+        let document = authored("the build script's document", through_abi);
         assert_eq!(document.page_count(), 2);
-        assert!(
-            document.validate().is_empty(),
-            "the strict validator finds nothing: {:?}",
-            document.validate()
-        );
     }
 
     /// A consuming call takes the value and leaves the handle, so free stays
@@ -6831,7 +6889,7 @@ endobj
             TpdfStatus::Ok
         );
         assert!(!first.is_null());
-        drop(take_buffer(first));
+        authored("a builder's first finish", take_buffer(first));
 
         // The second finish is refused rather than producing a second
         // document or freeing the first one again.
@@ -6933,7 +6991,7 @@ endobj
         unsafe { tpdf_page_builder_free(page) };
         unsafe { tpdf_builder_free(builder) };
 
-        let document = Document::open(bytes).expect("it opens");
+        let document = authored("a page pushed twice", bytes);
         assert_eq!(document.page_count(), 1, "one page, not two");
     }
 
@@ -6996,6 +7054,7 @@ endobj
             );
             let bytes = take_buffer(buffer);
             unsafe { tpdf_builder_free(builder) };
+            authored("a page kept, and one abandoned or not begun", &bytes);
             bytes
         };
 
@@ -7073,6 +7132,7 @@ endobj
         );
         let bytes = take_buffer(buffer);
         unsafe { tpdf_builder_free(builder) };
+        authored("a page and a nested outline", &bytes);
 
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("(Part one)"), "the parent is in the outline");

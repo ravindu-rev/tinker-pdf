@@ -17,7 +17,8 @@ use tinker_pdf_filters::{zlib_compress, Limits};
 
 use super::*;
 use crate::object::Object;
-use crate::{CosDocument, DocumentBuilder, ObjRef};
+use crate::written_support::{expecting, Expected};
+use crate::{CosDocument, DefectKind, DocumentBuilder, ObjRef, WarningKind};
 
 const CAP: Limits = Limits::new(1 << 22);
 
@@ -222,7 +223,18 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// One page drawing `image`, held as written: a strip whose codec is an image
+/// codec is not decoded by the validator, so the dummy strips under a fax
+/// coding are clean as well as the G4 one.
+#[track_caller]
 fn write_one(image: &TiffImageData) -> Vec<u8> {
+    write_damaged(image, &[])
+}
+
+/// [`write_one`] for a strip whose bytes are a dummy under a filter the
+/// validator decodes, held to exactly the findings `damage` lists.
+#[track_caller]
+fn write_damaged(image: &TiffImageData, damage: &[Expected]) -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
     assert!(
         builder.add_image(b"Im", &image.image()),
@@ -230,7 +242,9 @@ fn write_one(image: &TiffImageData) -> Vec<u8> {
     );
     let (w, h) = (f64::from(image.width()), f64::from(image.height()));
     builder.add_page(w, h, |page| page.image(b"Im", 0.0, 0.0, w, h));
-    builder.finish()
+    let bytes = builder.finish();
+    expecting("a TIFF image on its page", &bytes, damage);
+    bytes
 }
 
 // ---- the claim this module exists for ----------------------------------
@@ -374,7 +388,17 @@ fn lzw_and_deflate_strips_are_placed_under_their_own_filters() {
             c.compression,
             c.predictor
         );
-        let (dict, data) = image_stream(&write_one(&prepared));
+        // The dummy LZW strip is four codes and then four bits: the Clear
+        // code, three literals, and no EOD, so its decode ends early. The
+        // deflated strip is a whole zlib stream of a whole image.
+        let damage = if c.compression == 5 {
+            vec![Expected::Defect(DefectKind::RepairedWhileReading(
+                WarningKind::Filter(tinker_pdf_filters::Warning::EarlyEod),
+            ))]
+        } else {
+            Vec::new()
+        };
+        let (dict, data) = image_stream(&write_damaged(&prepared, &damage));
         assert_eq!(data, c.strip, "compression {}", c.compression);
         assert!(dict.contains(c.filter), "{dict}");
         assert!(dict.contains(c.space), "{dict}");

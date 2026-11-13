@@ -629,7 +629,9 @@ mod tests {
                 }
             });
         }
-        builder.finish()
+        let bytes = builder.finish();
+        crate::written_support::authored("a dense document", &bytes);
+        bytes
     }
 
     /// Four of [`dense`]'s 100-page documents merged as `tpdf merge` merges
@@ -656,10 +658,13 @@ mod tests {
                     .expect("the page imports");
             }
         }
-        editor.save(&crate::write::WriteOptions {
+        let merged = editor.save(&crate::write::WriteOptions {
             mode: crate::write::WriteMode::Rewrite,
             ..crate::write::WriteOptions::default()
-        })
+        });
+        // Every part is a document this engine wrote, held as it was built.
+        crate::written_support::authored("four dense documents merged", &merged);
+        merged
     }
 
     /// The fixture `stream_dedup.rs`'s `two_encodings_of_one_content_merge`
@@ -668,7 +673,7 @@ mod tests {
     fn two_encodings_of_one_content() -> (crate::doc::CosDocument, ObjectSet) {
         let mut builder = crate::build::DocumentBuilder::new();
         builder.add_page(50.0, 50.0, |_| {});
-        let doc = crate::doc::CosDocument::open(builder.finish()).expect("opens");
+        let doc = crate::written_support::authored("a blank page", builder.finish());
         let names = doc.names_table();
         let content = b"one content, two encodings, one object".repeat(20);
         let packed = tinker_pdf_filters::zlib_compress(&content);

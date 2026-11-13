@@ -3368,15 +3368,20 @@ mod tests {
         for _ in 0..pages {
             builder.add_page(200.0, 100.0, |page| page.raw(b"0 0 10 10 re f"));
         }
-        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
-        crate::DocumentEditor::new(doc).save(&crate::WriteOptions {
+        let doc = Arc::new(crate::written_support::authored(
+            "pages to linearize",
+            builder.finish(),
+        ));
+        let bytes = crate::DocumentEditor::new(doc).save(&crate::WriteOptions {
             mode: crate::WriteMode::Rewrite,
             linearize: true,
             // A container would hold the first page's objects in the same blob
             // as everything else, and there would be no head to open from.
             object_streams: false,
             ..crate::WriteOptions::default()
-        })
+        });
+        crate::written_support::authored("those pages linearized", &bytes);
+        bytes
     }
 
     /// [`linearized`], with one entry of its main table, the table at `/T`
@@ -3911,6 +3916,7 @@ mod tests {
             });
         }
         let bytes = builder.finish();
+        crate::written_support::authored("a thousand pages", &bytes);
         let base = Arc::new(CosDocument::open(bytes.clone()).expect("it opens"));
         let before = crate::pages::collect(&base);
         assert_eq!(before.len(), 1000, "the premise: a thousand pages");
@@ -3939,6 +3945,13 @@ mod tests {
             mode: crate::WriteMode::Incremental,
             ..crate::WriteOptions::default()
         });
+        // The save is the base and the update together, held before the
+        // counting below begins, so the door's own open touches nothing it
+        // counts.
+        crate::written_support::authored(
+            "a thousand pages, one annotated by an update",
+            [&bytes[..], &update[..]].concat(),
+        );
         let page = before[500].reference;
         // The page, and every number the edit allocated: the annotation, and
         // the appearance synthesized for it.

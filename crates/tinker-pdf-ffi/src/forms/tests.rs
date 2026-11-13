@@ -5,6 +5,7 @@
 //! applied as the same document `form_data::apply` makes.
 
 use super::*;
+use crate::written_support::rewritten;
 use crate::{
     tpdf_buffer_data, tpdf_buffer_free, tpdf_document_editor, tpdf_document_free,
     tpdf_document_open, tpdf_editor_free, tpdf_editor_save, tpdf_fill_report_count,
@@ -298,13 +299,21 @@ fn every_kind_of_field_saves_the_facades_bytes() {
     let through_the_abi = save(editor);
     unsafe { tpdf_editor_free(editor) };
 
-    let mut facade = Document::open(fixture).expect("opens").editor();
+    let mut facade = Document::open(fixture.clone()).expect("opens").editor();
     add_every_kind_against_the_facade(&mut facade);
     let against_the_facade = facade.save(&WriteOptions::default());
+    rewritten(
+        "every kind of field, against the facade",
+        &fixture,
+        &against_the_facade,
+    );
     assert_eq!(through_the_abi, against_the_facade);
 
-    let reopened = Document::open(through_the_abi).expect("the result reopens");
-    assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
+    let reopened = rewritten(
+        "every kind of field, through the C ABI",
+        &fixture,
+        through_the_abi,
+    );
     let names: Vec<String> = reopened.form_fields().into_iter().map(|f| f.name).collect();
     for name in ["person.given", "subscribe", "size", "shade"] {
         assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
@@ -316,6 +325,7 @@ fn a_refused_field_writes_nothing_and_says_why() {
     let fixture = form_fixture();
     let editor = editor_over(&fixture);
     let before = save(editor);
+    rewritten("the form fixture, saved untouched", &fixture, &before);
     let name = c("name");
     // `name` is the fixture's own field: taken.
     assert_eq!(
@@ -404,7 +414,9 @@ fn a_refused_field_writes_nothing_and_says_why() {
         TpdfStatus::EditRefused
     );
     assert!(last_error().contains("needs a button"), "{}", last_error());
-    assert_eq!(save(editor), before, "nothing was written");
+    let after = save(editor);
+    rewritten("the form fixture, every field refused", &fixture, &after);
+    assert_eq!(after, before, "nothing was written");
     unsafe { tpdf_editor_free(editor) };
 }
 
@@ -465,10 +477,11 @@ fn fields_of(handle: *const TpdfFormData) -> Vec<FieldData> {
 #[test]
 fn a_documents_form_data_is_the_facades_and_writes_its_bytes() {
     let fixture = form_fixture();
-    let mut filled = Document::open(fixture).expect("opens").editor();
+    let mut filled = Document::open(fixture.clone()).expect("opens").editor();
     filled.fill_field("notes", "carried").expect("fills");
     filled.set_checkbox("agree", true);
     let filled = filled.save(&WriteOptions::default());
+    rewritten("the form fixture, filled", &fixture, &filled);
 
     let handle = document_data(&filled);
     let facade = FormData::from_fields(&Document::open(filled).expect("opens").form_fields());
@@ -675,11 +688,22 @@ fn applying_data_is_the_facades_apply_all_or_nothing() {
     unsafe { tpdf_fill_report_free(report) };
     let through_the_abi = save(editor);
     unsafe { tpdf_editor_free(editor) };
+    rewritten(
+        "the form fixture, data applied through the C ABI",
+        &fixture,
+        &through_the_abi,
+    );
 
     let mut facade = Document::open(fixture.clone()).expect("opens").editor();
     let data = form_data::read_xfdf(XFDF_NOTES.as_bytes()).expect("reads");
     form_data::apply(&mut facade, &data).expect("applies");
-    assert_eq!(through_the_abi, facade.save(&WriteOptions::default()));
+    let applied = facade.save(&WriteOptions::default());
+    rewritten(
+        "the form fixture, data applied by the facade",
+        &fixture,
+        &applied,
+    );
+    assert_eq!(through_the_abi, applied);
     unsafe { tpdf_form_data_free(handle) };
 
     // A field the document does not have: NoSuchField, named, nothing written.
@@ -692,12 +716,15 @@ fn applying_data_is_the_facades_apply_all_or_nothing() {
     );
     let editor = editor_over(&fixture);
     let before = save(editor);
+    rewritten("the form fixture, saved before its data", &fixture, &before);
     assert_eq!(
         unsafe { tpdf_editor_apply_form_data(editor, handle, ptr::null_mut()) },
         TpdfStatus::NoSuchField
     );
     assert!(last_error().contains("nowhere"), "{}", last_error());
-    assert_eq!(save(editor), before, "nothing was written");
+    let after = save(editor);
+    rewritten("the form fixture, its data refused", &fixture, &after);
+    assert_eq!(after, before, "nothing was written");
     unsafe { tpdf_editor_free(editor) };
     unsafe { tpdf_form_data_free(handle) };
 }

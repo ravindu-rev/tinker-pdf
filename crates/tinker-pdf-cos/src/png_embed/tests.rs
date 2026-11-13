@@ -17,6 +17,7 @@
 
 use super::*;
 use crate::object::Object;
+use crate::written_support::authored;
 use crate::{CosDocument, Dict, DocumentBuilder, ObjRef};
 use tinker_pdf_filters::Crc32;
 
@@ -394,6 +395,7 @@ fn a_decoded_png_is_re_deflated_here_because_the_writer_will_not() {
     assert!(builder.add_image(b"Im0", &prepared.image()));
     builder.add_page(64.0, 64.0, |page| page.image(b"Im0", 0.0, 0.0, 64.0, 64.0));
     let written = builder.finish();
+    authored("a decoded PNG on its page", &written);
     assert!(
         written.len() < 64 * 64 * 4 / 2,
         "and the document is not the raster: {} bytes",
@@ -629,6 +631,7 @@ fn a_passed_through_png_reaches_the_page_as_flate_with_predictor_fifteen() {
     assert!(builder.add_image(b"Im0", &prepared.image()));
     builder.add_page(6.0, 3.0, |page| page.image(b"Im0", 0.0, 0.0, 6.0, 3.0));
     let bytes = builder.finish();
+    authored("a passed-through PNG on its page", &bytes);
 
     let doc = CosDocument::open(bytes.clone()).expect("it opens");
     let (dict, reference) = image_dict(&doc).expect("an image XObject");
@@ -681,7 +684,7 @@ fn an_indexed_png_carries_its_palette_as_the_colour_space() {
     let mut builder = DocumentBuilder::new();
     assert!(builder.add_image(b"Im0", &prepared.image()));
     builder.add_page(4.0, 1.0, |page| page.image(b"Im0", 0.0, 0.0, 4.0, 1.0));
-    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let doc = authored("an indexed PNG on its page", builder.finish());
     let (dict, _) = image_dict(&doc).expect("an image XObject");
 
     let space = dict
@@ -739,7 +742,7 @@ fn a_colour_key_reaches_the_dictionary_as_a_flat_array() {
     let mut builder = DocumentBuilder::new();
     assert!(builder.add_image(b"Im0", &prepared.image()));
     builder.add_page(1.0, 1.0, |page| page.image(b"Im0", 0.0, 0.0, 1.0, 1.0));
-    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let doc = authored("a colour-keyed PNG on its page", builder.finish());
     let (dict, _) = image_dict(&doc).expect("an image XObject");
 
     let mask = dict
@@ -764,7 +767,7 @@ fn a_soft_mask_is_written_as_its_own_xobject() {
     let mut builder = DocumentBuilder::new();
     assert!(builder.add_image(b"Im0", &prepared.image()));
     builder.add_page(2.0, 1.0, |page| page.image(b"Im0", 0.0, 0.0, 2.0, 1.0));
-    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let doc = authored("a PNG with an alpha channel on its page", builder.finish());
     let (dict, _) = image_dict(&doc).expect("an image XObject");
 
     let smask = dict.get_ref(doc.intern(b"SMask")).expect("/SMask");

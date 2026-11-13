@@ -909,6 +909,7 @@ fn plural(count: usize, one: &str, many: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::written_support::{authored, rewritten, Handed, Key, Locked};
     use tinker_pdf::{
         AuthLevel, Dict, DocumentBuilder, ImageData, ObjRef, Object, PdfString, Target, XrefEntry,
     };
@@ -959,11 +960,29 @@ mod tests {
             .collect()
     }
 
-    /// The strict validator finds nothing: a written file is a valid PDF,
-    /// not merely one this engine's tolerant reader opens.
-    fn assert_clean(doc: &Document, what: &str) {
-        let defects = doc.validate();
-        assert!(defects.is_empty(), "{what}: {defects:?}");
+    /// `bytes` as a door takes them: locked with `password` when there is one.
+    fn handed<'k>(bytes: Vec<u8>, password: Option<&'k str>) -> Handed<'k> {
+        match password {
+            Some(password) => Locked {
+                bytes,
+                key: Key::Password(password),
+            }
+            .into(),
+            None => bytes.into(),
+        }
+    }
+
+    /// The file a command wrote at `path`, held to the validate-on-save
+    /// helper as a save of `input`, the file it opened, and its password when
+    /// it is locked: a command opens one document and rewrites it, whatever
+    /// else it copies in. `password` opens what it wrote, when that is locked.
+    /// A written file is then a valid PDF, not merely one this engine's
+    /// tolerant reader opens.
+    #[track_caller]
+    fn held(what: &str, input: (&str, Option<&str>), path: &str, password: Option<&str>) {
+        let before = std::fs::read(input.0).expect(input.0);
+        let after = std::fs::read(path).expect(path);
+        rewritten(what, handed(before, input.1), handed(after, password));
     }
 
     /// Every object the file's table lists, as the facade parsed it.
@@ -1021,7 +1040,9 @@ mod tests {
                 page.text(b"F0", 12.0, 10.0, 50.0, line);
             });
         }
-        builder.finish()
+        let bytes = builder.finish();
+        authored("a page of text per line", &bytes);
+        bytes
     }
 
     /// Liberation Serif, whole: the face `bundled-fonts` embeds, and the one
@@ -1043,7 +1064,9 @@ mod tests {
         builder.add_page(300.0, 100.0, |page| {
             page.text(b"F0", 24.0, 20.0, 40.0, "Hello");
         });
-        builder.finish()
+        let bytes = builder.finish();
+        authored("a page of text over the whole face", &bytes);
+        bytes
     }
 
     /// The program the output embeds for its one font.
@@ -1073,7 +1096,7 @@ mod tests {
             .collect();
         expected.extend((1..=6).map(|n| format!("Outline fixture, page {n}")));
         assert_eq!(texts(&merged), expected);
-        assert_clean(&merged, "the merged file");
+        held("the merged file", (&first, None), &out, None);
     }
 
     /// Pages sharing one picture arrive with a copy each from `import_page`,
@@ -1093,7 +1116,9 @@ mod tests {
         for _ in 0..3 {
             builder.add_page(50.0, 50.0, |page| page.image(b"Im0", 0.0, 0.0, 50.0, 50.0));
         }
-        let shared = write(&dir, "shared.pdf", &builder.finish());
+        let built = builder.finish();
+        authored("three pages drawing one image", &built);
+        let shared = write(&dir, "shared.pdf", &built);
         assert_eq!(count_named(&reopen(&shared, None), b"Subtype", b"Image"), 1);
 
         let out = format!("{dir}/merged.pdf");
@@ -1109,7 +1134,7 @@ mod tests {
         for index in 3..6 {
             assert_eq!(merged.page(index).expect("page").images().len(), 1);
         }
-        assert_clean(&merged, "the merged file");
+        held("the merged file", (&first, None), &out, None);
     }
 
     #[test]
@@ -1131,12 +1156,22 @@ mod tests {
             "a piece carries nothing of the pages it left out"
         );
         assert_eq!(count_named(&last, b"Type", b"Page"), 1);
-        assert_clean(&last, "the one-page piece");
+        held(
+            "the one-page piece",
+            (&source, None),
+            &format!("{out}/three-0003.pdf"),
+            None,
+        );
 
         let front = reopen(&format!("{out}/three-0001-0002.pdf"), None);
         assert_eq!(texts(&front), vec!["first words", "second words"]);
         assert!(!any_stream_says(&front, b"third words"));
-        assert_clean(&front, "the two-page piece");
+        held(
+            "the two-page piece",
+            (&source, None),
+            &format!("{out}/three-0001-0002.pdf"),
+            None,
+        );
 
         let names: Vec<String> = std::fs::read_dir(&out)
             .expect("the directory")
@@ -1156,8 +1191,10 @@ mod tests {
             .iter()
             .enumerate()
         {
-            let piece = reopen(&format!("{every}/three-{:04}.pdf", n + 1), None);
+            let path = format!("{every}/three-{:04}.pdf", n + 1);
+            let piece = reopen(&path, None);
             assert_eq!(texts(&piece), vec![*words]);
+            held("a piece of every page", (&source, None), &path, None);
         }
     }
 
@@ -1173,6 +1210,12 @@ mod tests {
         let dir = scratch("split-outline");
         let source = fixture("outline-3level.pdf");
         split(&parse(&[&source, "--pages", "6", "--out", &dir])).expect("splits");
+        held(
+            "the outline fixture's sixth page",
+            (&source, None),
+            &format!("{dir}/outline-3level-0006.pdf"),
+            None,
+        );
         let piece = reopen(&format!("{dir}/outline-3level-0006.pdf"), None);
         assert_eq!(piece.page_count(), 1);
         assert_eq!(texts(&piece), vec!["Outline fixture, page 6"]);
@@ -1226,11 +1269,17 @@ mod tests {
         };
         assert_eq!(rotation(&turned), vec![90, 0, 90]);
         assert_eq!(texts(&turned), texts(&reopen(&source, None)));
-        assert_clean(&turned, "the rotated file");
+        held("the rotated file", (&source, None), &once, None);
 
         let twice = format!("{dir}/twice.pdf");
         rotate(&parse(&[&once, "--by", "-180", "--out", &twice])).expect("rotates");
         assert_eq!(rotation(&reopen(&twice, None)), vec![270, 180, 270]);
+        held(
+            "the rotated file, turned again",
+            (&once, None),
+            &twice,
+            None,
+        );
 
         // A turn that is not a quarter is the facade's to refuse, as it is
         // for every surface, and nothing is written.
@@ -1269,6 +1318,7 @@ mod tests {
 
         let cut = format!("{dir}/cut.pdf");
         let lines = rotate(&parse(&[&source, "--by", "90", "--out", &cut])).expect("rotates");
+        held("the face, subset", (&source, None), &cut, None);
         let program = only_program(&reopen(&cut, None));
         assert!(
             program.len() < whole.len(),
@@ -1294,6 +1344,7 @@ mod tests {
             &kept,
         ]))
         .expect("rotates");
+        held("the face, kept whole", (&source, None), &kept, None);
         assert_eq!(only_program(&reopen(&kept, None)), whole, "the face, whole");
         assert!(
             lines
@@ -1306,6 +1357,7 @@ mod tests {
         // the merge of one file is that file, rewritten.
         let merged = format!("{dir}/merged.pdf");
         merge(&parse(&[&source, "--out", &merged])).expect("merges");
+        held("the face, merged alone", (&source, None), &merged, None);
         assert!(only_program(&reopen(&merged, None)).len() < whole.len());
 
         let args = strings(&[&source, "--font-policy", "whole"]);
@@ -1343,7 +1395,7 @@ mod tests {
         assert!(!locked.permissions().print(), "/P -2056 withholds printing");
         assert!(locked.permissions().copy());
         assert_eq!(texts(&locked), texts(&reopen(&source, None)));
-        assert_clean(&locked, "the encrypted file");
+        held("the encrypted file", (&source, None), &out, Some("open"));
         assert_eq!(
             reopen(&out, None).authenticate("owner"),
             Ok(AuthLevel::Owner)
@@ -1399,7 +1451,12 @@ mod tests {
         assert_eq!(doc.authenticate("new user"), Ok(AuthLevel::User));
         assert!(doc.permissions().print(), "the new /P, -1, replaced -2056");
         assert_eq!(texts(&doc), texts(&reopen(&restricted, Some("owner"))));
-        assert_clean(&doc, "the re-encrypted file");
+        held(
+            "the re-encrypted file",
+            (&restricted, Some("owner")),
+            &out,
+            Some("new user"),
+        );
     }
 
     /// With no owner password, or an empty one, the command writes what the
@@ -1428,7 +1485,12 @@ mod tests {
             );
             assert_eq!(locked.authenticate("u"), Ok(AuthLevel::Owner));
             assert_eq!(texts(&locked), texts(&reopen(&source, None)));
-            assert_clean(&locked, "the file locked with one password");
+            held(
+                "the file locked with one password",
+                (&source, None),
+                &out,
+                Some("u"),
+            );
         }
 
         // The facade's save with the same fields writes the same bytes: the
@@ -1447,6 +1509,14 @@ mod tests {
                     ..rewrite()
                 },
                 ..SaveOptions::default()
+            },
+        );
+        rewritten(
+            "the facade's save with one password",
+            std::fs::read(&source).expect("the fixture"),
+            Locked {
+                bytes: saved.bytes.clone(),
+                key: Key::Password("u"),
             },
         );
         assert_eq!(std::fs::read(&out).ok(), Some(saved.bytes));
@@ -1475,7 +1545,12 @@ mod tests {
         let clear = reopen(&out, None);
         assert!(!clear.is_encrypted());
         assert_eq!(texts(&clear), texts(&reopen(&restricted, Some("owner"))));
-        assert_clean(&clear, "the decrypted file");
+        held(
+            "the decrypted file",
+            (&restricted, Some("owner")),
+            &out,
+            None,
+        );
 
         // A user the owner restricted in nothing has nothing to lift.
         let open_to_all = fixture("encrypted-aes256.pdf");
@@ -1488,6 +1563,12 @@ mod tests {
             &out,
         ]))
         .expect("decrypts");
+        held(
+            "the AES-256 fixture, decrypted",
+            (&open_to_all, Some("open-sesame")),
+            &out,
+            None,
+        );
         let clear = reopen(&out, None);
         assert!(!clear.is_encrypted());
         assert_eq!(
@@ -1572,6 +1653,14 @@ mod tests {
                 ..SaveOptions::default()
             },
         );
+        rewritten(
+            "simple-text.pdf, locked with an empty user password",
+            std::fs::read(&plain).expect("the fixture"),
+            Locked {
+                bytes: locked.bytes.clone(),
+                key: Key::Password(""),
+            },
+        );
         let locked = write(&dir, "locked.pdf", &locked.bytes);
         assert!(reopen(&locked, None).is_encrypted());
 
@@ -1594,6 +1683,7 @@ mod tests {
         assert!(!Path::new(&out).exists());
 
         merge(&parse(&[&plain, &plain, "--out", &out])).expect("two plain inputs merge");
+        held("two plain inputs merged", (&plain, None), &out, None);
         assert_eq!(
             reopen(&out, None).page_count(),
             2 * reopen(&plain, None).page_count()
@@ -1736,14 +1826,32 @@ mod tests {
         let lines = split(&parse(&[&source, "--pages", "1-2,2-3", "--out", &pieces]))
             .expect("overlapping pieces split");
         assert_eq!(lines[0], format!("  {source}: 3 pages, 2 pieces"));
-        let names = std::fs::read_dir(&pieces).expect("the directory").count();
-        assert_eq!(names, 2, "two pieces, two files");
+        let names: Vec<String> = std::fs::read_dir(&pieces)
+            .expect("the directory")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .path()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names.len(), 2, "two pieces, two files");
+        for piece in &names {
+            held("an overlapping piece", (&source, None), piece, None);
+        }
 
         let lines = rotate(&parse(&[
             &source, "--by", "90", "--pages", "2,1", "--out", &out,
         ]))
         .expect("rotates");
         assert_eq!(lines[0], format!("  {source}: 2 pages turned by 90"));
+        held(
+            "two pages turned, named in any order",
+            (&source, None),
+            &out,
+            None,
+        );
     }
 
     #[test]
@@ -1788,13 +1896,14 @@ mod tests {
             .and_then(|dict| dict.get_name(cos.intern(b"Subtype")));
         assert_eq!(subtype, Some(cos.intern(b"text/csv")));
         assert_eq!(texts(&doc), texts(&reopen(&source, None)));
-        assert_clean(&doc, "the file with an attachment");
+        held("the file with an attachment", (&source, None), &out, None);
 
         let named = format!("{dir}/named.pdf");
         attach(&parse(&[
             &out, "--attach", &csv, "--name", "copy", "--out", &named,
         ]))
         .expect("a second name is a second file");
+        held("the file with two attachments", (&out, None), &named, None);
         let names: Vec<String> = reopen(&named, None)
             .attachments()
             .into_iter()
@@ -1845,7 +1954,7 @@ mod tests {
             ],
             "drawn after the page's own content, and on the pages named only"
         );
-        assert_clean(&stamped, "the stamped file");
+        held("the stamped file", (&source, None), &over, None);
 
         let under = format!("{dir}/under.pdf");
         stamp(&parse(&[
@@ -1867,7 +1976,7 @@ mod tests {
             "drawn before the page's own content, on every page: {:?}",
             texts(&beneath)
         );
-        assert_clean(&beneath, "the file stamped underneath");
+        held("the file stamped underneath", (&source, None), &under, None);
 
         let missing = stamp(&parse(&[
             &source,
@@ -1900,7 +2009,7 @@ mod tests {
                 &Target::Uri("https://example.com/".to_string())
             ));
         });
-        let doc = Document::open(builder.finish()).expect("it opens");
+        let doc = authored("a page with a link", builder.finish());
         let mut editor = doc.editor();
 
         let mut script = Dict::new();
@@ -1931,11 +2040,9 @@ mod tests {
                 ..EmbeddedFile::default()
             })
             .expect("attaches");
-        write(
-            dir,
-            "everything.pdf",
-            &editor.save(&WriteOptions::default()),
-        )
+        let saved = editor.save(&WriteOptions::default());
+        authored("one of everything sanitise takes out", &saved);
+        write(dir, "everything.pdf", &saved)
     }
 
     /// What is left of the document `everything_to_take_out` built, as four
@@ -1979,7 +2086,7 @@ mod tests {
         assert_eq!(doc.metadata().title.as_deref(), Some("a title"));
         assert_eq!(doc.page(0).expect("page").annotations().len(), 1);
         assert!(!any_stream_says(&doc, b"app.alert"));
-        assert_clean(&doc, "the file without scripts");
+        held("the file without scripts", (&source, None), &scripts, None);
 
         let title = Some("a title".to_string());
         for (flag, said, left) in [
@@ -2005,7 +2112,7 @@ mod tests {
                 flag != "--embedded-files",
                 "{flag}: the attachment's bytes"
             );
-            assert_clean(&doc, flag);
+            held(flag, (&source, None), &out, None);
         }
 
         let nothing = format!("{dir}/nothing.pdf");
@@ -2044,7 +2151,7 @@ mod tests {
             "the attachment's bytes left the file"
         );
         assert_eq!(texts(&doc), vec!["the page stays"]);
-        assert_clean(&doc, "the sanitised file");
+        held("the sanitised file", (&source, None), &all, None);
     }
 
     /// A single-input command given two files refuses rather than write them
@@ -2111,7 +2218,9 @@ mod tests {
             page.image(b"Im0", 0.0, 0.0, 64.0, 64.0);
             page.image(b"Im1", 100.0, 0.0, 64.0, 64.0);
         });
-        (builder.finish(), rgb, bits)
+        let bytes = builder.finish();
+        authored("two images, stored unfiltered", &bytes);
+        (bytes, rgb, bits)
     }
 
     /// Each image XObject's `/Filter` name, in object order, empty for none.
@@ -2152,6 +2261,7 @@ mod tests {
         let lines = merge(&parse(&[&source, "--out", &kept])).expect("merges");
         assert!(lines.iter().all(|l| !l.contains("images:")), "{lines:?}");
         assert_eq!(image_filters(&reopen(&kept, None)), vec!["", ""]);
+        held("the images, kept", (&source, None), &kept, None);
 
         let coded = format!("{dir}/coded.pdf");
         let lines = merge(&parse(&[
@@ -2175,7 +2285,7 @@ mod tests {
         let drawn = doc.page(0).expect("page").images();
         assert_eq!(drawn[0].samples, rgb, "deflate is lossless");
         assert_eq!(drawn[1].samples, bits, "and so is G4");
-        assert_clean(&doc, "the recoded file");
+        held("the recoded file", (&source, None), &coded, None);
 
         let halved = format!("{dir}/halved.pdf");
         let lines = rotate(&parse(&[
@@ -2188,6 +2298,7 @@ mod tests {
             &halved,
         ]))
         .expect("rotates");
+        held("the images, resampled", (&source, None), &halved, None);
         let drawn = reopen(&halved, None).page(0).expect("page").images();
         assert_eq!((drawn[0].width, drawn[0].height), (32, 32), "72 ppi to 36");
         assert_eq!(
@@ -2215,6 +2326,7 @@ mod tests {
         ]))
         .expect("merges");
         assert_eq!(image_filters(&reopen(&jpeg, None)), vec!["DCTDecode", ""]);
+        held("the images, recoded as JPEG", (&source, None), &jpeg, None);
 
         let short = write(&dir, "short", &[1u8; 100]);
         for (args, why) in [

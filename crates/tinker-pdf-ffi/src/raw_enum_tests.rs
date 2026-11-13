@@ -209,6 +209,24 @@ fn the_read_and_editor_calls_refuse_a_number_their_enum_does_not_declare() {
     );
     assert!(buffer.is_null());
 
+    // Every number above was refused before it reached the editor, so a save
+    // with a mode the enum declares writes the fixture as it was opened, held
+    // as a rewrite of it.
+    options.mode = TpdfWriteMode::Rewrite as c_int;
+    assert_eq!(
+        unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
+        TpdfStatus::Ok
+    );
+    let mut len = 0;
+    let data = unsafe { tpdf_buffer_data(buffer, &mut len) };
+    let saved = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+    unsafe { tpdf_buffer_free(buffer) };
+    crate::written_support::rewritten(
+        "the outline fixture, after every number its enums refuse",
+        &bytes,
+        &saved,
+    );
+
     // A sanitise report: `count` names no list for a number outside the
     // enum and so answers zero, while the two accessors refuse it.
     let what = TpdfSanitise {

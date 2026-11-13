@@ -984,15 +984,17 @@ mod annex_f_numbering {
                     page.text(b"F0", 12.0, 10.0, 50.0, &format!("page {index}"));
                 });
             }
-            let doc = std::sync::Arc::new(
-                CosDocument::open(builder.finish()).expect("the fixture opens"),
-            );
+            let doc = std::sync::Arc::new(crate::written_support::authored(
+                "pages of text",
+                builder.finish(),
+            ));
             let bytes = crate::edit::DocumentEditor::new(doc).save(&crate::write::WriteOptions {
                 mode: crate::write::WriteMode::Rewrite,
                 linearize: true,
                 object_streams: false,
                 ..crate::write::WriteOptions::default()
             });
+            crate::written_support::authored("pages of text linearized", &bytes);
             assert_eq!(
                 check(bytes),
                 Outcome::Numbered,

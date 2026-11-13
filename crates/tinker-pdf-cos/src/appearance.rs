@@ -2050,7 +2050,7 @@ mod tests {
     fn doc() -> CosDocument {
         let mut builder = DocumentBuilder::new();
         builder.add_page(200.0, 200.0, |_| {});
-        CosDocument::open(builder.finish()).expect("it opens")
+        crate::written_support::authored("a blank page", builder.finish())
     }
 
     fn text_of(stream: &StreamData) -> String {

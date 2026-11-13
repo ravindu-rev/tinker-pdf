@@ -2116,6 +2116,7 @@ mod tests {
         trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
 
         let bytes = rewrite(&objects, &trailer, &WriteOptions::default(), &table);
+        crate::written_support::authored("a catalog rewritten", &bytes);
         let text = String::from_utf8_lossy(&bytes);
 
         assert!(text.starts_with("%PDF-1.7"), "a header");
@@ -2141,7 +2142,7 @@ mod tests {
         trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
 
         let original = rewrite(&objects, &trailer, &WriteOptions::default(), &table);
-        let base = crate::CosDocument::open(original.clone()).expect("the base opens");
+        let base = crate::written_support::authored("a catalog rewritten", &original);
 
         let mut changed = ObjectSet::new();
         changed.insert(2, Object::Int(42));
@@ -2154,6 +2155,7 @@ mod tests {
             false,
             None,
         );
+        crate::written_support::authored("a catalog and a number added by an update", &updated);
 
         assert!(
             updated.starts_with(&original),
@@ -2190,6 +2192,11 @@ mod tests {
         trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
 
         let updated = incremental_update(&original[..], &changed, &trailer, 0, &table, false, None);
+        crate::written_support::rewritten(
+            "a number added to a document with no section",
+            &original[..],
+            &updated,
+        );
         let text = String::from_utf8_lossy(&updated);
         assert!(!text.contains("/Prev"), "no section to name: {text}");
     }
@@ -2343,6 +2350,7 @@ mod tests {
         };
         let pooled = rewrite(&objects, &trailer, &four, &table);
         let ran = taken();
+        crate::written_support::authored("forty streams compressed on four threads", &pooled);
         assert_eq!(ran.len(), 40, "every stream was made ready on the pool");
         if cfg!(target_family = "wasm") {
             assert!(ran.iter().all(|on_worker| !on_worker), "the caller ran all");
@@ -2412,6 +2420,8 @@ mod tests {
                 .0
             };
             let serial_update = update(Parallelism::Serial);
+            crate::written_support::authored("streams compressed serially", &serial);
+            crate::written_support::authored("streams updated serially", &serial_update);
             for threads in [1usize, 2, 3, 4, 7] {
                 let pooled = rewrite(
                     &objects,
@@ -2467,6 +2477,7 @@ mod objstm_tests {
             ..WriteOptions::default()
         };
         let bytes = rewrite(&objects, &trailer, &options, &table);
+        crate::written_support::authored("a catalog and a number packed", &bytes);
 
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("/ObjStm"), "a container was written");

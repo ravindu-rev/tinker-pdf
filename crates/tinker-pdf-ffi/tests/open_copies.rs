@@ -15,6 +15,11 @@
 //! unchanged and reads no document byte. One test, so nothing else in the
 //! process allocates while it measures.
 
+// The validate-on-save helper's facade reading: the C ABI's tests reach the
+// facade and nothing under it.
+#[path = "../../tinker-pdf/tests/written_support/mod.rs"]
+mod written_support;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -79,7 +84,8 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 /// A page drawing at least a mebibyte of content: one document, few objects,
-/// and almost every byte its content's.
+/// and almost every byte its content's. Held as written before anything is
+/// measured, so the door's own reading allocates outside the measurement.
 fn a_mebibyte_document() -> Vec<u8> {
     let mut content = Vec::new();
     while content.len() < 1 << 20 {
@@ -89,7 +95,9 @@ fn a_mebibyte_document() -> Vec<u8> {
     builder.add_page(200.0, 100.0, |page| {
         page.raw(&content);
     });
-    builder.finish()
+    let bytes = builder.finish();
+    written_support::authored("a mebibyte of content on one page", &bytes);
+    bytes
 }
 
 /// **Opening bytes copies them once.** Over a mebibyte document,

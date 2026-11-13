@@ -829,7 +829,9 @@ two readings open the bytes and hand it their findings — the cos reading
 beside it, for the cos crate's tests, and the facade reading in
 `crates/tinker-pdf/tests/written_support/mod.rs`, for the facade's, the C
 ABI's and the CLI's — and a `src` test module reaches its crate's reading
-through a `#[cfg(test)]` self-alias in that crate's `lib.rs`. The profile
+through one `#[cfg(test)]` declaration of it in that crate, which the cos
+crate and the facade can make only through a `#[cfg(test)]` self-alias in
+their `lib.rs`. The profile
 validators are the facade's, so the cos reading refuses a document that
 might claim a profile and names the facade tree.
 `crates/tinker-pdf/tests/written_helper.rs` holds each door to its form, and

@@ -9798,7 +9798,10 @@ mod tests {
             "a paragraph of {SPANS} spans looked at {looked} kids to place them"
         );
 
-        let doc = CosDocument::open(builder.finish()).expect("the built document opens");
+        let doc = crate::written_support::authored(
+            "an element of many kids costs its kids",
+            builder.finish(),
+        );
         let page = crate::pages::at(&doc, 0).expect("a page");
         let content =
             String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &page)).into_owned();
@@ -9842,6 +9845,10 @@ mod tests {
             });
         });
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "a tree of many keyed elements costs its elements",
+            &bytes,
+        );
         let looked = KIDS_LOOKED.with(core::cell::Cell::get);
         let spans = usize::try_from(SPANS).unwrap_or(usize::MAX);
         assert!(
@@ -9948,7 +9955,10 @@ mod tests {
             }
         }
         builder.push_page(page);
-        CosDocument::open(builder.finish()).expect("the built document opens");
+        crate::written_support::authored(
+            "next order is the greatest order among the kids",
+            builder.finish(),
+        );
     }
 
     /// 7.3.4.2's three escapes, on the operator a caller writes its **own**
@@ -9976,6 +9986,10 @@ mod tests {
             );
         });
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "encoded text escapes the three characters a literal string cannot hold",
+            &bytes,
+        );
         let doc = CosDocument::open(bytes).expect("the built document opens");
         assert_eq!(
             doc.ladder_level(),
@@ -10002,6 +10016,7 @@ mod tests {
             });
         }
         let bytes = builder.finish();
+        crate::written_support::authored("a built document opens and reports its pages", &bytes);
 
         let doc = CosDocument::open(bytes).expect("the built document opens");
         assert_eq!(crate::pages::count(&doc), 3);
@@ -10025,6 +10040,7 @@ mod tests {
             page.text(b"F0", 12.0, 10.0, 50.0, "Hello");
         });
         let bytes = builder.finish();
+        crate::written_support::authored("built pages carry their geometry and content", &bytes);
 
         let doc = CosDocument::open(bytes).expect("it opens");
         let pages = crate::pages::collect(&doc);
@@ -10059,6 +10075,10 @@ mod tests {
             page.fill_rect(0.0, 0.0, 612.0, 792.0, 0.5);
         });
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "a page carries the boxes it was given and no others",
+            &bytes,
+        );
 
         let doc = CosDocument::open(bytes).expect("it opens");
         let pages = crate::pages::collect(&doc);
@@ -10112,6 +10132,7 @@ mod tests {
             page.text(b"F0", 12.0, 10.0, 50.0, r"a (nested) string\here");
         });
         let bytes = builder.finish();
+        crate::written_support::authored("strings with parentheses survive the round trip", &bytes);
 
         let doc = CosDocument::open(bytes).expect("it opens");
         let pages = crate::pages::collect(&doc);
@@ -10163,6 +10184,10 @@ mod tests {
             },
         ]));
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "a built outline round trips with explicit destinations",
+            &bytes,
+        );
 
         let doc = CosDocument::open(bytes).expect("it opens");
         let items = crate::outline::outline(&doc);
@@ -10201,6 +10226,7 @@ mod tests {
         builder.set_info(b"Title", "A Built Document");
         builder.set_info(b"Producer", "tinker-pdf");
         let bytes = builder.finish();
+        crate::written_support::authored("metadata round trips", &bytes);
 
         let doc = CosDocument::open(bytes).expect("it opens");
         let meta = crate::outline::metadata(&doc);
@@ -10211,6 +10237,7 @@ mod tests {
     #[test]
     fn an_empty_document_is_still_a_document() {
         let bytes = DocumentBuilder::new().finish();
+        crate::written_support::authored("an empty document is still a document", &bytes);
         let doc = CosDocument::open(bytes).expect("even an empty one opens");
         assert_eq!(crate::pages::count(&doc), 0);
         assert!(doc.catalog().is_some());
@@ -10239,7 +10266,10 @@ mod image_tests {
             page.image(b"Im0", 10.0, 10.0, 50.0, 50.0);
         });
 
-        let doc = CosDocument::open(builder.finish()).expect("it opens");
+        let doc = crate::written_support::authored(
+            "a raw image round trips through the reader",
+            builder.finish(),
+        );
         let pages = crate::pages::collect(&doc);
         let content = crate::pages::content_bytes(&doc, pages.first().expect("a page"));
         let text = String::from_utf8_lossy(&content);
@@ -10262,7 +10292,10 @@ mod image_tests {
         ));
         builder.add_page(10.0, 10.0, |_| {});
 
-        let doc = CosDocument::open(builder.finish()).expect("it opens");
+        let doc = crate::written_support::authored(
+            "an images samples survive the round trip",
+            builder.finish(),
+        );
         // The image is the only stream with /Subtype /Image.
         let subtype = doc.intern(b"Subtype");
         let found = (1..20u32).find_map(|num| {
@@ -10300,6 +10333,7 @@ mod image_tests {
         builder.add_page(10.0, 10.0, |_| {});
 
         let bytes = builder.finish();
+        crate::written_support::authored("a jpeg is embedded without being re encoded", &bytes);
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("/DCTDecode"), "kept as JPEG");
         assert!(
@@ -10340,6 +10374,10 @@ mod image_tests {
         assert!(builder.add_image(b"Im", &ImageData::Compressed(jpx())));
         builder.add_page(1.0, 9.0, |page| page.image(b"Im", 0.0, 0.0, 1.0, 9.0));
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "a jpx image is placed without a depth or a space",
+            &bytes,
+        );
         assert!(
             bytes.windows(BODY.len()).any(|w| w == BODY),
             "the bytes are placed as they are"
@@ -10654,6 +10692,7 @@ mod image_tests {
         builder.add_page(10.0, 10.0, |_| {});
 
         let bytes = builder.finish();
+        crate::written_support::authored("a refused image leaves no orphan stream behind", &bytes);
         assert!(
             !bytes
                 .windows(33)
@@ -10697,6 +10736,10 @@ mod image_tests {
         builder.add_page(64.0, 64.0, |page| page.image(b"Im0", 0.0, 0.0, 64.0, 64.0));
 
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "a compressed image with no filter is placed as raw samples",
+            &bytes,
+        );
         assert!(
             bytes.windows(samples.len()).any(|w| w == samples),
             "the samples are in the file verbatim"
@@ -10915,7 +10958,7 @@ mod graphics_tests {
     }
 
     fn opened(builder: DocumentBuilder) -> CosDocument {
-        CosDocument::open(builder.finish()).expect("the built document opens")
+        crate::written_support::authored("a built document", builder.finish())
     }
 
     /// The content stream of the first page, as text.
@@ -11482,6 +11525,10 @@ mod graphics_tests {
         });
 
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "a form that cannot be one is refused and leaves nothing behind",
+            &bytes,
+        );
         assert!(
             !bytes.windows(11).any(|w| w == b"the content"),
             "a refused form wrote a stream anyway"
@@ -12055,6 +12102,7 @@ mod graphics_tests {
             assert!(!page.set_stroke_pattern(b"P"));
         });
         let bytes = builder.finish();
+        crate::written_support::authored("a tiling pattern that cannot tile is refused", &bytes);
         assert_eq!(
             bytes.windows(8).filter(|w| *w == b"the cell").count(),
             1,
@@ -12210,6 +12258,10 @@ mod graphics_tests {
             assert!(!page.set_fill_pattern(b"P"));
         });
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "a shading pattern that describes no gradient is refused and writes nothing",
+            &bytes,
+        );
         assert_eq!(
             bytes.windows(13).filter(|w| *w == b"/PatternType ").count(),
             0,
@@ -12891,7 +12943,10 @@ mod graphics_tests {
             assert!(page.glyphs(b"C0", 12.0, 1.0, 1.0, &[Glyph { id: 2, text: "A" }]));
         });
 
-        let plain = CosDocument::open(builder.finish()).expect("it opens");
+        let plain = crate::written_support::authored(
+            "the new streams declare no filter and the writer compresses them",
+            builder.finish(),
+        );
         for (kind, name) in [(&b"XObject"[..], &b"Fm0"[..]), (b"Pattern", b"P0")] {
             let dict = resource(&plain, kind, name);
             assert!(
@@ -12919,6 +12974,7 @@ mod graphics_tests {
             compress: true,
             ..crate::WriteOptions::default()
         });
+        crate::written_support::authored("the new streams declare no filter and the writer compresses them, rewritten compressed", &packed);
         let reopened = CosDocument::open(packed).expect("it reopens");
         let form = resource(&reopened, b"XObject", b"Fm0");
         assert!(
@@ -12938,7 +12994,7 @@ mod tint_tests {
     use crate::CosDocument;
 
     fn opened(builder: DocumentBuilder) -> CosDocument {
-        CosDocument::open(builder.finish()).expect("the built document opens")
+        crate::written_support::authored("a built document", builder.finish())
     }
 
     /// The colour space registered under `name` on the first page, resolved.
@@ -13331,6 +13387,10 @@ mod tint_tests {
             assert!(page.set_fill_tint(b"S", &[0.5]));
         });
         let bytes = builder.finish();
+        crate::written_support::authored(
+            "a sampled function writes its table and refuses one that does not add up",
+            &bytes,
+        );
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("/FunctionType 0"), "{text}");
         assert!(text.contains("/BitsPerSample 16"), "{text}");
@@ -13516,7 +13576,7 @@ mod layer_tests {
     use crate::CosDocument;
 
     fn opened(builder: DocumentBuilder) -> CosDocument {
-        CosDocument::open(builder.finish()).expect("the built document opens")
+        crate::written_support::authored("a built document", builder.finish())
     }
 
     fn content(doc: &CosDocument) -> String {
@@ -13784,7 +13844,7 @@ mod cie_tests {
     type Entry = (Vec<u8>, Vec<f64>);
 
     fn opened(builder: DocumentBuilder) -> CosDocument {
-        CosDocument::open(builder.finish()).expect("the built document opens")
+        crate::written_support::authored("a built document", builder.finish())
     }
 
     fn content(doc: &CosDocument) -> String {

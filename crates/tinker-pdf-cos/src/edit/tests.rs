@@ -3,6 +3,7 @@ use crate::build::DocumentBuilder;
 use crate::form;
 use crate::pages::{self, Rect};
 use crate::write::{WriteMode, WriteOptions};
+use crate::written_support::{authored, rewritten};
 
 fn document(pages: usize) -> Arc<CosDocument> {
     let mut builder = DocumentBuilder::new();
@@ -12,14 +13,22 @@ fn document(pages: usize) -> Arc<CosDocument> {
             page.text(b"F0", 12.0, 10.0, 50.0, &format!("page {i}"));
         });
     }
-    Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    Arc::new(authored("pages of text", builder.finish()))
 }
 
+/// The edits saved with `mode`, held as a save of the bytes the editor was
+/// opened over, and read again from the saved bytes.
+#[track_caller]
 fn reopen(editor: &DocumentEditor, mode: WriteMode) -> CosDocument {
     let bytes = editor.save(&WriteOptions {
         mode,
         ..WriteOptions::default()
     });
+    rewritten(
+        &format!("an edit saved as {mode:?}"),
+        editor.document().bytes(),
+        &bytes,
+    );
     CosDocument::open(bytes).expect("the saved document opens")
 }
 
@@ -67,6 +76,11 @@ fn numbered_to_the_ceiling() -> Arc<CosDocument> {
 fn a_rewrite_carries_the_objects_the_document_has() {
     let editor = DocumentEditor::new(numbered_to_the_ceiling());
     let bytes = editor.save(&WriteOptions::default());
+    rewritten(
+        "four objects numbered to the ceiling, rewritten",
+        editor.document().bytes(),
+        &bytes,
+    );
     assert!(
         bytes.len() < 2048,
         "a four-object rewrite is {} bytes",
@@ -92,6 +106,11 @@ fn a_packed_rewrite_carries_the_objects_the_document_has() {
         compress: true,
         ..WriteOptions::default()
     });
+    rewritten(
+        "four objects numbered to the ceiling, rewritten packed",
+        editor.document().bytes(),
+        &bytes,
+    );
     assert!(
         bytes.len() < 2048,
         "a four-object rewrite is {} bytes",
@@ -307,6 +326,7 @@ fn an_incremental_save_keeps_the_original_bytes() {
         mode: WriteMode::Incremental,
         ..WriteOptions::default()
     });
+    rewritten("a page turned by an update", &original, &saved);
 
     assert!(
         saved.starts_with(&original),
@@ -364,6 +384,7 @@ fn an_update_section_is_written_without_copying_the_original() {
             whole == [&bytes[..], &section[..]].concat(),
             "the save is the document's bytes and then the section"
         );
+        rewritten("a page turned and a number added", &bytes, &whole);
 
         let saved = CosDocument::open(whole).expect("the update reopens");
         assert_eq!(
@@ -383,7 +404,9 @@ fn an_update_section_is_written_without_copying_the_original() {
     let _ = crate::write::count::take();
     let section = editor.save_update(&options);
     assert_eq!(crate::write::count::take(), 0);
-    assert!(editor.save(&options) == [doc.bytes(), &section[..]].concat());
+    let whole = editor.save(&options);
+    authored("an update that changed nothing", &whole);
+    assert!(whole == [doc.bytes(), &section[..]].concat());
 }
 
 /// `changed_numbers` names exactly the objects the update section writes:

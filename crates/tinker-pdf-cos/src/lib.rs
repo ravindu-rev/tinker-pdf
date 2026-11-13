@@ -191,3 +191,9 @@ pub use xref::{Revision, XrefEntry, XrefTable};
 // (`docs/design/validate-on-save.md`).
 #[cfg(test)]
 extern crate self as tinker_pdf_cos;
+
+// The cos reading itself, compiled once for this crate's own test modules,
+// each of which holds what it writes through `crate::written_support`.
+#[cfg(test)]
+#[path = "../tests/written_support/mod.rs"]
+mod written_support;

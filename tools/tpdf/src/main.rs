@@ -3768,9 +3768,18 @@ fn filter_names(cos: &CosDocument, value: &Object) -> Vec<Vec<u8>> {
     }
 }
 
+// The validate-on-save helper's facade reading, compiled once for this
+// crate's own test modules, each of which holds what it writes through
+// `crate::written_support` (`docs/design/validate-on-save.md`). The CLI
+// reaches the facade and nothing under it, which is what the reading names.
+#[cfg(test)]
+#[path = "../../../crates/tinker-pdf/tests/written_support/mod.rs"]
+mod written_support;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::written_support::{authored, expecting, Expected};
     use tinker_pdf::{DocumentBuilder, ImageData, PdfString};
 
     /// The status file states its sizes in what it calls `kB` and means KiB;
@@ -3829,7 +3838,9 @@ mod tests {
         builder.add_page(200.0, 100.0, |page| {
             page.text(b"F0", 12.0, 10.0, 50.0, "every part marked");
         });
-        let record = probe_record(&builder.finish(), &["--dpi", "72"], "marks");
+        let bytes = builder.finish();
+        authored("a page of text, every part marked", &bytes);
+        let record = probe_record(&bytes, &["--dpi", "72"], "marks");
         let peak = record
             .iter()
             .find_map(|line| line.strip_prefix("peak "))
@@ -4001,7 +4012,9 @@ mod tests {
         builder.add_page(200.0, 100.0, |page| {
             page.text(b"F0", 12.0, 10.0, 50.0, "hello");
         });
-        Document::open(builder.finish()).expect("it opens")
+        let bytes = builder.finish();
+        authored("a page of text with a title", &bytes);
+        Document::open(bytes).expect("it opens")
     }
 
     /// A document of `count` pages, each doing a different amount of work.
@@ -4018,7 +4031,9 @@ mod tests {
                 }
             });
         }
-        Document::open(builder.finish()).expect("it opens")
+        let bytes = builder.finish();
+        authored("pages of unequal work", &bytes);
+        Document::open(bytes).expect("it opens")
     }
 
     /// An empty directory of this test's own, named after it.
@@ -4186,7 +4201,9 @@ mod tests {
             });
         }
 
-        let document = Document::open(builder.finish()).expect("it opens");
+        let bytes = builder.finish();
+        authored("pages of text, an image and squares", &bytes);
+        let document = Document::open(bytes).expect("it opens");
         let mut editor = document.editor();
         for n in 0..count {
             let left = 40.0 + f64::from(n % 5);
@@ -4223,7 +4240,12 @@ mod tests {
                 "page {n} takes its annotation"
             );
         }
-        editor.save(&WriteOptions::default())
+        let saved = editor.save(&WriteOptions::default());
+        authored(
+            "pages of text, an image, squares and an annotation each",
+            &saved,
+        );
+        saved
     }
 
     /// What `tpdf render --out DIR --jobs N --quiet PATH` is given, parsed.
@@ -4521,7 +4543,9 @@ mod tests {
                 page.text(b"F0", 10.0, x, y, text);
             }
         });
-        Document::open(builder.finish()).expect("it opens")
+        let bytes = builder.finish();
+        authored("two columns and a table", &bytes);
+        Document::open(bytes).expect("it opens")
     }
 
     /// **`--order inferred` reads down each column and says so**; the stream
@@ -4599,7 +4623,9 @@ mod tests {
                 }
             });
         }
-        let doc = Document::open(builder.finish()).expect("it opens");
+        let bytes = builder.finish();
+        authored("an untagged book of two columns", &bytes);
+        let doc = Document::open(bytes).expect("it opens");
         assert!(doc.structure().is_none(), "the book is untagged");
         let pages = [4, 5, 0, 1, 2, 2, 3];
         let printed: Vec<(String, String)> = inferred_texts(&doc, &pages).collect();
@@ -4644,7 +4670,9 @@ mod tests {
                 });
             }
         });
-        let doc = Document::open(builder.finish()).expect("it opens");
+        let bytes = builder.finish();
+        authored("a tagged page of three paragraphs", &bytes);
+        let doc = Document::open(bytes).expect("it opens");
         let page = doc.page(0).expect("a page");
         let structured = page.structured_text().expect("a tagged page");
         let (stated, label) = page_text(&page, 0, ReadingOrder::Stated).expect("a stated order");
@@ -4826,8 +4854,26 @@ mod tests {
             builder.add_page(200.0, 100.0, |page| {
                 page.text(b"F0", 12.0, 10.0, 50.0, "hello");
             });
+            let bytes = builder.finish();
+            // The claim's near miss: a page drawn in a face it does not embed,
+            // with no output intent, no trim box and no `/Trapped`, which is
+            // what the check exists to refuse. Without the claim it is clean.
+            let expected = match claim {
+                Some(_) => vec![
+                    Expected::PdfX(tinker_pdf::FindingKind::TrappedMissing),
+                    Expected::PdfX(tinker_pdf::FindingKind::TrimOrArtBoxMissing),
+                    Expected::PdfX(tinker_pdf::FindingKind::OutputIntentMissing {
+                        subtype: "GTS_PDFX".to_string(),
+                    }),
+                    Expected::PdfX(tinker_pdf::FindingKind::FontNotEmbedded {
+                        subtype: "Type1".to_string(),
+                    }),
+                ],
+                None => Vec::new(),
+            };
+            expecting(name, &bytes, &expected);
             let path = format!("{dir}/{name}.pdf");
-            std::fs::write(&path, builder.finish()).expect("written");
+            std::fs::write(&path, bytes).expect("written");
             path
         };
         let check_pdfx = |path: String| {
@@ -5048,7 +5094,9 @@ mod tests {
                 page.raw(&content);
             });
         }
-        builder.finish()
+        let bytes = builder.finish();
+        authored("heavy pages", &bytes);
+        bytes
     }
 
     /// A tree of `pages` pages between two fillers of `filler` bytes each, so a
@@ -5245,11 +5293,11 @@ trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
         builder.add_page(200.0, 100.0, |page| {
             page.text(b"F0", 12.0, 10.0, 50.0, "on demand");
         });
-        [
-            b"leading bytes, not a header\n".as_slice(),
-            &builder.finish(),
-        ]
-        .concat()
+        // What the builder wrote is held; the bytes in front of it are the
+        // damage the reader is tested on, which no writer wrote.
+        let built = builder.finish();
+        authored("a page of text", &built);
+        [b"leading bytes, not a header\n".as_slice(), &built].concat()
     }
 
     /// Three pages saved linearized, the root `/Pages` node carrying `/Rotate
@@ -5261,7 +5309,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
                 page.raw(b"0 0 10 10 re f");
             });
         }
-        let doc = Document::open(builder.finish()).expect("it opens");
+        let doc = authored("three pages", builder.finish());
         let mut editor = doc.editor();
         if rotated {
             let pages = editor.intern(b"Pages");
@@ -5275,23 +5323,39 @@ trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
             tree.insert(editor.intern(b"Rotate"), Object::Int(90));
             editor.put(root, Object::Dict(tree));
         }
-        editor.save(&WriteOptions {
+        let saved = editor.save(&WriteOptions {
             mode: WriteMode::Rewrite,
             linearize: true,
             ..WriteOptions::default()
-        })
+        });
+        authored("three pages, linearized", &saved);
+        saved
     }
 
     /// [`linearized`] with an update appended, which leaves the length its
     /// linearization states behind.
+    ///
+    /// Damage on purpose, and held as exactly that: the parameter dictionary
+    /// still states the linearized file's length as `/L`, and its `/T` the
+    /// main table, which the update's `/Prev` chain no longer reaches second
+    /// — the update is first, then the first-page table it chains to.
     fn updated() -> Vec<u8> {
         let doc = Document::open(linearized(false)).expect("it opens");
         let mut editor = doc.editor();
         let _ = editor.set_title("updated");
-        editor.save(&WriteOptions {
+        let saved = editor.save(&WriteOptions {
             mode: WriteMode::Incremental,
             ..WriteOptions::default()
-        })
+        });
+        expecting(
+            "a linearized file updated since",
+            &saved,
+            &[
+                Expected::Defect(tinker_pdf::DefectKind::LinearizedParameterWrong { entry: "/L" }),
+                Expected::Defect(tinker_pdf::DefectKind::LinearizedParameterWrong { entry: "/T" }),
+            ],
+        );
+        saved
     }
 
     /// **On demand, the buffer's lines.** Over four megabytes of four heavy

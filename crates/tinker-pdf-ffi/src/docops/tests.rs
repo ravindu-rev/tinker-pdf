@@ -3,6 +3,7 @@
 //! must save **the same bytes**, and a sanitise must report the same entries.
 
 use super::*;
+use crate::written_support::rewritten;
 use crate::{
     tpdf_buffer_data, tpdf_buffer_free, tpdf_document_editor, tpdf_document_free,
     tpdf_document_open, tpdf_editor_free, tpdf_editor_save, tpdf_last_error_message,
@@ -251,6 +252,7 @@ fn operate_through_the_abi(bytes: &[u8]) -> Vec<u8> {
 
     let saved = save(editor);
     unsafe { tpdf_editor_free(editor) };
+    rewritten("every document operation, through the C ABI", bytes, &saved);
     saved
 }
 
@@ -301,7 +303,13 @@ fn operate_through_the_facade(bytes: &[u8]) -> Vec<u8> {
         open: false,
         children: Vec::new(),
     }]));
-    editor.save(&WriteOptions::default())
+    let saved = editor.save(&WriteOptions::default());
+    rewritten(
+        "every document operation, through the facade",
+        bytes,
+        &saved,
+    );
+    saved
 }
 
 #[test]
@@ -316,8 +324,7 @@ fn the_document_operations_through_the_abi_are_byte_equal_to_the_facade() {
 
     // And the operations did what they say, read back through the facade:
     // the equality above is about something rather than about two no-ops.
-    let document = Document::open(abi).expect("the saved document opens");
-    assert!(document.validate().is_empty(), "{:?}", document.validate());
+    let document = rewritten("every document operation, read back", &fixture, abi);
     assert_eq!(document.page_labels()[..3], ["i", "ii", "A-1"]);
     assert_eq!(document.attachments().len(), 1);
     assert_eq!(
@@ -530,6 +537,7 @@ fn a_date_field_past_a_byte_is_a_bad_argument_and_a_byte_that_is_no_date_is_refu
     let fixture = outline_fixture();
     let editor = editor_over(&fixture);
     let before = save(editor);
+    rewritten("the outline fixture, saved untouched", &fixture, &before);
     let name = CString::new("dated.txt").expect("no nul");
     let data = b"x";
 
@@ -611,7 +619,9 @@ fn a_date_field_past_a_byte_is_a_bad_argument_and_a_byte_that_is_no_date_is_refu
             "attach_file, {field} {value}"
         );
     }
-    assert_eq!(save(editor), before, "no refused date wrote anything");
+    let after = save(editor);
+    rewritten("the outline fixture, every date refused", &fixture, &after);
+    assert_eq!(after, before, "no refused date wrote anything");
     unsafe { tpdf_editor_free(editor) };
 }
 
@@ -619,7 +629,7 @@ fn a_date_field_past_a_byte_is_a_bad_argument_and_a_byte_that_is_no_date_is_refu
 /// JavaScript open action, a URI link, an attachment and `/Info`.
 fn hazardous() -> Vec<u8> {
     let operated = operate_through_the_facade(&outline_fixture());
-    let document = Document::open(operated).expect("opens");
+    let document = Document::open(operated.clone()).expect("opens");
     let mut editor = document.editor();
     let (open_action, s, js, javascript) = (
         editor.intern(b"OpenAction"),
@@ -636,7 +646,13 @@ fn hazardous() -> Vec<u8> {
     assert!(editor.update_catalog(|catalog| {
         catalog.insert(open_action, tinker_pdf::Object::Dict(action));
     }));
-    editor.save(&WriteOptions::default())
+    let saved = editor.save(&WriteOptions::default());
+    rewritten(
+        "the operated fixture, given a script to open with",
+        &operated,
+        &saved,
+    );
+    saved
 }
 
 #[test]
@@ -646,7 +662,13 @@ fn a_sanitise_reports_through_the_abi_what_the_facade_reports() {
         let document = Document::open(bytes.clone()).expect("opens");
         let mut editor = document.editor();
         let report = editor.sanitise(&Sanitise::ALL);
-        (report, editor.save(&WriteOptions::default()))
+        let saved = editor.save(&WriteOptions::default());
+        rewritten(
+            "the hazardous fixture, sanitised by the facade",
+            &bytes,
+            &saved,
+        );
+        (report, saved)
     };
     assert!(
         !facade.0.is_empty(),
@@ -665,11 +687,13 @@ fn a_sanitise_reports_through_the_abi_what_the_facade_reports() {
         unsafe { tpdf_editor_sanitise(editor, &all, &mut report) },
         TpdfStatus::Ok
     );
-    assert_eq!(
-        save(editor),
-        facade.1,
-        "the sanitised bytes are the facade's"
+    let saved = save(editor);
+    rewritten(
+        "the hazardous fixture, sanitised through the C ABI",
+        &bytes,
+        &saved,
     );
+    assert_eq!(saved, facade.1, "the sanitised bytes are the facade's");
     unsafe { tpdf_editor_free(editor) };
 
     let expected = &facade.0;

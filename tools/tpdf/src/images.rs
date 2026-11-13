@@ -382,7 +382,9 @@ mod tests {
             page.image(b"Im2", 0.0, 0.0, 40.0, 20.0);
             page.image(b"Im3", 50.0, 0.0, 20.0, 10.0);
         });
-        Document::open(builder.finish()).expect("the built document opens")
+        let bytes = builder.finish();
+        crate::written_support::authored("a page of every kind of image", &bytes);
+        Document::open(bytes).expect("the built document opens")
     }
 
     /// The listing names each image once with its geometry, depth, codec and

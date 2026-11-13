@@ -61,33 +61,7 @@ use std::path::Path;
 ///
 /// Every change to this list is a deletion: a file leaves it in the commit
 /// that migrates it, and nothing joins it.
-pub const PENDING: &[&str] = &[
-    "crates/tinker-pdf-cos/src/appearance.rs",
-    "crates/tinker-pdf-cos/src/build.rs",
-    "crates/tinker-pdf-cos/src/dedup.rs",
-    "crates/tinker-pdf-cos/src/doc.rs",
-    "crates/tinker-pdf-cos/src/edit/sanitise.rs",
-    "crates/tinker-pdf-cos/src/edit/save.rs",
-    "crates/tinker-pdf-cos/src/edit/tests.rs",
-    "crates/tinker-pdf-cos/src/png_embed/tests.rs",
-    "crates/tinker-pdf-cos/src/tiff_embed/tests.rs",
-    "crates/tinker-pdf-cos/src/validate/hints.rs",
-    "crates/tinker-pdf-cos/src/write.rs",
-    "crates/tinker-pdf-cos/tests/save_refusals.rs",
-    "crates/tinker-pdf-cos/tests/strict_validator.rs",
-    "crates/tinker-pdf-ffi/src/docops/tests.rs",
-    "crates/tinker-pdf-ffi/src/forms/tests.rs",
-    "crates/tinker-pdf-ffi/src/graphics/tests.rs",
-    "crates/tinker-pdf-ffi/src/lib.rs",
-    "crates/tinker-pdf-ffi/src/raw_enum_tests.rs",
-    "crates/tinker-pdf-ffi/src/read/tests.rs",
-    "crates/tinker-pdf-ffi/src/tagging/tests.rs",
-    "crates/tinker-pdf-ffi/tests/open_copies.rs",
-    "tools/tpdf/src/doubled_peak.rs",
-    "tools/tpdf/src/images.rs",
-    "tools/tpdf/src/main.rs",
-    "tools/tpdf/src/writing.rs",
-];
+pub const PENDING: &[&str] = &["crates/tinker-pdf-cos/tests/strict_validator.rs"];
 
 /// The helper's own files, which are never a unit and never read into one.
 pub const HELPER: [&str; 3] = [
@@ -408,7 +382,9 @@ fn units<'a>(
 
     let mut units = BTreeMap::new();
     for (path, source) in sources {
-        let whole = (in_tests(path) && !HELPER.contains(path)) || module_files.contains(path);
+        // The helper's own files are never a unit, even where a crate root
+        // declares the reading its `src` test modules hold through.
+        let whole = !HELPER.contains(path) && (in_tests(path) || module_files.contains(path));
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         if whole {
             ranges.push((0, source.code.len()));
@@ -1361,6 +1337,46 @@ mod tests {
         // The file it includes is not a unit of its own, and is pending under
         // the unit that reads it.
         assert!(judge(&files, &["crates/x/tests/counts.rs"]).is_empty());
+    }
+
+    /// A crate root that declares a reading for its `src` test modules, by a
+    /// `#[cfg(test)]` declaration, makes no unit of the helper's file: the
+    /// helper names writers — the facade reading reads a conversion's report —
+    /// and is never judged as a test. The test modules that hold through the
+    /// declaration are units as ever, and one that writes and holds nothing
+    /// still fails.
+    #[test]
+    fn a_crate_root_declaring_the_helper_makes_no_unit_of_it() {
+        let reading = "pub fn synthesised(d: Document) -> bool { d.archive().is_some() }\n";
+        let root = |test_module: &str| {
+            format!(
+                "#[cfg(test)]\n\
+                 #[path = \"../../tinker-pdf/tests/written_support/mod.rs\"]\n\
+                 mod written_support;\n\
+                 #[cfg(test)]\n\
+                 mod tests {{\n    {test_module}\n}}\n"
+            )
+        };
+        let holding = root(
+            "fn t(b: DocumentBuilder) { crate::written_support::authored(\"x\", b.finish()); }",
+        );
+        let files = tree(&[
+            ("crates/tinker-pdf-ffi/src/lib.rs", holding.as_str()),
+            ("crates/tinker-pdf/tests/written_support/mod.rs", reading),
+        ]);
+        assert!(judge(&files, &[]).is_empty(), "{:?}", judge(&files, &[]));
+
+        let skipping = root("fn t(b: DocumentBuilder) { let _ = b.finish(); }");
+        let files = tree(&[
+            ("crates/tinker-pdf-ffi/src/lib.rs", skipping.as_str()),
+            ("crates/tinker-pdf/tests/written_support/mod.rs", reading),
+        ]);
+        let problems = judge(&files, &[]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with("crates/tinker-pdf-ffi/src/lib.rs:6:"),
+            "{problems:?}"
+        );
     }
 
     /// A pending entry that no longer writes fails, and so does one that names

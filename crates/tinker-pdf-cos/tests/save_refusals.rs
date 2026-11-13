@@ -4,14 +4,22 @@
 //! encryption lifts what the owner withheld from the user who opened it
 //! (7.6.4.2, Table 22). `DocumentEditor::check_save` and
 //! `DocumentEditor::check_decrypt` answer; the save doors do not ask.
+//!
+//! Every save here is held to the validate-on-save helper: its input read with
+//! the key the target was opened with, its output with the key it is sealed
+//! under. A save `check_save` refuses is damage the test writes on purpose,
+//! and is held to exactly what that damage is.
+
+mod written_support;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    AuthLevel, CosDocument, DocumentEditor, Encryption, Object, SaveRefusal, WriteMode,
+    AuthLevel, CosDocument, DefectKind, DocumentEditor, Encryption, Object, SaveRefusal, WriteMode,
     WriteOptions,
 };
+use written_support::{expecting, rewritten, Expected, Handed, Key, Locked};
 
 fn open(name: &str, password: Option<&str>) -> Arc<CosDocument> {
     open_bytes(fixture(name), password)
@@ -269,6 +277,58 @@ fn encrypted() -> WriteOptions {
     }
 }
 
+/// `bytes` as a door takes them: locked with `password` when there is one.
+fn handed<'k>(bytes: &[u8], password: Option<&'k str>) -> Handed<'k> {
+    match password {
+        Some(password) => Locked {
+            bytes: bytes.to_vec(),
+            key: Key::Password(password),
+        }
+        .into(),
+        None => bytes.into(),
+    }
+}
+
+/// The key a save with `options` seals its output under, for an input read
+/// with `input`: the encryption a rewrite is asked for, or none; and for an
+/// incremental update, which keeps its input's `/Encrypt` and reads no
+/// `WriteOptions::encryption`, the input's own.
+fn sealed_under<'a>(options: &'a WriteOptions, input: Option<&'a str>) -> Option<&'a str> {
+    match options.mode {
+        WriteMode::Rewrite => options
+            .encryption
+            .as_ref()
+            .map(|encryption| encryption.user_password.as_str()),
+        WriteMode::Incremental => input,
+    }
+}
+
+/// `saved`, a save of `editor` with `options`, held to the validate-on-save
+/// helper: the input read with `password`, the key the target was opened
+/// with, and the output with the key it is sealed under. A save `check_save`
+/// answers `Ok` to is held as a rewrite of its input; one it refuses as the
+/// damage it is, exactly `damage`.
+#[track_caller]
+fn hold(
+    label: &str,
+    editor: &DocumentEditor,
+    password: Option<&str>,
+    options: &WriteOptions,
+    answer: Result<(), SaveRefusal>,
+    saved: &[u8],
+    damage: &[Expected],
+) {
+    let output = handed(saved, sealed_under(options, password));
+    match answer {
+        Ok(()) => {
+            rewritten(label, handed(editor.document().bytes(), password), output);
+        }
+        Err(_) => {
+            expecting(label, output, damage);
+        }
+    }
+}
+
 /// A document that is not encrypted has nothing a save could undo, and
 /// nothing to decrypt.
 #[test]
@@ -398,31 +458,40 @@ fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_wit
         ..encrypted()
     };
 
+    // Each target with the password it was opened with, which is the key the
+    // door reads it with. The one opened without its password is read with
+    // the password it has: a door cannot read a locked file it is not given
+    // the key to, and what the editor never decrypted it wrote as it read it.
     let targets = [
-        ("a plain document", open("simple-text.pdf", None)),
+        ("a plain document", open("simple-text.pdf", None), None),
         (
             "an encrypted document opened without its password",
             open("encrypted-aes256.pdf", None),
+            Some("open-sesame"),
         ),
         (
             "an encrypted document opened with its password",
             open("encrypted-aes256.pdf", Some("open-sesame")),
+            Some("open-sesame"),
         ),
         (
             "an encrypted document whose streams' filter is /Identity",
             identity("StmF"),
+            Some("open-sesame"),
         ),
         (
             "an encrypted document whose strings' filter is /Identity",
             identity("StrF"),
+            Some("open-sesame"),
         ),
         (
             "an encrypted document whose AESV2 key is 40 bits",
             forty_bit_aesv2(),
+            Some("u"),
         ),
     ];
     let mut answers = Vec::new();
-    for (target, doc) in targets {
+    for (target, doc, password) in targets {
         let mut editor = DocumentEditor::new(doc);
         editor.import_page(&source, 0, 1).expect("imported");
         for (how, options) in [
@@ -436,6 +505,29 @@ fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_wit
         ] {
             let answer = editor.check_save(&options);
             let saved = editor.save(&options);
+            // What a refused save writes in the clear is plaintext the
+            // validator reads as any other bytes: an unfiltered content stream
+            // decrypted from plaintext is still a stream with no filter to
+            // refuse it, and the page copied in carries no string. So the
+            // damage it reads is the input's own structure an update keeps:
+            // the hand-built 40-bit document has no binary comment after its
+            // header, and an update keeps its header.
+            let damage = if target == "an encrypted document whose AESV2 key is 40 bits"
+                && options.mode == WriteMode::Incremental
+            {
+                vec![Expected::Defect(DefectKind::BinaryCommentMissing)]
+            } else {
+                Vec::new()
+            };
+            hold(
+                &format!("{target}, {how}"),
+                &editor,
+                password,
+                &options,
+                answer,
+                &saved,
+                &damage,
+            );
             if answer.is_ok() {
                 assert!(
                     !holds(&saved, &plaintext),
@@ -559,10 +651,13 @@ fn a_string_in_a_stream_dictionary_is_sealed_wherever_the_answer_is_ok() {
         linearize: true,
         ..encrypted()
     };
+    // Each case with the password its target was opened with, and the one
+    // its output is read with.
     let cases = [
         (
             "the source, rewritten with encryption",
             Arc::clone(&source),
+            Some("u"),
             encrypted(),
             "u",
             2,
@@ -570,6 +665,7 @@ fn a_string_in_a_stream_dictionary_is_sealed_wherever_the_answer_is_ok() {
         (
             "the source, rewritten linearized with encryption",
             Arc::clone(&source),
+            Some("u"),
             linearized.clone(),
             "u",
             2,
@@ -577,6 +673,7 @@ fn a_string_in_a_stream_dictionary_is_sealed_wherever_the_answer_is_ok() {
         (
             "the source, updated under its RC4 key",
             Arc::clone(&source),
+            Some("u"),
             incremental(),
             "u",
             2,
@@ -584,6 +681,7 @@ fn a_string_in_a_stream_dictionary_is_sealed_wherever_the_answer_is_ok() {
         (
             "an encrypted document opened with its password, updated",
             open("encrypted-aes256.pdf", Some("open-sesame")),
+            Some("open-sesame"),
             incremental(),
             "open-sesame",
             1,
@@ -591,6 +689,7 @@ fn a_string_in_a_stream_dictionary_is_sealed_wherever_the_answer_is_ok() {
         (
             "a plain document, rewritten with encryption",
             open("simple-text.pdf", None),
+            None,
             encrypted(),
             "u",
             1,
@@ -598,16 +697,24 @@ fn a_string_in_a_stream_dictionary_is_sealed_wherever_the_answer_is_ok() {
         (
             "a plain document, rewritten linearized with encryption",
             open("simple-text.pdf", None),
+            None,
             linearized,
             "u",
             1,
         ),
     ];
-    for (target, doc, options, password, pages) in cases {
+    for (target, doc, opened_with, options, password, pages) in cases {
         let mut editor = DocumentEditor::new(doc);
         editor.import_page(&source, 0, 1).expect("imported");
-        assert_eq!(editor.check_save(&options), Ok(()), "{target}");
+        let answer = editor.check_save(&options);
+        assert_eq!(answer, Ok(()), "{target}");
         let saved = editor.save(&options);
+        assert_eq!(
+            sealed_under(&options, opened_with),
+            Some(password),
+            "{target}: the output is read with the key it is sealed under"
+        );
+        hold(target, &editor, opened_with, &options, answer, &saved, &[]);
         assert!(
             !holds_string(&saved, DICTIONARY_SECRET),
             "{target}: Ok, and the saved file holds the string in the clear"

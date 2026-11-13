@@ -3,6 +3,7 @@
 //! document, and a refused call leaves it as if it had not been made.
 
 use super::*;
+use crate::written_support::authored;
 use crate::{
     tpdf_buffer_data, tpdf_buffer_free, tpdf_builder_add_base_font, tpdf_builder_begin_page,
     tpdf_builder_finish, tpdf_builder_free, tpdf_builder_new, tpdf_builder_push_page,
@@ -11,7 +12,7 @@ use crate::{
 };
 use std::ffi::{CStr, CString};
 use std::ptr;
-use tinker_pdf::{Document, DocumentBuilder};
+use tinker_pdf::DocumentBuilder;
 
 fn last_error() -> String {
     let pointer = unsafe { tpdf_last_error_message() };
@@ -27,6 +28,9 @@ fn ok(status: TpdfStatus) {
     assert_eq!(status, TpdfStatus::Ok, "{}", last_error());
 }
 
+/// What `builder` finishes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
 fn finish(builder: *mut TpdfBuilder) -> Vec<u8> {
     let mut buffer: *mut TpdfBuffer = ptr::null_mut();
     ok(unsafe { tpdf_builder_finish(builder, &mut buffer) });
@@ -35,6 +39,7 @@ fn finish(builder: *mut TpdfBuilder) -> Vec<u8> {
     let data = unsafe { tpdf_buffer_data(buffer, &mut len) };
     let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
     unsafe { tpdf_buffer_free(buffer) };
+    authored("a tagged document built through the C ABI", &bytes);
     bytes
 }
 
@@ -171,7 +176,9 @@ fn against_the_facade() -> Vec<u8> {
     two.text(b"F1", 12.0, 20.0, 40.0, "read first");
     assert!(two.close_tag());
     builder.push_page(two);
-    builder.finish()
+    let bytes = builder.finish();
+    authored("tagged writing, against the facade", &bytes);
+    bytes
 }
 
 #[test]
@@ -182,8 +189,7 @@ fn tagged_writing_builds_the_facades_bytes() {
         against_the_facade(),
         "the C ABI wrote a different document"
     );
-    let document = Document::open(ours).expect("the document reopens");
-    assert!(document.validate().is_empty());
+    let document = authored("tagged writing, through the C ABI", ours);
     let structure = document.structure().expect("the document is tagged");
     assert!(
         structure.warnings.is_empty(),

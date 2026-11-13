@@ -352,6 +352,16 @@ fn a_reading_past_the_tolerance_or_without_its_canvas_is_named() {
     );
 }
 
+/// **Each shape is a document this engine wrote**, held to the validate-on-save
+/// helper here rather than in the child: the child's resident set is the
+/// measurement, and the helper's own reading would run in the process it
+/// measures. The builds are deterministic, so these are the child's bytes.
+#[test]
+fn each_shape_is_held_as_written() {
+    crate::written_support::authored("one tagged A4 page of text over an image", one_page());
+    crate::written_support::authored("ten thousand A4 pages of a line each", many_pages());
+}
+
 #[test]
 fn a_report_is_found_after_the_harness_began_its_line() {
     let stdout = "running 1 test\ntest doubled_peak::doubled_peak_child ... \

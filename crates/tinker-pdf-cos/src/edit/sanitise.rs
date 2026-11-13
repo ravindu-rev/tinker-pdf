@@ -906,7 +906,7 @@ mod tests {
     fn editor() -> DocumentEditor {
         let mut builder = crate::build::DocumentBuilder::new();
         builder.add_page(10.0, 10.0, |_| {});
-        let doc = crate::doc::CosDocument::open(builder.finish()).expect("opens");
+        let doc = crate::written_support::authored("a blank page", builder.finish());
         DocumentEditor::new(std::sync::Arc::new(doc))
     }
 

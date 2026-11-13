@@ -4,6 +4,7 @@
 //! document exactly as if it had not been made.
 
 use super::*;
+use crate::written_support::authored;
 use crate::{
     tpdf_buffer_data, tpdf_buffer_free, tpdf_builder_add_base_font, tpdf_builder_add_image,
     tpdf_builder_begin_page, tpdf_builder_finish, tpdf_builder_free, tpdf_builder_new,
@@ -12,7 +13,7 @@ use crate::{
 };
 use std::ffi::{CStr, CString};
 use std::ptr;
-use tinker_pdf::{Document, ImageData, PageBuilder};
+use tinker_pdf::{ImageData, PageBuilder};
 
 fn last_error() -> String {
     let pointer = unsafe { tpdf_last_error_message() };
@@ -32,6 +33,9 @@ fn take_buffer(buffer: *mut TpdfBuffer) -> Vec<u8> {
     bytes
 }
 
+/// What `builder` finishes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
 fn finish(builder: *mut TpdfBuilder) -> Vec<u8> {
     let mut buffer = ptr::null_mut();
     assert_eq!(
@@ -41,7 +45,9 @@ fn finish(builder: *mut TpdfBuilder) -> Vec<u8> {
         last_error()
     );
     unsafe { tpdf_builder_free(builder) };
-    take_buffer(buffer)
+    let bytes = take_buffer(buffer);
+    authored("a document built through the C ABI", &bytes);
+    bytes
 }
 
 fn begin(builder: *mut TpdfBuilder) -> *mut TpdfPageBuilder {
@@ -318,7 +324,9 @@ fn against_the_facade() -> Vec<u8> {
     let mut page = builder.begin_page(200.0, 200.0);
     assert!(page.form(b"Fm0"));
     builder.push_page(page);
-    builder.finish()
+    let bytes = builder.finish();
+    authored("every graphics call, against the facade", &bytes);
+    bytes
 }
 
 #[test]
@@ -329,16 +337,7 @@ fn every_graphics_call_builds_the_facades_bytes() {
         against_the_facade(),
         "the C ABI wrote a different document"
     );
-    let document = Document::open(ours).expect("the document reopens");
-    assert!(
-        document.validate().is_empty(),
-        "{:?}",
-        document
-            .validate()
-            .iter()
-            .map(|d| d.kind.as_str())
-            .collect::<Vec<_>>()
-    );
+    let document = authored("every graphics call, through the C ABI", ours);
     assert_eq!(document.pdf_version(), "PDF 2.0");
     assert_eq!(document.page_count(), 2);
 }
@@ -679,11 +678,18 @@ fn null_and_spent_handles_are_refused_not_dereferenced() {
     unsafe { tpdf_builder_free(builder) };
 }
 
-/// Finishes without freeing the handle, for the spent-handle leg.
+/// Finishes without freeing the handle, for the spent-handle leg, and holds
+/// what it finished as [`finish`] does.
+#[track_caller]
 fn finish_keeping(builder: *mut TpdfBuilder) -> Vec<u8> {
     let mut buffer = ptr::null_mut();
     ok(unsafe { tpdf_builder_finish(builder, &mut buffer) });
-    take_buffer(buffer)
+    let bytes = take_buffer(buffer);
+    authored(
+        "a document built through the C ABI, its handle kept",
+        &bytes,
+    );
+    bytes
 }
 
 /// The numbers the hand-written bindings transcribe.

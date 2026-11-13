@@ -118,19 +118,27 @@ How each tree reaches it:
   readings declare the policy with an explicit `#[path]`, which resolves
   from the reading's own directory in whatever context the reading is
   itself included.
-- **The C ABI's and the CLI's test modules**: the facade reading, by
-  `#[path]`. A `#[path]` inside an inline `mod tests { }` resolves from the
-  file's directory with a directory added for each enclosing inline module,
-  and, in a file that is not a `lib.rs`, `main.rs` or `mod.rs`, one named
-  after the file before them — the reference's rule for path attributes
-  inside inline module blocks — so from `tools/tpdf/src/writing.rs`'s test
-  module the include climbs from `src/writing/tests/`.
+- **The C ABI's and the CLI's test modules**: the facade reading, declared
+  once in each crate's root by `#[cfg(test)]` and `#[path]` —
+  `crates/tinker-pdf-ffi/src/lib.rs` and `tools/tpdf/src/main.rs`, each just
+  before the root's own test module — and reached from every test module of
+  the crate as `crate::written_support`. The C ABI's integration test takes
+  it by `#[path]` as a facade test would.
 - **The `src` test modules of the cos crate and of the facade**: the two
   crates' `lib.rs` carry `#[cfg(test)] extern crate self as tinker_pdf_cos;`
   and `#[cfg(test)] extern crate self as tinker_pdf;`, so a reading's paths
   resolve to the crate itself in its own unit-test build and nowhere else.
   Each stands after every item but the file's own test module, so no line a
-  document cites in either file moved to make room for it.
+  document cites in either file moved to make room for it. The cos crate's
+  `lib.rs` then declares the cos reading once, by `#[cfg(test)]` and
+  `#[path]`, after the self-alias, and every test module of the crate holds
+  through `crate::written_support`; the facade's hold through `subset.rs`'s
+  `#[cfg(test)]` module `tests_support`, which declares the facade reading by
+  `#[path]`.
+
+A `#[cfg(test)]` declaration of the helper's file makes no unit of it:
+`cargo xtask written` never judges the helper's own files, wherever they are
+declared.
 
 A packaged crate's tests therefore name a file outside the package. That is
 already so — `crates/tinker-pdf/tests/pubsec_write.rs:39` takes
@@ -527,7 +535,7 @@ path is outside the agreement.
    and `src` modules, `strict_validator.rs` through `expecting` in place of
    its `verdict` and `refused` (`strict_validator.rs:121`, `:133`); the C
    ABI's `src` test modules, their `validate().is_empty()` checks gone; the
-   CLI's test modules, `assert_clean` (`tools/tpdf/src/writing.rs:964`) gone;
+   CLI's test modules, their `assert_clean` gone;
    `PENDING` emptied and deleted; `README.md` and `docs/verification.md` say
    the rule holds by test. Exit: `written.rs`'s
    `a_new_writing_test_without_the_helper_fails`; `cargo xtask check`;

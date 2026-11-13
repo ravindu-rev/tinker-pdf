@@ -603,13 +603,14 @@ mod gc_tests {
     use crate::build::DocumentBuilder;
     use crate::doc::CosDocument;
     use crate::pages;
+    use crate::written_support::authored;
 
     fn document_with_orphan() -> (Arc<CosDocument>, ObjRef) {
         let mut builder = DocumentBuilder::new();
         builder.add_page(100.0, 100.0, |page| {
             page.fill_rect(0.0, 0.0, 10.0, 10.0, 0.0);
         });
-        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        let doc = Arc::new(authored("a filled square", builder.finish()));
 
         let mut editor = DocumentEditor::new(Arc::clone(&doc));
         let orphan = editor.allocate();
@@ -625,7 +626,7 @@ mod gc_tests {
             ..WriteOptions::default()
         });
         (
-            Arc::new(CosDocument::open(saved).expect("it reopens")),
+            Arc::new(authored("a filled square and an orphan", saved)),
             orphan,
         )
     }
@@ -640,6 +641,7 @@ mod gc_tests {
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
+        authored("an orphan rewritten", &saved);
         let text = String::from_utf8_lossy(&saved).into_owned();
         assert!(
             text.contains("THIS-IS-UNREFERENCED"),
@@ -659,6 +661,7 @@ mod gc_tests {
             garbage_collect: true,
             ..WriteOptions::default()
         });
+        authored("an orphan collected", &saved);
 
         let text = String::from_utf8_lossy(&saved).into_owned();
         assert!(
@@ -682,7 +685,7 @@ mod gc_tests {
         builder.add_page(100.0, 100.0, |page| {
             page.text(b"F0", 12.0, 10.0, 50.0, "reachable");
         });
-        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        let doc = Arc::new(authored("a line of text", builder.finish()));
 
         let editor = DocumentEditor::new(Arc::clone(&doc));
         let saved = editor.save(&WriteOptions {
@@ -690,6 +693,7 @@ mod gc_tests {
             garbage_collect: true,
             ..WriteOptions::default()
         });
+        authored("a line of text collected", &saved);
 
         let reopened = CosDocument::open(saved).expect("it reopens");
         let pages = pages::collect(&reopened);

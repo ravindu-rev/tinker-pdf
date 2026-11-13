@@ -5,6 +5,7 @@
 //! than in a host language.
 
 use super::*;
+use crate::written_support::authored;
 use crate::{tpdf_buffer_data, tpdf_buffer_free, tpdf_document_free, tpdf_string_free};
 use std::ffi::CStr;
 use tinker_pdf::{DocumentBuilder, EmbeddedFile, LabelStyle, OutlineEntry, PageLabelRange, Target};
@@ -91,7 +92,7 @@ pub(crate) fn rich_document() -> Vec<u8> {
     ]));
     let built = builder.finish();
 
-    let document = Document::open(built).expect("the built document opens");
+    let document = authored("every shape the read surface reads, built", built);
     let mut editor = document.editor();
     editor
         .attach_file(&EmbeddedFile {
@@ -112,7 +113,9 @@ pub(crate) fn rich_document() -> Vec<u8> {
         }])
         .expect("the labels are written");
     let _ = editor.set_xmp_metadata(b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>");
-    editor.save(&tinker_pdf::WriteOptions::default())
+    let saved = editor.save(&tinker_pdf::WriteOptions::default());
+    authored("every shape the read surface reads", &saved);
+    saved
 }
 
 /// The canonical outline fixture with five bytes in front of its header, which
@@ -403,7 +406,7 @@ fn the_page_label_handle_holds_its_own_copy_of_every_label() {
         let page = builder.begin_page(100.0, 100.0);
         builder.push_page(page);
     }
-    let document = Document::open(builder.finish()).expect("the built document opens");
+    let document = authored("three hundred blank pages", builder.finish());
     let mut editor = document.editor();
     editor
         .set_page_labels(&[
@@ -422,7 +425,7 @@ fn the_page_label_handle_holds_its_own_copy_of_every_label() {
         ])
         .expect("the labels are written");
     let bytes = editor.save(&tinker_pdf::WriteOptions::default());
-    let facade = Document::open(bytes.clone()).expect("the labelled document opens");
+    let facade = authored("three hundred blank pages, labelled", &bytes);
 
     let doc = open(&bytes);
     let mut labels = ptr::null_mut();
