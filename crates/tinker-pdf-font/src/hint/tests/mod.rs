@@ -7,6 +7,7 @@
 
 mod flow;
 mod stack;
+mod storage;
 
 use super::vm::{Error, Limits, MaxProfile, Program, Vm};
 

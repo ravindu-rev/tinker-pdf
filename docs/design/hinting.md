@@ -275,9 +275,12 @@ and instruction definitions every later program may call; a face whose `fpgm`
 fails is unhinted at every size.
 
 **A size** is set up once a face and `GlyphSize`: the CVT's FWORDs scaled to
-26.6 at the size, `round(v · ppem / unitsPerEm)` in 64 bits, the storage area
-cleared to zeros, the twilight zone set to the origin, and `prep` run over
-them. The CVT, the storage area, the twilight zone and the graphics-state
+26.6 at the size, `round(v · ppem / unitsPerEm)` in 64 bits — as `WCVTF` and
+`SSW` scale font units too, and to zero for a face that states no units per
+em — the storage area cleared to zeros, the twilight zone set to the origin,
+and `prep` run over them. A storage location never written reads zero, this
+engine's answer where the specification calls the value "unpredictable"; a
+storage location or a CVT entry past its table is an error. The CVT, the storage area, the twilight zone and the graphics-state
 defaults `prep` leaves are kept for the size; a size whose `prep` fails is
 unhinted.
 
@@ -291,9 +294,14 @@ midpoints included, in pixels. A glyph with no program is its scaled points.
 
 `INSTCTRL`'s first selector, set in `prep`, makes every glyph of the size its
 scaled points with no program run; its second makes glyph programs start from
-the summary's defaults rather than `prep`'s. In a glyph program both are
-ignored, as the specification says. The third selector is kept and changes
-nothing (*Non-goals*). A selector past 3 is ignored.
+the summary's defaults rather than `prep`'s. The flag a selector chooses
+takes the value's bit of the same weight, so 0 clears it and 1, 2 or 4 — the
+values the specification lists for selectors 1, 2 and 3 — sets it. In a
+glyph program and in `fpgm` the instruction pops its two values and changes
+nothing, as "INSTCTRL[] can only be executed in the CVT program" (Apple's
+manual) and "Flags 1 and 2 must be set in the CV program" have it. The third
+selector is kept and changes nothing (*Non-goals*). A selector past 3, or
+below 1, is ignored.
 
 **Composites** (`glyf`, FT-04b.10) hint each component in turn at the size with
 its own program, then place it: its offset scaled, rounded to the grid on each
@@ -323,9 +331,10 @@ hinted and drawn at 12. `unitsPerEm` is read as `Sfnt` reads it.
 
 ### What a program asks of its engine
 
-- **`MPPEM`** answers the size's whole pixels per em, along whichever vector
-  is the projection vector, since a hinted glyph's two axes are one size.
-  **`MPS`** answers `GlyphSize::points`.
+- **`MPPEM`** answers the size's whole pixels per em, `ppem` rounded to the
+  nearest pixel, along whichever vector is the projection vector, since a
+  hinted glyph's two axes are one size. **`MPS`** answers
+  `GlyphSize::points`, in 26.6.
 - **`GETINFO`**, by selector bit, as the OpenType text's table gives them:
 
 | Selector bit | Result bits | Answer |

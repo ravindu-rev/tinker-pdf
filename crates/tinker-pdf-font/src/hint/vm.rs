@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use super::fixed;
 use super::flow::Definitions;
+use super::storage::Size;
 
 /// The steps one run may take: a run of `fpgm`, of `prep`, or of a glyph's or
 /// a component's program, the functions it calls included
@@ -198,6 +199,10 @@ pub enum Error {
     InstructionDefinitions,
     /// Calls nested past [`CALL_DEPTH`].
     CallDepth,
+    /// A storage location outside `0` to `maxStorage - 1`.
+    StorageIndex(i32),
+    /// A control value table entry the `cvt ` table does not have.
+    CvtIndex(i32),
 }
 
 impl core::fmt::Display for Error {
@@ -224,6 +229,8 @@ impl core::fmt::Display for Error {
                 write!(f, "more instruction definitions than maxInstructionDefs")
             }
             Error::CallDepth => write!(f, "calls nested past {CALL_DEPTH}"),
+            Error::StorageIndex(n) => write!(f, "storage location {n} is past maxStorage"),
+            Error::CvtIndex(n) => write!(f, "control value {n} is past the cvt table"),
         }
     }
 }
@@ -249,11 +256,20 @@ pub struct Vm {
     stop_due: u32,
     /// How many calls the current run is inside.
     pub(super) depth: u32,
+    /// The storage area, `maxStorage` values.
+    pub(super) storage: Vec<i32>,
+    /// The control value table, in 26.6 at the size.
+    pub(super) cvt: Vec<i32>,
+    /// The size the programs hint at.
+    pub(super) size: Size,
+    /// The flags `INSTCTRL` sets: bit 0 inhibits grid-fitting, bit 1 ignores
+    /// the control value program's settings, bit 2 is native ClearType.
+    pub(super) instruct_control: u8,
 }
 
 impl Vm {
-    /// A machine for a face with these limits, its stack empty and nothing
-    /// defined.
+    /// A machine for a face with these limits: its stack empty, nothing
+    /// defined, its storage area zeros, no control value table, and no size.
     #[must_use]
     pub fn new(limits: Limits) -> Vm {
         Vm {
@@ -264,6 +280,10 @@ impl Vm {
             steps: 0,
             stop_due: STOP_EVERY,
             depth: 0,
+            storage: vec![0; limits.storage],
+            cvt: Vec::new(),
+            size: Size::default(),
+            instruct_control: 0,
         }
     }
 
@@ -271,6 +291,51 @@ impl Vm {
     #[must_use]
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// Sets the size the programs hint at. A control value table loaded
+    /// before keeps the values it was scaled to.
+    pub fn set_size(&mut self, size: Size) {
+        self.size = size;
+    }
+
+    /// The size the programs hint at.
+    #[must_use]
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    /// Loads the control value table from a `cvt ` table, its FWORDs
+    /// big-endian, each scaled to the size set, as [`Size::scale`] scales
+    /// (`docs/design/hinting.md`, "The pipeline"). A trailing odd byte is no
+    /// entry.
+    pub fn load_cvt(&mut self, table: &[u8]) {
+        self.cvt = table
+            .chunks_exact(2)
+            .map(|fword| {
+                self.size
+                    .scale(i32::from(i16::from_be_bytes([fword[0], fword[1]])))
+            })
+            .collect();
+    }
+
+    /// The control value table, in 26.6.
+    #[must_use]
+    pub fn cvt(&self) -> &[i32] {
+        &self.cvt
+    }
+
+    /// The storage area.
+    #[must_use]
+    pub fn storage(&self) -> &[i32] {
+        &self.storage
+    }
+
+    /// The flags `INSTCTRL` set: bit 0 inhibits grid-fitting, bit 1 ignores
+    /// the control value program's settings, bit 2 asks for native ClearType.
+    #[must_use]
+    pub fn instruct_control(&self) -> u8 {
+        self.instruct_control
     }
 
     /// Runs `code` as `program` from an empty stack, asking `stop` once in
@@ -388,6 +453,10 @@ impl Vm {
             // IF, ELSE, EIF, the jumps, and the definitions and calls.
             0x58 | 0x1B | 0x59 | 0x1C | 0x78 | 0x79 | 0x2C | 0x2D | 0x2B | 0x2A | 0x89 => {
                 return self.flow(op, code, at, stop);
+            }
+            // RS, WS, RCVT, WCVTP, WCVTF, MPPEM, MPS, GETINFO, INSTCTRL.
+            0x43 | 0x42 | 0x45 | 0x44 | 0x70 | 0x4B | 0x4C | 0x88 | 0x8E => {
+                self.storage_or_engine(op)?;
             }
             _ => self.undefined(op, stop)?,
         }
