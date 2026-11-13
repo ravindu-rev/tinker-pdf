@@ -184,8 +184,9 @@ of the sixteen million colours survives the round trip.
 non-separable ones of 11.3.5.3 — with the whole operation scaled by an
 alpha, which is what the graphics state's `ca` and `CA` do (8.6.4.4).
 `fill_mask_inked` is the same with the colour's own ink beside it (and
-`blend_pixel_inked` for a caller that samples, which is how `ImageDraw::ink`
-reaches the canvas for a tinted stencil, directly or through a run's
+`blend_pixel_inked` for a caller that samples — a shading, a mesh and, by its
+level, every image pixel, which is how `ImageDraw::ink` reaches the canvas for
+a tinted stencil, directly or through a run's
 `Fragments::composite_region_inked`): a
 `CmykA8` canvas composites those four bytes rather than the colour turned
 back into ink, which matters because light has one ink for each colour and
@@ -299,7 +300,13 @@ sums. Neither multiplies in `u128` or calls `floor` per pixel, and
 one pixel mapped on its own gives. So is the run's
 accumulation, and so is the coverage the quad contributes. The only floats left
 on the path are `sqrt`, division and `round`, which IEEE 754 pins exactly
-(ruling 4). The pyramid belongs to the caller, so an image's lifetime is
+(ruling 4). An image pixel's opacity — the draw's alpha times its coverage, its
+sample's alpha and the clip, or a run's coverage and the clip — becomes a
+level with no call to `round`: in integers at an alpha of one, and at any other
+as the `f64` expression, in its order, rounded exactly by a truncation and a
+comparison, the draw's alpha read once a draw. Both give the level the
+expression rounded by `round` gives, and
+[design/image-edges.md](../design/image-edges.md) shows why. The pyramid belongs to the caller, so an image's lifetime is
 decided where it is known. A stencil's colour is `ImageDraw::tint`
 (8.9.6.2): the image says where, the caller says what — and `ImageDraw::ink`
 what that colour is in ink, which only a `CmykA8` canvas reads.
@@ -405,8 +412,12 @@ tiny pattern over a long line cannot generate millions of pieces.
   wholly off the canvas costing nothing — holds the planned walk pixel for
   pixel to every pixel mapped on its own, from 8:1 magnified to past 128:1
   minified, flipped, short and turned
-  (`the_column_plan_is_the_per_pixel_sampler`), and counts one plan a column
-  and one a row (`a_draw_plans_its_weights_once_per_column_and_row`); `mesh.rs`
+  (`the_column_plan_is_the_per_pixel_sampler`), counts one plan a column
+  and one a row (`a_draw_plans_its_weights_once_per_column_and_row`) and no
+  `round` call per pixel (`an_image_draw_rounds_no_float_per_pixel`), and
+  `canvas.rs` holds every image pixel's level to the expression rounded, over
+  every coverage, sample alpha and clip at a sweep of alphas
+  (`an_image_pixel_composes_as_the_float_expression_rounded`); `mesh.rs`
   proves shared edges leave no seam; `canvas.rs` covers formats, backdrops
   and bounded compositing, holds the opaque composite to the general blend
   byte for byte — exhaustively over coverage, source and destination channel

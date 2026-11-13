@@ -14,7 +14,7 @@
 //! The sampling policy is recorded in `docs/features/rasterizer.md`.
 
 use crate::blend::BlendMode;
-use crate::canvas::{mul255, Canvas, Color};
+use crate::canvas::{mul255, Canvas, Color, Opacity};
 use crate::fill::{fill_with, FillScratch, Mask};
 use crate::fragments::Fragments;
 use crate::geom::{FillRule, Path};
@@ -600,7 +600,10 @@ pub fn draw_image(
     pyramid: &mut Pyramid,
     scratch: &mut FillScratch,
 ) {
-    let alpha = draw.alpha.clamp(0.0, 1.0);
+    // The draw's alpha, read once: each pixel's level is it times the pixel's
+    // coverage, its sample's alpha and the clip, made a level without a call
+    // to `round` (`Opacity`).
+    let opacity = Opacity::new(draw.alpha);
     // The canvas's own device pixels, which is all a draw can reach. The walk
     // is in device pixels — the frame every placement is stated in — and only
     // the write below turns one into a canvas index (ruling 5).
@@ -619,10 +622,8 @@ pub fn draw_image(
             let Some((x, y)) = canvas.local(px, py) else {
                 return;
             };
-            let effective = alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0
-                * f64::from(clip)
-                / 255.0;
-            canvas.blend_pixel_inked(x, y, color, ink, effective, draw.blend);
+            let level = opacity.level_three(covered, own, clip);
+            canvas.blend_pixel_level(x, y, color, ink, level, draw.blend);
         },
     );
 }
@@ -2598,5 +2599,93 @@ mod tests {
                 "{filter:?}: the pixels, {pixels}, outnumber the plans, {planned}"
             );
         }
+    }
+
+    /// **An image draw rounds no float per pixel through `f64::round`.**
+    ///
+    /// Each draw here, direct and through a run, at an alpha of one and of
+    /// 0.6, with and without a clip, composites hundreds of pixels; their
+    /// levels come from `Opacity`, and the counter of `f64::round` calls on
+    /// the composition path may see at most one a draw. It sees none. A fill
+    /// on the same canvas rounds its own alpha, once, which is what shows the
+    /// counter counting.
+    #[test]
+    fn an_image_draw_rounds_no_float_per_pixel() {
+        use crate::canvas::LEVEL_ROUNDS;
+        let rounds = || LEVEL_ROUNDS.with(core::cell::Cell::get);
+
+        let rgb = noise(12 * 9 * 3, 4);
+        let alpha = noise(12 * 9, 5);
+        let image = ImageSource {
+            width: 12,
+            height: 9,
+            rgb: &rgb,
+            alpha: &alpha,
+        };
+        let placement = Transform {
+            a: 37.3,
+            b: 0.0,
+            c: 0.0,
+            d: -25.1,
+            e: 3.4,
+            f: 30.2,
+        };
+        let mut square = Path::new();
+        square.move_to(10.5, 4.25);
+        square.line_to(30.75, 4.25);
+        square.line_to(30.75, 22.5);
+        square.line_to(10.5, 22.5);
+        square.close();
+        let mask = crate::fill::fill(&square, FillRule::NonZero, 0, 0, 64, 64, 0.2, None);
+
+        let mut canvas = Canvas::new(64, 64, crate::PixelFormat::Rgb8, Color::WHITE);
+        let start = rounds();
+        let mut draws = 0;
+        for state_alpha in [1.0, 0.6] {
+            for clip in [None, Some(&mask)] {
+                let mut draw = ImageDraw::new(image, placement);
+                draw.alpha = state_alpha;
+                draw.clip = clip;
+                draw_image(
+                    &mut canvas,
+                    &draw,
+                    &mut Pyramid::new(),
+                    &mut FillScratch::new(),
+                );
+                let mut run = Fragments::new(0, 0, 64, 64);
+                accumulate_image(
+                    &mut run,
+                    &draw,
+                    &mut Pyramid::new(),
+                    (0, 0, 64, 64),
+                    &mut FillScratch::new(),
+                );
+                run.composite_region_inked(
+                    &mut canvas,
+                    (0, 0, 64, 64),
+                    state_alpha,
+                    BlendMode::Normal,
+                    clip,
+                    None,
+                    None,
+                );
+                draws += 2;
+            }
+        }
+        let made = rounds() - start;
+        assert!(
+            made <= draws,
+            "{draws} image draws made {made} f64::round calls on the composition path"
+        );
+        assert_eq!(made, 0, "and none of them makes one at all");
+        let painted = canvas
+            .data
+            .chunks_exact(3)
+            .filter(|pixel| *pixel != [255, 255, 255])
+            .count();
+        assert!(painted > 800, "the draws painted {painted} pixels");
+
+        canvas.fill_mask(&mask, Color::BLACK, 0.5);
+        assert_eq!(rounds() - start, 1, "a fill rounds its own alpha, once");
     }
 }

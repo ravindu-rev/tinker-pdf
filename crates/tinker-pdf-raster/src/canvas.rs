@@ -394,7 +394,7 @@ impl Canvas {
         mode: BlendMode,
     ) {
         let alpha = if alpha.is_finite() {
-            (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
+            operation_level(alpha)
         } else {
             255
         };
@@ -585,6 +585,10 @@ impl Canvas {
     /// which a [`PixelFormat::CmykA8`] canvas composites in place of `color`
     /// turned back into ink — what [`Canvas::fill_mask_inked`] does for a
     /// mask, for a caller that samples. Every other format never reads `ink`.
+    ///
+    /// `alpha` becomes a level as `round(clamp(alpha, 0, 1) × 255)`, by
+    /// [`nearest_level`] rather than a call to `round`; a non-finite alpha
+    /// composites nothing.
     pub fn blend_pixel_inked(
         &mut self,
         x: u32,
@@ -594,15 +598,29 @@ impl Canvas {
         alpha: f64,
         mode: BlendMode,
     ) {
+        if !alpha.is_finite() {
+            return;
+        }
+        let level = nearest_level(alpha.clamp(0.0, 1.0) * 255.0);
+        self.blend_pixel_level(x, y, color, ink, level, mode);
+    }
+
+    /// As [`Canvas::blend_pixel_inked`], with the opacity already a level,
+    /// 0..=255: how an image pixel reaches the canvas, its level made by
+    /// [`Opacity`] from the draw's alpha and the pixel's own factors.
+    pub(crate) fn blend_pixel_level(
+        &mut self,
+        x: u32,
+        y: u32,
+        color: Color,
+        ink: Option<[u8; 4]>,
+        level: u32,
+        mode: BlendMode,
+    ) {
         if x >= self.width || y >= self.height {
             return;
         }
-        let alpha = if alpha.is_finite() {
-            (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
-        } else {
-            return;
-        };
-        let effective = mul255(alpha, u32::from(color.a));
+        let effective = mul255(level, u32::from(color.a));
         if effective == 0 {
             return;
         }
@@ -678,7 +696,7 @@ impl Canvas {
         stop: Option<&dyn Fn() -> bool>,
     ) {
         let alpha = if alpha.is_finite() {
-            (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
+            operation_level(alpha)
         } else {
             255
         };
@@ -1208,6 +1226,145 @@ fn over_opaque(pixel: &mut [u8], source: &[u8; 5], c: u32, channels: usize) {
 pub(crate) fn mul255(a: u32, b: u32) -> u32 {
     let product = a * b + 128;
     (product + (product >> 8)) >> 8
+}
+
+/// `x.round() as u32`, without the call: the whole part, and one more where
+/// what is left is a half or over.
+///
+/// `x - whole` is exact. Below one it is `x` itself, and from one up
+/// `whole <= x < 2 × whole`, which is Sterbenz's condition for a difference
+/// with no rounding in it; so the comparison sees the true fraction and the
+/// answer is `round`'s, half away from zero, for every `x` in `[0, 2^32)`.
+/// Below zero, past `u32::MAX` and at NaN it saturates as the cast after
+/// `round` does, so the two agree on every `f64`.
+///
+/// `round` is exact as well (ruling 4), and the reason for this is cost
+/// rather than determinism: on a target without a rounding instruction
+/// `f64::round` is a call into the platform's maths library, and an image
+/// made one for every pixel it drew.
+#[must_use]
+pub(crate) fn nearest_level(x: f64) -> u32 {
+    let whole = x as u32;
+    whole.saturating_add(u32::from(x - f64::from(whole) >= 0.5))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `f64::round` calls this thread has made to turn an opacity into a
+    /// level: what `an_image_draw_rounds_no_float_per_pixel` counts.
+    pub(crate) static LEVEL_ROUNDS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// A fill's or a composite's own alpha as a level,
+/// `round(clamp(alpha, 0, 1) × 255)`: the one `f64::round` an operation
+/// makes, once for the whole of it, and counted under `cfg(test)`.
+fn operation_level(alpha: f64) -> u32 {
+    #[cfg(test)]
+    LEVEL_ROUNDS.with(|rounds| rounds.set(rounds.get() + 1));
+    (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
+}
+
+/// A draw's alpha, read once, and the level it gives a pixel of integer
+/// coverage factors.
+///
+/// An image pixel's opacity is the draw's alpha times each of its factors
+/// over 255 — the quad's coverage, the sample's own alpha and the clip for a
+/// pixel drawn directly, the run's coverage and the clip for one composited
+/// from a run — evaluated in `f64` in that order and made a level by
+/// rounding `clamp(·, 0, 1) × 255`. This answers with that level, exactly,
+/// without rounding a float per pixel through `round`:
+///
+/// - **An alpha of one** gives `(a·b·c + 32512) / 65025` and `(a·b + 127) /
+///   255`. The exact value `N / 65025` is never a half-integer, since `2N` is
+///   even and 65 025 odd, so it stands at least 1/130 050 from one, and the
+///   `f64` expression's six roundings of relative size 2^-53, on a value at
+///   most 255, leave it within 2e-13 of the exact value: both round to
+///   `floor((N + 32512.5) / 65025)`, which is the integer quotient above
+///   because no multiple of 65 025 lies above `N + 32512` and at or below
+///   `N + 32512.5`. Two factors stand 1/510 apart, against four roundings.
+/// - **Any other alpha** keeps the expression, in its order, rounded by
+///   [`nearest_level`]. No integer form can stand in for it: the alpha carries
+///   53 bits, and a decimal alpha such as 0.37 puts the exact value of some
+///   integer product within 1e-15 of a half-integer, where only the
+///   expression's own roundings say which way it goes. The level of a pixel
+///   whose factors are all 255 — most of a draw — is worked out once.
+///
+/// `docs/design/image-edges.md`, P-08, has the argument at more length, and
+/// `an_image_pixel_composes_as_the_float_expression_rounded` holds every
+/// factor at a sweep of alphas to the expression rounded by `f64::round`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Opacity {
+    /// The draw's alpha, clamped into `[0, 1]`; NaN stays NaN and composites
+    /// nothing, as it did as a non-finite opacity.
+    alpha: f64,
+    /// Whether the alpha is exactly one, where the levels are integers.
+    unit: bool,
+    /// The level of three factors of 255.
+    full_three: u32,
+    /// The level of two factors of 255.
+    full_two: u32,
+}
+
+impl Opacity {
+    /// The opacity of a draw at `alpha`, which is clamped into `[0, 1]`.
+    #[must_use]
+    pub(crate) fn new(alpha: f64) -> Opacity {
+        let alpha = alpha.clamp(0.0, 1.0);
+        let mut opacity = Opacity {
+            alpha,
+            unit: alpha == 1.0,
+            full_three: 0,
+            full_two: 0,
+        };
+        opacity.full_three = opacity.expression_three(255, 255, 255);
+        opacity.full_two = opacity.expression_two(255, 255);
+        opacity
+    }
+
+    /// The level of `alpha × a/255 × b/255 × c/255`: a pixel drawn directly,
+    /// `a` its coverage, `b` its sample's alpha and `c` the clip.
+    #[must_use]
+    pub(crate) fn level_three(&self, a: u8, b: u8, c: u8) -> u32 {
+        if self.unit {
+            return (u32::from(a) * u32::from(b) * u32::from(c) + 32_512) / 65_025;
+        }
+        if [a, b, c] == [255; 3] {
+            return self.full_three;
+        }
+        self.expression_three(a, b, c)
+    }
+
+    /// The level of `alpha × a/255 × b/255`: a pixel composited from a run,
+    /// `a` the run's coverage and `b` the clip.
+    #[must_use]
+    pub(crate) fn level_two(&self, a: u8, b: u8) -> u32 {
+        if self.unit {
+            return (u32::from(a) * u32::from(b) + 127) / 255;
+        }
+        if [a, b] == [255; 2] {
+            return self.full_two;
+        }
+        self.expression_two(a, b)
+    }
+
+    /// The three-factor expression in `f64`, in the order a draw writes it.
+    fn expression_three(&self, a: u8, b: u8, c: u8) -> u32 {
+        level_of(self.alpha * f64::from(a) / 255.0 * f64::from(b) / 255.0 * f64::from(c) / 255.0)
+    }
+
+    /// The two-factor expression in `f64`, in the order a run writes it.
+    fn expression_two(&self, a: u8, b: u8) -> u32 {
+        level_of(self.alpha * f64::from(a) / 255.0 * f64::from(b) / 255.0)
+    }
+}
+
+/// An opacity in `f64` as the level [`Canvas::blend_pixel_inked`] makes it,
+/// with nothing for one that is not finite.
+fn level_of(opacity: f64) -> u32 {
+    if !opacity.is_finite() {
+        return 0;
+    }
+    nearest_level(opacity.clamp(0.0, 1.0) * 255.0)
 }
 
 /// How many colour channels a format carries, before any alpha.
@@ -2259,6 +2416,93 @@ mod tests {
         assert_eq!(mul255(0, 255), 0);
         assert_eq!(mul255(255, 0), 0);
         assert_eq!(mul255(128, 255), 128);
+    }
+
+    /// `nearest_level` is `f64::round` and then the cast, everywhere: across
+    /// every quarter-level from below zero to past 255, at every half-integer
+    /// and the doubles either side of it, and at the values a cast saturates.
+    #[test]
+    fn the_nearest_level_is_round_without_the_call() {
+        let rounded = |x: f64| x.round() as u32;
+        let mut values = vec![
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -0.0,
+            0.0,
+            4_294_967_294.5,
+            4_294_967_295.0,
+            4_294_967_295.4,
+            4_294_967_296.0,
+            1e300,
+        ];
+        for quarter in -8..=1100 {
+            values.push(f64::from(quarter) / 4.0);
+        }
+        for whole in -2..=300 {
+            let half = f64::from(whole) + 0.5;
+            values.extend([
+                half,
+                f64::from_bits(half.to_bits() - 1),
+                f64::from_bits(half.to_bits() + 1),
+            ]);
+        }
+        for x in values {
+            assert_eq!(nearest_level(x), rounded(x), "at {x:e}");
+        }
+    }
+
+    /// **An image pixel's level is the `f64` expression a draw writes, rounded
+    /// by `f64::round`, at every coverage, sample alpha and clip.**
+    ///
+    /// Exhaustive over the three factors and the two, at a sweep of draw
+    /// alphas: one, which takes the integer form; a half, two thirds, 0.37 and
+    /// 0.999, which take the expression; a thousandth; and the alphas that
+    /// clamp or are not numbers at all. The expression is evaluated here as the
+    /// draw writes it, left to right, with each prefix kept for the next
+    /// factor, which is the same number because `x × y / z × w` is
+    /// `((x × y) / z) × w`.
+    #[test]
+    fn an_image_pixel_composes_as_the_float_expression_rounded() {
+        let rounded = |opacity: f64| -> u32 {
+            if !opacity.is_finite() {
+                return 0;
+            }
+            (opacity.clamp(0.0, 1.0) * 255.0).round() as u32
+        };
+        let exhaustive = [1.0, 0.5, 2.0 / 3.0, 0.37, 0.999, 1e-3];
+        let degenerate = [0.0, -0.5, 1.5, f64::NAN, f64::INFINITY];
+        for alpha in exhaustive.into_iter().chain(degenerate) {
+            let opacity = Opacity::new(alpha);
+            let clamped = alpha.clamp(0.0, 1.0);
+            // The degenerate alphas are a clamp to nothing or to one, or no
+            // number at all, so every third factor says what all would.
+            let step = if exhaustive.contains(&alpha) { 1 } else { 3 };
+            for a in (0..=255u8).step_by(step) {
+                let after_a = clamped * f64::from(a) / 255.0;
+                for b in 0..=255u8 {
+                    let after_b = after_a * f64::from(b) / 255.0;
+                    if opacity.level_two(a, b) != rounded(after_b) {
+                        panic!(
+                            "alpha {alpha}, run coverage {a}, clip {b}: {} against {}",
+                            opacity.level_two(a, b),
+                            rounded(after_b)
+                        );
+                    }
+                    for c in (0..=255u8).step_by(step) {
+                        let after_c = after_b * f64::from(c) / 255.0;
+                        if opacity.level_three(a, b, c) != rounded(after_c) {
+                            panic!(
+                                "alpha {alpha}, coverage {a}, sample alpha {b}, clip {c}: \
+                                 {} against {}",
+                                opacity.level_three(a, b, c),
+                                rounded(after_c)
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

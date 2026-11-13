@@ -33,7 +33,7 @@
 //! caller asks before accumulating, and a true overlap ends the run instead.
 
 use crate::blend::BlendMode;
-use crate::canvas::{mul255, Canvas, Color};
+use crate::canvas::{mul255, Canvas, Color, Opacity};
 use crate::fill::Mask;
 
 /// A run of image draws, accumulated before any of it reaches the canvas.
@@ -213,7 +213,9 @@ impl Fragments {
         ink: Option<[u8; 4]>,
         stop: Option<&dyn Fn() -> bool>,
     ) {
-        let alpha = alpha.clamp(0.0, 1.0);
+        // The run's alpha, read once: each pixel's level is it times the run's
+        // coverage and the clip, made a level without a call to `round`.
+        let opacity = Opacity::new(alpha);
         let (rx0, ry0, rx1, ry1) = region;
         if rx1 <= rx0 || ry1 <= ry0 {
             return;
@@ -259,11 +261,11 @@ impl Fragments {
                     straight(u32::from(slot[1])),
                     straight(u32::from(slot[2])),
                 );
-                let effective = alpha * f64::from(covered) / 255.0 * f64::from(clipped) / 255.0;
+                let level = opacity.level_two(slot[3], clipped);
                 let Some((x, y)) = canvas.local(px, py) else {
                     continue;
                 };
-                canvas.blend_pixel_inked(x, y, color, ink, effective, blend);
+                canvas.blend_pixel_level(x, y, color, ink, level, blend);
             }
         }
     }
