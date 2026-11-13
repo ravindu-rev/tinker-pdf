@@ -3903,3 +3903,344 @@ a step and each in `work()`:
 | Two threads search one page at once | A `OnceLock` builds each form once; the second waits for the build, and no lock is held across a search |
 | The accessors break a caller outside the tree | The C ABI and the bindings read no field of a `TextPage`; at 0.0.1, before SU-18, no stability is promised, and the feature doc states the accessors |
 | Counting moves an answer | `search_counted` returns `search_with`'s quads to the bit, which `folding_happens_once_per_page_whatever_the_searches` asserts |
+
+## P-17 — Incremental reparse and dirty-region re-render
+
+*For [ROADMAP](../ROADMAP.md) row P-17.* An edit, its incremental save and the
+reopen of what it wrote cost what the edit changed, and a changed annotation
+is re-rendered by its rectangle alone. At the tip `DocumentEditor::save`
+under `WriteMode::Incremental` copies the whole original before it appends
+(`write::incremental_update_reserving`), and the update is reopened from that
+copy as a new file: every cross-reference section of the chain is walked
+again and every entry probed against its header (`doc.rs` `validate`), so a
+one-object edit of a 1 000-page file costs the file twice. A page whose
+annotation changed is rendered whole. This section fixes the update section
+the writer produces alone, the backing that reads a document over its
+original and that section without joining them, the reopen that reads only
+the section and keeps its base's state for everything else, the facade call
+that does the three in one, the rectangle an annotation edit changes and how a
+render of that rectangle over the previous bitmap is the full render, and the
+counted quantity each step's guard reads.
+
+### Scope
+
+- **The update section** (P-17.2): the changed objects, a cross-reference
+  section and a trailer, offsets counted from the original's end, written
+  without the original's bytes.
+- **A document over segments** (P-17.3): the original and its section, held
+  as they were handed in, read without a copy.
+- **The reopen** (P-17.4): what it reads, what it keeps of its base, what it
+  parses afresh, which bases it opens whole and the reason it gives, and
+  `DocumentEditor::view` through it.
+- **The facade's call** (P-17.5): edit, save and reopen in one, the font
+  provider and any archive report carried, counted on MS-01's stats.
+- **The changed rectangle and the patch** (P-17.6), and the patched page's
+  fingerprint (P-17.7).
+- **MS-04's edit-and-reopen operations and the patch's** (P-17.8a), and the
+  row's close (P-17.9).
+
+### Non-goals
+
+- **A writable object store.** A reopened document is read-only, as every
+  `CosDocument` is; an edit is still a `DocumentEditor`'s, the one way a
+  document changes.
+- **A rewrite.** A rewrite renumbers and lays out the whole file, so nothing
+  of a base survives it to keep; only an incremental update has a section to
+  reopen over.
+- **Comparing pixels.** The rectangle comes from the annotations' geometry,
+  and the previous bitmap is written into, never read for what changed.
+- **An edit that changes what the page draws besides its annotations.** A
+  page whose content, resources or boxes changed is rendered whole.
+- **RC-21's class.** Making a tile exact where an image run's overlap falls
+  outside it is RC-21's; the patch grows around such a run instead (*The patch
+  stays the full render*).
+
+### Design
+
+#### The update section
+
+`write::update_section` writes what `write::incremental_update` appends: a
+newline when the original does not end in one (7.5.6's update begins on a new
+line), each changed object, the cross-reference section of their rows with
+object zero's free head (`write_classic_xref`), and the trailer with `/Size`,
+`/Prev` and the `/ID` whose first string the original keeps (14.4), every
+offset the original's length plus the section's own. It is handed the
+original as a `write::Prefix` — its length, and whether its last byte is a
+newline — and nothing else, so it reads no byte of the original, and a
+streamed document answers that with a one-byte window rather than a fetch of
+the whole (`CosDocument::prefix`). `incremental_update` is the original
+followed by that section, joined once into a buffer of the sum's length: the
+file it writes at the tip, byte for byte. `DocumentEditor::save_update` hands
+back the section alone for the save `DocumentEditor::save` would write under
+`WriteMode::Incremental` — the same changed set (`changed_set`), trailer
+(`update_trailer`) and inherited cipher — whatever `WriteOptions::mode` says,
+and `save` in incremental mode is the document's bytes followed by it.
+
+A signature reserves its object the same way: the section is written with the
+reservation, the placeholder's two fields at their offsets in the whole file —
+the original's length plus their place in the section — and the whole file is
+joined once, because the digest covers it (`sign::seal`).
+
+#### Two segments, one document
+
+`Backing::Segments` holds a document's bytes as segments: the original, then
+each section appended to it, in order, each shared as it was handed in. A read
+inside one segment borrows that segment whole, as a buffer's read borrows the
+buffer, standing at the segment's offset in the document; a read across a seam
+gathers its own range and nothing more; and a whole-file operation —
+`CosDocument::bytes`, a signature's byte range, `stream_raw_encrypted`, the
+repair scanner — joins the segments once and keeps the join, as a chunked
+backing keeps its whole. The segments are in hand, so a document over them
+takes every decision a buffered open takes where a streamed one differs: the
+chain is walked at open, every type-1 entry is probed against its header then
+(through the segments, a header across a seam gathered), the ladder is decided
+then, no hint table is read and no fetch is declared.
+`CosDocument::open_appended(original, update)` is the open over two segments:
+the document `CosDocument::open` gives the joined bytes, object for object,
+without the join.
+
+#### The reopen: what it reads
+
+`CosDocument::reopen(base, update)` opens the base's bytes followed by
+`update`, an incremental section written after them, over segments — the
+base's own and the section — and of all of it reads only the section:
+
+1. `startxref` from the tail, which names the section's cross-reference data;
+2. that one section (`xref::build_limited`, one deep), with its `/XRefStm` when
+   it is a hybrid one;
+3. its trailer, which must chain to the base: `/Prev` the base's
+   `last_startxref`, and `/Encrypt`, and on an encrypted base the first `/ID`
+   string, the base's own;
+4. each of the section's type-1 entries, probed against the header at its
+   offset as validation probes every entry of a full open.
+
+The trailer is the section's entries over the base's, newest first, as the
+walker merges a chain; the revisions are the section's and then the base's;
+`/Root` must be locatable through both. The section's entries — its changed
+objects and its free head — are the reopened document's own table, and every
+other number's entry is the base's, read where it lies; the merged table is
+built only when `CosDocument::xref` asks for all of it.
+
+#### What it keeps of its base
+
+For a number the section does not define, the reopened document is its
+base's: the entry, the parsed object, the decoded object stream and the
+security. A load of such a number goes to the base, which parses it once into
+its own store if no read has yet, and the reopened document takes that object
+— unless its parse read a number the section redefines: a stream whose
+indirect `/Length` the section changed, or a member of an object stream whose
+container, or the container's indirect `/Length`, `/N` or `/First`, it
+changed. Such an object is parsed afresh in the reopened document, against the
+merged entries, as a full open of the same bytes parses it. A number the
+section defines is parsed afresh from the section's bytes. A resolved chain
+and a stream's extent are each read in the document asked, so nothing the base
+resolves for itself stands in for what the update changed.
+
+The sharing holds only while both documents keep the security the reopen
+found: the reopened document is given the base's decryptor, key and
+authorisation as `inherit_security` gives them, each document counts the times
+its security is installed, and once either count moves — a password given to
+one of them afterwards — the reopened document stops reading through its base
+and parses every number itself, as a full open holding its own security would.
+The base's warnings and ladder level carry over: the reopened document's
+warnings are its base's, as they stand, and then its own — the section's, and
+what its own parses raise — and its ladder level is its base's. Its page index
+is its own, empty until a count builds it, since an update can change the page
+tree.
+
+A reopen of a reopened document is the same step one segment further: the
+base's segments and the new section, the new section's entries over the base,
+which reads through its own base in turn.
+
+#### The bases it opens whole
+
+A reopen that cannot read only the section opens the base's bytes and the
+section whole, over segments (`open_appended`), gives that document the base's
+security as `DocumentEditor::view` gives a view, and says why, as
+`Reopened::full_open`:
+
+| `FullOpen` | When | Why reading only the section would differ |
+| --- | --- | --- |
+| `Linearized` | the base opened on Annex F's head-only path | its table is the first page's until a read fetches `/T`, and its one revision is the whole file |
+| `Streamed` | the base's bytes come from a source | its bytes are not segments to keep; they are fetched whole first, which a fetch declares (ruling 10) |
+| `Repaired` | the base's ladder is `Patch` or `Rescan` | a full open of the joined bytes repairs from a scan of all of them, and a rescanned base has no section to chain to |
+| `Shifted` | the base's header is not at byte zero (7.5.2) | every offset the section states is read through the shift's candidates |
+| `Deep` | the base is itself 32 reopens deep | every read of a number the chain leaves alone walks it to the bottom |
+| `Unchained` | the section's `startxref`, cross-reference data or trailer does not read, its `/Prev` is not the base's last section, `/Encrypt` or an encrypted base's first `/ID` string moved, it redefines the `/Encrypt` dictionary, or an entry's header is not the object it names | a full open would walk, warn and repair what the section alone cannot say |
+
+Nothing else sends a reopen to a full open, and a full open is never a guess:
+each row is a test of the base or of the section the reopen has just read.
+
+#### `DocumentEditor::view`
+
+`view` is the reopen of the editor's document over `save_update`'s section,
+`full_open` dropped: an untouched editor still answers with its document, and
+a view is still a snapshot.
+
+#### The facade's call
+
+`tinker_pdf::write::append(document, editor, options)` takes an editor over
+`document` — the same `Arc<CosDocument>`, or `AppendError::NotThisDocument` —
+writes `save_update`'s section, reopens `document`'s object layer over it, and
+hands back `Appended`: the section (`update`), the reopened `Document`
+carrying `document`'s font provider and archive report, the `FullOpen` when
+there was one, the numbers the update changed (the editor's changed set), and
+the reopen's counts when `AppendOptions::stats` asked. `Appended::patch`
+re-renders one of its pages over a bitmap of the page before the edit.
+
+#### The counted quantities
+
+**At the object layer** (`doc.rs`, under `cfg(test)`, per thread): the object
+numbers an open touches — whose cross-reference row it reads, whose header it
+probes, whose body it parses. A full open of a 1 000-page file touches every
+number it has; a reopen touches the numbers of the section's rows, its changed
+objects and object zero, and a cross-reference stream's own number when the
+section is one. `a_reopen_parses_only_what_changed` holds a one-annotation
+update of that file to those.
+
+**At the facade** (MS-01's `Stats`, when `AppendOptions::stats` asks): the
+reopen's `xref_entries_read`, at most the section's rows where a full open
+reads every row of every section, and its `objects_parsed`, at most the
+section's cross-reference stream objects, of which a classic section has none.
+Their sum is the row's "objects re-parsed ≤ changed + cross-reference".
+
+**The section** (`write.rs`, under `cfg(test)`, per thread): the bytes the
+writer copies out of an original into what it writes — none for
+`update_section`, and the original's length for `incremental_update`, the one
+copy a whole-file save makes.
+
+**The segments** (`source.rs`, under `cfg(test)`, per backing): the bytes
+gathered across a seam and the bytes joined into a whole. A document opened
+and read over segments joins nothing before a whole-file read, and gathers
+only the windows that straddle a seam.
+
+#### The changed rectangle
+
+`Appended::patch(index, previous, options)` takes page `index` of the reopened
+document and `previous`, the bitmap `Page::render` gave the same page of the
+base under the same `options`. The page is patched only when the update
+changed nothing it draws but annotations; otherwise it is rendered whole and
+the patch says why (`PatchFallback`):
+
+- **The page itself**: its dictionary changed in anything but `/Annots`, or the
+  update changed a number its `/Contents` or its resources, inherited or its
+  own, reach (`ContentChanged`).
+- **The annotations**: an annotation changed when the update changed its
+  dictionary or a number its `/AP` reaches; one is added or removed when one
+  page's `/Annots` holds it and the other's does not. Those neither changed,
+  added nor removed are in the same order on both pages, or the page is
+  rendered whole (`Reordered`).
+- **Each changed, added or removed annotation's drawn bounds**, on the base's
+  page and on the reopened one: none for one that draws nothing — hidden or
+  `NoView` by its `/F`, a pop-up, no normal appearance; its `/Rect` for an
+  appearance with a `/BBox`, which 12.5.5's fit places on the rectangle and the
+  `/BBox` clip confines (`annots::prepare`); and no bound at all for an
+  appearance without one, which is drawn where its own `/Matrix` puts it
+  (`Unbounded`).
+
+The rectangle is each such `/Rect`'s corners carried through the render's page
+transform — its scale, the page's `/Rotate` and its crop box — and the hull of
+all of them rounded outward to whole pixels, widened by one pixel on every side
+(the renderer's `SLACK`, which a fill's region keeps for the same reason) and
+clipped to the page. An edit that changes no drawn bounds changes no pixel, and
+the patch is `previous`. `previous` must be the whole page at these options —
+its width, height and format the page's (`Mismatch` otherwise) — and must carry
+no warnings (`PreviousWarned` otherwise), for the reason below.
+
+#### The patch stays the full render
+
+The rectangle is rendered through `RenderOptions::region` and written over
+`previous` at its place. Ruling 5 makes that region the full render's own
+pixels, in one frame, and outside it the full render after the edit equals
+`previous`: every pixel the changed annotations draw, before the edit and
+after it, is inside the rectangle, and everything else the page draws is the
+same objects in the same order on both pages, composited onto the same pixels.
+Two things a tile cannot see are taken care of:
+
+- **An image run** (ruling 5's named exception, RC-21's class). Whether an
+  image joins the run held back from conflation is decided by its overlap with
+  what the run holds over the canvas, so a tile can join what the page splits.
+  The region render reports each image it put in a run whose page-frame
+  rectangle the canvas does not hold whole, and the patch grows the rectangle
+  to cover every one reported and renders it again — at most four rounds, then
+  the whole page (`ImageRun`). A rectangle holding every image that meets it
+  sees every overlap the page sees, so the run decisions inside it are the
+  page's.
+- **Warnings.** A region render raises a part of what a full render raises: a
+  tiling cell is drawn only where it meets the canvas, and its warnings with
+  it. With `previous` clean, the page's content and its unchanged annotations
+  raise nothing, and every warning the full render after the edit raises is a
+  changed annotation's, drawn wholly inside the rectangle; so the patch's
+  warnings are the region render's. A `previous` with warnings is rendered
+  whole.
+
+The patched bitmap is then the full render's, pixels and warnings.
+`dirty_region.rs` holds it over moves, resizes, recolourings, removals and
+additions on turned and cropped pages at 0.5× to 4× and over RC-21's
+three-image page, and P-17.7's fingerprint holds one patched page on every
+target.
+
+#### What MS-04 times
+
+`write/edit an annotation, save, reopen, 1000 pages` and its 10-page twin time,
+an iteration, an editor over the document, the appearance replaced
+(`put_stream`), and `write::append`: the section written and the document
+reopened over it. "≤ 2 ms plus output bytes" allows the 2 ms and a time linear
+in the section's bytes — the replaced appearance serialised, its rows and the
+trailer — and nothing linear in the base: no copy of its bytes, no walk of its
+chain, no probe of its entries, no merged table. The relation holds the
+1 000-page file to twice the 10-page one, which only work that does not grow
+with the base meets. `render/re-render a changed 100x100 pt annotation` times
+`Appended::patch` over the bitmap `render/the annotated text page at 150 dpi`
+renders: the rectangle's pixels and one interpretation of the page, held to
+10 % of the full render.
+
+### Milestones
+
+1. **P-17.1: this section.**
+2. **P-17.2: the update section.** Exit: `edit/tests.rs`
+   `an_update_section_is_written_without_copying_the_original`;
+   `an_incremental_save_keeps_the_original_bytes`,
+   `an_incremental_save_chains_to_the_table_it_updates` and
+   `encrypt_on_save.rs` unchanged, and `crates/tinker-pdf/tests/signing.rs`
+   and `document_timestamp.rs` with them.
+3. **P-17.3: segments.** Exit: `crates/tinker-pdf-cos/tests/reopen.rs`
+   `two_segments_read_as_their_concatenation`; `source.rs`
+   `opening_over_two_segments_copies_neither`; `streaming.rs` unchanged.
+4. **P-17.4: the reopen.** Exit: `doc.rs` `a_reopen_parses_only_what_changed`;
+   `reopen.rs` `a_reopen_reads_as_a_fresh_open_does`, over random edit
+   sequences on encrypted, object-stream and hybrid-reference bases, and
+   `every_base_a_reopen_cannot_keep_says_why`; `editor_view.rs` unchanged.
+5. **P-17.5: the facade's call.** Exit: `incremental_reopen.rs`
+   `an_annotation_edit_saved_and_reopened_parses_only_what_changed`, in both
+   builds.
+6. **P-17.6: the patch.** Exit: `dirty_region.rs`
+   `a_patched_render_is_the_full_render_after_every_annotation_edit` and
+   `a_patch_renders_only_its_rectangle`, in both builds.
+7. **P-17.7: the patched page's fingerprint.** Exit: `determinism.rs`
+   `a_patched_render_reproduces_the_edited_pages_fingerprint`, both paths at
+   the one committed hash, under `cargo test` on linux and windows and under
+   `--target wasm32-wasip1` locally; `cargo xtask check` green.
+8. **P-17.8a: the operations**, through `write::append` and
+   `Appended::patch`, unmeasured; `xtask/src/bench.rs`
+   `the_committed_baseline_agrees_with_the_tree` holds them as relations.
+   **P-17.8b** takes their figures in the timing phase.
+9. **P-17.9: the row's close** in MS-02's paired run: the 1 000-page edit, save
+   and reopen at most twice the 10-page one, and the patch at most 10 % of the
+   full-page render, with `reopen.rs`, `incremental_reopen.rs` and
+   `dirty_region.rs`'s counted guards green on linux and windows and on
+   `wasm32-wasip1` locally.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The section's bytes differ from the tip's append | `incremental_update` is the original and the section; every incremental-save test, `signing.rs` and `document_timestamp.rs` unchanged |
+| A read near a seam differs from the joined bytes | A read inside a segment borrows it whole and stops where the joined bytes would; one across a seam gathers its range; `two_segments_read_as_their_concatenation` reads every object, stream and window both ways |
+| A kept object depends on a number the update changed | An indirect `/Length`, a container and its `/N` and `/First` are the dependencies a load has, each checked against the section's numbers, and a dependent object is parsed afresh; `a_reopen_reads_as_a_fresh_open_does` edits lengths and containers |
+| A password given after the reopen mixes plaintext and ciphertext | Each document counts its security installs, and the reopened one reads through its base only while neither count has moved |
+| A base the reopen should not keep is kept | Each `FullOpen` row is a test of the base or the section; `every_base_a_reopen_cannot_keep_says_why` builds one of each |
+| A chain of reopens grows without bound | Past 32 deep a reopen opens whole (`Deep`) and starts a chain of its own |
+| A patch misses a pixel the edit changed | The rectangle covers each changed annotation's `/Rect` before and after, rounded outward with a pixel of slack; changed content, an unbounded appearance and a reorder render whole; `a_patched_render_is_the_full_render_after_every_annotation_edit` |
+| An image run decided in the tile differs from the page's | The region render reports every run image the canvas does not hold whole, and the patch grows around it |
+| A patch's warnings differ from the full render's | A `previous` with warnings is rendered whole, and a clean page's only warnings after the edit are the changed annotations', inside the rectangle |
