@@ -204,6 +204,14 @@ impl<'a> Sfnt<'a> {
             .get(*off as usize..(*off as usize).checked_add(*len as usize)?)
     }
 
+    /// `maxp`'s `numGlyphs`, which sizes every per-glyph array a table keeps
+    /// beside the outlines — `sbix`'s offsets among them — or `None` where the
+    /// face has no `maxp` long enough to say.
+    #[must_use]
+    pub fn glyph_count(&self) -> Option<u16> {
+        be16(self.table(TAG_MAXP)?, 4)
+    }
+
     /// The advance of a glyph, in font units.
     ///
     /// `hmtx` stores full entries for the first `numberOfHMetrics` glyphs and
@@ -217,11 +225,6 @@ impl<'a> Sfnt<'a> {
         }
         let index = glyph.min(self.num_h_metrics - 1);
         be16(hmtx, usize::from(index) * 4)
-    }
-
-    /// The face's glyph count, from `maxp`, where it has one.
-    fn glyph_count(&self) -> Option<u16> {
-        be16(self.table(TAG_MAXP)?, 4)
     }
 
     /// A glyph's advance height, in font units, from `vmtx`.

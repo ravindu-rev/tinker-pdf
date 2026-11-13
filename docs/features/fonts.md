@@ -121,6 +121,23 @@ An extend value or a composite mode the enumerations do not define reads as
 `EXTEND_PAD` or `COMPOSITE_CLEAR`, as the chapter says, each warned with its
 value; records out of order are scanned and warned, as version 0's are.
 
+Bitmap strikes (the sbix chapter). `Sbix::parse` takes the table and the
+face's glyph count — `Sfnt::glyph_count`, `maxp`'s — and reads every strike's
+`ppem`, `ppi` and `numGlyphs + 1` offsets, refusing the table where any of
+them runs past it. `Sbix::glyph` answers a glyph's bitmap in a strike: its
+origin offsets, its graphic type (`png `, `jpg ` or `tiff`) and its bytes,
+undecoded; no data where its offsets are equal; a `dupe` resolved once, in
+the same strike, to the named glyph's record, which `SbixGlyph::from` names.
+What it refuses it names (`SbixRefusal`): a graphic type the chapter does not
+define — `mask` and `pdf ` among them — a `dupe` of a `dupe`, a `dupe` naming
+a glyph past the count or with no data, and data that runs backwards, past
+the table or short of its header. `Sbix::draws_outlines` reads bit 1 of the
+flags. `Sbix::choose_strike` picks the strike a `StrikeChoice` names among
+those holding the glyph: `Largest`, `AtLeast(ppem)` (the smallest at least
+that large, else the largest), `Multiple(ppem)` (the smallest whole multiple,
+else `AtLeast`'s) and `Nearest(ppem)` (the larger on a tie), strikes of one
+size taken in table order.
+
 **Type 1** (9.9, `/FontFile`). `Type1::parse` reads PFB, PFA and the bare
 bytes a PDF embeds: eexec decryption, the second decryption layer around each
 charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
@@ -1375,9 +1392,12 @@ corpora already vendored here. So every name stays on the list.
   `PaintColrGlyph` cycle and a self-naming slice refused by name, a shared
   table one node, the depth and size limits met exactly, an overrunning
   colour line, an unknown format, a missing glyph and a slice past the list;
+  `sbix`'s strikes and every graphic type, a `dupe` resolved and its chains
+  and bad targets refused, no data, refused types and short, backward and
+  overrunning data, and each `StrikeChoice` over strikes of repeated sizes;
   and every prefix and flipped byte of the tables answering without a panic.
-  The `sfnt` fuzz target's `colr-v0.ttf` and `colr-v1.ttf` seeds are written
-  by the same builders, and read back through their directories.
+  The `sfnt` fuzz target's `colr-v0.ttf`, `colr-v1.ttf` and `sbix.ttf` seeds
+  are written by the same builders, and read back through their directories.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

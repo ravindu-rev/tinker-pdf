@@ -27,7 +27,8 @@ use libfuzzer_sys::fuzz_target;
 
 use std::collections::BTreeSet;
 use tinker_pdf_font::{
-    glyf, glyphs_for, subset, substitute_glyph, BuiltInEncoding, Colr, Cpal, PaletteChoice, Sfnt,
+    glyf, glyphs_for, subset, substitute_glyph, BuiltInEncoding, Colr, Cpal, PaletteChoice, Sbix,
+    Sfnt, StrikeChoice,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -136,6 +137,31 @@ fuzz_target!(|data: &[u8]| {
                     PaletteChoice::DarkBackground,
                 ] {
                     let _ = colr.layers(glyph, cpal, cpal.choose(choice));
+                }
+            }
+        }
+    }
+
+    // `sbix`, sized by `maxp`: every glyph's bitmap in the first strikes, a
+    // `dupe` resolved, and each strike option's choice among the strikes that
+    // hold the glyph.
+    if let (Some(table), Some(count)) =
+        (font.table(u32::from_be_bytes(*b"sbix")), font.glyph_count())
+    {
+        if let Some(sbix) = Sbix::parse(table, count) {
+            let _ = sbix.draws_outlines();
+            let strikes = sbix.strikes().len().min(8);
+            for glyph in 0..64u16 {
+                for strike in 0..strikes {
+                    let _ = sbix.glyph(strike, glyph);
+                }
+                for choice in [
+                    StrikeChoice::Largest,
+                    StrikeChoice::AtLeast(32),
+                    StrikeChoice::Multiple(16),
+                    StrikeChoice::Nearest(48),
+                ] {
+                    let _ = sbix.choose_strike(glyph, choice);
                 }
             }
         }

@@ -19,6 +19,7 @@ pub mod encoding;
 pub mod glyf;
 pub mod outline;
 mod predefined;
+pub mod sbix;
 pub mod sfnt;
 pub mod subset;
 pub mod symbolic;
@@ -38,6 +39,7 @@ pub use encoding::{
     BuiltInEncoding,
 };
 pub use outline::{Outline, Segment};
+pub use sbix::{Graphic, Sbix, SbixGlyph, SbixRefusal, SbixStrike, StrikeChoice};
 pub use sfnt::{Sfnt, VerticalOrigins};
 pub use subset::{glyphs_for, subset};
 pub use symbolic::{substitute_glyph, SymbolRoute};

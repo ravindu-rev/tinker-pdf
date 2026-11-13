@@ -13,7 +13,8 @@ use tinker_pdf_font::colr::{
     PaintId, FOREGROUND, MAX_PAINT_DEPTH, MAX_PAINT_NODES,
 };
 use tinker_pdf_font::{
-    ColourIndex, Colr, Cpal, Layer, LayerColour, PaletteChoice, PaletteType, Rgba, Sfnt,
+    ColourIndex, Colr, Cpal, Graphic, Layer, LayerColour, PaletteChoice, PaletteType, Rgba, Sbix,
+    SbixGlyph, SbixRefusal, SbixStrike, Sfnt, StrikeChoice,
 };
 
 /// A colour, written as the reader hands it back.
@@ -1889,6 +1890,371 @@ fn colr_v1_seed() -> Vec<u8> {
     ])
 }
 
+/// One glyph's `sbix` data: its origin offsets, its graphic tag and the bytes
+/// after it (*Glyph data*).
+fn glyph_data(origin_x: i16, origin_y: i16, tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&origin_x.to_be_bytes());
+    out.extend_from_slice(&origin_y.to_be_bytes());
+    out.extend_from_slice(tag);
+    out.extend_from_slice(data);
+    out
+}
+
+/// A `dupe` naming `glyph`.
+fn dupe(glyph: u16) -> Vec<u8> {
+    glyph_data(0, 0, b"dupe", &glyph.to_be_bytes())
+}
+
+/// An `sbix` table (*Header*, *Strikes*): `flags`, then each strike's `ppem`,
+/// `ppi` and its glyphs' data in glyph order, `None` for no data, for a face
+/// of `glyph_count` glyphs.
+fn sbix_table(
+    flags: u16,
+    glyph_count: u16,
+    strikes: &[(u16, u16, Vec<Option<Vec<u8>>>)],
+) -> Vec<u8> {
+    let header = 8 + 4 * strikes.len();
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&flags.to_be_bytes());
+    out.extend_from_slice(&(strikes.len() as u32).to_be_bytes());
+    let mut bodies = Vec::new();
+    let mut at = header;
+    for (ppem, ppi, glyphs) in strikes {
+        out.extend_from_slice(&(at as u32).to_be_bytes());
+        let mut strike = Vec::new();
+        strike.extend_from_slice(&ppem.to_be_bytes());
+        strike.extend_from_slice(&ppi.to_be_bytes());
+        let mut offset = 4 + 4 * (usize::from(glyph_count) + 1);
+        let mut data = Vec::new();
+        for glyph in 0..usize::from(glyph_count) {
+            strike.extend_from_slice(&(offset as u32).to_be_bytes());
+            if let Some(Some(bytes)) = glyphs.get(glyph) {
+                offset += bytes.len();
+                data.extend_from_slice(bytes);
+            }
+        }
+        strike.extend_from_slice(&(offset as u32).to_be_bytes());
+        strike.extend_from_slice(&data);
+        at += strike.len();
+        bodies.extend_from_slice(&strike);
+    }
+    out.extend_from_slice(&bodies);
+    out
+}
+
+/// PNG, JPEG and TIFF bytes: each format's signature and a byte to tell them
+/// apart, never decoded here.
+const PNG_A: &[u8] = b"\x89PNG\r\n\x1a\nA";
+const PNG_B: &[u8] = b"\x89PNG\r\n\x1a\nB";
+const JPEG: &[u8] = b"\xff\xd8\xff\xe0J";
+const TIFF: &[u8] = b"II*\0T";
+
+#[test]
+fn sbix_strikes_and_glyph_data_read_as_written() {
+    let strikes = vec![
+        (
+            20,
+            72,
+            vec![
+                None,
+                Some(glyph_data(-2, 5, b"png ", PNG_A)),
+                Some(glyph_data(0, 0, b"jpg ", JPEG)),
+                Some(glyph_data(3, -4, b"tiff", TIFF)),
+            ],
+        ),
+        (
+            40,
+            144,
+            vec![None, Some(glyph_data(-4, 10, b"png ", PNG_B)), None, None],
+        ),
+    ];
+    let bytes = sbix_table(0x0001, 4, &strikes);
+    let sbix = Sbix::parse(&bytes, 4).expect("an sbix table");
+    assert_eq!(sbix.flags(), 1);
+    assert!(!sbix.draws_outlines());
+    assert_eq!(
+        sbix.strikes(),
+        vec![
+            SbixStrike { ppem: 20, ppi: 72 },
+            SbixStrike { ppem: 40, ppi: 144 }
+        ]
+    );
+    let glyph = |origin_x,
+                 origin_y,
+                 graphic,
+                 data,
+                 from|
+     -> Result<Option<SbixGlyph<'static>>, SbixRefusal> {
+        Ok(Some(SbixGlyph {
+            origin_x,
+            origin_y,
+            graphic,
+            data,
+            from,
+        }))
+    };
+    assert_eq!(sbix.glyph(0, 1), glyph(-2, 5, Graphic::Png, PNG_A, 1));
+    assert_eq!(sbix.glyph(0, 2), glyph(0, 0, Graphic::Jpeg, JPEG, 2));
+    assert_eq!(sbix.glyph(0, 3), glyph(3, -4, Graphic::Tiff, TIFF, 3));
+    assert_eq!(sbix.glyph(1, 1), glyph(-4, 10, Graphic::Png, PNG_B, 1));
+    assert_eq!(sbix.glyph(1, 2), Ok(None), "this strike has no data for it");
+    assert!(sbix.holds(0, 3) && !sbix.holds(1, 3));
+
+    // Bit 1 asks for the outline drawn over the bitmap.
+    let bytes = sbix_table(0x0003, 4, &strikes);
+    assert!(Sbix::parse(&bytes, 4)
+        .expect("an sbix table")
+        .draws_outlines());
+}
+
+#[test]
+fn a_dupe_resolves_once_and_a_chain_is_refused() {
+    let glyphs = vec![
+        None,
+        Some(glyph_data(1, 2, b"png ", PNG_A)),
+        Some(dupe(1)),
+        Some(dupe(2)),
+        Some(dupe(10)),
+        Some(dupe(0)),
+        Some(glyph_data(0, 0, b"dupe", &[1])),
+        Some(dupe(7)),
+        Some(glyph_data(0, 0, b"mask", b"m")),
+        Some(dupe(8)),
+    ];
+    let bytes = sbix_table(1, 10, &[(32, 72, glyphs)]);
+    let sbix = Sbix::parse(&bytes, 10).expect("an sbix table");
+    assert_eq!(
+        sbix.glyph(0, 2),
+        Ok(Some(SbixGlyph {
+            origin_x: 1,
+            origin_y: 2,
+            graphic: Graphic::Png,
+            data: PNG_A,
+            from: 1,
+        })),
+        "the named glyph's offsets and bytes"
+    );
+    assert!(sbix.holds(0, 2));
+    assert_eq!(
+        sbix.glyph(0, 3),
+        Err(SbixRefusal::DupeChain),
+        "dupe of a dupe"
+    );
+    assert_eq!(
+        sbix.glyph(0, 7),
+        Err(SbixRefusal::DupeChain),
+        "a dupe of itself"
+    );
+    assert_eq!(
+        sbix.glyph(0, 4),
+        Err(SbixRefusal::DupeTarget),
+        "past the count"
+    );
+    assert_eq!(
+        sbix.glyph(0, 5),
+        Err(SbixRefusal::DupeTarget),
+        "a glyph with no data"
+    );
+    assert_eq!(
+        sbix.glyph(0, 6),
+        Err(SbixRefusal::DupeTarget),
+        "too short to name one"
+    );
+    assert_eq!(
+        sbix.glyph(0, 9),
+        Err(SbixRefusal::GraphicType(*b"mask")),
+        "what the named glyph is refused for"
+    );
+    assert!(!sbix.holds(0, 3));
+}
+
+#[test]
+fn a_glyph_with_no_data_has_no_bitmap() {
+    let glyphs = vec![
+        None,
+        Some(glyph_data(0, 0, b"png ", PNG_A)),
+        Some(glyph_data(0, 0, b"mask", b"x")),
+        Some(glyph_data(0, 0, b"pdf ", b"%PDF")),
+        Some(vec![0, 1, 2, 3]),
+    ];
+    let bytes = sbix_table(1, 5, &[(20, 72, glyphs)]);
+    let sbix = Sbix::parse(&bytes, 5).expect("an sbix table");
+    assert_eq!(sbix.glyph(0, 0), Ok(None), "equal offsets are no bitmap");
+    assert!(!sbix.holds(0, 0));
+    assert_eq!(sbix.glyph(0, 5), Ok(None), "a glyph past the count");
+    assert_eq!(sbix.glyph(1, 1), Ok(None), "a strike past the count");
+    assert_eq!(sbix.glyph(0, 2), Err(SbixRefusal::GraphicType(*b"mask")));
+    assert_eq!(sbix.glyph(0, 3), Err(SbixRefusal::GraphicType(*b"pdf ")));
+    assert_eq!(
+        sbix.glyph(0, 4),
+        Err(SbixRefusal::Malformed),
+        "shorter than its header"
+    );
+    assert_eq!(sbix.choose_strike(0, StrikeChoice::Largest), None);
+
+    // Offsets that run backwards, and one past the table.
+    let strike = 8 + 4;
+    let offsets = strike + 4;
+    let mut backwards = bytes.clone();
+    let second = u32::from_be_bytes(backwards[offsets + 8..offsets + 12].try_into().unwrap());
+    backwards[offsets + 4..offsets + 8].copy_from_slice(&(second + 1).to_be_bytes());
+    let sbix = Sbix::parse(&backwards, 5).expect("an sbix table");
+    assert_eq!(sbix.glyph(0, 1), Err(SbixRefusal::Malformed));
+    let mut past = bytes.clone();
+    past[offsets + 8..offsets + 12].copy_from_slice(&0x00FF_FFFFu32.to_be_bytes());
+    let sbix = Sbix::parse(&past, 5).expect("an sbix table");
+    assert_eq!(
+        sbix.glyph(0, 1),
+        Err(SbixRefusal::Malformed),
+        "data past the table"
+    );
+    assert_eq!(sbix.glyph(0, 0), Ok(None), "the glyph before it as it was");
+
+    // What is no table: another version, a cut header, a strike past the
+    // data, and a face whose count leaves the offsets past the table.
+    let mut other = bytes.clone();
+    other[1] = 2;
+    assert!(Sbix::parse(&other, 5).is_none());
+    assert!(Sbix::parse(&bytes[..10], 5).is_none());
+    let mut far = bytes.clone();
+    far[8..12].copy_from_slice(&0x0010_0000u32.to_be_bytes());
+    assert!(Sbix::parse(&far, 5).is_none());
+    assert!(Sbix::parse(&bytes, 2000).is_none());
+}
+
+#[test]
+fn each_strike_option_picks_its_strike() {
+    // Glyph 1 is in every strike but the 64-pixel one, which alone holds
+    // glyph 0 and, through a dupe of it, glyph 2.
+    let held = || vec![None, Some(glyph_data(0, 0, b"png ", PNG_A)), None];
+    let only = vec![Some(glyph_data(0, 0, b"png ", PNG_B)), None, Some(dupe(0))];
+    let strikes = vec![
+        (20, 72, held()),
+        (40, 72, held()),
+        (32, 72, held()),
+        (64, 72, only),
+        (40, 144, held()),
+        (160, 72, held()),
+    ];
+    let bytes = sbix_table(1, 3, &strikes);
+    let sbix = Sbix::parse(&bytes, 3).expect("an sbix table");
+    for (choice, strike) in [
+        (StrikeChoice::Largest, 5),
+        (StrikeChoice::AtLeast(30), 2),
+        (StrikeChoice::AtLeast(40), 1),
+        (StrikeChoice::AtLeast(41), 5),
+        (StrikeChoice::AtLeast(200), 5),
+        (StrikeChoice::Multiple(16), 2),
+        (StrikeChoice::Multiple(20), 0),
+        (StrikeChoice::Multiple(50), 5),
+        (StrikeChoice::Multiple(0), 0),
+        (StrikeChoice::Nearest(36), 1),
+        (StrikeChoice::Nearest(64), 1),
+        (StrikeChoice::Nearest(20), 0),
+        (StrikeChoice::Nearest(1000), 5),
+    ] {
+        assert_eq!(
+            sbix.choose_strike(1, choice),
+            Some(strike),
+            "{choice:?}: among the strikes holding glyph 1"
+        );
+    }
+    for choice in [
+        StrikeChoice::Largest,
+        StrikeChoice::AtLeast(10),
+        StrikeChoice::Multiple(7),
+        StrikeChoice::Nearest(10),
+    ] {
+        assert_eq!(sbix.choose_strike(0, choice), Some(3), "{choice:?}");
+        assert_eq!(sbix.choose_strike(2, choice), Some(3), "a dupe holds it");
+        assert_eq!(sbix.choose_strike(3, choice), None, "past the count");
+    }
+}
+
+#[test]
+fn every_prefix_and_flip_of_an_sbix_table_answers_without_panicking() {
+    let table = sbix_seed_table();
+    let walk = |bytes: &[u8]| {
+        for count in [6u16, 0, 1, 40] {
+            if let Some(sbix) = Sbix::parse(bytes, count) {
+                let strikes = sbix.strikes().len();
+                for glyph in 0..8 {
+                    for strike in 0..strikes + 1 {
+                        let _ = sbix.glyph(strike, glyph);
+                    }
+                    for choice in [
+                        StrikeChoice::Largest,
+                        StrikeChoice::AtLeast(30),
+                        StrikeChoice::Multiple(16),
+                        StrikeChoice::Nearest(30),
+                    ] {
+                        if let Some(strike) = sbix.choose_strike(glyph, choice) {
+                            assert!(sbix.holds(strike, glyph));
+                        }
+                    }
+                }
+            }
+        }
+    };
+    walk(&table);
+    for end in 0..=table.len() {
+        walk(&table[..end]);
+    }
+    for at in 0..table.len() {
+        for flip in [0x01u8, 0x80, 0xFF] {
+            let mut bytes = table.clone();
+            bytes[at] ^= flip;
+            walk(&bytes);
+        }
+    }
+}
+
+/// The `sbix` table the `sbix` seed carries: two strikes, every graphic type
+/// the chapter defines, a `dupe`, and a `mask` it refuses.
+fn sbix_seed_table() -> Vec<u8> {
+    sbix_table(
+        1,
+        6,
+        &[
+            (
+                20,
+                72,
+                vec![
+                    None,
+                    Some(glyph_data(0, -4, b"png ", PNG_A)),
+                    Some(glyph_data(1, -4, b"jpg ", JPEG)),
+                    Some(glyph_data(2, -4, b"tiff", TIFF)),
+                    Some(dupe(1)),
+                    Some(glyph_data(0, 0, b"mask", b"m")),
+                ],
+            ),
+            (
+                40,
+                144,
+                vec![
+                    None,
+                    Some(glyph_data(0, -8, b"png ", PNG_B)),
+                    Some(dupe(1)),
+                    None,
+                    None,
+                    None,
+                ],
+            ),
+        ],
+    )
+}
+
+/// `fuzz/corpus/sfnt/sbix.ttf`: [`sbix_seed_table`] in a face of six glyphs.
+fn sbix_seed() -> Vec<u8> {
+    face(&[
+        (b"head", head(1000)),
+        (b"maxp", maxp(6)),
+        (b"sbix", sbix_seed_table()),
+    ])
+}
+
 /// The colour tables a seed carries, read through its directory, as the
 /// `sfnt` target reads them.
 fn colour_tables_of(face: &[u8]) -> (Option<Colr<'_>>, Option<Cpal<'_>>) {
@@ -1903,25 +2269,25 @@ fn colour_tables_of(face: &[u8]) -> (Option<Colr<'_>>, Option<Cpal<'_>>) {
 }
 
 /// The `fuzz/corpus/sfnt` seeds the builders here write.
-const SEEDS: [&str; 2] = ["colr-v0.ttf", "colr-v1.ttf"];
+const SEEDS: [&str; 3] = ["colr-v0.ttf", "colr-v1.ttf", "sbix.ttf"];
 
 /// A seed's bytes, as the builders write it.
 fn seed_bytes(name: &str) -> Vec<u8> {
     match name {
         "colr-v0.ttf" => colr_v0_seed(),
         "colr-v1.ttf" => colr_v1_seed(),
+        "sbix.ttf" => sbix_seed(),
         _ => Vec::new(),
     }
 }
 
 /// Whether a seed reaches the readers it is there for.
 fn reaches(name: &str, face: &[u8]) -> bool {
-    let (colr, cpal) = colour_tables_of(face);
-    let (Some(colr), Some(cpal)) = (colr, cpal) else {
-        return false;
-    };
     match name {
         "colr-v0.ttf" => {
+            let (Some(colr), Some(cpal)) = colour_tables_of(face) else {
+                return false;
+            };
             let palette = cpal.choose(PaletteChoice::DarkBackground);
             palette == 1
                 && colr
@@ -1930,12 +2296,29 @@ fn reaches(name: &str, face: &[u8]) -> bool {
                 && cpal.palette_label(0) == Some(256)
         }
         "colr-v1.ttf" => {
+            let (Some(colr), Some(_)) = colour_tables_of(face) else {
+                return false;
+            };
             (1..=4).all(|glyph| {
                 colr.paint_graph(glyph)
                     .is_some_and(|graph| graph.warnings().is_empty())
             }) && colr
                 .clip_box(4)
                 .is_some_and(|clip| clip.var_index_base == Some(0))
+        }
+        "sbix.ttf" => {
+            let font = Sfnt::parse(face).expect("the seed's directory reads");
+            let (Some(table), Some(count)) =
+                (font.table(u32::from_be_bytes(*b"sbix")), font.glyph_count())
+            else {
+                return false;
+            };
+            Sbix::parse(table, count).is_some_and(|sbix| {
+                sbix.strikes().len() == 2
+                    && sbix.choose_strike(1, StrikeChoice::Largest) == Some(1)
+                    && sbix.glyph(0, 4).is_ok_and(|glyph| glyph.is_some())
+                    && sbix.glyph(0, 5) == Err(SbixRefusal::GraphicType(*b"mask"))
+            })
         }
         _ => false,
     }

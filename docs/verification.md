@@ -175,6 +175,16 @@ corpus needs its refusal cases: `type1/truncated-eexec.pfb` does not parse on
 purpose, and `truetype/cmap12-glyph-id-overflow.ttf` is exactly what its name
 says.
 
+The `sfnt` corpus's colour seeds — `colr-v0.ttf`, `colr-v1.ttf` and
+`sbix.ttf` — are each held by name to the readers they are there for:
+`crates/tinker-pdf-font/tests/colour_tables.rs` reads the committed seed
+through its directory and asserts what it reaches, a glyph's layers, a
+version 1 graph with no refusal, a `dupe` resolved and a `mask` refused, as
+it does the seed its builders write (`write_the_fuzz_seeds`, ignored, writes
+them). The bitmaps they carry are a format's signature and a byte, handed
+back undecoded: the `sfnt` target reaches no image decoder, and the `png`,
+`jpeg` and `tiff` targets are what fuzz those.
+
 `truetype` is held to two floors more, because composite recursion is what
 the target's own header calls "the interesting part": a floor on the seeds
 carrying an outline table, and one on those holding a **composite** glyph.
