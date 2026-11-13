@@ -4,6 +4,8 @@
 //! open at [`LadderLevel::Trust`] with an empty warning list. A warning here
 //! is a regression in this crate, not damage in the file.
 
+mod written_support;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -237,16 +239,23 @@ fn compression_shrinks_a_written_file_and_it_still_opens() {
             }
         });
     }
-    let plain = builder.finish();
+    let plain = built(
+        "compression shrinks a written file and it still opens",
+        builder,
+    );
 
     let doc = Arc::new(CosDocument::open(plain.clone()).expect("it opens"));
     let editor = DocumentEditor::new(doc);
-    let packed = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        compress: true,
-        object_streams: true,
-        ..WriteOptions::default()
-    });
+    let packed = held_save(
+        "compression shrinks a written file and it still opens",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            compress: true,
+            object_streams: true,
+            ..WriteOptions::default()
+        },
+    );
 
     // Object streams alone make a file *larger* — packing many objects into
     // one container only pays once the container is compressed, which is
@@ -295,11 +304,15 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
         },
     );
 
-    let saved = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        compress: true,
-        ..WriteOptions::default()
-    });
+    let saved = held_save(
+        "an already filtered stream is not compressed twice",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            compress: true,
+            ..WriteOptions::default()
+        },
+    );
 
     let text = String::from_utf8_lossy(&saved);
     assert!(
@@ -307,4 +320,38 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
         "a filtered stream was wrapped again"
     );
     assert!(text.contains("/ASCIIHexDecode"), "and kept its own filter");
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

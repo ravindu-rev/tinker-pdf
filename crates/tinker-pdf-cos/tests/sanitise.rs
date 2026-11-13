@@ -20,6 +20,8 @@
 //! is that it reads zero afterwards — those walkers miss the page and
 //! annotation `/AA`, so the fixture carries both and asserts them by hand.
 
+mod written_support;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -178,10 +180,14 @@ trailer
 /// numbers, inside a well-formed file.
 fn fixture() -> Arc<CosDocument> {
     let raw = Arc::new(CosDocument::open(FIXTURE.as_bytes().to_vec()).expect("the fixture opens"));
-    let written = DocumentEditor::new(raw).save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let written = held_save(
+        "fixture",
+        &DocumentEditor::new(raw),
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -208,10 +214,14 @@ fn objects(editor: &DocumentEditor) -> BTreeMap<u32, Object> {
 }
 
 fn saved(editor: &DocumentEditor, mode: WriteMode) -> (Vec<u8>, CosDocument) {
-    let bytes = editor.save(&WriteOptions {
-        mode,
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "saved",
+        &editor,
+        &WriteOptions {
+            mode,
+            ..WriteOptions::default()
+        },
+    );
     let reopened = CosDocument::open(bytes.clone()).expect("the sanitised file reopens");
     let defects = tinker_pdf_cos::validate(&reopened);
     assert!(
@@ -705,10 +715,14 @@ trailer
 
 fn dressed() -> Arc<CosDocument> {
     let raw = Arc::new(CosDocument::open(DRESSED.as_bytes().to_vec()).expect("the fixture opens"));
-    let written = DocumentEditor::new(raw).save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let written = held_save(
+        "dressed",
+        &DocumentEditor::new(raw),
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -844,7 +858,13 @@ fn an_imported_page_keeps_its_content_when_its_link_goes() {
 
     let mut builder = tinker_pdf_cos::DocumentBuilder::new();
     builder.add_page(200.0, 200.0, |_| {});
-    let target = Arc::new(CosDocument::open(builder.finish()).expect("the target opens"));
+    let target = Arc::new(
+        CosDocument::open(built(
+            "an imported page keeps its content when its link goes",
+            builder,
+        ))
+        .expect("the target opens"),
+    );
     let mut editor = DocumentEditor::new(target);
     let imported = editor.import_page(&source, 0, 1).expect("the page imports");
     let page = editor.get(imported).expect("the imported page");
@@ -913,10 +933,14 @@ trailer
 fn info_taken_out_does_not_come_back_from_an_earlier_trailer() {
     let raw = Arc::new(CosDocument::open(NAMED_INFO.as_bytes().to_vec()).expect("it opens"));
     let doc = Arc::new(
-        CosDocument::open(DocumentEditor::new(raw).save(&WriteOptions {
-            mode: WriteMode::Rewrite,
-            ..WriteOptions::default()
-        }))
+        CosDocument::open(held_save(
+            "info taken out does not come back from an earlier trailer",
+            &DocumentEditor::new(raw),
+            &WriteOptions {
+                mode: WriteMode::Rewrite,
+                ..WriteOptions::default()
+            },
+        ))
         .expect("the rewrite reopens"),
     );
     assert_eq!(metadata(&doc).title.as_deref(), Some("Secret"), "premise");
@@ -942,4 +966,38 @@ fn info_taken_out_does_not_come_back_from_an_earlier_trailer() {
             _ => assert_eq!(info, None, "{mode:?}"),
         }
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

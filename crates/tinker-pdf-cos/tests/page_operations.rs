@@ -4,6 +4,8 @@
 //! *assemble* a document — add a page, take a page from another file, keep a
 //! subset, make an annotation permanent — was missing.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -19,14 +21,18 @@ fn document(pages: usize, label: &str) -> Arc<CosDocument> {
             page.text(b"F0", 12.0, 10.0, 50.0, &format!("{label} page {i}"));
         });
     }
-    Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    Arc::new(CosDocument::open(built("document", builder)).expect("it opens"))
 }
 
 fn saved(editor: &DocumentEditor) -> CosDocument {
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "saved",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     CosDocument::open(bytes).expect("it reopens")
 }
 
@@ -312,7 +318,7 @@ fn a_font_can_be_embedded() {
         page.text(b"F0", 12.0, 10.0, 50.0, "EMBEDDED");
     });
 
-    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let doc = CosDocument::open(built("a font can be embedded", builder)).expect("it opens");
     let collected = pages::collect(&doc);
     let resources = collected[0].resources.as_ref().expect("resources");
     let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
@@ -346,7 +352,8 @@ fn embedded_widths_come_from_the_font_program() {
     builder.add_embedded_font(b"F0", b"Boxy", &boxy_font());
     builder.add_page(100.0, 100.0, |_| {});
 
-    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let doc = CosDocument::open(built("embedded widths come from the font program", builder))
+        .expect("it opens");
     let collected = pages::collect(&doc);
     let resources = collected[0].resources.as_ref().expect("resources");
     let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
@@ -521,7 +528,10 @@ fn an_embedded_font_is_cut_down_to_what_the_document_draws() {
         page.text(b"F0", 12.0, 10.0, 50.0, "AB");
     });
 
-    let (embedded, _) = embedded_program(builder.finish());
+    let (embedded, _) = embedded_program(built(
+        "an embedded font is cut down to what the document draws",
+        builder,
+    ));
     assert!(
         embedded.len() < program.len(),
         "the subset is smaller: {} vs {}",
@@ -542,7 +552,10 @@ fn the_glyphs_that_were_drawn_survive_subsetting() {
         page.text(b"F0", 12.0, 10.0, 50.0, "AC");
     });
 
-    let (embedded, _) = embedded_program(builder.finish());
+    let (embedded, _) = embedded_program(built(
+        "the glyphs that were drawn survive subsetting",
+        builder,
+    ));
     let sfnt = tinker_pdf_font::Sfnt::parse(&embedded).expect("the subset is a font");
 
     for c in ['A', 'C'] {
@@ -570,7 +583,7 @@ fn a_subset_font_name_carries_its_tag() {
         page.text(b"F0", 12.0, 10.0, 50.0, "AB");
     });
 
-    let (_, base) = embedded_program(builder.finish());
+    let (_, base) = embedded_program(built("a subset font name carries its tag", builder));
     let (tag, name) = base.split_once('+').expect("a subset tag and a plus sign");
     assert_eq!(name, "Boxy");
     assert_eq!(tag.len(), 6, "six letters: {tag}");
@@ -591,7 +604,7 @@ fn the_same_document_subsets_to_the_same_bytes() {
         builder.add_page(200.0, 100.0, |page| {
             page.text(b"F0", 12.0, 10.0, 50.0, "AB");
         });
-        builder.finish()
+        built("the same document subsets to the same bytes", builder)
     };
     assert_eq!(build(), build());
 }
@@ -609,7 +622,7 @@ fn subsetting_can_be_turned_off() {
         page.text(b"F0", 12.0, 10.0, 50.0, "AB");
     });
 
-    let (embedded, base) = embedded_program(builder.finish());
+    let (embedded, base) = embedded_program(built("subsetting can be turned off", builder));
     assert_eq!(embedded.len(), program.len(), "the whole face");
     assert_eq!(base, "Boxy", "and no subset tag, because it is not one");
 }
@@ -628,7 +641,8 @@ fn a_font_that_maps_nothing_is_embedded_whole() {
         page.text(b"F0", 12.0, 10.0, 50.0, "TEXT");
     });
 
-    let (embedded, base) = embedded_program(builder.finish());
+    let (embedded, base) =
+        embedded_program(built("a font that maps nothing is embedded whole", builder));
     assert_eq!(embedded.len(), program.len(), "the whole face is carried");
     assert_eq!(base, "Boxy");
 }
@@ -646,7 +660,7 @@ fn length1_describes_the_subset_and_not_the_original() {
         page.text(b"F0", 12.0, 10.0, 50.0, "AB");
     });
 
-    let bytes = builder.finish();
+    let bytes = built("length1 describes the subset and not the original", builder);
     let (embedded, _) = embedded_program(bytes.clone());
 
     let doc = CosDocument::open(bytes).expect("it opens");
@@ -675,4 +689,38 @@ fn length1_describes_the_subset_and_not_the_original() {
         embedded.len(),
         "the subset's length, not the face's"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

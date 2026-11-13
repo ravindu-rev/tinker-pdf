@@ -50,6 +50,8 @@
 //! `allowing_the_catalog_trigger_changes_no_answer` is the assertion that
 //! says so out loud rather than leaving it to be assumed.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -62,10 +64,14 @@ use tinker_pdf_cos::{
 /// file.
 fn normalize(bytes: Vec<u8>) -> Arc<CosDocument> {
     let raw = Arc::new(CosDocument::open(bytes).expect("the fixture opens"));
-    let written = DocumentEditor::new(raw).save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let written = held_save(
+        "normalize",
+        &DocumentEditor::new(raw),
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -493,4 +499,29 @@ fn a_form_that_calls_no_helper_computes_the_same_either_way() {
     // it changes nothing — which is the contract, not an accident of this
     // fixture.
     assert_eq!(allowed.recalculate(), Ok(Recalculation::default()));
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

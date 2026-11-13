@@ -6,6 +6,8 @@
 //! allocated. Through `shared_document` that reference names nothing; through
 //! the view it names what the editor put there, at the same number.
 
+mod written_support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,7 +21,7 @@ fn one_page() -> Arc<CosDocument> {
     builder.add_page(100.0, 100.0, |page| {
         page.fill_rect(10.0, 10.0, 20.0, 20.0, 0.0);
     });
-    Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    Arc::new(CosDocument::open(built("one page", builder)).expect("it opens"))
 }
 
 /// Allocates a form XObject in `editor` and names it `/Fm9` in page 0's
@@ -190,4 +192,13 @@ fn an_encrypted_documents_view_decrypts_old_and_new() {
         original,
         "and the file's own content still decrypts"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

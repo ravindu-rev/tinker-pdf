@@ -38,6 +38,8 @@
 //! that fires nothing is worth writing down precisely because the next reader
 //! would otherwise assume it fires something.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -49,10 +51,14 @@ use tinker_pdf_cos::{
 /// repair scanner; a rewrite gives the same graph inside a well-formed file.
 fn normalize(bytes: Vec<u8>) -> Arc<CosDocument> {
     let raw = Arc::new(CosDocument::open(bytes).expect("the fixture opens"));
-    let written = DocumentEditor::new(raw).save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let written = held_save(
+        "normalize",
+        &DocumentEditor::new(raw),
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -177,10 +183,14 @@ fn value_of(editor: &DocumentEditor, name: &str) -> String {
 /// assertion can say what a widget actually draws rather than what its `/V`
 /// claims.
 fn saved(editor: &DocumentEditor) -> String {
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "saved",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -972,4 +982,29 @@ fn a_policy_refuses_a_script_that_is_there_and_not_one_that_is_not() {
         Ok(None),
         "a field with no format action has nothing to refuse"
     );
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

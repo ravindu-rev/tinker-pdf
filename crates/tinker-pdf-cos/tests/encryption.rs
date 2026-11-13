@@ -5,6 +5,8 @@
 //! still reports its restrictions instead of degrading to "everything is
 //! permitted".
 
+mod written_support;
+
 use std::path::PathBuf;
 use tinker_pdf_cos::{AuthError, AuthLevel, CosDocument, Name};
 
@@ -179,10 +181,15 @@ fn rewriting_a_decrypted_document_does_not_claim_to_be_encrypted() {
     assert!(doc.is_encrypted(), "the source is encrypted");
 
     let editor = DocumentEditor::new(Arc::new(doc));
-    let saved = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let saved = held_save_opened(
+        "rewriting a decrypted document does not claim to be encrypted",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+        "open-sesame",
+    );
 
     let reopened = CosDocument::open(saved).expect("the rewrite opens");
     assert!(
@@ -259,4 +266,39 @@ fn a_cross_reference_stream_is_never_decrypted() {
     // Opening at all proves it: the xref stream had to be read before any
     // password existed, and the pages resolve through it afterwards.
     assert!(tinker_pdf_cos::pages::count(&doc) > 0);
+}
+
+/// `editor` saved with `options` over a document opened with `password`,
+/// held to the validate-on-save helper as a rewrite of it: the
+/// input is read with it, and so is an incremental update, which keeps the
+/// input's encryption.
+#[track_caller]
+fn held_save_opened(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+    password: &str,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = written_support::Locked {
+        bytes: editor.document().bytes().to_vec(),
+        key: written_support::Key::Password(password),
+    };
+    let sealed = match &options.encryption {
+        Some(encryption) => Some(encryption.user_password.as_str()),
+        None if matches!(options.mode, tinker_pdf_cos::WriteMode::Incremental) => Some(password),
+        None => None,
+    };
+    match sealed {
+        Some(key) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(key),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

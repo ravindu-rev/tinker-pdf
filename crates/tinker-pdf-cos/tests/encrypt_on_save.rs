@@ -10,6 +10,8 @@
 //! with this engine's own handler, and check both that the password is
 //! required and that the content survives it.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -34,21 +36,25 @@ fn source() -> Arc<CosDocument> {
     builder.add_page(200.0, 100.0, |page| {
         page.text(b"F0", 12.0, 10.0, 50.0, "CONFIDENTIAL CONTENT");
     });
-    Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    Arc::new(CosDocument::open(built("source", builder)).expect("it opens"))
 }
 
 fn encrypted(user: &str, owner: &str, permissions: i32) -> Vec<u8> {
     let editor = DocumentEditor::new(source());
-    editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        encryption: Some(Encryption {
-            user_password: user.to_string(),
-            owner_password: owner.to_string(),
-            permissions,
-            entropy: entropy(),
-        }),
-        ..WriteOptions::default()
-    })
+    held_save(
+        "encrypted",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            encryption: Some(Encryption {
+                user_password: user.to_string(),
+                owner_password: owner.to_string(),
+                permissions,
+                entropy: entropy(),
+            }),
+            ..WriteOptions::default()
+        },
+    )
 }
 
 /// The headline: the option now does something, and what it does is reversible
@@ -200,19 +206,26 @@ fn identical_content_encrypts_differently() {
             page.fill_rect(0.0, 0.0, 50.0, 50.0, 0.0);
         });
     }
-    let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+    let doc = Arc::new(
+        CosDocument::open(built("identical content encrypts differently", builder))
+            .expect("it opens"),
+    );
 
     let editor = DocumentEditor::new(doc);
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        encryption: Some(Encryption {
-            user_password: "x".to_string(),
-            owner_password: "y".to_string(),
-            permissions: -1,
-            entropy: entropy(),
-        }),
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "identical content encrypts differently",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            encryption: Some(Encryption {
+                user_password: "x".to_string(),
+                owner_password: "y".to_string(),
+                permissions: -1,
+                entropy: entropy(),
+            }),
+            ..WriteOptions::default()
+        },
+    );
 
     let doc = CosDocument::open(bytes).expect("it opens");
     let first = doc
@@ -241,18 +254,22 @@ fn identical_content_encrypts_differently() {
 #[test]
 fn encryption_survives_object_streams() {
     let editor = DocumentEditor::new(source());
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        object_streams: true,
-        compress: true,
-        encryption: Some(Encryption {
-            user_password: "open-me".to_string(),
-            owner_password: "owner-me".to_string(),
-            permissions: -1,
-            entropy: entropy(),
-        }),
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "encryption survives object streams",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            object_streams: true,
+            compress: true,
+            encryption: Some(Encryption {
+                user_password: "open-me".to_string(),
+                owner_password: "owner-me".to_string(),
+                permissions: -1,
+                entropy: entropy(),
+            }),
+            ..WriteOptions::default()
+        },
+    );
 
     let doc = CosDocument::open(bytes).expect("it opens");
     assert!(doc.is_encrypted(), "the /Encrypt dictionary is reachable");
@@ -310,18 +327,22 @@ fn the_trailer_size_counts_the_encryption_dictionary() {
 #[test]
 fn no_object_number_is_written_twice() {
     let editor = DocumentEditor::new(source());
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        object_streams: true,
-        compress: true,
-        encryption: Some(Encryption {
-            user_password: "open-me".to_string(),
-            owner_password: "owner-me".to_string(),
-            permissions: -1,
-            entropy: entropy(),
-        }),
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "no object number is written twice",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            object_streams: true,
+            compress: true,
+            encryption: Some(Encryption {
+                user_password: "open-me".to_string(),
+                owner_password: "owner-me".to_string(),
+                permissions: -1,
+                entropy: entropy(),
+            }),
+            ..WriteOptions::default()
+        },
+    );
 
     // Header scan rather than a parse: the point is what is *in the file*, and
     // asking this repository's reader would ask the half that already agrees.
@@ -435,19 +456,23 @@ fn strings_in_a_stream_dictionary_are_encrypted_too() {
     let sealed = |object_streams: bool, linearize: bool| -> Vec<u8> {
         let mut editor = DocumentEditor::new(source());
         with_strings_in_a_stream_dictionary(&mut editor, content);
-        editor.save(&WriteOptions {
-            mode: WriteMode::Rewrite,
-            object_streams,
-            linearize,
-            compress: object_streams,
-            encryption: Some(Encryption {
-                user_password: "open-me".to_string(),
-                owner_password: "owner-me".to_string(),
-                permissions: -1,
-                entropy: entropy(),
-            }),
-            ..WriteOptions::default()
-        })
+        held_save(
+            "strings in a stream dictionary are encrypted too",
+            &editor,
+            &WriteOptions {
+                mode: WriteMode::Rewrite,
+                object_streams,
+                linearize,
+                compress: object_streams,
+                encryption: Some(Encryption {
+                    user_password: "open-me".to_string(),
+                    owner_password: "owner-me".to_string(),
+                    permissions: -1,
+                    entropy: entropy(),
+                }),
+                ..WriteOptions::default()
+            },
+        )
     };
     let mut saves = vec![
         ("a rewrite", sealed(false, false), "open-me"),
@@ -463,10 +488,15 @@ fn strings_in_a_stream_dictionary_are_encrypted_too() {
         .expect("the password opens it");
     let mut editor = DocumentEditor::new(Arc::new(doc));
     with_strings_in_a_stream_dictionary(&mut editor, content);
-    let updated = editor.save(&WriteOptions {
-        mode: WriteMode::Incremental,
-        ..WriteOptions::default()
-    });
+    let updated = held_save_opened(
+        "strings in a stream dictionary are encrypted too",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        },
+        "open-sesame",
+    );
     assert!(updated.starts_with(&original), "an update appends");
     saves.push((
         "an incremental update under the inherited key",
@@ -505,17 +535,21 @@ fn strings_in_a_stream_dictionary_are_encrypted_too() {
 #[test]
 fn the_page_index_is_dropped_when_a_password_arrives() {
     let editor = DocumentEditor::new(source());
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        object_streams: true,
-        encryption: Some(Encryption {
-            user_password: "open-me".to_string(),
-            owner_password: "owner-me".to_string(),
-            permissions: -1,
-            entropy: entropy(),
-        }),
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "the page index is dropped when a password arrives",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            object_streams: true,
+            encryption: Some(Encryption {
+                user_password: "open-me".to_string(),
+                owner_password: "owner-me".to_string(),
+                permissions: -1,
+                entropy: entropy(),
+            }),
+            ..WriteOptions::default()
+        },
+    );
     let doc = CosDocument::open(bytes).expect("it opens");
 
     assert_eq!(
@@ -545,4 +579,72 @@ fn the_page_index_is_dropped_when_a_password_arrives() {
             .contains("CONFIDENTIAL CONTENT"),
         "and reads decrypted"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
+}
+
+/// [`held_save`] for an editor over a document opened with `password`: the
+/// input is read with it, and so is an incremental update, which keeps the
+/// input's encryption.
+#[track_caller]
+fn held_save_opened(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+    password: &str,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = written_support::Locked {
+        bytes: editor.document().bytes().to_vec(),
+        key: written_support::Key::Password(password),
+    };
+    let sealed = match &options.encryption {
+        Some(encryption) => Some(encryption.user_password.as_str()),
+        None if matches!(options.mode, tinker_pdf_cos::WriteMode::Incremental) => Some(password),
+        None => None,
+    };
+    match sealed {
+        Some(key) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(key),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

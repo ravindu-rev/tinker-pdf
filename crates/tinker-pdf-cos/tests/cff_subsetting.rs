@@ -38,6 +38,8 @@
 //! | `glyph_run` writes the index | 1 |
 //! | `PageBuilder::glyphs` writes the index | 3 |
 
+mod written_support;
+
 use tinker_pdf_cos::{
     CosDocument, Dict, DocumentBuilder, EmbeddedWhole, Glyph, Object, SubsetRefusal,
 };
@@ -566,7 +568,9 @@ fn simple_document(program: &[u8], text: &str) -> (Vec<u8>, Vec<EmbeddedWhole>) 
     builder.add_page(200.0, 100.0, |page| {
         page.text(b"F0", 24.0, 20.0, 40.0, text);
     });
-    builder.finish_reporting()
+    let (bytes, warnings) = builder.finish_reporting();
+    written_support::authored("simple document", &bytes);
+    (bytes, warnings)
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +780,7 @@ fn a_composite_font_over_a_cff_face_is_subsetted() {
         );
     });
     let (bytes, warnings) = builder.finish_reporting();
+    written_support::authored("a composite font over a cff face is subsetted", &bytes);
     assert!(warnings.is_empty(), "nothing declined: {warnings:?}");
 
     let doc = CosDocument::open(bytes).expect("the document opens");
@@ -899,6 +904,7 @@ fn composite(program: &[u8], drawn: &[Glyph<'_>]) -> CosDocument {
         assert!(page.glyphs(b"C0", 24.0, 20.0, 40.0, drawn));
     });
     let (bytes, _) = builder.finish_reporting();
+    written_support::authored("composite", &bytes);
     CosDocument::open(bytes).expect("the document opens")
 }
 
@@ -1109,6 +1115,7 @@ fn subsetting_turned_off_reports_nothing() {
         page.text(b"F0", 24.0, 20.0, 40.0, "AC");
     });
     let (bytes, warnings) = builder.finish_reporting();
+    written_support::authored("subsetting turned off reports nothing", &bytes);
     assert!(warnings.is_empty(), "the caller asked for the whole face");
 
     let doc = CosDocument::open(bytes).expect("the document opens");

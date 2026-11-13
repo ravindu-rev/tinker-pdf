@@ -9,6 +9,8 @@
 //! in the same editor. Each test here is one of those, saved and reopened
 //! where the claim is about the file.
 
+mod written_support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,7 +34,7 @@ fn incremental() -> WriteOptions {
 }
 
 fn reopen(editor: &DocumentEditor) -> CosDocument {
-    CosDocument::open(editor.save(&incremental())).expect("the save reopens")
+    CosDocument::open(held_save("reopen", &editor, &incremental())).expect("the save reopens")
 }
 
 fn name_of(doc: &CosDocument, object: Option<&Object>) -> Option<String> {
@@ -272,6 +274,11 @@ fn a_certified_save_writes_perms_into_the_catalog() {
     let signed = editor
         .save_signed(&incremental(), &request)
         .expect("signing succeeds");
+    written_support::rewritten(
+        "a certified save writes perms into the catalog",
+        editor.document().bytes(),
+        &signed,
+    );
 
     let saved = CosDocument::open(signed).expect("reopens");
     let catalog = saved.catalog().expect("a catalog");
@@ -312,11 +319,21 @@ fn an_imported_pages_filtered_content_reads_decoded() {
             page.text(b"F0", 12.0, 10.0, f64::from(line) * 2.0, "imported words");
         }
     });
-    let plain = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
-    let packed = DocumentEditor::new(plain).save(&WriteOptions {
-        compress: true,
-        ..WriteOptions::default()
-    });
+    let plain = Arc::new(
+        CosDocument::open(built(
+            "an imported pages filtered content reads decoded",
+            builder,
+        ))
+        .expect("it opens"),
+    );
+    let packed = held_save(
+        "an imported pages filtered content reads decoded",
+        &DocumentEditor::new(plain),
+        &WriteOptions {
+            compress: true,
+            ..WriteOptions::default()
+        },
+    );
     let source = CosDocument::open(packed).expect("the compressed copy opens");
     let first = &tinker_pdf_cos::pages::collect(&source)[0];
     let content = tinker_pdf_cos::pages::contents(&source, first)
@@ -343,4 +360,38 @@ fn an_imported_pages_filtered_content_reads_decoded() {
         text.contains("(imported words) Tj"),
         "the imported drawing survives the append: {text:?}"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

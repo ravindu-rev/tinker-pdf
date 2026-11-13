@@ -20,6 +20,8 @@
 //! skipped-widget path would be reachable in principle and untravelled in
 //! fact.
 
+mod written_support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -181,10 +183,14 @@ fn the_undamaged_fields_fill_with_nothing_skipped() {
         .expect("taken")
         .is_empty());
 
-    let saved = editor.save(&WriteOptions {
-        mode: WriteMode::Incremental,
-        ..WriteOptions::default()
-    });
+    let saved = held_save(
+        "the undamaged fields fill with nothing skipped",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        },
+    );
     let reopened = CosDocument::open(saved).expect("the saved document opens");
     let states: Vec<String> = fields(&reopened)
         .into_iter()
@@ -202,10 +208,14 @@ fn an_incremental_save_keeps_the_original_bytes_as_a_prefix() {
     let mut editor = DocumentEditor::new(fixture());
     assert!(editor.fill_field("name", "Ada Lovelace").is_ok());
 
-    let saved = editor.save(&WriteOptions {
-        mode: WriteMode::Incremental,
-        ..WriteOptions::default()
-    });
+    let saved = held_save(
+        "an incremental save keeps the original bytes as a prefix",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        },
+    );
 
     assert!(saved.len() > original.len(), "it grew");
     assert_eq!(
@@ -223,4 +233,29 @@ fn an_incremental_save_keeps_the_original_bytes_as_a_prefix() {
         "the artefact is clean too: {:?}",
         defects.iter().map(|d| d.kind.as_str()).collect::<Vec<_>>()
     );
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

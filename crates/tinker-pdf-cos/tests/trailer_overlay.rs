@@ -5,6 +5,8 @@
 //! editor had no way to give a file an `/Info` it did not have: the
 //! dictionary could be put, and nothing would ever point at it.
 
+mod written_support;
+
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -19,16 +21,20 @@ fn bare() -> Arc<CosDocument> {
     builder.add_page(100.0, 100.0, |page| {
         page.fill_rect(10.0, 10.0, 20.0, 20.0, 0.0);
     });
-    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let doc = CosDocument::open(built("bare", builder)).expect("it opens");
     assert!(doc.trailer().get(Name::INFO).is_none(), "the premise");
     Arc::new(doc)
 }
 
 fn saved(editor: &DocumentEditor, mode: WriteMode) -> CosDocument {
-    CosDocument::open(editor.save(&WriteOptions {
-        mode,
-        ..WriteOptions::default()
-    }))
+    CosDocument::open(held_save(
+        "saved",
+        &editor,
+        &WriteOptions {
+            mode,
+            ..WriteOptions::default()
+        },
+    ))
     .expect("the save reopens")
 }
 
@@ -41,10 +47,14 @@ fn info_given_to_a_file_without_one_survives_an_incremental_save() {
     editor.set_info(b"Author", "日本語");
     assert!(editor.is_dirty());
 
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Incremental,
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "info given to a file without one survives an incremental save",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        },
+    );
     assert!(bytes.starts_with(&original), "an update, not a rewrite");
     let reopened = CosDocument::open(bytes).expect("reopens");
     let info = metadata(&reopened);
@@ -58,11 +68,15 @@ fn info_given_to_a_file_without_one_survives_a_rewrite() {
     let mut editor = DocumentEditor::new(bare());
     editor.set_info(b"Title", "Rewritten");
     for collect in [false, true] {
-        let reopened = CosDocument::open(editor.save(&WriteOptions {
-            mode: WriteMode::Rewrite,
-            garbage_collect: collect,
-            ..WriteOptions::default()
-        }))
+        let reopened = CosDocument::open(held_save(
+            "info given to a file without one survives a rewrite",
+            &editor,
+            &WriteOptions {
+                mode: WriteMode::Rewrite,
+                garbage_collect: collect,
+                ..WriteOptions::default()
+            },
+        ))
         .expect("reopens");
         assert_eq!(
             metadata(&reopened).title.as_deref(),
@@ -78,7 +92,9 @@ fn an_existing_info_is_updated_in_place() {
     let mut builder = DocumentBuilder::new();
     builder.add_page(100.0, 100.0, |_| {});
     assert!(builder.set_info(b"Title", "Kept"));
-    let doc = Arc::new(CosDocument::open(builder.finish()).expect("opens"));
+    let doc = Arc::new(
+        CosDocument::open(built("an existing info is updated in place", builder)).expect("opens"),
+    );
     let info_ref = doc.trailer().get_ref(Name::INFO).expect("an /Info");
 
     let mut editor = DocumentEditor::new(doc);
@@ -198,6 +214,11 @@ fn a_signed_save_carries_the_trailer_and_still_verifies() {
             &request,
         )
         .expect("signing succeeds");
+    written_support::rewritten(
+        "a signed save carries the trailer and still verifies",
+        editor.document().bytes(),
+        &bytes,
+    );
 
     let reopened = CosDocument::open(bytes.clone()).expect("reopens");
     assert_eq!(metadata(&reopened).title.as_deref(), Some("Signed"));
@@ -228,4 +249,38 @@ fn a_signed_save_carries_the_trailer_and_still_verifies() {
     let recomputed =
         digest_spans(&bytes, &[a..a + b, c..c + d], DigestAlgorithm::Sha256).expect("spans fit");
     assert_eq!(recomputed, *signer.0.borrow(), "the digest the signer saw");
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

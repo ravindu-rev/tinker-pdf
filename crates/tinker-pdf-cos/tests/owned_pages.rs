@@ -42,6 +42,8 @@
 //! both forms agree while the contract is broken. A milestone that shipped
 //! only the byte-equality test would have shipped this defect.
 
+mod written_support;
+
 use tinker_pdf_cos::{pages, CosDocument, DocumentBuilder, Object};
 
 /// FNV-1a, 64 bit. Hand-rolled so the byte-identity assertions depend on
@@ -103,7 +105,7 @@ fn built_with_the_closure() -> Vec<u8> {
     builder.add_base_font(b"F1", b"Helvetica");
     builder.add_page(200.0, 200.0, draw);
     builder.add_base_font(b"F2", b"Courier");
-    builder.finish()
+    built("built with the closure", builder)
 }
 
 /// The owned form, with the late registration in the one place that can tell
@@ -115,7 +117,7 @@ fn built_with_the_pair() -> Vec<u8> {
     builder.add_base_font(b"F2", b"Courier");
     draw(&mut page);
     builder.push_page(page);
-    builder.finish()
+    built("built with the pair", builder)
 }
 
 /// The equivalence the design claims, asserted rather than assumed.
@@ -169,7 +171,10 @@ fn the_closure_page_and_the_owned_page_write_the_same_document() {
             page.text(b"F1", 14.0, 20.0, 170.0, "Page two");
         });
         builder.set_info(b"Title", "two pages");
-        builder.finish()
+        built(
+            "the closure page and the owned page write the same document",
+            builder,
+        )
     };
 
     let primitive = {
@@ -183,7 +188,10 @@ fn the_closure_page_and_the_owned_page_write_the_same_document() {
         two.text(b"F1", 14.0, 20.0, 170.0, "Page two");
         builder.push_page(two);
         builder.set_info(b"Title", "two pages");
-        builder.finish()
+        built(
+            "the closure page and the owned page write the same document",
+            builder,
+        )
     };
 
     assert_eq!(fnv(&sugar), fnv(&primitive));
@@ -208,7 +216,7 @@ fn a_page_that_is_never_pushed_leaves_no_trace() {
     abandoned.text(b"F1", 14.0, 20.0, 170.0, "abandoned, and never pushed");
     drop(abandoned);
 
-    let bytes = builder.finish();
+    let bytes = built("a page that is never pushed leaves no trace", builder);
     let doc = CosDocument::open(bytes.clone()).expect("it opens");
     assert_eq!(pages::count(&doc), 1, "only the pushed page is in the file");
 
@@ -224,7 +232,11 @@ fn a_page_that_is_never_pushed_leaves_no_trace() {
     let mut only = clean.begin_page(200.0, 200.0);
     only.text(b"F1", 14.0, 20.0, 170.0, "kept");
     clean.push_page(only);
-    assert_eq!(bytes, clean.finish(), "byte for byte");
+    assert_eq!(
+        bytes,
+        built("a page that is never pushed leaves no trace", clean),
+        "byte for byte"
+    );
 }
 
 /// Pages arrive in the order they are pushed, which is the order `add_page`
@@ -244,7 +256,8 @@ fn pages_arrive_in_the_order_they_are_pushed() {
     builder.push_page(second);
     builder.push_page(first);
 
-    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let doc = CosDocument::open(built("pages arrive in the order they are pushed", builder))
+        .expect("it opens");
     let collected = pages::collect(&doc);
     assert_eq!(collected.len(), 2);
     assert_eq!(
@@ -281,7 +294,10 @@ fn an_owned_page_can_still_be_tagged_with_the_closure_form() {
     });
     builder.push_page(page);
 
-    let bytes = builder.finish();
+    let bytes = built(
+        "an owned page can still be tagged with the closure form",
+        builder,
+    );
     let doc = CosDocument::open(bytes.clone()).expect("it opens");
     assert_eq!(pages::count(&doc), 1);
 
@@ -298,4 +314,13 @@ fn an_owned_page_can_still_be_tagged_with_the_closure_form() {
         String::from_utf8_lossy(&bytes).contains("/P <</MCID 0>> BDC"),
         "and the marked-content pair is in the content stream"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

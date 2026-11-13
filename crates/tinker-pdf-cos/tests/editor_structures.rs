@@ -16,6 +16,8 @@
 //! any `i32`, and one no zone has is refused like any other date 7.9.4 cannot
 //! spell, `i32::MIN` included.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -60,10 +62,14 @@ trailer
 "
     );
     let raw = Arc::new(CosDocument::open(text.into_bytes()).expect("the fixture opens"));
-    let written = DocumentEditor::new(raw).save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let written = held_save(
+        "document",
+        &DocumentEditor::new(raw),
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -71,10 +77,14 @@ trailer
 /// validator.
 #[track_caller]
 fn saved(editor: &DocumentEditor, mode: WriteMode) -> CosDocument {
-    let bytes = editor.save(&WriteOptions {
-        mode,
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "saved",
+        &editor,
+        &WriteOptions {
+            mode,
+            ..WriteOptions::default()
+        },
+    );
     let reopened = CosDocument::open(bytes).expect("the save reopens");
     let defects = validate(&reopened);
     assert!(defects.is_empty(), "{mode:?}: {defects:?}");
@@ -394,4 +404,29 @@ fn an_offset_out_of_every_range_is_refused_not_a_panic() {
             "{offset}"
         );
     }
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

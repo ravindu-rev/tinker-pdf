@@ -10,6 +10,12 @@
 //! Two files use it. `strict_validator.rs` holds it to the rules; the
 //! replacement for the oracle reads its values back.
 
+/// The validate-on-save helper's cos reading, for the document this module
+/// builds; a test that takes this module may take the reading itself too.
+#[allow(clippy::duplicate_mod)]
+#[path = "../written_support/mod.rs"]
+mod written_support;
+
 use tinker_pdf_cos::{
     BlendMode, DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Function, Glyph, MaskKind,
     Shading, StateMask, TilingPattern, TilingType, TransparencyGroup,
@@ -263,5 +269,14 @@ pub fn whole_surface_document() -> Vec<u8> {
             ]
         ));
     });
-    builder.finish()
+    built("whole surface document", builder)
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

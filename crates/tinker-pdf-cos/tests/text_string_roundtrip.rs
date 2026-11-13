@@ -10,6 +10,8 @@
 //! because a writer that reached UTF-8 at 1.7 would read back perfectly here
 //! and show three stray characters in a 1.x viewer.
 
+mod written_support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -61,7 +63,7 @@ fn built(version: (u8, u8)) -> CosDocument {
     assert!(builder.set_info(b"Producer", SAMPLES[6]));
     let children = SAMPLES.iter().map(|s| entry(s, Vec::new())).collect();
     assert!(builder.set_outline(vec![entry(SAMPLES[4], children)]));
-    CosDocument::open(builder.finish()).expect("the built document opens")
+    CosDocument::open(held_build("built", builder)).expect("the built document opens")
 }
 
 fn assert_reads_back(doc: &CosDocument) {
@@ -154,10 +156,14 @@ fn a_filled_field_reads_back_at_both_versions() {
         editor
             .fill_field("notes", SAMPLES[4])
             .expect("the field takes the value");
-        let saved = CosDocument::open(editor.save(&WriteOptions {
-            mode: WriteMode::Incremental,
-            ..WriteOptions::default()
-        }))
+        let saved = CosDocument::open(held_save(
+            "a filled field reads back at both versions",
+            &editor,
+            &WriteOptions {
+                mode: WriteMode::Incremental,
+                ..WriteOptions::default()
+            },
+        ))
         .expect("the save reopens");
         let field = fields(&saved)
             .into_iter()
@@ -226,4 +232,38 @@ proptest! {
             prop_assert!(!two, "2.0 takes UTF-8 where it needs a mark");
         }
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn held_build(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

@@ -11,6 +11,8 @@
 //! in the plan and are not run here; what is checked here is everything the
 //! engine can verify about its own output without them.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -30,7 +32,7 @@ fn document(page_count: usize) -> Arc<CosDocument> {
             page.text(b"F0", 12.0, 10.0, 50.0, &format!("page {index}"));
         });
     }
-    Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    Arc::new(CosDocument::open(built("document", builder)).expect("it opens"))
 }
 
 fn linearized(page_count: usize) -> Vec<u8> {
@@ -65,16 +67,20 @@ fn encrypted_linearized(page_count: usize) -> Vec<u8> {
 
 fn save(page_count: usize, encryption: Option<Encryption>) -> Vec<u8> {
     let editor = DocumentEditor::new(document(page_count));
-    editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        linearize: true,
-        // Object streams pack objects into a container, which would put the
-        // first page's objects inside the same blob as everything else and
-        // defeat the layout entirely.
-        object_streams: false,
-        encryption,
-        ..WriteOptions::default()
-    })
+    held_save(
+        "save",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            linearize: true,
+            // Object streams pack objects into a container, which would put the
+            // first page's objects inside the same blob as everything else and
+            // defeat the layout entirely.
+            object_streams: false,
+            encryption,
+            ..WriteOptions::default()
+        },
+    )
 }
 
 /// Reads one integer out of the linearization parameter dictionary.
@@ -898,11 +904,15 @@ trailer\n<< /Size 2 /Root 1 0 R >>\n%%EOF\n";
     let doc = Arc::new(CosDocument::open(bytes.to_vec()).expect("it opens"));
 
     let editor = DocumentEditor::new(doc);
-    let written = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        linearize: true,
-        ..WriteOptions::default()
-    });
+    let written = held_save(
+        "a document with no pages is written plainly",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            linearize: true,
+            ..WriteOptions::default()
+        },
+    );
 
     assert!(
         !String::from_utf8_lossy(&written).contains("/Linearized"),
@@ -915,10 +925,14 @@ trailer\n<< /Size 2 /Root 1 0 R >>\n%%EOF\n";
 #[test]
 fn linearization_is_off_by_default() {
     let editor = DocumentEditor::new(document(3));
-    let plain = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let plain = held_save(
+        "linearization is off by default",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     assert!(!String::from_utf8_lossy(&plain).contains("/Linearized"));
 }
 
@@ -1216,18 +1230,25 @@ fn compression_applies_to_a_linearized_file() {
                 }
             });
         }
-        Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+        Arc::new(
+            CosDocument::open(built("compression applies to a linearized file", builder))
+                .expect("it opens"),
+        )
     };
 
     let save = |compress: bool| -> Vec<u8> {
         let editor = DocumentEditor::new(build());
-        editor.save(&WriteOptions {
-            mode: WriteMode::Rewrite,
-            linearize: true,
-            object_streams: false,
-            compress,
-            ..WriteOptions::default()
-        })
+        held_save(
+            "compression applies to a linearized file",
+            &editor,
+            &WriteOptions {
+                mode: WriteMode::Rewrite,
+                linearize: true,
+                object_streams: false,
+                compress,
+                ..WriteOptions::default()
+            },
+        )
     };
 
     let plain = save(false);
@@ -1278,12 +1299,16 @@ fn the_first_page_read_from_the_head_inherits_its_rotation_and_crop_box() {
         Object::Array([10, 10, 190, 90].into_iter().map(Object::Int).collect()),
     );
     editor.put(pages_ref, Object::Dict(tree));
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        linearize: true,
-        object_streams: false,
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "the first page read from the head inherits its rotation and crop box",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            linearize: true,
+            object_streams: false,
+            ..WriteOptions::default()
+        },
+    );
 
     let full = CosDocument::open(bytes.clone()).expect("it opens");
     let head = CosDocument::open_source(Arc::new(SliceSource::new(bytes))).expect("it opens");
@@ -1301,4 +1326,38 @@ fn the_first_page_read_from_the_head_inherits_its_rotation_and_crop_box() {
     assert_eq!(alone.crop_box, walked.crop_box, "and the crop box");
     assert_eq!(alone.media_box, walked.media_box);
     assert!(!head.main_table_fetched(), "page one is read from the head");
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

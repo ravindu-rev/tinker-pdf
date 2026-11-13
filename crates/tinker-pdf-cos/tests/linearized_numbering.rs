@@ -32,6 +32,8 @@
 //! are those gaps. The validator ties the declared counts to the file's own
 //! object extents; this ties the gaps to the pages.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -48,7 +50,7 @@ fn document(page_count: usize) -> Arc<CosDocument> {
             page.text(b"F0", 12.0, 10.0, 50.0, &format!("page {index}"));
         });
     }
-    Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    Arc::new(CosDocument::open(built("document", builder)).expect("it opens"))
 }
 
 /// The same forty-eight deterministic bytes `linearized.rs` uses, so the
@@ -62,13 +64,17 @@ fn entropy() -> [u8; 48] {
 }
 
 fn save(page_count: usize, encryption: Option<Encryption>) -> Vec<u8> {
-    DocumentEditor::new(document(page_count)).save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        linearize: true,
-        object_streams: false,
-        encryption,
-        ..WriteOptions::default()
-    })
+    held_save(
+        "save",
+        &DocumentEditor::new(document(page_count)),
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            linearize: true,
+            object_streams: false,
+            encryption,
+            ..WriteOptions::default()
+        },
+    )
 }
 
 fn linearized(page_count: usize) -> Vec<u8> {
@@ -303,4 +309,38 @@ fn every_page_is_found_by_annex_fs_own_arithmetic() {
             the_declared_counts_agree(&doc);
         }
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

@@ -525,7 +525,7 @@ path is outside the agreement.
    commands, with no unit under `crates/tinker-pdf` left pending.
 7. **K-03.8, the cos crate, the C ABI and the CLI.** The cos crate's tests
    and `src` modules, `strict_validator.rs` through `expecting` in place of
-   its `verdict` and `refused` (`strict_validator.rs:120`, `:132`); the C
+   its `verdict` and `refused` (`strict_validator.rs:121`, `:133`); the C
    ABI's `src` test modules, their `validate().is_empty()` checks gone; the
    CLI's test modules, `assert_clean` (`tools/tpdf/src/writing.rs:964`) gone;
    `PENDING` emptied and deleted; `README.md` and `docs/verification.md` say

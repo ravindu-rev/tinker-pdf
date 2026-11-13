@@ -54,6 +54,8 @@
 //! previous milestone's tables reported zeroes in both columns;
 //! `form_calculations.rs` still does, and this is the file where they stop.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -63,10 +65,14 @@ use tinker_pdf_cos::{
 
 fn normalize(bytes: Vec<u8>) -> Arc<CosDocument> {
     let raw = Arc::new(CosDocument::open(bytes).expect("the fixture opens"));
-    let written = DocumentEditor::new(raw).save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let written = held_save(
+        "normalize",
+        &DocumentEditor::new(raw),
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -450,4 +456,29 @@ fn a_validation_inside_a_pass_cannot_write() {
     );
     assert_eq!(value_of(&editor, "net"), "100");
     assert!(!editor.is_dirty());
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

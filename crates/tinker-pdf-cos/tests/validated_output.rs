@@ -21,6 +21,7 @@
 //! its own voice; nothing in this file closes it.
 
 mod surface_support;
+mod written_support;
 
 use std::sync::Arc;
 
@@ -474,7 +475,7 @@ fn navigation() -> Vec<u8> {
             }],
         },
     ]));
-    builder.finish()
+    built("navigation", builder)
 }
 
 /// 12.5.6.5: two link actions, which are two different dictionaries and not
@@ -615,20 +616,30 @@ fn the_encrypted_layout_is_the_same_pages_at_greater_length() {
             page.text(b"F0", 12.0, 10.0, 50.0, &format!("page {index}"));
         });
     }
-    let document = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+    let document = Arc::new(
+        CosDocument::open(built(
+            "the encrypted layout is the same pages at greater length",
+            builder,
+        ))
+        .expect("it opens"),
+    );
 
     let mut entropy = [0u8; 48];
     for (index, byte) in entropy.iter_mut().enumerate() {
         *byte = (index as u8).wrapping_mul(7).wrapping_add(11);
     }
     let save = |encryption: Option<Encryption>| {
-        DocumentEditor::new(Arc::clone(&document)).save(&WriteOptions {
-            mode: WriteMode::Rewrite,
-            linearize: true,
-            object_streams: false,
-            encryption,
-            ..WriteOptions::default()
-        })
+        held_save(
+            "the encrypted layout is the same pages at greater length",
+            &DocumentEditor::new(Arc::clone(&document)),
+            &WriteOptions {
+                mode: WriteMode::Rewrite,
+                linearize: true,
+                object_streams: false,
+                encryption,
+                ..WriteOptions::default()
+            },
+        )
     };
 
     let plain = save(None);
@@ -699,4 +710,38 @@ fn the_encrypted_layout_is_the_same_pages_at_greater_length() {
         compared += 1;
     }
     assert_eq!(compared, 6, "every page was compared");
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

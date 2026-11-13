@@ -8,6 +8,8 @@
 //! wrong would still read back whole through the walks and lose entries
 //! through the lookups, so every entry is looked up as well as collected.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use proptest::prelude::*;
@@ -20,16 +22,20 @@ use tinker_pdf_cos::{
 fn blank() -> Arc<CosDocument> {
     let mut builder = DocumentBuilder::new();
     builder.add_page(100.0, 100.0, |_| {});
-    Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    Arc::new(CosDocument::open(built("blank", builder)).expect("it opens"))
 }
 
 /// Saves the editor and reopens the result, so what is read is what was
 /// written rather than what the overlay holds.
 fn reopen(editor: &DocumentEditor) -> CosDocument {
-    let bytes = editor.save(&WriteOptions {
-        mode: WriteMode::Incremental,
-        ..WriteOptions::default()
-    });
+    let bytes = held_save(
+        "reopen",
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        },
+    );
     let doc = CosDocument::open(bytes).expect("the save reopens");
     assert!(doc.warnings().is_empty(), "{:?}", doc.warnings());
     doc
@@ -332,4 +338,38 @@ proptest! {
         }
         prop_assert!(!editor.is_dirty());
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }

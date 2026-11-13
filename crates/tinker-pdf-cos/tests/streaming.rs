@@ -6,6 +6,8 @@
 //! aligned chunks, or one byte at a time from the most hostile conforming
 //! source that can be written.
 
+mod written_support;
+
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
@@ -452,7 +454,7 @@ fn a_multi_chunk_document() -> Vec<u8> {
             page.raw(&ops);
         });
     }
-    builder.finish()
+    built("a multi chunk document", builder)
 }
 
 /// A slot that could not be read must not become a published null.
@@ -577,4 +579,13 @@ fn a_count_that_missed_keeps_no_page_index() {
         2,
         "fed, the next count walks again rather than reading a kept index"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf_cos::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

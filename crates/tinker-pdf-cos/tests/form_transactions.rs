@@ -12,6 +12,8 @@
 //!    file whose `/V` said `Ada`. That is a document that looks filled and is
 //!    wrong.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
@@ -35,10 +37,14 @@ fn fnv(bytes: &[u8]) -> u64 {
 /// file, which is what a fixture has to be for a saved edit to be readable.
 fn normalize(bytes: &[u8]) -> Arc<CosDocument> {
     let raw = Arc::new(CosDocument::open(bytes).expect("the fixture opens"));
-    let written = DocumentEditor::new(raw).save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        ..WriteOptions::default()
-    });
+    let written = held_save(
+        "normalize",
+        &DocumentEditor::new(raw),
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+    );
     Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
 }
 
@@ -125,10 +131,14 @@ trailer
 }
 
 fn save(editor: &DocumentEditor, mode: WriteMode) -> Vec<u8> {
-    editor.save(&WriteOptions {
-        mode,
-        ..WriteOptions::default()
-    })
+    held_save(
+        "save",
+        &editor,
+        &WriteOptions {
+            mode,
+            ..WriteOptions::default()
+        },
+    )
 }
 
 fn reopen(editor: &DocumentEditor, mode: WriteMode) -> CosDocument {
@@ -664,4 +674,29 @@ fn the_closure_form_and_the_pair_write_the_same_bytes() {
     };
     assert_eq!(sugar_rolled, primitive_rolled, "abandoned edits agree too");
     assert_ne!(sugar_rolled, sugar, "and the two legs are different files");
+}
+
+/// `editor` saved with `options`, held to the validate-on-save helper as a
+/// rewrite of the bytes it was opened over: an encrypted save with the user
+/// password it was sealed with.
+#[track_caller]
+fn held_save(
+    label: &str,
+    editor: &tinker_pdf_cos::DocumentEditor,
+    options: &tinker_pdf_cos::WriteOptions,
+) -> Vec<u8> {
+    let bytes = editor.save(options);
+    let input = editor.document().bytes();
+    match &options.encryption {
+        Some(encryption) => written_support::rewritten(
+            label,
+            input,
+            written_support::Locked {
+                bytes: bytes.clone(),
+                key: written_support::Key::Password(&encryption.user_password),
+            },
+        ),
+        None => written_support::rewritten(label, input, &bytes),
+    };
+    bytes
 }
