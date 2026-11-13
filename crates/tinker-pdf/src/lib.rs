@@ -3071,7 +3071,7 @@ impl Page {
             &resources::PageResources,
         ),
     ) -> Bitmap {
-        self.draw_layer(options, frame, resources, paint)
+        self.draw_layer(options, frame, resources, stats::Draws::Counted, paint)
             .into_bitmap()
     }
 
@@ -3127,12 +3127,15 @@ impl Page {
 
     /// [`Page::render_layer_with`]'s render, its pixels in the format handed
     /// back and what it met kept in the parts its warnings are assembled from
-    /// ([`Met`]), which the bands of one page merge.
+    /// ([`Met`]), which the bands of one page merge. What the renderer drew
+    /// is counted where `draws` says it is the render's: every band of a page
+    /// drawn in bands draws the same calls, and one of them counts them.
     pub(crate) fn draw_layer(
         &self,
         options: &RenderOptions,
         frame: Option<(f64, f64, f64, f64)>,
         resources: &resources::PageResources,
+        draws: stats::Draws,
         paint: impl FnOnce(
             &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
             &resources::PageResources,
@@ -3207,7 +3210,7 @@ impl Page {
         }
         paint(&mut renderer, resources);
         let (canvas, warnings, counts, parameters) = renderer.finish_with_parameters();
-        stats::add_render(resources.work().map(|work| &**work), counts);
+        stats::add_render(resources.work().map(|work| &**work), counts, draws);
         let met = Met {
             renderer: warnings,
             missing_fonts: !resources.missing_fonts().is_empty(),

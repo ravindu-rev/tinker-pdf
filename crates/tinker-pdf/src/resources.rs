@@ -4129,8 +4129,10 @@ impl GlyphSource for PageResources {
         // 11.7.5.2 asks whether every object of the cell was fully opaque.
         let opaque = renderer.painted_opaquely();
         let (canvas, warnings, counts) = renderer.finish_counted();
-        // The cell's renderer is one of this render's own, so what it drew is.
-        stats::add_render(self.op.work.as_deref(), counts);
+        // The cell's renderer is one of this render's own, so the work it did
+        // is; the calls it drew are a paint of the fill that names the
+        // pattern, not the page's.
+        stats::add_render(self.op.work.as_deref(), counts, stats::Draws::Elsewhere);
 
         // Ruling 10, and only reachable when the cell had resources of its
         // own: a font the cell could not resolve, or an image it had to

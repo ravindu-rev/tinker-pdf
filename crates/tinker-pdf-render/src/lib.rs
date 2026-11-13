@@ -1112,11 +1112,52 @@ pub struct RenderCounts {
     /// repeat. A quantity, the canvas's size, rather than a count of steps:
     /// what a render of part of a page saves is the pixels it does not draw.
     pub pixels_rendered: u64,
+    // The calls drawn by class, the calls hidden, and the images drawn from
+    // their samples (`docs/design/page-analysis.md`, "Per-render
+    // statistics"): each counted once a call, never once a pixel, so a
+    // replay counts what a direct render counts. A paint skipped because
+    // nothing would read it (forced colours inside a soft mask's group) is
+    // not drawn.
+    /// Glyphs this renderer painted: a fill or stroke mode and an outline to
+    /// paint, outside hidden content.
+    pub drawn_glyphs: u64,
+    /// [`Device::fill_path`] calls this renderer painted, with a path to
+    /// fill, a pattern's fill among them.
+    pub drawn_fills: u64,
+    /// [`Device::stroke_path`] calls this renderer painted, with a path to
+    /// stroke.
+    pub drawn_strokes: u64,
+    /// Clips this renderer installed: a `W` or `W*` path, a form's or a mask
+    /// group's `/BBox`, which arrive as one, and a text object's clip at `ET`.
+    pub drawn_clips: u64,
+    /// [`Device::draw_image`] calls this renderer drew, from decoded samples
+    /// or as the placeholder of an image that would not decode.
+    pub drawn_images: u64,
+    /// `sh` calls whose shading this renderer painted.
+    pub drawn_shadings: u64,
+    /// Transparency groups this renderer accepted.
+    pub drawn_groups: u64,
+    /// Soft-mask groups this renderer accepted.
+    pub drawn_soft_masks: u64,
+    /// Glyphs, fills, strokes, images, `sh` calls and groups that hidden
+    /// optional content kept from painting (8.11.3.2).
+    pub hidden_calls: u64,
+    /// Images this renderer drew from decoded samples.
+    pub decoded_images_drawn: u64,
+    /// Samples of those images as the glyph source decoded them, width by
+    /// height, at every draw: fewer than `/Width` by `/Height` where it
+    /// decoded one at the size the page draws it.
+    pub decoded_image_samples: u64,
 }
 
 /// A canvas's pixels, counted as `RenderCounts` counts a buffer.
 fn pixels_of(canvas: &Canvas) -> u64 {
     u64::from(canvas.width) * u64::from(canvas.height)
+}
+
+/// One more of a count, saturating.
+fn tally(slot: &mut u64) {
+    *slot = slot.saturating_add(1);
 }
 
 /// What a render of part of a page could not see of the page's image runs,
@@ -1963,6 +2004,21 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// its paints are skipped rather than drawn into a buffer nothing reads.
     fn discarding(&self) -> bool {
         self.forced.is_some() && !self.mask_frames.is_empty()
+    }
+
+    /// Whether a paint is skipped rather than drawn: the render is stopping,
+    /// hidden content holds it — which counts it among the calls optional
+    /// content hid, as it is wherever it lies — or nothing would read it
+    /// ([`Renderer::discarding`]).
+    fn skips_paint(&mut self) -> bool {
+        if self.stopping() {
+            return true;
+        }
+        if self.hidden() {
+            tally(&mut self.counts.hidden_calls);
+            return true;
+        }
+        self.discarding()
     }
 
     /// Whether to stop now — and, if so, a record that this check is one that
@@ -4686,7 +4742,7 @@ impl<G: GlyphSource> Renderer<'_, G> {
         // layer clip away the visible ones -- and must not be counted as an
         // unreadable font, which is a warning about a page that is missing
         // something rather than about one that is doing as it was told.
-        if self.stopping() || self.hidden() || self.discarding() {
+        if self.skips_paint() {
             return;
         }
         let painting = self.painting(state);
@@ -4732,6 +4788,11 @@ impl<G: GlyphSource> Renderer<'_, G> {
         let combined = glyph.transform.then(&self.base);
         if !combined.is_finite() {
             return;
+        }
+        // From here the glyph is painted, by its mask or by its path, unless
+        // its mode only clips.
+        if mode.paints() {
+            tally(&mut self.counts.drawn_glyphs);
         }
 
         // 9.3.6 mode 0 in a solid colour: drawn from a mask rasterised in the
@@ -4973,13 +5034,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
-        if self.stopping() || self.hidden() || self.discarding() {
+        if self.skips_paint() {
             return;
         }
         let built = self.to_path(path);
         if built.is_empty() {
             return;
         }
+        tally(&mut self.counts.drawn_fills);
         self.tolerance = flatness_tolerance(state);
         let rule = if even_odd {
             FillRule::EvenOdd
@@ -5074,6 +5136,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         let (clip, bounds) = self.clip_coverage(&built, rule, Some(&stop));
         self.clip = Some(clip);
         self.clip_bounds = Some(bounds);
+        tally(&mut self.counts.drawn_clips);
     }
 
     fn begin_text(&mut self) {
@@ -5126,6 +5189,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         self.showing = self.showing.saturating_sub(1);
         self.clip = Some(clip);
         self.clip_bounds = Some(bounds);
+        tally(&mut self.counts.drawn_clips);
     }
 
     fn save_state(&mut self) {
@@ -5151,13 +5215,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
-        if self.stopping() || self.hidden() || self.discarding() {
+        if self.skips_paint() {
             return;
         }
         let built = self.to_path(path);
         if built.is_empty() {
             return;
         }
+        tally(&mut self.counts.drawn_strokes);
         // 10.7.2: the path, and the stroker's round joins and caps, are
         // flattened at the flatness in force.
         self.tolerance = flatness_tolerance(state);
@@ -5232,7 +5297,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // about the page: decoding first would report `UnsupportedImage` for
         // a JPX nobody was going to see, and paint the grey placeholder that
         // goes with it.
-        if self.stopping() || self.hidden() || self.discarding() {
+        if self.skips_paint() {
             return;
         }
         let painting = self.painting(state);
@@ -5258,8 +5323,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             }
         };
 
+        tally(&mut self.counts.drawn_images);
         match decoded {
-            Ok(decoded) => self.blit(&decoded, state),
+            Ok(decoded) => {
+                tally(&mut self.counts.decoded_images_drawn);
+                let samples = u64::from(decoded.width).saturating_mul(u64::from(decoded.height));
+                self.counts.decoded_image_samples =
+                    self.counts.decoded_image_samples.saturating_add(samples);
+                self.blit(&decoded, state);
+            }
             Err(codec) => {
                 // Ruling 2: the page renders without it and says so.
                 let warning = RenderWarning::UnsupportedImage { codec };
@@ -5275,7 +5347,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
-        if self.stopping() || self.hidden() || self.discarding() {
+        if self.skips_paint() {
             return;
         }
         let painting = self.painting(state);
@@ -5324,7 +5396,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // brings its own coverage and its own knockout restore with it.
         if let Some(mesh) = shading.mesh() {
             let limit = self.page_limit();
-            if !self.paint_mesh(
+            if self.paint_mesh(
                 mesh,
                 to_device,
                 area.as_ref(),
@@ -5334,6 +5406,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 mode,
                 &set,
             ) {
+                tally(&mut self.counts.drawn_shadings);
+            } else {
                 let warning = RenderWarning::UnsupportedShading { kind: mesh.kind };
                 if !self.warnings.contains(&warning) {
                     self.warnings.push(warning);
@@ -5345,6 +5419,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         let Some(inverse) = invert(&to_device) else {
             return;
         };
+        tally(&mut self.counts.drawn_shadings);
         self.record_shading(&shading, &inverse, shape_area.as_ref(), set.entry);
         let (ox, oy, width, height) = self.device();
         let (x_start, y_start, x_end, y_end) =
@@ -5458,13 +5533,20 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // A group inside a layer that is off paints nothing, so there is
         // nothing to buffer. Declining also leaves the interpreter's 11.6.6
         // state reset undone, which is right: nothing is going to paint.
-        if self.stopping() || self.hidden() {
+        if self.stopping() {
+            return false;
+        }
+        if self.hidden() {
+            tally(&mut self.counts.hidden_calls);
             return false;
         }
         // Under forced colours a group's `ca` and `/BM` at the `Do` are its
         // paint's too, and composite it opaque and `Normal`.
         let painting = self.painting(state);
         let entered = self.open_group(group, &painting);
+        if entered {
+            tally(&mut self.counts.drawn_groups);
+        }
         self.entered_stream(entered);
         entered
     }
@@ -5490,6 +5572,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             return false;
         }
         let entered = self.open_soft_mask(mask, bbox);
+        if entered {
+            tally(&mut self.counts.drawn_soft_masks);
+        }
         self.entered_stream(entered);
         entered
     }
@@ -8967,6 +9052,96 @@ mod tests {
         renderer.finish()
     }
 
+    /// **The per-render statistics count each call once, by its class**: a
+    /// fill (a patterned one among them), a stroke, a glyph and an image drawn,
+    /// a clip installed by `W` and one by a text object at `ET`; a glyph in
+    /// mode 3 and one that only clips are not drawn; a fill, a stroke, a glyph
+    /// and an image in a hidden layer are hidden; an image this source has no
+    /// samples for is drawn as its placeholder, and one it has is drawn from
+    /// its samples, two by two; and a render cancelled before it starts counts
+    /// nothing.
+    #[test]
+    fn the_counts_classify_what_the_render_drew() {
+        let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &Patterns);
+        interpret(
+            b"0 0 10 10 re f \
+              /Pattern cs /Grad scn 20 0 10 10 re f \
+              12 w 0 20 m 40 20 l S \
+              BT /F0 10 Tf 1 4 Td (A) Tj ET \
+              BT 3 Tr /F0 10 Tf 1 4 Td (A) Tj ET \
+              q 10 0 0 10 0 0 cm /Im0 Do Q \
+              q 0 0 5 5 re W n Q \
+              q BT 7 Tr /F0 10 Tf 1 4 Td (A) Tj ET Q \
+              /OC /Off BDC 0 0 40 40 re f 0 20 m 40 20 l S \
+                BT 0 Tr /F0 10 Tf 1 4 Td (A) Tj ET q 40 0 0 40 0 0 cm /Im0 Do Q EMC",
+            Matrix::IDENTITY,
+            &mut renderer,
+            &HiddenLayer,
+        );
+        let (_, _, counts) = renderer.finish_counted();
+        assert_eq!(
+            (
+                counts.drawn_fills,
+                counts.drawn_strokes,
+                counts.drawn_glyphs,
+                counts.drawn_images,
+                counts.drawn_clips,
+                counts.hidden_calls,
+            ),
+            (2, 1, 1, 1, 2, 4),
+            "{counts:?}"
+        );
+        assert_eq!(
+            (
+                counts.decoded_images_drawn,
+                counts.decoded_image_samples,
+                counts.drawn_shadings,
+                counts.drawn_groups,
+                counts.drawn_soft_masks,
+            ),
+            (0, 0, 0, 0, 0),
+            "{counts:?}"
+        );
+
+        let source = OneImage {
+            color: (255, 0, 0),
+            alpha: Vec::new(),
+        };
+        let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &source);
+        interpret(
+            b"q 10 0 0 10 0 0 cm /Im0 Do Q q 10 0 0 10 20 20 cm /Im0 Do Q",
+            Matrix::IDENTITY,
+            &mut renderer,
+            &NoFonts,
+        );
+        let (_, _, counts) = renderer.finish_counted();
+        assert_eq!(
+            (
+                counts.drawn_images,
+                counts.decoded_images_drawn,
+                counts.decoded_image_samples
+            ),
+            (2, 2, 8),
+            "{counts:?}"
+        );
+
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let canvas = Canvas::new(20, 20, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer =
+            Renderer::new(canvas, page_transform(20.0, 1.0), &Patterns).with_cancel(cancel);
+        interpret(
+            b"0 0 20 20 re f /OC /Off BDC 0 0 20 20 re f EMC",
+            Matrix::IDENTITY,
+            &mut renderer,
+            &HiddenLayer,
+        );
+        let (_, _, counts) = renderer.finish_counted();
+        assert_eq!(counts, RenderCounts::default(), "a cancelled render");
+    }
+
     /// M3: a rectangle inside an `/OFF` layer paints nothing, and the same
     /// rectangle outside one paints.
     ///
@@ -9825,6 +10000,59 @@ mod forced_colour_tests {
         let mut stroked = renderer(Some(true));
         stroked.fill_path(&square(4.0, 4.0, 8.0), &plain(), false);
         assert_eq!(pixels(after), pixels(stroked));
+    }
+
+    /// **A paint forced colours skip is not counted as drawn**: inside a soft
+    /// mask's group, which forced colours install nothing of, a fill is
+    /// skipped and neither drawn nor hidden, while the mask is accepted as an
+    /// ordinary render accepts it and the fills on either side of it are
+    /// drawn; an ordinary render draws all three.
+    #[test]
+    fn a_paint_forced_colours_skip_is_not_counted_as_drawn() {
+        let mask = MaskGroup {
+            form: Form {
+                content: Vec::new(),
+                matrix: Matrix::IDENTITY,
+                bbox: Some([0.0, 0.0, 24.0, 24.0]),
+                group: None,
+                stream: 0,
+            },
+            luminosity: true,
+            backdrop: None,
+            transfer: None,
+        };
+        let draw = |renderer: &mut Renderer<'static, NoGlyphs>| {
+            renderer.fill_path(&square(2.0, 2.0, 8.0), &plain(), false);
+            if renderer.begin_soft_mask(&mask, &square(0.0, 0.0, 24.0), &plain()) {
+                renderer.fill_path(&square(0.0, 0.0, 24.0), &plain(), false);
+                renderer.end_soft_mask();
+            }
+            renderer.fill_path(&square(14.0, 14.0, 6.0), &plain(), false);
+        };
+        let mut ordinary = renderer(None);
+        draw(&mut ordinary);
+        let (_, _, ordinary) = ordinary.finish_counted();
+        assert_eq!(
+            (
+                ordinary.drawn_fills,
+                ordinary.drawn_soft_masks,
+                ordinary.hidden_calls
+            ),
+            (3, 1, 0),
+            "an ordinary render"
+        );
+        let mut forced = renderer(Some(false));
+        draw(&mut forced);
+        let (_, _, forced) = forced.finish_counted();
+        assert_eq!(
+            (
+                forced.drawn_fills,
+                forced.drawn_soft_masks,
+                forced.hidden_calls
+            ),
+            (2, 1, 0),
+            "forced colours"
+        );
     }
 
     /// The interpreter's questions are answered as an ordinary render answers

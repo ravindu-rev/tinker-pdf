@@ -320,7 +320,9 @@ impl DisplayList {
     /// is merged into the list the page drawn whole reports ([`merged`]). On
     /// the pool's workers where they start, and on the caller where none does
     /// — wasm32, a host at its thread limit — with the same output; each band
-    /// counts where it ran into the render's one tally.
+    /// counts where it ran into the render's one tally, and the first band
+    /// alone counts the calls it drew, which every band draws alike, so the
+    /// page's statistics of what it drew are the page's drawn whole.
     fn render_in_bands(&self, options: &RenderOptions) -> Option<Bitmap> {
         let threads = match options.parallelism {
             Parallelism::Threads(threads) if threads >= 2 => threads.min(MAX_THREADS),
@@ -385,16 +387,29 @@ impl DisplayList {
                 ..options.clone()
             };
             let mut stamps = Stamps::default();
-            let layer = page.draw_layer(&band_options, None, &resources, |renderer, resources| {
-                let mut stamping = Stamping {
-                    renderer,
-                    resources,
-                    ordinal: 0,
-                    stamps: Stamps::default(),
-                };
-                self.replay_onto(options, &mut stamping, resources);
-                stamps = stamping.stamps;
-            });
+            // Every band replays the same calls and answers them alike, so
+            // the first band's draws are the page's, counted once.
+            let draws = if index == 0 {
+                crate::stats::Draws::Counted
+            } else {
+                crate::stats::Draws::Elsewhere
+            };
+            let layer = page.draw_layer(
+                &band_options,
+                None,
+                &resources,
+                draws,
+                |renderer, resources| {
+                    let mut stamping = Stamping {
+                        renderer,
+                        resources,
+                        ordinal: 0,
+                        stamps: Stamps::default(),
+                    };
+                    self.replay_onto(options, &mut stamping, resources);
+                    stamps = stamping.stamps;
+                },
+            );
             let mut rows = slot.lock().unwrap_or_else(PoisonError::into_inner);
             let rows: &mut [u8] = &mut rows;
             let length = rows.len().min(layer.pixels.data.len());

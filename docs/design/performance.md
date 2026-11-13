@@ -237,6 +237,7 @@ already carries it.
 | `group_bound_pixels` | a pixel of the region such a group opened over, once a group — a quantity | the renderer | built |
 | `soft_mask_pixels` | a pixel of a soft mask the renderer installed — a quantity | the renderer | built |
 | `soft_mask_bound_pixels` | a pixel of the region of the group such a mask was read from, once a mask — a quantity | the renderer | built |
+| `drawn_glyphs`, `drawn_fills`, `drawn_strokes`, `drawn_clips`, `drawn_images`, `drawn_shadings`, `drawn_groups`, `drawn_soft_masks`, `hidden_calls`, `decoded_images_drawn`, `decoded_image_samples` | a call the renderer drew, by class; one hidden optional content kept from painting; an image drawn from decoded samples, and its samples — the per-render statistics (`docs/design/page-analysis.md`), which are not steps | the renderer: a page's, its first band's when it is drawn in bands, and never a tiling cell's | built |
 
 `work()` sums every counter that counts a step taken, and leaves out maxima and
 quantities — `most_decodes_of_one_stream`, `bytes_decoded`, and every byte or
@@ -246,7 +247,8 @@ byte the repair scan looked through is a step it took, not output. A page loop w
 reads `i + 1` nodes, over pages that decode 20 kB each, is 4.29 times as
 much work at 4 000 pages as at 1 000 when its bytes are summed in, inside A2's
 4.4, and 15.99 times without them. A row that adds a counter says which kind it
-is.
+is. The per-render statistics are neither: each classifies a call whose steps
+are counted where they were taken, so `work()` leaves them out too.
 
 ### How the tally rides each operation context
 

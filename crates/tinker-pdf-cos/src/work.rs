@@ -49,9 +49,9 @@ fn lowest(one: Option<ObjRef>, other: Option<ObjRef>) -> Option<ObjRef> {
 /// a count of steps of one kind, but for five maxima, the stream one was
 /// reached on, seven quantities — the bytes decoded, the samples JPEG decodes
 /// transformed, four counts of pixels the renderer's group buffers and soft
-/// masks held, and the pixels its canvases drew — and two counts of where a
-/// pooled operation's parts ran, which say so. **It is `#[non_exhaustive]`**
-/// so that a counter a
+/// masks held, and the pixels its canvases drew — two counts of where a
+/// pooled operation's parts ran, and a render's statistics of what it drew,
+/// which say so. **It is `#[non_exhaustive]`** so that a counter a
 /// later row adds — masks rasterised, threads run — is an addition rather
 /// than a break: read a field by name, total the steps with [`Stats::work`],
 /// and sum two with `+`.
@@ -441,6 +441,49 @@ pub struct Stats {
     /// Counted by `tinker-pdf-render`'s renderer and added to the
     /// operation's tally by the facade.
     pub pixels_rendered: u64,
+    /// Glyphs a render painted — a fill or stroke mode and an outline to
+    /// paint, outside hidden content — the first of the per-render
+    /// statistics (`docs/design/page-analysis.md`): the calls a render drew
+    /// by class, the calls optional content hid, and the images it drew from
+    /// their samples. Each is counted once a call, never once a pixel, so a
+    /// replay and a render in bands count what a direct render counts; none
+    /// is a step, so [`Stats::work`] leaves them out, as it leaves the
+    /// pool's.
+    ///
+    /// Counted by `tinker-pdf-render`'s renderer and added to the
+    /// operation's tally by the facade, as `glyphs_shown` is; so is every
+    /// statistic below. A render in bands adds its first band's, since every
+    /// band draws the same calls; a tiling pattern's cell, a paint of the fill
+    /// that names it, adds none of its own.
+    pub drawn_glyphs: u64,
+    /// Fills a render painted, with a path to fill, a pattern's among them.
+    pub drawn_fills: u64,
+    /// Strokes a render painted, with a path to stroke.
+    pub drawn_strokes: u64,
+    /// Clips a render installed: a `W` or `W*` path, a form's or a mask
+    /// group's `/BBox`, and a text object's clip at `ET`. A paint the clip
+    /// leaves nothing of is drawn all the same: a clip decides pixels, not
+    /// calls.
+    pub drawn_clips: u64,
+    /// Images a render drew, from decoded samples or as the placeholder of
+    /// one that would not decode.
+    pub drawn_images: u64,
+    /// `sh` calls whose shading a render painted.
+    pub drawn_shadings: u64,
+    /// Transparency groups a render accepted.
+    pub drawn_groups: u64,
+    /// Soft-mask groups a render accepted.
+    pub drawn_soft_masks: u64,
+    /// Glyphs, fills, strokes, images, `sh` calls and groups that hidden
+    /// optional content kept from painting (8.11.3.2).
+    pub hidden_calls: u64,
+    /// Images a render drew from decoded samples, at every draw: one decoded
+    /// once and drawn twice is two.
+    pub decoded_images_drawn: u64,
+    /// Samples of those images as decoded, the decoded image's width by its
+    /// height, at every draw: `/Width` by `/Height`, or fewer for a JPEG
+    /// decoded at the size the page draws it.
+    pub decoded_image_samples: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -543,6 +586,28 @@ pub enum Counter {
     SoftMaskBoundPixels,
     /// [`Stats::pixels_rendered`].
     PixelsRendered,
+    /// [`Stats::drawn_glyphs`].
+    DrawnGlyphs,
+    /// [`Stats::drawn_fills`].
+    DrawnFills,
+    /// [`Stats::drawn_strokes`].
+    DrawnStrokes,
+    /// [`Stats::drawn_clips`].
+    DrawnClips,
+    /// [`Stats::drawn_images`].
+    DrawnImages,
+    /// [`Stats::drawn_shadings`].
+    DrawnShadings,
+    /// [`Stats::drawn_groups`].
+    DrawnGroups,
+    /// [`Stats::drawn_soft_masks`].
+    DrawnSoftMasks,
+    /// [`Stats::hidden_calls`].
+    HiddenCalls,
+    /// [`Stats::decoded_images_drawn`].
+    DecodedImagesDrawn,
+    /// [`Stats::decoded_image_samples`].
+    DecodedImageSamples,
 }
 
 impl Stats {
@@ -560,6 +625,9 @@ impl Stats {
     /// thread a part ran, and the part's own steps are counted where they
     /// were taken, so a page walked on a pool totals what the same page
     /// rendered alone does.
+    /// And so are the per-render statistics, `drawn_glyphs` to
+    /// `decoded_image_samples`: they classify calls whose steps are counted
+    /// where they were taken.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -659,6 +727,17 @@ impl Stats {
             Counter::SoftMaskPixels => &mut self.soft_mask_pixels,
             Counter::SoftMaskBoundPixels => &mut self.soft_mask_bound_pixels,
             Counter::PixelsRendered => &mut self.pixels_rendered,
+            Counter::DrawnGlyphs => &mut self.drawn_glyphs,
+            Counter::DrawnFills => &mut self.drawn_fills,
+            Counter::DrawnStrokes => &mut self.drawn_strokes,
+            Counter::DrawnClips => &mut self.drawn_clips,
+            Counter::DrawnImages => &mut self.drawn_images,
+            Counter::DrawnShadings => &mut self.drawn_shadings,
+            Counter::DrawnGroups => &mut self.drawn_groups,
+            Counter::DrawnSoftMasks => &mut self.drawn_soft_masks,
+            Counter::HiddenCalls => &mut self.hidden_calls,
+            Counter::DecodedImagesDrawn => &mut self.decoded_images_drawn,
+            Counter::DecodedImageSamples => &mut self.decoded_image_samples,
         }
     }
 }
@@ -787,6 +866,21 @@ impl Add for Stats {
                 .soft_mask_bound_pixels
                 .saturating_add(other.soft_mask_bound_pixels),
             pixels_rendered: self.pixels_rendered.saturating_add(other.pixels_rendered),
+            drawn_glyphs: self.drawn_glyphs.saturating_add(other.drawn_glyphs),
+            drawn_fills: self.drawn_fills.saturating_add(other.drawn_fills),
+            drawn_strokes: self.drawn_strokes.saturating_add(other.drawn_strokes),
+            drawn_clips: self.drawn_clips.saturating_add(other.drawn_clips),
+            drawn_images: self.drawn_images.saturating_add(other.drawn_images),
+            drawn_shadings: self.drawn_shadings.saturating_add(other.drawn_shadings),
+            drawn_groups: self.drawn_groups.saturating_add(other.drawn_groups),
+            drawn_soft_masks: self.drawn_soft_masks.saturating_add(other.drawn_soft_masks),
+            hidden_calls: self.hidden_calls.saturating_add(other.hidden_calls),
+            decoded_images_drawn: self
+                .decoded_images_drawn
+                .saturating_add(other.decoded_images_drawn),
+            decoded_image_samples: self
+                .decoded_image_samples
+                .saturating_add(other.decoded_image_samples),
         }
     }
 }
@@ -1009,6 +1103,60 @@ mod tests {
             (500, 500, 500, 500)
         );
         assert_eq!(stats.work(), 7, "the operators alone are steps");
+    }
+
+    /// The per-render statistics: what a render drew, by class.
+    const DRAWN: [Counter; 11] = [
+        Counter::DrawnGlyphs,
+        Counter::DrawnFills,
+        Counter::DrawnStrokes,
+        Counter::DrawnClips,
+        Counter::DrawnImages,
+        Counter::DrawnShadings,
+        Counter::DrawnGroups,
+        Counter::DrawnSoftMasks,
+        Counter::HiddenCalls,
+        Counter::DecodedImagesDrawn,
+        Counter::DecodedImageSamples,
+    ];
+
+    /// Each statistic counts into its own field and sums as a count does,
+    /// and into no total of steps.
+    #[test]
+    fn a_drawn_call_counts_into_its_own_field_and_no_step() {
+        for (index, counter) in DRAWN.into_iter().enumerate() {
+            let work = Work::new();
+            let n = index as u64 + 2;
+            work.add(counter, n);
+            let mut expected = Stats::default();
+            *expected.slot(counter) = n;
+            let stats = work.stats();
+            assert_eq!(stats, expected, "{counter:?} counted somewhere else");
+            assert_eq!(stats.work(), 0, "{counter:?} counted as a step");
+            let mut doubled = stats + stats;
+            assert_eq!(*doubled.slot(counter), 2 * n, "{counter:?} sums");
+        }
+        // Eleven fields, eleven counters, each its own.
+        let mut all = Stats::default();
+        for counter in DRAWN {
+            *all.slot(counter) += 1;
+        }
+        assert_eq!(
+            (
+                all.drawn_glyphs,
+                all.drawn_fills,
+                all.drawn_strokes,
+                all.drawn_clips,
+                all.drawn_images,
+                all.drawn_shadings,
+                all.drawn_groups,
+                all.drawn_soft_masks,
+                all.hidden_calls,
+                all.decoded_images_drawn,
+                all.decoded_image_samples,
+            ),
+            (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+        );
     }
 
     /// Each pool count counts into its own field and sums as a count does,

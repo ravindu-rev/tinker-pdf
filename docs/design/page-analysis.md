@@ -217,27 +217,43 @@ annotations count as the options say.
 
 Counted by the renderer as it draws, in `tinker_pdf_render::RenderCounts`, and
 added to the operation's tally by the facade as `glyphs_shown` is — so
-`Bitmap::stats` carries them, a tiling cell's renderer counts into the same
-tally, and **a replay counts what a direct render counts**, at any scale,
-because each is counted once a call and never once a pixel:
+`Bitmap::stats` carries them, and **a replay and a render in bands count what
+a direct render counts**, because each is counted once a call and never once
+a pixel:
 
 | `Stats` field | One for each |
 | --- | --- |
 | `drawn_glyphs` | glyph the renderer painted: a fill or stroke mode, an outline, outside hidden content |
 | `drawn_fills` | `fill_path` outside hidden content with a path to fill, a pattern's included |
 | `drawn_strokes` | `stroke_path` likewise |
-| `drawn_clips` | clip installed: a `W`/`W*` path, and a text object's clip at `ET` |
+| `drawn_clips` | clip installed: a `W`/`W*` path, a form's or a mask group's `/BBox`, which arrive as one, and a text object's clip at `ET` |
 | `drawn_images` | `draw_image` outside hidden content, decoded or drawn as a placeholder |
 | `drawn_shadings` | `sh` whose shading the renderer painted |
 | `drawn_groups` | transparency group the renderer accepted |
 | `drawn_soft_masks` | soft-mask group the renderer accepted |
 | `hidden_calls` | glyph, fill, stroke, image, `sh` or group that hidden optional content kept from painting |
 | `decoded_images_drawn` | image drawn from decoded samples |
-| `decoded_image_samples` | sample of those images: width by height by components, each draw |
+| `decoded_image_samples` | sample of those images as decoded, width by height, at each draw: `/Width` by `/Height`, or fewer for a JPEG decoded at the size the page draws it |
 
 A paint the clip leaves nothing of is drawn: the clip decides pixels, not
-calls. None of these is a step, so `Stats::work` leaves them out, as it leaves
-out the pool's two counts; `+` sums them.
+calls. A paint nothing would read is skipped, not drawn: under forced colours,
+which install no soft mask, the inside of a soft mask's group. None of these is
+a step, so `Stats::work` leaves them out, as it leaves out the pool's two
+counts; `+` sums them.
+
+Whose draws are counted is the facade's to say (`stats::Draws`):
+
+- **A render in bands** counts its first band's. Every band replays the same
+  list and answers each call alike — a group or a mask is accepted over a
+  buffer of no pixels where its clip misses the band, and an image is asked
+  for at the size the page draws it — so each band classifies every call as
+  the page drawn whole does, and the first band's counts are the page's. The
+  work each band does is counted from every band, as it is done.
+- **A tiling pattern's cell** counts none of its own. It is a paint of the
+  fill that names the pattern, drawn once for the page to repeat and only
+  where a canvas needs it, so its calls are not the page's: a render in bands
+  draws it in each band that needs it, and a region that misses the fill draws
+  none. The fill is counted, and the cell's work is.
 
 ## Milestones
 
@@ -268,7 +284,8 @@ out the pool's two counts; `+` sums them.
 5. **RC-17.5, the statistics.** `page_analysis.rs`
    `the_statistics_count_what_the_render_drew`: a page of known counts of each
    class, some hidden and some clipped away, reports exactly those counts,
-   directly and from a display list at two scales.
+   directly and from a display list, drawn whole and in bands, at two
+   scales.
 6. **RC-17.6a, the speed rows**, unmeasured, in MS-04's analysis group: the
    box, transparency and overprint answers for the 150-dpi text page from its
    display list, and the grey test at 72 dpi, each paired with the planning

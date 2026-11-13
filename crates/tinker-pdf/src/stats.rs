@@ -135,13 +135,29 @@ pub(crate) fn cache_held(work: Option<&Work>, bytes: u64) {
     }
 }
 
+/// Whether a renderer's draws are the render's to count: the per-render
+/// statistics of what it drew (`docs/design/page-analysis.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Draws {
+    /// They are: the page's renderer, or the first band's of a page drawn in
+    /// bands.
+    Counted,
+    /// Another renderer counts them, or none does: a band after the first,
+    /// which draws the calls the first band counted, since every band replays
+    /// the same calls and answers them alike; or a tiling pattern's cell,
+    /// which is a paint of the fill that names it, drawn once for the page to
+    /// repeat and only where a canvas needs it.
+    Elsewhere,
+}
+
 /// Adds what a renderer counted — its glyphs shown, its outlines painted,
 /// its glyph masks rasterised and found in its cache, its shading functions
 /// evaluated, the pixels its group buffers and soft masks held beside the
-/// regions they were held to, and the pixels of its canvas — to the
-/// operation's tally, when it is counting. The renderer has no edge to the
-/// tally's crate and hands its counts back as a value instead.
-pub(crate) fn add_render(work: Option<&Work>, counts: RenderCounts) {
+/// regions they were held to, the pixels of its canvas, and, where `draws`
+/// says they are the render's, the per-render statistics of what it drew —
+/// to the operation's tally, when it is counting. The renderer has no edge
+/// to the tally's crate and hands its counts back as a value instead.
+pub(crate) fn add_render(work: Option<&Work>, counts: RenderCounts, draws: Draws) {
     if let Some(work) = work {
         work.add(Counter::GlyphsShown, counts.glyphs_shown);
         work.add(Counter::OutlinesFilled, counts.outlines_filled);
@@ -156,5 +172,23 @@ pub(crate) fn add_render(work: Option<&Work>, counts: RenderCounts) {
         work.add(Counter::SoftMaskPixels, counts.soft_mask_pixels);
         work.add(Counter::SoftMaskBoundPixels, counts.soft_mask_bound_pixels);
         work.add(Counter::PixelsRendered, counts.pixels_rendered);
+        if draws == Draws::Elsewhere {
+            return;
+        }
+        for (counter, n) in [
+            (Counter::DrawnGlyphs, counts.drawn_glyphs),
+            (Counter::DrawnFills, counts.drawn_fills),
+            (Counter::DrawnStrokes, counts.drawn_strokes),
+            (Counter::DrawnClips, counts.drawn_clips),
+            (Counter::DrawnImages, counts.drawn_images),
+            (Counter::DrawnShadings, counts.drawn_shadings),
+            (Counter::DrawnGroups, counts.drawn_groups),
+            (Counter::DrawnSoftMasks, counts.drawn_soft_masks),
+            (Counter::HiddenCalls, counts.hidden_calls),
+            (Counter::DecodedImagesDrawn, counts.decoded_images_drawn),
+            (Counter::DecodedImageSamples, counts.decoded_image_samples),
+        ] {
+            work.add(counter, n);
+        }
     }
 }

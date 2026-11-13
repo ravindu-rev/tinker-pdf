@@ -10,8 +10,8 @@
 mod render_support;
 
 use tinker_pdf::{
-    Bitmap, Document, GreyThresholds, Greyness, Overprint, PageAnalysis, PixelFormat, PixelRegion,
-    RenderOptions,
+    Bitmap, Document, GreyThresholds, Greyness, Overprint, PageAnalysis, Parallelism, PixelFormat,
+    PixelRegion, RenderOptions,
 };
 
 // ---- building pages -------------------------------------------------------------
@@ -893,4 +893,168 @@ fn grey_and_colour_are_decided_at_their_thresholds() {
         ..rendered
     };
     assert_eq!(empty.greyness(&defaults), None, "no picture");
+}
+
+// ---- the statistics -----------------------------------------------------------------
+
+/// The page of known counts, each line commented with what it adds. Objects:
+/// the face at 5 to 7, a two-by-two image at 8, a transparency group at 9, a
+/// soft mask's group at 10, a JPX codestream of four zero bytes that will not
+/// decode at 11, and the two layers at 12 and 13.
+const COUNTED: &str = "\
+    10 10 20 20 re f \
+    30 10 20 20 re f \
+    q 0 0 5 5 re W n 100 50 20 20 re f Q \
+    /OC /Off BDC 0 0 200 100 re f EMC \
+    2 w 10 60 m 100 60 l S \
+    10 70 m 100 70 l S \
+    /OC /Off BDC 10 80 m 100 80 l S EMC \
+    BT /F1 20 Tf 120 10 Td (!!!) Tj ET \
+    /OC /Off BDC BT /F1 20 Tf 120 40 Td (!!) Tj ET EMC \
+    BT 3 Tr /F1 20 Tf 120 70 Td (!) Tj ET \
+    q 20 0 0 20 150 60 cm /Im Do Q \
+    q 20 0 0 20 170 60 cm /Im Do Q \
+    /OC /Off BDC q 20 0 0 20 150 80 cm /Im Do Q EMC \
+    q 160 0 40 20 re W n /Sh sh Q \
+    /OC /Off BDC /Sh sh EMC \
+    /Grp Do \
+    /OC /Off BDC /Grp Do EMC \
+    q /M gs 50 50 10 10 re f Q \
+    q BT 7 Tr /F1 20 Tf 10 30 Td (!) Tj ET Q \
+    q 10 0 0 10 60 30 cm /Odd Do Q";
+
+/// The counts [`COUNTED`] makes, line by line:
+///
+/// - fills: two drawn, one drawn and clipped away, the group's own and the
+///   mask group's and the one painted under the mask: six;
+/// - strokes: two;
+/// - clips: the square that clips a fill away, the shading's, each of the two
+///   forms' `/BBox` (one in hidden content, which clips there as anywhere),
+///   the mask group's `/BBox` and a text object's clip at `ET`: six;
+/// - glyphs: three — the two in hidden content are hidden, the invisible one
+///   is neither, and the clipping one only clips;
+/// - images: the image twice and the placeholder of the one that will not
+///   decode: three, two of them from samples, four samples each;
+/// - one `sh`, one group, one soft mask;
+/// - hidden: a fill, a stroke, two glyphs, an image, an `sh`, and the hidden
+///   form's group and its fill: eight.
+const COUNTS: [(&str, u64); 11] = [
+    ("drawn_glyphs", 3),
+    ("drawn_fills", 6),
+    ("drawn_strokes", 2),
+    ("drawn_clips", 6),
+    ("drawn_images", 3),
+    ("drawn_shadings", 1),
+    ("drawn_groups", 1),
+    ("drawn_soft_masks", 1),
+    ("hidden_calls", 8),
+    ("decoded_images_drawn", 2),
+    ("decoded_image_samples", 8),
+];
+
+/// What a render's statistics read, by name.
+fn counted(stats: &tinker_pdf::Stats) -> [(&'static str, u64); 11] {
+    [
+        ("drawn_glyphs", stats.drawn_glyphs),
+        ("drawn_fills", stats.drawn_fills),
+        ("drawn_strokes", stats.drawn_strokes),
+        ("drawn_clips", stats.drawn_clips),
+        ("drawn_images", stats.drawn_images),
+        ("drawn_shadings", stats.drawn_shadings),
+        ("drawn_groups", stats.drawn_groups),
+        ("drawn_soft_masks", stats.drawn_soft_masks),
+        ("hidden_calls", stats.hidden_calls),
+        ("decoded_images_drawn", stats.decoded_images_drawn),
+        ("decoded_image_samples", stats.decoded_image_samples),
+    ]
+}
+
+/// **The statistics count what the render drew**: a page of known counts of
+/// each class, some hidden and some clipped away, reports exactly those
+/// counts, directly and from a display list, drawn whole and in bands, at two
+/// scales — counted once a call, so no scale and no band moves one.
+#[test]
+fn the_statistics_count_what_the_render_drew() {
+    let mut extra = face(5);
+    extra.push(image(""));
+    extra.push(stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Group << /S /Transparency >>",
+        b"10 10 5 5 re f",
+    ));
+    extra.push(stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 200 100] \
+         /Group << /S /Transparency /CS /DeviceGray >>",
+        b"1 g 0 0 200 100 re f",
+    ));
+    extra.push(stream(
+        "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB \
+         /BitsPerComponent 8 /Filter /JPXDecode",
+        &[0, 0, 0, 0],
+    ));
+    extra.extend(vec![
+        object("<< /Type /OCG /Name (Off) >>"),
+        object("<< /Type /OCG /Name (On) >>"),
+    ]);
+    let resources = format!(
+        "/Font << /F1 5 0 R >> /XObject << /Im 8 0 R /Grp 9 0 R /Odd 11 0 R >> \
+         /Shading << /Sh {AXIAL} >> \
+         /ExtGState << /M << /SMask << /S /Luminosity /G 10 0 R >> >> >> \
+         /Properties << /Off 12 0 R /On 13 0 R >>"
+    );
+    let page = Page {
+        catalog: "/OCProperties << /OCGs [12 0 R 13 0 R] /D << /ON [13 0 R] /OFF [12 0 R] >> >>",
+        resources: &resources,
+        content: COUNTED,
+        extra,
+        ..Page::default()
+    };
+    let document = Document::open(page.bytes()).expect("the page opens");
+    let opened = document.page(0).expect("its page");
+    let list = opened.display_list();
+    for scale in [1.0, 2.5] {
+        let options = RenderOptions {
+            scale,
+            stats: true,
+            ..RenderOptions::default()
+        };
+        let direct = opened.render(&options).stats.expect("asked for");
+        assert_eq!(counted(&direct), COUNTS, "a direct render at {scale}x");
+        let replayed = list.render(&options).stats.expect("asked for");
+        assert_eq!(counted(&replayed), COUNTS, "a replay at {scale}x");
+        // In bands, directly and from the list: every band draws the same
+        // calls and the first counts them, so the page's statistics are the
+        // page's drawn whole. Each band counts where it ran, which is how the
+        // bands are seen to have been drawn at all.
+        let in_bands = RenderOptions {
+            parallelism: Parallelism::Threads(4),
+            ..options.clone()
+        };
+        for (what, stats) in [
+            ("directly", opened.render(&in_bands).stats),
+            ("from the list", list.render(&in_bands).stats),
+        ] {
+            let stats = stats.expect("asked for");
+            assert!(
+                stats.pool_items_on_workers + stats.pool_items_on_caller >= 2,
+                "drawn {what} in bands at {scale}x: {stats:?}"
+            );
+            assert_eq!(counted(&stats), COUNTS, "in bands {what} at {scale}x");
+        }
+        // A statistic is no step: the total a guard compares does not move.
+        let mut without = direct;
+        without.drawn_glyphs = 0;
+        without.drawn_fills = 0;
+        without.drawn_strokes = 0;
+        without.drawn_clips = 0;
+        without.drawn_images = 0;
+        without.drawn_shadings = 0;
+        without.drawn_groups = 0;
+        without.drawn_soft_masks = 0;
+        without.hidden_calls = 0;
+        without.decoded_images_drawn = 0;
+        without.decoded_image_samples = 0;
+        assert_eq!(without.work(), direct.work(), "no statistic is a step");
+    }
+    // Not asked, nothing counted.
+    assert_eq!(opened.render(&RenderOptions::default()).stats, None);
 }

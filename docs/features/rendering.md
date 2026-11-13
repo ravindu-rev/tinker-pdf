@@ -1327,10 +1327,32 @@ save that encrypts counts ([writing](writing.md)); and
 ran — on one of the pool's workers or on the caller — counted into the first
 counted operation the page makes, its render or its counted text, and never
 into a page rendered outside a walk; and where each band of a page drawn in
-bands ran, counted into that render's one tally. `Stats::work()` totals the step counts,
-which leaves out those maxima, those quantities and the two pool counts — where
-a part ran is no step, so a walked page totals what the page rendered alone
-does — and two `Stats` add with `+`, a maximum keeping the larger. Every
+bands ran, counted into that render's one tally. Beside them a render's
+**statistics** of what it drew ([page analysis](../design/page-analysis.md)),
+counted by the renderer once a call and never once a pixel, so a
+display-list replay and a render in bands count what a direct render
+counts: `drawn_glyphs`, `drawn_fills`, `drawn_strokes`, `drawn_images`,
+`drawn_shadings`, `drawn_groups` and `drawn_soft_masks`, the glyphs,
+fills, strokes, images (a placeholder among them), `sh` calls, groups and
+soft masks it painted or accepted outside hidden content; `drawn_clips`,
+each clip it installed — a `W` or `W*` path, a form's or a mask group's
+`/BBox`, and a text object's at `ET`; `hidden_calls`, each glyph, fill,
+stroke, image, `sh` and group hidden optional content kept from painting;
+and `decoded_images_drawn` and `decoded_image_samples`, each image drawn
+from decoded samples and the samples it was decoded to, its width by its
+height, at every draw — fewer than `/Width` by `/Height` for a JPEG
+decoded at the size the page draws it, which is the one figure a scale
+moves. A paint the clip leaves nothing of is drawn. A render in bands
+counts each call once: every band replays the same calls and answers
+them alike, and the first band's renderer counts them. A tiling
+pattern's cell is a paint of the fill that names it, drawn once for the
+page to repeat, and its own calls are not among the page's. Under forced
+colours what a soft mask's group would paint is skipped, not drawn.
+`Stats::work()` totals the step counts, which leaves out those maxima,
+those quantities, the two pool counts — where a part ran is no step, so a
+walked page totals what the page rendered alone does — and the
+statistics, which classify calls whose steps are counted where they were
+taken; two `Stats` add with `+`, a maximum keeping the larger. Every
 render door counts the same way: `Page::render`, `Page::render_form` (the
 scope it reads the form's name in included), `Page::render_annotation` (both
 of the appearance's scopes) and `DisplayList::render`, which counts through

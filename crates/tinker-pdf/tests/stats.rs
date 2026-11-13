@@ -333,6 +333,13 @@ fn glyphs_and_an_image_stats() -> Stats {
     expected.images_decoded = 1;
     expected.image_misses = 1;
     expected.image_hits = 1;
+    // What the render drew: every glyph it had an outline for, each one a
+    // mask's miss so as many as the outlines filled, and the image twice from
+    // its samples, two by two each.
+    expected.drawn_glyphs = expected.outlines_filled;
+    expected.drawn_images = 2;
+    expected.decoded_images_drawn = 2;
+    expected.decoded_image_samples = 2 * 4;
     expected
 }
 
@@ -520,6 +527,9 @@ fn a_form_shown_three_times_builds_its_scope_once() {
     expected.glyph_outline_hits = shown - distinct;
     expected.font_program_misses = 1;
     expected.font_program_hits = distinct - 1;
+    // Every glyph is painted, and each `Do` clips to the form's `/BBox`.
+    expected.drawn_glyphs = shown;
+    expected.drawn_clips = 3;
     assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
 
@@ -590,6 +600,9 @@ fn render_form_counts_the_scope_it_reads_the_name_in() {
     expected.glyph_outline_hits = shown - distinct;
     expected.font_program_misses = 1;
     expected.font_program_hits = distinct - 1;
+    // Its glyphs painted, and its `/BBox` clipped to at the one `Do`.
+    expected.drawn_glyphs = shown;
+    expected.drawn_clips = 1;
     // The canvas is the form's `/BBox`, 80 x 20 at 72 dpi.
     assert_eq!(stats, drew(expected, 80 * 20));
 }
@@ -630,6 +643,12 @@ fn a_profile_two_images_share_is_compiled_once() {
     // Each decode reads its space once: the first compiles the profile.
     expected.icc_transform_misses = 1;
     expected.icc_transform_hits = 1;
+    // Three draws from samples, two by two each: a profile that will not
+    // parse is read through its component count (8.6.5.5), and the images
+    // decode.
+    expected.drawn_images = 3;
+    expected.decoded_images_drawn = 3;
+    expected.decoded_image_samples = 3 * 4;
     assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
 
@@ -647,6 +666,10 @@ fn every_inline_image_is_decoded() {
     let page = document.page(index).expect("a page");
     let mut expected = decoding(Stats::default(), &[(4, 1, content.len())]);
     expected.images_decoded = 3;
+    // Each drawn from its samples, two by two.
+    expected.drawn_images = 3;
+    expected.decoded_images_drawn = 3;
+    expected.decoded_image_samples = 3 * 4;
     assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
 
@@ -768,7 +791,9 @@ fn a_form_that_draws_itself_renders_in_work_its_page_bounds() {
 }
 
 /// A tiling pattern's cell is drawn by a renderer of its own over a scope of
-/// its own, and both count into the page's tally.
+/// its own, and the work both do counts into the page's tally; the calls the
+/// cell draws are a paint of the page's fill, which is the one call of them
+/// the page drew.
 #[test]
 fn a_pattern_cell_counts_what_it_draws() {
     let content = "/Pattern cs /P1 scn 0 0 200 100 re f\n";
@@ -803,6 +828,10 @@ fn a_pattern_cell_counts_what_it_draws() {
     expected.glyph_outline_misses = 2;
     expected.font_program_misses = 1;
     expected.font_program_hits = 1;
+    // The page's one patterned fill. The cell is a paint of that fill,
+    // drawn once for the page to repeat, and its clip and glyphs are not
+    // the page's calls.
+    expected.drawn_fills = 1;
     // The page's canvas; the cell's renderer counts no pixels of its own.
     assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
@@ -831,6 +860,10 @@ fn an_annotation_counts_both_scopes_its_appearance_builds() {
     drawn.glyph_outline_misses = shown;
     drawn.font_program_misses = 1;
     drawn.font_program_hits = shown - 1;
+    // Its glyphs painted, and the clip its `/BBox` is drawn under, written as
+    // `re W n` in front of the appearance.
+    drawn.drawn_glyphs = shown;
+    drawn.drawn_clips = 1;
     let content = (4, 1, 0);
     assert_eq!(
         counted(&page),
@@ -923,6 +956,11 @@ fn a_display_list_counts_through_the_resources_it_keeps() {
     expected.image_hits = 2;
     // Each replay draws the page's canvas.
     expected.pixels_rendered = PAGE_PIXELS;
+    // And it draws what every render of the page draws.
+    expected.drawn_glyphs = direct.drawn_glyphs;
+    expected.drawn_images = direct.drawn_images;
+    expected.decoded_images_drawn = direct.decoded_images_drawn;
+    expected.decoded_image_samples = direct.decoded_image_samples;
     assert_eq!(second, expected, "the second replay");
 
     // A replay not asked counts nothing, and does not disturb what the next
@@ -955,6 +993,9 @@ fn a_display_list_counts_the_annotations_it_keeps() {
     expected.glyph_outline_misses = shown;
     expected.font_program_misses = 1;
     expected.font_program_hits = shown - 1;
+    // Its glyphs painted, under its `/BBox`'s clip.
+    expected.drawn_glyphs = shown;
+    expected.drawn_clips = 1;
     assert_eq!(
         list.render(&asking()).stats,
         Some(drew(expected, PAGE_PIXELS)),
@@ -967,6 +1008,8 @@ fn a_display_list_counts_the_annotations_it_keeps() {
     expected.glyph_masks_rasterised = shown;
     expected.glyph_outline_hits = shown;
     expected.pixels_rendered = PAGE_PIXELS;
+    expected.drawn_glyphs = shown;
+    expected.drawn_clips = 1;
     assert_eq!(
         list.render(&asking()).stats,
         Some(expected),
