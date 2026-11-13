@@ -542,6 +542,7 @@ name = "tinker-pdf"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "proptest",
  "tinker-pdf-archive",
  "tinker-pdf-color",
  "tinker-pdf-content",

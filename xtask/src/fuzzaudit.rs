@@ -227,6 +227,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "markdown",
         "Markdown is text with no header and no control byte",
     ),
+    (
+        "ocr_import",
+        "hOCR, ALTO and PAGE XML are markup text, which has no header to look for",
+    ),
     ("pki_cms", "DER: a SEQUENCE tag, which any DER shares"),
     ("pki_der", "DER: a SEQUENCE tag, which any DER shares"),
     ("render_page", "a generator over page content, not a file"),

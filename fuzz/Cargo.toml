@@ -327,6 +327,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "ocr_import"
+path = "fuzz_targets/ocr_import.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fb2"
 path = "fuzz_targets/fb2.rs"
 test = false

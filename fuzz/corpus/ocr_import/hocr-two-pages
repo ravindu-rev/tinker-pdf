@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+<title>A hand-written hOCR file</title>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+<meta name="ocr-system" content="written by hand"/>
+<meta name="ocr-capabilities" content="ocr_page ocr_carea ocr_par ocr_line ocrx_word ocrp_wconf"/>
+<meta name="ocr-number-of-pages" content="2"/>
+</head>
+<body>
+<div class="ocr_page" id="page_1" title='image "scan-1.png"; bbox 0 0 1000 1400; ppageno 0; scan_res 300 300'>
+<div class="ocr_carea" id="block_1_2" title="bbox 100 700 900 800; order 2">
+<p class="ocr_par" id="par_1_2_1" title="bbox 100 700 900 800">
+<span class="ocr_line" id="line_1_2_1_1" title="bbox 100 700 520 760">
+<span class="ocrx_word" id="word_second" title="bbox 100 700 300 760; x_wconf 88">second</span>
+<span class="ocrx_word" id="word_block" title="bbox 320 700 520 760; x_wconf 79">block</span>
+</span>
+</p>
+</div>
+<div class="ocr_carea" id="block_1_1" title="bbox 100 100 900 400; order 1">
+<p class="ocr_par" id="par_1_1_1" title="bbox 100 100 900 250">
+<span class="ocr_line" id="line_1_1_1_1" title="bbox 100 100 600 160">
+<span class="ocrx_word" id="word_hello" title="bbox 100 100 300 160; x_wconf 96">Hello</span>
+<span class="ocrx_word" id="word_world" title="bbox 320 100 600 160; x_wconf 91"><span class="alternatives"><ins class="alt" title="nlp 0.2">world</ins><del class="alt" title="nlp 1.3">word</del></span></span>
+</span>
+<span class="ocr_line" id="line_1_1_1_2" title="bbox 100 180 400 240">
+<span class="ocrx_word" id="word_again" title="bbox 100 180 400 240">again</span>
+</span>
+</p>
+<p class="ocr_par" id="par_1_1_2" title="bbox 100 300 900 400">
+<span class="ocr_line" id="line_1_1_2_1" title="bbox 100 300 700 360">A line   of
+ text</span>
+</p>
+</div>
+</div>
+<div class="ocr_page" id="page_2" title="bbox 0 0 800 600; ppageno 1">
+<div class="ocr_carea" id="block_2_1" title="bbox 50 50 750 150">
+<span class="ocr_line" id="line_2_1_1" title="bbox 50 50 300 100">
+<span class="ocrx_word" id="word_page" title="bbox 50 50 200 100">Page</span>
+<span class="ocrx_word" id="word_two" title="bbox 220 50 300 100">two</span>
+</span>
+</div>
+</div>
+</body>
+</html>

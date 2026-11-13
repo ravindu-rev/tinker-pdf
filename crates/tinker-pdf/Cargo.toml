@@ -74,13 +74,15 @@ tinker-pdf-svg = { workspace = true }
 tinker-pdf-pki = { workspace = true }
 
 [dev-dependencies]
-# The only third-party crate in this workspace's own tree, and it is exempt
-# tooling by name in `Cargo.toml`'s header rule and `CONTRIBUTING.md`: it
-# measures the engine and is not part of it. `default-features = false` drops
+# A third-party crate, exempt tooling by name in `Cargo.toml`'s header rule
+# and `CONTRIBUTING.md`: it measures the engine and is not part of it. `default-features = false` drops
 # the HTML reports and their plotting stack, which would pull a dozen crates in
 # to draw pictures nobody looks at in a scheduled job; `cargo_bench_support` is
 # what makes plain `cargo bench` work without `cargo-criterion` installed.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Exempt tooling, as in `tinker-pdf-cos`: `tests/ocr_import.rs` holds the OCR
+# import to "arbitrary bytes never panic" as a property.
+proptest = "1.11.0"
 tinker-pdf-cos = { workspace = true }
 # `tests/xps.rs` recomputes the XPS corpus's committed inventory through this
 # reader and compares it against the one .NET's `System.IO.Compression` wrote,

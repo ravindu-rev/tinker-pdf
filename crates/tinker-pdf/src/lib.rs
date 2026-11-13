@@ -39,6 +39,7 @@ pub mod layers;
 pub mod markdown;
 pub mod mdp;
 mod observe;
+pub mod ocr;
 mod optional;
 mod output_intents;
 pub mod pdfa;

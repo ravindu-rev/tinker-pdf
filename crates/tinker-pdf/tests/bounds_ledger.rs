@@ -1,5 +1,14 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, the OCR import seam (OC-01).* **One more row,
+//! `MAX_IMPORTED_WORDS`, a cap on what a recogniser's file asks a page to
+//! hold.** An hOCR, ALTO or PAGE XML file states its words, and a page of
+//! them is a model the layer then writes a glyph a character of; the cap keeps
+//! the words, in reading order, and drops the rest with
+//! `ImportWarning::TooManyWords`. Its `fixtures` is the cap — the firing test
+//! imports one word more — and its three yardsticks are zeros, because none of
+//! the container paths imports a recogniser's file.
+//!
 //! *Amended, October 2026, the `jbig2` fuzz sweep.* **One more row,
 //! `MAX_JBIG2_WORK_MULTIPLE`, the second ratio here and the first that bounds a
 //! whole decode rather than one thing inside it.** Every other JBIG2 row caps
@@ -582,6 +591,7 @@ use tinker_pdf::epub::{
 };
 use tinker_pdf::form_data::MAX_FORM_DATA_BYTES;
 use tinker_pdf::markdown::{MAX_MARKDOWN_NESTING, MAX_MARKDOWN_REFERENCE_BYTES};
+use tinker_pdf::ocr::MAX_IMPORTED_WORDS;
 use tinker_pdf::redact::MAX_FORM_COPY_BYTES;
 use tinker_pdf::structure::{MAX_STRUCTURE_BYTES, MAX_STRUCTURE_VALUES};
 use tinker_pdf::xps::{
@@ -662,6 +672,10 @@ const RENDER_DISPLAY: &str = include_str!("../../tinker-pdf-render/src/display.r
 const DISPLAY_LIST_TESTS: &str = include_str!("display_list.rs");
 const MARKDOWN: &str = include_str!("../src/markdown.rs");
 const MARKDOWN_TESTS: &str = include_str!("markdown.rs");
+/// The OCR import seam: the word cap, declared beside the import, and fired
+/// by the import's suite.
+const OCR_IMPORT: &str = include_str!("../src/ocr/import.rs");
+const OCR_IMPORT_TESTS: &str = include_str!("ocr_import.rs");
 /// The review of the tagged-writing lane: the structure walk's two budgets,
 /// declared beside the walk, and the two PDF 2.0 listings' copy budgets,
 /// declared beside each listing; fired by the suites that read them.
@@ -2711,6 +2725,28 @@ fn ledger() -> Vec<Bound> {
                 LAYOUT_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_IMPORTED_WORDS",
+            cap: MAX_IMPORTED_WORDS as u128,
+            published: "100 000",
+            // The test that fires it imports one word past the cap, so it
+            // spends the cap; every other fixture states a few words.
+            fixtures: MAX_IMPORTED_WORDS as u128,
+            // None of the three container paths imports a recogniser's file.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // An ALTO `String` is a start event and an end event, so one
+            // file's page states half the XML reader's token cap in words.
+            reachable: xml_limits::MAX_XML_TOKENS as u128 / 2,
+            reachable_because: "an ALTO page of empty `String` elements, two events each, \
+                                inside MAX_XML_TOKENS",
+            declared_in: OCR_IMPORT,
+            fires_in: (
+                "each_tolerated_defect_is_a_named_warning",
+                OCR_IMPORT_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2760,8 +2796,9 @@ fn segment_size() -> u128 {
 /// `MAX_HTML_CLONE_BYTES`; and the EPUB CSS row's font features add
 /// `MAX_CSS_FEATURE_SETTINGS`, and its gradients `MAX_CSS_GRADIENT_STOPS`;
 /// and the review of lane 8C adds `MAX_EMBEDDING_DEPTH`; and the `jbig2` fuzz
-/// sweep adds `MAX_JBIG2_WORK_MULTIPLE`. All **sixty-six** are here, and a
-/// bound added without a row fails this.
+/// sweep adds `MAX_JBIG2_WORK_MULTIPLE`; and the OCR import seam adds
+/// `MAX_IMPORTED_WORDS`. All **sixty-seven** are here, and a bound added
+/// without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2834,6 +2871,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_CSS_FEATURE_SETTINGS",
             "MAX_CSS_GRADIENT_STOPS",
             "MAX_EMBEDDING_DEPTH",
+            "MAX_IMPORTED_WORDS",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -3947,6 +3985,30 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                     "the references' share of it",
                 ),
                 buffer(Input, PARSED, 1, "the XHTML's tree"),
+            ],
+        ),
+        path(
+            "ocr_import",
+            vec![
+                buffer(
+                    Input,
+                    PARSED,
+                    4,
+                    "the XML reader's tree, the HTML parser's two readings of the file \
+                     and the pages imported from it",
+                ),
+                buffer(
+                    Input,
+                    4,
+                    2,
+                    "the text each reader decodes, at most four bytes a byte",
+                ),
+                buffer(
+                    Row("MAX_HTML_CLONE_BYTES"),
+                    1,
+                    1,
+                    "the attribute bytes the HTML parser's clones copy",
+                ),
             ],
         ),
         path(
