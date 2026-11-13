@@ -520,6 +520,12 @@ pub const USE_MARK_FILTERING_SET: u16 = 0x0010;
 pub const RIGHT_TO_LEFT: u16 = 0x0001;
 
 impl<'a> Lookup<'a> {
+    /// A lookup over its own bytes, for one that lives outside a
+    /// `LookupList`: a `JSTF` table's `JstfMax` lookups.
+    pub(crate) const fn new(data: Bytes<'a>) -> Self {
+        Self { data }
+    }
+
     /// The lookup type, as the table numbers them: what it means depends on
     /// which of `GSUB` and `GPOS` the lookup came from.
     #[must_use]

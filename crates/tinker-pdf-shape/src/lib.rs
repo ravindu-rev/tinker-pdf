@@ -7,7 +7,9 @@
 //! fifth are built on it: the default, Arabic and USE shapers ([`Shaper`]),
 //! which map text to glyphs and decide which features run, and UAX #9
 //! ([`bidi`]). [`graphite`] reads a Graphite description's tables, which no
-//! run is shaped through yet (`docs/design/shaping.md`, *Graphite shaping*).
+//! run is shaped through yet (`docs/design/shaping.md`, *Graphite shaping*),
+//! and the standard's `JSTF`, a face's justification suggestions, is read by
+//! [`jstf`].
 //!
 //! **The eleventh leaf.** Ruling 8's August 2026 amendment makes the test of
 //! a leaf the definition rather than the list: *a leaf is any crate that takes
@@ -88,6 +90,7 @@ pub mod gdef;
 mod gpos;
 pub mod graphite;
 mod gsub;
+pub mod jstf;
 pub mod limits;
 pub mod read;
 pub mod shape;
@@ -100,6 +103,9 @@ pub use common::{
     FeatureSubstitutions, FeatureVariations, LangSys, Lookup, LookupList, Script, ScriptList, Tag,
 };
 pub use gdef::{AttachList, Caret, Gdef, GlyphClass, LigCaretList};
+pub use jstf::{
+    Change, ExtenderGlyphs, Jstf, JstfLangSys, JstfMax, JstfModList, JstfPriority, JstfScript, Mode,
+};
 pub use limits::Limits;
 pub use shape::{ColumnMetrics, Orientation, Plans, ShapedRun, Shaper, VerticalMetrics};
 
@@ -451,12 +457,14 @@ impl<'a> LayoutTable<'a> {
 /// The three are held as one because they are read as one: a lookup flag in
 /// `GSUB` is meaningless without `GDEF`'s glyph classes, and a mark
 /// attachment in `GPOS` is meaningless without the ligature components
-/// `GSUB` recorded.
+/// `GSUB` recorded. `JSTF` rides beside them, because its suggestions are
+/// indices into the other two's lookup lists.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Layout<'a> {
     gdef: Option<Gdef<'a>>,
     gsub: Option<LayoutTable<'a>>,
     gpos: Option<LayoutTable<'a>>,
+    jstf: Option<Jstf<'a>>,
 }
 
 /// `GDEF`, as the table directory spells it.
@@ -465,6 +473,8 @@ const GDEF: u32 = u32::from_be_bytes(*b"GDEF");
 const GSUB: u32 = u32::from_be_bytes(*b"GSUB");
 /// `GPOS`.
 const GPOS: u32 = u32::from_be_bytes(*b"GPOS");
+/// `JSTF`.
+const JSTF: u32 = u32::from_be_bytes(*b"JSTF");
 
 impl<'a> Layout<'a> {
     /// Reads whichever of the three tables a face carries.
@@ -486,6 +496,7 @@ impl<'a> Layout<'a> {
             gpos: sfnt
                 .table(GPOS)
                 .and_then(|bytes| LayoutTable::parse(bytes, Table::Gpos)),
+            jstf: sfnt.table(JSTF).and_then(Jstf::parse),
         }
     }
 
@@ -505,7 +516,17 @@ impl<'a> Layout<'a> {
             gdef: gdef.and_then(Gdef::parse),
             gsub: gsub.and_then(|bytes| LayoutTable::parse(bytes, Table::Gsub)),
             gpos: gpos.and_then(|bytes| LayoutTable::parse(bytes, Table::Gpos)),
+            jstf: None,
         }
+    }
+
+    /// The same layout with a `JSTF` table read from bytes a caller already
+    /// has — the third argument [`Layout::from_tables`] does not take, so
+    /// that its callers keep their signature.
+    #[must_use]
+    pub fn with_jstf(mut self, jstf: Option<&'a [u8]>) -> Self {
+        self.jstf = jstf.and_then(Jstf::parse);
+        self
     }
 
     /// The face's `GDEF`, if it has one this crate could read.
@@ -524,6 +545,12 @@ impl<'a> Layout<'a> {
     #[must_use]
     pub const fn gpos(&self) -> Option<&LayoutTable<'a>> {
         self.gpos.as_ref()
+    }
+
+    /// The face's `JSTF`, if it has one of the version this crate reads.
+    #[must_use]
+    pub const fn jstf(&self) -> Option<&Jstf<'a>> {
+        self.jstf.as_ref()
     }
 
     /// Runs `lookups` from `GSUB` over the buffer.

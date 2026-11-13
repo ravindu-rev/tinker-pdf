@@ -1098,9 +1098,10 @@ fn every_fuzz_seed_shapes_without_panicking() {
         }
         count += 1;
     }
-    // Eight written by `write_the_fuzz_seeds` above, and one the first
-    // `shape` session found: `lookup-list-subtable-storm`.
-    assert_eq!(count, 9, "the seed corpus changed size");
+    // Eight written by `write_the_fuzz_seeds` above, one the first `shape`
+    // session found, `lookup-list-subtable-storm`, and the `JSTF` seed
+    // `tests/justify.rs` writes, `jstf-every-structure`.
+    assert_eq!(count, 10, "the seed corpus changed size");
 }
 
 // --- positioning, end to end on a hand-built GPOS -----------------------

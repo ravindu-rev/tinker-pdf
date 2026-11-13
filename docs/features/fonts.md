@@ -808,6 +808,15 @@ What it does:
 
 - **OpenType Layout.** `GDEF`, `GSUB` types 1–8 and `GPOS` types 1–9,
   coverage and class definitions, extension and chaining-context lookups.
+- **`JSTF`, read** (`jstf::Jstf`, carried as `Layout::jstf`): its scripts,
+  each script's extender glyphs and its default and per-language systems,
+  each system's priorities in order, each priority's eight modification
+  lists — the `GSUB` and `GPOS` lookups to enable and to disable, for
+  shrinkage and for extension — and its two `JstfMax` tables of `GPOS`-form
+  lookups, read by the `GPOS` lookup reader over their own bytes. Every
+  structure is a view: a NULL offset is an absent table, and an offset or a
+  count past the table, or a major version other than 1, answers `None`.
+  Nothing justifies a line with it.
 - **The default shaper.** `cmap` through `tinker_pdf_font::Sfnt`, plus `cmap`
   format 14 read here because a variation selector is consumed by a shaper and
   never reaches a renderer; script itemization; `locl`/`ccmp`/`rlig`/`liga`/
@@ -1417,6 +1426,15 @@ corpora already vendored here. So every name stays on the list.
   each setting that moves them; a `VORG` face and a synthesized one — on
   every target, after checking the glyphs and the upright and sideways runs
   it shaped.
+- `crates/tinker-pdf-shape/tests/justify.rs` — `JSTF` read back from a table
+  the test assembles from the chapter's field lists, the chapter's own
+  examples among it: every script, extender glyph, language system — by
+  record, by tag and by fallback to the default — priority, modification
+  list and `JstfMax` lookup as written; NULL offsets absent; every offset,
+  count and version that passes the table answering `None`, with every
+  truncation and single-byte change read without a panic; and the `shape`
+  fuzz target's `JSTF` seed, `fuzz/corpus/shape/jstf-every-structure`,
+  replayed through both of its paths and held to the writer's bytes.
 - `crates/tinker-pdf/src/fontlist.rs` — unit tests beside the listing:
   9.6.4's subset-tag shape in both directions (seven strings that are not a
   tag, each for its own reason), a descriptor deciding embedding, a

@@ -23,9 +23,10 @@
 //!    real face's path, and a mutator that finds a table directory explores
 //!    every table behind it.
 //! 2. **As each of the three tables directly**, through
-//!    `Layout::from_tables`. Without this the table parsers are reachable
-//!    only behind a valid twelve-byte directory with a plausible checksum, and
-//!    a mutator would spend its whole session on the container.
+//!    `Layout::from_tables`, and as a `JSTF` through `Layout::with_jstf`.
+//!    Without this the table parsers are reachable only behind a valid
+//!    twelve-byte directory with a plausible checksum, and a mutator would
+//!    spend its whole session on the container.
 //!
 //! The control byte picks the **limits** rather than the input, for the reason
 //! `css` and `layout` already record: a target whose ceilings are all at
@@ -160,7 +161,9 @@
 use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_font::Sfnt;
-use tinker_pdf_shape::{Buffer, Layout, Limits, MarkWidths, ShapedGlyph, Tag};
+use tinker_pdf_shape::{
+    Buffer, Change, Jstf, JstfLangSys, Layout, Limits, MarkWidths, Mode, ShapedGlyph, Table, Tag,
+};
 
 /// The feature tags asked for, in an order that is not sorted, so that
 /// `lookups_for`'s own sorting is exercised rather than inherited.
@@ -339,6 +342,65 @@ fn interrogate(layout: &Layout<'_>, glyphs: &[u16]) {
             }
         }
     }
+
+    if let Some(jstf) = layout.jstf() {
+        interrogate_jstf(jstf);
+    }
+}
+
+/// Every structure of a `JSTF`: each script's extender glyphs and language
+/// systems, each priority's eight modification lists and two `JstfMax`
+/// tables, and each `JstfMax` lookup's subtables.
+fn interrogate_jstf(jstf: &Jstf<'_>) {
+    let _ = jstf.minor_version();
+    for index in 0..jstf.len().min(64) {
+        let _ = jstf.tag(index);
+        let Some(script) = jstf.get(index) else {
+            continue;
+        };
+        if let Some(extenders) = script.extender_glyphs() {
+            for at in 0..extenders.len().min(64) {
+                let _ = extenders.get(at);
+            }
+        }
+        let mut systems: Vec<JstfLangSys<'_>> = script.default_lang_sys().into_iter().collect();
+        for lang in 0..script.len().min(64) {
+            let _ = script.tag(lang);
+            systems.extend(script.get(lang));
+        }
+        for tag in SCRIPTS {
+            let _ = script.lang_sys(Some(tag));
+        }
+        for system in systems {
+            for at in 0..system.len().min(64) {
+                let Some(priority) = system.get(at) else {
+                    continue;
+                };
+                for mode in [Mode::Shrinkage, Mode::Extension] {
+                    for table in [Table::Gsub, Table::Gpos] {
+                        for change in [Change::Enable, Change::Disable] {
+                            if let Some(list) = priority.mod_list(mode, table, change) {
+                                for lookup in 0..list.len().min(64) {
+                                    let _ = list.lookup(lookup);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(max) = priority.max(mode) {
+                        for lookup in 0..max.len().min(64) {
+                            if let Some(lookup) = max.lookup(lookup) {
+                                let _ =
+                                    (lookup.kind(), lookup.flags(), lookup.mark_filtering_set());
+                                for sub in 0..lookup.len().min(64) {
+                                    let _ = lookup.subtable(sub);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -403,9 +465,10 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // 2. The same bytes as each of the three tables, so a malformed lookup
-    //    list is reachable without a valid directory in front of it.
-    let layout = Layout::from_tables(Some(face), Some(face), Some(face));
+    // 2. The same bytes as each of the three tables, and as `JSTF`, so a
+    //    malformed lookup list is reachable without a valid directory in
+    //    front of it.
+    let layout = Layout::from_tables(Some(face), Some(face), Some(face)).with_jstf(Some(face));
     interrogate(&layout, &glyphs);
     let once = shape(&layout, &glyphs, limits, SCRIPTS[0], marks);
     let twice = shape(&layout, &glyphs, limits, SCRIPTS[0], marks);
