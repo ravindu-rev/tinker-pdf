@@ -323,11 +323,16 @@ are reached only from a 16-bit canvas.
    coverage units, takes today's byte from `Canvas` and each candidate's
    16-bit value from arithmetic in the test, and prints, per candidate, how
    many top bytes differ from today's, how many values (A) holds, and how far
-   each lies from the exact value. Run with
-   `cargo test -p tinker-pdf-raster --test sixteen_bit_census -- --ignored
-   --nocapture`; it prints its `RAN` banner and the figures as tab-separated
-   lines, which are committed in `crates/tinker-pdf-raster/tests/
-   sixteen_bit_census.tsv` beside that command when it runs (ruling 16).
+   each lies from the exact value. Run with `cargo test --release -p
+   tinker-pdf-raster --test sixteen_bit_census -- --ignored --nocapture`; it
+   prints its `RAN` banner and the figures as tab-separated lines, which are
+   committed as `crates/tinker-pdf-raster/tests/sixteen_bit_census.tsv`
+   beside that command when it runs (ruling 16). Each stage is priced on its
+   own, its 8-bit operands widened: the effective alpha over every coverage
+   and constant alpha, the opaque branch over every effective alpha, source
+   and backdrop, the straight-alpha branch over every effective alpha and
+   backdrop alpha short of opaque on a grid of sources and backdrops a
+   seventeenth apart, and coverage over every unit count.
 2. **RC-07.3, the formats and the core.** The table's formats, `Color16`,
    `sample_bytes` and `pixel_bytes`; `Canvas` stores, clears, reads and
    composites them through `blend`'s `Normal` path and both backdrop
