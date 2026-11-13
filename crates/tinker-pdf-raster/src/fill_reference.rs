@@ -136,6 +136,75 @@ pub(crate) fn fill_reference(
     mask
 }
 
+/// The mask `HardEdge::Centre` makes of a path, by the sorted sweep: each
+/// row's middle sub-scanline, `16·row + 8`, swept as [`fill_reference`]
+/// sweeps every sub-scanline — the edges sorted by their tops, the crossings
+/// by `x`, both stably, and walked span by span, a span added where the rule
+/// goes from inside back to outside — and every pixel whose centre unit,
+/// `256·col + 128`, a span holds painted 255. A span opened and never closed
+/// adds nothing, as it adds no coverage.
+pub(crate) fn centres_reference(
+    path: &Path,
+    rule: FillRule,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    tolerance: f64,
+) -> Mask {
+    let mut mask = Mask::empty(x0, y0, width, height);
+    if width == 0 || height == 0 {
+        return mask;
+    }
+    let mut edges = edges_of(path, tolerance);
+    if edges.is_empty() {
+        return mask;
+    }
+    edges.sort_by_key(|edge| edge.top);
+
+    let mut crossings: Vec<(i64, i32)> = Vec::new();
+    for row in active_rows(&edges, y0, height) {
+        let sub = y0
+            .saturating_add(row as i32)
+            .saturating_mul(SAMPLES)
+            .saturating_add(SAMPLES / 2);
+        crossings.clear();
+        for edge in edges
+            .iter()
+            .filter(|edge| edge.top <= sub && sub < edge.bottom)
+        {
+            crossings.push((crossing(edge, sub), edge.winding));
+        }
+        if crossings.len() < 2 {
+            continue;
+        }
+        crossings.sort_by_key(|(x, _)| *x);
+
+        let base = (row as usize) * (width as usize);
+        let Some(out) = mask.data.get_mut(base..base + width as usize) else {
+            continue;
+        };
+        let mut winding = 0i32;
+        let mut span_start = 0i64;
+        for (x, w) in &crossings {
+            let was_inside = inside(winding, rule);
+            winding += w;
+            let is_inside = inside(winding, rule);
+            if !was_inside && is_inside {
+                span_start = *x;
+            } else if was_inside && !is_inside {
+                for (column, pixel) in (0i64..).zip(out.iter_mut()) {
+                    let centre = (i64::from(x0) + column) * 256 + 128;
+                    if span_start <= centre && centre < *x {
+                        *pixel = 255;
+                    }
+                }
+            }
+        }
+    }
+    mask
+}
+
 /// The path's edges, in the order the path gives them.
 fn edges_of(path: &Path, tolerance: f64) -> Vec<Edge> {
     let mut edges = Vec::new();
@@ -949,6 +1018,112 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The centre rule is the sorted sweep of each row's middle** (RC-11.3):
+    /// `fill_hard` under `HardEdge::Centre` is [`centres_reference`], byte
+    /// for byte, on every path the classes generate — the dropped class's
+    /// unclosed sub-scanlines among them — at every region, under both rules;
+    /// and so is every centre fill made through one scratch that coverage
+    /// fills share, each coverage fill there the fresh one's, so nothing
+    /// either kind leaves in the scratch reaches the other's pixels. Every
+    /// mask is whole or empty; every class holds a centre somewhere, and a
+    /// quarter of all the cases at least hold one — a sliver thinner than a
+    /// sub-scanline holds a centre only where it lies across a row's middle,
+    /// so the share is the classes' together.
+    #[test]
+    fn the_centre_rule_is_the_sorted_sweep_of_each_row_s_middle() {
+        use crate::fill::{fill_hard, fill_hard_with, HardEdge};
+
+        let mut s = Stream::new(0x6365_6e74_7265);
+        let mut scratch = FillScratch::new();
+        let (mut all_cases, mut all_inked) = (0u64, 0u64);
+        for class in CLASSES {
+            let (mut cases, mut inked) = (0u64, 0u64);
+            for index in 0..PATHS {
+                let path = generate(class, index, &mut s);
+                let tolerance = s.range(0.05, 0.5);
+                for _ in 0..REGIONS {
+                    let (x0, y0, width, height) = region(&mut s);
+                    for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                        let want = centres_reference(&path, rule, x0, y0, width, height, tolerance);
+                        let got = fill_hard(
+                            &path,
+                            rule,
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            tolerance,
+                            None,
+                            HardEdge::Centre,
+                        );
+                        let reused = fill_hard_with(
+                            &mut scratch,
+                            &path,
+                            rule,
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            tolerance,
+                            None,
+                            HardEdge::Centre,
+                        );
+                        let soft = fill_with(
+                            &mut scratch,
+                            &path,
+                            rule,
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            tolerance,
+                            None,
+                        );
+                        assert_eq!(
+                            soft.data,
+                            fill(&path, rule, x0, y0, width, height, tolerance, None).data,
+                            "{class:?} path {index} under {rule:?}: a coverage fill after a centre fill"
+                        );
+                        assert_eq!(
+                            reused.data, got.data,
+                            "{class:?} path {index} under {rule:?}: through the one scratch"
+                        );
+                        assert!(
+                            got.data.iter().all(|v| *v == 0 || *v == 255),
+                            "{class:?} path {index} under {rule:?}: whole or empty"
+                        );
+                        if let Some(at) = got.data.iter().zip(&want.data).position(|(a, b)| a != b)
+                        {
+                            let across = i64::from(width.max(1));
+                            panic!(
+                                "{class:?} path {index} under {rule:?} over {x0},{y0} \
+                                 {width}x{height} at tolerance {tolerance}: pixel ({}, {}) is \
+                                 {:?} where the sweep has {:?}\n{:?}",
+                                i64::from(x0) + at as i64 % across,
+                                i64::from(y0) + at as i64 / across,
+                                got.data.get(at),
+                                want.data.get(at),
+                                path.verbs()
+                            );
+                        }
+                        cases += 1;
+                        if want.data.contains(&255) {
+                            inked += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(cases, PATHS * REGIONS * 2, "{class:?}: every case ran");
+            assert!(inked > 0, "{class:?}: no case held a centre");
+            all_cases += cases;
+            all_inked += inked;
+        }
+        assert!(
+            all_inked * 4 >= all_cases,
+            "{all_inked} of {all_cases} cases held a centre"
+        );
     }
 
     /// The reference stops as the filler does, and keeps what it had swept:

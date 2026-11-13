@@ -15,7 +15,7 @@
 
 use crate::blend::BlendMode;
 use crate::canvas::{mul255, Canvas, Color, Opacity};
-use crate::fill::{fill_with, FillScratch, Mask};
+use crate::fill::{fill_hard_with, fill_with, FillScratch, HardEdge, Mask};
 use crate::fragments::Fragments;
 use crate::geom::{FillRule, Path};
 
@@ -622,6 +622,12 @@ pub struct ImageDraw<'a> {
     /// what a pixel's colour is and how much of it is covered are different
     /// questions.
     pub edge_bits: u8,
+    /// The rule the edge is drawn by at [`ImageDraw::edge_bits`] 0, where
+    /// each pixel is whole or empty: [`HardEdge::Half`], the default, reads
+    /// the square's coverage, and [`HardEdge::Centre`] paints the pixels whose
+    /// centres the square holds, the filler's own rule
+    /// ([`crate::fill_hard_with`]). Read at 0 bits only.
+    pub edge_rule: HardEdge,
 }
 
 impl<'a> ImageDraw<'a> {
@@ -640,6 +646,7 @@ impl<'a> ImageDraw<'a> {
             ink: None,
             stop: None,
             edge_bits: 8,
+            edge_rule: HardEdge::Half,
         }
     }
 }
@@ -823,7 +830,26 @@ pub fn image_coverage(
     stop: Option<&dyn Fn() -> bool>,
     scratch: &mut FillScratch,
 ) -> Mask {
-    unit_quad(scratch, t, (x0, y0, width, height), stop)
+    unit_quad(scratch, t, (x0, y0, width, height), stop, None)
+}
+
+/// The square the draw is cut at — [`ImageDraw::cut`], or the one its samples
+/// span — over `region`, `(x0, y0, width, height)`, as the draw's edge has
+/// it: the coverage quantised at [`ImageDraw::edge_bits`], and at 0 bits
+/// whole or empty by [`ImageDraw::edge_rule`] — the coverage hardened under
+/// [`HardEdge::Half`], the filler's own rule under any other.
+fn edge_shape(
+    draw: &ImageDraw<'_>,
+    scratch: &mut FillScratch,
+    region: (i32, i32, u32, u32),
+) -> Mask {
+    let cut = draw.cut.as_ref().unwrap_or(&draw.unit_to_device);
+    if draw.edge_bits == 0 {
+        return unit_quad(scratch, cut, region, draw.stop, Some(draw.edge_rule));
+    }
+    let mut shape = unit_quad(scratch, cut, region, draw.stop, None);
+    shape.quantise(draw.edge_bits);
+    shape
 }
 
 /// Walks the destination pixels of one image draw, handing each to `emit` as
@@ -872,13 +898,7 @@ fn walk(
     // measured a second time here, so an image edge anti-aliases exactly as a
     // filled path does — same sub-scanline grid, same fixed point, same
     // cancellation. `docs/design/image-edges.md` records what this trades.
-    let mut shape = unit_quad(
-        scratch,
-        cut,
-        (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)),
-        draw.stop,
-    );
-    shape.quantise(draw.edge_bits);
+    let shape = edge_shape(draw, scratch, (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)));
 
     let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
     // Borrowed for the rest of the draw: the level, or the image itself when
@@ -1154,12 +1174,14 @@ impl Lines {
 /// The tolerance cannot matter — four corners and four straight edges have
 /// nothing to flatten — but `fill` takes one, so it is named rather than left
 /// as a bare number somebody would later try to tune. The region is `(x0, y0,
-/// width, height)`, and the square is filled in `scratch`.
+/// width, height)`, and the square is filled in `scratch`: its coverage, or
+/// with `hard` whole or empty by that rule ([`fill_hard_with`]).
 fn unit_quad(
     scratch: &mut FillScratch,
     t: &Transform,
     (x0, y0, width, height): (i32, i32, u32, u32),
     stop: Option<&dyn Fn() -> bool>,
+    hard: Option<HardEdge>,
 ) -> Mask {
     /// Unused: the quad has no curves.
     const TOLERANCE: f64 = 0.2;
@@ -1193,17 +1215,31 @@ fn unit_quad(
     }
     quad.close();
 
-    fill_with(
-        scratch,
-        &quad,
-        FillRule::NonZero,
-        x0,
-        y0,
-        width,
-        height,
-        TOLERANCE,
-        stop,
-    )
+    match hard {
+        None => fill_with(
+            scratch,
+            &quad,
+            FillRule::NonZero,
+            x0,
+            y0,
+            width,
+            height,
+            TOLERANCE,
+            stop,
+        ),
+        Some(edge) => fill_hard_with(
+            scratch,
+            &quad,
+            FillRule::NonZero,
+            x0,
+            y0,
+            width,
+            height,
+            TOLERANCE,
+            stop,
+            edge,
+        ),
+    }
 }
 
 /// The destination pixels the unit square can reach, clipped to the canvas's
@@ -1936,6 +1972,117 @@ mod tests {
         }
     }
 
+    /// **An image's edge under the centre rule is the pixels whose centres its
+    /// square holds** (RC-11.3).
+    ///
+    /// A black image upright on the canvas, its corners off the grid at
+    /// `(2.3, 3.35)` and `(7.8, 7.6)`: at 0 bits under `HardEdge::Centre` it
+    /// paints exactly the pixels whose centres the rectangle holds, columns 2
+    /// to 7 and rows 3 to 7, computed here from the corners — a centre
+    /// `c + ½` at or right of the left edge and left of the right one, as a
+    /// span holds its units — and nothing else, with no partial pixel. Under
+    /// `HardEdge::Half` the same draw is its square's coverage hardened: an
+    /// edge alone parts its pixels as the centres do, so column 2, 0.7 of a
+    /// pixel across, is kept, but the two left corners, 0.7 across times
+    /// 0.625 down, are under half and left out where their centres are in.
+    /// The rule is read at 0 bits only: at 8 the edge is soft whatever it
+    /// says. And turned, the drawn edge is the unit square filled by the rule
+    /// over the draw's own pixels.
+    #[test]
+    fn an_image_edge_under_the_centre_rule_paints_the_pixels_whose_centres_it_holds() {
+        let rgb = [0u8, 0, 0].repeat(4);
+        let image = ImageSource {
+            width: 2,
+            height: 2,
+            rgb: &rgb,
+            alpha: &[],
+            two_colour: None,
+        };
+        let upright = Transform {
+            a: 5.5,
+            b: 0.0,
+            c: 0.0,
+            d: -4.25,
+            e: 2.3,
+            f: 7.6,
+        };
+        let render = |placement: Transform, edge_bits: u8, edge_rule: HardEdge| {
+            let mut canvas = Canvas::new(12, 12, PixelFormat::Rgb8, Color::WHITE);
+            draw_image(
+                &mut canvas,
+                &ImageDraw {
+                    edge_bits,
+                    edge_rule,
+                    ..ImageDraw::new(image, placement)
+                },
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
+            canvas
+        };
+        let pixel = |canvas: &Canvas, x: usize, y: usize| {
+            let at = (y * 12 + x) * 3;
+            [canvas.data[at], canvas.data[at + 1], canvas.data[at + 2]]
+        };
+
+        let centred = render(upright, 0, HardEdge::Centre);
+        for y in 0..12 {
+            for x in 0..12 {
+                let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+                let held = (2.3..7.8).contains(&cx) && (3.35..7.6).contains(&cy);
+                let want = if held { [0, 0, 0] } else { [255, 255, 255] };
+                assert_eq!(pixel(&centred, x, y), want, "pixel ({x}, {y})");
+            }
+        }
+
+        let halved = render(upright, 0, HardEdge::Half);
+        assert_eq!(pixel(&halved, 2, 4), [0, 0, 0], "0.7 of the pixel is held");
+        assert_eq!(pixel(&halved, 4, 3), [0, 0, 0], "and 0.625 down");
+        for corner in [(2, 3), (2, 7)] {
+            assert_eq!(
+                pixel(&halved, corner.0, corner.1),
+                [255, 255, 255],
+                "the corner {corner:?} is under half a pixel"
+            );
+            assert_eq!(
+                pixel(&centred, corner.0, corner.1),
+                [0, 0, 0],
+                "and its centre is in"
+            );
+        }
+        assert_eq!(
+            render(upright, 8, HardEdge::Centre).data,
+            render(upright, 8, HardEdge::Half).data,
+            "at 8 bits the rule is not read"
+        );
+
+        let turned = Transform {
+            a: 6.0,
+            b: 3.3,
+            c: -3.3,
+            d: 6.0,
+            e: 5.37,
+            f: 1.18,
+        };
+        let drawn = render(turned, 0, HardEdge::Centre);
+        let (x0, y0, width, height) =
+            image_bounds(&turned, 12, 12).expect("the image is on the canvas");
+        let shape = unit_quad(
+            &mut FillScratch::new(),
+            &turned,
+            (x0, y0, width, height),
+            None,
+            Some(HardEdge::Centre),
+        );
+        let mut filled = Canvas::new(12, 12, PixelFormat::Rgb8, Color::WHITE);
+        filled.fill_mask(&shape, Color::BLACK, 1.0);
+        assert_eq!(drawn.data, filled.data, "the turned square, by its centres");
+        assert!(
+            drawn.data.iter().all(|v| *v == 0 || *v == 255),
+            "no partial pixel"
+        );
+    }
+
     #[test]
     fn a_one_to_one_blit_preserves_every_byte() {
         let rgb = ramp(8);
@@ -2663,13 +2810,7 @@ mod tests {
             if x1 <= x0 || y1 <= y0 {
                 return;
             }
-            let mut shape = unit_quad(
-                scratch,
-                &draw.unit_to_device,
-                (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)),
-                draw.stop,
-            );
-            shape.quantise(draw.edge_bits);
+            let shape = edge_shape(draw, scratch, (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)));
             let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
             let filter = sampling.filter;
             let image = &pyramid.reduce(image, sampling.halvings);
@@ -2951,6 +3092,9 @@ mod tests {
                             let mut draw = ImageDraw::new(source, placement);
                             draw.interpolate = interpolate;
                             draw.edge_bits = if cases % 5 != 0 { 8 } else { 0 };
+                            if cases % 10 == 5 {
+                                draw.edge_rule = HardEdge::Centre;
+                            }
                             if cases % 7 == 0 {
                                 draw.tint = Some(Color::rgb(200, 30, 90));
                             }

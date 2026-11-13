@@ -33,6 +33,13 @@ use crate::geom::{flatten_flat, FillRule, Path, Point, MAX_VERBS};
 /// combined with exact horizontal spans for 8-bit total coverage.
 const SAMPLES: i32 = 16;
 
+/// The sub-scanline of a row that holds its pixels' centres, `row + ½`
+/// exactly, and so the lane of a cell [`HardEdge::Centre`] reads.
+const CENTRE_LANE: usize = (SAMPLES / 2) as usize;
+
+/// The unit of a pixel, of its 256 across, that holds its centre.
+const CENTRE_UNIT: u8 = 128;
+
 /// Rows of the sweep between one cancellation check and the next.
 ///
 /// Asking every row would put a branch in the hottest loop in the engine.
@@ -494,9 +501,157 @@ pub fn fill_with(
     }
     #[cfg(test)]
     let held = scratch.capacities();
-    scratch.sweep_into(&mut mask, path, rule, tolerance, stop);
+    scratch.sweep_into(&mut mask, path, rule, tolerance, stop, Measure::Coverage);
     #[cfg(test)]
     count::allocated(scratch.grown_from(&held));
+    mask
+}
+
+/// The rule a fill with no anti-aliasing paints each pixel whole or leaves it
+/// empty by (`docs/design/anti-aliasing.md`).
+///
+/// [`HardEdge::Half`] reads the 8-bit coverage a fill measures; the other
+/// rules read the shape itself, which a coverage does not hold, so they are
+/// the filler's own and are asked of it ([`fill_hard_with`],
+/// [`fill_outline_hard`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HardEdge {
+    /// Whole where the shape covers at least half the pixel: the coverage
+    /// through [`Mask::harden`]. The default, and what no anti-aliasing has
+    /// always meant here.
+    #[default]
+    Half,
+    /// Whole where the shape holds the pixel's centre, read on the filler's
+    /// own grid: the centre of pixel `(col, row)` is unit `256·col + 128` of
+    /// sub-scanline `16·row + 8`, and the pixel is whole when the winding the
+    /// fill rule reads there calls it inside. An edge exactly through a
+    /// centre takes it on its left and top and gives it up on its right and
+    /// bottom, as a span does, so two shapes sharing an edge split its
+    /// pixels.
+    Centre,
+}
+
+/// What a sweep makes of each pixel of its region.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Measure {
+    /// Its 8-bit coverage over the sixteen sub-scanlines.
+    Coverage,
+    /// 255 where its centre unit is inside, 0 where it is not.
+    Centre,
+}
+
+impl Measure {
+    /// What `edge` asks a sweep for: the coverage, which [`HardEdge::Half`]
+    /// hardens afterwards, or the rule's own answer.
+    fn of(edge: HardEdge) -> Measure {
+        match edge {
+            HardEdge::Half => Measure::Coverage,
+            HardEdge::Centre => Measure::Centre,
+        }
+    }
+}
+
+/// [`fill`] with every pixel whole or empty by `edge`, through a scratch of its
+/// own.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn fill_hard(
+    path: &Path,
+    rule: FillRule,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
+    edge: HardEdge,
+) -> Mask {
+    fill_hard_with(
+        &mut FillScratch::new(),
+        path,
+        rule,
+        x0,
+        y0,
+        width,
+        height,
+        tolerance,
+        stop,
+        edge,
+    )
+}
+
+/// [`fill_with`] with every pixel whole or empty by `edge`: under
+/// [`HardEdge::Half`] the coverage hardened, under [`HardEdge::Centre`] each
+/// pixel whose centre the shape holds on the filler's grid.
+///
+/// The centre rule reads one sub-scanline a row, the row's middle, and one
+/// unit a pixel on it, the pixel's middle, in the page's device pixels: a
+/// region's left edge is a whole pixel, so a tile reads the units the page
+/// reads (ruling 5). The rows, the stop and the scratch are [`fill_with`]'s,
+/// and a row whose middle sub-scanline does not close is read as the sorted
+/// sweep reads it.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn fill_hard_with(
+    scratch: &mut FillScratch,
+    path: &Path,
+    rule: FillRule,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
+    edge: HardEdge,
+) -> Mask {
+    let mut mask = Mask::empty(x0, y0, width, height);
+    if width == 0 || height == 0 {
+        return mask;
+    }
+    #[cfg(test)]
+    let held = scratch.capacities();
+    scratch.sweep_into(&mut mask, path, rule, tolerance, stop, Measure::of(edge));
+    #[cfg(test)]
+    count::allocated(scratch.grown_from(&held));
+    if edge == HardEdge::Half {
+        mask.harden();
+    }
+    mask
+}
+
+/// [`fill_outline`] with every pixel whole or empty by `edge`, as
+/// [`fill_hard_with`] fills a path: the mask [`fill_hard_with`] gives the
+/// outline's path, byte for byte.
+#[must_use]
+pub fn fill_outline_hard(
+    scratch: &mut FillScratch,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    stop: Option<&dyn Fn() -> bool>,
+    edge: HardEdge,
+) -> Mask {
+    let mut mask = Mask::empty(x0, y0, width, height);
+    if width == 0 || height == 0 {
+        return mask;
+    }
+    #[cfg(test)]
+    let held = scratch.capacities();
+    let FillScratch { outline, work, .. } = &mut *scratch;
+    work.sweep(
+        &mut mask,
+        &outline.edges,
+        outline.open,
+        FillRule::NonZero,
+        stop,
+        Measure::of(edge),
+    );
+    #[cfg(test)]
+    count::allocated(scratch.grown_from(&held));
+    if edge == HardEdge::Half {
+        mask.harden();
+    }
     mask
 }
 
@@ -534,6 +689,7 @@ pub fn fill_outline(
         outline.open,
         FillRule::NonZero,
         stop,
+        Measure::Coverage,
     );
     #[cfg(test)]
     count::allocated(scratch.grown_from(&held));
@@ -593,7 +749,8 @@ impl FillScratch {
         &mut self.outline
     }
 
-    /// Fills `path` into `mask`'s rectangle, which is not empty.
+    /// Fills `path` into `mask`'s rectangle, which is not empty, measuring
+    /// each pixel as `measure` says.
     fn sweep_into(
         &mut self,
         mask: &mut Mask,
@@ -601,6 +758,7 @@ impl FillScratch {
         rule: FillRule,
         tolerance: f64,
         stop: Option<&dyn Fn() -> bool>,
+        measure: Measure,
     ) {
         let FillScratch {
             points,
@@ -620,7 +778,7 @@ impl FillScratch {
             }
             begin = *end;
         }
-        work.sweep(mask, edges, open, rule, stop);
+        work.sweep(mask, edges, open, rule, stop, measure);
     }
 
     /// The capacity of every buffer, for [`FillScratch::grown_from`].
@@ -722,8 +880,8 @@ struct Work {
 
 impl Work {
     /// Sweeps `edges` into `mask`'s rectangle, which is not empty, under
-    /// `rule`; `open` says whether [`build_edges`] dropped an edge that may
-    /// cover a sub-scanline.
+    /// `rule`, measuring each pixel as `measure` says; `open` says whether
+    /// [`build_edges`] dropped an edge that may cover a sub-scanline.
     fn sweep(
         &mut self,
         mask: &mut Mask,
@@ -731,6 +889,7 @@ impl Work {
         open: bool,
         rule: FillRule,
         stop: Option<&dyn Fn() -> bool>,
+        measure: Measure,
     ) {
         let (x0, y0, width, height) = (mask.x0, mask.y0, mask.width, mask.height);
         let Work {
@@ -794,7 +953,30 @@ impl Work {
             let Some(out) = mask.data.get_mut(base..base + width as usize) else {
                 return;
             };
-            if open && sweep.is_open(edges, active, top, rule) {
+            if measure == Measure::Centre {
+                // The centre rule reads the row's middle sub-scanline alone,
+                // lane `CENTRE_LANE` of the cells, and only it is deposited.
+                let middle = top + samples / 2;
+                if open && sweep.is_open_at(edges, active, middle, rule) {
+                    sweep.centres(edges, active, middle, rule, (x0, width), out);
+                } else {
+                    for index in active.iter() {
+                        let Some(edge) = edges.get(*index as usize) else {
+                            continue;
+                        };
+                        if i64::from(edge.top) <= middle && middle < i64::from(edge.bottom) {
+                            // As below: the difference cannot wrap.
+                            cells.deposit(
+                                CENTRE_LANE,
+                                crossing(edge, middle).wrapping_sub(origin),
+                                units,
+                                edge.winding,
+                            );
+                        }
+                    }
+                    cells.convert_centres(rule, out);
+                }
+            } else if open && sweep.is_open(edges, active, top, rule) {
                 sweep.row(edges, active, top, rule, (x0, width), out);
             } else {
                 for index in active.iter() {
@@ -1184,6 +1366,91 @@ impl Row {
         heads.clear();
         later.clear();
     }
+
+    /// Walks the row's cells left to right into `out` as
+    /// [`HardEdge::Centre`] reads them, and leaves every cell clear: only
+    /// lane [`CENTRE_LANE`] holds crossings, and a pixel is 255 where that
+    /// lane's winding at its centre unit is one the rule calls inside, 0
+    /// where it is not.
+    ///
+    /// The winding at a pixel's centre is the lane's winding from the left of
+    /// the region, every crossing of the cells before it, and the crossings
+    /// of its own cell at an offset up to [`CENTRE_UNIT`]: a crossing at unit
+    /// `x` begins or ends a span at `x`, which holds unit `x` and not the one
+    /// before it. A sum, so the order the crossings came in decides nothing
+    /// and none is compared. Between two cells holding a crossing the
+    /// winding does not change, and the run between is written at once.
+    fn convert_centres(&mut self, rule: FillRule, out: &mut [u8]) {
+        let Row {
+            cells,
+            touched,
+            left,
+            heads,
+            later,
+            ..
+        } = self;
+        let mask = rule_mask(rule);
+        let bit = 1u16 << CENTRE_LANE;
+        let mut winding = left[CENTRE_LANE];
+        // The first pixel not yet written.
+        let mut at = 0;
+        for (word, bits) in touched.iter_mut().enumerate() {
+            let mut held = core::mem::take(bits);
+            while held != 0 {
+                let index = word * 64 + held.trailing_zeros() as usize;
+                held &= held - 1;
+                whole(out, at, index, inside_by(winding, mask) != 0);
+                at = index + 1;
+                let (Some(cell), Some(byte)) = (cells.get_mut(index), out.get_mut(index)) else {
+                    continue;
+                };
+
+                // The cell's crossings either side of its centre, summed.
+                let (mut before, mut after) = (0i32, 0i32);
+                let mut take = |off: u8, w: i8| {
+                    if off <= CENTRE_UNIT {
+                        before += i32::from(w);
+                    } else {
+                        after += i32::from(w);
+                    }
+                };
+                if cell.lanes & bit != 0 {
+                    take(cell.off[CENTRE_LANE], cell.w[CENTRE_LANE]);
+                }
+                if cell.multi & bit != 0 {
+                    let mut next = heads
+                        .get(cell.more as usize * 16 + CENTRE_LANE)
+                        .copied()
+                        .unwrap_or(NONE);
+                    while let Some(item) = later.get(next as usize) {
+                        take(item.off, item.w);
+                        next = item.next;
+                    }
+                }
+                winding += before;
+                if inside_by(winding, mask) != 0 {
+                    *byte = 255;
+                }
+                winding += after;
+                *cell = Cell::CLEAR;
+            }
+        }
+        whole(out, at, out.len(), inside_by(winding, mask) != 0);
+        *left = [0; 16];
+        heads.clear();
+        later.clear();
+    }
+}
+
+/// Writes the run of pixels `from..to` of a row [`HardEdge::Centre`] reads,
+/// none of which holds a crossing: whole where the winding across it is
+/// inside, and no write at all where it is not, the mask being zero already.
+fn whole(out: &mut [u8], from: usize, to: usize, inside: bool) {
+    if inside && from < to {
+        if let Some(run) = out.get_mut(from..to) {
+            run.fill(255);
+        }
+    }
 }
 
 /// Writes the run of pixels `from..to` of a row, none of which holds a
@@ -1237,6 +1504,66 @@ impl Sweep {
             }
         }
         total.iter().any(|w| inside(*w, rule))
+    }
+
+    /// Whether sub-scanline `sub` ends inside, as [`Sweep::is_open`] asks it
+    /// of each of a row's sixteen.
+    fn is_open_at(&self, edges: &[Edge], active: &[u32], sub: i64, rule: FillRule) -> bool {
+        let total: i32 = active
+            .iter()
+            .filter_map(|index| edges.get(*index as usize))
+            .filter(|edge| i64::from(edge.top) <= sub && sub < i64::from(edge.bottom))
+            .map(|edge| edge.winding)
+            .sum();
+        inside(total, rule)
+    }
+
+    /// The row's pixels under [`HardEdge::Centre`] when its middle
+    /// sub-scanline, `sub`, does not close: that sub-scanline swept as
+    /// [`Sweep::row`] sweeps each of its own — crossings sorted by position,
+    /// then the edge's top, then its place in the path, and walked span by
+    /// span — and every pixel whose centre unit a span holds painted whole.
+    /// The span opened last and never closed adds nothing, as it adds no
+    /// coverage there.
+    fn centres(
+        &mut self,
+        edges: &[Edge],
+        active: &[u32],
+        sub: i64,
+        rule: FillRule,
+        (x0, width): (i32, u32),
+        out: &mut [u8],
+    ) {
+        self.crossings.clear();
+        for index in active {
+            let Some(edge) = edges.get(*index as usize) else {
+                continue;
+            };
+            if i64::from(edge.top) <= sub && sub < i64::from(edge.bottom) {
+                self.crossings
+                    .push((crossing(edge, sub), edge.top, *index, edge.winding));
+            }
+        }
+        if self.crossings.len() < 2 {
+            return;
+        }
+        self.crossings.sort_unstable_by(|a, b| {
+            count::compared();
+            (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2))
+        });
+
+        let mut winding = 0i32;
+        let mut span_start = 0i64;
+        for (x, _, _, w) in &self.crossings {
+            let was_inside = inside(winding, rule);
+            winding += w;
+            let is_inside = inside(winding, rule);
+            if !was_inside && is_inside {
+                span_start = *x;
+            } else if was_inside && !is_inside {
+                paint_centres(out, x0, width, span_start, *x);
+            }
+        }
     }
 
     /// The row starting at sub-scanline `top`, swept into `out`.
@@ -1394,6 +1721,28 @@ fn inside(winding: i32, rule: FillRule) -> bool {
     match rule {
         FillRule::NonZero => winding != 0,
         FillRule::EvenOdd => winding % 2 != 0,
+    }
+}
+
+/// Paints whole every pixel of a row whose centre unit the span `[from, to)`
+/// holds, `from` and `to` in 1/256 pixel, absolute: pixel `i` of a region
+/// whose left edge is pixel `x0` has its centre at unit `256·(x0 + i) + 128`.
+fn paint_centres(out: &mut [u8], x0: i32, width: u32, from: i64, to: i64) {
+    let first_centre = i64::from(x0)
+        .saturating_mul(256)
+        .saturating_add(i64::from(CENTRE_UNIT));
+    // The first pixel whose centre is at or right of `at`, clamped to the row.
+    let first_at = |at: i64| {
+        at.saturating_sub(first_centre)
+            .saturating_add(255)
+            .div_euclid(256)
+            .clamp(0, i64::from(width)) as usize
+    };
+    let (start, end) = (first_at(from), first_at(to));
+    if start < end {
+        if let Some(run) = out.get_mut(start..end) {
+            run.fill(255);
+        }
     }
 }
 
@@ -2962,5 +3311,420 @@ mod tests {
         let mask = fill(&far, FillRule::NonZero, 0, 0, 8, 8, 0.1, Some(&ask));
         assert!(mask.data.iter().all(|&v| v == 0));
         assert_eq!(stop.calls.get(), 0, "no rows, no questions");
+    }
+
+    // ---- The centre rule (RC-11.3) ----------------------------------------
+
+    /// A circle of four cubics about `(cx, cy)`.
+    fn circle(path: &mut Path, (cx, cy): (f64, f64), r: f64) {
+        const K: f64 = 0.552_284_75;
+        path.move_to(cx + r, cy);
+        path.curve_to(cx + r, cy + K * r, cx + K * r, cy + r, cx, cy + r);
+        path.curve_to(cx - K * r, cy + r, cx - r, cy + K * r, cx - r, cy);
+        path.curve_to(cx - r, cy - K * r, cx - K * r, cy - r, cx, cy - r);
+        path.curve_to(cx + K * r, cy - r, cx + r, cy - K * r, cx + r, cy);
+        path.close();
+    }
+
+    /// A rectangle whose middle sub-scanline in row 0 does not close: its top
+    /// edge is the one that rises a single ulp across `y = ½`, which
+    /// `build_edges` drops, so on that sub-scanline only the left edge
+    /// crosses.
+    fn unclosed_middle() -> Path {
+        let mut path = Path::new();
+        path.move_to(1.0, 0.5);
+        path.line_to(6.0, f64::from_bits(0.5f64.to_bits() + 1));
+        path.line_to(6.0, 5.0);
+        path.line_to(1.0, 5.0);
+        path.close();
+        path
+    }
+
+    /// **The centre rule over a tile is the page under it** (ruling 5,
+    /// RC-11.3).
+    ///
+    /// Rectangles whose edges stand at sixteenths, on and between the tiles'
+    /// boundaries and through rows and columns of centres, one reaching past
+    /// the page's left and top edges; a turned triangle; a circle of four
+    /// cubics; an even-odd ring; a rectangle whose middle sub-scanline does
+    /// not close; and a stroke's outline swept from the scratch — each filled
+    /// over the whole page and over every tile of every width from one pixel
+    /// to four at every column, across three bands of rows, row 0 among
+    /// them: every pixel of every tile is the page's. A centre is one unit
+    /// of one sub-scanline in the page's device pixels, and a tile's left
+    /// edge is a whole pixel, so the crossings left of a tile fold into the
+    /// winding it starts with and none moves.
+    #[test]
+    fn the_centre_rule_on_a_tile_is_the_page_s() {
+        const WIDE: u32 = 12;
+        const TALL: u32 = 10;
+        let mut shapes: Vec<(&str, Path, FillRule)> = Vec::new();
+        let mut rects = Path::new();
+        rects.rect(2.0 + 5.0 / 16.0, 1.5, 4.0 + 3.0 / 16.0, 6.0);
+        rects.rect(8.5, 0.25, 2.0, 9.0);
+        shapes.push(("rectangles at sixteenths", rects, FillRule::NonZero));
+        let mut past = Path::new();
+        past.rect(-3.0, -2.0, 5.5, 4.0);
+        shapes.push(("a rectangle past the corner", past, FillRule::NonZero));
+        let mut triangle = Path::new();
+        triangle.move_to(0.7, 9.3);
+        triangle.line_to(11.2, 0.4);
+        triangle.line_to(6.1, 8.8);
+        triangle.close();
+        shapes.push(("a turned triangle", triangle, FillRule::NonZero));
+        let mut disc = Path::new();
+        circle(&mut disc, (6.2, 5.1), 3.7);
+        shapes.push(("a circle", disc, FillRule::NonZero));
+        let mut ring = Path::new();
+        circle(&mut ring, (5.9, 4.8), 4.4);
+        circle(&mut ring, (5.9, 4.8), 2.1);
+        shapes.push(("an even-odd ring", ring, FillRule::EvenOdd));
+        shapes.push(("an unclosed middle", unclosed_middle(), FillRule::NonZero));
+
+        let bands = [(0, TALL), (3, 4), (TALL as i32 - 1, 1)];
+        for (name, path, rule) in &shapes {
+            let page = fill_hard(path, *rule, 0, 0, WIDE, TALL, 0.1, None, HardEdge::Centre);
+            assert!(page.data.contains(&255), "{name} holds a centre");
+            assert!(page.data.iter().all(|&v| v == 0 || v == 255), "{name}");
+            for x0 in 0..WIDE {
+                for width in 1..=(WIDE - x0).min(4) {
+                    for (y0, height) in bands {
+                        let tile = fill_hard(
+                            path,
+                            *rule,
+                            x0 as i32,
+                            y0,
+                            width,
+                            height,
+                            0.1,
+                            None,
+                            HardEdge::Centre,
+                        );
+                        for y in y0..y0 + height as i32 {
+                            for x in x0 as i32..(x0 + width) as i32 {
+                                assert_eq!(
+                                    tile.at(x, y),
+                                    page.at(x, y),
+                                    "{name}: the tile at ({x0}, {y0}) {width} wide, pixel ({x}, {y})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut line = Path::new();
+        line.move_to(0.6, 8.7);
+        line.line_to(11.3, 1.2);
+        let style = crate::StrokeStyle {
+            width: 1.3,
+            cap: crate::LineCap::Round,
+            ..crate::StrokeStyle::default()
+        };
+        let mut scratch = FillScratch::new();
+        crate::stroke_with(&mut scratch, &line, &style, 0.1, None);
+        let page = fill_outline_hard(&mut scratch, 0, 0, WIDE, TALL, None, HardEdge::Centre);
+        assert!(page.data.contains(&255), "the stroke holds a centre");
+        for x0 in 0..WIDE {
+            for width in 1..=(WIDE - x0).min(4) {
+                for (y0, height) in bands {
+                    let tile = fill_outline_hard(
+                        &mut scratch,
+                        x0 as i32,
+                        y0,
+                        width,
+                        height,
+                        None,
+                        HardEdge::Centre,
+                    );
+                    for y in y0..y0 + height as i32 {
+                        for x in x0 as i32..(x0 + width) as i32 {
+                            assert_eq!(
+                                tile.at(x, y),
+                                page.at(x, y),
+                                "the stroke: the tile at ({x0}, {y0}) {width} wide, pixel ({x}, {y})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `HardEdge::Half` is the coverage hardened, whichever way it is asked
+    /// for: a fill, a fill through a scratch and a stroke's outline, under
+    /// both rules, are `harden` of the soft mask byte for byte — the rule
+    /// turning anti-aliasing off has always applied.
+    #[test]
+    fn the_half_rule_is_the_coverage_hardened() {
+        let mut path = Path::new();
+        path.move_to(1.3, 2.7);
+        path.curve_to(18.1, 0.4, 19.9, 16.5, 2.2, 17.1);
+        path.close();
+        path.rect(6.3, 4.1, 7.7, 8.25);
+        let mut scratch = FillScratch::new();
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            let mut hardened = fill(&path, rule, 0, 0, 20, 20, 0.1, None);
+            assert!(hardened.data.iter().any(|v| *v != 0 && *v != 255));
+            hardened.harden();
+            let hard = fill_hard(&path, rule, 0, 0, 20, 20, 0.1, None, HardEdge::Half);
+            assert_eq!(hard.data, hardened.data, "{rule:?}");
+            let through = fill_hard_with(
+                &mut scratch,
+                &path,
+                rule,
+                0,
+                0,
+                20,
+                20,
+                0.1,
+                None,
+                HardEdge::Half,
+            );
+            assert_eq!(through.data, hardened.data, "{rule:?}, through a scratch");
+        }
+
+        let style = crate::StrokeStyle {
+            width: 2.6,
+            ..crate::StrokeStyle::default()
+        };
+        crate::stroke_with(&mut scratch, &path, &style, 0.1, None);
+        let mut hardened = fill_outline(&mut scratch, 0, 0, 20, 20, None);
+        hardened.harden();
+        let hard = fill_outline_hard(&mut scratch, 0, 0, 20, 20, None, HardEdge::Half);
+        assert_eq!(hard.data, hardened.data, "the stroke's outline");
+    }
+
+    /// A stroke's outline under the centre rule is the centre fill of the
+    /// path the stroker returns, byte for byte, as its coverage is that
+    /// path's coverage: the outline's edges are the ones filling that path
+    /// makes. Every cap and join, a dash and a curve.
+    #[test]
+    fn the_centre_rule_outlines_as_it_fills() {
+        let mut path = Path::new();
+        path.move_to(2.2, 3.1);
+        path.line_to(15.7, 4.9);
+        path.curve_to(18.0, 12.0, 6.0, 17.5, 3.3, 11.8);
+        let mut scratch = FillScratch::new();
+        for (index, (cap, join, dashes)) in [
+            (crate::LineCap::Butt, crate::LineJoin::Miter, vec![]),
+            (crate::LineCap::Round, crate::LineJoin::Round, vec![]),
+            (
+                crate::LineCap::Square,
+                crate::LineJoin::Bevel,
+                vec![2.5, 1.25],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let style = crate::StrokeStyle {
+                width: 1.7,
+                cap,
+                join,
+                dashes,
+                ..crate::StrokeStyle::default()
+            };
+            crate::stroke_with(&mut scratch, &path, &style, 0.1, None);
+            let swept = fill_outline_hard(&mut scratch, 0, 0, 20, 20, None, HardEdge::Centre);
+            let outline = crate::stroke(&path, &style, 0.1, None);
+            let filled = fill_hard(
+                &outline,
+                FillRule::NonZero,
+                0,
+                0,
+                20,
+                20,
+                0.1,
+                None,
+                HardEdge::Centre,
+            );
+            assert_eq!(swept.data, filled.data, "style {index}");
+            assert!(swept.data.contains(&255), "style {index} holds a centre");
+        }
+    }
+
+    /// **A row whose middle sub-scanline does not close is read as the sweep
+    /// reads it.** The rectangle of `unclosed_middle` has its top edge
+    /// dropped, so on row 0's middle only its left edge crosses and the
+    /// winding never returns: the sorted sweep opens a span there and never
+    /// adds it, so row 0 holds no centre — where reading the cells' winding
+    /// would paint row 0 from column 1 to the region's end. Rows 1 to 4 close
+    /// and hold the centres of columns 1 to 5, as the rectangle's corners
+    /// say; and the sorted sweep of every row's middle agrees under both
+    /// rules.
+    #[test]
+    fn a_centre_on_a_sub_scanline_that_does_not_close_is_read_as_the_sweep_reads_it() {
+        use crate::fill_reference::centres_reference;
+
+        let path = unclosed_middle();
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            let mask = fill_hard(&path, rule, 0, 0, 10, 8, 0.1, None, HardEdge::Centre);
+            for y in 0..8 {
+                for x in 0..10 {
+                    let held = (1..=5).contains(&x) && (1..=4).contains(&y);
+                    assert_eq!(
+                        mask.at(x, y),
+                        if held { 255 } else { 0 },
+                        "{rule:?}: pixel ({x}, {y})"
+                    );
+                }
+            }
+            assert_eq!(
+                mask.data,
+                centres_reference(&path, rule, 0, 0, 10, 8, 0.1).data,
+                "{rule:?}"
+            );
+        }
+    }
+
+    /// **An edge through a row or a column of centres gives them to one
+    /// side.** Two rectangles meeting at `x = 4.5`, two meeting at `y = 3.5`
+    /// and two triangles meeting along the diagonal `x = y`, which passes
+    /// through every pixel's centre on it: every pixel of the pair's union
+    /// is painted by exactly one of the two — the right or lower shape, which
+    /// the edge begins, takes the centres on it — and nothing outside.
+    #[test]
+    fn an_edge_through_a_row_of_centres_gives_them_to_one_side() {
+        let rect = |x: f64, y: f64, w: f64, h: f64| {
+            let mut path = Path::new();
+            path.rect(x, y, w, h);
+            path
+        };
+        let triangle = |points: [(f64, f64); 3]| {
+            let mut path = Path::new();
+            path.move_to(points[0].0, points[0].1);
+            path.line_to(points[1].0, points[1].1);
+            path.line_to(points[2].0, points[2].1);
+            path.close();
+            path
+        };
+        let pairs = [
+            (rect(1.0, 1.0, 3.5, 6.0), rect(4.5, 1.0, 3.5, 6.0)),
+            (rect(1.0, 1.0, 6.0, 2.5), rect(1.0, 3.5, 6.0, 3.5)),
+            (
+                triangle([(0.0, 0.0), (8.0, 8.0), (0.0, 8.0)]),
+                triangle([(0.0, 0.0), (8.0, 0.0), (8.0, 8.0)]),
+            ),
+        ];
+        for (index, (first, second)) in pairs.iter().enumerate() {
+            let centres = |path: &Path| {
+                fill_hard(
+                    path,
+                    FillRule::NonZero,
+                    0,
+                    0,
+                    8,
+                    8,
+                    0.1,
+                    None,
+                    HardEdge::Centre,
+                )
+            };
+            let (a, b) = (centres(first), centres(second));
+            let mut union = first.clone();
+            union.extend(second);
+            let whole = centres(&union);
+            for y in 0..8 {
+                for x in 0..8 {
+                    let painted = u32::from(a.at(x, y) == 255) + u32::from(b.at(x, y) == 255);
+                    let expected = u32::from(whole.at(x, y) == 255);
+                    assert_eq!(painted, expected, "pair {index}, pixel ({x}, {y})");
+                }
+            }
+            assert!(whole.data.contains(&255), "pair {index}");
+        }
+        // The column of centres at x = 4.5 is the right rectangle's, the row
+        // at y = 3.5 the lower one's, and the diagonal's the triangle right
+        // of it.
+        let right = fill_hard(
+            &pairs[0].1,
+            FillRule::NonZero,
+            0,
+            0,
+            8,
+            8,
+            0.1,
+            None,
+            HardEdge::Centre,
+        );
+        assert_eq!(right.at(4, 2), 255);
+        let lower = fill_hard(
+            &pairs[1].1,
+            FillRule::NonZero,
+            0,
+            0,
+            8,
+            8,
+            0.1,
+            None,
+            HardEdge::Centre,
+        );
+        assert_eq!(lower.at(2, 3), 255);
+        let upper_right = fill_hard(
+            &pairs[2].1,
+            FillRule::NonZero,
+            0,
+            0,
+            8,
+            8,
+            0.1,
+            None,
+            HardEdge::Centre,
+        );
+        for d in 0..8 {
+            assert_eq!(
+                upper_right.at(d, d),
+                255,
+                "the diagonal's centre ({d}, {d})"
+            );
+        }
+    }
+
+    /// A stopped centre fill keeps the rows it had swept, as a stopped
+    /// coverage fill does: the fourth question is asked at row
+    /// `3 × STOP_EVERY` and stops there, and the rows above it hold the bar's
+    /// thirty centres each.
+    #[test]
+    fn a_stopped_centre_fill_keeps_the_rows_it_had_already_swept() {
+        let path = tall_bar();
+        let whole = fill_hard(
+            &path,
+            FillRule::NonZero,
+            0,
+            0,
+            40,
+            400,
+            0.1,
+            None,
+            HardEdge::Centre,
+        );
+        assert_eq!(
+            whole.at(20, 399),
+            255,
+            "the bar's centres reach the last row"
+        );
+        let stop = StopAt::new(4);
+        let ask = || stop.ask();
+        let partial = fill_hard(
+            &path,
+            FillRule::NonZero,
+            0,
+            0,
+            40,
+            400,
+            0.1,
+            Some(&ask),
+            HardEdge::Centre,
+        );
+        let cut = 3 * STOP_EVERY as i32;
+        assert_eq!(partial.at(20, cut - 1), 255, "the rows before the cut drew");
+        assert_eq!(partial.at(20, cut), 0, "the row it stopped on did not");
+        assert_eq!(
+            partial.data.iter().filter(|&&v| v != 0).count(),
+            cut as usize * 30,
+            "exactly the rows above the cut, the bar's thirty columns of centres"
+        );
     }
 }

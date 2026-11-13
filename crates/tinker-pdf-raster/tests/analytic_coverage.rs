@@ -93,8 +93,8 @@
 //! narrows it.
 
 use tinker_pdf_raster::{
-    fill, fill_stripes, stroke, FillRule, LineCap, LineJoin, Mask, Path, StripeMask, StrokeStyle,
-    SubpixelOrder, Transform,
+    fill, fill_hard, fill_stripes, flatten, stroke, FillRule, HardEdge, LineCap, LineJoin, Mask,
+    Path, StripeMask, StrokeStyle, SubpixelOrder, Transform,
 };
 
 /// The region every fixture rasterises into.
@@ -846,6 +846,280 @@ fn a_stripe_mask_over_a_tile_is_the_page_s() {
                     }
                 }
             }
+        }
+    }
+}
+
+// ---- the centre rule (RC-11.3) ----------------------------------------------
+
+/// Whether the rectangle `[x0, x1) × [y0, y1)` holds pixel `(column, row)`'s
+/// centre on the grid: the centre is unit `256·column + 128` of sub-scanline
+/// `16·row + 8`, and the rectangle holds it when that sub-scanline is among
+/// the ones its two horizontal edges bound, `⌈16·y0⌉` to `⌈16·y1⌉`, and the
+/// unit among the ones its two vertical edges bound, each taken to the nearest
+/// 1/256 — the grid's own two bounds, stated from the corners
+/// (`docs/design/anti-aliasing.md`).
+fn rect_holds_centre(column: i64, row: i64, (x0, y0, x1, y1): (f64, f64, f64, f64)) -> bool {
+    let sub = row * SAMPLES + SAMPLES / 2;
+    let centre = column * UNITS + UNITS / 2;
+    let down = |y: f64| (y * SAMPLES as f64).ceil() as i64;
+    let across = |x: f64| (x * UNITS as f64).round() as i64;
+    down(y0) <= sub && sub < down(y1) && across(x0) <= centre && centre < across(x1)
+}
+
+/// One edge of a flattened outline: its ends ordered by `y`, and its winding,
+/// +1 where the path took it downward.
+struct Line {
+    top: (f64, f64),
+    bottom: (f64, f64),
+    winding: i32,
+}
+
+/// The edges a fill makes of `path`: each subpath flattened at the tolerance
+/// the fill is given — `flatten` is the fill's own flattening — closed on its
+/// first point, and every segment kept that reaches a sub-scanline, from
+/// `⌈16·y⌉` of its upper end to `⌈16·y⌉` of its lower.
+fn lines_of(path: &Path, tolerance: f64) -> Vec<Line> {
+    let mut lines = Vec::new();
+    for poly in flatten(path, tolerance) {
+        let (Some(first), Some(last)) = (poly.first(), poly.last()) else {
+            continue;
+        };
+        let closing = (first != last).then(|| [*last, *first]);
+        for pair in poly
+            .windows(2)
+            .chain(closing.as_ref().map(|pair| &pair[..]))
+        {
+            let (a, b) = (pair[0], pair[1]);
+            let (top, bottom, winding) = if a.y < b.y { (a, b, 1) } else { (b, a, -1) };
+            if (top.y * SAMPLES as f64).ceil() >= (bottom.y * SAMPLES as f64).ceil() {
+                continue;
+            }
+            lines.push(Line {
+                top: (top.x, top.y),
+                bottom: (bottom.x, bottom.y),
+                winding,
+            });
+        }
+    }
+    lines
+}
+
+/// How near half a unit a crossing may lie before its equation alone cannot
+/// say which unit the grid takes it to: the fill carries an edge in sixteen
+/// bits under the unit, and a sixty-fourth of a unit is far past what those
+/// can drift over a region this size.
+const NEAR: f64 = 1.0 / 64.0;
+
+/// Whether the outline `lines` holds pixel `(column, row)`'s centre under
+/// `rule`, from the lines' own equations: each line that reaches sub-scanline
+/// `16·row + 8` meets `y = row + ½` at the `x` its equation gives, taken to
+/// the nearest 1/256, a half going up; the crossings at or left of the
+/// centre's unit `256·column + 128` sum to the winding the rule reads there,
+/// since a crossing at a unit begins or ends a span that holds that unit.
+///
+/// `None` where a crossing lies within [`NEAR`] of half a unit and the two
+/// units it could be taken to lie either side of the centre: there the
+/// equation does not decide the pixel, and nothing is asserted of it.
+fn holds_centre(lines: &[Line], column: i64, row: i64, rule: FillRule) -> Option<bool> {
+    let sub = row * SAMPLES + SAMPLES / 2;
+    let y = sub as f64 / SAMPLES as f64;
+    let centre = column * UNITS + UNITS / 2;
+    let mut winding = 0i32;
+    for line in lines {
+        let first = (line.top.1 * SAMPLES as f64).ceil() as i64;
+        let last = (line.bottom.1 * SAMPLES as f64).ceil() as i64;
+        if sub < first || sub >= last {
+            continue;
+        }
+        let x = line.top.0
+            + (y - line.top.1) * (line.bottom.0 - line.top.0) / (line.bottom.1 - line.top.1);
+        let at = x * UNITS as f64 + 0.5;
+        let (low, high) = ((at - NEAR).floor() as i64, (at + NEAR).floor() as i64);
+        if low != high && low == centre {
+            return None;
+        }
+        if at.floor() as i64 <= centre {
+            winding += line.winding;
+        }
+    }
+    Some(match rule {
+        FillRule::NonZero => winding != 0,
+        FillRule::EvenOdd => winding % 2 != 0,
+    })
+}
+
+/// A circle of four cubics about `(cx, cy)`.
+fn circle(path: &mut Path, (cx, cy): (f64, f64), r: f64) {
+    const K: f64 = 0.552_284_75;
+    path.move_to(cx + r, cy);
+    path.curve_to(cx + r, cy + K * r, cx + K * r, cy + r, cx, cy + r);
+    path.curve_to(cx - K * r, cy + r, cx - r, cy + K * r, cx - r, cy);
+    path.curve_to(cx - r, cy - K * r, cx - K * r, cy - r, cx, cy - r);
+    path.curve_to(cx + K * r, cy - r, cx + r, cy - K * r, cx + r, cy);
+    path.close();
+}
+
+/// The centre rule's mask of `path` over the fixtures' region.
+fn centres(path: &Path, rule: FillRule) -> Mask {
+    fill_hard(path, rule, 0, 0, W, H, 0.1, None, HardEdge::Centre)
+}
+
+/// Every pixel of `mask` against `expected`, which may decline one: the mask
+/// whole or empty everywhere, and each pixel `expected` decides 255 where it
+/// says the centre is held and 0 where it says not. Returns how many pixels
+/// were decided and how many of those are held.
+fn assert_centres(
+    mask: &Mask,
+    name: &str,
+    expected: impl Fn(i64, i64) -> Option<bool>,
+) -> (u32, u32) {
+    assert!(
+        mask.data.iter().all(|&v| v == 0 || v == 255),
+        "{name}: every pixel whole or empty"
+    );
+    let (mut decided, mut held) = (0, 0);
+    for row in 0..H {
+        for column in 0..W {
+            let Some(inside) = expected(i64::from(column), i64::from(row)) else {
+                continue;
+            };
+            decided += 1;
+            held += u32::from(inside);
+            assert_eq!(
+                at(mask, column, row),
+                if inside { 255 } else { 0 },
+                "{name}: pixel ({column}, {row})"
+            );
+        }
+    }
+    (decided, held)
+}
+
+/// **The centre rule paints exactly the pixels whose centres the shape holds**
+/// (RC-11.3).
+///
+/// Each pixel's answer is computed here from the shape's own equation on the
+/// grid, as this file's other expectations are, and never from `fill.rs`:
+///
+/// - **rectangles at every sixteenth of a pixel**, every one of the sixteen
+///   offsets on each of the four edges — `x.5` and `y.5` among them, where an
+///   edge runs through a column or a row of centres and the shape takes them
+///   on its left and top and gives them up on its right and bottom — and
+///   between the gradations, where the two bounds round: thirds and
+///   hundredths across, hundredths about the middle down. Each is
+///   [`rect_holds_centre`], the closed form from the corners; a rectangle
+///   narrower than a pixel standing between two centres holds none.
+/// - **triangles**, wound both ways and one a sliver, whose corners stand at
+///   sixteenths and whose sides have slopes with odd denominators — so that
+///   no crossing of a row's middle lands on half a unit — each pixel by
+///   [`holds_centre`] over its three sides' equations.
+/// - **a circle** and **an even-odd ring** of two circles, by
+///   [`holds_centre`] over the flattened outline the fill fills, the ring
+///   under both rules: even-odd leaves its hole, non-zero fills it.
+#[test]
+fn the_centre_rule_paints_exactly_the_pixels_whose_centres_the_shape_holds() {
+    let rectangle = |(x0, y0, x1, y1): (f64, f64, f64, f64)| {
+        let mut path = Path::new();
+        path.rect(x0, y0, x1 - x0, y1 - y0);
+        // `rect` writes its far corners as these sums.
+        let far = (x0 + (x1 - x0), y0 + (y1 - y0));
+        (path, (x0, y0, far.0, far.1))
+    };
+    for a in 0..16 {
+        for b in 0..16 {
+            let (fa, fb) = (f64::from(a) / 16.0, f64::from(b) / 16.0);
+            for corners in [
+                (1.0 + fa, 1.0 + fb, 5.0 + fb, 5.0 + fa),
+                (1.0 + fb, 2.0 + fa, 6.0 + fa, 3.0 + fb),
+            ] {
+                let (path, corners) = rectangle(corners);
+                let (decided, _) = assert_centres(
+                    &centres(&path, FillRule::NonZero),
+                    &format!("the rectangle {corners:?}"),
+                    |column, row| Some(rect_holds_centre(column, row, corners)),
+                );
+                assert_eq!(decided, W * H);
+            }
+        }
+    }
+    for across in [1.0 / 3.0, 0.49, 0.51, 2.0 / 3.0] {
+        for down in [0.03, 0.47, 0.53, 0.97] {
+            let (path, corners) = rectangle((1.0 + across, 1.0 + down, 6.0 - across, 6.5 - down));
+            let (_, held) = assert_centres(
+                &centres(&path, FillRule::NonZero),
+                &format!("the rectangle {corners:?}"),
+                |column, row| Some(rect_holds_centre(column, row, corners)),
+            );
+            assert!(held > 0, "{corners:?} holds centres");
+        }
+    }
+    let (path, corners) = rectangle((2.6, 1.0, 3.4, 6.0));
+    let (_, held) = assert_centres(
+        &centres(&path, FillRule::NonZero),
+        "a rectangle between two columns of centres",
+        |column, row| Some(rect_holds_centre(column, row, corners)),
+    );
+    assert_eq!(held, 0, "it is narrower than the gap between centres");
+
+    let triangles: [[(f64, f64); 3]; 3] = [
+        [(1.0, 1.0), (7.0, 2.0), (3.0, 7.0)],
+        [(0.5, 0.75), (7.5, 3.25), (2.25, 7.5)],
+        [(1.0, 1.0), (7.0, 7.0), (1.75, 1.25)],
+    ];
+    for corners in triangles {
+        for reversed in [false, true] {
+            let mut order = corners;
+            if reversed {
+                order.reverse();
+            }
+            let mut path = Path::new();
+            path.move_to(order[0].0, order[0].1);
+            path.line_to(order[1].0, order[1].1);
+            path.line_to(order[2].0, order[2].1);
+            path.close();
+            let lines = lines_of(&path, 0.1);
+            let (decided, held) = assert_centres(
+                &centres(&path, FillRule::NonZero),
+                &format!("the triangle {order:?}"),
+                |column, row| holds_centre(&lines, column, row, FillRule::NonZero),
+            );
+            assert_eq!(
+                decided,
+                W * H,
+                "{order:?}: no crossing lies near half a unit"
+            );
+            assert!(held > 0, "{order:?} holds centres");
+        }
+    }
+
+    let mut disc = Path::new();
+    circle(&mut disc, (4.1, 3.9), 3.3);
+    let lines = lines_of(&disc, 0.1);
+    let (decided, held) = assert_centres(
+        &centres(&disc, FillRule::NonZero),
+        "the circle",
+        |column, row| holds_centre(&lines, column, row, FillRule::NonZero),
+    );
+    assert!(decided + 4 >= W * H, "{decided} pixels decided");
+    assert!(held > 20, "the circle holds {held} centres");
+
+    let mut ring = Path::new();
+    circle(&mut ring, (4.05, 4.05), 3.6);
+    circle(&mut ring, (4.05, 4.05), 1.7);
+    let lines = lines_of(&ring, 0.1);
+    for rule in [FillRule::EvenOdd, FillRule::NonZero] {
+        let mask = centres(&ring, rule);
+        let (decided, held) =
+            assert_centres(&mask, &format!("the ring under {rule:?}"), |column, row| {
+                holds_centre(&lines, column, row, rule)
+            });
+        assert!(decided + 4 >= W * H, "{rule:?}: {decided} pixels decided");
+        assert!(held > 20, "{rule:?}: {held} centres");
+        let hole = at(&mask, 4, 4);
+        match rule {
+            FillRule::EvenOdd => assert_eq!(hole, 0, "even-odd leaves the hole"),
+            FillRule::NonZero => assert_eq!(hole, 255, "non-zero fills it"),
         }
     }
 }

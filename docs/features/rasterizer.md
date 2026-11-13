@@ -204,6 +204,30 @@ exact half, where both take it — which is the property
 `hardened_shapes_sharing_an_edge_partition_its_pixels` holds, and the reason
 the threshold is a half and not anything above it.
 
+*The rules of a hard edge.* `HardEdge` names the rule a fill with no
+anti-aliasing paints a pixel whole by ([design](../design/anti-aliasing.md)):
+`Half`, the default, is the coverage hardened; `Centre` paints a pixel whose
+centre the shape holds, read on the filler's own grid — the centre of pixel
+`(col, row)` is unit `256·col + 128` of sub-scanline `16·row + 8`, and the
+pixel is whole when the winding the fill rule reads there calls it inside. A
+rule that reads the shape rather than its coverage is the filler's, asked of it
+by `fill_hard`, `fill_hard_with` and `fill_outline_hard`, which give a mask
+whole or empty everywhere; `fill`, `fill_with` and `fill_outline` keep the
+coverage. Under `Centre` a sweep deposits each row's middle sub-scanline alone,
+one lane of the cells, and walks the cells carrying that lane's winding: a
+pixel's centre takes the crossings left of it and those of its own cell at an
+offset up to 128, a sum, so nothing is ordered, and the runs between cells are
+written at once. A crossing at a unit begins or ends a span that holds that
+unit, so an edge through a centre gives it to the shape on the edge's right or
+below, and two shapes sharing an edge split its pixels; a shape narrower than
+a pixel between two centres paints nothing. A row whose middle sub-scanline
+does not close is read as the sorted sweep reads it, the span left open adding
+nothing. One sample in the page's device pixels decides a pixel, and a
+region's left edge is a whole pixel, so a tile under the rule is the page under
+it. `ImageDraw::edge_rule` and `MeshDraw::edge_rule` are the rule an image's
+unit square and a mesh's silhouette are drawn by at 0 bits; the renderer passes
+`Half` to both.
+
 **Coverage levels.** `Mask::quantise(bits)` reduces a mask to a number of
 bits of coverage ([design](../design/anti-aliasing.md)): 8 leaves it, 1 to 7
 take each pixel to the nearest of `2^bits` values spaced evenly from 0 to 255
@@ -215,6 +239,9 @@ coverage, so a tile and the page under it agree (ruling 5).
 `ImageDraw::edge_bits`, 8 by default, is the level an image's unit square is
 quantised at before the samples are read, so an image's edge quantises as a
 path's does; the renderer passes 8, or 0 with anti-aliasing off.
+`MeshDraw::edge_bits` is the same for a mesh's silhouette, applied after the
+colours are spread over it, so they reach the pixels they reach anti-aliased;
+the renderer passes 8 and hardens the buffer itself with anti-aliasing off.
 
 **Coverage a stripe at a time.** `fill_stripes` measures a shape for a
 liquid-crystal panel's red, green and blue stripes
@@ -570,8 +597,9 @@ one as well: `stroke_with(&mut scratch, …)` writes the outline into it, and
 `scratch.outline_bounds()`.
 
 The crate root re-exports the working set: `Path`, `Verb`, `Point`,
-`FillRule`, `flatten`; `fill`, `fill_with`, `fill_outline`, `FillScratch`,
-`Mask`; `stroke`, `stroke_mapped`, `stroke_with`, `stroke_mapped_with`,
+`FillRule`, `flatten`; `fill`, `fill_with`, `fill_outline`, `fill_hard`,
+`fill_hard_with`, `fill_outline_hard`, `HardEdge`, `FillScratch`, `Mask`;
+`stroke`, `stroke_mapped`, `stroke_with`, `stroke_mapped_with`,
 `stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`;
 `PlateInk`, `Spots`, `TooManySpots`, `MAX_SPOT_PLATES`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `TwoColour`, `Transform`, `Filter`,
@@ -636,6 +664,17 @@ tiny pattern over a long line cannot generate millions of pieces.
   overlapping subpaths wound either way, self-intersections, crowded pixels,
   slivers, coordinates near 1e9, every cap, join and dash of the stroker, and
   dropped edges — through a fresh scratch and back to back through one;
+  `the_centre_rule_is_the_sorted_sweep_of_each_row_s_middle` holds the centre
+  rule there to the sweep of each row's middle sub-scanline, through one
+  scratch that coverage fills share; in `fill.rs`,
+  `the_centre_rule_on_a_tile_is_the_page_s` holds it over every tile of
+  rectangles at sixteenths, a triangle, a circle, an even-odd ring, an
+  unclosed middle and a stroke's outline to the page (ruling 5), and
+  `the_half_rule_is_the_coverage_hardened`,
+  `the_centre_rule_outlines_as_it_fills`,
+  `a_centre_on_a_sub_scanline_that_does_not_close_is_read_as_the_sweep_reads_it`,
+  `an_edge_through_a_row_of_centres_gives_them_to_one_side` and
+  `a_stopped_centre_fill_keeps_the_rows_it_had_already_swept` its pieces;
   `a_fill_after_the_first_allocates_no_scratch` counts the scratch's buffers
   that grow, none after a first fill as large as any that follows;
   `an_interior_run_is_one_slice_fill` counts conversions, exactly the cells
@@ -675,11 +714,16 @@ tiny pattern over a long line cannot generate millions of pieces.
   summed a tap where the expansion sums four
   (`a_coverage_image_sums_one_channel`), holds an image's edge at every level
   to its unit square's coverage quantised and filled
-  (`an_image_edge_quantises_as_a_path_edge`), and
+  (`an_image_edge_quantises_as_a_path_edge`) and under the centre rule to the
+  pixels whose centres its square holds
+  (`an_image_edge_under_the_centre_rule_paints_the_pixels_whose_centres_it_holds`),
+  and
   `canvas.rs` holds every image pixel's level to the expression rounded, over
   every coverage, sample alpha and clip at a sweep of alphas
   (`an_image_pixel_composes_as_the_float_expression_rounded`); `mesh.rs`
-  proves shared edges leave no seam; `canvas.rs` covers formats, backdrops
+  proves shared edges leave no seam and holds a silhouette at every level and
+  under the centre rule to its coverage quantised and its triangles' centres,
+  the colours spread before the level (`a_mesh_silhouette_takes_its_level_and_its_rule`); `canvas.rs` covers formats, backdrops
   and bounded compositing, holds the opaque composite to the general blend
   byte for byte — exhaustively over coverage, source and destination channel
   on every format it is taken on, and over whole fills
@@ -741,7 +785,13 @@ tiny pattern over a long line cannot generate millions of pieces.
   pixels wide, at every column, to the page's stripes; `stripes.rs`'s unit
   tests hold the taps to a pixel's average taken twice, a horizontal edge to
   its grey coverage, a vertical one at a stripe to its ninths, `Bgr` to `Rgb`
-  reversed, and a region with no stripes to fill to no coverage. What this
+  reversed, and a region with no stripes to fill to no coverage.
+  `the_centre_rule_paints_exactly_the_pixels_whose_centres_the_shape_holds`
+  holds the centre rule to the grid's own answer: rectangles at every
+  sixteenth on each edge and between the gradations by the closed form from
+  their corners, and triangles, a circle and an even-odd ring under both rules
+  by each edge's crossing of a row's middle, from its equation, to the nearest
+  1/256, and the winding of the crossings left of each centre. What this
   tier adjudicates is the
   implementation against the *stated sampling model*, which is this crate's
   own contract rather than ISO 32000's — named here because that is a weaker

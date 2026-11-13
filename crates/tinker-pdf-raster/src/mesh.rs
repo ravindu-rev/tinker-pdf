@@ -42,7 +42,7 @@
 //! interpolates numbers it cannot interpret and converts nothing.
 
 use crate::canvas::Color;
-use crate::fill::{fill_with, FillScratch, Mask};
+use crate::fill::{fill_hard_with, fill_with, FillScratch, HardEdge, Mask};
 use crate::geom::{FillRule, Path};
 
 /// The most work one mesh may cost, summed over its triangles.
@@ -113,6 +113,19 @@ pub struct MeshDraw<'a> {
     /// each axis: the render's scale. [`MAX_MESH_WORK`] is counted in that
     /// space, so the same mesh is drawn or refused alike at every scale.
     pub scale: f64,
+    /// The bits of coverage the silhouette keeps
+    /// (`docs/design/anti-aliasing.md`), as an image's edge keeps
+    /// [`crate::ImageDraw::edge_bits`]: 8 anti-aliased, 1 to 7 quantised
+    /// ([`Mask::quantise`]), 0 whole or empty by
+    /// [`MeshDraw::edge_rule`]. The colours are spread over the silhouette
+    /// before it is quantised, so the pixels they reach are the ones they
+    /// reach anti-aliased.
+    pub edge_bits: u8,
+    /// The rule the silhouette is drawn by at 0 bits: [`HardEdge::Half`]
+    /// hardens its coverage, [`HardEdge::Centre`] paints the pixels whose
+    /// centres the triangles hold, the filler's own rule
+    /// ([`crate::fill_hard_with`]). Read at 0 bits only.
+    pub edge_rule: HardEdge,
 }
 
 /// One mesh, rasterized.
@@ -282,21 +295,43 @@ pub fn draw_mesh_over(
     }
     // A mesh path holds nothing but straight lines, so the flattening
     // tolerance is never consulted; it is passed because `fill` takes one.
-    let coverage = fill_with(
-        scratch,
-        &path,
-        FillRule::NonZero,
-        x0,
-        y0,
-        width,
-        height,
-        1.0,
-        draw.stop,
-    );
+    // A rule that reads the shape is the filler's to apply; every other
+    // level is the coverage's, applied below.
+    let ruled = draw.edge_bits == 0 && draw.edge_rule != HardEdge::Half;
+    let mut coverage = if ruled {
+        fill_hard_with(
+            scratch,
+            &path,
+            FillRule::NonZero,
+            x0,
+            y0,
+            width,
+            height,
+            1.0,
+            draw.stop,
+            draw.edge_rule,
+        )
+    } else {
+        fill_with(
+            scratch,
+            &path,
+            FillRule::NonZero,
+            x0,
+            y0,
+            width,
+            height,
+            1.0,
+            draw.stop,
+        )
+    };
 
     let mut color = vec![[0u8; 4]; pixels];
     paint_triangles(draw, &region, width, &mut color);
     spread_fringe(&coverage, width, height, &mut color);
+    // After the spread, so that the colours reach every pixel the coverage
+    // reaches before it is quantised: what hardening the buffer after the
+    // draw reaches.
+    coverage.quantise(draw.edge_bits);
 
     Some(MeshBuffer { coverage, color })
 }
@@ -923,6 +958,8 @@ mod tests {
             color: &color,
             stop: None,
             scale: 1.0,
+            edge_bits: 8,
+            edge_rule: HardEdge::Half,
         };
         draw_mesh(&draw, 0, 0, size, size, &mut FillScratch::new()).expect("it fits the budget")
     }
@@ -1094,6 +1131,8 @@ mod tests {
             color: &color,
             stop: None,
             scale: 1.0,
+            edge_bits: 8,
+            edge_rule: HardEdge::Half,
         };
         assert!(
             draw_mesh(&draw, 0, 0, 2000, 2000, &mut FillScratch::new()).is_none(),
@@ -1137,6 +1176,8 @@ mod tests {
                     color: &color,
                     stop: None,
                     scale,
+                    edge_bits: 8,
+                    edge_rule: HardEdge::Half,
                 };
                 let width = (4.0 * scale) as u32;
                 let height = (tall * scale) as u32;
@@ -1311,6 +1352,8 @@ mod tests {
             color: &color,
             stop: None,
             scale: 1.0,
+            edge_bits: 8,
+            edge_rule: HardEdge::Half,
         };
         let region = Region::of(rect);
         let pixels = (rect.2 as usize) * (rect.3 as usize);
@@ -1482,6 +1525,8 @@ mod tests {
                 color: &color,
                 stop: None,
                 scale: 1.0,
+                edge_bits: 8,
+                edge_rule: HardEdge::Half,
             };
             let mut buffer = vec![[0u8; 4]; 64 * 64];
             let _ = count::take();
@@ -1565,6 +1610,8 @@ mod tests {
                 color: &color,
                 stop: None,
                 scale: 1.0,
+                edge_bits: 8,
+                edge_rule: HardEdge::Half,
             };
             let mut buffer = vec![[0u8; 4]; 64 * 64];
             let _ = count::take();
@@ -1618,6 +1665,8 @@ mod tests {
             color: &color,
             stop: None,
             scale: 1.0,
+            edge_bits: 8,
+            edge_rule: HardEdge::Half,
         };
         let mut page = vec![[0u8; 4]; 160 * 72];
         paint_triangles(&draw, &Region::of((0, 0, 160, 72)), 160, &mut page);
@@ -1674,6 +1723,8 @@ mod tests {
             color: &color,
             stop: None,
             scale: 1.0,
+            edge_bits: 8,
+            edge_rule: HardEdge::Half,
         };
         let mut buffer = vec![[0u8; 4]; 24 * 12];
         paint_triangles(&draw, &Region::of((0, 0, 24, 12)), 24, &mut buffer);
@@ -1681,5 +1732,89 @@ mod tests {
         // The centroid is (11.33..., 4.766...): column 11 of row 4.
         assert_eq!(painted, vec![4 * 24 + 11]);
         let _ = count::take();
+    }
+
+    /// **A mesh's silhouette takes its level and its rule** (RC-11.3), as an
+    /// image's edge does.
+    ///
+    /// Two triangles meeting along a diagonal, off the grid: at every level
+    /// from 1 to 8 the silhouette is the 8-bit one quantised by
+    /// `Mask::quantise`, and at 0 bits under `HardEdge::Half` it is the 8-bit
+    /// one hardened — what hardening the buffer after the draw gave — and in
+    /// every case the colours are the 8-bit draw's, spread before the level
+    /// is applied. Under `HardEdge::Centre` the silhouette is the triangles'
+    /// path filled by the centre rule, every pixel it paints has a colour,
+    /// and at 8 bits the rule is not read.
+    #[test]
+    fn a_mesh_silhouette_takes_its_level_and_its_rule() {
+        let positions = [(1.3, 0.8), (17.6, 2.9), (9.1, 18.4), (2.2, 15.7)];
+        let values = [0.0, 0.4, 1.0, 0.7];
+        let triangles = [[0, 1, 2], [0, 2, 3]];
+        let color = grey;
+        let drawn = |edge_bits: u8, edge_rule: HardEdge| {
+            let draw = MeshDraw {
+                positions: &positions,
+                values: &values,
+                components: 1,
+                triangles: &triangles,
+                color: &color,
+                stop: None,
+                scale: 1.0,
+                edge_bits,
+                edge_rule,
+            };
+            draw_mesh(&draw, 0, 0, 20, 20, &mut FillScratch::new()).expect("it fits the budget")
+        };
+
+        let soft = drawn(8, HardEdge::Half);
+        assert!(
+            soft.coverage.data.iter().any(|v| *v != 0 && *v != 255),
+            "the silhouette has partial pixels to quantise"
+        );
+        for bits in 0..=8u8 {
+            let mut expected = soft.coverage.clone();
+            expected.quantise(bits);
+            let at = drawn(bits, HardEdge::Half);
+            assert_eq!(
+                at.coverage.data, expected.data,
+                "the silhouette at {bits} bits"
+            );
+            assert_eq!(at.color, soft.color, "the colours at {bits} bits");
+        }
+
+        let centred = drawn(0, HardEdge::Centre);
+        let mut path = Path::new();
+        for triangle in &triangles {
+            let [a, b, c] = triangle.map(|index| positions[index as usize]);
+            path.move_to(a.0, a.1);
+            path.line_to(b.0, b.1);
+            path.line_to(c.0, c.1);
+            path.close();
+        }
+        let want = crate::fill::fill_hard(
+            &path,
+            FillRule::NonZero,
+            0,
+            0,
+            20,
+            20,
+            1.0,
+            None,
+            HardEdge::Centre,
+        );
+        assert_eq!(centred.coverage.data, want.data, "the triangles' centres");
+        assert!(centred.coverage.data.contains(&255));
+        for y in 0..20 {
+            for x in 0..20 {
+                if centred.coverage.at(x, y) == 255 {
+                    assert!(centred.at(x, y).is_some(), "({x}, {y}) has a colour");
+                }
+            }
+        }
+        assert_eq!(
+            drawn(8, HardEdge::Centre).coverage.data,
+            soft.coverage.data,
+            "at 8 bits the rule is not read"
+        );
     }
 }

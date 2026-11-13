@@ -34,7 +34,7 @@ use tinker_pdf_content::{
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
     canvas::{Canvas, Color, InkTables, MaskKind, PixelFormat},
-    fill::{fill_outline, fill_with, FillScratch, Mask},
+    fill::{fill_outline, fill_with, FillScratch, HardEdge, Mask},
     fragments::Fragments,
     geom::{FillRule, Path},
     image::{
@@ -3114,6 +3114,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             color: &convert,
             stop: Some(&stop),
             scale: self.pixels_per_square_unit().sqrt(),
+            // The silhouette is hardened below when anti-aliasing is off.
+            edge_bits: 8,
+            edge_rule: HardEdge::Half,
         };
         let drawn = draw_mesh_over(&draw, wanted.rect(), whole.rect(), &mut self.scratch);
         let kept = shading.take();
@@ -3836,6 +3839,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     ink: None,
                     stop: None,
                     edge_bits: if self.antialias { 8 } else { 0 },
+                    edge_rule: HardEdge::Half,
                 };
                 draw_image(
                     &mut probe,
@@ -3951,6 +3955,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             ink,
             stop: Some(&stop),
             edge_bits: if self.antialias { 8 } else { 0 },
+            edge_rule: HardEdge::Half,
         };
         // Built here and dropped here. The levels are the caller's to keep,
         // and keeping them needs an identity for the image rather than a

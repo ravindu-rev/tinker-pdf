@@ -21,7 +21,10 @@ pub mod toolbox;
 pub use canvas::{
     Canvas, Color, InkTables, MaskKind, PixelFormat, PlateInk, Spots, TooManySpots, MAX_SPOT_PLATES,
 };
-pub use fill::{fill, fill_outline, fill_with, FillScratch, Mask};
+pub use fill::{
+    fill, fill_hard, fill_hard_with, fill_outline, fill_outline_hard, fill_with, FillScratch,
+    HardEdge, Mask,
+};
 pub use fragments::Fragments;
 pub use geom::{flatten, FillRule, Path, Point, Verb};
 pub use image::{
