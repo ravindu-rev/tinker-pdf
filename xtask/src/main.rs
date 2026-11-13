@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use xtask::version::{internal_dependencies, package_name};
 use xtask::{
     bench, corpus, count, determinism, diff, fetch, footprint, fuzzaudit, fuzzservice, names,
-    parity, peaks, release, repo_root, version,
+    parity, peaks, release, repo_root, version, written,
 };
 
 const USAGE: &str = "\
@@ -44,7 +44,10 @@ usage:
   cargo xtask names     check that the roadmap names no engine, viewer,
                         validator or document tool: each of its words and
                         word pairs hashed against xtask/never-named.sha256
-  cargo xtask check     all eleven of the above
+  cargo xtask written   check that every test that writes a document holds
+                        it to the validate-on-save helper, but the files on
+                        its pending list, which only shrinks
+  cargo xtask check     all twelve of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -262,6 +265,7 @@ fn main() -> ExitCode {
         "baseline" => report("baseline", bench::check(&repo_root())),
         "determinism" => report("determinism", determinism::check(&repo_root())),
         "names" => report("names", names::check(&repo_root())),
+        "written" => report("written", written::check(&repo_root())),
         "footprint" if rest.is_empty() => report("footprint", footprint::check(&repo_root())),
         "footprint" => one("footprint", footprint::run(&repo_root(), rest)),
         "check" => {
@@ -276,6 +280,7 @@ fn main() -> ExitCode {
             let figures = footprint::check(&repo_root());
             let roster = determinism::check(&repo_root());
             let named = names::check(&repo_root());
+            let writers = written::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
@@ -287,6 +292,7 @@ fn main() -> ExitCode {
             problems.extend(figures.err().unwrap_or_default());
             problems.extend(roster.err().unwrap_or_default());
             problems.extend(named.err().unwrap_or_default());
+            problems.extend(writers.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {

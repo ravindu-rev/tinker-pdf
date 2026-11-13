@@ -759,6 +759,18 @@ might claim a profile and names the facade tree.
 `crates/tinker-pdf/tests/written_helper.rs` holds each door to its form, and
 the two readings to one verdict for the same bytes.
 
+`cargo xtask written`, which `cargo xtask check` runs beside
+`cargo xtask oracles`, fails a test file or `src` test module that names a
+writer entry point and calls no door. The entry points are one closed table
+in `xtask/src/written.rs` — the builder's `finish`, the editor's `save`, the
+signer's and the sealer's saves, the facade's save door, the cos crate's
+lower entry points, the C ABI's two writers, the CLI's writing commands, and
+what only a conversion's tests name — matched in code with comments and
+literals blanked, so a writer named in a comment is not a write. Its
+`PENDING` list holds the files not migrated yet and only shrinks: a listed
+file that calls the helper fails too, as a `SPAWNERS` row whose file stopped
+spawning does.
+
 ### XPS conservation
 
 `xps_conservation.rs` asks one question of every committed package: **does the
@@ -1043,10 +1055,12 @@ so the caps are properties of inputs, not of machines.
   white, and one whose raster stops short is refused rather than scored.
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary: every
-  program this repository spawns is written down with a reason), `vendor`
-  (data-file provenance gate), `versions`, `names` (the roadmap names no
-  engine, viewer, validator or document tool), `check`, `corpus-fetch` /
-  `corpus-run` / `corpus-licences`, `release`, `nuget-stage`.
+  program this repository spawns is written down with a reason), `written`
+  (a test that writes a document calls the validate-on-save helper, but the
+  files its pending list names), `vendor` (data-file provenance gate),
+  `versions`, `names` (the roadmap names no engine, viewer, validator or
+  document tool), `check`, `corpus-fetch` / `corpus-run` /
+  `corpus-licences`, `release`, `nuget-stage`.
 
 `cargo xtask names` holds the roadmap to the owner's answer on how far the
 never-name rule reaches (ruling 23, H-07): `docs/ROADMAP.md` and every file

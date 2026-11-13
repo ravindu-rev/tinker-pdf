@@ -68,14 +68,14 @@ The crate graph decides it, through three constraints that are each
 enforced:
 
 1. A `tinker-pdf-cos` test cannot reach the facade. `cargo xtask dag` holds
-   every crate to `ALLOWED` (`xtask/src/main.rs:636`), and
+   every crate to `ALLOWED` (`xtask/src/main.rs:767`), and
    `internal_dependencies` counts a dev-dependency as an edge
    (`xtask/src/version.rs:373-382`), so the cos crate may not take
    `tinker-pdf` even for its tests — and the profile validators are the
    facade's (`crates/tinker-pdf/src/lib.rs:2060-2157`).
 2. The C ABI and the CLI reach the facade and nothing under it:
-   `("tinker-pdf-ffi", &["tinker-pdf"])` (`xtask/src/main.rs:807`) and
-   `TOOLS` (`xtask/src/main.rs:836`), ruling 11. Their test modules can name
+   `("tinker-pdf-ffi", &["tinker-pdf"])` (`xtask/src/main.rs:938`) and
+   `TOOLS` (`xtask/src/main.rs:967`), ruling 11. Their test modules can name
    `tinker_pdf` and not `tinker_pdf_cos`.
 3. A crate's own `src` test modules cannot name the crate they are in:
    inside `tinker-pdf-cos`, `tinker_pdf_cos::` does not resolve, and inside
@@ -292,8 +292,8 @@ facade tree, as `pdfa_writer.rs` does.
 
 ### What `cargo xtask written` counts
 
-`xtask/src/written.rs`, run by `cargo xtask check`, whose count in `USAGE`
-(`xtask/src/main.rs:34`) becomes eleven.
+`xtask/src/written.rs`, run by `cargo xtask check`, the twelfth of the
+checks its count in `USAGE` names (`xtask/src/main.rs:50`).
 
 **The units**, each judged on its own text:
 
@@ -314,7 +314,7 @@ is not a unit, nothing under `xtask/`, `fuzz/`, `bindings/`, `benches/` or
 `examples/` is a unit of its own, and no doc comment is read.
 
 **Reading a unit.** Comments are dropped before matching, as
-`check_oracles` drops them (`xtask/src/main.rs:1105-1110`), but by a lexer
+`check_oracles` drops them (`xtask/src/main.rs:1285-1290`), but by a lexer
 that knows string and character literals: `line.split("//")` cuts a line
 at the `//` of a URL inside a literal, and an inline module's extent needs
 its braces counted outside literals. A writer named in a comment or inside
@@ -371,7 +371,7 @@ point it matched and its line:
 
 - a unit that writes, does not call the helper, and is not pending fails;
 - a pending unit that calls the helper fails until it is taken off the
-  list — `SPAWNERS`' second direction (`xtask/src/main.rs:1128-1136`), for
+  list — `SPAWNERS`' second direction (`xtask/src/main.rs:1308-1316`), for
   its reason: an allowance that outlives its need is how the next one gets
   in;
 - a pending entry that names no unit, or a unit that no longer writes,
