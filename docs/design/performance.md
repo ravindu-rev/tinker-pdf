@@ -943,7 +943,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 180 operations over inputs the benches
+each, MS-09's `threads` among them: 182 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1267,6 +1267,8 @@ no run has timed them, so their window is *untimed*.
 | `render/the 150-dpi text page scaled to two thirds` | pixels · 1240×1755, the render's | the same, scaled to 826×1170 | the same | untimed | built |
 | `render/the text page at 150 dpi in forced colours, fill to stroke` | pixels · 2 × 1240×1755 | `dense(1, 0)`, `RenderOptions::forced_colours` black on white with `fill_to_stroke`; the planning baseline draws the default render in its place | the same | untimed | built |
 | `render/the text page at 150 dpi at a 4-bit text level` | pixels · 2 × 1240×1755 | `dense(1, 0)`, `RenderOptions::text_bits` 4; the planning baseline draws the default render in its place | not in tier P's table; floor 1, paired with the baseline's `the text page at 150 dpi`; a target is the owner's (H-77) | untimed | built |
+| `render/write the 150-dpi text page's command stream` | pixels · 2 × 1240×1755, the 150-dpi render's | `dense(1, 0)`, `Page::command_stream` (`crates/tinker-pdf/src/display.rs`): the page interpreted and written as versioned bytes with every glyph outline its runs name, two writes an iteration; held before it is timed to read back to its own bytes, to be page 0's, and to draw at 150 dpi the page's render pixel for pixel with its warnings; the planning baseline, which has no command stream, renders the page at 150 dpi twice in its place | not in tier P's table; floor 1, paired with the baseline's `the text page at 150 dpi`; a target is the owner's (H-77) | untimed | built |
+| `render/the text page at 150 dpi from its parsed command stream` | pixels · 2 × 1240×1755 | `dense(1, 0)`'s command stream, written and parsed once untimed and held as the write's is, drawn by `CommandStream::render` at 150 dpi; the planning baseline draws the page's direct render in its place | the same | untimed | built |
 | `render/250 paths at 150 dpi` | pixels · 1240×1755 | `paths(250)` | 66.3 → 22.5, rescaled from 5 000 paths' 1 326 → 450; 2.94× | in | built |
 | `render/250 paths at 150 dpi under the centre rule` | pixels · 1240×1755 | `paths(250)`, `graphics_bits` 0 under `HardEdge::Centre`; the planning baseline draws the default render in its place | not in tier P's table; floor 1, paired with the baseline's `250 paths at 150 dpi`; a target is the owner's (H-77) | untimed | built |
 | `render/250 paths at 150 dpi under the any-part rule` | pixels · 1240×1755 | the same under `HardEdge::AnyPart`, whose walk of each edge over every row it reaches is the one new cost | the same | untimed | built |

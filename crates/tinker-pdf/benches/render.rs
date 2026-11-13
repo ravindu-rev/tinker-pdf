@@ -20,7 +20,9 @@
 //! beside the default renders of the same pages, which the planning
 //! baseline's arm draws in their place, and are untimed too. So are the two
 //! separations rows, a page's plates, whose pages the planning baseline's arm
-//! draws as their process inks in their place.
+//! draws as their process inks in their place, and the two command stream
+//! rows, the text page's stream written and the page drawn from it, in whose
+//! place that arm draws the text page at 150 dpi.
 
 mod support;
 
@@ -40,7 +42,7 @@ use tinker_pdf::{
 };
 use tinker_pdf::{Bitmap, Document, Page, RenderOptions, RenderWarning, SampleCodec};
 #[cfg(not(tinker_planning_baseline))]
-use tinker_pdf::{ForcedColours, HardEdge, SeparationOptions, Separations};
+use tinker_pdf::{CommandStream, ForcedColours, HardEdge, SeparationOptions, Separations};
 #[cfg(tinker_planning_baseline)]
 use tinker_pdf::{PixelFormat, PixelRegion, WriteMode, WriteOptions};
 use tinker_pdf_cos::ObjRef;
@@ -77,6 +79,53 @@ fn forced_at_150() -> RenderOptions {
 #[cfg(tinker_planning_baseline)]
 fn forced_at_150() -> RenderOptions {
     RenderOptions::at_dpi(150.0)
+}
+
+/// `page`'s command stream, written (`Page::command_stream`): what the
+/// stream write row times.
+#[cfg(not(tinker_planning_baseline))]
+fn written_stream(page: &Page) -> Vec<u8> {
+    page.command_stream()
+}
+
+/// The planning baseline has no command stream: its arm renders the page at
+/// 150 dpi in the write's place, the operation the gate pairs this one with.
+#[cfg(tinker_planning_baseline)]
+fn written_stream(page: &Page) -> Bitmap {
+    page.render(&RenderOptions::at_dpi(150.0))
+}
+
+/// `page`'s command stream, written and parsed, held before a stream row's
+/// runs to read back to the bytes it was written as, to be the page's, and to
+/// draw at 150 dpi the page's own render, pixel for pixel and warning for
+/// warning — so what is timed is a stream that is the page.
+#[cfg(not(tinker_planning_baseline))]
+fn parsed_stream(page: &Page, what: &str) -> CommandStream {
+    let bytes = written_stream(page);
+    let stream = CommandStream::parse(&bytes)
+        .unwrap_or_else(|error| panic!("{what}: the stream does not read: {error}"));
+    assert!(
+        stream.to_bytes() == bytes,
+        "{what}: the stream reads back to the bytes it was written as"
+    );
+    assert_eq!(stream.page_index(), 0, "{what}: the stream is the page's");
+    let options = RenderOptions::at_dpi(150.0);
+    let direct = page.render(&options);
+    let replayed = stream.render(&options);
+    assert_eq!(
+        (replayed.width, replayed.height, replayed.format),
+        (direct.width, direct.height, direct.format),
+        "{what}: the stream draws the page's bitmap"
+    );
+    assert!(
+        replayed.data == direct.data,
+        "{what}: the stream draws the page's pixels"
+    );
+    assert_eq!(
+        replayed.warnings, direct.warnings,
+        "{what}: the stream reports what the page does"
+    );
+    stream
 }
 
 /// What a coverage row renders (RC-11.7a): graphics at 0 bits under a rule,
@@ -797,6 +846,45 @@ fn render(c: &mut Criterion) {
             }
         });
     });
+
+    // ---- the command stream -----------------------------------------------
+
+    // RC-18's stream of the text page: the page interpreted and written as
+    // versioned bytes, with every glyph outline its runs name, two writes an
+    // iteration. The unit is the 150-dpi render's pixels, two of them, because
+    // the planning baseline, which has no command stream, renders the page at
+    // 150 dpi twice in its place: the operation the gate pairs this one with.
+    group.operation("write the 150-dpi text page's command stream", |op| {
+        let text_page: &Page = &text_page;
+        #[cfg(not(tinker_planning_baseline))]
+        parsed_stream(text_page, "the text page's command stream");
+        op.per(renders(text_page, 150.0, 2));
+        op.iter(move || {
+            for _ in 0..2 {
+                black_box(written_stream(text_page));
+            }
+        });
+    });
+    // The same stream, written and parsed once untimed, drawn at 150 dpi
+    // (`CommandStream::render`) beside the page's direct render, which the
+    // planning baseline's arm draws in its place: two renders an iteration, as
+    // that one makes.
+    group.operation(
+        "the text page at 150 dpi from its parsed command stream",
+        |op| {
+            let text_page: &Page = &text_page;
+            #[cfg(not(tinker_planning_baseline))]
+            let source = parsed_stream(text_page, "the text page's parsed command stream");
+            #[cfg(tinker_planning_baseline)]
+            let source = text_page;
+            op.per(renders(text_page, 150.0, 2));
+            op.iter(move || {
+                for _ in 0..2 {
+                    black_box(source.render(&RenderOptions::at_dpi(150.0)));
+                }
+            });
+        },
+    );
 
     // ---- vectors ----------------------------------------------------------
 

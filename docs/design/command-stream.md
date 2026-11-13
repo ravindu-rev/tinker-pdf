@@ -418,10 +418,15 @@ has none, in its smoke program, where it runs — and never binding API.
    `xtask/src/parity.rs` records. **RC-18.9b** projects what no surface
    carries yet, so `cargo xtask bindings-coverage` passes with no refusal
    line left for the stream.
-9. **RC-18.10a, the speed rows**, unmeasured, in MS-04's render group:
-   writing the 150-dpi text page's stream, and rendering it at 150 dpi from
-   its parsed stream, each paired with the planning baseline's direct render
-   of the same page; `xtask/src/bench.rs`
+9. **RC-18.10a, landed: the speed rows**, unmeasured, in MS-04's render
+   group (`crates/tinker-pdf/benches/render.rs`):
+   `render/write the 150-dpi text page's command stream`, two writes an
+   iteration, and `render/the text page at 150 dpi from its parsed command
+   stream`, two renders an iteration of the stream written and parsed once,
+   each held before it is timed to a stream that reads back to its own
+   bytes and draws the page's render pixel for pixel, and each paired with
+   the planning baseline's direct render of the same page, which that
+   build draws in its place; `xtask/src/bench.rs`
    `the_committed_baseline_agrees_with_the_tree` holds the bench file and
    `baseline.json` to one list. **RC-18.10b** takes their figures in the
    timing phase, committed in `baseline.json` and held by `cargo xtask
