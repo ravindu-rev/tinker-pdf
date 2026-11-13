@@ -792,7 +792,10 @@ what it is *not* allowed to read:
   object, or a generation the table invented, opens at `Trust` with no warning
   at all. So the validator walks the cross-reference **sections** out of the
   bytes, one `/Prev` link at a time, in both spellings, and holds every entry
-  to the byte it names.
+  to the byte it names. A stream that walk does not reach — in a file the
+  reader opened by scanning, or under an entry that names a byte that is not
+  its object — is still decoded, through the reader's own table, so damage
+  in a stream's data is reported whatever state the tables are in.
 
 Rules are split into two tiers, and the split is a claim about *whose* defect
 it is. **Structure** is what a writer owns whatever document it was handed;

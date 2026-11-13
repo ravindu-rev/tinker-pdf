@@ -140,7 +140,7 @@ library, not its tests.
 ### The two readings are one strict implementation
 
 The cos reading opens with `CosDocument::open` and calls
-`tinker_pdf_cos::validate` (`crates/tinker-pdf-cos/src/validate.rs:771`).
+`tinker_pdf_cos::validate` (`crates/tinker-pdf-cos/src/validate.rs:772`).
 The facade reading opens with `Document::open` and calls
 `Document::validate`, which is `tinker_pdf_cos::validate` over the
 document's `inner` (`crates/tinker-pdf/src/lib.rs:1748-1750`), and `inner`
@@ -162,7 +162,7 @@ is `Key::Password` or `Key::Recipient` — the two ways a document is opened
 `crates/tinker-pdf-cos/src/doc.rs:1211` and `:1236`, and the facade's at
 `lib.rs:1785` and `:2028`). `validate` wants an authenticated document,
 because a stream it cannot decrypt reads as one that does not decode
-(`validate.rs:764-771`). An encrypted document handed over with no key is
+(`validate.rs:765-772`). An encrypted document handed over with no key is
 tried with the empty user password, which `Document::open` leaves untried
 on purpose (`lib.rs:1806-1810`); if that fails, the door fails and says the
 key is missing. Bytes that do not open fail the
@@ -181,7 +181,7 @@ Each verdict's findings become items as follows.
 
 A repair is classed by the warning it repaired, not by the phase of the
 reading that met it. `validate` reports each warning's label once
-(`seen_repairs`, `crates/tinker-pdf-cos/src/validate.rs:865`), in the first
+(`seen_repairs`, `crates/tinker-pdf-cos/src/validate.rs:866`), in the first
 of three phases that meets it: the open, as `Repaired`; an object re-parsed
 at its entry's offset, as `ObjectRepaired`; or reading on, as
 `RepairedWhileReading`. Which phase meets a warning first depends on what
@@ -202,7 +202,7 @@ no repair, because the ladder and every repair the reader performed are the
 validator's first rules (`DefectKind::OpenedLenient`, `Repaired` and
 `RepairedWhileReading`); the two leniencies `validate` does not count — a
 DCT stream left encoded, and a predefined CMap this build did not compile
-in — are its own call (`is_a_defect`, `validate.rs:851`).
+in — are its own call (`is_a_defect`, `validate.rs:852`).
 
 **`rewritten(label, input, output)`** — a save of an input this engine did
 not write: a committed fixture, a corpus file, a hand-built or damaged file.
@@ -217,7 +217,7 @@ own key.
   Owned items are then held to no more of each class than the input's, and
   to none at or past the input's length: the appended section, its objects
   and its trailer are the writer's. The trailer rules read the newest
-  section and carry no offset (`validate.rs:1346-1401`), so a trailer
+  section and carry no offset (`validate.rs:1347-1402`), so a trailer
   defect the input did not have is a class it did not have, and fails.
 - A profile the output claims is held to no more findings of each class
   than the input's under the same claim. The claim is part of the class, so
@@ -227,7 +227,7 @@ Classes rather than findings, because a rewrite renumbers: a defect's
 object and offset move, and so do the kinds that carry a number
 (`PageParentWrong { found }`, `ObjStmNumberMismatch { container, .. }`),
 while a kind's label does not. It is the corpus report's own unit
-(`kind_counts`, `validate.rs:757`), but for a repair, which a rewrite can
+(`kind_counts`, `validate.rs:758`), but for a repair, which a rewrite can
 also move from one phase of the reading to another and which is classed by
 its warning. With a clean input, no more than nothing is nothing:
 `rewritten` is then `authored`, so choosing it cannot loosen a test whose

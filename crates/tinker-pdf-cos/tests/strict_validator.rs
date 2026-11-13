@@ -36,8 +36,9 @@ use std::sync::Arc;
 use surface_support::whole_surface_document;
 use tinker_pdf_cos::dest::DestKind;
 use tinker_pdf_cos::{
-    CosDocument, Defect, Dict, DocumentBuilder, DocumentEditor, Encryption, LadderLevel, Object,
-    OutlineEntry, PdfString, Target, WriteMode, WriteOptions,
+    CosDocument, Defect, DefectKind, Dict, DocumentBuilder, DocumentEditor, Encryption,
+    LadderLevel, ObjRef, Object, OutlineEntry, PdfString, Target, WarningKind, WriteMode,
+    WriteOptions,
 };
 
 // ---- the documents under test ----------------------------------------------
@@ -647,6 +648,119 @@ fn a_length_that_stops_short_of_endstream_is_refused() {
         patch_at(&bytes, at, shorter.as_bytes()),
         "stream-length-not-exact",
     );
+}
+
+/// A catalog, its page tree, a page and the two streams the page draws, with a
+/// classic table for them or with none. Object 4 is stored as ASCIIHex with
+/// bytes that are not hex, which decodes with a repair (7.4.2), and object 5's
+/// `/DecodeParms` give its rows no columns, which describes no stream, so its
+/// chain refuses it (7.4.4.4). Hand-built, because this crate's writer always
+/// writes a table.
+fn damaged_streams(table: bool) -> Vec<u8> {
+    let hex: &[u8] = b"30 20 30 20 6d zz>";
+    let deflated = tinker_pdf_filters::zlib_compress(b"0 0 m 10 10 l S");
+    let mut four = format!(
+        "<< /Filter /ASCIIHexDecode /Length {} >>\nstream\n",
+        hex.len()
+    )
+    .into_bytes();
+    four.extend_from_slice(hex);
+    four.extend_from_slice(b"\nendstream");
+    let mut five = format!(
+        "<< /Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 0 >> /Length {} >>\n\
+         stream\n",
+        deflated.len()
+    )
+    .into_bytes();
+    five.extend_from_slice(&deflated);
+    five.extend_from_slice(b"\nendstream");
+    let bodies: [Vec<u8>; 5] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents [4 0 R 5 0 R] >>".to_vec(),
+        four,
+        five,
+    ];
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n");
+    out.extend_from_slice(&[b'%', 0xE2, 0xE3, 0xCF, 0xD3, b'\n']);
+    let mut offsets = Vec::new();
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    if table {
+        let at = out.len();
+        out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in &offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{at}\n%%EOF\n").as_bytes(),
+        );
+    } else {
+        out.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+    }
+    out
+}
+
+/// 7.4: a stream the walk of the sections does not reach is decoded all the
+/// same, through the reader's own table. With a table the walk reaches both of
+/// [`damaged_streams`]'s, and the verdict holds the hex stream's repair and
+/// the other's refusal. With none, the reader finds them by scanning and the
+/// verdict holds the same two, where it once decoded no stream at all, so a
+/// rewrite that copies them through is held to an input that read them. And
+/// an entry that names another object's header leaves its object to the
+/// reader, which found it where it is, and its stream is decoded too.
+#[test]
+fn a_stream_no_section_reaches_is_decoded_too() {
+    let repaired = DefectKind::RepairedWhileReading(WarningKind::Filter(
+        tinker_pdf_filters::Warning::NonHexByte,
+    ));
+    fn holds(defects: &[Defect], kind: DefectKind, object: u32) -> bool {
+        defects
+            .iter()
+            .any(|defect| defect.kind == kind && defect.object == Some(ObjRef::new(object, 0)))
+    }
+
+    let listed = verdict(damaged_streams(true));
+    assert!(holds(&listed, repaired, 4), "{listed:?}");
+    assert!(
+        holds(&listed, DefectKind::StreamDoesNotDecode, 5),
+        "{listed:?}"
+    );
+
+    let scanned = verdict(damaged_streams(false));
+    assert!(labels(&scanned).contains(&"opened-lenient"), "{scanned:?}");
+    assert!(holds(&scanned, repaired, 4), "{scanned:?}");
+    assert!(
+        holds(&scanned, DefectKind::StreamDoesNotDecode, 5),
+        "{scanned:?}"
+    );
+
+    // Object 4's entry moved to object 3's header: the walk reads object 3
+    // there, and the reader, which found object 4 by its own header, decodes
+    // it.
+    let tabled = damaged_streams(true);
+    let three = find(&tabled, b"3 0 obj").expect("object 3") as u64;
+    let moved = verdict(entry_offset(&tabled, 4, three));
+    assert!(
+        holds(
+            &moved,
+            DefectKind::ObjectHeaderMismatch {
+                found: ObjRef::new(3, 0)
+            },
+            4
+        ),
+        "{moved:?}"
+    );
+    assert!(holds(&moved, repaired, 4), "{moved:?}");
+
+    // A document whose sections reach every object reads as before.
+    clean(rewritten());
 }
 
 // ---- object streams ---------------------------------------------------------

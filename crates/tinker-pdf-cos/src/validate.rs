@@ -17,7 +17,8 @@
 //! its object is accepted because the header lookup lexes forward. Both open
 //! at [`LadderLevel::Trust`] with no warning. This module therefore walks the
 //! cross-reference **sections** out of the bytes, one `/Prev` link at a time,
-//! and holds every entry to the byte it names.
+//! and holds every entry to the byte it names; the merged table only names the
+//! streams that walk did not reach, which are decoded all the same (7.4).
 //!
 //! # Two tiers, because a rewrite has two authors
 //!
@@ -1401,9 +1402,16 @@ impl Validator<'_> {
     // ---- the entries, one object at a time ---------------------------------
 
     fn entries(&mut self, sections: &[Section]) {
-        if sections.is_empty() {
-            return;
+        let mut reached = BTreeSet::new();
+        if !sections.is_empty() {
+            self.section_entries(sections, &mut reached);
         }
+        self.streams_off_the_walk(&reached);
+    }
+
+    /// Every entry the sections spell, each held to the byte it names, and the
+    /// objects the walk reached itself put in `reached`.
+    fn section_entries(&mut self, sections: &[Section], reached: &mut BTreeSet<u32>) {
         let declared_size = sections
             .first()
             .and_then(|section| section.trailer.get_int(Name::SIZE));
@@ -1473,8 +1481,53 @@ impl Validator<'_> {
                         );
                     }
                 }
-                RawEntry::Offset { offset, gen } => self.body(num, gen, offset),
+                RawEntry::Offset { offset, gen } => {
+                    if self.body(num, gen, offset) {
+                        reached.insert(num);
+                    }
+                }
                 RawEntry::InStream { container, index } => self.in_stream(num, container, index),
+            }
+        }
+    }
+
+    /// 7.4: every stream the reader found decodes, whether or not the walk of
+    /// the sections reached it.
+    ///
+    /// The walk holds each entry to the byte it names, so it reads an object
+    /// only where a section says it is. A document the reader opened by
+    /// scanning has no section to walk, and an entry that names a byte that
+    /// is not its object leaves the object unread there; the reader found
+    /// those objects all the same, and a reader decodes their streams as it
+    /// decodes any other. So this does too, through the reader's own table,
+    /// and the repairs a decode needs are this reading's like any other's
+    /// ([`Validator::repairs_raised_while_reading`]). Without it a verdict
+    /// would say nothing of a stream's data whose tables it could not walk,
+    /// and a rewrite that copies the stream through, whose tables it can, would
+    /// be held to an input that never read it.
+    fn streams_off_the_walk(&mut self, reached: &BTreeSet<u32>) {
+        let unreached: Vec<(ObjRef, u64)> =
+            self.doc
+                .xref()
+                .iter()
+                .filter(|(num, _)| !reached.contains(num))
+                .filter_map(|(num, entry)| match entry {
+                    crate::xref::XrefEntry::Offset { offset, gen } => {
+                        Some((ObjRef::new(num, gen), offset))
+                    }
+                    // 7.5.7: an object stream holds no stream, and a free entry
+                    // holds nothing.
+                    crate::xref::XrefEntry::InStream { .. }
+                    | crate::xref::XrefEntry::Free { .. } => None,
+                })
+                .collect();
+        for (r, offset) in unreached {
+            let is_stream = self
+                .doc
+                .get(r)
+                .is_ok_and(|object| object.as_stream().is_some());
+            if is_stream && self.doc.stream_decoded(r).is_err() {
+                self.report(Some(r), Some(offset), DefectKind::StreamDoesNotDecode);
             }
         }
     }
@@ -1500,18 +1553,23 @@ impl Validator<'_> {
         }
     }
 
-    /// The object body at a type-1 entry, and its stream extent.
-    fn body(&mut self, num: u32, gen: u16, offset: u64) {
+    /// The object body at a type-1 entry, and its stream extent; and whether
+    /// the walk reached the object itself there — its stream, which
+    /// [`Validator::stream`] decodes as the reader has it, or a body that is
+    /// not a stream under the object's own header.
+    fn body(&mut self, num: u32, gen: u16, offset: u64) -> bool {
         let r = ObjRef::new(num, gen);
         let mut sink = WarningSink::new();
         let Some(parsed) = parse_indirect_at(self.buf, offset, self.doc.names_table(), &mut sink)
         else {
-            return;
+            return false;
         };
         self.repairs(Some(r), sink);
         if parsed.object.as_stream().is_some() {
             self.stream(r, &parsed.object);
+            return true;
         }
+        header_at(self.buf, offset) == Some(r)
     }
 
     /// 7.3.8: the declared length reaches `endstream` exactly, and the chain

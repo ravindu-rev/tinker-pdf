@@ -140,6 +140,36 @@ fn unsubtyped() -> Vec<u8> {
     out
 }
 
+/// A one-page file with no cross-reference table, whose page draws a stream
+/// stored as ASCIIHex with bytes in it that are not hex (7.4.2): damage in a
+/// stream's data, which a rewrite copies through as it found it, in a file the
+/// reader opens by scanning. Hand-built, as `image_recode.rs`'s fixtures are,
+/// because this engine's writer always writes a table.
+fn untabled_hex_page() -> Vec<u8> {
+    let content: &[u8] = b"30 20 30 20 6d 20 31 30 20 31 30 20 6c 20 53 zz>";
+    let mut out = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    for (index, body) in [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>",
+    ]
+    .iter()
+    .enumerate()
+    {
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "4 0 obj\n<< /Filter /ASCIIHexDecode /Length {} >>\nstream\n",
+            content.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(content);
+    out.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n");
+    out
+}
+
 // ---- byte surgery -----------------------------------------------------------
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -539,6 +569,45 @@ fn a_repair_is_one_class_whichever_phase_met_it() {
         );
     });
     assert!(message.contains("found and not listed"), "{message}");
+}
+
+/// A rewrite that copies a damaged stream through is held to its input's own
+/// report of the damage, even where the input has no cross-reference table to
+/// walk: the strict validator decodes the streams the reader found by
+/// scanning, so the input's verdict holds the repair its full rewrite's does,
+/// and `rewritten` passes it where `authored` refuses it, naming the repair.
+#[test]
+fn a_rewrite_that_copies_a_damaged_stream_is_held_to_its_input() {
+    let repaired = format!(
+        "{:?}",
+        DefectKind::RepairedWhileReading(WarningKind::Filter(
+            tinker_pdf_filters::Warning::NonHexByte
+        ))
+    );
+    let input = untabled_hex_page();
+    let read = written_support::items("the untabled input", &input);
+    assert!(
+        read.iter()
+            .any(|item| item.exact == repaired && item.class == "repair: filter"),
+        "{read:?}"
+    );
+    assert!(
+        read.iter().any(|item| item.class == "opened-lenient"),
+        "the input is read by scanning: {read:?}"
+    );
+
+    let full = saved(&input, &WriteOptions::default());
+    let written = written_support::items("its full rewrite", &full);
+    assert!(
+        written.iter().any(|item| item.exact == repaired),
+        "the rewrite copied the stream as it found it: {written:?}"
+    );
+    rewritten("the untabled input, rewritten in full", &input, &full);
+    let message = refusal(|| {
+        authored("the untabled input, rewritten in full", &full);
+    });
+    assert!(message.contains("[repaired-while-reading]"), "{message}");
+    assert!(message.contains("non-hex byte skipped"), "{message}");
 }
 
 // ---- the two readings -------------------------------------------------------
