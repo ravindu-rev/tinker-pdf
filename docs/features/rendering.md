@@ -1010,6 +1010,23 @@ shading's function at every pixel centre, within ruling 22's level, and
 `a_shading_in_none_paints_nothing`). A light sweep tabulates and converts as
 it did.
 
+**Meshes on plates.** On plates by a plan a mesh (types 4 to 7) in a space
+naming colorants is drawn in tints, through the rasterizer's
+`draw_mesh_tints_over`: one tint a plate a pixel, from the same silhouette,
+walk and fringe spread a light draw of the mesh makes. Each pixel's
+interpolated inputs are converted once, and its tints read off the components
+that light came from (`Mesh::color_components`: the inputs themselves, or a
+`/Function`'s outputs at them, evaluated afresh, so a mesh on plates keeps no
+colour table) by its space's road, as a shading's are; they composite through
+`Canvas::blend_tints` at the mesh's coverage and the paint's alpha. A mesh in
+`/None` has no effect on the page, and one in a space naming no colorant
+reaches the process plates as its light turned into ink
+(`a_mesh_in_each_ink_space_lands_on_its_plates`, a type 4 mesh and a type 6
+patch in a `/DeviceN`, through a `/Function`, in a `/Separation`, DeviceCMYK
+and a composited spot, by `sh` and as a pattern, each plate the tint the test
+interpolates at every pixel centre, and `a_mesh_in_none_paints_nothing`). A
+light mesh draws and tabulates as it did.
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and

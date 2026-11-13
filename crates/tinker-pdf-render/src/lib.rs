@@ -54,7 +54,7 @@ use tinker_pdf_raster::{
         image_coverage, ImageDraw, ImageSource, PlatePyramid, PlateSource, Pyramid, SourceWindow,
         Transform, TwoColour,
     },
-    mesh::{draw_mesh_over, MeshDraw},
+    mesh::{draw_mesh_over, draw_mesh_tints_over, MeshBuffer, MeshDraw, MeshTintBuffer, MeshTints},
     stroke::{
         adjusted_to_pixels, stretches, stroke_mapped_with, stroke_with, whole_pixel_width, LineCap,
         LineJoin, StrokeStyle,
@@ -3900,6 +3900,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// its colour is within it as well as by its device length
     /// ([`Mesh::tessellate`]). The count is a function of the patch and the
     /// page's transform alone, so a tile cuts the page's mesh (ruling 5).
+    ///
+    /// On plates by a plan a mesh in a space naming colorants is drawn in
+    /// tints (RC-04.14): the same silhouette, walk and fringe spread, each
+    /// pixel's tints read off the components its light is converted from
+    /// ([`Mesh::color_components`]) by the space's road ([`SpaceTints`]) and
+    /// composited through [`Canvas::blend_tints`]; a space naming only
+    /// `/None` has no effect on the page.
     #[allow(clippy::too_many_arguments)]
     fn paint_mesh(
         &mut self,
@@ -3914,6 +3921,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         smoothness: Option<f64>,
         conversion: Conversion,
     ) -> bool {
+        let plates = self.shading_plates(&mesh.space);
+        if plates.as_ref().is_some_and(SpaceTints::paints_nothing) {
+            return true;
+        }
         let Some(tessellation) = mesh.tessellate(&to_device, smoothness) else {
             return false;
         };
@@ -3954,9 +3965,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // pixel; a mesh carrying a function reads it through a table over
         // the inputs its vertices span (P-14.5), decided on the mesh's
         // rectangle on the whole page. Its colours convert in the intent in
-        // force at the paint, the table's entries among them.
+        // force at the paint, the table's entries among them. On plates the
+        // tints are read off each colour's own evaluation, so there is no
+        // table.
         let mut kept = ShadingScratch::converting(conversion);
-        if let (Some(function), 1) = (&mesh.function, mesh.components) {
+        if let (Some(function), 1, None) = (&mesh.function, mesh.components, &plates) {
             let (low, high) = tessellation
                 .values
                 .iter()
@@ -3972,6 +3985,28 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             shading.set(taken);
             Color { r, g, b, a: 0xFF }
         };
+        let channels = plates.as_ref().map(SpaceTints::channels);
+        let road = core::cell::RefCell::new(plates);
+        // The same evaluation's components, by the space's road to the
+        // plates; a colour that paints nothing, which only a space naming
+        // `/None` alone has and which never gets here, as no ink.
+        let tint = |inputs: &[f64], out: &mut [u8]| {
+            let mut taken = shading.take();
+            out.fill(0);
+            {
+                let (light, components) = mesh.color_components(inputs, &mut taken);
+                let mut road = road.borrow_mut();
+                if let Some(tints) = road
+                    .as_mut()
+                    .and_then(|road| road.tints(&mesh.space, components, light))
+                {
+                    for (slot, tint) in out.iter_mut().zip(tints) {
+                        *slot = *tint;
+                    }
+                }
+            }
+            shading.set(taken);
+        };
         let draw = MeshDraw {
             positions: &tessellation.positions,
             values: &tessellation.values,
@@ -3984,7 +4019,21 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             edge_bits: self.level(),
             edge_rule: self.hard_edge,
         };
-        let drawn = draw_mesh_over(&draw, wanted.rect(), whole.rect(), &mut self.scratch);
+        let drawn = match channels {
+            None => draw_mesh_over(&draw, wanted.rect(), whole.rect(), &mut self.scratch)
+                .map(MeshPixels::Light),
+            Some(channels) => draw_mesh_tints_over(
+                &draw,
+                &MeshTints {
+                    channels,
+                    tints: &tint,
+                },
+                wanted.rect(),
+                whole.rect(),
+                &mut self.scratch,
+            )
+            .map(MeshPixels::Tints),
+        };
         let kept = shading.take();
         self.count_evaluations(&kept);
         let Some(mut buffer) = drawn else {
@@ -3992,15 +4041,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         };
         #[cfg(test)]
         {
-            self.mask_pixels = self.mask_pixels.saturating_add(
-                u64::from(buffer.coverage.width) * u64::from(buffer.coverage.height),
-            );
+            let coverage = buffer.coverage();
+            self.mask_pixels = self
+                .mask_pixels
+                .saturating_add(u64::from(coverage.width) * u64::from(coverage.height));
         }
 
         // The mesh's shape for the plane: its coverage over the area the
         // paint is shaped by, without the soft mask.
         if self.records(set.entry) {
-            let mut shape = buffer.coverage.clone();
+            let mut shape = buffer.coverage().clone();
             if let Some(shape_area) = shape_area {
                 shape.intersect_in_place(shape_area);
             }
@@ -4011,16 +4061,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // with a mesh does not paint the whole clip the way `sh` with a
         // gradient does.
         if let Some(area) = area {
-            buffer.coverage.intersect_in_place(area);
+            buffer.coverage_mut().intersect_in_place(area);
         }
         if self.in_knockout() {
-            self.knockout_restore(&buffer.coverage);
+            self.knockout_restore(buffer.coverage());
         }
 
         let (ox, oy) = self.canvas.origin();
         let (x_start, y_start, x_end, y_end) =
             buffer
-                .coverage
+                .coverage()
                 .overlap_at((ox, oy), self.canvas.width, self.canvas.height);
         let held = self.hold_removal(&set.removal);
         for row in y_start..y_end {
@@ -4030,15 +4080,30 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             }
             for col in x_start..x_end {
                 let (px, py) = (ox.saturating_add(col as i32), oy.saturating_add(row as i32));
-                let coverage = buffer.coverage.at(px, py);
-                if coverage == 0 {
-                    continue;
+                match &buffer {
+                    MeshPixels::Light(light) => {
+                        let coverage = light.coverage.at(px, py);
+                        if coverage == 0 {
+                            continue;
+                        }
+                        let Some(color) = light.at(px, py) else {
+                            continue;
+                        };
+                        let weight = alpha * f64::from(coverage) / 255.0;
+                        self.canvas.blend_pixel_with(col, row, color, weight, mode);
+                    }
+                    MeshPixels::Tints(tinted) => {
+                        let coverage = tinted.coverage.at(px, py);
+                        if coverage == 0 {
+                            continue;
+                        }
+                        let Some(tints) = tinted.at(px, py) else {
+                            continue;
+                        };
+                        let weight = alpha * f64::from(coverage) / 255.0;
+                        self.canvas.blend_tints(col, row, tints, weight, mode);
+                    }
                 }
-                let Some(color) = buffer.at(px, py) else {
-                    continue;
-                };
-                let weight = alpha * f64::from(coverage) / 255.0;
-                self.canvas.blend_pixel_with(col, row, color, weight, mode);
             }
         }
         self.release_removal(held);
@@ -6923,6 +6988,31 @@ fn region_canvas(region: PixelRegion, format: PixelFormat, background: Color) ->
     let at = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
     Canvas::new(region.width, region.height, format, background)
         .at_origin(at(region.x), at(region.y))
+}
+
+/// A mesh drawn for the canvas it composites onto ([`Renderer::paint_mesh`]):
+/// in light, or on plates by a plan in a tint a plate (RC-04.14).
+enum MeshPixels {
+    Light(MeshBuffer),
+    Tints(MeshTintBuffer),
+}
+
+impl MeshPixels {
+    /// The mesh's coverage, the same silhouette either way.
+    fn coverage(&self) -> &Mask {
+        match self {
+            MeshPixels::Light(light) => &light.coverage,
+            MeshPixels::Tints(tinted) => &tinted.coverage,
+        }
+    }
+
+    /// [`MeshPixels::coverage`], to narrow to the area the paint is shaped by.
+    fn coverage_mut(&mut self) -> &mut Mask {
+        match self {
+            MeshPixels::Light(light) => &mut light.coverage,
+            MeshPixels::Tints(tinted) => &mut tinted.coverage,
+        }
+    }
 }
 
 /// The largest canvas this will allocate for one page, in pixels.

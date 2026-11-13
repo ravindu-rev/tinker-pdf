@@ -33,7 +33,10 @@ pub use image::{
     PlatePyramid, PlateSource, Pyramid, Sampling, SourceWindow, Transform, TwoColour,
     MAX_PLATE_CHANNELS,
 };
-pub use mesh::{draw_mesh, draw_mesh_over, MeshBuffer, MeshDraw};
+pub use mesh::{
+    draw_mesh, draw_mesh_over, draw_mesh_tints_over, MeshBuffer, MeshDraw, MeshTintBuffer,
+    MeshTints,
+};
 pub use stripes::{fill_stripes, fill_stripes_with, StripeMask, SubpixelOrder};
 pub use stroke::{
     adjusted_to_pixels, dash, stretches, stroke, stroke_mapped, stroke_mapped_with, stroke_with,

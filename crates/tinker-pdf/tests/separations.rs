@@ -1600,3 +1600,340 @@ fn a_shading_in_none_paints_nothing() {
         }
     }
 }
+
+// ---- meshes on plates (RC-04.14) --------------------------------------------
+
+/// One mesh case: its shading dictionary's keys — its space a `/DeviceN`'s
+/// tint transform object 6 where it names one — the bytes of its stream, the
+/// plan's uses, and the tint each plate it names takes at a point of the
+/// page, interpolated there as 8.7.4.5.5 and 8.7.4.5.7 have it; every other
+/// plate none.
+struct MeshCase {
+    what: &'static str,
+    keys: String,
+    data: Vec<u8>,
+    plates: &'static [(&'static str, PlateUse)],
+    tints: Box<dyn Fn(f64, f64) -> Vec<(&'static str, f64)>>,
+}
+
+/// The page's corners `(0, 0)`, `(40, 0)`, `(40, 20)` and `(0, 20)`, as a
+/// mesh's raw eight-bit coordinates under `/Decode [0 40 0 20 ...]`.
+const MESH_CORNERS: [(u8, u8); 4] = [(0, 0), (255, 0), (255, 255), (0, 255)];
+
+/// The page's rectangle as two type 4 triangles over [`MESH_CORNERS`], the
+/// first three corners and the first, third and fourth, each corner taking
+/// its raw components in `colours`: a stream of eight bits a flag, a
+/// coordinate and a component.
+fn two_triangles(colours: &[Vec<u8>; 4]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for corner in [0, 1, 2, 0, 2, 3] {
+        let (x, y) = MESH_CORNERS[corner];
+        data.extend([0, x, y]);
+        data.extend(&colours[corner]);
+    }
+    data
+}
+
+/// What [`two_triangles`] paints at `(x, y)`: each of its corners' components,
+/// a raw byte over 255, weighted by the point's barycentric weights in the
+/// triangle holding it.
+fn across_triangles(colours: &[Vec<u8>; 4], x: f64, y: f64) -> Vec<f64> {
+    let at = |corner: usize| {
+        let (rx, ry) = MESH_CORNERS[corner];
+        (f64::from(rx) * 40.0 / 255.0, f64::from(ry) * 20.0 / 255.0)
+    };
+    for triangle in [[0, 1, 2], [0, 2, 3]] {
+        let [a, b, c] = triangle.map(at);
+        let area = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
+        let wb = ((x - a.0) * (c.1 - a.1) - (c.0 - a.0) * (y - a.1)) / area;
+        let wc = ((b.0 - a.0) * (y - a.1) - (x - a.0) * (b.1 - a.1)) / area;
+        let wa = 1.0 - wb - wc;
+        if wa >= -1e-9 && wb >= -1e-9 && wc >= -1e-9 {
+            return (0..colours[0].len())
+                .map(|k| {
+                    let [ca, cb, cc] = triangle.map(|corner| f64::from(colours[corner][k]));
+                    (wa * ca + wb * cb + wc * cc) / 255.0
+                })
+                .collect();
+        }
+    }
+    panic!("({x}, {y}) is off the page");
+}
+
+/// The page's rectangle as one type 6 patch with straight edges, its control
+/// points a third of the way along them, in 8.7.4.5.7's order from `(0, 0)`
+/// up the left edge, and its corners `(0, 0)`, `(0, 20)`, `(40, 20)` and
+/// `(40, 0)` taking the raw components in `colours`, in that order: a stream
+/// of eight bits a flag, a coordinate and a component.
+fn one_patch(colours: &[Vec<u8>; 4]) -> Vec<u8> {
+    let points: [(u8, u8); 12] = [
+        (0, 0),
+        (0, 85),
+        (0, 170),
+        (0, 255),
+        (85, 255),
+        (170, 255),
+        (255, 255),
+        (255, 170),
+        (255, 85),
+        (255, 0),
+        (170, 0),
+        (85, 0),
+    ];
+    let mut data = vec![0];
+    for (x, y) in points {
+        data.extend([x, y]);
+    }
+    for colour in colours {
+        data.extend(colour);
+    }
+    data
+}
+
+/// What [`one_patch`] paints at `(x, y)`: its corners' components, a raw
+/// byte over 255, interpolated bilinearly over `u = x / 40` and `v = y / 20`.
+/// Each case's corners make that linear — opposite corners summing alike —
+/// so the triangles any subdivision of the patch cuts paint it exactly.
+fn across_patch(colours: &[Vec<u8>; 4], x: f64, y: f64) -> Vec<f64> {
+    let (u, v) = (x / 40.0, y / 20.0);
+    let weights = [(1.0 - u) * (1.0 - v), (1.0 - u) * v, u * v, u * (1.0 - v)];
+    (0..colours[0].len())
+        .map(|k| {
+            weights
+                .iter()
+                .zip(colours)
+                .map(|(weight, colour)| weight * f64::from(colour[k]))
+                .sum::<f64>()
+                / 255.0
+        })
+        .collect()
+}
+
+/// A mesh shading dictionary's keys: its type, its space, eight bits a flag,
+/// a coordinate and a component, the page's corners through `/Decode` and
+/// `components` inputs of 0 to 1, and `extra`.
+fn mesh_keys(kind: u8, space: &str, components: usize, extra: &str) -> String {
+    let inputs = vec!["0 1"; components].join(" ");
+    format!(
+        "/ShadingType {kind} /ColorSpace {space} /BitsPerCoordinate 8 /BitsPerComponent 8 \
+         /BitsPerFlag 8 /Decode [0 40 0 20 {inputs}] {extra}"
+    )
+}
+
+/// The cases: a type 4 and a type 6 mesh in a two-colorant `/DeviceN`, each
+/// also through a `/Function` — the type 4 one in a `/Separation` — a type 6
+/// one in DeviceCMYK, and a type 4 one in a `/DeviceN` naming a spot the
+/// plan composites, which reverts to its alternate.
+fn mesh_cases() -> Vec<MeshCase> {
+    let gold = "[/Separation /Gold /DeviceCMYK << /FunctionType 2 /Domain [0 1] \
+                /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>]";
+    let gold_silver = "[/DeviceN [/Gold /Silver] /DeviceCMYK 6 0 R]";
+    let gold_teal = "[/DeviceN [/Gold /Teal] /DeviceCMYK 6 0 R]";
+    let triangles = [vec![26, 230], vec![204, 77], vec![128, 0], vec![255, 153]];
+    let patch = [vec![51, 204], vec![153, 204], vec![255, 0], vec![153, 0]];
+    let cmyk = [
+        vec![0, 51, 255, 0],
+        vec![0, 153, 255, 102],
+        vec![255, 153, 0, 102],
+        vec![255, 51, 0, 0],
+    ];
+    let along_triangles = [vec![0], vec![255], vec![128], vec![51]];
+    let along_patch = [vec![0], vec![128], vec![255], vec![127]];
+    let spotted = triangles.clone();
+    vec![
+        MeshCase {
+            what: "a type 4 /DeviceN",
+            keys: mesh_keys(4, gold_silver, 2, ""),
+            data: two_triangles(&triangles),
+            plates: &[],
+            tints: Box::new(move |x, y| {
+                let c = across_triangles(&triangles, x, y);
+                vec![("Gold", c[0]), ("Silver", c[1])]
+            }),
+        },
+        MeshCase {
+            what: "a type 6 /DeviceN",
+            keys: mesh_keys(6, gold_silver, 2, ""),
+            data: one_patch(&patch),
+            plates: &[],
+            tints: Box::new(move |x, y| {
+                let c = across_patch(&patch, x, y);
+                vec![("Gold", c[0]), ("Silver", c[1])]
+            }),
+        },
+        MeshCase {
+            what: "a type 4 /Separation through a /Function",
+            keys: mesh_keys(
+                4,
+                gold,
+                1,
+                "/Function << /FunctionType 2 /Domain [0 1] /C0 [0.1] /C1 [0.9] /N 1 >>",
+            ),
+            data: two_triangles(&along_triangles),
+            plates: &[],
+            tints: Box::new(move |x, y| {
+                let t = across_triangles(&along_triangles, x, y)[0];
+                vec![("Gold", 0.1 + 0.8 * t)]
+            }),
+        },
+        MeshCase {
+            what: "a type 6 /DeviceN through a /Function",
+            keys: mesh_keys(
+                6,
+                gold_silver,
+                1,
+                "/Function << /FunctionType 2 /Domain [0 1] /C0 [0 1] /C1 [1 0] /N 1 >>",
+            ),
+            data: one_patch(&along_patch),
+            plates: &[],
+            tints: Box::new(move |x, y| {
+                let t = across_patch(&along_patch, x, y)[0];
+                vec![("Gold", t), ("Silver", 1.0 - t)]
+            }),
+        },
+        MeshCase {
+            what: "a type 6 DeviceCMYK",
+            keys: mesh_keys(6, "/DeviceCMYK", 4, ""),
+            data: one_patch(&cmyk),
+            plates: &[],
+            tints: Box::new(move |x, y| {
+                let c = across_patch(&cmyk, x, y);
+                vec![
+                    ("Cyan", c[0]),
+                    ("Magenta", c[1]),
+                    ("Yellow", c[2]),
+                    ("Black", c[3]),
+                ]
+            }),
+        },
+        MeshCase {
+            what: "a type 4 /DeviceN of a composited spot",
+            keys: mesh_keys(4, gold_teal, 2, ""),
+            data: two_triangles(&spotted),
+            plates: &[("Teal", PlateUse::Composite)],
+            tints: Box::new(move |x, y| {
+                let c = across_triangles(&spotted, x, y);
+                vec![("Cyan", c[0]), ("Magenta", c[1])]
+            }),
+        },
+    ]
+}
+
+/// A page of 40 by 20 points over a process backdrop painting `case`'s mesh,
+/// object 5, with `sh`, or, `as_pattern`, as a shading pattern filling the
+/// page; object 6 is the `/DeviceN`s' tint transform, `{ 0 0 }`, onto cyan
+/// and magenta.
+fn mesh_page(case: &MeshCase, as_pattern: bool) -> Document {
+    let (resources, draw) = if as_pattern {
+        (
+            "/Pattern << /P << /PatternType 2 /Shading 5 0 R >> >>",
+            "/Pattern cs /P scn 0 0 40 20 re f",
+        )
+    } else {
+        ("/Shading << /Sh 5 0 R >>", "/Sh sh")
+    };
+    let content = format!("0.1 0.2 0.3 0.4 k 0 0 40 20 re f {draw}");
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 20] /Resources << {resources} >> \
+             /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        render_support::raw_stream("", content.as_bytes()),
+        render_support::raw_stream(&case.keys, &case.data),
+        render_support::raw_stream(
+            "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+            b"{ 0 0 }",
+        ),
+    ];
+    Document::open(render_support::raw_pdf(&objects)).expect("it opens")
+}
+
+/// **A mesh in each ink space lands on its plates** (RC-04.14; the design's
+/// "Shadings on plates").
+///
+/// A type 4 mesh of two triangles and a type 6 patch over the whole page in
+/// a two-colorant `/DeviceN`, each also through a `/Function` (the type 4
+/// one in a `/Separation`), a type 6 patch in DeviceCMYK and a type 4 mesh in
+/// a `/DeviceN` naming a spot the plan composites, painted by `sh` and as a
+/// shading pattern over a backdrop of process ink: at every pixel each plate
+/// the mesh names holds the tint the test interpolates at the pixel's centre
+/// — the triangles' barycentric weights, the patch's bilinear ones —
+/// `round(255 × t)` within a level, and every other plate no ink; a spot with
+/// no plate reverts the whole colour to its alternate on the process plates.
+#[test]
+fn a_mesh_in_each_ink_space_lands_on_its_plates() {
+    for case in mesh_cases() {
+        for as_pattern in [false, true] {
+            let doc = mesh_page(&case, as_pattern);
+            let page = doc.page(0).expect("a page");
+            let plates = separations(&page, &RenderOptions::default(), case.plates);
+            let what = format!(
+                "{} {}",
+                case.what,
+                if as_pattern { "as a pattern" } else { "by sh" }
+            );
+            assert!(plates.warnings.is_empty(), "{what}: {:?}", plates.warnings);
+            assert_eq!((plates.width, plates.height), (40, 20), "{what}");
+            let names = plate_names(&plates);
+            for py in 0..20u32 {
+                for px in 0..40u32 {
+                    let (x, y) = (f64::from(px) + 0.5, 20.0 - (f64::from(py) + 0.5));
+                    let named = (case.tints)(x, y);
+                    for name in &names {
+                        let expected = named
+                            .iter()
+                            .find(|(plate, _)| plate == name)
+                            .map_or(0, |(_, tint)| byte(*tint));
+                        let got = tint_at(&plates, name, px, py);
+                        assert!(
+                            got.abs_diff(expected) <= 1,
+                            "{what}: {name} at ({px}, {py}) is {got}, interpolated {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **A mesh in `/None` has no effect on the page** (RC-04.14; 8.6.6.4): a
+/// type 4 and a type 6 mesh in a `/Separation /None`, by `sh` and as a
+/// pattern, leave every plate the backdrop's.
+#[test]
+fn a_mesh_in_none_paints_nothing() {
+    let none = "[/Separation /None /DeviceCMYK << /FunctionType 2 /Domain [0 1] \
+                /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>]";
+    let flat = [vec![255], vec![255], vec![255], vec![255]];
+    for (keys, data) in [
+        (mesh_keys(4, none, 1, ""), two_triangles(&flat)),
+        (mesh_keys(6, none, 1, ""), one_patch(&flat)),
+    ] {
+        let case = MeshCase {
+            what: "a /None mesh",
+            keys,
+            data,
+            plates: &[],
+            tints: Box::new(|_, _| Vec::new()),
+        };
+        for as_pattern in [false, true] {
+            let doc = mesh_page(&case, as_pattern);
+            let page = doc.page(0).expect("a page");
+            let plates = separations(&page, &RenderOptions::default(), case.plates);
+            let what = format!("{} ({}), pattern {as_pattern}", case.what, case.keys);
+            assert_eq!(plate_names(&plates), PROCESS, "{what}");
+            for (name, tint) in PROCESS.iter().zip([0.1, 0.2, 0.3, 0.4]) {
+                assert!(
+                    plate(&plates, name)
+                        .expect("a process plate")
+                        .tints
+                        .iter()
+                        .all(|got| *got == byte(tint)),
+                    "{what}: {name} is the backdrop's"
+                );
+            }
+        }
+    }
+}

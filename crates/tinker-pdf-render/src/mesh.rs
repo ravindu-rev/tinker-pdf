@@ -179,6 +179,25 @@ impl Mesh {
         }
     }
 
+    /// [`Mesh::color`], beside the components in the mesh's space its light
+    /// was converted from: `inputs` themselves without a `/Function`, and the
+    /// function's outputs at them with one — what a mesh on plates reads its
+    /// tints from (RC-04.14). A colour read through the scratch's table
+    /// evaluates nothing, so a pass that reads the components keeps none.
+    #[must_use]
+    pub fn color_components<'s>(
+        &self,
+        inputs: &'s [f64],
+        scratch: &'s mut ShadingScratch,
+    ) -> ((u8, u8, u8), &'s [f64]) {
+        let light = self.color(inputs, scratch);
+        if self.function.is_some() {
+            (light, scratch.outputs())
+        } else {
+            (light, inputs)
+        }
+    }
+
     /// Whether this mesh describes any geometry at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {

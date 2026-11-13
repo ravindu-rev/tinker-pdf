@@ -1431,16 +1431,117 @@ fn spot_page_shaded(spaces: render_support::SpotSpaces) -> render_support::SpotP
     )
 }
 
+/// A page of eight spots in `spaces` with meshes over it (RC-04.14): a type 6
+/// patch whose edges bulge, painted by `sh` inside a clip that cuts it, and a
+/// type 4 mesh of four triangles about a centre filling a rectangle as a
+/// shading pattern, each in a `/Separation` of one of the page's spots on a
+/// `/Separation` page and in a `/DeviceN` of two of them on a `/DeviceN`
+/// page, its tint transform the page's first extra object and the meshes the
+/// next two. Coordinates and components are eight bits, the page's corners
+/// through `/Decode`.
+fn spot_page_meshed(spaces: render_support::SpotSpaces) -> render_support::SpotPage {
+    let next = render_support::spot_page_next_object(8, spaces);
+    let separation = |name: &str, inks: &str| {
+        format!(
+            "[/Separation /{name} /DeviceCMYK << /FunctionType 2 /Domain [0 1] \
+             /C0 [0 0 0 0] /C1 [{inks}] /N 1 >>]"
+        )
+    };
+    // Each vertex's components, as raw bytes: one for a `/Separation`, two
+    // for a `/DeviceN`.
+    let (patch_space, mesh_space, colours): (String, String, [&[u8]; 5]) = match spaces {
+        render_support::SpotSpaces::Separation => (
+            separation("Gold", "1 0 0 0"),
+            separation("Silver", "0 1 0 0"),
+            [&[26], &[230], &[77], &[179], &[128]],
+        ),
+        render_support::SpotSpaces::DeviceN => (
+            format!("[/DeviceN [/Gold /Silver] /DeviceCMYK {next} 0 R]"),
+            format!("[/DeviceN [/Teal /Gold] /DeviceCMYK {next} 0 R]"),
+            [&[26, 200], &[230, 40], &[77, 255], &[179, 0], &[128, 128]],
+        ),
+    };
+    let components = colours[0].len();
+    let point = |x: f64, y: f64| {
+        [
+            (x / 60.0 * 255.0).round() as u8,
+            (y / 40.0 * 255.0).round() as u8,
+        ]
+    };
+    let mut patch = vec![0u8];
+    for (x, y) in [
+        (31.0, 21.0),
+        (29.0, 26.0),
+        (29.0, 32.0),
+        (31.0, 37.0),
+        (40.0, 39.0),
+        (48.0, 39.0),
+        (57.0, 37.0),
+        (58.5, 32.0),
+        (58.5, 26.0),
+        (57.0, 21.0),
+        (48.0, 19.0),
+        (40.0, 19.5),
+    ] {
+        patch.extend(point(x, y));
+    }
+    for colour in &colours[..4] {
+        patch.extend(*colour);
+    }
+    let vertices = [
+        (3.3, 22.4),
+        (25.6, 21.2),
+        (24.1, 36.8),
+        (4.2, 37.5),
+        (13.7, 29.1),
+    ];
+    let mut mesh = Vec::new();
+    for triangle in [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]] {
+        for vertex in triangle {
+            let (x, y) = vertices[vertex];
+            mesh.push(0);
+            mesh.extend(point(x, y));
+            mesh.extend(colours[vertex]);
+        }
+    }
+    let keys = |kind: u8, space: &str| {
+        format!(
+            "/ShadingType {kind} /ColorSpace {space} /BitsPerCoordinate 8 /BitsPerComponent 8 \
+             /BitsPerFlag 8 /Decode [0 60 0 40 {}]",
+            vec!["0 1"; components].join(" ")
+        )
+    };
+    let resources = format!(
+        "/Shading << /M0 {} 0 R >> /Pattern << /Q0 << /PatternType 2 /Shading {} 0 R >> >>",
+        next + 1,
+        next + 2
+    );
+    render_support::spot_page_with(
+        8,
+        spaces,
+        "q 30 20 29 19 re W n /M0 sh Q\n/Pattern cs /Q0 scn 2 21 25 17 re f\n",
+        &resources,
+        &[
+            render_support::raw_stream(
+                "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+                b"{ 0 0 }",
+            ),
+            render_support::raw_stream(&keys(6, &patch_space), &patch),
+            render_support::raw_stream(&keys(4, &mesh_space), &mesh),
+        ],
+    )
+}
+
 /// **Separation tiles are the page's plates** (RC-04.10; ruling 5): a page of
 /// eight spots, in `/Separation` spaces and in `/DeviceN` ones, beside process
 /// fills and text in an embedded face, drawn with its edges anti-aliased,
-/// alone and with shadings in the spots' spaces over it by `sh` and as a
-/// shading pattern ([`spot_page_shaded`]; RC-04.13), upright, a quarter
-/// turned, and three quarters turned under a crop box offset from its media
-/// box, at 1x and 2x: at tile sizes none of which divides the page, every
-/// tile's plates are the whole page's plates under it, through the one
-/// pipeline `Page::render` tiles through, and what each page adds changes
-/// its plates.
+/// alone, with shadings in the spots' spaces over it by `sh` and as a shading
+/// pattern ([`spot_page_shaded`]; RC-04.13), and with meshes in them likewise
+/// ([`spot_page_meshed`]; RC-04.14), upright, a quarter turned, and three
+/// quarters turned under a crop box offset from its media box, at 1x and 2x:
+/// at tile sizes none of which divides the page, every tile's plates are the
+/// whole page's plates under it, through the one pipeline `Page::render`
+/// tiles through, and what each page adds changes its plates.
 #[test]
 fn separation_tiles_are_the_page_s_plates() {
     let cropped = Shape {
@@ -1454,6 +1555,7 @@ fn separation_tiles_are_the_page_s_plates() {
         let fixtures = [
             ("spots", render_support::spot_page(8, spaces)),
             ("spots and shadings", spot_page_shaded(spaces)),
+            ("spots and meshes", spot_page_meshed(spaces)),
         ];
         for (shape, name) in [
             (Shape::PLAIN, "upright"),

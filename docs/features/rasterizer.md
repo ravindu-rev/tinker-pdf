@@ -656,6 +656,17 @@ rounds outward, so what a pixel gets depends on two pixels around it:
 reach and kept inside the region a render of the whole page uses, and measures
 `MAX_MESH_WORK` over the whole region, so a tile's mesh is the page's mesh
 pixel for pixel and a tile refuses exactly the meshes the page refuses.
+`draw_mesh_tints_over` draws a mesh in tints: a `MeshTints` names how many
+bytes a pixel holds, any number of them — a plate's tint each — and the
+closure that writes them for one interpolated input vector, called where a
+light draw asks `MeshDraw::color`, which a draw in tints never calls. The
+budget, the region, the one non-zero fill, the walk and the fringe spread are
+the light draw's own, the spread copying a neighbour's bytes whole, so a
+`MeshTintBuffer` holds the coverage of a light draw of the same mesh, paints
+the same pixels and interpolates the same inputs there
+(`an_n_component_mesh_interpolates_each_component_as_light_does`, against a
+light draw of each input alone, at three edge levels and over a part of the
+region); a light draw keeps its four bytes a pixel and its bits.
 
 **Cost and cancellation.** A paint costs what it covers: the caller asks for
 a region per shape clipped to the clip's rectangle, every consumer walks the
@@ -706,7 +717,7 @@ The crate root re-exports the working set: `Path`, `Verb`, `Point`,
 `PlateInk`, `Spots`, `TooManySpots`, `MAX_SPOT_PLATES`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `SourceWindow`, `TwoColour`, `Transform`,
 `Filter`, `Sampling`, `Pyramid`, `image_bounds_in`, `resample`; `draw_mesh`, `draw_mesh_over`,
-`MeshDraw`, `MeshBuffer`; `fill_stripes`, `fill_stripes_with`, `StripeMask`,
+`draw_mesh_tints_over`, `MeshDraw`, `MeshBuffer`, `MeshTints`, `MeshTintBuffer`; `fill_stripes`, `fill_stripes_with`, `StripeMask`,
 `SubpixelOrder`. The bridge
 from PDF vocabulary — `/BM` names to `BlendMode`, content-stream operators
 to paths — lives one layer up, in [rendering](rendering.md).

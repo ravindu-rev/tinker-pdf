@@ -32,6 +32,11 @@
 //!   triangles agree there: linear interpolation along an edge depends only on
 //!   its two endpoints, which both triangles share.
 //!
+//! A mesh is drawn in light ([`draw_mesh_over`], a [`Color`] a pixel) or in
+//! tints ([`draw_mesh_tints_over`], any number of bytes a pixel, a plate's
+//! tint each): one silhouette, one walk and one fringe spread serve both, so
+//! the two paint the same pixels from the same interpolated inputs.
+//!
 //! # Ruling 8
 //!
 //! No PDF vocabulary crosses this boundary. The mesh arrives as positions,
@@ -170,6 +175,59 @@ impl MeshBuffer {
     }
 }
 
+/// What a mesh drawn in tints paints ([`draw_mesh_tints_over`]): beside a
+/// [`MeshDraw`]'s geometry and inputs, `channels` tints a pixel in place of
+/// its light — a tint for each plate of a press, which this crate knows as
+/// numbers by index and never as colorants (ruling 8).
+pub struct MeshTints<'a> {
+    /// How many tints one pixel holds.
+    pub channels: usize,
+    /// What one interpolated input vector paints: its tints, written into
+    /// the `channels` bytes handed, every one of them.
+    ///
+    /// Called per pixel, after interpolation, exactly where
+    /// [`MeshDraw::color`] is called for light — never before it.
+    pub tints: &'a dyn Fn(&[f64], &mut [u8]),
+}
+
+/// One mesh rasterized in tints ([`draw_mesh_tints_over`]): a
+/// [`MeshBuffer`] with each pixel's tints in place of its light.
+pub struct MeshTintBuffer {
+    /// The anti-aliased union of every triangle, as a light draw's.
+    pub coverage: Mask,
+    /// How many tints a pixel holds.
+    pub channels: usize,
+    /// `channels` tints and a `painted` byte per pixel of `coverage`'s
+    /// rectangle, row-major: [`MeshBuffer::color`]'s layout with the tints
+    /// in place of `r, g, b`, `painted` 0 where no triangle reached the pixel.
+    pub tints: Vec<u8>,
+}
+
+impl MeshTintBuffer {
+    /// The tints at a device pixel, or `None` where nothing was painted.
+    #[must_use]
+    pub fn at(&self, x: i32, y: i32) -> Option<&[u8]> {
+        let (Some(column), Some(row)) = (
+            x.checked_sub(self.coverage.x0),
+            y.checked_sub(self.coverage.y0),
+        ) else {
+            return None;
+        };
+        if column < 0
+            || row < 0
+            || column as u32 >= self.coverage.width
+            || row as u32 >= self.coverage.height
+        {
+            return None;
+        }
+        let stride = self.channels + 1;
+        let index = (row as usize) * (self.coverage.width as usize) + column as usize;
+        let pixel = self.tints.get(index * stride..(index + 1) * stride)?;
+        let (painted, tints) = pixel.split_last()?;
+        (*painted != 0).then_some(tints)
+    }
+}
+
 /// Rasterizes a whole mesh into one buffer over the given region.
 ///
 /// `None` refuses a mesh that would cost more than [`MAX_MESH_WORK`]. The
@@ -216,11 +274,108 @@ pub fn draw_mesh_over(
     whole: (i32, i32, u32, u32),
     scratch: &mut FillScratch,
 ) -> Option<MeshBuffer> {
+    Some(match silhouette(draw, wanted, whole, scratch)? {
+        Silhouette::Empty { coverage, pixels } => MeshBuffer {
+            coverage,
+            color: vec![[0; 4]; pixels],
+        },
+        Silhouette::Drawn {
+            mut coverage,
+            region,
+            width,
+            height,
+            pixels,
+        } => {
+            let mut color = vec![[0u8; 4]; pixels];
+            paint_triangles(draw, &region, width, &mut color);
+            spread_fringe(&coverage, width, height, color.as_flattened_mut(), 4);
+            // After the spread, so that the colours reach every pixel the
+            // coverage reaches before it is quantised: what hardening the
+            // buffer after the draw reaches.
+            coverage.quantise(draw.edge_bits);
+            MeshBuffer { coverage, color }
+        }
+    })
+}
+
+/// [`draw_mesh_over`] in tints: the same budget, region and silhouette, the
+/// same colour pass interpolating `draw`'s inputs at each pixel and the same
+/// fringe spread, each pixel painted `tints.channels` tints by `tints.tints`
+/// where [`draw_mesh_over`] asks `draw.color` for its light — which a draw in
+/// tints never calls. So the pixels a light draw of the same mesh paints, the
+/// inputs it interpolates there and the coverage it composites through are
+/// this draw's too, whatever the number of channels: a mesh's colour on the
+/// plates of a press, one tint a plate.
+#[must_use]
+pub fn draw_mesh_tints_over(
+    draw: &MeshDraw<'_>,
+    tints: &MeshTints<'_>,
+    wanted: (i32, i32, u32, u32),
+    whole: (i32, i32, u32, u32),
+    scratch: &mut FillScratch,
+) -> Option<MeshTintBuffer> {
+    let stride = tints.channels.checked_add(1)?;
+    Some(match silhouette(draw, wanted, whole, scratch)? {
+        Silhouette::Empty { coverage, pixels } => MeshTintBuffer {
+            coverage,
+            channels: tints.channels,
+            tints: vec![0; pixels.checked_mul(stride)?],
+        },
+        Silhouette::Drawn {
+            mut coverage,
+            region,
+            width,
+            height,
+            pixels,
+        } => {
+            let mut bytes = vec![0u8; pixels.checked_mul(stride)?];
+            let mut sink = TintPixels {
+                bytes: &mut bytes,
+                channels: tints.channels,
+                paint: tints.tints,
+                colour: vec![0; tints.channels],
+            };
+            paint_into(draw, &region, width, &mut sink);
+            spread_fringe(&coverage, width, height, &mut bytes, stride);
+            coverage.quantise(draw.edge_bits);
+            MeshTintBuffer {
+                coverage,
+                channels: tints.channels,
+                tints: bytes,
+            }
+        }
+    })
+}
+
+/// A mesh's silhouette over the region its colour pass paints, before that
+/// pass: what [`draw_mesh_over`] and [`draw_mesh_tints_over`] share.
+enum Silhouette {
+    /// Nothing to paint: an empty mask over the region, of `pixels` pixels.
+    Empty { coverage: Mask, pixels: usize },
+    /// The mesh's coverage, not yet quantised, over `region`, `width` by
+    /// `height` pixels, `pixels` of them.
+    Drawn {
+        coverage: Mask,
+        region: Region,
+        width: u32,
+        height: u32,
+        pixels: usize,
+    },
+}
+
+/// The budget, the region and the one fill of [`draw_mesh_over`], or `None`
+/// past [`MAX_MESH_WORK`] or a region of more pixels than an address holds.
+fn silhouette(
+    draw: &MeshDraw<'_>,
+    wanted: (i32, i32, u32, u32),
+    whole: (i32, i32, u32, u32),
+    scratch: &mut FillScratch,
+) -> Option<Silhouette> {
     let empty = |(x0, y0, width, height): (i32, i32, u32, u32)| {
         let pixels = (width as usize).checked_mul(height as usize)?;
-        Some(MeshBuffer {
+        Some(Silhouette::Empty {
             coverage: Mask::empty(x0, y0, width, height),
-            color: vec![[0; 4]; pixels],
+            pixels,
         })
     };
     if whole.2 == 0 || whole.3 == 0 || draw.components == 0 {
@@ -299,7 +454,7 @@ pub fn draw_mesh_over(
     // A rule that reads the shape is the filler's to apply; every other
     // level is the coverage's, applied below.
     let ruled = draw.edge_bits == 0 && draw.edge_rule != HardEdge::Half;
-    let mut coverage = if ruled {
+    let coverage = if ruled {
         fill_hard_with(
             scratch,
             &path,
@@ -325,16 +480,13 @@ pub fn draw_mesh_over(
             draw.stop,
         )
     };
-
-    let mut color = vec![[0u8; 4]; pixels];
-    paint_triangles(draw, &region, width, &mut color);
-    spread_fringe(&coverage, width, height, &mut color);
-    // After the spread, so that the colours reach every pixel the coverage
-    // reaches before it is quantised: what hardening the buffer after the
-    // draw reaches.
-    coverage.quantise(draw.edge_bits);
-
-    Some(MeshBuffer { coverage, color })
+    Some(Silhouette::Drawn {
+        coverage,
+        region,
+        width,
+        height,
+        pixels,
+    })
 }
 
 /// The region a mesh is being drawn into, in device pixels.
@@ -606,13 +758,76 @@ impl Plane {
     }
 }
 
+/// Where the colour pass puts what a pixel's interpolated inputs paint: a
+/// light buffer's `[r, g, b, painted]` ([`LightPixels`]), or a tint buffer's
+/// tints and `painted` byte ([`TintPixels`]).
+trait Pixels {
+    /// Paints pixel `(px, py)` of `region`, `width` pixels a row, with what
+    /// the interpolated inputs `mixed` paint, marking it painted.
+    fn put(&mut self, region: &Region, width: u32, px: i64, py: i64, mixed: &[f64]);
+}
+
+/// A light draw's colour buffer and the conversion that fills it.
+struct LightPixels<'p, 'a> {
+    color: &'p mut [[u8; 4]],
+    paint: &'a dyn Fn(&[f64]) -> Color,
+}
+
+impl Pixels for LightPixels<'_, '_> {
+    fn put(&mut self, region: &Region, width: u32, px: i64, py: i64, mixed: &[f64]) {
+        write(self.color, region, width, px, py, (self.paint)(mixed));
+    }
+}
+
+/// A draw in tints' buffer, `channels` tints and a `painted` byte a pixel,
+/// the paint that fills it and one pixel's tints, kept between pixels.
+struct TintPixels<'p, 'a> {
+    bytes: &'p mut [u8],
+    channels: usize,
+    paint: &'a dyn Fn(&[f64], &mut [u8]),
+    colour: Vec<u8>,
+}
+
+impl Pixels for TintPixels<'_, '_> {
+    fn put(&mut self, region: &Region, width: u32, px: i64, py: i64, mixed: &[f64]) {
+        // Painted before the pixel is placed, as `write`'s colour is.
+        (self.paint)(mixed, &mut self.colour);
+        let column = px - i64::from(region.x0);
+        let row = py - i64::from(region.y0);
+        if column < 0 || row < 0 {
+            return;
+        }
+        let stride = self.channels + 1;
+        let index = (row as usize) * (width as usize) + column as usize;
+        if let Some((painted, tints)) = self
+            .bytes
+            .get_mut(index * stride..(index + 1) * stride)
+            .and_then(<[u8]>::split_last_mut)
+        {
+            tints.copy_from_slice(&self.colour);
+            *painted = 0xFF;
+        }
+    }
+}
+
+/// The colour pass of a light draw: [`paint_into`] its colour buffer, each
+/// pixel's light from `draw.color`.
+fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut [[u8; 4]]) {
+    let mut pixels = LightPixels {
+        color,
+        paint: draw.color,
+    };
+    paint_into(draw, region, width, &mut pixels);
+}
+
 /// The colour pass: one scanline walk per triangle, interpolating the vertex
-/// inputs and asking the caller what they paint.
+/// inputs and asking the caller what they paint, the one walk a light draw
+/// and a draw in tints share.
 ///
 /// Each row walks its [`Spans::columns`] rather than the whole clamped box,
 /// and along it steps the weights and inputs ([`Plane`]); a row the spans
 /// cannot bound walks the whole box through the inside test at every pixel.
-fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut [[u8; 4]]) {
+fn paint_into<P: Pixels>(draw: &MeshDraw<'_>, region: &Region, width: u32, pixels: &mut P) {
     let mut mixed = vec![0.0f64; draw.components];
     // Per component: `v0 − v2`, `v1 − v2`, the increment a column, and the
     // running value.
@@ -665,7 +880,7 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
                             + w1 * at(inputs[1], component)
                             + w2 * at(inputs[2], component);
                     }
-                    write(color, region, width, px, py, (draw.color)(&mixed));
+                    pixels.put(region, width, px, py, &mixed);
                     painted = true;
                 }
                 continue;
@@ -737,7 +952,7 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
                     }
                 }
                 count::inside();
-                write(color, region, width, px, py, (draw.color)(&mixed));
+                pixels.put(region, width, px, py, &mixed);
                 painted = true;
             }
         }
@@ -758,7 +973,7 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
             let px = centroid.0.floor().clamp(-1.0e18, 1.0e18) as i64;
             let py = centroid.1.floor().clamp(-1.0e18, 1.0e18) as i64;
             if px >= bounds.x0 && px < bounds.x1 && py >= bounds.y0 && py < bounds.y1 {
-                write(color, region, width, px, py, (draw.color)(&mixed));
+                pixels.put(region, width, px, py, &mixed);
             }
         }
     }
@@ -878,19 +1093,26 @@ fn write(color: &mut [[u8; 4]], region: &Region, width: u32, px: i64, py: i64, v
 
 /// Spreads colour into the anti-aliased fringe: pixels the coverage mask
 /// reaches that no triangle's interior did.
-fn spread_fringe(coverage: &Mask, width: u32, height: u32, color: &mut [[u8; 4]]) {
-    if width == 0 || height == 0 {
+///
+/// `pixels` holds `stride` bytes a pixel, the last of them its `painted`
+/// byte — a light buffer's `[r, g, b, painted]`, or a tint buffer's tints and
+/// its `painted` — and a pixel the spread reaches takes its neighbour's bytes
+/// whole, so a draw in tints spreads its tints exactly where a light draw of
+/// the same mesh spreads its light.
+fn spread_fringe(coverage: &Mask, width: u32, height: u32, pixels: &mut [u8], stride: usize) {
+    if width == 0 || height == 0 || stride == 0 {
         return;
     }
+    let painted = |bytes: &[u8], pixel: usize| bytes[pixel * stride + stride - 1] != 0;
     for _ in 0..FRINGE_ROUNDS {
         // From a snapshot, so a pixel filled this round cannot feed the next
         // pixel in scan order and make the result depend on the direction.
-        let previous = color.to_vec();
+        let previous = pixels.to_vec();
         let mut changed = false;
         for row in 0..height {
             for column in 0..width {
                 let index = (row as usize) * (width as usize) + column as usize;
-                if previous[index][3] != 0 {
+                if painted(&previous, index) {
                     continue;
                 }
                 let x = coverage.x0.saturating_add(column as i32);
@@ -914,8 +1136,9 @@ fn spread_fringe(coverage: &Mask, width: u32, height: u32, color: &mut [[u8; 4]]
                         continue;
                     }
                     let source = (ny as usize) * (width as usize) + nx as usize;
-                    if previous[source][3] != 0 {
-                        color[index] = previous[source];
+                    if painted(&previous, source) {
+                        pixels[index * stride..(index + 1) * stride]
+                            .copy_from_slice(&previous[source * stride..(source + 1) * stride]);
                         changed = true;
                         break;
                     }
@@ -1848,6 +2071,176 @@ mod tests {
                 if touched.coverage.at(x, y) == 255 {
                     assert!(touched.at(x, y).is_some(), "({x}, {y}) has a colour");
                 }
+            }
+        }
+    }
+
+    /// A draw of the mesh `positions`, `values` (three a vertex) and
+    /// `triangles`, its light `color`, its silhouette at `bits` by `rule`.
+    fn three_inputs<'a>(
+        positions: &'a [(f64, f64)],
+        values: &'a [f64],
+        triangles: &'a [[u32; 3]],
+        color: &'a dyn Fn(&[f64]) -> Color,
+        bits: u8,
+        rule: HardEdge,
+    ) -> MeshDraw<'a> {
+        MeshDraw {
+            positions,
+            values,
+            components: 3,
+            triangles,
+            color,
+            stop: None,
+            scale: 1.0,
+            edge_bits: bits,
+            edge_rule: rule,
+        }
+    }
+
+    /// **An N-component mesh interpolates each component as light does**
+    /// (RC-04.14): a mesh of three inputs a vertex — four triangles about a
+    /// centre, sharing their edges, with a silhouette off the pixel grid, and
+    /// a sliver no pixel centre lies in — drawn in four tints a pixel, the
+    /// first three each an input's level and the fourth fixed, has at every
+    /// pixel the coverage and the painted pixels of a light draw of the same
+    /// mesh, and in each input's channel the level a light draw of that input
+    /// alone paints there, its fringe and its sliver's pixel among them: at 8
+    /// and 3 bits of edge and at 0 by the centre rule, over the whole region
+    /// and over a part of it. A draw in tints never asks for light.
+    #[test]
+    fn an_n_component_mesh_interpolates_each_component_as_light_does() {
+        let positions = [
+            (1.3, 2.1),
+            (17.6, 1.4),
+            (18.2, 15.7),
+            (2.4, 16.9),
+            (9.1, 8.3),
+            (20.2, 3.1),
+            (26.9, 3.3),
+            (20.3, 3.4),
+        ];
+        let values = [
+            0.0, 0.2, 1.0, //
+            1.0, 0.4, 0.0, //
+            0.3, 0.9, 0.5, //
+            0.6, 0.0, 0.8, //
+            0.5, 0.5, 0.25, //
+            0.9, 0.1, 0.7, //
+            0.2, 0.8, 0.4, //
+            0.4, 0.6, 0.1,
+        ];
+        let triangles = [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4], [5, 6, 7]];
+        let level = |value: f64| (value * 255.0).clamp(0.0, 255.0) as u8;
+        let paint = |inputs: &[f64], out: &mut [u8]| {
+            for (channel, slot) in out.iter_mut().enumerate() {
+                *slot = inputs.get(channel).map_or(77, |value| level(*value));
+            }
+        };
+        let tints = MeshTints {
+            channels: 4,
+            tints: &paint,
+        };
+        let no_light = |_: &[f64]| -> Color { panic!("a draw in tints asked for light") };
+        let greys: Vec<Box<dyn Fn(&[f64]) -> Color>> = (0..3)
+            .map(|input| {
+                Box::new(move |inputs: &[f64]| {
+                    let grey = level(inputs[input]);
+                    Color {
+                        r: grey,
+                        g: grey,
+                        b: grey,
+                        a: 0xFF,
+                    }
+                }) as Box<dyn Fn(&[f64]) -> Color>
+            })
+            .collect();
+        let whole = (0, 0, 30, 24);
+        for (bits, rule) in [
+            (8, HardEdge::Half),
+            (3, HardEdge::Half),
+            (0, HardEdge::Centre),
+        ] {
+            for wanted in [whole, (5, 4, 13, 9)] {
+                let what = format!("{bits} bits over {wanted:?}");
+                let mut scratch = FillScratch::new();
+                let tinted = draw_mesh_tints_over(
+                    &three_inputs(&positions, &values, &triangles, &no_light, bits, rule),
+                    &tints,
+                    wanted,
+                    whole,
+                    &mut scratch,
+                )
+                .expect("it fits the budget");
+                let lights: Vec<MeshBuffer> = greys
+                    .iter()
+                    .map(|grey| {
+                        draw_mesh_over(
+                            &three_inputs(
+                                &positions,
+                                &values,
+                                &triangles,
+                                grey.as_ref(),
+                                bits,
+                                rule,
+                            ),
+                            wanted,
+                            whole,
+                            &mut scratch,
+                        )
+                        .expect("it fits the budget")
+                    })
+                    .collect();
+                let (x0, y0, width, height) = (
+                    lights[0].coverage.x0,
+                    lights[0].coverage.y0,
+                    lights[0].coverage.width,
+                    lights[0].coverage.height,
+                );
+                assert_eq!(
+                    (
+                        tinted.coverage.x0,
+                        tinted.coverage.y0,
+                        tinted.coverage.width,
+                        tinted.coverage.height
+                    ),
+                    (x0, y0, width, height),
+                    "{what}: the region"
+                );
+                assert_eq!(tinted.channels, 4, "{what}");
+                assert_eq!(
+                    tinted.tints.len(),
+                    (width * height) as usize * 5,
+                    "{what}: four tints and a painted byte a pixel"
+                );
+                let mut painted = 0;
+                for y in y0..y0 + height as i32 {
+                    for x in x0..x0 + width as i32 {
+                        assert_eq!(
+                            tinted.coverage.at(x, y),
+                            lights[0].coverage.at(x, y),
+                            "{what}: the coverage at ({x}, {y})"
+                        );
+                        let light: Vec<Option<Color>> =
+                            lights.iter().map(|light| light.at(x, y)).collect();
+                        match tinted.at(x, y) {
+                            None => assert!(
+                                light.iter().all(Option::is_none),
+                                "{what}: ({x}, {y}) is painted in light alone"
+                            ),
+                            Some(got) => {
+                                painted += 1;
+                                let want: Vec<u8> = light
+                                    .iter()
+                                    .map(|colour| colour.expect("painted in light too").r)
+                                    .chain([77])
+                                    .collect();
+                                assert_eq!(got, want.as_slice(), "{what}: at ({x}, {y})");
+                            }
+                        }
+                    }
+                }
+                assert!(painted > 60, "{what}: the mesh painted {painted} pixels");
             }
         }
     }

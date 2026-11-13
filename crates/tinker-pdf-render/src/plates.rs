@@ -375,6 +375,12 @@ impl SpaceTints {
         matches!(self.road, Road::Nothing)
     }
 
+    /// How many tints a colour puts on the canvas: one a plate, its process
+    /// plates and its spots.
+    pub(crate) fn channels(&self) -> usize {
+        self.out.len()
+    }
+
     /// The tints a colour of `space` with `components` and light `light`
     /// puts on each plate, or `None` where it paints nothing.
     pub(crate) fn tints(
