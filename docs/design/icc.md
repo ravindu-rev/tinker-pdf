@@ -193,7 +193,11 @@ cross-target divergence ruling 4 exists to stop. The PCS leg reuses the D50
 XYZ→sRGB path; a LUT profile's connection space is read both as XYZ and as
 v2's legacy 16-bit Lab encoding, which goes through the `finv` machinery
 `lab_to_rgb` owns. A grey profile compiles its one curve to a luminance the
-three sRGB channels share.
+three sRGB channels share. A lookup-table transform over one, three or four
+inputs is read through an integer grid of that pipeline, its nodes evaluated
+as conversions reach them ([P-22](#p-22--colour-conversion-throughput));
+`Transform::evaluate` is the pipeline itself, which each node and the tests
+run.
 
 **Wiring.** `ColorSpace::Icc { transforms: Arc<Transforms>, components }` is
 built by the `ICCBased` arm from the stream bytes and `/N`. `Transforms` holds
@@ -1090,8 +1094,8 @@ built beside what it priced; the test's failure prints the worst input it met.
   space — fills, strokes, glyphs, stencil masks, shading samples and the
   colour tables P-14 builds from them, `/Indexed` palettes, tint alternates and
   `/BC` — and the row path. Nothing reads the pipeline directly but a node's
-  evaluation and the tests' reference, `Transform::evaluate`, which is what
-  `apply` is today.
+  evaluation and the tests' reference, `Transform::evaluate`, the pipeline
+  itself.
 - **A node is evaluated the first time a conversion reads it** and kept with
   the transform for every conversion after; the node array is allocated at the
   first conversion through the grid. So a page painting one colour through a

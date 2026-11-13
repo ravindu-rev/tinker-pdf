@@ -410,7 +410,7 @@ fn xyz_to_rgb(xyz: [f64; 3], white: [f64; 3]) -> (u8, u8, u8) {
 }
 
 /// One linear-light channel as an sRGB byte (IEC 61966-2-1).
-fn srgb_encode(v: f64) -> u8 {
+pub(crate) fn srgb_encode(v: f64) -> u8 {
     let v = v.clamp(0.0, 1.0);
     // Linear near zero, so the gradient stays finite where a plain power
     // would flatten.
@@ -473,6 +473,15 @@ pub fn lab_to_srgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
 
 /// than the alternative, which was rendering the whole space black.
 pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
+    let [r, g, bl] = lab_to_linear_srgb(l, a, b);
+    (srgb_encode(r), srgb_encode(g), srgb_encode(bl))
+}
+
+/// A CIE L*a*b* triple, relative to D50, as linear sRGB before it is
+/// encoded and unclamped: [`lab_to_rgb`]'s light, which an ICC transform's
+/// grid holds at its nodes (`docs/design/icc.md`, P-22, "What a node
+/// holds").
+pub(crate) fn lab_to_linear_srgb(l: f64, a: f64, b: f64) -> [f64; 3] {
     // D50, normalized so Y is 1.
     const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
 
@@ -495,9 +504,7 @@ pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     let y = WHITE[1] * finv(fy);
     let z = WHITE[2] * finv(fz);
 
-    let [r, g, bl] = xyz_d50_to_linear_srgb(x, y, z);
-
-    (srgb_encode(r), srgb_encode(g), srgb_encode(bl))
+    xyz_d50_to_linear_srgb(x, y, z)
 }
 
 #[cfg(test)]

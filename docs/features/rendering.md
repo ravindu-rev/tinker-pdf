@@ -35,12 +35,21 @@ curves, a grid whose axes may each carry their own point count, M curves, a
 matrix and B curves, run in that order although the header lists their
 offsets in the reverse. A grey profile whose connection space is `Lab` rather
 than `XYZ` reads as well: its one curve gives lightness instead of luminance,
-and the two differ by 8.6.5.4's cube root. A profile carrying a table for more
-than one rendering intent keeps each, and compiles one the first time an
-intent selects it, by ICC.1 8.10.2's precedence (`docs/design/icc.md`); every
-conversion the renderer makes takes relative colorimetric, 8.6.5.8's initial
-intent, through `A2B1`, or where the profile carries none, through `A2B0`
-and then `A2B2`.
+and the two differ by 8.6.5.4's cube root. A lookup table over one, three or
+four inputs converts through an integer grid of its own pipeline — 256, 33 or
+17 nodes an axis, each holding the pipeline's linear sRGB, evaluated the
+first time a conversion reaches it and kept — read linearly, tetrahedrally,
+or tetrahedrally over the first three inputs and linearly in the fourth, in
+16-bit fixed point, then encoded as the pipeline encodes: every node is the
+pipeline's colour exactly, and between them a read is within two levels of
+255 (`docs/design/icc.md`, P-22). A fill and an image sample of one colour
+read the same nodes. A table over any other input count, a matrix/TRC
+profile and a grey one convert through their pipeline. A profile carrying a
+table for more than one rendering intent keeps each, and compiles one the
+first time an intent selects it, by ICC.1 8.10.2's precedence
+(`docs/design/icc.md`); every conversion the renderer makes takes relative
+colorimetric, 8.6.5.8's initial intent, through `A2B1`, or where the profile
+carries none, through `A2B0` and then `A2B2`.
 
 A profile that contradicts itself — a monitor profile whose data space is
 `LAB` carrying the `rXYZ` columns a matrix applies to linear RGB; one naming a

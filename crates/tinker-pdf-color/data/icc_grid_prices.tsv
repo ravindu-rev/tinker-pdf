@@ -14,10 +14,15 @@
 #   nodes          points to the power of inputs
 #   bytes          three a node, an sRGB byte a channel
 #   evaluations    pipeline evaluations the grid's build made
-#   worst          the largest difference, in levels of 255, from Transform::apply
+#   worst          the largest difference, in levels of 255, from the direct
+#                  pipeline, Transform::evaluate
 #   mean           the mean difference, over every channel of every input swept
 #
 # The sweep is of 8-bit inputs: every value over one input, every fifth over
-# three, every seventeenth over four. Every node reproduces Transform::apply
-# exactly, which the probe asserts before it prices a grid.
+# three, every seventeenth over four. Every node reproduces the direct
+# pipeline exactly, which the probe asserts before it prices a grid. The
+# probe's own grids hold sRGB bytes, three a node; the row whose
+# interpolation is "the transform's grid" is the grid Transform::apply reads
+# (docs/design/icc.md, P-22), eight bytes a node, its evaluations the nodes
+# the sweep filled.
 profile	inputs	points	interpolation	nodes	bytes	evaluations	worst	mean

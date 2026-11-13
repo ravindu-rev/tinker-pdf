@@ -8,7 +8,10 @@
 //!
 //! Compiling is fuzzed beside parsing because it is where the values become
 //! tables: a curve with an absurd count, a matrix of infinities, a gamma that
-//! makes `pow` return something that is not a number.
+//! makes `pow` return something that is not a number. Applying a lookup-table
+//! transform over one, three or four inputs reads it through its grid, which
+//! evaluates the table's pipeline at each node the colours reach
+//! (`docs/design/icc.md`, P-22), so a hostile table builds its grid here too.
 //!
 //! # What this target checks, and what it does not
 //!

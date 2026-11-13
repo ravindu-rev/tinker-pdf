@@ -60,6 +60,7 @@
 //! reconstructed from the format's structure with some confidence, where a
 //! JBIG2 context template could not.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::{ColorSpace, XYZ_D50_TO_SRGB};
@@ -713,6 +714,17 @@ impl Lut {
 
     /// The sRGB this table's connection-space value is.
     fn to_rgb(&self, components: &[f64]) -> (u8, u8, u8) {
+        let [r, g, b] = self.to_linear(components);
+        let encoding = self.encoding();
+        (encoding.encode(r), encoding.encode(g), encoding.encode(b))
+    }
+
+    /// The linear sRGB this table's connection-space value is, before it is
+    /// encoded and unclamped: the light [`Lut::to_rgb`] encodes, and what a
+    /// grid's node holds (`docs/design/icc.md`, P-22, "What a node holds").
+    fn to_linear(&self, components: &[f64]) -> [f64; 3] {
+        #[cfg(test)]
+        tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
         let pcs = self.evaluate(components);
         if self.lab {
             // ICC v2's *legacy* 16-bit Lab encoding, which is not v4's: full
@@ -726,21 +738,399 @@ impl Lut {
             let l = pcs[0] * FULL * 100.0;
             let a = pcs[1] * FULL * 255.0 - 128.0;
             let b = pcs[2] * FULL * 255.0 - 128.0;
-            crate::lab_to_rgb(l, a, b)
+            crate::lab_to_linear_srgb(l, a, b)
         } else {
             // XYZ, in the s15Fixed16 convention the connection space uses:
             // 1.0 is 0x8000 of the 16-bit range, so full scale is just under
             // two.
             let scale = 65535.0 / 32768.0;
-            let [r, g, b] =
-                crate::xyz_d50_to_linear_srgb(pcs[0] * scale, pcs[1] * scale, pcs[2] * scale);
-            (
-                encode_component(r),
-                encode_component(g),
-                encode_component(b),
-            )
+            crate::xyz_d50_to_linear_srgb(pcs[0] * scale, pcs[1] * scale, pcs[2] * scale)
         }
     }
+
+    /// How this table's light is encoded: as `lab_to_rgb` encodes it under a
+    /// Lab connection space, as [`encode_component`] does under XYZ.
+    const fn encoding(&self) -> Encoding {
+        if self.lab {
+            Encoding::Lab
+        } else {
+            Encoding::Xyz
+        }
+    }
+}
+
+/// The last stage of a lookup-table transform's pipeline: its linear sRGB
+/// encoded as a byte, which differs by connection space because the two
+/// paths into sRGB were written separately and each is what a page draws
+/// today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Encoding {
+    /// IEC 61966-2-1's transfer function through `tinker_pdf_math::pow`, as
+    /// `lab_to_rgb` encodes a Lab connection space's light.
+    Lab,
+    /// [`encode_component`]'s 4 096-entry table, as an XYZ connection space's
+    /// light is encoded.
+    Xyz,
+}
+
+impl Encoding {
+    /// One channel of linear light as the pipeline encodes it.
+    fn encode(self, linear: f64) -> u8 {
+        match self {
+            Encoding::Lab => crate::srgb_encode(linear),
+            Encoding::Xyz => encode_component(linear),
+        }
+    }
+
+    /// This encoding sampled at every 16-bit value of light, built once: what
+    /// a grid's read encodes its interpolated light through.
+    fn table(self) -> &'static EncodingTable {
+        static LAB: OnceLock<EncodingTable> = OnceLock::new();
+        static XYZ: OnceLock<EncodingTable> = OnceLock::new();
+        let slot = match self {
+            Encoding::Lab => &LAB,
+            Encoding::Xyz => &XYZ,
+        };
+        slot.get_or_init(|| EncodingTable::sampled(self))
+    }
+}
+
+/// An [`Encoding`] at each of the 65 536 values of light a grid's read can
+/// hold, where 65 535 is 1.0, and for each byte the run of values that
+/// encode to it.
+struct EncodingTable {
+    /// The byte the encoding gives each value.
+    bytes: Box<[u8]>,
+    /// For each byte, the first and last value that encode to it; the first
+    /// above the last for a byte nothing encodes to.
+    runs: [(u16, u16); 256],
+}
+
+impl EncodingTable {
+    /// The table of `encoding`, each entry the pipeline's own encoding of its
+    /// value, so a read encodes as the pipeline does.
+    fn sampled(encoding: Encoding) -> EncodingTable {
+        let bytes: Box<[u8]> = (0..=u16::MAX)
+            .map(|value| encoding.encode(f64::from(value) / LIGHT_ONE as f64))
+            .collect();
+        let mut runs = [(u16::MAX, 0u16); 256];
+        for (value, &byte) in (0..=u16::MAX).zip(bytes.iter()) {
+            let run = &mut runs[usize::from(byte)];
+            if run.0 > run.1 {
+                *run = (value, value);
+            } else {
+                run.1 = value;
+            }
+        }
+        EncodingTable { bytes, runs }
+    }
+
+    /// The byte light `value` encodes to, `value` clamped to `0..=1`.
+    fn encode(&self, value: i64) -> u8 {
+        let index = value.clamp(0, LIGHT_ONE) as usize;
+        self.bytes.get(index).copied().unwrap_or(0)
+    }
+}
+
+/// 1.0 of light, as a grid's node and its read hold it.
+const LIGHT_ONE: i64 = 65535;
+
+/// A grid's nodes along each axis, for a transform over one, three or four
+/// inputs, and `None` for any other count, which keeps today's evaluation
+/// (`docs/design/icc.md`, P-22, "The grid's size").
+const fn grid_points(inputs: usize) -> Option<usize> {
+    match inputs {
+        1 => Some(256),
+        3 => Some(33),
+        4 => Some(17),
+        _ => None,
+    }
+}
+
+/// Bits a channel of a node's light takes in its word: signed, so from
+/// `-2^20` to `2^20 - 1`, which with [`LIGHT_ONE`] as 1.0 is from −16 to 16.
+const CHANNEL_BITS: u32 = 21;
+
+/// The bit that says a node has been evaluated.
+const FILLED: u64 = 1 << 63;
+
+/// A lookup-table transform's pipeline sampled at the nodes of an integer
+/// grid, and read between them in fixed point (`docs/design/icc.md`, P-22).
+///
+/// Each node holds the pipeline's linear sRGB at the node — three signed
+/// channels of [`CHANNEL_BITS`], unclamped, beside [`FILLED`] — in one atomic
+/// word, evaluated the first time a read reaches it and kept for every read
+/// after. A node is a function of the table and its position alone, so two
+/// threads that fill one at once store one value, and no read depends on
+/// which nodes were filled before it.
+struct Grid {
+    /// One, three or four.
+    inputs: usize,
+    /// Nodes along each axis.
+    points: usize,
+    /// The pipeline's last stage, which the read runs after interpolating.
+    encoding: Encoding,
+    /// `points.pow(inputs)` nodes, the last axis varying fastest, allocated
+    /// at the first read.
+    nodes: OnceLock<Box<[AtomicU64]>>,
+}
+
+impl Grid {
+    /// The grid `lut` converts through, or `None` for an input count no grid
+    /// is built over.
+    fn over(lut: &Lut) -> Option<Grid> {
+        Some(Grid {
+            inputs: lut.inputs,
+            points: grid_points(lut.inputs)?,
+            encoding: lut.encoding(),
+            nodes: OnceLock::new(),
+        })
+    }
+
+    /// How many nodes the grid holds.
+    fn count(&self) -> usize {
+        // At most 17^4, so the product cannot overflow.
+        self.points.pow(self.inputs as u32)
+    }
+
+    /// The node array, allocated now if no read has reached it yet.
+    fn nodes(&self) -> &[AtomicU64] {
+        self.nodes
+            .get_or_init(|| (0..self.count()).map(|_| AtomicU64::new(0)).collect())
+    }
+
+    /// The inputs node `index` stands at: each axis's node over `0..=1`.
+    fn node_input(&self, index: usize) -> [f64; 4] {
+        let mut x = [0.0f64; 4];
+        let mut rest = index;
+        let last = (self.points - 1) as f64;
+        for slot in x[..self.inputs].iter_mut().rev() {
+            *slot = (rest % self.points) as f64 / last;
+            rest /= self.points;
+        }
+        x
+    }
+
+    /// Node `index`'s word, filled: evaluated through `lut` now if no read
+    /// has reached it before.
+    fn node(&self, lut: &Lut, nodes: &[AtomicU64], index: usize) -> [i64; 3] {
+        let word = match nodes.get(index) {
+            Some(slot) => {
+                let held = slot.load(Ordering::Relaxed);
+                if held & FILLED != 0 {
+                    held
+                } else {
+                    let fresh = self.evaluate(lut, index);
+                    slot.store(fresh, Ordering::Relaxed);
+                    fresh
+                }
+            }
+            // An index past the grid is not reachable from `read`, whose
+            // cells stop a node short of each axis's last; answered all the
+            // same rather than indexed into.
+            None => self.evaluate(lut, index),
+        };
+        unpack(word)
+    }
+
+    /// Node `index` evaluated: the pipeline's light there, each channel
+    /// within `0..=1` pulled to the value nearest it that encodes to the
+    /// pipeline's own byte, so a read at the node is the pipeline exactly.
+    fn evaluate(&self, lut: &Lut, index: usize) -> u64 {
+        let x = self.node_input(index);
+        let light = lut.to_linear(&x[..self.inputs]);
+        let table = self.encoding.table();
+        let mut word = FILLED;
+        for (channel, light) in light.into_iter().enumerate() {
+            let byte = self.encoding.encode(light);
+            let held = node_value(light, byte, table);
+            word |= pack(held) << (CHANNEL_BITS * channel as u32);
+        }
+        word
+    }
+
+    /// `components` converted through the grid: each located on its axis,
+    /// the nodes around it interpolated in fixed point, the light encoded as
+    /// the pipeline encodes it.
+    fn read(&self, lut: &Lut, components: &[f64]) -> (u8, u8, u8) {
+        let mut cells = [0usize; 4];
+        let mut fractions = [0i64; 4];
+        for (axis, (cell, fraction)) in cells
+            .iter_mut()
+            .zip(fractions.iter_mut())
+            .enumerate()
+            .take(self.inputs)
+        {
+            let x = components.get(axis).copied().unwrap_or(0.0);
+            (*cell, *fraction) = locate(x, self.points);
+        }
+        self.read_at(lut, &cells, &fractions)
+    }
+
+    /// The grid read at `cells` and `fractions`, one of each an input: the
+    /// interpolation every conversion through the grid shares.
+    fn read_at(&self, lut: &Lut, cells: &[usize; 4], fractions: &[i64; 4]) -> (u8, u8, u8) {
+        let nodes = self.nodes();
+        let points = self.points;
+        let light = match self.inputs {
+            1 => {
+                let low = self.node(lut, nodes, cells[0]);
+                let high = self.node(lut, nodes, cells[0] + 1);
+                [0, 1, 2]
+                    .map(|c| round_shift((low[c] << 16) + fractions[0] * (high[c] - low[c]), 16))
+            }
+            3 => {
+                let base = (cells[0] * points + cells[1]) * points + cells[2];
+                let strides = [points * points, points, 1];
+                let sum = self.tetrahedral(
+                    lut,
+                    nodes,
+                    base,
+                    strides,
+                    [fractions[0], fractions[1], fractions[2]],
+                );
+                sum.map(|channel| round_shift(channel, 16))
+            }
+            _ => {
+                // Tetrahedral over the first three at the fourth's two nodes
+                // either side, then linear between them.
+                let base = ((cells[0] * points + cells[1]) * points + cells[2]) * points + cells[3];
+                let strides = [points * points * points, points * points, points];
+                let three = [fractions[0], fractions[1], fractions[2]];
+                let low = self.tetrahedral(lut, nodes, base, strides, three);
+                let high = self.tetrahedral(lut, nodes, base + 1, strides, three);
+                [0, 1, 2]
+                    .map(|c| round_shift((low[c] << 16) + fractions[3] * (high[c] - low[c]), 32))
+            }
+        };
+        let table = self.encoding.table();
+        (
+            table.encode(light[0]),
+            table.encode(light[1]),
+            table.encode(light[2]),
+        )
+    }
+
+    /// From node `base`, a step along each of three axes in turn, the
+    /// largest fraction first and the earlier axis first between equals,
+    /// each node reached weighed by its step's fraction against the one
+    /// before: the light, in 2^-16 of [`LIGHT_ONE`]'s unit.
+    fn tetrahedral(
+        &self,
+        lut: &Lut,
+        nodes: &[AtomicU64],
+        base: usize,
+        strides: [usize; 3],
+        fractions: [i64; 3],
+    ) -> [i64; 3] {
+        let mut at = base;
+        let mut previous = self.node(lut, nodes, at);
+        let mut sum = previous.map(|value| value << 16);
+        for axis in largest_first(fractions) {
+            at += strides[axis];
+            let next = self.node(lut, nodes, at);
+            for ((slot, now), before) in sum.iter_mut().zip(next).zip(previous) {
+                *slot += fractions[axis] * (now - before);
+            }
+            previous = next;
+        }
+        sum
+    }
+}
+
+/// A grid's nodes are a cache of its pipeline, so a copy starts with none
+/// filled and reads exactly as the original does.
+impl Clone for Grid {
+    fn clone(&self) -> Self {
+        Grid {
+            inputs: self.inputs,
+            points: self.points,
+            encoding: self.encoding,
+            nodes: OnceLock::new(),
+        }
+    }
+}
+
+/// The shape and not the nodes: 83 521 words say nothing a reader needs.
+impl std::fmt::Debug for Grid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Grid")
+            .field("inputs", &self.inputs)
+            .field("points", &self.points)
+            .field("encoding", &self.encoding)
+            .field("allocated", &self.nodes.get().is_some())
+            .finish()
+    }
+}
+
+/// Where `x` falls on an axis of `points` nodes: the lower node of its cell,
+/// and the fraction past it in 16 bits, 65 536 at the top of the last cell.
+/// `x` is clamped to `0..=1`, and a NaN locates at 0.
+fn locate(x: f64, points: usize) -> (usize, i64) {
+    let last = points - 1;
+    let scaled = (x.clamp(0.0, 1.0) * last as f64 * 65536.0).round();
+    // `as` saturates and takes a NaN to 0.
+    let scaled = scaled as i64;
+    let cell = (scaled >> 16) as usize;
+    if cell >= last {
+        (last - 1, 65536)
+    } else {
+        (cell, scaled & 0xFFFF)
+    }
+}
+
+/// The three axes in the order a tetrahedral read steps along them: the
+/// largest fraction first, the earlier axis first between equals.
+fn largest_first(fractions: [i64; 3]) -> [usize; 3] {
+    let mut order = [0usize, 1, 2];
+    if fractions[order[1]] > fractions[order[0]] {
+        order.swap(0, 1);
+    }
+    if fractions[order[2]] > fractions[order[1]] {
+        order.swap(1, 2);
+        if fractions[order[1]] > fractions[order[0]] {
+            order.swap(0, 1);
+        }
+    }
+    order
+}
+
+/// `value`, a fixed-point number with `bits` fractional bits, rounded to a
+/// whole one, a half rounding up.
+const fn round_shift(value: i64, bits: u32) -> i64 {
+    (value + (1 << (bits - 1))) >> bits
+}
+
+/// One channel of a node's light as the grid holds it: the light in units
+/// of [`LIGHT_ONE`], held within [`CHANNEL_BITS`]; where it is within
+/// `0..=1`, the value nearest it among those `table` encodes to `byte`, the
+/// pipeline's own byte for it.
+fn node_value(light: f64, byte: u8, table: &EncodingTable) -> i64 {
+    let limit = 1i64 << (CHANNEL_BITS - 1);
+    // `as` saturates, and takes a NaN to 0.
+    let value = ((light * LIGHT_ONE as f64).round() as i64).clamp(-limit, limit - 1);
+    if (0..=LIGHT_ONE).contains(&value) {
+        let (low, high) = table.runs[usize::from(byte)];
+        if low <= high {
+            return value.clamp(i64::from(low), i64::from(high));
+        }
+    }
+    value
+}
+
+/// One channel's value in its [`CHANNEL_BITS`], offset to be unsigned.
+fn pack(value: i64) -> u64 {
+    let offset = value + (1i64 << (CHANNEL_BITS - 1));
+    (offset as u64) & ((1u64 << CHANNEL_BITS) - 1)
+}
+
+/// A filled node's three channels.
+fn unpack(word: u64) -> [i64; 3] {
+    let mask = (1u64 << CHANNEL_BITS) - 1;
+    [0u32, 1, 2].map(|channel| {
+        let offset = (word >> (CHANNEL_BITS * channel)) & mask;
+        offset as i64 - (1i64 << (CHANNEL_BITS - 1))
+    })
 }
 
 /// A sampled table at `x` in `0..=1`, linearly interpolated.
@@ -1326,7 +1716,17 @@ fn read_curve(data: &[u8]) -> Result<Curve, IccError> {
 ///
 /// The matrix is held in s15.16 — ICC.1's own `s15Fixed16Number`, which is
 /// what the profile stored it as, so no precision is invented on the way in.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// # A lookup table is read through a grid
+///
+/// A lookup-table transform over one, three or four inputs converts through
+/// a [`Grid`] of its own pipeline, sampled at 256, 33 or 17 nodes an axis and
+/// read between them in fixed point (`docs/design/icc.md`, P-22): its
+/// pipeline — `Lut::evaluate`, the connection space into sRGB and the
+/// encoding — runs once a node, the first time a conversion reaches it,
+/// rather than once a colour. A matrix/TRC or grey transform has no grid: its
+/// pipeline is already integer, and exact.
+#[derive(Debug)]
 pub struct Transform {
     /// Per input channel, the curve sampled into 16-bit linear values.
     curves: Vec<Vec<u16>>,
@@ -1339,6 +1739,35 @@ pub struct Transform {
     /// shared with the profile's [`Tables`] and with every other intent that
     /// converts through it.
     lut: Option<Arc<Lut>>,
+    /// The grid `lut` is read through, where it takes one, three or four
+    /// inputs.
+    grid: Option<Grid>,
+}
+
+/// A copy converts as the original does; its grid starts with no node
+/// filled, which no conversion can tell.
+impl Clone for Transform {
+    fn clone(&self) -> Self {
+        Transform {
+            curves: self.curves.clone(),
+            matrix: self.matrix,
+            inputs: self.inputs,
+            lut: self.lut.clone(),
+            grid: self.grid.clone(),
+        }
+    }
+}
+
+/// Two transforms are one where their pipelines are: a grid is the
+/// pipeline's, and which of its nodes are filled is not a property of the
+/// transform.
+impl PartialEq for Transform {
+    fn eq(&self, other: &Self) -> bool {
+        self.curves == other.curves
+            && self.matrix == other.matrix
+            && self.inputs == other.inputs
+            && self.lut == other.lut
+    }
 }
 
 /// Entries in a compiled tone curve.
@@ -1382,17 +1811,20 @@ impl Transform {
                     matrix,
                     inputs: 3,
                     lut: None,
+                    grid: None,
                 })
             }
-            // A table is already the transform: there is nothing to compile,
-            // because its curves arrived sampled and its grid is the matrix's
-            // replacement rather than a factor of it.
+            // A table is already the transform: its curves arrived sampled and
+            // its grid is the matrix's replacement rather than a factor of it.
+            // What compiles is the grid it is read through, whose nodes are
+            // evaluated as conversions reach them.
             Model::Lut(tables) => {
                 let lut = tables.select(intent)?;
                 Some(Transform {
                     curves: Vec::new(),
                     matrix: [[0; 3]; 3],
                     inputs: lut.inputs,
+                    grid: Grid::over(&lut),
                     lut: Some(lut),
                 })
             }
@@ -1425,6 +1857,7 @@ impl Transform {
                     matrix: identity,
                     inputs: 1,
                     lut: None,
+                    grid: None,
                 })
             }
         }
@@ -1441,9 +1874,23 @@ impl Transform {
     /// Integers throughout: a table lookup per channel, an s15.16 matrix
     /// multiply in `i64`, then the sRGB transfer function from a second
     /// compiled table. No float, no `pow`, nothing that rounds differently
-    /// between one target and the next.
+    /// between one target and the next. A lookup-table transform with a grid
+    /// reads its grid: each component located in 16-bit fixed point, the
+    /// nodes around it interpolated in `i64` and the light encoded through a
+    /// table, every node it reads evaluated once and kept.
     #[must_use]
     pub fn apply(&self, components: &[f64]) -> (u8, u8, u8) {
+        #[cfg(test)]
+        tests::APPLY_CALLS.with(|count| count.set(count.get() + 1));
+        if let (Some(lut), Some(grid)) = (&self.lut, &self.grid) {
+            return grid.read(lut, components);
+        }
+        self.evaluate(components)
+    }
+
+    /// The transform's whole pipeline for one colour, with no grid: what a
+    /// grid's node is evaluated as, and what the tests hold a grid to.
+    pub(crate) fn evaluate(&self, components: &[f64]) -> (u8, u8, u8) {
         if let Some(lut) = &self.lut {
             return lut.to_rgb(components);
         }
@@ -1619,6 +2066,18 @@ pub(crate) mod tests {
         /// Every lookup table this thread has read out of a tag's bytes, so a
         /// test can say how many reads compiling an intent cost.
         pub(super) static TABLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Every time this thread has run a lookup table's pipeline, from
+        /// `Lut::evaluate` to linear sRGB: what a grid's nodes cost, and what
+        /// a conversion through a filled grid must not.
+        pub(super) static PIPELINE_EVALUATIONS: std::cell::Cell<u64> =
+            const { std::cell::Cell::new(0) };
+        /// Every call of [`Transform::apply`] on this thread.
+        pub(super) static APPLY_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The pipeline evaluations this thread has made since the last call.
+    fn pipeline_evaluations() -> u64 {
+        PIPELINE_EVALUATIONS.with(|count| count.replace(0))
     }
 
     /// sRGB's own primaries, chromatically adapted to D50 — which is what an
@@ -3194,23 +3653,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// Where `x` falls on an axis of `points` nodes: the lower node of its
-    /// cell, and the fraction past it in 16 bits, which is 65 536 at the top
-    /// of the last cell.
-    fn locate(x: f64, points: usize) -> (usize, i64) {
-        let scaled = (x.clamp(0.0, 1.0) * (points - 1) as f64 * 65536.0).round() as i64;
-        let cell = (scaled >> 16) as usize;
-        if cell >= points - 1 {
-            (points - 2, 65536)
-        } else {
-            (cell, scaled & 0xFFFF)
-        }
-    }
-
     /// A probe's integer grid: a transform's sRGB at every node of `points`
     /// per axis over its inputs, the last axis fastest, three bytes a node.
-    /// A node holds the direct pipeline's own answer there, so between the
-    /// nodes the grid's difference from the pipeline is what it costs.
+    /// A node holds the direct pipeline's own answer there,
+    /// [`Transform::evaluate`]'s, so between the nodes the grid's difference
+    /// from the pipeline is what it costs.
     struct ProbeGrid {
         inputs: usize,
         points: usize,
@@ -3226,7 +3673,7 @@ pub(crate) mod tests {
             let nodes = (0..count)
                 .map(|index| {
                     evaluations += 1;
-                    let (r, g, b) = transform.apply(&Self::node_input(index, inputs, points));
+                    let (r, g, b) = transform.evaluate(&Self::node_input(index, inputs, points));
                     [r, g, b]
                 })
                 .collect();
@@ -3372,12 +3819,17 @@ pub(crate) mod tests {
 #   nodes          points to the power of inputs
 #   bytes          three a node, an sRGB byte a channel
 #   evaluations    pipeline evaluations the grid's build made
-#   worst          the largest difference, in levels of 255, from Transform::apply
+#   worst          the largest difference, in levels of 255, from the direct
+#                  pipeline, Transform::evaluate
 #   mean           the mean difference, over every channel of every input swept
 #
 # The sweep is of 8-bit inputs: every value over one input, every fifth over
-# three, every seventeenth over four. Every node reproduces Transform::apply
-# exactly, which the probe asserts before it prices a grid.
+# three, every seventeenth over four. Every node reproduces the direct
+# pipeline exactly, which the probe asserts before it prices a grid. The
+# probe's own grids hold sRGB bytes, three a node; the row whose
+# interpolation is \"the transform's grid\" is the grid Transform::apply reads
+# (docs/design/icc.md, P-22), eight bytes a node, its evaluations the nodes
+# the sweep filled.
 profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
 ";
 
@@ -3386,14 +3838,16 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
     /// For each profile model the tree reads — matrix/TRC at gamma 1.0 and
     /// 2.2, grey under XYZ and under Lab, `mft2` CMYK into Lab and into XYZ,
     /// and a three-input `mAB ` with every stage — a 17- and a 33-point grid
-    /// built from [`Transform::apply`] at its nodes, read in fixed point in
-    /// each form [`Form::priced`] names, against `apply` over [`sweep`]'s
-    /// inputs: its nodes, bytes and build evaluations, and its worst and mean
-    /// difference in levels. Today's evaluation is the reference because it
-    /// is this engine's own, pinned by this module's known-answer tests; no
-    /// other colour engine is asked (ruling 13).
+    /// built from [`Transform::evaluate`], the direct pipeline, at its nodes,
+    /// read in fixed point in each form [`Form::priced`] names, against the
+    /// pipeline over [`sweep`]'s inputs: its nodes, bytes and build
+    /// evaluations, and its worst and mean difference in levels; and, for a
+    /// transform `apply` reads through a [`Grid`], that grid priced the same
+    /// way. The pipeline is the reference because it is this engine's own,
+    /// pinned by this module's known-answer tests; no other colour engine is
+    /// asked (ruling 13).
     ///
-    /// Every node is read back through every form and must be `apply`'s
+    /// Every node is read back through every form and must be the pipeline's
     /// answer exactly before the grid is priced, so a wrong grid cannot price
     /// itself. The rows are printed after a `RAN` banner and written to the
     /// committed table, which this run regenerates.
@@ -3423,7 +3877,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             let direct: Vec<[u8; 3]> = samples
                 .iter()
                 .map(|x| {
-                    let (r, g, b) = transform.apply(x);
+                    let (r, g, b) = transform.evaluate(x);
                     [r, g, b]
                 })
                 .collect();
@@ -3436,7 +3890,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
                 );
                 for index in 0..grid.nodes.len() {
                     let x = ProbeGrid::node_input(index, inputs, points);
-                    let (r, g, b) = transform.apply(&x);
+                    let (r, g, b) = transform.evaluate(&x);
                     for &form in Form::priced(inputs) {
                         assert_eq!(
                             grid.read(form, &x),
@@ -3463,6 +3917,35 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
                     ));
                 }
             }
+            if let Some(built) = &transform.grid {
+                for index in 0..built.count() {
+                    let x = built.node_input(index);
+                    assert_eq!(
+                        transform.apply(&x[..inputs]),
+                        transform.evaluate(&x[..inputs]),
+                        "{name}: the transform's grid at node {index} is not the pipeline"
+                    );
+                }
+                let fresh = transform.clone();
+                let _ = pipeline_evaluations();
+                let (mut worst, mut total) = (0u8, 0u64);
+                for (x, want) in samples.iter().zip(&direct) {
+                    let (r, g, b) = fresh.apply(x);
+                    for (got, want) in [r, g, b].into_iter().zip(*want) {
+                        let difference = got.abs_diff(want);
+                        worst = worst.max(difference);
+                        total += u64::from(difference);
+                    }
+                }
+                let filled = pipeline_evaluations();
+                let mean = total as f64 / (samples.len() * 3) as f64;
+                rows.push_str(&format!(
+                    "{name}\t{inputs}\t{}\tthe transform's grid\t{}\t{}\t{filled}\t{worst}\t{mean:.4}\n",
+                    built.points,
+                    built.count(),
+                    built.count() * 8,
+                ));
+            }
         }
         println!("icc-grid-prices: RAN, {} rows", rows.lines().count());
         print!("{rows}");
@@ -3471,5 +3954,318 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             .join("icc_grid_prices.tsv");
         std::fs::write(&path, format!("{GRID_PRICES_HEAD}{rows}"))
             .unwrap_or_else(|error| panic!("writing {path:?}: {error}"));
+    }
+
+    // ---- the grid (docs/design/icc.md, P-22) --------------------------------
+
+    /// A one-input `mft2` grey printer table into XYZ over nine nodes, each
+    /// the D50 white scaled by its input squared: a curve the one-input grid
+    /// has to follow between its 256 nodes, and the model P-22.1 had no row
+    /// for, since its grey profiles are curves rather than tables.
+    fn grey_table() -> Vec<u8> {
+        let white = [0.9642f64, 1.0, 0.8249];
+        let clut: Vec<[u16; 3]> = (0..9u32)
+            .map(|node| {
+                let y = f64::from(node * node) / 64.0;
+                white.map(|w| (w * y * 32768.0).round() as u16)
+            })
+            .collect();
+        lut_profile(b"GRAY", b"XYZ ", mft2(1, 9, &clut))
+    }
+
+    /// Each model P-22.1 priced, and [`grey_table`], compiled for relative
+    /// colorimetric, by name.
+    fn priced_models() -> Vec<(&'static str, Transform)> {
+        [
+            ("matrix/TRC, gamma 1.0", matrix_trc(1.0)),
+            ("matrix/TRC, gamma 2.2", matrix_trc(2.2)),
+            ("grey under XYZ, gamma 2.2", grey(b"XYZ ", 2.2)),
+            ("grey under Lab, gamma 1.0", grey(b"Lab ", 1.0)),
+            ("mft2 CMYK to Lab", cmyk_table(true)),
+            ("mft2 CMYK to XYZ", cmyk_table(false)),
+            (
+                "mAB RGB to XYZ",
+                lut_profile(b"RGB ", b"XYZ ", mab_every_stage()),
+            ),
+            ("mft2 grey to XYZ", grey_table()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| {
+            let profile = Profile::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let transform = Transform::compile(&profile, Intent::RelativeColorimetric)
+                .unwrap_or_else(|| panic!("{name}: no transform"));
+            (name, transform)
+        })
+        .collect()
+    }
+
+    /// The largest of three channels' differences between two colours.
+    fn apart(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
+        a.0.abs_diff(b.0)
+            .max(a.1.abs_diff(b.1))
+            .max(a.2.abs_diff(b.2))
+    }
+
+    /// **The grid is the pipeline at its nodes, and within the bound
+    /// between** (`docs/design/icc.md`, P-22, "The bound").
+    ///
+    /// For each lookup-table model P-22.1 priced, and a one-input table: a
+    /// grid of the design's size, every node of which converts to the direct
+    /// pipeline's bytes exactly; every 8-bit input over one input exact, as
+    /// each is a node, and a component between two within one level; every
+    /// input of P-22.1's sweep over three and four within two levels. The
+    /// matrix/TRC and grey models build no grid and convert as their pipeline
+    /// does. A failure names the worst input it met.
+    #[test]
+    fn the_grid_is_the_pipeline_at_its_nodes_and_within_the_bound_between() {
+        for (name, transform) in priced_models() {
+            let inputs = transform.inputs();
+            let Some(grid) = &transform.grid else {
+                assert!(
+                    transform.lut.is_none(),
+                    "{name}: a lookup table over {inputs} inputs with no grid"
+                );
+                for x in sweep(inputs) {
+                    assert_eq!(
+                        transform.apply(&x),
+                        transform.evaluate(&x),
+                        "{name} at {x:?}: a transform with no grid is its pipeline"
+                    );
+                }
+                continue;
+            };
+            assert_eq!(Some(grid.points), grid_points(inputs), "{name}: its size");
+            assert_eq!(grid.count(), grid.points.pow(inputs as u32));
+            for index in 0..grid.count() {
+                let x = grid.node_input(index);
+                assert_eq!(
+                    transform.apply(&x[..inputs]),
+                    transform.evaluate(&x[..inputs]),
+                    "{name}: node {index} at {:?} is not the pipeline",
+                    &x[..inputs]
+                );
+            }
+            let bound = if inputs == 1 { 0 } else { 2 };
+            let mut worst: (u8, Vec<f64>) = (0, Vec::new());
+            for x in sweep(inputs) {
+                let difference = apart(transform.apply(&x), transform.evaluate(&x));
+                if difference > worst.0 {
+                    worst = (difference, x);
+                }
+            }
+            assert!(
+                worst.0 <= bound,
+                "{name}: {} levels from the pipeline at {:?}, past the bound of {bound}",
+                worst.0,
+                worst.1
+            );
+            if inputs == 1 {
+                for step in 0..=4096u32 {
+                    let x = [f64::from(step) / 4096.0];
+                    let difference = apart(transform.apply(&x), transform.evaluate(&x));
+                    assert!(
+                        difference <= 1,
+                        "{name}: {difference} levels from the pipeline at {x:?}, between nodes"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A conversion through a filled grid evaluates no pipeline.** Before
+    /// every node is filled, any number of conversions evaluate at most one
+    /// pipeline a node; once every node is, a sweep on and between the nodes
+    /// evaluates none.
+    #[test]
+    fn a_conversion_evaluates_no_pipeline() {
+        for (name, transform) in priced_models() {
+            let Some(grid) = &transform.grid else {
+                continue;
+            };
+            let inputs = transform.inputs();
+            let _ = pipeline_evaluations();
+            for _ in 0..2 {
+                for x in sweep(inputs) {
+                    let _ = transform.apply(&x);
+                }
+            }
+            let filling = pipeline_evaluations();
+            assert!(filling > 0, "{name}: the sweep filled no node");
+            assert!(
+                filling <= grid.count() as u64,
+                "{name}: {filling} evaluations for {} nodes",
+                grid.count()
+            );
+            for index in 0..grid.count() {
+                let x = grid.node_input(index);
+                let _ = transform.apply(&x[..inputs]);
+            }
+            let _ = pipeline_evaluations();
+            let mut state = 0x9E37_79B9u32;
+            let mut component = || {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                f64::from(state >> 8) / f64::from(1u32 << 24)
+            };
+            for _ in 0..4096 {
+                let x: Vec<f64> = (0..inputs).map(|_| component()).collect();
+                let _ = transform.apply(&x);
+            }
+            for x in sweep(inputs) {
+                let _ = transform.apply(&x);
+            }
+            assert_eq!(
+                pipeline_evaluations(),
+                0,
+                "{name}: a conversion through a filled grid evaluated the pipeline"
+            );
+        }
+    }
+
+    /// **Each encoding table is its pipeline's encoding**: at every one of
+    /// the 65 536 values the byte the pipeline's own encoding gives, never
+    /// falling as the light rises, every byte reached, and each byte's run the
+    /// values that encode to it and no others.
+    #[test]
+    fn each_encoding_table_is_its_pipelines_encoding_and_reaches_every_byte() {
+        for encoding in [Encoding::Lab, Encoding::Xyz] {
+            let table = encoding.table();
+            assert_eq!(table.bytes.len(), 65_536, "{encoding:?}");
+            let mut previous = 0u8;
+            for value in 0..=u16::MAX {
+                let byte = table.bytes[usize::from(value)];
+                assert_eq!(
+                    byte,
+                    encoding.encode(f64::from(value) / 65535.0),
+                    "{encoding:?} at {value}"
+                );
+                assert!(byte >= previous, "{encoding:?} falls at {value}");
+                previous = byte;
+            }
+            for byte in 0..=u8::MAX {
+                let (low, high) = table.runs[usize::from(byte)];
+                assert!(low <= high, "{encoding:?}: nothing encodes to {byte}");
+                assert_eq!(table.bytes[usize::from(low)], byte, "{encoding:?}");
+                assert_eq!(table.bytes[usize::from(high)], byte, "{encoding:?}");
+                if low > 0 {
+                    assert_ne!(table.bytes[usize::from(low) - 1], byte, "{encoding:?}");
+                }
+                if high < u16::MAX {
+                    assert_ne!(table.bytes[usize::from(high) + 1], byte, "{encoding:?}");
+                }
+            }
+            assert_eq!(table.encode(-5), 0, "{encoding:?}: below the gamut");
+            assert_eq!(table.encode(1 << 20), 255, "{encoding:?}: above it");
+        }
+    }
+
+    /// **A node holds each channel's light signed and unclamped**, from −16
+    /// to 16, in one word beside its flag; light within the gamut is pulled
+    /// into the run of the pipeline's byte, and light past ±16 is held at
+    /// the end of the range.
+    #[test]
+    fn a_node_holds_its_light_signed_and_reads_back_the_pipelines_byte() {
+        let limit = 1i64 << (CHANNEL_BITS - 1);
+        for values in [
+            [0, 0, 0],
+            [-limit, limit - 1, 12_345],
+            [LIGHT_ONE, -1, LIGHT_ONE + 1],
+            [-7, 0, limit - 1],
+        ] {
+            let mut word = FILLED;
+            for (channel, value) in values.into_iter().enumerate() {
+                word |= pack(value) << (CHANNEL_BITS * channel as u32);
+            }
+            assert_ne!(word & FILLED, 0, "{values:?}: the flag");
+            assert_eq!(unpack(word), values, "{values:?}");
+        }
+        let table = Encoding::Lab.table();
+        assert_eq!(node_value(-0.25, 0, table), -16_384, "outside the gamut");
+        assert_eq!(node_value(40.0, 255, table), limit - 1, "past 16");
+        assert_eq!(node_value(-40.0, 0, table), -limit, "past -16");
+        assert_eq!(node_value(f64::NAN, 0, table), 0, "a NaN");
+        for byte in [0u8, 1, 17, 128, 254, 255] {
+            let (low, high) = table.runs[usize::from(byte)];
+            let held = node_value(0.5, byte, table);
+            assert!(
+                (i64::from(low)..=i64::from(high)).contains(&held),
+                "{byte}: {held} outside {low}..={high}"
+            );
+            assert_eq!(table.encode(held), byte);
+        }
+    }
+
+    /// **A grid exists over one, three or four inputs only** (ruling 1): a
+    /// table over two or five converts through its pipeline at every
+    /// conversion, as before grids, and one over one, three or four is read
+    /// through a grid of the design's size whatever the profile's own grid
+    /// declares.
+    #[test]
+    fn a_grid_is_built_over_one_three_or_four_inputs_only() {
+        for inputs in 1usize..=5 {
+            let clut: Vec<[u16; 3]> = (0..1usize << inputs)
+                .map(|node| {
+                    [
+                        (node * 4_099 % 32_768) as u16,
+                        (node * 9_157 % 32_768) as u16,
+                        (node * 1_237 % 32_768) as u16,
+                    ]
+                })
+                .collect();
+            let space = [b'0' + inputs as u8, b'C', b'L', b'R'];
+            let profile = Profile::parse(&lut_profile(&space, b"XYZ ", mft2(inputs, 2, &clut)))
+                .unwrap_or_else(|e| panic!("{inputs} inputs: {e:?}"));
+            let transform = Transform::compile(&profile, Intent::RelativeColorimetric)
+                .unwrap_or_else(|| panic!("{inputs} inputs"));
+            let x = vec![0.3; inputs];
+            match grid_points(inputs) {
+                Some(points) => {
+                    let grid = transform.grid.as_ref().expect("a grid");
+                    assert_eq!(grid.points, points, "{inputs} inputs");
+                }
+                None => {
+                    assert!(transform.grid.is_none(), "{inputs} inputs: a grid");
+                    let _ = pipeline_evaluations();
+                    assert_eq!(transform.apply(&x), transform.evaluate(&x));
+                    assert_eq!(
+                        pipeline_evaluations(),
+                        2,
+                        "{inputs} inputs: each conversion runs the pipeline"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Two threads filling one grid read what one alone reads**: a node is
+    /// a function of its table and position, so conversions racing to fill
+    /// the same nodes, in opposite orders, return the colours a fresh copy
+    /// converting alone returns.
+    #[test]
+    fn two_threads_filling_one_grid_read_what_one_alone_reads() {
+        let profile = Profile::parse(&cmyk_table(true)).expect("a table");
+        let shared =
+            Transform::compile(&profile, Intent::RelativeColorimetric).expect("a transform");
+        let alone = shared.clone();
+        let inputs = sweep(4);
+        let (forward, backward) = std::thread::scope(|scope| {
+            let forward =
+                scope.spawn(|| inputs.iter().map(|x| shared.apply(x)).collect::<Vec<_>>());
+            let backward = scope.spawn(|| {
+                inputs
+                    .iter()
+                    .rev()
+                    .map(|x| shared.apply(x))
+                    .collect::<Vec<_>>()
+            });
+            (
+                forward.join().expect("the first thread"),
+                backward.join().expect("the second thread"),
+            )
+        });
+        let expected: Vec<_> = inputs.iter().map(|x| alone.apply(x)).collect();
+        assert_eq!(forward, expected, "the first thread");
+        let mut backward = backward;
+        backward.reverse();
+        assert_eq!(backward, expected, "the second thread");
     }
 }
