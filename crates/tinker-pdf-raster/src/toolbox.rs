@@ -45,10 +45,16 @@ impl Layout {
 
     /// Whether `len` bytes laid out so are a picture: a width and a height
     /// that are not zero, a stride that holds a row, and every row the other
-    /// fields promise inside the bytes — `Bitmap::to_png`'s condition. A map
-    /// on anything else changes nothing and a reduction answers `None`.
+    /// fields promise inside the bytes — `Bitmap::to_png`'s condition — in a
+    /// format of light or of process ink. A map on anything else changes
+    /// nothing and a reduction answers `None`, and plates are anything else:
+    /// their spot channels are tints of colorants whose colours the bytes do
+    /// not carry, so they have no tone to map, as they have no light to write.
     #[must_use]
     pub fn is_picture(&self, len: usize) -> bool {
+        if matches!(self.format, PixelFormat::Plates { .. }) {
+            return false;
+        }
         let Some(row) = self.row_bytes() else {
             return false;
         };
@@ -78,6 +84,7 @@ fn colours(format: PixelFormat) -> usize {
         | PixelFormat::Bgra8
         | PixelFormat::LabA8 => 3,
         PixelFormat::CmykA8 => 4,
+        PixelFormat::Plates { spots } => 4 + spots.count(),
     }
 }
 
@@ -217,6 +224,16 @@ pub fn decode(format: PixelFormat, px: &[u8]) -> Option<Color> {
                 a: *px.get(3)?,
             }
         }
+        // The process channels' light, as the canvas reads a plates pixel.
+        PixelFormat::Plates { spots } => {
+            let (r, g, b) = cmyk_to_rgb(*px.first()?, *px.get(1)?, *px.get(2)?, *px.get(3)?);
+            Color {
+                r,
+                g,
+                b,
+                a: *px.get(4 + spots.count())?,
+            }
+        }
     })
 }
 
@@ -237,6 +254,12 @@ pub fn encode(format: PixelFormat, color: Color) -> ([u8; 4], usize) {
         PixelFormat::LabA8 => {
             let (l, a, b) = lab_bytes(color);
             ([l, a, b, 0], 3)
+        }
+        // The process half of a plates pixel a canvas is filled with; its
+        // spots, no ink, are the canvas's to write.
+        PixelFormat::Plates { .. } => {
+            let (c, m, y, k) = rgb_to_cmyk(color.r, color.g, color.b);
+            ([c, m, y, k], 4)
         }
     }
 }
@@ -307,6 +330,8 @@ pub fn gamma(layout: &Layout, data: &mut [u8], gamma: f64) -> bool {
                 *l = tone(*l);
             }
         }
+        // Not a picture (`Layout::is_picture`), so never reached.
+        PixelFormat::Plates { .. } => {}
     })
 }
 
@@ -350,6 +375,8 @@ pub fn invert_luminance(layout: &Layout, data: &mut [u8]) -> bool {
                 Color::rgb(turn(color.r), turn(color.g), turn(color.b)),
             );
         }
+        // Not a picture (`Layout::is_picture`), so never reached.
+        PixelFormat::Plates { .. } => {}
     })
 }
 
@@ -385,9 +412,11 @@ pub fn tint(layout: &Layout, data: &mut [u8], dark: Color, light: Color) -> bool
 /// becomes (`docs/design/bitmap-toolbox.md`): black goes to `dark`, white to
 /// `light`, and every pixel between by its coverage.
 ///
-/// `None` for a buffer that is not a `Gray8` picture or a result whose bytes
-/// cannot be had; otherwise the result's layout, its rows packed, and its
-/// bytes.
+/// `None` for a buffer that is not a `Gray8` picture, for a `format` of
+/// plates — not a picture ([`Layout::is_picture`]): their spots are tints of
+/// colorants a colour does not name, which a ramp of light has none of — or a
+/// result whose bytes cannot be had; otherwise the result's layout, its rows
+/// packed, and its bytes.
 #[must_use]
 pub fn tint_grey(
     layout: &Layout,
@@ -396,7 +425,7 @@ pub fn tint_grey(
     light: Color,
     format: PixelFormat,
 ) -> Option<(Layout, Vec<u8>)> {
-    if layout.format != PixelFormat::Gray8 {
+    if layout.format != PixelFormat::Gray8 || matches!(format, PixelFormat::Plates { .. }) {
         return None;
     }
     let components = format.components();
@@ -458,6 +487,8 @@ pub fn grayscale(layout: &Layout, data: &mut [u8]) -> bool {
                 *v = 128;
             }
         }
+        // Not a picture (`Layout::is_picture`), so never reached.
+        PixelFormat::Plates { .. } => {}
     })
 }
 
@@ -750,6 +781,78 @@ mod tests {
                     decode(format, &canvas.data),
                     canvas.pixel(0, 0),
                     "{format:?}: {color:?} decoded"
+                );
+            }
+        }
+    }
+
+    /// **Plates are not a picture**: every map leaves a plates buffer as it
+    /// was and answers `false`, and every reduction, a scale and a subsample
+    /// answer `None`, with no spot, with some and at the cap — its spot
+    /// channels are tints of colorants whose colours the bytes do not carry —
+    /// and a grey is tinted into no plates. Its decoding and the encoding of
+    /// its process half are still the canvas's.
+    #[test]
+    fn plates_are_not_a_picture() {
+        for count in [0, 2, crate::canvas::MAX_SPOT_PLATES] {
+            let spots = crate::canvas::Spots::new(count).expect("under the cap");
+            let format = PixelFormat::Plates { spots };
+            let layout = Layout {
+                format,
+                width: 2,
+                height: 2,
+                stride: 2 * format.components(),
+                premultiplied: false,
+            };
+            let original: Vec<u8> = (0..4 * format.components())
+                .map(|i| (i * 7) as u8)
+                .collect();
+            assert!(!layout.is_picture(original.len()), "{count} spots");
+            let mut data = original.clone();
+            assert!(!gamma(&layout, &mut data, 2.2));
+            assert!(!invert(&layout, &mut data));
+            assert!(!invert_luminance(&layout, &mut data));
+            assert!(!tint(&layout, &mut data, Color::BLACK, Color::WHITE));
+            assert!(!grayscale(&layout, &mut data));
+            assert_eq!(data, original, "{count} spots: nothing mapped");
+            assert_eq!(colour_count(&layout, &data, 10), None);
+            assert_eq!(is_unicolour(&layout, &data), None);
+            assert_eq!(is_monochrome(&layout, &data), None);
+            assert_eq!(scale(&layout, &data, 4, 4), None, "{count} spots");
+            assert_eq!(scale(&layout, &data, 2, 2), None, "{count} spots");
+            assert_eq!(subsample(&layout, &data, 2, 2), None, "{count} spots");
+            assert_eq!(subsample(&layout, &data, 1, 1), None, "{count} spots");
+            let grey = Layout {
+                format: PixelFormat::Gray8,
+                width: 2,
+                height: 2,
+                stride: 2,
+                premultiplied: false,
+            };
+            assert_eq!(
+                tint_grey(
+                    &grey,
+                    &[0, 85, 170, 255],
+                    Color::BLACK,
+                    Color::WHITE,
+                    format
+                ),
+                None,
+                "{count} spots: no grey tinted into plates"
+            );
+
+            for color in [Color::WHITE, Color::rgb(10, 200, 90), Color::TRANSPARENT] {
+                let canvas = Canvas::new(1, 1, format, color);
+                let (bytes, process) = encode(format, color);
+                assert_eq!(
+                    &canvas.data[..process],
+                    &bytes[..process],
+                    "{count}: {color:?}"
+                );
+                assert_eq!(
+                    decode(format, &canvas.data),
+                    canvas.pixel(0, 0),
+                    "{count}: {color:?}"
                 );
             }
         }

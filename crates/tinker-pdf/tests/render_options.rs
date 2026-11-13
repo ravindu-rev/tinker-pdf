@@ -536,6 +536,43 @@ fn the_opt_in_changes_nothing_for_a_format_that_is_not_ink() {
     }
 }
 
+/// **Plates are not a page format**: a page asked for in
+/// `PixelFormat::Plates` comes back in `Rgba8`, with or without the ink
+/// opt-in, whose bytes are the ink page's light — what a `CmykA8` request
+/// without the opt-in returns — however many spots the format names, since a
+/// page whose paints name none leaves every spot channel without ink.
+#[test]
+fn a_page_asked_for_in_plates_comes_back_as_its_light() {
+    let light = render(
+        ink_page(),
+        &RenderOptions {
+            format: PixelFormat::CmykA8,
+            ..RenderOptions::default()
+        },
+    );
+    assert_eq!(light.format, PixelFormat::Rgba8);
+    for spots in [0, 2, tinker_pdf::MAX_SPOT_PLATES] {
+        let format = PixelFormat::Plates {
+            spots: tinker_pdf::Spots::new(spots).expect("under the cap"),
+        };
+        for allow_cmyk in [false, true] {
+            let plates = render(
+                ink_page(),
+                &RenderOptions {
+                    format,
+                    allow_cmyk,
+                    ..RenderOptions::default()
+                },
+            );
+            assert_eq!(plates.format, PixelFormat::Rgba8, "{spots} spots");
+            assert_eq!(
+                plates.data, light.data,
+                "{spots} spots, opt-in {allow_cmyk}"
+            );
+        }
+    }
+}
+
 /// `to_png` writes an ink page as the light it stands for, and that light is
 /// byte for byte what the same render returns without the switch: one
 /// conversion, 8.6.4.4's, reached two ways.
@@ -1532,6 +1569,7 @@ fn tinted(coverage: &Bitmap, colours: ForcedColours, format: PixelFormat) -> Vec
                     out.extend([c, m, yellow, k, 255]);
                 }
                 PixelFormat::LabA8 => panic!("Lab is not a page format"),
+                PixelFormat::Plates { .. } => panic!("plates are not a page format"),
             }
         }
     }

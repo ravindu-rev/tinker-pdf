@@ -1472,8 +1472,8 @@ impl DeviceParameters {
                             }
                         }
                     }
-                    // A page is never handed back in Lab.
-                    PixelFormat::LabA8 => {}
+                    // A page is never handed back in Lab, nor in plates.
+                    PixelFormat::LabA8 | PixelFormat::Plates { .. } => {}
                 }
             }
         }
@@ -2399,6 +2399,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             // but a caller handing this renderer such a canvas gets buffers in
             // its order, which the canvas composites right.
             PixelFormat::Bgr8 | PixelFormat::Bgra8 => PixelFormat::Bgra8,
+            plates @ PixelFormat::Plates { .. } => plates,
         }
     }
 
@@ -5838,10 +5839,13 @@ pub fn group_format(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
 /// and this function's both said a page never came back in it: the `match`
 /// named `CmykA8` alone, so `format: LabA8` handed a caller four bytes of
 /// encoded `L*a*b*` under a format that stores no light at all.
+///
+/// `Plates` is ink too, and of colorants whose colours a `Bitmap` does not
+/// carry, so a caller asking for it is handed `Rgba8` as well.
 #[must_use]
 pub fn page_format(format: PixelFormat) -> PixelFormat {
     match format {
-        PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
+        PixelFormat::CmykA8 | PixelFormat::LabA8 | PixelFormat::Plates { .. } => PixelFormat::Rgba8,
         other => other,
     }
 }
@@ -5865,20 +5869,24 @@ pub fn canvas_format(format: PixelFormat) -> PixelFormat {
         | PixelFormat::Rgb8
         | PixelFormat::Rgba8
         | PixelFormat::CmykA8
-        | PixelFormat::LabA8 => format,
+        | PixelFormat::LabA8
+        | PixelFormat::Plates { .. } => format,
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    /// Every format a page may come back in, and the two it may not.
+    /// Every format a page may come back in, and the three it may not.
     ///
-    /// Exhaustive over `PixelFormat` on purpose: a seventh format added to the
+    /// Exhaustive over `PixelFormat` on purpose: a format added to the
     /// rasterizer fails to compile here until somebody decides which side of
     /// this line it is on.
     #[test]
     fn only_formats_that_store_light_are_page_formats() {
+        let spots = |count| PixelFormat::Plates {
+            spots: tinker_pdf_raster::Spots::new(count).expect("under the cap"),
+        };
         for format in [
             PixelFormat::Gray8,
             PixelFormat::GrayA8,
@@ -5888,6 +5896,9 @@ mod tests {
             PixelFormat::LabA8,
             PixelFormat::Bgr8,
             PixelFormat::Bgra8,
+            spots(0),
+            spots(3),
+            spots(tinker_pdf_raster::MAX_SPOT_PLATES),
         ] {
             // The blue-first orders store light, in another order: a page
             // comes back in them as asked.
@@ -5898,7 +5909,9 @@ mod tests {
                 | PixelFormat::Rgba8
                 | PixelFormat::Bgr8
                 | PixelFormat::Bgra8 => format,
-                PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
+                PixelFormat::CmykA8 | PixelFormat::LabA8 | PixelFormat::Plates { .. } => {
+                    PixelFormat::Rgba8
+                }
             };
             assert_eq!(page_format(format), expected, "{format:?}");
         }
@@ -5921,6 +5934,9 @@ mod tests {
             PixelFormat::LabA8,
             PixelFormat::Bgr8,
             PixelFormat::Bgra8,
+            PixelFormat::Plates {
+                spots: tinker_pdf_raster::Spots::new(3).expect("under the cap"),
+            },
         ] {
             let expected = match format {
                 PixelFormat::Bgr8 => PixelFormat::Rgb8,
@@ -5930,7 +5946,8 @@ mod tests {
                 | PixelFormat::Rgb8
                 | PixelFormat::Rgba8
                 | PixelFormat::CmykA8
-                | PixelFormat::LabA8 => format,
+                | PixelFormat::LabA8
+                | PixelFormat::Plates { .. } => format,
             };
             let composited = canvas_format(format);
             assert_eq!(composited, expected, "{format:?}");

@@ -259,15 +259,16 @@ weights directly, a blue-first buffer the same weights over its bytes in
 their order, ink goes through `cmyk_to_rgb` — and a `LabA8` buffer through
 `lab_to_rgb`, as `pixel` does.
 
-**Compositing.** A `Canvas` stores pixels in one of eight formats (`Gray8`,
-`GrayA8`, `Rgb8`, `Rgba8`, `Bgr8`, `Bgra8`, `CmykA8`, `LabA8`) and composites in integer
-arithmetic throughout. `Bgr8` and `Bgra8` are `Rgb8`'s and `Rgba8`'s light
-blue first, the orders a host's surfaces store: a page composites red first
-and is reordered once at the end, and a canvas made in a blue-first order
-composites right too — the separable modes are per channel, and `blend`
-hands the non-separable ones, which reason about red, green and blue, the
-channels in that order (`a_bgr_canvas_composites_as_the_rgb_canvas_reordered`,
-every mode). `CmykA8` is the one **subtractive** format — its components are
+**Compositing.** A `Canvas` stores pixels in one of nine formats (`Gray8`,
+`GrayA8`, `Rgb8`, `Rgba8`, `Bgr8`, `Bgra8`, `CmykA8`, `LabA8` and `Plates`)
+and composites in integer arithmetic throughout. `Bgr8` and `Bgra8` are
+`Rgb8`'s and `Rgba8`'s light blue first, the orders a host's surfaces store:
+a page composites red first and is reordered once at the end, and a canvas
+made in a blue-first order composites right too — the separable modes are
+per channel, and `blend` hands the non-separable ones, which reason about
+red, green and blue, the channels in that order
+(`a_bgr_canvas_composites_as_the_rgb_canvas_reordered`, every mode). `CmykA8`
+is a **subtractive** format, as `Plates` is below — its components are
 quantities of ink — and it exists for transparency groups that declare
 `/DeviceCMYK`, whose blends the specification says happen over ink rather than
 over light ([rendering](rendering.md)). A page comes back in it only when a
@@ -304,6 +305,34 @@ out reading the same pixels again, and `knock_out` puts 11.4.5's initial state
 back — transparent, or the parent's colour at no alpha — with no snapshot of
 it kept. Each read is at the same device pixel of the parent, in its own
 format where it shares the buffer's, so an ink backdrop is the document's ink.
+
+*Plates.* `PixelFormat::Plates { spots }` is the plates a press prints: cyan,
+magenta, yellow and black, then `spots` spot channels, then alpha, `5 + spots`
+bytes a pixel, every channel a tint — a quantity of ink, subtractive as
+`CmykA8`'s are. `Spots::new` holds the count to `MAX_SPOT_PLATES`, sixty-four,
+and refuses one past it by name (`TooManySpots`, which `Canvas::plates`
+returns), so a canvas is allocated for the spots it is asked for and never
+past the cap. A paint is a `PlateInk`, a tint for each channel by its index —
+cyan 0 to black 3 and spot `i` at `4 + i`; a colorant reaches this crate as an
+index and never as a name (ruling 8) — and every channel it names no tint for
+holds no ink, so `fill_mask_plates` under `Normal` knocks those channels out.
+Each channel composites by `CmykA8`'s arithmetic, line for line: complemented
+through the separable blend functions, 11.3.6's straight-alpha composite, the
+coverage and the alpha multiplied; so four process channels with no spot are
+a `CmykA8` canvas's bytes for the same masks, inks, alphas and modes, and a
+spot channel is what a process channel holding its tints is. A non-separable
+mode has no per-channel form and composites as `Normal`. The five other
+formats keep their five-byte compositing word and run no line they did
+before: a plates paint builds a word as wide as its canvas once a paint. A
+colour handed to plates through `fill_mask_inked` or `blend_pixel_inked` is
+its ink on the process channels, as on `CmykA8` — its own components, or its
+light turned into ink — with every spot knocked out, and a `PlateInk` handed
+to another format paints its process tints as the DeviceCMYK colour they are.
+`Canvas::channel` reads one channel out as `width × height` bytes, a plate's
+tints; `pixel` reads a plates pixel as its process channels' light, a spot's
+colour being its caller's to know; and `extract` copies plates as tints, into
+`CmykA8` as process ink, into light as that light, and ink or light into
+plates on the process channels.
 
 *The opaque composite.* Under `Normal`, with the colour's alpha and the
 state's both whole, onto a canvas that holds no initial backdrop and is not
@@ -525,7 +554,8 @@ one as well: `stroke_with(&mut scratch, …)` writes the outline into it, and
 The crate root re-exports the working set: `Path`, `Verb`, `Point`,
 `FillRule`, `flatten`; `fill`, `fill_with`, `fill_outline`, `FillScratch`,
 `Mask`; `stroke`, `stroke_mapped`, `stroke_with`, `stroke_mapped_with`,
-`stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
+`stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`;
+`PlateInk`, `Spots`, `TooManySpots`, `MAX_SPOT_PLATES`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `TwoColour`, `Transform`, `Filter`,
 `Sampling`, `Pyramid`, `image_bounds_in`, `resample`; `draw_mesh`, `draw_mesh_over`,
 `MeshDraw`, `MeshBuffer`; `fill_stripes`, `fill_stripes_with`, `StripeMask`,
@@ -538,9 +568,10 @@ to paths — lives one layer up, in [rendering](rendering.md).
 `toolbox::Layout` — its format, size, stride and whether it is premultiplied —
 `gamma`, `invert`, `invert_luminance`, `tint` and `grayscale` map every pixel
 in place and `colour_count`, `is_unicolour` and `is_monochrome` answer about
-them, refusing whole a buffer that is not a picture (`Layout::is_picture`) and
-never reading or writing a row's padding. `scale` and `subsample` hand back a
-new layout and its bytes: `scale` gives the colour to `image::resample` in
+them, refusing whole a buffer that is not a picture (`Layout::is_picture`),
+plates among them — tints of colorants whose colours the bytes do not carry —
+and never reading or writing a row's padding. `scale` and `subsample` hand back
+a new layout and its bytes: `scale` gives the colour to `image::resample` in
 three-channel groups, premultiplied for the average where the buffer is
 straight, and `resample` is the area filter's `area_taps` over a grid the
 image covers exactly — column `x` of `width` covering
@@ -548,7 +579,7 @@ image covers exactly — column `x` of `width` covering
 with a sample measured in `1 / width` of one, so the weights are the
 rationals themselves rather than a centre a floating-point inverse found;
 `subsample` keeps the first sample of each block. `tint_grey` writes a `Gray8`
-picture into any format, opaque, each grey on `tint`'s ramp between two
+picture into any format but plates, opaque, each grey on `tint`'s ramp between two
 colours — what a forced-colour render's black-on-white coverage becomes in the
 facade. `gamma_table` is gamma's 256 bytes,
 built through `tinker_pdf_math::pow`, and `decode` and `encode` are a pixel's
@@ -564,6 +595,7 @@ toolbox and its tests encode Lab as a Lab canvas does.
 | A verb with a non-finite point | dropped at `Path` construction | A NaN cannot be rasterized, and dropping the verb keeps the rest of the path usable | [ruling 1](../rulings.md) |
 | A mesh costing more than 67 108 864 units of work, counted in the space it is drawn from (pixels at 72 dpi) so the same mesh is drawn or refused alike at every scale | `MAX_MESH_WORK` (`mesh.rs`); `draw_mesh` returns `None`, reported as `RenderWarning::UnsupportedShading` | Half a mesh reads as an artefact where nothing reads as the gap it is | [rendering](rendering.md) |
 | An image under a singular transform | `Transform::invert` returns `None`; the draw paints nothing | A determinant near zero maps the image to a sliver with no useful bits left | `image.rs` |
+| A plates canvas of more than 64 spot channels | `TooManySpots { asked }`, from `Spots::new` and `Canvas::plates` | Sixty-nine bytes a pixel is the most a canvas carries, and which spots to keep is the caller's plan, not this crate's | `canvas.rs` |
 | A cancelled render | `RenderWarning::Cancelled` | The sweep stops at the next scanline band, keeping the rows already swept | [rendering](rendering.md) |
 
 A dash expansion is additionally capped at 100 000 steps per segment, so a

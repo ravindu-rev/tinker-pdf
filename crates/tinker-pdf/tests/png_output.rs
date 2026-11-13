@@ -1,4 +1,4 @@
-//! `Bitmap::to_png` over all six pixel formats, and what a rendered page does
+//! `Bitmap::to_png` over all seven pixel formats, and what a rendered page does
 //! when it goes out through it.
 //!
 //! # Why every format
@@ -97,6 +97,30 @@ fn every_pixel_format_maps_onto_a_colour_type_png_actually_has() {
             image.warnings
         );
         assert!(image.complete, "{format:?}");
+    }
+}
+
+/// **A plates bitmap has no light to write.** Its spot channels are tints of
+/// colorants whose colours a bitmap does not carry, so `to_png` answers
+/// `None` for one — with no spot, with some and at the cap — whatever bytes
+/// it holds, and the counted door writes nothing and counts nothing. No
+/// render hands one back; a caller builds it.
+#[test]
+fn a_plates_bitmap_has_no_light_to_write() {
+    for spots in [0, 3, tinker_pdf::MAX_SPOT_PLATES] {
+        let format = PixelFormat::Plates {
+            spots: tinker_pdf::Spots::new(spots).expect("under the cap"),
+        };
+        let bitmap = packed(2, 2, format, vec![0x40; 4 * format.components()]);
+        assert_eq!(bitmap.components(), 5 + spots);
+        assert!(bitmap.to_png().is_none(), "{spots} spots");
+        let (file, stats) = bitmap.to_png_counted();
+        assert!(file.is_none(), "{spots} spots, counted");
+        assert_eq!(
+            stats,
+            tinker_pdf::Stats::default(),
+            "{spots} spots: nothing held"
+        );
     }
 }
 

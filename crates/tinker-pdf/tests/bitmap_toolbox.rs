@@ -89,6 +89,7 @@ fn colours(format: PixelFormat) -> usize {
         | PixelFormat::Bgra8
         | PixelFormat::LabA8 => 3,
         PixelFormat::CmykA8 => 4,
+        PixelFormat::Plates { spots } => 4 + spots.count(),
     }
 }
 
@@ -127,6 +128,13 @@ fn variant(golden: &Bitmap, format: PixelFormat, premultiplied: bool) -> Bitmap 
                 PixelFormat::Bgra8 => vec![b, g, r, a],
                 PixelFormat::CmykA8 => {
                     vec![255 - r, 255 - g, 255 - b, ((x + 3 * y) % 256) as u8, a]
+                }
+                // The ink layout, and no ink on any spot.
+                PixelFormat::Plates { spots } => {
+                    let mut pixel = vec![255 - r, 255 - g, 255 - b, ((x + 3 * y) % 256) as u8];
+                    pixel.resize(4 + spots.count(), 0);
+                    pixel.push(a);
+                    pixel
                 }
             };
             if premultiplied && format.has_alpha() {
@@ -171,7 +179,7 @@ fn srgb(format: PixelFormat, px: &[u8]) -> (u8, u8, u8) {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => (px[0], px[0], px[0]),
         PixelFormat::Rgb8 | PixelFormat::Rgba8 => (px[0], px[1], px[2]),
         PixelFormat::Bgr8 | PixelFormat::Bgra8 => (px[2], px[1], px[0]),
-        PixelFormat::CmykA8 => cmyk_to_rgb(px[0], px[1], px[2], px[3]),
+        PixelFormat::CmykA8 | PixelFormat::Plates { .. } => cmyk_to_rgb(px[0], px[1], px[2], px[3]),
         PixelFormat::LabA8 => lab_to_rgb(px[0], px[1], px[2]),
     }
 }
@@ -182,7 +190,7 @@ fn write(format: PixelFormat, px: &mut [u8], (r, g, b): (u8, u8, u8)) {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => px[0] = luma(r, g, b),
         PixelFormat::Rgb8 | PixelFormat::Rgba8 => px[..3].copy_from_slice(&[r, g, b]),
         PixelFormat::Bgr8 | PixelFormat::Bgra8 => px[..3].copy_from_slice(&[b, g, r]),
-        PixelFormat::CmykA8 => {
+        PixelFormat::CmykA8 | PixelFormat::Plates { .. } => {
             let (c, m, y, k) = rgb_to_cmyk(r, g, b);
             px[..4].copy_from_slice(&[c, m, y, k]);
         }
@@ -268,6 +276,8 @@ fn gamma_pixel(table: &[u8; 256], format: PixelFormat, px: &mut [u8]) {
                 *v = 255 - t(255 - *v);
             }
         }
+        // Plates are not a picture, and no map changes them.
+        PixelFormat::Plates { .. } => {}
     }
 }
 
@@ -292,6 +302,8 @@ fn invert_luminance_pixel(format: PixelFormat, px: &mut [u8]) {
             let turn = |c: u8| (i32::from(c) + 255 - 2 * y).clamp(0, 255) as u8;
             write(format, px, (turn(r), turn(g), turn(b)));
         }
+        // Plates are not a picture, and no map changes them.
+        PixelFormat::Plates { .. } => {}
     }
 }
 
@@ -334,6 +346,8 @@ fn grayscale_pixel(format: PixelFormat, px: &mut [u8]) {
             px[1] = 128;
             px[2] = 128;
         }
+        // Plates are not a picture, and no map changes them.
+        PixelFormat::Plates { .. } => {}
     }
 }
 
@@ -509,6 +523,14 @@ fn bilevel(golden: &Bitmap, format: PixelFormat) -> Bitmap {
             (PixelFormat::LabA8, _) => {
                 let (l, a, b) = lab_bytes(if black { Color::BLACK } else { Color::WHITE });
                 vec![l, a, b, 255]
+            }
+            // Black ink or none, no spot, opaque: the shape a plates bitmap
+            // would take, though it is no picture to test.
+            (PixelFormat::Plates { spots }, _) => {
+                let mut bytes = vec![0, 0, 0, if black { 255 } else { 0 }];
+                bytes.resize(4 + spots.count(), 0);
+                bytes.push(255);
+                bytes
             }
         };
         pixel.copy_from_slice(&bytes);
@@ -707,6 +729,39 @@ fn a_bitmap_that_is_not_a_picture_is_refused_whole() {
         assert_eq!(bitmap.colour_count(10), None);
         assert_eq!(bitmap.is_unicolour(), None);
         assert_eq!(bitmap.is_monochrome(), None);
+    }
+}
+
+/// **A plates bitmap is not a picture, and is refused whole**: its spot
+/// channels are tints of colorants whose colours the bitmap does not carry,
+/// so no map writes a byte of one — with no spot, with some, at the cap,
+/// straight and premultiplied — and every reduction, scale and subsample
+/// answers `None`, its own size and a factor of one among them, as `to_png`
+/// writes none.
+#[test]
+fn a_plates_bitmap_is_refused_whole() {
+    let maps = maps();
+    let (_, golden) = goldens().remove(0);
+    for count in [0, 2, tinker_pdf::MAX_SPOT_PLATES] {
+        let format = PixelFormat::Plates {
+            spots: tinker_pdf::Spots::new(count).expect("under the cap"),
+        };
+        for premultiplied in [false, true] {
+            let bitmap = variant(&golden, format, premultiplied);
+            for (map, apply, _) in &maps {
+                let mut got = bitmap.clone();
+                apply(&mut got);
+                assert_eq!(got.data, bitmap.data, "{map} wrote plates of {count} spots");
+            }
+            assert_eq!(bitmap.colour_count(10), None);
+            assert_eq!(bitmap.is_unicolour(), None);
+            assert_eq!(bitmap.is_monochrome(), None);
+            assert!(bitmap.scaled(bitmap.width * 2, bitmap.height).is_none());
+            assert!(bitmap.scaled(bitmap.width, bitmap.height).is_none());
+            assert!(bitmap.subsampled(2, 2).is_none());
+            assert!(bitmap.subsampled(1, 1).is_none());
+            assert!(bitmap.to_png().is_none());
+        }
     }
 }
 

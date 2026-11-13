@@ -506,7 +506,7 @@ pub use tinker_pdf_crypto::Permissions;
 /// disagree with itself.
 pub use tinker_pdf_filters::CcittParams;
 pub use tinker_pdf_filters::PngError;
-pub use tinker_pdf_raster::canvas::{Color, PixelFormat};
+pub use tinker_pdf_raster::canvas::{Color, PixelFormat, Spots, TooManySpots, MAX_SPOT_PLATES};
 pub use tinker_pdf_render::{CancelToken, PixelRegion, RenderWarning};
 /// Signature verdicts (12.8), behind [`Document::verify_signatures`].
 pub use verdict::{
@@ -1080,7 +1080,11 @@ impl Bitmap {
     /// `None` exactly when the bitmap is not a picture: a zero `width` or
     /// `height`, a `stride` narrower than one row, or a `data` shorter than
     /// the rows the other three fields promise. There is nothing to degrade
-    /// to — a PNG with no pixels is not a smaller PNG.
+    /// to — a PNG with no pixels is not a smaller PNG. A bitmap in
+    /// [`PixelFormat::Plates`], which no render returns and only a caller
+    /// builds, is not a picture either: its spot channels are tints of
+    /// colorants whose colours it does not carry, so it has no light to
+    /// write.
     ///
     /// [`Page::render`] produces a picture for every page, at every scale, and
     /// for every [`RenderOptions::region`] that meets the page: a page is at
@@ -1090,14 +1094,15 @@ impl Bitmap {
     /// [`RenderWarning::RegionClamped`]. `Bitmap`'s fields are public besides,
     /// so a caller may always build one by hand.
     ///
-    /// # Every format, and the two that cannot be written as they are
+    /// # Every format, and the three that cannot be written as they are
     ///
     /// PNG has five colour types — 0 grey, 2 truecolour, 3 indexed, 4 grey
     /// with alpha, 6 truecolour with alpha — and **no CMYK and no Lab**. Four
-    /// of the eight [`PixelFormat`]s are one of those layouts already and are
+    /// of the nine [`PixelFormat`]s are one of those layouts already and are
     /// written byte for byte, and two are those layouts blue first, written
-    /// red first as PNG stores them. The other two are converted here, and the
-    /// conversion is the point rather than a detail:
+    /// red first as PNG stores them. Two more are converted here, and the
+    /// conversion is the point rather than a detail; the last is plates,
+    /// which has no light to write:
     ///
     /// | `PixelFormat` | Colour type | What happens |
     /// | --- | --- | --- |
@@ -1109,6 +1114,7 @@ impl Bitmap {
     /// | `Bgra8` | 6 | reordered red first, alpha kept: the `Rgba8` render's file |
     /// | `CmykA8` | 6 | 8.6.4.4's device relation, ink to light; alpha kept |
     /// | `LabA8` | 6 | `L*a*b*` decoded back to sRGB; alpha kept |
+    /// | `Plates` | — | `None`: tints of colorants whose colours the bitmap does not carry |
     ///
     /// `tinker_pdf_render::page_format`'s own doc already argues why this must
     /// happen rather than being refused or passed through: a `Bitmap` says how
@@ -1119,7 +1125,7 @@ impl Bitmap {
     /// *and* sets [`RenderOptions::allow_cmyk`]. It is constructible besides —
     /// the fields are public, and a transparency group compositing over ink
     /// (11.6.6) is a real buffer of this shape — so this method has to be
-    /// total over all eight, and writing four components under colour type 6
+    /// total over all nine, and writing four components under colour type 6
     /// would put cyan, magenta and yellow into a file labelled RGB. An ink page
     /// written here is the light it stands for, byte for byte what the same
     /// render without `allow_cmyk` would have returned.
@@ -1212,6 +1218,9 @@ impl Bitmap {
                 };
                 (source, copies + converted.capacity())
             }
+            // Plates are tints of colorants a bitmap does not name, so there
+            // is no light to write: see `Bitmap::to_png`.
+            PixelFormat::Plates { .. } => return None,
             PixelFormat::CmykA8 | PixelFormat::LabA8 => {
                 converted = self.to_rgba()?;
                 let source = PngSource {

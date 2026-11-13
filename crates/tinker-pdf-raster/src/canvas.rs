@@ -64,6 +64,152 @@ pub enum PixelFormat {
     /// Blue, green, red and alpha: `Rgba8` in a host's order, alpha last as
     /// there. An output order, as [`PixelFormat::Bgr8`] is.
     Bgra8,
+    /// Cyan, magenta, yellow, black, then `spots` spot channels, then alpha:
+    /// `5 + spots` bytes a pixel.
+    ///
+    /// The plates a press prints, one channel a colorant: every channel is a
+    /// **tint**, a quantity of ink — subtractive, as `CmykA8`'s channels are,
+    /// so 11.3.5's blend formulas see each one complemented — and the four
+    /// process channels with no spot are byte for byte a `CmykA8` pixel. A
+    /// paint is a [`PlateInk`], a tint for each channel by its index, and the
+    /// channels it names no ink for are knocked out under `Normal`; the spot
+    /// channels mean nothing to this crate beyond their index (ruling 8),
+    /// and which colorant each is, is the caller's plan. A canvas carries the
+    /// spots it is asked for, at most [`MAX_SPOT_PLATES`] ([`Spots`]).
+    ///
+    /// It exists for separations and overprint simulation, which draw a page
+    /// as its inks. It is not a page format: a plate is ink, and a `Bitmap`
+    /// says nothing about what its channels mean.
+    Plates {
+        /// How many spot channels.
+        spots: Spots,
+    },
+}
+
+/// The most spot channels a [`PixelFormat::Plates`] canvas carries beside its
+/// four process channels: sixty-eight colour channels and an alpha, sixty-nine
+/// bytes a pixel.
+pub const MAX_SPOT_PLATES: usize = 64;
+
+/// How many spot channels a [`PixelFormat::Plates`] canvas carries: at most
+/// [`MAX_SPOT_PLATES`], which [`Spots::new`] holds, so a canvas past the cap
+/// cannot be asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Spots(u8);
+
+impl Spots {
+    /// No spot channel: the four process channels and an alpha, the bytes of
+    /// a [`PixelFormat::CmykA8`] pixel.
+    pub const NONE: Spots = Spots(0);
+
+    /// `count` spot channels, or [`TooManySpots`] past [`MAX_SPOT_PLATES`].
+    ///
+    /// # Errors
+    ///
+    /// [`TooManySpots`] when `count` is more than [`MAX_SPOT_PLATES`].
+    pub const fn new(count: usize) -> Result<Spots, TooManySpots> {
+        if count > MAX_SPOT_PLATES {
+            return Err(TooManySpots { asked: count });
+        }
+        // At most the cap, sixty-four, which a byte holds.
+        Ok(Spots(count as u8))
+    }
+
+    /// How many spot channels.
+    #[must_use]
+    pub const fn count(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A plates canvas asked for with more spot channels than
+/// [`MAX_SPOT_PLATES`]: refused by name rather than clamped, because which
+/// spots to keep is the caller's plan and not this crate's to choose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooManySpots {
+    /// How many spot channels were asked for.
+    pub asked: usize,
+}
+
+impl core::fmt::Display for TooManySpots {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "a plates canvas of {} spot channels, past the cap of {MAX_SPOT_PLATES}",
+            self.asked
+        )
+    }
+}
+
+impl std::error::Error for TooManySpots {}
+
+/// A paint's ink on a [`PixelFormat::Plates`] canvas: a tint for each colour
+/// channel — cyan 0, magenta 1, yellow 2, black 3 and spot `i` at `4 + i` —
+/// where 0 is no ink and 255 solid.
+///
+/// Built from the channels a paint names, every channel it does not name
+/// holding no ink: composited under `Normal`, the paint knocks those channels
+/// out, which is what 8.6.7 has a paint do with overprint off. A colorant
+/// arrives here as its channel's index and never as a name (ruling 8); which
+/// colorant a channel is, is the caller's plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlateInk {
+    /// One tint per colour channel, process channels first.
+    tints: Vec<u8>,
+}
+
+impl PlateInk {
+    /// No ink in any channel of a canvas with `spots` spot channels.
+    #[must_use]
+    pub fn none(spots: Spots) -> PlateInk {
+        PlateInk {
+            tints: vec![0; 4 + spots.count()],
+        }
+    }
+
+    /// The tint each `(channel, tint)` pair gives its channel, and no ink in
+    /// every channel no pair names. A channel past the canvas's last is not
+    /// one of its channels and is passed over; a channel named twice keeps
+    /// the later tint.
+    #[must_use]
+    pub fn named(spots: Spots, channels: &[(usize, u8)]) -> PlateInk {
+        let mut ink = PlateInk::none(spots);
+        for &(channel, tint) in channels {
+            if let Some(slot) = ink.tints.get_mut(channel) {
+                *slot = tint;
+            }
+        }
+        ink
+    }
+
+    /// A DeviceCMYK colour's own components on the four process channels,
+    /// and no ink on any spot: what a `CmykA8` canvas composites for the
+    /// same colour.
+    #[must_use]
+    pub fn process(spots: Spots, [c, m, y, k]: [u8; 4]) -> PlateInk {
+        PlateInk::named(spots, &[(0, c), (1, m), (2, y), (3, k)])
+    }
+
+    /// Light turned into ink on the process channels — 8.6.4.4's relation
+    /// inverted with maximum undercolour removal ([`rgb_to_cmyk`]), as a
+    /// `CmykA8` canvas turns light into ink — and no ink on any spot.
+    #[must_use]
+    pub fn from_light(spots: Spots, color: Color) -> PlateInk {
+        let (c, m, y, k) = rgb_to_cmyk(color.r, color.g, color.b);
+        PlateInk::process(spots, [c, m, y, k])
+    }
+
+    /// The tints, one a colour channel, process channels first.
+    #[must_use]
+    pub fn tints(&self) -> &[u8] {
+        &self.tints
+    }
+
+    /// The four process tints.
+    fn process_tints(&self) -> [u8; 4] {
+        let at = |i: usize| self.tints.get(i).copied().unwrap_or(0);
+        [at(0), at(1), at(2), at(3)]
+    }
 }
 
 impl PixelFormat {
@@ -79,6 +225,7 @@ impl PixelFormat {
             PixelFormat::LabA8 => 4,
             PixelFormat::Bgr8 => 3,
             PixelFormat::Bgra8 => 4,
+            PixelFormat::Plates { spots } => 5 + spots.count(),
         }
     }
 
@@ -98,7 +245,8 @@ impl PixelFormat {
             | PixelFormat::Rgba8
             | PixelFormat::CmykA8
             | PixelFormat::LabA8
-            | PixelFormat::Bgra8 => true,
+            | PixelFormat::Bgra8
+            | PixelFormat::Plates { .. } => true,
             PixelFormat::Gray8 | PixelFormat::Rgb8 | PixelFormat::Bgr8 => false,
         }
     }
@@ -118,7 +266,8 @@ impl PixelFormat {
             | PixelFormat::Rgb8
             | PixelFormat::Rgba8
             | PixelFormat::CmykA8
-            | PixelFormat::LabA8 => false,
+            | PixelFormat::LabA8
+            | PixelFormat::Plates { .. } => false,
         }
     }
 }
@@ -349,6 +498,54 @@ impl Canvas {
         canvas
     }
 
+    /// A [`PixelFormat::Plates`] canvas of `spots` spot channels filled with
+    /// `background`, as [`Canvas::new`] fills one: its light turned into ink
+    /// on the process channels and no ink on any spot. A canvas of `spots` is
+    /// allocated for those spots alone, never for the cap.
+    ///
+    /// # Errors
+    ///
+    /// [`TooManySpots`] for more spot channels than [`MAX_SPOT_PLATES`].
+    pub fn plates(
+        width: u32,
+        height: u32,
+        spots: usize,
+        background: Color,
+    ) -> Result<Canvas, TooManySpots> {
+        let spots = Spots::new(spots)?;
+        Ok(Canvas::new(
+            width,
+            height,
+            PixelFormat::Plates { spots },
+            background,
+        ))
+    }
+
+    /// One colour channel's bytes, row by row, `width × height` of them: on a
+    /// plates canvas one plate's tints — cyan 0 to black 3, spot `i` at
+    /// `4 + i` — 0 no ink and 255 solid, and on any other format that
+    /// channel's stored component. `None` for a channel the format does not
+    /// carry, its alpha among them.
+    ///
+    /// A plate is a one-channel image of ink, not of light: read as grey it
+    /// is its own negative.
+    #[must_use]
+    pub fn channel(&self, index: usize) -> Option<Vec<u8>> {
+        if index >= color_channels(self.format) {
+            return None;
+        }
+        let components = self.format.components();
+        let mut out =
+            Vec::with_capacity((self.width as usize).saturating_mul(self.height as usize));
+        for row in 0..self.height as usize {
+            for col in 0..self.width as usize {
+                let at = row * self.stride + col * components + index;
+                out.push(self.data.get(at).copied().unwrap_or(0));
+            }
+        }
+        Some(out)
+    }
+
     /// The same canvas, standing at device pixel `(x, y)` rather than at the
     /// origin.
     ///
@@ -385,7 +582,17 @@ impl Canvas {
     }
 
     /// Repaints every pixel.
+    ///
+    /// A plates canvas takes `color` as `CmykA8` does — its light turned into
+    /// ink on the process channels — with no ink on any spot.
     pub fn clear(&mut self, color: Color) {
+        if let PixelFormat::Plates { spots } = self.format {
+            let word = plate_word(color, spots, self.ink_tables.as_deref());
+            for chunk in self.data.chunks_exact_mut(word.len()) {
+                chunk.copy_from_slice(&word);
+            }
+            return;
+        }
         let pixel = self.encode(color);
         for chunk in self.data.chunks_exact_mut(self.format.components()) {
             chunk.copy_from_slice(&pixel[..chunk.len()]);
@@ -450,34 +657,17 @@ impl Canvas {
     /// removal an ink format turns light into ink by, `None` for maximum
     /// removal.
     fn encode_by(&self, color: Color, tables: Option<&InkTables>) -> [u8; 5] {
-        match self.format {
-            PixelFormat::Gray8 => [color.luma(), 0, 0, 0, 0],
-            PixelFormat::GrayA8 => [color.luma(), color.a, 0, 0, 0],
-            PixelFormat::Rgb8 => [color.r, color.g, color.b, 0, 0],
-            PixelFormat::Rgba8 => [color.r, color.g, color.b, color.a, 0],
-            PixelFormat::CmykA8 => {
-                let (c, m, y, k) = match tables {
-                    Some(tables) => tables.ink(color.r, color.g, color.b),
-                    None => rgb_to_cmyk(color.r, color.g, color.b),
-                };
-                [c, m, y, k, color.a]
-            }
-            PixelFormat::LabA8 => {
-                let (l, a, b) = lab_bytes(color);
-                [l, a, b, color.a, 0]
-            }
-            PixelFormat::Bgr8 => [color.b, color.g, color.r, 0, 0],
-            PixelFormat::Bgra8 => [color.b, color.g, color.r, color.a, 0],
-        }
+        encode_in(self.format, color, tables)
     }
 
     /// Puts black generation and undercolour removal in force for the light
     /// this canvas turns into ink from now on, or maximum removal again for
     /// `None`, and hands back what was in force.
     ///
-    /// Read only by a `CmykA8` canvas, wherever it encodes light: a colour
-    /// without ink of its own, an image's sample, a shading's pixel, a buffer
-    /// of another format composited onto it.
+    /// Read only by an ink canvas — `CmykA8`, and a plates canvas's process
+    /// channels — wherever it encodes light: a colour without ink of its own,
+    /// an image's sample, a shading's pixel, a buffer of another format
+    /// composited onto it.
     pub fn set_ink_tables(
         &mut self,
         tables: Option<std::sync::Arc<InkTables>>,
@@ -524,6 +714,21 @@ impl Canvas {
             return;
         }
 
+        // A plates canvas composites the colour's ink on its process
+        // channels, as `CmykA8` does — the colour's own components where it
+        // has them, its light turned into ink where it has not — and knocks
+        // out every spot channel.
+        if let PixelFormat::Plates { spots } = self.format {
+            let ink = match ink {
+                Some(ink) => PlateInk::process(spots, ink),
+                None => {
+                    let (c, m, y, k) = light_ink(color, self.ink_tables.as_deref());
+                    PlateInk::process(spots, [c, m, y, k])
+                }
+            };
+            self.fill_plates(mask, ink.tints(), u32::from(color.a), alpha, mode);
+            return;
+        }
         if mode.is_nonseparable() && self.format == PixelFormat::CmykA8 {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
         }
@@ -551,6 +756,83 @@ impl Canvas {
             self.fill_opaque(mask, &source, rect);
         } else {
             self.fill_blended(mask, &source, color_alpha, alpha, mode, rect);
+        }
+    }
+
+    /// Composites `ink` through `mask` onto a [`PixelFormat::Plates`] canvas,
+    /// at `alpha` under `mode` (11.3.5, 11.3.6): each colour channel its own
+    /// tint, a channel the ink names no tint for taking no ink, so under
+    /// `Normal` the paint knocks it out.
+    ///
+    /// The arithmetic is `CmykA8`'s, channel by channel: a tint enters and
+    /// leaves the blend function complemented, the composite is 11.3.6's
+    /// over straight alpha, and the coverage and `alpha` multiply as they do
+    /// for an opaque colour there. So the four process channels of a plates
+    /// canvas come out of the same masks, inks, alphas and modes byte for
+    /// byte as a `CmykA8` canvas's do.
+    ///
+    /// On a canvas of any other format the ink's process tints are painted as
+    /// the DeviceCMYK colour they are — that colour's own ink on `CmykA8`,
+    /// its light everywhere else — and its spots, which no other format
+    /// carries, are not.
+    pub fn fill_mask_plates(&mut self, mask: &Mask, ink: &PlateInk, alpha: f64, mode: BlendMode) {
+        if !matches!(self.format, PixelFormat::Plates { .. }) {
+            let [c, m, y, k] = ink.process_tints();
+            let (r, g, b) = cmyk_to_rgb(c, m, y, k);
+            self.fill_mask_inked(mask, Color::rgb(r, g, b), Some([c, m, y, k]), alpha, mode);
+            return;
+        }
+        let alpha = if alpha.is_finite() {
+            operation_level(alpha)
+        } else {
+            255
+        };
+        if alpha == 0 {
+            return;
+        }
+        self.fill_plates(mask, ink.tints(), 255, alpha, mode);
+    }
+
+    /// The plates composite of [`Canvas::fill_mask_plates`] and of
+    /// [`Canvas::fill_mask_inked`] on a plates canvas: every pixel the mask
+    /// covers through [`blend_plates`], at the coverage, the colour's own
+    /// alpha and the operation's `alpha` level multiplied as
+    /// [`Canvas::fill_mask_inked`]'s general composite multiplies them.
+    fn fill_plates(
+        &mut self,
+        mask: &Mask,
+        tints: &[u8],
+        color_alpha: u32,
+        alpha: u32,
+        mode: BlendMode,
+    ) {
+        let channels = color_channels(self.format);
+        let components = self.format.components();
+        // The source as wide as this canvas's colour channels: the ink's own
+        // tint in each channel it has, and no ink in each it has not.
+        let source: Vec<u8> = (0..channels)
+            .map(|channel| tints.get(channel).copied().unwrap_or(0))
+            .collect();
+        let (x0, y0, x1, y1) = mask.overlap_at(self.origin, self.width, self.height);
+        let (ox, oy) = self.origin;
+        for row in y0..y1 {
+            for col in x0..x1 {
+                let coverage = u32::from(
+                    mask.at(ox.saturating_add(col as i32), oy.saturating_add(row as i32)),
+                );
+                if coverage == 0 {
+                    continue;
+                }
+                let effective = mul255(mul255(coverage, color_alpha), alpha);
+                if effective == 0 {
+                    continue;
+                }
+                let base = (row as usize) * self.stride + (col as usize) * components;
+                let backdrop = self.backdrop_alpha(col, row);
+                if let Some(pixel) = self.data.get_mut(base..base + components) {
+                    blend_plates(pixel, &source, effective, channels, mode, backdrop);
+                }
+            }
         }
     }
 
@@ -671,6 +953,9 @@ impl Canvas {
             PixelFormat::Rgb8 | PixelFormat::Bgr8 => opaque_row::<3, false>,
             PixelFormat::Rgba8 | PixelFormat::Bgra8 | PixelFormat::LabA8 => opaque_row::<4, true>,
             PixelFormat::CmykA8 => opaque_row::<5, true>,
+            // Plates are not a format of this path: `fill_mask_inked` hands
+            // them to `fill_plates` before it is chosen.
+            PixelFormat::Plates { .. } => return,
         };
         for (index, row) in (y0..y1).enumerate() {
             let start = (line + index) * (mask.width as usize) + column;
@@ -762,6 +1047,10 @@ impl Canvas {
             (Some([cyan, magenta, yellow, black]), PixelFormat::CmykA8) => {
                 [cyan, magenta, yellow, black, color.a]
             }
+            (_, PixelFormat::Plates { spots }) => {
+                self.blend_plate_pixel(x, y, color, ink, effective, mode, spots);
+                return;
+            }
             _ => self.encode(color),
         };
         let base = (y as usize) * self.stride + (x as usize) * components;
@@ -780,6 +1069,44 @@ impl Canvas {
             mode,
             backdrop,
         );
+    }
+
+    /// [`Canvas::blend_pixel_level`] on a plates canvas: the colour's ink on
+    /// the process channels, as a fill's ([`Canvas::fill_mask_inked`]), no
+    /// ink on any spot, at the pixel's `effective` opacity.
+    #[allow(clippy::too_many_arguments)]
+    fn blend_plate_pixel(
+        &mut self,
+        x: u32,
+        y: u32,
+        color: Color,
+        ink: Option<[u8; 4]>,
+        effective: u32,
+        mode: BlendMode,
+        spots: Spots,
+    ) {
+        let [c, m, yellow, k] = match ink {
+            Some(ink) => ink,
+            None => {
+                let (c, m, yellow, k) = light_ink(color, self.ink_tables.as_deref());
+                [c, m, yellow, k]
+            }
+        };
+        // On the stack: an image reaches here once a pixel.
+        let mut source = [0u8; 4 + MAX_SPOT_PLATES];
+        if let Some(process) = source.get_mut(..4) {
+            process.copy_from_slice(&[c, m, yellow, k]);
+        }
+        let channels = 4 + spots.count();
+        let components = self.format.components();
+        let base = (y as usize) * self.stride + (x as usize) * components;
+        let backdrop = self.backdrop_alpha(x, y);
+        if let (Some(pixel), Some(source)) = (
+            self.data.get_mut(base..base + components),
+            source.get(..channels),
+        ) {
+            blend_plates(pixel, source, effective, channels, mode, backdrop);
+        }
     }
 
     /// How opaque the initial backdrop is at a pixel, `a0`: the parent's
@@ -980,9 +1307,22 @@ impl Canvas {
     /// Pixels outside this canvas come back transparent, which is the right
     /// answer for a group whose bounding box hangs off the edge of the page:
     /// there is no backdrop out there to blend against.
+    ///
+    /// Plates come out of a plates canvas as their tints, and go into one as
+    /// ink: a `CmykA8` pixel's own ink, any other's light turned into ink, on
+    /// the process channels, with no ink on any spot. Out of plates into a
+    /// format of light, a pixel is its process channels' light, 8.6.4.4 as
+    /// [`Canvas::pixel`] reads it — the colour of a spot is its caller's, and
+    /// nothing here knows it.
     #[must_use]
     pub fn extract(&self, at: (i32, i32), width: u32, height: u32, format: PixelFormat) -> Canvas {
         let mut out = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(at.0, at.1);
+        if matches!(format, PixelFormat::Plates { .. })
+            || matches!(self.format, PixelFormat::Plates { .. })
+        {
+            self.extract_plates_into(&mut out, at);
+            return out;
+        }
         for row in 0..height {
             for col in 0..width {
                 let (Some(x), Some(y)) = (
@@ -1010,6 +1350,34 @@ impl Canvas {
             }
         }
         out
+    }
+
+    /// [`Canvas::extract`] where either canvas is plates: each pixel of `out`
+    /// read across from this canvas by [`plate_pixel_into`].
+    fn extract_plates_into(&self, out: &mut Canvas, at: (i32, i32)) {
+        let components = out.format.components();
+        let mut word = vec![0u8; components];
+        for row in 0..out.height {
+            for col in 0..out.width {
+                let (Some(x), Some(y)) = (
+                    (i64::from(at.0) + i64::from(col) - i64::from(self.origin.0))
+                        .try_into()
+                        .ok(),
+                    (i64::from(at.1) + i64::from(row) - i64::from(self.origin.1))
+                        .try_into()
+                        .ok(),
+                ) else {
+                    continue;
+                };
+                if !plate_pixel_into(self, x, y, out.format, out.ink_tables.as_deref(), &mut word) {
+                    continue;
+                }
+                let base = (row as usize) * out.stride + (col as usize) * components;
+                if let Some(slot) = out.data.get_mut(base..base + components) {
+                    slot.copy_from_slice(&word);
+                }
+            }
+        }
     }
 
     /// Starts this group's buffer from its parent, the canvas it will be
@@ -1263,12 +1631,24 @@ impl Canvas {
     ///
     /// A no-op on a format with no alpha channel, where every pixel is opaque
     /// and the result would be one flat rectangle rather than a shape.
+    ///
+    /// On a plates canvas the colour is light turned into ink on the process
+    /// channels, with no ink on any spot.
     pub fn recolor(&mut self, color: Color) {
         if !self.format.has_alpha() {
             return;
         }
         let components = self.format.components();
         let channels = color_channels(self.format);
+        if let PixelFormat::Plates { spots } = self.format {
+            let word = plate_word(color, spots, self.ink_tables.as_deref());
+            for pixel in self.data.chunks_exact_mut(components) {
+                for (slot, from) in pixel.iter_mut().zip(&word).take(channels) {
+                    *slot = *from;
+                }
+            }
+            return;
+        }
         let source = self.encode(color);
         for row in 0..self.height as usize {
             for col in 0..self.width as usize {
@@ -1340,6 +1720,17 @@ impl Canvas {
                 b: *px.first()?,
                 a: *px.get(3)?,
             },
+            // The process channels' light, as a `CmykA8` pixel's: a spot's
+            // colour is its caller's to say, and nothing here knows it.
+            PixelFormat::Plates { spots } => {
+                let (r, g, b) = cmyk_to_rgb(*px.first()?, *px.get(1)?, *px.get(2)?, *px.get(3)?);
+                Color {
+                    r,
+                    g,
+                    b,
+                    a: *px.get(4 + spots.count())?,
+                }
+            }
         })
     }
 }
@@ -1367,6 +1758,8 @@ fn mask_value(kind: MaskKind, format: PixelFormat) -> fn(&[u8]) -> u8 {
             |pixel| byte(pixel, 3)
         }
         (MaskKind::Alpha, PixelFormat::CmykA8) => |pixel| byte(pixel, 4),
+        // A plates pixel's alpha is its last byte, however many spots.
+        (MaskKind::Alpha, PixelFormat::Plates { .. }) => |pixel| pixel.last().copied().unwrap_or(0),
         // A grey `v` reads as `(v, v, v)`, whose luminosity is
         // `(1000 v + 500) / 1000`, which is `v`.
         (MaskKind::Luminosity, PixelFormat::Gray8 | PixelFormat::GrayA8) => |pixel| byte(pixel, 0),
@@ -1377,7 +1770,8 @@ fn mask_value(kind: MaskKind, format: PixelFormat) -> fn(&[u8]) -> u8 {
         (MaskKind::Luminosity, PixelFormat::Bgr8 | PixelFormat::Bgra8) => {
             |pixel| luminosity(byte(pixel, 2), byte(pixel, 1), byte(pixel, 0))
         }
-        (MaskKind::Luminosity, PixelFormat::CmykA8) => |pixel| {
+        // A plates pixel is its process channels' light, as `pixel` reads it.
+        (MaskKind::Luminosity, PixelFormat::CmykA8 | PixelFormat::Plates { .. }) => |pixel| {
             let (r, g, b) = cmyk_to_rgb(
                 byte(pixel, 0),
                 byte(pixel, 1),
@@ -1391,6 +1785,104 @@ fn mask_value(kind: MaskKind, format: PixelFormat) -> fn(&[u8]) -> u8 {
             luminosity(r, g, b)
         },
     }
+}
+
+/// A light colour as a [`PixelFormat::Plates`] pixel: its ink on the process
+/// channels, as a `CmykA8` canvas encodes it — by `tables` where they are in
+/// force — no ink on any spot, and its alpha.
+fn plate_word(color: Color, spots: Spots, tables: Option<&InkTables>) -> Vec<u8> {
+    let (c, m, y, k) = light_ink(color, tables);
+    let mut word = Vec::with_capacity(5 + spots.count());
+    word.extend_from_slice(&[c, m, y, k]);
+    word.resize(4 + spots.count(), 0);
+    word.push(color.a);
+    word
+}
+
+/// `src`'s pixel `(sx, sy)` in `format`'s storage, written into `out`, which
+/// is `format.components()` bytes, light turned into ink by `tables` where
+/// they are in force: `false` off `src` or where `out` is not that wide.
+///
+/// The conversion every copy across formats makes where one side is plates.
+/// The same format reads the bytes across. Into plates, a `CmykA8` or plates
+/// pixel's process inks are copied as ink, a pixel of light is turned into
+/// ink ([`rgb_to_cmyk`]), and a spot channel takes the source's spot of the
+/// same index where the source has one and no ink where it has not. Out of
+/// plates into `CmykA8`, the process inks are copied; into any other format
+/// the pixel is its process channels' light ([`Canvas::pixel`]).
+fn plate_pixel_into(
+    src: &Canvas,
+    sx: u32,
+    sy: u32,
+    format: PixelFormat,
+    tables: Option<&InkTables>,
+    out: &mut [u8],
+) -> bool {
+    if sx >= src.width || sy >= src.height || out.len() != format.components() {
+        return false;
+    }
+    let src_components = src.format.components();
+    let base = (sy as usize) * src.stride + (sx as usize) * src_components;
+    let Some(raw) = src.data.get(base..base + src_components) else {
+        return false;
+    };
+    if src.format == format {
+        out.copy_from_slice(raw);
+        return true;
+    }
+    let inked = matches!(src.format, PixelFormat::CmykA8 | PixelFormat::Plates { .. });
+    let alpha = src.alpha_at(sx, sy).min(255) as u8;
+    match format {
+        PixelFormat::Plates { spots } => {
+            let process = if inked {
+                [
+                    raw.first().copied().unwrap_or(0),
+                    raw.get(1).copied().unwrap_or(0),
+                    raw.get(2).copied().unwrap_or(0),
+                    raw.get(3).copied().unwrap_or(0),
+                ]
+            } else {
+                let Some(color) = src.pixel(sx, sy) else {
+                    return false;
+                };
+                let (c, m, y, k) = light_ink(color, tables);
+                [c, m, y, k]
+            };
+            let source_spots = match src.format {
+                PixelFormat::Plates { spots } => spots.count(),
+                _ => 0,
+            };
+            for (channel, slot) in out.iter_mut().enumerate().take(4 + spots.count()) {
+                *slot = match channel {
+                    0..=3 => process.get(channel).copied().unwrap_or(0),
+                    spot if spot - 4 < source_spots => raw.get(spot).copied().unwrap_or(0),
+                    _ => 0,
+                };
+            }
+            if let Some(slot) = out.get_mut(4 + spots.count()) {
+                *slot = alpha;
+            }
+        }
+        PixelFormat::CmykA8 => {
+            // Out of plates: the process inks, as ink.
+            for (slot, from) in out.iter_mut().zip(raw).take(4) {
+                *slot = *from;
+            }
+            if let Some(slot) = out.get_mut(4) {
+                *slot = alpha;
+            }
+        }
+        _ => {
+            let Some(color) = src.pixel(sx, sy) else {
+                return false;
+            };
+            let word = encode_in(format, color, tables);
+            for (slot, from) in out.iter_mut().zip(word.iter()) {
+                *slot = *from;
+            }
+        }
+    }
+    true
 }
 
 /// Where a `width` by `height` source placed at `at` lands on a `dst_width` by
@@ -1451,6 +1943,46 @@ pub fn lab_bytes(color: Color) -> (u8, u8, u8) {
     let (l, a, b) = tinker_pdf_color::srgb_to_lab(color.r, color.g, color.b);
     let byte = |v: f64| -> u8 { v.clamp(0.0, 255.0).round() as u8 };
     (byte(l / 100.0 * 255.0), byte(a + 128.0), byte(b + 128.0))
+}
+
+/// A colour in `format`'s bytes, light turned into ink by `tables` where
+/// they are in force and by maximum undercolour removal where they are not:
+/// [`Canvas::encode`], for a caller holding a format rather than a canvas.
+fn encode_in(format: PixelFormat, color: Color, tables: Option<&InkTables>) -> [u8; 5] {
+    match format {
+        PixelFormat::Gray8 => [color.luma(), 0, 0, 0, 0],
+        PixelFormat::GrayA8 => [color.luma(), color.a, 0, 0, 0],
+        PixelFormat::Rgb8 => [color.r, color.g, color.b, 0, 0],
+        PixelFormat::Rgba8 => [color.r, color.g, color.b, color.a, 0],
+        PixelFormat::CmykA8 => {
+            let (c, m, y, k) = light_ink(color, tables);
+            [c, m, y, k, color.a]
+        }
+        PixelFormat::LabA8 => {
+            let (l, a, b) = lab_bytes(color);
+            [l, a, b, color.a, 0]
+        }
+        PixelFormat::Bgr8 => [color.b, color.g, color.r, 0, 0],
+        PixelFormat::Bgra8 => [color.b, color.g, color.r, color.a, 0],
+        // The whole pixel only where there is no spot, which is a `CmykA8`
+        // pixel; a plates canvas with spots is wider than this word, and
+        // every path that composites on one builds its own
+        // (`plate_word`, `PlateInk`) rather than reading this.
+        PixelFormat::Plates { .. } => {
+            let (c, m, y, k) = light_ink(color, tables);
+            [c, m, y, k, color.a]
+        }
+    }
+}
+
+/// Light turned into ink: by black generation and undercolour removal where
+/// `tables` hold them (10.4.2.4), and by maximum undercolour removal
+/// ([`rgb_to_cmyk`]) where they do not.
+fn light_ink(color: Color, tables: Option<&InkTables>) -> (u8, u8, u8, u8) {
+    match tables {
+        Some(tables) => tables.ink(color.r, color.g, color.b),
+        None => rgb_to_cmyk(color.r, color.g, color.b),
+    }
 }
 
 /// The inverse of [`lab_bytes`]: [`PixelFormat::LabA8`]'s three bytes back to
@@ -1824,6 +2356,7 @@ fn color_channels(format: PixelFormat) -> usize {
         | PixelFormat::Bgr8
         | PixelFormat::Bgra8 => 3,
         PixelFormat::CmykA8 => 4,
+        PixelFormat::Plates { spots } => 4 + spots.count(),
     }
 }
 
@@ -2026,6 +2559,60 @@ fn blend(
         if let Some(slot) = dst.get_mut(channels) {
             *slot = own_out.min(255) as u8;
         }
+    }
+}
+
+/// [`blend`] over a [`PixelFormat::Plates`] pixel: `dst` holds `channels`
+/// tints and an alpha after them, `source` a tint for each channel, and the
+/// source composites at `alpha` under `mode` with `initial` the alpha of a
+/// non-isolated group's initial backdrop (11.4.4), zero everywhere else.
+///
+/// Each channel is `CmykA8`'s arithmetic, line for line: the tint enters and
+/// leaves the separable blend function complemented, since 11.3.5's formulas
+/// are written for additive values and a tint is a quantity of ink; the
+/// result is 11.3.6's straight-alpha composite against the union alpha, and
+/// the alpha channel keeps the group's own. So with the same inputs a
+/// process channel here is the byte the same channel of a `CmykA8` pixel
+/// comes out as, and a spot channel is what a process channel holding its
+/// tints would be. A non-separable mode has no per-channel form and
+/// composites as [`BlendMode::apply`] answers for it, the source.
+fn blend_plates(
+    dst: &mut [u8],
+    source: &[u8],
+    alpha: u32,
+    channels: usize,
+    mode: BlendMode,
+    initial: u32,
+) {
+    #[cfg(test)]
+    blends::counted();
+    if alpha == 0 {
+        return;
+    }
+    let inverse = 255 - alpha;
+    let own_alpha = dst.get(channels).map_or(255, |a| u32::from(*a));
+    let backdrop_alpha = own_alpha + mul255(initial, 255 - own_alpha);
+    // The colour renormalises against the union alpha; the alpha channel keeps
+    // the group's own. They are the same number outside a non-isolated group.
+    let union_out = alpha + mul255(backdrop_alpha, inverse);
+    let own_out = alpha + mul255(own_alpha, inverse);
+    for (slot, src) in dst.iter_mut().zip(source).take(channels) {
+        let cs = u32::from(*src);
+        let cb = u32::from(*slot);
+        let blended = 255 - mode.apply(255 - cb, 255 - cs);
+        let mixed = mul255(255 - backdrop_alpha, cs) + mul255(backdrop_alpha, blended);
+        *slot = if backdrop_alpha == 255 {
+            (mul255(mixed, alpha) + mul255(cb, inverse)).min(255) as u8
+        } else {
+            let weighted = mul255(mixed, alpha) + mul255(mul255(cb, backdrop_alpha), inverse);
+            (weighted * 255 + union_out / 2)
+                .checked_div(union_out)
+                .unwrap_or(0)
+                .min(255) as u8
+        };
+    }
+    if let Some(slot) = dst.get_mut(channels) {
+        *slot = own_out.min(255) as u8;
     }
 }
 
@@ -4384,5 +4971,612 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- The plates format ------------------------------------------------
+
+    /// The twelve separable modes (11.3.5.2), `Normal` first.
+    const SEPARABLE: [BlendMode; 12] = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+    ];
+
+    /// The separable modes that preserve white (11.7.4.2): all but
+    /// `Difference` and `Exclusion`.
+    const WHITE_PRESERVING: [BlendMode; 10] = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+    ];
+
+    fn spots(count: usize) -> Spots {
+        Spots::new(count).expect("under the cap")
+    }
+
+    /// A mask over device pixels `x0..x0 + width`, `y0..y0 + height`, every
+    /// pixel at `coverage`.
+    fn solid(x0: i32, y0: i32, width: u32, height: u32, coverage: u8) -> Mask {
+        Mask {
+            x0,
+            y0,
+            width,
+            height,
+            data: vec![coverage; (width * height) as usize],
+            outside: 0,
+        }
+    }
+
+    /// A mask over the 8 by 8 pixels at the origin whose coverage steps
+    /// through the byte: every pixel a different partial cover, zero and
+    /// full among them.
+    fn ramp() -> Mask {
+        Mask {
+            x0: 0,
+            y0: 0,
+            width: 8,
+            height: 8,
+            data: (0..64u32).map(|i| (i * 255 / 63) as u8).collect(),
+            outside: 0,
+        }
+    }
+
+    /// The four process channels and the alpha of every pixel of a plates
+    /// canvas, as a `CmykA8` canvas lays them out.
+    fn process_and_alpha(canvas: &Canvas) -> Vec<u8> {
+        let components = canvas.format.components();
+        canvas
+            .data
+            .chunks_exact(components)
+            .flat_map(|pixel| {
+                let mut kept = pixel[..4].to_vec();
+                kept.push(pixel[components - 1]);
+                kept
+            })
+            .collect()
+    }
+
+    /// **Four process channels composite as `CmykA8` does** (RC-04.3).
+    ///
+    /// The same masks, inks, alphas and separable modes, over the same
+    /// backdrops — opaque white, a colour turned into ink, and nothing at
+    /// all — painted on a `CmykA8` canvas through `fill_mask_inked` and on
+    /// plates through `fill_mask_plates`, with no spot and with three: the
+    /// plates with none are the `CmykA8` bytes, and the plates with three
+    /// carry the `CmykA8` bytes on their process channels and alpha. A light
+    /// colour on plates through `fill_mask_inked` is its light turned into
+    /// ink, as on `CmykA8`.
+    #[test]
+    fn four_process_channels_composite_as_cmyka8_does() {
+        let masks = [
+            square_mask(0.0, 0.0, 8.0, 8.0, 8),
+            square_mask(1.3, 0.6, 5.2, 4.7, 8),
+            ramp(),
+            square_mask(2.5, 2.5, 3.0, 3.0, 8),
+        ];
+        let inks: [[u8; 4]; 4] = [
+            [255, 0, 0, 0],
+            [12, 200, 77, 31],
+            [255, 255, 255, 255],
+            [0, 90, 0, 140],
+        ];
+        for background in [Color::WHITE, Color::rgb(40, 160, 220), Color::TRANSPARENT] {
+            for mode in SEPARABLE {
+                for alpha in [1.0, 0.5, 0.3] {
+                    let mut ink = Canvas::new(8, 8, PixelFormat::CmykA8, background);
+                    let mut none = Canvas::plates(8, 8, 0, background).expect("under the cap");
+                    let mut three = Canvas::plates(8, 8, 3, background).expect("under the cap");
+                    for (index, (mask, cmyk)) in masks.iter().zip(inks).enumerate() {
+                        // The first paint is the backdrop, `Normal` and whole.
+                        let (mode, alpha) = if index == 0 {
+                            (BlendMode::Normal, 1.0)
+                        } else {
+                            (mode, alpha)
+                        };
+                        let [c, m, y, k] = cmyk;
+                        let (r, g, b) = cmyk_to_rgb(c, m, y, k);
+                        ink.fill_mask_inked(mask, Color::rgb(r, g, b), Some(cmyk), alpha, mode);
+                        none.fill_mask_plates(
+                            mask,
+                            &PlateInk::process(spots(0), cmyk),
+                            alpha,
+                            mode,
+                        );
+                        three.fill_mask_plates(
+                            mask,
+                            &PlateInk::process(spots(3), cmyk),
+                            alpha,
+                            mode,
+                        );
+                    }
+                    let case = format!("{mode:?} at {alpha} over {background:?}");
+                    assert_eq!(none.data, ink.data, "no spot: {case}");
+                    assert_eq!(process_and_alpha(&three), ink.data, "three spots: {case}");
+
+                    let light = Color::rgb(200, 30, 90);
+                    let mut lit_ink = ink.clone();
+                    let mut lit_plates = three.clone();
+                    lit_ink.fill_mask_inked(&masks[1], light, None, alpha, mode);
+                    lit_plates.fill_mask_inked(&masks[1], light, None, alpha, mode);
+                    assert_eq!(
+                        process_and_alpha(&lit_plates),
+                        lit_ink.data,
+                        "light: {case}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A spot channel is a channel like a process one: under every separable
+    /// mode that preserves white, the same tints over the same backdrop give
+    /// a spot channel the bytes magenta gets.
+    #[test]
+    fn a_spot_channel_composites_as_a_process_channel_does() {
+        for mode in WHITE_PRESERVING {
+            for alpha in [1.0, 0.6] {
+                let mut canvas =
+                    Canvas::plates(8, 8, 2, Color::TRANSPARENT).expect("under the cap");
+                let backdrop = PlateInk::named(spots(2), &[(1, 180), (5, 180)]);
+                canvas.fill_mask_plates(
+                    &square_mask(0.0, 0.0, 6.0, 6.0, 8),
+                    &backdrop,
+                    0.8,
+                    BlendMode::Normal,
+                );
+                let paint = PlateInk::named(spots(2), &[(1, 70), (5, 70)]);
+                canvas.fill_mask_plates(&ramp(), &paint, alpha, mode);
+                assert_eq!(
+                    canvas.channel(1),
+                    canvas.channel(5),
+                    "{mode:?} at {alpha}: the spot is magenta's twin"
+                );
+            }
+        }
+    }
+
+    /// **A paint knocks out the channels it does not name** (RC-04.3; 8.6.7
+    /// with overprint off): where it covers, every channel it names takes its
+    /// tint and every other takes no ink, process and spot alike; where it
+    /// covers part of a pixel, or paints at part of an alpha, each knocked-out
+    /// channel keeps what 11.3.6's composite of no ink over it leaves.
+    #[test]
+    fn a_paint_knocks_out_the_channels_it_does_not_name() {
+        let mut canvas = Canvas::plates(8, 8, 4, Color::WHITE).expect("under the cap");
+        let first = PlateInk::named(spots(4), &[(0, 200), (5, 120), (7, 33)]);
+        canvas.fill_mask_plates(&solid(0, 0, 8, 8, 255), &first, 1.0, BlendMode::Normal);
+        let second = PlateInk::named(spots(4), &[(2, 90), (6, 60)]);
+        canvas.fill_mask_plates(&solid(2, 2, 4, 4, 255), &second, 1.0, BlendMode::Normal);
+
+        let inside = |canvas: &Canvas, channel: usize| {
+            canvas.channel(channel).expect("a channel")[3 * 8 + 3]
+        };
+        let outside =
+            |canvas: &Canvas, channel: usize| canvas.channel(channel).expect("a channel")[0];
+        for channel in 0..8 {
+            let named = match channel {
+                2 => 90,
+                6 => 60,
+                _ => 0,
+            };
+            assert_eq!(inside(&canvas, channel), named, "inside, channel {channel}");
+            let before = match channel {
+                0 => 200,
+                5 => 120,
+                7 => 33,
+                _ => 0,
+            };
+            assert_eq!(
+                outside(&canvas, channel),
+                before,
+                "outside, channel {channel}"
+            );
+        }
+
+        // At half an alpha, over an opaque backdrop: `cs·a + cb·(1 − a)` in
+        // the crate's integer steps, a named channel's `cs` its tint and a
+        // knocked-out one's no ink.
+        let mut half = Canvas::plates(8, 8, 4, Color::WHITE).expect("under the cap");
+        half.fill_mask_plates(&solid(0, 0, 8, 8, 255), &first, 1.0, BlendMode::Normal);
+        half.fill_mask_plates(&solid(0, 0, 8, 8, 255), &second, 0.5, BlendMode::Normal);
+        let a = 128;
+        for channel in 0..8 {
+            let cs = match channel {
+                2 => 90,
+                6 => 60,
+                _ => 0,
+            };
+            let cb = match channel {
+                0 => 200,
+                5 => 120,
+                7 => 33,
+                _ => 0,
+            };
+            let want = (mul255(cs, a) + mul255(cb, 255 - a)).min(255) as u8;
+            assert_eq!(
+                outside(&half, channel),
+                want,
+                "half alpha, channel {channel}"
+            );
+        }
+        assert_eq!(half.data[8], 255, "the alpha of an opaque page stays whole");
+    }
+
+    /// **Sixty-eight channels each keep their own ink** (RC-04.3): a canvas
+    /// at the cap paints each of its channels in a column of its own, and
+    /// each plate read out holds its tint in its column and no ink anywhere
+    /// else; one paint naming all sixty-eight puts each tint on its own plate.
+    #[test]
+    fn sixty_eight_channels_each_keep_their_own_ink() {
+        let channels = 4 + MAX_SPOT_PLATES;
+        let tint = |channel: usize| (channel * 3 + 7) as u8;
+        let mut canvas =
+            Canvas::plates(channels as u32, 2, MAX_SPOT_PLATES, Color::WHITE).expect("at the cap");
+        assert_eq!(canvas.format.components(), 69);
+        for channel in 0..channels {
+            let ink = PlateInk::named(spots(MAX_SPOT_PLATES), &[(channel, tint(channel))]);
+            canvas.fill_mask_plates(
+                &solid(channel as i32, 0, 1, 2, 255),
+                &ink,
+                1.0,
+                BlendMode::Normal,
+            );
+        }
+        for channel in 0..channels {
+            let plate = canvas.channel(channel).expect("a plate");
+            for (index, value) in plate.iter().enumerate() {
+                let want = if index % channels == channel {
+                    tint(channel)
+                } else {
+                    0
+                };
+                assert_eq!(*value, want, "plate {channel} at pixel {index}");
+            }
+        }
+        assert_eq!(canvas.channel(channels), None, "the alpha is no plate");
+
+        let all: Vec<(usize, u8)> = (0..channels)
+            .map(|channel| (channel, tint(channel)))
+            .collect();
+        let mut whole =
+            Canvas::plates(3, 3, MAX_SPOT_PLATES, Color::TRANSPARENT).expect("at the cap");
+        whole.fill_mask_plates(
+            &solid(0, 0, 3, 3, 255),
+            &PlateInk::named(spots(MAX_SPOT_PLATES), &all),
+            1.0,
+            BlendMode::Normal,
+        );
+        for channel in 0..channels {
+            assert_eq!(
+                whole.channel(channel),
+                Some(vec![tint(channel); 9]),
+                "plate {channel}"
+            );
+        }
+        assert!(
+            whole.data.chunks_exact(69).all(|pixel| pixel[68] == 255),
+            "opaque"
+        );
+    }
+
+    /// **A canvas past the channel cap is refused by name** (RC-04.3): the
+    /// cap is sixty-four spots, a count past it is `TooManySpots` saying how
+    /// many were asked for, and no plates canvas is made of it.
+    #[test]
+    fn a_canvas_past_the_channel_cap_is_refused_by_name() {
+        assert_eq!(MAX_SPOT_PLATES, 64);
+        assert_eq!(Spots::new(MAX_SPOT_PLATES).map(Spots::count), Ok(64));
+        assert_eq!(
+            Spots::new(MAX_SPOT_PLATES + 1),
+            Err(TooManySpots { asked: 65 })
+        );
+        assert_eq!(
+            Spots::new(usize::MAX),
+            Err(TooManySpots { asked: usize::MAX })
+        );
+        let refused = Canvas::plates(4, 4, 65, Color::WHITE).expect_err("past the cap");
+        assert_eq!(refused, TooManySpots { asked: 65 });
+        assert_eq!(
+            refused.to_string(),
+            "a plates canvas of 65 spot channels, past the cap of 64"
+        );
+        let at_cap = Canvas::plates(4, 4, 64, Color::WHITE).expect("at the cap");
+        assert_eq!(at_cap.data.len(), 4 * 4 * 69);
+        assert_eq!(Spots::NONE.count(), 0);
+        assert_eq!(Spots::default(), Spots::NONE);
+    }
+
+    /// A plates canvas starts as `CmykA8` starts — its background's light
+    /// turned into ink on the process channels and its alpha — with no ink on
+    /// any spot, and a plates canvas is allocated for its own spots.
+    #[test]
+    fn a_plates_canvas_starts_at_its_background_as_cmyka8_does() {
+        for background in [Color::WHITE, Color::TRANSPARENT, Color::rgb(10, 200, 90)] {
+            let ink = Canvas::new(2, 2, PixelFormat::CmykA8, background);
+            let plates = Canvas::plates(2, 2, 2, background).expect("under the cap");
+            assert_eq!(plates.data.len(), 2 * 2 * 7);
+            assert_eq!(plates.stride, 2 * 7);
+            for (pixel, from) in plates.data.chunks_exact(7).zip(ink.data.chunks_exact(5)) {
+                assert_eq!(&pixel[..4], &from[..4], "{background:?}");
+                assert_eq!(&pixel[4..6], &[0, 0], "no ink on a spot");
+                assert_eq!(pixel[6], from[4], "the alpha");
+            }
+        }
+    }
+
+    /// A plates pixel reads back as its process channels' light, 8.6.4.4 as a
+    /// `CmykA8` pixel reads, with its alpha; a spot's colour is not this
+    /// crate's to know.
+    #[test]
+    fn a_plates_canvas_reads_back_as_its_process_light() {
+        let mut canvas = Canvas::plates(1, 1, 3, Color::TRANSPARENT).expect("under the cap");
+        let ink = PlateInk::named(spots(3), &[(0, 255), (3, 51), (4, 200), (6, 255)]);
+        canvas.fill_mask_plates(&solid(0, 0, 1, 1, 255), &ink, 1.0, BlendMode::Normal);
+        let (r, g, b) = cmyk_to_rgb(255, 0, 0, 51);
+        assert_eq!(canvas.pixel(0, 0), Some(Color { r, g, b, a: 255 }));
+        assert_eq!(canvas.pixel(1, 0), None);
+        let mask = canvas.to_mask((0, 0), MaskKind::Alpha, None);
+        assert_eq!(mask.data, vec![255], "its alpha reads as a mask");
+    }
+
+    /// One channel read out is that channel's bytes, row by row, on plates
+    /// and on any other format; past the colour channels there is none.
+    #[test]
+    fn a_plate_is_one_channel_read_out() {
+        let mut canvas = Canvas::plates(3, 2, 1, Color::WHITE).expect("under the cap");
+        canvas.fill_mask_plates(
+            &solid(1, 0, 2, 2, 255),
+            &PlateInk::named(spots(1), &[(4, 77), (1, 9)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        assert_eq!(canvas.channel(4), Some(vec![0, 77, 77, 0, 77, 77]));
+        assert_eq!(canvas.channel(1), Some(vec![0, 9, 9, 0, 9, 9]));
+        assert_eq!(canvas.channel(0), Some(vec![0; 6]));
+        assert_eq!(canvas.channel(5), None, "the alpha");
+        assert_eq!(canvas.channel(500), None);
+
+        let rgb = Canvas::new(2, 1, PixelFormat::Rgb8, Color::rgb(1, 2, 3));
+        assert_eq!(rgb.channel(2), Some(vec![3, 3]));
+        assert_eq!(rgb.channel(3), None);
+    }
+
+    /// A colour handed to plates as a fill or a pixel paints its ink on the
+    /// process channels, as on `CmykA8` — its own components where it has
+    /// them, its light turned into ink where it has not — and knocks out
+    /// every spot.
+    #[test]
+    fn a_colour_on_plates_paints_its_process_ink() {
+        let full = solid(0, 0, 2, 2, 255);
+        let mut canvas = Canvas::plates(2, 2, 2, Color::WHITE).expect("under the cap");
+        canvas.fill_mask_plates(
+            &full,
+            &PlateInk::named(spots(2), &[(4, 99), (5, 98)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        canvas.fill_mask_inked(
+            &full,
+            Color::BLACK,
+            Some([255, 255, 255, 255]),
+            1.0,
+            BlendMode::Normal,
+        );
+        assert_eq!(
+            &canvas.data[..7],
+            &[255, 255, 255, 255, 0, 0, 255],
+            "the rich black"
+        );
+        canvas.fill_mask_inked(&full, Color::rgb(255, 0, 0), None, 1.0, BlendMode::Normal);
+        assert_eq!(
+            &canvas.data[..7],
+            &[0, 255, 255, 0, 0, 0, 255],
+            "red light as ink"
+        );
+
+        canvas.blend_pixel_inked(
+            1,
+            1,
+            Color::BLACK,
+            Some([10, 20, 30, 40]),
+            1.0,
+            BlendMode::Normal,
+        );
+        assert_eq!(
+            &canvas.data[21..28],
+            &[10, 20, 30, 40, 0, 0, 255],
+            "a sampled pixel"
+        );
+        canvas.blend_pixel_inked(0, 1, Color::rgb(0, 0, 0), None, 1.0, BlendMode::Normal);
+        assert_eq!(
+            &canvas.data[14..21],
+            &[0, 0, 0, 255, 0, 0, 255],
+            "black light is K"
+        );
+        canvas.blend_pixel_inked(9, 9, Color::BLACK, None, 1.0, BlendMode::Normal);
+    }
+
+    /// A plate ink on a canvas that is not plates paints its process tints
+    /// as the DeviceCMYK colour they are: that colour's ink on `CmykA8` and
+    /// its light on every other format, the spots, which no other format
+    /// carries, dropped.
+    #[test]
+    fn a_plate_ink_on_another_format_paints_its_process_colour() {
+        let full = solid(0, 0, 2, 2, 255);
+        let ink = PlateInk::named(spots(2), &[(0, 30), (2, 60), (4, 255), (5, 255)]);
+        let mut cmyk = Canvas::new(2, 2, PixelFormat::CmykA8, Color::WHITE);
+        cmyk.fill_mask_plates(&full, &ink, 1.0, BlendMode::Normal);
+        assert_eq!(&cmyk.data[..5], &[30, 0, 60, 0, 255]);
+        let mut rgb = Canvas::new(2, 2, PixelFormat::Rgb8, Color::WHITE);
+        rgb.fill_mask_plates(&full, &ink, 1.0, BlendMode::Normal);
+        let (r, g, b) = cmyk_to_rgb(30, 0, 60, 0);
+        assert_eq!(&rgb.data[..3], &[r, g, b]);
+    }
+
+    /// Ruling 5: a plates canvas standing at a device pixel takes a mask in
+    /// device pixels, and its own pixel `(col, row)` is device pixel
+    /// `(x0 + col, y0 + row)`.
+    #[test]
+    fn plates_stand_at_their_origin_in_the_page_frame() {
+        let mut canvas = Canvas::plates(4, 4, 1, Color::WHITE)
+            .expect("under the cap")
+            .at_origin(10, 20);
+        let ink = PlateInk::named(spots(1), &[(4, 200)]);
+        canvas.fill_mask_plates(&solid(11, 21, 2, 2, 255), &ink, 1.0, BlendMode::Normal);
+        let plate = canvas.channel(4).expect("the spot");
+        for row in 0..4 {
+            for col in 0..4 {
+                let want = if (1..3).contains(&col) && (1..3).contains(&row) {
+                    200
+                } else {
+                    0
+                };
+                assert_eq!(plate[row * 4 + col], want, "({col}, {row})");
+            }
+        }
+    }
+
+    /// Plates copy across as ink: plates to plates keeps every tint, plates
+    /// to `CmykA8` its process inks and to light their light, and ink or
+    /// light into plates lands on the process channels with no spot.
+    #[test]
+    fn plates_extract_as_ink_and_light() {
+        let mut canvas = Canvas::plates(2, 2, 2, Color::WHITE).expect("under the cap");
+        let ink = PlateInk::named(spots(2), &[(0, 40), (3, 80), (5, 120)]);
+        canvas.fill_mask_plates(&solid(0, 0, 1, 2, 255), &ink, 1.0, BlendMode::Normal);
+        let format = canvas.format;
+
+        let same = canvas.extract((0, 0), 2, 2, format);
+        assert_eq!(same.data, canvas.data);
+        let cmyk = canvas.extract((0, 0), 2, 2, PixelFormat::CmykA8);
+        assert_eq!(&cmyk.data[..5], &[40, 0, 0, 80, 255]);
+        let light = canvas.extract((0, 0), 2, 2, PixelFormat::Rgba8);
+        let (r, g, b) = cmyk_to_rgb(40, 0, 0, 80);
+        assert_eq!(&light.data[..4], &[r, g, b, 255]);
+        let off = canvas.extract((1, 0), 2, 2, format);
+        assert_eq!(
+            &off.data[7..14],
+            &[0, 0, 0, 255, 0, 0, 0],
+            "off the source: the transparent pixel a new canvas starts as"
+        );
+
+        let mut rich = Canvas::new(1, 1, PixelFormat::CmykA8, Color::TRANSPARENT);
+        rich.fill_mask_inked(
+            &solid(0, 0, 1, 1, 255),
+            Color::BLACK,
+            Some([255; 4]),
+            1.0,
+            BlendMode::Normal,
+        );
+        let inked = rich.extract((0, 0), 1, 1, format);
+        assert_eq!(
+            inked.data,
+            vec![255, 255, 255, 255, 0, 0, 255],
+            "ink stays ink"
+        );
+        let lit = Canvas::new(1, 1, PixelFormat::Rgb8, Color::rgb(0, 255, 255)).extract(
+            (0, 0),
+            1,
+            1,
+            format,
+        );
+        assert_eq!(
+            lit.data,
+            vec![255, 0, 0, 0, 0, 0, 255],
+            "light turned into ink"
+        );
+    }
+
+    /// Recolouring plates paints the colour as process ink on every colour
+    /// channel, spots knocked out, and keeps each pixel's alpha.
+    #[test]
+    fn recolouring_plates_turns_the_colour_into_process_ink() {
+        let mut canvas = Canvas::plates(2, 1, 1, Color::TRANSPARENT).expect("under the cap");
+        canvas.fill_mask_plates(
+            &solid(0, 0, 1, 1, 128),
+            &PlateInk::named(spots(1), &[(4, 255)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        canvas.recolor(Color::rgb(0, 0, 255));
+        let (c, m, y, k) = rgb_to_cmyk(0, 0, 255);
+        assert_eq!(&canvas.data[..6], &[c, m, y, k, 0, 128]);
+        assert_eq!(&canvas.data[6..12], &[c, m, y, k, 0, 0]);
+    }
+
+    /// The ink's own constructors: a channel named twice keeps the later
+    /// tint, a channel past the format's is passed over, and the process and
+    /// light forms carry no spot.
+    #[test]
+    fn a_plate_ink_names_its_channels() {
+        let ink = PlateInk::named(spots(1), &[(4, 1), (4, 2), (9, 99), (0, 5)]);
+        assert_eq!(ink.tints(), &[5, 0, 0, 0, 2]);
+        assert_eq!(PlateInk::none(spots(2)).tints(), &[0; 6]);
+        assert_eq!(
+            PlateInk::process(spots(1), [1, 2, 3, 4]).tints(),
+            &[1, 2, 3, 4, 0]
+        );
+        let (c, m, y, k) = rgb_to_cmyk(10, 20, 30);
+        assert_eq!(
+            PlateInk::from_light(spots(1), Color::rgb(10, 20, 30)).tints(),
+            &[c, m, y, k, 0]
+        );
+    }
+
+    /// Degenerate plates are harmless (ruling 1): an empty canvas, alphas
+    /// that are no alpha, and an ink built for another number of spots —
+    /// the channels it lacks take no ink and the ones the canvas lacks are
+    /// passed over.
+    #[test]
+    fn degenerate_plates_are_harmless() {
+        let mut empty = Canvas::plates(0, 0, 3, Color::WHITE).expect("under the cap");
+        empty.fill_mask_plates(
+            &solid(0, 0, 1, 1, 255),
+            &PlateInk::none(spots(3)),
+            1.0,
+            BlendMode::Normal,
+        );
+        assert!(empty.data.is_empty());
+        assert_eq!(empty.channel(0), Some(Vec::new()));
+
+        let mut canvas = Canvas::plates(2, 2, 2, Color::WHITE).expect("under the cap");
+        for alpha in [0.0, -1.0, 2.0, f64::NAN, f64::INFINITY] {
+            canvas.fill_mask_plates(
+                &solid(0, 0, 2, 2, 255),
+                &PlateInk::named(spots(2), &[(4, 9)]),
+                alpha,
+                BlendMode::Multiply,
+            );
+        }
+        let narrow = PlateInk::named(spots(0), &[(1, 50)]);
+        canvas.fill_mask_plates(&solid(0, 0, 2, 2, 255), &narrow, 1.0, BlendMode::Normal);
+        assert_eq!(
+            &canvas.data[..7],
+            &[0, 50, 0, 0, 0, 0, 255],
+            "the missing spots take no ink"
+        );
+        let wide = PlateInk::named(spots(9), &[(1, 60), (12, 255)]);
+        canvas.fill_mask_plates(&solid(0, 0, 2, 2, 255), &wide, 1.0, BlendMode::Normal);
+        assert_eq!(
+            &canvas.data[..7],
+            &[0, 60, 0, 0, 0, 0, 255],
+            "the extra ones are passed over"
+        );
     }
 }

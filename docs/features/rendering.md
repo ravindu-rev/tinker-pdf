@@ -1394,7 +1394,7 @@ the four formats PNG has, the straightened copy of a premultiplied bitmap, the
 copy of a `Bgr8` or `Bgra8` one reordered red first, the RGBA copy of a
 `CmykA8` or `LabA8` one — and whose `png_peak` is the most held
 at once with the file (guard A8, [performance](../design/performance.md)). It is
-**total over all eight `PixelFormat`s**, which matters because a
+**total over all nine `PixelFormat`s**, which matters because a
 page comes back in two of them and the fields are public: `Gray8`, `Rgb8`,
 `GrayA8` and `Rgba8` are colour types 0, 2, 4 and 6 byte for byte, `Bgr8` and
 `Bgra8` are colour types 2 and 6 written red first, so each file is the
@@ -1404,8 +1404,11 @@ through 8.6.4.4's device relation and `LabA8` back out of `L*a*b*`, both
 keeping their alpha and both landing on type 6. Writing ink under a label
 saying RGB is the failure `page_format` exists to prevent one layer up, and it
 would be just as invisible here. `None` comes back only for a bitmap that is
-not a picture: a zero dimension, a stride narrower than a row, or a buffer
-shorter than the rows the other fields promise. `Page::render` produces a
+not a picture: a zero dimension, a stride narrower than a row, a buffer
+shorter than the rows the other fields promise, or one in `Plates`, which no
+render returns — `page_format` answers `Rgba8` to a caller asking for it, as
+it does for `CmykA8` without `allow_cmyk` and for `LabA8` — and whose spot
+channels are tints of colorants whose colours a bitmap does not carry. `Page::render` produces a
 picture for every page at every scale and for every `region` that meets the
 page; the one way to get a bitmap that is not one is to ask for a region
 wholly off the page, which trims to nothing and says so. `Bitmap`'s fields
@@ -1457,7 +1460,8 @@ answer about the whole bitmap, reading the bytes as stored:
 `is_unicolour`; and `is_monochrome`, every pixel opaque black or opaque white
 by the canvas's reading of its format. Each walks the rows over `stride` and
 touches none of a row's padding, and on a bitmap that is not a picture — `to_png`'s
-condition — a map changes nothing and a reduction answers `None`.
+condition, a `Plates` bitmap's among it — a map changes nothing and a
+reduction answers `None`.
 `scaled(width, height)` resizes a bitmap through the image sampler's area
 filter, its spans planned in integers: every pixel the average of the
 rectangle of the source it covers, each sample weighted by the area of it
