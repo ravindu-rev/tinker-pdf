@@ -99,13 +99,17 @@ fn glyph_slot(sfnt: &Sfnt, glyph: u16) -> Option<(usize, usize)> {
     })
 }
 
-/// A glyph's bounding box as its `glyf` header states it, in font units.
+/// A glyph's bounding box as its `glyf` header states it, in font units —
+/// or the face's, as `head` states it ([`Sfnt::font_box`]).
 ///
 /// The four `FWORD`s every glyph's data begins with after its contour
 /// count, simple and composite alike, read as written: nothing here
 /// recomputes them from the points, because the `vmtx` clause defines a
 /// glyph's vertical origin against *this* `yMax` and a face's top side
-/// bearings were computed from it.
+/// bearings were computed from it. The `glyf` chapter defines them as the
+/// minimum and maximum of the glyph's coordinate data, and the font
+/// measurement API answers them as a TrueType glyph's box
+/// (`docs/design/font-metrics.md`, *Glyph boxes*).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Bounds {
     /// The leftmost x.

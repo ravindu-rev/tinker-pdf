@@ -64,3 +64,8 @@ tinker-pdf-filters = { workspace = true }
 # reaches a released binary, so this one is unconditional: gating it would
 # mean `build.rs` could not compile with the feature off.
 tinker-pdf-filters = { workspace = true }
+
+[dev-dependencies]
+# Exempt tooling, as in `tinker-pdf-cos`: `sfnt.rs`'s font measurement
+# readers are held to "arbitrary bytes never panic" as a property.
+proptest = "1.11.0"

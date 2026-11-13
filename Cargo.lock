@@ -625,6 +625,7 @@ dependencies = [
 name = "tinker-pdf-font"
 version = "0.0.1"
 dependencies = [
+ "proptest",
  "tinker-pdf-filters",
 ]
 

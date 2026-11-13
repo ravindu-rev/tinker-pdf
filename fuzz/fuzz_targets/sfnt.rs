@@ -92,6 +92,32 @@ fuzz_target!(|data: &[u8]| {
         let _ = glyf::bounds(&font, glyph);
     }
 
+    // What the font measurement API reads (`docs/design/font-metrics.md`):
+    // every scalar the text subtable maps — a format 4 subtable's segments
+    // read once in order, a format 12 or 13 subtable's groups once against
+    // the codes earlier groups decided — each glyph's `post` name, fed back
+    // to `glyph_for_name`, and `glyf` box, the face's box, its style facts,
+    // `loca`'s count, and a collection's faces by index.
+    let map = font.char_map();
+    let _ = font.code_points();
+    let _ = font.text_subtable();
+    for (c, _) in map.iter().take(64) {
+        let _ = font.glyph_for_char(*c);
+    }
+    for glyph in (0..64u16).chain([u16::MAX - 1, u16::MAX]) {
+        if let Some(name) = font.glyph_name(glyph) {
+            let _ = font.glyph_for_name(name);
+        }
+        let _ = font.glyph_box(glyph);
+    }
+    let _ = font.font_box();
+    let _ = font.style();
+    let _ = font.loca_glyph_count();
+    let faces = Sfnt::faces(data);
+    for face in [1, faces.saturating_sub(1), faces, u32::MAX] {
+        let _ = Sfnt::parse_face(data, face).map(|other| other.char_map().len());
+    }
+
     // The colour tables (`docs/design/colour-fonts.md`), for the face's first
     // glyphs as `cmap` is walked for its first characters: every palette
     // entry a short palette can name, each choice of palette, and each glyph's

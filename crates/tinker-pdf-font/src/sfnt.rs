@@ -12,12 +12,21 @@
 //! subtable, asked for a glyph name's value, and a (3,0) symbol subtable, asked
 //! for a code.
 //!
+//! What the font measurement API answers from (`docs/design/font-metrics.md`)
+//! is read here too: every scalar value the text subtable maps
+//! ([`Sfnt::char_map`]), a glyph's `post` name ([`Sfnt::glyph_name`]), a
+//! glyph's and the face's boxes ([`Sfnt::glyph_box`], [`Sfnt::font_box`]),
+//! the style facts of `OS/2`, `post` and `head` ([`Sfnt::style`]), and a
+//! collection's other faces ([`Sfnt::parse_face`]).
+//!
 //! Every read is bounds-checked against the buffer the caller supplied,
 //! because a font program is document-controlled data like any other.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use crate::cff::Cff;
+use crate::glyf::Bounds;
 
 /// A parsed table directory over borrowed bytes.
 ///
@@ -42,6 +51,10 @@ pub struct Sfnt<'a> {
     /// requires, checked at the first lookup and kept: in order they are
     /// bisected, out of order scanned as written.
     vorg_sorted: OnceLock<bool>,
+    /// Where each of a version 2.0 `post` table's own strings starts in the
+    /// table and how long it is, read once at the first name asked for, as
+    /// far as the table holds whole strings.
+    post_strings: OnceLock<Vec<(usize, u8)>>,
     data: &'a [u8],
     tables: Vec<(u32, u32, u32)>,
     /// The `sfntVersion` of the directory these tables came from.
@@ -82,12 +95,19 @@ const TAG_VMTX: u32 = 0x766D_7478;
 const TAG_VORG: u32 = 0x564F_5247;
 const TAG_GLYF: u32 = 0x676C_7966;
 const TAG_CFF: u32 = 0x4346_4620;
+const TAG_OS2: u32 = 0x4F53_2F32;
+const TAG_LOCA: u32 = 0x6C6F_6361;
+
+/// The highest Unicode scalar value.
+const MAX_SCALAR: u32 = 0x10_FFFF;
 
 /// The `cmap` subtable a face's characters are looked up in (9.6.6.4).
 #[derive(Clone, Copy, Debug)]
 struct CmapChoice {
     score: u32,
     platform: u16,
+    /// The encoding record's encoding ID, beside its platform.
+    encoding: u16,
     offset: usize,
     /// Whether the subtable's entries are in the order its format requires —
     /// format 4's end codes ascending, format 12's and 13's groups ascending,
@@ -105,7 +125,36 @@ impl<'a> Sfnt<'a> {
     /// face, since it has no way to say otherwise.
     #[must_use]
     pub fn parse(data: &'a [u8]) -> Option<Sfnt<'a>> {
-        Sfnt::parse_with(data, &mut 0)
+        Sfnt::parse_with(data, 0, &mut 0)
+    }
+
+    /// One face of a TrueType Collection by its index in the `ttcf` header,
+    /// or a plain sfnt as face 0: the face [`Sfnt::parse`] reads is face 0.
+    ///
+    /// `None` for an index at or past [`Sfnt::faces`], whose header offsets
+    /// are bounded by what the bytes hold, and wherever [`Sfnt::parse`]
+    /// would answer `None` for the face's directory.
+    #[must_use]
+    pub fn parse_face(data: &'a [u8], index: u32) -> Option<Sfnt<'a>> {
+        Sfnt::parse_with(data, index, &mut 0)
+    }
+
+    /// How many faces the bytes hold: a collection's `numFonts`, no more than
+    /// the offsets its header has room for; one for a plain sfnt; none for
+    /// anything else.
+    #[must_use]
+    pub fn faces(data: &[u8]) -> u32 {
+        if data.get(..4) == Some(b"ttcf") {
+            let Some(count) = be32(data, 8) else {
+                return 0;
+            };
+            let room = data.len().saturating_sub(12) / 4;
+            return count.min(u32::try_from(room).unwrap_or(u32::MAX));
+        }
+        match be32(data, 0) {
+            Some(0x0001_0000 | 0x7472_7565 | 0x4F54_544F) => 1,
+            _ => 0,
+        }
     }
 
     /// [`Sfnt::parse`], and the steps it took
@@ -115,14 +164,23 @@ impl<'a> Sfnt<'a> {
     #[must_use]
     pub fn parse_counted(data: &'a [u8]) -> (Option<Sfnt<'a>>, u64) {
         let mut steps = 0u64;
-        let font = Sfnt::parse_with(data, &mut steps);
+        let font = Sfnt::parse_with(data, 0, &mut steps);
         (font, steps)
     }
 
-    fn parse_with(data: &'a [u8], steps: &mut u64) -> Option<Sfnt<'a>> {
+    fn parse_with(data: &'a [u8], face: u32, steps: &mut u64) -> Option<Sfnt<'a>> {
         let mut base = 0usize;
         if data.get(..4) == Some(b"ttcf") {
-            base = be32(data, 12)? as usize;
+            // Face 0 is read wherever its offset is, whatever `numFonts`
+            // says, as `parse` has always read a collection; a later face
+            // only where the header counts it.
+            if face != 0 && face >= Sfnt::faces(data) {
+                return None;
+            }
+            let at = 12usize.checked_add(usize::try_from(face).ok()?.checked_mul(4)?)?;
+            base = be32(data, at)? as usize;
+        } else if face != 0 {
+            return None;
         }
 
         let tag = be32(data, base)?;
@@ -149,6 +207,7 @@ impl<'a> Sfnt<'a> {
             unicode_cmap: OnceLock::new(),
             symbol_cmap: OnceLock::new(),
             vorg_sorted: OnceLock::new(),
+            post_strings: OnceLock::new(),
             data,
             tables,
             version: tag,
@@ -417,6 +476,7 @@ impl<'a> Sfnt<'a> {
             platform,
             offset,
             ordered,
+            ..
         } = choice?;
         let sub = self.table_with(TAG_CMAP, steps)?.get(offset..)?;
         let mut code = u32::from(c);
@@ -453,7 +513,7 @@ impl<'a> Sfnt<'a> {
 
         // 9.6.6.4 prefers (3,1) Windows Unicode BMP, then (3,0) symbol, then
         // (1,0) Macintosh Roman. (3,10) covers characters beyond the BMP.
-        let mut best: Option<(u32, u16, usize)> = None;
+        let mut best: Option<(u32, u16, u16, usize)> = None;
         for i in 0..count.min(64) {
             *steps = steps.saturating_add(1);
             let at = 4 + i * 8;
@@ -470,19 +530,91 @@ impl<'a> Sfnt<'a> {
                 (1, 0) => 1,
                 _ => 0,
             };
-            if score > 0 && best.is_none_or(|(b, _, _)| score > b) {
-                best = Some((score, platform, offset as usize));
+            if score > 0 && best.is_none_or(|(b, _, _, _)| score > b) {
+                best = Some((score, platform, encoding, offset as usize));
             }
         }
 
-        let (score, platform, offset) = best?;
+        let (score, platform, encoding, offset) = best?;
         let ordered = cmap.get(offset..).is_some_and(|sub| in_order(sub, steps));
         Some(CmapChoice {
             score,
             platform,
+            encoding,
             offset,
             ordered,
         })
+    }
+
+    /// The platform and encoding of the subtable [`Sfnt::glyph_for_char`]
+    /// looks characters up in, the one [`Sfnt::char_map`] reads: (3,10),
+    /// else (3,1), else a platform 0 one, else (3,0), else (1,0), the first of
+    /// equals. `None` for a face with no `cmap` or none of those.
+    #[must_use]
+    pub fn text_subtable(&self) -> Option<(u16, u16)> {
+        let choice = (*self.cmap.get_or_init(|| self.choose_cmap(&mut 0)))?;
+        Some((choice.platform, choice.encoding))
+    }
+
+    /// Every scalar value [`Sfnt::glyph_for_char`] answers with a glyph
+    /// other than glyph 0, and that glyph, in ascending order of the scalar.
+    ///
+    /// The text subtable is read exactly as that lookup reads it: a (3,0)
+    /// subtable answers a scalar below U+0100 at `0xF000` plus it, and its
+    /// own codes from U+0100 up as themselves, so its `F0xx` codes answer two
+    /// scalars each and its codes below U+0100 none; a Macintosh subtable
+    /// answers no scalar past U+007F; a surrogate and a code past U+10FFFF are
+    /// no scalar. In each format the lookup reads — 0, 2, 4, 6, 12 and 13 —
+    /// the code a subtable maps is the one the lookup finds for it, out of
+    /// order as written: a format 4 subtable's segments are read once in
+    /// order, the first whose end is at or past a code deciding it, and a
+    /// format 12 or 13 subtable's groups once in order, the first that holds a
+    /// code deciding it, against the codes earlier groups decided — so the
+    /// walk is linear in the subtable and the codes it maps, and the answer at
+    /// most one entry a scalar value. Read afresh at each call: a caller
+    /// asking often keeps it.
+    #[must_use]
+    pub fn char_map(&self) -> Vec<(char, u16)> {
+        let Some(choice) = *self.cmap.get_or_init(|| self.choose_cmap(&mut 0)) else {
+            return Vec::new();
+        };
+        let Some(sub) = self
+            .table(TAG_CMAP)
+            .and_then(|cmap| cmap.get(choice.offset..))
+        else {
+            return Vec::new();
+        };
+        let mut codes = subtable_codes(sub, choice.ordered);
+        codes.sort_unstable_by_key(|(code, _)| *code);
+        let mut out = Vec::with_capacity(codes.len());
+        for (code, glyph) in codes {
+            if choice.score == 2 {
+                // 9.6.6.4: a symbol subtable's `F0xx` codes are addressed by
+                // their low byte as well as by themselves.
+                if (0xF000..=0xF0FF).contains(&code) {
+                    if let Some(c) = char::from_u32(code - 0xF000) {
+                        out.push((c, glyph));
+                    }
+                }
+                if code < 0x100 {
+                    continue;
+                }
+            }
+            if choice.platform == 1 && code >= 0x80 {
+                continue;
+            }
+            if let Some(c) = char::from_u32(code) {
+                out.push((c, glyph));
+            }
+        }
+        out.sort_unstable_by_key(|(c, _)| *c);
+        out
+    }
+
+    /// The scalar values of [`Sfnt::char_map`], ascending.
+    #[must_use]
+    pub fn code_points(&self) -> Vec<char> {
+        self.char_map().into_iter().map(|(c, _)| c).collect()
     }
 
     /// The glyph named `name`, through the `post` table's names.
@@ -642,7 +774,7 @@ impl<'a> Sfnt<'a> {
     fn choose_subtable(&self, score: fn(u16, u16) -> u32) -> Option<CmapChoice> {
         let cmap = self.table(TAG_CMAP)?;
         let count = usize::from(be16(cmap, 2)?);
-        let mut best: Option<(u32, u16, usize)> = None;
+        let mut best: Option<(u32, u16, u16, usize)> = None;
         for i in 0..count.min(64) {
             let at = 4 + i * 8;
             let (Some(platform), Some(encoding), Some(offset)) =
@@ -651,19 +783,384 @@ impl<'a> Sfnt<'a> {
                 break;
             };
             let scored = score(platform, encoding);
-            if scored > 0 && best.is_none_or(|(b, _, _)| scored > b) {
-                best = Some((scored, platform, offset as usize));
+            if scored > 0 && best.is_none_or(|(b, _, _, _)| scored > b) {
+                best = Some((scored, platform, encoding, offset as usize));
             }
         }
-        let (score, platform, offset) = best?;
+        let (score, platform, encoding, offset) = best?;
         let ordered = cmap.get(offset..).is_some_and(|sub| in_order(sub, &mut 0));
         Some(CmapChoice {
             score,
             platform,
+            encoding,
             offset,
             ordered,
         })
     }
+
+    /// A glyph's name from `post`, the reverse of [`Sfnt::glyph_for_name`].
+    ///
+    /// Version 1.0 is the 258 standard Macintosh names in their order, one a
+    /// glyph, as far as `maxp`'s count reaches; version 2.0 gives each of its
+    /// glyphs an index, one of those 258 below 258 and the table's own Pascal
+    /// strings from 258 on, an index whose string the table does not hold
+    /// whole naming nothing; version 2.5 gives each glyph a signed offset
+    /// from its own index into the standard order; version 3.0 and any other
+    /// name nothing. A string that is not UTF-8 is no name. Glyph names are
+    /// ASCII in every face that follows the `post` chapter, which asks for
+    /// PostScript names.
+    #[must_use]
+    pub fn glyph_name(&self, glyph: u16) -> Option<&'a str> {
+        let post = self.table(TAG_POST)?;
+        let index = usize::from(glyph);
+        match be32(post, 0)? {
+            0x0001_0000 => {
+                let glyphs = self
+                    .glyph_count()
+                    .map_or(MAC_STANDARD_NAMES.len(), usize::from);
+                if index >= glyphs {
+                    return None;
+                }
+                MAC_STANDARD_NAMES.get(index).copied()
+            }
+            0x0002_0000 => {
+                let count = usize::from(be16(post, 32)?);
+                if index >= count {
+                    return None;
+                }
+                let name = usize::from(be16(post, 34 + index * 2)?);
+                match name.checked_sub(MAC_STANDARD_NAMES.len()) {
+                    None => MAC_STANDARD_NAMES.get(name).copied(),
+                    Some(ordinal) => {
+                        let strings = self.post_strings.get_or_init(|| post_strings(post, count));
+                        let &(start, len) = strings.get(ordinal)?;
+                        let bytes = post.get(start..start + usize::from(len))?;
+                        core::str::from_utf8(bytes).ok()
+                    }
+                }
+            }
+            0x0002_5000 => {
+                let count = usize::from(be16(post, 32)?);
+                if index >= count {
+                    return None;
+                }
+                let offset = i64::from(i8::from_be_bytes([*post.get(34 + index)?]));
+                let standard = usize::try_from(i64::from(glyph) + offset).ok()?;
+                MAC_STANDARD_NAMES.get(standard).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// A glyph's box as its `glyf` header states it, read through `loca`:
+    /// [`crate::glyf::bounds`], the origin point for a glyph with no outline,
+    /// and `None` for a face with no `glyf`, `loca` or `head`, a glyph past
+    /// the end of `loca`, and data too short to hold the header.
+    #[must_use]
+    pub fn glyph_box(&self, glyph: u16) -> Option<Bounds> {
+        crate::glyf::bounds(self, glyph)
+    }
+
+    /// How many glyphs `loca` indexes: its entries less one, two bytes each
+    /// in the short form `head`'s `indexToLocFormat` of 0 names and four in
+    /// the long, held to 65 535, the most a glyph index addresses. `None` for
+    /// a face with no `loca`, or no `head` to say which form it is in. What
+    /// a face with no `maxp` that states its count holds.
+    #[must_use]
+    pub fn loca_glyph_count(&self) -> Option<u16> {
+        let head = self.table(TAG_HEAD)?;
+        let long = be16(head, 50)? != 0;
+        let loca = self.table(TAG_LOCA)?;
+        let entries = loca.len() / if long { 4 } else { 2 };
+        Some(u16::try_from(entries.saturating_sub(1)).unwrap_or(u16::MAX))
+    }
+
+    /// The face's box, `head`'s `xMin`, `yMin`, `xMax` and `yMax`, as
+    /// written; `None` for a face with no `head` long enough to hold them.
+    #[must_use]
+    pub fn font_box(&self) -> Option<Bounds> {
+        let head = self.table(TAG_HEAD)?;
+        Some(Bounds {
+            x_min: be16(head, 36)? as i16,
+            y_min: be16(head, 38)? as i16,
+            x_max: be16(head, 40)? as i16,
+            y_max: be16(head, 42)? as i16,
+        })
+    }
+
+    /// The style facts of `post`, `OS/2` and `head` the font flags read
+    /// (`docs/design/font-metrics.md`, *Flags*), each as its table writes it
+    /// and `None` where the table is absent or too short to hold it.
+    #[must_use]
+    pub fn style(&self) -> Style {
+        let post = self.table(TAG_POST);
+        let os2 = self.table(TAG_OS2);
+        let head = self.table(TAG_HEAD);
+        let os2_u16 = |at: usize| os2.and_then(|t| be16(t, at));
+        // sxHeight and sCapHeight are version 2's.
+        let os2_v2 = os2_u16(0).filter(|version| *version >= 2).is_some();
+        Style {
+            italic_angle: post
+                .and_then(|t| be32(t, 4))
+                .map(|fixed| f64::from(fixed as i32) / 65_536.0),
+            underline_position: post.and_then(|t| be16(t, 8)).map(|v| v as i16),
+            underline_thickness: post.and_then(|t| be16(t, 10)).map(|v| v as i16),
+            fixed_pitch: post.and_then(|t| be32(t, 12)).map(|v| v != 0),
+            weight_class: os2_u16(4),
+            width_class: os2_u16(6),
+            family_class: os2_u16(30).map(|v| v as i16),
+            panose: os2
+                .and_then(|t| t.get(32..42))
+                .and_then(|b| <[u8; 10]>::try_from(b).ok()),
+            selection: os2_u16(62),
+            x_height: if os2_v2 {
+                os2_u16(86).map(|v| v as i16)
+            } else {
+                None
+            },
+            cap_height: if os2_v2 {
+                os2_u16(88).map(|v| v as i16)
+            } else {
+                None
+            },
+            mac_style: head.and_then(|t| be16(t, 44)),
+        }
+    }
+}
+
+/// The style facts of an sfnt's `post`, `OS/2` and `head` tables
+/// ([`Sfnt::style`]): what the font flags and the font measurement API read
+/// a face's slant, pitch, weight, class and heights from.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Style {
+    /// `post`'s `italicAngle`, its 16.16 `Fixed` in degrees counterclockwise
+    /// from the vertical.
+    pub italic_angle: Option<f64>,
+    /// `post`'s `underlinePosition`, in font units.
+    pub underline_position: Option<i16>,
+    /// `post`'s `underlineThickness`, in font units.
+    pub underline_thickness: Option<i16>,
+    /// Whether `post`'s `isFixedPitch` is not zero.
+    pub fixed_pitch: Option<bool>,
+    /// `OS/2`'s `usWeightClass`.
+    pub weight_class: Option<u16>,
+    /// `OS/2`'s `usWidthClass`.
+    pub width_class: Option<u16>,
+    /// `OS/2`'s `sFamilyClass`: the IBM font class in its high byte, the
+    /// subclass in its low.
+    pub family_class: Option<i16>,
+    /// `OS/2`'s ten PANOSE digits, family kind first.
+    pub panose: Option<[u8; 10]>,
+    /// `OS/2`'s `fsSelection`: bit 0 `ITALIC`, bit 5 `BOLD`, bit 6
+    /// `REGULAR`, bit 9 `OBLIQUE`.
+    pub selection: Option<u16>,
+    /// `OS/2`'s `sxHeight`, which version 2 added: `None` in an earlier one.
+    pub x_height: Option<i16>,
+    /// `OS/2`'s `sCapHeight`, which version 2 added.
+    pub cap_height: Option<i16>,
+    /// `head`'s `macStyle`: bit 0 bold, bit 1 italic.
+    pub mac_style: Option<u16>,
+}
+
+/// Where each of a version 2.0 `post` table's own Pascal strings starts and
+/// how long it is, after the `count` glyph indices: as many as the table
+/// holds whole, a string cut short ending the list.
+fn post_strings(post: &[u8], count: usize) -> Vec<(usize, u8)> {
+    let mut out = Vec::new();
+    let Some(mut at) = count.checked_mul(2).and_then(|n| n.checked_add(34)) else {
+        return out;
+    };
+    while let Some(&len) = post.get(at) {
+        let start = at + 1;
+        if post.get(start..start + usize::from(len)).is_none() {
+            break;
+        }
+        out.push((start, len));
+        at = start + usize::from(len);
+    }
+    out
+}
+
+/// Every code a `cmap` subtable maps to a glyph other than glyph 0, and the
+/// glyph, as [`lookup_cmap`] reads the subtable: the same answer it gives a
+/// lookup of each code, in an order of its own.
+fn subtable_codes(sub: &[u8], ordered: bool) -> Vec<(u32, u16)> {
+    let mut out = Vec::new();
+    let mut each = |code: u32| {
+        if let Some(glyph) = lookup_cmap(sub, code, ordered, &mut 0).filter(|g| *g != 0) {
+            out.push((code, glyph));
+        }
+    };
+    match be16(sub, 0) {
+        // One byte, or one byte or two: every code is asked, each in one step.
+        Some(0) => (0..=0xFF).for_each(&mut each),
+        Some(2) => (0..=0xFFFF).for_each(&mut each),
+        // A trimmed range: the codes it counts, which may pass 0xFFFF, as the
+        // lookup reads them.
+        Some(6) => {
+            let (Some(first), Some(count)) = (be16(sub, 6), be16(sub, 8)) else {
+                return out;
+            };
+            let first = u32::from(first);
+            (first..first + u32::from(count)).for_each(&mut each);
+        }
+        Some(4) => return format_4_codes(sub),
+        Some(format @ (12 | 13)) => return group_codes(sub, format),
+        _ => {}
+    }
+    out
+}
+
+/// A format 4 subtable's codes and glyphs, its segments read once in order.
+///
+/// A lookup of a code stops at the first segment whose end is at or past the
+/// code — by a scan from the start, or by a bisection where the ends ascend,
+/// which finds the same segment — and answers glyph 0 where the segment
+/// starts past it. So each segment decides the codes past every end before
+/// it and up to its own, and none twice. A segment whose fields the
+/// subtable does not hold decides its codes as no glyph, as the lookup does,
+/// and an end it does not hold ends the subtable for every code after.
+fn format_4_codes(sub: &[u8]) -> Vec<(u32, u16)> {
+    let mut out = Vec::new();
+    let Some(seg2) = be16(sub, 6) else {
+        return out;
+    };
+    let seg2 = usize::from(seg2);
+    let segs = seg2 / 2;
+    let ends = 14;
+    let starts = ends + seg2 + 2;
+    let deltas = starts + seg2;
+    let ranges = deltas + seg2;
+    // Every code below `next` belongs to an earlier segment.
+    let mut next = 0u32;
+    for i in 0..segs {
+        let Some(end) = be16(sub, ends + i * 2) else {
+            break;
+        };
+        let end = u32::from(end);
+        if end < next {
+            continue;
+        }
+        let first = next;
+        next = end + 1;
+        let (Some(start), Some(delta), Some(range_offset)) = (
+            be16(sub, starts + i * 2),
+            be16(sub, deltas + i * 2),
+            be16(sub, ranges + i * 2),
+        ) else {
+            continue;
+        };
+        let start = u32::from(start);
+        for code in first.max(start)..=end {
+            // `code` is at most 0xFFFF: an end is a 16-bit value.
+            let code16 = code as u16;
+            let glyph = if range_offset == 0 {
+                code16.wrapping_add(delta)
+            } else {
+                let at = ranges
+                    + i * 2
+                    + usize::from(range_offset)
+                    + usize::from(code16 - start as u16) * 2;
+                match be16(sub, at) {
+                    Some(0) | None => 0,
+                    Some(glyph) => glyph.wrapping_add(delta),
+                }
+            };
+            if glyph != 0 {
+                out.push((code, glyph));
+            }
+        }
+    }
+    out
+}
+
+/// A format 12 or 13 subtable's codes and glyphs, its groups read once in
+/// order.
+///
+/// A lookup of a code answers from the first group that holds it — by a
+/// scan as written, or by a bisection where the groups ascend and are
+/// disjoint, which finds the same group — whatever that group answers, and
+/// stops at the first group the subtable does not hold whole. So each group
+/// decides the codes in its range no earlier group holds: the ranges decided
+/// so far are kept merged, and only a group's codes outside them are read.
+/// Codes past U+10FFFF are no scalar value and are not read.
+fn group_codes(sub: &[u8], format: u16) -> Vec<(u32, u16)> {
+    let mut out = Vec::new();
+    let Some(groups) = be32(sub, 12) else {
+        return out;
+    };
+    let groups = (groups as usize).min(1 << 20);
+    let mut decided: BTreeMap<u32, u32> = BTreeMap::new();
+    for i in 0..groups {
+        let at = 16 + i * 12;
+        let (Some(start), Some(end), Some(glyph)) =
+            (be32(sub, at), be32(sub, at + 4), be32(sub, at + 8))
+        else {
+            break;
+        };
+        if start > end || start > MAX_SCALAR {
+            continue;
+        }
+        let end = end.min(MAX_SCALAR);
+        claim(&mut decided, start, end, |from, to| {
+            for code in from..=to {
+                let id = if format == 12 {
+                    glyph
+                        .checked_add(code - start)
+                        .and_then(|id| u16::try_from(id).ok())
+                } else {
+                    u16::try_from(glyph).ok()
+                };
+                if let Some(id) = id.filter(|id| *id != 0) {
+                    out.push((code, id));
+                }
+            }
+        });
+    }
+    out
+}
+
+/// Calls `each` with every run of `start..=end` no range in `decided` holds,
+/// ascending, then adds the range to `decided`, merged with every range it
+/// meets or touches. Each range of `decided` is removed at most once, so a
+/// walk of `n` ranges is `n log n` however they overlap.
+fn claim(decided: &mut BTreeMap<u32, u32>, start: u32, end: u32, mut each: impl FnMut(u32, u32)) {
+    let mut cursor = start;
+    let mut first = start;
+    let mut last = end;
+    let mut absorbed = Vec::new();
+    if let Some((&at, &to)) = decided.range(..start).next_back() {
+        if to >= start {
+            cursor = to.saturating_add(1);
+            first = at;
+            last = last.max(to);
+            absorbed.push(at);
+        } else if to.checked_add(1) == Some(start) {
+            first = at;
+            absorbed.push(at);
+        }
+    }
+    for (&at, &to) in decided.range(start..=end.saturating_add(1)) {
+        if at > end {
+            // Touching the range's end: merged, holding nothing of it.
+            last = last.max(to);
+            absorbed.push(at);
+            continue;
+        }
+        if cursor < at {
+            each(cursor, at - 1);
+        }
+        cursor = cursor.max(to.saturating_add(1));
+        last = last.max(to);
+        absorbed.push(at);
+    }
+    if cursor <= end {
+        each(cursor, end);
+    }
+    for at in absorbed {
+        decided.remove(&at);
+    }
+    decided.insert(first, last);
 }
 
 /// How [`Sfnt::glyph_for_unicode`] scores a subtable: (3,10) over (3,1) over a
@@ -2086,6 +2583,855 @@ mod tests {
             let face = Sfnt::parse(&data).expect("a directory");
             assert_eq!(face.glyph_for_unicode('a'), None);
             assert_eq!(face.glyph_for_symbol_code(0x61), None);
+        }
+    }
+
+    // ---- FT-16.2: what the font measurement API reads -------------------
+
+    /// A format 0 subtable mapping each byte given to its glyph.
+    fn format_0(pairs: &[(u8, u8)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0u16.to_be_bytes()); // format
+        out.extend_from_slice(&262u16.to_be_bytes()); // length
+        out.extend_from_slice(&0u16.to_be_bytes()); // language
+        let mut glyphs = [0u8; 256];
+        for (code, glyph) in pairs {
+            glyphs[usize::from(*code)] = *glyph;
+        }
+        out.extend_from_slice(&glyphs);
+        out
+    }
+
+    /// A format 6 subtable: `first`, then one glyph a code.
+    fn format_6(first: u16, glyphs: &[u16]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&6u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // length, unread
+        out.extend_from_slice(&0u16.to_be_bytes()); // language
+        out.extend_from_slice(&first.to_be_bytes());
+        out.extend_from_slice(&(glyphs.len() as u16).to_be_bytes());
+        for glyph in glyphs {
+            out.extend_from_slice(&glyph.to_be_bytes());
+        }
+        out
+    }
+
+    /// A format 12 or 13 subtable of the groups given, in the order given,
+    /// each `(startCharCode, endCharCode, glyph)`.
+    fn format_groups(format: u16, groups: &[(u32, u32, u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&format.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        out.extend_from_slice(&0u32.to_be_bytes()); // length, unread
+        out.extend_from_slice(&0u32.to_be_bytes()); // language
+        out.extend_from_slice(&(groups.len() as u32).to_be_bytes());
+        for (start, end, glyph) in groups {
+            out.extend_from_slice(&start.to_be_bytes());
+            out.extend_from_slice(&end.to_be_bytes());
+            out.extend_from_slice(&glyph.to_be_bytes());
+        }
+        out
+    }
+
+    /// One format 4 segment: its start and end codes, its delta, and the
+    /// glyphs its `idRangeOffset` points at, where it has any.
+    struct Segment4 {
+        start: u16,
+        end: u16,
+        delta: u16,
+        array: Option<Vec<u16>>,
+    }
+
+    /// A format 4 subtable of the segments given, in the order given — out
+    /// of order where they are — each glyph array placed after the
+    /// `idRangeOffset`s and pointed at from its segment's slot.
+    fn format_4_segments(segments: &[Segment4]) -> Vec<u8> {
+        let count = segments.len();
+        let ranges = 14 + count * 2 + 2 + count * 2 + count * 2;
+        let arrays = ranges + count * 2;
+        let mut placed = Vec::new();
+        let mut offsets = Vec::new();
+        for (i, segment) in segments.iter().enumerate() {
+            match &segment.array {
+                None => offsets.push(0u16),
+                Some(glyphs) => {
+                    let at = arrays + placed.len() * 2;
+                    offsets.push((at - (ranges + i * 2)) as u16);
+                    placed.extend_from_slice(glyphs);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&4u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // length, unread
+        out.extend_from_slice(&0u16.to_be_bytes()); // language
+        out.extend_from_slice(&((count * 2) as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]); // search hints
+        for segment in segments {
+            out.extend_from_slice(&segment.end.to_be_bytes());
+        }
+        out.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+        for segment in segments {
+            out.extend_from_slice(&segment.start.to_be_bytes());
+        }
+        for segment in segments {
+            out.extend_from_slice(&segment.delta.to_be_bytes());
+        }
+        for offset in &offsets {
+            out.extend_from_slice(&offset.to_be_bytes());
+        }
+        for glyph in &placed {
+            out.extend_from_slice(&glyph.to_be_bytes());
+        }
+        out
+    }
+
+    /// The terminating segment every format 4 subtable ends with; its delta
+    /// takes 0xFFFF to glyph 0.
+    fn terminator() -> Segment4 {
+        Segment4 {
+            start: 0xFFFF,
+            end: 0xFFFF,
+            delta: 1,
+            array: None,
+        }
+    }
+
+    /// The format 2 subtable `a_format_2_subtable_reads_one_byte_and_two`
+    /// builds: 0x41 and 0x42 single bytes, 0x8140 and 0x8141 a pair.
+    fn format_2() -> Vec<u8> {
+        let mut sub: Vec<u8> = Vec::new();
+        sub.extend_from_slice(&2u16.to_be_bytes());
+        sub.extend_from_slice(&0u16.to_be_bytes());
+        sub.extend_from_slice(&0u16.to_be_bytes());
+        let mut keys = vec![0u8; 512];
+        keys[0x81 * 2 + 1] = 8;
+        sub.extend_from_slice(&keys);
+        let headers = sub.len();
+        for (first, count, delta) in [(0x41u16, 2u16, 0u16), (0x40, 2, 1000)] {
+            sub.extend_from_slice(&first.to_be_bytes());
+            sub.extend_from_slice(&count.to_be_bytes());
+            sub.extend_from_slice(&delta.to_be_bytes());
+            sub.extend_from_slice(&0u16.to_be_bytes());
+        }
+        let glyphs = sub.len();
+        for id in [7u16, 8, 1, 0] {
+            sub.extend_from_slice(&id.to_be_bytes());
+        }
+        for (header, to) in [(headers, glyphs), (headers + 8, glyphs + 4)] {
+            let offset = (to - (header + 6)) as u16;
+            sub[header + 6..header + 8].copy_from_slice(&offset.to_be_bytes());
+        }
+        sub
+    }
+
+    /// A face holding one `cmap` subtable under `(platform, encoding)`, with
+    /// enough glyphs for every glyph a test maps.
+    fn mapped_face(platform: u16, encoding: u16, sub: Vec<u8>) -> Vec<u8> {
+        face(&[
+            (b"cmap", &cmap_of(&[(platform, encoding, sub)])),
+            (b"head", &head()),
+            (b"maxp", &maxp(u16::MAX)),
+        ])
+    }
+
+    /// Every scalar value `char_map` answers is the one `glyph_for_char`
+    /// answers, and every scalar `glyph_for_char` answers with a glyph is in
+    /// `char_map`: the walk reads the subtable as the lookup does.
+    fn assert_agrees_with_the_lookup(what: &str, sfnt: &Sfnt<'_>, map: &[(char, u16)]) {
+        let scalars = (0u32..0x3_0000).chain([0xF_0000, 0x10_FFFE, 0x10_FFFF]);
+        let mut expected = Vec::new();
+        for scalar in scalars {
+            let Some(c) = char::from_u32(scalar) else {
+                continue;
+            };
+            if let Some(glyph) = sfnt.glyph_for_char(c).filter(|glyph| *glyph != 0) {
+                expected.push((c, glyph));
+            }
+        }
+        let read: Vec<(char, u16)> = map
+            .iter()
+            .copied()
+            .filter(|(c, _)| {
+                let scalar = u32::from(*c);
+                scalar < 0x3_0000 || [0xF_0000, 0x10_FFFE, 0x10_FFFF].contains(&scalar)
+            })
+            .collect();
+        assert_eq!(read, expected, "{what}: char_map against glyph_for_char");
+    }
+
+    /// FT-16.2: every scalar the chosen subtable maps, in each format the
+    /// lookup reads, with the glyph it maps to, written in the test — and
+    /// nothing the lookup does not answer.
+    #[test]
+    fn code_points_are_every_scalar_the_subtable_maps() {
+        let ordered = format_4_segments(&[
+            Segment4 {
+                start: 0x41,
+                end: 0x43,
+                delta: 10,
+                array: None,
+            },
+            Segment4 {
+                start: 0x61,
+                end: 0x62,
+                delta: 0,
+                array: Some(vec![7, 0]),
+            },
+            terminator(),
+        ]);
+        // Out of order: 'P' to 'Z' first, then 'A' to 'E', whose codes the
+        // first segment already decides — its end is past them and its start
+        // is not — so a lookup of 'B' answers glyph 0.
+        let unordered = format_4_segments(&[
+            Segment4 {
+                start: 0x50,
+                end: 0x5A,
+                delta: 100,
+                array: None,
+            },
+            Segment4 {
+                start: 0x41,
+                end: 0x45,
+                delta: 200,
+                array: None,
+            },
+            terminator(),
+        ]);
+        let symbol = format_4_segments(&[
+            Segment4 {
+                start: 0x41,
+                end: 0x41,
+                delta: 9u16.wrapping_sub(0x41),
+                array: None,
+            },
+            Segment4 {
+                start: 0x2022,
+                end: 0x2022,
+                delta: 8u16.wrapping_sub(0x2022),
+                array: None,
+            },
+            Segment4 {
+                start: 0xF020,
+                end: 0xF020,
+                delta: 5u16.wrapping_sub(0xF020),
+                array: None,
+            },
+            Segment4 {
+                start: 0xF041,
+                end: 0xF041,
+                delta: 6u16.wrapping_sub(0xF041),
+                array: None,
+            },
+            terminator(),
+        ]);
+        let cases: Vec<(&str, Vec<u8>, Vec<(char, u16)>)> = vec![
+            (
+                "format 4, in order, a delta and a glyph array",
+                mapped_face(3, 1, ordered),
+                vec![('A', 0x4B), ('B', 0x4C), ('C', 0x4D), ('a', 7)],
+            ),
+            (
+                "format 4, out of order",
+                mapped_face(3, 1, unordered),
+                ('P'..='Z')
+                    .map(|c| (c, u32::from(c) as u16 + 100))
+                    .collect(),
+            ),
+            (
+                "format 4 under (3,0): F0xx codes twice, low codes never",
+                mapped_face(3, 0, symbol),
+                vec![
+                    (' ', 5),
+                    ('A', 6),
+                    ('\u{2022}', 8),
+                    ('\u{F020}', 5),
+                    ('\u{F041}', 6),
+                ],
+            ),
+            (
+                "format 12, in order, past the Basic Multilingual Plane",
+                mapped_face(
+                    3,
+                    10,
+                    format_groups(12, &[(0x41, 0x42, 5), (0x1_F600, 0x1_F601, 9)]),
+                ),
+                vec![('A', 5), ('B', 6), ('\u{1F600}', 9), ('\u{1F601}', 10)],
+            ),
+            (
+                "format 12, overlapping groups, an overflow and a glyph 0",
+                mapped_face(
+                    3,
+                    10,
+                    format_groups(
+                        12,
+                        &[
+                            (0x41, 0x45, 10),
+                            (0x43, 0x48, 20),
+                            (0x30, 0x31, 0xFFFF),
+                            (0x32, 0x32, 0),
+                            (0x5A, 0x59, 3),
+                        ],
+                    ),
+                ),
+                vec![
+                    ('0', 0xFFFF),
+                    ('A', 10),
+                    ('B', 11),
+                    ('C', 12),
+                    ('D', 13),
+                    ('E', 14),
+                    ('F', 23),
+                    ('G', 24),
+                    ('H', 25),
+                ],
+            ),
+            (
+                "format 13, one glyph for a range",
+                mapped_face(0, 6, format_groups(13, &[(0x41, 0x43, 7)])),
+                vec![('A', 7), ('B', 7), ('C', 7)],
+            ),
+            (
+                "format 0 under (1,0): nothing past U+007F",
+                mapped_face(1, 0, format_0(&[(0x41, 3), (0x80, 4)])),
+                vec![('A', 3)],
+            ),
+            (
+                "format 6",
+                mapped_face(3, 1, format_6(0x20, &[1, 0, 2])),
+                vec![(' ', 1), ('"', 2)],
+            ),
+            (
+                "format 2 under platform 0",
+                mapped_face(0, 3, format_2()),
+                vec![('A', 7), ('B', 8), ('\u{8140}', 1001)],
+            ),
+        ];
+        for (what, data, expected) in &cases {
+            let sfnt = Sfnt::parse(data).expect("a directory");
+            let map = sfnt.char_map();
+            assert_eq!(&map, expected, "{what}");
+            assert_eq!(
+                sfnt.code_points(),
+                expected.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+                "{what}: the code points are the map's scalars"
+            );
+            assert_agrees_with_the_lookup(what, &sfnt, &map);
+        }
+
+        // The subtable chosen is the lookup's, and its record is named.
+        let data = sfnt_with_tables(&[(
+            b"cmap",
+            cmap_of(&[(1, 0, format_0(&[(0x41, 3)])), (3, 1, format_6(0x41, &[4]))]),
+        )]);
+        let sfnt = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(sfnt.text_subtable(), Some((3, 1)));
+        assert_eq!(sfnt.char_map(), vec![('A', 4)]);
+
+        // A face with no cmap, or none of the records the lookup takes, or a
+        // subtable of a format it does not read, maps nothing.
+        for data in [
+            sfnt_with(b"head", &head()),
+            mapped_face(3, 2, format_6(0x41, &[4])),
+            mapped_face(3, 1, vec![0, 99, 0, 0]),
+        ] {
+            let sfnt = Sfnt::parse(&data).expect("a directory");
+            assert!(sfnt.char_map().is_empty());
+            assert!(sfnt.code_points().is_empty());
+        }
+    }
+
+    /// A subtable whose counts claim more than it holds is read as far as
+    /// it goes: format 12's groups up to the first it does not hold whole,
+    /// format 4's segments up to the first field it does not hold.
+    #[test]
+    fn an_overcounted_subtable_maps_what_it_holds() {
+        let mut groups = format_groups(12, &[(0x41, 0x42, 5)]);
+        groups[12..16].copy_from_slice(&u32::MAX.to_be_bytes());
+        let data = mapped_face(3, 10, groups);
+        let sfnt = Sfnt::parse(&data).expect("a directory");
+        let map = sfnt.char_map();
+        assert_eq!(map, vec![('A', 5), ('B', 6)]);
+        assert_agrees_with_the_lookup("overcounted groups", &sfnt, &map);
+
+        // Two segments, the subtable cut inside its start codes: the first
+        // end is held and its start is not, so nothing maps.
+        let mut segments = format_4_segments(&[
+            Segment4 {
+                start: 0x41,
+                end: 0x42,
+                delta: 1,
+                array: None,
+            },
+            terminator(),
+        ]);
+        segments[6..8].copy_from_slice(&0xFFFEu16.to_be_bytes());
+        segments.truncate(18);
+        let data = mapped_face(3, 1, segments);
+        let sfnt = Sfnt::parse(&data).expect("a directory");
+        let map = sfnt.char_map();
+        assert_agrees_with_the_lookup("overcounted segments", &sfnt, &map);
+        assert!(map.is_empty(), "no start code is held: {map:?}");
+    }
+
+    /// FT-16.2: `post` names each glyph as its version states, the
+    /// standard order's names transcribed from the `post` chapter, and the
+    /// names read back to the glyphs `glyph_for_name` finds.
+    #[test]
+    fn post_names_glyphs_in_formats_1_2_and_3() {
+        // 1.0: the standard order, as far as maxp's count reaches.
+        let data = sfnt_with_tables(&[(b"maxp", maxp(40)), (b"post", post(0x0001_0000, &[]))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_name(0), Some(".notdef"));
+        assert_eq!(face.glyph_name(1), Some(".null"));
+        assert_eq!(face.glyph_name(3), Some("space"));
+        assert_eq!(face.glyph_name(36), Some("A"));
+        assert_eq!(face.glyph_name(39), Some("D"));
+        assert_eq!(face.glyph_name(40), None, "past maxp's count");
+        let data = sfnt_with_tables(&[(b"post", post(0x0001_0000, &[]))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(
+            face.glyph_name(257),
+            Some("dcroat"),
+            "no maxp: the order whole"
+        );
+        assert_eq!(face.glyph_name(258), None);
+
+        // 2.0: the standard order below 258, the table's strings from 258,
+        // an index past its strings naming nothing.
+        let body = post_2_body(&[0, 3, 168, 258, 259, 0, 300], &["alpha", "uni2665"]);
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_0000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        let names: Vec<Option<&str>> = (0..8).map(|glyph| face.glyph_name(glyph)).collect();
+        assert_eq!(
+            names,
+            [
+                Some(".notdef"),
+                Some("space"),
+                Some("Delta"),
+                Some("alpha"),
+                Some("uni2665"),
+                Some(".notdef"),
+                None,
+                None,
+            ]
+        );
+        for glyph in 0..5u16 {
+            let name = face.glyph_name(glyph).expect("named");
+            let first = (0..=glyph)
+                .find(|g| face.glyph_name(*g) == Some(name))
+                .expect("itself at least");
+            assert_eq!(face.glyph_for_name(name), Some(first), "{name}");
+        }
+
+        // 2.5: a signed offset from the glyph's own index.
+        let mut body = 5u16.to_be_bytes().to_vec();
+        for offset in [0i8, 35, 1, 95, -2] {
+            body.extend_from_slice(&offset.to_be_bytes());
+        }
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_5000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        let names: Vec<Option<&str>> = (0..6).map(|glyph| face.glyph_name(glyph)).collect();
+        assert_eq!(
+            names,
+            [
+                Some(".notdef"),
+                Some("A"),
+                Some("space"),
+                Some("Adieresis"),
+                Some("nonmarkingreturn"),
+                None,
+            ]
+        );
+        // An offset that leaves the standard order names nothing.
+        let mut body = 2u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&(-1i8).to_be_bytes());
+        body.extend_from_slice(&127i8.to_be_bytes());
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_5000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_name(0), None, "index -1");
+        assert_eq!(face.glyph_name(1), Some("ucircumflex"), "1 + 127 = 128");
+
+        // 3.0, and a version no specification gives, name nothing.
+        for version in [0x0003_0000u32, 0x0004_0000, 0] {
+            let body = post_2_body(&[0, 3], &["alpha"]);
+            let data = sfnt_with_tables(&[(b"post", post(version, &body))]);
+            let face = Sfnt::parse(&data).expect("a directory");
+            for glyph in 0..3 {
+                assert_eq!(face.glyph_name(glyph), None, "{version:#x}");
+            }
+        }
+
+        // A string cut short, a string that is not UTF-8, a table that ends
+        // in its index array, and no table at all.
+        let mut body = post_2_body(&[258, 259, 260], &["alpha", "beta", "gamma"]);
+        body.truncate(body.len() - 2);
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_0000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_name(0), Some("alpha"));
+        assert_eq!(face.glyph_name(1), Some("beta"));
+        assert_eq!(face.glyph_name(2), None, "cut short");
+        let mut body = post_2_body(&[258], &["x"]);
+        let last = body.len() - 1;
+        body[last] = 0xFF;
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_0000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_name(0), None, "not UTF-8");
+        let mut body = 9u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&3u16.to_be_bytes());
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_0000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_name(0), Some("space"));
+        assert_eq!(face.glyph_name(1), None, "its index is not in the table");
+        let data = sfnt_with(b"head", &[0u8; 54]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_name(0), None, "no post table");
+    }
+
+    /// A `glyf` and `loca` of six glyphs: an empty one, a simple one, a
+    /// composite one, one whose header is written backwards, one too short
+    /// to hold its header, and the end of `loca`.
+    fn boxed_face(long: bool) -> Vec<u8> {
+        let mut glyf = Vec::new();
+        let header = |contours: i16, edges: [i16; 4], glyf: &mut Vec<u8>| {
+            glyf.extend_from_slice(&contours.to_be_bytes());
+            for edge in edges {
+                glyf.extend_from_slice(&edge.to_be_bytes());
+            }
+        };
+        header(1, [-10, -20, 500, 700], &mut glyf);
+        header(-1, [5, 6, 7, 8], &mut glyf);
+        header(1, [900, 800, -900, -800], &mut glyf);
+        glyf.extend_from_slice(&[0, 1, 0, 0]);
+        // Glyph 0 empty, 1 at 0, 2 at 10, 3 at 20, 4 at 30 (four bytes).
+        let offsets = [0u32, 0, 10, 20, 30, 34];
+        let loca: Vec<u8> = if long {
+            offsets.iter().flat_map(|o| o.to_be_bytes()).collect()
+        } else {
+            offsets
+                .iter()
+                .flat_map(|o| ((o / 2) as u16).to_be_bytes())
+                .collect()
+        };
+        let mut head = head();
+        head[50..52].copy_from_slice(&i16::from(long).to_be_bytes());
+        face(&[
+            (b"glyf", &glyf),
+            (b"head", &head),
+            (b"loca", &loca),
+            (b"maxp", &maxp(5)),
+        ])
+    }
+
+    /// FT-16.2: a glyph's box is the four values its `glyf` header writes,
+    /// found through `loca` in either of its forms.
+    #[test]
+    fn a_glyph_box_is_its_glyf_header() {
+        let bounds = |x_min, y_min, x_max, y_max| Bounds {
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+        };
+        for long in [false, true] {
+            let data = boxed_face(long);
+            let face = Sfnt::parse(&data).expect("a directory");
+            assert_eq!(
+                face.glyph_box(0),
+                Some(bounds(0, 0, 0, 0)),
+                "empty: the origin"
+            );
+            assert_eq!(face.glyph_box(1), Some(bounds(-10, -20, 500, 700)));
+            assert_eq!(face.glyph_box(2), Some(bounds(5, 6, 7, 8)), "composite");
+            assert_eq!(
+                face.glyph_box(3),
+                Some(bounds(900, 800, -900, -800)),
+                "as written"
+            );
+            assert_eq!(face.glyph_box(4), None, "too short for a header");
+            assert_eq!(face.glyph_box(5), None, "past loca");
+            assert_eq!(face.glyph_box(u16::MAX), None);
+            assert_eq!(face.loca_glyph_count(), Some(5), "six entries");
+        }
+        let data = sfnt_with(b"head", &head());
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_box(0), None, "no glyf or loca");
+        assert_eq!(face.loca_glyph_count(), None);
+        // An empty loca indexes nothing.
+        let data = face_of_loca(&[]);
+        assert_eq!(
+            Sfnt::parse(&data).expect("a directory").loca_glyph_count(),
+            Some(0)
+        );
+    }
+
+    /// A face of `head` (long offsets) and the `loca` given.
+    fn face_of_loca(loca: &[u8]) -> Vec<u8> {
+        face(&[(b"head", &head()), (b"loca", loca)])
+    }
+
+    /// FT-16.2: the face's box is `head`'s four values as written.
+    #[test]
+    fn the_font_box_is_heads() {
+        let mut head = head();
+        for (at, value) in [(36, -100i16), (38, -200), (40, 1100), (42, 900)] {
+            head[at..at + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let data = sfnt_with(b"head", &head);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(
+            face.font_box(),
+            Some(Bounds {
+                x_min: -100,
+                y_min: -200,
+                x_max: 1100,
+                y_max: 900,
+            })
+        );
+        let data = sfnt_with(b"head", &head[..42]);
+        assert_eq!(Sfnt::parse(&data).expect("a directory").font_box(), None);
+        let data = sfnt_with(b"maxp", &maxp(1));
+        assert_eq!(Sfnt::parse(&data).expect("a directory").font_box(), None);
+    }
+
+    /// An `OS/2` table of `version`, `len` bytes long, its fields written
+    /// where it holds them.
+    fn os2(version: u16, len: usize) -> Vec<u8> {
+        let mut os2 = vec![0u8; len];
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(slot) = os2.get_mut(at..at + bytes.len()) {
+                slot.copy_from_slice(bytes);
+            }
+        };
+        put(0, &version.to_be_bytes());
+        put(4, &700u16.to_be_bytes()); // usWeightClass
+        put(6, &5u16.to_be_bytes()); // usWidthClass
+        put(30, &0x0105u16.to_be_bytes()); // sFamilyClass
+        put(32, &[2, 2, 6, 3, 5, 4, 5, 2, 3, 4]); // PANOSE
+        put(62, &0x0201u16.to_be_bytes()); // fsSelection
+        put(86, &(-1i16).to_be_bytes()); // sxHeight
+        put(88, &1409i16.to_be_bytes()); // sCapHeight
+        os2
+    }
+
+    /// FT-16.2: the style facts are `post`'s, `OS/2`'s and `head`'s fields
+    /// as written, each `None` where its table does not hold it.
+    #[test]
+    fn the_style_facts_are_os2_posts_and_heads() {
+        let mut post_table = post(0x0003_0000, &[]);
+        post_table[4..8].copy_from_slice(&(-819_200i32).to_be_bytes()); // -12.5
+        post_table[8..10].copy_from_slice(&(-100i16).to_be_bytes());
+        post_table[10..12].copy_from_slice(&50i16.to_be_bytes());
+        post_table[12..16].copy_from_slice(&1u32.to_be_bytes());
+        let mut head = head();
+        head[44..46].copy_from_slice(&3u16.to_be_bytes());
+        let data = sfnt_with_tables(&[
+            (b"OS/2", os2(2, 96)),
+            (b"head", head),
+            (b"post", post_table),
+        ]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(
+            face.style(),
+            Style {
+                italic_angle: Some(-12.5),
+                underline_position: Some(-100),
+                underline_thickness: Some(50),
+                fixed_pitch: Some(true),
+                weight_class: Some(700),
+                width_class: Some(5),
+                family_class: Some(0x0105),
+                panose: Some([2, 2, 6, 3, 5, 4, 5, 2, 3, 4]),
+                selection: Some(0x0201),
+                x_height: Some(-1),
+                cap_height: Some(1409),
+                mac_style: Some(3),
+            }
+        );
+
+        // Version 1 holds no heights, whatever its bytes; version 0 of
+        // Apple's 78 bytes holds the rest.
+        for (version, len) in [(1u16, 96usize), (0, 78)] {
+            let data = sfnt_with_tables(&[(b"OS/2", os2(version, len))]);
+            let style = Sfnt::parse(&data).expect("a directory").style();
+            assert_eq!(style.x_height, None, "version {version}");
+            assert_eq!(style.cap_height, None, "version {version}");
+            assert_eq!(style.weight_class, Some(700), "version {version}");
+            assert_eq!(style.selection, Some(0x0201), "version {version}");
+        }
+        // A version 2 table cut before its heights, and one cut before its
+        // PANOSE.
+        let data = sfnt_with_tables(&[(b"OS/2", os2(2, 87))]);
+        let style = Sfnt::parse(&data).expect("a directory").style();
+        assert_eq!((style.x_height, style.cap_height), (None, None));
+        let data = sfnt_with_tables(&[(b"OS/2", os2(2, 40))]);
+        let style = Sfnt::parse(&data).expect("a directory").style();
+        assert_eq!(style.panose, None);
+        assert_eq!(style.family_class, Some(0x0105));
+        assert_eq!(style.selection, None);
+
+        // An upright, proportional post; and no tables at all.
+        let data = sfnt_with_tables(&[(b"post", post(0x0003_0000, &[]))]);
+        let style = Sfnt::parse(&data).expect("a directory").style();
+        assert_eq!(style.italic_angle, Some(0.0));
+        assert_eq!(style.fixed_pitch, Some(false));
+        let data = sfnt_with(b"maxp", &maxp(1));
+        assert_eq!(
+            Sfnt::parse(&data).expect("a directory").style(),
+            Style::default()
+        );
+    }
+
+    /// A collection's faces are read by their index in the `ttcf` header,
+    /// and a face past its count, or past what the header holds, is none.
+    #[test]
+    fn a_collections_faces_are_read_by_index() {
+        let head_of = |units: u16| {
+            let mut head = head();
+            head[18..20].copy_from_slice(&units.to_be_bytes());
+            head
+        };
+        // Two directories, each one table, after a header of two offsets;
+        // each directory's table offset moved by where it now sits.
+        let first = face(&[(b"head", &head_of(1000))]);
+        let second = face(&[(b"head", &head_of(2048))]);
+        let header_len = 12 + 8;
+        let moved = |directory: &[u8], by: usize| -> Vec<u8> {
+            let mut moved = directory.to_vec();
+            let offset = u32::from_be_bytes([moved[20], moved[21], moved[22], moved[23]]);
+            moved[20..24].copy_from_slice(&(offset + by as u32).to_be_bytes());
+            moved
+        };
+        let mut data = b"ttcf".to_vec();
+        data.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend_from_slice(&(header_len as u32).to_be_bytes());
+        data.extend_from_slice(&((header_len + first.len()) as u32).to_be_bytes());
+        data.extend_from_slice(&moved(&first, header_len));
+        data.extend_from_slice(&moved(&second, header_len + first.len()));
+        assert_eq!(Sfnt::faces(&data), 2);
+        let units: Vec<Option<u16>> = (0..3)
+            .map(|face| Sfnt::parse_face(&data, face).map(|sfnt| sfnt.units_per_em))
+            .collect();
+        assert_eq!(units, [Some(1000), Some(2048), None]);
+        assert_eq!(
+            Sfnt::parse(&data).map(|sfnt| sfnt.units_per_em),
+            Some(1000),
+            "parse is face 0"
+        );
+
+        // A count past the header's room is held to it.
+        let mut overcounted = data.clone();
+        overcounted[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        let room = ((overcounted.len() - 12) / 4) as u32;
+        assert_eq!(Sfnt::faces(&overcounted), room);
+        assert!(Sfnt::parse_face(&overcounted, room).is_none());
+        assert!(Sfnt::parse_face(&overcounted, u32::MAX).is_none());
+
+        // A plain face is face 0 alone; anything else has none.
+        let plain = face(&[(b"head", &head())]);
+        assert_eq!(Sfnt::faces(&plain), 1);
+        assert!(Sfnt::parse_face(&plain, 0).is_some());
+        assert!(Sfnt::parse_face(&plain, 1).is_none());
+        assert_eq!(Sfnt::faces(b"not a font"), 0);
+        assert_eq!(Sfnt::faces(b"ttcf"), 0);
+        assert!(Sfnt::parse_face(b"ttcf", 0).is_none());
+    }
+
+    /// Every reader FT-16.2 adds, over one input.
+    fn read_everything(data: &[u8]) {
+        let faces = Sfnt::faces(data);
+        for face in [0, 1, faces.saturating_sub(1), faces, u32::MAX] {
+            let Some(sfnt) = Sfnt::parse_face(data, face) else {
+                continue;
+            };
+            let map = sfnt.char_map();
+            assert!(map.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(map.iter().all(|(_, glyph)| *glyph != 0));
+            let _ = sfnt.code_points();
+            let _ = sfnt.text_subtable();
+            for glyph in (0..64u16).chain([u16::MAX - 1, u16::MAX]) {
+                let _ = sfnt.glyph_name(glyph);
+                let _ = sfnt.glyph_box(glyph);
+            }
+            let _ = sfnt.font_box();
+            let _ = sfnt.style();
+            let _ = sfnt.loca_glyph_count();
+        }
+    }
+
+    /// A `cmap` table of one subtable of a format the lookup reads, under a
+    /// record the lookup takes, its body arbitrary after the format.
+    fn arbitrary_cmap() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+        use proptest::prelude::*;
+        (
+            prop_oneof![Just(0u16), Just(2), Just(4), Just(6), Just(12), Just(13)],
+            prop_oneof![
+                Just((3u16, 1u16)),
+                Just((3, 10)),
+                Just((3, 0)),
+                Just((1, 0)),
+                Just((0, 3))
+            ],
+            proptest::collection::vec(any::<u8>(), 0..512),
+        )
+            .prop_map(|(format, (platform, encoding), body)| {
+                let mut sub = format.to_be_bytes().to_vec();
+                sub.extend_from_slice(&body);
+                cmap_of(&[(platform, encoding, sub)])
+            })
+    }
+
+    /// A `post` version the readers tell apart.
+    fn arbitrary_post_version() -> impl proptest::strategy::Strategy<Value = u32> {
+        use proptest::prelude::*;
+        prop_oneof![
+            Just(0x0001_0000u32),
+            Just(0x0002_0000),
+            Just(0x0002_5000),
+            Just(0x0003_0000),
+            any::<u32>()
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// Ruling 1: no reader FT-16.2 adds panics on arbitrary bytes, as a
+        /// face or as a collection's header.
+        #[test]
+        fn the_measurement_readers_never_panic_on_arbitrary_bytes(
+            data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..1024)
+        ) {
+            read_everything(&data);
+            let mut ttcf = b"ttcf".to_vec();
+            ttcf.extend_from_slice(&data);
+            read_everything(&ttcf);
+        }
+
+        /// Ruling 1, over a directory whose tables are arbitrary: the
+        /// readers meet every count and offset a table can claim.
+        #[test]
+        fn the_measurement_readers_never_panic_on_arbitrary_tables(
+            cmap in arbitrary_cmap(),
+            post_body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),
+            version in arbitrary_post_version(),
+            os2_body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..128),
+            head_body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+            loca in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..128),
+            glyf in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256),
+            maxp_body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..8),
+        ) {
+            let data = sfnt_with_tables(&[
+                (b"OS/2", os2_body),
+                (b"cmap", cmap),
+                (b"glyf", glyf),
+                (b"head", head_body),
+                (b"loca", loca),
+                (b"maxp", maxp_body),
+                (b"post", post(version, &post_body)),
+            ]);
+            read_everything(&data);
         }
     }
 }

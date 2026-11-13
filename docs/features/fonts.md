@@ -100,6 +100,26 @@ or none. A face without the tables, a count of zero, or a
 read past a table's end answers `None`, and what a shaper sets then is
 [design/shaping.md](../design/shaping.md)'s *Vertical shaping*.
 
+**What the measurement API reads** ([design](../design/font-metrics.md)).
+`Sfnt::char_map` answers every scalar value the text subtable maps, with its
+glyph, reading the subtable exactly as `Sfnt::glyph_for_char` looks it up: a
+(3,0) subtable's `F0xx` codes at their low byte as well, a Macintosh
+subtable nothing past U+007F, a format 4 subtable's segments once in order, a
+format 12 or 13 subtable's groups once against the codes earlier groups
+decided, so the walk is linear in the subtable and the codes it maps;
+`Sfnt::code_points` is its scalars and `Sfnt::text_subtable` names the
+subtable. `Sfnt::glyph_name` reads `post` forwards — version 1.0's standard
+order as far as `maxp`'s count, 2.0's indices and its own strings, read once,
+2.5's offsets, 3.0 nothing — beside `glyph_for_name`. `Sfnt::glyph_box` is a
+glyph's `glyf` header through `loca`, `Sfnt::font_box` `head`'s box, and
+`Sfnt::loca_glyph_count` what `loca` indexes. `Sfnt::style` answers the facts
+of `post` (italic angle, underline, fixed pitch), `OS/2` (weight and width
+class, family class, PANOSE, `fsSelection`, and version 2's x-height and cap
+height) and `head` (`macStyle`), each `None` where its table does not hold
+it. `Sfnt::parse_face` reads a collection's face by index and `Sfnt::faces`
+counts them, no more than its header has room for; face 0 is the one
+`Sfnt::parse` reads.
+
 **Colour tables** (OpenType 1.9.1's CPAL and COLR chapters,
 [design](../design/colour-fonts.md)). `Cpal` reads both versions of the
 palette table: every palette's entries as `Rgba` — sRGB, not premultiplied,
@@ -1907,6 +1927,16 @@ corpora already vendored here. So every name stays on the list.
   order or overcounted are read as written; and `glyf::bounds` reads the
   header as written, bounds an empty glyph at its origin and a missing one
   not at all. The `sfnt` fuzz target asks for each of them.
+- `crates/tinker-pdf-font/src/sfnt.rs` — what the measurement API reads, over
+  hand-built tables: every scalar a format 0, 2, 4 (in order and out of
+  order), 6, 12 (in order and overlapping), 13, (3,0) or Macintosh subtable
+  maps, agreeing with `glyph_for_char` on every scalar to U+2FFFF and at the
+  top of the range; a subtable that claims more than it holds read as far as
+  it holds; `post` names in versions 1.0, 2.0, 2.5 and 3.0, cut short and not
+  UTF-8; glyph boxes through both `loca` forms; `head`'s box; the style facts
+  of `OS/2` versions 0 to 2, `post` and `head`; a collection's faces by index;
+  and a proptest that none of them panics on arbitrary bytes or on a directory
+  of arbitrary tables. The `sfnt` fuzz target calls each.
 - `crates/tinker-pdf-font/src/type1.rs` — a two-axis, four-master program
   built in the test, its masters at the corners out of their order and a
   procedure naming `/WeightVector` before the definition, reads its blend
