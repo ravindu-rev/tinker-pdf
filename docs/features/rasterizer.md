@@ -319,9 +319,27 @@ holds no ink, so `fill_mask_plates` under `Normal` knocks those channels out.
 Each channel composites by `CmykA8`'s arithmetic, line for line: complemented
 through the separable blend functions, 11.3.6's straight-alpha composite, the
 coverage and the alpha multiplied; so four process channels with no spot are
-a `CmykA8` canvas's bytes for the same masks, inks, alphas and modes, and a
-spot channel is what a process channel holding its tints is. A non-separable
-mode has no per-channel form and composites as `Normal`. The five other
+a `CmykA8` canvas's bytes for the same masks, inks, alphas and modes, the
+non-separable ones taken through light as on `CmykA8` and counted in
+`approximated_blends`. A spot channel blends only under a separable mode that
+preserves white (11.7.3, 11.7.4.2), as a process channel holding its tints
+would: under `Difference`, `Exclusion` and the four non-separable modes the
+mode reaches the process channels alone and every spot channel takes
+`Normal`. Groups composite on plates as on ink: `Canvas::composite` blends a
+plates buffer onto its parent channel for channel; a non-isolated group's
+`adopt_backdrop` reads its parent's tints, spots among them, where the parent
+lies, whole pixels at a time since a plates pixel is wider than the five-byte
+word, and `remove_backdrop` takes them out again by 11.4.7.2's step; and a
+knockout group's `knock_out` restores its initial state under each element
+(11.4.5), the backdrop's tints at no alpha or the transparent pixel it was
+made as — so process ink in isolated, non-isolated and knockout groups is a
+`CmykA8` page's bytes, and a spot under a non-isolated group comes back as it
+went in. Across
+formats a plates source composites onto `CmykA8` as its process ink and onto
+light as that ink's light, and a light or ink source onto plates as ink on the
+process channels with every spot under its shape knocked out, a group painting
+every component; an uncoloured cell's colour on plates is its light turned
+into ink. The five other
 formats keep their five-byte compositing word and run no line they did
 before: a plates paint builds a word as wide as its canvas once a paint. A
 colour handed to plates through `fill_mask_inked` or `blend_pixel_inked` is

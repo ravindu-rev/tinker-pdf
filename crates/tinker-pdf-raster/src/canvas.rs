@@ -806,6 +806,9 @@ impl Canvas {
         alpha: u32,
         mode: BlendMode,
     ) {
+        if mode.is_nonseparable() {
+            self.approximated_blends = self.approximated_blends.saturating_add(1);
+        }
         let channels = color_channels(self.format);
         let components = self.format.components();
         // The source as wide as this canvas's colour channels: the ink's own
@@ -1092,6 +1095,9 @@ impl Canvas {
                 [c, m, yellow, k]
             }
         };
+        if mode.is_nonseparable() {
+            self.approximated_blends = self.approximated_blends.saturating_add(1);
+        }
         // On the stack: an image reaches here once a pixel.
         let mut source = [0u8; 4 + MAX_SPOT_PLATES];
         if let Some(process) = source.get_mut(..4) {
@@ -1206,6 +1212,11 @@ impl Canvas {
             self.composite_through(src, None, at, alpha, mode, mask, stop);
             return;
         }
+        if let PixelFormat::Plates { spots } = self.format {
+            let tint = plate_word(color, spots, self.ink_tables.as_deref());
+            self.composite_plates(src, Some(&tint), at, alpha, mode, mask, stop);
+            return;
+        }
         let mut swatch = Canvas::new(1, 1, src.format, color);
         if self.format == PixelFormat::CmykA8 && self.ink_tables.is_some() {
             swatch.ink_tables = self.ink_tables.clone();
@@ -1231,6 +1242,12 @@ impl Canvas {
         mask: Option<&Mask>,
         stop: Option<&dyn Fn() -> bool>,
     ) {
+        if matches!(self.format, PixelFormat::Plates { .. })
+            || matches!(src.format, PixelFormat::Plates { .. })
+        {
+            self.composite_plates(src, None, at, alpha, mode, mask, stop);
+            return;
+        }
         let alpha = if alpha.is_finite() {
             operation_level(alpha)
         } else {
@@ -1295,6 +1312,99 @@ impl Canvas {
                     mode,
                     backdrop,
                 );
+            }
+        }
+    }
+
+    /// [`Canvas::composite_through`] where either canvas is plates (11.3.6):
+    /// each source pixel read across into this canvas's storage by
+    /// [`plate_pixel_into`] — the same format's bytes, ink as ink, light
+    /// turned into ink — or, for an uncoloured cell, `tint` beside the
+    /// source's alpha, and composited by [`blend_plates`] onto plates or by
+    /// `blend` onto any other format, at the source's alpha, the operation's
+    /// and the mask's multiplied as `composite_through` multiplies them.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_plates(
+        &mut self,
+        src: &Canvas,
+        tint: Option<&[u8]>,
+        at: (i32, i32),
+        alpha: f64,
+        mode: BlendMode,
+        mask: Option<&Mask>,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
+        let alpha = if alpha.is_finite() {
+            operation_level(alpha)
+        } else {
+            255
+        };
+        if alpha == 0 {
+            return;
+        }
+        let (ox, oy) = self.origin;
+        let at_local = (
+            i64::from(at.0) - i64::from(ox),
+            i64::from(at.1) - i64::from(oy),
+        );
+        let (x0, y0, x1, y1) = place(at_local, src.width, src.height, self.width, self.height);
+        let format = self.format;
+        let components = format.components();
+        let plates = matches!(format, PixelFormat::Plates { .. });
+        if mode.is_nonseparable() && (plates || format == PixelFormat::CmykA8) {
+            self.approximated_blends = self.approximated_blends.saturating_add(1);
+        }
+        let channels = color_channels(format);
+        // Light a source carries becomes ink here by the tables in force.
+        let tables = self.ink_tables.clone();
+        let mut word = vec![0u8; components];
+        for row in y0..y1 {
+            if row.wrapping_sub(y0) % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
+                return;
+            }
+            for col in x0..x1 {
+                // `place` guarantees these subtractions stay in range.
+                let (sx, sy) = (
+                    (i64::from(col) - at_local.0) as u32,
+                    (i64::from(row) - at_local.1) as u32,
+                );
+                let read = match tint {
+                    Some(tint) => {
+                        for (slot, from) in word.iter_mut().zip(tint) {
+                            *slot = *from;
+                        }
+                        sx < src.width && sy < src.height
+                    }
+                    None => plate_pixel_into(src, sx, sy, format, tables.as_deref(), &mut word),
+                };
+                if !read {
+                    continue;
+                }
+                let own = src.alpha_at(sx, sy);
+                let coverage = mask.map_or(255, |mask| {
+                    u32::from(mask.at(ox.saturating_add(col as i32), oy.saturating_add(row as i32)))
+                });
+                if coverage == 0 {
+                    continue;
+                }
+                let effective = mul255(mul255(own, alpha), coverage);
+                if effective == 0 {
+                    continue;
+                }
+                let base = (row as usize) * self.stride + (col as usize) * components;
+                let backdrop = self.backdrop_alpha(col, row);
+                let Some(pixel) = self.data.get_mut(base..base + components) else {
+                    continue;
+                };
+                if plates {
+                    blend_plates(pixel, &word, effective, channels, mode, backdrop);
+                } else {
+                    let mut five = [0u8; 5];
+                    for (slot, from) in five.iter_mut().zip(&word) {
+                        *slot = *from;
+                    }
+                    blend(Some(pixel), &five, effective, format, mode, backdrop);
+                }
             }
         }
     }
@@ -1401,6 +1511,28 @@ impl Canvas {
     pub fn adopt_backdrop(&mut self, parent: Canvas) {
         let channels = color_channels(self.format);
         let components = self.format.components();
+        if matches!(self.format, PixelFormat::Plates { .. }) {
+            // A plates pixel is wider than `backdrop_word`'s word: each one
+            // read across whole, a plates parent's tints straight across.
+            let mut word = vec![0u8; components];
+            for row in 0..self.height {
+                for col in 0..self.width {
+                    let Some((px, py)) = under(self.origin, &parent, col, row) else {
+                        continue;
+                    };
+                    if !plate_pixel_into(&parent, px, py, self.format, None, &mut word) {
+                        continue;
+                    }
+                    let base = (row as usize) * self.stride + (col as usize) * components;
+                    for (slot, tint) in self.data.iter_mut().skip(base).zip(&word).take(channels) {
+                        *slot = *tint;
+                    }
+                }
+            }
+            self.parent = Some(Box::new(parent));
+            self.backdrop = true;
+            return;
+        }
         for row in 0..self.height {
             for col in 0..self.width {
                 let Some((px, py)) = under(self.origin, &parent, col, row) else {
@@ -1460,6 +1592,10 @@ impl Canvas {
         if !self.format.has_alpha() {
             return;
         }
+        if matches!(self.format, PixelFormat::Plates { .. }) {
+            self.remove_plate_backdrop(parent);
+            return;
+        }
         let channels = color_channels(self.format);
         let components = self.format.components();
 
@@ -1478,13 +1614,13 @@ impl Canvas {
                 // painted, which is the known instability of the removal step
                 // and is why every channel clamps.
                 let factor = (i64::from(initial) * 255 / i64::from(own)) - i64::from(initial);
+                let base = (row as usize) * self.stride + (col as usize) * components;
                 // `C0` in this buffer's format, as `adopt_backdrop` wrote it:
                 // the parent's own bytes when the two share a format, so no
                 // trip through light.
                 let Some(base0) = self.backdrop_word(parent, px, py) else {
                     continue;
                 };
-                let base = (row as usize) * self.stride + (col as usize) * components;
                 for i in 0..channels {
                     let Some(slot) = self.data.get_mut(base + i) else {
                         continue;
@@ -1492,6 +1628,41 @@ impl Canvas {
                     let cn = i64::from(*slot);
                     let c0 = i64::from(base0.get(i).copied().unwrap_or(0));
                     let value = cn + (cn - c0) * factor / 255;
+                    *slot = value.clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
+
+    /// [`Canvas::remove_backdrop`] on a plates buffer: the same step, `C0`
+    /// the parent's pixel read across whole as adoption read it, a plates
+    /// parent's tints straight across, since a plates pixel is wider than
+    /// `backdrop_word`'s word.
+    fn remove_plate_backdrop(&mut self, parent: &Canvas) {
+        let channels = color_channels(self.format);
+        let components = self.format.components();
+        let mut base0 = vec![0u8; components];
+        for row in 0..self.height {
+            for col in 0..self.width {
+                let own = self.alpha_at(col, row);
+                let Some((px, py)) = under(self.origin, parent, col, row) else {
+                    continue;
+                };
+                let initial = parent.alpha_at(px, py);
+                if own == 0 || initial == 0 {
+                    continue;
+                }
+                let factor = (i64::from(initial) * 255 / i64::from(own)) - i64::from(initial);
+                if !plate_pixel_into(parent, px, py, self.format, None, &mut base0) {
+                    continue;
+                }
+                let base = (row as usize) * self.stride + (col as usize) * components;
+                for (i, c0) in base0.iter().enumerate().take(channels) {
+                    let Some(slot) = self.data.get_mut(base + i) else {
+                        continue;
+                    };
+                    let cn = i64::from(*slot);
+                    let value = cn + (cn - i64::from(*c0)) * factor / 255;
                     *slot = value.clamp(0, 255) as u8;
                 }
             }
@@ -1550,6 +1721,10 @@ impl Canvas {
     /// colour at no alpha, read from the parent it holds, so a knockout
     /// group keeps no second buffer.
     pub fn knock_out(&mut self, mask: &Mask) {
+        if let PixelFormat::Plates { spots } = self.format {
+            self.knock_out_plates(mask, spots);
+            return;
+        }
         let components = self.format.components();
         // The bytes `Canvas::new` cleared the buffer to, with no tables.
         let clear = self.encode_by(Color::TRANSPARENT, None);
@@ -1566,6 +1741,49 @@ impl Canvas {
                 let initial = self.initial_state(col, row, &clear);
                 let base = (row as usize) * self.stride + (col as usize) * components;
                 for (i, from) in initial.iter().enumerate().take(components) {
+                    let Some(slot) = self.data.get_mut(base + i) else {
+                        continue;
+                    };
+                    *slot = (mul255(u32::from(*from), coverage)
+                        + mul255(u32::from(*slot), 255 - coverage))
+                    .min(255) as u8;
+                }
+            }
+        }
+    }
+
+    /// [`Canvas::knock_out`] on a plates buffer: the initial state read whole
+    /// — a non-isolated group's backdrop tints at no alpha, read across from
+    /// the parent as adoption read them, and otherwise the transparent pixel
+    /// the buffer was made as — since a plates pixel is wider than
+    /// `initial_state`'s word.
+    fn knock_out_plates(&mut self, mask: &Mask, spots: Spots) {
+        let components = self.format.components();
+        let clear = plate_word(Color::TRANSPARENT, spots, None);
+        let mut initial = vec![0u8; components];
+        let (x0, y0, x1, y1) = mask.overlap_at(self.origin, self.width, self.height);
+        let (ox, oy) = self.origin;
+        for row in y0..y1 {
+            for col in x0..x1 {
+                let coverage = u32::from(
+                    mask.at(ox.saturating_add(col as i32), oy.saturating_add(row as i32)),
+                );
+                if coverage == 0 {
+                    continue;
+                }
+                let read = self.backdrop
+                    && self.beneath(col, row).is_some_and(|(parent, px, py)| {
+                        plate_pixel_into(parent, px, py, self.format, None, &mut initial)
+                    });
+                if read {
+                    if let Some(alpha) = initial.last_mut() {
+                        *alpha = 0;
+                    }
+                } else {
+                    initial.copy_from_slice(&clear);
+                }
+                let base = (row as usize) * self.stride + (col as usize) * components;
+                for (i, from) in initial.iter().enumerate() {
                     let Some(slot) = self.data.get_mut(base + i) else {
                         continue;
                     };
@@ -2573,9 +2791,16 @@ fn blend(
 /// result is 11.3.6's straight-alpha composite against the union alpha, and
 /// the alpha channel keeps the group's own. So with the same inputs a
 /// process channel here is the byte the same channel of a `CmykA8` pixel
-/// comes out as, and a spot channel is what a process channel holding its
-/// tints would be. A non-separable mode has no per-channel form and
-/// composites as [`BlendMode::apply`] answers for it, the source.
+/// comes out as, under every mode.
+///
+/// **The spot channels take a mode only where it preserves white** (11.7.3,
+/// 11.7.4.2): a spot colorant blends under a separable, white-preserving mode
+/// — every separable mode but `Difference` and `Exclusion` — as a process
+/// channel holding its tints would. Under those two the mode applies to the
+/// process channels alone, and under the four non-separable modes it applies
+/// to the process channels through light, as `CmykA8`'s `blend` takes them —
+/// 8.6.4.4 out of ink, 11.3.5.3 over the light, maximum undercolour removal
+/// back — while every spot channel takes `Normal`.
 fn blend_plates(
     dst: &mut [u8],
     source: &[u8],
@@ -2596,10 +2821,36 @@ fn blend_plates(
     // the group's own. They are the same number outside a non-isolated group.
     let union_out = alpha + mul255(backdrop_alpha, inverse);
     let own_out = alpha + mul255(own_alpha, inverse);
-    for (slot, src) in dst.iter_mut().zip(source).take(channels) {
+    // 11.3.5.3's modes are over light: the process channels' ink converted,
+    // blended and converted back, from the pixel as it is before any channel
+    // is written — `blend`'s round trip for `CmykA8`, counted by the caller.
+    let lit = mode.is_nonseparable().then(|| {
+        let at = |pixel: &[u8], i: usize| pixel.get(i).copied().unwrap_or(0);
+        let (br, bg, bb) = cmyk_to_rgb(at(dst, 0), at(dst, 1), at(dst, 2), at(dst, 3));
+        let (sr, sg, sb) = cmyk_to_rgb(at(source, 0), at(source, 1), at(source, 2), at(source, 3));
+        let lit = mode.apply_nonseparable(
+            [u32::from(br), u32::from(bg), u32::from(bb)],
+            [u32::from(sr), u32::from(sg), u32::from(sb)],
+        );
+        let byte = |v: u32| v.min(255) as u8;
+        let (c, m, y, k) = rgb_to_cmyk(byte(lit[0]), byte(lit[1]), byte(lit[2]));
+        [c, m, y, k]
+    });
+    let preserves_white =
+        !mode.is_nonseparable() && !matches!(mode, BlendMode::Difference | BlendMode::Exclusion);
+    let spot_mode = if preserves_white {
+        mode
+    } else {
+        BlendMode::Normal
+    };
+    for (channel, (slot, src)) in dst.iter_mut().zip(source).take(channels).enumerate() {
         let cs = u32::from(*src);
         let cb = u32::from(*slot);
-        let blended = 255 - mode.apply(255 - cb, 255 - cs);
+        let blended = match lit {
+            Some(lit) if channel < 4 => u32::from(lit.get(channel).copied().unwrap_or(0)),
+            _ if channel < 4 => 255 - mode.apply(255 - cb, 255 - cs),
+            _ => 255 - spot_mode.apply(255 - cb, 255 - cs),
+        };
         let mixed = mul255(255 - backdrop_alpha, cs) + mul255(backdrop_alpha, blended);
         *slot = if backdrop_alpha == 255 {
             (mul255(mixed, alpha) + mul255(cb, inverse)).min(255) as u8
@@ -5577,6 +5828,507 @@ mod tests {
             &canvas.data[..7],
             &[0, 60, 0, 0, 0, 0, 255],
             "the extra ones are passed over"
+        );
+    }
+
+    // ---- Transparency on plates ---------------------------------------------
+
+    /// Every blend mode: the twelve separable and the four non-separable.
+    const EVERY_MODE: [BlendMode; 16] = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+    ];
+
+    /// Paints `cmyk` through `mask` as the document's own ink: through
+    /// `fill_mask_plates` on plates, through `fill_mask_inked` on `CmykA8`.
+    fn ink(canvas: &mut Canvas, mask: &Mask, cmyk: [u8; 4], alpha: f64, mode: BlendMode) {
+        match canvas.format {
+            PixelFormat::Plates { spots } => {
+                canvas.fill_mask_plates(mask, &PlateInk::process(spots, cmyk), alpha, mode);
+            }
+            _ => {
+                let [c, m, y, k] = cmyk;
+                let (r, g, b) = cmyk_to_rgb(c, m, y, k);
+                canvas.fill_mask_inked(mask, Color::rgb(r, g, b), Some(cmyk), alpha, mode);
+            }
+        }
+    }
+
+    /// A page of process ink with an isolated, a non-isolated and a knockout
+    /// group on it, each painting process ink under `mode` and composited
+    /// back at `alpha` under `mode` — every step a renderer takes for a group
+    /// (11.4.4, 11.4.5, 11.4.7.2) — in `format`.
+    fn grouped_page(format: PixelFormat, mode: BlendMode, alpha: f64) -> Canvas {
+        let mut page = Canvas::new(12, 12, format, Color::WHITE);
+        let whole = square_mask(0.0, 0.0, 12.0, 12.0, 12);
+        ink(&mut page, &whole, [40, 0, 120, 10], 1.0, BlendMode::Normal);
+        ink(
+            &mut page,
+            &square_mask(2.4, 1.3, 7.1, 8.6, 12),
+            [0, 210, 30, 0],
+            0.7,
+            BlendMode::Multiply,
+        );
+
+        // Isolated: from nothing, holding the page while it is open.
+        let mut isolated = Canvas::new(6, 6, format, Color::TRANSPARENT).at_origin(1, 1);
+        isolated.hold_parent(page);
+        ink(
+            &mut isolated,
+            &square_mask(1.5, 1.5, 4.0, 3.0, 12),
+            [255, 0, 0, 40],
+            1.0,
+            BlendMode::Normal,
+        );
+        ink(
+            &mut isolated,
+            &square_mask(2.2, 2.7, 4.5, 4.4, 12),
+            [0, 90, 200, 0],
+            0.6,
+            mode,
+        );
+        let mut page = isolated.release_parent().expect("the group holds its page");
+        page.composite(&isolated, (1, 1), alpha, mode, None, None);
+
+        // Non-isolated: the page's own ink its backdrop, taken out at the close.
+        let mut adopted = Canvas::new(7, 7, format, Color::TRANSPARENT).at_origin(4, 3);
+        adopted.adopt_backdrop(page);
+        ink(
+            &mut adopted,
+            &square_mask(4.6, 3.2, 5.0, 4.1, 12),
+            [255, 255, 255, 255],
+            0.8,
+            mode,
+        );
+        ink(
+            &mut adopted,
+            &square_mask(6.3, 5.5, 3.9, 4.2, 12),
+            [10, 20, 30, 200],
+            0.5,
+            mode,
+        );
+        let mut page = adopted.release_parent().expect("the group holds its page");
+        adopted.remove_backdrop(&page);
+        page.composite(&adopted, (4, 3), alpha, mode, None, None);
+
+        // Knockout: each element over the group's initial state, the page's
+        // ink at no alpha.
+        let mut knockout = Canvas::new(8, 8, format, Color::TRANSPARENT).at_origin(3, 4);
+        knockout.adopt_backdrop(page);
+        for (mask, cmyk) in [
+            (square_mask(3.5, 4.5, 6.0, 5.0, 12), [200, 0, 0, 0]),
+            (square_mask(5.2, 6.1, 5.0, 5.3, 12), [0, 0, 180, 60]),
+        ] {
+            knockout.knock_out(&mask);
+            ink(&mut knockout, &mask, cmyk, 0.9, mode);
+        }
+        let mut page = knockout.release_parent().expect("the group holds its page");
+        knockout.remove_backdrop(&page);
+        page.composite(&knockout, (3, 4), alpha, mode, None, None);
+
+        // An isolated knockout group: each element over nothing.
+        let mut isolated = Canvas::new(5, 5, format, Color::TRANSPARENT).at_origin(6, 6);
+        isolated.hold_parent(page);
+        for (mask, cmyk) in [
+            (square_mask(6.5, 6.5, 4.0, 4.0, 12), [0, 255, 0, 0]),
+            (square_mask(7.5, 7.0, 3.5, 4.5, 12), [30, 0, 0, 90]),
+        ] {
+            isolated.knock_out(&mask);
+            ink(&mut isolated, &mask, cmyk, 0.7, mode);
+        }
+        let mut page = isolated.release_parent().expect("the group holds its page");
+        page.composite(&isolated, (6, 6), alpha, mode, None, None);
+        page
+    }
+
+    /// **Spot groups composite as CMYK groups do** (RC-04.4): an isolated, a
+    /// non-isolated and a knockout group of process ink, under every mode and
+    /// at two alphas, give the plates with no spot a `CmykA8` page's bytes,
+    /// backdrop removal included, and the plates with three spots those bytes
+    /// on their process channels and alpha, no ink reaching a spot; the
+    /// non-separable blends taken through light are counted alike.
+    #[test]
+    fn spot_groups_composite_as_cmyk_groups_do() {
+        for mode in EVERY_MODE {
+            for alpha in [1.0, 0.6] {
+                let ink = grouped_page(PixelFormat::CmykA8, mode, alpha);
+                let none = grouped_page(PixelFormat::Plates { spots: spots(0) }, mode, alpha);
+                let three = grouped_page(PixelFormat::Plates { spots: spots(3) }, mode, alpha);
+                let case = format!("{mode:?} at {alpha}");
+                assert_eq!(none.data, ink.data, "no spot: {case}");
+                assert_eq!(process_and_alpha(&three), ink.data, "three spots: {case}");
+                for spot in 4..7 {
+                    assert!(
+                        three
+                            .channel(spot)
+                            .expect("a spot")
+                            .iter()
+                            .all(|tint| *tint == 0),
+                        "no ink on spot {spot}: {case}"
+                    );
+                }
+                assert_eq!(
+                    three.approximated_blends(),
+                    ink.approximated_blends(),
+                    "counted alike: {case}"
+                );
+            }
+        }
+    }
+
+    /// The twin of `a_backdrop_of_ink_is_adopted_and_removed_as_that_ink` on
+    /// plates: a non-isolated group adopts the page's own tints, spots among
+    /// them, with none of the group's own alpha (11.4.4); half of a magenta
+    /// and spot paint, the backdrop taken out (11.4.7.2), leaves the group's
+    /// own ink; and compositing it back reconstructs the mixture.
+    #[test]
+    fn a_plates_backdrop_is_adopted_and_removed_as_its_tints() {
+        let whole = solid(0, 0, 4, 4, 255);
+        let mut page = Canvas::plates(4, 4, 2, Color::WHITE).expect("under the cap");
+        let rich = PlateInk::named(
+            spots(2),
+            &[(0, 255), (1, 255), (2, 255), (3, 255), (5, 180)],
+        );
+        page.fill_mask_plates(&whole, &rich, 1.0, BlendMode::Normal);
+
+        let mut group = Canvas::plates(4, 4, 2, Color::TRANSPARENT).expect("under the cap");
+        group.adopt_backdrop(page);
+        assert_eq!(
+            group.data[..7],
+            [255, 255, 255, 255, 0, 180, 0],
+            "the page's tints, with none of the group's own alpha"
+        );
+
+        let paint = PlateInk::named(spots(2), &[(1, 255), (4, 255)]);
+        group.fill_mask_plates(&whole, &paint, 0.5, BlendMode::Normal);
+        let mixed = group.data[..7].to_vec();
+        let mut page = group.release_parent().expect("the group holds its page");
+        assert_eq!(
+            page.data[..7],
+            [255, 255, 255, 255, 0, 180, 255],
+            "the page is its own"
+        );
+        group.remove_backdrop(&page);
+        let own = &group.data[..6];
+        assert!(
+            own.iter()
+                .zip([0u8, 255, 0, 0, 255, 0])
+                .all(|(got, want)| got.abs_diff(want) <= 3),
+            "the group's own ink is magenta and the first spot, got {own:?}"
+        );
+        assert_eq!(group.data[6], mixed[6], "at the alpha it painted with");
+
+        page.composite(&group, (0, 0), 1.0, BlendMode::Normal, None, None);
+        let back = &page.data[..6];
+        assert!(
+            back.iter()
+                .zip(&mixed[..6])
+                .all(|(got, want)| got.abs_diff(*want) <= 2),
+            "round trip: {back:?} against {mixed:?}"
+        );
+
+        let mut isolated = Canvas::plates(2, 2, 1, Color::TRANSPARENT).expect("under the cap");
+        isolated.fill_mask_plates(
+            &solid(0, 0, 1, 1, 200),
+            &PlateInk::named(spots(1), &[(4, 99)]),
+            0.4,
+            BlendMode::Normal,
+        );
+        let before = isolated.data.clone();
+        let parent = Canvas::plates(2, 2, 1, Color::WHITE).expect("under the cap");
+        isolated.hold_parent(parent);
+        let parent = isolated
+            .release_parent()
+            .expect("the group holds its parent");
+        isolated.remove_backdrop(&parent);
+        assert_eq!(isolated.data, before, "no backdrop, no correction");
+    }
+
+    /// **A spot under a non-isolated group comes back as it went in**
+    /// (RC-04.4): the group adopts the page's spot as its backdrop, paints
+    /// process ink over half of it under `Multiply` — no ink in the spot,
+    /// which a white-preserving mode leaves as it is — and nothing over the
+    /// rest; with the backdrop taken out and the group composited back, the
+    /// spot is the page's own tint everywhere, painted over or not, at a whole
+    /// alpha and, where the group painted nothing, at half of one.
+    #[test]
+    fn a_spot_under_a_non_isolated_group_comes_back_as_it_went_in() {
+        for alpha in [1.0, 0.5] {
+            let mut page = Canvas::plates(8, 8, 2, Color::WHITE).expect("under the cap");
+            page.fill_mask_plates(
+                &solid(0, 0, 8, 8, 255),
+                &PlateInk::named(spots(2), &[(0, 100)]),
+                1.0,
+                BlendMode::Normal,
+            );
+            page.fill_mask_plates(
+                &solid(0, 0, 4, 8, 255),
+                &PlateInk::named(spots(2), &[(0, 100), (4, 150)]),
+                1.0,
+                BlendMode::Normal,
+            );
+            let spot_before = page.channel(4).expect("the first spot");
+            let cyan_before = page.channel(0).expect("cyan");
+
+            let mut group = Canvas::plates(8, 8, 2, Color::TRANSPARENT).expect("under the cap");
+            group.adopt_backdrop(page);
+            group.fill_mask_plates(
+                &solid(0, 0, 8, 4, 255),
+                &PlateInk::named(spots(2), &[(1, 200)]),
+                1.0,
+                BlendMode::Multiply,
+            );
+            let mut page = group.release_parent().expect("the group holds its page");
+            group.remove_backdrop(&page);
+            page.composite(&group, (0, 0), alpha, BlendMode::Normal, None, None);
+
+            let spot_after = page.channel(4).expect("the first spot");
+            let cyan_after = page.channel(0).expect("cyan");
+            let magenta = page.channel(1).expect("magenta");
+            for index in 0..64 {
+                let painted = index / 8 < 4;
+                if painted && alpha < 1.0 {
+                    continue;
+                }
+                assert_eq!(
+                    spot_after[index], spot_before[index],
+                    "the spot at {index}, alpha {alpha}"
+                );
+                assert_eq!(
+                    cyan_after[index], cyan_before[index],
+                    "cyan at {index}, alpha {alpha}"
+                );
+                let want = if painted { 200 } else { 0 };
+                assert_eq!(magenta[index], want, "magenta at {index}, alpha {alpha}");
+            }
+        }
+    }
+
+    /// **The non-separable modes reach spot channels as transcribed**
+    /// (RC-04.4; 11.7.3, 11.7.4.2): under `Difference`, `Exclusion` and the
+    /// four non-separable modes the process channels take the mode — the
+    /// non-separable ones through light, byte for byte as on `CmykA8`, and
+    /// counted — while every spot channel takes `Normal`, the bytes the same
+    /// paint under `Normal` leaves there; under a white-preserving mode a
+    /// spot takes the mode.
+    #[test]
+    fn non_separable_modes_reach_spot_channels_as_transcribed() {
+        let whole = solid(0, 0, 8, 8, 255);
+        let backdrop = [(0, 30), (1, 160), (2, 0), (3, 90), (4, 200), (5, 60)];
+        let paint = [(0, 220), (1, 10), (2, 140), (3, 0), (4, 90), (5, 0)];
+        for mode in [
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ] {
+            for background in [Color::WHITE, Color::TRANSPARENT] {
+                for alpha in [1.0, 0.5] {
+                    let case = format!("{mode:?} at {alpha} over {background:?}");
+                    let mut plates = Canvas::plates(8, 8, 2, background).expect("under the cap");
+                    plates.fill_mask_plates(
+                        &whole,
+                        &PlateInk::named(spots(2), &backdrop),
+                        1.0,
+                        BlendMode::Normal,
+                    );
+                    plates.fill_mask_plates(
+                        &ramp(),
+                        &PlateInk::named(spots(2), &paint),
+                        alpha,
+                        mode,
+                    );
+
+                    let mut cmyk = Canvas::new(8, 8, PixelFormat::CmykA8, background);
+                    ink(&mut cmyk, &whole, [30, 160, 0, 90], 1.0, BlendMode::Normal);
+                    ink(&mut cmyk, &ramp(), [220, 10, 140, 0], alpha, mode);
+                    assert_eq!(process_and_alpha(&plates), cmyk.data, "process: {case}");
+
+                    let mut normal = Canvas::plates(8, 8, 2, background).expect("under the cap");
+                    normal.fill_mask_plates(
+                        &whole,
+                        &PlateInk::named(spots(2), &backdrop),
+                        1.0,
+                        BlendMode::Normal,
+                    );
+                    normal.fill_mask_plates(
+                        &ramp(),
+                        &PlateInk::named(spots(2), &paint),
+                        alpha,
+                        BlendMode::Normal,
+                    );
+                    for spot in [4, 5] {
+                        assert_eq!(
+                            plates.channel(spot),
+                            normal.channel(spot),
+                            "spot {spot}: {case}"
+                        );
+                    }
+                    assert_eq!(
+                        plates.approximated_blends(),
+                        u32::from(mode.is_nonseparable()),
+                        "a blend through light is counted: {case}"
+                    );
+                }
+            }
+        }
+
+        // A white-preserving mode reaches a spot: under `Multiply` a spot of
+        // 200 under a paint of 90 is their product's complement, not the 90
+        // `Normal` leaves.
+        let mut multiplied = Canvas::plates(1, 1, 1, Color::WHITE).expect("under the cap");
+        multiplied.fill_mask_plates(
+            &solid(0, 0, 1, 1, 255),
+            &PlateInk::named(spots(1), &[(4, 200)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        multiplied.fill_mask_plates(
+            &solid(0, 0, 1, 1, 255),
+            &PlateInk::named(spots(1), &[(4, 90)]),
+            1.0,
+            BlendMode::Multiply,
+        );
+        let want = 255 - mul255(255 - 200, 255 - 90);
+        assert_eq!(multiplied.channel(4), Some(vec![want as u8]));
+        assert_eq!(multiplied.approximated_blends(), 0, "nothing through light");
+    }
+
+    /// Plates composite across formats as ink and light: a plates group onto
+    /// a `CmykA8` page lands its process ink, onto a light page their light,
+    /// its spots, which neither carries, dropped; a light group onto plates is
+    /// its light turned into ink, and an ink group its own ink, on the process
+    /// channels, every spot under its shape knocked out (Table 146's last row:
+    /// a group paints every component).
+    #[test]
+    fn plates_and_other_formats_composite_across_as_ink_and_light() {
+        let whole = solid(0, 0, 2, 2, 255);
+        let mut group = Canvas::plates(2, 2, 1, Color::TRANSPARENT).expect("under the cap");
+        group.fill_mask_plates(
+            &whole,
+            &PlateInk::named(spots(1), &[(0, 90), (3, 30), (4, 200)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        let mut cmyk = Canvas::new(2, 2, PixelFormat::CmykA8, Color::WHITE);
+        cmyk.composite(&group, (0, 0), 1.0, BlendMode::Normal, None, None);
+        assert_eq!(&cmyk.data[..5], &[90, 0, 0, 30, 255], "process ink, as ink");
+        let mut light = Canvas::new(2, 2, PixelFormat::Rgba8, Color::WHITE);
+        light.composite(&group, (0, 0), 1.0, BlendMode::Normal, None, None);
+        let (r, g, b) = cmyk_to_rgb(90, 0, 0, 30);
+        assert_eq!(&light.data[..4], &[r, g, b, 255], "and as light");
+
+        let mut page = Canvas::plates(2, 2, 1, Color::WHITE).expect("under the cap");
+        page.fill_mask_plates(
+            &whole,
+            &PlateInk::named(spots(1), &[(4, 200)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        let mut red = Canvas::new(1, 1, PixelFormat::Rgba8, Color::TRANSPARENT);
+        red.fill_mask(&solid(0, 0, 1, 1, 255), Color::rgb(255, 0, 0), 1.0);
+        page.composite(&red, (0, 0), 1.0, BlendMode::Normal, None, None);
+        assert_eq!(
+            &page.data[..6],
+            &[0, 255, 255, 0, 0, 255],
+            "light as ink, the spot out"
+        );
+        let mut rich = Canvas::new(1, 1, PixelFormat::CmykA8, Color::TRANSPARENT);
+        rich.fill_mask_inked(
+            &solid(0, 0, 1, 1, 255),
+            Color::BLACK,
+            Some([255; 4]),
+            1.0,
+            BlendMode::Normal,
+        );
+        page.composite(&rich, (1, 0), 1.0, BlendMode::Normal, None, None);
+        assert_eq!(
+            &page.data[6..12],
+            &[255, 255, 255, 255, 0, 255],
+            "ink as ink"
+        );
+        assert_eq!(
+            &page.data[12..18],
+            &[0, 0, 0, 0, 200, 255],
+            "outside the shapes, as it was"
+        );
+    }
+
+    /// An uncoloured cell on plates paints its colour's light turned into
+    /// ink, no ink on a spot, wherever the cell painted: what recolouring the
+    /// cell and compositing it writes, byte for byte, as on every format.
+    #[test]
+    fn an_uncoloured_cell_tints_plates_as_its_colour_in_ink() {
+        let mut cell = Canvas::plates(4, 4, 1, Color::TRANSPARENT).expect("under the cap");
+        cell.fill_mask_plates(
+            &square_mask(0.5, 0.5, 2.6, 2.2, 4),
+            &PlateInk::named(spots(1), &[(4, 255), (0, 9)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        let blue = Color::rgb(0, 0, 255);
+        let mut tinted = Canvas::plates(4, 4, 1, Color::WHITE).expect("under the cap");
+        tinted.composite_tinted(&cell, blue, (0, 0), 0.8, BlendMode::Normal, None, None);
+        let mut recoloured = cell.clone();
+        recoloured.recolor(blue);
+        let mut composited = Canvas::plates(4, 4, 1, Color::WHITE).expect("under the cap");
+        composited.composite(&recoloured, (0, 0), 0.8, BlendMode::Normal, None, None);
+        assert_eq!(tinted.data, composited.data);
+        assert!(tinted
+            .channel(4)
+            .expect("the spot")
+            .iter()
+            .all(|tint| *tint == 0));
+        let (c, m, ..) = rgb_to_cmyk(0, 0, 255);
+        assert!(tinted
+            .channel(0)
+            .expect("cyan")
+            .iter()
+            .any(|tint| *tint > 0 && *tint <= c));
+        assert!(tinted
+            .channel(1)
+            .expect("magenta")
+            .iter()
+            .any(|tint| *tint > 0 && *tint <= m));
+    }
+
+    /// A plates composite stops when asked, between rows, and leaves what it
+    /// had not reached as it was.
+    #[test]
+    fn a_plates_composite_stops_when_asked() {
+        let mut group = Canvas::plates(4, 4, 1, Color::TRANSPARENT).expect("under the cap");
+        group.fill_mask_plates(
+            &solid(0, 0, 4, 4, 255),
+            &PlateInk::named(spots(1), &[(4, 255)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        let mut page = Canvas::plates(4, 4, 1, Color::WHITE).expect("under the cap");
+        let before = page.data.clone();
+        let stop = || true;
+        page.composite(&group, (0, 0), 1.0, BlendMode::Normal, None, Some(&stop));
+        assert_eq!(page.data, before, "stopped before the first row");
+        page.composite(&group, (0, 0), 1.0, BlendMode::Normal, None, None);
+        assert_eq!(
+            page.channel(4),
+            Some(vec![255; 16]),
+            "and composited when not"
         );
     }
 }
