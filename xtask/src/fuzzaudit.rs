@@ -196,6 +196,10 @@ const UNSIGNED: &[(&str, &str)] = &[
     ),
     ("css", "a stylesheet is text"),
     (
+        "css_structured",
+        "a structured generator: the body chooses the sheets, their rules and the tree they cascade over",
+    ),
+    (
         "fb2",
         "FB2 is XML text, and a knob byte picks whether it is framed",
     ),

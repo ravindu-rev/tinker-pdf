@@ -315,13 +315,27 @@ ordinary XML document and a soup the tree builder has work to do on.
 
 ### CSS: `css_structured`
 
-The generator writes a stylesheet — rule sets whose selectors use every
-combinator and the pseudo-classes of `selectors-4` the matcher implements;
-`@media`, `@import` with cycles, `@font-face` and `@layer`; declarations of
-known and unknown properties, and `!important` — over a generated tree, and
-cascades it as `css` does. It asserts `css`'s strongest assertion, with
-well-formed stylesheets: the rule index and brute force match the same rules
-for every element, and give the same cascade.
+`fuzz/src/css.rs` writes a stylesheet — rule sets whose selectors use every
+combinator, attribute selectors of every matcher and case flag, and the
+pseudo-classes and pseudo-elements of `selectors-4` the matcher implements;
+`@import`s with layers and media, naming one another and the sheet that
+imports them; `@media`, `@supports` and `@layer` blocks nested, `@layer`
+statements, `@font-face` and an at-rule nothing defines; declarations of
+implemented, unsupported and unknown properties, the defaulting keywords and
+`!important` — and a tree in document order to cascade it over, with ids,
+classes repeated and not, links, languages, directions and `style=""`.
+
+It writes the stylesheet twice: as written, and with every selector `S`
+written `:is(S)`, a pseudo-element kept outside. `:is(S)` matches what `S`
+matches at `S`'s specificity, and the rule index buckets a selector by its
+rightmost compound's id, class or type, which `:is(S)` has none of — so every
+selector of the second writing is a candidate for every element, and its
+cascade is brute force's. It asserts that the two writings parse to the same
+rules — the same declarations, layers, specificities and pseudo-elements —
+that the rule index and brute force match the same rules for every element,
+as `css` asserts, and that the indexed cascade and the brute-force one give
+every element the same computed style and the same generated boxes, under a
+match budget wide enough for brute force's extra work.
 
 ### Render against rewrite: `render_rewrite`
 

@@ -397,3 +397,9 @@ name = "html_structured"
 path = "fuzz_targets/html_structured.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "css_structured"
+path = "fuzz_targets/css_structured.rs"
+test = false
+doc = false

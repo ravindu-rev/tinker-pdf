@@ -17,6 +17,7 @@ cos_syntax	935	257	512
 crypt	332	9	512
 crypt_ciphers	332	9	512
 css	899	257	512
+css_structured	426	25	512
 fb2	2051	1025	512
 form_data	899	257	512
 form_script	611	257	512

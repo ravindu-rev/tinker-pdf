@@ -198,13 +198,14 @@ exception list is a check that has been talked out of firing. `svg` has a
 replay of its own in `crates/tinker-pdf-svg/src/tests.rs`.
 
 `cff_charstrings`, `content_stream`, `cos_syntax`, `crypt`, `crypt_ciphers`,
-`form_script`, `glyf_outlines`, `html_structured`, `jpx_codestream`, `layout`,
-`render_page`, `signatures` and `xml_structured` are structured generators: the
-body is carved into fields rather than parsed as a format, so every seed
-reaches the code by construction and there is no reachability question of this
-shape to ask. The seeds of `cff_charstrings`, `content_stream`, `cos_syntax`,
-`glyf_outlines`, `html_structured`, `jpx_codestream` and `xml_structured` are
-choice sequences their
+`css_structured`, `form_script`, `glyf_outlines`, `html_structured`,
+`jpx_codestream`, `layout`, `render_page`, `signatures` and `xml_structured`
+are structured generators: the body is carved into fields rather than parsed
+as a format, so every seed reaches the code by construction and there is no
+reachability question of this shape to ask. The seeds of `cff_charstrings`,
+`content_stream`, `cos_syntax`, `css_structured`, `glyf_outlines`,
+`html_structured`, `jpx_codestream` and `xml_structured` are choice sequences
+their
 generators' `write_the_fuzz_seeds` write, each named for the feature it
 reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
 `cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
@@ -287,7 +288,11 @@ a decoded sample is right; `jpx_reference.rs` is what does.
 element and character for character in both document type modes, with each
 declaration and each defect refused as itself; `html_structured` holds the
 HTML tree builder to soup it must build into a tree inside its bounds. Whether
-that tree is the standard's is `html5lib.rs`'s.
+that tree is the standard's is `html5lib.rs`'s. `css_structured` cascades a
+generated stylesheet as written and as rewritten with every selector in
+`:is()`, which the rule index cannot bucket, and holds the indexed cascade to
+the brute-force one, style for style; a selector both match wrongly passes, and
+the crate's own tests and the EPUB reftests are what hold matching right.
 
 `cff_subset` is the strongest target and still not exempt: it fuzzes a
 *writer*, and its round trip goes through **this repository's own** parser, so

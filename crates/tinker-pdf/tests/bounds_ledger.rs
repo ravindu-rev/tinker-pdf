@@ -720,6 +720,7 @@ const FUZZ_ZSTD: &str = include_str!("../../../fuzz/fuzz_targets/zstd.rs");
 const FUZZ_GEN_CFF: &str = include_str!("../../../fuzz/src/cff.rs");
 const FUZZ_GEN_CONTENT: &str = include_str!("../../../fuzz/src/content.rs");
 const FUZZ_GEN_COS: &str = include_str!("../../../fuzz/src/cos.rs");
+const FUZZ_GEN_CSS: &str = include_str!("../../../fuzz/src/css.rs");
 const FUZZ_GEN_GLYF: &str = include_str!("../../../fuzz/src/glyf.rs");
 const FUZZ_GEN_JPX: &str = include_str!("../../../fuzz/src/jpx.rs");
 const FUZZ_GEN_MARKUP: &str = include_str!("../../../fuzz/src/markup.rs");
@@ -3749,6 +3750,40 @@ fn fuzz_paths() -> Vec<FuzzPath> {
         path(
             "css",
             vec![buffer(Input, PARSED, 2, "the stylesheet, parsed twice")],
+        ),
+        written(
+            "css_structured",
+            vec![
+                buffer(
+                    Value(1 << 21),
+                    1,
+                    1,
+                    "both writings of the four generated sheets, under 2 MiB at their \
+                     generator's caps: sixteen items a sheet, blocks two deep of four items, \
+                     rules of three selectors of four compounds and six declarations \
+                     (estimate)",
+                ),
+                buffer(
+                    Row("MAX_CSS_RULES"),
+                    512,
+                    2,
+                    "the rules each writing's parse keeps, its imports spliced in, each \
+                     rule with its selectors' compounds (estimate)",
+                ),
+                buffer(
+                    Row("MAX_CSS_DECLARATIONS"),
+                    PARSED,
+                    2,
+                    "the declarations each writing's parse keeps",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_CSS, "pub const MAX_RULES: usize = 16;"),
+                (FUZZ_GEN_CSS, "pub const MAX_IMPORTS: usize = 3;"),
+                (FUZZ_GEN_CSS, "pub const MAX_NESTING: u32 = 2;"),
+                (FUZZ_GEN_CSS, "pub const MAX_COMPOUNDS: usize = 4;"),
+                (FUZZ_GEN_CSS, "pub const MAX_DECLARATIONS: usize = 6;"),
+            ],
         ),
         path(
             "fb2",

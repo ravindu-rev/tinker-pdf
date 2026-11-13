@@ -11,6 +11,7 @@ use std::path::PathBuf;
 pub mod cff;
 pub mod content;
 pub mod cos;
+pub mod css;
 pub mod glyf;
 pub mod jpx;
 pub mod markup;
