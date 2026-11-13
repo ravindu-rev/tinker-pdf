@@ -1075,7 +1075,8 @@ light mesh draws and tabulates as it did.
 
 **Overprint simulation** (the design's "The switch" and "The composite").
 `RenderOptions::simulate_overprint`, off by default, draws the page as its
-inks and hands back their composite in the format asked for. On,
+inks and hands back their composite in the format asked for; `tpdf render
+--overprint` draws each page with it and changes no other option. On,
 `Page::render`, `Page::render_form`, `Page::render_annotation` and
 `DisplayList::render` draw through `draw_sheet` on plates by a plan
 (`Page::simulation`): the plan `Page::separations` lays out with every

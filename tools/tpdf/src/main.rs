@@ -49,7 +49,7 @@ usage:
   tpdf text    <file.pdf> [--page N | --pages LIST] [--password P]
                           [--json | --xml | --html | --order ORDER | --tables]
   tpdf render  <file.pdf> --out DIR [--page N | --pages LIST] [--dpi D]
-                                    [--jobs N] [--no-annotations]
+                                    [--jobs N] [--no-annotations] [--overprint]
   tpdf fields  <file.pdf> [--password P]
   tpdf fonts   <file.pdf> [--out DIR] [--password P]
   tpdf images  <file.pdf> [--out DIR] [--page N | --pages LIST] [--password P]
@@ -80,6 +80,9 @@ options:
   --raw        with --stream, before the filters rather than after
   --dpi D      resolution for render (default 150)
   --jobs N     render N pages at once (default 1)
+  --overprint  with render, each page drawn with overprint simulated: on its
+               plates, cyan, magenta, yellow, black and each spot colorant it
+               names, and their composite written as the PNG
   --out DIR    where render writes its PNGs
   --fonts PATH a face, or a directory of faces, for documents that embed none
   --fonts bundled
@@ -378,6 +381,10 @@ struct Options {
     order: ReadingOrder,
     /// `--tables`, for `text`: the page's tables rather than its text.
     tables: bool,
+    /// `--overprint`, for `render`: each page drawn with overprint simulated
+    /// (`RenderOptions::simulate_overprint`). Off unless asked, so no
+    /// existing invocation changes.
+    overprint: bool,
     /// Print the record format version and stop, naming no file.
     ///
     /// The corpus runner asks before it spawns anything, because a child one
@@ -471,6 +478,19 @@ fn page_ranges(raw: &str) -> Result<Vec<(u32, u32)>, String> {
 }
 
 impl Options {
+    /// What `render` draws each page with: the resolution `--dpi` asks, the
+    /// annotations unless `--no-annotations`, overprint simulated where
+    /// `--overprint` asks, and the work counted where a walk counts it; every
+    /// other option the library's default.
+    fn render_options(&self, counted: bool) -> RenderOptions {
+        RenderOptions {
+            annotations: self.annotations,
+            stats: counted,
+            simulate_overprint: self.overprint,
+            ..RenderOptions::at_dpi(self.dpi)
+        }
+    }
+
     fn parse(args: &[String]) -> Result<Options, String> {
         let mut options = Options {
             files: Vec::new(),
@@ -492,6 +512,7 @@ impl Options {
             format: None,
             order: ReadingOrder::Stream,
             tables: false,
+            overprint: false,
             record_version: false,
             stages: false,
             stage_limit: None,
@@ -621,6 +642,7 @@ impl Options {
                     };
                 }
                 "--tables" => options.tables = true,
+                "--overprint" => options.overprint = true,
                 // The two values `FontPolicy` has, by the names it gives them.
                 // Anything else is refused: a typo that fell back to the
                 // default would subset a document somebody asked to keep
@@ -1404,11 +1426,7 @@ fn walk_to_files(
     // The workers ask the file's source before they write, and the file is
     // this thread's.
     let reading = reading_now();
-    let render = RenderOptions {
-        annotations: options.annotations,
-        stats: counted,
-        ..RenderOptions::at_dpi(options.dpi)
-    };
+    let render = options.render_options(counted);
     let mut walked = Vec::with_capacity(pages.len());
     doc.walk_pages(
         pages,
@@ -4677,6 +4695,68 @@ mod tests {
                 "`--jobs {raw}` must be refused"
             );
         }
+    }
+
+    /// **`--overprint` sets the switch and nothing else** (RC-03.4): parsed, it
+    /// has `render` draw each page with `RenderOptions::simulate_overprint`
+    /// and every other option as the same invocation without it does — at
+    /// the default resolution and at one asked for, with annotations and
+    /// without, counted or not; without it the switch is off. The usage text
+    /// names it on `render`'s line and says what it does, and a writing
+    /// command, which draws no page, refuses it.
+    #[test]
+    fn render_overprint_sets_the_switch_and_nothing_else() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        for extra in [
+            &[][..],
+            &["--dpi", "72", "--no-annotations", "--jobs", "3"][..],
+        ] {
+            let mut without = args(extra);
+            without.push("a.pdf".to_string());
+            let mut with = args(&["--overprint"]);
+            with.extend(without.iter().cloned());
+            let plain = Options::parse(&without).expect("parses");
+            let asked = Options::parse(&with).expect("parses");
+            assert!(!plain.overprint && asked.overprint, "{extra:?}");
+            assert_eq!(
+                (&asked.files, asked.dpi, asked.jobs, asked.annotations),
+                (&plain.files, plain.dpi, plain.jobs, plain.annotations),
+                "{extra:?}: the rest of the invocation"
+            );
+            for counted in [false, true] {
+                assert!(!plain.render_options(counted).simulate_overprint);
+                let want = RenderOptions {
+                    simulate_overprint: true,
+                    ..plain.render_options(counted)
+                };
+                assert_eq!(
+                    format!("{:?}", asked.render_options(counted)),
+                    format!("{want:?}"),
+                    "{extra:?}, counted {counted}: the switch and nothing else"
+                );
+            }
+        }
+        assert!(
+            USAGE.contains("[--jobs N] [--no-annotations] [--overprint]"),
+            "render's line names it"
+        );
+        assert!(
+            USAGE.contains("--overprint  with render, each page drawn with overprint simulated"),
+            "the options say what it does"
+        );
+        let rotating = Options::parse(&args(&[
+            "a.pdf",
+            "--by",
+            "90",
+            "--out",
+            "b.pdf",
+            "--overprint",
+        ]))
+        .expect("parses");
+        assert_eq!(
+            writing::rotate(&rotating).err().as_deref(),
+            Some("rotate takes no --overprint")
+        );
     }
 
     /// Plain text unless a format is asked for, and one format at most: two
