@@ -214,6 +214,40 @@ pub use tinker_pdf_cos::{
 pub use tinker_pdf_cos::{FontKind, ProgramKey};
 pub use word_boxes::WordBoxOptions;
 
+/// The engine's own sRGB ICC profile (`docs/design/icc.md`, "A first-party
+/// sRGB profile (RC-19)"): `tinker_pdf_color::icc::SRGB_PROFILE`, on the
+/// facade (ruling 11).
+///
+/// A version 2.4.0 display profile, `RGB ` into `XYZ `, computed when the
+/// engine is built from IEC 61966-2-1's published primaries, white point and
+/// transfer function — not vendored, so the ICC's own files stay refused
+/// (NG-03) — and the same bytes on every target. Nothing applies it unasked; a
+/// caller states it where a profile is stated:
+///
+/// - as an archival document's destination profile,
+///   [`ArchivalProfile::destination_profile`] with
+///   [`DeviceSpace::Rgb`](crate::DeviceSpace::Rgb), which every part of ISO
+///   19005 the writer claims admits;
+/// - as the stream of an `/ICCBased` space a scope's `/DefaultRGB` names
+///   (8.6.5.6), so that `DeviceRGB` paints in a characterised space.
+///
+/// ```
+/// use tinker_pdf::{ArchivalLevel, ArchivalPart, ArchivalProfile, DeviceSpace, SRGB_PROFILE};
+///
+/// let archival = ArchivalProfile {
+///     part: ArchivalPart::Two,
+///     level: Some(ArchivalLevel::B),
+///     destination_profile: SRGB_PROFILE.to_vec(),
+///     destination_space: DeviceSpace::Rgb,
+///     output_condition: "sRGB IEC 61966-2-1".to_string(),
+///     language: None,
+/// };
+/// // An ICC profile: its `acsp` signature at byte 36, its data space at 16.
+/// assert_eq!(&archival.destination_profile[36..40], b"acsp");
+/// assert_eq!(&archival.destination_profile[16..20], b"RGB ");
+/// ```
+pub const SRGB_PROFILE: &[u8] = tinker_pdf_color::icc::SRGB_PROFILE;
+
 /// How many bytes are read to decide whether a source holds a container.
 ///
 /// `cbz::container` tests fixed positions and reads no further than byte 262;

@@ -438,6 +438,55 @@ fn a_default_colour_space_stands_in_for_the_device_space_it_is_named_for() {
     );
 }
 
+/// **The engine's own sRGB profile, named by `/DefaultRGB`, excuses
+/// `DeviceRGB`** (`docs/design/icc.md`, RC-19): under a CMYK output intent, a
+/// page painting in `DeviceRGB` whose resources name
+/// `/DefaultRGB [/ICCBased …]` over [`tinker_pdf::SRGB_PROFILE`] has no
+/// 6.2.3.3 (part 1) or 6.2.4.3 (parts 2 to 4) finding, under every part, and
+/// its twin without the entry has exactly that finding. A page painting in
+/// the profile's own `ICCBased` space is admitted under every part too: its
+/// header is one 6.2.3.2 and 6.2.4.2 admit, version 2.4.0, class `mntr`,
+/// space `RGB `.
+#[test]
+fn a_first_party_srgb_default_rgb_excuses_device_rgb() {
+    for (part, level) in [
+        ("1", Some("B")),
+        ("2", Some("B")),
+        ("3", Some("B")),
+        ("4", None),
+    ] {
+        let mut defaulted = Fixture::new(part, level);
+        defaulted.profile = Some(cmyk_like());
+        defaulted.resources = "<< /ColorSpace << /DefaultRGB [/ICCBased 7 0 R] >> >>".to_string();
+        defaulted.extra = vec![(7, stream("/N 3", tinker_pdf::SRGB_PROFILE))];
+        assert_eq!(
+            defaulted.findings(),
+            Vec::<FindingKind>::new(),
+            "part {part}: the first-party profile stands in for DeviceRGB"
+        );
+
+        let mut twin = defaulted.clone();
+        twin.resources = "<< >>".to_string();
+        assert_eq!(
+            twin.one_finding(),
+            FindingKind::DeviceColourNotInOutputIntent {
+                space: "DeviceRGB".to_string(),
+                profile: "CMYK".to_string()
+            },
+            "part {part}: without the default, DeviceRGB is not the intent's"
+        );
+
+        let mut own_space = defaulted.clone();
+        own_space.resources = "<< /ColorSpace << /CS0 [/ICCBased 7 0 R] >> >>".to_string();
+        own_space.content = "/CS0 cs 1 0 0 sc 10 10 50 50 re f".to_string();
+        assert_eq!(
+            own_space.findings(),
+            Vec::<FindingKind>::new(),
+            "part {part}: the profile's own space is admitted"
+        );
+    }
+}
+
 /// A transparency group's blending space is the second stand-in, and the
 /// corpus is where this rule came from — `6-2-4-3-t04-pass-a.pdf` paints in
 /// `DeviceRGB` with no matching intent and passes because its page group

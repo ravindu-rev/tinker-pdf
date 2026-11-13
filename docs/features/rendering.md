@@ -86,8 +86,11 @@ entries, whose media white is the PCS white and whose `chad` is the
 adaptation. To the CMM it is a profile like any other, a matrix/TRC model
 that takes every grey and every primary back to itself within one level
 (`srgb_profile.rs`), and nothing applies it unasked: a caller states it where
-a profile is stated. Its bytes are computed, not vendored, and are one string
-on every build host.
+a profile is stated — the facade hands it out as `tinker_pdf::SRGB_PROFILE`,
+an archival destination profile every part of ISO 19005 the writer claims
+admits (`pdfa_writer.rs`) and the stream of an `/ICCBased` `/DefaultRGB`
+that excuses `DeviceRGB` under any output intent (`pdfa_colour.rs`). Its
+bytes are computed, not vendored, and are one string on every build host.
 A scope compiles a profile stream once, the first time a space it names
 reads it, and keeps the transforms — or the profile's refusal — for every
 render over it; a document with a cache budget keeps them across its

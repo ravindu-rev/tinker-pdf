@@ -233,6 +233,54 @@ fn every_flavour_the_writer_claims_validates_with_no_findings() {
     }
 }
 
+/// **The engine's own sRGB profile is a destination every flavour admits**
+/// (`docs/design/icc.md`, RC-19): each flavour the test above builds, built
+/// with [`tinker_pdf::SRGB_PROFILE`] as its RGB destination, validates with no
+/// finding under its claim and clean under the strict validator, its output
+/// intent naming the very bytes the facade hands out.
+#[test]
+fn the_first_party_srgb_profile_is_a_destination_every_flavour_admits() {
+    for (part, level) in [
+        (ArchivalPart::One, Some(ArchivalLevel::B)),
+        (ArchivalPart::Two, Some(ArchivalLevel::B)),
+        (ArchivalPart::Two, Some(ArchivalLevel::U)),
+        (ArchivalPart::Three, Some(ArchivalLevel::B)),
+        (ArchivalPart::Four, None),
+        (ArchivalPart::Four, Some(ArchivalLevel::E)),
+        (ArchivalPart::Four, Some(ArchivalLevel::F)),
+    ] {
+        let profile = ArchivalProfile {
+            destination_profile: tinker_pdf::SRGB_PROFILE.to_vec(),
+            ..rgb_profile(part, level)
+        };
+        let label = format!(
+            "part {} level {level:?}, the first-party sRGB",
+            part.number()
+        );
+        let document = authored(&label, built(profile));
+        let cos = document.cos();
+        let catalog = cos.catalog().expect("a catalog");
+        let intents = cos.resolve_key(&catalog, cos.intern(b"OutputIntents"));
+        let intent = cos.resolve(
+            intents
+                .as_array()
+                .and_then(<[tinker_pdf_cos::Object]>::first)
+                .unwrap_or_else(|| panic!("{label}: one output intent")),
+        );
+        let profile = intent
+            .as_dict()
+            .and_then(|intent| intent.get_ref(cos.intern(b"DestOutputProfile")))
+            .unwrap_or_else(|| panic!("{label}: a destination profile"));
+        assert_eq!(
+            cos.stream_decoded(profile)
+                .unwrap_or_else(|error| panic!("{label}: the profile decodes: {error}"))
+                .as_slice(),
+            tinker_pdf::SRGB_PROFILE,
+            "{label}: the facade's bytes, embedded as they are"
+        );
+    }
+}
+
 /// **The near-miss twin for the whole profile.** The same document built
 /// without one is not a PDF/A, and the validator says so.
 ///
