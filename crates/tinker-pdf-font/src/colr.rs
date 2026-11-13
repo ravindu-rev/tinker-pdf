@@ -854,7 +854,7 @@ impl<'a> Colr<'a> {
             let r = at + 5 + i * 7;
             Some((be16(data, r)?, be16(data, r + 2)?, be24(data, r + 4)?))
         };
-        let holds = |&(start, end, _): &(u16, u16, u32)| start <= glyph && glyph <= end;
+        let holds = |&(start, end, _): &(u16, u16, u32)| (start..=end).contains(&glyph);
         let found = if self.clips_ordered {
             // The last record starting at or below the glyph is the only one
             // that can hold it, the ranges being sorted and disjoint.

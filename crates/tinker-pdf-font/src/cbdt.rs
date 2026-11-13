@@ -214,7 +214,7 @@ impl<'a> ColourBitmaps<'a> {
             let record = list_at + i * 8;
             let first = be16(list, record).ok_or(bad)?;
             let last = be16(list, record + 2).ok_or(bad)?;
-            if first <= glyph && glyph <= last {
+            if (first..=last).contains(&glyph) {
                 let offset = be32(list, record + 4).ok_or(bad)?;
                 found = Some((first, last, offset));
                 break;
