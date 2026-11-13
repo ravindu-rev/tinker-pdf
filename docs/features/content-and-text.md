@@ -793,6 +793,47 @@ page whose tree states a table the stated one is the answer, and
 `Page::tables(TableSource)` says which it gave. `tpdf text --tables` prints
 them, a line for each cell.
 
+### Word boxes and TSV
+
+`Page::word_boxes(&WordBoxOptions)` returns a `WordPage`: the page's words
+with their boxes in the frame of a render at `WordBoxOptions::resolution`
+pixels per inch (72 by default, so a pixel is a point; a value that is not a
+finite positive number reads as 72) — the page as displayed, crop box and
+`/Rotate` applied, origin at the top-left, `y` down, with `Page::render`'s
+own clamp for an enormous page, so each box stands on the pixels a render at
+that resolution draws its word in. `Document::word_boxes` returns a
+`WordBoxes` of every page, with `created` and `modified` from the information
+dictionary's `/CreationDate` and `/ModDate` as XML Schema `dateTime`s, each
+standing for the other where only one reads as a date. The model is plain
+data with public fields — `WordBoxes`, `WordPage` (`index`, `width` and
+`height` in the frame's pixels, `resolution`, `image`), `WordBlock`,
+`WordParagraph`, `WordLine` (with a `LineDirection`) and `WordBox` (`text`, a
+`Quad` in the frame, and a `confidence` from 0 to 100) — so a recogniser
+fills one with no page at all ([design/word-boxes.md](../design/word-boxes.md)).
+
+The fill reads `Page::text`, so lines are in logical order and stated text
+stands where its glyphs do. A block holds one paragraph, whose box is the
+block's: a page states no paragraphs. A word is one of `TextLine::words` with
+the punctuation and symbols it touches — `(quick)`, `jumps!` and `Hello,`
+are one word each — and a run of them between white space is a word of its
+own, so every character but white space is in a word
+(`tinker_pdf_content::word_boxes::box_words`); its quad is the union of its
+characters' along the line's baseline, carried into the frame corner by
+corner, so a turned word keeps a turned box. A word none of whose box is on
+the page is left out, with a line or block it leaves empty. No word has a
+confidence.
+
+`WordBoxes::tsv` writes the TSV word-box format: the header `TSV_HEADER`,
+then a row a page, block, paragraph, line and word, depth first, levels 1 to
+5, each numbered from 1 within its parent and 0 at the levels above it; each
+box as `left`, `top`, `width` and `height`, the quad's enclosing rectangle
+clipped to the page and rounded outward to whole pixels; `conf` to six
+decimals on a word with a confidence, clamped into 0 to 100, and `-1` on
+every other row and on a word with none or one that is not a number; `text`
+the word, empty on every other row. Every record is one line of twelve
+fields, so a word's tab, line feed, vertical tab, form feed, carriage return,
+U+0085, U+2028 and U+2029 are written as spaces.
+
 ### The structured view (14.7, 14.8)
 
 A tagged document says its own reading order, and that order is often not
@@ -1096,6 +1137,21 @@ seeded values, each with its neighbours and both signs; and
 `crates/tinker-pdf/tests/text_allocations.rs` counts a page's allocations in
 each format at 1 000 and 4 000 characters, a character costing none
 (`a_character_writes_its_numbers_without_allocating`).
+
+`word_boxes.rs`'s unit tests hold the word rule — punctuation joins the word
+it touches, marks alone between spaces are a word, ideographs stay a word
+each — the whole-pixel box's clipping and outward rounding, and the clamping
+of a confidence. `crates/tinker-pdf/tests/word_boxes.rs` reads the TSV of a
+left-to-right page with a turned line, a right-to-left page drawn in visual
+order and a page under `/Rotate 90` and a crop box back by the published
+definition — the twelve-name header, twelve fields a record, the levels'
+nesting and numbering, `-1` and no text on every row but a word's — at 72 and
+144 dpi, and holds every record to the one computed in the test from
+`Page::text`'s characters, carried by the page's own crop box and `/Rotate`;
+a model filled with no page writes an exact TSV (two paragraphs in a block, a
+turned word, a clipped word, clamped and absent confidences, an empty page);
+and a word holding a tab or any line break stays one field of one record.
+Both build configurations run it.
 
 Facade integration tests: `crates/tinker-pdf/tests/text_options.rs` (the
 text options through `Page::text()` on a written document, every type named

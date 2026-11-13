@@ -323,7 +323,7 @@ impl<'a> Segmenter<'a> {
 
 /// Whether a segment is a word rather than the space or punctuation between
 /// words — see the module documentation.
-fn is_word(segment: &str) -> bool {
+pub(crate) fn is_word(segment: &str) -> bool {
     segment.chars().any(|c| {
         c.is_alphanumeric()
             || matches!(
@@ -413,7 +413,7 @@ impl TextLine {
 /// rotated line it is the rotated rectangle a selection would draw; an
 /// axis-aligned one would cover the text's neighbours as well as the text.
 /// Non-finite quads are skipped, and `None` means nothing finite was left.
-fn oriented_union(quads: impl Iterator<Item = Quad>) -> Option<Quad> {
+pub(crate) fn oriented_union(quads: impl Iterator<Item = Quad>) -> Option<Quad> {
     let quads: Vec<Quad> = quads.filter(Quad::is_finite).collect();
     let first = quads.first()?;
     let (dx, dy) = (first.lr.0 - first.ll.0, first.lr.1 - first.ll.1);

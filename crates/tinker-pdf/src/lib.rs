@@ -60,6 +60,7 @@ mod svg_out;
 pub mod tables;
 mod text_order;
 pub mod verdict;
+mod word_boxes;
 pub mod write;
 pub mod xps;
 
@@ -157,6 +158,11 @@ pub use tinker_pdf_content::{
     HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, SearchOptions, TextBlock,
     TextChar, TextLine, TextPage, TextWarning, TextWord, WritingMode,
 };
+/// Word boxes — a page's words in the frame of a render, and the formats
+/// that write them — behind [`Page::word_boxes`] and [`Document::word_boxes`].
+pub use tinker_pdf_content::{
+    LineDirection, WordBlock, WordBox, WordBoxes, WordLine, WordPage, WordParagraph, TSV_HEADER,
+};
 /// Structured text serialisation — JSON, XML and HTML with fonts, sizes and
 /// boxes — behind [`Page::text_frame`] and [`TextPage::serialize`].
 pub use tinker_pdf_content::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
@@ -197,6 +203,7 @@ pub use tinker_pdf_cos::{
 /// asks that a caller be able to *name* what it is handed, and a re-export is
 /// that.
 pub use tinker_pdf_cos::{FontKind, ProgramKey};
+pub use word_boxes::WordBoxOptions;
 
 /// How many bytes are read to decide whether a source holds a container.
 ///

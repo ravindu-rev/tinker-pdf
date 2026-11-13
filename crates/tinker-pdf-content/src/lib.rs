@@ -16,6 +16,7 @@ pub mod serialize;
 pub mod state;
 pub mod text;
 pub mod tokenizer;
+pub mod word_boxes;
 pub mod words;
 
 pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
@@ -37,4 +38,7 @@ pub use text::{
     Quad, TextBlock, TextChar, TextDevice, TextLine, TextPage, TextWarning, WritingMode,
 };
 pub use tokenizer::{Token, Tokenizer};
+pub use word_boxes::{
+    LineDirection, WordBlock, WordBox, WordBoxes, WordLine, WordPage, WordParagraph, TSV_HEADER,
+};
 pub use words::{word_boundaries, TextWord};
