@@ -928,7 +928,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in fourteen groups of one file
-each, MS-09's `threads` among them: 157 operations over inputs the benches
+each, MS-09's `threads` among them: 164 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1198,10 +1198,25 @@ and the figures their fifteen dispatches recorded until MS-04.10 retires them
 | `text/search a phrase over 5 pages from scratch` | pages · 5 | `dense(5, 0)`, `TextPage::search` (`crates/tinker-pdf-content/src/text.rs:265`) | 36.1 → 5.5, rescaled from 100 pages' 722 → 110; 6.56× | in | built |
 | `text/search 100 pages' prebuilt text` | pages · 500 | the 100 `TextPage`s, built once | 36 → 6; 6× | ×5 | built |
 | `text/search 100 pages' prebuilt text, whole words, unaccented` | pages · 200 | the same, `search_with` whole-word and diacritic-insensitive (`search.rs:43-50`, `:108`) | 77 → 12; 6.41× | ×2 | built |
+| `text/plain prebuilt search, folding and joining` | pages · 500 | the 100 `TextPage`s, each line's glyph texts lower-cased one by one and joined, and the needle, as `TextPage::search` does each call (`crates/tinker-pdf-content/src/text.rs:281`) | not in tier P's table; floor 1 | untimed | built |
+| `text/plain prebuilt search, find and its restarts` | pages · 500 | the same lines, folded and joined once: `str::find` from each restart | not in tier P's table; floor 1 | untimed | built |
+| `text/plain prebuilt search, mapping hits to glyphs` | pages · 500 | the same lines' hits, each walked back to its glyphs and their quad | not in tier P's table; floor 1 | untimed | built |
+| `text/unaccented whole-word search, folding and joining` | pages · 200 | the 100 `TextPage`s, folded as `search_with` folds them (`search.rs:83`): lower-cased, then `fold_diacritics` (`:59`) | not in tier P's table; floor 1 | untimed | built |
+| `text/unaccented whole-word search, UAX 29 word boundaries` | pages · 200 | the same lines, folded and joined once: `word_boundaries` (`crates/tinker-pdf-content/src/words.rs:158`) | not in tier P's table; floor 1 | untimed | built |
+| `text/unaccented whole-word search, find and its restarts` | pages · 200 | the same lines and their boundaries: `str::find` from each restart, a candidate off a boundary resuming one character on | not in tier P's table; floor 1 | untimed | built |
+| `text/unaccented whole-word search, mapping hits to glyphs` | pages · 200 | the same lines' hits, each walked back to its glyphs and their quad | not in tier P's table; floor 1 | untimed | built |
 | `text/text of 5 dense pages, CLI` | pages · 5 | `tpdf text` | 33.9 → 6.5, rescaled from 100 pages' 678 → 130; 5.21× | in | built |
 | `text/text of 1000 small pages, CLI` | pages · 2 × 1 000 | `tpdf text` | 350 → 15; 23.3× | ×2 | built |
 | `text/text of 4000 small pages, CLI` | pages · 4 000 | `tpdf text` | Θ(n²) (36 000 at 10 000 pages) → 60, rescaled from 10 000 pages' 150; relation ≤ 4.4 × 1 000 | in | built |
 | `text/structured JSON of 5 pages, CLI` | pages · 5 | `tpdf text --json` | 96.3 → 10, rescaled from 100 pages' 1 926 → 200; 9.63× | in | built |
+
+The seven phase operations beside the two prebuilt-text searches are P-24's
+profile of them (`docs/verification.md`, "Where prebuilt-text search spends
+its time"): each makes its search's calls over its pages, so that
+`cargo xtask search-split` can hold the phases together to the search. No run
+has timed them, so the named machine's entry names the seven unmeasured, and
+their window is *untimed*: MS-04.10's fifteen runs size them as they size the
+set, and the split divides each by its own `calls`.
 
 **analysis** — every relation's "text of the same pages" is the group's own
 text of the document the operation reads, so all six stay inside the group.

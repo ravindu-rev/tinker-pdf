@@ -1543,6 +1543,44 @@ its end and lowercases it, so a name holding a capital is recorded under
 another key there; `bench-check` reads each directory, in a plain run and in
 a pair's rounds alike, as the listed id it was made from.
 
+### Where prebuilt-text search spends its time
+
+MS-04's two searches of the 100 pages' prebuilt text,
+`text/search 100 pages' prebuilt text` and
+`text/search 100 pages' prebuilt text, whole words, unaccented`, each have an
+operation beside them in the text group for every phase of the work
+`TextPage::search` and `TextPage::search_with` do on every call:
+
+| Phase | Plain | Whole words, unaccented |
+| --- | --- | --- |
+| The needle folded, and each line's glyph texts folded one by one — `str::to_lowercase`, and `fold_diacritics` after it for the unaccented search — and joined | `text/plain prebuilt search, folding and joining` | `text/unaccented whole-word search, folding and joining` |
+| The joined line's UAX #29 boundaries, `word_boundaries` | — | `text/unaccented whole-word search, UAX 29 word boundaries` |
+| `str::find` from each restart: past a hit, and one character on from a candidate the boundaries refuse | `text/plain prebuilt search, find and its restarts` | `text/unaccented whole-word search, find and its restarts` |
+| Each hit's byte range walked back from the line's start to the glyphs it covers, and the quad over them | `text/plain prebuilt search, mapping hits to glyphs` | `text/unaccented whole-word search, mapping hits to glyphs` |
+
+Each phase runs the content crate's public pieces as the search runs them,
+the calls its search makes — five passes over the 100 pages for the plain
+search and two for the other — over what the phases before it produce, made
+once before it is timed; and the phases are asserted, before any is timed, to
+find on every page exactly the quads the search finds there.
+`cargo xtask search-split` reads a run's estimates and prints, for each
+search, its time a call and each phase's time a call and share of it, a call
+an iteration's time over the `calls` its list gives it. It fails when the run
+lacks a search or a phase, and when a search's phases together are not within
+a tenth of it, since a phase the split leaves out, or time it counts twice,
+moves the sum before anything else:
+
+```sh
+cargo bench -p tinker-pdf --bench text
+cargo xtask search-split
+```
+
+The split's figures are the operations' own: a run's estimates, and the named
+machine's entry in `baseline.json` once MS-04.10's runs have measured them,
+with the run, its revision and its day in the commit that records them
+(ruling 16). No run has timed the phases yet, so that entry names all seven
+unmeasured.
+
 ### The named machine is `ubuntu-latest`
 
 The committed entry is `ubuntu-latest`'s, the hosted runner its fifteen runs

@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use xtask::version::{internal_dependencies, package_name};
 use xtask::{
     bench, corpus, count, determinism, diff, fetch, footprint, fuzzaudit, fuzzservice, names,
-    parity, peaks, release, repo_root, version, written,
+    parity, peaks, release, repo_root, split, version, written,
 };
 
 const USAGE: &str = "\
@@ -192,6 +192,15 @@ bindings-parity options:
                                          reported. The head defaults to HEAD
                                          and the base to the head's parent;
                                          cachegrind runs on Linux
+  cargo xtask search-split
+                                         read the text group's run under
+                                         target/criterion and print where
+                                         prebuilt-text search spends its time:
+                                         each search's time a call, and each
+                                         phase's beside its share of it. A
+                                         search or phase the run lacks fails,
+                                         and so do phases that together are not
+                                         within a tenth of their search
   cargo xtask footprint --profile NAME --gzipped BYTES [options]
                                          hold a profile's gzipped wasm to its
                                          figure in bindings/js/footprint.json
@@ -344,6 +353,7 @@ fn main() -> ExitCode {
         "corpus-names" => one("corpus-names", corpus::names(&repo_root(), rest)),
         "bench-check" => one("bench-check", bench::run(&repo_root(), rest)),
         "bench-count" => one("bench-count", count::run(&repo_root(), rest)),
+        "search-split" => one("search-split", split::run(&repo_root(), rest)),
         "synth-face" => one("synth-face", synth_face(rest)),
         "help" | "-h" | "--help" => {
             print!("{}", usage());
@@ -2299,6 +2309,15 @@ mod tests {
                 "{placeholder} is left unfilled"
             );
         }
+    }
+
+    /// `search-split`'s usage text names the task and its tenth.
+    #[test]
+    fn the_usage_text_names_the_search_split() {
+        let text = usage();
+        assert!(text.contains("cargo xtask search-split"));
+        assert!(text.contains("within a tenth of their search"));
+        assert!((split::TOLERANCE - 0.1).abs() < f64::EPSILON, "a tenth");
     }
 
     /// `bench-check --wasm`'s usage text names the mode and the three trees

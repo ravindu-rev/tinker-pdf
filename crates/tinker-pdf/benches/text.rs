@@ -11,6 +11,18 @@
 //! read of the dense text is longer, twenty standard-14 pages, 4 000 small
 //! pages beside 1 000, and the shorter ones repeated inside an iteration,
 //! their unit counting every call.
+//!
+//! Beside the two searches of the 100 pages' prebuilt text, an operation for
+//! each phase of each: the work `TextPage::search` and `TextPage::search_with`
+//! do on every call, split where its cost could be — folding and joining each
+//! line, the whole-word search's UAX #29 boundaries, `str::find` with its
+//! restarts, and mapping each hit back to glyphs — each run from the content
+//! crate's public pieces as the search runs them, over what the phases before
+//! it produce, made once beforehand and checked to find the search's own
+//! quads. `cargo xtask search-split` reads a run of this group and prints
+//! each phase's share of its search, failing where the phases together are
+//! not within a tenth of it (`docs/verification.md`, "Where prebuilt-text
+//! search spends its time").
 
 mod support;
 
@@ -22,7 +34,8 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, Criterion};
 use support::cli::Cli;
 use support::{inputs, Group, Per};
-use tinker_pdf::{Document, SearchOptions, TextFormat, TextPage, TextWriter};
+use tinker_pdf::{Document, Quad, SearchOptions, TextFormat, TextLine, TextPage, TextWriter};
+use tinker_pdf_content::{fold_diacritics, word_boundaries};
 
 fn text(c: &mut Criterion) {
     let dense = LazyCell::new(|| dense_pages(100));
@@ -51,6 +64,18 @@ fn text(c: &mut Criterion) {
             );
         }
         prebuilt
+    });
+    // The two searches' lines as each reads them, every phase's output made
+    // once, so that a phase is timed over what the phases before it produce.
+    let plain = LazyCell::new(|| {
+        Prepared::of(&prebuilt, inputs::PHRASE, &lowercase, false, |text| {
+            text.search(inputs::PHRASE)
+        })
+    });
+    let unaccented_lines = LazyCell::new(|| {
+        Prepared::of(&prebuilt, inputs::UNACCENTED, &unaccent, true, |text| {
+            text.search_with(inputs::UNACCENTED, &unaccented)
+        })
     });
     let small_1000 = LazyCell::new(|| small_pages(1000));
     let small_4000 = LazyCell::new(|| small_pages(4000));
@@ -164,6 +189,105 @@ fn text(c: &mut Criterion) {
         },
     );
 
+    // The two searches phase by phase, each phase a call at a time as its
+    // search's operation makes them: five over the 100 pages for the plain
+    // search, two for the whole-word one.
+    group.operation("plain prebuilt search, folding and joining", |op| {
+        op.per(Per::Pages(500));
+        op.iter(|| {
+            let mut folded = 0usize;
+            for _ in 0..5 {
+                for text in prebuilt.iter() {
+                    folded += fold_and_join(text, inputs::PHRASE, &lowercase);
+                }
+            }
+            black_box(folded)
+        });
+    });
+    group.operation("plain prebuilt search, find and its restarts", |op| {
+        op.per(Per::Pages(500));
+        op.iter(|| {
+            let mut found = 0usize;
+            for _ in 0..5 {
+                for line in plain.lines() {
+                    found += find_hits(&line.joined, &plain.needle, None).len();
+                }
+            }
+            black_box(found)
+        });
+    });
+    group.operation("plain prebuilt search, mapping hits to glyphs", |op| {
+        op.per(Per::Pages(500));
+        op.iter(|| {
+            let mut mapped = 0usize;
+            for _ in 0..5 {
+                for line in plain.lines() {
+                    mapped += map_hits(line).len();
+                }
+            }
+            black_box(mapped)
+        });
+    });
+    group.operation("unaccented whole-word search, folding and joining", |op| {
+        op.per(Per::Pages(200));
+        op.iter(|| {
+            let mut folded = 0usize;
+            for _ in 0..2 {
+                for text in prebuilt.iter() {
+                    folded += fold_and_join(text, inputs::UNACCENTED, &unaccent);
+                }
+            }
+            black_box(folded)
+        });
+    });
+    group.operation(
+        "unaccented whole-word search, UAX 29 word boundaries",
+        |op| {
+            op.per(Per::Pages(200));
+            op.iter(|| {
+                let mut bounded = 0usize;
+                for _ in 0..2 {
+                    for line in unaccented_lines.lines() {
+                        bounded += black_box(word_boundaries(&line.joined)).len();
+                    }
+                }
+                black_box(bounded)
+            });
+        },
+    );
+    group.operation(
+        "unaccented whole-word search, find and its restarts",
+        |op| {
+            op.per(Per::Pages(200));
+            op.iter(|| {
+                let mut found = 0usize;
+                for _ in 0..2 {
+                    for line in unaccented_lines.lines() {
+                        let boundaries = Some(line.boundaries.as_slice());
+                        found +=
+                            find_hits(&line.joined, &unaccented_lines.needle, boundaries).len();
+                    }
+                }
+                black_box(found)
+            });
+        },
+    );
+    group.operation(
+        "unaccented whole-word search, mapping hits to glyphs",
+        |op| {
+            op.per(Per::Pages(200));
+            op.iter(|| {
+                let mut mapped = 0usize;
+                for _ in 0..2 {
+                    for line in unaccented_lines.lines() {
+                        mapped += map_hits(line).len();
+                    }
+                }
+                black_box(mapped)
+            });
+        },
+    );
+
     // The same text through the CLI, one child a call: plain text with a
     // form feed after every page, and the structured text as JSON.
     group.operation("text of 5 dense pages, CLI", |op| {
@@ -255,6 +379,191 @@ fn pages(bytes: Vec<u8>, count: u32) -> Arc<[u8]> {
     let doc = Document::open(Arc::clone(&bytes)).expect("it opens");
     assert_eq!(doc.page_count(), count, "the input's pages");
     bytes
+}
+
+/// `TextPage::search`'s fold: `str::to_lowercase`, which is lower-casing and
+/// not Unicode case folding.
+fn lowercase(text: &str) -> String {
+    text.to_lowercase()
+}
+
+/// `TextPage::search_with`'s fold for a case- and diacritic-insensitive
+/// search: lower-cased, then `fold_diacritics`.
+fn unaccent(text: &str) -> String {
+    fold_diacritics(&text.to_lowercase())
+}
+
+/// The first phase of a search of one page, as every call makes it: the
+/// needle folded, then each line's glyph texts folded one by one, so that a
+/// hit maps back to the glyphs it covers, and joined.
+fn fold_and_join(text: &TextPage, needle: &str, fold: &impl Fn(&str) -> String) -> usize {
+    let mut folded = black_box(fold(needle)).len();
+    for line in text.lines() {
+        let pieces: Vec<String> = line.chars.iter().map(|c| fold(&c.text)).collect();
+        let joined: String = pieces.concat();
+        folded += black_box(&pieces).len() + black_box(&joined).len();
+    }
+    folded
+}
+
+/// The third phase on one line: `str::find` from each restart. A hit
+/// resumes the search past itself; where `boundaries` holds the line's UAX
+/// #29 word boundaries, a candidate that does not begin and end on two of
+/// them is no hit and resumes the search one character on, since it may
+/// overlap one that is. The byte range of each hit.
+fn find_hits(joined: &str, needle: &str, boundaries: Option<&[usize]>) -> Vec<(usize, usize)> {
+    let mut hits = Vec::new();
+    let mut from = 0usize;
+    while let Some(found) = joined.get(from..).and_then(|s| s.find(needle)) {
+        let start = from + found;
+        let end = start + needle.len();
+        let whole = boundaries.is_none_or(|boundaries| {
+            boundaries.binary_search(&start).is_ok() && boundaries.binary_search(&end).is_ok()
+        });
+        if whole {
+            hits.push((start, end));
+            from = end;
+        } else {
+            from = start
+                + joined
+                    .get(start..)
+                    .and_then(|s| s.chars().next())
+                    .map_or(1, char::len_utf8);
+        }
+        if from >= joined.len() {
+            break;
+        }
+    }
+    hits
+}
+
+/// The last phase on one line: each hit's byte range walked back to the
+/// glyphs it covers from the line's start, and the quad over them.
+fn map_hits(line: &Searched<'_>) -> Vec<Quad> {
+    let mut quads = Vec::new();
+    for &(start, end) in &line.hits {
+        let mut at = 0usize;
+        let mut first = None;
+        let mut last = None;
+        for (i, piece) in line.pieces.iter().enumerate() {
+            let next = at + piece.len();
+            if first.is_none() && next > start {
+                first = Some(i);
+            }
+            if at < end {
+                last = Some(i);
+            }
+            at = next;
+        }
+        if let (Some(a), Some(b)) = (first, last) {
+            if let Some(quad) = span_quad(line.line, a, b) {
+                quads.push(quad);
+            }
+        }
+    }
+    quads
+}
+
+/// The quad over glyphs `a..=b` of `line`, as the content crate makes one
+/// for a hit: its left edge from whichever of the two ends starts first along
+/// the first's baseline, so a right-to-left line in logical order gives a
+/// quad the right way out.
+fn span_quad(line: &TextLine, a: usize, b: usize) -> Option<Quad> {
+    let mut first = line.chars.get(a)?;
+    let mut last = line.chars.get(b)?;
+    let (ux, uy) = (
+        first.quad.lr.0 - first.quad.ll.0,
+        first.quad.lr.1 - first.quad.ll.1,
+    );
+    let along = |p: (f64, f64)| p.0 * ux + p.1 * uy;
+    if along(last.quad.lr) < along(first.quad.ll) {
+        std::mem::swap(&mut first, &mut last);
+    }
+    Some(Quad {
+        ul: first.quad.ul,
+        ll: first.quad.ll,
+        ur: last.quad.ur,
+        lr: last.quad.lr,
+    })
+}
+
+/// One line of a prebuilt page as a search reads it: its glyph texts
+/// folded, joined, the joined text's UAX #29 boundaries where the search is
+/// whole-word, and the byte range of each hit.
+struct Searched<'p> {
+    line: &'p TextLine,
+    pieces: Vec<String>,
+    joined: String,
+    boundaries: Vec<usize>,
+    hits: Vec<(usize, usize)>,
+}
+
+/// Every line of the 100 pages as one search reads it, and its needle
+/// folded.
+struct Prepared<'p> {
+    needle: String,
+    pages: Vec<Vec<Searched<'p>>>,
+}
+
+impl<'p> Prepared<'p> {
+    /// `pages` read for `needle` by the phases in turn, folding as `fold`
+    /// does and holding hits to word boundaries where `whole_word` says, and
+    /// asserted to find on every page exactly the quads `search` finds there:
+    /// the phases are the search, split.
+    fn of(
+        pages: &'p [TextPage],
+        needle: &str,
+        fold: &impl Fn(&str) -> String,
+        whole_word: bool,
+        search: impl Fn(&TextPage) -> Vec<Quad>,
+    ) -> Prepared<'p> {
+        let needle = fold(needle);
+        let prepared: Vec<Vec<Searched<'p>>> = pages
+            .iter()
+            .map(|text| {
+                text.lines()
+                    .into_iter()
+                    .map(|line| {
+                        let pieces: Vec<String> =
+                            line.chars.iter().map(|c| fold(&c.text)).collect();
+                        let joined = pieces.concat();
+                        let boundaries = if whole_word {
+                            word_boundaries(&joined)
+                        } else {
+                            Vec::new()
+                        };
+                        let hits =
+                            find_hits(&joined, &needle, whole_word.then_some(&boundaries[..]));
+                        Searched {
+                            line,
+                            pieces,
+                            joined,
+                            boundaries,
+                            hits,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        for (index, (text, lines)) in pages.iter().zip(&prepared).enumerate() {
+            let quads: Vec<Quad> = lines.iter().flat_map(map_hits).collect();
+            assert!(!quads.is_empty(), "page {index} holds `{needle}`");
+            assert_eq!(
+                quads,
+                search(text),
+                "page {index}: the phases find the quads the search finds"
+            );
+        }
+        Prepared {
+            needle,
+            pages: prepared,
+        }
+    }
+
+    /// Every line of every page, in order.
+    fn lines(&self) -> impl Iterator<Item = &Searched<'p>> {
+        self.pages.iter().flatten()
+    }
 }
 
 /// The document opened from `bytes`, and every page's text read, by index,

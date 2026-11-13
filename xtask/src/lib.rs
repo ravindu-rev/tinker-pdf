@@ -31,6 +31,7 @@ pub mod ratchet;
 pub mod release;
 pub mod report;
 pub mod runner;
+pub mod split;
 pub mod version;
 pub mod written;
 
