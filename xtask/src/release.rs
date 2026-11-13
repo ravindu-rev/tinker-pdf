@@ -1428,6 +1428,62 @@ mod tests {
         );
     }
 
+    /// **Each CJK face crate publishes its face and its licence, under the
+    /// ceiling** (FT-01.8). The four faces are four crates because together
+    /// they pass `CRATES_IO_CEILING` (ruling 23), so each crate is held to
+    /// the half of that argument it carries: its package lists its WOFF2
+    /// file and the OFL text the face travels with, and is under the ceiling.
+    ///
+    /// The bytes held are an upper bound on the `.crate`, which is a gzipped
+    /// tar: a Brotli stream does not shrink under gzip, which stores it at a
+    /// few bytes a 64 KiB block, and tar spends at most three 512-byte blocks
+    /// a file on its header, a long name and padding, two at the end, and
+    /// the files cargo writes itself — its manifest, lockfile and VCS note —
+    /// are not on disk to measure and are given 64 KiB.
+    #[test]
+    fn each_cjk_face_crate_publishes_its_face_under_the_ceiling() {
+        let graph = released_graph(&repo_root());
+        let faces: Vec<&String> = graph
+            .iter()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("tinker-pdf-font-cjk-"))
+            .collect();
+        assert_eq!(
+            faces,
+            [
+                "tinker-pdf-font-cjk-cn",
+                "tinker-pdf-font-cjk-jp",
+                "tinker-pdf-font-cjk-kr",
+                "tinker-pdf-font-cjk-tw",
+            ],
+            "a crate a region"
+        );
+        for name in faces {
+            let (listed, bytes) =
+                package_contents(&repo_root(), name).expect("cargo package --list");
+            assert!(
+                listed
+                    .iter()
+                    .any(|path| path.starts_with("data/source-han-sans/")
+                        && path.ends_with("-Regular.woff2")),
+                "{name} publishes its face: {listed:?}"
+            );
+            assert!(
+                listed
+                    .iter()
+                    .any(|path| path == "data/source-han-sans/LICENSE.txt"),
+                "{name} publishes the licence its face travels with: {listed:?}"
+            );
+            let files = u64::try_from(listed.len()).expect("a count");
+            let bound = bytes + bytes / 1000 + files * 1536 + 1024 + (64 << 10);
+            assert!(
+                bound < CRATES_IO_CEILING,
+                "{name}: {bytes} bytes on disk, at most {bound} packaged, against \
+                 crates.io's {CRATES_IO_CEILING}"
+            );
+        }
+    }
+
     /// Found by the first end-to-end dry run, at step 15 of 20: `wasm-pack`
     /// was on `PATH` as `wasm-pack.cmd`, and `Command::new` reported "program
     /// not found".

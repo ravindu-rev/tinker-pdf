@@ -1,0 +1,18 @@
+[package]
+name = "tinker-pdf-font-cjk-kr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The face is the package, and it is OFL-1.1's: the one source file is
+# this repository's own and the workspace's licence, so the expression names
+# both. `cargo deny` reads it against `deny.toml`, which admits each.
+license = "OFL-1.1 AND (MIT OR Apache-2.0)"
+repository.workspace = true
+authors.workspace = true
+description = "Source Han Sans KR Regular in WOFF2, the Adobe-Korea1 and Adobe-KR face tinker-pdf-font's cjk-fonts feature draws with"
+# A crate of its own because the four region faces together pass crates.io's
+# package ceiling (`CRATES_IO_CEILING`, `xtask/src/release.rs`): ruling 23
+# gives each region's face a crate (`docs/design/fallback-faces.md`, "Where
+# the faces live"). `data/` ships, since the library is its `include_bytes!`,
+# and with it the licence the OFL has travel with the face.
+exclude = ["target/"]

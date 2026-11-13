@@ -40,9 +40,23 @@ cmap-predefined = []
 # 52 % of the corpus's reported degradation, measured in
 # `corpus/ratchet-fonts.json` against `corpus/ratchet.json`.
 #
-# No `dep:` and no build script: a font program is already the form the
-# rasterizer wants, so unlike the CMap registry there is nothing to compile.
-bundled-fonts = []
+# No build script: a font program is already the form the rasterizer wants,
+# so unlike the CMap registry there is nothing to compile. It turns
+# `cjk-fonts` on, so a bundled build carries the CJK faces too
+# (`docs/design/fallback-faces.md`, "The feature and the profile").
+bundled-fonts = ["cjk-fonts"]
+# The CJK fallback faces: Source Han Sans JP, CN, TW and KR Regular, in
+# WOFF2, the faces of Adobe-Japan1, Adobe-GB1, Adobe-CNS1, and Adobe-Korea1
+# and Adobe-KR. Each is the only data of a crate of its own, because together
+# they pass crates.io's package ceiling (ruling 23), and each is decoded once a
+# process, through `woff.rs`, on its region's first request. Off by default
+# for ruling 19's reason: they are a profile's data, the wasm CJK profile's.
+cjk-fonts = [
+  "dep:tinker-pdf-font-cjk-jp",
+  "dep:tinker-pdf-font-cjk-cn",
+  "dep:tinker-pdf-font-cjk-tw",
+  "dep:tinker-pdf-font-cjk-kr",
+]
 
 [dependencies]
 # Inflating the compiled tables. A sibling leaf crate with no dependencies of
@@ -58,6 +72,13 @@ bundled-fonts = []
 # `default-features = false`, so the shape crate's own `cargo test` failed to
 # build until this line lost its `optional`.
 tinker-pdf-filters = { workspace = true }
+# The CJK faces' bytes, a crate a region, behind `cjk-fonts`. Each holds one
+# `static` and depends on nothing, so the edges point down into crates with
+# nothing under them (xtask's `ALLOWED`, the fifteenth amendment).
+tinker-pdf-font-cjk-jp = { workspace = true, optional = true }
+tinker-pdf-font-cjk-cn = { workspace = true, optional = true }
+tinker-pdf-font-cjk-tw = { workspace = true, optional = true }
+tinker-pdf-font-cjk-kr = { workspace = true, optional = true }
 
 [build-dependencies]
 # The same crate's deflate encoder, at build time. A build-dependency never

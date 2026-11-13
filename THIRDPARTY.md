@@ -46,6 +46,10 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-layout/data/hyphenation-pl` | Polish hyphenation patterns, `hyph-pl.tex` of the same collection at the same commit, taken under the MIT choice its header offers beside a public-domain notice | `MIT` |
 | `crates/tinker-pdf-layout/data/hyphenation-pt` | Portuguese hyphenation patterns, `hyph-pt.tex` of the same collection at the same commit | `BSD-3-Clause` |
 | `crates/tinker-pdf-layout/data/hyphenation-sk` | Slovak hyphenation patterns, `hyph-sk.tex` of the same collection at the same commit | `MIT` |
+| `crates/tinker-pdf-font-cjk-jp/data/source-han-sans` | [adobe-fonts/source-han-sans](https://github.com/adobe-fonts/source-han-sans), release `2.005R` (2025-06-18), `SubsetOTF/JP/SourceHanSansJP-Regular.otf`, made WOFF2 by Debian's `woff2` 1.0.2-2 | `OFL-1.1` |
+| `crates/tinker-pdf-font-cjk-cn/data/source-han-sans` | The same release, `SubsetOTF/CN/SourceHanSansCN-Regular.otf`, made WOFF2 by the same encoder | `OFL-1.1` |
+| `crates/tinker-pdf-font-cjk-tw/data/source-han-sans` | The same release, `SubsetOTF/TW/SourceHanSansTW-Regular.otf`, made WOFF2 by the same encoder | `OFL-1.1` |
+| `crates/tinker-pdf-font-cjk-kr/data/source-han-sans` | The same release, `SubsetOTF/KR/SourceHanSansKR-Regular.otf`, made WOFF2 by the same encoder | `OFL-1.1` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -315,6 +319,107 @@ DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER
 DEALINGS IN THE FONT SOFTWARE.
 ```
+
+### `crates/tinker-pdf-font-cjk-*/data/source-han-sans`
+
+Four faces, one a crate: **Source Han Sans Regular** for each of the CJK
+regions [docs/design/fallback-faces.md](docs/design/fallback-faces.md) names,
+the faces `tinker-pdf-font`'s `cjk-fonts` feature draws an unembedded
+composite font of the registry's CJK collections with — JP for Adobe-Japan1,
+CN for Adobe-GB1, TW for Adobe-CNS1, and KR for Adobe-Korea1 and Adobe-KR.
+Ruling 23 answers FT-01.8 with them: the collection FT-01.4's census prefers
+passes crates.io's package ceiling in every form, so each region's own file
+lives in a crate of its own, `tinker-pdf-font-cjk-jp`, `-cn`, `-tw` and
+`-kr`.
+
+| File | What it is |
+| --- | --- |
+| `SourceHanSansJP-Regular.woff2` | The release's `SubsetOTF/JP/SourceHanSansJP-Regular.otf`, 4 562 224 bytes, as WOFF2: 3 399 196 bytes, in `tinker-pdf-font-cjk-jp` |
+| `SourceHanSansCN-Regular.woff2` | `SubsetOTF/CN/SourceHanSansCN-Regular.otf`, 8 429 224 bytes, as WOFF2: 6 200 108 bytes, in `tinker-pdf-font-cjk-cn` |
+| `SourceHanSansTW-Regular.woff2` | `SubsetOTF/TW/SourceHanSansTW-Regular.otf`, 5 730 540 bytes, as WOFF2: 4 236 308 bytes, in `tinker-pdf-font-cjk-tw` |
+| `SourceHanSansKR-Regular.woff2` | `SubsetOTF/KR/SourceHanSansKR-Regular.otf`, 4 632 304 bytes, as WOFF2: 3 182 156 bytes, in `tinker-pdf-font-cjk-kr` |
+| `LICENSE.txt` | Upstream's `LICENSE.txt` at the release, verbatim, in each of the four |
+
+**Where the faces come from.** Release `2.005R` of
+[adobe-fonts/source-han-sans](https://github.com/adobe-fonts/source-han-sans),
+the tag at `6c709ca`. Each face was taken from the release's region archive —
+`17_SourceHanSansJP.zip`, `19_SourceHanSansCN.zip`, `20_SourceHanSansTW.zip`
+and `18_SourceHanSansKR.zip` — each of which hashes to the SHA-256 the
+release publishes for it, and each is byte for byte the file of the same path
+in the tag's tree, whose git object ids are
+
+```text
+5c11ef7a56fca42de83614aa7480304814b295d7  SubsetOTF/JP/SourceHanSansJP-Regular.otf
+5e6605995d5cbc432c4273f566a5f2b8c376c682  SubsetOTF/CN/SourceHanSansCN-Regular.otf
+788ceee86f8eddaeb2456dd1ef3791eff3a4ca0b  SubsetOTF/TW/SourceHanSansTW-Regular.otf
+35c9fd399a72c1e9d8f52b36e024bc0f8916f51f  SubsetOTF/KR/SourceHanSansKR-Regular.otf
+3ff0ccaba06857bf292ade9a50f16a0f02b3b8d4  LICENSE.txt
+```
+
+**Who made the WOFF2 bytes.** The reference encoder, `woff2_compress`, of
+Debian 12's `woff2` package, version `1.0.2-2`, over its `libbrotli1`
+`1.0.9-2+deb12u1`, run in a `debian:bookworm` container on each published
+face and on nothing else. Ruling 23 asks an established encoder named with
+its version, and that no outside program vouch for its output:
+`crates/tinker-pdf/tests/cjk_faces.rs` unpacks each file with the engine's
+own `woff.rs` and holds every table it gives back to the published face's,
+through `crates/tinker-pdf/tests/cjk_faces.tsv`, each published table's
+length and SHA-256. Three things differ, each by WOFF2 §5, and nothing else:
+the `DSIG` table, an eight-byte stub holding no signature, is removed, as §5
+has an encoder remove it; bit 11 of `head`'s flags is set, as §5 has an
+encoder set it; and `head`'s `checkSumAdjustment` is the one a decoder
+recalculates for the font it assembles, as §5 has it do. The files carry no
+WOFF metadata and no private data.
+
+The SHA-256 of each file, the four WOFF2 files a build compiles in and the
+published faces and licence they were made from:
+
+```text
+7adbdb729d1786fca83b235433b48554f4fd125325d95eb52c820006de22cdbf  SourceHanSansJP-Regular.woff2
+e15e47db3bdfef885fe35733d2358fdcb5186a707eecc03510d22ca43333bef0  SourceHanSansCN-Regular.woff2
+4b1e1f69589ef6c3ffe2a35a5c20e9a73856a425c530646126f1f00e7d3a7ddc  SourceHanSansTW-Regular.woff2
+4d05d481fbd0d2598576b727f731cf97dc92b05cc8dea1ed02c3ec95b2c6cb10  SourceHanSansKR-Regular.woff2
+40d1b760d1135539f6b6e0ee2b9f415de6d97576f7676840b06306c7c190c074  SourceHanSansJP-Regular.otf
+e2bc8a2e7f37474b774fff8db758681ece40bb6947a90d571bce9dd60671a8e4  SourceHanSansCN-Regular.otf
+5034bc32aa64bc93ce673fe05752724bb31fc6757c6bc1d23e925052c54fd2ac  SourceHanSansTW-Regular.otf
+d8299926a5284f7461b46fa0617cc05d4f1fce8f034ffff78084225ce8b38071  SourceHanSansKR-Regular.otf
+fcac737e761ec63dbfbdce11030a1780161920d80315edba9c8beff1c2bac5a2  LICENSE.txt
+```
+
+and of the release archives they were taken from, as the release publishes
+them:
+
+```text
+076a167394a2bf125a7ab13164a5ea1ce529b988d867c11052e83473b2a704f1  17_SourceHanSansJP.zip
+3a769d1b082ebd813cdb4c06ea57d29b340bce548edcc8e61976b78ca28e6236  19_SourceHanSansCN.zip
+2cbfe304a4d794725d5c1873e159b74d5f874ae4ea007a2dcaa18afbb0f00321  20_SourceHanSansTW.zip
+ada0398122ebfebcae9efc1c6bb1dc5512c03b8f54035a8f527cd82a3c0441ac  18_SourceHanSansKR.zip
+```
+
+`cjk_faces.rs` holds each crate's compiled-in bytes to the WOFF2 digests
+above, and, wherever `TINKER_CJK_FACES` names a directory holding the
+published faces, each published face to its digest and its tables to the
+record.
+
+**The licence, and the reserved name.** Each face is under the SIL Open Font
+License 1.1, `Copyright 2014-2025 Adobe (http://www.adobe.com/), with
+Reserved Font Name 'Source'`. The OFL lets a font travel with any software as
+long as it is not sold by itself, and clause 2 requires its copyright notice
+and licence to travel with it, which they do: the notice in each face's own
+`name` table and at the head of `LICENSE.txt`, the licence in that file in
+full, beside the face in each crate. Clause 3 binds only a Modified Version,
+which may not use the reserved name; the OFL FAQ treats a WOFF or WOFF2 form
+of a font as no modification where the font data are unchanged apart from
+the compression and the WOFF metadata is absent or complete — which is what
+the test above holds, table by table, so each face keeps its name. A subset
+would be a Modified Version, which is why each face is vendored whole.
+`deny.toml` already allows `OFL-1.1`, and each crate's manifest names it.
+
+**Compiled into the library behind a feature.** Each crate's one `static`
+holds its face by `include_bytes!`, and `tinker-pdf-font` decodes a region's
+face once a process, on its first request, behind `cjk-fonts`, which
+`bundled-fonts` turns on. A build without the feature links none of the
+four.
 
 ### `crates/tinker-pdf-layout/data/ucd`
 

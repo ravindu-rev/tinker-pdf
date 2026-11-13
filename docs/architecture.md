@@ -46,13 +46,14 @@ Each crate with the internal crates it depends on:
 ```text
 tinker-pdf-math
 tinker-pdf-pool
+tinker-pdf-font-cjk-jp, tinker-pdf-font-cjk-cn, tinker-pdf-font-cjk-tw, tinker-pdf-font-cjk-kr
 tinker-pdf-filters  → pool
 tinker-pdf-crypto
 tinker-pdf-xml
 tinker-pdf-css
 tinker-pdf-color    → math
 tinker-pdf-raster   → math, color
-tinker-pdf-font     → filters
+tinker-pdf-font     → filters, font-cjk-jp, font-cjk-cn, font-cjk-tw, font-cjk-kr
 tinker-pdf-zip      → filters
 tinker-pdf-archive  → filters
 tinker-pdf-pki      → crypto
@@ -63,7 +64,7 @@ tinker-pdf-svg      → xml, css, math
 tinker-pdf-cos      → filters, crypto, font, pki, shape, pool
 tinker-pdf-content  → cos, font, color
 tinker-pdf-render   → content, raster, font, color
-tinker-pdf          → every crate above but math
+tinker-pdf          → every crate above but math and the four face crates
 tinker-pdf-ffi      → tinker-pdf
 
 tools: pdfcmp, tpdf (both on the facade and nothing below it)
@@ -71,10 +72,15 @@ tools: pdfcmp, tpdf (both on the facade and nothing below it)
 
 **The leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
 `math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape`, `svg`, `archive`,
-`pool` — are bytes-in/values-out with zero PDF types (ruling 8 defines a
-leaf; the definition binds, not the list). `archive` is late rather than next
-to `zip` because the ordinals in `xtask`'s `ALLOWED` table are positions in
-this list. This is the property that makes each one independently fuzzable:
+`pool`, `font-cjk-jp`, `font-cjk-cn`, `font-cjk-tw`, `font-cjk-kr` — are
+bytes-in/values-out with zero PDF types (ruling 8 defines a leaf; the
+definition binds, not the list). `archive` is late rather than next to `zip`
+because the ordinals in `xtask`'s `ALLOWED` table are positions in this list.
+The last four are data, not code: each holds one region's CJK fallback face,
+Source Han Sans in WOFF2, as a `static`, and `font` alone reads them, behind
+`cjk-fonts`. They are four crates rather than files under `font`'s `data/`
+because together they pass crates.io's package ceiling (ruling 23,
+[design/fallback-faces.md](design/fallback-faces.md)). This is the property that makes each one independently fuzzable:
 a fuzz target hands `tinker-pdf-font` a byte slice and expects a value or a
 structured error, with no COS machinery in the corpus or the crash triage.
 It also means a leaf is tested against its own spec (DEFLATE against
@@ -88,7 +94,9 @@ hands its code-blocks to an executor beside its request, the engine's pool or
 a caller's own threads, and the pool learns nothing of what it schedules.
 
 The leaf-to-leaf edges each point from a higher layer down:
-`font → filters` (the CMap asset pipeline), `zip → filters` (raw DEFLATE
+`font → filters` (the CMap asset pipeline), `font → font-cjk-*` (the CJK
+fallback faces' bytes, optional edges into crates with nothing under them),
+`zip → filters` (raw DEFLATE
 and CRC-32 — and **not** `zip → archive` for ZIP methods 14, 12 and 93:
 `Archive::read_coded` takes the decoder as a callback and the facade, which
 already depends on both, hands `tinker_pdf_archive::lzma`,
@@ -192,6 +200,7 @@ Convenient shortcuts between crates are how seams die.
 | `tinker-pdf-pki` | DER (X.690), X.509 (RFC 5280), CMS (RFC 5652) | [signatures](features/signatures.md) | `pki_der`, `pki_cms` |
 | `tinker-pdf-shape` | text shaping: OpenType Layout (GDEF, GSUB, GPOS) and AAT (`morx`, `kerx`) | [design/shaping.md](design/shaping.md) | `shape`, `shape_text` |
 | `tinker-pdf-font` | font and CMap parsing, subsetting | [fonts](features/fonts.md) | `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`, `woff` |
+| `tinker-pdf-font-cjk-jp`, `-cn`, `-tw`, `-kr` | one CJK fallback face each, Source Han Sans in WOFF2, and the licence it travels with | [fonts](features/fonts.md), [design/fallback-faces.md](design/fallback-faces.md) | — (no code; `woff` reads the bytes) |
 | `tinker-pdf-content` | interpreter + `Device` seam, text device, recording device | [content-and-text](features/content-and-text.md) | `content_tokenizer` |
 | `tinker-pdf-raster` | deterministic AA rasterizer | [rasterizer](features/rasterizer.md) | — (driven via `render_page`) |
 | `tinker-pdf-render` | the rasterizing `Device` | [rendering](features/rendering.md) | — (driven via `render_page`) |

@@ -77,6 +77,11 @@ fuzz/corpus/** binary
 # `linguist-vendored` collapses eight megabytes of PostScript out of the diff
 # a reviewer has to read, and out of the repository's language statistics.
 crates/tinker-pdf-font/data/** -text linguist-vendored
+# The CJK fallback faces, a crate a region (THIRDPARTY.md): WOFF2 files, which
+# `*.woff2` below names binary, and the licence each travels with, kept
+# byte for byte for cmap-resources' reason. `linguist-vendored` keeps
+# seventeen megabytes of fonts out of the language statistics.
+crates/tinker-pdf-font-cjk-*/data/** -text linguist-vendored
 
 # The UCD (gap 31 milestone 7, THIRDPARTY.md). `-text` for cmap-resources'
 # reason and one more of its own: the published files are CRLF, the licence

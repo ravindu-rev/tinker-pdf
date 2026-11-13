@@ -7,9 +7,11 @@
 #![forbid(unsafe_code)]
 
 pub mod base14;
-/// The twelve faces a `bundled-fonts` build carries (9.6.2.2's standard 14,
-/// less the two symbolic ones).
-#[cfg(feature = "bundled-fonts")]
+/// The faces a build carries: with `bundled-fonts`, the twelve Liberation
+/// faces (9.6.2.2's standard 14, less the two symbolic ones); with
+/// `cjk-fonts`, which `bundled-fonts` turns on, the four CJK fallback faces
+/// (`docs/design/fallback-faces.md`).
+#[cfg(any(feature = "bundled-fonts", feature = "cjk-fonts"))]
 pub mod bundled;
 pub mod cbdt;
 pub mod cff;

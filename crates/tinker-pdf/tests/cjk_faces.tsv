@@ -1,0 +1,93 @@
+# The published CJK fallback faces' tables (docs/design/fallback-faces.md,
+# "The storage form"): what crates/tinker-pdf/tests/cjk_faces.rs holds every
+# table each stored WOFF2 file unpacks to against. cjk_face_tables, beside
+# it, prints these rows from the published faces, release 2.005R of Source
+# Han Sans, each its region's SubsetOTF/<region>/SourceHanSans<region>-Regular.otf:
+#
+#   TINKER_CJK_FACES=<directory> cargo test -p tinker-pdf --features cjk-fonts --test cjk_faces -- --ignored cjk_face_tables --exact --nocapture
+#
+# and the_record_is_the_published_faces holds them to the files wherever the
+# variable names a directory holding them, each file first held to the
+# SHA-256 THIRDPARTY.md records for it.
+#
+#   face   a row for each published face: its sfnt version, how many tables
+#          its directory lists, and head's checkSumAdjustment and flags, the
+#          two fields WOFF2 section 5 has a decoder and an encoder rewrite
+#   table  a row for each of its tables, in its directory's order: the tag,
+#          its four characters with a trailing space kept, the length its
+#          directory states and the SHA-256 of those bytes
+#
+face	file	sfnt_version	tables	checksum_adjustment	flags
+face	SourceHanSansJP-Regular.otf	0x4f54544f	17	0xca18b811	0x0003
+face	SourceHanSansCN-Regular.otf	0x4f54544f	17	0xf1035586	0x0003
+face	SourceHanSansTW-Regular.otf	0x4f54544f	17	0xe80e0c8f	0x0003
+face	SourceHanSansKR-Regular.otf	0x4f54544f	17	0xc63d605c	0x0003
+table	file	tag	length	sha256
+table	SourceHanSansJP-Regular.otf	BASE	228	09400594afa1759a688553a0e090a17bba6c143b8d7058f6c500d4e517b26866
+table	SourceHanSansJP-Regular.otf	CFF 	4220615	fa51b364de0fa229c78dc2646dec62c3c313c9fc7a90608957d409f1275c0a6e
+table	SourceHanSansJP-Regular.otf	DSIG	8	cbbc48750debb8535093b3deaf88ac7f4cff87425576a58de2bac754acdb4616
+table	SourceHanSansJP-Regular.otf	GDEF	28	cc08d969b7987dface5fc1fcd4755279ffacbc1a27e24ae0077e6a41fc7d651f
+table	SourceHanSansJP-Regular.otf	GPOS	43178	82f25cc3beb26215ad47643bbaa716b2594134d7a142906b1572155b723bf1b7
+table	SourceHanSansJP-Regular.otf	GSUB	21310	7c809201b192357fd06185d7bc0b2751305a3541ce7256cc409221fa216d16db
+table	SourceHanSansJP-Regular.otf	OS/2	96	1130972444ae46e3b5318045f4428977530a6d1050578265f25036cffe913afb
+table	SourceHanSansJP-Regular.otf	VORG	920	5fe8f57b1531eef7e958875c1e05954307c16007c5831095f49c4248a9d3c9e2
+table	SourceHanSansJP-Regular.otf	cmap	130786	5ef64f8d73f01705acfb747985555eed72ec4365d07d190415c45d8e183abb29
+table	SourceHanSansJP-Regular.otf	head	54	a51bb4792aeb702bbf8ff53efa93add5c572ac8161d09845c7a7ee6c78a7238c
+table	SourceHanSansJP-Regular.otf	hhea	36	55a091623eaed6f6bc436d265b690450248b1ec006f1707a93cebe5969dfb824
+table	SourceHanSansJP-Regular.otf	hmtx	71122	1c4a304878a1cad4983b035af8d259701c6d449b874a4e1b5db8ef431bcac533
+table	SourceHanSansJP-Regular.otf	maxp	6	76fc1d394929de4cc9089706c816aeb7ecb718a98f35a827991ea11a5b171b43
+table	SourceHanSansJP-Regular.otf	name	2348	cfe7eb6b8558fe0ea3ae033aace195147ee295cb0cecb92390e39520fb826fdb
+table	SourceHanSansJP-Regular.otf	post	32	22dd499f08932214bde96943f3882f3619324478217095c049b68a57c6c10693
+table	SourceHanSansJP-Regular.otf	vhea	36	90b6740e0ddb93e8fa8690339a8da9ff8a9dfedb6dd0f09d026ac7f571b6832f
+table	SourceHanSansJP-Regular.otf	vmtx	71122	031a0a76502527e1498d10bfd8cf9e731995ad07c52c584e4d1880b6f1bc201f
+table	SourceHanSansCN-Regular.otf	BASE	228	09400594afa1759a688553a0e090a17bba6c143b8d7058f6c500d4e517b26866
+table	SourceHanSansCN-Regular.otf	CFF 	8103891	e24a0e3b482c36c67320924539c3a819bdcfde6b18b764e8457f3e927873f25f
+table	SourceHanSansCN-Regular.otf	DSIG	8	cbbc48750debb8535093b3deaf88ac7f4cff87425576a58de2bac754acdb4616
+table	SourceHanSansCN-Regular.otf	GDEF	28	cc08d969b7987dface5fc1fcd4755279ffacbc1a27e24ae0077e6a41fc7d651f
+table	SourceHanSansCN-Regular.otf	GPOS	43178	ad5cdbd9b978e467df3ea0d4f327a4bfaeb49b0067ce885600d5590c6afb5666
+table	SourceHanSansCN-Regular.otf	GSUB	11876	b0077a21097a0132f9c9da8ece9889d8142d2d9ce50b1f593ec8233bf83dc10b
+table	SourceHanSansCN-Regular.otf	OS/2	96	3c6ccfe72e6d326e0f660cccb00af4a62ae462b410c1c25f70a2227673ac797f
+table	SourceHanSansCN-Regular.otf	VORG	920	20df3cb3b872f1db6fc2d836211734709bc0cf642606ee43500eaef6545d087b
+table	SourceHanSansCN-Regular.otf	cmap	18925	440949506e6ecdc9179eed3a86652adcc38b30d0f9f6a044d3d684a09ab0bcf5
+table	SourceHanSansCN-Regular.otf	head	54	8add8f690bb2fac4d94020b74a0fd268b39d51e7d5ab5f1b8e79eaf78de6aa64
+table	SourceHanSansCN-Regular.otf	hhea	36	46340835e3a8e8add65c818efa35c38bbcd4e1f8c42872ab68533432eea75787
+table	SourceHanSansCN-Regular.otf	hmtx	123634	7f3eaf9c6d14a6f8ee3895c76f5f92bda05d1ce8310362faea767d4c48f9fc7c
+table	SourceHanSansCN-Regular.otf	maxp	6	cc39ca4f9c76e06b405c4b85f0968e0b489ba8c323b68131f267a393d178050a
+table	SourceHanSansCN-Regular.otf	name	2342	cf6a4749dd87d74f1225eb512c28e7fd4393653c52cbdd596950c87b082fee85
+table	SourceHanSansCN-Regular.otf	post	32	22dd499f08932214bde96943f3882f3619324478217095c049b68a57c6c10693
+table	SourceHanSansCN-Regular.otf	vhea	36	3fd2f369a02756e91089d62edc6bfdbdc44f1fe66d2a6bebff1f458a93cd6ee4
+table	SourceHanSansCN-Regular.otf	vmtx	123634	6f67f87b66eb96c3f7d69c93d5806bcf2a6e8ac85f8826a65112f0757139b89a
+table	SourceHanSansTW-Regular.otf	BASE	228	09400594afa1759a688553a0e090a17bba6c143b8d7058f6c500d4e517b26866
+table	SourceHanSansTW-Regular.otf	CFF 	5405579	3cb10d4ff6886f8eb54026603a448dce461457b3911e2f6d200c15114b301906
+table	SourceHanSansTW-Regular.otf	DSIG	8	cbbc48750debb8535093b3deaf88ac7f4cff87425576a58de2bac754acdb4616
+table	SourceHanSansTW-Regular.otf	GDEF	28	cc08d969b7987dface5fc1fcd4755279ffacbc1a27e24ae0077e6a41fc7d651f
+table	SourceHanSansTW-Regular.otf	GPOS	43178	f6897085bebfa1230c32057ba28a26ee752cb2b2b7b88c673b4659159d5f7a69
+table	SourceHanSansTW-Regular.otf	GSUB	11818	9bd5a6493f7271e9064f6cb9580c1cdb2b1f9bbb476424f5c865460e80e42a2c
+table	SourceHanSansTW-Regular.otf	OS/2	96	472d8a170e43f310ea23072ac13fbeafaccda8d6c680d30e74cc2c613c755a14
+table	SourceHanSansTW-Regular.otf	VORG	920	1a9caf238db8d14ad31a2b37716c83a8670b9ffde99d9c3bc61ae7cd05b4bf2d
+table	SourceHanSansTW-Regular.otf	cmap	99484	3c8778a62277ba5f791629e33ecc8c988b9363870e56e4fcd1ce0bd7ce9dd97a
+table	SourceHanSansTW-Regular.otf	head	54	e7511c83d9b4cfe9fc472c7a30c90baefd7f245d801e5f5cda369b8874e36620
+table	SourceHanSansTW-Regular.otf	hhea	36	185cb5b0485793480ffce41034f9a4a40a752bf414f34a060a83044be544adb1
+table	SourceHanSansTW-Regular.otf	hmtx	83198	6ee9be92d55912ab76c44245e15fb2c7aa643157769edc72f1ed334e21e0f140
+table	SourceHanSansTW-Regular.otf	maxp	6	a0a3195f172b7cb236c91af24a37e69712feddac795f7c6c9174de153ae856be
+table	SourceHanSansTW-Regular.otf	name	2342	425627daaeb0b7024c936d2b54d16b2c0b5e00714bc40b4d3e2071cec3321881
+table	SourceHanSansTW-Regular.otf	post	32	22dd499f08932214bde96943f3882f3619324478217095c049b68a57c6c10693
+table	SourceHanSansTW-Regular.otf	vhea	36	ae5f32445d4c42a9c30675df3e1d7bc6d3bed2801589f70c4b765be4f508f5fa
+table	SourceHanSansTW-Regular.otf	vmtx	83198	45f8513ce57ed40d94e8ed57850c9a1edeca761d0db2bace37763c183f862eff
+table	SourceHanSansKR-Regular.otf	BASE	240	1f772c08ba87c232da9955d2eab55dfc4fb8bcf6bf065e278c88abcd193daa1b
+table	SourceHanSansKR-Regular.otf	CFF 	4247013	2108146ccfb3f0100176741028f22b8ea245915bf2ebfc8c79841743830dfe98
+table	SourceHanSansKR-Regular.otf	DSIG	8	cbbc48750debb8535093b3deaf88ac7f4cff87425576a58de2bac754acdb4616
+table	SourceHanSansKR-Regular.otf	GDEF	28	cc08d969b7987dface5fc1fcd4755279ffacbc1a27e24ae0077e6a41fc7d651f
+table	SourceHanSansKR-Regular.otf	GPOS	43470	5b1f74ffa9027fef578333a0b4eb3196e4f2c869baed4bd70745c2d093c7c5e4
+table	SourceHanSansKR-Regular.otf	GSUB	28346	30f55e29cc0cac721f7bbb3f45ac3c74844767d04abf7ccfa4c7e5f67d789a6c
+table	SourceHanSansKR-Regular.otf	OS/2	96	c768dd3d87bae7f432b693f37b86d0ab9da27a2a2ddbc071aa58c17cf9d7ead9
+table	SourceHanSansKR-Regular.otf	VORG	920	efc7810b32c4e2fdb72865462459d0d5d4f04cb0da8fe6e426cbd933c0a5ef8f
+table	SourceHanSansKR-Regular.otf	cmap	110903	e5f41df967060fc51753a4ff940bf072e9d27404c21a70600de614787dbd0756
+table	SourceHanSansKR-Regular.otf	head	54	e5b328d3335ac955edeb31ed12e2a567fa3dd275a602c8414d161274f91e2dd8
+table	SourceHanSansKR-Regular.otf	hhea	36	9e55dd53bfab3bc823f7fb84bb575cd945bf59333e0fd37ea0a25be5c206c145
+table	SourceHanSansKR-Regular.otf	hmtx	99238	e02800a070d3e81a4a6579f6029cdf539cf930b1bcd6678d3eefa61d24517f10
+table	SourceHanSansKR-Regular.otf	maxp	6	e81ee92fbed169493c9e88015cec84481b36b325db230073ec2eab79c63072de
+table	SourceHanSansKR-Regular.otf	name	2340	988ec7b2567a4d3f27b45fb8ca84e78809bf3654015b8cb7fb355f473c029407
+table	SourceHanSansKR-Regular.otf	post	32	22dd499f08932214bde96943f3882f3619324478217095c049b68a57c6c10693
+table	SourceHanSansKR-Regular.otf	vhea	36	e36171684025aacbe8cbbece5d54f71f78f8f0895096735e1bad025215d4ea48
+table	SourceHanSansKR-Regular.otf	vmtx	99238	c001105dae18f994ceeece79063fd10a8df5450de86649a77c465b4397a42914

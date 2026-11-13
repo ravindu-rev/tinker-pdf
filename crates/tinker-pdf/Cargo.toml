@@ -24,8 +24,14 @@ cmap-predefined = [
 # ones), embedded rather than read from a directory. Off by default: a host
 # with faces of its own supplies them through `FontProvider` and should not
 # carry 4.2 MB of ours. When it is on, the bundled set is asked *after* the
-# host's provider, so turning it on can only add answers.
-bundled-fonts = ["tinker-pdf-font/bundled-fonts"]
+# host's provider, so turning it on can only add answers. It turns
+# `cjk-fonts` on, so a bundled build carries the CJK faces as well.
+bundled-fonts = ["tinker-pdf-font/bundled-fonts", "cjk-fonts"]
+# The CJK fallback faces, Source Han Sans JP, CN, TW and KR Regular, for the
+# unembedded composite fonts of the registry's five CJK collections
+# (`docs/design/fallback-faces.md`). Off by default for ruling 19's reason:
+# they are an opt-in profile's data, the wasm CJK profile's.
+cjk-fonts = ["tinker-pdf-font/cjk-fonts"]
 # The eight vendored hyphenation dictionaries `hyphens: auto` breaks words by
 # (`tinker_pdf_layout::hyphenate`, docs/design/hyphenation.md). Off by default
 # for ruling 19's reason: they are locale data, an opt-in profile's; without

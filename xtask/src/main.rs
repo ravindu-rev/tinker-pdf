@@ -824,6 +824,22 @@ fn quiet(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// crate's verification argument, and `inflate_raw`, because 7z method 040108
 /// is RFC 1951 with no wrapper exactly as ZIP method 8 is. It cannot cycle,
 /// because `filters` depends on nothing but `pool`, which depends on nothing.
+///
+/// **`font -> font-cjk-jp`, `font-cjk-cn`, `font-cjk-tw` and `font-cjk-kr`
+/// are the fifteenth amendment**, and the four crates they point at hold no
+/// code worth the name: each is one region's CJK fallback face, Source Han
+/// Sans in WOFF2, as one `static`, beside the OFL text the face travels with.
+/// They are crates rather than files under `font`'s `data/` for one reason,
+/// and it is crates.io's: the four faces together pass `CRATES_IO_CEILING`,
+/// so ruling 23 answers FT-01.8 with a crate a region
+/// (`docs/design/fallback-faces.md`, "Where the faces live").
+///
+/// They are leaves on ruling 8's definition, bytes and nothing else, and the
+/// edges are optional ones behind `cjk-fonts`, so a build without the feature
+/// does not link them. Each points down into a crate with nothing under it,
+/// so none can cycle, and `font` is the one crate that reads the bytes: it
+/// decodes them through its own `woff.rs`, so no crate above it learns that
+/// the faces live anywhere else.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -836,7 +852,18 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // what it schedules.
     ("tinker-pdf-filters", &["tinker-pdf-pool"]),
     ("tinker-pdf-crypto", &[]),
-    ("tinker-pdf-font", &["tinker-pdf-filters"]),
+    // And the four CJK fallback faces, a crate a region behind `cjk-fonts`.
+    // See the fifteenth amendment above.
+    (
+        "tinker-pdf-font",
+        &[
+            "tinker-pdf-filters",
+            "tinker-pdf-font-cjk-jp",
+            "tinker-pdf-font-cjk-cn",
+            "tinker-pdf-font-cjk-tw",
+            "tinker-pdf-font-cjk-kr",
+        ],
+    ),
     // The fourth leaf-to-leaf edge: ASN.1 is structure walking on hostile
     // bytes, `crypto` is vector-gated arithmetic, and they are reviewed and
     // fuzzed differently. See the seventh amendment above.
@@ -860,6 +887,13 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // after `archive` for the same reason `archive` is filed where it is: the
     // ordinal is its position in `docs/architecture.md`'s leaf list.
     ("tinker-pdf-pool", &[]),
+    // The sixteenth to the nineteenth leaves, with nothing internal under
+    // them: the CJK fallback faces, one region's Source Han Sans each, as a
+    // `static` of WOFF2 bytes. See the fifteenth amendment above.
+    ("tinker-pdf-font-cjk-jp", &[]),
+    ("tinker-pdf-font-cjk-cn", &[]),
+    ("tinker-pdf-font-cjk-tw", &[]),
+    ("tinker-pdf-font-cjk-kr", &[]),
     // The eighth leaf, and the first with nothing under it since `crypto`.
     ("tinker-pdf-xml", &[]),
     // The ninth, and the fourth crate here with no internal dependency at all.

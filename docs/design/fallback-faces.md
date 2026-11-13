@@ -161,29 +161,53 @@ never committed, and each carries a licence the allowlist admits (ruling 18):
 | Droid Sans Fallback, and its full build | all four, one face | `DroidSansFallback.ttf`, `DroidSansFallbackFull.ttf` | <https://android.googlesource.com/platform/frameworks/base>, `data/fonts/` | `Apache-2.0` |
 
 For each, FT-01.4 counts the CIDs of each collection and supplement the routes
-reach in it, which also says which route each candidate's glyphs take. FT-01.8
-vendors, per region, the candidate that reaches the most of its collection's
-CIDs, and of two that reach as many the smaller in the stored form; a
-collection of faces that share glyphs across regions is weighed as one
-storage of the four.
+reach in it, which also says which route each candidate's glyphs take. The
+rule FT-01.4's figures were read by: per region the candidate that reaches the
+most of its collection's CIDs, and of two that reach as many the smaller in
+the stored form, a collection of faces that share glyphs across regions
+weighed as one storage of the four.
+
+**The faces vendored.** By that rule the Source Han Sans collection is every
+region's face, and it passes crates.io's ceiling in every form it can be
+stored in, so ruling 23 answers FT-01.8 with the region files instead: Source
+Han Sans JP for Adobe-Japan1, CN for Adobe-GB1, TW for Adobe-CNS1 — which
+reaches as many of its CIDs as the Hong Kong file and is the smaller — and KR
+for Adobe-Korea1 and Adobe-KR. The CIDs the collection reaches and its region
+files do not, which `cjk_coverage.tsv`'s rows for the collection and for the
+region files state, are the price ruling 23 records.
 
 **The storage form.** Three are weighed: the program as published; the
 program deflated, inflated by `tinker-pdf-filters` on first use; and WOFF2,
 which `woff.rs` and the in-tree Brotli decoder already read. FT-01.4 measures
-each form's bytes and the time to make it ready on first use. FT-01.8 stores
-the smallest; whatever it is, a face is made ready once a process, behind a
-`OnceLock`, and the ready program is shared by every request after.
+each form's bytes and the time to make it ready on first use, and WOFF2 is
+the smallest, so each face is stored as WOFF2. A face is made ready once a
+process, behind a `OnceLock` (`tinker_pdf_font::bundled::cjk_face`), on its
+region's first request, and the ready program is shared by every request
+after.
 
-**Where the faces live.** `tinker-pdf-font`'s package already holds the CMap
-registry and the Liberation faces, and crates.io refuses a package over
-`CRATES_IO_CEILING` (`xtask/src/release.rs`). The faces go under
-`crates/tinker-pdf-font/data/cjk` where FT-01.4's packaged size of the font
-crate with them stays under the ceiling, and otherwise into a data crate of
-their own, `tinker-pdf-font-cjk`, which `tinker-pdf-font` depends on through
-`cjk-fonts`; a region whose face alone passes the ceiling gets a crate of its
-own. A data crate is a new edge for `cargo xtask dag` and a manifest for
-`cargo xtask versions`, and either home is a vendored tree with its licence
-file and a `THIRDPARTY.md` row.
+The WOFF2 files are the reference encoder's, `woff2_compress`, named with its
+version in `THIRDPARTY.md` (ruling 23), and nothing outside the engine vouches
+for them: `crates/tinker-pdf/tests/cjk_faces.rs` unpacks each with `woff.rs`
+and holds every table it gives back to the published face's, by
+`cjk_faces.tsv`, each published table's length and SHA-256. WOFF2 §5 changes
+three things and the test holds each: an encoder removes `DSIG` and sets bit
+11 of `head`'s flags, and a decoder recalculates `head`'s
+`checkSumAdjustment`. Everything else is the published face's byte for byte,
+so the font data are unchanged apart from the compression, which is what
+lets each face keep the name its licence reserves.
+
+**Where the faces live.** crates.io refuses a package over
+`CRATES_IO_CEILING` (`xtask/src/release.rs`), and the four region faces
+together pass it, so each region's face is the only data of a crate of its
+own (ruling 23): `tinker-pdf-font-cjk-jp`, `-cn`, `-tw` and `-kr`, each
+holding its WOFF2 file and the OFL text it travels with under
+`data/source-han-sans` and exposing the file as one `static`. `release.rs`'s
+`each_cjk_face_crate_publishes_its_face_under_the_ceiling` holds each
+package to carrying both and to the ceiling. `tinker-pdf-font` depends on the
+four through `cjk-fonts`, optional edges `cargo xtask dag` declares (the
+fifteenth amendment), each crate is a manifest `cargo xtask versions` reads,
+and each `data/` tree is a vendored tree with its licence file and a
+`THIRDPARTY.md` row.
 
 **The feature and the profile.** `cjk-fonts`, in `tinker-pdf-font`, the facade
 and `bindings/js`, carries the faces; `bundled-fonts` turns it on in
@@ -312,11 +336,17 @@ FT-01's exit falls from.
 6. **FT-01.7: the figure before the face.** Exit: the three local corpus runs
    green to the end, their `cjk` counts in the three ratchet files.
 7. **FT-01.8: the faces vendored.** Exit: `bundled.rs`
-   `the_cjk_face_is_compiled_in_and_reads` and
-   `the_cjk_face_is_made_ready_once`; `cargo xtask vendor`, `cargo deny
-   check licenses bans sources`, and `release.rs`'s
-   `a_crate_that_vendors_data_publishes_it` and
-   `the_cmap_registry_is_in_the_font_crates_package`.
+   `the_cjk_face_is_compiled_in_and_reads` (each face parses and covers the
+   collections FT-01.4 counted) and `the_cjk_face_is_made_ready_once`;
+   `crates/tinker-pdf/tests/cjk_faces.rs`
+   `each_cjk_face_hashes_to_the_sha256_thirdparty_records`,
+   `each_cjk_face_holds_every_table_of_the_published_face` and
+   `the_record_is_whole`, and `the_record_is_the_published_faces` where the
+   published faces are fetched; `cargo xtask vendor`, `cargo deny check
+   licenses bans sources`, and `release.rs`'s
+   `a_crate_that_vendors_data_publishes_it`,
+   `the_cmap_registry_is_in_the_font_crates_package` and
+   `each_cjk_face_crate_publishes_its_face_under_the_ceiling`.
 8. **FT-01.9: the bundled faces answer.** Exit: `substitute_fonts.rs`
    `a_bundled_build_draws_unembedded_cjk_text_in_every_collection`,
    `a_cjk_request_is_never_answered_with_a_latin_face`,
@@ -344,6 +374,7 @@ FT-01's exit falls from.
 | Several characters reach one CID, a radical or a compatibility ideograph among them, and a face draws that one in another form or not at all | Radicals and compatibility ideographs rank after every other character, and the two best are kept, so a face lacking the first is asked for the second |
 | A face's `vert` substitutes a form that differs from the collection's vertical variant | The vertical variant's character is drawn in the face's vertical form, which is that face's statement of the same glyph; a face with no `vert` draws it upright and the line still advances by `/W2` |
 | A build without `cmap-predefined` has no tables to invert | It reaches no CID by route 2 and reports; nothing is guessed |
-| The faces pass crates.io's package ceiling | A data crate of their own, and a crate a region where one face passes it alone |
+| The faces pass crates.io's package ceiling | A crate a region, each holding its region's file; the collection the census prefers passes the ceiling in every form, and the CIDs only it reaches are the price ruling 23 records |
+| The WOFF2 encoder changes the font data beyond the compression, and the face loses the name its licence reserves | `cjk_faces.rs` holds every table each file unpacks to against the published face's, and names the three changes WOFF2 §5 makes |
 | The `bundled-fonts` wasm profile grows by the faces | Its figure is re-recorded at FT-01.10 at the price ruling 19 leaves with the owner; the default profile carries no face |
 | A region's best face lacks CIDs of a later supplement | FT-01.4 counts the CIDs each candidate reaches per supplement, and a CID no route reaches draws `.notdef` and reports |

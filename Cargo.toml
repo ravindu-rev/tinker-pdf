@@ -21,6 +21,10 @@ members = [
   "crates/tinker-pdf-crypto",
   "crates/tinker-pdf-pki",
   "crates/tinker-pdf-font",
+  "crates/tinker-pdf-font-cjk-jp",
+  "crates/tinker-pdf-font-cjk-cn",
+  "crates/tinker-pdf-font-cjk-tw",
+  "crates/tinker-pdf-font-cjk-kr",
   "crates/tinker-pdf-shape",
   "crates/tinker-pdf-color",
   "crates/tinker-pdf-math",
@@ -76,6 +80,10 @@ tinker-pdf-layout = { path = "crates/tinker-pdf-layout", version = "0.0.1" }
 tinker-pdf-crypto = { path = "crates/tinker-pdf-crypto", version = "0.0.1" }
 tinker-pdf-pki = { path = "crates/tinker-pdf-pki", version = "0.0.1" }
 tinker-pdf-font = { path = "crates/tinker-pdf-font", version = "0.0.1", default-features = false }
+tinker-pdf-font-cjk-jp = { path = "crates/tinker-pdf-font-cjk-jp", version = "0.0.1" }
+tinker-pdf-font-cjk-cn = { path = "crates/tinker-pdf-font-cjk-cn", version = "0.0.1" }
+tinker-pdf-font-cjk-tw = { path = "crates/tinker-pdf-font-cjk-tw", version = "0.0.1" }
+tinker-pdf-font-cjk-kr = { path = "crates/tinker-pdf-font-cjk-kr", version = "0.0.1" }
 tinker-pdf-shape = { path = "crates/tinker-pdf-shape", version = "0.0.1" }
 tinker-pdf-svg = { path = "crates/tinker-pdf-svg", version = "0.0.1" }
 tinker-pdf-color = { path = "crates/tinker-pdf-color", version = "0.0.1" }

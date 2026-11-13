@@ -627,7 +627,27 @@ version = "0.0.1"
 dependencies = [
  "proptest",
  "tinker-pdf-filters",
+ "tinker-pdf-font-cjk-cn",
+ "tinker-pdf-font-cjk-jp",
+ "tinker-pdf-font-cjk-kr",
+ "tinker-pdf-font-cjk-tw",
 ]
+
+[[package]]
+name = "tinker-pdf-font-cjk-cn"
+version = "0.0.1"
+
+[[package]]
+name = "tinker-pdf-font-cjk-jp"
+version = "0.0.1"
+
+[[package]]
+name = "tinker-pdf-font-cjk-kr"
+version = "0.0.1"
+
+[[package]]
+name = "tinker-pdf-font-cjk-tw"
+version = "0.0.1"
 
 [[package]]
 name = "tinker-pdf-layout"

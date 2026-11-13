@@ -1175,6 +1175,19 @@ to hand them over, and none of them should carry ours. `FontProvider` remains
 the seam either way. Provenance and the OFL text are in
 [THIRDPARTY.md](../../THIRDPARTY.md).
 
+**The CJK faces.** `cjk-fonts`, off by default too and turned on by
+`bundled-fonts`, carries four more: Source Han Sans Regular, one face a
+region ([design/fallback-faces.md](../design/fallback-faces.md)) — JP for
+Adobe-Japan1, CN for Adobe-GB1, TW for Adobe-CNS1, and KR for Adobe-Korea1
+and Adobe-KR (`tinker_pdf_font::bundled::Region::of`). Each is stored as
+WOFF2, the reference encoder's, as the only data of a crate of its own,
+`tinker-pdf-font-cjk-jp`, `-cn`, `-tw` and `-kr`, because together they pass
+crates.io's package ceiling, and each is made ready once a process: decoded
+through `woff.rs` on its region's first request and shared after
+(`tinker_pdf_font::bundled::cjk_face`). Every table a file unpacks to is the
+published face's but the three WOFF2 §5 changes, and the faces keep the name
+their licence reserves.
+
 ## Shaping, and what it is allowed to claim
 
 `crates/tinker-pdf-shape` is a leaf crate: face bytes and text in, positioned
@@ -2549,6 +2562,21 @@ corpora already vendored here. So every name stays on the list.
   the committed WOFF fixtures, the `name` reading, the candidate list
   against the design's table, and the committed record, `cjk_coverage.tsv`,
   whole and adding up (`the_committed_census_is_whole`).
+- The CJK faces, with `cjk-fonts`: `bundled.rs`'s
+  `the_cjk_face_is_compiled_in_and_reads` — each region's file is WOFF2,
+  unpacks to an sfnt of CFF outlines and covers its collections' CIDs exactly
+  as the census counted the published face's — and
+  `the_cjk_face_is_made_ready_once`, a count over many requests from several
+  threads, beside `each_collection_is_drawn_by_its_regions_face`,
+  `a_collection_of_no_region_is_drawn_by_no_face` and
+  `a_file_that_is_no_face_is_not_made_ready`;
+  `crates/tinker-pdf/tests/cjk_faces.rs`'s
+  `each_cjk_face_hashes_to_the_sha256_thirdparty_records` and
+  `each_cjk_face_holds_every_table_of_the_published_face`, every table held
+  to the published face's through the record `cjk_faces.tsv`, held whole by
+  `the_record_is_whole` and to the published faces by
+  `the_record_is_the_published_faces`, `RAN`/`SKIPPED`; and `xtask`'s
+  `each_cjk_face_crate_publishes_its_face_under_the_ceiling`.
 - `crates/tinker-pdf-font/src/type1_subset/tests.rs` — programs built byte by
   byte through the crate's own cipher, whose `type1.rs` tests hold it to
   chapter 7.3's worked example: every kept glyph outlining and advancing as
