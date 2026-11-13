@@ -32,6 +32,7 @@
 //! that is too wide. The two are asserted separately for that reason.
 
 mod epub_support;
+mod written_support;
 
 use std::collections::BTreeSet;
 
@@ -40,6 +41,7 @@ use tinker_pdf::epub::ocf::{CONTAINER_ITEM, MIMETYPE_ITEM, OCF_MEDIA_TYPE};
 use tinker_pdf::epub::package::{self, RenditionLayout};
 use tinker_pdf::epub::{Limits, DEFAULT_PAGE};
 use tinker_pdf::{ArchiveWarning, Document, OpenOptions, RenderOptions};
+use written_support::synthesised;
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -151,10 +153,16 @@ fn book_with_bodies(
     ocf_zip(&entries, &directory)
 }
 
+/// The fixture opened at `page`, the document it synthesised held to the
+/// validate-on-save helper.
+#[track_caller]
 fn open_at(bytes: &[u8], page: (f64, f64)) -> Document {
     let mut options = OpenOptions::default();
     options.page = page;
-    Document::open_with(bytes.to_vec(), &options).expect("the fixture opens")
+    synthesised(
+        "a fixed-layout book",
+        Document::open_with(bytes.to_vec(), &options).expect("the fixture opens"),
+    )
 }
 
 /// One page's content stream, decoded, through this repository's own reader.

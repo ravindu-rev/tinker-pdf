@@ -57,9 +57,11 @@
 //! the wrong name, which is precisely why a suite with only one of the two
 //! would pass with the other deleted.
 
+mod written_support;
 mod xps_support;
 
 use tinker_pdf::{ArchiveWarning, Document, WriteMode, WriteOptions, XpsElementDefect};
+use written_support::{authored, synthesised};
 use xps_support::{archive, one_page_package, with, XPS_NS};
 
 /// The resource-dictionary key namespace, which every real package binds.
@@ -78,7 +80,7 @@ fn package(body: &str) -> Vec<u8> {
 }
 
 fn defects(body: &str) -> Vec<XpsElementDefect> {
-    let document = Document::open(package(body)).expect("an XPS");
+    let document = synthesised("defects", Document::open(package(body)).expect("an XPS"));
     document
         .archive()
         .expect("a synthesised document")
@@ -93,7 +95,7 @@ fn defects(body: &str) -> Vec<XpsElementDefect> {
 
 /// The page's own content stream.
 fn stream(body: &str) -> String {
-    let document = Document::open(package(body)).expect("an XPS");
+    let document = synthesised("stream", Document::open(package(body)).expect("an XPS"));
     let cos = document.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
@@ -109,11 +111,15 @@ fn stream(body: &str) -> String {
 /// `xps_images.rs`'s own choice and for its reason: it is the artefact a reader
 /// would open.
 fn saved(body: &str) -> String {
-    let document = Document::open(package(body)).expect("an XPS");
+    let document = synthesised(
+        "a page filled by a visual brush",
+        Document::open(package(body)).expect("an XPS"),
+    );
     let out = document.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    authored("the page filled by a visual brush, saved", &out);
     String::from_utf8_lossy(&out).into_owned()
 }
 

@@ -25,6 +25,7 @@
 //!   else**, because a warning every document trips is not a warning.
 
 mod epub_support;
+mod written_support;
 mod xps_support;
 
 use std::sync::Arc;
@@ -39,6 +40,7 @@ use tinker_pdf::{
     ArchiveRefusal, ArchiveWarning, Document, DocumentBuilder, OpenError, OpenOptions,
     RenderOptions, SimpleFontProvider,
 };
+use written_support::{authored, synthesised};
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -154,7 +156,10 @@ fn the_page_count_is_the_spine_and_not_the_manifest_or_the_archive() {
         ),
         concat!(r#"<itemref idref="c1"/>"#, r#"<itemref idref="c3"/>"#),
     ));
-    let doc = Document::open(bytes).expect("a book");
+    let doc = synthesised(
+        "the page count is the spine and not the manifest or the archive",
+        Document::open(bytes).expect("a book"),
+    );
     assert_eq!(doc.page_count(), 2);
 
     // And the two pages are the two the spine names, in the spine's order —
@@ -174,7 +179,10 @@ fn the_page_box_is_the_one_open_options_states_and_the_default_is_six_by_nine() 
     let bytes = three_chapters();
 
     // The default, which `open` uses and which is stated on the type.
-    let doc = Document::open(bytes.clone()).expect("a book");
+    let doc = synthesised(
+        "the page box is the one open options states and the default is six by nine",
+        Document::open(bytes.clone()).expect("a book"),
+    );
     assert_eq!(doc.page_count(), 3);
     for page in 0..doc.page_count() {
         assert_eq!(doc.page(page).expect("a page").size(), (432.0, 648.0));
@@ -188,8 +196,11 @@ fn the_page_box_is_the_one_open_options_states_and_the_default_is_six_by_nine() 
     // _needs` in `tests/epub_reading.rs` is where the other half is asserted,
     // on a chapter long enough to fragment.
     for (width, height) in [(600.0, 800.0), (200.0, 1_000.0)] {
-        let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(width, height))
-            .expect("a book");
+        let doc = synthesised(
+            "the page box is the one open options states and the default is six by nine",
+            Document::open_with(bytes.clone(), &OpenOptions::at_page(width, height))
+                .expect("a book"),
+        );
         assert_eq!(doc.page_count(), 3, "at {width}x{height}");
         for page in 0..doc.page_count() {
             assert_eq!(
@@ -222,13 +233,25 @@ fn open_takes_bytes_and_nothing_else_and_is_open_with_at_the_defaults() {
 
     // `open` accepts what it always accepted: anything that becomes an
     // `Arc<[u8]>`, by value, with no second argument.
-    let from_vec = Document::open(bytes.clone()).expect("a Vec");
-    let from_arc = Document::open(Arc::<[u8]>::from(bytes.clone())).expect("an Arc");
-    let from_slice_owned = Document::open(bytes.as_slice().to_vec()).expect("a slice's Vec");
+    let from_vec = synthesised(
+        "open takes bytes and nothing else and is open with at the defaults",
+        Document::open(bytes.clone()).expect("a Vec"),
+    );
+    let from_arc = synthesised(
+        "open takes bytes and nothing else and is open with at the defaults",
+        Document::open(Arc::<[u8]>::from(bytes.clone())).expect("an Arc"),
+    );
+    let from_slice_owned = synthesised(
+        "open takes bytes and nothing else and is open with at the defaults",
+        Document::open(bytes.as_slice().to_vec()).expect("a slice's Vec"),
+    );
     assert_eq!(from_vec.page_count(), from_arc.page_count());
     assert_eq!(from_vec.page_count(), from_slice_owned.page_count());
 
-    let defaulted = Document::open_with(bytes, &OpenOptions::default()).expect("a book");
+    let defaulted = synthesised(
+        "open takes bytes and nothing else and is open with at the defaults",
+        Document::open_with(bytes, &OpenOptions::default()).expect("a book"),
+    );
     assert_eq!(
         from_vec.archive().expect("a report").synthesised_bytes(),
         defaulted.archive().expect("a report").synthesised_bytes(),
@@ -250,7 +273,10 @@ fn an_unusable_page_box_is_replaced_and_named_rather_than_refused() {
     let mut options = OpenOptions::default();
     options.page = (f64::NAN, MAX_PAGE_SIDE * 2.0);
     options.font_size = -3.0;
-    let doc = Document::open_with(three_chapters(), &options).expect("still a book");
+    let doc = synthesised(
+        "an unusable page box is replaced and named rather than refused",
+        Document::open_with(three_chapters(), &options).expect("still a book"),
+    );
 
     assert_eq!(doc.page_count(), 3);
     assert_eq!(doc.page(0).expect("a page").size(), DEFAULT_PAGE);
@@ -305,14 +331,17 @@ fn a_page_that_will_not_read_is_grey_and_a_page_that_reads_is_not() {
     // Two itemrefs: one declared an SVG content document and holding XHTML,
     // which the SVG reader refuses at the root element, and one an ordinary
     // chapter.
-    let doc = Document::open(book_with(&package(
-        concat!(
-            r#"<item id="drawing" href="text/ch2.xhtml" media-type="image/svg+xml"/>"#,
-            r#"<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>"#
-        ),
-        concat!(r#"<itemref idref="drawing"/>"#, r#"<itemref idref="c1"/>"#),
-    )))
-    .expect("a book");
+    let doc = synthesised(
+        "a page that will not read is grey and a page that reads is not",
+        Document::open(book_with(&package(
+            concat!(
+                r#"<item id="drawing" href="text/ch2.xhtml" media-type="image/svg+xml"/>"#,
+                r#"<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>"#
+            ),
+            concat!(r#"<itemref idref="drawing"/>"#, r#"<itemref idref="c1"/>"#),
+        )))
+        .expect("a book"),
+    );
     assert_eq!(doc.page_count(), 2);
 
     // 0xBF is the same grey the renderer paints over an image it could not
@@ -404,7 +433,10 @@ fn an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place() {
     ] {
         let spine =
             format!(r#"<itemref idref="c1"/><itemref idref="{idref}"/><itemref idref="c3"/>"#);
-        let doc = Document::open(book_with(&package(manifest, &spine))).expect("a book");
+        let doc = synthesised(
+            "an unresolved spine item still makes a page and keeps its place",
+            Document::open(book_with(&package(manifest, &spine))).expect("a book"),
+        );
 
         assert_eq!(doc.page_count(), 3, "{idref} lost a page");
         // **Named at page 1 and nowhere else**, which since milestone 8 is two
@@ -437,11 +469,14 @@ fn an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place() {
 /// three.
 #[test]
 fn one_manifest_item_named_three_times_is_three_pages() {
-    let doc = Document::open(book_with(&package(
-        r#"<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>"#,
-        r#"<itemref idref="c1"/><itemref idref="c1"/><itemref idref="c1"/>"#,
-    )))
-    .expect("a book");
+    let doc = synthesised(
+        "one manifest item named three times is three pages",
+        Document::open(book_with(&package(
+            r#"<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"<itemref idref="c1"/><itemref idref="c1"/><itemref idref="c1"/>"#,
+        )))
+        .expect("a book"),
+    );
     assert_eq!(doc.page_count(), 3);
     let report = doc.archive().expect("a report");
     assert!(report
@@ -569,7 +604,10 @@ fn a_cover_wrapper_is_a_page_exactly_when_the_spine_names_it() {
         (r#"<itemref idref="coverpage-wrapper" linear="no"/>"#, true),
         (r#"<itemref idref="coverpage-wrapper" linear="yes"/>"#, true),
     ] {
-        let doc = Document::open(gutenberg_book(cover)).expect("a book");
+        let doc = synthesised(
+            "a cover wrapper is a page exactly when the spine names it",
+            Document::open(gutenberg_book(cover)).expect("a book"),
+        );
         let report = doc.archive().expect("a report");
         let mut runs: Vec<&str> = Vec::new();
         for origin in report.pages() {
@@ -637,7 +675,10 @@ fn the_mimetype_clauses_reach_a_callers_report_now_that_a_book_has_one() {
         ),
     ];
     let directory: Vec<usize> = (0..entries.len()).collect();
-    let doc = Document::open(ocf_zip(&entries, &directory)).expect("still a book");
+    let doc = synthesised(
+        "the mimetype clauses reach a callers report now that a book has one",
+        Document::open(ocf_zip(&entries, &directory)).expect("still a book"),
+    );
     assert_eq!(doc.page_count(), 1);
 
     let clauses: Vec<MimetypeDefect> = doc
@@ -672,13 +713,19 @@ fn the_mimetype_clauses_reach_a_callers_report_now_that_a_book_has_one() {
 /// milestone added.
 #[test]
 fn the_books_metadata_reaches_the_synthesised_document() {
-    let doc = Document::open(three_chapters()).expect("a book");
+    let doc = synthesised(
+        "the books metadata reaches the synthesised document",
+        Document::open(three_chapters()).expect("a book"),
+    );
     let metadata = doc.metadata();
     assert_eq!(metadata.title.as_deref(), Some("A Book Of Three Chapters"));
     assert_eq!(metadata.author.as_deref(), Some("The tinker-pdf authors"));
 
     // And a real book's, from a producer that writes both.
-    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
+    let doc = synthesised(
+        "the books metadata reaches the synthesised document",
+        Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book"),
+    );
     assert_eq!(
         doc.metadata().title.as_deref(),
         Some("A Short Account of Containers")
@@ -697,7 +744,10 @@ fn a_missing_required_metadata_element_warns_rather_than_refuses() {
         r#"<itemref idref="c1"/>"#,
     )
     .replace(r#"<dc:language>en</dc:language>"#, "");
-    let doc = Document::open(book_with(&without_language)).expect("still a book");
+    let doc = synthesised(
+        "a missing required metadata element warns rather than refuses",
+        Document::open(book_with(&without_language)).expect("still a book"),
+    );
     assert_eq!(doc.page_count(), 1);
 
     let defects: Vec<PackageDefect> = doc
@@ -721,7 +771,7 @@ fn a_missing_required_metadata_element_warns_rather_than_refuses() {
 /// distinction between "it opened" and "it opened cleanly".
 #[test]
 fn an_unimplemented_manifest_property_is_named_once_with_its_count() {
-    let doc = Document::open(book_with(&package(
+    let doc = synthesised("an unimplemented manifest property is named once with its count", Document::open(book_with(&package(
         concat!(
             r#"<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml" properties="mathml"/>"#,
             r#"<item id="c2" href="text/ch2.xhtml" media-type="application/xhtml+xml" properties="mathml scripted"/>"#,
@@ -733,7 +783,7 @@ fn an_unimplemented_manifest_property_is_named_once_with_its_count() {
             r#"<itemref idref="c3"/>"#
         ),
     )))
-    .expect("a book");
+    .expect("a book"));
 
     let counted: Vec<(Property, u32)> = doc
         .archive()
@@ -767,9 +817,11 @@ fn an_unimplemented_manifest_property_is_named_once_with_its_count() {
 fn a_late_font_provider_warns_on_a_book_and_on_nothing_else() {
     let provider = Arc::new(SimpleFontProvider::new(Vec::new()));
 
-    let doc = Document::open(three_chapters())
-        .expect("a book")
-        .with_fonts(provider.clone());
+    let doc = synthesised(
+        "a late font provider warns on a book and on nothing else",
+        Document::open(three_chapters()).expect("a book"),
+    )
+    .with_fonts(provider.clone());
     assert!(
         doc.archive()
             .expect("a report")
@@ -781,7 +833,11 @@ fn a_late_font_provider_warns_on_a_book_and_on_nothing_else() {
     // A comic archive: the same call, and no warning, because nothing about it
     // was decided by a font.
     let comic = comic_archive();
-    let doc = Document::open(comic).expect("a comic").with_fonts(provider);
+    let doc = synthesised(
+        "a late font provider warns on a book and on nothing else",
+        Document::open(comic).expect("a comic"),
+    )
+    .with_fonts(provider);
     assert!(
         !doc.archive()
             .expect("a report")
@@ -808,7 +864,7 @@ fn a_late_font_provider_warns_on_a_book_and_on_nothing_else() {
 fn a_font_provider_passed_at_open_reaches_the_render() {
     let pdf = pdf_naming_a_font_it_does_not_embed();
 
-    let bare = Document::open(pdf.clone()).expect("a PDF");
+    let bare = authored("a PDF naming a font it does not embed", pdf.clone());
     let bitmap = bare
         .page(0)
         .expect("a page")
@@ -877,11 +933,17 @@ fn every_committed_book_paginates_to_its_spine_at_the_box_it_was_given() {
             out
         };
 
-        let big = Document::open(bytes.clone()).expect(name);
+        let big = synthesised(
+            "every committed book paginates to its spine at the box it was given",
+            Document::open(bytes.clone()).expect(name),
+        );
         assert_eq!(big.page_count(), wide, "{name} at the default box");
         assert_eq!(spine_of(&big).len(), spine as usize, "{name}");
 
-        let small = Document::open_with(bytes, &OpenOptions::at_page(300.0, 500.0)).expect(name);
+        let small = synthesised(
+            "every committed book paginates to its spine at the box it was given",
+            Document::open_with(bytes, &OpenOptions::at_page(300.0, 500.0)).expect(name),
+        );
         assert_eq!(small.page_count(), narrow, "{name} at another box");
         assert_eq!(
             spine_of(&small),

@@ -53,7 +53,10 @@
 //! | a value 12.1.5 does not name is not named | 1 |
 //! | simulations are not drawn at all, as before | 7 |
 
+mod written_support;
 mod xps_support;
+
+use written_support::{authored, synthesised};
 
 use tinker_pdf::xps::font::{deobfuscate, obfuscation_key, OBFUSCATED_FONT_MEDIA_TYPE};
 use tinker_pdf::xps::glyphs::{self, Cluster, Mapping};
@@ -134,7 +137,10 @@ fn stream(document: &Document) -> String {
 /// The content stream a `Glyphs` element with these attributes produces.
 fn drawn(extra: &str) -> String {
     let bytes = obfuscated(&run(extra));
-    let document = open(&bytes).unwrap_or_else(|e| panic!("{extra}: {e:?}"));
+    let document = synthesised(
+        "drawn",
+        open(&bytes).unwrap_or_else(|e| panic!("{extra}: {e:?}")),
+    );
     stream(&document)
 }
 
@@ -490,7 +496,11 @@ fn the_content_type_selects_the_de_obfuscation_and_the_extension_does_not() {
         "a plain `.odttf` is not de-obfuscated"
     );
     assert!(
-        stream(&open(&lying_extension).expect("an XPS")).contains("<0001>"),
+        stream(&synthesised(
+            "the content type selects the de obfuscation and the extension does not",
+            open(&lying_extension).expect("an XPS")
+        ))
+        .contains("<0001>"),
         "and it drew"
     );
 
@@ -509,7 +519,11 @@ fn the_content_type_selects_the_de_obfuscation_and_the_extension_does_not() {
         "an obfuscated `.ttf` is de-obfuscated on the strength of its media type"
     );
     assert!(
-        stream(&open(&lying_the_other_way).expect("an XPS")).contains("<0001>"),
+        stream(&synthesised(
+            "the content type selects the de obfuscation and the extension does not",
+            open(&lying_the_other_way).expect("an XPS")
+        ))
+        .contains("<0001>"),
         "and it drew too"
     );
 }
@@ -614,7 +628,11 @@ fn a_font_uri_naming_a_face_other_than_the_first_is_refused_by_name() {
         "the first face is the one this draws"
     );
     assert!(
-        stream(&open(&with_fragment("#0")).expect("an XPS")).contains("<0001>"),
+        stream(&synthesised(
+            "a font uri naming a face other than the first is refused by name",
+            open(&with_fragment("#0")).expect("an XPS")
+        ))
+        .contains("<0001>"),
         "and it drew"
     );
     assert_eq!(
@@ -755,8 +773,16 @@ fn indices_that_are_not_the_grammar_are_named_and_not_painted() {
             "{bad}"
         );
         assert!(
-            !stream(&open(&obfuscated(&body)).expect("an XPS")).contains(" Tj")
-                && !stream(&open(&obfuscated(&body)).expect("an XPS")).contains(" TJ"),
+            !stream(&synthesised(
+                "indices that are not the grammar are named and not painted",
+                open(&obfuscated(&body)).expect("an XPS")
+            ))
+            .contains(" Tj")
+                && !stream(&synthesised(
+                    "indices that are not the grammar are named and not painted",
+                    open(&obfuscated(&body)).expect("an XPS")
+                ))
+                .contains(" TJ"),
             "{bad} drew something"
         );
     }
@@ -1076,8 +1102,12 @@ fn with_gradient(extra: &str) -> String {
         font_uri("odttf")
     );
     let bytes = obfuscated(&body);
-    let document = open(&bytes).unwrap_or_else(|e| panic!("{extra}: {e:?}"));
+    let document = synthesised(
+        "a run whose font is obfuscated",
+        open(&bytes).unwrap_or_else(|e| panic!("{extra}: {e:?}")),
+    );
     let out = document.editor().save(&Default::default());
+    authored("the run whose font is obfuscated, saved", &out);
     String::from_utf8_lossy(&out).into_owned()
 }
 
@@ -1396,7 +1426,10 @@ fn a_run_whose_gradient_stops_differ_in_alpha_is_masked() {
     );
     let bytes = obfuscated(&body);
     assert_eq!(defects(&bytes), []);
-    let page = stream(&open(&bytes).expect("an XPS"));
+    let page = stream(&synthesised(
+        "a run whose gradient stops differ in alpha is masked",
+        open(&bytes).expect("an XPS"),
+    ));
     assert!(page.contains(" Do"), "{page}");
     assert!(!page.contains("2 Tr"), "drawn inside the group: {page}");
 }
@@ -1481,7 +1514,11 @@ fn a_glyphs_with_no_usable_origin_or_em_size_is_named_and_not_painted() {
     // than about this build.
     let zero = bare(r#"OriginX="10" OriginY="100" FontRenderingEmSize="0""#);
     assert_eq!(defects(&obfuscated(&zero)), []);
-    assert!(!stream(&open(&obfuscated(&zero)).expect("an XPS")).contains("TJ"));
+    assert!(!stream(&synthesised(
+        "a glyphs with no usable origin or em size is named and not painted",
+        open(&obfuscated(&zero)).expect("an XPS")
+    ))
+    .contains("TJ"));
 }
 
 // ---- the whole reason milestone 5 came first ----------------------------
@@ -1593,7 +1630,10 @@ fn the_width_array_is_the_fonts_own_hmtx_for_the_glyphs_the_run_drew() {
 #[test]
 fn page_text_comes_back_from_the_unicode_string_through_the_to_unicode() {
     for name in ["wpf-image-and-text.xps", "xpsom-image-and-text.oxps"] {
-        let document = Document::open(corpus(name)).expect("a fixed document");
+        let document = synthesised(
+            "page text comes back from the unicode string through the to unicode",
+            Document::open(corpus(name)).expect("a fixed document"),
+        );
         let text = document.page(0).expect("a page").text().plain_text();
         assert!(
             text.contains("Page one"),
@@ -1611,7 +1651,10 @@ fn page_text_comes_back_from_the_unicode_string_through_the_to_unicode() {
 /// adjustment after the first glyph is the difference, in thousandths.
 #[test]
 fn the_real_run_draws_the_cmaps_glyphs_and_the_files_own_first_advance() {
-    let document = Document::open(corpus("wpf-image-and-text.xps")).expect("a fixed document");
+    let document = synthesised(
+        "the real run draws the cmaps glyphs and the files own first advance",
+        Document::open(corpus("wpf-image-and-text.xps")).expect("a fixed document"),
+    );
     let content = stream(&document);
     // 'P' is glyph 146 (0x92), 'a' 222 (0xDE), 'g' 284 (0x11C), 'e' 260
     // (0x104), the space 861 (0x35D), 'o' 345 (0x159), 'n' 336 (0x150).
@@ -1641,8 +1684,14 @@ fn the_real_run_draws_the_cmaps_glyphs_and_the_files_own_first_advance() {
 /// 9.1.7's reference resolves against the **fixed page part's own name**.
 #[test]
 fn both_dialects_resolve_the_same_font_and_draw_the_same_run() {
-    let xps = stream(&Document::open(corpus("wpf-image-and-text.xps")).expect("a document"));
-    let oxps = stream(&Document::open(corpus("xpsom-image-and-text.oxps")).expect("a document"));
+    let xps = stream(&synthesised(
+        "both dialects resolve the same font and draw the same run",
+        Document::open(corpus("wpf-image-and-text.xps")).expect("a document"),
+    ));
+    let oxps = stream(&synthesised(
+        "both dialects resolve the same font and draw the same run",
+        Document::open(corpus("xpsom-image-and-text.oxps")).expect("a document"),
+    ));
     let run_of = |content: &str| {
         let at = content.find("BT ").expect("a run");
         content[at..].to_string()
@@ -1671,7 +1720,10 @@ fn a_gradient_over_text_is_a_shading_pattern_rather_than_the_placeholder_grey() 
         font_uri("odttf")
     );
     assert_eq!(defects(&obfuscated(&body)), []);
-    let content = stream(&open(&obfuscated(&body)).expect("an XPS"));
+    let content = stream(&synthesised(
+        "a gradient over text is a shading pattern rather than the placeholder grey",
+        open(&obfuscated(&body)).expect("an XPS"),
+    ));
     assert!(
         content.contains("/Pattern cs /"),
         "the gradient is the fill colour: {content}"
@@ -1702,7 +1754,11 @@ fn a_static_resource_fill_that_names_nothing_paints_the_run_grey() {
         defects(&obfuscated(&body)),
         [XpsElementDefect::BrushUnresolved]
     );
-    assert!(stream(&open(&obfuscated(&body)).expect("an XPS")).contains("0.749 0.749 0.749 rg"));
+    assert!(stream(&synthesised(
+        "a static resource fill that names nothing paints the run grey",
+        open(&obfuscated(&body)).expect("an XPS")
+    ))
+    .contains("0.749 0.749 0.749 rg"));
 }
 
 /// A transform that is not six numbers refuses the run, and a `Clip` that will
@@ -1755,9 +1811,15 @@ fn an_element_opacity_multiplies_the_brushs_own_alpha() {
         r##"<Glyphs OriginX="10" OriginY="100" FontRenderingEmSize="100" FontUri="{}" Fill="#80000000" Opacity="0.5" UnicodeString="A" />"##,
         font_uri("odttf")
     );
-    let content = stream(&open(&obfuscated(&body)).expect("an XPS"));
+    let content = stream(&synthesised(
+        "an element opacity multiplies the brushs own alpha",
+        open(&obfuscated(&body)).expect("an XPS"),
+    ));
     assert!(content.contains(" gs"), "an /ExtGState is named: {content}");
-    let document = open(&obfuscated(&body)).expect("an XPS");
+    let document = synthesised(
+        "an element opacity multiplies the brushs own alpha",
+        open(&obfuscated(&body)).expect("an XPS"),
+    );
     let cos = document.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
@@ -1795,7 +1857,10 @@ fn a_run_past_the_glyph_cap_is_refused_by_name() {
     };
 
     let under = package_of(tinker_pdf::xps::MAX_XPS_GLYPHS);
-    let opened = open(&under).expect("a run of exactly the cap is one this build draws");
+    let opened = synthesised(
+        "a run past the glyph cap is refused by name",
+        open(&under).expect("a run of exactly the cap is one this build draws"),
+    );
     // And it **drew**: an `Ok` on its own would be satisfied by a placeholder
     // page, which is what a package refused one level down produces.
     assert_eq!(
@@ -1887,7 +1952,11 @@ fn a_font_uri_resolves_against_the_fixed_page_part_and_not_the_package_root() {
     // The part sits beside the page, and the reference is relative to it.
     let sibling = build(&format!("{FONT_GUID}.odttf"), &beside);
     assert_eq!(defects(&sibling), [], "a sibling part resolves");
-    assert!(stream(&open(&sibling).expect("an XPS")).contains("<0001>"));
+    assert!(stream(&synthesised(
+        "a font uri resolves against the fixed page part and not the package root",
+        open(&sibling).expect("an XPS")
+    ))
+    .contains("<0001>"));
 
     // The same reference, with the part at the package root instead: it must
     // **not** be found, because the page is three segments down.
@@ -1981,7 +2050,10 @@ fn a_run_contributes_its_box_to_its_canvass_overlap_test() {
         r##"<Glyphs OriginX="10" OriginY="50" FontRenderingEmSize="40" FontUri="{}" Fill="#000000" UnicodeString="A" />"##,
         font_uri("odttf")
     ));
-    let document = open(&overlapping).expect("an XPS");
+    let document = synthesised(
+        "a run contributes its box to its canvass overlap test",
+        open(&overlapping).expect("an XPS"),
+    );
     let content = stream(&document);
     assert!(
         content.contains(" Do\n"),
@@ -2002,7 +2074,11 @@ fn a_run_contributes_its_box_to_its_canvass_overlap_test() {
         font_uri("odttf")
     ));
     assert!(
-        !stream(&open(&apart).expect("an XPS")).contains(" Do\n"),
+        !stream(&synthesised(
+            "a run contributes its box to its canvass overlap test",
+            open(&apart).expect("an XPS")
+        ))
+        .contains(" Do\n"),
         "no form XObject is needed"
     );
 }

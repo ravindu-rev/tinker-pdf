@@ -24,9 +24,11 @@
 //! raster would be**, which is a statement about the bytes rather than about the
 //! allocator, and it is what the pass-through actually promises.
 
+mod written_support;
 mod xps_support;
 
 use tinker_pdf::{Document, WriteMode, WriteOptions};
+use written_support::{authored, synthesised};
 use xps_support::{archive, before_content_types, binary_part, one_page_package, rgb_png, with};
 
 /// A page whose whole content is one large image.
@@ -82,11 +84,15 @@ fn big_package() -> Vec<u8> {
 #[test]
 fn a_page_of_one_large_image_does_not_cost_its_decoded_size() {
     let package = big_package();
-    let document = Document::open(package.clone()).expect("an XPS");
+    let document = synthesised(
+        "a page of one large image",
+        Document::open(package.clone()).expect("an XPS"),
+    );
     let saved = document.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    authored("the page of one large image, saved", &saved);
 
     let decoded = (WIDE as usize) * (TALL as usize) * 3;
     assert!(

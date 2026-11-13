@@ -75,12 +75,14 @@
 
 mod cbz_support;
 mod epub_support;
+mod written_support;
 
 use cbz_support::rgb_png;
 use epub_support::typeface::covering;
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::epub::SpineDefect;
 use tinker_pdf::{ArchiveWarning, Document, OpenOptions, RenderOptions};
+use written_support::{authored, synthesised};
 
 const CONTAINER: &str = concat!(
     r##"<?xml version="1.0" encoding="utf-8"?>"##,
@@ -118,7 +120,10 @@ fn book(svg: &str, extra: &[(&str, Vec<u8>)]) -> Vec<u8> {
 }
 
 fn open(svg: &str) -> Document {
-    Document::open(book(svg, &[])).expect("the book opens")
+    synthesised(
+        "a book of one SVG spine item",
+        Document::open(book(svg, &[])).expect("the book opens"),
+    )
 }
 
 /// Every distinct grey on a page, which is how a page that drew is told from
@@ -152,6 +157,7 @@ fn greys(doc: &Document, page: u32) -> Vec<u8> {
 /// its text matrix, and this reads that matrix.
 fn text_origins(doc: &Document) -> Vec<f64> {
     let pdf = doc.editor().save(&Default::default());
+    authored("text origins, saved", &pdf);
     let text = String::from_utf8_lossy(&pdf);
     let mut out = Vec::new();
     let mut previous: Option<f64> = None;
@@ -181,6 +187,7 @@ fn text_origins(doc: &Document) -> Vec<f64> {
 /// — [`text_origins`]' reading, for runs that are turned as well as moved.
 fn text_matrices(doc: &Document) -> Vec<[f64; 6]> {
     let pdf = doc.editor().save(&Default::default());
+    authored("text matrices, saved", &pdf);
     let text = String::from_utf8_lossy(&pdf);
     let mut out = Vec::new();
     let mut previous: Option<[f64; 6]> = None;
@@ -255,8 +262,11 @@ fn a_scene_is_fitted_to_the_page_rather_than_stretched() {
     // it disagree about which scale wins, and a build that always divided by
     // the width would pass the first and overflow the second.
     let band = |markup: &str| -> (u8, u8, u8) {
-        let doc = Document::open_with(book(markup, &[]), &OpenOptions::at_page(200.0, 200.0))
-            .expect("the book opens");
+        let doc = synthesised(
+            "a scene is fitted to the page rather than stretched",
+            Document::open_with(book(markup, &[]), &OpenOptions::at_page(200.0, 200.0))
+                .expect("the book opens"),
+        );
         let bitmap = doc
             .page(0)
             .expect("a page")
@@ -307,7 +317,7 @@ fn a_scene_is_fitted_to_the_page_rather_than_stretched() {
 /// that are ordered light to dark — rather than on the presence of ink.
 #[test]
 fn a_gradient_fills_a_shape_as_a_ramp() {
-    let doc = Document::open_with(
+    let doc = synthesised("a gradient fills a shape as a ramp", Document::open_with(
         book(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
                   <defs>
@@ -323,7 +333,7 @@ fn a_gradient_fills_a_shape_as_a_ramp() {
         ),
         &OpenOptions::at_page(200.0, 200.0),
     )
-    .expect("the book opens");
+    .expect("the book opens"));
     let bitmap = doc
         .page(0)
         .expect("a page")
@@ -357,7 +367,7 @@ fn a_gradient_fills_a_shape_as_a_ramp() {
 /// this test used one and caught nothing.
 #[test]
 fn a_gradients_matrix_carries_the_page_mapping() {
-    let doc = Document::open_with(
+    let doc = synthesised("a gradients matrix carries the page mapping", Document::open_with(
         book(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
                   <defs>
@@ -373,7 +383,7 @@ fn a_gradients_matrix_carries_the_page_mapping() {
         ),
         &OpenOptions::at_page(200.0, 200.0),
     )
-    .expect("the book opens");
+    .expect("the book opens"));
     let bitmap = doc
         .page(0)
         .expect("a page")
@@ -515,8 +525,11 @@ fn rgb_at(doc: &Document, x: f64, y: f64) -> [u8; 3] {
 }
 
 fn square(svg: &str) -> Document {
-    Document::open_with(book(svg, &[]), &OpenOptions::at_page(200.0, 200.0))
-        .expect("the book opens")
+    synthesised(
+        "square",
+        Document::open_with(book(svg, &[]), &OpenOptions::at_page(200.0, 200.0))
+            .expect("the book opens"),
+    )
 }
 
 /// **A group's opacity is composited once**, which is the whole of §14.5.
@@ -642,6 +655,7 @@ fn a_clip_of_a_shape_and_text_masks_by_both() {
     assert_eq!(rgb_at(&doc, 0.25, 0.5), [0, 0, 255], "inside the rectangle");
     assert_eq!(rgb_at(&doc, 0.75, 0.1), [255, 255, 255], "outside both");
     let pdf = doc.editor().save(&Default::default());
+    authored("a clip of a shape and text masks by both, saved", &pdf);
     let text = String::from_utf8_lossy(&pdf);
     assert!(text.contains("/Luminosity"), "a luminosity mask is written");
     let fonts = fonts_named_and_defined(&doc);
@@ -673,6 +687,7 @@ fn a_use_in_a_clip_clips_like_its_shape() {
 /// dictionary somewhere defines it.
 fn fonts_named_and_defined(doc: &Document) -> Vec<(String, bool)> {
     let pdf = doc.editor().save(&Default::default());
+    authored("fonts named and defined, saved", &pdf);
     let text = String::from_utf8_lossy(&pdf);
     let mut named: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -1061,14 +1076,14 @@ fn an_image_reference_is_resolved_against_the_container() {
     // Black pixels, so the assertion is that the picture reached the page and
     // not merely that a rectangle did.
     let png = rgb_png(2, 2, &[0; 12]);
-    let doc = Document::open(book(
+    let doc = synthesised("an image reference is resolved against the container", Document::open(book(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
              <image x="0" y="0" width="100" height="100" href="photo.png"
                     preserveAspectRatio="none"/>
            </svg>"##,
         &[("EPUB/photo.png", png)],
     ))
-    .expect("the book opens");
+    .expect("the book opens"));
     let seen = greys(&doc, 0);
     assert!(
         seen.contains(&0),
@@ -1100,13 +1115,13 @@ fn an_image_reference_is_resolved_against_the_container() {
 #[test]
 fn an_image_is_fitted_by_its_own_proportions() {
     let png = rgb_png(4, 2, &[0; 24]);
-    let doc = Document::open(book(
+    let doc = synthesised("an image is fitted by its own proportions", Document::open(book(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
              <image x="0" y="0" width="100" height="100" href="photo.png"/>
            </svg>"##,
         &[("EPUB/photo.png", png)],
     ))
-    .expect("the book opens");
+    .expect("the book opens"));
     let bitmap = doc
         .page(0)
         .expect("a page")
@@ -1477,18 +1492,21 @@ fn an_svg_reaches_its_container_for_its_imports_and_faces() {
     let sheet = b"@font-face { font-family: Drawn; src: url(../fonts/drawn.ttf) }\n\
                   .drawn { font-family: Drawn }"
         .to_vec();
-    let doc = Document::open_with(
-        book(
-            svg,
-            &[
-                ("EPUB/style/draw.css", sheet),
-                ("EPUB/fonts/drawn.ttf", covering("Drawn", "ABC")),
-                ("EPUB/fonts/local.ttf", covering("Local", "DEF")),
-            ],
-        ),
-        &OpenOptions::at_page(200.0, 200.0),
-    )
-    .expect("the book opens");
+    let doc = synthesised(
+        "an svg reaches its container for its imports and faces",
+        Document::open_with(
+            book(
+                svg,
+                &[
+                    ("EPUB/style/draw.css", sheet),
+                    ("EPUB/fonts/drawn.ttf", covering("Drawn", "ABC")),
+                    ("EPUB/fonts/local.ttf", covering("Local", "DEF")),
+                ],
+            ),
+            &OpenOptions::at_page(200.0, 200.0),
+        )
+        .expect("the book opens"),
+    );
 
     assert_eq!(svg_warnings(&doc), [], "every at-rule was read");
     assert!(
@@ -1533,7 +1551,10 @@ fn an_import_the_container_lacks_is_named_and_a_loose_svg_reads_data_urls() {
                  <rect width="10" height="10" fill="#fff"/>
                </svg>"##
         );
-        Document::open(markup.into_bytes()).expect("a loose SVG opens")
+        synthesised(
+            "an import the container lacks is named and a loose svg reads data urls",
+            Document::open(markup.into_bytes()).expect("a loose SVG opens"),
+        )
     };
     let doc = loose("@import url('data:text/css,rect%20%7B%20fill%3A%20%23000%20%7D');");
     assert_eq!(svg_warnings(&doc), [], "{:?}", warnings(&doc));
@@ -1658,6 +1679,7 @@ fn page_mapping(doc: &Document) -> [f64; 6] {
 /// The `/Matrix` of the first shading pattern in the saved file.
 fn shading_matrix(doc: &Document) -> [f64; 6] {
     let pdf = doc.editor().save(&Default::default());
+    authored("shading matrix, saved", &pdf);
     let text = String::from_utf8_lossy(&pdf);
     let at = text.find("/PatternType 2").expect("a shading pattern");
     let dictionary = &text[at..];
@@ -1698,7 +1720,10 @@ fn a_bounding_box_gradient_on_svg_text_spans_the_text_it_paints() {
     for (doc, what) in [
         (open(svg), "a book"),
         (
-            Document::open(svg.as_bytes().to_vec()).expect("a loose SVG opens"),
+            synthesised(
+                "a bounding box gradient on svg text spans the text it paints",
+                Document::open(svg.as_bytes().to_vec()).expect("a loose SVG opens"),
+            ),
             "a loose file",
         ),
     ] {
@@ -1749,6 +1774,7 @@ fn a_bounding_box_mask_on_svg_text_masks_it() {
     );
     assert_eq!(svg_warnings(&doc), [], "{:?}", warnings(&doc));
     let pdf = doc.editor().save(&Default::default());
+    authored("a bounding box mask on svg text masks it, saved", &pdf);
     assert!(
         String::from_utf8_lossy(&pdf).contains("/Luminosity"),
         "a soft mask"

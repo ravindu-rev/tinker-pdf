@@ -12,6 +12,7 @@
 
 mod cbz_support;
 mod render_support;
+mod written_support;
 
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use tinker_pdf::{
     ArchiveWarning, Bitmap, Document, DocumentBuilder, FromHtml, PageBox, RenderOptions,
     SimpleFontProvider, Standalone,
 };
+use written_support::{authored, synthesised};
 
 fn render(document: &Document, page: u32) -> Bitmap {
     document
@@ -156,7 +158,10 @@ fn an_fb2_opens_as_its_book() {
         tinker_pdf::standalone::sniff(source.as_bytes()),
         Some(Standalone::Fb2)
     );
-    let document = Document::open(source.into_bytes()).expect("the book opens");
+    let document = synthesised(
+        "an fb2 opens as its book",
+        Document::open(source.into_bytes()).expect("the book opens"),
+    );
     let words = text(&document);
     for expected in [
         "The Long Way",
@@ -231,7 +236,10 @@ fn a_books_own_stylesheet_wins_over_the_formats() {
         "<description>",
         "<stylesheet type=\"text/css\">.title { text-align: left }</stylesheet><description>",
     );
-    let document = Document::open(source.into_bytes()).expect("opens");
+    let document = synthesised(
+        "a books own stylesheet wins over the formats",
+        Document::open(source.into_bytes()).expect("opens"),
+    );
     assert!(warnings(&document).is_empty(), "{:?}", warnings(&document));
     assert!(
         left_edge(&document, "Chapter One") < 80.0,
@@ -253,7 +261,10 @@ fn an_fb2_is_the_xhtml_it_translates_to() {
          </section></body>",
         "",
     );
-    let opened = drawn(Document::open(source.clone().into_bytes()).expect("opens"));
+    let opened = drawn(synthesised(
+        "an fb2 is the xhtml it translates to",
+        Document::open(source.clone().into_bytes()).expect("opens"),
+    ));
     let xhtml = tinker_pdf::fb2::to_xhtml(source.as_bytes()).expect("translates");
     let (built, _) = DocumentBuilder::from_html(
         xhtml,
@@ -261,7 +272,10 @@ fn an_fb2_is_the_xhtml_it_translates_to() {
         PageBox::new(432.0, 648.0),
     )
     .expect("lays out");
-    let made = drawn(Document::open(built.finish()).expect("opens"));
+    let made = drawn(authored(
+        "an fb2 is the xhtml it translates to",
+        built.finish(),
+    ));
     assert_eq!(opened.page_count(), made.page_count());
     for at in 0..opened.page_count() {
         let (a, b) = (render(&opened, at), render(&made, at));
@@ -294,14 +308,20 @@ fn a_picture_is_drawn_from_the_books_own_binary() {
         "<lang>en</lang>",
         "<coverpage><image l:href=\"#pic.png\"/></coverpage><lang>en</lang>",
     );
-    let document = Document::open(covered.into_bytes()).expect("opens");
+    let document = synthesised(
+        "a picture is drawn from the books own binary",
+        Document::open(covered.into_bytes()).expect("opens"),
+    );
     assert!(warnings(&document).is_empty(), "{:?}", warnings(&document));
     assert!(
         blue(&render(&document, 0)),
         "the cover is not on the first page"
     );
 
-    let document = Document::open(full_book().into_bytes()).expect("opens");
+    let document = synthesised(
+        "a picture is drawn from the books own binary",
+        Document::open(full_book().into_bytes()).expect("opens"),
+    );
     assert!(warnings(&document).is_empty(), "{:?}", warnings(&document));
     assert!(
         (0..document.page_count()).any(|at| blue(&render(&document, at))),
@@ -314,7 +334,10 @@ fn a_picture_is_drawn_from_the_books_own_binary() {
 fn a_note_reference_lands_on_its_note() {
     use tinker_pdf_cos::dest::{Action, Destination};
 
-    let document = Document::open(full_book().into_bytes()).expect("opens");
+    let document = synthesised(
+        "a note reference lands on its note",
+        Document::open(full_book().into_bytes()).expect("opens"),
+    );
     let mut targets = Vec::new();
     for at in 0..document.page_count() {
         for link in document.page(at).expect("a page").links() {
@@ -348,7 +371,10 @@ fn what_does_not_translate_is_named() {
          <image l:href=\"#broken\"/></section></body>",
         "<binary id=\"broken\" content-type=\"image/png\">not base64 at all!</binary>",
     );
-    let document = Document::open(source.into_bytes()).expect("opens");
+    let document = synthesised(
+        "what does not translate is named",
+        Document::open(source.into_bytes()).expect("opens"),
+    );
     let found = warnings(&document);
     assert!(
         found.contains(&ArchiveWarning::Translation {
@@ -435,7 +461,10 @@ fn koi8_r(text: &str) -> Vec<u8> {
 /// is held to the charts and not to itself.
 #[test]
 fn an_fb2_in_an_eight_bit_encoding_is_the_book_its_utf8_twin_is() {
-    let twin = Document::open(cyrillic_book("utf-8").into_bytes()).expect("opens");
+    let twin = synthesised(
+        "an fb2 in an eight bit encoding is the book its utf8 twin is",
+        Document::open(cyrillic_book("utf-8").into_bytes()).expect("opens"),
+    );
     let words = text(&twin);
     let drawn_twin = drawn(twin);
     assert!(
@@ -453,7 +482,10 @@ fn an_fb2_in_an_eight_bit_encoding_is_the_book_its_utf8_twin_is() {
             Some(Standalone::Fb2),
             "{label}"
         );
-        let document = drawn(Document::open(bytes).expect("opens"));
+        let document = drawn(synthesised(
+            "an fb2 in an eight bit encoding is the book its utf8 twin is",
+            Document::open(bytes).expect("opens"),
+        ));
         assert_eq!(text(&document), words, "{label}");
         // The same as the twin's — a face covering no Cyrillic is named the
         // same way for both — and nothing about markup or translation.
@@ -492,7 +524,10 @@ fn what_an_eight_bit_book_cannot_say_is_named() {
         .position(|w| w == b"nested te")
         .expect("the fixture has nested text");
     greek[at] = 0xAA;
-    let document = Document::open(greek).expect("opens");
+    let document = synthesised(
+        "what an eight bit book cannot say is named",
+        Document::open(greek).expect("opens"),
+    );
     assert!(
         warnings(&document).contains(&ArchiveWarning::Translation {
             item: String::new(),
@@ -505,7 +540,10 @@ fn what_an_eight_bit_book_cannot_say_is_named() {
     assert!(text(&document).contains("\u{FFFD}ested text"));
 
     let source = full_book().replace("encoding=\"utf-8\"", "encoding=\"Shift_JIS\"");
-    let document = Document::open(source.into_bytes()).expect("opens");
+    let document = synthesised(
+        "what an eight bit book cannot say is named",
+        Document::open(source.into_bytes()).expect("opens"),
+    );
     assert_eq!(document.page_count(), 1);
     assert!(warnings(&document).contains(&ArchiveWarning::Markup {
         item: String::new(),
@@ -530,7 +568,10 @@ fn a_book_cut_part_way_is_read_as_far_as_it_goes() {
         "the translation of a cut book is not XML: {:?}",
         dom.defects
     );
-    let document = Document::open(cut.as_bytes().to_vec()).expect("opens");
+    let document = synthesised(
+        "a book cut part way is read as far as it goes",
+        Document::open(cut.as_bytes().to_vec()).expect("opens"),
+    );
     assert!(text(&document).contains("Chapter One"));
     assert!(warnings(&document).contains(&ArchiveWarning::Markup {
         item: String::new(),
@@ -547,8 +588,14 @@ fn an_fb2_in_a_zip_of_one_file_is_the_book() {
         &[ZipFile::deflated("book.fb2", source.as_bytes())],
         Damage::None,
     );
-    let unpacked = Document::open(source.into_bytes()).expect("opens");
-    let document = Document::open(packed).expect("the archive opens");
+    let unpacked = synthesised(
+        "an fb2 in a zip of one file is the book",
+        Document::open(source.into_bytes()).expect("opens"),
+    );
+    let document = synthesised(
+        "an fb2 in a zip of one file is the book",
+        Document::open(packed).expect("the archive opens"),
+    );
     assert_eq!(document.page_count(), unpacked.page_count());
     assert_eq!(text(&document), text(&unpacked));
     assert_eq!(
@@ -557,6 +604,9 @@ fn an_fb2_in_a_zip_of_one_file_is_the_book() {
     );
 
     let comic = zip(&[ZipFile::stored("book.fb2", &picture())], Damage::None);
-    let opened = Document::open(comic).expect("the comic opens");
+    let opened = synthesised(
+        "an fb2 in a zip of one file is the book",
+        Document::open(comic).expect("the comic opens"),
+    );
     assert_eq!(opened.page(0).expect("a page").size(), (24.0, 24.0));
 }

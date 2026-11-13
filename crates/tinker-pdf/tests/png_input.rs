@@ -19,12 +19,14 @@
 //! the bytes these helpers wrote, with no encoder of this engine's in between.
 
 mod render_support;
+mod written_support;
 
 use render_support::{axial_page, blend_grid_page, curvy_font, image_page};
 use tinker_pdf::{
-    Bitmap, Document, DocumentBuilder, PixelFormat, PixelRegion, PngError, PngReadError,
-    RenderOptions, RenderWarning,
+    Bitmap, DocumentBuilder, PixelFormat, PixelRegion, PngError, PngReadError, RenderOptions,
+    RenderWarning,
 };
+use written_support::authored;
 
 // ---- PNG files, assembled here ---------------------------------------------
 
@@ -187,7 +189,7 @@ fn assert_same_bitmap(read: &Bitmap, rendered: &Bitmap, what: &str) {
 #[test]
 fn render_to_png_and_back_is_byte_identical_for_every_page_format() {
     for (name, bytes) in pages() {
-        let doc = Document::open(bytes).expect("the page opens");
+        let doc = authored(name, bytes);
         let page = doc.page(0).expect("a page");
         for format in PAGE_FORMATS {
             for scale in [1.0, 1.5] {
@@ -210,7 +212,7 @@ fn render_to_png_and_back_is_byte_identical_for_every_page_format() {
 /// read back at the page's stride by mistake.
 #[test]
 fn a_region_round_trips_as_the_region() {
-    let doc = Document::open(text_page()).expect("it opens");
+    let doc = authored("a page of text", text_page());
     let page = doc.page(0).expect("a page");
     for format in PAGE_FORMATS {
         let tile = page.render(&RenderOptions {
@@ -496,8 +498,7 @@ fn arbitrary_bytes_never_panic() {
         }
     }
 
-    let rendered = Document::open(text_page())
-        .expect("it opens")
+    let rendered = authored("a page of text", text_page())
         .page(0)
         .expect("a page")
         .render(&RenderOptions {

@@ -14,6 +14,7 @@
 mod cbz_support;
 mod epub_support;
 mod render_support;
+mod written_support;
 
 use std::sync::Arc;
 
@@ -27,11 +28,21 @@ use tinker_pdf::{
     ArchiveWarning, Bitmap, Document, OpenError, OpenOptions, RenderOptions, ShreddedSource,
     SimpleFontProvider, SliceSource, Standalone,
 };
+use written_support::{authored, synthesised};
 
 // ---- helpers -----------------------------------------------------------------
 
+/// The bytes opened, and what `open` synthesised from them held to the
+/// validate-on-save helper. A PDF a test put behind junk is not synthesised,
+/// and is only read.
+#[track_caller]
 fn open(bytes: &[u8]) -> Document {
-    Document::open(bytes.to_vec()).expect("the document opens")
+    let document = Document::open(bytes.to_vec()).expect("the document opens");
+    if document.archive().is_some() {
+        synthesised("a standalone document", document)
+    } else {
+        document
+    }
 }
 
 fn render(document: &Document, page: u32) -> Bitmap {
@@ -191,6 +202,7 @@ fn a_pdf_behind_junk_is_the_pdf_wherever_the_parser_finds_its_header() {
         builder.add_page(200.0, 100.0, |_| {});
     }
     let pdf = builder.finish();
+    authored("two empty pages", &pdf);
     let window = tinker_pdf_cos::limits::MAX_HEADER_SCAN;
     for prefix in [
         b"\xFF\xD8\xFF\xE0".as_slice(),
@@ -326,7 +338,10 @@ fn an_svg_is_one_page_at_the_size_its_root_states() {
 fn an_svg_with_no_size_takes_the_callers_box() {
     let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>"##;
     let options = OpenOptions::at_page(300.0, 200.0);
-    let document = Document::open_with(svg.as_bytes().to_vec(), &options).expect("it opens");
+    let document = synthesised(
+        "an svg with no size takes the callers box",
+        Document::open_with(svg.as_bytes().to_vec(), &options).expect("it opens"),
+    );
     assert_eq!(document.page(0).expect("a page").size(), (300.0, 200.0));
 }
 
@@ -1026,7 +1041,10 @@ fn a_streamed_standalone_document_is_the_same_document() {
     for bytes in [RED_SQUARE.as_bytes().to_vec(), png] {
         let buffered = open(&bytes);
         let source = Arc::new(ShreddedSource::new(SliceSource::new(bytes.clone())));
-        let streamed = Document::open_streaming(source).expect("it opens streamed");
+        let streamed = synthesised(
+            "a standalone document, streamed",
+            Document::open_streaming(source).expect("it opens streamed"),
+        );
         assert!(streamed.whole_file_fetched());
         assert_eq!(streamed.page_count(), buffered.page_count());
         assert!(render(&streamed, 0).data == render(&buffered, 0).data);
@@ -1044,7 +1062,10 @@ fn a_comic_streamed_from_a_source_that_answers_in_pieces_opens() {
     let png = rgb_png(5, 3, &distinct_pixels(5, 3));
     let archive = zip(&[ZipFile::stored("p.png", &png)], Damage::None);
     let source = Arc::new(ShreddedSource::new(SliceSource::new(archive.clone())));
-    let streamed = Document::open_streaming(source).expect("the archive opens streamed");
+    let streamed = synthesised(
+        "a comic, streamed in pieces",
+        Document::open_streaming(source).expect("the archive opens streamed"),
+    );
     assert_eq!(streamed.page_count(), 1);
     assert!(render(&streamed, 0).data == render(&open(&archive), 0).data);
 }

@@ -106,12 +106,14 @@
 //! position worked from the fixture face's `hmtx` and `GPOS` values.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::book::{faces_book, faces_book_with, one_face_book};
 use epub_support::typeface::{
     origin_of, shown_glyphs, text_objects, Face, Form, Joining, Kern, Ligature, Pair, Placement,
 };
 use tinker_pdf::{Document, OpenOptions, RenderOptions, TextOptions};
+use written_support::synthesised;
 
 /// Beh, hah and meem: three Arabic letters that join on both sides, and a
 /// space, which joins on neither.
@@ -167,7 +169,10 @@ fn page_content(doc: &Document) -> String {
 #[test]
 fn an_arabic_paragraph_is_drawn_joined_and_right_to_left() {
     let face = arabic_face();
-    let doc = Document::open(arabic_book(LINE)).expect("a book");
+    let doc = synthesised(
+        "an arabic paragraph is drawn joined and right to left",
+        Document::open(arabic_book(LINE)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(
@@ -230,7 +235,10 @@ fn an_arabic_paragraph_is_drawn_joined_and_right_to_left() {
 fn the_line_is_measured_the_way_it_is_drawn() {
     let face = arabic_face().with_advance(500).with_joined_advance(100);
     let book = one_face_book("Fixture Arabic", &face.build(), 24, LINE);
-    let doc = Document::open_with(book, &OpenOptions::at_page(PAGE.0, PAGE.1)).expect("a book");
+    let doc = synthesised(
+        "the line is measured the way it is drawn",
+        Document::open_with(book, &OpenOptions::at_page(PAGE.0, PAGE.1)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(
@@ -248,7 +256,10 @@ fn the_line_is_measured_the_way_it_is_drawn() {
 /// exists for, met here from the layout side.
 #[test]
 fn the_arabic_book_paginates_and_its_text_extracts() {
-    let doc = Document::open(arabic_book(LINE)).expect("a book");
+    let doc = synthesised(
+        "the arabic book paginates and its text extracts",
+        Document::open(arabic_book(LINE)).expect("a book"),
+    );
     assert_eq!(doc.page_count(), 1, "one paragraph is one page");
     let text = doc.page(0).expect("a page").text().plain_text();
     for ch in LINE.chars().filter(|c| *c != ' ') {
@@ -311,7 +322,10 @@ fn two_face_book(first: &str, second: &str, body: &str) -> Vec<u8> {
 /// indices and only where they sit says which came first.
 #[test]
 fn a_right_to_left_line_in_two_faces_is_drawn_right_to_left() {
-    let doc = Document::open(two_face_book(FIRST_HALF, SECOND_HALF, SPLIT_LINE)).expect("a book");
+    let doc = synthesised(
+        "a right to left line in two faces is drawn right to left",
+        Document::open(two_face_book(FIRST_HALF, SECOND_HALF, SPLIT_LINE)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(
@@ -370,13 +384,16 @@ fn a_right_to_left_line_in_two_faces_is_drawn_right_to_left() {
 #[test]
 fn a_one_face_arabic_line_extracts_in_reading_order() {
     let face = Face::new("Fixture Arabic", SPLIT_LINE).with_joining(Joining { script: *b"arab" });
-    let doc = Document::open(one_face_book(
-        "Fixture Arabic",
-        &face.build(),
-        24,
-        SPLIT_LINE,
-    ))
-    .expect("a book");
+    let doc = synthesised(
+        "a one face arabic line extracts in reading order",
+        Document::open(one_face_book(
+            "Fixture Arabic",
+            &face.build(),
+            24,
+            SPLIT_LINE,
+        ))
+        .expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(objects.len(), 1, "one face, one text object: {content}");
@@ -414,7 +431,10 @@ fn a_one_face_arabic_line_extracts_in_reading_order() {
 /// direction has to be read from the text.
 #[test]
 fn a_left_to_right_line_in_two_faces_keeps_its_order() {
-    let doc = Document::open(two_face_book("ab", "cd", LTR_LINE)).expect("a book");
+    let doc = synthesised(
+        "a left to right line in two faces keeps its order",
+        Document::open(two_face_book("ab", "cd", LTR_LINE)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(
@@ -499,7 +519,10 @@ fn placed_book(x: i16, y: i16) -> Vec<u8> {
 #[test]
 fn a_positioned_glyph_is_drawn_where_its_anchor_puts_it() {
     let face = placed_face(X_PLACEMENT, 0);
-    let doc = Document::open(placed_book(X_PLACEMENT, 0)).expect("a book");
+    let doc = synthesised(
+        "a positioned glyph is drawn where its anchor puts it",
+        Document::open(placed_book(X_PLACEMENT, 0)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(objects.len(), 1, "one face is one text object: {content}");
@@ -533,7 +556,10 @@ fn a_positioned_glyph_is_drawn_where_its_anchor_puts_it() {
 /// forgot the `0 Ts` produces a page whose *first* paragraph is right.
 #[test]
 fn a_vertical_offset_becomes_a_rise_and_is_put_back() {
-    let doc = Document::open(placed_book(X_PLACEMENT, Y_PLACEMENT)).expect("a book");
+    let doc = synthesised(
+        "a vertical offset becomes a rise and is put back",
+        Document::open(placed_book(X_PLACEMENT, Y_PLACEMENT)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(objects.len(), 1, "one face is one text object: {content}");
@@ -574,7 +600,10 @@ fn a_vertical_offset_becomes_a_rise_and_is_put_back() {
 /// in pieces.
 #[test]
 fn the_positioned_page_still_extracts_as_one_line() {
-    let doc = Document::open(placed_book(X_PLACEMENT, Y_PLACEMENT)).expect("a book");
+    let doc = synthesised(
+        "the positioned page still extracts as one line",
+        Document::open(placed_book(X_PLACEMENT, Y_PLACEMENT)).expect("a book"),
+    );
     let text = doc.page(0).expect("a page").text();
     assert_eq!(
         text.lines().len(),
@@ -631,7 +660,10 @@ fn spaced_book(spacing: u32) -> Vec<u8> {
 /// looked for `0 Tc` would pass on a build that dropped the spacing entirely.
 #[test]
 fn letter_spacing_is_folded_into_the_positions() {
-    let doc = Document::open(spaced_book(6)).expect("a book");
+    let doc = synthesised(
+        "letter spacing is folded into the positions",
+        Document::open(spaced_book(6)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(objects.len(), 1, "one face is one text object: {content}");
@@ -644,7 +676,10 @@ fn letter_spacing_is_folded_into_the_positions() {
         "the spacing did not reach the glyph positions: {content}"
     );
 
-    let plain = Document::open(spaced_book(0)).expect("a book");
+    let plain = synthesised(
+        "letter spacing is folded into the positions",
+        Document::open(spaced_book(0)).expect("a book"),
+    );
     let plain = page_content(&plain);
     let plain = text_objects(&plain);
     assert!(
@@ -677,7 +712,10 @@ fn a_mark_takes_no_letter_spacing_of_its_own_in_a_shaped_run() {
         24,
         "<span style=\"letter-spacing: 6px\">A\u{301}Bz</span>",
     );
-    let doc = Document::open(book).expect("a book");
+    let doc = synthesised(
+        "a mark takes no letter spacing of its own in a shaped run",
+        Document::open(book).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(
@@ -752,7 +790,10 @@ const LEAST_INK: usize = 200;
 
 #[test]
 fn the_shaped_page_renders_to_the_bytes_it_always_did() {
-    let doc = Document::open(arabic_book(LINE)).expect("a book");
+    let doc = synthesised(
+        "the shaped page renders to the bytes it always did",
+        Document::open(arabic_book(LINE)).expect("a book"),
+    );
     let bitmap = doc
         .page(0)
         .expect("a page")
@@ -837,7 +878,10 @@ fn drawn_word(face: &Face, word: &str) -> String {
 fn a_right_to_left_line_of_two_styled_spans_is_drawn_right_to_left() {
     let face = arabic_face();
     let body = format!(r#"{FIRST_WORD}<span style="color: #c00000">{SECOND_WORD}</span>"#);
-    let doc = Document::open(arabic_book(&body)).expect("a book");
+    let doc = synthesised(
+        "a right to left line of two styled spans is drawn right to left",
+        Document::open(arabic_book(&body)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     let first = drawn_word(&face, FIRST_WORD);
@@ -872,13 +916,16 @@ fn a_right_to_left_line_of_two_styled_spans_is_drawn_right_to_left() {
 #[test]
 fn a_left_to_right_line_of_two_styled_spans_keeps_its_order() {
     let face = Face::new("Fixture Arabic", "ab cd");
-    let doc = Document::open(one_face_book(
-        "Fixture Arabic",
-        &face.build(),
-        24,
-        r#"ab <span style="color: #c00000">cd</span>"#,
-    ))
-    .expect("a book");
+    let doc = synthesised(
+        "a left to right line of two styled spans keeps its order",
+        Document::open(one_face_book(
+            "Fixture Arabic",
+            &face.build(),
+            24,
+            r#"ab <span style="color: #c00000">cd</span>"#,
+        ))
+        .expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     let glyph = |ch: char| format!("{:04X}", face.glyph_of(ch).expect("covered"));
@@ -907,8 +954,11 @@ fn an_english_line_holding_an_arabic_word_reads_back_as_written() {
     let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}")
         .with_joining(Joining { script: *b"arab" });
     let written = "a \u{628}\u{62D}\u{645} b";
-    let doc = Document::open(one_face_book("Fixture Arabic", &face.build(), 24, written))
-        .expect("a book");
+    let doc = synthesised(
+        "an english line holding an arabic word reads back as written",
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, written))
+            .expect("a book"),
+    );
     let extracted = doc.page(0).expect("a page").text().plain_text();
     assert_eq!(extracted.trim_end(), written);
 }
@@ -965,7 +1015,10 @@ fn a_word_ending_a_line_is_not_joined_to_the_next_line() {
         .expect("meem has a final form");
     for line_height in ["1", "0.8", "0", "1.5"] {
         let body = format!(r#"x</p><p style="line-height: {line_height}">{words}"#);
-        let doc = Document::open(arabic_book(&body)).expect("a book");
+        let doc = synthesised(
+            "a word ending a line is not joined to the next line",
+            Document::open(arabic_book(&body)).expect("a book"),
+        );
         assert_eq!(
             (times_shown(&doc, medial), times_shown(&doc, fin)),
             (0, 60),
@@ -989,8 +1042,10 @@ fn a_styled_letter_in_a_mixed_line_overprints_nothing() {
     let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}")
         .with_joining(Joining { script: *b"arab" });
     let body = "a \u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645} b";
-    let doc =
-        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let doc = synthesised(
+        "a styled letter in a mixed line overprints nothing",
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book"),
+    );
     let page = doc.page(0).expect("a page");
     let text = page.text_with(&TextOptions {
         content_order: true,
@@ -1030,7 +1085,10 @@ fn a_styled_letter_in_a_mixed_line_overprints_nothing() {
 fn a_word_spaced_right_to_left_run_draws_its_words_right_to_left() {
     let face = arabic_face();
     let body = format!(r#"<span style="word-spacing: 4px">{}</span>"#, LINE);
-    let doc = Document::open(arabic_book(&body)).expect("a book");
+    let doc = synthesised(
+        "a word spaced right to left run draws its words right to left",
+        Document::open(arabic_book(&body)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     let first = drawn_word(&face, FIRST_WORD);
@@ -1106,7 +1164,10 @@ fn a_justified_arabic_paragraph_reads_in_order() {
     ];
     let text: Vec<&str> = (0..30).map(|at| words[at % 3]).collect();
     let body = format!(r#"x</p><p style="text-align: justify">{}"#, text.join(" "));
-    let doc = Document::open(arabic_book(&body)).expect("a book");
+    let doc = synthesised(
+        "a justified arabic paragraph reads in order",
+        Document::open(arabic_book(&body)).expect("a book"),
+    );
     let mut read: Vec<String> = Vec::new();
     for page in doc.pages() {
         let plain = page.text().plain_text();
@@ -1131,7 +1192,10 @@ fn a_justified_arabic_paragraph_reads_in_order() {
 fn a_word_split_by_a_span_is_drawn_joined() {
     let face = arabic_face();
     let body = "\u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645}";
-    let doc = Document::open(arabic_book(body)).expect("a book");
+    let doc = synthesised(
+        "a word split by a span is drawn joined",
+        Document::open(arabic_book(body)).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     let drawn: Vec<String> = objects
@@ -1170,7 +1234,10 @@ fn a_text_shadow_is_shaped_in_the_word_its_run_is() {
     let face = arabic_face();
     let body = "<span style=\"text-shadow: 2px 2px #0000c0\">\u{628}\
                 <span style=\"color: #c00000\">\u{62D}</span>\u{645}</span>";
-    let doc = Document::open(arabic_book(body)).expect("a book");
+    let doc = synthesised(
+        "a text shadow is shaped in the word its run is",
+        Document::open(arabic_book(body)).expect("a book"),
+    );
     let content = page_content(&doc);
     let drawn: Vec<String> = text_objects(&content)
         .iter()
@@ -1225,13 +1292,16 @@ fn a_pair_across_a_span_boundary_is_positioned() {
         x: PAIR_X,
         y: 0,
     });
-    let doc = Document::open(one_face_book(
-        "Fixture Pairs",
-        &face.build(),
-        24,
-        "A<span style=\"color: #c00000\">B</span>C",
-    ))
-    .expect("a book");
+    let doc = synthesised(
+        "a pair across a span boundary is positioned",
+        Document::open(one_face_book(
+            "Fixture Pairs",
+            &face.build(),
+            24,
+            "A<span style=\"color: #c00000\">B</span>C",
+        ))
+        .expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     let b = format!("{:04X}", face.glyph_of('B').expect("covered"));
@@ -1300,8 +1370,10 @@ fn a_span_inside_a_word_of_the_other_direction_keeps_the_word_in_order() {
     let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}")
         .with_joining(Joining { script: *b"arab" });
     let body = "a \u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645} b";
-    let doc =
-        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let doc = synthesised(
+        "a span inside a word of the other direction keeps the word in order",
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book"),
+    );
     let drawn = drawn_left_to_right(&doc);
     let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
     assert_eq!(
@@ -1360,8 +1432,10 @@ fn a_number_in_a_right_to_left_run_keeps_its_digits_in_order() {
     let face = Face::new("Fixture Arabic", " 12\u{628}\u{62D}\u{645}")
         .with_joining(Joining { script: *b"arab" });
     let body = "\u{628}\u{62D}\u{645} 12";
-    let doc =
-        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let doc = synthesised(
+        "a number in a right to left run keeps its digits in order",
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book"),
+    );
     let drawn = drawn_left_to_right(&doc);
     let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
     // P2 finds `ب`: a level-1 paragraph, the digits at level 2 by I2, and the
@@ -1400,8 +1474,10 @@ fn a_joiner_inside_a_word_does_not_cut_it() {
     let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}\u{200D}")
         .with_joining(Joining { script: *b"arab" });
     let body = "a \u{628}\u{200D}\u{62D}\u{645} b";
-    let doc =
-        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let doc = synthesised(
+        "a joiner inside a word does not cut it",
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book"),
+    );
     let drawn = drawn_left_to_right(&doc);
     // The joiner is in the text of the glyph it rides on, `ب`'s, and is
     // drawn as nothing of its own.
@@ -1455,13 +1531,16 @@ fn kerned_face() -> Face {
 #[test]
 fn a_kerned_pair_across_a_span_is_measured_kerned() {
     let face = kerned_face();
-    let doc = Document::open(one_face_book(
-        "Fixture Kern",
-        &face.build(),
-        24,
-        "A<span style=\"color: #c00000\">V</span>C",
-    ))
-    .expect("a book");
+    let doc = synthesised(
+        "a kerned pair across a span is measured kerned",
+        Document::open(one_face_book(
+            "Fixture Kern",
+            &face.build(),
+            24,
+            "A<span style=\"color: #c00000\">V</span>C",
+        ))
+        .expect("a book"),
+    );
     let drawn = drawn_left_to_right(&doc);
     let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
     assert_eq!(order, ["A", "V", "C"], "{drawn:?}");
@@ -1490,13 +1569,16 @@ fn a_kerned_pair_across_a_span_is_measured_kerned() {
 #[test]
 fn a_joined_form_across_a_span_is_measured_joined() {
     let face = arabic_face().with_joined_advance(700);
-    let doc = Document::open(one_face_book(
-        "Fixture Arabic",
-        &face.build(),
-        24,
-        "\u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645}",
-    ))
-    .expect("a book");
+    let doc = synthesised(
+        "a joined form across a span is measured joined",
+        Document::open(one_face_book(
+            "Fixture Arabic",
+            &face.build(),
+            24,
+            "\u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645}",
+        ))
+        .expect("a book"),
+    );
     let drawn = drawn_left_to_right(&doc);
     let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
     assert_eq!(order, ["\u{645}", "\u{62D}", "\u{628}"], "{drawn:?}");
@@ -1523,11 +1605,14 @@ fn the_line_breaker_measures_a_kerned_pair_across_a_span() {
     let face = kerned_face();
     let word = "A<span style=\"color: #c00000\">V</span>";
     let body = [word; 4].join(" ");
-    let doc = Document::open_with(
-        one_face_book("Fixture Kern", &face.build(), 24, &body),
-        &OpenOptions::at_page(162.0, 400.0),
-    )
-    .expect("a book");
+    let doc = synthesised(
+        "the line breaker measures a kerned pair across a span",
+        Document::open_with(
+            one_face_book("Fixture Kern", &face.build(), 24, &body),
+            &OpenOptions::at_page(162.0, 400.0),
+        )
+        .expect("a book"),
+    );
     let page = doc.page(0).expect("a page");
     let text = page.text_with(&TextOptions {
         content_order: true,
@@ -1561,8 +1646,10 @@ fn a_mixed_line_is_cut_and_measured_in_one_context() {
         .with_joining(Joining { script: *b"arab" })
         .with_joined_advance(700);
     let body = "a \u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645} b";
-    let doc =
-        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let doc = synthesised(
+        "a mixed line is cut and measured in one context",
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book"),
+    );
     let drawn = drawn_left_to_right(&doc);
     let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
     assert_eq!(
@@ -1606,8 +1693,10 @@ fn a_paragraph_set_on_one_line_opens_as_one_line() {
     let face = Face::new("Fixture Kern", "ab ");
     let words = "ab ".repeat(20_000);
     let body = format!("<span style=\"font-size: 0.001px\">{words}</span>");
-    let doc =
-        Document::open(one_face_book("Fixture Kern", &face.build(), 24, &body)).expect("a book");
+    let doc = synthesised(
+        "a paragraph set on one line opens as one line",
+        Document::open(one_face_book("Fixture Kern", &face.build(), 24, &body)).expect("a book"),
+    );
     assert_eq!(doc.page_count(), 1);
     // The letters are a few ten-thousandths of a point apart, which the
     // extractor reads as one letter drawn over another; what it can say is
@@ -1631,8 +1720,10 @@ fn kerned_positions(style: &str) -> Vec<(String, f64)> {
     // `C` outside the span, so where it lands is the span's width as layout
     // measured it, not only where the shaper drew the span's own glyphs.
     let body = format!("<span style='{style}'>AV</span>C");
-    let doc =
-        Document::open(one_face_book("Fixture Kern", &face.build(), 24, &body)).expect("a book");
+    let doc = synthesised(
+        "kerned positions",
+        Document::open(one_face_book("Fixture Kern", &face.build(), 24, &body)).expect("a book"),
+    );
     let drawn = drawn_left_to_right(&doc);
     let origin = drawn[0].1;
     drawn
@@ -1696,8 +1787,10 @@ fn ligating_face(feature: &[u8; 4]) -> Face {
 /// its `x` lands in points from the first glyph.
 fn ligated(face: &Face, style: &str) -> (String, f64) {
     let body = format!("<span style='{style}'>fi</span>x");
-    let doc =
-        Document::open(one_face_book("Fixture Liga", &face.build(), 24, &body)).expect("a book");
+    let doc = synthesised(
+        "ligated",
+        Document::open(one_face_book("Fixture Liga", &face.build(), 24, &body)).expect("a book"),
+    );
     let content = page_content(&doc);
     let shown: String = text_objects(&content)
         .iter()
@@ -1777,7 +1870,7 @@ fn bidi_face() -> Face {
 fn drawn_lines(attributes: &str, body: &str) -> Vec<Vec<(String, f64)>> {
     let program = bidi_face().build();
     let book = faces_book_with(&[("Fixture Bidi", &program)], 24, attributes, body);
-    let doc = Document::open(book).expect("a book");
+    let doc = synthesised("drawn lines", Document::open(book).expect("a book"));
     page_lines(&doc, 0)
 }
 
@@ -2378,7 +2471,10 @@ fn a_wrapped_line_is_ordered_by_its_paragraphs_levels() {
     let program = Face::new("Fixture Bidi", " ()abcde").build();
     let open = |attributes: &str, options: &OpenOptions| {
         let book = faces_book_with(&[("Fixture Bidi", &program)], 24, attributes, "abc (de");
-        Document::open_with(book, options).expect("a book")
+        synthesised(
+            "a wrapped line is ordered by its paragraphs levels",
+            Document::open_with(book, options).expect("a book"),
+        )
     };
     let whole = page_lines(&open(" dir=\"rtl\"", &OpenOptions::default()), 0);
     assert_eq!(whole.len(), 1, "{whole:?}");
@@ -2448,7 +2544,10 @@ fn an_inside_marker_is_ordered_at_its_paragraphs_level() {
     let program = bidi_face().build();
     let open = |attributes: &str| {
         let book = faces_book_with(&[("Fixture Bidi", &program)], 24, attributes, word);
-        Document::open(book).expect("a book")
+        synthesised(
+            "an inside marker is ordered at its paragraphs level",
+            Document::open(book).expect("a book"),
+        )
     };
     let number_at = |doc: &Document| {
         let content = page_content(doc);
@@ -2515,7 +2614,13 @@ fn an_inside_marker_is_ordered_at_its_paragraphs_level() {
         &format!(" dir=\"rtl\" style=\"{item}; width: {}px\"", width / 0.75),
         "ab ! ab",
     );
-    let wrapped = page_lines(&Document::open(book).expect("a book"), 0);
+    let wrapped = page_lines(
+        &synthesised(
+            "an inside marker is ordered at its paragraphs level",
+            Document::open(book).expect("a book"),
+        ),
+        0,
+    );
     assert_eq!(wrapped.len(), 2, "{wrapped:?}");
     let start = LEFT + width - marker - 4.0 * GLYPH;
     assert!(

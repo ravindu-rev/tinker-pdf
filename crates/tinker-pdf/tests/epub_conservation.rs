@@ -36,12 +36,14 @@
 //! that raises it has to say so in the same commit.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::conservation::{
     self, compare, conservation, spine_text, visible_text, Divergence, SpineSource, SpineText,
 };
 use epub_support::reading::{check, rep, word, Case, Expect, AR, HE, HEN, HEP};
 use tinker_pdf::{Document, DocumentBuilder, OpenOptions};
+use written_support::{authored, synthesised};
 
 // ---- leg 1: the comparator ---------------------------------------------------
 
@@ -248,7 +250,10 @@ fn the_paginated_side_reads_a_real_documents_pages_in_order() {
             page.text(b"F1", 12.0, 20.0, 40.0, word);
         });
     }
-    let doc = Document::open(builder.finish()).expect("a PDF");
+    let doc = authored(
+        "the paginated side reads a real documents pages in order",
+        builder.finish(),
+    );
     assert_eq!(doc.page_count(), 3);
 
     let pages = conservation::paginated_text(&doc);
@@ -363,7 +368,10 @@ fn the_source_side_finds_the_same_spine_the_engine_did() {
         "pandoc-plates.epub",
     ] {
         let bytes = corpus_book(name);
-        let doc = Document::open(bytes.clone()).expect(name);
+        let doc = synthesised(
+            "the source side finds the same spine the engine did",
+            Document::open(bytes.clone()).expect(name),
+        );
         let harness = spine_text(&bytes);
         // **Distinct consecutive** names, because since milestone 8 a chapter
         // takes as many pages as its text needs and `pages()` has one entry
@@ -528,7 +536,10 @@ fn every_committed_book_conserves_the_figure_the_record_states() {
     let mut measured: Vec<String> = Vec::new();
     for name in COMMITTED {
         let bytes = corpus_book(name);
-        let doc = Document::open(bytes.clone()).expect(name);
+        let doc = synthesised(
+            "every committed book conserves the figure the record states",
+            Document::open(bytes.clone()).expect(name),
+        );
         let verdict = conservation(&bytes, &doc);
         let text = spine_text(&bytes);
 
@@ -593,10 +604,14 @@ const COMMITTED: &[&str] = &[
 #[test]
 fn conservation_does_not_depend_on_the_page_box() {
     let bytes = corpus_book("pandoc-book-cover.epub");
-    let wide =
-        Document::open_with(bytes.clone(), &OpenOptions::at_page(300.0, 500.0)).expect("a book");
-    let tall =
-        Document::open_with(bytes.clone(), &OpenOptions::at_page(900.0, 1_200.0)).expect("a book");
+    let wide = synthesised(
+        "conservation does not depend on the page box",
+        Document::open_with(bytes.clone(), &OpenOptions::at_page(300.0, 500.0)).expect("a book"),
+    );
+    let tall = synthesised(
+        "conservation does not depend on the page box",
+        Document::open_with(bytes.clone(), &OpenOptions::at_page(900.0, 1_200.0)).expect("a book"),
+    );
     let at_wide = conservation(&bytes, &wide);
     let at_tall = conservation(&bytes, &tall);
     assert_eq!(at_wide.source, at_tall.source);
@@ -680,7 +695,10 @@ fn a_book_with_an_uppercased_heading_conserves() {
         "h1 { text-transform: uppercase }",
         "<h1>The Swans</h1><p>Ho! pretty swans, do you know?</p>",
     );
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = synthesised(
+        "a book with an uppercased heading conserves",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let pages = conservation::paginated_text(&doc).concat();
     assert!(
         pages.contains("THE SWANS"),
@@ -749,7 +767,10 @@ fn unpointed(text: &str) -> String {
 fn a_bracketed_run_and_its_full_stop_in_right_to_left_text_read_as_written() {
     let read = |style: &str, open: &str, text: &str| {
         let bytes = epub_support::book::styled_book("ar", style, &format!("{open}{text}</p>"));
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = synthesised(
+            "a bracketed run and its full stop in right to left text read as written",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         (
             conservation(&bytes, &doc),
             conservation::conservation_in_logical_order(&bytes, &doc),
@@ -828,7 +849,7 @@ fn a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_dr
     use tinker_pdf_shape::bidi::{logical_order, order_units, BaseDirection};
     let text = unpointed(&bracketed_paragraph("HDAC", 1));
     let bytes = epub_support::book::styled_book("ar", "", &format!("<p>{text}</p>"));
-    let book = Document::open(bytes.clone()).expect("the book opens");
+    let book = synthesised("a dirless line with arabic at both ends and latin in brackets reads as its drawn alike twin", Document::open(bytes.clone()).expect("the book opens"));
     assert!(
         conservation::conservation_in_logical_order(&bytes, &book).holds(),
         "the book reads as written in the direction its paragraph declares"
@@ -853,7 +874,7 @@ fn a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_dr
         }
     }
     editor.put(root, Object::Dict(kept));
-    let doc = Document::open(editor.save(&WriteOptions::default())).expect("the page opens");
+    let doc = authored("a dirless line with arabic at both ends and latin in brackets reads as its drawn alike twin, saved without its structure tree", editor.save(&WriteOptions::default()));
     assert!(
         doc.structure().is_none(),
         "nothing declares the line's direction"
@@ -945,7 +966,10 @@ fn list_markers_and_glosses_in_left_to_right_text_conserve() {
                 for text in [paragraph.clone(), unpointed_hebrew(&unpointed(paragraph))] {
                     let bytes =
                         epub_support::book::styled_book(language, style, &format!("<p>{text}</p>"));
-                    let doc = Document::open(bytes.clone()).expect("the book opens");
+                    let doc = synthesised(
+                        "list markers and glosses in left to right text conserve",
+                        Document::open(bytes.clone()).expect("the book opens"),
+                    );
                     let content = conservation(&bytes, &doc);
                     let logical = conservation::conservation_in_logical_order(&bytes, &doc);
                     assert!(
@@ -970,7 +994,10 @@ fn unpointed_hebrew(text: &str) -> String {
 fn conserves_pointed_and_not(language: &str, style: &str, body: &str) {
     for body in [body.to_owned(), unpointed_hebrew(&unpointed(body))] {
         let bytes = epub_support::book::styled_book(language, style, &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = synthesised(
+            "conserves pointed and not",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let content = conservation(&bytes, &doc);
         let logical = conservation::conservation_in_logical_order(&bytes, &doc);
         assert!(
@@ -1047,7 +1074,10 @@ fn spacing_carries_the_pen_only_within_right_to_left_text() {
     }
     for body in pointed {
         let bytes = epub_support::book::styled_book("he", cells, body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = synthesised(
+            "spacing carries the pen only within right to left text",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let content = conservation(&bytes, &doc);
         let logical = conservation::conservation_in_logical_order(&bytes, &doc);
         assert!(
@@ -1114,7 +1144,10 @@ fn a_neutral_cut_from_its_line_carries_no_pen_into_the_word_after_it() {
         ("ar", worded, "<p><i>(1)</i> عوامل عدّة</p>"),
     ] {
         let bytes = epub_support::book::styled_book(language, style, body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = synthesised(
+            "a neutral cut from its line carries no pen into the word after it",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let content = conservation(&bytes, &doc);
         let logical = conservation::conservation_in_logical_order(&bytes, &doc);
         assert!(
@@ -1187,7 +1220,10 @@ fn a_bracket_pair_the_line_above_resolved_turns_no_line() {
         };
         for body in bodies {
             let bytes = epub_support::book::styled_book("en", style, &body);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = synthesised(
+                "a bracket pair the line above resolved turns no line",
+                Document::open(bytes.clone()).expect("the book opens"),
+            );
             let logical = conservation::conservation_in_logical_order(&bytes, &doc);
             assert!(logical.holds(), "{style:?}, {body}: {logical:?}");
         }
@@ -1236,7 +1272,10 @@ fn an_ornate_parenthesis_or_an_arabic_percent_sign_carries_no_pen() {
         ),
     ] {
         let bytes = epub_support::book::styled_book(language, style, body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = synthesised(
+            "an ornate parenthesis or an arabic percent sign carries no pen",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let content = conservation(&bytes, &doc);
         let logical = conservation::conservation_in_logical_order(&bytes, &doc);
         assert!(
@@ -1267,7 +1306,10 @@ fn a_sign_after_a_number_opening_a_wrapped_arabic_line_reads_as_typed() {
         "<p dir=\"rtl\">جميل بيت كبير نور 10–20% يوم</p>",
     ] {
         let bytes = epub_support::book::styled_book("ar", style, body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = synthesised(
+            "a sign after a number opening a wrapped arabic line reads as typed",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let content = conservation(&bytes, &doc);
         let logical = conservation::conservation_in_logical_order(&bytes, &doc);
         assert!(
@@ -1292,7 +1334,10 @@ fn a_styled_pair_glued_to_the_word_after_it_reads_as_typed_letter_spaced() {
     let style = "p { letter-spacing: 0.25em; text-align: justify; margin: 0 25% }";
     let body = "<p dir=\"rtl\">كتاب <i>?!</i> مدرسة <b>?!</b>الطالب جميل.</p>";
     let bytes = epub_support::book::styled_book("ar", style, body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = synthesised(
+        "a styled pair glued to the word after it reads as typed letter spaced",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let logical = conservation::conservation_in_logical_order(&bytes, &doc);
     assert!(logical.holds(), "{body}: {logical:?}");
 }
@@ -1331,7 +1376,10 @@ fn a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last() {
     };
     for (language, body) in books {
         let bytes = epub_support::book::styled_book(language, narrow, body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = synthesised(
+            "a dirless line opening with a bracket pair reads its full stop last",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let logical = conservation::conservation_in_logical_order(&bytes, &doc);
         assert!(logical.holds(), "{body}: {logical:?}");
     }
@@ -1340,7 +1388,10 @@ fn a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last() {
                 تكبح عوامل. </p>";
     let style = "p, li, td { letter-spacing: 0.5em }";
     let bytes = epub_support::book::styled_book("ar", style, body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = synthesised(
+        "a dirless line opening with a bracket pair reads its full stop last",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let content = conservation(&bytes, &doc);
     let logical = conservation::conservation_in_logical_order(&bytes, &doc);
     assert!(
@@ -1386,7 +1437,7 @@ fn a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops
             ),
         ] {
             let bytes = epub_support::book::styled_book(language, narrow, &body);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = synthesised("a dirless line opening with a bracket pair reads its closing quotes and stops last", Document::open(bytes.clone()).expect("the book opens"));
             let logical = conservation::conservation_in_logical_order(&bytes, &doc);
             assert!(logical.holds(), "{body}: {logical:?}");
         }

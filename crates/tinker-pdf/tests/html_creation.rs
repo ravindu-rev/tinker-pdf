@@ -20,6 +20,7 @@
 
 mod epub_support;
 mod render_support;
+mod written_support;
 
 use std::sync::Arc;
 
@@ -31,6 +32,7 @@ use tinker_pdf::{
     ArchiveWarning, Bitmap, Document, DocumentBuilder, FromHtml, HtmlError, OpenOptions, PageBox,
     RenderOptions, SimpleFontProvider,
 };
+use written_support::{authored, synthesised};
 
 /// The face every pair is set in: Courier's 600/1000 advance, so a line
 /// breaks where arithmetic says and a pair can disagree by a whole character.
@@ -56,11 +58,13 @@ fn document(body: &str) -> String {
     )
 }
 
-/// The finished document a `from_html` call made.
+/// The finished document a `from_html` call made, held to the validate-on-save
+/// helper.
+#[track_caller]
 fn made(markup: &str, stylesheet: &str, page: PageBox) -> Document {
     let (builder, _) =
         DocumentBuilder::from_html(markup, stylesheet, page).expect("the markup lays out");
-    Document::open(builder.finish()).expect("the finished document opens")
+    authored("made", builder.finish())
 }
 
 /// Every line on the first page, its text and where it starts, read back out of
@@ -191,14 +195,18 @@ fn a_document_made_from_html_is_the_book_of_the_same_chapter() {
         let page = PageBox::new(width, height);
         let (builder, report) =
             DocumentBuilder::from_html(wrap(&made_head), sheet, page).expect("the markup lays out");
-        let made = drawn(Document::open(builder.finish()).expect("it opens"));
-        let book = drawn(
+        let made = drawn(authored(
+            "a document made from html is the book of the same chapter",
+            builder.finish(),
+        ));
+        let book = drawn(synthesised(
+            "a document made from html is the book of the same chapter",
             Document::open_with(
                 book_of(&wrap(&book_head), sheet),
                 &OpenOptions::at_page(width, height),
             )
             .expect("the book opens"),
-        );
+        ));
         assert!(made.page_count() >= 2, "the body needs two pages");
         assert_eq!(made.page_count() as usize, report.pages());
         assert_eq!(
@@ -310,7 +318,10 @@ fn tag_soup_makes_the_document_its_tree_is() {
             defect: tinker_pdf::epub::xhtml::MarkupDefect::NotXml
         }]
     );
-    let from_soup = drawn(Document::open(builder.finish()).expect("opens"));
+    let from_soup = drawn(authored(
+        "tag soup makes the document its tree is",
+        builder.finish(),
+    ));
     let from_tree = drawn(made(&tree, sheet, PageBox::new(300.0, 300.0)));
     let (a, b) = (render(&from_soup, 0), render(&from_tree, 0));
     assert!(ink(&a) >= LEAST_INK, "nothing was drawn");
@@ -408,7 +419,7 @@ fn a_provider_answers_what_the_markup_names() {
     let (builder, answered) =
         DocumentBuilder::from_html_with(markup, "", page, &mut Sheet).expect("it lays out");
     assert!(answered.warnings().is_empty(), "{:?}", answered.warnings());
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored("a provider answers what the markup names", builder.finish());
     let bitmap = render(&document, 0);
     let at = 30 * bitmap.stride + 30 * bitmap.components();
     assert_eq!(

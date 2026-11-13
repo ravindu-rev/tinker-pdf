@@ -18,10 +18,12 @@
 
 mod cbz_support;
 mod validated_support;
+mod written_support;
 
 use cbz_support::{distinct_pixels, grey_jpeg, rgb_png, zip, Damage, ZipFile};
-use tinker_pdf::{cbz, Container, CosDocument, Defect, Document, WriteMode, WriteOptions};
+use tinker_pdf::{cbz, Container, Document, WriteMode, WriteOptions};
 use validated_support::{category, flat, numbers, pages, value};
+use written_support::{authored, synthesised};
 
 /// Four pages whose stored order, lexicographic order and natural order all
 /// disagree, and whose third page this build cannot decode.
@@ -38,25 +40,13 @@ fn comic() -> Vec<u8> {
     )
 }
 
-#[track_caller]
-fn valid(label: &str, bytes: &[u8]) -> CosDocument {
-    let doc = CosDocument::open(bytes.to_vec()).expect("the document opens");
-    let defects = tinker_pdf_cos::validate(&doc);
-    assert!(
-        defects.is_empty(),
-        "{label}: {:?}",
-        defects.iter().map(Defect::to_string).collect::<Vec<_>>()
-    );
-    doc
-}
-
 /// The document the synthesiser hands the parser is a valid PDF.
 #[test]
 fn a_synthesised_comic_validates() {
     let (pdf, report) =
         cbz::synthesise(Container::Zip, &comic(), &cbz::Limits::DEFAULT).expect("it synthesises");
     assert_eq!(report.pages().len(), 4);
-    valid("the synthesised document", &pdf);
+    authored("the synthesised document", &pdf);
 }
 
 /// A comic of JPEG 2000 pages validates too, and it is the one whose image
@@ -75,7 +65,7 @@ fn a_synthesised_jpeg_2000_comic_validates() {
         report.pages().iter().all(|p| p.defect.is_none()),
         "both pages are pictures"
     );
-    valid("the synthesised JPEG 2000 comic", &pdf);
+    authored("the synthesised JPEG 2000 comic", &pdf);
 }
 
 /// And so does the same document saved back through the writer, in both
@@ -85,8 +75,10 @@ fn a_synthesised_jpeg_2000_comic_validates() {
 /// the synthesised document, and saving it produces a file that reads clean.
 #[test]
 fn a_saved_synthesised_comic_validates() {
-    let document = Document::open(comic()).expect("the archive opens");
-    assert!(document.archive().is_some(), "it was synthesised");
+    let document = synthesised(
+        "the comic",
+        Document::open(comic()).expect("the archive opens"),
+    );
 
     for linearize in [false, true] {
         let saved = document.editor().save(&WriteOptions {
@@ -94,7 +86,8 @@ fn a_saved_synthesised_comic_validates() {
             linearize,
             ..WriteOptions::default()
         });
-        let doc = valid(if linearize { "linearized" } else { "rewritten" }, &saved);
+        let reopened = authored(if linearize { "linearized" } else { "rewritten" }, &saved);
+        let doc = reopened.cos();
         if linearize {
             let first = doc
                 .catalog()
@@ -127,9 +120,10 @@ fn a_saved_synthesised_comic_validates() {
 fn the_pages_are_at_the_sizes_the_images_are() {
     let (pdf, _) =
         cbz::synthesise(Container::Zip, &comic(), &cbz::Limits::DEFAULT).expect("it synthesises");
-    let doc = valid("the synthesised document", &pdf);
+    let document = authored("the synthesised document", &pdf);
+    let doc = document.cos();
 
-    let pages = pages(&doc);
+    let pages = pages(doc);
     assert_eq!(pages.len(), 4, "four pages");
 
     // Natural order, which is the whole point of the fixture's names: stored
@@ -146,7 +140,7 @@ fn the_pages_are_at_the_sizes_the_images_are() {
         [0.0, 0.0, 6.0, 4.0],
     ];
     for (index, (reference, page)) in pages.iter().enumerate() {
-        let box_ = numbers(&doc, page, b"MediaBox")
+        let box_ = numbers(doc, page, b"MediaBox")
             .unwrap_or_else(|| panic!("page {index} ({reference}) states no /MediaBox"));
         assert_eq!(box_, wanted[index], "page {index}'s /MediaBox");
     }
@@ -156,12 +150,12 @@ fn the_pages_are_at_the_sizes_the_images_are() {
     // badly.
     let sizes: Vec<(i64, i64)> = pages
         .iter()
-        .flat_map(|(_, page)| category(&doc, page, b"XObject"))
+        .flat_map(|(_, page)| category(doc, page, b"XObject"))
         .filter_map(|(_, object)| {
             let dict = object.as_dict()?;
             Some((
-                value(&doc, dict, b"Width").as_int()?,
-                value(&doc, dict, b"Height").as_int()?,
+                value(doc, dict, b"Width").as_int()?,
+                value(doc, dict, b"Height").as_int()?,
             ))
         })
         .collect();
@@ -175,8 +169,8 @@ fn the_pages_are_at_the_sizes_the_images_are() {
     // decode.
     let placeholder = &pages[2].1;
     assert!(
-        category(&doc, placeholder, b"XObject").is_empty(),
+        category(doc, placeholder, b"XObject").is_empty(),
         "the placeholder page carries no image: {}",
-        flat(&doc, &value(&doc, placeholder, b"Resources"))
+        flat(doc, &value(doc, placeholder, b"Resources"))
     );
 }

@@ -30,7 +30,10 @@
 //!   times the page uses the part — which is `State::warn`'s deduplication and
 //!   is invisible to any package that draws its picture once.
 
+mod written_support;
 mod xps_support;
+
+use written_support::{authored, synthesised};
 
 use tinker_pdf::{
     ArchiveWarning, Document, RenderOptions, WriteMode, WriteOptions, XpsElementDefect,
@@ -137,7 +140,7 @@ fn cell_stream(saved: &str) -> String {
 
 /// Every element-level defect a package reported.
 fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
+    let document = synthesised("defects", Document::open(bytes.to_vec()).expect("an XPS"));
     document
         .archive()
         .expect("a synthesised document")
@@ -152,7 +155,7 @@ fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
 
 /// The one page's content stream, as text.
 fn stream(bytes: &[u8]) -> String {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
+    let document = synthesised("stream", Document::open(bytes.to_vec()).expect("an XPS"));
     let cos = document.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
@@ -167,11 +170,15 @@ fn stream(bytes: &[u8]) -> String {
 /// qpdf reads, so an assertion here and an assertion there are about one
 /// artefact.
 fn saved(bytes: &[u8]) -> String {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
+    let document = synthesised(
+        "a package of images",
+        Document::open(bytes.to_vec()).expect("an XPS"),
+    );
     let out = document.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    authored("the package of images, saved", &out);
     String::from_utf8_lossy(&out).into_owned()
 }
 
@@ -620,11 +627,18 @@ fn a_colour_converted_bitmap_is_read_with_its_profile() {
     // and it is silent: the page looks right and the colours are a guess. A
     // counted injection that removed the registration entirely failed nothing
     // at all until these three assertions existed.
-    let document = Document::open(bytes).expect("the package opens");
+    let document = synthesised(
+        "a package whose image names a colour profile",
+        Document::open(bytes).expect("the package opens"),
+    );
     let saved = document.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    authored(
+        "the package whose image names a colour profile, saved",
+        &saved,
+    );
     let holds = |needle: &[u8]| saved.windows(needle.len()).any(|w| w == needle);
     assert!(holds(b"/ICCBased"), "the space is an ICCBased one");
     assert!(holds(b"/N 3"), "declaring the profile's own channel count");
@@ -1135,7 +1149,10 @@ fn a_page_with_an_image_brush_draws_ink() {
            Viewbox="0,0,4,2" Viewport="0,0,200,100""#,
         None,
     );
-    let document = Document::open(bytes).expect("an XPS");
+    let document = synthesised(
+        "a page with an image brush draws ink",
+        Document::open(bytes).expect("an XPS"),
+    );
     let bitmap = document
         .page(0)
         .expect("a page")

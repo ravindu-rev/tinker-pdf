@@ -10,6 +10,7 @@
 //! on the way is named, and that the nesting cap fires.
 
 mod render_support;
+mod written_support;
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use tinker_pdf::{
     ArchiveWarning, Bitmap, Document, DocumentBuilder, FromHtml, OpenError, OpenOptions, PageBox,
     RenderOptions, SimpleFontProvider,
 };
+use written_support::{authored, synthesised};
 
 /// `document` with a face to draw its text in.
 ///
@@ -179,8 +181,10 @@ fn entity_references_resolve_from_the_xhtml_sets() {
 /// heading as its title, and nothing tolerated.**
 #[test]
 fn a_markdown_document_opens_with_its_words_and_its_title() {
-    let document =
-        Document::open_markdown(NOTE.as_bytes().to_vec(), &OpenOptions::default()).expect("opens");
+    let document = synthesised(
+        "a markdown document opens with its words and its title",
+        Document::open_markdown(NOTE.as_bytes().to_vec(), &OpenOptions::default()).expect("opens"),
+    );
     let words = text(&document);
     for expected in [
         "Release notes",
@@ -216,8 +220,11 @@ fn the_title_is_the_first_headings_text_with_its_links_and_images_resolved() {
             "[not a link] and ![nor this",
         ),
     ] {
-        let document = Document::open_markdown(source.as_bytes().to_vec(), &OpenOptions::default())
-            .expect("opens");
+        let document = synthesised(
+            "the title is the first headings text with its links and images resolved",
+            Document::open_markdown(source.as_bytes().to_vec(), &OpenOptions::default())
+                .expect("opens"),
+        );
         assert_eq!(
             document.metadata().title.as_deref(),
             Some(title),
@@ -235,8 +242,11 @@ fn the_title_is_the_first_headings_text_with_its_links_and_images_resolved() {
 #[test]
 fn a_hard_line_break_is_a_line_break_on_the_page() {
     let lines = |source: &str| -> Vec<String> {
-        let document = Document::open_markdown(source.as_bytes().to_vec(), &OpenOptions::default())
-            .expect("opens");
+        let document = synthesised(
+            "a hard line break is a line break on the page",
+            Document::open_markdown(source.as_bytes().to_vec(), &OpenOptions::default())
+                .expect("opens"),
+        );
         let text = document.page(0).expect("a page").text();
         text.lines().iter().map(|line| line.text.clone()).collect()
     };
@@ -261,8 +271,14 @@ fn a_markdown_document_is_the_xhtml_it_translates_to() {
         to_html(NOTE)
     );
     let (from_html, _) = DocumentBuilder::from_html(xhtml, sheet, page).expect("lays out");
-    let a = drawn(Document::open(from_markdown.finish()).expect("opens"));
-    let b = drawn(Document::open(from_html.finish()).expect("opens"));
+    let a = drawn(authored(
+        "a markdown document is the xhtml it translates to",
+        from_markdown.finish(),
+    ));
+    let b = drawn(authored(
+        "a markdown document is the xhtml it translates to",
+        from_html.finish(),
+    ));
     assert_eq!(a.page_count(), b.page_count());
     assert_eq!(a.page_count() as usize, report.pages());
     for at in 0..a.page_count() {
@@ -279,8 +295,11 @@ fn a_markdown_document_is_the_xhtml_it_translates_to() {
 #[test]
 fn raw_html_is_set_as_text_and_counted() {
     let source = "<div class=\"x\">\nunclosed\n\nand <span>inline</span> tags\n";
-    let document = Document::open_markdown(source.as_bytes().to_vec(), &OpenOptions::default())
-        .expect("opens");
+    let document = synthesised(
+        "raw html is set as text and counted",
+        Document::open_markdown(source.as_bytes().to_vec(), &OpenOptions::default())
+            .expect("opens"),
+    );
     assert_eq!(
         warnings(&document),
         [ArchiveWarning::Translation {
@@ -297,9 +316,11 @@ fn raw_html_is_set_as_text_and_counted() {
 /// **Bytes that are not UTF-8 are read as U+FFFD and counted.**
 #[test]
 fn bytes_that_are_not_utf_8_are_counted() {
-    let document =
+    let document = synthesised(
+        "bytes that are not utf 8 are counted",
         Document::open_markdown(b"caf\xE9 and na\xEFve\n".to_vec(), &OpenOptions::default())
-            .expect("opens");
+            .expect("opens"),
+    );
     // The replacement character is then a character the standard 14 have no
     // glyph for, which is the second warning and a true one.
     assert_eq!(
@@ -356,8 +377,10 @@ fn a_container_past_the_nesting_cap_is_read_as_text_and_counted() {
         MAX_MARKDOWN_NESTING - 1,
         "the document is one container and the quotes are the rest"
     );
-    let document =
-        Document::open_markdown(deep.into_bytes(), &OpenOptions::default()).expect("opens");
+    let document = synthesised(
+        "a container past the nesting cap is read as text and counted",
+        Document::open_markdown(deep.into_bytes(), &OpenOptions::default()).expect("opens"),
+    );
     assert!(
         warnings(&document).iter().any(|w| matches!(
             w,
@@ -396,8 +419,10 @@ fn inline_nesting_past_what_the_reader_takes_keeps_the_rest_of_the_document() {
         format!("{lists}{}- {nest}\n\nafter the nest\n", "  ".repeat(levels)),
     ] {
         assert_eq!(to_html(&source).matches("<em>").count(), 300);
-        let document =
-            Document::open_markdown(source.into_bytes(), &OpenOptions::default()).expect("opens");
+        let document = synthesised(
+            "inline nesting past what the reader takes keeps the rest of the document",
+            Document::open_markdown(source.into_bytes(), &OpenOptions::default()).expect("opens"),
+        );
         let words = text(&document);
         assert!(words.contains("after the nest"), "{words:?}");
         assert!(words.contains("a a x a a"), "the nest's own text is kept");

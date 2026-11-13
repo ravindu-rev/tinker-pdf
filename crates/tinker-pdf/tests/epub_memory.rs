@@ -31,9 +31,11 @@
 //! promises.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::{Document, OpenOptions, WriteMode, WriteOptions};
+use written_support::{authored, synthesised};
 
 /// A page whose whole content is one large picture.
 const WIDE: u32 = 2000;
@@ -150,11 +152,15 @@ fn book_of_one_plate() -> Vec<u8> {
 #[test]
 fn a_book_of_one_large_plate_does_not_cost_its_decoded_size() {
     let bytes = book_of_one_plate();
-    let document = Document::open(bytes).expect("a book");
+    let document = synthesised(
+        "a book of one large plate",
+        Document::open(bytes).expect("a book"),
+    );
     let saved = document.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    authored("the book of one large plate, saved", &saved);
 
     let decoded = (WIDE as usize) * (TALL as usize) * 3;
     assert!(
@@ -236,6 +242,9 @@ fn measure(label: &str, dir: &std::path::Path) {
         println!("epub-memory: {label} holds no books");
         return;
     };
+    // Not held to the validate-on-save helper: the strict validator decodes
+    // every stream, a picture's raster among them, and that is the peak this
+    // process is read for. The book above is held.
     let document = Document::open_with(bytes.clone(), &OpenOptions::default())
         .unwrap_or_else(|e| panic!("{name}: {e:?}"));
     let report = document.archive().expect("a book");

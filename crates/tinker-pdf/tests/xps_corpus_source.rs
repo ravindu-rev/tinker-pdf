@@ -53,6 +53,9 @@ use std::path::{Path, PathBuf};
 
 use tinker_pdf::{DeviceSpace, DocumentBuilder, Function, ImageData, PageBuilder, Shading};
 
+mod written_support;
+use written_support::authored;
+
 /// The page every source document is, in points.
 ///
 /// Not US Letter, and deliberately: 400 pt is 533.333 XPS units and `xpswrite`
@@ -457,8 +460,7 @@ fn the_committed_sources_are_what_this_writer_writes_today() {
 #[test]
 fn every_source_document_opens() {
     for (name, bytes) in documents() {
-        let document = tinker_pdf::Document::open(bytes)
-            .unwrap_or_else(|e| panic!("{name} does not open: {e:?}"));
+        let document = authored(name, bytes);
         assert_eq!(document.page_count(), 1, "{name}: one page");
         let page = document.page(0).unwrap_or_else(|| panic!("{name}: page 0"));
         assert_eq!(page.size(), PAGE, "{name}: the page size");

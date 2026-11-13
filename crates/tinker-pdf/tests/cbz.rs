@@ -20,6 +20,7 @@
 //! two blank pages compare equal.
 
 mod cbz_support;
+mod written_support;
 
 use cbz_support::{
     broken_png, distinct_pixels, grey_jpeg, one_image_page, pdf, rgb_png, stream, zip, Damage,
@@ -31,11 +32,18 @@ use tinker_pdf::{
     WriteOptions,
 };
 use tinker_pdf_filters::png_scan;
+use written_support::{authored, synthesised};
 
 // ---- helpers -----------------------------------------------------------
 
+/// The archive opened, the document it synthesised held to the
+/// validate-on-save helper.
+#[track_caller]
 fn open(archive: &[u8]) -> Document {
-    Document::open(archive.to_vec()).expect("the archive opens as a document")
+    synthesised(
+        "a comic",
+        Document::open(archive.to_vec()).expect("the archive opens as a document"),
+    )
 }
 
 fn render(document: &Document, page: u32) -> Bitmap {
@@ -437,7 +445,7 @@ fn a_synthesised_document_saves_and_reopens() {
         ..WriteOptions::default()
     });
 
-    let reopened = Document::open(saved).expect("the saved document opens");
+    let reopened = authored("the comic, saved linearized", saved);
     assert_eq!(reopened.page_count(), 2);
     assert_eq!(reopened.page(0).expect("a page").size(), (4.0, 5.0));
     assert_eq!(reopened.page(1).expect("a page").size(), (8.0, 8.0));
@@ -761,6 +769,9 @@ fn a_page_count_at_the_cap_still_opens() {
         let archive = zip(&files, Damage::None);
         let result = cbz::synthesise(Container::Zip, &archive, &limits);
         assert_eq!(result.is_ok(), expected, "{count} pages against a cap of 4");
+        if let Ok((pdf, _)) = &result {
+            authored(&format!("{count} pages under a cap of 4"), pdf);
+        }
     }
 }
 
@@ -789,7 +800,9 @@ fn a_synthesis_past_the_byte_cap_is_refused_by_name() {
         max_synthesised: charge,
         ..cbz::Limits::DEFAULT
     };
-    assert!(cbz::synthesise(Container::Zip, &archive, &at_the_cap).is_ok());
+    let (pdf, _) = cbz::synthesise(Container::Zip, &archive, &at_the_cap)
+        .expect("a comic at the cap synthesises");
+    authored("a comic at the byte cap", &pdf);
 
     let one_short = cbz::Limits {
         max_synthesised: charge - 1,
@@ -820,6 +833,7 @@ fn the_synthesised_document_fits_inside_what_was_charged_for_it() {
 
         let (pdf, report) = cbz::synthesise(Container::Zip, &archive, &cbz::Limits::DEFAULT)
             .expect("it synthesises");
+        authored(&format!("{count} pages"), &pdf);
         assert_eq!(report.synthesised_bytes(), pdf.len());
         assert!(
             pdf.len() <= charge,
@@ -871,6 +885,11 @@ fn truncating_a_good_archive_anywhere_never_panics() {
     for cut in 0..archive.len() {
         let bytes = archive[..cut].to_vec();
         if let Ok(document) = Document::open(bytes) {
+            let document = if document.archive().is_some() {
+                synthesised(&format!("the archive cut at {cut}"), document)
+            } else {
+                document
+            };
             for index in 0..document.page_count() {
                 let _ = document.page(index).map(|p| p.size());
             }
@@ -893,6 +912,11 @@ fn flipping_any_single_byte_never_panics() {
         let mut bytes = archive.clone();
         bytes[at] ^= 0xFF;
         if let Ok(document) = Document::open(bytes) {
+            let document = if document.archive().is_some() {
+                synthesised(&format!("the archive with byte {at} flipped"), document)
+            } else {
+                document
+            };
             if let Some(page) = document.page(0) {
                 let _ = page.render(&RenderOptions::default());
             }

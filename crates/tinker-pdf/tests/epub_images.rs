@@ -45,6 +45,7 @@
 
 mod cbz_support;
 mod epub_support;
+mod written_support;
 
 use std::collections::BTreeSet;
 
@@ -54,6 +55,7 @@ use tinker_pdf::cbz::{ImageDefect, ImageFormat};
 use tinker_pdf::epub::read::PX_TO_PT;
 use tinker_pdf::epub::{DEFAULT_PAGE, PAGE_MARGIN};
 use tinker_pdf::{ArchiveWarning, Document, OpenOptions, RenderOptions};
+use written_support::synthesised;
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -122,8 +124,15 @@ fn book(body: &str, resources: &[(&str, Vec<u8>)]) -> Vec<u8> {
     ocf_zip(&entries, &directory)
 }
 
+/// The book of `body` opened, the document it synthesised held to the
+/// validate-on-save helper.
+#[track_caller]
 fn open(body: &str, resources: &[(&str, Vec<u8>)]) -> Document {
-    Document::open_with(book(body, resources), &OpenOptions::default()).expect("the book opens")
+    synthesised(
+        "a book with pictures",
+        Document::open_with(book(body, resources), &OpenOptions::default())
+            .expect("the book opens"),
+    )
 }
 
 /// A picture whose every pixel differs from every other, so a page drawn from

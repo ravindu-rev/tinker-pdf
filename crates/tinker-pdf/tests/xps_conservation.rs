@@ -91,9 +91,11 @@
 //! real packages and one hole nothing else covered, not sole custody of seven
 //! defect classes.
 
+mod written_support;
 mod xps_support;
 
 use tinker_pdf::{DeviceSpace, Document, DocumentBuilder, Function, ImageData, Shading};
+use written_support::{authored, synthesised};
 use xps_support::conservation::{
     conservation, conserve, document_census, markup_census, Census, Divergence, Gradient, Mark,
     PageCensus, Paint, Rect, Run,
@@ -1165,7 +1167,10 @@ fn the_document_census_reads_a_document_this_test_wrote() {
         page.text(b"F1", 12.0, 20.0, 60.0, "HELLO");
     });
 
-    let document = Document::open(builder.finish()).expect("a document");
+    let document = authored(
+        "the document census reads a document this test wrote",
+        builder.finish(),
+    );
     let census = document_census(&document);
     assert_eq!(census.pages.len(), 1);
     let page = &census.pages[0];
@@ -1221,7 +1226,10 @@ fn the_document_census_reads_the_pages_in_page_order() {
             page.fill_rect(10.0, 10.0, 10.0 * (index as f64 + 1.0), 10.0, grey);
         });
     }
-    let document = Document::open(builder.finish()).expect("a document");
+    let document = authored(
+        "the document census reads the pages in page order",
+        builder.finish(),
+    );
     let census = document_census(&document);
     assert_eq!(census.pages.len(), 3);
     let widths: Vec<f64> = census
@@ -1351,7 +1359,10 @@ fn an_interleaved_package_states_the_census_of_the_one_it_was_cut_from() {
     // do not say: a font joined from its pieces in the wrong order still
     // yields a run at the right place, in glyphs that are not the file's.
     let render = |bytes: Vec<u8>| {
-        let document = Document::open(bytes).expect("the package opens");
+        let document = synthesised(
+            "an interleaved package states the census of the one it was cut from",
+            Document::open(bytes).expect("the package opens"),
+        );
         assert!(
             document.archive().expect("a report").warnings().is_empty(),
             "{:?}",
@@ -1436,7 +1447,10 @@ fn the_package_that_used_to_be_excluded_now_conserves_with_its_profiles() {
 
     // No refusal is left on the element, which is what the old assertion was
     // counting.
-    let document = Document::open(bytes).expect("gs-images.xps opens");
+    let document = synthesised(
+        "the package that used to be excluded now conserves with its profiles",
+        Document::open(bytes).expect("gs-images.xps opens"),
+    );
     let report = document.archive().expect("a report");
     let refusals: Vec<&tinker_pdf::ArchiveWarning> = report
         .warnings()

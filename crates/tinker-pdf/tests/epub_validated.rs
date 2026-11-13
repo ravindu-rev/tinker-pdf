@@ -18,11 +18,13 @@
 
 mod epub_support;
 mod validated_support;
+mod written_support;
 
 use epub_support::typeface::Face;
 use epub_support::{ocf_zip, OcfEntry};
-use tinker_pdf::{CosDocument, Defect, Document, Name, OpenOptions, WriteOptions};
+use tinker_pdf::{CosDocument, Document, Name, OpenOptions, WriteOptions};
 use validated_support::{category, flat, numbers, pages, value};
+use written_support::{authored, synthesised};
 
 const CONTAINER_XML: &str = concat!(
     r#"<?xml version="1.0" encoding="UTF-8"?>"#,
@@ -129,18 +131,6 @@ fn three_face_book() -> Vec<u8> {
     ocf_zip(&entries, &directory)
 }
 
-#[track_caller]
-fn valid(label: &str, bytes: &[u8]) -> CosDocument {
-    let doc = CosDocument::open(bytes.to_vec()).expect("the document opens");
-    let defects = tinker_pdf_cos::validate(&doc);
-    assert!(
-        defects.is_empty(),
-        "{label}: {:?}",
-        defects.iter().map(Defect::to_string).collect::<Vec<_>>()
-    );
-    doc
-}
-
 /// Every page's content stream, decoded, in page order.
 fn contents(doc: &CosDocument) -> Vec<String> {
     pages(doc)
@@ -164,14 +154,16 @@ fn contents(doc: &CosDocument) -> Vec<String> {
 
 #[test]
 fn a_synthesised_book_validates() {
-    let doc = Document::open(book()).expect("a book");
+    let doc = synthesised(
+        "the synthesised document",
+        Document::open(book()).expect("a book"),
+    );
     assert_eq!(doc.page_count(), 3);
-    valid("the synthesised document", doc.cos().bytes());
 }
 
 #[test]
 fn a_saved_synthesised_book_validates() {
-    let doc = Document::open(book()).expect("a book");
+    let doc = synthesised("a book", Document::open(book()).expect("a book"));
     for (label, options) in [
         ("saved", WriteOptions::default()),
         (
@@ -182,7 +174,7 @@ fn a_saved_synthesised_book_validates() {
             },
         ),
     ] {
-        valid(label, &doc.editor().save(&options));
+        authored(label, doc.editor().save(&options));
     }
 }
 
@@ -194,22 +186,26 @@ fn a_saved_synthesised_book_validates() {
 /// number of pages at the wrong size satisfies the first and not the second.
 #[test]
 fn the_spines_pages_are_at_the_box_the_caller_stated() {
-    let doc = Document::open_with(book(), &OpenOptions::at_page(300.0, 500.0)).expect("a book");
+    let doc = synthesised(
+        "a book at 300 x 500",
+        Document::open_with(book(), &OpenOptions::at_page(300.0, 500.0)).expect("a book"),
+    );
     let pdf = doc.editor().save(&WriteOptions::default());
-    let doc = valid("the saved book", &pdf);
+    let held = authored("the saved book", &pdf);
+    let doc = held.cos();
 
-    let pages = pages(&doc);
+    let pages = pages(doc);
     assert_eq!(pages.len(), 3, "three pages");
     for (reference, page) in &pages {
         assert_eq!(
-            numbers(&doc, page, b"MediaBox"),
+            numbers(doc, page, b"MediaBox"),
             Some(vec![0.0, 0.0, 300.0, 500.0]),
             "page {reference} is not the box the caller stated"
         );
         assert!(
-            category(&doc, page, b"XObject").is_empty(),
+            category(doc, page, b"XObject").is_empty(),
             "a book of placeholders carries no image: {}",
-            flat(&doc, &value(&doc, page, b"Resources"))
+            flat(doc, &value(doc, page, b"Resources"))
         );
     }
 }
@@ -224,11 +220,12 @@ fn the_spines_pages_are_at_the_box_the_caller_stated() {
 /// and third. Only reading the operators tells those apart.
 #[test]
 fn a_placeholder_page_and_a_page_that_reads_are_different_operators() {
-    let doc = Document::open(book()).expect("a book");
+    let doc = synthesised("a book", Document::open(book()).expect("a book"));
     let pdf = doc.editor().save(&WriteOptions::default());
-    let doc = valid("the saved book", &pdf);
+    let held = authored("the saved book", &pdf);
+    let doc = held.cos();
 
-    let contents = contents(&doc);
+    let contents = contents(doc);
     assert_eq!(contents.len(), 3, "three pages, three content streams");
 
     // The middle page: the spine item that does not resolve. The grey is
@@ -285,9 +282,10 @@ fn a_placeholder_page_and_a_page_that_reads_are_different_operators() {
 /// nothing else does.
 #[test]
 fn the_books_title_reaches_the_documents_info() {
-    let doc = Document::open(book()).expect("a book");
+    let doc = synthesised("a book", Document::open(book()).expect("a book"));
     let pdf = doc.editor().save(&WriteOptions::default());
-    let doc = valid("the saved book", &pdf);
+    let held = authored("the saved book", &pdf);
+    let doc = held.cos();
 
     let info = doc
         .trailer()
@@ -321,11 +319,15 @@ fn the_books_title_reaches_the_documents_info() {
 /// rather than in aggregate.
 #[test]
 fn a_books_three_faces_keep_their_own_widths() {
-    let doc = Document::open(three_face_book()).expect("a book");
+    let doc = synthesised(
+        "a book of three faces",
+        Document::open(three_face_book()).expect("a book"),
+    );
     let pdf = doc.editor().save(&WriteOptions::default());
-    let doc = valid("the saved book", &pdf);
+    let held = authored("the saved book", &pdf);
+    let doc = held.cos();
 
-    let stream = contents(&doc).first().cloned().expect("one page");
+    let stream = contents(doc).first().cloned().expect("one page");
     assert_eq!(
         stream.matches("BT /").count(),
         3,
@@ -335,29 +337,29 @@ fn a_books_three_faces_keep_their_own_widths() {
         assert!(stream.contains(resource), "{resource} is not in {stream}");
     }
 
-    let (_, page) = pages(&doc).into_iter().next().expect("one page");
+    let (_, page) = pages(doc).into_iter().next().expect("one page");
     for (name, advance) in [("Bf0", 500.0), ("Bf1", 750.0), ("Bf2", 250.0)] {
-        let (_, font) = validated_support::resource(&doc, &page, b"Font", name.as_bytes())
+        let (_, font) = validated_support::resource(doc, &page, b"Font", name.as_bytes())
             .unwrap_or_else(|| panic!("{name} is not in the page's resources"));
         let font = font.as_dict().expect("a font dictionary").clone();
         assert_eq!(
-            validated_support::name(&doc, &font, b"Subtype").as_deref(),
+            validated_support::name(doc, &font, b"Subtype").as_deref(),
             Some(&b"Type0"[..]),
             "{name} is not a composite font"
         );
         assert_eq!(
-            validated_support::name(&doc, &font, b"Encoding").as_deref(),
+            validated_support::name(doc, &font, b"Encoding").as_deref(),
             Some(&b"Identity-H"[..])
         );
 
-        let descendants = value(&doc, &font, b"DescendantFonts");
+        let descendants = value(doc, &font, b"DescendantFonts");
         let descendants = descendants.as_array().expect("9.7.1's one descendant");
         let descendant = doc.resolve(&descendants[0]);
         let descendant = descendant.as_dict().expect("a CID font").clone();
 
         // 9.7.4.3: `c [w1 w2 ...]`, and every width in it is this face's own
         // advance rather than the first face's.
-        let widths = value(&doc, &descendant, b"W");
+        let widths = value(doc, &descendant, b"W");
         let widths = widths.as_array().expect("a /W array").to_vec();
         let mut seen = 0usize;
         for entry in &widths {

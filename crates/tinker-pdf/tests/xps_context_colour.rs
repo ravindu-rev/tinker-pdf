@@ -94,9 +94,11 @@
 //! bytes against the fixture's own rather than checking that *a* profile was
 //! written.
 
+mod written_support;
 mod xps_support;
 
 use tinker_pdf::{ArchiveWarning, Document, WriteMode, WriteOptions, XpsElementDefect};
+use written_support::{authored, synthesised};
 use xps_support::{
     archive, before_content_types, binary_part, content_types_with, one_page_package, with, XPS_NS,
 };
@@ -177,7 +179,7 @@ fn n_channel_lut(n: u8) -> Vec<u8> {
 
 /// The red channel at the middle of a rendered page.
 fn ink(bytes: &[u8]) -> u8 {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
+    let document = synthesised("ink", Document::open(bytes.to_vec()).expect("an XPS"));
     let bitmap = document
         .page(0)
         .expect("a page")
@@ -206,7 +208,7 @@ fn package(body: &str, profile: Option<&[u8]>) -> Vec<u8> {
 }
 
 fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
+    let document = synthesised("defects", Document::open(bytes.to_vec()).expect("an XPS"));
     document
         .archive()
         .expect("a synthesised document")
@@ -220,7 +222,7 @@ fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
 }
 
 fn stream(bytes: &[u8]) -> String {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
+    let document = synthesised("stream", Document::open(bytes.to_vec()).expect("an XPS"));
     let cos = document.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
@@ -230,11 +232,16 @@ fn stream(bytes: &[u8]) -> String {
 /// The whole synthesised document, saved. Uncompressed, so a profile's bytes
 /// are in it as themselves.
 fn saved(bytes: &[u8]) -> Vec<u8> {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
-    document.editor().save(&WriteOptions {
+    let document = synthesised(
+        "a package with context colour",
+        Document::open(bytes.to_vec()).expect("an XPS"),
+    );
+    let saved = document.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
-    })
+    });
+    authored("the package with context colour, saved", &saved);
+    saved
 }
 
 /// Whether `needle` appears in `haystack`.
