@@ -225,6 +225,7 @@ already carries it.
 | `bytes_scanned` | a byte the repair scan's keyword searches looked through, a step rather than a quantity | the same, from the searches' own count, which the repair pass's unit test reads too | built |
 | `content_tokens_read` | a token the content interpreter took from its tokenizer, nested content included | `tinker-pdf-content`'s interpreter, in its own state, added once a run by `interpret_counted` | built |
 | `operators_run` | an operator the content interpreter ran, nested content included | the same | built |
+| `shading_functions_evaluated` | a shading's function evaluated for a colour: once a table entry where a sweep reads it through a colour table, once a colour asked of it otherwise | the renderer | built |
 | `jpeg_held` | a byte a JPEG decode held beside the image it decoded into — coefficients, planes and the strip it handed on — the most at once, a maximum | `tinker-pdf-filters`' strip decode, handed back as a value (`JpegHeld`), and the facade's image path, which writes each strip into the image | built |
 
 `work()` sums every counter that counts a step taken, and leaves out maxima and

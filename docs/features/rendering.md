@@ -170,7 +170,23 @@ stops, where a circle's radius reaches zero, where no circle reaches the
 point — or where their error bound is past 2^-24, the pixel takes the
 expression, so a shading paints the pixels the expression paints. A
 function-based shading, a radial family whose quadratic is linear, and an axis
-a pixel crosses more than eight thousand times are evaluated at every pixel. Types 4–7 —
+a pixel crosses more than eight thousand times are evaluated at every pixel.
+A one-input function of types 0, 2 or 3, or an array of them
+(`Function::tabulable`), is read through a `ColorTable` wherever the shape's
+rectangle on the whole page holds more pixels than the table has entries:
+its colours, converted, at 1 025 evenly spaced inputs — `0` to `1` for an
+axial or radial shading, the span of its vertices' inputs for a mesh — each
+evaluated once (`a_shading_evaluates_its_function_at_most_once_per_table_entry`),
+and read per pixel through the input in 16.16 fixed point, the two entries
+either side mixed in integers. A lookup is a function of the input alone, so
+a tile reads what the page reads, and the decision is taken on the page's
+rectangle, never the tile's (ruling 5). At an entry a lookup is the
+function's colour; between entries it is within a level of 255 of it wherever
+two intervals' middle entry lies within a level of the mean of their ends,
+and where it does not — a stitch's jump, a curve's steep foot — the input is
+evaluated as it is asked
+(`a_table_agrees_with_the_clause_at_and_between_its_entries`, ruling 22). A
+type 4 function is evaluated at every pixel. Types 4–7 —
 free-form and lattice-form triangle meshes, Coons and tensor patches
 (8.7.4.5.5–8.7.4.5.8) — are geometry, carried as a `Mesh`: a Coons patch is
 stored as the tensor patch 8.7.4.5.7's formula makes it, so there is one
@@ -705,8 +721,11 @@ takes and hands them back as `Bitmap::stats`, an `Option<Stats>` that is
 `None` whenever it was not asked — and for a bitmap `Bitmap::from_png` reads
 or a caller builds. `Stats` (`Copy`, `Default`, `Eq`, `#[non_exhaustive]`,
 every field a public `u64`) names them: `glyphs_shown`, every glyph the
-interpreter showed the renderer, and `outlines_filled`, every glyph outline it
-painted, both counted by the renderer, a tiling pattern's cell included;
+interpreter showed the renderer, `outlines_filled`, every glyph outline it
+painted, and `shading_functions_evaluated`, every evaluation of a shading's
+function for a colour — once a table entry where a sweep reads the function
+through a `ColorTable`, once a colour asked of it otherwise — all counted by
+the renderer, a tiling pattern's cell included;
 `font_dictionaries_resolved`, each font a resource scope reads — once for
 each name its content selects a font by, the first time the scope is asked
 about the name, and kept for every render over the scope: a font a scope

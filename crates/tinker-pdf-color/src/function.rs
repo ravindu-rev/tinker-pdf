@@ -118,6 +118,24 @@ impl Function {
         self.append(inputs, out);
     }
 
+    /// Whether this is a function of one input whose values a table can stand
+    /// in for: a type 0 table of one input, a type 2 exponential, a type 3
+    /// stitch of such functions, or an array of them (7.10.2 to 7.10.4). A
+    /// type 4 program, a table of more inputs and the identity a function that
+    /// could not be read becomes are evaluated where they are asked.
+    #[must_use]
+    pub fn tabulable(&self) -> bool {
+        match self {
+            Function::Sampled { size, domain, .. } => size.len() == 1 && domain.len() <= 1,
+            Function::Exponential { .. } => true,
+            Function::Stitching { functions, .. } => functions.iter().all(Function::tabulable),
+            Function::Array(functions) => {
+                !functions.is_empty() && functions.iter().all(Function::tabulable)
+            }
+            Function::PostScript { .. } | Function::Identity => false,
+        }
+    }
+
     /// Appends the outputs to `out`, leaving what it already held alone.
     fn append(&self, inputs: &[f64], out: &mut Vec<f64>) {
         match self {
@@ -1288,5 +1306,56 @@ mod tests {
             }
             .eval(&[0.5]);
         }
+    }
+
+    /// The functions a table stands in for: one input, of types 0, 2 or 3,
+    /// or an array of them, all the way down a stitch.
+    #[test]
+    fn a_table_stands_in_for_one_input_types_0_2_and_3() {
+        let exponential = Function::Exponential {
+            domain: (0.0, 1.0),
+            c0: vec![0.0],
+            c1: vec![1.0],
+            n: 2.0,
+        };
+        let one_input = Function::Sampled {
+            domain: vec![(0.0, 1.0)],
+            range: vec![(0.0, 1.0)],
+            size: vec![4],
+            bits: 8,
+            encode: vec![],
+            decode: vec![],
+            samples: vec![0, 80, 160, 255],
+        };
+        let two_inputs = Function::Sampled {
+            domain: vec![(0.0, 1.0); 2],
+            range: vec![(0.0, 1.0)],
+            size: vec![2, 2],
+            bits: 8,
+            encode: vec![],
+            decode: vec![],
+            samples: vec![0, 80, 160, 255],
+        };
+        let calculator = Function::PostScript {
+            domain: vec![(0.0, 1.0)],
+            range: vec![(0.0, 1.0)],
+            program: parse_postscript(b"{ 2 mul }"),
+        };
+        let stitch = |pieces: Vec<Function>| Function::Stitching {
+            domain: (0.0, 1.0),
+            bounds: vec![0.5; pieces.len().saturating_sub(1)],
+            encode: vec![(0.0, 1.0); pieces.len()],
+            functions: pieces,
+        };
+        assert!(exponential.tabulable());
+        assert!(one_input.tabulable());
+        assert!(stitch(vec![exponential.clone(), one_input.clone()]).tabulable());
+        assert!(Function::Array(vec![exponential.clone(), one_input.clone()]).tabulable());
+        assert!(!two_inputs.tabulable());
+        assert!(!calculator.tabulable());
+        assert!(!Function::Identity.tabulable());
+        assert!(!stitch(vec![exponential.clone(), calculator.clone()]).tabulable());
+        assert!(!Function::Array(vec![exponential, calculator]).tabulable());
+        assert!(!Function::Array(Vec::new()).tabulable());
     }
 }

@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
-pub use shading::{Shading, ShadingScratch};
+pub use shading::{ColorTable, Shading, ShadingScratch, TABLE_ENTRIES};
 use tinker_pdf_content::{
     Device, Glyph, GraphicsState, ImageRef, LineCap as ContentCap, LineJoin as ContentJoin, Matrix,
     PathSegment,
@@ -789,6 +789,11 @@ pub struct RenderCounts {
     /// stroked or both, once a glyph. A glyph with no outline, an empty one
     /// and one a clipping-only mode adds to the clip are not.
     pub outlines_filled: u64,
+    /// A shading's function evaluated for a colour: once a table entry where
+    /// a sweep reads it through a [`ColorTable`](shading::ColorTable), and
+    /// once a colour asked of it otherwise — each pixel of a sweep no table
+    /// stands in for, and each input a table does not vouch for.
+    pub shading_functions_evaluated: u64,
 }
 
 /// The rasterizing device.
@@ -1755,8 +1760,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let (x_start, y_start, x_end, y_end) =
             area.overlap_at((ox, oy), self.canvas.width, self.canvas.height);
         let mut scratch = ShadingScratch::default();
+        // P-14.5: through a table, where the shape's rectangle on the whole
+        // page asks for more colours than the table holds.
+        if let Some((space, function)) = shading.parametric() {
+            scratch.tabulate(space, function, 0.0, 1.0, self.page_region(shape).area());
+        }
         for row in y_start..y_end {
             if self.stopping() {
+                self.count_evaluations(&scratch);
                 return true;
             }
             // The device pixel, in the page's frame: the one number a tile
@@ -1778,7 +1789,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     .blend_pixel_with(col, row, Color { r, g, b, a: 0xFF }, weight, mode);
             }
         }
+        self.count_evaluations(&scratch);
         true
+    }
+
+    /// Adds the function evaluations a sweep made to the render's count.
+    fn count_evaluations(&mut self, scratch: &ShadingScratch) {
+        self.counts.shading_functions_evaluated = self
+            .counts
+            .shading_functions_evaluated
+            .saturating_add(scratch.evaluations());
     }
 
     /// Paints a mesh shading through a coverage mask (8.7.4.5.5 to 8.7.4.5.8).
@@ -1843,8 +1863,20 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         //
         // One shading scratch for the whole colour pass, taken out of its
         // cell for each pixel and put back, so the pass allocates nothing per
-        // pixel.
-        let shading = core::cell::Cell::new(ShadingScratch::default());
+        // pixel; a mesh carrying a function reads it through a table over
+        // the inputs its vertices span (P-14.5), decided on the mesh's
+        // rectangle on the whole page.
+        let mut kept = ShadingScratch::default();
+        if let (Some(function), 1) = (&mesh.function, mesh.components) {
+            let (low, high) = tessellation
+                .values
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| {
+                    (low.min(*value), high.max(*value))
+                });
+            kept.tabulate(&mesh.space, function, low, high, whole.area());
+        }
+        let shading = core::cell::Cell::new(kept);
         let convert = |inputs: &[f64]| {
             let mut taken = shading.take();
             let (r, g, b) = mesh.color(inputs, &mut taken);
@@ -1860,9 +1892,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             stop: Some(&stop),
             scale: self.pixels_per_square_unit().sqrt(),
         };
-        let Some(mut buffer) =
-            draw_mesh_over(&draw, wanted.rect(), whole.rect(), &mut self.scratch)
-        else {
+        let drawn = draw_mesh_over(&draw, wanted.rect(), whole.rect(), &mut self.scratch);
+        let kept = shading.take();
+        self.count_evaluations(&kept);
+        let Some(mut buffer) = drawn else {
             return false;
         };
         #[cfg(test)]
@@ -3307,8 +3340,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             self.knockout_restore(&restore);
         }
         let mut scratch = ShadingScratch::default();
+        // P-14.5, decided on the clip's rectangle on the whole page.
+        if let Some((space, function)) = shading.parametric() {
+            scratch.tabulate(space, function, 0.0, 1.0, self.page_limit().area());
+        }
         for row in y_start..y_end {
             if self.stopping() {
+                self.count_evaluations(&scratch);
                 return;
             }
             // The device pixel, in the page's frame: see
@@ -3330,6 +3368,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     .blend_pixel_with(col, row, Color::rgb(r, g, b), effective, mode);
             }
         }
+        self.count_evaluations(&scratch);
     }
 
     /// The property list is ignored here on purpose. 14.7.4.2's `/MCID` ties

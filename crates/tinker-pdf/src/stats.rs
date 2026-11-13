@@ -91,12 +91,17 @@ pub(crate) fn jpeg_held(work: Option<&Work>, bytes: usize) {
     }
 }
 
-/// Adds what a renderer counted — its glyphs shown and outlines painted — to
-/// the operation's tally, when it is counting. The renderer has no edge to the
-/// tally's crate and hands its counts back as a value instead.
+/// Adds what a renderer counted — its glyphs shown, outlines painted and
+/// shading functions evaluated — to the operation's tally, when it is
+/// counting. The renderer has no edge to the tally's crate and hands its
+/// counts back as a value instead.
 pub(crate) fn add_render(work: Option<&Work>, counts: RenderCounts) {
     if let Some(work) = work {
         work.add(Counter::GlyphsShown, counts.glyphs_shown);
         work.add(Counter::OutlinesFilled, counts.outlines_filled);
+        work.add(
+            Counter::ShadingFunctionsEvaluated,
+            counts.shading_functions_evaluated,
+        );
     }
 }

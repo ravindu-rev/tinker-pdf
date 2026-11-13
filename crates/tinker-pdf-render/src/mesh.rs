@@ -148,9 +148,10 @@ impl Mesh {
     /// pass allocates nothing per pixel.
     #[must_use]
     pub fn color(&self, inputs: &[f64], scratch: &mut ShadingScratch) -> (u8, u8, u8) {
-        match &self.function {
-            Some(function) => scratch.color(&self.space, function, inputs),
-            None => scratch.convert(&self.space, inputs),
+        match (&self.function, inputs) {
+            (Some(function), [t]) => scratch.tabled(&self.space, function, *t),
+            (Some(function), _) => scratch.color(&self.space, function, inputs),
+            (None, _) => scratch.convert(&self.space, inputs),
         }
     }
 

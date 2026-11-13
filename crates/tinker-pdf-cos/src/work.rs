@@ -271,6 +271,14 @@ pub struct Stats {
     ///
     /// Counted with `content_tokens_read`.
     pub operators_run: u64,
+    /// A shading's function evaluated for a colour: once a table entry where
+    /// a sweep reads the function through a table (P-14.5), and once a colour
+    /// asked of it otherwise — each pixel of a sweep no table stands in for,
+    /// and each input a table does not vouch for.
+    ///
+    /// Counted by `tinker-pdf-render`'s renderer, a tiling pattern's cell
+    /// included, and added to the operation's tally by the facade.
+    pub shading_functions_evaluated: u64,
     /// The most bytes a JPEG decode held at once beside the image it decoded
     /// into: its coefficients, its component planes and the strip it handed
     /// on, every buffer sized from the image. A maximum, as
@@ -344,6 +352,8 @@ pub enum Counter {
     ContentTokensRead,
     /// [`Stats::operators_run`].
     OperatorsRun,
+    /// [`Stats::shading_functions_evaluated`].
+    ShadingFunctionsEvaluated,
 }
 
 impl Stats {
@@ -387,6 +397,7 @@ impl Stats {
             self.bytes_scanned,
             self.content_tokens_read,
             self.operators_run,
+            self.shading_functions_evaluated,
         ]
         .into_iter()
         .fold(0u64, u64::saturating_add)
@@ -423,6 +434,7 @@ impl Stats {
             Counter::BytesScanned => &mut self.bytes_scanned,
             Counter::ContentTokensRead => &mut self.content_tokens_read,
             Counter::OperatorsRun => &mut self.operators_run,
+            Counter::ShadingFunctionsEvaluated => &mut self.shading_functions_evaluated,
         }
     }
 }
@@ -507,6 +519,9 @@ impl Add for Stats {
                 .content_tokens_read
                 .saturating_add(other.content_tokens_read),
             operators_run: self.operators_run.saturating_add(other.operators_run),
+            shading_functions_evaluated: self
+                .shading_functions_evaluated
+                .saturating_add(other.shading_functions_evaluated),
             jpeg_held: self.jpeg_held.max(other.jpeg_held),
         }
     }
@@ -621,7 +636,7 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 28] = [
+    const ALL: [Counter; 29] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::FontDictionariesResolved,
@@ -650,6 +665,7 @@ mod tests {
         Counter::BytesScanned,
         Counter::ContentTokensRead,
         Counter::OperatorsRun,
+        Counter::ShadingFunctionsEvaluated,
     ];
 
     #[test]

@@ -154,3 +154,87 @@ fn a_sampled_function_shades_its_own_colours() {
         "a quarter across",
     );
 }
+
+/// What one render of `bytes` at `scale`, its counts asked for, evaluated of
+/// shading functions.
+fn evaluated(bytes: Vec<u8>, scale: f64) -> u64 {
+    Document::open(bytes)
+        .expect("the document opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions {
+            scale,
+            stats: true,
+            ..RenderOptions::default()
+        })
+        .stats
+        .expect("asked")
+        .shading_functions_evaluated
+}
+
+/// **P-14.5's exit.** A shading whose function a table stands in for
+/// evaluates it at most once a table entry, whatever the pixel count: an
+/// axial shading of a type 2 function, a radial one of a stitch, and an axial
+/// one of a stream's sampled table, each over the page at sixteen times the
+/// pixels as well. A type 4 program, which no table stands in for, is
+/// evaluated once a pixel, so its count grows with the page.
+#[test]
+fn a_shading_evaluates_its_function_at_most_once_per_table_entry() {
+    let entries = tinker_pdf_render::TABLE_ENTRIES as u64;
+    let exponential = pdf(
+        AXIAL,
+        b"<< /FunctionType 2 /Domain [0 1] /C0 [0 0.1 0.6] /C1 [1 0.9 0.2] /N 1.8 >>",
+    );
+    let stitched = pdf(
+        "<< /ShadingType 3 /ColorSpace /DeviceRGB /Coords [50 50 5 50 50 60] \
+         /Extend [true true] /Function 6 0 R >>",
+        b"<< /FunctionType 3 /Domain [0 1] /Bounds [0.5] /Encode [0 1 0 1] /Functions \
+          [<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [0.9 0.2 0.1] /N 1 >> \
+           << /FunctionType 2 /Domain [0 1] /C0 [0.9 0.2 0.1] /C1 [0 0 0.3] /N 1 >>] >>",
+    );
+    let ramp: Vec<u8> = (0..=255u8)
+        .flat_map(|level| [level, 255 - level, level / 2])
+        .collect();
+    let sampled = pdf(
+        AXIAL,
+        &stream(
+            "/FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1] /Size [256] /BitsPerSample 8",
+            &ramp,
+        ),
+    );
+    for (what, bytes) in [
+        ("a type 2 function", exponential),
+        ("a stitch", stitched),
+        ("a sampled table", sampled),
+    ] {
+        let small = evaluated(bytes.clone(), 1.0);
+        let large = evaluated(bytes, 4.0);
+        assert!(
+            small >= 1 && small <= entries && large <= entries,
+            "{what}: {small} evaluations on 100 by 100 pixels and {large} on 400 by 400, \
+             against a table of {entries}"
+        );
+        assert_eq!(
+            small, large,
+            "{what}: the count follows the table, not the pixels"
+        );
+    }
+
+    let calculator = pdf(
+        AXIAL,
+        &stream(
+            "/FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1]",
+            b"{ dup 0 exch 1 exch sub }",
+        ),
+    );
+    assert_eq!(
+        evaluated(calculator.clone(), 1.0),
+        100 * 100,
+        "a type 4 program, once a pixel"
+    );
+    assert_eq!(
+        evaluated(calculator, 2.0),
+        200 * 200,
+        "and four times over at twice the scale"
+    );
+}

@@ -259,14 +259,16 @@ fn a_lattice_mesh_paints() {
 }
 
 /// A `/Function` mesh and a direct-component mesh describing the same colours
-/// render to the same bytes.
+/// render to the same picture, within ruling 22's level.
 ///
 /// The two forms are deliberately chosen so that "the same colours" is exact
 /// rather than approximate: the function is `C0 = [0]`, `C1 = [1]`, `N = 1`,
 /// which evaluates to its input unchanged, and the space is `/DeviceGray`, so
 /// the interpolated parametric value and the interpolated component are the
-/// same number reached by the same arithmetic. Anything less than byte
-/// equality here would be the two paths disagreeing.
+/// same number reached by the same arithmetic. The function form reads its
+/// colours through a table of the function (P-14.5), exact at its entries and
+/// within a level between them, so the two forms may part by a level at a
+/// pixel and by no more: anything more is the two paths disagreeing.
 #[test]
 fn the_function_form_and_the_component_form_agree() {
     let component_form = mesh_page(
@@ -286,10 +288,12 @@ fn the_function_form_and_the_component_form_agree() {
     assert_eq!(unsupported(&function_form), None);
     for y in 0..component_form.height {
         for x in 0..component_form.width {
-            assert_eq!(
-                pixel(&component_form, x, y),
-                pixel(&function_form, x, y),
-                "the two forms disagree at ({x}, {y})"
+            let (component, function) = (pixel(&component_form, x, y), pixel(&function_form, x, y));
+            assert!(
+                component.0.abs_diff(function.0) <= 1
+                    && component.1.abs_diff(function.1) <= 1
+                    && component.2.abs_diff(function.2) <= 1,
+                "the two forms disagree at ({x}, {y}): {component:?} against {function:?}"
             );
         }
     }

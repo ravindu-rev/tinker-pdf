@@ -208,11 +208,15 @@ impl Shading {
 }
 
 /// What evaluating a shading writes, kept by a sweep from one pixel to the
-/// next: a function's outputs and a colour space's tint transform's.
+/// next: a function's outputs and a colour space's tint transform's, the
+/// sweep's [`ColorTable`] where it reads its function through one, and how
+/// many times the function was evaluated.
 #[derive(Clone, Debug, Default)]
 pub struct ShadingScratch {
     outputs: Vec<f64>,
     converted: Vec<f64>,
+    table: Option<ColorTable>,
+    evaluations: u64,
 }
 
 impl ShadingScratch {
@@ -223,13 +227,175 @@ impl ShadingScratch {
         function: &Function,
         inputs: &[f64],
     ) -> (u8, u8, u8) {
+        self.evaluations = self.evaluations.saturating_add(1);
         function.eval_into(inputs, &mut self.outputs);
         space.to_rgb_with(&self.outputs, &mut self.converted)
+    }
+
+    /// `function` at the one input `t`, converted from `space`: read from the
+    /// sweep's table where it has one and it vouches for `t`, and evaluated
+    /// otherwise.
+    pub(crate) fn tabled(
+        &mut self,
+        space: &ColorSpace,
+        function: &Function,
+        t: f64,
+    ) -> (u8, u8, u8) {
+        if let Some(color) = self.table.as_ref().and_then(|table| table.color(t)) {
+            return color;
+        }
+        self.color(space, function, &[t])
+    }
+
+    /// Reads `function`, converted from `space`, through a [`ColorTable`]
+    /// over the inputs `low` to `high` for the rest of the sweep, where the
+    /// function is one a table can stand in for (`Function::tabulable`) and
+    /// the sweep, `asks` colours over the shape's rectangle on the whole page,
+    /// would evaluate it more often than the table does. The decision is the
+    /// page's, so a tile reads its colours as the page under it does
+    /// (ruling 5).
+    pub fn tabulate(
+        &mut self,
+        space: &ColorSpace,
+        function: &Function,
+        low: f64,
+        high: f64,
+        asks: u64,
+    ) {
+        self.table = None;
+        if asks <= TABLE_ENTRIES as u64
+            || !function.tabulable()
+            || !low.is_finite()
+            || !high.is_finite()
+            || !(high > low)
+        {
+            return;
+        }
+        self.table = Some(ColorTable::new(self, space, function, low, high));
+    }
+
+    /// How many times a function was evaluated through this scratch: a table's
+    /// entries, and each colour asked of a function no table stands in for.
+    #[must_use]
+    pub fn evaluations(&self) -> u64 {
+        self.evaluations
     }
 
     /// `components` of `space`, converted, with no function between.
     pub(crate) fn convert(&mut self, space: &ColorSpace, components: &[f64]) -> (u8, u8, u8) {
         space.to_rgb_with(components, &mut self.converted)
+    }
+}
+
+/// How many entries a [`ColorTable`] holds: the function's colours at 1 025
+/// evenly spaced inputs, 1 024 intervals, which an input reaches in 16.16
+/// fixed point.
+pub const TABLE_ENTRIES: usize = 1025;
+
+/// A one-input shading function's colours, sampled at [`TABLE_ENTRIES`] evenly
+/// spaced inputs over the range the sweep can ask for, converted there, and
+/// read per pixel through the input in 16.16 fixed point, the two entries
+/// either side of it mixed in integers (P-14.5).
+///
+/// The table is built from the function itself, `tinker-pdf-math`'s `pow`
+/// for an exponent other than one, so it is the same bits on every target
+/// (ruling 4), and a lookup is a function of the input alone, so a tile and
+/// the page under it read the same colour wherever they start. At an entry a
+/// lookup is the function's colour exactly. Between entries it is within a
+/// level of 255 of the function's colour wherever the function is linear
+/// enough over two intervals that their middle entry lies within a level of
+/// the mean of their ends; an interval pair where it does not — a stitch's
+/// jump, a curve's steep foot — is not vouched for, and an input there is
+/// evaluated as it is asked (ruling 22).
+#[derive(Clone, Debug)]
+pub struct ColorTable {
+    /// The input of the first entry.
+    low: f64,
+    /// Entries a unit of input, in sixty-five-thousand-five-hundred-and-
+    /// thirty-sixths: the input's fixed-point position is `(t − low) · scale`.
+    scale: f64,
+    entries: Vec<[u8; 3]>,
+    /// For each pair of intervals, whether a lookup there is vouched for.
+    vouched: Vec<bool>,
+}
+
+impl ColorTable {
+    /// The table of `function` over `low` to `high`, evaluated through
+    /// `scratch`, which counts the evaluations.
+    fn new(
+        scratch: &mut ShadingScratch,
+        space: &ColorSpace,
+        function: &Function,
+        low: f64,
+        high: f64,
+    ) -> ColorTable {
+        let last = (TABLE_ENTRIES - 1) as f64;
+        let span = high - low;
+        let entries: Vec<[u8; 3]> = (0..TABLE_ENTRIES)
+            .map(|entry| {
+                // The last entry is `high` itself, which a sum can miss.
+                let t = if entry + 1 == TABLE_ENTRIES {
+                    high
+                } else {
+                    low + span * (entry as f64 / last)
+                };
+                let (r, g, b) = scratch.color(space, function, &[t]);
+                [r, g, b]
+            })
+            .collect();
+        let vouched = entries
+            .windows(3)
+            .step_by(2)
+            .map(|three| {
+                (0..3).all(|channel| {
+                    let (first, middle, last) = (
+                        i32::from(three[0][channel]),
+                        i32::from(three[1][channel]),
+                        i32::from(three[2][channel]),
+                    );
+                    (2 * middle - first - last).abs() <= 1
+                })
+            })
+            .collect();
+        ColorTable {
+            low,
+            scale: last * 65_536.0 / span,
+            entries,
+            vouched,
+        }
+    }
+
+    /// The colour at input `t`, or `None` where the table does not vouch for
+    /// it. An input past either end reads that end's entry, which is the
+    /// function's colour there, since a sweep's inputs lie between them.
+    #[must_use]
+    pub fn color(&self, t: f64) -> Option<(u8, u8, u8)> {
+        let last = self.entries.len().checked_sub(1)?;
+        let top = last as f64 * 65_536.0;
+        let position = ((t - self.low) * self.scale).round();
+        if position.is_nan() {
+            return None;
+        }
+        // In `0..=top`, a whole number under 2^27: exact as an integer.
+        let position = position.clamp(0.0, top) as u64;
+        let index = (position >> 16) as usize;
+        let fraction = (position & 0xFFFF) as u32;
+        if index >= last {
+            let [r, g, b] = *self.entries.get(last)?;
+            return Some((r, g, b));
+        }
+        if !self.vouched.get(index / 2).copied().unwrap_or(false) {
+            return None;
+        }
+        let (below, above) = (self.entries.get(index)?, self.entries.get(index + 1)?);
+        let mix = |a: u8, b: u8| {
+            ((u32::from(a) * (65_536 - fraction) + u32::from(b) * fraction + 32_768) >> 16) as u8
+        };
+        Some((
+            mix(below[0], above[0]),
+            mix(below[1], above[1]),
+            mix(below[2], above[2]),
+        ))
     }
 }
 
@@ -273,6 +439,22 @@ pub enum Shading {
 }
 
 impl Shading {
+    /// An axial or radial shading's colour space and its function of the
+    /// parameter, which a sweep may read through a [`ColorTable`] over `0` to
+    /// `1`: the parameter it hands the function, `/Extend` applied.
+    #[must_use]
+    pub fn parametric(&self) -> Option<(&ColorSpace, &Function)> {
+        match self {
+            Shading::Axial {
+                space, function, ..
+            }
+            | Shading::Radial {
+                space, function, ..
+            } => Some((space, function)),
+            _ => None,
+        }
+    }
+
     /// The mesh a type 4 to 7 shading paints, if this is one.
     #[must_use]
     pub fn mesh(&self) -> Option<&Mesh> {
@@ -317,7 +499,7 @@ impl Shading {
             } => {
                 let t = axial_parameter(*coords, x, y)?;
                 let t = clamp_extend(t, *extend)?;
-                Some(scratch.color(space, function, &[t]))
+                Some(scratch.tabled(space, function, t))
             }
 
             Shading::Radial {
@@ -327,7 +509,7 @@ impl Shading {
                 extend,
             } => {
                 let t = radial_parameter(*coords, x, y, *extend)?;
-                Some(scratch.color(space, function, &[t]))
+                Some(scratch.tabled(space, function, t))
             }
         }
     }
@@ -374,7 +556,7 @@ impl ShadingRow<'_> {
             _ => None,
         };
         match stepped {
-            Some((space, function, t)) => Some(scratch.color(space, function, &[t?])),
+            Some((space, function, t)) => Some(scratch.tabled(space, function, t?)),
             None => {
                 count::evaluated();
                 let (x, y) = self.map.at(px as f64 + 0.5);
@@ -1246,6 +1428,207 @@ mod tests {
         let mut walk = huge.row(&inverse, 7.5);
         for px in 0..130 {
             let _ = walk.color_at(px, &mut scratch);
+        }
+    }
+
+    /// The functions a table stands in for, each with the space it converts
+    /// in: exponentials straight, curved and steep at their foot, a stitch
+    /// that joins and one that jumps, a one-input sampled table, an array of
+    /// one per channel, and a tint transform after the function.
+    fn tabled_functions() -> Vec<(ColorSpace, Function)> {
+        let gamma = |c0: Vec<f64>, c1: Vec<f64>, n: f64| Function::Exponential {
+            domain: (0.0, 1.0),
+            c0,
+            c1,
+            n,
+        };
+        let stitch = |second_start: Vec<f64>| Function::Stitching {
+            domain: (0.0, 1.0),
+            functions: vec![
+                gamma(vec![0.0, 0.1, 0.9], vec![0.6, 0.5, 0.3], 1.0),
+                gamma(second_start, vec![1.0, 0.2, 0.0], 1.0),
+            ],
+            bounds: vec![0.37],
+            encode: vec![(0.0, 1.0), (0.0, 1.0)],
+        };
+        vec![
+            (ColorSpace::DeviceRgb, spread_ramp()),
+            (
+                ColorSpace::DeviceRgb,
+                gamma(vec![0.0, 0.2, 0.9], vec![1.0, 0.7, 0.1], 2.2),
+            ),
+            (
+                ColorSpace::DeviceRgb,
+                gamma(vec![0.0, 0.0, 0.0], vec![1.0, 1.0, 1.0], 0.45),
+            ),
+            (ColorSpace::DeviceRgb, stitch(vec![0.6, 0.5, 0.3])),
+            (ColorSpace::DeviceRgb, stitch(vec![0.0, 0.9, 1.0])),
+            (
+                ColorSpace::DeviceGray,
+                Function::Sampled {
+                    domain: vec![(0.0, 1.0)],
+                    range: vec![(0.0, 1.0)],
+                    size: vec![5],
+                    bits: 8,
+                    encode: vec![],
+                    decode: vec![],
+                    samples: vec![0, 200, 40, 255, 128],
+                },
+            ),
+            (
+                ColorSpace::DeviceRgb,
+                Function::Array(vec![
+                    gamma(vec![0.0], vec![1.0], 1.0),
+                    gamma(vec![1.0], vec![0.0], 3.0),
+                    gamma(vec![0.3], vec![0.8], 0.7),
+                ]),
+            ),
+            (
+                ColorSpace::Separation {
+                    components: 1,
+                    alternate: Box::new(ColorSpace::DeviceCmyk),
+                    tint: Box::new(gamma(vec![0.0; 4], vec![0.1, 0.7, 0.2, 0.05], 1.6)),
+                },
+                gamma(vec![0.0], vec![1.0], 1.0),
+            ),
+        ]
+    }
+
+    /// **The table agrees with the clause at and between its entries**
+    /// (ruling 22): at an entry a lookup is the function's colour exactly,
+    /// between entries it is within one level of 255 in every channel, and
+    /// where it is not vouched for it says so and the colour is the
+    /// function's, evaluated.
+    #[test]
+    fn a_table_agrees_with_the_clause_at_and_between_its_entries() {
+        let last = (TABLE_ENTRIES - 1) as f64;
+        for (space, function) in tabled_functions() {
+            let mut scratch = ShadingScratch::default();
+            scratch.tabulate(&space, &function, 0.0, 1.0, u64::MAX);
+            let table = scratch.table.clone().expect("the function is tabulable");
+            let mut fresh = ShadingScratch::default();
+            for entry in 0..TABLE_ENTRIES {
+                let t = entry as f64 / last;
+                assert_eq!(
+                    table
+                        .color(t)
+                        .unwrap_or_else(|| fresh.color(&space, &function, &[t])),
+                    fresh.color(&space, &function, &[t]),
+                    "{function:?} at entry {entry}"
+                );
+            }
+            for step in 0..=20_000u32 {
+                let t = f64::from(step) / 20_000.0;
+                let clause = fresh.color(&space, &function, &[t]);
+                let read = scratch.tabled(&space, &function, t);
+                assert!(
+                    clause.0.abs_diff(read.0) <= 1
+                        && clause.1.abs_diff(read.1) <= 1
+                        && clause.2.abs_diff(read.2) <= 1,
+                    "{function:?} in {space:?} at {t}: the table read {read:?}, the clause \
+                     {clause:?}"
+                );
+            }
+        }
+    }
+
+    /// The table is the function evaluated once an entry: building it costs
+    /// [`TABLE_ENTRIES`] evaluations, and reading any number of colours from
+    /// a function it vouches for everywhere costs none more.
+    #[test]
+    fn a_table_evaluates_its_function_once_an_entry() {
+        let mut scratch = ShadingScratch::default();
+        scratch.tabulate(&ColorSpace::DeviceRgb, &spread_ramp(), 0.0, 1.0, 1_000_000);
+        assert_eq!(scratch.evaluations(), TABLE_ENTRIES as u64);
+        for step in 0..100_000u32 {
+            let t = f64::from(step) / 99_999.0;
+            let _ = scratch.tabled(&ColorSpace::DeviceRgb, &spread_ramp(), t);
+        }
+        assert_eq!(scratch.evaluations(), TABLE_ENTRIES as u64);
+    }
+
+    /// No table where none should stand in: a type 4 program, a sweep asking
+    /// no more colours than a table holds, and a range with no width; and a
+    /// lookup outside the range reads its end, and one of no number declines.
+    #[test]
+    fn a_table_stands_in_only_where_it_should() {
+        let calculator = Function::PostScript {
+            domain: vec![(0.0, 1.0)],
+            range: vec![(0.0, 1.0); 3],
+            program: tinker_pdf_color::function::parse_postscript(b"{ dup dup }"),
+        };
+        let mut scratch = ShadingScratch::default();
+        scratch.tabulate(&ColorSpace::DeviceRgb, &calculator, 0.0, 1.0, u64::MAX);
+        assert!(scratch.table.is_none(), "a type 4 program");
+        scratch.tabulate(
+            &ColorSpace::DeviceRgb,
+            &spread_ramp(),
+            0.0,
+            1.0,
+            TABLE_ENTRIES as u64,
+        );
+        assert!(scratch.table.is_none(), "a sweep no larger than the table");
+        scratch.tabulate(&ColorSpace::DeviceRgb, &spread_ramp(), 0.5, 0.5, u64::MAX);
+        assert!(scratch.table.is_none(), "a range of no width");
+        scratch.tabulate(
+            &ColorSpace::DeviceRgb,
+            &spread_ramp(),
+            f64::NAN,
+            1.0,
+            u64::MAX,
+        );
+        assert!(scratch.table.is_none(), "a range of no number");
+        assert_eq!(
+            scratch.evaluations(),
+            0,
+            "and nothing evaluated for any of them"
+        );
+
+        scratch.tabulate(&ColorSpace::DeviceRgb, &spread_ramp(), 0.25, 0.75, u64::MAX);
+        let table = scratch.table.clone().expect("a table");
+        let mut fresh = ShadingScratch::default();
+        assert_eq!(
+            table.color(0.0),
+            Some(fresh.color(&ColorSpace::DeviceRgb, &spread_ramp(), &[0.25]))
+        );
+        assert_eq!(
+            table.color(2.0),
+            Some(fresh.color(&ColorSpace::DeviceRgb, &spread_ramp(), &[0.75]))
+        );
+        assert_eq!(table.color(f64::NAN), None);
+        assert_eq!(table.color(f64::INFINITY), table.color(0.75));
+    }
+
+    /// A row read through a table paints within a level of the clause, as a
+    /// stepped row does without one, and a tile reads the page's colours.
+    #[test]
+    fn a_row_read_through_a_table_paints_within_a_level_of_the_clause() {
+        let inverse = tilted();
+        for shading in &stepped_shadings() {
+            let (space, function) = shading.parametric().expect("axial or radial");
+            let mut page = ShadingScratch::default();
+            page.tabulate(space, function, 0.0, 1.0, u64::MAX);
+            let mut tile = page.clone();
+            for row in [3.5, 40.5, 97.5] {
+                let mut walk = shading.row(&inverse, row);
+                let mut part = shading.row(&inverse, row);
+                for px in 0..256 {
+                    let read = walk.color_at(px, &mut page);
+                    if px >= 77 {
+                        assert_eq!(part.color_at(px, &mut tile), read, "column {px}");
+                    }
+                    let clause = direct(shading, &inverse, row, px);
+                    assert_eq!(read.is_some(), clause.is_some(), "column {px}");
+                    if let (Some(read), Some(clause)) = (read, clause) {
+                        assert!(
+                            read.0.abs_diff(clause.0) <= 1
+                                && read.1.abs_diff(clause.1) <= 1
+                                && read.2.abs_diff(clause.2) <= 1,
+                            "{shading:?} at ({px}, {row}): {read:?} against {clause:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
