@@ -1156,6 +1156,63 @@ fn a_to_unicode_that_is_not_a_cmap_is_refused() {
     );
 }
 
+/// One page showing `A` in the font `font`, whose one glyph procedure, if it
+/// has one, is object 5. Hand-built, because this engine's builder writes no
+/// Type 3 font.
+fn font_page(font: &str) -> Vec<u8> {
+    let glyph = "1000 0 d0 0 0 1000 1000 re f";
+    let content = "BT /F1 10 Tf 10 10 Td (A) Tj ET";
+    let bodies = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60] \
+         /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>"
+            .to_string(),
+        font.to_string(),
+        format!("<< /Length {} >>\nstream\n{glyph}\nendstream", glyph.len()),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ),
+    ];
+    let mut out = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let table = out.len();
+    let size = bodies.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// 9.6.2: a simple font names the face it wants, and one with no `/BaseFont`
+/// is refused — but not a Type 3 font, whose glyphs are its own content
+/// streams and whose dictionary has no `/BaseFont` to state (Table 110).
+#[test]
+fn a_type_3_font_names_no_face_and_any_other_simple_font_must() {
+    clean(font_page(
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+         /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /sq 5 0 R >> \
+         /Encoding << /Type /Encoding /Differences [65 /sq] >> \
+         /FirstChar 65 /LastChar 65 /Widths [1000] /Resources << >> >>",
+    ));
+    refused(
+        font_page("<< /Type /Font /Subtype /Type1 >>"),
+        "font-malformed",
+    );
+    clean(font_page(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ));
+}
+
 /// 8.10.1: a form states the box its content is clipped to.
 #[test]
 fn a_form_with_no_bounding_box_is_refused() {

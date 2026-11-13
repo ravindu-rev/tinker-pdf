@@ -1725,6 +1725,7 @@ struct SemNames {
     bits_per_component: Name,
     image_mask: Name,
     type0: Name,
+    type3: Name,
     encoding: Name,
     descendant_fonts: Name,
     cid_system_info: Name,
@@ -1799,6 +1800,7 @@ impl SemNames {
             bits_per_component: doc.intern(b"BitsPerComponent"),
             image_mask: doc.intern(b"ImageMask"),
             type0: doc.intern(b"Type0"),
+            type3: doc.intern(b"Type3"),
             encoding: doc.intern(b"Encoding"),
             descendant_fonts: doc.intern(b"DescendantFonts"),
             cid_system_info: doc.intern(b"CIDSystemInfo"),
@@ -2674,8 +2676,10 @@ impl Validator<'_> {
             return;
         };
         if subtype != names.type0 {
-            // 9.6.2: a simple font names the face it wants.
-            if dict.get_name(names.base_font).is_none() {
+            // 9.6.2: a simple font names the face it wants — all but Type 3,
+            // whose glyphs are its own content streams and whose dictionary
+            // has no /BaseFont to state (Table 110).
+            if subtype != names.type3 && dict.get_name(names.base_font).is_none() {
                 self.report(at, None, DefectKind::FontMalformed { entry: "/BaseFont" });
             }
             return;
