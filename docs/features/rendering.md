@@ -188,7 +188,9 @@ does not lose its pattern at a higher resolution — and past any bound the
 fill paints nothing and names the pattern. A pattern that fills with
 itself terminates at a nesting depth of 4. Shading patterns paint through
 the same shading machinery, and pattern *strokes* route through fill-of-
-outline, so both slots share one warning path and cannot diverge.
+outline, so both slots share one warning path and cannot diverge: the
+outline the pen writes into the fill's edges is the shape a pattern fills,
+its bounds deciding the lattice as a path's do.
 
 **Images.** `/SMask` (Table 89, 11.6.5.3), `/Decode` (8.9.5.2), stencil
 masks that take the current fill colour (8.9.6.2) and inline images (8.9.7)
@@ -608,8 +610,12 @@ any other map (`user_space_pen` decides, from the map's two singular values,
 and the SVG writer asks the same function) it takes the path back to user
 space, strokes it there with the width, caps, joins, miter limit and dashes
 the content stream gave, and carries the outline out
-(`tinker_pdf_raster::stroke_mapped`); the thinnest-line floor stays in
-device pixels in every direction. A glyph stroked by text rendering modes
+(`tinker_pdf_raster::stroke_mapped_with`); the thinnest-line floor stays in
+device pixels in every direction. Either way the outline is written straight
+into the renderer's fill scratch as edges and never built as a path, so the
+path is flattened once, by the stroker, and the outline not at all; its mask
+is the one filling the outline's path would give, byte for byte
+([rasterizer](rasterizer.md)). A glyph stroked by text rendering modes
 1, 2, 5 and 6 goes the same way, with the CTM's user space and not the text
 matrix's. `stroke_parameters.rs`'s
 `a_circle_under_scale_1_3_is_six_wide_at_its_top_and_two_at_its_side` and

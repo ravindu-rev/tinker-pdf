@@ -17,7 +17,7 @@ pub mod mesh;
 pub mod stroke;
 
 pub use canvas::{Canvas, Color, MaskKind, PixelFormat};
-pub use fill::{fill, fill_with, FillScratch, Mask};
+pub use fill::{fill, fill_outline, fill_with, FillScratch, Mask};
 pub use fragments::Fragments;
 pub use geom::{flatten, FillRule, Path, Point, Verb};
 pub use image::{
@@ -25,4 +25,7 @@ pub use image::{
     ImageSource, Pyramid, Sampling, Transform,
 };
 pub use mesh::{draw_mesh, draw_mesh_over, MeshBuffer, MeshDraw};
-pub use stroke::{dash, stretches, stroke, stroke_mapped, LineCap, LineJoin, StrokeStyle};
+pub use stroke::{
+    dash, stretches, stroke, stroke_mapped, stroke_mapped_with, stroke_with, LineCap, LineJoin,
+    StrokeStyle,
+};

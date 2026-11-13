@@ -27,7 +27,7 @@
 
 use core::ops::Range;
 
-use crate::geom::{flatten_flat, FillRule, Path, Point};
+use crate::geom::{flatten_flat, FillRule, Path, Point, MAX_VERBS};
 
 /// Sub-scanlines per pixel row. Sixteen gives 4-bit vertical resolution,
 /// combined with exact horizontal spans for 8-bit total coverage.
@@ -397,6 +397,46 @@ pub fn fill_with(
     mask
 }
 
+/// The outline the last [`crate::stroke_with`] or
+/// [`crate::stroke_mapped_with`] wrote into `scratch`, filled under the
+/// non-zero rule into the region: the mask [`fill`] gives the [`Path`]
+/// [`crate::stroke::stroke`] returns for the same stroke, byte for byte, with
+/// no path built and nothing flattened.
+///
+/// The stroker turned each piece into edges as it made it, so this sweeps
+/// them as [`fill`] sweeps a path's — the same rows, cells and stop hook — and
+/// the region is the caller's, as it is for [`fill`]: a renderer takes it from
+/// [`FillScratch::outline_bounds`], the bounds the outline's path would have.
+/// The outline stays in the scratch until the next stroke, whatever is filled
+/// through the scratch in between.
+#[must_use]
+pub fn fill_outline(
+    scratch: &mut FillScratch,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    stop: Option<&dyn Fn() -> bool>,
+) -> Mask {
+    let mut mask = Mask::empty(x0, y0, width, height);
+    if width == 0 || height == 0 {
+        return mask;
+    }
+    #[cfg(test)]
+    let held = scratch.capacities();
+    let FillScratch { outline, work, .. } = &mut *scratch;
+    work.sweep(
+        &mut mask,
+        &outline.edges,
+        outline.open,
+        FillRule::NonZero,
+        stop,
+    );
+    #[cfg(test)]
+    count::allocated(scratch.grown_from(&held));
+    mask
+}
+
 /// The memory a fill works in, which the caller owns and every fill through
 /// it reuses: grown when a fill needs more, never shrunk.
 ///
@@ -405,13 +445,15 @@ pub fn fill_with(
 /// crossings, and the buffers of a row swept because it does not close. A
 /// renderer filling a page's paths, clips, glyphs, image quads and meshes
 /// through one allocates for the largest of them, and after that only the
-/// masks it is handed back.
+/// masks it is handed back. A stroke's outline is held here too, as the edges
+/// the stroker made of it ([`fill_outline`]), apart from a path's.
 ///
 /// **Nothing left in it reaches a pixel.** A fill empties the points, the
 /// edges, the lists and the active set before it uses them; every cell is
 /// cleared as it is turned into a byte and the crowded-lane table as it is
 /// read, and a stop is asked before a row's deposit, so the cells are clear
-/// between fills however the last one ended.
+/// between fills however the last one ended. A stroke empties the outline
+/// before it writes one.
 #[derive(Default)]
 pub struct FillScratch {
     /// The path's points, subpath after subpath.
@@ -420,16 +462,10 @@ pub struct FillScratch {
     ends: Vec<usize>,
     /// The edges, in the order the path gives them.
     edges: Vec<Edge>,
-    /// Each active row's list of the edges that begin in it: its first edge.
-    starts: Vec<u32>,
-    /// Each edge's successor in its row's list.
-    next: Vec<u32>,
-    /// The edges reaching the current row, in no order.
-    active: Vec<u32>,
-    /// The current row's cells.
-    row: Row,
-    /// A row that does not close.
-    sweep: Sweep,
+    /// The last stroke's outline, as edges.
+    outline: Outline,
+    /// What the rows are worked in.
+    work: Work,
 }
 
 impl FillScratch {
@@ -437,6 +473,21 @@ impl FillScratch {
     #[must_use]
     pub fn new() -> FillScratch {
         FillScratch::default()
+    }
+
+    /// The bounds of the outline the last stroke wrote into this scratch:
+    /// [`Path::bounds`] of the path [`crate::stroke::stroke`] would have
+    /// returned for it, from the same points in the same order, and `None`
+    /// where that path is empty.
+    #[must_use]
+    pub fn outline_bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        self.outline.bounds
+    }
+
+    /// The outline, emptied for a stroke to write.
+    pub(crate) fn begin_outline(&mut self) -> &mut Outline {
+        self.outline.clear();
+        &mut self.outline
     }
 
     /// Fills `path` into `mask`'s rectangle, which is not empty.
@@ -448,16 +499,12 @@ impl FillScratch {
         tolerance: f64,
         stop: Option<&dyn Fn() -> bool>,
     ) {
-        let (x0, y0, width, height) = (mask.x0, mask.y0, mask.width, mask.height);
         let FillScratch {
             points,
             ends,
             edges,
-            starts,
-            next,
-            active,
-            row: cells,
-            sweep,
+            work,
+            ..
         } = self;
 
         flatten_flat(path, tolerance, points, ends);
@@ -470,6 +517,126 @@ impl FillScratch {
             }
             begin = *end;
         }
+        work.sweep(mask, edges, open, rule, stop);
+    }
+
+    /// The capacity of every buffer, for [`FillScratch::grown_from`].
+    #[cfg(test)]
+    pub(crate) fn capacities(&self) -> [usize; 13] {
+        [
+            self.points.capacity(),
+            self.ends.capacity(),
+            self.edges.capacity(),
+            self.outline.edges.capacity(),
+            self.work.starts.capacity(),
+            self.work.next.capacity(),
+            self.work.active.capacity(),
+            self.work.row.cells.capacity(),
+            self.work.row.touched.capacity(),
+            self.work.row.heads.capacity(),
+            self.work.row.later.capacity(),
+            self.work.sweep.accumulator.capacity(),
+            self.work.sweep.crossings.capacity(),
+        ]
+    }
+
+    /// How many buffers have grown since `held` was taken: each made at least
+    /// one allocation, and a fill makes none anywhere else but its mask.
+    #[cfg(test)]
+    pub(crate) fn grown_from(&self, held: &[usize; 13]) -> u64 {
+        self.capacities()
+            .iter()
+            .zip(held)
+            .filter(|(now, then)| now != then)
+            .count() as u64
+    }
+}
+
+/// A stroke's outline, as the edges of a fill: each piece the stroker makes of
+/// it — a segment's quad, a join, a cap — turned into edges as it is made, so
+/// the outline is never a [`Path`] and never flattened.
+///
+/// It fills to what the outline's path fills to because it is made of what
+/// filling that path would make of it. A piece is a polygon; its verbs in a
+/// path would be a move, a line to each later point and a close, which
+/// flattening gives back as the same points closed on the first, and
+/// [`build_edges`] makes the same edges of the polygon, in the same order,
+/// closing it itself. A path holds at most [`MAX_VERBS`] and drops every verb
+/// past them, so the outline counts the verbs its pieces would have been: the
+/// piece that reaches the bound keeps the points whose verbs fit, closed on its
+/// first as flattening closes a subpath with no close, and nothing after it is
+/// kept.
+#[derive(Default)]
+pub(crate) struct Outline {
+    /// The edges, piece after piece.
+    edges: Vec<Edge>,
+    /// [`Path::bounds`] over the points kept.
+    bounds: Option<(f64, f64, f64, f64)>,
+    /// Whether [`build_edges`] dropped an edge that may cover a sub-scanline.
+    open: bool,
+    /// The verbs the pieces kept would have been in a path.
+    verbs: usize,
+}
+
+impl Outline {
+    fn clear(&mut self) {
+        self.edges.clear();
+        self.bounds = None;
+        self.open = false;
+        self.verbs = 0;
+    }
+
+    /// One piece of the outline: a polygon of finite points, wound as every
+    /// other piece is.
+    pub(crate) fn piece(&mut self, points: &[Point]) {
+        let room = MAX_VERBS.saturating_sub(self.verbs);
+        self.verbs = self.verbs.saturating_add((points.len() + 1).min(room));
+        let kept = points.get(..points.len().min(room)).unwrap_or(&[]);
+        for p in kept {
+            self.bounds = Some(match self.bounds {
+                None => (p.x, p.y, p.x, p.y),
+                Some((x0, y0, x1, y1)) => (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)),
+            });
+        }
+        self.open |= build_edges(kept, &mut self.edges);
+    }
+}
+
+/// The buffers a fill's rows are worked in, whichever edges they sweep.
+#[derive(Default)]
+struct Work {
+    /// Each active row's list of the edges that begin in it: its first edge.
+    starts: Vec<u32>,
+    /// Each edge's successor in its row's list.
+    next: Vec<u32>,
+    /// The edges reaching the current row, in no order.
+    active: Vec<u32>,
+    /// The current row's cells.
+    row: Row,
+    /// A row that does not close.
+    sweep: Sweep,
+}
+
+impl Work {
+    /// Sweeps `edges` into `mask`'s rectangle, which is not empty, under
+    /// `rule`; `open` says whether [`build_edges`] dropped an edge that may
+    /// cover a sub-scanline.
+    fn sweep(
+        &mut self,
+        mask: &mut Mask,
+        edges: &[Edge],
+        open: bool,
+        rule: FillRule,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
+        let (x0, y0, width, height) = (mask.x0, mask.y0, mask.width, mask.height);
+        let Work {
+            starts,
+            next,
+            active,
+            row: cells,
+            sweep,
+        } = self;
         let rows = active_rows(edges, y0, height);
         if rows.is_empty() {
             return;
@@ -555,36 +722,6 @@ impl FillScratch {
                 }
             }
         }
-    }
-
-    /// The capacity of every buffer, for [`FillScratch::grown_from`].
-    #[cfg(test)]
-    fn capacities(&self) -> [usize; 12] {
-        [
-            self.points.capacity(),
-            self.ends.capacity(),
-            self.edges.capacity(),
-            self.starts.capacity(),
-            self.next.capacity(),
-            self.active.capacity(),
-            self.row.cells.capacity(),
-            self.row.touched.capacity(),
-            self.row.heads.capacity(),
-            self.row.later.capacity(),
-            self.sweep.accumulator.capacity(),
-            self.sweep.crossings.capacity(),
-        ]
-    }
-
-    /// How many buffers have grown since `held` was taken: each made at least
-    /// one allocation, and a fill makes none anywhere else but its mask.
-    #[cfg(test)]
-    fn grown_from(&self, held: &[usize; 12]) -> u64 {
-        self.capacities()
-            .iter()
-            .zip(held)
-            .filter(|(now, then)| now != then)
-            .count() as u64
     }
 }
 

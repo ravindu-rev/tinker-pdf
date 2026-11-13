@@ -183,7 +183,11 @@ impl Path {
 
 /// A path may not describe more verbs than this. A content stream can ask for
 /// unbounded geometry; a real page never does.
-const MAX_VERBS: usize = 1 << 20;
+///
+/// A stroke's outline written straight into a fill's edges holds the same
+/// bound, counted in the verbs its pieces would have been
+/// (`crate::fill::Outline`), so it stops where its path would have.
+pub(crate) const MAX_VERBS: usize = 1 << 20;
 
 /// Flattens a path into polylines, one per subpath.
 ///
@@ -271,6 +275,7 @@ fn flatten_walk(
     points: &mut Vec<Point>,
     mut close: impl FnMut(&mut Vec<Point>, usize),
 ) {
+    count::flattened();
     let mut begin = points.len();
     let mut start = Point::new(0.0, 0.0);
     let mut cursor = start;
@@ -383,6 +388,34 @@ fn subdivide(p0: Point, p1: Point, p2: Point, p3: Point, tolerance: f64, out: &m
 fn distance(a: Point, b: Point) -> f64 {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     (dx * dx + dy * dy).sqrt()
+}
+
+/// Flattening passes, counted for the stroker's guard: compiled only under
+/// `cfg(test)` and kept per thread, as the fill's counters are.
+#[cfg(test)]
+pub(crate) mod count {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static FLATTENED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One walk of a path's verbs into polylines.
+    pub(crate) fn flattened() {
+        FLATTENED.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The walks made on this thread since the last call, which starts the
+    /// count again from zero.
+    pub(crate) fn take() -> u64 {
+        FLATTENED.with(|count| count.replace(0))
+    }
+}
+
+/// The counter outside tests: nothing.
+#[cfg(not(test))]
+mod count {
+    pub(crate) fn flattened() {}
 }
 
 /// Which points a fill considers inside (8.5.3.3).

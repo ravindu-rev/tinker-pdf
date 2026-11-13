@@ -64,10 +64,12 @@ every subpath into one reused buffer rather than a vector each. `fill` is a
 fill through a scratch of its own; `tinker-pdf-render`'s renderer holds one and
 fills every path, clip, glyph, image quad and mesh through it, on the page,
 in a group's or a soft mask's buffer and in a tile alike, while a tiling
-cell, drawn by a renderer of its own, has its own. Nothing left in a scratch
-reaches a pixel: a fill empties what it reuses before it uses it, every cell
-is cleared as it is converted, and a stop comes before a row's deposit, so
-the cells are clear between fills however the last one ended.
+cell, drawn by a renderer of its own, has its own. A scratch also holds the
+last stroke's outline, as edges, apart from a path's (*Stroking*, below).
+Nothing left in a scratch reaches a pixel: a fill empties what it reuses
+before it uses it, a stroke empties the outline before it writes one, every
+cell is cleared as it is converted, and a stop comes before a row's deposit,
+so the cells are clear between fills however the last one ended.
 
 A sub-scanline closes — its windings sum
 to zero — wherever every edge of a closed subpath reaches it, so the only row
@@ -117,6 +119,26 @@ pixel (8.4.3.2). A point repeated has no direction to join or cap along,
 so repeats are dropped before the joins are read — the close of a circle
 of four Béziers and an `h` ends on its start point twice, and would
 otherwise lose the join at the start.
+
+*The outline goes straight into the fill.* Every piece of an outline — a
+segment's quad, a join, a cap — is written through one sink, which fixes its
+orientation (after mapping it, for a pen in another space) and hands it to a
+target: a `Path` for a caller that wants the outline (`stroke`,
+`stroke_mapped`), or a `FillScratch` for one that wants its coverage
+(`stroke_with`, `stroke_mapped_with`), where the piece becomes the fill's
+edges as it is made. `fill_outline` then sweeps those edges over the region
+the caller gives — `FillScratch::outline_bounds` gives the bounds the
+outline's path would have — so the path is flattened once, by the stroker,
+and the outline never is; the mask is the one `fill` gives the outline's
+path, byte for byte, because the edges are the ones filling that path makes,
+in the same order. A piece is an array of at most sixteen points (a circle's
+`ARC_STEPS`), so mapping and turning it over allocate nothing. The outline
+counts the verbs its pieces would have been in a path and stops at
+`MAX_VERBS` where the path would; it stays in the scratch until the next
+stroke, whatever paths are filled through the scratch meanwhile.
+`tinker-pdf-render` strokes paths, stroked glyphs and pattern strokes this
+way, and the SVG writer calls only `dash`, so no outline is built as a path
+on the way to a page.
 
 **A pen in another space.** `stroke_mapped` is 8.4.3.2 read literally for
 a map that is not a similarity: the path, the width and the dashes are in
@@ -361,10 +383,14 @@ canvas.fill_mask(&mask, Color::BLACK, 1.0);
 A caller filling many shapes keeps a `FillScratch` and fills through
 `fill_with(&mut scratch, …)`; `draw_image`, `accumulate_image`,
 `image_coverage`, `draw_mesh` and `draw_mesh_over` take one too, for the
-image's unit square and the mesh's coverage.
+image's unit square and the mesh's coverage. A stroke's coverage goes through
+one as well: `stroke_with(&mut scratch, …)` writes the outline into it, and
+`fill_outline(&mut scratch, …)` fills it over the region taken from
+`scratch.outline_bounds()`.
 
 The crate root re-exports the working set: `Path`, `Verb`, `Point`,
-`FillRule`, `flatten`; `fill`, `fill_with`, `FillScratch`, `Mask`; `stroke`, `stroke_mapped`,
+`FillRule`, `flatten`; `fill`, `fill_with`, `fill_outline`, `FillScratch`,
+`Mask`; `stroke`, `stroke_mapped`, `stroke_with`, `stroke_mapped_with`,
 `stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `Transform`, `Filter`,
 `Sampling`, `Pyramid`, `image_bounds_in`; `draw_mesh`, `draw_mesh_over`,
@@ -376,7 +402,7 @@ to paths — lives one layer up, in [rendering](rendering.md).
 
 | What | Typed variant / named bound | Why (one line) | See |
 | --- | --- | --- | --- |
-| A path past 1 048 576 verbs | `MAX_VERBS` (`geom.rs`); further verbs are dropped | A content stream can ask for unbounded geometry; a real page never does | [ruling 1](../rulings.md) |
+| A path past 1 048 576 verbs | `MAX_VERBS` (`geom.rs`); further verbs are dropped, and a stroke's outline written into a fill stops where its path would | A content stream can ask for unbounded geometry; a real page never does | [ruling 1](../rulings.md) |
 | A verb with a non-finite point | dropped at `Path` construction | A NaN cannot be rasterized, and dropping the verb keeps the rest of the path usable | [ruling 1](../rulings.md) |
 | A mesh costing more than 67 108 864 units of work, counted in the space it is drawn from (pixels at 72 dpi) so the same mesh is drawn or refused alike at every scale | `MAX_MESH_WORK` (`mesh.rs`); `draw_mesh` returns `None`, reported as `RenderWarning::UnsupportedShading` | Half a mesh reads as an artefact where nothing reads as the gap it is | [rendering](rendering.md) |
 | An image under a singular transform | `Transform::invert` returns `None`; the draw paints nothing | A determinant near zero maps the image to a sliver with no useful bits left | `image.rs` |
@@ -406,7 +432,15 @@ tiny pattern over a long line cannot generate millions of pieces.
   holding a crossing plus one a run on every closed generated path — five a
   row for a rectangle 193 pixels wide;
   `stroke.rs` covers caps, joins, the miter limit and
-  dash phase; `blend.rs` pins all sixteen modes in integers; `image.rs`
+  dash phase, holds the outline written into a scratch to `fill` of the path
+  the same stroke returns, byte for byte and from the same bounds, over every
+  cap, join, miter limit, width, dash pattern and phase, mapped pen and floor,
+  open, closed, curved, degenerate and far-flung paths, partial outlines a
+  stop leaves, and an outline cut at `MAX_VERBS`
+  (`the_direct_outline_fills_as_the_path_outline_did`,
+  `an_outline_stops_where_its_path_reaches_the_verb_bound`), and counts
+  flattening passes, one a stroke written and filled
+  (`a_stroke_is_flattened_once`); `blend.rs` pins all sixteen modes in integers; `image.rs`
   measures the sampling policy against numbers — a magnified gradient's
   largest step, a 2:1 checkerboard averaging to uniform 128, and an image
   wholly off the canvas costing nothing — holds the planned walk pixel for

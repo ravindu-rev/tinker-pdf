@@ -1,12 +1,20 @@
 //! Stroking: turning a path and a pen into an outline to fill.
 //!
-//! Expanding a stroke into a fillable path rather than rasterizing it directly
-//! means one rasterizer serves both, so a stroked edge and a filled one
-//! anti-alias identically — which is what stops strokes looking subtly
+//! Expanding a stroke into a fillable outline rather than rasterizing it
+//! directly means one rasterizer serves both, so a stroked edge and a filled
+//! one anti-alias identically — which is what stops strokes looking subtly
 //! different from fills at the same position.
+//!
+//! The outline is written piece by piece through a sink: into a [`Path`] for
+//! a caller that wants the outline ([`stroke`], [`stroke_mapped`]), or
+//! straight into a [`FillScratch`]'s edges for one that wants its coverage
+//! ([`stroke_with`], [`stroke_mapped_with`], then
+//! [`crate::fill::fill_outline`]), where it is never a path and never
+//! flattened a second time.
 
 use tinker_pdf_math as math;
 
+use crate::fill::{FillScratch, Outline};
 use crate::geom::{flatten, flatten_mapped, Path, Point};
 use crate::image::Transform;
 
@@ -101,7 +109,39 @@ pub fn stroke(
     stop: Option<&dyn Fn() -> bool>,
 ) -> Path {
     let mut out = Path::new();
+    outline(path, style, tolerance, stop, &mut out);
+    out
+}
 
+/// [`stroke`], with the outline written into `scratch` as the edges of a fill
+/// rather than returned as a path: [`crate::fill::fill_outline`] then fills
+/// it, to the mask [`crate::fill::fill`] gives the path [`stroke`] returns,
+/// byte for byte, and [`FillScratch::outline_bounds`] gives that path's
+/// bounds.
+///
+/// The path is flattened once, here, and the outline not at all: each piece
+/// becomes edges as it is made. The outline replaces the one the last stroke
+/// wrote into `scratch`; `stop` is asked as [`stroke`] asks it, and a stop
+/// leaves the partial outline.
+pub fn stroke_with(
+    scratch: &mut FillScratch,
+    path: &Path,
+    style: &StrokeStyle,
+    tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
+) {
+    outline(path, style, tolerance, stop, scratch.begin_outline());
+}
+
+/// The walk [`stroke`] and [`stroke_with`] share, writing every piece into
+/// `out`.
+fn outline(
+    path: &Path,
+    style: &StrokeStyle,
+    tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
+    out: &mut dyn Pieces,
+) {
     let width = if style.width.is_finite() && style.width > 0.0 {
         style.width
     } else {
@@ -111,20 +151,15 @@ pub fn stroke(
     };
     let radius = width / 2.0;
 
-    let mut sink = Sink {
-        path: &mut out,
-        map: None,
-    };
+    let mut sink = Sink { out, map: None };
     for poly in flatten(path, tolerance) {
         if stop.is_some_and(|stop| stop()) {
-            return out;
+            return;
         }
         for piece in apply_dashes(&poly, style, stop) {
             stroke_polyline(&piece, radius, style, &mut sink);
         }
     }
-
-    out
 }
 
 /// Expands a stroke whose pen lives in another space from the device's: the
@@ -164,9 +199,48 @@ pub fn stroke_mapped(
     stop: Option<&dyn Fn() -> bool>,
 ) -> Path {
     let mut out = Path::new();
+    outline_mapped(path, style, map, floor, tolerance, stop, &mut out);
+    out
+}
+
+/// [`stroke_mapped`], with the outline written into `scratch` as the edges of
+/// a fill, as [`stroke_with`] writes [`stroke`]'s: the path is flattened once,
+/// in the pen's space, and neither the pen's pieces nor the floor's are
+/// flattened again.
+pub fn stroke_mapped_with(
+    scratch: &mut FillScratch,
+    path: &Path,
+    style: &StrokeStyle,
+    map: &Transform,
+    floor: f64,
+    tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
+) {
+    outline_mapped(
+        path,
+        style,
+        map,
+        floor,
+        tolerance,
+        stop,
+        scratch.begin_outline(),
+    );
+}
+
+/// The walk [`stroke_mapped`] and [`stroke_mapped_with`] share, writing every
+/// piece into `out`.
+fn outline_mapped(
+    path: &Path,
+    style: &StrokeStyle,
+    map: &Transform,
+    floor: f64,
+    tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
+    out: &mut dyn Pieces,
+) {
     let (largest, smallest) = stretches(map);
     if !(largest.is_finite() && largest > 0.0) {
-        return out;
+        return;
     }
     let width = if style.width.is_finite() && style.width > 0.0 {
         style.width
@@ -192,12 +266,12 @@ pub fn stroke_mapped(
     };
     for poly in flatten_mapped(path, tolerance / largest) {
         if stop.is_some_and(|stop| stop()) {
-            return out;
+            return;
         }
         for piece in apply_dashes(&poly, style, stop) {
             if width > 0.0 {
                 let mut sink = Sink {
-                    path: &mut out,
+                    out: &mut *out,
                     map: Some(map),
                 };
                 stroke_polyline(&piece, width / 2.0, style, &mut sink);
@@ -211,15 +285,13 @@ pub fn stroke_mapped(
                     })
                     .collect();
                 let mut sink = Sink {
-                    path: &mut out,
+                    out: &mut *out,
                     map: None,
                 };
                 stroke_polyline(&mapped, floor / 2.0, style, &mut sink);
             }
         }
     }
-
-    out
 }
 
 /// The pieces a dash pattern leaves of a path, as polylines in the path's
@@ -524,7 +596,7 @@ fn stroke_polyline(poly: &[Point], radius: f64, style: &StrokeStyle, out: &mut S
             circle(p, radius, out);
         } else if let (Some(&p), LineCap::Square) = (poly.first(), style.cap) {
             emit(
-                &[
+                [
                     Point::new(p.x - radius, p.y - radius),
                     Point::new(p.x + radius, p.y - radius),
                     Point::new(p.x + radius, p.y + radius),
@@ -549,7 +621,7 @@ fn stroke_polyline(poly: &[Point], radius: f64, style: &StrokeStyle, out: &mut S
         let (nx, ny) = (-(b.y - a.y) / len * radius, (b.x - a.x) / len * radius);
 
         emit(
-            &[
+            [
                 Point::new(a.x + nx, a.y + ny),
                 Point::new(b.x + nx, b.y + ny),
                 Point::new(b.x - nx, b.y - ny),
@@ -624,7 +696,7 @@ fn join(a: Point, b: Point, c: Point, radius: f64, style: &StrokeStyle, out: &mu
             // Both offsets of the corner plus the tip: filled non-zero, this
             // is the miter whichever side the turn is on.
             emit(
-                &[
+                [
                     Point::new(b.x + n1x, b.y + n1y),
                     tip,
                     Point::new(b.x + n2x, b.y + n2y),
@@ -633,7 +705,7 @@ fn join(a: Point, b: Point, c: Point, radius: f64, style: &StrokeStyle, out: &mu
                 out,
             );
             emit(
-                &[
+                [
                     Point::new(b.x - n1x, b.y - n1y),
                     tip,
                     Point::new(b.x - n2x, b.y - n2y),
@@ -653,7 +725,7 @@ fn bevel(a: Point, b: Point, c: Point, radius: f64, out: &mut Sink<'_>) {
     let (n2x, n2y) = (-v.1 * radius, v.0 * radius);
 
     emit(
-        &[
+        [
             Point::new(b.x + n1x, b.y + n1y),
             Point::new(b.x + n2x, b.y + n2y),
             b,
@@ -661,7 +733,7 @@ fn bevel(a: Point, b: Point, c: Point, radius: f64, out: &mut Sink<'_>) {
         out,
     );
     emit(
-        &[
+        [
             Point::new(b.x - n1x, b.y - n1y),
             Point::new(b.x - n2x, b.y - n2y),
             b,
@@ -681,7 +753,7 @@ fn cap(end: Point, toward: Point, radius: f64, cap: LineCap, out: &mut Sink<'_>)
             let (nx, ny) = (-dy * radius, dx * radius);
             let (ex, ey) = (dx * radius, dy * radius);
             emit(
-                &[
+                [
                     Point::new(end.x + nx, end.y + ny),
                     Point::new(end.x + nx + ex, end.y + ny + ey),
                     Point::new(end.x - nx + ex, end.y - ny + ey),
@@ -693,10 +765,40 @@ fn cap(end: Point, toward: Point, radius: f64, cap: LineCap, out: &mut Sink<'_>)
     }
 }
 
-/// Where the pieces of an outline go: a path, and the map they are carried
-/// through on the way in, if the pen was not in the path's own space.
+/// What the pieces of an outline are written into.
+///
+/// Every piece reaches it closed, finite and wound as every other piece is
+/// ([`emit`]), so a target only records it: a [`Path`] as a move, lines and
+/// a close, and a fill's [`Outline`] as the edges filling that path would
+/// make of it.
+trait Pieces {
+    /// One piece: a polygon of at least three points.
+    fn piece(&mut self, points: &[Point]);
+}
+
+impl Pieces for Path {
+    fn piece(&mut self, points: &[Point]) {
+        let mut points = points.iter();
+        if let Some(first) = points.next() {
+            self.move_to(first.x, first.y);
+        }
+        for p in points {
+            self.line_to(p.x, p.y);
+        }
+        self.close();
+    }
+}
+
+impl Pieces for Outline {
+    fn piece(&mut self, points: &[Point]) {
+        Outline::piece(self, points);
+    }
+}
+
+/// Where the pieces of an outline go: a target, and the map they are carried
+/// through on the way in, if the pen was not in the target's own space.
 struct Sink<'a> {
-    path: &'a mut Path,
+    out: &'a mut dyn Pieces,
     map: Option<&'a Transform>,
 }
 
@@ -706,75 +808,57 @@ struct Sink<'a> {
 /// together under the non-zero rule, and **two overlapping pieces wound in
 /// opposite directions cancel to nothing**. Round caps vanishing entirely is
 /// what that looks like, so orientation is normalized here rather than trusted
-/// from each construction site.
+/// from each construction site, and in this one place whichever target the
+/// sink writes to.
 ///
 /// A piece built in the pen's space is mapped *before* its orientation is
 /// measured: a map with a negative determinant turns every piece over, and
 /// the floor's pieces ([`stroke_mapped`]), which are built in device space,
 /// would otherwise be wound against them and punch holes where the two meet.
-fn emit(points: &[Point], sink: &mut Sink<'_>) {
-    if points.len() < 3 {
+///
+/// A piece is an array of its points — four for a quad, a miter or a square
+/// cap, three for a bevel, [`ARC_STEPS`] for a circle — so mapping it and
+/// turning it over happen on the stack, and no piece allocates.
+fn emit<const N: usize>(points: [Point; N], sink: &mut Sink<'_>) {
+    if N < 3 {
         return;
     }
-    let mapped: Vec<Point>;
-    let points = match sink.map {
-        Some(map) => {
-            mapped = points
-                .iter()
-                .map(|p| {
-                    let (x, y) = map.apply(p.x, p.y);
-                    Point::new(x, y)
-                })
-                .collect();
-            &mapped[..]
-        }
+    let mut points = match sink.map {
+        Some(map) => points.map(|p| {
+            let (x, y) = map.apply(p.x, p.y);
+            Point::new(x, y)
+        }),
         None => points,
     };
-    let out = &mut *sink.path;
     if points.iter().any(|p| !p.is_finite()) {
         return;
     }
 
     // Twice the signed area; negative is the orientation the segment quads
-    // produce, so match it.
+    // produce, so match it. Each point with the next, the last with the
+    // first.
     let mut area = 0.0;
-    for i in 0..points.len() {
-        let (Some(a), Some(b)) = (points.get(i), points.get((i + 1) % points.len())) else {
-            return;
-        };
+    for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
         area += a.x * b.y - b.x * a.y;
     }
-
-    let ordered: Vec<Point> = if area > 0.0 {
-        points.iter().rev().copied().collect()
-    } else {
-        points.to_vec()
-    };
-
-    for (i, p) in ordered.iter().enumerate() {
-        if i == 0 {
-            out.move_to(p.x, p.y);
-        } else {
-            out.line_to(p.x, p.y);
-        }
+    if area > 0.0 {
+        points.reverse();
     }
-    out.close();
+    sink.out.piece(&points);
 }
 
 fn circle(center: Point, radius: f64, out: &mut Sink<'_>) {
     if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
         return;
     }
-    let points: Vec<Point> = (0..ARC_STEPS)
-        .map(|step| {
-            let angle = (step as f64) / (ARC_STEPS as f64) * std::f64::consts::TAU;
-            Point::new(
-                center.x + radius * math::cos(angle),
-                center.y + radius * math::sin(angle),
-            )
-        })
-        .collect();
-    emit(&points, out);
+    let points: [Point; ARC_STEPS] = std::array::from_fn(|step| {
+        let angle = (step as f64) / (ARC_STEPS as f64) * std::f64::consts::TAU;
+        Point::new(
+            center.x + radius * math::cos(angle),
+            center.y + radius * math::sin(angle),
+        )
+    });
+    emit(points, out);
 }
 
 fn unit(from: Point, to: Point) -> Option<(f64, f64)> {
@@ -790,8 +874,8 @@ fn distance(a: Point, b: Point) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fill::fill;
-    use crate::geom::FillRule;
+    use crate::fill::{fill, fill_outline, fill_with, Mask};
+    use crate::geom::{FillRule, Verb, MAX_VERBS};
 
     fn coverage(path: &Path, w: u32, h: u32) -> f64 {
         let mask = fill(path, FillRule::NonZero, 0, 0, w, h, 0.05, None);
@@ -1550,6 +1634,532 @@ mod tests {
                 &apply_dashes(&line, &style(&[1.0, 1.0, 0.0, 1.0], phase), None),
                 &apply_dashes(&line, &style(&[1.0, 2.0], phase), None),
                 &format!("[1 1 0 1] at {phase}"),
+            );
+        }
+    }
+
+    // ---- the outline written straight into a fill's edges -----------------
+
+    /// A pen for the comparisons: a style, the map and floor it is carried
+    /// out through where its space is not the device's, and the tolerance
+    /// the path is flattened at.
+    struct Pen {
+        style: StrokeStyle,
+        mapped: Option<(Transform, f64)>,
+        tolerance: f64,
+    }
+
+    impl Pen {
+        /// The outline as the path [`stroke`] or [`stroke_mapped`] returns.
+        fn outline(&self, path: &Path, stop: Option<&dyn Fn() -> bool>) -> Path {
+            match &self.mapped {
+                Some((map, floor)) => {
+                    stroke_mapped(path, &self.style, map, *floor, self.tolerance, stop)
+                }
+                None => stroke(path, &self.style, self.tolerance, stop),
+            }
+        }
+
+        /// The outline written into `scratch`, by [`stroke_with`] or
+        /// [`stroke_mapped_with`].
+        fn write(&self, scratch: &mut FillScratch, path: &Path, stop: Option<&dyn Fn() -> bool>) {
+            match &self.mapped {
+                Some((map, floor)) => stroke_mapped_with(
+                    scratch,
+                    path,
+                    &self.style,
+                    map,
+                    *floor,
+                    self.tolerance,
+                    stop,
+                ),
+                None => stroke_with(scratch, path, &self.style, self.tolerance, stop),
+            }
+        }
+    }
+
+    /// Pens with the cap and join given, between them every miter limit —
+    /// the default, one every corner is past, one a right angle just passes,
+    /// a vast one, one that is not a number and one below zero — every width
+    /// — the thinnest line, a thin one, wide ones, one that is not a number —
+    /// every kind of dash pattern — none, even, odd, every dash of no length,
+    /// one of no length among others — at phases inside, below and past the
+    /// pattern and one that is not a number, three tolerances, and pens in
+    /// another space: a turn, a stretch, a shear, a reflection and a skew,
+    /// with floors of none, under the pen, over it and not a number.
+    fn pens(cap: LineCap, join: LineJoin) -> Vec<Pen> {
+        let style = |width: f64, miter_limit: f64, dashes: &[f64], dash_phase: f64| StrokeStyle {
+            width,
+            cap,
+            join,
+            miter_limit,
+            dashes: dashes.to_vec(),
+            dash_phase,
+        };
+        let plain = |style: StrokeStyle, tolerance: f64| Pen {
+            style,
+            mapped: None,
+            tolerance,
+        };
+        let carried = |style: StrokeStyle, to: Transform, floor: f64| Pen {
+            style,
+            mapped: Some((to, floor)),
+            tolerance: 0.1,
+        };
+        vec![
+            plain(style(2.0, 10.0, &[], 0.0), 0.05),
+            plain(style(5.5, 1.0, &[], 0.0), 0.3),
+            plain(style(3.0, 1.42, &[4.0, 2.0], 1.5), 0.1),
+            plain(style(0.0, 4.0, &[3.0], -2.5), 0.1),
+            plain(style(f64::NAN, f64::NAN, &[5.0, 1.0, 0.0, 1.0], 1e3), 0.2),
+            plain(style(0.4, 1e6, &[0.0, 2.0], 0.0), 0.1),
+            plain(style(2.5, -3.0, &[0.5, 0.25, 1.0], f64::NAN), 0.1),
+            carried(
+                style(2.0, 10.0, &[], 0.0),
+                map(0.6, 0.8, -0.8, 0.6, 20.0, 2.0),
+                0.0,
+            ),
+            carried(
+                style(2.0, 10.0, &[4.0, 3.0], 1.0),
+                map(1.0, 0.0, 0.0, 3.0, 4.0, 4.0),
+                0.8,
+            ),
+            carried(
+                style(0.2, 4.0, &[], 0.0),
+                map(1.0, 0.0, 1.0, 1.0, 0.0, 0.0),
+                1.5,
+            ),
+            carried(
+                style(0.0, 10.0, &[2.0, 2.0], 0.5),
+                map(1.0, 0.0, 0.0, -3.0, 0.0, 130.0),
+                1.0,
+            ),
+            carried(
+                style(1.0, 10.0, &[], 0.0),
+                map(2.0, 0.5, 0.25, 0.5, 3.0, 9.0),
+                f64::NAN,
+            ),
+        ]
+    }
+
+    /// Paths for the comparisons: open and closed, a sharp corner and a
+    /// shallow one, both curve verbs, a circle closed on its start, a lone
+    /// point, points named twice, one point named twice and nothing else,
+    /// several subpaths, one a million pixels out and one reaching past any
+    /// page.
+    fn strokeable() -> Vec<(&'static str, Path)> {
+        let mut out = Vec::new();
+
+        let mut zigzag = Path::new();
+        zigzag.move_to(3.0, 4.0);
+        zigzag.line_to(28.0, 6.5);
+        zigzag.line_to(5.5, 12.0);
+        zigzag.line_to(30.0, 30.0);
+        zigzag.line_to(31.0, 31.5);
+        out.push(("an open zigzag", zigzag));
+
+        let mut rectangle = Path::new();
+        rectangle.rect(6.25, 5.5, 20.0, 17.75);
+        out.push(("a closed rectangle", rectangle));
+
+        let mut curves = Path::new();
+        curves.move_to(4.0, 30.0);
+        curves.curve_to(4.0, 2.0, 34.0, 2.0, 34.0, 30.0);
+        curves.quad_to(19.0, 40.0, 10.0, 24.0);
+        out.push(("a cubic and a quadratic", curves));
+
+        let k = 0.552_284_75 * 12.0;
+        let mut circle = Path::new();
+        circle.move_to(32.0, 20.0);
+        circle.curve_to(32.0, 20.0 + k, 20.0 + k, 32.0, 20.0, 32.0);
+        circle.curve_to(20.0 - k, 32.0, 8.0, 20.0 + k, 8.0, 20.0);
+        circle.curve_to(8.0, 20.0 - k, 20.0 - k, 8.0, 20.0, 8.0);
+        circle.curve_to(20.0 + k, 8.0, 32.0, 20.0 - k, 32.0, 20.0);
+        circle.close();
+        out.push(("a circle of four curves and a close", circle));
+
+        let mut dot = Path::new();
+        dot.move_to(18.5, 18.5);
+        out.push(("a lone point", dot));
+
+        let mut repeats = Path::new();
+        repeats.move_to(8.0, 8.0);
+        repeats.line_to(8.0, 8.0);
+        repeats.line_to(24.0, 14.0);
+        repeats.line_to(24.0, 14.0);
+        repeats.line_to(12.0, 28.0);
+        out.push(("points named twice", repeats));
+
+        let mut twice = Path::new();
+        twice.move_to(14.0, 9.0);
+        twice.line_to(14.0, 9.0);
+        out.push(("one point named twice", twice));
+
+        let mut several = Path::new();
+        several.move_to(2.0, 2.0);
+        several.line_to(14.0, 2.0);
+        several.move_to(20.0, 6.0);
+        several.line_to(20.0, 26.0);
+        several.line_to(34.0, 26.0);
+        several.move_to(6.0, 34.0);
+        several.move_to(30.0, 4.0);
+        several.line_to(36.0, 12.0);
+        several.close();
+        out.push(("several subpaths", several));
+
+        let mut far = Path::new();
+        far.move_to(1_000_003.25, 7.0);
+        far.line_to(1_000_031.5, 29.75);
+        far.line_to(1_000_009.0, 30.5);
+        out.push(("a path a million pixels out", far));
+
+        let mut huge = Path::new();
+        huge.move_to(-1e300, 5.0);
+        huge.line_to(1e300, 9.0);
+        huge.line_to(20.0, 1e300);
+        out.push(("a path reaching past any page", huge));
+
+        out
+    }
+
+    /// The regions an outline is filled over: its rectangle with a pixel to
+    /// spare, at most 160 pixels a side, one cutting through its middle, and
+    /// the pixel at its centre — or a small square where it has no points.
+    fn regions(bounds: Option<(f64, f64, f64, f64)>) -> [(i32, i32, u32, u32); 3] {
+        let Some((x0, y0, x1, y1)) = bounds else {
+            return [(0, 0, 16, 16), (4, 4, 3, 3), (8, 8, 1, 1)];
+        };
+        let at = |v: f64| (v as i64).clamp(-1_000_000_000, 1_000_000_000);
+        let (left, top) = (at(x0.floor()) - 1, at(y0.floor()) - 1);
+        let (right, bottom) = (at(x1.ceil()) + 1, at(y1.ceil()) + 1);
+        let width = (right - left).clamp(1, 160);
+        let height = (bottom - top).clamp(1, 160);
+        let rect = |x: i64, y: i64, w: i64, h: i64| (x as i32, y as i32, w as u32, h as u32);
+        [
+            rect(left, top, width, height),
+            rect(
+                left + width / 3,
+                top + height / 3,
+                width / 2 + 1,
+                height / 2 + 1,
+            ),
+            rect(left + width / 2, top + height / 2, 1, 1),
+        ]
+    }
+
+    /// Two masks of one region, byte for byte, naming the first pixel apart.
+    fn same_mask(got: &Mask, want: &Mask, what: &str) {
+        assert_eq!(
+            (got.x0, got.y0, got.width, got.height),
+            (want.x0, want.y0, want.width, want.height),
+            "{what}: the region"
+        );
+        assert_eq!(got.data.len(), want.data.len(), "{what}: the mask's size");
+        if let Some(at) = got.data.iter().zip(&want.data).position(|(a, b)| a != b) {
+            let across = want.width.max(1) as usize;
+            panic!(
+                "{what}: pixel ({}, {}) is {:?} where the path's fill has {:?}",
+                i64::from(want.x0) + (at % across) as i64,
+                i64::from(want.y0) + (at / across) as i64,
+                got.data.get(at),
+                want.data.get(at)
+            );
+        }
+    }
+
+    /// **The direct outline fills as the path outline did.** For every cap,
+    /// join and pen above, over every path above, the outline a stroke writes
+    /// into a scratch has the bounds of the path the same stroke returns, and
+    /// fills — over its rectangle, one cutting through it and a single pixel —
+    /// to the bytes `fill` gives that path; and so does every partial outline
+    /// a stop leaves, the stop asked as often either way. One scratch takes
+    /// every stroke, so no outline is left over to reach the next one's mask.
+    #[test]
+    fn the_direct_outline_fills_as_the_path_outline_did() {
+        let mut scratch = FillScratch::new();
+        let (mut cases, mut inked) = (0u64, 0u64);
+        for (name, path) in strokeable() {
+            for cap in [LineCap::Butt, LineCap::Round, LineCap::Square] {
+                for join in [LineJoin::Miter, LineJoin::Round, LineJoin::Bevel] {
+                    for (index, pen) in pens(cap, join).iter().enumerate() {
+                        let what = format!("{name}, {cap:?} caps, {join:?} joins, pen {index}");
+                        let outline = pen.outline(&path, None);
+                        pen.write(&mut scratch, &path, None);
+                        assert_eq!(
+                            scratch.outline_bounds(),
+                            outline.bounds(),
+                            "{what}: the bounds"
+                        );
+                        for (x0, y0, width, height) in regions(outline.bounds()) {
+                            let want = fill(
+                                &outline,
+                                FillRule::NonZero,
+                                x0,
+                                y0,
+                                width,
+                                height,
+                                pen.tolerance,
+                                None,
+                            );
+                            let got = fill_outline(&mut scratch, x0, y0, width, height, None);
+                            same_mask(
+                                &got,
+                                &want,
+                                &format!("{what} over {x0},{y0} {width}x{height}"),
+                            );
+                            cases += 1;
+                            if want.data.iter().any(|v| *v != 0) {
+                                inked += 1;
+                            }
+                        }
+
+                        for at in [2, 3] {
+                            let what = format!("{what}, stopped at question {at}");
+                            let (asked_path, asked_edges) = (StopAt::new(at), StopAt::new(at));
+                            let partial = pen.outline(&path, Some(&|| asked_path.ask()));
+                            pen.write(&mut scratch, &path, Some(&|| asked_edges.ask()));
+                            assert_eq!(
+                                asked_edges.calls.get(),
+                                asked_path.calls.get(),
+                                "{what}: asked as often"
+                            );
+                            assert_eq!(
+                                scratch.outline_bounds(),
+                                partial.bounds(),
+                                "{what}: the bounds"
+                            );
+                            let [(x0, y0, width, height), ..] = regions(partial.bounds());
+                            same_mask(
+                                &fill_outline(&mut scratch, x0, y0, width, height, None),
+                                &fill(
+                                    &partial,
+                                    FillRule::NonZero,
+                                    x0,
+                                    y0,
+                                    width,
+                                    height,
+                                    pen.tolerance,
+                                    None,
+                                ),
+                                &what,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            inked * 4 > cases,
+            "{inked} of {cases} comparisons drew anything"
+        );
+    }
+
+    /// **A stroke is flattened once**: by the stroker, never by the fill. A
+    /// stroke written into a scratch and filled is one flattening pass —
+    /// solid or dashed, with curves, several subpaths and a lone point, in
+    /// the device's space or carried out of the pen's with a floor or none —
+    /// where the same outline returned as a path and filled is two. A map
+    /// with no stretch outlines nothing and flattens nothing to find that
+    /// out.
+    #[test]
+    fn a_stroke_is_flattened_once() {
+        let mut path = Path::new();
+        path.move_to(3.0, 3.0);
+        path.curve_to(3.0, 30.0, 30.0, 30.0, 30.0, 3.0);
+        path.quad_to(16.0, -8.0, 3.0, 3.0);
+        path.move_to(8.0, 20.0);
+        path.line_to(24.0, 22.0);
+        path.move_to(16.0, 16.0);
+        let solid = StrokeStyle {
+            width: 2.5,
+            cap: LineCap::Round,
+            join: LineJoin::Round,
+            ..StrokeStyle::default()
+        };
+        let dashed = StrokeStyle {
+            width: 1.5,
+            dashes: vec![3.0, 1.5],
+            dash_phase: 0.75,
+            ..StrokeStyle::default()
+        };
+        let stretch = map(1.0, 0.0, 0.5, 3.0, 2.0, 1.0);
+        let mut scratch = FillScratch::new();
+        for (what, style) in [("solid", &solid), ("dashed", &dashed)] {
+            for floor in [None, Some(0.0), Some(1.5)] {
+                let _ = crate::geom::count::take();
+                match floor {
+                    None => stroke_with(&mut scratch, &path, style, 0.1, None),
+                    Some(floor) => {
+                        stroke_mapped_with(&mut scratch, &path, style, &stretch, floor, 0.1, None);
+                    }
+                }
+                let _ = fill_outline(&mut scratch, -8, -8, 80, 120, None);
+                assert_eq!(
+                    crate::geom::count::take(),
+                    1,
+                    "{what}, floor {floor:?}: written and filled, one pass"
+                );
+
+                let outline = match floor {
+                    None => stroke(&path, style, 0.1, None),
+                    Some(floor) => stroke_mapped(&path, style, &stretch, floor, 0.1, None),
+                };
+                let _ = fill(&outline, FillRule::NonZero, -8, -8, 80, 120, 0.1, None);
+                assert_eq!(
+                    crate::geom::count::take(),
+                    2,
+                    "{what}, floor {floor:?}: returned as a path and filled, two"
+                );
+            }
+        }
+
+        let _ = crate::geom::count::take();
+        let collapse = map(0.0, 0.0, 0.0, 0.0, 1.0, 1.0);
+        stroke_mapped_with(&mut scratch, &path, &solid, &collapse, 1.0, 0.1, None);
+        assert_eq!(crate::geom::count::take(), 0, "no stretch, no pass");
+        assert_eq!(scratch.outline_bounds(), None, "and no outline");
+    }
+
+    /// The outline stays in the scratch until the next stroke writes another:
+    /// a path filled through the scratch meanwhile leaves it, and so does
+    /// filling it; the same stroke again grows none of the scratch's buffers;
+    /// another stroke replaces it; and a stroke that outlines nothing leaves
+    /// nothing to fill.
+    #[test]
+    fn an_outline_stays_in_the_scratch_until_the_next_stroke() {
+        let style = StrokeStyle {
+            width: 3.0,
+            cap: LineCap::Round,
+            dashes: vec![6.0, 2.0],
+            ..StrokeStyle::default()
+        };
+        let first = segment(2.0, 4.0, 30.0, 20.0);
+        let second = segment(4.0, 28.0, 28.0, 6.0);
+        let path_fill = |path: &Path| {
+            fill(
+                &stroke(path, &style, 0.05, None),
+                FillRule::NonZero,
+                0,
+                0,
+                40,
+                40,
+                0.05,
+                None,
+            )
+        };
+
+        let mut scratch = FillScratch::new();
+        stroke_with(&mut scratch, &first, &style, 0.05, None);
+        let mut square = Path::new();
+        square.rect(1.0, 1.0, 30.0, 30.0);
+        let _ = fill_with(
+            &mut scratch,
+            &square,
+            FillRule::EvenOdd,
+            0,
+            0,
+            40,
+            40,
+            0.05,
+            None,
+        );
+        let want = path_fill(&first);
+        same_mask(
+            &fill_outline(&mut scratch, 0, 0, 40, 40, None),
+            &want,
+            "after a path was filled through the scratch",
+        );
+        same_mask(
+            &fill_outline(&mut scratch, 0, 0, 40, 40, None),
+            &want,
+            "filled a second time",
+        );
+
+        let held = scratch.capacities();
+        stroke_with(&mut scratch, &first, &style, 0.05, None);
+        same_mask(
+            &fill_outline(&mut scratch, 0, 0, 40, 40, None),
+            &want,
+            "the same stroke again",
+        );
+        assert_eq!(
+            scratch.grown_from(&held),
+            0,
+            "the same stroke again grows nothing"
+        );
+
+        stroke_with(&mut scratch, &second, &style, 0.05, None);
+        assert_eq!(
+            scratch.outline_bounds(),
+            stroke(&second, &style, 0.05, None).bounds(),
+            "the next stroke's bounds"
+        );
+        same_mask(
+            &fill_outline(&mut scratch, 0, 0, 40, 40, None),
+            &path_fill(&second),
+            "the next stroke's outline",
+        );
+
+        let nowhere = map(f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0);
+        stroke_mapped_with(&mut scratch, &first, &style, &nowhere, 1.0, 0.05, None);
+        assert_eq!(scratch.outline_bounds(), None, "a map that is not finite");
+        assert!(
+            fill_outline(&mut scratch, 0, 0, 40, 40, None)
+                .data
+                .iter()
+                .all(|v| *v == 0),
+            "outlines nothing"
+        );
+    }
+
+    /// A path holds at most `MAX_VERBS` verbs and drops the rest, and the
+    /// outline written into a fill's edges stops where that path stops: the
+    /// piece the bound cuts keeps the points whose verbs fit, closed back to
+    /// its first as an unclosed subpath is, and nothing after it is kept.
+    ///
+    /// Round caps on dashes of `[1 1]` down a line sixty thousand long, with
+    /// a corner in the first dash and in the third: a dash is a quad and two
+    /// circles, 39 verbs, and a dash holding a corner 54, with its two quads
+    /// and its miter, so the bound falls on the ninth point of a circle and
+    /// its close is past it.
+    #[test]
+    fn an_outline_stops_where_its_path_reaches_the_verb_bound() {
+        let mut path = Path::new();
+        path.move_to(10.0, 0.0);
+        path.line_to(10.0, 0.5);
+        path.line_to(14.0, 0.5);
+        path.line_to(14.0, 60_000.0);
+        let style = StrokeStyle {
+            width: 2.0,
+            cap: LineCap::Round,
+            dashes: vec![1.0, 1.0],
+            ..StrokeStyle::default()
+        };
+        let outline = stroke(&path, &style, 0.1, None);
+        assert_eq!(outline.verbs().len(), MAX_VERBS, "the path is at its bound");
+        assert!(
+            matches!(outline.verbs().last(), Some(Verb::LineTo(_))),
+            "the bound falls inside a piece: {:?}",
+            outline.verbs().last()
+        );
+
+        let mut scratch = FillScratch::new();
+        stroke_with(&mut scratch, &path, &style, 0.1, None);
+        assert_eq!(scratch.outline_bounds(), outline.bounds(), "the bounds");
+        let Some((_, _, _, bottom)) = outline.bounds() else {
+            panic!("an outline with points");
+        };
+        let cut = bottom.floor() as i32;
+        for (y0, what) in [
+            (-4, "the corners at the top"),
+            (cut - 40, "where the bound cuts"),
+        ] {
+            let want = fill(&outline, FillRule::NonZero, 0, y0, 24, 64, 0.1, None);
+            assert!(want.data.iter().any(|v| *v != 0), "{what}: ink");
+            same_mask(
+                &fill_outline(&mut scratch, 0, y0, 24, 64, None),
+                &want,
+                what,
             );
         }
     }

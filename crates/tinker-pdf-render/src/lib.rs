@@ -31,7 +31,7 @@ use tinker_pdf_content::{
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
     canvas::{Canvas, Color, MaskKind, PixelFormat},
-    fill::{fill_with, FillScratch, Mask},
+    fill::{fill_outline, fill_with, FillScratch, Mask},
     fragments::Fragments,
     geom::{FillRule, Path},
     image::{
@@ -39,7 +39,7 @@ use tinker_pdf_raster::{
         Pyramid, Transform,
     },
     mesh::{draw_mesh_over, MeshDraw},
-    stroke::{stretches, stroke, stroke_mapped, LineCap, LineJoin, StrokeStyle},
+    stroke::{stretches, stroke_mapped_with, stroke_with, LineCap, LineJoin, StrokeStyle},
 };
 
 /// How far apart a map's two stretches may be, as a fraction of the larger,
@@ -64,7 +64,7 @@ const STROKE_CONDITION: f64 = 1e9;
 /// with one number. Under any other map no single width is the pen, and the
 /// answer is `Some(largest)`, the factor the map stretches its most-stretched
 /// direction by — the renderer strokes through user space
-/// (`tinker_pdf_raster::stroke_mapped`), and the SVG writer states the path
+/// (`tinker_pdf_raster::stroke_mapped_with`), and the SVG writer states the path
 /// in a space this much larger than user space, where the pen is round.
 ///
 /// Also `None` for a map that is not finite or that stretches one direction
@@ -1009,11 +1009,25 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
     }
 
-    /// The rectangle a path's mask would have on a render of the whole page:
+    /// The rectangle a shape's mask would have on a render of the whole page:
     /// [`paint_region`] over the page-frame rectangles rather than over the
     /// masks and the canvas.
-    fn page_region(&self, path: &Path) -> Bounds {
-        region_within(path, &[self.clip_bounds, self.soft_bounds], self.frame)
+    fn page_region(&self, shape: Shape<'_>) -> Bounds {
+        region_within(
+            self.bounds_of(shape),
+            &[self.clip_bounds, self.soft_bounds],
+            self.frame,
+        )
+    }
+
+    /// A shape's bounding box in device pixels, control points included:
+    /// a path's own, or the bounds of the stroke's outline in the scratch,
+    /// which are the ones that outline's path would have.
+    fn bounds_of(&self, shape: Shape<'_>) -> Option<(f64, f64, f64, f64)> {
+        match shape {
+            Shape::Fill(path, _) => path.bounds(),
+            Shape::Stroke => self.scratch.outline_bounds(),
+        }
     }
 
     /// What the clip and the soft mask leave of the frame, on a render of the
@@ -1479,7 +1493,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let (x0, y0, width, height) = if built.is_empty() {
             self.device()
         } else {
-            paint_region(&built, None, None, self.device())
+            paint_region(built.bounds(), None, None, self.device())
         };
         // A box that misses this canvas is accepted over a buffer of no
         // pixels, for the reason `open_group` gives: declining depends on the
@@ -1538,7 +1552,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // The buffer a whole-page render would have made, from the same
         // arithmetic as the one above.
         if !built.is_empty() {
-            self.frame = region_within(&built, &[], self.frame);
+            self.frame = region_within(built.bounds(), &[], self.frame);
         }
         // The mask group draws under no clip and no mask of its own: it is a
         // picture of a mask, not a painting on the page. It draws in the
@@ -1646,14 +1660,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         );
     }
 
-    /// Fills a path with a pattern, or reports one that cannot be.
+    /// Fills a shape with a pattern, or reports one that cannot be.
     ///
     /// 8.7.3.1: a pattern's matrix maps pattern space to the *default* space
     /// of the page, not to the space in force when it is used. The CTM at fill
     /// time is therefore not part of it, which is why `base` appears in both
     /// branches below and `state.ctm` appears in neither. A stroke reaches
-    /// this through its outline, so that guarantee covers strokes too — the
-    /// stroker's transform never enters the pattern.
+    /// this through its outline ([`Shape::Stroke`]), so that guarantee covers
+    /// strokes too — the stroker's transform never enters the pattern.
     ///
     /// `alpha` is a parameter rather than a field of `state` because 8.4.5
     /// gives painting two of them: a fill uses `ca`, a stroke uses `CA`, and
@@ -1663,8 +1677,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// the slot that named it, and a stroke's slot is not a fill's.
     fn fill_with_pattern(
         &mut self,
-        path: &Path,
-        rule: FillRule,
+        shape: Shape<'_>,
         name: &[u8],
         state: &GraphicsState,
         alpha: f64,
@@ -1675,12 +1688,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 // A mesh too large to paint is reported as the unpainted
                 // pattern it is, exactly as an unreadable tiling cell is: the
                 // area is left alone rather than filled with black.
-                if !self.fill_with_shading(path, rule, &shading, matrix, state, alpha) {
+                if !self.fill_with_shading(shape, &shading, matrix, state, alpha) {
                     self.report_unpainted_pattern(name);
                 }
             }
             Some(PatternPaint::Tiling(tiling)) => {
-                if !self.fill_with_tiles(path, rule, name, &tiling, state, alpha, color) {
+                if !self.fill_with_tiles(shape, name, &tiling, state, alpha, color) {
                     self.report_unpainted_pattern(name);
                 }
             }
@@ -1699,18 +1712,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
     }
 
-    /// Fills a path with a shading pattern.
+    /// Fills a shape with a shading pattern.
     ///
-    /// The path becomes the clip and the shading is evaluated per pixel inside
-    /// it, which is the same machinery `sh` uses — a shading pattern is `sh`
-    /// bounded by a path rather than by the current clip.
+    /// The shape becomes the clip and the shading is evaluated per pixel
+    /// inside it, which is the same machinery `sh` uses — a shading pattern is
+    /// `sh` bounded by a shape rather than by the current clip.
     ///
     /// False means nothing was painted and the caller should say so: a mesh
     /// past its work budget is the only way that happens.
     fn fill_with_shading(
         &mut self,
-        path: &Path,
-        rule: FillRule,
+        shape: Shape<'_>,
         shading: &Shading,
         matrix: Matrix,
         state: &GraphicsState,
@@ -1718,7 +1730,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ) -> bool {
         let to_device = matrix.then(&self.base);
         let stop = self.stop_predicate();
-        let area = self.coverage(path, rule, Some(&stop));
+        let area = self.coverage(shape, Some(&stop));
         let alpha = alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
 
@@ -1726,7 +1738,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // the other route entirely — and it does its own knockout restore,
         // with its own coverage rather than the shape's.
         if let Some(mesh) = shading.mesh() {
-            let limit = self.page_region(path);
+            let limit = self.page_region(shape);
             return self.paint_mesh(mesh, to_device, Some(&area), limit, alpha, mode);
         }
 
@@ -1816,7 +1828,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // Taken on the whole page and then narrowed to this canvas by the
         // rasterizer, which knows how far past the canvas a silhouette pixel
         // looks for its colour (ruling 5).
-        let whole = region_within(&bbox, &[Some(limit)], self.frame);
+        let whole = region_within(bbox.bounds(), &[Some(limit)], self.frame);
         if whole.is_empty() {
             return true;
         }
@@ -1899,7 +1911,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         true
     }
 
-    /// Fills a path with a tiling pattern: one cell, rasterized once, blitted
+    /// Fills a shape with a tiling pattern: one cell, rasterized once, blitted
     /// across the lattice (8.7.3.2).
     ///
     /// Returns false when the pattern could not be painted at all, which the
@@ -1920,11 +1932,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// not spill into them. With the buffer sized to the box there is nowhere
     /// for a neighbour's ink to be — the spill is impossible by construction
     /// rather than prevented by a clip that could be forgotten.
-    #[allow(clippy::too_many_arguments)]
     fn fill_with_tiles(
         &mut self,
-        path: &Path,
-        rule: FillRule,
+        shape: Shape<'_>,
         name: &[u8],
         tiling: &TilingPattern,
         state: &GraphicsState,
@@ -1983,7 +1993,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // levels at 1x. Indexed from the page's, every canvas composites the
         // same cells in the same order, and the budgets below refuse the same
         // lattices.
-        let reach = self.page_region(path);
+        let reach = self.page_region(shape);
         if reach.is_empty() {
             return true;
         }
@@ -2112,7 +2122,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let tile = tile.canvas;
 
         let stop = self.stop_predicate();
-        let coverage = self.coverage(path, rule, Some(&stop));
+        let coverage = self.coverage(shape, Some(&stop));
         if self.in_knockout() {
             self.knockout_restore(&coverage);
         }
@@ -2172,40 +2182,49 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ) -> (Mask, Bounds) {
         let soft = self.soft.take();
         let soft_bounds = self.soft_bounds.take();
-        let bounds = self.page_region(path);
-        let mask = self.coverage(path, rule, stop);
+        let bounds = self.page_region(Shape::Fill(path, rule));
+        let mask = self.coverage(Shape::Fill(path, rule), stop);
         self.soft = soft;
         self.soft_bounds = soft_bounds;
         (mask, bounds)
     }
 
-    /// The coverage a path contributes, over the pixels it can reach and with
+    /// The coverage a shape contributes, over the pixels it can reach and with
     /// the current clip already multiplied in.
     ///
     /// Every paint and every clip goes through here, and this is the only
     /// place that decides how large a mask is. A comma used to allocate and
     /// scan a full page: eight megabytes at 300 dpi, per glyph, twice for
-    /// stroked text. It now costs its own bounding box.
-    fn coverage(&mut self, path: &Path, rule: FillRule, stop: Option<&dyn Fn() -> bool>) -> Mask {
-        let (x0, y0, width, height) =
-            paint_region(path, self.clip.as_ref(), self.soft.as_ref(), self.device());
+    /// stroked text. It now costs its own bounding box. A path is filled; a
+    /// stroke's outline, which the pen wrote into the scratch as edges, is
+    /// swept as it stands, over the region its path would have had.
+    fn coverage(&mut self, shape: Shape<'_>, stop: Option<&dyn Fn() -> bool>) -> Mask {
+        let (x0, y0, width, height) = paint_region(
+            self.bounds_of(shape),
+            self.clip.as_ref(),
+            self.soft.as_ref(),
+            self.device(),
+        );
         #[cfg(test)]
         {
             self.mask_pixels = self
                 .mask_pixels
                 .saturating_add(u64::from(width) * u64::from(height));
         }
-        let mut mask = fill_with(
-            &mut self.scratch,
-            path,
-            rule,
-            x0,
-            y0,
-            width,
-            height,
-            self.tolerance,
-            stop,
-        );
+        let mut mask = match shape {
+            Shape::Fill(path, rule) => fill_with(
+                &mut self.scratch,
+                path,
+                rule,
+                x0,
+                y0,
+                width,
+                height,
+                self.tolerance,
+                stop,
+            ),
+            Shape::Stroke => fill_outline(&mut self.scratch, x0, y0, width, height, stop),
+        };
         // Before the clip, so the clip multiplies into a hard shape and the
         // product of two hard masks stays hard. See `with_antialias`.
         if !self.antialias {
@@ -2239,18 +2258,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// whose rasterization is the expensive part. A caller's entry is a
     /// different moment from this one, and this is the moment the work starts.
     fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
-        self.paint_inked(path, rule, color, None, alpha, mode);
+        self.paint_inked(Shape::Fill(path, rule), color, None, alpha, mode);
     }
 
-    /// As [`Renderer::paint`], with the colour's DeviceCMYK components beside
-    /// it (`GraphicsState::fill_ink`): a canvas compositing in ink — the
-    /// page asked for in ink, or a `/DeviceCMYK` group's buffer — composites
-    /// the document's own components rather than the light turned back into
-    /// ink, which would lose every separation the file chose but one.
+    /// As [`Renderer::paint`], for any shape, with the colour's DeviceCMYK
+    /// components beside it (`GraphicsState::fill_ink`): a canvas compositing
+    /// in ink — the page asked for in ink, or a `/DeviceCMYK` group's buffer —
+    /// composites the document's own components rather than the light turned
+    /// back into ink, which would lose every separation the file chose but
+    /// one.
     fn paint_inked(
         &mut self,
-        path: &Path,
-        rule: FillRule,
+        shape: Shape<'_>,
         color: Color,
         ink: Option<[u8; 4]>,
         alpha: f64,
@@ -2260,7 +2279,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             return;
         }
         let stop = self.stop_predicate();
-        let mask = self.coverage(path, rule, Some(&stop));
+        let mask = self.coverage(shape, Some(&stop));
         if self.in_knockout() {
             self.knockout_restore(&mask);
         }
@@ -2332,7 +2351,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
             quad.close();
-            let area = self.coverage(&quad, FillRule::NonZero, None);
+            let area = self.coverage(Shape::Fill(&quad, FillRule::NonZero), None);
             self.knockout_restore(&area);
         }
         // Whether this draw joins the run held back so that abutting images do
@@ -2463,9 +2482,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         run.fragments.would_overlap(&shape)
     }
 
-    /// The outline of a stroke of `path`, which is in device space, with a
-    /// pen whose width, dash array and phase are in **user space** (8.4.3.2,
-    /// 8.4.3.6), at least `floor` device pixels wide.
+    /// Strokes `path`, which is in device space, with a pen whose width, dash
+    /// array and phase are in **user space** (8.4.3.2, 8.4.3.6), at least
+    /// `floor` device pixels wide — writing the outline into the scratch as
+    /// the edges of a fill, and handing back the [`Shape`] that fills it.
     ///
     /// Under a similarity — a uniform scale with any rotation or reflection,
     /// which is nearly every page — a user-space pen is a device-space pen
@@ -2475,25 +2495,41 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// makes a pen two units wide six device units across the stretch and two
     /// along it, and cuts a dash square in user space and sheared on the
     /// device. So the path is taken back to user space, stroked there, and
-    /// the outline carried out again (`stroke_mapped`), with `floor` held in
-    /// device pixels in every direction.
+    /// the outline carried out again (`stroke_mapped_with`), with `floor`
+    /// held in device pixels in every direction.
+    ///
+    /// The outline is never a path: the stroker turns each of its pieces into
+    /// edges as it makes them, so the path is flattened once, here, and the
+    /// outline not at all, and its mask is the one filling the outline's path
+    /// would give, byte for byte (`tinker_pdf_raster::fill_outline`). It stays
+    /// in the scratch until the next stroke writes another, and a path filled
+    /// through the scratch meanwhile does not touch it.
     ///
     /// Which of the two is [`user_space_pen`]'s decision, shared with the
     /// SVG writer so the two state one pen.
     fn pen(
-        &self,
+        &mut self,
         path: &Path,
         state: &GraphicsState,
         style: StrokeStyle,
         floor: f64,
         stop: &dyn Fn() -> bool,
-    ) -> Path {
+    ) -> Shape<'static> {
         let m = state.ctm.then(&self.base);
         if user_space_pen(&m).is_some() {
             let map = transform(&m);
             if let Some(back) = pen_inverse(&map) {
                 let user = path.mapped(&back);
-                return stroke_mapped(&user, &style, &map, floor, self.tolerance, Some(stop));
+                stroke_mapped_with(
+                    &mut self.scratch,
+                    &user,
+                    &style,
+                    &map,
+                    floor,
+                    self.tolerance,
+                    Some(stop),
+                );
+                return Shape::Stroke;
             }
         }
         let scale = m.expansion();
@@ -2503,7 +2539,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             dash_phase: style.dash_phase * scale,
             ..style
         };
-        stroke(path, &style, self.tolerance, Some(stop))
+        stroke_with(&mut self.scratch, path, &style, self.tolerance, Some(stop));
+        Shape::Stroke
     }
 
     /// Converts interpreter path segments into a rasterizer path.
@@ -2655,16 +2692,21 @@ impl Bounds {
     }
 }
 
-/// The device pixels a path can put ink on: its bounding box widened by
-/// [`SLACK`], clipped to `within` and to every rectangle in `limits`.
+/// The device pixels a shape can put ink on: its bounding box, `bounds` as
+/// [`Path::bounds`] gives it, widened by [`SLACK`], clipped to `within` and
+/// to every rectangle in `limits`.
 ///
 /// The one computation behind both [`paint_region`], which clips to masks and
 /// a canvas, and the renderer's page-frame rectangles, which clip to the
 /// rectangles those masks would have had on the whole page. One function, so
 /// the two cannot drift: a page-frame rectangle is the region a render of the
 /// whole page computes, by construction rather than by a second spelling.
-fn region_within(path: &Path, limits: &[Option<Bounds>], within: Bounds) -> Bounds {
-    let Some((x0, y0, x1, y1)) = path.bounds() else {
+fn region_within(
+    bounds: Option<(f64, f64, f64, f64)>,
+    limits: &[Option<Bounds>],
+    within: Bounds,
+) -> Bounds {
+    let Some((x0, y0, x1, y1)) = bounds else {
         return Bounds {
             left: 0,
             top: 0,
@@ -2709,29 +2751,49 @@ fn region_within(path: &Path, limits: &[Option<Bounds>], within: Bounds) -> Boun
     }
 }
 
-/// The device pixels a path can put ink on: its bounding box widened by
-/// [`SLACK`], clipped to the canvas and to the clip's own rectangle.
+/// The device pixels a shape can put ink on: its bounding box, `bounds` as
+/// [`Path::bounds`] gives it, widened by [`SLACK`], clipped to the canvas and
+/// to the clip's own rectangle.
 ///
 /// Clipping to the clip's rectangle is safe for the same reason the whole
 /// change is: a clip reports zero coverage outside itself, and coverage
 /// multiplies, so nothing outside it could ever have been painted.
 ///
-/// A path with no points at all — which is what a text object that selected a
-/// clipping mode and drew nothing produces — yields an empty region, and an
+/// A shape with no points at all — which is what a text object that selected
+/// a clipping mode and drew nothing produces — yields an empty region, and an
 /// empty mask reads as zero everywhere. That is the same "clip everything
 /// away" a page-sized mask of zeroes gave, at none of the cost.
 fn paint_region(
-    path: &Path,
+    bounds: Option<(f64, f64, f64, f64)>,
     clip: Option<&Mask>,
     soft: Option<&Mask>,
     canvas: (i32, i32, u32, u32),
 ) -> (i32, i32, u32, u32) {
     region_within(
-        path,
+        bounds,
         &[clip.map(Bounds::of_mask), soft.map(Bounds::of_mask)],
         Bounds::of_rect(canvas),
     )
     .rect()
+}
+
+/// What a paint covers: a path filled under a rule, or a stroke's outline.
+///
+/// A stroke's outline is never a path. [`Renderer::pen`] writes it into the
+/// scratch as the edges of a fill, piece by piece as the stroker makes them,
+/// and [`Shape::Stroke`] names it there: its bounds are the ones its path
+/// would have had (`FillScratch::outline_bounds`) and its coverage the mask
+/// filling that path would give (`tinker_pdf_raster::fill_outline`), so every
+/// route a path takes — a solid paint, a shading or tiling pattern, the
+/// page-frame rectangle a lattice or a mesh is decided on — a stroke takes
+/// with the same numbers.
+#[derive(Clone, Copy)]
+enum Shape<'a> {
+    /// A path, filled under a rule.
+    Fill(&'a Path, FillRule),
+    /// The outline the last [`Renderer::pen`] wrote into the scratch, filled
+    /// under the non-zero rule.
+    Stroke,
 }
 
 /// Which lattice indices of a tiling pattern reach `[lo, hi]` (8.7.3.2).
@@ -2799,8 +2861,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // gradient in the document.
         if let Some(name) = state.fill_pattern.clone() {
             self.fill_with_pattern(
-                &built,
-                rule,
+                Shape::Fill(&built, rule),
                 &name,
                 state,
                 state.fill_alpha,
@@ -2811,8 +2872,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 
         let color = fill_color(state);
         self.paint_inked(
-            &built,
-            rule,
+            Shape::Fill(&built, rule),
             color,
             state.fill_ink,
             state.fill_alpha,
@@ -2963,8 +3023,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             // paints" assertion is satisfied by a cell that paints in *some*
             // colour.
             self.fill_with_pattern(
-                &outline,
-                FillRule::NonZero,
+                outline,
                 &name,
                 state,
                 state.stroke_alpha,
@@ -2975,8 +3034,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 
         let color = stroke_color(state);
         self.paint_inked(
-            &outline,
-            FillRule::NonZero,
+            outline,
             color,
             state.stroke_ink,
             state.stroke_alpha,
@@ -3090,8 +3148,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if mode.fills() {
             if let Some(name) = state.fill_pattern.clone() {
                 self.fill_with_pattern(
-                    &path,
-                    FillRule::NonZero,
+                    Shape::Fill(&path, FillRule::NonZero),
                     &name,
                     state,
                     state.fill_alpha,
@@ -3099,8 +3156,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 );
             } else {
                 self.paint_inked(
-                    &path,
-                    FillRule::NonZero,
+                    Shape::Fill(&path, FillRule::NonZero),
                     fill_color(state),
                     state.fill_ink,
                     state.fill_alpha,
@@ -3119,8 +3175,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             let outlined = self.pen(&path, state, style, self.thinnest(0.6), &stop);
             if let Some(name) = state.stroke_pattern.clone() {
                 self.fill_with_pattern(
-                    &outlined,
-                    FillRule::NonZero,
+                    outlined,
                     &name,
                     state,
                     state.stroke_alpha,
@@ -3128,8 +3183,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 );
             } else {
                 self.paint_inked(
-                    &outlined,
-                    FillRule::NonZero,
+                    outlined,
                     stroke_color(state),
                     state.stroke_ink,
                     state.stroke_alpha,
@@ -4163,7 +4217,7 @@ mod tests {
         for (name, path) in shapes() {
             for rule in [FillRule::NonZero, FillRule::EvenOdd] {
                 let whole = fill(&path, rule, 0, 0, SIDE, SIDE, 0.2, None);
-                let (x0, y0, w, h) = paint_region(&path, None, None, (0, 0, SIDE, SIDE));
+                let (x0, y0, w, h) = paint_region(path.bounds(), None, None, (0, 0, SIDE, SIDE));
                 let bounded = fill(&path, rule, x0, y0, w, h, 0.2, None);
 
                 for y in 0..SIDE as i32 {
@@ -4187,7 +4241,7 @@ mod tests {
         let mut path = Path::new();
         path.rect(4.0, 6.0, 9.0, 7.0);
         assert_eq!(
-            paint_region(&path, None, None, (0, 0, 2000, 2000)),
+            paint_region(path.bounds(), None, None, (0, 0, 2000, 2000)),
             (3, 5, 11, 9),
             "the bounding box, one pixel of slack on each side"
         );
@@ -4196,7 +4250,7 @@ mod tests {
         let mut over = Path::new();
         over.rect(-50.0, -50.0, 60.0, 60.0);
         assert_eq!(
-            paint_region(&over, None, None, (0, 0, 100, 100)),
+            paint_region(over.bounds(), None, None, (0, 0, 100, 100)),
             (0, 0, 11, 11)
         );
 
@@ -4204,13 +4258,13 @@ mod tests {
         let mut away = Path::new();
         away.rect(500.0, 500.0, 10.0, 10.0);
         assert_eq!(
-            paint_region(&away, None, None, (0, 0, 100, 100)),
+            paint_region(away.bounds(), None, None, (0, 0, 100, 100)),
             (100, 100, 0, 0)
         );
 
         // Neither does one with no points.
         assert_eq!(
-            paint_region(&Path::new(), None, None, (0, 0, 100, 100)),
+            paint_region(Path::new().bounds(), None, None, (0, 0, 100, 100)),
             (0, 0, 0, 0)
         );
     }
@@ -4225,7 +4279,7 @@ mod tests {
         clip_path.rect(30.0, 40.0, 10.0, 10.0);
         let clip = fill(&clip_path, FillRule::NonZero, 29, 39, 12, 12, 0.2, None);
 
-        let (x0, y0, w, h) = paint_region(&path, Some(&clip), None, (0, 0, 200, 200));
+        let (x0, y0, w, h) = paint_region(path.bounds(), Some(&clip), None, (0, 0, 200, 200));
         assert_eq!((x0, y0, w, h), (29, 39, 12, 12), "the clip is the smaller");
 
         // And the clipped coverage is unchanged by that: compare against the
@@ -5461,6 +5515,48 @@ mod tests {
                     "step {xstep} at {scale}x"
                 );
             }
+        }
+    }
+
+    /// A stroke painted with a tiling pattern takes its lattice and its
+    /// coverage from the outline the pen wrote into the scratch, which is
+    /// never a path: the cell is drawn once, the line is the cell's colour
+    /// from end to end, and nothing beside it is painted — under a
+    /// similarity, stroked in device space, and under a stretch, stroked in
+    /// user space and carried out.
+    #[test]
+    fn a_tiling_pattern_stroke_paints_its_outline_and_nothing_else() {
+        for (content, what) in [
+            (
+                &b"/Pattern CS /T0 SCN 6 w 4 20 m 36 20 l S"[..],
+                "a similarity",
+            ),
+            (
+                &b"/Pattern CS /T0 SCN 1 0 0 3 0 0 cm 2 w 4 6.6666667 m 36 6.6666667 l S"[..],
+                "a stretch",
+            ),
+        ] {
+            let tiles = Tiles::new([0.0, 0.0, 2.0, 2.0], 2.0, 2.0);
+            let (canvas, warnings) = with_tiles(content, &tiles);
+            assert_eq!(
+                tiles.drawn.get(),
+                1,
+                "{what}: one rasterization of the cell"
+            );
+            for x in [6, 20, 34] {
+                assert_eq!(
+                    canvas.pixel(x, 20),
+                    Some(Color::rgb(0, 0, 255)),
+                    "{what}: the line at x = {x}"
+                );
+            }
+            assert_eq!(canvas.pixel(20, 12), Some(Color::WHITE), "{what}: above it");
+            assert_eq!(canvas.pixel(20, 28), Some(Color::WHITE), "{what}: below it");
+            assert_eq!(canvas.pixel(2, 20), Some(Color::WHITE), "{what}: before it");
+            assert!(
+                warnings.is_empty(),
+                "{what}: nothing to report: {warnings:?}"
+            );
         }
     }
 
