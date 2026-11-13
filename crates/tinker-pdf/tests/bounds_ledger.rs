@@ -750,6 +750,7 @@ const FUZZ_GEN_JPX: &str = include_str!("../../../fuzz/src/jpx.rs");
 const FUZZ_GEN_MARKUP: &str = include_str!("../../../fuzz/src/markup.rs");
 const FONT_OUTLINE: &str = include_str!("../../tinker-pdf-font/src/outline.rs");
 const FONT_CFF_SUBSET: &str = include_str!("../../tinker-pdf-font/src/cff_subset.rs");
+const FONT_HINT_VM: &str = include_str!("../../tinker-pdf-font/src/hint/vm.rs");
 const ARCHIVE_BZIP2: &str = include_str!("../../tinker-pdf-archive/src/bzip2.rs");
 
 /// One bound, as its own ledger publishes it.
@@ -4713,6 +4714,71 @@ fn fuzz_paths() -> Vec<FuzzPath> {
             "truetype",
             vec![buffer(Input, PARSED, 1, "the tables read"), outline()],
             vec![OUTLINE_CAP],
+        ),
+        written(
+            "truetype_hinting",
+            vec![
+                buffer(Input, 1, 1, "the input's fields, decoded"),
+                buffer(
+                    Input,
+                    2,
+                    1,
+                    "the face built from them, each field again with the tables around it",
+                ),
+                buffer(
+                    Input,
+                    1,
+                    1,
+                    "the face's own copies of its control values and its control value program",
+                ),
+                buffer(
+                    Input,
+                    1,
+                    1,
+                    "the definitions' bodies, copied out of fpgm and prep",
+                ),
+                buffer(
+                    Input,
+                    2,
+                    3,
+                    "the control value table, a 32-bit value for each two bytes of `cvt `, in \
+                     the face's, the size's and the glyph's machines",
+                ),
+                buffer(
+                    Value(1 << 16),
+                    4,
+                    3,
+                    "the stack at its ceiling of 65 536 values, in each machine",
+                ),
+                buffer(
+                    Value(1 << 16),
+                    4,
+                    3,
+                    "the storage area, at most maxp's 65 535 values, in each machine",
+                ),
+                buffer(
+                    Value(16_384),
+                    17,
+                    3,
+                    "the twilight zone at its ceiling, each point two positions and its flags, \
+                     in each machine",
+                ),
+                buffer(
+                    Value(1 << 16),
+                    16,
+                    1,
+                    "the function table, an entry for each of maxp's 65 535 numbers, which \
+                     every machine shares",
+                ),
+                outline(),
+            ],
+            vec![
+                (FONT_HINT_VM, "const STACK_CEILING: usize = 65_536;"),
+                (FONT_HINT_VM, "pub max_storage: u16,"),
+                (FONT_HINT_VM, "const TWILIGHT_CEILING: usize = 16_384;"),
+                (FONT_HINT_VM, "pub max_function_defs: u16,"),
+                OUTLINE_CAP,
+            ],
         ),
         written(
             "type1",

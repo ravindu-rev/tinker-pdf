@@ -215,7 +215,7 @@ replay of its own in `crates/tinker-pdf-svg/src/tests.rs`.
 `cff_charstrings`, `content_stream`, `cos_syntax`, `crypt`, `crypt_ciphers`,
 `css_structured`, `form_script`, `glyf_outlines`, `html_structured`,
 `jpx_codestream`, `layout`, `render_page`, `render_rewrite`, `render_tile`,
-`signatures` and `xml_structured` are structured generators: the body is
+`signatures`, `truetype_hinting` and `xml_structured` are structured generators: the body is
 carved into fields rather than parsed as a format, so every seed reaches the
 code by construction and there is no reachability question of this shape to
 ask. The seeds of `cff_charstrings`, `content_stream`, `cos_syntax`,
@@ -223,7 +223,13 @@ ask. The seeds of `cff_charstrings`, `content_stream`, `cos_syntax`,
 `render_rewrite`, `render_tile` and `xml_structured` are choice sequences
 their
 generators' `write_the_fuzz_seeds` write, each named for the feature it
-reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `command_stream`,
+reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). The seeds of
+`truetype_hinting` are its fields encoded, written by
+`crates/tinker-pdf-font/tests/fuzz_seeds.rs`'s `write_the_truetype_hinting_seeds`, one
+for each instruction family and runs past the step budget, the call depth and the
+stack's bound, and
+`the_truetype_hinting_seeds_reach_the_interpreter` replays each to the answer it was
+written for, its prefixes and its single-byte inversions too. `command_stream`,
 `cos_document`, `cos_object`, `content_tokenizer`, `icc_profile` and
 `zip_archive` are covered by the signature check above or have no gate to fail
 at.

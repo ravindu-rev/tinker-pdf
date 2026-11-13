@@ -37,7 +37,17 @@
 
 use std::path::{Path, PathBuf};
 
+use tinker_pdf_font::hint::{Error as HintError, Program, Unhinted};
 use tinker_pdf_font::{cmap, substitute_glyph, BuiltInEncoding, Cff, Sfnt, Type1, Type42};
+
+/// The `truetype_hinting` target's input and its run: the target's own file,
+/// so the seeds are written with its encoder and replayed through its run.
+#[allow(
+    dead_code,
+    reason = "the target's file; the replay reaches all of it but a few accessors"
+)]
+#[path = "../../../fuzz/src/hinting.rs"]
+mod hinting;
 
 /// One corpus directory, or `None` when the fuzz tree is not in this checkout.
 fn seeds(name: &str) -> Option<Vec<(String, Vec<u8>)>> {
@@ -351,4 +361,901 @@ fn the_cmap_seeds_reach_the_parser() {
         }
     }
     report("cmap", files.len(), reached, &missed);
+}
+
+// ---- truetype_hinting: the interpreter over programs it was never meant to see -
+
+/// The opcodes the hinting seeds' programs are written in, by the
+/// specification's names: the first of a range for an instruction with
+/// flags, which a seed adds.
+mod op {
+    pub const SVTCA: u8 = 0x00;
+    pub const SPVTCA: u8 = 0x02;
+    pub const SFVTCA: u8 = 0x04;
+    pub const SPVTL: u8 = 0x06;
+    pub const SFVTL: u8 = 0x08;
+    pub const SPVFS: u8 = 0x0A;
+    pub const SFVFS: u8 = 0x0B;
+    pub const GPV: u8 = 0x0C;
+    pub const GFV: u8 = 0x0D;
+    pub const SFVTPV: u8 = 0x0E;
+    pub const ISECT: u8 = 0x0F;
+    pub const SRP0: u8 = 0x10;
+    pub const SRP1: u8 = 0x11;
+    pub const SRP2: u8 = 0x12;
+    pub const SZP0: u8 = 0x13;
+    pub const SZP1: u8 = 0x14;
+    pub const SZP2: u8 = 0x15;
+    pub const SZPS: u8 = 0x16;
+    pub const SLOOP: u8 = 0x17;
+    pub const RTG: u8 = 0x18;
+    pub const RTHG: u8 = 0x19;
+    pub const SMD: u8 = 0x1A;
+    pub const ELSE: u8 = 0x1B;
+    pub const JMPR: u8 = 0x1C;
+    pub const SCVTCI: u8 = 0x1D;
+    pub const SSWCI: u8 = 0x1E;
+    pub const SSW: u8 = 0x1F;
+    pub const DUP: u8 = 0x20;
+    pub const POP: u8 = 0x21;
+    pub const CLEAR: u8 = 0x22;
+    pub const SWAP: u8 = 0x23;
+    pub const DEPTH: u8 = 0x24;
+    pub const CINDEX: u8 = 0x25;
+    pub const MINDEX: u8 = 0x26;
+    pub const ALIGNPTS: u8 = 0x27;
+    pub const UTP: u8 = 0x29;
+    pub const LOOPCALL: u8 = 0x2A;
+    pub const CALL: u8 = 0x2B;
+    pub const FDEF: u8 = 0x2C;
+    pub const ENDF: u8 = 0x2D;
+    pub const MDAP: u8 = 0x2E;
+    pub const IUP: u8 = 0x30;
+    pub const SHP: u8 = 0x32;
+    pub const SHC: u8 = 0x34;
+    pub const SHZ: u8 = 0x36;
+    pub const SHPIX: u8 = 0x38;
+    pub const IP: u8 = 0x39;
+    pub const MSIRP: u8 = 0x3A;
+    pub const ALIGNRP: u8 = 0x3C;
+    pub const RTDG: u8 = 0x3D;
+    pub const MIAP: u8 = 0x3E;
+    pub const NPUSHB: u8 = 0x40;
+    pub const NPUSHW: u8 = 0x41;
+    pub const WS: u8 = 0x42;
+    pub const RS: u8 = 0x43;
+    pub const WCVTP: u8 = 0x44;
+    pub const RCVT: u8 = 0x45;
+    pub const GC: u8 = 0x46;
+    pub const SCFS: u8 = 0x48;
+    pub const MD: u8 = 0x49;
+    pub const MPPEM: u8 = 0x4B;
+    pub const MPS: u8 = 0x4C;
+    pub const FLIPON: u8 = 0x4D;
+    pub const FLIPOFF: u8 = 0x4E;
+    pub const DEBUG: u8 = 0x4F;
+    pub const LT: u8 = 0x50;
+    pub const LTEQ: u8 = 0x51;
+    pub const GT: u8 = 0x52;
+    pub const GTEQ: u8 = 0x53;
+    pub const EQ: u8 = 0x54;
+    pub const NEQ: u8 = 0x55;
+    pub const ODD: u8 = 0x56;
+    pub const EVEN: u8 = 0x57;
+    pub const IF: u8 = 0x58;
+    pub const EIF: u8 = 0x59;
+    pub const AND: u8 = 0x5A;
+    pub const OR: u8 = 0x5B;
+    pub const NOT: u8 = 0x5C;
+    pub const DELTAP1: u8 = 0x5D;
+    pub const SDB: u8 = 0x5E;
+    pub const SDS: u8 = 0x5F;
+    pub const ADD: u8 = 0x60;
+    pub const SUB: u8 = 0x61;
+    pub const DIV: u8 = 0x62;
+    pub const MUL: u8 = 0x63;
+    pub const ABS: u8 = 0x64;
+    pub const NEG: u8 = 0x65;
+    pub const FLOOR: u8 = 0x66;
+    pub const CEILING: u8 = 0x67;
+    pub const ROUND: u8 = 0x68;
+    pub const NROUND: u8 = 0x6C;
+    pub const WCVTF: u8 = 0x70;
+    pub const DELTAP2: u8 = 0x71;
+    pub const DELTAP3: u8 = 0x72;
+    pub const DELTAC1: u8 = 0x73;
+    pub const DELTAC2: u8 = 0x74;
+    pub const DELTAC3: u8 = 0x75;
+    pub const SROUND: u8 = 0x76;
+    pub const S45ROUND: u8 = 0x77;
+    pub const JROT: u8 = 0x78;
+    pub const JROF: u8 = 0x79;
+    pub const ROFF: u8 = 0x7A;
+    pub const RUTG: u8 = 0x7C;
+    pub const RDTG: u8 = 0x7D;
+    pub const SANGW: u8 = 0x7E;
+    pub const AA: u8 = 0x7F;
+    pub const FLIPPT: u8 = 0x80;
+    pub const FLIPRGON: u8 = 0x81;
+    pub const FLIPRGOFF: u8 = 0x82;
+    pub const SCANCTRL: u8 = 0x85;
+    pub const SDPVTL: u8 = 0x86;
+    pub const GETINFO: u8 = 0x88;
+    pub const IDEF: u8 = 0x89;
+    pub const ROLL: u8 = 0x8A;
+    pub const MAX: u8 = 0x8B;
+    pub const MIN: u8 = 0x8C;
+    pub const SCANTYPE: u8 = 0x8D;
+    pub const INSTCTRL: u8 = 0x8E;
+    pub const PUSHB: u8 = 0xB0;
+    pub const PUSHW: u8 = 0xB8;
+    pub const MDRP: u8 = 0xC0;
+    pub const MIRP: u8 = 0xE0;
+}
+
+/// The instructions that push `values` in order, the last on top: `PUSHB`
+/// where every value is a byte, `PUSHW` otherwise, each value a word.
+fn push(values: &[i32]) -> Vec<u8> {
+    assert!(
+        (1..=8).contains(&values.len()),
+        "a push of one to eight values"
+    );
+    let bytes = values.iter().all(|v| (0..=255).contains(v));
+    let count = values.len() as u8;
+    let mut code = vec![if bytes {
+        op::PUSHB + count - 1
+    } else {
+        op::PUSHW + count - 1
+    }];
+    for &value in values {
+        if bytes {
+            code.push(value as u8);
+        } else {
+            let word = i16::try_from(value).expect("a pushed value fits a word");
+            code.extend(word.to_be_bytes());
+        }
+    }
+    code
+}
+
+/// Pieces of a program, in order.
+fn cat(pieces: &[&[u8]]) -> Vec<u8> {
+    pieces.concat()
+}
+
+/// What a hinting seed's run comes to.
+#[derive(Clone, Copy, Debug)]
+enum Comes {
+    /// Every answer at every size a hint.
+    Hints,
+    /// One answer at least the named failure of the named program.
+    Fails(Program, HintError),
+    /// One size at least declined by the face's `gasp`, and every other
+    /// answer a hint.
+    Declined,
+}
+
+/// One seed of `fuzz/corpus/truetype_hinting`: its name, its bytes and what
+/// its run comes to.
+struct HintingSeed {
+    name: &'static str,
+    bytes: Vec<u8>,
+    comes: Comes,
+}
+
+/// The input every seed but `empty` starts from: hinted at 7, 12 and 16
+/// pixels an em; `maxp`'s limits roomy enough for the programs; four control
+/// values, 1 408, 300, 100 and 50; and the glyph the programs point at, two
+/// contours of four points — (100, 0), (1 000, 0), (1 000, 1 400), (100,
+/// 1 400) and (300, 300), (800, 300) off the curve, (800, 1 100), (300,
+/// 1 100) — so points 0 to 7 are its contour points, and 8 to 11 its phantom
+/// points.
+fn base_input() -> hinting::Input {
+    hinting::Input {
+        sizes: 0b0001_1010,
+        options: 0,
+        profile: [8, 32, 32, 4, 256],
+        cvt: [1_408i16, 300, 100, 50]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect(),
+        points: vec![
+            (100, 0, 1),
+            (1_000, 0, 1),
+            (1_000, 1_400, 1),
+            (100, 1_400, 3),
+            (300, 300, 1),
+            (800, 300, 0),
+            (800, 1_100, 1),
+            (300, 1_100, 3),
+        ],
+        ..hinting::Input::default()
+    }
+}
+
+/// Every seed, written by [`write_the_truetype_hinting_seeds`] and replayed
+/// by [`the_truetype_hinting_seeds_reach_the_interpreter`]: one for each
+/// instruction family, each program running straight through the family's
+/// instructions with every operand in range, so it hints; the composite in
+/// every placement; `maxp` at its ceilings; a `gasp` that declines a size;
+/// every size, monochrome and at integer sizes; and a run past each of the
+/// bounds that keep a hostile program finite, each refused by its name.
+#[allow(clippy::too_many_lines)]
+fn hinting_seeds() -> Vec<HintingSeed> {
+    use op::*;
+    let hints = |name, input: hinting::Input| HintingSeed {
+        name,
+        bytes: input.encode(),
+        comes: Comes::Hints,
+    };
+    let fails = |name, input: hinting::Input, program, error| HintingSeed {
+        name,
+        bytes: input.encode(),
+        comes: Comes::Fails(program, error),
+    };
+    let mut seeds = Vec::new();
+
+    // The stack, logic, arithmetic and DEBUG, each operand traced: 5 7 9,
+    // DUP and POP, SWAP to 5 9 7, DEPTH and CINDEX 3 to 5 9 7 5, MINDEX 2 to
+    // 5 9 5 7, ROLL to 5 5 7 9, CLEAR; 1 2 3 300 −2, ADD, SUB, MUL to 1 −9,
+    // ABS, NEG, MAX to 1, DIV by 128 to 0, MIN, FLOOR, CEILING of 65 and the
+    // six comparisons, AND, OR and NOT, each leaving one value, and DEBUG
+    // popping the last.
+    seeds.push(hints(
+        "stack-and-arithmetic",
+        hinting::Input {
+            glyph: cat(&[
+                &push(&[5, 7, 9]),
+                &[DUP, POP, SWAP, DEPTH, CINDEX],
+                &push(&[2]),
+                &[MINDEX, ROLL, CLEAR],
+                &[NPUSHB, 3, 1, 2, 3],
+                &[NPUSHW, 2, 0x01, 0x2C, 0xFF, 0xFE],
+                &[ADD, SUB, MUL, ABS, NEG, MAX],
+                &push(&[128]),
+                &[DIV],
+                &push(&[100]),
+                &[MIN, FLOOR],
+                &push(&[65]),
+                &[CEILING, LT],
+                &push(&[1]),
+                &[LTEQ],
+                &push(&[0]),
+                &[GT],
+                &push(&[1]),
+                &[GTEQ],
+                &push(&[1]),
+                &[EQ],
+                &push(&[0]),
+                &[NEQ],
+                &push(&[1]),
+                &[AND],
+                &push(&[0]),
+                &[OR, NOT, DEBUG],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // Flow: fpgm defines function 0, function 1 holding an IF and an ELSE,
+    // and an instruction for 0x91, which no instruction of the set has; the
+    // glyph calls 0, loops it three times, calls 1, takes an IF's false and
+    // true arms, and jumps over a push by JMPR, JROT on true and JROF on
+    // false, falls through a JROF on true, and runs 0x91.
+    seeds.push(hints(
+        "flow-and-definitions",
+        hinting::Input {
+            fpgm: cat(&[
+                &push(&[0]),
+                &[FDEF],
+                &push(&[1]),
+                &[POP, ENDF],
+                &push(&[1]),
+                &[FDEF],
+                &push(&[1]),
+                &[IF],
+                &push(&[2]),
+                &[POP, ELSE],
+                &push(&[3]),
+                &[POP, EIF, ENDF],
+                &push(&[0x91]),
+                &[IDEF],
+                &push(&[4]),
+                &[POP, ENDF],
+            ]),
+            glyph: cat(&[
+                &push(&[0]),
+                &[CALL],
+                &push(&[3, 0]),
+                &[LOOPCALL],
+                &push(&[1]),
+                &[CALL],
+                &push(&[0]),
+                &[IF],
+                &push(&[9]),
+                &[POP, EIF],
+                &push(&[1]),
+                &[IF],
+                &push(&[9]),
+                &[POP, ELSE],
+                &push(&[8]),
+                &[POP, EIF],
+                &push(&[3]),
+                &[JMPR],
+                &push(&[99]),
+                &push(&[3, 1]),
+                &[JROT],
+                &push(&[98]),
+                &push(&[3, 0]),
+                &[JROF],
+                &push(&[97]),
+                &push(&[3, 1]),
+                &[JROF, 0x91],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // Storage, the control value table and the engine's answers, in prep
+    // and in the glyph: WS, RS, WCVTP, WCVTF, RCVT, MPPEM, MPS, GETINFO for
+    // one selector and for all, and INSTCTRL, which in the glyph's program
+    // pops its two values and changes nothing.
+    seeds.push(hints(
+        "storage-and-the-engine",
+        hinting::Input {
+            prep: cat(&[
+                &push(&[0, 77]),
+                &[WS],
+                &push(&[1, 64]),
+                &[WCVTP],
+                &push(&[2, 100]),
+                &[WCVTF],
+                &push(&[0]),
+                &[RS, POP],
+                &push(&[1]),
+                &[RCVT, POP, MPPEM, POP, MPS, POP],
+                &push(&[1]),
+                &[GETINFO, POP],
+                &push(&[0x3F]),
+                &[GETINFO, POP],
+                &push(&[0, 3]),
+                &[INSTCTRL],
+            ]),
+            glyph: cat(&[
+                &push(&[0]),
+                &[RS],
+                &push(&[1]),
+                &[RCVT, POP, POP, MPPEM, POP],
+                &push(&[33]),
+                &[GETINFO, POP],
+                &push(&[0, 1]),
+                &[INSTCTRL],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // The graphics state: every vector instruction, the reference points,
+    // the zone pointers, the loop, every round state with SROUND's and
+    // S45ROUND's, ROUND, NROUND, ODD and EVEN, the distance and delta
+    // settings, auto flip, SANGW, and the scan converter's.
+    seeds.push(hints(
+        "graphics-state",
+        hinting::Input {
+            glyph: cat(&[
+                &[SVTCA, SVTCA + 1, SPVTCA, SPVTCA + 1, SFVTCA, SFVTCA + 1],
+                &push(&[2, 1]),
+                &[SPVTL],
+                &push(&[2, 1]),
+                &[SPVTL + 1],
+                &push(&[3, 0]),
+                &[SFVTL],
+                &push(&[3, 0]),
+                &[SFVTL + 1],
+                &push(&[6, 4]),
+                &[SDPVTL],
+                &push(&[6, 4]),
+                &[SDPVTL + 1],
+                &push(&[0, 16_384]),
+                &[SPVFS],
+                &push(&[16_384, 0]),
+                &[SFVFS, GPV, POP, POP, GFV, POP, POP, SFVTPV],
+                &push(&[0]),
+                &[SRP0],
+                &push(&[1]),
+                &[SRP1],
+                &push(&[2]),
+                &[SRP2],
+                &push(&[1]),
+                &[SZP0],
+                &push(&[1]),
+                &[SZP1],
+                &push(&[1]),
+                &[SZP2],
+                &push(&[1]),
+                &[SZPS],
+                &push(&[1]),
+                &[SLOOP, RTG, RTHG, RTDG, RDTG, RUTG, ROFF],
+                &push(&[0x48]),
+                &[SROUND],
+                &push(&[0x48]),
+                &[S45ROUND],
+                &push(&[100]),
+                &[ROUND, POP],
+                &push(&[100]),
+                &[ROUND + 3, POP],
+                &push(&[100]),
+                &[NROUND, POP],
+                &push(&[64]),
+                &[ODD, POP],
+                &push(&[64]),
+                &[EVEN, POP],
+                &push(&[64]),
+                &[SMD],
+                &push(&[68]),
+                &[SCVTCI],
+                &push(&[0]),
+                &[SSWCI],
+                &push(&[0]),
+                &[SSW, FLIPON, FLIPOFF],
+                &push(&[0]),
+                &[SANGW],
+                &push(&[9]),
+                &[SDB],
+                &push(&[3]),
+                &[SDS],
+                &push(&[0x1FF]),
+                &[SCANCTRL],
+                &push(&[4]),
+                &[SCANTYPE, SVTCA + 1],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // Measuring and moving, across and then up: GC both ways, SCFS, MD both
+    // ways, MDAP both ways, MIAP both ways, MSIRP both ways, MDRP and MIRP
+    // under several of their flag sets, every point and CVT entry in range.
+    seeds.push(hints(
+        "measuring-and-moving",
+        hinting::Input {
+            glyph: cat(&[
+                &[SVTCA + 1],
+                &push(&[0]),
+                &[GC, POP],
+                &push(&[0]),
+                &[GC + 1, POP],
+                &push(&[0, 128]),
+                &[SCFS],
+                &push(&[2, 1]),
+                &[MD, POP],
+                &push(&[2, 1]),
+                &[MD + 1, POP],
+                &push(&[0]),
+                &[MDAP],
+                &push(&[1]),
+                &[MDAP + 1],
+                &push(&[2, 0]),
+                &[MIAP],
+                &push(&[3, 1]),
+                &[MIAP + 1],
+                &push(&[4, 64]),
+                &[MSIRP],
+                &push(&[5, 32]),
+                &[MSIRP + 1],
+                &push(&[6]),
+                &[MDRP + 0x04],
+                &push(&[7]),
+                &[MDRP + 0x0D],
+                &push(&[4]),
+                &[MDRP + 0x16],
+                &push(&[5, 2]),
+                &[MIRP + 0x05],
+                &push(&[6, 3]),
+                &[MIRP + 0x1E, SVTCA],
+                &push(&[1]),
+                &[MDAP + 1],
+                &push(&[2, 0]),
+                &[MIAP + 1],
+                &push(&[3]),
+                &[MDRP + 0x04],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // The other point instructions, across: SHP and SHC by rp2 and by rp1,
+    // SHZ, SHPIX, IP between points 0 and 2, ALIGNRP, ALIGNPTS, ISECT of the
+    // bottom edge and the inner contour's left side, UTP, FLIPPT, FLIPRGON,
+    // FLIPRGOFF and AA.
+    seeds.push(hints(
+        "shifting-and-interpolating",
+        hinting::Input {
+            glyph: cat(&[
+                &[SVTCA + 1],
+                &push(&[0]),
+                &[SRP0],
+                &push(&[1]),
+                &[SRP1],
+                &push(&[2]),
+                &[SRP2],
+                &push(&[3]),
+                &[SHP],
+                &push(&[4]),
+                &[SHP + 1],
+                &push(&[1]),
+                &[SHC],
+                &push(&[0]),
+                &[SHC + 1],
+                &push(&[1]),
+                &[SHZ],
+                &push(&[2, 32]),
+                &[SHPIX],
+                &push(&[0]),
+                &[SRP1],
+                &push(&[5]),
+                &[IP],
+                &push(&[0]),
+                &[SRP0],
+                &push(&[3]),
+                &[ALIGNRP],
+                &push(&[1, 2]),
+                &[ALIGNPTS],
+                &push(&[6, 0, 1, 4, 7]),
+                &[ISECT],
+                &push(&[6]),
+                &[UTP],
+                &push(&[5]),
+                &[FLIPPT],
+                &push(&[4, 5]),
+                &[FLIPRGON],
+                &push(&[4, 5]),
+                &[FLIPRGOFF],
+                &push(&[0]),
+                &[AA],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // Interpolation and exceptions: IUP both ways after points touched each
+    // way, DELTAP1 to DELTAP3 in the glyph, DELTAC1 to DELTAC3 in prep.
+    seeds.push(hints(
+        "interpolation-and-exceptions",
+        hinting::Input {
+            prep: cat(&[
+                &push(&[0x0F, 0, 1]),
+                &[DELTAC1],
+                &push(&[0x0F, 1, 1]),
+                &[DELTAC2],
+                &push(&[0x0F, 2, 1]),
+                &[DELTAC3],
+            ]),
+            glyph: cat(&[
+                &[SVTCA + 1],
+                &push(&[0]),
+                &[MDAP + 1],
+                &push(&[2]),
+                &[MDAP + 1, IUP + 1, SVTCA],
+                &push(&[1]),
+                &[MDAP + 1, IUP],
+                &push(&[0x3F, 1, 1]),
+                &[DELTAP1],
+                &push(&[0x0F, 2, 1]),
+                &[DELTAP2],
+                &push(&[0x0F, 3, 1]),
+                &[DELTAP3],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // The composite every way it places a component: the first's offset
+    // rounded to the grid and its metrics taken, the second matched by a
+    // point and scaled by a half, and the composite's own program over its
+    // sixteen points.
+    seeds.push(hints(
+        "composites-placed-every-way",
+        hinting::Input {
+            options: hinting::ROUND_XY | hinting::MATCHED | hinting::SCALED | hinting::MY_METRICS,
+            glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1]]),
+            composite: cat(&[
+                &[SVTCA + 1],
+                &push(&[0]),
+                &[MDAP + 1],
+                &push(&[9]),
+                &[MDAP + 1, IUP + 1],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // maxp at every ceiling: function 32 767 defined and called, storage
+    // location 32 767 written and read, twilight point 16 383 moved.
+    seeds.push(hints(
+        "maxp-at-its-ceilings",
+        hinting::Input {
+            profile: [u16::MAX; 5],
+            fpgm: cat(&[&push(&[32_767]), &[FDEF], &push(&[1]), &[POP, ENDF]]),
+            prep: cat(&[&push(&[32_767, 5]), &[WS]]),
+            glyph: cat(&[
+                &push(&[0]),
+                &[SZP0],
+                &push(&[16_383]),
+                &[MDAP + 1],
+                &push(&[1]),
+                &[SZP0],
+                &push(&[32_767]),
+                &[CALL],
+                &push(&[32_767]),
+                &[RS, POP],
+            ]),
+            ..base_input()
+        },
+    ));
+
+    // A gasp that grid-fits to 16 pixels: 12 hints and 33 is declined.
+    seeds.push(HintingSeed {
+        name: "gasp-declines-past-16",
+        bytes: hinting::Input {
+            sizes: 0b0010_1000,
+            options: hinting::GASP,
+            glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1]]),
+            ..base_input()
+        }
+        .encode(),
+        comes: Comes::Declined,
+    });
+
+    // Every size, from a pixel to 1 024, monochrome and at integer sizes,
+    // prep turning dropout control on.
+    seeds.push(hints(
+        "every-size-monochrome-and-integer",
+        hinting::Input {
+            sizes: 0xFF,
+            options: hinting::MONOCHROME | hinting::INTEGER_PPEM,
+            prep: cat(&[&push(&[0x1FF]), &[SCANCTRL], &push(&[5]), &[SCANTYPE]]),
+            glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1, IUP + 1]]),
+            ..base_input()
+        },
+    ));
+
+    // The empty input: every field zero, no program and no point.
+    seeds.push(HintingSeed {
+        name: "empty",
+        bytes: Vec::new(),
+        comes: Comes::Hints,
+    });
+
+    // fpgm jumps back to its own start for ever: −3 pushed, then JMPR.
+    seeds.push(fails(
+        "fpgm-runs-to-its-budget",
+        hinting::Input {
+            fpgm: vec![PUSHW, 0xFF, 0xFD, JMPR],
+            ..base_input()
+        },
+        Program::Font,
+        HintError::Budget,
+    ));
+
+    // Function 0 calls itself, past 64 nested calls.
+    seeds.push(fails(
+        "calls-nest-past-their-depth",
+        hinting::Input {
+            fpgm: cat(&[&push(&[0]), &[FDEF], &push(&[0]), &[CALL, ENDF]]),
+            glyph: cat(&[&push(&[0]), &[CALL]]),
+            ..base_input()
+        },
+        Program::Glyph,
+        HintError::CallDepth,
+    ));
+
+    // Each loop pushes one value more than it pops: 1, then −5 and a JMPR
+    // back to the start, past the stack's 288 entries.
+    seeds.push(fails(
+        "the-stack-past-its-bound",
+        hinting::Input {
+            glyph: vec![PUSHB, 1, PUSHW, 0xFF, 0xFB, JMPR],
+            ..base_input()
+        },
+        Program::Glyph,
+        HintError::StackOverflow,
+    ));
+
+    // A definition with no ENDF.
+    seeds.push(fails(
+        "a-definition-with-no-end",
+        hinting::Input {
+            fpgm: cat(&[&push(&[0]), &[FDEF], &push(&[1]), &[POP]]),
+            ..base_input()
+        },
+        Program::Font,
+        HintError::UnterminatedDefinition,
+    ));
+
+    // prep divides by zero, so every size is unhinted.
+    seeds.push(fails(
+        "prep-divides-by-zero",
+        hinting::Input {
+            prep: cat(&[&push(&[1, 0]), &[DIV]]),
+            ..base_input()
+        },
+        Program::ControlValue,
+        HintError::DivideByZero,
+    ));
+
+    seeds
+}
+
+/// The instruction family `op` belongs to, as `docs/design/hinting.md`'s
+/// milestones divide the set and `src/hint/tests/` holds them, a file a
+/// family; an opcode no instruction has is flow's, where an `IDEF` defines
+/// it.
+fn family(op: u8) -> &'static str {
+    match op {
+        0x40
+        | 0x41
+        | 0xB0..=0xBF
+        | 0x20..=0x26
+        | 0x8A
+        | 0x50..=0x55
+        | 0x5A..=0x5C
+        | 0x60..=0x67
+        | 0x8B
+        | 0x8C
+        | 0x4F => "stack",
+        0x43 | 0x42 | 0x45 | 0x44 | 0x70 | 0x4B | 0x4C | 0x88 | 0x8E => "storage",
+        0x00..=0x0E
+        | 0x10..=0x1A
+        | 0x1D..=0x1F
+        | 0x3D
+        | 0x4D
+        | 0x4E
+        | 0x56
+        | 0x57
+        | 0x5E
+        | 0x5F
+        | 0x68..=0x6F
+        | 0x76
+        | 0x77
+        | 0x7A
+        | 0x7C..=0x7E
+        | 0x85..=0x87
+        | 0x8D => "state",
+        0x46..=0x4A | 0x2E | 0x2F | 0x3E | 0x3F | 0x3A | 0x3B | 0xC0..=0xFF => "moves",
+        0x32..=0x39 | 0x3C | 0x27 | 0x0F | 0x29 | 0x80..=0x82 | 0x7F => "shift",
+        0x30 | 0x31 | 0x5D | 0x71..=0x75 => "iup",
+        _ => "flow",
+    }
+}
+
+/// The opcodes of `code`, walked an instruction at a time: a push's data is
+/// passed over, and a push cut short ends the walk.
+fn opcodes(code: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let Some(&op) = code.get(at) {
+        out.push(op);
+        let count = code.get(at + 1).map_or(0, |&n| usize::from(n));
+        at += match op {
+            0x40 => 2 + count,
+            0x41 => 2 + 2 * count,
+            0xB0..=0xB7 => 1 + usize::from(op - 0xAF),
+            0xB8..=0xBF => 1 + 2 * usize::from(op - 0xB7),
+            _ => 1,
+        };
+    }
+    out
+}
+
+/// Writes `fuzz/corpus/truetype_hinting` from [`hinting_seeds`], each seed
+/// under its name. Run with `--ignored` when a seed changes; the corpus is
+/// committed, and a run that rewrites it is a diff to read.
+#[test]
+#[ignore = "writes fuzz/corpus/truetype_hinting, which is committed"]
+fn write_the_truetype_hinting_seeds() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/truetype_hinting");
+    std::fs::create_dir_all(&dir).expect("the corpus directory");
+    for seed in hinting_seeds() {
+        std::fs::write(dir.join(seed.name), &seed.bytes).expect("a seed is written");
+    }
+}
+
+/// **The `truetype_hinting` seeds reach the interpreter** (FT-04b.13): the
+/// corpus is [`hinting_seeds`]' bytes, seed for seed; every seed comes to
+/// what it was written for, each refusal a named `Unhinted`, through the
+/// target's own run; the seeds that hint run every instruction family
+/// between them; and every prefix of every seed, and every seed with any one
+/// byte inverted, reaches an answer rather than a panic.
+#[test]
+fn the_truetype_hinting_seeds_reach_the_interpreter() {
+    let Some(files) = seeds("truetype_hinting") else {
+        println!("truetype_hinting-seeds: SKIPPED (no fuzz/corpus/truetype_hinting)");
+        return;
+    };
+    let mut written = hinting_seeds();
+    written.sort_by(|a, b| a.name.cmp(b.name));
+    let on_disk: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let generated: Vec<(&str, &[u8])> = written
+        .iter()
+        .map(|seed| (seed.name, seed.bytes.as_slice()))
+        .collect();
+    assert!(
+        on_disk == generated,
+        "fuzz/corpus/truetype_hinting is not the seeds this file writes: \
+         `cargo test -p tinker-pdf-font --test fuzz_seeds -- --ignored \
+         write_the_truetype_hinting_seeds --exact` writes them"
+    );
+
+    let mut families: Vec<&str> = Vec::new();
+    let mut variants = 0usize;
+    for seed in &written {
+        let report = hinting::exercise(&seed.bytes);
+        let refusals = report.refusals();
+        match seed.comes {
+            Comes::Hints => assert!(
+                refusals.is_empty(),
+                "{}: written to hint, refused {refusals:?}",
+                seed.name
+            ),
+            Comes::Fails(program, error) => assert!(
+                refusals.iter().any(|why| matches!(
+                    why,
+                    Unhinted::Failed { program: p, error: e, .. } if *p == program && *e == error
+                )),
+                "{}: written to fail {program:?} with {error:?}, came to {refusals:?}",
+                seed.name
+            ),
+            Comes::Declined => {
+                assert!(
+                    !refusals.is_empty()
+                        && refusals.iter().all(|why| *why == Unhinted::NotAtThisSize),
+                    "{}: written for a declined size, came to {refusals:?}",
+                    seed.name
+                );
+                assert!(
+                    report.sizes.iter().any(|(_, size, glyphs)| size.is_ok()
+                        && glyphs.len() == 2
+                        && glyphs.iter().all(Result::is_ok)),
+                    "{}: no size hinted beside the declined one",
+                    seed.name
+                );
+            }
+        }
+        if !matches!(seed.comes, Comes::Fails(..)) {
+            let input = hinting::Input::decode(&seed.bytes);
+            for code in [&input.fpgm, &input.prep, &input.glyph, &input.composite] {
+                for op in opcodes(code) {
+                    let family = family(op);
+                    if !families.contains(&family) {
+                        families.push(family);
+                    }
+                }
+            }
+        }
+        for end in 0..seed.bytes.len() {
+            let _ = hinting::exercise(&seed.bytes[..end]);
+            variants += 1;
+        }
+        for at in 0..seed.bytes.len() {
+            let mut flipped = seed.bytes.clone();
+            flipped[at] ^= 0xFF;
+            let _ = hinting::exercise(&flipped);
+            variants += 1;
+        }
+    }
+    families.sort_unstable();
+    assert_eq!(
+        families,
+        ["flow", "iup", "moves", "shift", "stack", "state", "storage"],
+        "every instruction family runs in a seed that hints"
+    );
+    println!(
+        "RAN truetype_hinting-seeds: {} seeds, every family run, {variants} prefixes and \
+         flips answered",
+        written.len()
+    );
 }

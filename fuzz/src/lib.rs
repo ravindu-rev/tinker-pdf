@@ -14,6 +14,7 @@ pub mod cos;
 pub mod css;
 pub mod document;
 pub mod glyf;
+pub mod hinting;
 pub mod jpx;
 pub mod markup;
 

@@ -395,6 +395,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "truetype_hinting"
+path = "fuzz_targets/truetype_hinting.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "jpx_codestream"
 path = "fuzz_targets/jpx_codestream.rs"
 test = false

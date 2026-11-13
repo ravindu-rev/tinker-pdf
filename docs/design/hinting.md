@@ -552,6 +552,16 @@ The instructions a run executes are its steps (`docs/design/resource-exhaustion.
 "The counters"): the hinter returns them as a value, and the facade adds them
 to the render's work.
 
+The `truetype_hinting` fuzz target (`fuzz/fuzz_targets/`) holds the bounds to
+programs no font was meant to carry: its input is carved into `maxp`'s five
+limits, the `cvt ` table, `fpgm`, `prep`, a simple glyph's program and points
+and a composite's program (`fuzz/src/hinting.rs`), on a face built from them
+and hinted at the sizes the input chooses, and every glyph that hints is held
+to an outline inside the segment cap and steps inside its runs' budgets. Its
+seeds, one for each instruction family and runs past the budget, the call
+depth and the stack, are replayed on stable by the font crate's
+`fuzz_seeds.rs`, every prefix and single-byte inversion of each with them.
+
 ### Failure
 
 An error in a glyph's program leaves that glyph drawn from its em outline, as

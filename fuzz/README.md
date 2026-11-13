@@ -30,6 +30,7 @@ Policy: [`docs/verification.md`](../docs/verification.md). Among them:
 | `truetype` | `cmap`, and `glyf` including composites |
 | `glyf_outlines` | A minimal `sfnt` a generator writes (`src/glyf.rs`): the directory, `head`, `hhea`, `hmtx`, `maxp`, a short or long `loca` and `glyf`, simple glyphs in every flag and coordinate form and composites in every component form, nested four deep. **Structure-aware**: every glyph must draw one closed contour per contour it holds, inside the caps, with the advance `hmtx` states, and a subset that keeps a glyph must draw it the same |
 | `cff` | The tables that decide which charstring runs — charset, encoding, string INDEX, FDSelect — and then Type 2 charstrings: subrs, `seac`, `flex`, `hintmask` |
+| `truetype_hinting` | The TrueType bytecode interpreter: an input carved into fields (`src/hinting.rs`) — the sizes and options, `maxp`'s five limits, the `cvt ` table, `fpgm`, `prep`, a simple glyph's program and points and a composite's program — on a face built from them, the composite placing the glyph by an offset, by matching a point or under a scale, hinted at the sizes the input chooses. **Structure-aware**: every byte lands in a program, a value or a point, and every hinted glyph's outline stays inside the segment cap on a 128th of a pixel, its steps inside its runs' budgets |
 | `type1` | eexec and charstring decryption, `/CharStrings`, othersubrs, and a multiple-master program's blend design and its blend othersubrs, instanced at three design vectors and at one of the wrong length |
 | `type42` | A Type 42 program's PostScript wrapper: the scanner, `/FontType`, `/FontMatrix`, `/Encoding`, `/CharStrings` and the hexadecimal and binary `/sfnts` strings, the face they reassemble, and its outlines |
 | `cff_charstrings` | A bare CFF a generator writes (`src/cff.rs`): INDEXes with chosen offset widths, the charset in all three formats, a CID-keyed font's FDArray and FDSelect, subroutine INDEXes either side of the 107 / 1 131 / 32 768 bias edges, and Type 2 charstrings of every operator — widths, stem hints with their masks, the flex family, biased calls without a cycle, `seac`. **Structure-aware**: every glyph's outline must stay inside the caps with its advance the width it was written with, and a subset that keeps a glyph must draw it the same and read the same advance, under the subset's own bias |
@@ -130,6 +131,13 @@ feature it reaches; a change to what a generator reads first runs the writer
 again. [`docs/design/structured-fuzzing.md`](../docs/design/structured-fuzzing.md)
 is the design.
 
+`truetype_hinting` reads its input as fields rather than choices:
+`src/hinting.rs` holds the reader, the face it builds and the target's run,
+and reads nothing but `std` and `tinker_pdf_font`, so
+`crates/tinker-pdf-font/tests/fuzz_seeds.rs` includes it by path, writes the
+seeds with its encoder and replays them on stable through the run the target
+makes.
+
 ## What runs without nightly
 
 Because these targets need a toolchain nobody has by accident, they cannot be
@@ -173,6 +181,7 @@ account for:
 | `truetype` | `determinism.rs`'s `curvy_font`, plus a truncated copy and its directory alone |
 | `glyf_outlines` | Choice sequences, written by `cargo test --release --manifest-path fuzz/Cargo.toml --lib write_the_fuzz_seeds -- --ignored` as `cos_syntax`'s are, each named for what its face holds — a short and a long `loca`, compressed flag runs, every coordinate form, nested composites, point-matched components, the three scale forms, the offset and rounding flags, word arguments with `USE_MY_METRICS`, `OVERLAP_COMPOUND` and instructions, empty glyphs beside a composite, and sixteen glyphs — and `plain`, the empty input |
 | `sfnt` | The same face, plus the `OTTO` program `glyf.rs` builds and a directory pointing past the end |
+| `truetype_hinting` | Inputs `src/hinting.rs` encodes, written by `cargo test -p tinker-pdf-font --test fuzz_seeds -- --ignored write_the_truetype_hinting_seeds --exact`, each named for what it runs: a program for each instruction family — the stack and arithmetic, flow and definitions, storage and the engine's answers, the graphics state, measuring and moving, shifting and interpolating, and `IUP` and the deltas — the composite placed every way, `maxp` at its ceilings, a `gasp` that declines a size, every size monochrome and at integer sizes, a run to the step budget, calls past their depth, the stack past its bound, a definition with no end, a `prep` that divides by zero, and `empty`. `fuzz_seeds.rs` replays them on stable, each to the answer it was written for, and every prefix and single-byte inversion of each |
 | `type1` | `type1.rs`'s `font_with_square`, and a copy cut off inside the eexec section; and `multiple-master.t1`, the two-axis, four-master program its tests instance, written by `cargo test -p tinker-pdf-font --lib -- --ignored type1::tests::write_the_multiple_master_fuzz_seed --exact` |
 | `type42` | Written by `type42.rs`'s own wrapper, `cargo test -p tinker-pdf-font --lib -- --ignored type42::tests::write_the_fuzz_seeds --exact`, around the three-glyph face its tests build: one hexadecimal string, the face split inside `glyf` and at `head`'s boundary as hexadecimal and as binary `RD` strings, `-|` in place of `RD`, and a copy cut off inside `/sfnts` |
 | `cff_charstrings` | Choice sequences, written by `cargo test --release --manifest-path fuzz/Cargo.toml --lib write_the_fuzz_seeds -- --ignored` as `cos_syntax`'s are, each named for what its font holds — a local subroutine INDEX at each of 1 239, 1 240, 33 899 and 33 900, a global one at 1 240 and at 33 900, a CID-keyed font of several Font DICTs, glyphs ending in `seac`, glyphs that are `endchar` alone, masks inside subroutines, and twelve glyphs — and `plain`, the empty input |

@@ -270,6 +270,11 @@ const UNSIGNED: &[(&str, &str)] = &[
     ),
     ("svg", "SVG is XML text"),
     (
+        "truetype_hinting",
+        "a structured generator: the body is carved into a face's programs, control values, \
+         limits and points",
+    ),
+    (
         "type1",
         "a Type 1 font may be PFB-framed or bare PostScript",
     ),
