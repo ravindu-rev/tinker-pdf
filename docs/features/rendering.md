@@ -959,6 +959,13 @@ defect to hide in.
   clip pins the reader's shortfall above and the clipped image its clip; a
   fixed-seed campaign of mutated pages must never panic the writer, and the
   `render_page` fuzz target writes every page it reaches as SVG.
+  `surface_goldens.rs`'s `to-svg` is the writer's whole output for one page —
+  paths, text in an embedded face, an image, a clip, a group at half opacity
+  and a fill under a soft mask, the mask the one thing declined and named —
+  committed as a reviewed-golden surface with its header in an XML comment,
+  compared past that comment byte for byte in both builds, and listed
+  unreviewed until a person reads it against SVG 1.1 5.2, 5.7, 8.3, 11.3,
+  11.4, 14.3 and 14.5.
 - The retained page: `determinism.rs`'s
   `a_display_list_replays_every_fingerprinted_page_byte_for_byte` records
   every fingerprinted page once and replays it at 1× (the fingerprints'

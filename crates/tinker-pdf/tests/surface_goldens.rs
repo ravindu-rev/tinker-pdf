@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tinker_pdf::{
     Bitmap, Date, DigestAlgorithm, Document, OpenOptions, Rect, RenderOptions, RenderWarning,
     SignRefused, SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget,
-    SimpleFontProvider, WriteMode, WriteOptions,
+    SimpleFontProvider, SvgOptions, SvgWarning, WriteMode, WriteOptions,
 };
 use tinker_pdf_cos::{CosDocument, DocumentEditor, ObjRef};
 
@@ -48,13 +48,27 @@ const ALL_SURFACES: u64 = 512 * 1024;
 struct Surface {
     /// The family, which is the golden's file name.
     name: &'static str,
-    /// The clause the picture is read against.
+    /// The clause the golden is read against.
     clause: &'static str,
-    /// The surface, drawn by this build.
-    draw: fn() -> Bitmap,
-    /// The fewest non-background pixels it may paint: a blank golden matches
-    /// a blank render forever.
-    least_ink: usize,
+    /// What the golden holds, made by this build.
+    golden: Kind,
+}
+
+/// What a surface's golden holds.
+enum Kind {
+    /// A rendered page, held as a PPM.
+    Raster {
+        /// The surface, drawn by this build.
+        draw: fn() -> Bitmap,
+        /// The fewest non-background pixels it may paint: a blank golden
+        /// matches a blank render forever.
+        least_ink: usize,
+    },
+    /// The SVG a writer produces, held past its header comment.
+    Svg {
+        /// The surface, written by this build.
+        write: fn() -> String,
+    },
 }
 
 /// The surfaces, in the order their goldens are listed and reviewed.
@@ -65,58 +79,79 @@ const SURFACES: &[Surface] = &[
     Surface {
         name: "annotation-appearances",
         clause: "ISO 32000-1 12.5.5, 12.5.6",
-        draw: annotation_appearances,
-        // About half of what the page paints, 6 895 pixels.
-        least_ink: 3400,
+        golden: Kind::Raster {
+            draw: annotation_appearances,
+            // About half of what the page paints, 6 895 pixels.
+            least_ink: 3400,
+        },
     },
     Surface {
         name: "visible-signature",
         clause: "ISO 32000-1 12.7.4.5, 12.5.5",
-        draw: visible_signature,
-        // About half of what the page paints, 2 867 pixels.
-        least_ink: 1400,
+        golden: Kind::Raster {
+            draw: visible_signature,
+            // About half of what the page paints, 2 867 pixels.
+            least_ink: 1400,
+        },
     },
     Surface {
         name: "epub-page",
         clause: "EPUB 3.3 3.2, 6.1, 6.3.1",
-        draw: epub_page,
-        // About half of what the page paints, 1 306 pixels.
-        least_ink: 650,
+        golden: Kind::Raster {
+            draw: epub_page,
+            // About half of what the page paints, 1 306 pixels.
+            least_ink: 650,
+        },
     },
     Surface {
         name: "html-page",
         clause: "HTML 15.3.3, 15.3.4, 15.3.6, 15.3.8",
-        draw: html_page,
-        // About half of what the page paints, 1 124 pixels.
-        least_ink: 560,
+        golden: Kind::Raster {
+            draw: html_page,
+            // About half of what the page paints, 1 124 pixels.
+            least_ink: 560,
+        },
     },
     Surface {
         name: "markdown-page",
         clause: "CommonMark 0.31.2 4.2, 4.8, 5.2, 5.3, 6.2",
-        draw: markdown_page,
-        // About half of what the page paints, 810 pixels.
-        least_ink: 400,
+        golden: Kind::Raster {
+            draw: markdown_page,
+            // About half of what the page paints, 810 pixels.
+            least_ink: 400,
+        },
     },
     Surface {
         name: "fb2-page",
         clause: "FictionBook 2.1 section, title, epigraph, p, emphasis",
-        draw: fb2_page,
-        // About half of what the page paints, 609 pixels.
-        least_ink: 300,
+        golden: Kind::Raster {
+            draw: fb2_page,
+            // About half of what the page paints, 609 pixels.
+            least_ink: 300,
+        },
     },
     Surface {
         name: "svg-page",
         clause: "SVG 1.1 8.3, 9.2, 9.3, 10.4, 11.3, 11.4, 13.2.2",
-        draw: svg_page,
-        // About half of what the page paints, 3 441 pixels.
-        least_ink: 1700,
+        golden: Kind::Raster {
+            draw: svg_page,
+            // About half of what the page paints, 3 441 pixels.
+            least_ink: 1700,
+        },
     },
     Surface {
         name: "xps-page",
         clause: "ECMA-388 11.1, 12.1, 13.1, 13.2, 13.5",
-        draw: xps_page,
-        // About half of what the page paints, 5 178 pixels.
-        least_ink: 2580,
+        golden: Kind::Raster {
+            draw: xps_page,
+            // About half of what the page paints, 5 178 pixels.
+            least_ink: 2580,
+        },
+    },
+    Surface {
+        name: "to-svg",
+        clause: "SVG 1.1 5.2, 5.7, 8.3, 11.3, 11.4, 14.3, 14.5",
+        golden: Kind::Svg { write: to_svg },
     },
 ];
 
@@ -132,6 +167,7 @@ const UNREVIEWED: &[&str] = &[
     "fb2-page",
     "svg-page",
     "xps-page",
+    "to-svg",
 ];
 
 fn surfaces_dir() -> PathBuf {
@@ -142,7 +178,11 @@ fn surfaces_dir() -> PathBuf {
 }
 
 fn golden_path(surface: &Surface) -> PathBuf {
-    surfaces_dir().join(format!("{}.ppm", surface.name))
+    let extension = match surface.golden {
+        Kind::Raster { .. } => "ppm",
+        Kind::Svg { .. } => "svg",
+    };
+    surfaces_dir().join(format!("{}.{extension}", surface.name))
 }
 
 /// Pixels that are not the white the page started as.
@@ -230,7 +270,12 @@ fn annotation_fixture() -> Vec<u8> {
     ];
     bodies.extend(curvy_objects());
     bodies.extend(ANNOTATIONS.iter().map(|a| a.as_bytes().to_vec()));
+    pdf_file(&bodies)
+}
 
+/// A file of `bodies` as objects 1 onwards, object 1 its catalog, with a
+/// cross-reference table.
+fn pdf_file(bodies: &[Vec<u8>]) -> Vec<u8> {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (index, body) in bodies.iter().enumerate() {
@@ -250,6 +295,14 @@ fn annotation_fixture() -> Vec<u8> {
     out.extend_from_slice(
         format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
     );
+    out
+}
+
+/// A stream object of `data` under the entries `dict`.
+fn stream_object(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\nendstream");
     out
 }
 
@@ -667,49 +720,158 @@ fn xps_page() -> Bitmap {
     only_page("xps-page", &document)
 }
 
+// ---- the SVG the writer produces ----------------------------------------------
+
+/// The `to_svg` page's size in points.
+const TO_SVG_PAGE: (u32, u32) = (120, 90);
+
+/// A one-page file of everything `Page::to_svg` maps: a filled path and a
+/// stroked curve, a line of text in `curvy_font` embedded as objects 4 to 6,
+/// an image (object 8), a fill under a clip, a transparency group drawn at
+/// half opacity (object 9) and a fill under a luminosity soft mask whose
+/// group is object 10.
+fn to_svg_fixture() -> Vec<u8> {
+    let (width, height) = TO_SVG_PAGE;
+    let content = "0.15 0.35 0.75 rg 8 46 40 34 re f\n\
+                   0.8 0.2 0.1 RG 2 w 1 J 8 8 m 30 44 60 0 112 28 c S\n\
+                   BT /Cv 16 Tf 0.1 0.1 0.1 rg 56 66 Td (Svg) Tj ET\n\
+                   q 22 0 0 22 92 58 cm /Im Do Q\n\
+                   q 56 30 26 26 re W n 0.2 0.6 0.3 rg 50 24 40 40 re f Q\n\
+                   q /Half gs /Grp Do Q\n\
+                   q /Soft gs 0.95 0.6 0.1 rg 92 30 20 20 re f Q";
+    // Four by four pixels of four colours, a quadrant each.
+    let samples: Vec<u8> = (0..4u32)
+        .flat_map(|y| {
+            (0..4u32).flat_map(move |x| match (x < 2, y < 2) {
+                (true, true) => [200u8, 30, 30],
+                (false, true) => [30, 160, 60],
+                (true, false) => [40, 60, 200],
+                (false, false) => [240, 200, 40],
+            })
+        })
+        .collect();
+    let mut bodies: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Contents 7 0 R \
+             /Resources << /Font << /Cv 4 0 R >> /XObject << /Im 8 0 R /Grp 9 0 R >> \
+             /ExtGState << /Half << /ca 0.5 /CA 0.5 >> \
+             /Soft << /SMask << /S /Luminosity /G 10 0 R >> >> >> >> >>"
+        )
+        .into_bytes(),
+    ];
+    bodies.extend(curvy_objects());
+    bodies.push(stream_object("", content.as_bytes()));
+    bodies.push(stream_object(
+        "/Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceRGB \
+         /BitsPerComponent 8",
+        &samples,
+    ));
+    bodies.push(stream_object(
+        "/Type /XObject /Subtype /Form /BBox [0 0 120 90] /Group << /S /Transparency >> \
+         /Resources << >>",
+        b"0.55 0.1 0.6 rg 60 4 44 20 re f",
+    ));
+    bodies.push(stream_object(
+        "/Type /XObject /Subtype /Form /BBox [0 0 120 90] \
+         /Group << /S /Transparency /CS /DeviceGray >> /Resources << >>",
+        b"0.5 g 0 0 120 90 re f",
+    ));
+    pdf_file(&bodies)
+}
+
+/// SVG 1.1 as `Page::to_svg` writes a page onto it: paths and the text's
+/// glyph outlines as path data (8.3) with their fill and stroke properties
+/// (11.3, 11.4), the image as an `image` (5.7), the clip as a `clipPath`
+/// (14.3) and the group as a `g` (5.2) at the group's opacity (14.5). The
+/// soft mask is the one thing the page asks for that the writer declines, so
+/// what it masks is written unmasked and named, and nothing else is.
+fn to_svg() -> String {
+    let document = Document::open(to_svg_fixture()).expect("the fixture opens");
+    let svg = document
+        .page(0)
+        .expect("the page")
+        .to_svg(&SvgOptions::default());
+    assert_eq!(
+        svg.warnings,
+        vec![SvgWarning::SoftMaskRefused {
+            group: Some(ObjRef { num: 10, gen: 0 }),
+        }],
+        "the soft mask is the one thing the writer declines"
+    );
+    svg.markup
+}
+
 // ---- the checks -------------------------------------------------------------
 
-/// Every surface golden is what this build draws, byte for byte, above the
-/// surface's ink floor and with every glyph it names drawn.
+/// Every surface golden is what this build makes, byte for byte: a raster
+/// above the surface's ink floor and with every glyph it names drawn, an SVG
+/// past its header comment.
 #[test]
 fn every_surface_golden_is_what_this_build_draws() {
     let mut wrong = Vec::new();
     for surface in SURFACES {
-        let bitmap = (surface.draw)();
-        let drawn = ink(&bitmap);
-        assert!(
-            drawn >= surface.least_ink,
-            "{}: the page painted {drawn} pixels, fewer than the {} it is \
-             supposed to -- a blank golden matches a blank render forever",
-            surface.name,
-            surface.least_ink
-        );
-        assert!(
-            !bitmap.warnings.contains(&RenderWarning::UnreadableFont),
-            "{}: a font this build cannot draw, so its glyphs are missing",
-            surface.name
-        );
-        let committed = std::fs::read(golden_path(surface)).expect("the golden reads");
-        wrong.extend(ppm_mismatch(surface.name, &committed, &bitmap));
+        match surface.golden {
+            Kind::Raster { draw, least_ink } => {
+                let bitmap = draw();
+                let drawn = ink(&bitmap);
+                assert!(
+                    drawn >= least_ink,
+                    "{}: the page painted {drawn} pixels, fewer than the {least_ink} it \
+                     is supposed to -- a blank golden matches a blank render forever",
+                    surface.name
+                );
+                assert!(
+                    !bitmap.warnings.contains(&RenderWarning::UnreadableFont),
+                    "{}: a font this build cannot draw, so its glyphs are missing",
+                    surface.name
+                );
+                let committed = std::fs::read(golden_path(surface)).expect("the golden reads");
+                wrong.extend(ppm_mismatch(surface.name, &committed, &bitmap));
+            }
+            Kind::Svg { write } => {
+                let committed =
+                    std::fs::read_to_string(golden_path(surface)).expect("the golden reads");
+                wrong.extend(svg_mismatch(surface.name, &committed, &write()));
+            }
+        }
     }
     assert!(wrong.is_empty(), "{}", disagreement(&wrong));
 }
 
-/// One pixel changed in a surface golden is a golden this build does not
-/// draw: every byte is compared, and no tolerance stands between a golden
-/// and the picture.
+/// One byte changed in a surface golden is a golden this build does not make:
+/// every byte is compared, and no tolerance stands between a golden and the
+/// picture or the markup.
 #[test]
-fn one_pixel_changed_in_a_surface_golden_fails_it() {
+fn one_changed_byte_in_a_surface_golden_fails_it() {
     for surface in SURFACES {
-        let bitmap = (surface.draw)();
         let mut committed = std::fs::read(golden_path(surface)).expect("the golden reads");
-        // The middle pixel's first component, one level away.
-        let samples = ppm_samples(&committed).len();
-        let at = committed.len() - samples + samples / 6 * 3;
-        committed[at] ^= 1;
+        let still_matched = match surface.golden {
+            Kind::Raster { draw, .. } => {
+                // The middle pixel's first component, one level away.
+                let samples = ppm_samples(&committed).len();
+                let at = committed.len() - samples + samples / 6 * 3;
+                committed[at] ^= 1;
+                ppm_mismatch(surface.name, &committed, &draw()).is_none()
+            }
+            Kind::Svg { write } => {
+                // The first letter or digit past the middle of the markup
+                // after the header comment, one bit away: an ASCII byte stays
+                // one, so the golden is still UTF-8 and only that byte moves.
+                let text = String::from_utf8(committed.clone()).expect("the golden is UTF-8");
+                let body = text.find("-->\n").expect("a header comment") + "-->\n".len();
+                let at = (body + (text.len() - body) / 2..text.len())
+                    .find(|&at| committed[at].is_ascii_alphanumeric())
+                    .expect("a letter or digit past the middle");
+                committed[at] ^= 1;
+                let changed = String::from_utf8(committed).expect("still UTF-8");
+                svg_mismatch(surface.name, &changed, &write()).is_none()
+            }
+        };
         assert!(
-            ppm_mismatch(surface.name, &committed, &bitmap).is_some(),
-            "{}: a golden one pixel off still matched",
+            !still_matched,
+            "{}: a golden one byte off still matched",
             surface.name
         );
     }
@@ -729,8 +891,11 @@ fn every_surface_family_has_a_golden() {
             surface.name
         );
         let bytes = std::fs::read(&path).expect("the golden reads");
-        let header = read_header(&bytes)
-            .unwrap_or_else(|e| panic!("{}: its header is refused: {e:?}", surface.name));
+        let header = match surface.golden {
+            Kind::Raster { .. } => read_header(&bytes),
+            Kind::Svg { .. } => read_svg_header(&String::from_utf8_lossy(&bytes)),
+        }
+        .unwrap_or_else(|e| panic!("{}: its header is refused: {e:?}", surface.name));
         assert_eq!(header.family, surface.name, "the header names its family");
         assert_eq!(header.clause, surface.clause, "the header names its clause");
         if header.reviewer == UNREVIEWED_MARK {
@@ -889,27 +1054,35 @@ fn write_the_surface_goldens() {
     let (reviewer, reviewed) = reviewer_and_date();
     std::fs::create_dir_all(surfaces_dir()).expect("the surfaces directory");
     for surface in SURFACES {
-        let bitmap = (surface.draw)();
-        let drawn = ink(&bitmap);
-        assert!(
-            drawn >= surface.least_ink,
-            "{}: the page painted {drawn} pixels, fewer than the {} it is \
-             supposed to -- a blank golden is not written",
-            surface.name,
-            surface.least_ink
-        );
         let built_by = format!("surface_goldens.rs::{}", surface.name);
         let golden = Golden {
             family: surface.name,
             clause: surface.clause,
             built_by: &built_by,
         };
-        let bytes = to_ppm(&bitmap, golden, &reviewer, &reviewed);
-        std::fs::write(golden_path(surface), &bytes).expect("the golden writes");
-        println!(
-            "  wrote {} ({} bytes, {drawn} pixels of ink)",
-            surface.name,
-            bytes.len()
-        );
+        match surface.golden {
+            Kind::Raster { draw, least_ink } => {
+                let bitmap = draw();
+                let drawn = ink(&bitmap);
+                assert!(
+                    drawn >= least_ink,
+                    "{}: the page painted {drawn} pixels, fewer than the {least_ink} it \
+                     is supposed to -- a blank golden is not written",
+                    surface.name
+                );
+                let bytes = to_ppm(&bitmap, golden, &reviewer, &reviewed);
+                std::fs::write(golden_path(surface), &bytes).expect("the golden writes");
+                println!(
+                    "  wrote {} ({} bytes, {drawn} pixels of ink)",
+                    surface.name,
+                    bytes.len()
+                );
+            }
+            Kind::Svg { write } => {
+                let text = to_svg_golden(&write(), golden, &reviewer, &reviewed);
+                std::fs::write(golden_path(surface), &text).expect("the golden writes");
+                println!("  wrote {} ({} bytes)", surface.name, text.len());
+            }
+        }
     }
 }

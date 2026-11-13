@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+tinker-pdf reviewed golden
+family: to-svg
+clause: SVG 1.1 5.2, 5.7, 8.3, 11.3, 11.4, 14.3, 14.5
+reviewer: unreviewed
+reviewed: unreviewed
+built-by: surface_goldens.rs::to-svg
+-->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" width="120pt" height="90pt" viewBox="0 0 120 90">
+<defs>
+<clipPath id="c1" clipPathUnits="userSpaceOnUse"><path d="M56 60L82 60L82 34L56 34Z"/></clipPath>
+<clipPath id="c2" clipPathUnits="userSpaceOnUse"><path d="M0 90L120 90L120 0L0 0Z"/></clipPath>
+</defs>
+<path d="M8 44L48 44L48 10L8 10Z" fill="#2659bf"/>
+<path d="M8 82C30 46 60 90 112 62" fill="none" stroke="#cc331a" stroke-width="2" stroke-linecap="round" stroke-miterlimit="10"/>
+<path d="M56 24L64.96 24C64.96 16.5333 61.9733 12.8 56 12.8L56 24Z" fill="#1a1a1a"/>
+<path d="M70.72 13.92C73.7067 13.92 75.2 15.4133 75.2 18.4C75.2 21.3867 73.7067 22.88 70.72 22.88C67.7333 22.88 66.24 21.3867 66.24 18.4C66.24 15.4133 67.7333 13.92 70.72 13.92ZM70.72 16C69.12 16 68.32 16.8 68.32 18.4C68.32 20 69.12 20.8 70.72 20.8C72.32 20.8 73.12 20 73.12 18.4C73.12 16.8 72.32 16 70.72 16Z" fill="#1a1a1a"/>
+<path d="M77.12 24C77.12 20.3733 78.4 18.5067 80.96 18.4C83.52 18.2933 84.8 16.4267 84.8 12.8L82.88 12.8C82.4533 17.0667 81.8133 19.3067 80.96 19.52C80.1067 19.7333 79.4667 21.2267 79.04 24L77.12 24Z" fill="#1a1a1a"/>
+<image x="0" y="0" width="1" height="1" preserveAspectRatio="none" image-rendering="optimizeSpeed" transform="matrix(22 0 0 22 92 10)" xlink:href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAJklEQVR4AWM8ISf3nwEIwprkQBQDE5hEAiwJcqvAjEsaCWAaQwUAAqUFhbefLfwAAAAASUVORK5CYII="/>
+<path d="M50 66L90 66L90 26L50 26Z" fill="#33994d" clip-path="url(#c1)"/>
+<g opacity="0.5">
+<path d="M60 86L104 86L104 66L60 66Z" fill="#8c1a99" clip-path="url(#c2)"/>
+</g>
+<path d="M92 60L112 60L112 40L92 40Z" fill="#f2991a"/>
+</svg>
