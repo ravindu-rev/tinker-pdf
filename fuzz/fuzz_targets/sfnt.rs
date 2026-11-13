@@ -7,15 +7,17 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** Every
-//! call is discarded — including the subsetter's, so a subset font
-//! that rebuilt its directory *wrongly* passes. So a run that returned the
-//! *wrong* answer passes this target exactly as a correct one does, and a
-//! green `cargo fuzz` here is evidence about ruling 1 and about nothing else.
+//! **Only that the code did not panic, hang, or exhaust memory.** Every call
+//! is discarded — the subsetter's and the colour tables' readers' included,
+//! so a subset font that rebuilt its directory *wrongly* passes. So a run that
+//! returned the *wrong* answer passes this target exactly as a correct one
+//! does, and a green `cargo fuzz` here is evidence about ruling 1 and about
+//! nothing else.
 //!
 //! That is worth writing down rather than leaving implied. Correctness lives
-//! in `crates/tinker-pdf-font`'s own tests and in the subset census, which
-//! checks that a rebuilt face is one a conformant consumer accepts.
+//! in `crates/tinker-pdf-font`'s own tests — the colour tables' in
+//! `tests/colour_tables.rs` — and in the subset census, which checks that a
+//! rebuilt face is one a conformant consumer accepts.
 //!
 //! Recorded because the same shape has already cost this repository once: the
 //! `brotli` target asserts only self-consistency and could not have found the
@@ -24,7 +26,9 @@
 use libfuzzer_sys::fuzz_target;
 
 use std::collections::BTreeSet;
-use tinker_pdf_font::{glyf, glyphs_for, subset, substitute_glyph, BuiltInEncoding, Sfnt};
+use tinker_pdf_font::{
+    glyf, glyphs_for, subset, substitute_glyph, BuiltInEncoding, Colr, Cpal, PaletteChoice, Sfnt,
+};
 
 fuzz_target!(|data: &[u8]| {
     let Some(font) = Sfnt::parse(data) else {
@@ -85,6 +89,44 @@ fuzz_target!(|data: &[u8]| {
         let _ = font.vorg_origin(glyph);
         let _ = font.vertical_origin(glyph);
         let _ = glyf::bounds(&font, glyph);
+    }
+
+    // The colour tables (`docs/design/colour-fonts.md`), for the face's first
+    // glyphs as `cmap` is walked for its first characters: every palette
+    // entry a short palette can name, each choice of palette, and each glyph's
+    // layers looked up in the palette chosen.
+    let cpal = font
+        .table(u32::from_be_bytes(*b"CPAL"))
+        .and_then(Cpal::parse);
+    if let Some(cpal) = &cpal {
+        for palette in 0..4u16 {
+            let _ = cpal.palette_type(palette);
+            let _ = cpal.palette_label(palette);
+            for entry in 0..16u16 {
+                let _ = cpal.colour(palette, entry);
+            }
+        }
+        for entry in 0..16u16 {
+            let _ = cpal.entry_label(entry);
+        }
+    }
+    if let Some(colr) = font
+        .table(u32::from_be_bytes(*b"COLR"))
+        .and_then(Colr::parse)
+    {
+        let _ = colr.warnings();
+        for glyph in 0..64u16 {
+            let _ = colr.layer_records(glyph);
+            if let Some(cpal) = &cpal {
+                for choice in [
+                    PaletteChoice::Default,
+                    PaletteChoice::LightBackground,
+                    PaletteChoice::DarkBackground,
+                ] {
+                    let _ = colr.layers(glyph, cpal, cpal.choose(choice));
+                }
+            }
+        }
     }
 
     // The subsetter reads the directory and writes a new one, so a hostile

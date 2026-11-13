@@ -81,6 +81,28 @@ or none. A face without the tables, a count of zero, or a
 read past a table's end answers `None`, and what a shaper sets then is
 [design/shaping.md](../design/shaping.md)'s *Vertical shaping*.
 
+**Colour tables** (OpenType 1.9.1's CPAL and COLR chapters,
+[design](../design/colour-fonts.md)). `Cpal` reads both versions of the
+palette table: every palette's entries as `Rgba` — sRGB, not premultiplied,
+the table's blue-green-red-alpha order named by field — and version 1's
+palette types (both flags, a reserved bit kept), palette labels and entry
+labels as `name` IDs, 0xFFFF reading as none. `Cpal::choose` takes a
+`PaletteChoice` — palette 0, an index, or the first palette flagged for a
+light or a dark background — and always answers one of the table's
+palettes, or 0. `Colr` reads version 0's `BaseGlyph` and layer records, in a
+version 0 or version 1 header: `Colr::layers` answers a glyph's layers bottom
+first, each outline glyph with its palette entry's colour or, for 0xFFFF,
+`LayerColour::Foreground`, the text's own colour; `Colr::layer_records` the
+same before the palette is consulted. The records are bisected where they are
+in increasing glyph order and scanned, the first record answering, where they
+are not, with `ColrWarning::BaseGlyphsOutOfOrder`. Every offset and count is
+held to the table: a palette or entry past its count, a record past
+`numColorRecords` or the table's end, a layer slice past `numLayerRecords`,
+and a layer naming an entry the palette lacks each answer `None` — the glyph
+is then drawn as its outline — and a header that does not fit, or a version
+other than 0 or 1, is no table. Nothing here draws a colour glyph; a PDF's
+embedded program is drawn from its outlines (ISO 32000-2 9.9.1).
+
 **Type 1** (9.9, `/FontFile`). `Type1::parse` reads PFB, PFA and the bare
 bytes a PDF embeds: eexec decryption, the second decryption layer around each
 charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
@@ -1323,6 +1345,16 @@ corpora already vendored here. So every name stays on the list.
   scalars the specification computes in the test; the default location
   drawing the unblended outline; and a design space of another axis count
   refused.
+- `crates/tinker-pdf-font/tests/colour_tables.rs` — the colour tables over
+  bytes the test writes from the OpenType chapters' layouts: COLR version 0's
+  layers bottom first with each palette's colours, a slice two glyphs share,
+  records out of order scanned and named, the foreground index never a
+  palette entry; CPAL version 1's types, labels and entry labels, each
+  `PaletteChoice`; every index past its count and every array past the
+  table's end answering `None`; and every prefix and flipped byte of the
+  tables answering without a panic. The `sfnt` fuzz target's
+  `colr-v0.ttf` seed is written by the same builders, and read back through
+  its directory.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

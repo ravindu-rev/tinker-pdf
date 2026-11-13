@@ -13,6 +13,8 @@ pub mod cff;
 pub mod cff2;
 pub mod cff_subset;
 pub mod cmap;
+pub mod colr;
+pub mod cpal;
 pub mod encoding;
 pub mod glyf;
 pub mod outline;
@@ -29,6 +31,8 @@ pub use cff::Cff;
 pub use cff2::Cff2;
 pub use cff_subset::subset_cff;
 pub use cmap::CMap;
+pub use colr::{ColourIndex, Colr, Layer, LayerColour};
+pub use cpal::{Cpal, PaletteChoice, PaletteType, Rgba};
 pub use encoding::{
     base_char, base_glyph_name, glyph_name_for_char, glyph_name_to_char, BaseEncoding, BuiltInCode,
     BuiltInEncoding,
