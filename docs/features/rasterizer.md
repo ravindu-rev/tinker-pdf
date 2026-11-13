@@ -420,7 +420,12 @@ formats a plates source composites onto `CmykA8` as its process ink and onto
 light as that ink's light, and a light or ink source onto plates as ink on the
 process channels with every spot under its shape knocked out, a group painting
 every component; an uncoloured cell's colour on plates is its light turned
-into ink. The five other
+into ink, or through `composite_inked` a `PlateInk`'s tints wherever the cell
+painted, each channel the ink names none for knocked out, as a fill through a
+mask of the cell's alpha puts them. An image draw's `ImageDraw::plates`, its
+tint's ink by plate, is what a plates canvas composites for a stencil's pixel
+in place of `ImageDraw::ink`; a run (`accumulate_image`) holds light and ink
+and never plates, so such a draw composites on its own. The five other
 formats keep their five-byte compositing word and run no line they did
 before: a plates paint builds a word as wide as its canvas once a paint. A
 colour handed to plates through `fill_mask_inked` or `blend_pixel_inked` is

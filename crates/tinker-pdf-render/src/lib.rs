@@ -17,6 +17,7 @@ pub mod display;
 mod glyph;
 mod glyph_cache;
 pub mod mesh;
+mod plates;
 #[cfg(test)]
 mod run_shadows;
 pub mod shading;
@@ -28,16 +29,19 @@ use tinker_pdf_color::icc::Conversion;
 
 pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
+use plates::{spotless, PlatePaint};
+pub use plates::{PlatePlan, PlateUse};
 pub use shading::{ColorTable, Shading, ShadingScratch, TABLE_ENTRIES};
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{
-    ColorFamily, Device, EventKind, Glyph, GraphicsState, ImageRef, LineCap as ContentCap,
-    LineJoin as ContentJoin, Matrix, PathSegment, RenderingIntent, StoredParameters, Transfer,
+    ColorFamily, ColorantTints, Device, EventKind, Glyph, GraphicsState, ImageRef,
+    LineCap as ContentCap, LineJoin as ContentJoin, Matrix, PathSegment, RenderingIntent,
+    StoredParameters, Transfer,
 };
 
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
-    canvas::{Canvas, Color, InkTables, MaskKind, PixelFormat},
+    canvas::{Canvas, Color, InkTables, MaskKind, PixelFormat, PlateInk},
     fill::{
         fill_hard_with, fill_outline, fill_outline_hard, fill_with, FillScratch, HardEdge, Mask,
     },
@@ -1634,6 +1638,10 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// Forced colours ([`Renderer::with_forced_colours`]); `None` for an
     /// ordinary render.
     forced: Option<Forced>,
+    /// The plate plan a render on plates maps each colour's colorants by
+    /// ([`Renderer::with_plates`]); `None` for every other render, which then
+    /// asks no colorants of anybody.
+    plan: Option<Arc<PlatePlan>>,
     /// Text objects open, each `BT` without its `ET` yet (9.4.1). A fill
     /// inside one is a Type 3 glyph's procedure painting (9.6.5), which
     /// fill-to-stroke leaves a glyph. No text object outlives the stream it
@@ -1660,6 +1668,61 @@ struct ParameterSet {
 struct DeviceSet {
     entry: u8,
     removal: Option<Arc<InkTables>>,
+}
+
+/// A colour slot's paint, as the state holds it: the colour's light, its
+/// DeviceCMYK ink where it was chosen in DeviceCMYK
+/// (`GraphicsState::fill_ink`), and what it paints by colorant where the
+/// render composites colorants (`GraphicsState::fill_colorants`).
+#[derive(Clone, Copy, Debug)]
+struct Paint<'a> {
+    light: Color,
+    ink: Option<[u8; 4]>,
+    colorants: Option<&'a ColorantTints>,
+}
+
+impl<'a> Paint<'a> {
+    /// The fill slot's paint.
+    fn fill(state: &'a GraphicsState) -> Paint<'a> {
+        Paint {
+            light: fill_color(state),
+            ink: state.fill_ink,
+            colorants: state.fill_colorants.as_deref(),
+        }
+    }
+
+    /// The stroke slot's paint.
+    fn stroke(state: &'a GraphicsState) -> Paint<'a> {
+        Paint {
+            light: stroke_color(state),
+            ink: state.stroke_ink,
+            colorants: state.stroke_colorants.as_deref(),
+        }
+    }
+
+    /// A colour of light alone, which the renderer chose: a placeholder's.
+    fn light(light: Color) -> Paint<'static> {
+        Paint {
+            light,
+            ink: None,
+            colorants: None,
+        }
+    }
+}
+
+/// What a paint puts on the canvas it lands on ([`Renderer::plating`]).
+#[derive(Clone, Debug)]
+enum Plating {
+    /// Its light, and its DeviceCMYK ink where it has one: what every
+    /// canvas but a plates one with a plan paints, and what a plates one
+    /// paints for a colour naming no colorant it can place.
+    Light,
+    /// A tint for each channel of a plates canvas, every channel it names
+    /// none for knocked out.
+    Ink(PlateInk),
+    /// Nothing at all: 8.6.6.4's `/None`, whose paints have no effect on the
+    /// page.
+    Nothing,
 }
 
 /// **11.7.5.2's rendering parameters, per point, for a finished page.**
@@ -1867,6 +1930,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             parameters_spent: false,
             every_paint_opaque: true,
             forced: None,
+            plan: None,
             text_depth: 0,
         }
     }
@@ -2178,10 +2242,56 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self
     }
 
+    /// Draws the page on its plates by `plan`
+    /// (`docs/design/overprint-separations.md`, "Separations"): over a
+    /// [`PixelFormat::Plates`] canvas whose spot channels are the plan's
+    /// plates, the renderer asks each colour what it paints by colorant
+    /// ([`Device::composites_colorants`]) and maps its colorants to channels
+    /// by the plan — a process name to its process plate, a spot with a
+    /// plate to that plate, a colour naming one with none through its
+    /// alternate's process ink, `/All` to every plate and `/None` to nothing
+    /// ([`PlatePlan`]) — for every fill, stroke, glyph, stencil mask and
+    /// uncoloured pattern, through the clip and the soft mask as on a light
+    /// canvas. Every channel a paint names no tint for is knocked out, as
+    /// 8.6.7 has a paint do with overprint off. A colour naming no colorant of
+    /// its own — DeviceGray, DeviceRGB, a CIE-based or ICC space — is its
+    /// light turned into ink on the process plates, as on a `CmykA8` canvas.
+    ///
+    /// A renderer over a canvas of any other format keeps no plan, and asks
+    /// no colour its colorants.
+    #[must_use]
+    pub fn with_plates(mut self, plan: PlatePlan) -> Self {
+        self.plan =
+            matches!(self.canvas.format, PixelFormat::Plates { .. }).then(|| Arc::new(plan));
+        self
+    }
+
+    /// What `paint` puts on the canvas drawn on now: on a plates canvas of a
+    /// render with a plan, the plate ink its colorants name, or nothing at
+    /// all for `/None`; on every other canvas, and for a colour naming no
+    /// colorant the plan can place, its light, and its DeviceCMYK ink where
+    /// it has one, as every canvas has always painted it.
+    ///
+    /// A soft mask's group is drawn on a buffer of light or ink of its own,
+    /// never on plates, so what its colours paint there is their light.
+    fn plating(&self, paint: Paint<'_>) -> Plating {
+        let (Some(plan), PixelFormat::Plates { spots }, Some(colorants)) =
+            (self.plan.as_deref(), self.canvas.format, paint.colorants)
+        else {
+            return Plating::Light;
+        };
+        match plan.paint(colorants, spots) {
+            Some(PlatePaint::Ink(ink)) => Plating::Ink(ink),
+            Some(PlatePaint::Nothing) => Plating::Nothing,
+            None => Plating::Light,
+        }
+    }
+
     /// The state a paint is made with: `state` itself, or under forced
-    /// colours a copy whose paint is opaque black and `Normal`, with no ink
-    /// and no pattern ([`Renderer::with_forced_colours`]). Everything else —
-    /// the transform, the pen, the text state — is the page's.
+    /// colours a copy whose paint is opaque black and `Normal`, with no ink,
+    /// no colorants and no pattern ([`Renderer::with_forced_colours`]).
+    /// Everything else — the transform, the pen, the text state — is the
+    /// page's.
     fn painting<'s>(&self, state: &'s GraphicsState) -> std::borrow::Cow<'s, GraphicsState> {
         if self.forced.is_none() {
             return std::borrow::Cow::Borrowed(state);
@@ -2193,6 +2303,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         forced.stroke_wide = tinker_pdf_content::Rgb16::BLACK;
         forced.fill_ink = None;
         forced.stroke_ink = None;
+        forced.fill_colorants = None;
+        forced.stroke_colorants = None;
         forced.fill_alpha = 1.0;
         forced.stroke_alpha = 1.0;
         forced.blend = tinker_pdf_content::BlendMode::Normal;
@@ -3137,7 +3249,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .map_or(raw, |lut| lut.get(raw as usize).copied().unwrap_or(raw))
         };
 
-        let format = Self::alpha_format(self.canvas.format);
+        // On plates the mask's group renders in ink and is read as a mask, as
+        // on an ink page: 11.7.3 substitutes the alternate space for every
+        // spot inside a soft mask, so a colour there is its light, and the
+        // mask reads its luminosity or its alpha off the process plates' own
+        // format, never off spots it would not see.
+        let format = match Self::alpha_format(self.canvas.format) {
+            PixelFormat::Plates { .. } => PixelFormat::CmykA8,
+            format => format,
+        };
         let buffer = Canvas::new(width, height, format, background).at_origin(x0, y0);
         self.count_group_buffer(&buffer);
         self.counts.group_bound_pixels = self
@@ -3340,17 +3460,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ///
     /// `alpha` is a parameter rather than a field of `state` because 8.4.5
     /// gives painting two of them: a fill uses `ca`, a stroke uses `CA`, and
-    /// the callers are the only things that know which they are. `color` is a
+    /// the callers are the only things that know which they are. `paint` is a
     /// parameter for exactly the same reason, and it is the same mistake
     /// waiting to be made: 8.7.3.3 gives an uncoloured pattern the colour of
-    /// the slot that named it, and a stroke's slot is not a fill's.
+    /// the slot that named it — its light, its ink and its colorants — and a
+    /// stroke's slot is not a fill's.
     fn fill_with_pattern(
         &mut self,
         shape: Shape<'_>,
         name: &[u8],
         state: &GraphicsState,
         alpha: f64,
-        color: Color,
+        paint: Paint<'_>,
         family: ColorFamily,
     ) {
         match self.glyphs.pattern(name) {
@@ -3363,7 +3484,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
             Some(PatternPaint::Tiling(tiling)) => {
-                if !self.fill_with_tiles(shape, name, &tiling, state, alpha, color, family) {
+                if !self.fill_with_tiles(shape, name, &tiling, state, alpha, paint, family) {
                     self.report_unpainted_pattern(name);
                 }
             }
@@ -3695,11 +3816,22 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         tiling: &TilingPattern,
         state: &GraphicsState,
         alpha: f64,
-        color: Color,
+        paint: Paint<'_>,
         family: ColorFamily,
     ) -> bool {
         if self.pattern_depth >= MAX_PATTERN_DEPTH {
             return false;
+        }
+        // 8.7.3.3: an uncoloured cell paints the colour its `SCN` gave, by
+        // plate on plates; one filled in `/None` has no effect on the page
+        // (8.6.6.4), so no cell is drawn for it, and nothing is unpainted.
+        let plating = if tiling.uncolored {
+            self.plating(paint)
+        } else {
+            Plating::Light
+        };
+        if matches!(plating, Plating::Nothing) {
+            return true;
         }
 
         // 8.7.3.1, and the whole of this function's correctness: `base`, the
@@ -3898,6 +4030,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // ignored" true of operators this engine has not implemented yet as
         // well. Opaque, as the colour slot's light is: the fill's `ca` is
         // `alpha`.
+        let color = paint.light;
         let tint = tiling
             .uncolored
             .then(|| Color::rgb(color.r, color.g, color.b));
@@ -3935,8 +4068,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     x.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
                     y.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
                 );
-                match tint {
-                    Some(tint) => self.canvas.composite_tinted(
+                match (tint, &plating) {
+                    // The colorants the colour names, by plate.
+                    (Some(_), Plating::Ink(ink)) => self.canvas.composite_inked(
+                        &tile,
+                        ink,
+                        at,
+                        alpha,
+                        mode,
+                        Some(&coverage),
+                        Some(&stop),
+                    ),
+                    (Some(tint), _) => self.canvas.composite_tinted(
                         &tile,
                         tint,
                         at,
@@ -3945,7 +4088,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                         Some(&coverage),
                         Some(&stop),
                     ),
-                    None => {
+                    (None, _) => {
                         self.canvas
                             .composite(&tile, at, alpha, mode, Some(&coverage), Some(&stop));
                     }
@@ -4119,15 +4262,24 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         mode: RasterBlend,
         set: &DeviceSet,
     ) {
-        self.paint_inked(Shape::Fill(path, rule), color, None, alpha, mode, set);
+        self.paint_inked(
+            Shape::Fill(path, rule),
+            Paint::light(color),
+            alpha,
+            mode,
+            set,
+        );
     }
 
-    /// As [`Renderer::paint`], for any shape, with the colour's DeviceCMYK
-    /// components beside it (`GraphicsState::fill_ink`): a canvas compositing
-    /// in ink — the page asked for in ink, or a `/DeviceCMYK` group's buffer —
-    /// composites the document's own components rather than the light turned
-    /// back into ink, which would lose every separation the file chose but
-    /// one.
+    /// As [`Renderer::paint`], for any shape, in a colour slot's `paint`:
+    /// its light, with the colour's DeviceCMYK components beside it
+    /// (`GraphicsState::fill_ink`) — a canvas compositing in ink, the page
+    /// asked for in ink or a `/DeviceCMYK` group's buffer, composites the
+    /// document's own components rather than the light turned back into ink,
+    /// which would lose every separation the file chose but one — and what it
+    /// paints by colorant, which a plates canvas composites by plate
+    /// ([`Renderer::with_plates`]). A paint of `/None` there has no effect at
+    /// all.
     ///
     /// `set` is what the paint takes from the device-dependent state: the
     /// plane entry its shape records (11.7.5.2), and the ink tables a light
@@ -4136,13 +4288,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     fn paint_inked(
         &mut self,
         shape: Shape<'_>,
-        color: Color,
-        ink: Option<[u8; 4]>,
+        paint: Paint<'_>,
         alpha: f64,
         mode: RasterBlend,
         set: &DeviceSet,
     ) {
         if self.stopping() {
+            return;
+        }
+        let plating = self.plating(paint);
+        if matches!(plating, Plating::Nothing) {
             return;
         }
         let stop = self.stop_predicate();
@@ -4151,8 +4306,30 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if self.in_knockout() {
             self.knockout_restore(&mask);
         }
+        self.composite_paint(&mask, paint, &plating, alpha, mode, set);
+    }
+
+    /// Composites `paint` through `mask`, under the ink tables `set` holds:
+    /// as its plating says, its plate ink on plates and its light and ink
+    /// everywhere else.
+    fn composite_paint(
+        &mut self,
+        mask: &Mask,
+        paint: Paint<'_>,
+        plating: &Plating,
+        alpha: f64,
+        mode: RasterBlend,
+        set: &DeviceSet,
+    ) {
         let held = self.hold_removal(&set.removal);
-        self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
+        match plating {
+            Plating::Ink(ink) => self.canvas.fill_mask_plates(mask, ink, alpha, mode),
+            Plating::Light => {
+                self.canvas
+                    .fill_mask_inked(mask, paint.light, paint.ink, alpha, mode);
+            }
+            Plating::Nothing => {}
+        }
         self.release_removal(held);
     }
 
@@ -4160,20 +4337,22 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// (`glyph::rasterise`), with its pixel (0, 0) at the page-frame pixel
     /// `origin` — through the clip, the soft mask and a knockout group's
     /// restore, as [`Renderer::paint_inked`] composites a path's coverage,
-    /// and taking `set`, the paint's device-dependent state, as that does:
-    /// the glyph's shape for the plane is its placed mask times the clip,
-    /// without the soft mask, which is opacity (11.6.4.3).
-    #[allow(clippy::too_many_arguments)]
+    /// and taking `paint` and `set`, the paint's device-dependent state, as
+    /// that does: the glyph's shape for the plane is its placed mask times
+    /// the clip, without the soft mask, which is opacity (11.6.4.3).
     fn paint_glyph_mask(
         &mut self,
         local: &Mask,
         origin: [i32; 2],
-        color: Color,
-        ink: Option<[u8; 4]>,
+        paint: Paint<'_>,
         alpha: f64,
         mode: RasterBlend,
         set: &DeviceSet,
     ) {
+        let plating = self.plating(paint);
+        if matches!(plating, Plating::Nothing) {
+            return;
+        }
         let mask = self.placed_glyph(local, origin, true);
         if self.records(set.entry) {
             if self.soft.is_some() {
@@ -4186,9 +4365,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if self.in_knockout() {
             self.knockout_restore(&mask);
         }
-        let held = self.hold_removal(&set.removal);
-        self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
-        self.release_removal(held);
+        self.composite_paint(&mask, paint, &plating, alpha, mode, set);
     }
 
     /// A glyph's mask placed with its pixel (0, 0) at the page-frame pixel
@@ -4288,6 +4465,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// it had no filtering — there is nowhere in a bridge crate to put a
     /// pyramid, and nothing here can be tested without building a page.
     fn blit(&mut self, image: &DecodedImage, state: &GraphicsState) {
+        // 8.9.6.2: a stencil paints the fill colour, which on plates is the
+        // colorants it names; in `/None` it has no effect on the page.
+        let plating = if image.stencil {
+            self.plating(Paint::fill(state))
+        } else {
+            Plating::Light
+        };
+        if matches!(plating, Plating::Nothing) {
+            return;
+        }
         let unit_to_device = transform(&state.ctm.then(&self.base));
         // A reduced decode's samples span a square of their own, which reaches
         // past the unit square where the last column and row stand for less
@@ -4344,6 +4531,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     clip: self.clip.as_ref(),
                     tint: image.stencil.then_some(Color::WHITE),
                     ink: None,
+                    plates: None,
                     stop: None,
                     edge_bits: self.level(),
                     edge_rule: self.hard_edge,
@@ -4365,12 +4553,25 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // 8.9.6.2: a stencil selects where the *current fill colour* is
         // painted; it has no colour of its own. That colour is a flat fill
         // like any other, so a canvas compositing in ink is handed its own
-        // ink beside its light, as a fill is (`GraphicsState::fill_ink`).
+        // ink beside its light, as a fill is (`GraphicsState::fill_ink`), and
+        // a canvas of plates the colorants it names by plate. A plate ink
+        // tinting no spot is its process ink, which a run holds as it holds
+        // any ink; one tinting a spot is drawn on its own.
         let tint = image.stencil.then(|| fill_color(state));
-        let ink = if image.stencil && self.canvas.format == PixelFormat::CmykA8 {
-            state.fill_ink
-        } else {
-            None
+        let (ink, plates) = match &plating {
+            Plating::Ink(plates) => match spotless(plates) {
+                Some(process) => (Some(process), None),
+                None => (None, Some(plates)),
+            },
+            _ if image.stencil
+                && matches!(
+                    self.canvas.format,
+                    PixelFormat::CmykA8 | PixelFormat::Plates { .. }
+                ) =>
+            {
+                (state.fill_ink, None)
+            }
+            _ => (None, None),
         };
         // 11.4.5: an image is one element, and its shape is the unit square of
         // its transform (8.9.5.2). Rasterised only inside a knockout group,
@@ -4402,8 +4603,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // draw.
         let pixels = self.frame_area();
         // 11.4.5 gives every element inside a knockout group its own shape, so
-        // a run there would restore the wrong one.
-        let direct = self.in_knockout() || pixels > MAX_IMAGE_RUN_PIXELS || removing;
+        // a run there would restore the wrong one. A run holds a colour's
+        // light and ink, never its plates, so a stencil tinting a spot is
+        // drawn on its own: a decision of the colour and the plan, which a
+        // tile and the page under it take alike.
+        let direct =
+            self.in_knockout() || pixels > MAX_IMAGE_RUN_PIXELS || removing || plates.is_some();
         let masks = self.mask_ids();
         let state_changed = self.run.as_ref().is_some_and(|run| {
             run.alpha.to_bits() != state.fill_alpha.to_bits()
@@ -4475,6 +4680,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             clip,
             tint,
             ink,
+            plates,
             stop: Some(&stop),
             edge_bits: self.level(),
             edge_rule: self.hard_edge,
@@ -5227,8 +5433,7 @@ impl<G: GlyphSource> Renderer<'_, G> {
                     self.paint_glyph_mask(
                         &local,
                         placement.origin,
-                        fill_color(state),
-                        state.fill_ink,
+                        Paint::fill(state),
                         state.fill_alpha,
                         blend_mode(state.blend),
                         &set,
@@ -5295,15 +5500,14 @@ impl<G: GlyphSource> Renderer<'_, G> {
                     &name,
                     state,
                     state.fill_alpha,
-                    fill_color(state),
+                    Paint::fill(state),
                     state.fill_family,
                 );
             } else {
                 let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
                 self.paint_inked(
                     Shape::Fill(&path, FillRule::NonZero),
-                    fill_color(state),
-                    state.fill_ink,
+                    Paint::fill(state),
                     state.fill_alpha,
                     blend_mode(state.blend),
                     &set,
@@ -5325,15 +5529,14 @@ impl<G: GlyphSource> Renderer<'_, G> {
                     &name,
                     state,
                     state.stroke_alpha,
-                    stroke_color(state),
+                    Paint::stroke(state),
                     state.stroke_family,
                 );
             } else {
                 let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
                 self.paint_inked(
                     outlined,
-                    stroke_color(state),
-                    state.stroke_ink,
+                    Paint::stroke(state),
                     state.stroke_alpha,
                     blend_mode(state.blend),
                     &set,
@@ -5386,6 +5589,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         !self.cancel.is_cancelled() && self.admission.answers_alike(events)
     }
 
+    /// A render on plates with a plan ([`Renderer::with_plates`]) composites
+    /// colorants, so each colour it is handed carries what it paints by
+    /// colorant; every other render none, and its states carry none.
+    fn composites_colorants(&self) -> bool {
+        self.plan.is_some()
+    }
+
     fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
@@ -5423,8 +5633,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
             self.paint_inked(
                 outline,
-                stroke_color(state),
-                state.stroke_ink,
+                Paint::stroke(state),
                 state.stroke_alpha,
                 blend_mode(state.blend),
                 &set,
@@ -5441,18 +5650,16 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 &name,
                 state,
                 state.fill_alpha,
-                fill_color(state),
+                Paint::fill(state),
                 state.fill_family,
             );
             return;
         }
 
-        let color = fill_color(state);
         let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
         self.paint_inked(
             Shape::Fill(&built, rule),
-            color,
-            state.fill_ink,
+            Paint::fill(state),
             state.fill_alpha,
             blend_mode(state.blend),
             &set,
@@ -5621,18 +5828,16 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 &name,
                 state,
                 state.stroke_alpha,
-                stroke_color(state),
+                Paint::stroke(state),
                 state.stroke_family,
             );
             return;
         }
 
-        let color = stroke_color(state);
         let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
         self.paint_inked(
             outline,
-            color,
-            state.stroke_ink,
+            Paint::stroke(state),
             state.stroke_alpha,
             blend_mode(state.blend),
             &set,
@@ -11216,5 +11421,645 @@ fn blend_mode(mode: tinker_pdf_content::BlendMode) -> RasterBlend {
         Pdf::Saturation => RasterBlend::Saturation,
         Pdf::Color => RasterBlend::Color,
         Pdf::Luminosity => RasterBlend::Luminosity,
+    }
+}
+
+/// RC-04.8: flat colours on plates. A renderer over a plates canvas with a
+/// plan, driven by the interpreter over resources that answer colorants as
+/// the facade's do: what each paint leaves on each plate, against tints the
+/// tests compute from the content's own operands.
+#[cfg(test)]
+mod plate_tests {
+    use super::*;
+    use tinker_pdf_content::{
+        interpret, BlendMode as ContentBlend, ColorantKind, ColorantTint, FontSource, Form,
+        MaskGroup, Rgb, SoftMask, StateParameters,
+    };
+
+    /// The page's side, in points and in pixels at 72 dpi.
+    const SIZE: u32 = 40;
+
+    /// A tint as the resources make it a byte, `round(255 × t)`.
+    fn byte(tint: f64) -> u8 {
+        (tint.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    /// A colour of `kind` naming each of `named` at its tint, painting
+    /// `alternate` where it reverts.
+    fn tints(
+        kind: ColorantKind,
+        named: &[(&[u8], f64)],
+        alternate: Option<[u8; 4]>,
+    ) -> Arc<ColorantTints> {
+        Arc::new(ColorantTints {
+            kind,
+            tints: named
+                .iter()
+                .map(|(name, tint)| ColorantTint {
+                    name: Arc::from(*name),
+                    tint: byte(*tint),
+                    alone: None,
+                })
+                .collect(),
+            alternate,
+            process: None,
+        })
+    }
+
+    /// Resources naming colorants, answered as the facade's answer them:
+    /// `/Gold`, a `/Separation` of `Gold`; `/Inks`, a `/DeviceN` of `Orange`
+    /// and `Green`; `/Violet`, a `/Separation` of a spot the plan composites;
+    /// `/Mixed`, a `/DeviceN` of `Gold` and `Teal`, a spot the plan does not
+    /// name; `/Silver`, a `/Separation` of a spot the plan disables;
+    /// `/Every`, `/Separation /All`; `/Nothing`, `/Separation /None`; `/Under`
+    /// and `/Unseen`, uncoloured patterns' spaces over `/Gold` and over
+    /// `/Nothing`, and `/UnderInk` one over DeviceCMYK; every alternate
+    /// DeviceCMYK. A font whose every code is one glyph, and two graphics
+    /// states: `/Half`, both alphas 0.5 under `Multiply`, and `/Masked`, a
+    /// luminosity soft mask whose group paints a grey and a spot. The
+    /// colorants questions are counted.
+    #[derive(Default)]
+    struct Spaces {
+        asked: std::cell::Cell<usize>,
+    }
+
+    impl Spaces {
+        /// The process ink a colour of `space` paints through its alternate.
+        fn alternate(space: &[u8], c: &[f64]) -> Option<[u8; 4]> {
+            match (space, c) {
+                (b"Gold" | b"Under", [t]) => Some([0, byte(0.2 * t), byte(0.9 * t), 0]),
+                (b"Violet", [t]) => Some([byte(0.5 * t), byte(*t), 0, 0]),
+                (b"Silver", [t]) => Some([0, 0, 0, byte(*t)]),
+                (b"Inks", [a, b]) => Some([0, byte(0.6 * a), byte(*a), byte(0.3 * b)]),
+                (b"Mixed", [a, b]) => Some([byte(*a), 0, byte(*b), 0]),
+                (b"Every", [t]) => Some([byte(*t); 4]),
+                (b"Nothing" | b"Unseen", [_]) => Some([0; 4]),
+                (b"UnderInk", [c, m, y, k]) => Some([byte(*c), byte(*m), byte(*y), byte(*k)]),
+                _ => None,
+            }
+        }
+    }
+
+    impl FontSource for Spaces {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn color_components(&self, space: &[u8]) -> Option<usize> {
+            match space {
+                b"Gold" | b"Violet" | b"Silver" | b"Every" | b"Nothing" | b"Under" | b"Unseen" => {
+                    Some(1)
+                }
+                b"Inks" | b"Mixed" => Some(2),
+                b"UnderInk" => Some(4),
+                _ => None,
+            }
+        }
+        fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+            self.color_components(space).map(|n| vec![1.0; n])
+        }
+        fn resolve_color(&self, space: &[u8], c: &[f64], _intent: RenderingIntent) -> Option<Rgb> {
+            // Each colour's light is its alternate's, by 8.6.4.4.
+            let [cyan, magenta, yellow, black] = Self::alternate(space, c)?;
+            let light = |ink: u8| 255 - (u16::from(ink) + u16::from(black)).min(255) as u8;
+            Some(Rgb {
+                r: light(cyan),
+                g: light(magenta),
+                b: light(yellow),
+            })
+        }
+        fn colorants(
+            &self,
+            space: &[u8],
+            c: &[f64],
+            _intent: RenderingIntent,
+        ) -> Option<Arc<ColorantTints>> {
+            self.asked.set(self.asked.get() + 1);
+            let alternate = Self::alternate(space, c);
+            match (space, c) {
+                (b"Gold" | b"Under", [t]) => {
+                    Some(tints(ColorantKind::Colorants, &[(b"Gold", *t)], alternate))
+                }
+                (b"Violet", [t]) => Some(tints(
+                    ColorantKind::Colorants,
+                    &[(b"Violet", *t)],
+                    alternate,
+                )),
+                (b"Silver", [t]) => Some(tints(
+                    ColorantKind::Colorants,
+                    &[(b"Silver", *t)],
+                    alternate,
+                )),
+                (b"Inks", [a, b]) => Some(tints(
+                    ColorantKind::Colorants,
+                    &[(b"Orange", *a), (b"Green", *b)],
+                    alternate,
+                )),
+                (b"Mixed", [a, b]) => Some(tints(
+                    ColorantKind::Colorants,
+                    &[(b"Gold", *a), (b"Teal", *b)],
+                    alternate,
+                )),
+                (b"Every", [t]) => Some(tints(ColorantKind::All, &[(b"All", *t)], None)),
+                (b"Nothing" | b"Unseen", [_]) => Some(tints(ColorantKind::None, &[], None)),
+                (b"UnderInk", [c, m, y, k]) => Some(Arc::new(ColorantTints::device_cmyk([
+                    byte(*c),
+                    byte(*m),
+                    byte(*y),
+                    byte(*k),
+                ]))),
+                _ => None,
+            }
+        }
+        fn ext_g_state(&self, name: &[u8]) -> Option<Arc<StateParameters>> {
+            match name {
+                b"Half" => Some(Arc::new(StateParameters {
+                    fill_alpha: Some(0.5),
+                    stroke_alpha: Some(0.5),
+                    blend: Some(ContentBlend::Multiply),
+                    ..StateParameters::default()
+                })),
+                b"Masked" => Some(Arc::new(StateParameters {
+                    soft_mask: Some(SoftMask::Group(Box::new(MaskGroup {
+                        form: Form {
+                            content: b"0.7 g 0 0 20 40 re f /Gold cs 0.5 scn 20 0 20 20 re f"
+                                .to_vec(),
+                            matrix: Matrix::IDENTITY,
+                            bbox: Some([0.0, 0.0, 40.0, 40.0]),
+                            group: None,
+                            stream: 0,
+                        },
+                        luminosity: true,
+                        backdrop: None,
+                        transfer: None,
+                    }))),
+                    ..StateParameters::default()
+                })),
+                _ => None,
+            }
+        }
+    }
+
+    /// What the paints draw: one glyph, a square over most of its em; `/Im0`,
+    /// a stencil painting its whole square; `/Im1`, an image of four colours;
+    /// and `/U0`, an uncoloured tiling pattern of 4-point cells, each
+    /// painting its left half.
+    struct Marks;
+
+    impl GlyphSource for Marks {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            use tinker_pdf_font::Segment;
+            Some(Outline {
+                segments: vec![
+                    Segment::MoveTo { x: 0.1, y: 0.0 },
+                    Segment::LineTo { x: 0.9, y: 0.0 },
+                    Segment::LineTo { x: 0.9, y: 0.8 },
+                    Segment::LineTo { x: 0.1, y: 0.8 },
+                    Segment::Close,
+                ],
+            })
+        }
+
+        fn image(
+            &self,
+            name: &[u8],
+            _request: &ImageRequest,
+            _intent: RenderingIntent,
+        ) -> Result<Option<DecodedImage>, String> {
+            let (stencil, rgb) = match name {
+                b"Im0" => (true, vec![0; 12]),
+                b"Im1" => (
+                    false,
+                    vec![200, 30, 90, 10, 220, 140, 250, 250, 20, 40, 60, 80],
+                ),
+                _ => return Ok(None),
+            };
+            Ok(Some(DecodedImage {
+                stencil,
+                family: if stencil {
+                    ColorFamily::Other
+                } else {
+                    ColorFamily::Rgb
+                },
+                soft_masked: false,
+                interpolate: false,
+                width: 2,
+                height: 2,
+                rgb,
+                alpha: vec![255; 4],
+                two_colour: None,
+                reduced: None,
+                window: None,
+            }))
+        }
+
+        fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
+            (name == b"U0").then(|| {
+                PatternPaint::Tiling(Box::new(TilingPattern {
+                    matrix: Matrix::IDENTITY,
+                    bbox: [0.0, 0.0, 4.0, 4.0],
+                    xstep: 4.0,
+                    ystep: 4.0,
+                    uncolored: true,
+                }))
+            })
+        }
+
+        fn tile(&self, name: &[u8], request: &TileRequest) -> Option<Tile> {
+            if name != b"U0" {
+                return None;
+            }
+            let mut canvas = Canvas::new(
+                request.width,
+                request.height,
+                request.format,
+                Color::TRANSPARENT,
+            );
+            for y in 0..request.height {
+                for x in 0..request.width / 2 {
+                    canvas.blend_pixel(x, y, Color::rgb(0, 255, 0), 1.0);
+                }
+            }
+            Some(Tile {
+                canvas: Arc::new(canvas),
+                opaque: true,
+                warnings: Vec::new(),
+            })
+        }
+    }
+
+    /// The plan the tests draw by: `Gold`, `Orange` and `Green` on plates 4
+    /// to 6, `Silver` disabled on plate 7, `Violet` composited.
+    fn plan() -> PlatePlan {
+        PlatePlan::new([
+            (&b"Gold"[..], PlateUse::Spot),
+            (b"Orange", PlateUse::Spot),
+            (b"Green", PlateUse::Spot),
+            (b"Violet", PlateUse::Composite),
+            (b"Silver", PlateUse::Disabled),
+        ])
+    }
+
+    /// `content` drawn on plates by [`plan`], over no ink.
+    fn plates(content: &[u8]) -> Canvas {
+        let plan = plan();
+        let canvas =
+            Canvas::plates(SIZE, SIZE, plan.spots().count(), Color::WHITE).expect("under the cap");
+        let mut renderer =
+            Renderer::new(canvas, page_transform(f64::from(SIZE), 1.0), &Marks).with_plates(plan);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &Spaces::default());
+        renderer.finish().0
+    }
+
+    /// Every channel of the canvas pixel `(x, y)` and its alpha last.
+    fn at(canvas: &Canvas, x: u32, y: u32) -> Vec<u8> {
+        let components = canvas.format.components();
+        let start = (y as usize) * canvas.stride + (x as usize) * components;
+        canvas.data[start..start + components].to_vec()
+    }
+
+    /// Every pixel's alpha, row by row.
+    fn alphas(canvas: &Canvas) -> Vec<u8> {
+        let components = canvas.format.components();
+        canvas
+            .data
+            .chunks_exact(components)
+            .map(|pixel| pixel[components - 1])
+            .collect()
+    }
+
+    /// `tints` on the eight colour channels, then an opaque alpha.
+    fn opaque(tints: [u8; 8]) -> Vec<u8> {
+        let mut pixel = tints.to_vec();
+        pixel.push(255);
+        pixel
+    }
+
+    /// The backdrop every plate test paints first: `/All` at 0.4, every
+    /// plate at one tint.
+    const BACKDROP: &str = "/Every cs 0.4 scn 0 0 40 40 re f";
+
+    /// **A spot paint lands on its plate and knocks out the rest** (RC-04.8):
+    /// over a backdrop of `/All`, every plate at one tint, a fill, a stroke,
+    /// a glyph and a stencil in a `/Separation`, a `/DeviceN` and DeviceCMYK
+    /// each put exactly their colour's tints, `round(255 × t)` of the
+    /// content's own operands, on the plates their colorants name and no ink
+    /// on every other plate — the process plates and the other spots alike —
+    /// opaque; and where a paint does not reach, every plate keeps the
+    /// backdrop.
+    #[test]
+    fn a_spot_paint_lands_on_its_plate_and_knocks_out_the_rest() {
+        let colours: [(&str, &str, &str, [u8; 8]); 3] = [
+            (
+                "a /Separation",
+                "/Gold cs 0.6 scn",
+                "/Gold CS 0.6 SCN",
+                [0, 0, 0, 0, byte(0.6), 0, 0, 0],
+            ),
+            (
+                "a /DeviceN",
+                "/Inks cs 0.25 0.8 scn",
+                "/Inks CS 0.25 0.8 SCN",
+                [0, 0, 0, 0, 0, byte(0.25), byte(0.8), 0],
+            ),
+            (
+                "DeviceCMYK",
+                "0.1 0.5 0.7 0.2 k",
+                "0.1 0.5 0.7 0.2 K",
+                [byte(0.1), byte(0.5), byte(0.7), byte(0.2), 0, 0, 0, 0],
+            ),
+        ];
+        let backdrop = opaque([byte(0.4); 8]);
+        for (space, fill, stroke, colour) in colours {
+            // Each paint, a pixel it covers whole and one it does not reach.
+            let paints = [
+                (
+                    "a fill",
+                    format!("{fill} 2 26 12 12 re f"),
+                    (8, 8),
+                    (36, 36),
+                ),
+                (
+                    "a stroke",
+                    format!("{stroke} 6 w 20 8 m 36 8 l S"),
+                    (28, 32),
+                    (5, 5),
+                ),
+                (
+                    "a glyph",
+                    format!("{fill} BT /F0 20 Tf 4 4 Td (A) Tj ET"),
+                    (14, 28),
+                    (34, 4),
+                ),
+                (
+                    "a stencil",
+                    format!("{fill} q 12 0 0 12 22 22 cm /Im0 Do Q"),
+                    (28, 12),
+                    (4, 30),
+                ),
+            ];
+            for (what, paint, (x, y), (ox, oy)) in paints {
+                let canvas = plates(format!("{BACKDROP} {paint}").as_bytes());
+                assert_eq!(
+                    at(&canvas, x, y),
+                    opaque(colour),
+                    "{what} in {space}: its tints on its plates, the rest knocked out"
+                );
+                assert_eq!(
+                    at(&canvas, ox, oy),
+                    backdrop,
+                    "{what} in {space}: where it does not reach, the backdrop"
+                );
+            }
+        }
+    }
+
+    /// **A colour naming a colorant with no plate lands through its
+    /// alternate** (8.6.6.4, 8.6.6.5): a `/Separation` of a spot the plan
+    /// composites puts its alternate's process ink on the process plates and
+    /// no ink on any spot; a `/DeviceN` naming a spot with a plate and one the
+    /// plan does not name reverts as a whole, its placed spot's plate taking
+    /// none; and a spot the plan disables keeps its plate, knocking out the
+    /// rest as any spot does.
+    #[test]
+    fn a_colour_naming_a_colorant_with_no_plate_lands_through_its_alternate() {
+        let cases: [(&str, &str, [u8; 8]); 3] = [
+            (
+                "a composite spot",
+                "/Violet cs 0.8 scn",
+                [byte(0.5 * 0.8), byte(0.8), 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                "a spot the plan does not name",
+                "/Mixed cs 0.3 0.9 scn",
+                [byte(0.3), 0, byte(0.9), 0, 0, 0, 0, 0],
+            ),
+            (
+                "a disabled spot",
+                "/Silver cs 0.7 scn",
+                [0, 0, 0, 0, 0, 0, 0, byte(0.7)],
+            ),
+        ];
+        for (what, colour, tints) in cases {
+            let canvas = plates(format!("{BACKDROP} {colour} 4 4 20 20 re f").as_bytes());
+            assert_eq!(at(&canvas, 10, 25), opaque(tints), "{what}");
+        }
+    }
+
+    /// **`/None` paints nothing at all** (8.6.6.4): a fill, a stroke, a
+    /// glyph, a stencil and an uncoloured pattern in `/Separation /None`
+    /// leave every plate as the backdrop left it — no ink, and nothing
+    /// knocked out.
+    #[test]
+    fn none_paints_nothing_at_all() {
+        let before = plates(BACKDROP.as_bytes());
+        for (what, paint) in [
+            ("a fill", "/Nothing cs 1 scn 2 2 30 30 re f"),
+            ("a stroke", "/Nothing CS 1 SCN 6 w 4 20 m 36 20 l S"),
+            ("a glyph", "/Nothing cs 1 scn BT /F0 20 Tf 4 4 Td (A) Tj ET"),
+            (
+                "a stencil",
+                "/Nothing cs 1 scn q 20 0 0 20 10 10 cm /Im0 Do Q",
+            ),
+            (
+                "an uncoloured pattern",
+                "/Unseen cs 1 /U0 scn 0 0 40 40 re f",
+            ),
+        ] {
+            let after = plates(format!("{BACKDROP} {paint}").as_bytes());
+            assert!(after.data == before.data, "{what} changed a plate");
+        }
+    }
+
+    /// **An uncoloured cell paints the colorants its colour names**
+    /// (8.7.3.3): filled in a `/Separation` its shape lands on the spot's
+    /// plate, and in DeviceCMYK on the process plates at the colour's own
+    /// components rather than its light turned back into ink, the rest
+    /// knocked out in both; where the cell paints nothing the backdrop
+    /// stays.
+    #[test]
+    fn an_uncoloured_cell_paints_the_colorants_its_colour_names() {
+        let cases: [(&str, &str, [u8; 8]); 2] = [
+            (
+                "a /Separation",
+                "/Under cs 0.6 /U0 scn",
+                [0, 0, 0, 0, byte(0.6), 0, 0, 0],
+            ),
+            (
+                "DeviceCMYK",
+                "/UnderInk cs 0.1 0.2 0.3 0.4 /U0 scn",
+                [byte(0.1), byte(0.2), byte(0.3), byte(0.4), 0, 0, 0, 0],
+            ),
+        ];
+        for (what, colour, tints) in cases {
+            let canvas = plates(format!("{BACKDROP} {colour} 0 0 40 40 re f").as_bytes());
+            // The cells stand every 4 pixels from the page's left edge, each
+            // painting its first two columns.
+            for x in [20, 21] {
+                assert_eq!(at(&canvas, x, 20), opaque(tints), "{what}, column {x}");
+            }
+            for x in [22, 23] {
+                assert_eq!(
+                    at(&canvas, x, 20),
+                    opaque([byte(0.4); 8]),
+                    "{what}, column {x}"
+                );
+            }
+        }
+    }
+
+    /// **Clips and soft masks reach a spot's plate as they reach black's**:
+    /// a fill in a `/Separation` under a clip, a luminosity soft mask whose
+    /// group paints a grey and a spot, and a constant alpha under `Multiply`,
+    /// over a backdrop tinting every plate alike, leaves on its spot's plate
+    /// exactly what the same fill in DeviceCMYK black at the same tint leaves
+    /// on the black plate — the two plates trade places — and every other
+    /// plate and the alpha alike in both. The mask's group is drawn in ink,
+    /// its spot through its alternate, as on an ink page, so both renders
+    /// are masked alike.
+    #[test]
+    fn clips_and_soft_masks_reach_a_spot_s_plate_as_they_reach_black_s() {
+        let draw = |colour: &str| {
+            plates(
+                format!(
+                    "{BACKDROP} q 5.5 3.25 27 30.5 re W n /Masked gs /Half gs {colour} \
+                     0 0 40 40 re f Q"
+                )
+                .as_bytes(),
+            )
+        };
+        let spot = draw("/Gold cs 0.6 scn");
+        let black = draw("0 0 0 0.6 k");
+        assert_eq!(
+            spot.channel(4),
+            black.channel(3),
+            "the spot's plate is black's"
+        );
+        assert_eq!(
+            spot.channel(3),
+            black.channel(4),
+            "and black's is the spot's"
+        );
+        for channel in [0, 1, 2, 5, 6, 7] {
+            assert_eq!(
+                spot.channel(channel),
+                black.channel(channel),
+                "channel {channel}"
+            );
+        }
+        assert_eq!(alphas(&spot), alphas(&black), "the alpha");
+        let plate = spot.channel(4).expect("the spot's plate");
+        assert!(
+            plate.contains(&byte(0.4)),
+            "outside the clip the backdrop stays"
+        );
+        assert!(
+            plate
+                .iter()
+                .any(|tint| ![0, byte(0.4), byte(0.6)].contains(tint)),
+            "the mask and the alpha leave tints between"
+        );
+    }
+
+    /// **Process plates draw as the ink canvas does** (RC-04.8): a page in
+    /// DeviceCMYK, DeviceGray and DeviceRGB — fills and strokes with
+    /// anti-aliased edges, glyphs, stencils in DeviceCMYK and DeviceRGB, an
+    /// image, a constant alpha under `Multiply`, a clip, and a luminosity
+    /// soft mask whose group paints a grey and a spot — drawn on plates by a
+    /// plan of four spots draws its cyan, magenta, yellow and black plates and
+    /// its alpha byte for byte as its `CmykA8` render does, and no ink on any
+    /// spot's plate.
+    #[test]
+    fn process_plates_draw_as_the_ink_canvas_does() {
+        let content: &[u8] = b"q 0.1 0.5 0.7 0.2 k 3.3 4.7 20.2 11.6 re f Q \
+            q 0.6 g 15.5 2.25 20 30 re f Q \
+            q 0.9 0.2 0.1 rg 1.5 20.5 18 16 re f Q \
+            q /Half gs 0 0.8 0.3 0.1 k 10.2 10.6 24 9 re f Q \
+            q 0.2 0.7 0 0.4 K 2.5 w 4 36.3 m 36.4 30 l S Q \
+            q 0.3 0.2 0.9 RG 1.5 w 30.2 4 m 38 20.7 l S Q \
+            q 6.4 6.2 26 26 re W n 0.7 0.1 0.4 0 k 0 13.3 40 4 re f Q \
+            BT /F0 18 Tf 0.4 0.4 0.9 0.1 k 2.3 21.7 Td (A) Tj ET \
+            BT /F0 14 Tf 0.1 0.6 0.3 rg 22.6 3.1 Td (A) Tj ET \
+            q 0.5 0.1 0.8 0.05 k 9.5 0 0 9.5 26.3 26.1 cm /Im0 Do Q \
+            q 0.8 0.3 0.6 rg 7 0 0 7 3.2 3.4 cm /Im0 Do Q \
+            q 8 0 0 6 18.5 30.2 cm /Im1 Do Q \
+            q /Masked gs 0.3 0.3 0.3 0.3 k 0 0 40 40 re f Q";
+        let base = page_transform(f64::from(SIZE), 1.0);
+
+        let ink_canvas = Canvas::new(SIZE, SIZE, PixelFormat::CmykA8, Color::WHITE);
+        let mut renderer = Renderer::new(ink_canvas, base, &Marks);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &Spaces::default());
+        let (ink, ink_warnings) = renderer.finish();
+
+        let plan = plan();
+        let spots = plan.spots().count();
+        let plates_canvas = Canvas::plates(SIZE, SIZE, spots, Color::WHITE).expect("under the cap");
+        let mut renderer = Renderer::new(plates_canvas, base, &Marks).with_plates(plan);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &Spaces::default());
+        let (on_plates, plate_warnings) = renderer.finish();
+
+        for channel in 0..4 {
+            let plate = on_plates.channel(channel).expect("a process plate");
+            assert_eq!(Some(plate), ink.channel(channel), "process plate {channel}");
+        }
+        assert_eq!(alphas(&on_plates), alphas(&ink), "the alpha");
+        for spot in 4..4 + spots {
+            assert!(
+                on_plates
+                    .channel(spot)
+                    .expect("a spot's plate")
+                    .iter()
+                    .all(|tint| *tint == 0),
+                "no ink on plate {spot}"
+            );
+        }
+        assert_eq!(plate_warnings, ink_warnings, "the warnings");
+        for channel in 0..4 {
+            assert!(
+                ink.channel(channel)
+                    .expect("an ink channel")
+                    .iter()
+                    .any(|tint| *tint != 0),
+                "the page put ink on channel {channel}"
+            );
+        }
+    }
+
+    /// **Only a render on plates with a plan asks for colorants**: a
+    /// renderer over a light canvas keeps no plan it is handed and asks no
+    /// colour its colorants, and so does one over plates handed none; one
+    /// over plates with a plan asks every colour that names a space.
+    #[test]
+    fn only_a_render_on_plates_with_a_plan_asks_for_colorants() {
+        let content = b"/Gold cs 0.6 scn 0 0 10 10 re f /Inks CS 0.2 0.4 SCN 1 1 m 9 9 l S";
+        let base = page_transform(f64::from(SIZE), 1.0);
+        let asked = |renderer: &mut Renderer<'_, Marks>| {
+            let spaces = Spaces::default();
+            interpret(content, Matrix::IDENTITY, renderer, &spaces);
+            spaces.asked.get()
+        };
+
+        let light = Canvas::new(SIZE, SIZE, PixelFormat::Rgb8, Color::WHITE);
+        let mut light = Renderer::new(light, base, &Marks).with_plates(plan());
+        assert!(
+            !light.composites_colorants(),
+            "a light canvas keeps no plan"
+        );
+        assert_eq!(asked(&mut light), 0, "a light render asks nothing");
+
+        let unplanned = Canvas::plates(SIZE, SIZE, 4, Color::WHITE).expect("under the cap");
+        let mut unplanned = Renderer::new(unplanned, base, &Marks);
+        assert!(!unplanned.composites_colorants(), "plates with no plan");
+        assert_eq!(asked(&mut unplanned), 0, "plates with no plan ask nothing");
+
+        let planned = Canvas::plates(SIZE, SIZE, 4, Color::WHITE).expect("under the cap");
+        let mut planned = Renderer::new(planned, base, &Marks).with_plates(plan());
+        assert!(planned.composites_colorants(), "plates with a plan");
+        assert!(asked(&mut planned) >= 2, "each colour set is asked");
     }
 }

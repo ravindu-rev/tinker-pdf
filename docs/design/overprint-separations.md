@@ -472,7 +472,9 @@ The overprint simulation draws with every spot a Spot plate.
   four-component CMYK `ICCBased` process space — paint the process plates. The
   components of any other process space are converted together through that
   space, with the components the names array leaves out at the space's initial
-  values, to light, and the light to ink on the process plates.
+  values, to light, and the light to ink on the process plates. Inks an
+  `NChannel` colour puts on one plate — a process component, a Composite
+  spot's own ink, the other process space's — add, held at solid ink.
 
 **Blend modes on spot plates** (11.7.3, 11.7.4.2): a spot colorant blends
 under a separable, white-preserving mode only — every separable mode but
@@ -543,9 +545,11 @@ group; its bytes are charged with the page's plates against the byte bound
 below, and a group that would pass it composites as a group of another space
 does, its spots through their alternates, under the cap's warning.
 
-**Soft masks on plates.** A soft mask's group renders in its own space and is
-read as a luminosity or an alpha, as on a light page — 11.7.3 substitutes the
-alternate space for every spot in it — and the mask scales every plate alike.
+**Soft masks on plates.** A soft mask's group renders in its own space — in
+`CmykA8`, a buffer of ink, where the group names none — and is read as a
+luminosity or an alpha, as on an ink page: 11.7.3 substitutes the alternate
+space for every spot in it, so a colour there paints its light, and the mask
+scales every plate alike.
 
 **The inventory.** `Page::spot_colorants()` lists each spot colorant once, as
 a `SpotColorant` carrying its name, in the order the page's scopes first name

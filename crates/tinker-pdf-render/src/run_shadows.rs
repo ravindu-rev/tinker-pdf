@@ -159,6 +159,7 @@ impl Member {
             clip: None,
             tint: self.tint,
             ink: None,
+            plates: None,
             stop: None,
             edge_bits: self.edge_bits,
             edge_rule: self.edge_rule,

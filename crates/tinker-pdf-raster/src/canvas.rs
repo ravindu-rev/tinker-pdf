@@ -1115,6 +1115,57 @@ impl Canvas {
         }
     }
 
+    /// As [`Canvas::blend_pixel_level`], in a plate ink rather than a colour:
+    /// on a [`PixelFormat::Plates`] canvas each colour channel takes the
+    /// ink's tint, a channel it names none for taking no ink, at the pixel's
+    /// `level` times `alpha`, the tint's own alpha — a sampled stencil's
+    /// pixel, as [`Canvas::fill_mask_plates`] composites a mask's. On a
+    /// canvas of any other format the ink's process tints are painted as the
+    /// DeviceCMYK colour they are, as `fill_mask_plates` paints them there.
+    pub(crate) fn blend_plates_level(
+        &mut self,
+        x: u32,
+        y: u32,
+        ink: &PlateInk,
+        alpha: u8,
+        level: u32,
+        mode: BlendMode,
+    ) {
+        if !matches!(self.format, PixelFormat::Plates { .. }) {
+            let [c, m, yellow, k] = ink.process_tints();
+            let (r, g, b) = cmyk_to_rgb(c, m, yellow, k);
+            let color = Color { r, g, b, a: alpha };
+            self.blend_pixel_level(x, y, color, Some([c, m, yellow, k]), level, mode);
+            return;
+        }
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let effective = mul255(level, u32::from(alpha));
+        if effective == 0 {
+            return;
+        }
+        if mode.is_nonseparable() {
+            self.approximated_blends = self.approximated_blends.saturating_add(1);
+        }
+        // On the stack, as `blend_plate_pixel`'s: a sampled stencil reaches
+        // here once a pixel. A channel past the ink's own takes no ink.
+        let mut source = [0u8; 4 + MAX_SPOT_PLATES];
+        for (slot, tint) in source.iter_mut().zip(ink.tints()) {
+            *slot = *tint;
+        }
+        let channels = color_channels(self.format);
+        let components = self.format.components();
+        let base = (y as usize) * self.stride + (x as usize) * components;
+        let backdrop = self.backdrop_alpha(x, y);
+        if let (Some(pixel), Some(source)) = (
+            self.data.get_mut(base..base + components),
+            source.get(..channels),
+        ) {
+            blend_plates(pixel, source, effective, channels, mode, backdrop);
+        }
+    }
+
     /// How opaque the initial backdrop is at a pixel, `a0`: the parent's
     /// alpha at the same device pixel, in the parent's own format — an alpha
     /// needs no conversion, so this is one byte, or 255 for a format that
@@ -1226,6 +1277,43 @@ impl Canvas {
             return;
         };
         self.composite_through(src, Some(tint), at, alpha, mode, mask, stop);
+    }
+
+    /// As [`Canvas::composite_tinted`], every pixel of `src` painted in a
+    /// plate ink rather than a colour of light: an uncoloured cell filled in
+    /// a colour that names its colorants (8.7.3.3), on a
+    /// [`PixelFormat::Plates`] canvas. `src` gives the coverage and its
+    /// alpha, `ink` a tint for each colour channel, and every channel it
+    /// names no tint for takes no ink, so under `Normal` the cell knocks it
+    /// out, as [`Canvas::fill_mask_plates`] does through a mask.
+    ///
+    /// On a canvas of any other format, or for a `src` with no alpha channel,
+    /// the ink's process tints are the DeviceCMYK colour they are, and that
+    /// colour's light is what `composite_tinted` composites.
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_inked(
+        &mut self,
+        src: &Canvas,
+        ink: &PlateInk,
+        at: (i32, i32),
+        alpha: f64,
+        mode: BlendMode,
+        mask: Option<&Mask>,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
+        if !matches!(self.format, PixelFormat::Plates { .. }) || !src.format.has_alpha() {
+            let [c, m, y, k] = ink.process_tints();
+            let (r, g, b) = cmyk_to_rgb(c, m, y, k);
+            self.composite_tinted(src, Color::rgb(r, g, b), at, alpha, mode, mask, stop);
+            return;
+        }
+        // As wide as this canvas's colour channels: a channel past the ink's
+        // own takes no ink, and one past the canvas's is not one of its.
+        let channels = color_channels(self.format);
+        let tints: Vec<u8> = (0..channels)
+            .map(|channel| ink.tints().get(channel).copied().unwrap_or(0))
+            .collect();
+        self.composite_plates(src, Some(&tints), at, alpha, mode, mask, stop);
     }
 
     /// The walk [`Canvas::composite`] and [`Canvas::composite_tinted`]
@@ -6306,6 +6394,98 @@ mod tests {
             .expect("magenta")
             .iter()
             .any(|tint| *tint > 0 && *tint <= m));
+    }
+
+    /// **An uncoloured cell composites its plate ink** (RC-04.8): wherever
+    /// the cell painted, the ink's tints go down as filling a mask of the
+    /// cell's alpha in that ink puts them, each channel the ink names taking
+    /// its tint and every other no ink, process and spot alike, and where it
+    /// painted nothing the backdrop stays; at part of an alpha and through a
+    /// mask too. On a canvas of another format the ink is the DeviceCMYK
+    /// colour its process tints are, whose light `composite_tinted` paints.
+    #[test]
+    fn an_uncoloured_cell_composites_its_plate_ink() {
+        let mut cell = Canvas::plates(8, 8, 2, Color::TRANSPARENT).expect("under the cap");
+        cell.fill_mask_plates(
+            &ramp(),
+            &PlateInk::named(spots(2), &[(0, 40)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        let shape = cell.to_mask((0, 0), MaskKind::Alpha, None);
+        let ink = PlateInk::named(spots(2), &[(1, 120), (5, 200)]);
+        let backdrop = PlateInk::named(spots(2), &[(0, 90), (2, 30), (4, 160)]);
+        let fresh = || {
+            let mut page = Canvas::plates(8, 8, 2, Color::WHITE).expect("under the cap");
+            page.fill_mask_plates(&solid(0, 0, 8, 8, 255), &backdrop, 1.0, BlendMode::Normal);
+            page
+        };
+
+        let mut inked = fresh();
+        inked.composite_inked(&cell, &ink, (0, 0), 1.0, BlendMode::Normal, None, None);
+        let mut filled = fresh();
+        filled.fill_mask_plates(&shape, &ink, 1.0, BlendMode::Normal);
+        assert_eq!(inked.data, filled.data, "the cell's shape in the ink");
+        // The ramp's last pixel is whole, its first empty.
+        for (channel, want) in [(0, 0), (1, 120), (2, 0), (3, 0), (4, 0), (5, 200)] {
+            assert_eq!(
+                inked.channel(channel).expect("a channel")[63],
+                want,
+                "where the cell painted whole, channel {channel}"
+            );
+        }
+        for (channel, want) in [(0, 90), (1, 0), (2, 30), (3, 0), (4, 160), (5, 0)] {
+            assert_eq!(
+                inked.channel(channel).expect("a channel")[0],
+                want,
+                "where it painted nothing, channel {channel}"
+            );
+        }
+
+        // At part of an alpha, through a mask: the cell's alpha and the
+        // mask's coverage multiply as a composite multiplies them, which a
+        // fill at that alpha through their product is when the cell is whole.
+        let mut whole = Canvas::plates(8, 8, 2, Color::TRANSPARENT).expect("under the cap");
+        whole.fill_mask_plates(
+            &solid(0, 0, 8, 8, 255),
+            &PlateInk::named(spots(2), &[(3, 255)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        let mut masked = fresh();
+        masked.composite_inked(
+            &whole,
+            &ink,
+            (0, 0),
+            0.6,
+            BlendMode::Normal,
+            Some(&ramp()),
+            None,
+        );
+        let mut through = fresh();
+        through.fill_mask_plates(&ramp(), &ink, 0.6, BlendMode::Normal);
+        assert_eq!(masked.data, through.data, "at 0.6 through the ramp");
+
+        // Elsewhere: the colour the process tints are, in light.
+        let mut light_cell = Canvas::new(8, 8, PixelFormat::Rgba8, Color::TRANSPARENT);
+        light_cell.fill_mask(&ramp(), Color::BLACK, 1.0);
+        let process = PlateInk::named(spots(2), &[(0, 30), (3, 200), (5, 255)]);
+        let (r, g, b) = cmyk_to_rgb(30, 0, 0, 200);
+        for mode in [BlendMode::Normal, BlendMode::Multiply] {
+            let mut light = Canvas::new(8, 8, PixelFormat::Rgba8, Color::WHITE);
+            light.composite_inked(&light_cell, &process, (0, 0), 0.7, mode, None, None);
+            let mut tinted = Canvas::new(8, 8, PixelFormat::Rgba8, Color::WHITE);
+            tinted.composite_tinted(
+                &light_cell,
+                Color::rgb(r, g, b),
+                (0, 0),
+                0.7,
+                mode,
+                None,
+                None,
+            );
+            assert_eq!(light.data, tinted.data, "{mode:?} on light");
+        }
     }
 
     /// A plates composite stops when asked, between rows, and leaves what it

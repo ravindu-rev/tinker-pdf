@@ -14,7 +14,7 @@
 //! The sampling policy is recorded in `docs/features/rasterizer.md`.
 
 use crate::blend::BlendMode;
-use crate::canvas::{mul255, Canvas, Color, Opacity};
+use crate::canvas::{mul255, Canvas, Color, Opacity, PlateInk};
 use crate::fill::{fill_hard_with, fill_with, FillScratch, HardEdge, Mask};
 use crate::fragments::Fragments;
 use crate::geom::{FillRule, Path};
@@ -697,6 +697,15 @@ pub struct ImageDraw<'a> {
     /// [`Canvas::fill_mask_inked`] does for a fill. Read only with a `tint`,
     /// and only by an ink canvas.
     pub ink: Option<[u8; 4]>,
+    /// The tint's ink by plate — a tint per colour channel of a
+    /// [`crate::PixelFormat::Plates`] canvas, spots among them — which a
+    /// plates canvas composites in place of [`Self::ink`], every channel it
+    /// names no tint for knocked out, as [`Canvas::fill_mask_plates`] does for
+    /// a mask; any other canvas paints its process tints as the DeviceCMYK
+    /// colour they are. Read only with a `tint`, and only by [`draw_image`]:
+    /// a run ([`accumulate_image`]) holds a colour's light and ink, never its
+    /// plates, so a draw carrying them is composited on its own.
+    pub plates: Option<&'a PlateInk>,
     /// Asked once per destination row; drawing stops as soon as it answers
     /// `true`.
     pub stop: Option<&'a dyn Fn() -> bool>,
@@ -733,6 +742,7 @@ impl<'a> ImageDraw<'a> {
             clip: None,
             tint: None,
             ink: None,
+            plates: None,
             stop: None,
             edge_bits: 8,
             edge_rule: HardEdge::Half,
@@ -765,6 +775,7 @@ pub fn draw_image(
     // the write below turns one into a canvas index (ruling 5).
     let rect = canvas.device_rect();
     let ink = draw.tint.and(draw.ink);
+    let plates = draw.tint.and(draw.plates);
     walk(
         draw,
         pyramid,
@@ -779,7 +790,12 @@ pub fn draw_image(
                 return;
             };
             let level = opacity.level_three(covered, own, clip);
-            canvas.blend_pixel_level(x, y, color, ink, level, draw.blend);
+            match plates {
+                Some(plates) => {
+                    canvas.blend_plates_level(x, y, plates, color.a, level, draw.blend);
+                }
+                None => canvas.blend_pixel_level(x, y, color, ink, level, draw.blend),
+            }
         },
     );
 }
@@ -2424,6 +2440,150 @@ mod tests {
             &mut FillScratch::new(),
         );
         assert_eq!(at(&untinted), [0, 0, 0, 255, 255], "no tint, no ink");
+    }
+
+    /// **A stencil's plate ink lands on its plates** (RC-04.8): drawn onto a
+    /// plates canvas, each channel the ink names takes its tint where the
+    /// stencil paints and every other channel no ink, process and spot
+    /// alike, and nothing changes where it does not paint; an ink naming no
+    /// spot draws, edge for edge, the bytes the tint's own ink draws; and on
+    /// a canvas of another format the ink's process tints are the DeviceCMYK
+    /// colour they are — that colour's own ink on `CmykA8`, its light on
+    /// `Rgb8`. Without a tint the plate ink is never read.
+    #[test]
+    fn a_stencil_s_plate_ink_lands_on_its_plates() {
+        use crate::canvas::Spots;
+        use crate::fill::fill;
+
+        let spots = Spots::new(2).expect("under the cap");
+        let rgb = vec![0u8; 4 * 3];
+        let stencil = ImageSource {
+            width: 2,
+            height: 2,
+            rgb: &rgb,
+            alpha: &[255, 0, 255, 255],
+            two_colour: None,
+            window: None,
+        };
+        let backdrop = PlateInk::named(spots, &[(0, 50), (4, 70)]);
+        let page = || {
+            let mut canvas = Canvas::plates(4, 4, 2, Color::WHITE).expect("under the cap");
+            let mut whole = Path::new();
+            whole.rect(0.0, 0.0, 4.0, 4.0);
+            let mask = fill(&whole, FillRule::NonZero, 0, 0, 4, 4, 0.05, None);
+            canvas.fill_mask_plates(&mask, &backdrop, 1.0, BlendMode::Normal);
+            canvas
+        };
+        let ink = PlateInk::named(spots, &[(1, 90), (5, 220)]);
+        let mut draw = ImageDraw::new(stencil, over(4.0));
+        draw.tint = Some(Color::BLACK);
+        // Beside plates on a plates canvas, never read.
+        draw.ink = Some([255; 4]);
+        draw.plates = Some(&ink);
+        let mut canvas = page();
+        draw_image(
+            &mut canvas,
+            &draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
+        let plate = |canvas: &Canvas, channel: usize, x: usize, y: usize| {
+            canvas.channel(channel).expect("a channel")[y * 4 + x]
+        };
+        for (channel, painted, untouched) in [
+            (0, 0, 50),
+            (1, 90, 0),
+            (2, 0, 0),
+            (3, 0, 0),
+            (4, 0, 70),
+            (5, 220, 0),
+        ] {
+            assert_eq!(plate(&canvas, channel, 0, 0), painted, "painted, {channel}");
+            assert_eq!(plate(&canvas, channel, 3, 3), painted, "painted, {channel}");
+            assert_eq!(
+                plate(&canvas, channel, 3, 0),
+                untouched,
+                "where the stencil does not paint, {channel}"
+            );
+        }
+
+        // Partly covered edges and part of an alpha: an ink naming no spot is
+        // the tint's own ink, byte for byte.
+        let process = [30, 0, 140, 200];
+        let only = PlateInk::process(spots, process);
+        let placed = Transform {
+            a: 3.3,
+            b: 0.0,
+            c: 0.0,
+            d: -2.7,
+            e: 0.35,
+            f: 3.6,
+        };
+        let mut by_plates = ImageDraw::new(stencil, placed);
+        by_plates.tint = Some(Color::BLACK);
+        by_plates.alpha = 0.7;
+        by_plates.plates = Some(&only);
+        let mut by_ink = ImageDraw::new(stencil, placed);
+        by_ink.tint = Some(Color::BLACK);
+        by_ink.alpha = 0.7;
+        by_ink.ink = Some(process);
+        let (mut plates_page, mut ink_page) = (page(), page());
+        draw_image(
+            &mut plates_page,
+            &by_plates,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
+        draw_image(
+            &mut ink_page,
+            &by_ink,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
+        assert_eq!(plates_page.data, ink_page.data, "the process ink alone");
+
+        // On another format, the DeviceCMYK colour the process tints are.
+        let (r, g, b) = crate::canvas::cmyk_to_rgb(30, 0, 140, 200);
+        let mut as_cmyk = ImageDraw::new(stencil, placed);
+        as_cmyk.tint = Some(Color::rgb(r, g, b));
+        as_cmyk.alpha = 0.7;
+        as_cmyk.ink = Some(process);
+        for format in [PixelFormat::CmykA8, PixelFormat::Rgb8] {
+            let mut through = Canvas::new(4, 4, format, Color::WHITE);
+            let mut direct = Canvas::new(4, 4, format, Color::WHITE);
+            draw_image(
+                &mut through,
+                &by_plates,
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
+            draw_image(
+                &mut direct,
+                &as_cmyk,
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
+            assert_eq!(through.data, direct.data, "{format:?}");
+        }
+
+        // No tint, no plates: the image's own samples.
+        let mut untinted = ImageDraw::new(stencil, over(4.0));
+        untinted.plates = Some(&ink);
+        let mut own = page();
+        draw_image(
+            &mut own,
+            &untinted,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
+        let mut plain = page();
+        draw_image(
+            &mut plain,
+            &ImageDraw::new(stencil, over(4.0)),
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+        );
+        assert_eq!(own.data, plain.data, "untinted");
     }
 
     #[test]

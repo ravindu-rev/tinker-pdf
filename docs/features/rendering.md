@@ -752,6 +752,47 @@ is counted, so `MAX_DISPLAY_LIST_BYTES` and a kept form's
 `form_recording_bytes` bound what a recording holds with them
 (`a_recorded_state_counts_its_colorants`).
 
+**Flat colours on plates.** A `Renderer` over a `PixelFormat::Plates` canvas
+handed a `PlatePlan` (`Renderer::with_plates`) composites colorants: the
+interpreter asks each colour what it paints by colorant, and the renderer
+maps those colorants to the canvas's channels by the plan (the design's
+"Colours on plates"). The plan is the four process plates, then a plate for
+each spot it names `PlateUse::Spot` or `PlateUse::Disabled`, in its order and
+at most `MAX_SPOT_PLATES` of them; a spot it names `PlateUse::Composite`, one
+past the cap and one it does not name have none, a name given twice keeps its
+first use, and `PlatePlan::channels` lists each plate with its colorant and
+its use. DeviceCMYK as the current colour paints its own components on the
+process plates; a `/Separation` or a plain `/DeviceN` paints each colorant on
+its plate when every name it gives has one — a process name its process
+plate, a disabled spot its own — and otherwise the whole colour's process ink
+through its alternate; an `NChannel` space paints each component that has a
+plate there, each spot without one its own process ink on the process plates
+and another process space's components their ink, inks meeting on one plate
+added and held at solid; `/All` tints every plate the canvas carries; and
+`/None`, or a `/DeviceN` of `/None` alone, has no effect at all — nothing
+drawn and nothing knocked out. Every channel a paint names no tint for takes
+none, so under `Normal` a paint knocks out every other plate, as 8.6.7 has a
+paint do with overprint off. Fills, strokes, glyphs, stencil masks and
+uncoloured patterns' cells (`Canvas::composite_inked`) paint so, through the
+clip, the soft mask, the constant alpha and the blend mode as on a light
+canvas; a colour naming no colorant of its own — DeviceGray, DeviceRGB, a
+CIE-based or ICC space — is its light turned into ink on the process plates,
+as on `CmykA8`. A stencil tinting a spot composites on its own rather than in
+an image run, which holds light and ink; one tinting the process plates alone
+is that ink, as on `CmykA8`. A soft mask's group renders in `CmykA8` and is
+read as a mask as on an ink page, every spot in it through its alternate
+(11.7.3). A transparency group with no `/CS` composites in a plates buffer of
+its own, where colours paint by plate as on the page, and one declaring a
+space in that space's buffer, where a colour paints its light and its ink; a
+coloured tiling cell is drawn by a renderer of its own with no plan, its
+paints their light and ink on the process plates. So the process plates of a
+page in DeviceCMYK, DeviceGray and DeviceRGB are its `CmykA8` render's bytes
+(`process_plates_draw_as_the_ink_canvas_does`), and a spot's paint is exactly
+its tints on its plates and no ink on the rest
+(`a_spot_paint_lands_on_its_plate_and_knocks_out_the_rest`). A renderer over
+any other canvas keeps no plan and asks no colour its colorants, so a light
+or ink render draws as it did.
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and
