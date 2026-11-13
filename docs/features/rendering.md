@@ -1193,7 +1193,19 @@ a filled glyph, an image or an `sh` made with `/op` in force — `/OP`'s value
 where a state writes no `/op` (Table 58) — and `strokes`, a stroke or a
 stroked glyph made with `/OP`; `nonzero_mode`, whether one of those was made
 under `/OPM 1` (8.6.7.4); and `used()`, either of the first two. It reads the
-state at the paints, under the same rules, and simulates nothing.
+state at the paints, under the same rules, and simulates nothing. **Colour or
+grey** is the one question pixels decide, so it is asked of a render:
+`Bitmap::greyness(&GreyThresholds)` reads every pixel as the colour
+`Bitmap::to_png` writes for it — straightened when premultiplied, ink through
+8.6.4.4's relation, Lab back to sRGB — and counts it coloured when the largest
+of its red, green and blue less the smallest is more than `tolerance`; a pixel
+whose alpha is zero holds nothing and is not. The page is grey when its
+coloured pixels number at most `allowed`. The defaults are a tolerance of 8
+levels of 255 and none allowed. `Greyness` holds the verdict, the coloured
+pixels, the pixels read and the widest spread met, and is `None` exactly for
+a bitmap that is not a picture; `Page::greyness` and `DisplayList::greyness`
+render with the caller's options and read that render, so a hidden layer's
+colour, and one an opaque grey paints over, are not counted.
 `page_analysis.rs` holds each answer to a fixture whose
 answer is known, `analysis.rs` holds the box to its own walk of the recorded
 events, and `determinism.rs` pins every fingerprinted page's box.

@@ -9,7 +9,10 @@
 
 mod render_support;
 
-use tinker_pdf::{Document, Overprint, PageAnalysis, PixelRegion, RenderOptions};
+use tinker_pdf::{
+    Bitmap, Document, GreyThresholds, Greyness, Overprint, PageAnalysis, PixelFormat, PixelRegion,
+    RenderOptions,
+};
 
 // ---- building pages -------------------------------------------------------------
 
@@ -681,4 +684,213 @@ fn overprint_is_reported_where_a_paint_uses_it() {
         ..Page::default()
     };
     assert!(!overprint(&masked).used(), "inside a mask's group");
+}
+
+// ---- colour or grey -----------------------------------------------------------------
+
+/// The page rendered at `options` and read against `thresholds`, by the
+/// page's door and the display list's alike.
+fn greyness(page: &Page<'_>, options: &RenderOptions, thresholds: &GreyThresholds) -> Greyness {
+    let document = Document::open(page.bytes()).expect("the page opens");
+    let opened = document.page(0).expect("its page");
+    let greyness = opened
+        .greyness(options, thresholds)
+        .expect("a render is a picture");
+    assert_eq!(
+        opened.display_list().greyness(options, thresholds),
+        Some(greyness),
+        "the display list answers as the page"
+    );
+    greyness
+}
+
+/// `byte / 255`, written so that the page's own conversion, `round(255 v)`,
+/// gives `byte` back.
+fn fraction(byte: u8) -> String {
+    format!("{:.10}", f64::from(byte) / 255.0)
+}
+
+/// The spread of a colour as the page carries it: the largest of its
+/// component bytes less the smallest, each byte the one the page's own
+/// conversion makes of [`fraction`].
+fn spread(bytes: [u8; 3]) -> u8 {
+    let carried = bytes.map(|v| {
+        let written: f64 = fraction(v).parse().expect("a number");
+        render_support::byte(written)
+    });
+    let [r, g, b] = carried;
+    r.max(g).max(b) - r.min(g).min(b)
+}
+
+/// **Grey and colour are decided at their thresholds**, each boundary
+/// computed from the fixture's own colours or its own size, never from the
+/// output.
+#[test]
+fn grey_and_colour_are_decided_at_their_thresholds() {
+    let defaults = GreyThresholds::default();
+    assert_eq!(
+        (defaults.tolerance, defaults.allowed),
+        (8, 0),
+        "the design's defaults"
+    );
+    let at_72 = RenderOptions::default();
+    let page = |content: &'static str| Page {
+        content,
+        ..Page::default()
+    };
+
+    // A grey page: greys and black, filled and stroked, anti-aliased edges
+    // and all, spread by nothing.
+    let grey = greyness(
+        &page(
+            "0.5 g 10 10 50 50 re f 0 G 3 w 0 0 m 200 100 l S 0.2 g 120 30 m 180 90 l 150 10 l f",
+        ),
+        &at_72,
+        &defaults,
+    );
+    assert!(grey.grey, "{grey:?}");
+    assert_eq!((grey.coloured, grey.widest), (0, 0), "{grey:?}");
+    assert_eq!(grey.pixels, 200 * 100, "every pixel read");
+
+    // One coloured mark, four by five pixels at whole-pixel edges, with hard
+    // edges so that no pixel is a part of it: twenty coloured pixels, which
+    // twenty allowed admit and nineteen do not.
+    let hard = RenderOptions {
+        antialias: false,
+        ..RenderOptions::default()
+    };
+    let one_mark = page("1 0 0 rg 10 10 4 5 re f");
+    let size = 4 * 5;
+    for (allowed, want) in [(size - 1, false), (size, true), (size + 1, true)] {
+        let thresholds = GreyThresholds {
+            allowed,
+            ..GreyThresholds::default()
+        };
+        let read = greyness(&one_mark, &hard, &thresholds);
+        assert_eq!(read.coloured, size, "the mark's pixels are its size");
+        assert_eq!(
+            read.grey, want,
+            "{size} coloured pixels against {allowed} allowed"
+        );
+        assert_eq!(read.widest, 255, "pure red spreads the whole range");
+    }
+
+    // A near-grey tint either side of the tolerance: its spread, as the page
+    // carries it, is the boundary.
+    let tint = [128u8, 128, 136];
+    let tinted = format!(
+        "{} {} {} rg 0 0 200 100 re f",
+        fraction(tint[0]),
+        fraction(tint[1]),
+        fraction(tint[2])
+    );
+    let tinted_page = Page {
+        content: &tinted,
+        ..Page::default()
+    };
+    let at = spread(tint);
+    for (tolerance, want) in [(at, true), (at - 1, false)] {
+        let thresholds = GreyThresholds {
+            tolerance,
+            ..GreyThresholds::default()
+        };
+        let read = greyness(&tinted_page, &at_72, &thresholds);
+        assert_eq!(
+            read.grey, want,
+            "a spread of {at} against a tolerance of {tolerance}"
+        );
+        assert_eq!(read.widest, at);
+    }
+
+    // A DeviceCMYK grey is equal light, on a light page and on an ink page,
+    // which is read as the light it stands for; a CMYK colour is not.
+    let cmyk_grey = page("0 0 0 0.5 k 0 0 200 100 re f");
+    let ink = RenderOptions {
+        format: PixelFormat::CmykA8,
+        allow_cmyk: true,
+        ..RenderOptions::default()
+    };
+    for options in [&at_72, &ink] {
+        let read = greyness(&cmyk_grey, options, &defaults);
+        assert!(read.grey, "a DeviceCMYK grey: {read:?}");
+        assert_eq!(read.widest, 0);
+    }
+    let cmyk_cyan = page("1 0 0 0 k 0 0 200 100 re f");
+    assert!(!greyness(&cmyk_cyan, &ink, &defaults).grey, "cyan ink");
+
+    // A colour image and a colour shading.
+    let image_page = Page {
+        resources: "/XObject << /Im 5 0 R >>",
+        content: "q 40 0 0 40 10 10 cm /Im Do Q",
+        extra: vec![image("")],
+        ..Page::default()
+    };
+    assert!(
+        !greyness(&image_page, &at_72, &defaults).grey,
+        "a colour image"
+    );
+    let shading_page = Page {
+        resources: &format!("/Shading << /Sh {AXIAL} >>"),
+        content: "/Sh sh",
+        ..Page::default()
+    };
+    assert!(
+        !greyness(&shading_page, &at_72, &defaults).grey,
+        "a colour shading"
+    );
+
+    // Colour under an opaque grey fill is not seen, and colour in a hidden
+    // layer is not drawn.
+    let covered = page("1 0 0 rg 10 10 50 50 re f 0.5 g 0 0 200 100 re f");
+    assert!(
+        greyness(&covered, &at_72, &defaults).grey,
+        "colour painted over"
+    );
+    let hidden = Page {
+        catalog: LAYERS_CATALOG,
+        resources: LAYERS_RESOURCES,
+        content: "/OC /Off BDC 1 0 0 rg 0 0 200 100 re f EMC",
+        extra: layers(),
+        ..Page::default()
+    };
+    assert!(
+        greyness(&hidden, &at_72, &defaults).grey,
+        "colour in a hidden layer"
+    );
+
+    // On a transparent page a pixel nothing painted holds nothing, and a
+    // half-transparent red is red, premultiplied or not.
+    let clear = RenderOptions {
+        format: PixelFormat::Rgba8,
+        transparent: true,
+        ..RenderOptions::default()
+    };
+    let nothing = greyness(&page(""), &clear, &defaults);
+    assert!(nothing.grey && nothing.coloured == 0, "{nothing:?}");
+    let half = Page {
+        resources: "/ExtGState << /Half << /ca 0.5 >> >>",
+        content: "/Half gs 1 0 0 rg 0 0 200 100 re f",
+        ..Page::default()
+    };
+    for premultiplied in [false, true] {
+        let options = RenderOptions {
+            premultiplied,
+            ..clear.clone()
+        };
+        let read = greyness(&half, &options, &defaults);
+        assert_eq!(read.coloured, 200 * 100, "premultiplied {premultiplied}");
+        assert_eq!(read.widest, 255, "premultiplied {premultiplied}");
+    }
+
+    // A bitmap that is not a picture has no answer.
+    let rendered = Document::open(page("").bytes())
+        .expect("it opens")
+        .page(0)
+        .expect("its page")
+        .render(&at_72);
+    let empty = Bitmap {
+        width: 0,
+        ..rendered
+    };
+    assert_eq!(empty.greyness(&defaults), None, "no picture");
 }

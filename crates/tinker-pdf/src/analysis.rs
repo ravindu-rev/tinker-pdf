@@ -52,7 +52,7 @@ use tinker_pdf_render::{user_space_pen, Admission, GlyphSource};
 use crate::annots::{self, AppearanceDevice};
 use crate::pdfa::colour::{is_transparency_group, ALPHA_TOLERANCE};
 use crate::resources::PageResources;
-use crate::{DisplayList, Page, PixelRegion, RenderOptions};
+use crate::{Bitmap, DisplayList, Page, PixelRegion, RenderOptions};
 
 /// How finely a stroke's outline is flattened before its box is read, in
 /// points: the box falls short of a curved outline by at most this.
@@ -1170,6 +1170,147 @@ impl Device for Analyser<'_> {
         // page asked for them, which is transparency the paints cannot show.
         self.admission.note_budget_spent();
         self.transparency = true;
+    }
+}
+
+// ---- colour or grey ------------------------------------------------------------
+
+/// The thresholds of the grey test (`docs/design/page-analysis.md`, "Colour
+/// or grey"): [`Bitmap::greyness`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GreyThresholds {
+    /// The widest a pixel's components may spread — the largest of its red,
+    /// green and blue less the smallest, in levels of 255 — and the pixel be
+    /// grey. 8 by default: past the few levels a grey picture coded as colour
+    /// wanders by, and short of the palest tint a page draws on purpose.
+    pub tolerance: u8,
+    /// How many coloured pixels a page may hold and be grey. None by default.
+    pub allowed: u64,
+}
+
+impl Default for GreyThresholds {
+    fn default() -> Self {
+        GreyThresholds {
+            tolerance: 8,
+            allowed: 0,
+        }
+    }
+}
+
+/// What the grey test read of a render: [`Bitmap::greyness`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Greyness {
+    /// Whether the page is grey: its coloured pixels number at most
+    /// [`GreyThresholds::allowed`].
+    pub grey: bool,
+    /// The pixels whose components spread more than
+    /// [`GreyThresholds::tolerance`].
+    pub coloured: u64,
+    /// The pixels read: the bitmap's width times its height.
+    pub pixels: u64,
+    /// The widest spread of any pixel that holds something, so a caller sees
+    /// how near the line a page fell.
+    pub widest: u8,
+}
+
+/// `round(c * 255 / a)`, clamped to 255 and zero where the alpha is:
+/// `Bitmap::straightened`'s arithmetic, for one component.
+fn straighten(c: u8, a: u8) -> u8 {
+    let a = u32::from(a);
+    (u32::from(c) * 255 + a / 2)
+        .checked_div(a)
+        .map_or(0, |v| v.min(255)) as u8
+}
+
+impl Bitmap {
+    /// Whether this render needs colour (`docs/design/page-analysis.md`):
+    /// each pixel read as the colour [`Bitmap::to_png`] writes for it —
+    /// straightened when premultiplied, ink through 8.6.4.4's relation, Lab
+    /// back to sRGB, grey replicated — and coloured when its components
+    /// spread more than `thresholds.tolerance`; the page is grey when its
+    /// coloured pixels number at most `thresholds.allowed`. A pixel whose
+    /// alpha is zero holds nothing and is not coloured.
+    ///
+    /// `None` exactly when the bitmap is not a picture, `to_png`'s
+    /// condition. Rows are read over `stride`, and no row's padding is.
+    #[must_use]
+    pub fn greyness(&self, thresholds: &GreyThresholds) -> Option<Greyness> {
+        if !self.layout().is_picture(self.data.len()) {
+            return None;
+        }
+        let format = self.format;
+        let components = format.components();
+        let alpha_at = format.has_alpha().then(|| components - 1);
+        let premultiplied = self.premultiplied && format.has_alpha();
+        let row = self.width as usize * components;
+        let (mut coloured, mut widest) = (0u64, 0u8);
+        for y in 0..self.height as usize {
+            let start = y * self.stride;
+            let Some(pixels) = self.data.get(start..start + row) else {
+                continue;
+            };
+            for pixel in pixels.chunks_exact(components) {
+                let alpha = alpha_at.map_or(255, |at| pixel.get(at).copied().unwrap_or(255));
+                if alpha == 0 {
+                    continue;
+                }
+                let mut straight = [0u8; 5];
+                for (slot, &c) in straight.iter_mut().zip(pixel) {
+                    *slot = c;
+                }
+                if premultiplied {
+                    for c in straight.iter_mut().take(components - 1) {
+                        *c = straighten(*c, alpha);
+                    }
+                }
+                let Some(colour) =
+                    tinker_pdf_raster::toolbox::decode(format, straight.get(..components)?)
+                else {
+                    continue;
+                };
+                let high = colour.r.max(colour.g).max(colour.b);
+                let low = colour.r.min(colour.g).min(colour.b);
+                let spread = high - low;
+                widest = widest.max(spread);
+                if spread > thresholds.tolerance {
+                    coloured += 1;
+                }
+            }
+        }
+        Some(Greyness {
+            grey: coloured <= thresholds.allowed,
+            coloured,
+            pixels: u64::from(self.width) * u64::from(self.height),
+            widest,
+        })
+    }
+}
+
+impl Page {
+    /// Whether this page needs colour: [`Page::render`] at `options` — the
+    /// caller's scale, since pixels decide — read by [`Bitmap::greyness`].
+    /// What a render decides, the test inherits: a hidden layer's colour is
+    /// not drawn and a colour an opaque grey paints over is not seen.
+    #[must_use]
+    pub fn greyness(
+        &self,
+        options: &RenderOptions,
+        thresholds: &GreyThresholds,
+    ) -> Option<Greyness> {
+        self.render(options).greyness(thresholds)
+    }
+}
+
+impl DisplayList {
+    /// [`Page::greyness`], from this list's render.
+    #[must_use]
+    pub fn greyness(
+        &self,
+        options: &RenderOptions,
+        thresholds: &GreyThresholds,
+    ) -> Option<Greyness> {
+        self.render(options).greyness(thresholds)
     }
 }
 
