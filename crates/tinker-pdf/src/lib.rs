@@ -105,7 +105,7 @@ pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 /// `DocumentBuilder::from_html(markup, stylesheet, page)` lays markup out
 /// through the EPUB reader's cascade, layout and painter.
 pub use html::{FromHtml, HtmlError, HtmlReport, PageBox};
-pub use layers::OptionalGroup;
+pub use layers::{LayerConfiguration, OptionalGroup};
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};
 /// Output intents, the catalog's and (PDF 2.0) a page's: what
@@ -908,6 +908,10 @@ pub struct RenderOptions {
     /// naming none — those whose `/NoView` is clear. `docs/design/render-usage.md`
     /// reads the clauses.
     pub usage: Option<Usage>,
+    /// What the render says about the document's layers: which
+    /// optional-content configuration's states it draws ([`LayerOptions`]).
+    /// The default draws `/D`'s, the render every page has always drawn.
+    pub layers: LayerOptions,
     /// The threads a render may spend. [`Parallelism::Serial`] by default.
     ///
     /// Spent on the pages of [`Document::render_pages`], each page rendered
@@ -997,6 +1001,7 @@ impl Default for RenderOptions {
             premultiplied: false,
             stats: false,
             usage: None,
+            layers: LayerOptions::default(),
             parallelism: Parallelism::Serial,
             forced_colours: None,
         }
@@ -1026,6 +1031,32 @@ impl Usage {
             Usage::Export => b"Export",
         }
     }
+}
+
+/// What a render says about a document's layers (8.11.4.3,
+/// `docs/design/optional-content-config.md`). See
+/// [`RenderOptions::layers`]; the default changes nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LayerOptions {
+    /// The optional-content configuration whose states the render draws:
+    /// `None`, the default, for the default configuration `/D`, and `Some(i)`
+    /// for the `i`th entry of `/OCProperties /Configs`, the index
+    /// [`Document::layer_configurations`] lists it at.
+    ///
+    /// A chosen configuration is applied to the document as opened: `/D`'s
+    /// initial states, then its `/BaseState` — `/ON` or `/OFF` setting every
+    /// group `/OCGs` lists, `/Unchanged` leaving each as `/D` set it, a
+    /// missing one `/ON` — and its own `/ON` and `/OFF` (Table 99); then its
+    /// own `/AS` entries for [`RenderOptions::usage`], none where it has none;
+    /// and its `/Intent` decides which groups count at all (8.11.2.3), a group
+    /// none of whose intents it holds reading as visible. `/D`'s `/Intent`
+    /// decides the same for a render of `/D`. Every state is bound once a
+    /// render and read by every scope it opens.
+    ///
+    /// An index past `/Configs`, or of an entry that is no dictionary,
+    /// renders as `/D` and is reported as
+    /// [`RenderWarning::UnreadableLayerConfiguration`].
+    pub configuration: Option<usize>,
 }
 
 impl RenderOptions {
@@ -2538,11 +2569,24 @@ impl Document {
     /// configuration, that decides what [`Page::render`] paints. Empty for
     /// the great majority of documents, which declare no optional content.
     ///
-    /// Read only. Writing groups and toggling a configuration are the other
-    /// half of the roadmap's optional content row and are not in this build.
+    /// Read only: groups are written by `DocumentBuilder::add_layer` and a
+    /// group's state in `/D` by `DocumentEditor::set_layer_visible`; a render
+    /// draws another configuration's states by [`RenderOptions::layers`].
     #[must_use]
     pub fn layers(&self) -> Vec<OptionalGroup> {
         layers::of_document(&self.inner)
+    }
+
+    /// The document's alternate optional-content configurations, the entries
+    /// of `/OCProperties /Configs` in their array's order (8.11.4.3): each its
+    /// `/Name` and `/Creator`, or `None` for an entry that is no dictionary,
+    /// so the index a caller reads off the list is the index
+    /// [`LayerOptions::configuration`] takes. Read 256 entries in, past which
+    /// a render renders `/D`; empty for a document with no `/Configs`, which
+    /// is nearly every document.
+    #[must_use]
+    pub fn layer_configurations(&self) -> Vec<Option<LayerConfiguration>> {
+        layers::configurations_of(&self.inner)
     }
 
     /// The document's interactive form fields (12.7).
@@ -2841,6 +2885,9 @@ pub(crate) struct Met {
     /// The region asked for and the part of it that is on the page, where the
     /// two differ.
     pub(crate) clamped: Option<(PixelRegion, PixelRegion)>,
+    /// The configuration the render named where it is none the document has
+    /// (`RenderOptions::layers`), so `/D` was drawn.
+    pub(crate) unreadable_configuration: Option<usize>,
 }
 
 impl Met {
@@ -2881,6 +2928,9 @@ impl Met {
             if !warnings.contains(&warning) {
                 warnings.push(warning);
             }
+        }
+        if let Some(index) = self.unreadable_configuration {
+            warnings.push(RenderWarning::UnreadableLayerConfiguration { index });
         }
         if let Some((requested, applied)) = self.scaled_down {
             warnings.push(RenderWarning::PageScaledDown { requested, applied });
@@ -3051,7 +3101,9 @@ impl Page {
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
         if matches!(options.parallelism, Parallelism::Threads(threads) if threads >= 2) {
-            return self.display_list_for(options.usage).render(options);
+            return self
+                .display_list_with(options.usage, &options.layers)
+                .render(options);
         }
         self.render_reaching(options).0
     }
@@ -3068,9 +3120,20 @@ impl Page {
     ) -> (Bitmap, tinker_pdf_render::RunReach) {
         // The operation is made before the content is decoded, so the decode
         // counts too; it binds the optional-content states the render's usage
-        // gives once, for every scope the render opens, and keeps what it
-        // computes in the document's cache where the document has one.
-        let op = self.render_operation(options, options.usage);
+        // and configuration give once, for every scope the render opens, and
+        // keeps what it computes in the document's cache where the document
+        // has one.
+        self.render_reaching_in(options, self.render_operation(options, options.usage))
+    }
+
+    /// [`Page::render_reaching`] in `op`, an operation made for this render
+    /// — one a display list has already bound the render's states in, to
+    /// compare them with its own.
+    pub(crate) fn render_reaching_in(
+        &self,
+        options: &RenderOptions,
+        op: resources::Operation,
+    ) -> (Bitmap, tinker_pdf_render::RunReach) {
         // A render that leaves the content out does not read it.
         let content = if options.content {
             stats::content(&self.doc, &self.inner, op.work())
@@ -3112,18 +3175,32 @@ impl Page {
         options: &RenderOptions,
         usage: Option<Usage>,
     ) -> resources::Operation {
-        self.operation(stats::tally(options.stats), usage)
+        self.operation(stats::tally(options.stats), usage, &options.layers)
             .on(options.parallelism)
     }
 
     /// [`Page::render_operation`], counting into `work`: a tally the parts of
-    /// one render share, a band's among them.
+    /// one render share, a band's among them, binding the states of the
+    /// configuration `layers` names.
     pub(crate) fn operation(
         &self,
         work: Option<Arc<stats::Work>>,
         usage: Option<Usage>,
+        layers: &LayerOptions,
     ) -> resources::Operation {
-        resources::Operation::rendering(work, usage).with_cache(self.cache.as_ref())
+        resources::Operation::rendering(work, usage)
+            .with_layers(layers.clone())
+            .with_cache(self.cache.as_ref())
+    }
+
+    /// The configuration `options` names where the document has no such
+    /// configuration — an index past `/Configs` or of an entry that is no
+    /// dictionary — which the render reports, having drawn `/D`.
+    pub(crate) fn unreadable_configuration(&self, options: &RenderOptions) -> Option<usize> {
+        options
+            .layers
+            .configuration
+            .filter(|&index| !optional::configuration_readable(&self.doc, index))
     }
 
     /// **The one pipeline every render of this page goes through** — the page
@@ -3327,6 +3404,7 @@ impl Page {
             clamped: asked
                 .filter(|requested| *requested != view)
                 .map(|requested| (requested, view)),
+            unreadable_configuration: self.unreadable_configuration(options),
         };
 
         // Back to something a caller can read. A page group composited over

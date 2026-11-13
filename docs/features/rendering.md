@@ -803,12 +803,16 @@ in the scope asked and the render's anti-aliasing beside it, and handed each
 mask a render that is not cancelled rasterised to the end
 (`GlyphSource::keep_mask`).
 
-**Optional content** (8.11). The catalog's `/OCProperties` `/D`
-configuration is resolved once a render, by the render's operation, and every
+**Optional content** (8.11). The render's configuration — the catalog's
+`/OCProperties` `/D`, or the entry of `/Configs` `RenderOptions::layers`
+chooses — is resolved once a render, by the render's operation, and every
 scope the render opens — the page's, each form's, each tiling cell's and each
 annotation appearance's — reads that one binding (`optional.rs`'s
-`one_render_binds_one_configuration`): `/BaseState` sets every group in
-`/OCGs` and `/ON`/`/OFF` name the exceptions (8.11.4.3 Table 101), OCMDs
+`one_render_binds_one_configuration` and
+`a_chosen_configuration_is_bound_once_a_render`): `/BaseState` sets every
+group in `/OCGs` and `/ON`/`/OFF` name the exceptions (8.11.4.3 Table 101),
+the configuration's `/Intent` decides which groups count at all (8.11.2.3),
+OCMDs
 honour all four `/P` policies and `/VE` visibility expressions (8.11.2.3,
 capped at depth 16 and 256 operands), and `/OC` on both XObject kinds hides
 the whole XObject (8.11.4.4) — expressed as a scope around the `Do`, so a
@@ -853,6 +857,38 @@ nor `/OFF` — recommends nothing and leaves its group as `/D` set it
 `a_usages_states_reach_every_scope_a_render_opens`). Text and image
 extraction, `to_svg`, a save's passes and the validators name no usage and
 read the initial states, bound once an operation as a render binds them.
+
+**A render chooses its configuration** (8.11.4.3,
+[design](../design/optional-content-config.md)). `RenderOptions::layers` is
+a `LayerOptions`, whose `configuration` is `None` by default for `/D` and
+`Some(i)` for the `i`th entry of `/Configs`, the index
+`Document::layer_configurations` lists it at; visibility is no longer
+something only an edit of `/D` changes. The states are built in one order:
+`/D`'s initial states; then the chosen configuration over them, applied to
+the document as opened — `/BaseState /ON` or `/OFF` setting every group
+`/OCGs` lists, `/Unchanged` leaving each as `/D` set it, one missing or none
+of the three `/ON` — and its own `/ON`, then `/OFF`; then the chosen
+configuration's own `/AS` entries for the render's usage, none where it has
+none, since Table 99 gives `/AS` no default from `/D`. The configuration's
+`/Intent`, a name or an array of names and `/View` otherwise, then decides
+which groups count: a group none of whose intents (`/View` by default) the
+set holds has no effect and reads as one the configuration never mentioned
+does, visible, as itself and as a member of a membership dictionary; `/All`
+counts every group and an empty array none. `/D`'s own `/Intent` decides the
+same for a render of `/D`, so a `/Design` layer `/D` turns off draws. An
+index past `/Configs`, past 256 entries, or of an entry that is no dictionary
+renders as `/D` and is reported as
+`RenderWarning::UnreadableLayerConfiguration { index }`. A form's kept
+drawing is keyed by the configuration beside the usage. A display list
+records under the layer options `Page::display_list_with` names — the
+defaults for `display_list` and `display_list_for` — and keeps the states its
+recording bound; a render naming its usage replays it where the render's own
+states are those, whether it names the same configuration or another that
+comes to the same states, binding its states once to compare them and drawing
+with that binding either way, and draws the direct way otherwise; `to_svg`
+from a list recorded under another configuration interprets the page again
+(`optional_content.rs`'s `each_configuration_renders_as_its_d_twin` and
+`an_intent_the_configuration_does_not_hold_has_no_effect`).
 
 **Which annotations draw** is their flags' and their `/OC`'s to say, for the
 render's usage (12.5.3 Table 167, [design](../design/render-usage.md)): one
@@ -1457,7 +1493,8 @@ The facade is the whole public surface (ruling 11): `Page::render` takes a
 `RenderOptions` — `scale` (pixels per point, or `RenderOptions::at_dpi`),
 `magnification` (1; the viewer's zoom, which `/NoZoom` reads),
 `content`, `widgets` and `other_annotations` (each on; the parts drawn, below
-`annotations`), `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
+`annotations`), `layers` (a `LayerOptions`; the optional-content
+configuration drawn, `/D` by default), `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
 checked between operations and scanline bands), `annotations` (on by
 default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
@@ -2019,6 +2056,7 @@ under it, so the copy holds every canvas the walk closes onto.
 | A pattern whose cell cannot be read, or a lattice past 65 536 positions, a cell past 16.7 Mpx, or a fill past 33.5 million square points of compositing, the same at every scale | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
 | A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it; and a JPEG's or JPEG 2000 image's `/ColorSpace` with another number of components than its samples, refused, the image drawn in the codec's own colour | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`; for such an image, `name` the image's (`inline` for an inline one) and `reason` `ImageSpaceComponents`; once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way | [rulings](../rulings.md) |
 | Content, or an annotation by its `/OC`, in a layer the render's optional-content states turn off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
+| A render naming an optional-content configuration the document does not have: an index past `/Configs` or 256 entries, or of an entry that is no dictionary | `RenderWarning::UnreadableLayerConfiguration { index }`, the page drawn in `/D`'s states | A page in `/D`'s states looks like a page in any other, so the caller is told its choice was not the one drawn (ruling 10) | [design/optional-content-config.md](../design/optional-content-config.md) |
 | A form, a soft mask's group or a Type 3 glyph procedure that names itself while it runs, directly or through the others, drawn once | `RenderWarning::RecursiveContent`, and `SvgWarning::Render` of it from `to_svg` | A cycle has no last run; refused at its first repeat by the stream's identity, the page is what every reader can draw, where the depth cap ended a branching cycle only after two or more runs to the sixteenth | [content and text](content-and-text.md) |
 | Nested runs past the interpreter's budget for nested content — 4 MiB, and 4 096 bytes for every byte of content the page reaches — past which no stream that has already run is run again | `RenderWarning::NestedBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group; every stream the page holds still runs once, so what is passed over is repeats of content already drawn | [content and text](content-and-text.md) |
 | More than 2 000 transparency-group buffers on one page, or more than 2 000 groups and soft masks' groups run in one stream, past which the interpreter runs no more of either | `RenderWarning::GroupBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A budget, not a depth: branching group and soft-mask recursion stays inside any depth cap, and every reading of the page — text, images, SVG — is bounded by the same walk | [rulings](../rulings.md) |

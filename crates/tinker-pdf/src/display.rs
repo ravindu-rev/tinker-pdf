@@ -106,7 +106,7 @@
 
 use std::sync::Arc;
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use tinker_pdf_content::{
     interpret, replay, Device, Event, Glyph, GraphicsState, Group, ImageRef, MarkedProps,
@@ -118,11 +118,12 @@ use tinker_pdf_raster::image::{image_bounds_in, Transform};
 use tinker_pdf_render::{DisplayRecorder, Renderer};
 
 use crate::annots::{self, AppearanceDevice, Kept, Kinds, Placement, Recorded};
+use crate::optional::OptionalContent;
 use crate::resources::PageResources;
 use crate::stats::Counter;
 use crate::{
-    handed_back, Bitmap, Met, Page, Parallelism, PixelRegion, RenderOptions, RenderWarning, Usage,
-    View,
+    handed_back, Bitmap, LayerOptions, Met, Page, Parallelism, PixelRegion, RenderOptions,
+    RenderWarning, Usage, View,
 };
 
 /// A page interpreted once, to be drawn as often and at as many scales as a
@@ -156,6 +157,13 @@ pub struct DisplayList {
     /// them, and each annotation's to the next, so a render that leaves out
     /// a part recorded before a part it draws draws the direct way.
     budget_spent: bool,
+    /// The layer options the list was recorded under: the configuration
+    /// whose states the recorded calls carry.
+    layers: LayerOptions,
+    /// Those states, bound by the recording: a render of another
+    /// configuration whose states are these replays the list, and any other
+    /// draws the direct way (`docs/design/optional-content-config.md`).
+    states: Arc<OnceLock<OptionalContent>>,
 }
 
 impl Page {
@@ -195,6 +203,20 @@ impl Page {
     /// list recorded for one writes SVG by interpreting the page again.
     #[must_use]
     pub fn display_list_for(&self, usage: Option<Usage>) -> DisplayList {
+        self.display_list_with(usage, &LayerOptions::default())
+    }
+
+    /// [`Page::display_list_for`], recorded under the configuration `layers`
+    /// names (8.11.4.3, `docs/design/optional-content-config.md`): the calls
+    /// carry that configuration's states for `usage`, so a viewer that keeps
+    /// one configuration keeps replaying. A render naming `usage` replays the
+    /// list where the states its own layer options give are the list's —
+    /// those options themselves, or another configuration that comes to the
+    /// same states — and draws the direct way otherwise; [`Page::to_svg`]
+    /// draws `/D`'s, so a list recorded under another writes SVG by
+    /// interpreting the page again.
+    #[must_use]
+    pub fn display_list_with(&self, usage: Option<Usage>, layers: &LayerOptions) -> DisplayList {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         // The recording is an operation of its own, binding the usage's
         // states and keeping what it computes in the document's cache where
@@ -204,7 +226,7 @@ impl Page {
             &self.doc,
             &self.inner,
             self.fonts.as_ref(),
-            self.operation(None, usage),
+            self.operation(None, usage, layers),
         );
         let mut recorder = DisplayRecorder::new();
         interpret(&content, Matrix::IDENTITY, &mut recorder, &resources);
@@ -225,6 +247,9 @@ impl Page {
             )
         };
         let budget_spent = recorder.admission().budget_spent();
+        // The states the calls were recorded under, bound now where nothing
+        // asked, so a render of another configuration can be held to them.
+        let states = resources.operation().states(&self.doc);
         let resources = resources.kept();
         if recorder.overflowed() {
             // Everything recorded is dropped here, the content's calls too:
@@ -239,6 +264,8 @@ impl Page {
                 retained: false,
                 usage,
                 budget_spent,
+                layers: layers.clone(),
+                states,
             };
         }
         DisplayList {
@@ -251,6 +278,8 @@ impl Page {
             retained: true,
             usage,
             budget_spent,
+            layers: layers.clone(),
+            states,
         }
     }
 }
@@ -274,31 +303,52 @@ impl DisplayList {
     /// calling [`Page::render`], on the caller, and so does a render naming
     /// a usage other than the one the list was recorded for
     /// ([`DisplayList::usage`]): its calls carry that usage's
-    /// optional-content states. So does a render that leaves out a part
-    /// recorded before a part it draws, on a page whose recording spent its
-    /// group budget: what the left-out part spent shaped the answers the
-    /// later one was recorded with.
+    /// optional-content states. So does a render naming layer options whose
+    /// states are not the list's ([`DisplayList::layers`]) — another
+    /// configuration's states are bound once to be compared, and that binding
+    /// is the render's whichever way it draws. So does a render that leaves
+    /// out a part recorded before a part it draws, on a page whose recording
+    /// spent its group budget: what the left-out part spent shaped the
+    /// answers the later one was recorded with.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
-        if !self.retained || options.usage != self.usage || !self.parts_replay_alike(options) {
+        let serial = RenderOptions {
+            parallelism: Parallelism::Serial,
+            ..options.clone()
+        };
+        if !self.retained || options.usage != self.usage {
             // On the caller: a page asked for in bands asks its list for
             // them, and a list that keeps nothing, or another usage's
             // states, draws it the direct way.
-            return self.page.render(&RenderOptions {
-                parallelism: Parallelism::Serial,
-                ..options.clone()
-            });
+            return self.page.render(&serial);
         }
-        if let Some(bitmap) = self.render_in_bands(options) {
+        // Another configuration replays the list where its states are the
+        // list's: bound once here, and handed on to whatever draws.
+        let compared = (options.layers != self.layers).then(|| {
+            let op = self.page.render_operation(&serial, self.usage);
+            let alike = self.states.get() == Some(op.optional(&self.page.doc));
+            (op, alike)
+        });
+        let alike = compared.as_ref().is_none_or(|(_, alike)| *alike);
+        if !alike || !self.parts_replay_alike(options) {
+            return match compared {
+                Some((op, _)) => self.page.render_reaching_in(&serial, op).0,
+                None => self.page.render(&serial),
+            };
+        }
+        let shared = compared.map(|(op, _)| op.states(&self.page.doc));
+        if let Some(bitmap) = self.render_in_bands(options, shared.as_ref()) {
             return bitmap;
         }
         // An operation of its own, keeping what it computes in the document's
         // cache where the document has one, as a direct render does; drawn
         // whole on the caller, its decodes may spend the threads the options
         // name, which no band took.
-        let resources = self
-            .resources
-            .for_operation(self.page.render_operation(options, self.usage));
+        let mut op = self.page.render_operation(options, self.usage);
+        if let Some(states) = shared {
+            op = op.sharing(states);
+        }
+        let resources = self.resources.for_operation(op);
         self.page
             .render_layer_with(options, None, &resources, |renderer, resources| {
                 self.replay_onto(options, renderer, resources);
@@ -411,7 +461,11 @@ impl DisplayList {
     /// counts where it ran into the render's one tally, and the first band
     /// alone counts the calls it drew, which every band draws alike, so the
     /// page's statistics of what it drew are the page's drawn whole.
-    fn render_in_bands(&self, options: &RenderOptions) -> Option<Bitmap> {
+    fn render_in_bands(
+        &self,
+        options: &RenderOptions,
+        shared: Option<&Arc<OnceLock<OptionalContent>>>,
+    ) -> Option<Bitmap> {
         let threads = match options.parallelism {
             Parallelism::Threads(threads) if threads >= 2 => threads.min(MAX_THREADS),
             _ => return None,
@@ -472,9 +526,13 @@ impl DisplayList {
             }
             // Each band's operation keeps what it computes in the document's
             // cache, as the whole list's render does.
-            let resources = self
-                .resources
-                .for_operation(self.page.operation(work.clone(), self.usage));
+            let mut op = self
+                .page
+                .operation(work.clone(), self.usage, &options.layers);
+            if let Some(states) = shared {
+                op = op.sharing(Arc::clone(states));
+            }
+            let resources = self.resources.for_operation(op);
             let band_options = RenderOptions {
                 region: Some(*band),
                 parallelism: Parallelism::Serial,
@@ -640,6 +698,15 @@ impl DisplayList {
     #[must_use]
     pub fn usage(&self) -> Option<Usage> {
         self.usage
+    }
+
+    /// The layer options the list was recorded under
+    /// ([`Page::display_list_with`]), the default for
+    /// [`Page::display_list`]'s and [`Page::display_list_for`]'s: the
+    /// configuration whose states its calls carry.
+    #[must_use]
+    pub fn layers(&self) -> &LayerOptions {
+        &self.layers
     }
 
     /// The resources a replay resolves names in.
@@ -905,6 +972,10 @@ fn merged(
         repaired,
         scaled_down,
         clamped,
+        // Every band names the one configuration.
+        unreadable_configuration: parts
+            .iter()
+            .find_map(|part| part.met.unreadable_configuration),
     }
     .warnings()
 }
@@ -1859,6 +1930,7 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
                 repaired: Vec::new(),
                 scaled_down: None,
                 clamped: None,
+                unreadable_configuration: None,
             },
             stamps: Stamps {
                 met,

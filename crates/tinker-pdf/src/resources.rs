@@ -38,7 +38,7 @@ use crate::cache::{
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
 use crate::stats::{self, Counter, Work};
-use crate::Usage;
+use crate::{LayerOptions, Usage};
 
 /// Extracted glyph outlines, keyed by font identity and character code.
 ///
@@ -994,11 +994,16 @@ pub(crate) struct Operation {
     /// `None` for a render naming none and for every operation that is not a
     /// render.
     usage: Option<Usage>,
+    /// What the render says about the document's layers
+    /// (`crate::RenderOptions::layers`): the configuration whose states it
+    /// draws. The default, `/D`, for every operation that is not a render.
+    layers: LayerOptions,
     /// The optional-content states every scope the operation opens reads,
-    /// bound by the first that asks (ISO 32000-2 8.11.4.4): the default
-    /// configuration's initial states, and its `/AS` entries for `usage` over
-    /// them. Shared by every clone, so the page's scope, each form's, each
-    /// tiling cell's and each appearance's read one binding.
+    /// bound by the first that asks (ISO 32000-2 8.11.4.4): the chosen
+    /// configuration's states over `/D`'s initial ones, and its `/AS` entries
+    /// for `usage` over them (`docs/design/optional-content-config.md`).
+    /// Shared by every clone, so the page's scope, each form's, each tiling
+    /// cell's and each appearance's read one binding.
     optional: Arc<OnceLock<OptionalContent>>,
     /// The document's cache, where its caller stated a budget for it
     /// (`crate::cache`): what every scope of the operation keeps across
@@ -1029,10 +1034,17 @@ impl Operation {
             streams: Some(Arc::new(DecodedStreams::new())),
             work,
             usage,
+            layers: LayerOptions::default(),
             optional: Arc::default(),
             cache: None,
             parallelism: Parallelism::Serial,
         }
+    }
+
+    /// This operation, binding the states of the configuration `layers`
+    /// names rather than `/D`'s.
+    pub(crate) fn with_layers(self, layers: LayerOptions) -> Operation {
+        Operation { layers, ..self }
     }
 
     /// This operation, its decodes handing their independent parts to
@@ -1053,6 +1065,7 @@ impl Operation {
             streams: None,
             work: None,
             usage: None,
+            layers: LayerOptions::default(),
             optional: Arc::default(),
             cache: None,
             parallelism: Parallelism::Serial,
@@ -1064,7 +1077,31 @@ impl Operation {
     /// after.
     pub(crate) fn optional(&self, doc: &CosDocument) -> &OptionalContent {
         self.optional
-            .get_or_init(|| OptionalContent::bind_for(doc, self.usage))
+            .get_or_init(|| OptionalContent::bind_with(doc, self.usage, self.layers.configuration))
+    }
+
+    /// The configuration the operation binds the states of: the layer
+    /// options a form's kept drawing is keyed by beside the usage.
+    pub(crate) fn layers(&self) -> &LayerOptions {
+        &self.layers
+    }
+
+    /// The operation's binding, bound now if no scope has asked yet: what a
+    /// display list keeps of its recording's states, and hands a render of
+    /// it whose states those are.
+    pub(crate) fn states(&self, doc: &CosDocument) -> Arc<OnceLock<OptionalContent>> {
+        self.optional(doc);
+        Arc::clone(&self.optional)
+    }
+
+    /// This operation, reading `states` — a binding another operation of the
+    /// same render made — rather than binding its own, so that a render
+    /// whose states were bound to compare them binds them once.
+    pub(crate) fn sharing(self, states: Arc<OnceLock<OptionalContent>>) -> Operation {
+        Operation {
+            optional: states,
+            ..self
+        }
     }
 
     /// This operation, keeping what it computes in the document's cache
@@ -4897,6 +4934,7 @@ impl PageResources {
             invocation: invocation.clone(),
             scope: (!owns).then(|| self.written().clone()),
             usage: self.op.usage(),
+            layers: self.op.layers().clone(),
         })
     }
 

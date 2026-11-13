@@ -79,6 +79,18 @@ fuzz_target!(|data: &[u8]| {
     // boxes, and the interesting failures are in the operators rather than in
     // how many pixels they cover.
     let _ = page.render(&RenderOptions::at_dpi(12.0));
+    // Every optional-content configuration the input lists (8.11.4.3), and
+    // the first index past them, which renders as `/D`: each entry's
+    // `/BaseState`, `/ON`, `/OFF`, `/AS` and `/Intent` the input shapes.
+    let configurations = doc.layer_configurations();
+    for index in 0..=configurations.len() {
+        let _ = page.render(&RenderOptions {
+            layers: tinker_pdf::LayerOptions {
+                configuration: Some(index),
+            },
+            ..RenderOptions::at_dpi(12.0)
+        });
+    }
     // The SVG writer over the same page: a second device fed from a display
     // list, whose numbers and data URIs a hostile page shapes. Rasterised
     // paints at the lowest scale it takes, for the reason above.

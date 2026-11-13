@@ -309,7 +309,9 @@ the catalog's `/OCProperties /OCGs` in the catalog's own order — which is the
 order a producer's layer panel shows, not object-number order — each entry
 carrying the group's reference, its `/Name` decoded as a text string, and
 whether the default configuration `/D` shows it. `/BaseState` then `/ON` then
-`/OFF`, exactly 8.11.4.3 Table 101's order.
+`/OFF`, exactly 8.11.4.3 Table 101's order, and `/D`'s `/Intent` over them: a
+group none of whose intents `/D` holds has no effect (8.11.2.3) and is
+visible.
 
 The visibility comes **from the reader the renderer uses**, not from a second
 read of the dictionary: both call the one `OptionalContent::bind`, so the list
@@ -317,6 +319,15 @@ and the painted page cannot disagree about the same file. A group with no
 `/Name` is listed with an empty one rather than dropped, because a caller
 toggling layers still has to see it. Most documents declare no optional
 content and get an empty list, which is an ordinary answer.
+
+`Document::layer_configurations()` lists the alternate configurations, the
+entries of `/OCProperties /Configs` in their array's order (8.11.4.3 Table
+99): each a `LayerConfiguration` of its `/Name` and `/Creator`, decoded as
+text strings and `None` where absent, or `None` for an entry that is no
+dictionary, so the index read off the list is the index
+`RenderOptions::layers` takes to draw that configuration's states
+([rendering](rendering.md)). It reads the array the renderer reads, 256
+entries in, and is empty for a document with no `/Configs`.
 
 **Layers are written too.** `DocumentBuilder::add_layer(name, visible)`
 writes an `/OCG` and returns a `LayerId`; `PageBuilder::optional(layer, |page|

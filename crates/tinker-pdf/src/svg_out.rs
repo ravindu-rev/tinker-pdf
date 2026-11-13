@@ -152,7 +152,7 @@ use tinker_pdf_render::{
 
 use crate::annots::{self, AppearanceDevice, Kept};
 use crate::resources::PageResources;
-use crate::{DisplayList, Page, PixelFormat, RenderWarning};
+use crate::{DisplayList, LayerOptions, Page, PixelFormat, RenderWarning};
 
 /// How a page is written as SVG. See [`Page::to_svg`].
 #[derive(Clone, Debug, PartialEq)]
@@ -360,7 +360,10 @@ impl DisplayList {
         let page = self.page();
         let (width, height) = page.size();
         let base = page_view_transform(page.crop_box(), page.rotation(), 1.0);
-        if !self.is_retained() || self.usage().is_some() {
+        if !self.is_retained()
+            || self.usage().is_some()
+            || *self.layers() != LayerOptions::default()
+        {
             let resources = PageResources::new(&page.doc, &page.inner, page.fonts.as_ref());
             let mut writer = Writer::new(&resources, base, page, options);
             let content = cos_pages::content_bytes(&page.doc, &page.inner);

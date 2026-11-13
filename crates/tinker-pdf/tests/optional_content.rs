@@ -9,7 +9,7 @@
 //! that hides content correctly for the wrong reason is exactly the failure
 //! this gap exists to prevent.
 
-use tinker_pdf::{Bitmap, Document, RenderOptions, RenderWarning, Usage};
+use tinker_pdf::{Bitmap, Document, LayerOptions, RenderOptions, RenderWarning, Usage};
 
 /// A 40x40 page with one optional content group at 5 0 R, called
 /// "Construction lines".
@@ -1009,5 +1009,200 @@ fn a_usages_states_reach_every_scope_a_render_opens() {
         &viewed,
         &render_for(&page("/ON [5 0 R]"), None),
         "view usage as before",
+    );
+}
+
+// ---- A render's configuration (RC-14.2) ---------------------------------------
+
+/// The page `configured` builds: an unmarked green band, then a band in each
+/// of groups 5 "A", 6 "B" and 7 "C".
+const BANDS: &str = "0 1 0 rg 0 0 10 40 re f\n\
+                     /OC /A BDC 1 0 0 rg 10 0 10 40 re f EMC\n\
+                     /OC /B BDC 0 0 1 rg 20 0 10 40 re f EMC\n\
+                     /OC /C BDC 1 1 0 rg 30 0 10 40 re f EMC";
+
+/// A 40x40 page drawing [`BANDS`], whose groups 5 "A", 6 "B" and 7 "C" carry
+/// `groups`' entries beside their `/Type` and `/Name`; the catalog's `/D` is
+/// `d` and its `/Configs` holds `configs`, where `9 0 R` is a configuration
+/// reached by reference, `/BaseState /OFF` with `/ON [5 0 R]` and its own
+/// print entry over group 5.
+fn configured(groups: [&str; 3], d: &str, configs: &str) -> Vec<u8> {
+    let configs = if configs.is_empty() {
+        String::new()
+    } else {
+        format!("/Configs [{configs}]")
+    };
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R 7 0 R] \
+/D << {d} >> {configs} >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /Properties << /A 5 0 R /B 6 0 R /C 7 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{BANDS}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (A) {} >>\nendobj\n\
+6 0 obj\n<< /Type /OCG /Name (B) {} >>\nendobj\n\
+7 0 obj\n<< /Type /OCG /Name (C) {} >>\nendobj\n\
+9 0 obj\n<< /Name (Indirect) /BaseState /OFF /ON [5 0 R] \
+/AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>] >>\nendobj\n\
+trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
+        BANDS.len(),
+        groups[0],
+        groups[1],
+        groups[2],
+    )
+    .into_bytes()
+}
+
+/// `/D`'s body writing groups 5, 6 and 7 in `states`, and nothing else.
+fn d_of(states: [bool; 3]) -> String {
+    let on: Vec<&str> = ["5 0 R", "6 0 R", "7 0 R"]
+        .into_iter()
+        .zip(states)
+        .filter_map(|(group, on)| on.then_some(group))
+        .collect();
+    format!("/BaseState /OFF /ON [{}]", on.join(" "))
+}
+
+/// Groups A and C turned off by a print state, which an `/AS` print entry
+/// over them applies.
+const PRINT_OFF: [&str; 3] = [
+    "/Usage << /Print << /PrintState /OFF >> >>",
+    "",
+    "/Usage << /Print << /PrintState /OFF >> >>",
+];
+
+/// The options rendering `configuration` for `usage`.
+fn under(configuration: Option<usize>, usage: Option<Usage>) -> RenderOptions {
+    RenderOptions {
+        usage,
+        layers: LayerOptions { configuration },
+        ..RenderOptions::default()
+    }
+}
+
+/// **Each configuration renders as its `/D` twin** (RC-14.2,
+/// `docs/design/optional-content-config.md`): `/D` and `/Configs` entries of
+/// base state `/ON` with `/OFF`, `/OFF` with `/ON`, `/Unchanged` with both,
+/// none with `/OFF`, and one reached by reference with an `/AS` of its own,
+/// each rendered with no usage, for view and for print, equal — pixels and
+/// warnings — to the page whose `/D` is written as that configuration's
+/// states and says nothing of usage: directly, from a display list recorded
+/// under the configuration, and from one recorded under `/D`. A chosen
+/// configuration's states are built over `/D`'s, its `/AS` is its own — the
+/// print entry `/D` has over C is not applied under a configuration that has
+/// none — and `/Unchanged` keeps `/D`'s. An index past `/Configs`, of an
+/// entry that is no dictionary, or past every bound renders as `/D` and is
+/// reported by its index.
+#[test]
+fn each_configuration_renders_as_its_d_twin() {
+    let d = "/OFF [6 0 R] /AS [<< /Event /Print /Category [/Print] /OCGs [7 0 R] >>]";
+    let configs = "<< /Name (Zero) /BaseState /ON /OFF [5 0 R] >> \
+                   << /Name (One) /BaseState /OFF /ON [6 0 R] >> \
+                   << /Name (Two) /BaseState /Unchanged /ON [6 0 R] /OFF [7 0 R] >> \
+                   << /Name (Three) /OFF [6 0 R 7 0 R] >> \
+                   5 9 0 R";
+    let document = Document::open(configured(PRINT_OFF, d, configs)).expect("it opens");
+    let page = document.page(0).expect("a page");
+    // (configuration, A B C with no usage and in view, A B C in print)
+    let cases = [
+        (None, [true, false, true], [true, false, false]),
+        (Some(0), [false, true, true], [false, true, true]),
+        (Some(1), [false, true, false], [false, true, false]),
+        (Some(2), [true, true, false], [true, true, false]),
+        (Some(3), [true, false, false], [true, false, false]),
+        (Some(5), [true, false, false], [false, false, false]),
+    ];
+    for (configuration, shown, printed) in cases {
+        for (usage, states) in [
+            (None, shown),
+            (Some(Usage::View), shown),
+            (Some(Usage::Print), printed),
+        ] {
+            let what = format!("configuration {configuration:?}, {usage:?}");
+            let twin = render_for(&configured(PRINT_OFF, &d_of(states), ""), None);
+            let options = under(configuration, usage);
+            same_render(&page.render(&options), &twin, &format!("{what}, directly"));
+            same_render(
+                &page
+                    .display_list_with(usage, &options.layers)
+                    .render(&options),
+                &twin,
+                &format!("{what}, from its own list"),
+            );
+            same_render(
+                &page.display_list_for(usage).render(&options),
+                &twin,
+                &format!("{what}, from a list under /D"),
+            );
+        }
+    }
+
+    let as_d = page.render(&RenderOptions::default());
+    let list = page.display_list();
+    for index in [4, 6, 255, 256, usize::MAX] {
+        let options = under(Some(index), None);
+        let mut warnings = as_d.warnings.clone();
+        warnings.push(RenderWarning::UnreadableLayerConfiguration { index });
+        for (how, got) in [
+            ("directly", page.render(&options)),
+            ("from a list", list.render(&options)),
+            (
+                "from its own list",
+                page.display_list_with(None, &options.layers)
+                    .render(&options),
+            ),
+        ] {
+            assert!(got.data == as_d.data, "{index}, {how}: drawn as /D");
+            assert_eq!(got.warnings, warnings, "{index}, {how}: reported by index");
+        }
+    }
+}
+
+/// **An intent the configuration does not hold has no effect** (8.11.2.3):
+/// group A is a `/Design` layer, B one of the default `/View`, and C both,
+/// all three off in `/D`. Under `/D`, whose intents are `/View`, A has no
+/// effect and draws while B and C stay hidden; under a configuration whose
+/// `/Intent` is `/Design`, A and C count and are hidden while B draws; under
+/// an empty `/Intent` nothing counts and everything draws; under `/All`
+/// everything counts; and an `/Intent` that is neither a name nor an array
+/// is `/View`. Each equals its twin, the page with no `/Intent` anywhere
+/// whose `/D` shows what the intents leave visible.
+#[test]
+fn an_intent_the_configuration_does_not_hold_has_no_effect() {
+    let groups = ["/Intent /Design", "", "/Intent [/View /Design]"];
+    let d = "/OFF [5 0 R 6 0 R 7 0 R]";
+    let configs = "<< /Intent /Design /BaseState /OFF >> \
+                   << /Intent [] /BaseState /OFF >> \
+                   << /Intent /All /BaseState /OFF >> \
+                   << /Intent 7 /BaseState /OFF >>";
+    let document = Document::open(configured(groups, d, configs)).expect("it opens");
+    let page = document.page(0).expect("a page");
+    // (configuration, what draws of A, B and C)
+    for (configuration, drawn) in [
+        (None, [true, false, false]),
+        (Some(0), [false, true, false]),
+        (Some(1), [true, true, true]),
+        (Some(2), [false, false, false]),
+        (Some(3), [true, false, false]),
+    ] {
+        let what = format!("configuration {configuration:?}");
+        let twin = render_for(&configured(["", "", ""], &d_of(drawn), ""), None);
+        let options = under(configuration, None);
+        same_render(&page.render(&options), &twin, &what);
+        same_render(
+            &page.display_list().render(&options),
+            &twin,
+            &format!("{what}, from a list"),
+        );
+    }
+    // The Design layer `/D` turns off draws, which it did not before `/D`'s
+    // intents were read: the correction 8.11.2.3 states.
+    let plain = page.render(&RenderOptions::default());
+    assert_eq!(pixel(&plain, 15, 20), vec![255, 0, 0], "A draws under /D");
+    assert_eq!(
+        pixel(&plain, 25, 20),
+        vec![255, 255, 255],
+        "B is hidden under /D"
     );
 }

@@ -139,7 +139,8 @@ impl Page {
     /// format and the rest change no answer.
     #[must_use]
     pub fn analysis(&self, options: &RenderOptions) -> PageAnalysis {
-        self.display_list_for(options.usage).analysis(options)
+        self.display_list_with(options.usage, &options.layers)
+            .analysis(options)
     }
 }
 
@@ -151,10 +152,10 @@ impl Page {
 /// for, so another usage is answered by the page's list for that usage, as a
 /// render of another usage is drawn the direct way.
 pub(crate) fn analyse(list: &DisplayList, options: &RenderOptions) -> PageAnalysis {
-    if options.usage != list.usage() {
+    if options.usage != list.usage() || options.layers != *list.layers() {
         return list
             .page()
-            .display_list_for(options.usage)
+            .display_list_with(options.usage, &options.layers)
             .analysis(options);
     }
     let page = list.page();

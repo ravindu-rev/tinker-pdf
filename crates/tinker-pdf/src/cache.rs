@@ -707,9 +707,10 @@ pub(crate) struct IccKey(pub(crate) ObjRef);
 /// drawing can read — and, for a form that brings no resources of its own,
 /// the scope its names resolve in, its resource dictionary written exactly
 /// ([`Written`]), so two scopes that hold the same resources share the
-/// drawing and two that do not keep two; and the usage the render names,
-/// whose optional-content states its drawing's marked content and the forms
-/// inside it are shown or hidden by (8.11.4.4).
+/// drawing and two that do not keep two; and the usage and the layer options
+/// the render names, whose optional-content states its drawing's marked
+/// content and the forms inside it are shown or hidden by (8.11.4.4,
+/// 8.11.4.3).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FormKey {
     /// The invocation, as the interpreter wrote it.
@@ -719,6 +720,8 @@ pub(crate) struct FormKey {
     pub(crate) scope: Option<Written>,
     /// The usage the render names (`crate::RenderOptions::usage`).
     pub(crate) usage: Option<crate::Usage>,
+    /// The configuration the render names (`crate::RenderOptions::layers`).
+    pub(crate) layers: crate::LayerOptions,
 }
 
 /// A form's recorded drawing as the document keeps it: the recording, and the

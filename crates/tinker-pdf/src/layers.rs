@@ -43,9 +43,11 @@ pub struct OptionalGroup {
     /// Whether the document's default configuration shows this group
     /// (8.11.4.3 Table 101).
     ///
-    /// This is `/BaseState` as modified by `/ON` and `/OFF`, in that order —
-    /// the same answer the renderer acts on, from the same reader, so a
-    /// caller cannot be told one thing here and shown another on the page.
+    /// This is `/BaseState` as modified by `/ON` and `/OFF`, in that order,
+    /// and `/D`'s `/Intent` (8.11.2.3): a group none of whose intents `/D`
+    /// holds has no effect on visibility and is visible — the same answer the
+    /// renderer acts on, from the same reader, so a caller cannot be told one
+    /// thing here and shown another on the page.
     pub visible: bool,
 }
 
@@ -87,6 +89,46 @@ pub(crate) fn of_document(doc: &CosDocument) -> Vec<OptionalGroup> {
         });
     }
     out
+}
+
+/// One alternate optional-content configuration, an entry of
+/// `/OCProperties /Configs` (8.11.4.3 Table 99), as
+/// [`crate::Document::layer_configurations`] lists it: what a render names by
+/// its index ([`crate::LayerOptions::configuration`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayerConfiguration {
+    /// `/Name`, decoded as a text string: "A name for the configuration,
+    /// suitable for presentation in an interactive PDF processor's user
+    /// interface". `None` where the configuration has none.
+    pub name: Option<String>,
+    /// `/Creator`, decoded as a text string: "Name of the application or
+    /// feature that created this configuration dictionary". `None` where it
+    /// has none.
+    pub creator: Option<String>,
+}
+
+/// The document's `/Configs` in their array's order, each a configuration's
+/// name and creator or `None` for an entry that is no dictionary — the array
+/// a render's configuration index reads, read as far (`MAX_CONFIGURATIONS`,
+/// in the optional-content reader), so the two cannot disagree about an
+/// index.
+pub(crate) fn configurations_of(doc: &CosDocument) -> Vec<Option<LayerConfiguration>> {
+    crate::optional::configurations(doc)
+        .into_iter()
+        .map(|entry| {
+            entry.map(|dict| {
+                let text = |key: &[u8]| {
+                    doc.resolve_key(&dict, doc.intern(key))
+                        .as_string()
+                        .map(|s| decode_text_string(&s.bytes))
+                };
+                LayerConfiguration {
+                    name: text(b"Name"),
+                    creator: text(b"Creator"),
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -166,6 +208,51 @@ trailer\n<< /Size 30 /Root 1 0 R >>\n%%EOF\n"
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[1].name, "");
         assert_eq!(layers[1].reference.num, 12);
+    }
+
+    /// **The configurations are listed in `/Configs` order** (8.11.4.3): each
+    /// entry's `/Name` and `/Creator` decoded as text strings, an entry
+    /// reached by reference read through it, one with neither key listed
+    /// with neither, and one that is no dictionary listed as `None`, so that
+    /// an index read off the list is the index a render takes; a document
+    /// with no `/Configs`, or none that is an array, lists none.
+    #[test]
+    fn the_configurations_are_listed_in_configs_order() {
+        let doc = document(
+            "/OCProperties << /OCGs [10 0 R 11 0 R] /D << >> \
+             /Configs [<< /Name (Print view) /Creator (Producer) >> 20 0 R 7 << >> \
+             << /Name <FEFF00C9> >>] >>",
+            "20 0 obj\n<< /Name (By reference) /BaseState /OFF >>\nendobj\n",
+        );
+        let named = |name: &str, creator: Option<&str>| {
+            Some(LayerConfiguration {
+                name: Some(name.to_string()),
+                creator: creator.map(str::to_string),
+            })
+        };
+        assert_eq!(
+            doc.layer_configurations(),
+            vec![
+                named("Print view", Some("Producer")),
+                named("By reference", None),
+                None,
+                Some(LayerConfiguration {
+                    name: None,
+                    creator: None,
+                }),
+                named("\u{c9}", None),
+            ]
+        );
+        for properties in [
+            "/OCProperties << /OCGs [10 0 R] /D << >> >>",
+            "/OCProperties << /OCGs [10 0 R] /D << >> /Configs 5 >>",
+            "",
+        ] {
+            assert!(
+                document(properties, "").layer_configurations().is_empty(),
+                "{properties}"
+            );
+        }
     }
 
     /// The listing and the renderer read the same configuration.

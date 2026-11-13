@@ -1,14 +1,16 @@
-//! Optional content: which layers a document's default configuration shows
-//! (8.11).
+//! Optional content: which layers a document's configuration shows (8.11).
 //!
 //! A layer is how a file carries a CAD drawing's construction lines, a map's
 //! alternate languages, a proof's annotation overlay. The catalog's
 //! `/OCProperties` `/D` configuration says which of them a reader shows when
-//! it opens the file with no further instruction, and its `/AS` entries how
-//! a view, a print or an export adjusts that (ISO 32000-2 8.11.4.4), for a
-//! render that names its usage; that is the whole of what this module
-//! answers, once a render (`docs/design/render-usage.md`). Toggling a layer
-//! afterwards is a separate feature, and nothing here mutates.
+//! it opens the file with no further instruction, an entry of its `/Configs`
+//! another set a render may choose (8.11.4.3), the chosen configuration's
+//! `/AS` entries how a view, a print or an export adjusts that (ISO 32000-2
+//! 8.11.4.4), for a render that names its usage, and its `/Intent` which
+//! groups count at all (8.11.2.3); that is the whole of what this module
+//! answers, once a render (`docs/design/render-usage.md`,
+//! `docs/design/optional-content-config.md`). Toggling a layer afterwards is
+//! a separate feature, and nothing here mutates.
 //!
 //! # Everything not understood is visible
 //!
@@ -39,13 +41,22 @@ const MAX_EXPRESSION_DEPTH: u32 = 16;
 /// How many members of a `/VE` or `/OCGs` list are examined.
 const MAX_OPERANDS: usize = 256;
 
-/// The document's default optional-content configuration, resolved once,
-/// for one usage or for none.
+/// How many entries of `/OCProperties /Configs` are read: a configuration a
+/// render names past them renders as `/D`, as one past the array does, and
+/// the listing stops there too.
+pub(crate) const MAX_CONFIGURATIONS: usize = MAX_OPERANDS;
+
+/// The states a render's optional-content configuration gives the document's
+/// groups — `/D`'s or a chosen entry of `/Configs` — resolved once, for one
+/// usage or for none.
 ///
 /// Built at bind time from the catalog, not consulted per operator: the
-/// answer for a given group cannot change during a render, whose usage is
-/// fixed before it starts and which no layer-toggle API reaches.
-#[derive(Debug, Default)]
+/// answer for a given group cannot change during a render, whose usage and
+/// configuration are fixed before it starts and which no layer-toggle API
+/// reaches. Two bindings that are equal answer every question alike, which is
+/// what lets a display list recorded under one configuration replay a render
+/// of another whose states are the same.
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct OptionalContent {
     /// Every group the configuration has an opinion about, and that opinion.
     ///
@@ -80,6 +91,28 @@ impl OptionalContent {
     /// `/Event` is the usage's (ISO 32000-2 8.11.4.4,
     /// `docs/design/render-usage.md`). With no usage, the initial states.
     pub(crate) fn bind_for(doc: &CosDocument, usage: Option<Usage>) -> OptionalContent {
+        OptionalContent::bind_with(doc, usage, None)
+    }
+
+    /// [`OptionalContent::bind_for`] in the configuration a render names:
+    /// `None` for `/D`, `Some(i)` for the `i`th entry of `/Configs`, an index
+    /// past them, or an entry that is no dictionary, binding `/D`'s
+    /// (`docs/design/optional-content-config.md`). The states are built in
+    /// one order: `/D`'s initial states — `/BaseState` over every group
+    /// `/OCGs` lists, then its `/ON`, then its `/OFF` (8.11.4.5) — then the
+    /// chosen configuration over them, its `/BaseState` `/ON` or `/OFF`
+    /// setting every listed group and `/Unchanged` leaving each as `/D` set
+    /// it, then its own `/ON` and `/OFF` (Table 99); then the chosen
+    /// configuration's own `/AS` entries for `usage` — a configuration with
+    /// none adjusts nothing, as Table 99 gives `/AS` no default — and last its
+    /// `/Intent` decides which groups count at all (8.11.2.3): a group none of
+    /// whose intents the configuration's set holds has no effect, and reads as
+    /// one the configuration never mentioned does, visible.
+    pub(crate) fn bind_with(
+        doc: &CosDocument,
+        usage: Option<Usage>,
+        configuration: Option<usize>,
+    ) -> OptionalContent {
         #[cfg(test)]
         binds::counted();
         let mut states = BTreeMap::new();
@@ -95,8 +128,8 @@ impl OptionalContent {
         // 8.11.4.2: /OCGs lists every group in the document, and /D is the
         // configuration a reader applies when it opens the file.
         let all = refs_of(doc, properties, b"OCGs");
-        let configuration = doc.resolve_key(properties, doc.intern(b"D"));
-        let default = configuration.as_dict().cloned().unwrap_or_default();
+        let d = doc.resolve_key(properties, doc.intern(b"D"));
+        let default = d.as_dict().cloned().unwrap_or_default();
 
         // 8.11.4.3 Table 101: /BaseState sets every group listed in /OCGs,
         // and /ON and /OFF then name the exceptions. Its default is /ON, so a
@@ -120,11 +153,47 @@ impl OptionalContent {
             states.insert(reference, false);
         }
 
+        // Table 99: the chosen configuration is applied to the document as
+        // opened, so `/Unchanged` leaves each group as `/D` set it; a
+        // `/BaseState` that is missing or none of the three names is `/ON`,
+        // its default; `/OFF` is applied after `/ON`, as `/D`'s is.
+        let chosen = configuration.and_then(|index| configuration_at(doc, properties, index));
+        if let Some(chosen) = &chosen {
+            let base = chosen
+                .get_name(doc.intern(b"BaseState"))
+                .and_then(|n| doc.name_bytes(n));
+            match base.as_deref() {
+                Some(b"Unchanged") => {}
+                Some(b"OFF") => {
+                    for reference in &all {
+                        states.insert(*reference, false);
+                    }
+                }
+                _ => {
+                    for reference in &all {
+                        states.insert(*reference, true);
+                    }
+                }
+            }
+            for reference in refs_of(doc, chosen, b"ON") {
+                states.insert(reference, true);
+            }
+            for reference in refs_of(doc, chosen, b"OFF") {
+                states.insert(reference, false);
+            }
+        }
+        let applied = chosen.as_ref().unwrap_or(&default);
+
         if let Some(usage) = usage {
-            for (reference, on) in recommendations(doc, &default, usage) {
+            for (reference, on) in recommendations(doc, applied, usage) {
                 states.insert(reference, on);
             }
         }
+
+        // 8.11.2.3: "If there is no match, the group shall have no effect on
+        // visibility", and an empty set of intents uses no group at all.
+        let intents = configuration_intents(doc, applied);
+        states.retain(|reference, _| counts(doc, *reference, &intents));
 
         OptionalContent {
             states,
@@ -323,6 +392,122 @@ impl OptionalContent {
             _ => None,
         }
     }
+}
+
+/// Entry `index` of `/OCProperties /Configs`, a configuration dictionary
+/// (8.11.4.3), or `None` past the array, past [`MAX_CONFIGURATIONS`], where
+/// there is no array, and for an entry that is no dictionary — each a
+/// configuration a render renders as `/D`.
+fn configuration_at(doc: &CosDocument, properties: &Dict, index: usize) -> Option<Dict> {
+    if index >= MAX_CONFIGURATIONS {
+        return None;
+    }
+    read_key(doc, properties, b"Configs", |configs| {
+        let entry = configs.as_array()?.get(index)?;
+        read_resolved(doc, entry, |entry| entry.as_dict().cloned())
+    })
+}
+
+/// The entries of `/OCProperties /Configs` in order, each a configuration
+/// dictionary or `None` for one that is not, read [`MAX_CONFIGURATIONS`] in;
+/// empty for a document with no `/Configs`. What a render takes the index
+/// into, so the listing and the render read one array.
+pub(crate) fn configurations(doc: &CosDocument) -> Vec<Option<Dict>> {
+    let Some(catalog) = doc.catalog() else {
+        return Vec::new();
+    };
+    let entry = doc.resolve_key(&catalog, doc.intern(b"OCProperties"));
+    let Some(properties) = entry.as_dict() else {
+        return Vec::new();
+    };
+    read_key(doc, properties, b"Configs", |configs| {
+        configs
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .take(MAX_CONFIGURATIONS)
+                    .map(|entry| read_resolved(doc, entry, |entry| entry.as_dict().cloned()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Whether a render naming configuration `index` finds it: an entry of
+/// `/Configs` that is a configuration dictionary. One that is not renders as
+/// `/D` and is reported (`RenderWarning::UnreadableLayerConfiguration`).
+pub(crate) fn configuration_readable(doc: &CosDocument, index: usize) -> bool {
+    let Some(catalog) = doc.catalog() else {
+        return false;
+    };
+    let entry = doc.resolve_key(&catalog, doc.intern(b"OCProperties"));
+    entry
+        .as_dict()
+        .is_some_and(|properties| configuration_at(doc, properties, index).is_some())
+}
+
+/// A configuration's set of intents (Table 99): every intent for `/All`
+/// among them, and otherwise the names it states.
+#[derive(Debug)]
+enum Intents {
+    /// `/All`: "the set of all intents, including those not yet defined".
+    All,
+    /// The names stated, `/View` where the configuration states none; empty
+    /// for an empty array, which uses no group at all.
+    Named(Vec<Vec<u8>>),
+}
+
+/// The names an `/Intent` value states: a name, or an array's names read
+/// [`MAX_OPERANDS`] in; `None` for anything else, which is the default.
+fn intent_names(doc: &CosDocument, value: &Object) -> Option<Vec<Vec<u8>>> {
+    if let Some(name) = name_of(doc, value) {
+        return Some(vec![name]);
+    }
+    value.as_array().map(|items| {
+        items
+            .iter()
+            .take(MAX_OPERANDS)
+            .filter_map(|item| read_resolved(doc, item, |item| name_of(doc, item)))
+            .collect()
+    })
+}
+
+/// `configuration`'s `/Intent` (Table 99), `/View` by default.
+fn configuration_intents(doc: &CosDocument, configuration: &Dict) -> Intents {
+    match read_key(doc, configuration, b"Intent", |value| {
+        intent_names(doc, value)
+    }) {
+        Some(names) if names.iter().any(|name| name.as_slice() == b"All") => Intents::All,
+        Some(names) => Intents::Named(names),
+        None => Intents::Named(vec![b"View".to_vec()]),
+    }
+}
+
+/// Whether the group at `reference` is used in determining visibility under
+/// `intents` (8.11.2.3): "If one or more of a group's intents is contained in
+/// the current configuration's set of intents, the group shall be used". A
+/// group's `/Intent` is `/View` by default (Table 98), and so is that of a
+/// reference that is no group dictionary.
+fn counts(doc: &CosDocument, reference: ObjRef, intents: &Intents) -> bool {
+    let set = match intents {
+        Intents::All => return true,
+        Intents::Named(set) => set,
+    };
+    if set.is_empty() {
+        return false;
+    }
+    let group = doc
+        .get(reference)
+        .ok()
+        .and_then(|object| {
+            object
+                .as_dict()
+                .map(|dict| read_key(doc, dict, b"Intent", |value| intent_names(doc, value)))
+        })
+        .flatten()
+        .unwrap_or_else(|| vec![b"View".to_vec()]);
+    group.iter().any(|intent| set.contains(intent))
 }
 
 /// The indirect references an array-valued key holds, deduplicated and
@@ -1134,5 +1319,100 @@ trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
         assert_eq!(binds::take(), 1, "a replay, for the cell it draws");
         let _ = list.render(&crate::RenderOptions::default());
         assert_eq!(binds::take(), 1, "another usage, the direct way");
+    }
+
+    /// **A configuration is applied over `/D`'s initial states** (8.11.4.3
+    /// Table 99, RC-14.2): `/BaseState /OFF` sets every listed group off,
+    /// `/Unchanged` keeps `/D`'s and then takes its own `/ON` and `/OFF`, and
+    /// a `/BaseState` none of the three names is `/ON`; an entry that is no
+    /// dictionary, and an index past the array, bind `/D`'s states, and are
+    /// what `configuration_readable` refuses and the listing holds as `None`.
+    #[test]
+    fn a_configuration_is_applied_over_d_s_initial_states() {
+        let doc = document(
+            "/OCProperties << /OCGs [10 0 R 11 0 R] /D << /OFF [11 0 R] >> \
+             /Configs [<< /BaseState /OFF >> \
+             << /BaseState /Unchanged /ON [11 0 R] /OFF [10 0 R] >> \
+             << /BaseState /Wrong >> 4] >>",
+            "",
+        );
+        for (configuration, alpha, beta) in [
+            (None, true, false),
+            (Some(0), false, false),
+            (Some(1), false, true),
+            (Some(2), true, true),
+            (Some(3), true, false),
+            (Some(9), true, false),
+            (Some(usize::MAX), true, false),
+        ] {
+            let oc = OptionalContent::bind_with(&doc, None, configuration);
+            assert_eq!(state(&oc, 10), Some(alpha), "{configuration:?}: Alpha");
+            assert_eq!(state(&oc, 11), Some(beta), "{configuration:?}: Beta");
+        }
+        assert_eq!(
+            OptionalContent::bind_with(&doc, None, Some(3)),
+            OptionalContent::bind(&doc),
+            "an unreadable configuration binds /D's states"
+        );
+        for (index, readable) in [(0, true), (1, true), (2, true), (3, false), (4, false)] {
+            assert_eq!(
+                super::configuration_readable(&doc, index),
+                readable,
+                "{index}"
+            );
+        }
+        assert_eq!(
+            super::configurations(&doc)
+                .iter()
+                .map(Option::is_some)
+                .collect::<Vec<_>>(),
+            vec![true, true, true, false]
+        );
+    }
+
+    /// **A chosen configuration is bound once a render** (RC-14.2): a direct
+    /// render naming one binds once; a list recorded under it binds once, and
+    /// its replay once more, for the tiling cell it interprets as it draws;
+    /// a render of that list under another configuration binds the render's
+    /// states once, to compare them with the list's, and draws with that
+    /// binding — the direct way where they differ, a replay where they agree.
+    #[test]
+    fn a_chosen_configuration_is_bound_once_a_render() {
+        let bytes = String::from_utf8(every_scope_page())
+            .expect("the page is text")
+            .replace(
+                "/OCProperties << /OCGs [10 0 R] ",
+                "/OCProperties << /OCGs [10 0 R] /Configs [<< /BaseState /OFF >> << >>] ",
+            );
+        let doc = crate::Document::open(bytes.into_bytes()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let configuration = |configuration| crate::RenderOptions {
+            layers: crate::LayerOptions { configuration },
+            ..crate::RenderOptions::default()
+        };
+        binds::take();
+        let direct = page.render(&configuration(Some(0)));
+        assert_eq!(binds::take(), 1, "a direct render naming a configuration");
+        let list = page.display_list_with(
+            None,
+            &crate::LayerOptions {
+                configuration: Some(0),
+            },
+        );
+        assert_eq!(binds::take(), 1, "the list's recording");
+        let replayed = list.render(&configuration(Some(0)));
+        assert_eq!(binds::take(), 1, "its replay, for the cell it draws");
+        assert!(replayed.data == direct.data);
+        let other = list.render(&configuration(None));
+        assert_eq!(binds::take(), 1, "another configuration, the direct way");
+        assert!(other.data == page.render(&configuration(None)).data);
+        binds::take();
+        // The second entry, an empty dictionary, shows every group: the
+        // states of `/D`, whose list replays it, binding once to compare.
+        let d_list = page.display_list();
+        binds::take();
+        let alike = d_list.render(&configuration(Some(1)));
+        assert_eq!(binds::take(), 1, "states alike, a replay");
+        assert!(alike.data == page.render(&configuration(None)).data);
     }
 }

@@ -319,6 +319,18 @@ pub enum RenderWarning {
         /// The part of it that is on the page, which is what was rendered.
         applied: PixelRegion,
     },
+    /// The render named an optional-content configuration the document does
+    /// not have — an index past `/OCProperties /Configs`, or of an entry that
+    /// is no dictionary (8.11.4.3) — and drew the default configuration's
+    /// states instead.
+    ///
+    /// Ruling 2 and ruling 10 together: the page is drawn, in the states every
+    /// reader starts from, and the caller is told its choice was not the one
+    /// drawn, since a page in `/D`'s states looks like a page in any other.
+    UnreadableLayerConfiguration {
+        /// The index the render named.
+        index: usize,
+    },
 }
 
 /// What a pattern name paints with (8.7.3).
