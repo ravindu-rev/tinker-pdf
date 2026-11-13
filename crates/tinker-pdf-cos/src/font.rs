@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use tinker_pdf_font::cmap::CMap;
-use tinker_pdf_font::{base_char, base_glyph_name, glyph_name_to_char, BaseEncoding, Standard14};
+use tinker_pdf_font::{
+    base_char, base_glyph_name, glyph_name_to_char, BaseEncoding, BuiltInEncoding, Standard14,
+};
 
 use crate::doc::CosDocument;
 use crate::name::Name;
@@ -466,8 +468,40 @@ impl Font {
         base_glyph_name(self.base_encoding, u8::try_from(code).ok()?)
     }
 
-    /// The advance of one code, in 1/1000 em, and whether it is the
-    /// document's own number.
+    /// The built-in encoding of the symbolic standard font this simple font
+    /// names, Symbol's or ZapfDingbats' (Annex D.5, D.6), by
+    /// [`Standard14::built_in_encoding_of`]: what a face substituted for it is
+    /// read by and its codes are measured by (`docs/design/symbol-faces.md`).
+    /// `None` for every other font, a composite or Type 3 one among them.
+    #[must_use]
+    pub fn built_in_encoding(&self) -> Option<BuiltInEncoding> {
+        if !matches!(self.kind, FontKind::Type1 | FontKind::TrueType) {
+            return None;
+        }
+        Standard14::built_in_encoding_of(&self.base_font)
+    }
+
+    /// The glyph name a code of a Symbol or ZapfDingbats font has: the one the
+    /// document gives it — `/Differences`, then a base encoding the
+    /// dictionary names ([`Font::glyph_name`]) — and otherwise the one the
+    /// font's built-in encoding gives it. `None` for a code none of them
+    /// names, and for every font [`Font::built_in_encoding`] answers `None`
+    /// for.
+    #[must_use]
+    pub fn symbolic_glyph_name(&self, code: u32) -> Option<&str> {
+        let encoding = self.built_in_encoding()?;
+        self.glyph_name(code)
+            .or_else(|| encoding.glyph_name(u8::try_from(code).ok()?))
+    }
+
+    /// The advance of one code, in 1/1000 em, and whether it is exact: the
+    /// document's own number, or a published one.
+    ///
+    /// A simple font with no `/Widths` that names a standard face takes the
+    /// face's published metrics: by character for the twelve text faces, and
+    /// for Symbol and ZapfDingbats by the code's glyph name
+    /// ([`Font::symbolic_glyph_name`]), whose advance Adobe's Core 14 metrics
+    /// give, a name they do not list taking 600, inexact.
     #[must_use]
     pub fn width_of(&self, code: u32) -> (f64, bool) {
         if self.kind == FontKind::Type0 {
@@ -485,6 +519,15 @@ impl Font {
 
         // A standard face supplies its own metrics when the document does not.
         if let Some(std) = self.standard {
+            // Symbol and ZapfDingbats by the code's name, which no text
+            // encoding knows (Annex D.5, D.6); a code with no name keeps the
+            // character reading below.
+            if let Some((w, exact)) = self
+                .symbolic_glyph_name(code)
+                .and_then(|name| std.advance_of_name(name))
+            {
+                return (f64::from(w), exact);
+            }
             if let Some(c) = self.char_of(code) {
                 let (w, exact) = std.advance(c);
                 return (f64::from(w), exact);

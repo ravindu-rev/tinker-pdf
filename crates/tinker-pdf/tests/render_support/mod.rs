@@ -1994,3 +1994,252 @@ pub fn substituted_cjk_page() -> Vec<u8> {
         &content,
     )
 }
+
+// ---- a substituted face for Symbol and ZapfDingbats (FT-03.4) ---------------
+
+/// The glyph names [`symbol_face`] gives its glyphs, glyph 1 on: every name of
+/// Symbol's built-in encoding in code order, then every name of
+/// ZapfDingbats' but `space`, which Symbol's holds already — 376 names, so the
+/// face holds 377 glyphs with its `.notdef`.
+pub fn symbol_face_names() -> Vec<&'static str> {
+    use tinker_pdf_font::BuiltInEncoding;
+
+    let mut names: Vec<&'static str> = BuiltInEncoding::Symbol
+        .codes()
+        .iter()
+        .map(|entry| entry.name)
+        .collect();
+    for entry in BuiltInEncoding::ZapfDingbats.codes() {
+        if !names.contains(&entry.name) {
+            names.push(entry.name);
+        }
+    }
+    names
+}
+
+/// The glyph of [`symbol_face`] named `name`: its place in
+/// [`symbol_face_names`], from 1.
+pub fn symbol_glyph(name: &str) -> u16 {
+    let at = symbol_face_names()
+        .iter()
+        .position(|listed| *listed == name)
+        .unwrap_or_else(|| panic!("{name} is a glyph of the face"));
+    u16::try_from(at + 1).expect("377 glyphs")
+}
+
+/// Glyph `glyph`'s box in [`symbol_face`]: anchored at the pen, `25 × (1 +
+/// glyph % 37)` units wide and `25 × (1 + glyph / 37)` tall, so no two glyphs
+/// are one size; and `.notdef`, glyph 0, a 50-unit square 300 units above the
+/// baseline, where no named glyph's box stands.
+pub fn symbol_box(glyph: u16) -> FaceBox {
+    if glyph == 0 {
+        return [0, 300, 50, 350];
+    }
+    let width = i16::try_from(25 * (1 + glyph % 37)).expect("under 1000 units");
+    let height = i16::try_from(25 * (1 + glyph / 37)).expect("under 1000 units");
+    [0, 0, width, height]
+}
+
+/// A TrueType face of [`symbol_face_names`]' glyphs, each a box of its own
+/// size ([`symbol_box`]): with `with_names` a version 2.0 `post` naming every
+/// glyph by a string of its own, and otherwise a version 3.0 one, which names
+/// none; and, where `symbol_codes` holds any, a `(3,0)` `cmap` mapping each
+/// code at `0xF000` plus the code to its glyph.
+pub fn symbol_face(with_names: bool, symbol_codes: &[(u8, u16)]) -> Vec<u8> {
+    let names = symbol_face_names();
+    let glyph_count = u16::try_from(names.len() + 1).expect("377 glyphs");
+
+    let mut glyf = Vec::new();
+    let mut loca = Vec::with_capacity((usize::from(glyph_count) + 1) * 4);
+    for glyph in 0..glyph_count {
+        loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+        glyf.extend_from_slice(&box_glyph(symbol_box(glyph)));
+    }
+    loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+
+    let mut head = vec![0u8; 54];
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+    head[50..52].copy_from_slice(&1i16.to_be_bytes()); // long loca
+    let mut maxp = 0x0000_5000u32.to_be_bytes().to_vec();
+    maxp.extend_from_slice(&glyph_count.to_be_bytes());
+
+    let version: u32 = if with_names { 0x0002_0000 } else { 0x0003_0000 };
+    let mut post = version.to_be_bytes().to_vec();
+    post.extend_from_slice(&[0; 28]);
+    if with_names {
+        post.extend_from_slice(&glyph_count.to_be_bytes());
+        // `.notdef`, the standard order's first, then a string each.
+        post.extend_from_slice(&0u16.to_be_bytes());
+        for at in 0..names.len() {
+            let index = u16::try_from(258 + at).expect("a string index");
+            post.extend_from_slice(&index.to_be_bytes());
+        }
+        for name in &names {
+            post.push(u8::try_from(name.len()).expect("a short name"));
+            post.extend_from_slice(name.as_bytes());
+        }
+    }
+
+    let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![
+        (b"head", head),
+        (b"loca", loca),
+        (b"glyf", glyf),
+        (b"maxp", maxp),
+        (b"post", post),
+    ];
+    if !symbol_codes.is_empty() {
+        tables.push((b"cmap", symbol_cmap(symbol_codes)));
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    let mut offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, data) in &tables {
+        out.extend_from_slice(*tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len();
+        body.extend_from_slice(data);
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A `cmap` of one `(3,0)` format-4 subtable: a segment for each code, at
+/// `0xF000` plus the code, mapped to its glyph by its delta, and the
+/// terminating segment at `0xFFFF`.
+fn symbol_cmap(codes: &[(u8, u16)]) -> Vec<u8> {
+    let mut mapped: Vec<(u16, u16)> = codes
+        .iter()
+        .map(|(code, glyph)| (0xF000 | u16::from(*code), *glyph))
+        .collect();
+    mapped.sort_unstable();
+    mapped.push((0xFFFF, 0));
+    let segments = mapped.len() as u16;
+    // The largest power of two at most `segments`.
+    let power = 1u16 << (15 - segments.leading_zeros());
+    let search_range = power * 2;
+    let entry_selector = power.trailing_zeros() as u16;
+    let length = 16 + 8 * segments;
+    let mut sub = Vec::new();
+    for value in [
+        4,
+        length,
+        0,
+        segments * 2,
+        search_range,
+        entry_selector,
+        segments * 2 - search_range,
+    ] {
+        sub.extend_from_slice(&value.to_be_bytes());
+    }
+    for (code, _) in &mapped {
+        sub.extend_from_slice(&code.to_be_bytes()); // endCode
+    }
+    sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+    for (code, _) in &mapped {
+        sub.extend_from_slice(&code.to_be_bytes()); // startCode
+    }
+    for (code, glyph) in &mapped {
+        // The terminating segment maps 0xFFFF to glyph 0 by a delta of one.
+        let delta = if *code == 0xFFFF {
+            1
+        } else {
+            glyph.wrapping_sub(*code)
+        };
+        sub.extend_from_slice(&delta.to_be_bytes()); // idDelta
+    }
+    for _ in &mapped {
+        sub.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset
+    }
+    let mut cmap = Vec::new();
+    for value in [0u16, 1, 3, 0] {
+        cmap.extend_from_slice(&value.to_be_bytes());
+    }
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&sub);
+    cmap
+}
+
+/// The size [`symbols_page`] shows its codes at: at 72 dpi a point is a
+/// pixel and 25 of [`symbol_face`]'s 1000 units are one, so every box edge
+/// falls on a pixel's edge.
+pub const SYMBOL_SIZE: f64 = 40.0;
+
+/// The cells of [`symbols_page`]: sixteen columns of cells 40 points wide and
+/// 16 tall, as many rows as the codes fill.
+pub const SYMBOL_COLUMNS: usize = 16;
+/// See [`SYMBOL_COLUMNS`].
+pub const SYMBOL_CELL: (f64, f64) = (40.0, 16.0);
+
+/// What [`symbols_page`] shows, in order: each code of Symbol's built-in
+/// encoding in `/S`, then each of ZapfDingbats' in `/D`, with the name the
+/// encoding gives it.
+pub fn symbol_draws() -> Vec<(&'static str, u8, &'static str)> {
+    use tinker_pdf_font::BuiltInEncoding;
+
+    let mut draws = Vec::new();
+    for (font, encoding) in [
+        ("S", BuiltInEncoding::Symbol),
+        ("D", BuiltInEncoding::ZapfDingbats),
+    ] {
+        for entry in encoding.codes() {
+            draws.push((font, entry.code, entry.name));
+        }
+    }
+    draws
+}
+
+/// The page [`symbols_page`] draws on, in points: [`SYMBOL_COLUMNS`] cells
+/// across and as many rows as [`symbol_draws`] fills.
+pub fn symbols_page_size() -> (f64, f64) {
+    let rows = symbol_draws().len().div_ceil(SYMBOL_COLUMNS);
+    (
+        SYMBOL_CELL.0 * SYMBOL_COLUMNS as f64,
+        SYMBOL_CELL.1 * rows as f64,
+    )
+}
+
+/// Where draw `at` of [`symbols_page`] puts its pen, in the page's
+/// coordinates: two points into its cell and three above the cell's foot.
+pub fn symbol_pen(at: usize) -> (f64, f64) {
+    let (_, height) = symbols_page_size();
+    let (column, row) = (at % SYMBOL_COLUMNS, at / SYMBOL_COLUMNS);
+    (
+        SYMBOL_CELL.0 * column as f64 + 2.0,
+        height - SYMBOL_CELL.1 * (row as f64 + 1.0) + 3.0,
+    )
+}
+
+/// The page `determinism.rs` fingerprints as `substituted_symbols` and
+/// `substitute_fonts.rs` reads: every code of both built-in encodings
+/// ([`symbol_draws`]) in an unembedded Symbol font `/S` and ZapfDingbats font
+/// `/D`, neither with `/Widths`, each code alone at its own pen
+/// ([`symbol_pen`]) at [`SYMBOL_SIZE`], which [`symbol_face`] draws by name
+/// (`docs/design/symbol-faces.md`).
+pub fn symbols_page() -> Vec<u8> {
+    let (width, height) = symbols_page_size();
+    let mut content = String::new();
+    for (at, (font, code, _)) in symbol_draws().into_iter().enumerate() {
+        let (x, y) = symbol_pen(at);
+        content.push_str(&format!(
+            "BT /{font} {SYMBOL_SIZE} Tf {x} {y} Td <{code:02X}> Tj ET\n"
+        ));
+    }
+    raw_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] \
+             /Resources << /Font << /S 5 0 R /D 6 0 R >> >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        raw_stream("", content.as_bytes()),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>".to_vec(),
+    ])
+}

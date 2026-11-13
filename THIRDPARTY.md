@@ -1223,6 +1223,41 @@ The rows were read as the page's index and name cells, the run from index 0,
 `.notdef`, to index 257, `dcroat`, unbroken; no name appears twice in it, and
 `sfnt.rs`'s tests hold the order's first and last names and several between.
 
+### The symbolic standard fonts' advances
+
+Transcribed into `crates/tinker-pdf-font/src/base14.rs` (`SYMBOL_ADVANCES`,
+`DINGBATS_ADVANCES`), as the twelve text faces' advances there are, and not
+vendored: each glyph name the two files' character metrics list and its
+advance, `WX`, sorted by name — 190 rows from `Symbol.afm` and 202 from
+`ZapfDingbats.afm`.
+
+| Table | Source | Revision | Bytes | SHA-256 |
+| --- | --- | --- | ---: | --- |
+| `Core14_AFMs.zip` | Adobe's Core 14 AFM files as Adobe published them at `partners.adobe.com/public/developer/en/pdf/Core14_AFMs.zip`, read through the Internet Archive's copy, <http://web.archive.org/web/20161003133536/http://partners.adobe.com/public/developer/en/pdf/Core14_AFMs.zip> | archived 2016-10-03 | 127 150 | `8c892c3c49553cfd2d2a27c4495b4bb12e2875115be7fd127ed3876df19d8654` |
+| `SYMBOL_ADVANCES` | `Symbol.afm` in that archive | `Version 001.008`, created 1997-05-01 | 9 953 | `3d2128a820375a10de9bc8bf6cfb15ded482c01ca0f95cc0b3277f37ec8bde66` |
+| `DINGBATS_ADVANCES` | `ZapfDingbats.afm` in that archive | `Version 002.000`, created 1997-05-01 | 9 752 | `a32565c90afd1b57a7008fc567b78d95cf1c22adff5e086094d666d88b039859` |
+
+**The files' codes agree with Annex D.** Each file's encoded `C`/`N` pairs are
+Table D.5's 189 and Table D.6's 188, code for code and name for name, as
+`encoding.rs` holds them; `Symbol.afm` lists `apple` with no code, and
+`ZapfDingbats.afm` encodes fourteen names Table D.6 does not, `a85` to `a96`,
+`a205` and `a206`, at 128 to 141. Every name keeps its advance, so a
+`/Differences` array that names one is measured by it.
+
+The archive's `MustRead.html` lets the AFM files be used, copied and
+distributed "for any purpose and without charge, with or without
+modification, provided that all copyright notices are retained" and that they
+are not distributed without it — SPDX `APAFML`, which is not on `deny.toml`'s
+allowlist. So nothing of the files is vendored or reproduced: what was taken
+is their facts, a glyph name and its advance, and the two notices they carry
+are recorded here:
+
+```
+Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems Incorporated. All rights reserved.
+Copyright (c) 1985, 1987, 1988, 1989, 1997 Adobe Systems Incorporated. All Rights Reserved.
+ITC Zapf Dingbats is a registered trademark of International Typeface Corporation.
+```
+
 ## Test fixtures
 
 `testdata/` holds PDFs written by mutool, copied from Tinker; see

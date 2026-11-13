@@ -1123,3 +1123,332 @@ fn without_the_tables_unembedded_cjk_text_is_reported() {
         assert!(!inked(&bitmap, 120.0, pen, CJK_SIZE, DECOY_ONLY));
     }
 }
+
+// ---- Symbol and ZapfDingbats drawn by glyph name (FT-03.4) -------------------
+
+use render_support::{
+    symbol_box, symbol_draws, symbol_face, symbol_glyph, symbol_pen, symbols_page,
+    symbols_page_size, SYMBOL_CELL, SYMBOL_COLUMNS, SYMBOL_SIZE,
+};
+
+/// The device-pixel box `[x0, y0, x1, y1)` the dark pixels of cell `at` of a
+/// [`symbols_page`]-sized page cover, `y` down; `None` for a blank cell.
+fn symbol_ink(bitmap: &tinker_pdf::Bitmap, at: usize) -> Option<[usize; 4]> {
+    let (width, height) = (SYMBOL_CELL.0 as usize, SYMBOL_CELL.1 as usize);
+    let (left, top) = (
+        (at % SYMBOL_COLUMNS) * width,
+        (at / SYMBOL_COLUMNS) * height,
+    );
+    let mut found: Option<[usize; 4]> = None;
+    for y in top..top + height {
+        for x in left..left + width {
+            let pixel = y * bitmap.stride + x * bitmap.components();
+            if bitmap.data.get(pixel).is_some_and(|value| *value < 128) {
+                found = Some(match found {
+                    None => [x, y, x + 1, y + 1],
+                    Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1)],
+                });
+            }
+        }
+    }
+    found
+}
+
+/// The device-pixel box [`symbol_face`]'s glyph `glyph` covers drawn at the
+/// pen of cell `at`, `y` down: every edge on a pixel's edge at
+/// [`SYMBOL_SIZE`].
+fn symbol_expected(at: usize, glyph: u16) -> [usize; 4] {
+    let (x, y) = symbol_pen(at);
+    let (_, height) = symbols_page_size();
+    let [x0, y0, x1, y1] = symbol_box(glyph);
+    let unit = SYMBOL_SIZE / 1000.0;
+    let pixel = |value: f64| value.round() as usize;
+    [
+        pixel(x + f64::from(x0) * unit),
+        pixel(height - (y + f64::from(y1) * unit)),
+        pixel(x + f64::from(x1) * unit),
+        pixel(height - (y + f64::from(y0) * unit)),
+    ]
+}
+
+/// A page of [`symbols_page`]'s size showing each of `draws`, a font resource
+/// and a code, at the pen of its place among them: the fonts, each a resource
+/// name and its dictionary written verbatim, are objects 5 on, and `more`
+/// follows them.
+fn symbolic_page(fonts: &[(&str, &str)], draws: &[(&str, u8)], more: &[Vec<u8>]) -> Vec<u8> {
+    let (width, height) = symbols_page_size();
+    let mut content = String::new();
+    for (at, (font, code)) in draws.iter().enumerate() {
+        let (x, y) = symbol_pen(at);
+        content.push_str(&format!(
+            "BT /{font} {SYMBOL_SIZE} Tf {x} {y} Td <{code:02X}> Tj ET\n"
+        ));
+    }
+    let resources: String = fonts
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _))| format!("/{name} {} 0 R ", index + 5))
+        .collect();
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] \
+             /Resources << /Font << {resources}>> >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        render_support::raw_stream("", content.as_bytes()),
+    ];
+    objects.extend(fonts.iter().map(|(_, dict)| dict.as_bytes().to_vec()));
+    objects.extend(more.iter().cloned());
+    render_support::raw_pdf(&objects)
+}
+
+/// The unembedded Symbol font of the pages below, as the standard 14 are
+/// written: no `/Widths`, no `/Encoding`, no descriptor.
+const SYMBOL: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>";
+
+/// **Every code of both built-in encodings draws its named glyph**
+/// (`docs/design/symbol-faces.md`, FT-03.4). A host face naming all 377 of
+/// its glyphs in its `post` table, each a box of its own size, draws the 189
+/// codes of Symbol's built-in encoding and the 188 of ZapfDingbats', each
+/// code alone at its own pen in an unembedded font: every code inks exactly
+/// the box of the glyph its built-in name names, `space` the one glyph both
+/// encodings name, and nothing is reported.
+#[test]
+fn every_code_of_both_built_in_encodings_draws_its_named_glyph() {
+    let bitmap = drawn_with(symbols_page(), symbol_face(true, &[]));
+    assert!(
+        !reports(&bitmap),
+        "every code reached its glyph: {:?}",
+        bitmap.warnings
+    );
+    let draws = symbol_draws();
+    assert_eq!(draws.len(), 189 + 188, "both encodings' codes");
+    for (at, (font, code, name)) in draws.iter().enumerate() {
+        assert_eq!(
+            symbol_ink(&bitmap, at),
+            Some(symbol_expected(at, symbol_glyph(name))),
+            "/{font} {code:#04x} draws {name}'s box"
+        );
+    }
+}
+
+/// **A `/Differences` name wins over the built-in encoding**, and so does a
+/// base encoding the dictionary names. Symbol's `0x41` is `Alpha` and its
+/// `0x42` `Beta`; renamed `heart` and `a1` — a ZapfDingbats name, which the
+/// face holds too — they draw those, while `0x43`, renamed nothing, keeps
+/// `Chi`. ZapfDingbats encodes nothing at `0x95`, and under a named
+/// `/WinAnsiEncoding` base it is `bullet`, while `0x61` there is `a`, which
+/// the face neither names nor maps: `.notdef`, reported.
+#[test]
+fn a_differences_name_wins_over_the_built_in_encoding() {
+    let page = symbolic_page(
+        &[
+            (
+                "R",
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol \
+                 /Encoding << /Differences [65 /heart /a1] >> >>",
+            ),
+            (
+                "B",
+                "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats \
+                 /Encoding << /BaseEncoding /WinAnsiEncoding >> >>",
+            ),
+        ],
+        &[
+            ("R", 0x41),
+            ("R", 0x42),
+            ("R", 0x43),
+            ("B", 0x95),
+            ("B", 0x61),
+        ],
+        &[],
+    );
+    let bitmap = drawn_with(page, symbol_face(true, &[]));
+    for (at, name) in [(0, "heart"), (1, "a1"), (2, "Chi"), (3, "bullet")] {
+        assert_eq!(
+            symbol_ink(&bitmap, at),
+            Some(symbol_expected(at, symbol_glyph(name))),
+            "draw {at} is {name}"
+        );
+    }
+    assert_eq!(
+        symbol_ink(&bitmap, 4),
+        Some(symbol_expected(4, 0)),
+        "a WinAnsi `a` reaches nothing and draws .notdef"
+    );
+    assert!(reports(&bitmap), "and reports it: {:?}", bitmap.warnings);
+}
+
+/// **An embedded Symbol program keeps its own encoding.** A TrueType font
+/// named Symbol embedding a face whose `(3,0)` `cmap` maps `0x41` to the
+/// glyph named `heart` draws the heart, by its own encoding, though a host
+/// face is on offer; the same face substituted for the same font with
+/// nothing embedded draws `Alpha`, the built-in encoding's name, which the
+/// route asks the face's names for first.
+#[test]
+fn an_embedded_symbol_program_keeps_its_own_encoding() {
+    let heart = symbol_glyph("heart");
+    let program = symbol_face(true, &[(0x41, heart)]);
+    let descriptor = |more: &str| {
+        format!(
+            "<< /Type /FontDescriptor /FontName /Symbol /Flags 4 \
+             /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0 \
+             /CapHeight 700 /StemV 80{more} >>"
+        )
+        .into_bytes()
+    };
+    let font = "<< /Type /Font /Subtype /TrueType /BaseFont /Symbol /FontDescriptor 6 0 R >>";
+    let embedded = symbolic_page(
+        &[("E", font)],
+        &[("E", 0x41)],
+        &[
+            descriptor(" /FontFile2 7 0 R"),
+            render_support::raw_stream("", &program),
+        ],
+    );
+    let bitmap = drawn_with(embedded, symbol_face(true, &[]));
+    assert!(!reports(&bitmap), "{:?}", bitmap.warnings);
+    assert_eq!(
+        symbol_ink(&bitmap, 0),
+        Some(symbol_expected(0, heart)),
+        "the program's own (3,0) reading"
+    );
+
+    let substituted = symbolic_page(&[("E", font)], &[("E", 0x41)], &[descriptor("")]);
+    let bitmap = drawn_with(substituted, program);
+    assert!(!reports(&bitmap), "{:?}", bitmap.warnings);
+    assert_eq!(
+        symbol_ink(&bitmap, 0),
+        Some(symbol_expected(0, symbol_glyph("Alpha"))),
+        "the face substituted is read by the code's name first"
+    );
+}
+
+/// **A face with neither names nor a `cmap` keeps the index reading**, as it
+/// does for a composite font: it has nothing to be read by name through, so
+/// Symbol's `0x41` draws glyph 65, the code as a glyph number, and nothing is
+/// reported.
+#[test]
+fn a_face_with_neither_names_nor_a_cmap_keeps_the_index_reading() {
+    let page = symbolic_page(&[("S", SYMBOL)], &[("S", 0x41)], &[]);
+    let bitmap = drawn_with(page, symbol_face(false, &[]));
+    assert!(!reports(&bitmap), "{:?}", bitmap.warnings);
+    assert_eq!(symbol_ink(&bitmap, 0), Some(symbol_expected(0, 65)));
+}
+
+/// **The `(3,0)` reading stays, last**: a face that names nothing and maps
+/// Symbol's codes through a `(3,0)` subtable alone, as a face that draws a
+/// Symbol page today may, still draws each code its subtable maps, and a code
+/// it does not map draws `.notdef` and reports.
+#[test]
+fn a_face_read_by_its_symbol_subtable_alone_still_draws() {
+    let beta = symbol_glyph("Beta");
+    let page = symbolic_page(&[("S", SYMBOL)], &[("S", 0x41), ("S", 0x43)], &[]);
+    let bitmap = drawn_with(page, symbol_face(false, &[(0x41, beta)]));
+    assert_eq!(
+        symbol_ink(&bitmap, 0),
+        Some(symbol_expected(0, beta)),
+        "what the subtable maps"
+    );
+    assert_eq!(symbol_ink(&bitmap, 1), Some(symbol_expected(1, 0)));
+    assert!(reports(&bitmap), "0x43 is reported: {:?}", bitmap.warnings);
+}
+
+/// **Zapf Chancery is no ZapfDingbats.** A text face of that family is read
+/// as a text face is: its `0x41` through the face's `cmap` by its character,
+/// here the glyph the `(3,0)` subtable maps at `0xF041`, and not the glyph
+/// ZapfDingbats' built-in encoding names at `0x41`.
+#[test]
+fn zapf_chancery_keeps_the_readings_a_text_face_gets() {
+    let heart = symbol_glyph("heart");
+    let page = symbolic_page(
+        &[(
+            "Z",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfChancery-MediumItalic >>",
+        )],
+        &[("Z", 0x41)],
+        &[],
+    );
+    let bitmap = drawn_with(page, symbol_face(true, &[(0x41, heart)]));
+    assert!(!reports(&bitmap), "{:?}", bitmap.warnings);
+    assert_eq!(symbol_ink(&bitmap, 0), Some(symbol_expected(0, heart)));
+}
+
+/// **A code with no `/Widths` takes its name's advance**: each character's
+/// box, as the page's text reads it, is the advance Adobe's Core 14 metrics
+/// give the code's glyph name — Symbol's `Alpha` 722 and `Beta` 667,
+/// ZapfDingbats' `a1` 974 and `a20` 846 — where it was a flat 600; a name
+/// the metrics do not list, here `A` by `/Differences`, keeps 600; and a font
+/// with `/Widths` takes its own.
+#[test]
+fn a_code_with_no_widths_takes_its_names_advance() {
+    let page = render_support::raw_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 400] \
+          /Resources << /Font << /S 5 0 R /D 6 0 R /X 7 0 R /W 8 0 R >> >> \
+          /Contents 4 0 R >>"
+            .to_vec(),
+        render_support::raw_stream(
+            "",
+            b"BT /S 10 Tf 20 300 Td <4142> Tj ET\n\
+              BT /D 10 Tf 20 250 Td <2134> Tj ET\n\
+              BT /X 10 Tf 20 200 Td <4142> Tj ET\n\
+              BT /W 10 Tf 20 150 Td <4142> Tj ET\n",
+        ),
+        SYMBOL.as_bytes().to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Symbol \
+          /Encoding << /Differences [65 /A] >> >>"
+            .to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Symbol \
+          /FirstChar 65 /LastChar 66 /Widths [400 500] >>"
+            .to_vec(),
+    ]);
+    let doc = Document::open(page).expect("it opens");
+    let text = doc
+        .page(0)
+        .expect("a page")
+        .text_with(&tinker_pdf::TextOptions {
+            content_order: true,
+            ..Default::default()
+        });
+    let lines: Vec<(String, Vec<f64>)> = text
+        .lines()
+        .iter()
+        .map(|line| {
+            let read: String = line.chars.iter().map(|c| c.text.as_str()).collect();
+            let widths = line
+                .chars
+                .iter()
+                .map(|c| {
+                    let (x0, _, x1, _) = c.quad.bounds();
+                    x1 - x0
+                })
+                .collect();
+            (read, widths)
+        })
+        .collect();
+    for (read, want, why) in [
+        ("AB", [7.22, 6.67], "Symbol's Alpha and Beta"),
+        ("!4", [9.74, 8.46], "ZapfDingbats' a1 and a20"),
+        (
+            "AB",
+            [6.0, 6.67],
+            "a name the metrics do not list, then Beta",
+        ),
+        ("AB", [4.0, 5.0], "the font's own /Widths"),
+    ] {
+        assert!(
+            lines.iter().any(|(text, widths)| text == read
+                && widths.len() == want.len()
+                && widths
+                    .iter()
+                    .zip(want)
+                    .all(|(width, want)| (width - want).abs() < 1e-6)),
+            "{why}: {lines:?}"
+        );
+    }
+}

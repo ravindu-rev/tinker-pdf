@@ -227,6 +227,14 @@ advances for the printable ASCII range exactly, with the aliases every viewer
 honours (Arial for Helvetica, TimesNewRoman for Times). Above 0x7F a width is
 approximated from the glyph's base letter, and the approximation is reported
 by the flag `Standard14::advance` returns beside the width, never silently.
+Symbol and ZapfDingbats are measured by glyph name: `cos::Font::width_of`
+lays a code of a font named either out with the advance `Symbol.afm` or
+`ZapfDingbats.afm` gives the code's name (`Standard14::advance_of_name`) —
+the name `/Differences` gives it, else a base encoding the dictionary names,
+else the built-in encoding's (`Font::symbolic_glyph_name`) — and a name the
+metrics do not list takes 600, reported as inexact. A name is ZapfDingbats
+there only where it names dingbats (`Standard14::built_in_encoding_of`), so
+Zapf Chancery, a text face, keeps its 600.
 
 **The symbolic fonts' built-in encodings** (Annex D.5, D.6). Symbol and
 ZapfDingbats each have an encoding of their own, and `BuiltInEncoding` holds
@@ -243,8 +251,13 @@ first — `Sfnt::glyph_for_name`, which reads every version of `post` over the
 gives, or a CFF charset — then the name's Unicode value through the face's
 Unicode subtable (`Sfnt::glyph_for_unicode`), then the code through a (3,0)
 subtable at `0xF000` (`Sfnt::glyph_for_symbol_code`), glyph 0 being no answer
-at any step. The facade does not ask it: a substituted Symbol or ZapfDingbats
-face is read by its `cmap` alone (*The host seam*, below).
+at any step. The facade draws a substituted face for a simple font named
+Symbol or ZapfDingbats through it, each code by the name
+`Font::symbolic_glyph_name` gives it, and a code no step reaches draws
+`.notdef` and reports `UnreadableFont`; a face with no glyph names — a CFF
+charset or a `post` of version 1.0, 2.0 or 2.5 — and no `cmap` keeps the
+index reading, as it does for a composite font. An embedded program keeps its
+own encoding and is never asked by name.
 `crates/tinker-pdf-font/tests/symbol_census.rs` counts, for H-94, what each
 candidate face the design names reaches by it.
 
@@ -1490,6 +1503,22 @@ corpora already vendored here. So every name stays on the list.
   tables in `tinker-pdf-font`'s `predefined.rs`, read from the vendored CMap
   text, inverted once (`the_collection_is_inverted_once`), and reached by
   nothing without `cmap-predefined`.
+- Symbol and ZapfDingbats drawn and measured by glyph name:
+  `substitute_fonts.rs`'s
+  `every_code_of_both_built_in_encodings_draws_its_named_glyph` — every code
+  of both built-in encodings, alone in its cell, inks the box of the glyph its
+  name names in a host face whose `post` names 376 glyphs, each a box of its
+  own size — `a_differences_name_wins_over_the_built_in_encoding`,
+  `an_embedded_symbol_program_keeps_its_own_encoding`,
+  `a_face_with_neither_names_nor_a_cmap_keeps_the_index_reading`,
+  `a_face_read_by_its_symbol_subtable_alone_still_draws`,
+  `zapf_chancery_keeps_the_readings_a_text_face_gets` and
+  `a_code_with_no_widths_takes_its_names_advance`; `base14.rs`'s
+  `the_symbolic_faces_advances_are_read_by_name` and
+  `only_symbol_and_dingbats_names_take_a_built_in_encoding`;
+  `crates/tinker-pdf-cos/tests/fonts.rs`'s
+  `a_symbolic_standard_fonts_codes_take_their_names_advances`; and the
+  `substituted_symbols` page `determinism.rs` fingerprints.
 - `crates/tinker-pdf-font/tests/cjk_coverage.rs` — the CJK census above,
   `#[ignore]`d, printing `RAN`/`SKIPPED`. Its instruments run in every
   `cargo test`: each collection's supplements against the `/CIDCount`s the

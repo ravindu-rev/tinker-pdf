@@ -97,8 +97,11 @@ exported from the crate root.
 
 ### Which name a code has
 
-A simple font whose `/BaseFont` `Standard14::from_base_font` reads as Symbol
-or ZapfDingbats gives a code its glyph name, first match wins:
+A simple font — Type 1 or TrueType — whose `/BaseFont` names Symbol or
+ZapfDingbats (`Standard14::built_in_encoding_of`: `Standard14::from_base_font`'s
+reading, a name it reads as ZapfDingbats counting only where it names
+dingbats, so Zapf Chancery, a text face, is neither) gives a code its glyph
+name, first match wins:
 
 1. the name `/Differences` gives the code;
 2. the name the base encoding the `/Encoding` entry names gives it, because
@@ -107,8 +110,9 @@ or ZapfDingbats gives a code its glyph name, first match wins:
 3. the name the font's built-in encoding gives it, Table D.5 or D.6;
 4. none: the code is undefined.
 
-Steps 1 and 2 are `cos::Font::glyph_name` as it stands, whose `None` already
-means the document named nothing; step 3 is `BuiltInEncoding::glyph_name`.
+Steps 1 and 2 are `cos::Font::glyph_name`, whose `None` means the document
+named nothing; step 3 is `BuiltInEncoding::glyph_name`; and the three are
+`cos::Font::symbolic_glyph_name`.
 
 ### The route: a name to a substitute face's glyph
 
@@ -161,8 +165,17 @@ pub fn substitute_glyph(
 `Sfnt::glyph_for_name` reads every version of `post` over the standard
 order, Apple's, from the TrueType Reference Manual's `post` chapter, so a
 name a face stores by its index — `space`, `Delta`, `summation` — reaches
-its glyph as one the table spells out does. FT-03.4 calls `substitute_glyph`
-from the facade's substitute addressing in `resources.rs`.
+its glyph as one the table spells out does. The facade's substitute
+addressing, `substituted_glyph` in `resources.rs`, calls `substitute_glyph`
+for every code of such a font, ahead of the readings a text face gets; a code
+it reaches nothing for draws glyph 0 and reports `UnreadableFont`.
+
+**A face with nothing to be read by keeps the index reading.** A face with
+no glyph names — no CFF charset, and no `post` of version 1.0, 2.0 or 2.5 —
+and no `cmap` offers the route nothing, and is read as a composite font's
+face of that shape is (`docs/design/fallback-faces.md`): the code as the
+glyph number. That is the synthetic face `corpus-run --fonts synthetic`
+measures with, so its bar measures what it did.
 
 ### Precedence: the document's program and the document's names
 
@@ -185,8 +198,10 @@ give **the code's name**, in 1/1000 em, taken as `base14.rs` takes the other
 twelve faces': the same name the route draws, so a `/Differences` name moves
 its width with it. A name the metrics do not list keeps today's 600, reported
 as inexact. The substitute face's own advances are not used: they are
-another face's. FT-03.4 transcribes the two tables into `base14.rs`, read by
-name, and `cos::Font::width_of` asks them through the code's name.
+another face's. `base14.rs` holds the two files' every name and advance,
+sorted by name (`Standard14::advance_of_name`), and `cos::Font::width_of`
+asks them through `symbolic_glyph_name`; a code no name reaches keeps the
+character reading, and a font Zapf Chancery names keeps its 600.
 
 ### The census
 
@@ -275,9 +290,16 @@ TINKER_SYMBOL_FACES=<directory> cargo test -p tinker-pdf-font --test symbol_cens
    size, inks each code's named box),
    `a_differences_name_wins_over_the_built_in_encoding`,
    `an_embedded_symbol_program_keeps_its_own_encoding`,
-   `a_code_with_no_widths_takes_its_names_advance`; `base14.rs`'s
-   `the_symbolic_faces_advances_are_read_by_name`; `determinism.rs` pins the
-   page, reproduced under `wasm32-wasip1` before it is committed.
+   `a_code_with_no_widths_takes_its_names_advance`, and beside them
+   `a_face_with_neither_names_nor_a_cmap_keeps_the_index_reading`,
+   `a_face_read_by_its_symbol_subtable_alone_still_draws` and
+   `zapf_chancery_keeps_the_readings_a_text_face_gets`; `base14.rs`'s
+   `the_symbolic_faces_advances_are_read_by_name` and
+   `only_symbol_and_dingbats_names_take_a_built_in_encoding`;
+   `tinker-pdf-cos`'s `tests/fonts.rs`
+   `a_symbolic_standard_fonts_codes_take_their_names_advances`; and
+   `determinism.rs` pins the page as `substituted_symbols`, its value a run's
+   on Linux, Windows and `wasm32-wasip1`.
 4. **FT-03.5, on H-94's first answer.** Exit: `substitute_fonts.rs`'s
    `a_bundled_build_draws_every_code_of_both_built_in_encodings` (every code
    draws the glyph the face's own tables give its name, read in the test, with

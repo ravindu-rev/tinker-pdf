@@ -23,7 +23,9 @@ use tinker_pdf_filters::{
     MAX_JBIG2_WORK_MULTIPLE,
 };
 use tinker_pdf_font::cmap::collection_character;
-use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
+use tinker_pdf_font::{
+    base_glyph_name, cff::Cff, glyf, substitute_glyph, BaseEncoding, Outline, Sfnt, Type1,
+};
 use tinker_pdf_pool::{Executor, Parallelism};
 use tinker_pdf_raster::canvas::{Canvas, Color};
 use tinker_pdf_raster::fill::Mask;
@@ -6572,7 +6574,14 @@ impl PageResources {
                 if let Some(table) = sfnt.table(0x4346_4620) {
                     if let Some(cff) = Cff::parse(table) {
                         let glyph = if substituted {
-                            self.substituted_glyph(Some(&sfnt), Some(&cff), font, name, code)
+                            self.substituted_glyph(
+                                &program,
+                                Some(&sfnt),
+                                Some(&cff),
+                                font,
+                                name,
+                                code,
+                            )
                         } else {
                             self.cff_selection(&cff, font, name, code).glyph
                         };
@@ -6583,7 +6592,7 @@ impl PageResources {
             }
 
             let glyph = if substituted {
-                self.substituted_glyph(Some(&sfnt), None, font, name, code)
+                self.substituted_glyph(&program, Some(&sfnt), None, font, name, code)
             } else {
                 self.sfnt_selection(&sfnt, font, name, code)?.glyph
             };
@@ -6595,7 +6604,7 @@ impl PageResources {
 
         if let Some(cff) = Cff::parse(&program) {
             let glyph = if substituted {
-                self.substituted_glyph(None, Some(&cff), font, name, code)
+                self.substituted_glyph(&program, None, Some(&cff), font, name, code)
             } else {
                 self.cff_selection(&cff, font, name, code).glyph
             };
@@ -6732,8 +6741,19 @@ impl PageResources {
     /// reported, never the code as a glyph index; a face with no `cmap` keeps
     /// that last resort. A CFF-flavoured face is read by the names the font's
     /// encoding gives, as an embedded CFF is ([`cff_glyph`]).
+    ///
+    /// A simple font named Symbol or ZapfDingbats
+    /// ([`cos_font::Font::built_in_encoding`]) takes neither: each code is
+    /// read by its glyph name — the document's, else the built-in encoding's
+    /// — through [`substitute_glyph`]'s route over `program`: the face's own
+    /// names, the name's Unicode value through its Unicode subtable, then the
+    /// code through a `(3,0)` subtable (`docs/design/symbol-faces.md`); and a
+    /// code none reaches draws `.notdef`, reported. A face with no names to
+    /// be read by and no `cmap` keeps the readings above, as it does for a
+    /// composite font.
     fn substituted_glyph(
         &self,
+        program: &[u8],
         sfnt: Option<&Sfnt<'_>>,
         cff: Option<&Cff<'_>>,
         font: &cos_font::Font,
@@ -6744,6 +6764,23 @@ impl PageResources {
         const CMAP: u32 = u32::from_be_bytes(*b"cmap");
         let mapped = sfnt.filter(|sfnt| sfnt.table(CMAP).is_some());
         if font.kind() != cos_font::FontKind::Type0 {
+            if let Some(encoding) = font.built_in_encoding() {
+                // A face holding glyph names — a CFF charset, or a `post`
+                // that names glyphs — or a `cmap` is read by the route.
+                let named = cff.is_some() || sfnt.is_some_and(names_glyphs);
+                if named || mapped.is_some() {
+                    let reached = u8::try_from(code).ok().and_then(|byte| {
+                        substitute_glyph(program, encoding, font.symbolic_glyph_name(code), byte)
+                    });
+                    return reached.map_or_else(
+                        || {
+                            self.report_unresolved_glyph(name);
+                            0
+                        },
+                        |(glyph, _)| glyph,
+                    );
+                }
+            }
             if let Some(cff) = cff {
                 return self.cff_selection(cff, font, name, code).glyph;
             }
@@ -9443,6 +9480,17 @@ fn simple_glyph_by_cmap(sfnt: &Sfnt<'_>, font: &cos_font::Font, code: u32) -> Op
     } else {
         by_text().or_else(by_code)
     }
+}
+
+/// Whether an sfnt's `post` table names its glyphs: versions 1.0, 2.0 and 2.5
+/// give each glyph a name, and version 3.0, like a face with no `post`, names
+/// none — the face a route by glyph name has nothing in to read.
+fn names_glyphs(sfnt: &Sfnt<'_>) -> bool {
+    /// `post`.
+    const POST: u32 = u32::from_be_bytes(*b"post");
+    sfnt.table(POST)
+        .and_then(|post| post.get(..4))
+        .is_some_and(|version| matches!(version, [0, 1, 0, 0] | [0, 2, 0, 0] | [0, 2, 0x50, 0]))
 }
 
 /// `glyph`'s vertical form in `sfnt` (`docs/design/fallback-faces.md`): the

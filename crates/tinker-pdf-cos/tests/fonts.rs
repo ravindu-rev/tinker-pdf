@@ -1195,3 +1195,89 @@ fn a_composite_fonts_character_collection_is_read() {
         "a simple font has none, whatever its dictionary holds"
     );
 }
+
+/// **A symbolic standard font's codes take their names' advances**
+/// (`docs/design/symbol-faces.md`, FT-03.4): with no `/Widths`, a code of a
+/// font named Symbol or ZapfDingbats is laid out with the advance Adobe's
+/// Core 14 metrics give its glyph name, exact, where it took a flat 600 —
+/// the name `/Differences` gives it, else the one a named base encoding
+/// gives it, else the built-in encoding's — and a name the metrics do not
+/// list keeps 600, inexact. A code no name reaches keeps the character
+/// reading, and `/Widths` wins over all of it. Zapf Chancery, which the
+/// looser standard-14 match reads as ZapfDingbats, keeps the 600 it had.
+#[test]
+fn a_symbolic_standard_fonts_codes_take_their_names_advances() {
+    let width = |dict: &str, code: u32| {
+        let doc = document(&[dict.as_bytes().to_vec()]);
+        font_at(&doc, 3).width_of(code)
+    };
+    let symbol = "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>";
+    assert_eq!(width(symbol, 0x41), (722.0, true), "Alpha");
+    assert_eq!(width(symbol, 0x42), (667.0, true), "Beta");
+    assert_eq!(width(symbol, 0x20), (250.0, true), "space");
+    assert_eq!(width(symbol, 0xA0), (750.0, true), "Euro");
+
+    let dingbats = "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>";
+    assert_eq!(width(dingbats, 0x21), (974.0, true), "a1");
+    assert_eq!(width(dingbats, 0x34), (846.0, true), "a20");
+    assert_eq!(width(dingbats, 0x20), (278.0, true), "space");
+
+    let renamed = "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol \
+                   /Encoding << /Differences [65 /heart /A] >> >>";
+    assert_eq!(
+        width(renamed, 0x41),
+        (753.0, true),
+        "heart, by /Differences"
+    );
+    assert_eq!(
+        width(renamed, 0x42),
+        (600.0, false),
+        "A, which Symbol.afm does not list"
+    );
+    assert_eq!(
+        width(renamed, 0x43),
+        (722.0, true),
+        "Chi, the built-in name"
+    );
+
+    let based = "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats \
+                 /Encoding << /BaseEncoding /WinAnsiEncoding >> >>";
+    assert_eq!(
+        width(based, 0x95),
+        (600.0, false),
+        "WinAnsi's bullet, which ZapfDingbats.afm does not list"
+    );
+    assert_eq!(
+        width(based, 0x41),
+        (600.0, false),
+        "WinAnsi's A, which ZapfDingbats.afm does not list"
+    );
+    assert_eq!(
+        width(based, 0x20),
+        (278.0, true),
+        "WinAnsi's space, which ZapfDingbats.afm lists"
+    );
+
+    let widths = "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol \
+                  /FirstChar 65 /LastChar 65 /Widths [400] >>";
+    assert_eq!(width(widths, 0x41), (400.0, true), "the document's own");
+
+    let chancery = "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfChancery-MediumItalic >>";
+    assert_eq!(width(chancery, 0x41), (600.0, false), "a text face");
+
+    let symbol = document(&[symbol.as_bytes().to_vec()]);
+    let symbol = font_at(&symbol, 3);
+    assert_eq!(
+        symbol.built_in_encoding(),
+        Some(tinker_pdf_font::BuiltInEncoding::Symbol)
+    );
+    assert_eq!(symbol.symbolic_glyph_name(0x41), Some("Alpha"));
+    assert_eq!(
+        symbol.symbolic_glyph_name(0x7F),
+        None,
+        "a code it does not encode"
+    );
+    let chancery = document(&[chancery.as_bytes().to_vec()]);
+    assert_eq!(font_at(&chancery, 3).built_in_encoding(), None);
+    assert_eq!(font_at(&chancery, 3).symbolic_glyph_name(0x41), None);
+}

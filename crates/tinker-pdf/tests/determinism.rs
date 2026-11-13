@@ -69,7 +69,7 @@ mod render_support;
 use render_support::{
     axial_page, bilevel_page, blend_grid_page, curvy_font, fallback_face,
     image_page as analytic_image_page, ink, intents_page, jpeg_minified_page, jpx_minified_page,
-    pen_page, radial_page, substituted_cjk_page,
+    pen_page, radial_page, substituted_cjk_page, symbol_face, symbols_page,
 };
 
 /// How a fixture's document is opened, and which of its pages is hashed.
@@ -100,6 +100,12 @@ enum Open {
     /// provider: a page whose composite fonts embed nothing, drawn by a
     /// substituted face read by character (`docs/design/fallback-faces.md`).
     Substituted,
+    /// `Document::open_with`, page 0, with [`symbol_face`] — built in
+    /// `render_support`, a box of its own size for each glyph its `post`
+    /// table names — as the host's provider: a page whose Symbol and
+    /// ZapfDingbats fonts embed nothing, drawn by each code's glyph name
+    /// (`docs/design/symbol-faces.md`).
+    Symbolic,
 }
 
 /// A named page: how to build it, and the least ink it may draw.
@@ -144,6 +150,12 @@ fn substitute_face() -> Arc<SimpleFontProvider> {
     Arc::new(SimpleFontProvider::new(fallback_face(true, true)).substituting_symbolic())
 }
 
+/// The provider [`Open::Symbolic`] opens with: [`symbol_face`], naming its
+/// glyphs, answering symbolic requests too.
+fn symbolic_face() -> Arc<SimpleFontProvider> {
+    Arc::new(SimpleFontProvider::new(symbol_face(true, &[])).substituting_symbolic())
+}
+
 /// A fixture's document, opened as [`Open`] says, and the page it hashes.
 fn opened(fixture: &Fixture) -> (Document, u32) {
     match fixture.open {
@@ -171,6 +183,17 @@ fn opened(fixture: &Fixture) -> (Document, u32) {
                 Document::open_with(
                     (fixture.build)(),
                     &OpenOptions::default().with_fonts(substitute_face()),
+                )
+                .expect("it opens"),
+            ),
+            0,
+        ),
+        Open::Symbolic => (
+            converted(
+                "opened",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::default().with_fonts(symbolic_face()),
                 )
                 .expect("it opens"),
             ),
@@ -2610,6 +2633,20 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Substituted,
         least_ink: 1_000,
     },
+    // Unembedded Symbol and ZapfDingbats fonts drawn by a substituted face,
+    // each code by its glyph name (FT-03.4): every code of both built-in
+    // encodings, 377, alone in its cell, through the face's `post` names
+    // (`render_support::symbols_page`), each glyph a box of its own size. The
+    // boxes cover about 39 000 of the page's 245 760 pixels and the floor is
+    // half: a code that draws `.notdef` paints four pixels where its box
+    // painted up to 407, and one drawn as another glyph keeps its ink, which
+    // is the hash's.
+    Fixture {
+        name: "substituted_symbols",
+        build: symbols_page,
+        open: Open::Symbolic,
+        least_ink: 19_000,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2861,6 +2898,10 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // the inverted `Uni*-UTF32` tables, the face's `cmap` and its `vert`, on
     // every target.
     ("substituted_cjk", ""),
+    // A substituted face drawing every code of Symbol's and ZapfDingbats'
+    // built-in encodings by its glyph name, through the face's `post`
+    // names, on every target.
+    ("substituted_symbols", ""),
 ];
 
 #[test]
@@ -3248,6 +3289,7 @@ fn svg_output_is_stable_across_targets() {
         ("jpx_minified", ""),
         ("intents", ""),
         ("substituted_cjk", ""),
+        ("substituted_symbols", ""),
     ];
     assert_eq!(
         expected.len(),
@@ -3635,6 +3677,7 @@ const MARK_BOXES: &[(&str, &str)] = &[
     ("jpx_minified", ""),
     ("intents", ""),
     ("substituted_cjk", ""),
+    ("substituted_symbols", ""),
 ];
 
 /// **The page analysis's box is the same number on every target.** The box is
@@ -4137,6 +4180,19 @@ fn opened_under(fixture: &Fixture, limits: CacheLimits) -> (Document, u32) {
                     (fixture.build)(),
                     &OpenOptions::default()
                         .with_fonts(substitute_face())
+                        .with_cache_limits(limits),
+                )
+                .expect("it opens"),
+            ),
+            0,
+        ),
+        Open::Symbolic => (
+            converted(
+                "opened under a budget",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::default()
+                        .with_fonts(symbolic_face())
                         .with_cache_limits(limits),
                 )
                 .expect("it opens"),
