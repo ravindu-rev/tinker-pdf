@@ -40,13 +40,17 @@
 //! returned, and one that fails is [`RsaRefusal::FaultDetected`], carrying
 //! nothing of it.
 //!
-//! **The scheme.** [`RsaPrivateKey::sign_pkcs1_v15`] is RSASSA-PKCS1-V1_5-SIGN
-//! (§8.2.1): the same EMSA-PKCS1-v1_5 block the verifier builds and compares
-//! whole, from the same per-digest `DigestInfo` prefixes, signed by the
-//! private operation. The digest is the caller's choice — any SHA-2 member,
-//! never SHA-1 — and the signature is a function of the key and the digest
-//! alone, so blinding moves nothing and the same request signs to the same
-//! bytes on every target.
+//! **The schemes.** [`RsaPrivateKey::sign_pkcs1_v15`] is
+//! RSASSA-PKCS1-V1_5-SIGN (§8.2.1): the same EMSA-PKCS1-v1_5 block the
+//! verifier builds and compares whole, from the same per-digest `DigestInfo`
+//! prefixes, signed by the private operation. [`RsaPrivateKey::sign_pss`] is
+//! RSASSA-PSS-SIGN (§8.1.1): EMSA-PSS-ENCODE (§9.1.1) with MGF1 and the salt
+//! the caller passes, or [`RsaPrivateKey::sign_pss_drawing_salt`] with one
+//! drawn from the caller's source, laid out exactly as the verifier reads it
+//! back, `emBits` one less than the modulus's bit length. The digest is the
+//! caller's choice — any SHA-2 member, never SHA-1 — and a signature is a
+//! function of the key, the digest and, for PSS, the salt, so blinding moves
+//! nothing and the same request signs to the same bytes on every target.
 //!
 //! # The whole encoding is compared, and that is the point
 //!
@@ -336,6 +340,14 @@ pub enum RsaRefusal {
     /// A digest that is verified and never signed with: SHA-1
     /// ([`DigestAlgorithm::signs`]).
     DigestNotForSigning,
+    /// An RSASSA-PSS salt that is not the length its parameters declare —
+    /// the length a verifier reads it by.
+    SaltLength {
+        /// `PssParameters::salt_length`.
+        expected: usize,
+        /// The salt handed over.
+        found: usize,
+    },
 }
 
 /// The check an RSA private key failed when it was built.
@@ -876,6 +888,136 @@ impl RsaPrivateKey {
         self.private_operation(&representative, entropy)
     }
 
+    /// RSASSA-PSS-SIGN (RFC 8017 §8.1.1) over a digest the caller has already
+    /// taken with `parameters.hash`, with the salt the caller passes:
+    /// EMSA-PSS-ENCODE (§9.1.1) with MGF1 over `parameters.mask_hash` and
+    /// `emBits = modBits - 1`, signed by the private operation. A signature
+    /// made under `parameters` verifies under the same parameters
+    /// ([`RsaPublicKey::verify_pss`]).
+    ///
+    /// The salt is the caller's (ruling 20): a fixed one, as published vectors
+    /// fix theirs, or one drawn from the caller's own source by
+    /// [`RsaPrivateKey::sign_pss_drawing_salt`]. Nothing here draws one
+    /// behind the caller's back, and with the salt fixed the signature is
+    /// fixed too: blinding moves nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`RsaRefusal::DigestNotForSigning`] when `parameters.hash` is SHA-1 —
+    /// MGF1 may run over any digest, its output being a mask rather than what
+    /// the signature binds — [`RsaRefusal::DigestLength`],
+    /// [`RsaRefusal::SaltLength`], [`RsaRefusal::ModulusTooShort`] for a salt
+    /// the encoding has no room for (§9.1.1 step 3), and the private
+    /// operation's own refusals.
+    pub fn sign_pss(
+        &self,
+        parameters: PssParameters,
+        digest: &[u8],
+        salt: &[u8],
+        entropy: &mut dyn EntropySource,
+    ) -> Result<Vec<u8>, RsaRefusal> {
+        if !parameters.hash.signs() {
+            return Err(RsaRefusal::DigestNotForSigning);
+        }
+        self.pss_signature(parameters, digest, salt, entropy)
+    }
+
+    /// Digests `message` with `parameters.hash` and signs the digest by
+    /// [`RsaPrivateKey::sign_pss`].
+    ///
+    /// # Errors
+    ///
+    /// As [`RsaPrivateKey::sign_pss`]; a digest that is not signed with is
+    /// refused before the message is read.
+    pub fn sign_pss_message(
+        &self,
+        parameters: PssParameters,
+        message: &[u8],
+        salt: &[u8],
+        entropy: &mut dyn EntropySource,
+    ) -> Result<Vec<u8>, RsaRefusal> {
+        if !parameters.hash.signs() {
+            return Err(RsaRefusal::DigestNotForSigning);
+        }
+        let digest = parameters.hash.digest(message);
+        self.sign_pss(parameters, digest.as_bytes(), salt, entropy)
+    }
+
+    /// [`RsaPrivateKey::sign_pss`] with a salt of `parameters.salt_length`
+    /// octets drawn from the caller's source — the random salt RSASSA-PSS
+    /// means, from the source the caller chose. The salt is held as a secret
+    /// until it is used, and wiped after.
+    ///
+    /// # Errors
+    ///
+    /// As [`RsaPrivateKey::sign_pss`], and [`RsaRefusal::EntropyUnavailable`]
+    /// when the source cannot fill the salt. A salt the encoding has no room
+    /// for is refused before anything is drawn.
+    pub fn sign_pss_drawing_salt(
+        &self,
+        parameters: PssParameters,
+        digest: &[u8],
+        entropy: &mut dyn EntropySource,
+    ) -> Result<Vec<u8>, RsaRefusal> {
+        if !parameters.hash.signs() {
+            return Err(RsaRefusal::DigestNotForSigning);
+        }
+        if digest.len() != parameters.hash.output_len() {
+            return Err(RsaRefusal::DigestLength {
+                expected: parameters.hash.output_len(),
+                found: digest.len(),
+            });
+        }
+        let em_len = self.public.modulus.bits().saturating_sub(1).div_ceil(8);
+        let needed = parameters
+            .hash
+            .output_len()
+            .checked_add(parameters.salt_length)
+            .and_then(|sum| sum.checked_add(2));
+        if needed.is_none_or(|needed| needed > em_len) {
+            return Err(RsaRefusal::ModulusTooShort);
+        }
+        let mut salt = SecretBytes::new(parameters.salt_length);
+        if !entropy.fill(salt.as_mut_slice()) {
+            return Err(RsaRefusal::EntropyUnavailable);
+        }
+        self.pss_signature(parameters, digest, salt.as_slice(), entropy)
+    }
+
+    /// RSASSA-PSS-SIGN without the check that the message digest is one this
+    /// module signs with, which every public entry point makes first.
+    fn pss_signature(
+        &self,
+        parameters: PssParameters,
+        digest: &[u8],
+        salt: &[u8],
+        entropy: &mut dyn EntropySource,
+    ) -> Result<Vec<u8>, RsaRefusal> {
+        if digest.len() != parameters.hash.output_len() {
+            return Err(RsaRefusal::DigestLength {
+                expected: parameters.hash.output_len(),
+                found: digest.len(),
+            });
+        }
+        if salt.len() != parameters.salt_length {
+            return Err(RsaRefusal::SaltLength {
+                expected: parameters.salt_length,
+                found: salt.len(),
+            });
+        }
+        // §8.1.1 step 1: EM is emLen octets for emBits = modBits - 1, so
+        // OS2IP(EM) is below 2^(modBits - 1), and below n.
+        let em_bits = self.public.modulus.bits().saturating_sub(1);
+        let mut em = [0u8; MAX_RSA_BYTES];
+        let em = em
+            .get_mut(..em_bits.div_ceil(8))
+            .ok_or(RsaRefusal::ModulusTooWide)?;
+        emsa_pss_encode(parameters, digest, salt, em_bits, em)?;
+        let representative =
+            Uint::<RSA_LIMBS>::from_be_bytes(em).ok_or(RsaRefusal::ModulusTooWide)?;
+        self.private_operation(&representative, entropy)
+    }
+
     /// Digests `message` with `algorithm` and signs the digest by
     /// [`RsaPrivateKey::sign_pkcs1_v15`].
     ///
@@ -1149,6 +1291,76 @@ fn mgf1_xor(hash: DigestAlgorithm, seed: &[u8], out: &mut [u8]) {
         }
         counter = counter.wrapping_add(1);
     }
+}
+
+/// EMSA-PSS-ENCODE (RFC 8017 §9.1.1), over a digest already taken and a salt
+/// the caller chose, into `em`, which is emLen octets.
+///
+/// Step numbers are the RFC's. Every offset is computed from `em.len()`, the
+/// digest length and the salt's: the block is laid out exactly as
+/// [`emsa_pss_verify`] reads it back.
+fn emsa_pss_encode(
+    parameters: PssParameters,
+    m_hash: &[u8],
+    salt: &[u8],
+    em_bits: usize,
+    em: &mut [u8],
+) -> Result<(), RsaRefusal> {
+    let h_len = parameters.hash.output_len();
+    let s_len = salt.len();
+    let em_len = em.len();
+
+    // Step 3: emLen >= hLen + sLen + 2.
+    let needed = h_len
+        .checked_add(s_len)
+        .and_then(|sum| sum.checked_add(2))
+        .ok_or(RsaRefusal::ModulusTooShort)?;
+    if em_len < needed {
+        return Err(RsaRefusal::ModulusTooShort);
+    }
+
+    // Steps 5 and 6: H = Hash(0x00 × 8 || mHash || salt).
+    let mut prime = [0u8; 8 + 64 + MAX_RSA_BYTES];
+    if !put(&mut prime, 8, m_hash) || !put(&mut prime, 8 + h_len, salt) {
+        return Err(RsaRefusal::ModulusTooWide);
+    }
+    let h = parameters
+        .hash
+        .digest(prime.get(..8 + h_len + s_len).unwrap_or(&[]));
+
+    // Steps 7 and 8: DB = PS || 0x01 || salt, emLen - hLen - 1 octets, PS
+    // the emLen - sLen - hLen - 2 zero octets in front.
+    let db_len = em_len - h_len - 1;
+    let ps_len = em_len - s_len - h_len - 2;
+    for byte in em.iter_mut() {
+        *byte = 0;
+    }
+    if let Some(separator) = em.get_mut(ps_len) {
+        *separator = 0x01;
+    }
+    if !put(em, ps_len + 1, salt) {
+        return Err(RsaRefusal::ModulusTooWide);
+    }
+
+    // Steps 9 and 10: maskedDB = DB ⊕ MGF(H, emLen - hLen - 1).
+    if let Some(db) = em.get_mut(..db_len) {
+        mgf1_xor(parameters.mask_hash, h.as_bytes(), db);
+    }
+
+    // Step 11: the leftmost 8·emLen - emBits bits of maskedDB cleared.
+    let unused = 8 * em_len - em_bits;
+    if let Some(lead) = em.first_mut() {
+        *lead &= 0xffu8.checked_shr(unused as u32).unwrap_or(0);
+    }
+
+    // Step 12: EM = maskedDB || H || 0xbc.
+    if !put(em, db_len, h.as_bytes()) {
+        return Err(RsaRefusal::ModulusTooWide);
+    }
+    if let Some(trailer) = em.last_mut() {
+        *trailer = 0xbc;
+    }
+    Ok(())
 }
 
 /// EMSA-PSS-VERIFY (RFC 8017 §9.1.2), over a digest already taken.
@@ -3136,5 +3348,265 @@ mod tests {
             }
         }
         assert_eq!(made, 75, "fifteen keys, five digests each");
+    }
+
+    // ---- RSASSA-PSS signing ------------------------------------------------
+
+    /// RSA Laboratories' sixty PSS signatures, made again: each message under
+    /// its key with its published salt gives the published signature octet
+    /// for octet, through the scheme's own encoding and private operation.
+    /// The file signs with SHA-1, which the public entry points refuse to
+    /// sign with, so this goes through the path behind that one check — and
+    /// it is the file that carries the 1 025- to 1 031-bit moduli, where
+    /// `emBits = modBits - 1` leaves EM an octet short of `k` or its first
+    /// octet partly outside the encoding, which CAVP's whole-octet keys never
+    /// reach.
+    #[test]
+    fn the_pss_encoding_makes_rsa_laboratories_signatures() {
+        let mut entropy = Stream::new(0x7073_73);
+        let mut made = 0usize;
+        for (index, example) in pss_examples().into_iter().enumerate() {
+            let [d, p, q, dp, dq, q_inv] = example.private.clone();
+            let vector = VectorKey {
+                parts: [
+                    example.modulus.clone(),
+                    example.exponent.clone(),
+                    d,
+                    p,
+                    q,
+                    dp,
+                    dq,
+                    q_inv,
+                ],
+                signatures: Vec::new(),
+            };
+            let key = vector.key();
+            for (number, (message, salt, signature)) in example.signatures.iter().enumerate() {
+                let parameters = PssParameters {
+                    hash: DigestAlgorithm::Sha1,
+                    mask_hash: DigestAlgorithm::Sha1,
+                    salt_length: salt.len(),
+                };
+                let digest = DigestAlgorithm::Sha1.digest(message);
+                assert_eq!(
+                    key.pss_signature(parameters, digest.as_bytes(), salt, &mut entropy)
+                        .as_ref(),
+                    Ok(signature),
+                    "example {}.{}",
+                    index + 1,
+                    number + 1
+                );
+                assert_eq!(
+                    key.sign_pss(parameters, digest.as_bytes(), salt, &mut entropy),
+                    Err(RsaRefusal::DigestNotForSigning)
+                );
+                made += 1;
+            }
+        }
+        assert_eq!(made, 60);
+    }
+
+    /// The encoder lays a block out as the verifier reads it back, for every
+    /// SHA-2 digest under the message-hash and two other mask hashes, salts
+    /// from empty to the longest the key has room for, and keys whose
+    /// `emBits` is one short of an octet and a whole octet over one: each
+    /// signature verifies under its own parameters, and is refused under a
+    /// mask hash it was not made with or a salt one octet off.
+    #[test]
+    fn a_pss_signature_verifies_under_its_own_parameters_only() {
+        let mut entropy = Stream::new(0x6d67_6631);
+        let keys = pss_vector_keys();
+        for index in [1usize, 3, 9] {
+            let key = keys.get(index).expect("a key").key();
+            let em_len = (key.modulus_bits() - 1).div_ceil(8);
+            for hash in EVERY_DIGEST.into_iter().filter(|digest| digest.signs()) {
+                let h_len = hash.output_len();
+                let longest = em_len - h_len - 2;
+                for mask_hash in [hash, DigestAlgorithm::Sha256, DigestAlgorithm::Sha1] {
+                    for salt_length in [0, 1, h_len.min(longest), longest] {
+                        let parameters = PssParameters {
+                            hash,
+                            mask_hash,
+                            salt_length,
+                        };
+                        let salt: Vec<u8> = (0..salt_length).map(|i| i as u8 ^ 0x5c).collect();
+                        let signature = key
+                            .sign_pss_message(parameters, b"tinker-pdf", &salt, &mut entropy)
+                            .expect("the key has room");
+                        let public = key.public_key();
+                        assert_eq!(
+                            public.verify_pss_message(parameters, b"tinker-pdf", &signature),
+                            Ok(()),
+                            "{parameters:?} under a {}-bit key",
+                            key.modulus_bits()
+                        );
+                        assert!(public
+                            .verify_pss_message(parameters, b"tinker-pdf!", &signature)
+                            .is_err());
+                        let other_mask = if mask_hash == DigestAlgorithm::Sha512 {
+                            DigestAlgorithm::Sha384
+                        } else {
+                            DigestAlgorithm::Sha512
+                        };
+                        assert_eq!(
+                            public.verify_pss_message(
+                                PssParameters {
+                                    mask_hash: other_mask,
+                                    ..parameters
+                                },
+                                b"tinker-pdf",
+                                &signature
+                            ),
+                            Err(RsaRefusal::EncodingMismatch),
+                            "{parameters:?} unmasked with {other_mask:?}"
+                        );
+                        for wrong in [salt_length.wrapping_sub(1), salt_length + 1] {
+                            let read = public.verify_pss_message(
+                                PssParameters {
+                                    salt_length: wrong,
+                                    ..parameters
+                                },
+                                b"tinker-pdf",
+                                &signature,
+                            );
+                            assert!(
+                                read.is_err(),
+                                "{parameters:?} read with a {wrong}-octet salt"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every refusal names itself: SHA-1 as the message digest at all three
+    /// entry points, whatever else is wrong; a digest or a salt of the wrong
+    /// length; a salt one octet longer than the key has room for, refused
+    /// before anything is drawn even at a length no allocation could hold;
+    /// and a source that cannot fill the salt.
+    #[test]
+    fn pss_refusals_are_named() {
+        let vector = pss_vector_keys().remove(0);
+        let key = vector.key();
+        let mut entropy = Stream::new(2);
+        let sha256 = PssParameters {
+            hash: DigestAlgorithm::Sha256,
+            mask_hash: DigestAlgorithm::Sha256,
+            salt_length: 32,
+        };
+        let digest = DigestAlgorithm::Sha256.digest(b"abc");
+        let sha1 = PssParameters {
+            hash: DigestAlgorithm::Sha1,
+            ..sha256
+        };
+        assert_eq!(
+            key.sign_pss(sha1, &[], &[], &mut Exhausted),
+            Err(RsaRefusal::DigestNotForSigning)
+        );
+        assert_eq!(
+            key.sign_pss_message(sha1, b"abc", &[0; 32], &mut entropy),
+            Err(RsaRefusal::DigestNotForSigning)
+        );
+        assert_eq!(
+            key.sign_pss_drawing_salt(sha1, &[], &mut Exhausted),
+            Err(RsaRefusal::DigestNotForSigning)
+        );
+        // MGF1 over SHA-1 is a mask, and signs.
+        let mgf1_sha1 = PssParameters {
+            mask_hash: DigestAlgorithm::Sha1,
+            ..sha256
+        };
+        assert!(key
+            .sign_pss(mgf1_sha1, digest.as_bytes(), &[7; 32], &mut entropy)
+            .is_ok());
+
+        assert_eq!(
+            key.sign_pss(sha256, &[0; 20], &[0; 32], &mut entropy),
+            Err(RsaRefusal::DigestLength {
+                expected: 32,
+                found: 20
+            })
+        );
+        assert_eq!(
+            key.sign_pss(sha256, digest.as_bytes(), &[0; 31], &mut entropy),
+            Err(RsaRefusal::SaltLength {
+                expected: 32,
+                found: 31
+            })
+        );
+        // A 1024-bit key's emLen is 128: a SHA-256 digest leaves room for a
+        // salt of 94 octets and no more.
+        for (salt_length, fits) in [(94usize, true), (95, false)] {
+            let parameters = PssParameters {
+                salt_length,
+                ..sha256
+            };
+            let salt = vec![0x11; salt_length];
+            let signed = key.sign_pss(parameters, digest.as_bytes(), &salt, &mut entropy);
+            assert_eq!(signed.is_ok(), fits, "a {salt_length}-octet salt");
+            if !fits {
+                assert_eq!(signed, Err(RsaRefusal::ModulusTooShort));
+                assert_eq!(
+                    key.sign_pss_drawing_salt(parameters, digest.as_bytes(), &mut Exhausted),
+                    Err(RsaRefusal::ModulusTooShort),
+                    "refused before the source is drawn from"
+                );
+            }
+        }
+        let huge = PssParameters {
+            salt_length: usize::MAX,
+            ..sha256
+        };
+        assert_eq!(
+            key.sign_pss_drawing_salt(huge, digest.as_bytes(), &mut Exhausted),
+            Err(RsaRefusal::ModulusTooShort)
+        );
+        assert_eq!(
+            key.sign_pss_drawing_salt(sha256, digest.as_bytes(), &mut Exhausted),
+            Err(RsaRefusal::EntropyUnavailable)
+        );
+    }
+
+    /// A drawn salt is the caller's bytes and nothing else: the signature made
+    /// with a salt drawn from a source is the one made by passing the bytes
+    /// that source gives first, and it verifies; another source draws
+    /// another salt and another signature.
+    #[test]
+    fn a_drawn_salt_is_the_first_thing_the_source_gives() {
+        let vector = pss_vector_keys().remove(9);
+        let parameters = PssParameters {
+            hash: DigestAlgorithm::Sha512,
+            mask_hash: DigestAlgorithm::Sha512,
+            salt_length: 64,
+        };
+        let digest = DigestAlgorithm::Sha512.digest(b"a salt from the caller");
+
+        let drawn = vector
+            .key()
+            .sign_pss_drawing_salt(parameters, digest.as_bytes(), &mut Stream::new(40))
+            .expect("signs");
+        let mut salt = vec![0u8; 64];
+        assert!(Stream::new(40).fill(&mut salt));
+        let passed = vector
+            .key()
+            .sign_pss(parameters, digest.as_bytes(), &salt, &mut Stream::new(41))
+            .expect("signs");
+        assert_eq!(drawn, passed);
+        let key = vector.key();
+        assert_eq!(
+            key.public_key()
+                .verify_pss(parameters, digest.as_bytes(), &drawn),
+            Ok(())
+        );
+        let other = key
+            .sign_pss_drawing_salt(parameters, digest.as_bytes(), &mut Stream::new(42))
+            .expect("signs");
+        assert_ne!(other, drawn);
+        assert_eq!(
+            key.public_key()
+                .verify_pss(parameters, digest.as_bytes(), &other),
+            Ok(())
+        );
     }
 }

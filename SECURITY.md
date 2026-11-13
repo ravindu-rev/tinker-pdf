@@ -57,10 +57,12 @@ scrutiny, so here is the honest framing:
   with a factor drawn from the caller's entropy (refreshed every thirty-two
   operations and squared between), and checked with the public exponent
   before a result leaves, so a miscomputed half is refused rather than
-  returned; RSASSA-PKCS1-v1_5 signing over any SHA-2 digest the caller names
-  (never SHA-1) is built on it. Every secret operand — the primes, the exponents, the blinding
-  factor — takes `bignum`'s second path: a fixed-window exponentiation that
-  reads the whole window table every window and reduces without a branch,
+  returned; RSASSA-PKCS1-v1_5 and RSASSA-PSS signing over any SHA-2 digest
+  the caller names (never SHA-1) are built on it, a PSS salt passed by the
+  caller or drawn from the caller's source. Every secret operand — the
+  primes, the exponents, the blinding factor — takes `bignum`'s second path:
+  a fixed-window exponentiation that reads the whole window table every
+  window and reduces without a branch,
   its operation counts held equal over every exponent shape by a test. Key
   material sits on the heap and is zeroised when dropped, and prints as
   `[redacted]`. There is no key generation and no PKCS#8 or PKCS#12 parsing.
@@ -89,10 +91,11 @@ scrutiny, so here is the honest framing:
   The *signature* primitives are the other exception, and they are gated on
   CAVP itself: `SigVer15` vectors for RSA (moduli of 1024 to 4096 bits
   crossed with SHA-1/224/256/384/512, valid ones and ones that must be
-  refused, forged paddings among them), `SigGen15` vectors for RSA signing
-  (every SHA-2 digest, reproduced octet for octet) beside Wycheproof's
-  generation vectors, `SigVer` vectors and `PKV` points for ECDSA, and RFC
-  6979's appendix A.2 signatures. The vector files are committed under
+  refused, forged paddings among them), `SigGen15` and `SigGenPSS` vectors
+  for RSA signing (every SHA-2 digest, reproduced octet for octet, PSS with
+  the salts the files print) beside Wycheproof's generation vectors,
+  `SigVer` vectors and `PKV` points for ECDSA, and RFC 6979's appendix A.2
+  signatures. The vector files are committed under
   `crates/tinker-pdf-crypto/tests/data/` with their provenance in each CAVP
   file's header and in `THIRDPARTY.md`.
 - **Password comparison is constant-time.**

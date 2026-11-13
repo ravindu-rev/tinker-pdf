@@ -1,5 +1,6 @@
 //! `RSASSA-PSS-params` (RFC 4055 §3.1, RFC 8017 A.2.3): what an
-//! `id-RSASSA-PSS` algorithm identifier says about how to verify.
+//! `id-RSASSA-PSS` algorithm identifier says about how to verify, read
+//! ([`parameters`]) and written for a signer ([`encode`]).
 //!
 //! PKCS#1 v1.5 names everything in its OID — `sha256WithRSAEncryption` is the
 //! whole of the instruction. PSS names one OID for every variant and puts the
@@ -46,11 +47,21 @@
 //! There is no second reading of the value for an attacker to choose between,
 //! which is the thing the DER rule exists to prevent everywhere else in this
 //! crate.
+//!
+//! # What is written
+//!
+//! [`encode`] writes what a signer puts beside an RSASSA-PSS signature, in
+//! DER: every field equal to its default left out (X.690 §11.5) — so the
+//! defaults alone are the empty `SEQUENCE` — the trailer field never written,
+//! `trailerFieldBC` being the only one, and each hash identifier with the
+//! `NULL` parameters RFC 4055 §2.1 gives `sha256Identifier` and its siblings.
+//! It writes the digests [`parameters`] reads and no other: anything it
+//! wrote, this module reads back as the same three choices.
 
 use tinker_pdf_crypto::rsa::PssParameters;
 
 use crate::cms::{digest_algorithm, DigestAlgorithm};
-use crate::der::{Budget, DerError, Limits, Tag, Tlv};
+use crate::der::{tlv, Budget, DerError, Limits, Tag, Tlv};
 use crate::oid;
 use crate::x509::AlgorithmIdentifier;
 
@@ -109,7 +120,8 @@ const LIMITS: Limits = Limits::new(8, 64);
 
 /// Reads the parameters of an `id-RSASSA-PSS` algorithm identifier — a
 /// `SignerInfo`'s `signatureAlgorithm` or a certificate's — into the three
-/// choices [`tinker_pdf_crypto::RsaPublicKey::verify_pss`] takes.
+/// choices [`tinker_pdf_crypto::RsaPublicKey::verify_pss`] takes, which are
+/// the three [`tinker_pdf_crypto::RsaPrivateKey::sign_pss`] signs under.
 ///
 /// # Errors
 ///
@@ -169,6 +181,76 @@ pub fn parameters(identifier: &AlgorithmIdentifier<'_>) -> Result<PssParameters,
     }
     fields.finish()?;
     Ok(parameters)
+}
+
+/// Writes the `AlgorithmIdentifier` a signer puts beside an RSASSA-PSS
+/// signature made under `parameters`: `id-RSASSA-PSS` and an
+/// `RSASSA-PSS-params` in DER, which [`parameters`] reads back as the same
+/// three choices.
+///
+/// # Errors
+///
+/// [`PssError::UnknownHash`], naming its OID, for a digest the CMS reader
+/// does not name — SHA-224, SHA-512/224 or SHA-512/256 — in either slot:
+/// written, it would be an identifier this crate refuses to read back.
+pub fn encode(parameters: &PssParameters) -> Result<Vec<u8>, PssError> {
+    let mut fields = Vec::new();
+    if parameters.hash != DigestAlgorithm::Sha1 {
+        fields.extend(tlv(0xa0, &hash_identifier(parameters.hash)?));
+    }
+    if parameters.mask_hash != DigestAlgorithm::Sha1 {
+        let mut generator = tlv(0x06, oid::MGF1.as_bytes());
+        generator.extend(hash_identifier(parameters.mask_hash)?);
+        fields.extend(tlv(0xa1, &tlv(0x30, &generator)));
+    }
+    if parameters.salt_length != 20 {
+        fields.extend(tlv(0xa2, &integer(parameters.salt_length)));
+    }
+    let mut identifier = tlv(0x06, oid::RSASSA_PSS.as_bytes());
+    identifier.extend(tlv(0x30, &fields));
+    Ok(tlv(0x30, &identifier))
+}
+
+/// A `HashAlgorithm` as RFC 4055 §2.1 writes one beside PSS: the digest's
+/// OID and `NULL`.
+fn hash_identifier(digest: DigestAlgorithm) -> Result<Vec<u8>, PssError> {
+    let identifier = match digest {
+        DigestAlgorithm::Sha1 => oid::ID_SHA1,
+        DigestAlgorithm::Sha256 => oid::ID_SHA256,
+        DigestAlgorithm::Sha384 => oid::ID_SHA384,
+        DigestAlgorithm::Sha512 => oid::ID_SHA512,
+        // NIST's hashAlgs arcs 4 to 6, which the reader does not name.
+        DigestAlgorithm::Sha224 => return Err(unnamed("2.16.840.1.101.3.4.2.4")),
+        DigestAlgorithm::Sha512_224 => return Err(unnamed("2.16.840.1.101.3.4.2.5")),
+        DigestAlgorithm::Sha512_256 => return Err(unnamed("2.16.840.1.101.3.4.2.6")),
+    };
+    let mut content = tlv(0x06, identifier.as_bytes());
+    content.extend(tlv(0x05, &[]));
+    Ok(tlv(0x30, &content))
+}
+
+fn unnamed(dotted: &str) -> PssError {
+    PssError::UnknownHash {
+        oid: dotted.to_string(),
+    }
+}
+
+/// A non-negative `INTEGER` in DER: its minimal octets, with a zero in front
+/// where the top bit would otherwise read as a sign (X.690 §8.3).
+fn integer(value: usize) -> Vec<u8> {
+    let octets = value.to_be_bytes();
+    let skip = octets
+        .iter()
+        .take_while(|&&octet| octet == 0)
+        .count()
+        .min(octets.len() - 1);
+    let significant = octets.get(skip..).unwrap_or(&[]);
+    let mut content = Vec::with_capacity(significant.len() + 1);
+    if significant.first().is_some_and(|&lead| lead & 0x80 != 0) {
+        content.push(0);
+    }
+    content.extend_from_slice(significant);
+    tlv(0x02, &content)
 }
 
 /// A `HashAlgorithm` — an `AlgorithmIdentifier` whose parameters are `NULL`
@@ -345,6 +427,103 @@ mod tests {
         // Fields out of order are not the grammar.
         let order = identifier("A2 03 02 01 20 A0 0B 30 09 06 05 2B 0E 03 02 1A 05 00");
         assert!(matches!(read(&order), Err(PssError::Der(_))));
+    }
+
+    fn pss(hash: DigestAlgorithm, mask_hash: DigestAlgorithm, salt_length: usize) -> PssParameters {
+        PssParameters {
+            hash,
+            mask_hash,
+            salt_length,
+        }
+    }
+
+    /// RFC 4055 §6's `rSASSA-PSS-SHA256-Params` written: the same octets the
+    /// reader's test holds, the salt and trailer omitted as their defaults.
+    #[test]
+    fn rfc_4055s_sha_256_parameter_set_is_written() {
+        let expected = identifier(
+            "A0 0F 30 0D 06 09 60 86 48 01 65 03 04 02 01 05 00
+             A1 1C 30 1A 06 09 2A 86 48 86 F7 0D 01 01 08
+                30 0D 06 09 60 86 48 01 65 03 04 02 01 05 00",
+        );
+        let written = encode(&pss(DigestAlgorithm::Sha256, DigestAlgorithm::Sha256, 20));
+        assert_eq!(written.as_ref(), Ok(&expected));
+    }
+
+    /// Every default at once is the empty `SEQUENCE`; a salt as long as the
+    /// digest is the shape the committed `rsa-pss.pdf` fixture carries.
+    #[test]
+    fn the_defaults_and_the_common_shape_are_written_as_der_writes_them() {
+        assert_eq!(
+            encode(&pss(DigestAlgorithm::Sha1, DigestAlgorithm::Sha1, 20)),
+            Ok(identifier(""))
+        );
+        assert_eq!(
+            encode(&pss(DigestAlgorithm::Sha256, DigestAlgorithm::Sha256, 32)),
+            Ok(identifier(
+                "A0 0F 30 0D 06 09 60 86 48 01 65 03 04 02 01 05 00
+                 A1 1C 30 1A 06 09 2A 86 48 86 F7 0D 01 01 08
+                    30 0D 06 09 60 86 48 01 65 03 04 02 01 05 00
+                 A2 03 02 01 20"
+            ))
+        );
+        // A salt of zero, and one whose top bit needs a zero in front.
+        assert_eq!(
+            encode(&pss(DigestAlgorithm::Sha1, DigestAlgorithm::Sha1, 0)),
+            Ok(identifier("A2 03 02 01 00"))
+        );
+        assert_eq!(
+            encode(&pss(DigestAlgorithm::Sha1, DigestAlgorithm::Sha1, 128)),
+            Ok(identifier("A2 04 02 02 00 80"))
+        );
+    }
+
+    /// Whatever is written reads back as written: every pair of the four
+    /// digests the reader names, under salts across the INTEGER's sign and
+    /// length boundaries.
+    #[test]
+    fn every_parameter_set_reads_back_as_written() {
+        let digests = [
+            DigestAlgorithm::Sha1,
+            DigestAlgorithm::Sha256,
+            DigestAlgorithm::Sha384,
+            DigestAlgorithm::Sha512,
+        ];
+        let mut read_back = 0usize;
+        for hash in digests {
+            for mask_hash in digests {
+                for salt_length in [0usize, 1, 20, 32, 64, 127, 128, 255, 256, 65_535, 1 << 31] {
+                    let parameters = pss(hash, mask_hash, salt_length);
+                    let written = encode(&parameters).expect("a digest the reader names");
+                    assert_eq!(read(&written), Ok(parameters), "{parameters:?}");
+                    read_back += 1;
+                }
+            }
+        }
+        assert_eq!(read_back, 4 * 4 * 11);
+    }
+
+    /// A digest the reader would refuse is not written, in either slot, and
+    /// the refusal is the reader's own, naming the OID.
+    #[test]
+    fn a_digest_the_reader_does_not_name_is_not_written() {
+        for (digest, dotted) in [
+            (DigestAlgorithm::Sha224, "2.16.840.1.101.3.4.2.4"),
+            (DigestAlgorithm::Sha512_224, "2.16.840.1.101.3.4.2.5"),
+            (DigestAlgorithm::Sha512_256, "2.16.840.1.101.3.4.2.6"),
+        ] {
+            let refused = Err(PssError::UnknownHash { oid: dotted.into() });
+            assert_eq!(encode(&pss(digest, DigestAlgorithm::Sha256, 32)), refused);
+            assert_eq!(encode(&pss(DigestAlgorithm::Sha256, digest, 32)), refused);
+        }
+        // And the reader refuses the first of them by the same OID.
+        let sha224 = identifier("A0 0D 30 0B 06 09 60 86 48 01 65 03 04 02 04");
+        assert_eq!(
+            read(&sha224),
+            Err(PssError::UnknownHash {
+                oid: "2.16.840.1.101.3.4.2.4".into()
+            })
+        );
     }
 
     /// Every truncation of a real parameter block is a refusal, not a panic

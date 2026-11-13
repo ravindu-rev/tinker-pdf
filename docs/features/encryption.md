@@ -355,7 +355,13 @@ factoring — and every SHA-2 signature of the Wycheproof files, octet for
 octet, refusing their SHA-1 groups by name
 (`cavp_pkcs1_v15_generation_vectors_pass`,
 `wycheproof_rsa_signature_vectors_pass`); in `rsa.rs` it reproduces CAVP
-`SigVer15`'s positives and signs the textbook twelve-bit key by hand. The
+`SigVer15`'s positives and signs the textbook twelve-bit key by hand.
+RSASSA-PSS signing reproduces every signature of the `SigGenPSS` files under
+its published key with the salt the file prints, the empty salt among them
+(`cavp_pss_generation_vectors_pass_with_their_salts`), and in `rsa.rs` RSA
+Laboratories' sixty, on the odd-length keys where `emBits` leaves EM short of
+`k`; every signature it makes verifies under its own parameters and no
+other, a drawn salt is the source's first bytes, and every refusal is named. The
 verifier's `SigVer15` and `SigVerPSS` runs take every digest group,
 SHA-224's among them, `DigestAlgorithm` naming the whole SHA-2 family.
 

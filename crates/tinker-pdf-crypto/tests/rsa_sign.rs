@@ -16,7 +16,7 @@ use tinker_pdf_crypto::bignum::{Modulus, Uint};
 use tinker_pdf_crypto::rsa::RSA_LIMBS;
 use tinker_pdf_crypto::sha2::sha256;
 use tinker_pdf_crypto::{
-    DigestAlgorithm, EntropySource, RsaPrivateComponents, RsaPrivateKey, RsaRefusal,
+    DigestAlgorithm, EntropySource, PssParameters, RsaPrivateComponents, RsaPrivateKey, RsaRefusal,
 };
 
 fn unhex(text: &str) -> Vec<u8> {
@@ -1163,4 +1163,73 @@ fn wycheproof_rsa_signature_vectors_pass() {
         refused, 16,
         "the SHA-1 groups of the 1024- and 2048-bit files"
     );
+}
+
+// ---- RSASSA-PSS (SG-01.6) ------------------------------------------------------
+
+/// SG-01.6's exit: all 120 of the `SigGenPSS` files' signatures, made by the
+/// engine from each message under its published key with the salt the file
+/// prints, octet for octet — ten for each of SHA-224, SHA-256, SHA-384 and
+/// SHA-512 under a 2048- and a 3072-bit key, with salts of the fifteen to
+/// sixty-two octets the CAVS header gives each, and ten for each of
+/// SHA-512/224 and SHA-512/256 with the empty salt. MGF1 runs over the
+/// message digest, as every record of the files does. Each published
+/// signature also verifies under the same parameters.
+#[test]
+fn cavp_pss_generation_vectors_pass_with_their_salts() {
+    let mut entropy = Stream::new(0x5347_2d30_312e_36);
+    let mut by_digest = BTreeMap::<&str, usize>::new();
+    let mut empty_salts = 0usize;
+    for (name, text, _) in [CAVP[2], CAVP[3]] {
+        let declared = declared_salt_lengths(text);
+        for vector in cavp_keys(text) {
+            let key = private_key(&cavp_parts(&vector));
+            assert_eq!(key.modulus_bits(), vector.bits, "{name}");
+            for record in &vector.records {
+                let salt = salt_of(record, vector.bits, &declared);
+                let hash = digest_named(record.digest);
+                let parameters = PssParameters {
+                    hash,
+                    mask_hash: hash,
+                    salt_length: salt.len(),
+                };
+                assert_eq!(
+                    key.sign_pss_message(parameters, &record.message, &salt, &mut entropy)
+                        .as_ref(),
+                    Ok(&record.signature),
+                    "{name}: {} with a {}-octet salt under the {}-bit key",
+                    record.digest,
+                    salt.len(),
+                    vector.bits
+                );
+                assert_eq!(
+                    key.public_key().verify_pss_message(
+                        parameters,
+                        &record.message,
+                        &record.signature
+                    ),
+                    Ok(()),
+                    "{name}: {} verifies",
+                    record.digest
+                );
+                if salt.is_empty() {
+                    empty_salts += 1;
+                }
+                *by_digest.entry(record.digest).or_default() += 1;
+            }
+        }
+    }
+    println!("RAN CAVP SigGenPSS: {by_digest:?}, {empty_salts} with the empty salt");
+    let expected: BTreeMap<&str, usize> = [
+        ("SHA-224", 20),
+        ("SHA-256", 20),
+        ("SHA-384", 20),
+        ("SHA-512", 20),
+        ("SHA-512/224", 20),
+        ("SHA-512/256", 20),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(by_digest, expected);
+    assert_eq!(empty_salts, 40, "every SHA-512/224 and SHA-512/256 record");
 }

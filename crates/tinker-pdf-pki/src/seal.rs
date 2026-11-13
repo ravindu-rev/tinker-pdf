@@ -1,13 +1,13 @@
 //! Sealing content to certificates: CMS `EnvelopedData` (RFC 5652 §6),
-//! **written** — the one structure this crate encodes as well as reads.
+//! **written** — one of the two structures this crate encodes as well as
+//! reads, beside `RSASSA-PSS-params` ([`crate::pss::encode`]).
 //!
 //! A public-key encrypted document puts the key that opens it inside an
 //! `EnvelopedData` for each group of recipients (ISO 32000-2 7.6.5), and
 //! writing one is the public half of key transport: a fresh content key,
 //! encrypted to each recipient's RSA key with RSAES-PKCS1-v1_5, and the
 //! content encrypted under it with AES-256-CBC. No private key is involved
-//! anywhere, which is why this belongs beside the reader rather than outside
-//! the engine with the signing key.
+//! anywhere, which is why this belongs beside the reader.
 //!
 //! # Exactly the shape OpenSSL writes
 //!
@@ -39,6 +39,7 @@
 use tinker_pdf_crypto::rsa::RsaPublicKey;
 use tinker_pdf_crypto::EntropySource;
 
+use crate::der::tlv;
 use crate::oid;
 use crate::x509::{Certificate, PublicKey};
 
@@ -226,27 +227,6 @@ fn nonzero(entropy: &mut dyn EntropySource, count: usize) -> Result<Vec<u8>, Sea
         }
     }
     Ok(out)
-}
-
-/// One DER node: `tag`, the definite length in its shortest form (X.690
-/// §10.1), and `content`.
-fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(content.len() + 6);
-    out.push(tag);
-    let length = content.len();
-    if length < 0x80 {
-        // Below 128 by the branch, so it fits the one octet.
-        out.push(length as u8);
-    } else {
-        let octets = length.to_be_bytes();
-        let skip = octets.iter().take_while(|&&octet| octet == 0).count();
-        let significant = octets.get(skip..).unwrap_or(&[]);
-        // At most eight octets of `usize`, so the count fits seven bits.
-        out.push(0x80 | significant.len() as u8);
-        out.extend_from_slice(significant);
-    }
-    out.extend_from_slice(content);
-    out
 }
 
 fn sequence(parts: &[Vec<u8>]) -> Vec<u8> {

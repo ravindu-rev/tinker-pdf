@@ -1979,6 +1979,28 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
+/// One DER node written: `tag`, the definite length in its shortest form
+/// (X.690 §10.1), and `content`. The structures this crate writes — `seal`'s
+/// `EnvelopedData`, `pss`'s `RSASSA-PSS-params` — are built from it.
+pub(crate) fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(content.len() + 6);
+    out.push(tag);
+    let length = content.len();
+    if length < 0x80 {
+        // Below 128 by the branch, so it fits the one octet.
+        out.push(length as u8);
+    } else {
+        let octets = length.to_be_bytes();
+        let skip = octets.iter().take_while(|&&octet| octet == 0).count();
+        let significant = octets.get(skip..).unwrap_or(&[]);
+        // At most eight octets of `usize`, so the count fits seven bits.
+        out.push(0x80 | significant.len() as u8);
+        out.extend_from_slice(significant);
+    }
+    out.extend_from_slice(content);
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

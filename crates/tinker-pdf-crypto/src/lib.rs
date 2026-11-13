@@ -43,9 +43,10 @@
 //! checked with the public exponent before a result leaves, on [`bignum`]'s
 //! second, constant-time path ([`bignum::Modulus::pow_secret`]), its secrets
 //! in [`bignum::Secret`]s wiped when it drops (`docs/design/signing.md`). It
-//! signs RSASSA-PKCS1-v1_5 over any SHA-2 digest the caller names, held to
-//! NIST CAVP's and Wycheproof's signature-generation vectors. There is no key
-//! generation and no key-file parsing: a key arrives as its numbers.
+//! signs RSASSA-PKCS1-v1_5 and RSASSA-PSS over any SHA-2 digest the caller
+//! names, a PSS salt the caller's, held to NIST CAVP's and Wycheproof's
+//! signature-generation vectors. There is no key generation and no key-file
+//! parsing: a key arrives as its numbers.
 
 #![forbid(unsafe_code)]
 
