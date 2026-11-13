@@ -435,6 +435,7 @@ fuzz_target!(|data: &[u8]| {
         max_transitions: Limits::DEFAULT.max_transitions,
         max_subtables: Limits::DEFAULT.max_subtables,
         max_feature_entries: Limits::DEFAULT.max_feature_entries,
+        max_attachment_depth: Limits::DEFAULT.max_attachment_depth,
         max_stack_depth: Limits::DEFAULT.max_stack_depth,
         max_instructions: Limits::DEFAULT.max_instructions,
     };

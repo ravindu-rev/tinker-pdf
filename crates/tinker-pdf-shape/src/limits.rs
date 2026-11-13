@@ -230,6 +230,17 @@ pub struct Limits {
     /// (`graphite::Refusal::TooManyInstructions`). Scaled by
     /// [`Limits::for_glyphs`].
     pub max_instructions: u32,
+
+    /// How deep a Graphite attachment chain is followed.
+    ///
+    /// **Sixty-four.** A slot attached to a slot attached to a slot is
+    /// resolved from the root down, and a hostile description can make
+    /// every slot of a run the child of the one before it. A stack of
+    /// diacritics is a handful deep; past the ceiling a slot is placed
+    /// where its pen puts it, attached to nothing, and named
+    /// (`graphite::Refusal::AttachmentTooDeep`). A face's ceiling, which
+    /// [`Limits::for_glyphs`] leaves alone.
+    pub max_attachment_depth: usize,
 }
 
 impl Limits {
@@ -256,6 +267,7 @@ impl Limits {
         max_feature_entries: 4_096,
         max_stack_depth: 256,
         max_instructions: 4_000_000,
+        max_attachment_depth: 64,
     };
 
     /// The default ceilings, with the four work numbers scaled to a run of
@@ -419,6 +431,7 @@ mod tests {
                 Limits::DEFAULT.max_rule_candidates
             );
             assert_eq!(limits.max_stack_depth, Limits::DEFAULT.max_stack_depth);
+            assert_eq!(limits.max_attachment_depth, 64);
         }
         assert_eq!(Limits::DEFAULT.max_table_bytes, 16 << 20);
         assert_eq!(Limits::DEFAULT.max_attribute_runs, 256);

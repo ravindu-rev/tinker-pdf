@@ -38,11 +38,13 @@
 //! inserted and deleted, and a copy of each input slot it changed, taken
 //! before the change.
 
+use core::cell::RefCell;
+
 use tinker_pdf_font::Sfnt;
 
 use super::glat::Attributes;
 use super::machine::{self, Budget, Fault, Metric, Op, Program, Reads, SlotAttribute};
-use super::{Description, Features, Refusal};
+use super::{position, Description, Features, Refusal};
 use crate::limits::Limits;
 
 /// The face a stream's slots take their glyphs' defaults from.
@@ -165,6 +167,11 @@ pub struct Slots<'f> {
     /// The run's feature values, which every slot carries until `SetFeat`
     /// changes its own.
     features: Vec<i16>,
+    /// How deep an attachment chain is followed.
+    attachment_depth: usize,
+    /// Each slot's height above the baseline, as positioning resolves it,
+    /// kept until the stream next changes.
+    heights: RefCell<Option<Vec<i32>>>,
 }
 
 impl<'f> Slots<'f> {
@@ -194,15 +201,64 @@ impl<'f> Slots<'f> {
             index: Vec::new(),
             issued,
             features: features.to_vec(),
+            attachment_depth: Limits::DEFAULT.max_attachment_depth,
+            heights: RefCell::new(None),
         };
         stream.reindex();
         stream
+    }
+
+    /// The same stream, its attachment chains followed no deeper than
+    /// `limits` allows.
+    #[must_use]
+    pub fn with_limits(mut self, limits: &Limits) -> Slots<'f> {
+        self.attachment_depth = limits.max_attachment_depth;
+        self
+    }
+
+    /// How deep the stream follows an attachment chain.
+    #[must_use]
+    pub const fn attachment_depth(&self) -> usize {
+        self.attachment_depth
     }
 
     /// The face the stream reads.
     #[must_use]
     pub const fn face(&self) -> &Source<'f> {
         &self.face
+    }
+
+    /// Forgets the heights positioning resolved, as every change to the
+    /// stream must.
+    fn changed(&self) {
+        self.heights.replace(None);
+    }
+
+    /// The height above the baseline of slot `at`, resolved through its
+    /// attachment chain and shifts.
+    fn height_of(&self, at: usize) -> i32 {
+        if self.heights.borrow().is_none() {
+            let tree = position::tree(self, self.attachment_depth);
+            let heights = position::heights(self, &tree);
+            self.heights.replace(Some(heights));
+        }
+        self.heights
+            .borrow()
+            .as_ref()
+            .and_then(|heights| heights.get(at).copied())
+            .unwrap_or(0)
+    }
+
+    /// The top of slot `at`'s cluster at attachment level `level`: its own
+    /// glyph's at 0.
+    fn top_at(&self, at: usize, level: u8) -> Result<i32, Refusal> {
+        let glyph = self.slots.get(at).map_or(0, |slot| slot.glyph);
+        if level == 0 {
+            return self.top_of(glyph);
+        }
+        let tree = position::tree(self, self.attachment_depth);
+        let heights = position::heights(self, &tree);
+        position::composite_top(self, &tree, &heights, at)
     }
 
     /// How many slots the stream holds.
@@ -231,6 +287,7 @@ impl<'f> Slots<'f> {
 
     /// Puts `glyph` in slot `at`, as a pass's mirroring does.
     pub(crate) fn set_glyph(&mut self, at: usize, glyph: u16) {
+        self.changed();
         if let Some(slot) = self.slots.get_mut(at) {
             slot.glyph = glyph;
         }
@@ -238,6 +295,7 @@ impl<'f> Slots<'f> {
 
     /// Turns the stream end to end, as a reversed pass runs over it.
     pub(crate) fn reverse(&mut self) {
+        self.changed();
         self.slots.reverse();
         self.reindex();
     }
@@ -332,7 +390,7 @@ impl<'f> Slots<'f> {
             return Ok(self.reference_offset(id, at));
         }
         if attribute == SlotAttribute::PositionY {
-            return Err(Refusal::PositionNotResolved);
+            return Ok(self.height_of(at));
         }
         if let Some(value) = slot.set_value(attribute, index) {
             return Ok(value);
@@ -545,6 +603,7 @@ impl<'f> Slots<'f> {
         cursor: Option<i64>,
         journal: &mut Journal,
     ) -> Result<(), Outcome> {
+        self.changed();
         let out_of_range = Outcome::Fault(Fault::SlotOutOfRange);
         let at = self
             .current(pointer)
@@ -718,6 +777,7 @@ impl<'f> Slots<'f> {
             components: Vec::new(),
             features: None,
         });
+        self.changed();
         slot.id = self.next_id();
         slot.attach_to = None;
         slot.components.clear();
@@ -731,6 +791,7 @@ impl<'f> Slots<'f> {
         if at >= self.slots.len() {
             return;
         }
+        self.changed();
         self.slots.remove(at);
         self.reindex();
     }
@@ -969,14 +1030,15 @@ impl Reads for Window<'_, '_> {
     }
 
     fn metric(&self, slot: usize, metric: Metric, level: u8) -> Result<i32, Refusal> {
-        let Some((found, _)) = self.resolve(slot) else {
+        let Some((found, at)) = self.resolve(slot) else {
             return Ok(0);
         };
-        if level != 0 {
-            return Err(Refusal::PositionNotResolved);
-        }
         let Metric::BoundingBoxTop = metric;
-        self.stream.top_of(found.glyph)
+        match at {
+            Some(at) => self.stream.top_at(at, level),
+            // A slot the action deleted is attached to nothing: its own box.
+            None => self.stream.top_of(found.glyph),
+        }
     }
 
     fn feature(&self, slot: usize, feature: u8) -> i32 {
@@ -1016,14 +1078,11 @@ impl Reads for Slots<'_> {
     }
 
     fn metric(&self, slot: usize, metric: Metric, level: u8) -> Result<i32, Refusal> {
-        let Some(found) = self.slots.get(slot) else {
+        if slot >= self.slots.len() {
             return Ok(0);
-        };
-        if level != 0 {
-            return Err(Refusal::PositionNotResolved);
         }
         let Metric::BoundingBoxTop = metric;
-        self.top_of(found.glyph)
+        self.top_at(slot, level)
     }
 
     fn feature(&self, slot: usize, feature: u8) -> i32 {

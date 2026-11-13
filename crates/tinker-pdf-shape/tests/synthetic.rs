@@ -738,6 +738,7 @@ fn the_lookup_list_storm_reaches_the_operation_ceiling_and_returns() {
         max_transitions: Limits::DEFAULT.max_transitions,
         max_subtables: Limits::DEFAULT.max_subtables,
         max_feature_entries: Limits::DEFAULT.max_feature_entries,
+        max_attachment_depth: Limits::DEFAULT.max_attachment_depth,
         max_stack_depth: Limits::DEFAULT.max_stack_depth,
         max_instructions: Limits::DEFAULT.max_instructions,
     };
@@ -1064,6 +1065,7 @@ fn every_fuzz_seed_shapes_without_panicking() {
                 max_transitions: 0,
                 max_subtables: 0,
                 max_feature_entries: 0,
+                max_attachment_depth: 0,
                 max_stack_depth: 0,
                 max_instructions: 0,
             },

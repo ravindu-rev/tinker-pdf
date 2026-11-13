@@ -1556,11 +1556,30 @@ added after, and moves the pen not at all; a cluster grows by the guard space
 the project documentation's font topics describe, so a diacritic with an
 advance, or with its origin before its base's, widens its base's cluster; and
 a positive shift or advance moves "further along" the run, so in a
-right-to-left run it moves left. Attachment chains are resolved from the
-root, at most `Limits::max_attachment_depth` deep, and a cycle is refused by
-name with the slots left where their pens put them. A run comes out as the
-crate's convention has it: one `ShapedGlyph` a slot in logical order, an
-advance and an offset from the pen, x to the right.
+right-to-left run it moves left. The guard space is the font topics': a
+member pushes its cluster's advance out to where its own advance ends, where
+that advance is not 0; and it pushes the cluster's origin out to its own,
+the base moving right, where its origin is left of the base's and, as the
+topics put it, "the origin of the diacritic is to the left of where it is
+attached or the advance is non-zero" — so of the topics' four tildes over a
+dotless i, the one drawn like a base pushes both sides, the one drawn left of
+its origin with no advance neither, the one drawn right of its origin with no
+advance the left alone, and the one finishing at its origin with an advance
+the right alone. Shifts move no pen and widen no cluster. Attachment chains
+are resolved from the root, at most `Limits::max_attachment_depth` deep, and
+a cycle is refused by name with the slots left where their pens put them;
+the slot past the depth ceiling is placed the same way. While the
+positioning passes run, `position.y` reads a slot's height so far — its
+chain's `attach.at.y − attach.with.y` and every shift along it, its own
+included — and a glyph metric at a level of 1 or more reads the cluster of
+the slot and every slot attached to it: `attach.level`, which no vendored
+code numbers, is refused by name, so every attachment is at the GDL's default
+level 1 and the levels past 0 coincide. A run comes out as the crate's
+convention has it: one `ShapedGlyph` a slot in logical order, an advance and
+an offset from the pen, x to the right, a cluster's root carrying the
+cluster's advance and its members none; a right-to-left run is drawn by
+walking its glyphs backwards, as every run of this crate is, so the pen before
+a glyph is the advances of the glyphs after it.
 
 **Collision avoidance.** The GDL states what the search weighs and not how
 it searches: the distance moved, a weight of 1; intrusion into a

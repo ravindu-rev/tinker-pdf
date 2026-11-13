@@ -1096,8 +1096,15 @@ What it does:
   constraint holds for every slot of its match fires, the position moving
   where its action leaves it, under the pass's own `maxRuleLoop` and
   `maxBackup`; the bidi pass mirrors a run at an odd level where the
-  description has one. No run is shaped through any of it yet: the
-  refused-by-name table below says what a run over such a face does.
+  description has one. Its positioning passes run the same way, each making
+  only one-to-one substitutions, and `graphite::position::place` resolves what
+  they set into one glyph a slot in logical order with an integer advance and
+  offset: an attached slot's `attach.with` point on its parent's `attach.at`,
+  a shift moving a slot and what is attached to it, an advance moving the
+  slots after it, the cluster widened by the font topics' guard space, and an
+  attachment cycle or a chain past `Limits::max_attachment_depth` cut and
+  named. No run is shaped through any of it yet: the refused-by-name table
+  below says what a run over such a face does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

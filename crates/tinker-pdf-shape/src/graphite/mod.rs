@@ -22,7 +22,9 @@
 //! and the passes that run them ([`pass`]): the line-break and substitution
 //! passes in the description's order and direction, each position's first
 //! rule whose constraint holds fired, under each pass's own loop ceiling,
-//! with the bidi pass's mirroring placed where the description names it. A face whose only
+//! with the bidi pass's mirroring placed where the description names it;
+//! and the positioning that resolves what the positioning passes set into
+//! each glyph's advance and offset ([`position::place`]). A face whose only
 //! layout tables are these is still shaped as though it carried none, and
 //! every run over it says so (`crate::Warning::TableNotRun`).
 //!
@@ -47,6 +49,7 @@ pub mod glat;
 mod lz4;
 pub mod machine;
 pub mod pass;
+pub mod position;
 pub mod silf;
 pub mod slot;
 
@@ -201,9 +204,19 @@ pub enum Refusal {
     /// The run spent [`Limits::max_instructions`]; the rest of its code did
     /// not run.
     TooManyInstructions,
-    /// Code read a slot's position, or a glyph metric over an attachment
-    /// cluster, which positioning resolves; the code ended there.
-    PositionNotResolved,
+    /// A slot's attachment chain comes back to itself: every slot of the
+    /// cycle is placed where its pen puts it, attached to nothing.
+    AttachmentCycle {
+        /// The glyph of the slot the cycle was found at.
+        glyph: u16,
+    },
+    /// A slot's attachment chain is deeper than
+    /// [`Limits::max_attachment_depth`]: the slot past the ceiling is placed
+    /// where its pen puts it, attached to nothing.
+    AttachmentTooDeep {
+        /// The glyph of that slot.
+        glyph: u16,
+    },
     /// Code read a glyph's box, and the face gives none: no `glyf`, or a
     /// glyph past `loca`.
     GlyphBoundsUnavailable {

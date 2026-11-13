@@ -4354,12 +4354,16 @@ fn each_action_instruction_rewrites_the_stream_as_specified() {
         vec![40, 5, 7],
         "the glyph put before the refusal stands"
     );
-    // A read the stream cannot answer: a slot's position, which positioning
-    // resolves, and a box from a face with no `glyf`.
-    assert_eq!(
-        run(&THREE, &[0x28, 19, 0, 0x23, 20], 0).0,
-        Err(Refusal::PositionNotResolved)
-    );
+    // A slot's position reads as positioning resolves it: shifted up 40, it
+    // reads 40, and the next instruction copies that into its `shift.x`;
+    // one unshifted reads the baseline. A box from a face with no `glyf` is
+    // a read the stream cannot answer.
+    with_stream(&face, &THREE, |slots| {
+        let code = [0x01, 40, 0x23, 21, 0x28, 19, 0, 0x23, 20, 0x31];
+        assert_eq!(act(slots, &code, 1), Ok(acted(1, 0)));
+        assert_eq!(attribute(slots, 1, SlotAttribute::ShiftX, 0), 40);
+        assert_eq!(attribute(slots, 0, SlotAttribute::PositionY, 0), 0);
+    });
     assert_eq!(
         run(&THREE, &[0x2A, 2, 0, 0, 0x23, 20], 0).0,
         Err(Refusal::GlyphBoundsUnavailable { glyph: 30 })
@@ -5490,4 +5494,742 @@ fn the_vendored_faces_passes_run() {
             Ok(-30)
         );
     });
+}
+
+// --- positioning (FT-07d.10) ---------------------------------------------
+//
+// `placing_face` is a face built for positioning: glyphs of stated advances
+// and box tops, the points rules attach them by as glyph attributes, and
+// positioning passes compiled from rules as `compile` compiles them. Each
+// run is taken through the substitution and positioning stages and
+// `position::place`, and what comes out is the run as the crate hands it on:
+// one glyph a slot in logical order, its advance and its offset from the
+// pen, a right-to-left run drawn by walking its glyphs backwards.
+
+use tinker_pdf_shape::graphite::position;
+
+/// The glyph attributes the positioning tests' points are: the point on the
+/// glyph attached to (`at`), the point on the glyph attached (`with`), a
+/// second point on the glyph attached to, a diacritic's height and an
+/// overhang.
+const AT: u8 = 10;
+const WITH: u8 = 12;
+const SECOND: u8 = 14;
+const HEIGHT: u8 = 16;
+const OVERHANG: u8 = 17;
+
+/// The same face with a `glyf` and short `loca` giving each glyph the box
+/// `(0, 0, 100, top)`, its top the one `tops` gives it or 0.
+fn with_boxes(face: Face, tops: &[(u16, i16)]) -> Face {
+    let mut glyf: Vec<u8> = Vec::new();
+    let mut loca: Vec<u8> = Vec::new();
+    for glyph in 0..face.advances.len() {
+        loca.extend(u16::try_from(glyf.len() / 2).expect("short").to_be_bytes());
+        let top = tops
+            .iter()
+            .find(|(g, _)| usize::from(*g) == glyph)
+            .map_or(0, |(_, top)| *top);
+        for value in [0i16, 0, 0, 100, top] {
+            glyf.extend(value.to_be_bytes());
+        }
+    }
+    loca.extend(u16::try_from(glyf.len() / 2).expect("short").to_be_bytes());
+    face.with(b"glyf", glyf).with(b"loca", loca)
+}
+
+/// A face of 64 glyphs: each glyph `500 + n` wide unless `advances` says
+/// otherwise, its box top from `tops`, its attributes from `attributes`,
+/// and a `Silf` 4 description of `passes`, every one a positioning pass, its
+/// classes `linear`, three user attributes.
+fn placing_face(
+    advances: &[(u16, u16)],
+    tops: &[(u16, i16)],
+    attributes: &[(u16, &[(u16, i16)])],
+    passes: Vec<PassSpec>,
+    linear: &[Vec<u16>],
+) -> Vec<u8> {
+    let mut description = passing_description(passes, linear, &[], 4);
+    description.order = [0, 0, 0, 255];
+    description.user_attributes = 3;
+    let silf = silf_table(4, &[description]);
+    let mut maps = vec![BTreeMap::new(); 64];
+    for (glyph, values) in attributes {
+        maps[usize::from(*glyph)] = values.iter().copied().collect();
+    }
+    let index = Index {
+        long: false,
+        names: false,
+    };
+    let (glat, gloc) = glat_and_gloc(GlatVersion::Two, &maps, &[], index, 8);
+    let mut face = Face::new(64, &[]);
+    for (glyph, advance) in advances {
+        face.advances[usize::from(*glyph)] = *advance;
+    }
+    let face = face
+        .with(b"Silf", silf)
+        .with(b"Glat", glat)
+        .with(b"Gloc", gloc);
+    with_boxes(face, tops).build()
+}
+
+/// What the face `bytes` makes of `glyphs`, glyph `n` standing for
+/// character `n`: its two stages run and the run placed; what was refused;
+/// and each slot's three user attributes after the passes.
+fn placed(
+    bytes: &[u8],
+    glyphs: &[u16],
+    right_to_left: bool,
+    limits: &Limits,
+) -> (Vec<ShapedGlyph>, Vec<Refusal>, Vec<[i32; 3]>) {
+    let sfnt = Sfnt::parse(bytes).expect("the face parses");
+    let tables = Tables::parse(&sfnt, limits).expect("a description");
+    let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+    let description = silf.description(0).expect("its description");
+    let attributes = tables
+        .attributes(limits)
+        .map(|read| read.expect("its attributes read"));
+    let source = Source {
+        sfnt: &sfnt,
+        attributes: attributes.as_ref(),
+        description: &description,
+        features: None,
+    };
+    let stream: Vec<(u16, u32, u32)> = glyphs
+        .iter()
+        .enumerate()
+        .map(|(at, glyph)| {
+            let at = u32::try_from(at).expect("a short run");
+            (*glyph, at, at)
+        })
+        .collect();
+    let mut slots = Slots::new(source, &stream, &[]).with_limits(limits);
+    let mut budget = Budget::new(limits);
+    let mut refusals = pass::substitute(&mut slots, right_to_left, limits, &mut budget);
+    refusals.extend(pass::position(&mut slots, limits, &mut budget));
+    let users = (0..slots.len())
+        .map(|at| {
+            [0u8, 1, 2].map(|index| {
+                slots
+                    .slot_attribute(at, SlotAttribute::User, index)
+                    .expect("answers")
+            })
+        })
+        .collect();
+    let (glyphs, cut) = position::place(&slots, right_to_left);
+    refusals.extend(cut);
+    (glyphs, refusals, users)
+}
+
+/// [`placed`] left to right under the default ceilings: the glyphs alone,
+/// with nothing refused.
+fn placed_glyphs(bytes: &[u8], glyphs: &[u16]) -> Vec<ShapedGlyph> {
+    let (out, refusals, _) = placed(bytes, glyphs, false, &Limits::DEFAULT);
+    assert!(refusals.is_empty(), "{refusals:?}");
+    out
+}
+
+/// A glyph as the crate hands it on.
+fn drawn(glyph: u16, cluster: u32, advance: i32, x: i32, y: i32) -> ShapedGlyph {
+    ShapedGlyph {
+        glyph,
+        cluster,
+        x_advance: advance,
+        y_advance: 0,
+        x_offset: x,
+        y_offset: y,
+    }
+}
+
+/// The action attaching the slot after the current one to it,
+/// `_ X {attach {to = @1; at = A; with = W}}`: A's x and y the glyph
+/// attributes `at` and `at + 1` of the glyph attached to, W's `with` and
+/// `with + 1` of the glyph attached; returning `back` from the slot after
+/// both.
+fn attach_next(at: u8, with: u8, back: i8) -> Vec<u8> {
+    vec![
+        0x1E,
+        0,
+        0x19,
+        0x1E,
+        0,
+        0x01,
+        0xFF,
+        0x26,
+        2,
+        0x2C,
+        at,
+        0,
+        0x23,
+        3,
+        0x2C,
+        at + 1,
+        0,
+        0x23,
+        4,
+        0x29,
+        with,
+        0,
+        0x23,
+        8,
+        0x29,
+        with + 1,
+        0,
+        0x23,
+        9,
+        0x19,
+        0x01,
+        back.to_ne_bytes()[0],
+        0x30,
+    ]
+}
+
+/// A rule over `slots`, `pre` of them before the scan position, running
+/// `action`, its constraint `constraint`.
+fn rule_of(pre: u8, slots: &[&[u16]], constraint: Vec<u8>, action: Vec<u8>) -> RuleSpec {
+    RuleSpec {
+        pre,
+        slots: slots.iter().map(|slot| slot.to_vec()).collect(),
+        constraint,
+        action,
+    }
+}
+
+/// The GDL's positioning examples and the font topics' four guard-space
+/// cases, each its rules compiled into positioning passes and its run
+/// placed; the positions are the ones the sources state, counted.
+#[test]
+fn positioning_passes_reproduce_the_specifications_examples() {
+    let mut held = 0usize;
+    let point = |x: i16, y: i16| [(u16::from(AT), x), (u16::from(AT) + 1, y)];
+    let with = |x: i16, y: i16| [(u16::from(WITH), x), (u16::from(WITH) + 1, y)];
+
+    // 4.1.1: `clsBase clsDiacritic {attach {to = @1; at = udap; with = lap}}
+    // / _ ^ _;` and `clsDiacritic clsDiacritic {…} / _ ^ _;` — each
+    // diacritic stacked on the one before, the `^` rescanning it. Base 1,
+    // 300 wide, `udap` (250, 600); diacritic 2, `lap` (100, 0), `udap`
+    // (100, 300).
+    let diacritic = [with(100, 0), point(100, 300)].concat();
+    let face = placing_face(
+        &[(1, 300), (2, 0)],
+        &[],
+        &[(1, &point(250, 600)), (2, &diacritic)],
+        vec![compile(
+            &[
+                rule_of(0, &[&[1], &[2]], vec![], attach_next(AT, WITH, -1)),
+                rule_of(0, &[&[2], &[2]], vec![], attach_next(AT, WITH, -1)),
+            ],
+            64,
+            5,
+            0,
+        )],
+        &[vec![0]],
+    );
+    assert_eq!(
+        placed_glyphs(&face, &[1, 2, 2, 2]),
+        vec![
+            drawn(1, 0, 300, 0, 0),
+            drawn(2, 1, 0, -150, 600),
+            drawn(2, 2, 0, -150, 900),
+            drawn(2, 3, 0, -150, 1200),
+        ]
+    );
+    held += 1;
+
+    // 4.6.1: `clsBase clsDia {shift.x = -@1.advance.x/2; shift.y =
+    // diaheight};` — the diacritic moved, the glyph after it not. Base 1,
+    // 300 wide; diacritic 3, of no advance, `diaheight` 700; glyph 4 after.
+    let shift = vec![
+        0x1E, 0, 0x19, 0x1E, 0, 0x28, 0, 0xFF, 0x01, 2, 0x09, 0x0C, 0x23, 20, 0x29, HEIGHT, 0,
+        0x23, 21, 0x19, 0x31,
+    ];
+    let face = placing_face(
+        &[(1, 300), (3, 0), (4, 400)],
+        &[],
+        &[(3, &[(u16::from(HEIGHT), 700)])],
+        vec![compile(
+            &[rule_of(0, &[&[1], &[3]], vec![], shift)],
+            64,
+            5,
+            0,
+        )],
+        &[vec![0]],
+    );
+    assert_eq!(
+        placed_glyphs(&face, &[1, 3, 4]),
+        vec![
+            drawn(1, 0, 300, 0, 0),
+            drawn(3, 1, 0, -150, 700),
+            drawn(4, 2, 400, 0, 0),
+        ]
+    );
+    held += 1;
+
+    // 4.6.2: `gOverhanger {advance.x += overhang} / _ clsAny;` — the glyph
+    // after moved by the overhang. Overhanger 5, 400 wide, overhang 80.
+    let overhang = vec![0x1E, 0, 0x29, OVERHANG, 0, 0x24, 0, 0x19, 0x31];
+    let face = placing_face(
+        &[(5, 400), (6, 500)],
+        &[],
+        &[(5, &[(u16::from(OVERHANG), 80)])],
+        vec![compile(
+            &[rule_of(0, &[&[5], &[]], vec![], overhang)],
+            64,
+            5,
+            0,
+        )],
+        &[vec![0]],
+    );
+    assert_eq!(
+        placed_glyphs(&face, &[5, 6]),
+        vec![drawn(5, 0, 480, 0, 0), drawn(6, 1, 500, 0, 0)]
+    );
+    held += 1;
+
+    // 4.6.2: `gA gW {kern.x = -10m};`, "implemented by specifying both
+    // shift and advance": `shift.x = -10m; adv.x = advancewidth - 10m`.
+    let kern = vec![
+        0x1E, 0, 0x19, 0x1E, 0, 0x01, 0xF6, 0x23, 20, 0x01, 0xF6, 0x24, 0, 0x19, 0x31,
+    ];
+    let face = placing_face(
+        &[(7, 500), (8, 600), (9, 500)],
+        &[],
+        &[],
+        vec![compile(
+            &[rule_of(0, &[&[7], &[8]], vec![], kern)],
+            64,
+            5,
+            0,
+        )],
+        &[vec![0]],
+    );
+    assert_eq!(
+        placed_glyphs(&face, &[7, 8, 9]),
+        vec![
+            drawn(7, 0, 500, 0, 0),
+            drawn(8, 1, 590, -10, 0),
+            drawn(9, 2, 500, 0, 0),
+        ]
+    );
+    held += 1;
+
+    // 4.6.3: composite metrics. `gOne gTwo {attach {to = @1; at = dap;
+    // with = base}}` in one pass and a later pass reading `@1`'s metric at
+    // levels 0, 1 and 2 into the third glyph's user attributes. The
+    // example's own metrics, `bb.width` and `advancewidth`, are numbered by
+    // no vendored code, so the example is held through `bb.top`, the one
+    // that is; and `attach.level`, numbered by none either, leaves every
+    // attachment at the GDL's default level 1, so levels 1 and 2 measure the
+    // same cluster. One 10, top 500, `dap` (250, 600); two 11, top 200,
+    // `base` (100, 0); three 12.
+    let levels = vec![
+        0x1E, 0, 0x19, 0x1E, 0, 0x19, 0x1E, 0, 0x2A, 2, 0xFE, 0, 0x33, 55, 0, 0x2A, 2, 0xFE, 1,
+        0x33, 55, 1, 0x2A, 2, 0xFE, 2, 0x33, 55, 2, 0x19, 0x31,
+    ];
+    let face = placing_face(
+        &[(10, 500), (11, 0), (12, 400)],
+        &[(10, 500), (11, 200), (12, 300)],
+        &[(10, &point(250, 600)), (11, &with(100, 0))],
+        vec![
+            compile(
+                &[rule_of(
+                    0,
+                    &[&[10], &[11]],
+                    vec![],
+                    attach_next(AT, WITH, 0),
+                )],
+                64,
+                5,
+                0,
+            ),
+            compile(
+                &[rule_of(0, &[&[10], &[11], &[12]], vec![], levels)],
+                64,
+                5,
+                0,
+            ),
+        ],
+        &[vec![0]],
+    );
+    let (_, refusals, users) = placed(&face, &[10, 11, 12], false, &Limits::DEFAULT);
+    assert!(refusals.is_empty(), "{refusals:?}");
+    assert_eq!(users[2], [500, 800, 800]);
+    held += 1;
+
+    // 4.6.8.1: the lam-alef ligature's two diacritics, `clsLM1? {attach {to
+    // = @1; at = ldia; with = base}} clsAM2? {attach {to = @1; at = adia;
+    // with = base}} / gLaf _ _;` — each at its own component's point. Laf
+    // 13, 600 wide, `ldia` (100, −200), `adia` (400, −200); the diacritics
+    // 14 and 15, `base` (50, 0).
+    let both = vec![
+        0x1E,
+        0,
+        0x01,
+        0xFF,
+        0x26,
+        2,
+        0x2C,
+        AT,
+        0,
+        0x23,
+        3,
+        0x2C,
+        AT + 1,
+        0,
+        0x23,
+        4,
+        0x29,
+        WITH,
+        0,
+        0x23,
+        8,
+        0x29,
+        WITH + 1,
+        0,
+        0x23,
+        9,
+        0x19,
+        0x1E,
+        0,
+        0x01,
+        0xFE,
+        0x26,
+        2,
+        0x2C,
+        SECOND,
+        0,
+        0x23,
+        3,
+        0x2C,
+        SECOND + 1,
+        0,
+        0x23,
+        4,
+        0x29,
+        WITH,
+        0,
+        0x23,
+        8,
+        0x29,
+        WITH + 1,
+        0,
+        0x23,
+        9,
+        0x19,
+        0x31,
+    ];
+    let laf = [
+        point(100, -200),
+        [(u16::from(SECOND), 400), (u16::from(SECOND) + 1, -200)],
+    ]
+    .concat();
+    let face = placing_face(
+        &[(13, 600), (14, 0), (15, 0)],
+        &[],
+        &[(13, &laf), (14, &with(50, 0)), (15, &with(50, 0))],
+        vec![compile(
+            &[rule_of(1, &[&[13], &[14], &[15]], vec![], both)],
+            64,
+            5,
+            0,
+        )],
+        &[vec![0]],
+    );
+    assert_eq!(
+        placed_glyphs(&face, &[13, 14, 15]),
+        vec![
+            drawn(13, 0, 600, 0, 0),
+            drawn(14, 1, 0, -550, -200),
+            drawn(15, 2, 0, -250, -200),
+        ]
+    );
+    held += 1;
+
+    // 4.6.8.2: the dotless i with its tilde. `clsUDia {attach.to = @1;
+    // attach.at = udia; attach.with = base} / clsbase _;` attaches it, of no
+    // advance, so nothing is guarded; `clsWideDia {advance.x += bb.width/2}
+    // / clsIbase _ clsLeftStem;`, in a pass after it, gives it an advance
+    // before a letter with a high stem, and the cluster widens to it. The
+    // tilde's half width, which the example reads as `bb.width / 2` and no
+    // vendored code numbers, is the constant it comes to, 250. Dotless i 16,
+    // 300 wide, `udia` (150, 500); tilde 17, `base` (−250, 0), drawn left of
+    // its origin; a left stem 18 and another letter 19.
+    let widen = vec![0x1E, 0, 0x03, 0, 250, 0x24, 0, 0x19, 0x31];
+    let face = placing_face(
+        &[(16, 300), (17, 0), (18, 500), (19, 500)],
+        &[],
+        &[(16, &point(150, 500)), (17, &with(-250, 0))],
+        vec![
+            compile(
+                &[rule_of(
+                    0,
+                    &[&[16], &[17]],
+                    vec![],
+                    attach_next(AT, WITH, 0),
+                )],
+                64,
+                5,
+                0,
+            ),
+            compile(
+                &[rule_of(1, &[&[16], &[17], &[18]], vec![], widen)],
+                64,
+                5,
+                0,
+            ),
+        ],
+        &[vec![0]],
+    );
+    assert_eq!(
+        placed_glyphs(&face, &[16, 17, 18]),
+        vec![
+            drawn(16, 0, 650, 0, 0),
+            drawn(17, 1, 0, -250, 500),
+            drawn(18, 2, 500, 0, 0),
+        ]
+    );
+    assert_eq!(
+        placed_glyphs(&face, &[16, 17, 19]),
+        vec![
+            drawn(16, 0, 300, 0, 0),
+            drawn(17, 1, 0, 100, 500),
+            drawn(19, 2, 500, 0, 0),
+        ]
+    );
+    held += 1;
+
+    // The font topics' four guard-space cases: a dotless i, 20, 300 wide,
+    // `udia` (150, 500), and a tilde 500 wide attached over it four ways.
+    // Both: drawn right of its origin with side bearings, 600 wide — the
+    // cluster takes its origin and advance. None: drawn left of its origin,
+    // no advance — the cluster is the i. Left only: drawn right of its
+    // origin, no advance — the cluster is pushed right. Right only: drawn
+    // left of its origin and finishing at it, 500 wide — the cluster's
+    // advance is the tilde's.
+    let tildes = [
+        (21u16, 300i16, 600u16),
+        (22, -250, 0),
+        (23, 250, 0),
+        (24, -250, 500),
+    ];
+    let attributes: Vec<(u16, Vec<(u16, i16)>)> =
+        std::iter::once((20u16, point(150, 500).to_vec()))
+            .chain(
+                tildes
+                    .iter()
+                    .map(|(glyph, x, _)| (*glyph, with(*x, 0).to_vec())),
+            )
+            .collect();
+    let attribute_refs: Vec<(u16, &[(u16, i16)])> = attributes
+        .iter()
+        .map(|(glyph, values)| (*glyph, values.as_slice()))
+        .collect();
+    let mut advances = vec![(20u16, 300u16)];
+    advances.extend(tildes.iter().map(|(glyph, _, advance)| (*glyph, *advance)));
+    let face = placing_face(
+        &advances,
+        &[],
+        &attribute_refs,
+        vec![compile(
+            &[rule_of(
+                0,
+                &[&[20], &[21, 22, 23, 24]],
+                vec![],
+                attach_next(AT, WITH, 0),
+            )],
+            64,
+            5,
+            0,
+        )],
+        &[vec![0]],
+    );
+    for (tilde, base_x, advance, tilde_x) in [
+        (21u16, 150, 600, -600),
+        (22, 0, 300, 100),
+        (23, 100, 400, -400),
+        (24, 0, 900, -500),
+    ] {
+        assert_eq!(
+            placed_glyphs(&face, &[20, tilde]),
+            vec![
+                drawn(20, 0, advance, base_x, 0),
+                drawn(tilde, 1, 0, tilde_x, 500)
+            ],
+            "tilde {tilde}"
+        );
+        held += 1;
+    }
+
+    assert_eq!(held, 11, "the positioning examples the design counts");
+}
+
+/// An attached slot puts its `attach.with` point on its parent's
+/// `attach.at` point and moves the pen not at all; a shift moves a slot and
+/// what is attached to it, and moves further along the run, so left in a
+/// right-to-left one; a later pass reads the position positioning resolved;
+/// and a right-to-left run comes out for walking backwards.
+#[test]
+fn an_attached_slot_is_placed_at_its_attachment_point() {
+    let point = [(u16::from(AT), 250i16), (u16::from(AT) + 1, 600)];
+    let low = [(u16::from(AT), 250i16), (u16::from(AT) + 1, 400)];
+    let with = [(u16::from(WITH), 100i16), (u16::from(WITH) + 1, 0)];
+    let attach = rule_of(0, &[&[30, 33], &[31]], vec![], attach_next(AT, WITH, 0));
+    let shifting = |glyph: u16, by: u8| {
+        rule_of(
+            0,
+            &[&[glyph]],
+            vec![],
+            vec![0x1E, 0, 0x01, by, 0x23, 20, 0x19, 0x31],
+        )
+    };
+    // `_ {position.y > 500}` on the mark, setting its first user attribute.
+    let high = rule_of(
+        0,
+        &[&[31]],
+        vec![0x22, 0, 7, 0x28, 19, 0, 0x03, 0x01, 0xF4, 0x16, 0x30],
+        vec![0x1E, 0, 0x01, 1, 0x33, 55, 0, 0x19, 0x31],
+    );
+    let face_of = |passes: Vec<PassSpec>| {
+        placing_face(
+            &[(30, 500), (31, 0), (32, 400), (33, 500)],
+            &[],
+            &[(30, &point), (31, &with), (33, &low)],
+            passes,
+            &[vec![0]],
+        )
+    };
+    let attached = face_of(vec![compile(std::slice::from_ref(&attach), 64, 5, 0)]);
+    assert_eq!(
+        placed_glyphs(&attached, &[30, 31, 32]),
+        vec![
+            drawn(30, 0, 500, 0, 0),
+            drawn(31, 1, 0, -350, 600),
+            drawn(32, 2, 400, 0, 0),
+        ]
+    );
+    // Right to left: the pen before a glyph is the advances after it.
+    let (out, refusals, _) = placed(&attached, &[30, 31, 32], true, &Limits::DEFAULT);
+    assert!(refusals.is_empty());
+    assert_eq!(
+        out,
+        vec![
+            drawn(30, 0, 500, 0, 0),
+            drawn(31, 1, 0, 150, 600),
+            drawn(32, 2, 400, 0, 0),
+        ]
+    );
+    // The base shifted 20 along the run: the mark goes with it.
+    let base_shift = face_of(vec![
+        compile(std::slice::from_ref(&attach), 64, 5, 0),
+        compile(&[shifting(30, 20)], 64, 5, 0),
+    ]);
+    assert_eq!(
+        placed_glyphs(&base_shift, &[30, 31, 32]),
+        vec![
+            drawn(30, 0, 500, 20, 0),
+            drawn(31, 1, 0, -330, 600),
+            drawn(32, 2, 400, 0, 0),
+        ]
+    );
+    let (out, _, _) = placed(&base_shift, &[30, 31, 32], true, &Limits::DEFAULT);
+    assert_eq!(
+        (out[0].x_offset, out[1].x_offset),
+        (-20, 130),
+        "further along a right-to-left run is to the left"
+    );
+    // The mark shifted: it alone moves.
+    let mark_shift = face_of(vec![
+        compile(std::slice::from_ref(&attach), 64, 5, 0),
+        compile(&[shifting(31, 30)], 64, 5, 0),
+    ]);
+    assert_eq!(
+        placed_glyphs(&mark_shift, &[30, 31, 32]),
+        vec![
+            drawn(30, 0, 500, 0, 0),
+            drawn(31, 1, 0, -320, 600),
+            drawn(32, 2, 400, 0, 0),
+        ]
+    );
+    // A later pass reads the mark's resolved height: over 500 on base 30,
+    // at 400 on base 33.
+    let reading = face_of(vec![
+        compile(std::slice::from_ref(&attach), 64, 5, 0),
+        compile(&[high], 64, 5, 0),
+    ]);
+    let (_, refusals, users) = placed(&reading, &[30, 31, 33, 31], false, &Limits::DEFAULT);
+    assert!(refusals.is_empty(), "{refusals:?}");
+    assert_eq!((users[1][0], users[3][0]), (1, 0));
+}
+
+/// An attachment chain that comes back to itself is cut: every slot of the
+/// cycle is placed where its pen puts it and the cycle is named once; so is
+/// a slot attached to itself; and a chain deeper than
+/// `Limits::max_attachment_depth` is cut at the ceiling, its slot past it
+/// placed as a root, named.
+#[test]
+fn an_attachment_cycle_is_refused_and_named() {
+    let each_other = vec![
+        0x1E, 0, 0x01, 1, 0x26, 2, 0x19, 0x1E, 0, 0x01, 0xFF, 0x26, 2, 0x19, 0x31,
+    ];
+    let itself = vec![0x1E, 0, 0x01, 0, 0x26, 2, 0x19, 0x31];
+    let point = [(u16::from(AT), 0i16), (u16::from(AT) + 1, 100)];
+    let face = placing_face(
+        &[(40, 300), (41, 300), (42, 300), (43, 300)],
+        &[],
+        &[(43, &point)],
+        vec![compile(
+            &[
+                rule_of(0, &[&[40], &[41]], vec![], each_other),
+                rule_of(0, &[&[42]], vec![], itself),
+                rule_of(0, &[&[43], &[43]], vec![], attach_next(AT, WITH, -1)),
+            ],
+            64,
+            5,
+            0,
+        )],
+        &[vec![0]],
+    );
+    let (out, refusals, _) = placed(&face, &[40, 41, 40, 41], false, &Limits::DEFAULT);
+    assert_eq!(
+        out,
+        vec![
+            drawn(40, 0, 300, 0, 0),
+            drawn(41, 1, 300, 0, 0),
+            drawn(40, 2, 300, 0, 0),
+            drawn(41, 3, 300, 0, 0),
+        ]
+    );
+    assert_eq!(refusals, vec![Refusal::AttachmentCycle { glyph: 40 }]);
+    let (out, refusals, _) = placed(&face, &[42], false, &Limits::DEFAULT);
+    assert_eq!(out, vec![drawn(42, 0, 300, 0, 0)]);
+    assert_eq!(refusals, vec![Refusal::AttachmentCycle { glyph: 42 }]);
+
+    // Four glyphs, each attached to the one before: under the default
+    // ceiling one cluster, its members stacked 100 apart and each of their
+    // advances inside the base's; under a ceiling of 2 the fourth is cut.
+    let (out, refusals, _) = placed(&face, &[43, 43, 43, 43], false, &Limits::DEFAULT);
+    assert!(refusals.is_empty(), "{refusals:?}");
+    assert_eq!(
+        out,
+        vec![
+            drawn(43, 0, 300, 0, 0),
+            drawn(43, 1, 0, -300, 100),
+            drawn(43, 2, 0, -300, 200),
+            drawn(43, 3, 0, -300, 300),
+        ]
+    );
+    let shallow = Limits {
+        max_attachment_depth: 2,
+        ..Limits::DEFAULT
+    };
+    let (out, refusals, _) = placed(&face, &[43, 43, 43, 43], false, &shallow);
+    assert_eq!(refusals, vec![Refusal::AttachmentTooDeep { glyph: 43 }]);
+    assert_eq!(
+        out,
+        vec![
+            drawn(43, 0, 300, 0, 0),
+            drawn(43, 1, 0, -300, 100),
+            drawn(43, 2, 0, -300, 200),
+            drawn(43, 3, 300, 0, 0),
+        ]
+    );
 }

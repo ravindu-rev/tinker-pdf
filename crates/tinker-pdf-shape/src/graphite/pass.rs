@@ -63,6 +63,25 @@ pub fn substitute(
     refusals
 }
 
+/// Runs the positioning stage of the stream's description: its passes from
+/// the first positioning pass on, each making only one-to-one substitutions.
+/// What they set is resolved into positions by [`super::position::place`].
+///
+/// Returns what the passes refused, each once, in the order met.
+pub fn position(slots: &mut Slots<'_>, limits: &Limits, budget: &mut Budget) -> Vec<Refusal> {
+    let description = slots.face().description;
+    let start = usize::from(description.positioning);
+    let mut refusals = Vec::new();
+    run_passes(
+        slots,
+        start..usize::from(description.passes),
+        limits,
+        budget,
+        &mut refusals,
+    );
+    refusals
+}
+
 /// Each slot's glyph, mirrored: the glyph the description's mirroring
 /// attribute names, where it names one.
 fn mirror(slots: &mut Slots<'_>, refusals: &mut Vec<Refusal>) {
