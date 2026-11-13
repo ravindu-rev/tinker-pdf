@@ -274,7 +274,9 @@ for SHA-256/384/512 and **NIST CAVP's byte-oriented SHAVS files** for SHA-224,
 SHA-256, SHA-512/224 and SHA-512/256 — every short message length, the long
 messages and the Monte Carlo chain, from the committed
 `tests/data/cavp/sha*.rsp`, SHA-256's messages also fed in pieces around a
-block (`sha2.rs`), the two SHA-512/t initial
+block, and its whole blocks compressed where they lie in the input, no byte of
+them copied (`a_whole_block_is_compressed_where_it_lies`, `sha2.rs`), the two
+SHA-512/t initial
 values recomputed by FIPS 180-4 5.3.6's IV generation function beside them —
 and for SHA-1 including the million-`a` vector (`sha1.rs`), RFC 6229
 keystream vectors (`rc4.rs`), the complete RFC 1321 appendix A.5 suite

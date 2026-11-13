@@ -215,6 +215,13 @@ impl Sha256 {
         }
     }
 
+    /// Hashes `data` onward from what came before.
+    ///
+    /// **A whole block is compressed where it lies**: each 64 bytes of `data`
+    /// that begin a block are handed to [`compress`] as a slice of `data`
+    /// itself, and only a block that straddles two calls is gathered into
+    /// the state's buffer — the bytes that start it in one call and the
+    /// bytes that finish it in the next, and a tail shorter than a block.
     pub fn update(&mut self, mut data: &[u8]) {
         self.length_bits = self.length_bits.wrapping_add((data.len() as u64) << 3);
 
@@ -225,12 +232,12 @@ impl Sha256 {
                 data.get(..take),
             ) {
                 dst.copy_from_slice(src);
+                count::copied(take);
             }
             self.buffered += take;
             data = data.get(take..).unwrap_or(&[]);
             if self.buffered == 64 {
-                let block = self.buffer;
-                self.compress(&block);
+                compress(&mut self.state, &self.buffer);
                 self.buffered = 0;
             } else {
                 // `data` is exhausted; see the note in `md5::Md5::update`.
@@ -240,14 +247,15 @@ impl Sha256 {
 
         let mut chunks = data.chunks_exact(64);
         for chunk in &mut chunks {
-            let mut block = [0u8; 64];
-            block.copy_from_slice(chunk);
-            self.compress(&block);
+            if let Ok(block) = <&[u8; 64]>::try_from(chunk) {
+                compress(&mut self.state, block);
+            }
         }
 
         let rest = chunks.remainder();
         if let Some(dst) = self.buffer.get_mut(..rest.len()) {
             dst.copy_from_slice(rest);
+            count::copied(rest.len());
         }
         self.buffered = rest.len();
     }
@@ -274,58 +282,98 @@ impl Sha256 {
         self.update(data);
         self.length_bits = saved;
     }
+}
 
-    fn compress(&mut self, block: &[u8; 64]) {
-        let mut w = [0u32; 64];
-        for (word, chunk) in w.iter_mut().zip(block.chunks_exact(4)) {
-            let mut b = [0u8; 4];
-            b.copy_from_slice(chunk);
-            *word = u32::from_be_bytes(b);
-        }
-        for i in 16..64usize {
-            let (a, b, c, d) = match (w.get(i - 15), w.get(i - 2), w.get(i - 16), w.get(i - 7)) {
-                (Some(a), Some(b), Some(c), Some(d)) => (*a, *b, *c, *d),
-                _ => continue,
-            };
-            let s0 = a.rotate_right(7) ^ a.rotate_right(18) ^ (a >> 3);
-            let s1 = b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10);
-            if let Some(slot) = w.get_mut(i) {
-                *slot = c.wrapping_add(s0).wrapping_add(d).wrapping_add(s1);
-            }
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-
-        for i in 0..64usize {
-            let (k, wi) = match (K256.get(i), w.get(i)) {
-                (Some(k), Some(wi)) => (*k, *wi),
-                _ => continue,
-            };
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = h
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(k)
-                .wrapping_add(wi);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-
-        for (slot, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-            *slot = slot.wrapping_add(value);
-        }
+/// SHA-256's compression of one block into `state` (FIPS 180-4 6.2.2).
+///
+/// **The message schedule is a ring of sixteen words.** Round `t` reads
+/// `W[t mod 16]`; from round 16 that slot is first replaced by
+/// `σ1(W[t−2]) + W[t−7] + σ0(W[t−15]) + W[t−16]` (6.2.2 step 1), each of
+/// which the ring still holds — `W[t−16]` in the slot itself and the others
+/// at most fifteen rounds old — so no 64-word schedule is built ahead of the
+/// rounds. Every index is a constant or the round counter masked to the ring,
+/// and the round constants are walked rather than looked up, so neither loop
+/// holds a bounds check. The block is read where it lies.
+fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
+    let mut w = [0u32; 16];
+    for (word, bytes) in w.iter_mut().zip(block.chunks_exact(4)) {
+        let mut be = [0u8; 4];
+        be.copy_from_slice(bytes);
+        *word = u32::from_be_bytes(be);
     }
+
+    let mut v = *state;
+    let Some((first, later)) = K256.split_first_chunk::<16>() else {
+        return;
+    };
+    for (k, wt) in first.iter().zip(w) {
+        round(&mut v, *k, wt);
+    }
+    for (t, k) in (16usize..).zip(later) {
+        let w15 = w[(t + 1) & 15];
+        let w2 = w[(t + 14) & 15];
+        let s0 = w15.rotate_right(7) ^ w15.rotate_right(18) ^ (w15 >> 3);
+        let s1 = w2.rotate_right(17) ^ w2.rotate_right(19) ^ (w2 >> 10);
+        let slot = t & 15;
+        let wt = w[slot]
+            .wrapping_add(s0)
+            .wrapping_add(w[(t + 9) & 15])
+            .wrapping_add(s1);
+        w[slot] = wt;
+        round(&mut v, *k, wt);
+    }
+
+    for (slot, value) in state.iter_mut().zip(v) {
+        *slot = slot.wrapping_add(value);
+    }
+}
+
+/// One of SHA-256's 64 rounds (FIPS 180-4 6.2.2 step 3) over the working
+/// variables `a` to `h`, with its constant and its schedule word.
+#[inline(always)]
+fn round(v: &mut [u32; 8], k: u32, wt: u32) {
+    let [a, b, c, d, e, f, g, h] = *v;
+    let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+    let ch = (e & f) ^ (!e & g);
+    let t1 = h
+        .wrapping_add(s1)
+        .wrapping_add(ch)
+        .wrapping_add(k)
+        .wrapping_add(wt);
+    let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+    let maj = (a & b) ^ (a & c) ^ (b & c);
+    let t2 = s0.wrapping_add(maj);
+    *v = [t1.wrapping_add(t2), a, b, c, d.wrapping_add(t1), e, f, g];
+}
+
+/// Bytes SHA-256 copies into its block buffer, counted for
+/// `a_whole_block_is_compressed_where_it_lies`: compiled only under
+/// `cfg(test)` and kept per thread, so tests running side by side cannot add
+/// into each other's.
+#[cfg(test)]
+mod count {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static COPIED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// `bytes` copied into the buffer.
+    pub(super) fn copied(bytes: usize) {
+        COPIED.with(|count| count.set(count.get() + bytes));
+    }
+
+    /// The bytes counted on this thread since the last call, which starts the
+    /// count again from zero.
+    pub(super) fn take() -> usize {
+        COPIED.with(|count| count.replace(0))
+    }
+}
+
+/// The counter outside tests: nothing.
+#[cfg(not(test))]
+mod count {
+    pub(super) fn copied(_bytes: usize) {}
 }
 
 /// SHA-512 streaming state. SHA-384, SHA-512/224 and SHA-512/256 are the same
@@ -869,6 +917,55 @@ mod tests {
             d.update(chunk);
         }
         assert_eq!(d.finish().get(..32), Some(&sha512_256(&data)[..]));
+    }
+
+    /// **A whole block is compressed where it lies** (P-13.3).
+    ///
+    /// Bytes copied into the block buffer are counted. Whole blocks handed
+    /// over in one call, or in calls each of whole blocks, copy none; a block
+    /// that straddles two calls is gathered, exactly its bytes, and every
+    /// block after it in the second call is read where it lies again; a tail
+    /// shorter than a block is held, its bytes and no more. The digest is the
+    /// same every way the bytes arrive, and the one-shot hash's.
+    #[test]
+    fn a_whole_block_is_compressed_where_it_lies() {
+        let data: Vec<u8> = (0..64 * 40u32).map(|i| (i * 7 + 3) as u8).collect();
+        let want = sha256(&data);
+
+        count::take();
+        let mut whole = Sha256::new();
+        whole.update(&data);
+        assert_eq!(count::take(), 0, "forty whole blocks in one call");
+        assert_eq!(whole.finish(), want);
+
+        count::take();
+        let mut pieces = Sha256::new();
+        for piece in data.chunks(64 * 3) {
+            pieces.update(piece);
+        }
+        assert_eq!(count::take(), 0, "calls of whole blocks each");
+        assert_eq!(pieces.finish(), want);
+
+        count::take();
+        let mut straddled = Sha256::new();
+        let (head, rest) = data.split_at(10);
+        straddled.update(head);
+        straddled.update(rest);
+        assert_eq!(
+            count::take(),
+            64,
+            "the straddling block gathered, ten bytes and fifty-four"
+        );
+        assert_eq!(straddled.finish(), want);
+
+        count::take();
+        let mut tailed = Sha256::new();
+        let (most, tail) = data.split_at(64 * 39 + 23);
+        tailed.update(most);
+        assert_eq!(count::take(), 23, "a tail of twenty-three bytes held");
+        tailed.update(tail);
+        assert_eq!(count::take(), 41, "and finished by the next call's first");
+        assert_eq!(tailed.finish(), want);
     }
 
     #[test]
