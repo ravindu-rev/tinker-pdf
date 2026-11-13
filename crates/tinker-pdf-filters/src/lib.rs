@@ -39,6 +39,10 @@
 //! archive row's, the first with no coding a `/Filter` shares. Each hands back
 //! [`ImagePixels`] — indexed or direct, eight bits — which is the one output
 //! shape the archive row's decoders share, so the embedder learns it once.
+//! [`netpbm_decode`] is the formats-in tier's: the Netpbm family carries
+//! sixteen-bit, CMYK and floating-point samples, none of which `ImagePixels`
+//! can hold, so it hands back [`PngImage`]'s and [`TiffImage`]'s shape instead,
+//! a colour layout at eight or sixteen bits.
 
 #![forbid(unsafe_code)]
 
@@ -56,6 +60,7 @@ mod jpx;
 mod jxr;
 mod lzw;
 pub mod mq;
+mod netpbm;
 mod packbits;
 mod png;
 mod predictors;
@@ -103,6 +108,10 @@ pub use jxr::{
     JxrWarning,
 };
 pub use mq::{encoder::MqEncoder, MqContext, MqContexts, MqDecoder};
+pub use netpbm::{
+    netpbm_decode, netpbm_decode_counted, NetpbmColour, NetpbmError, NetpbmFormat, NetpbmImage,
+    MAX_NETPBM_SAMPLES,
+};
 pub use png::{
     colour_type_depth_is_legal, png_decode, png_decode_counted, png_encode, png_encode_counted,
     png_scan, ChunkType, PngColour, PngEncodeError, PngError, PngHeader, PngHeld, PngImage,
@@ -458,6 +467,29 @@ pub enum Warning {
     WebpFramesIgnored,
     /// WebP: an `ALPH` chunk would not decode, so the picture is opaque.
     WebpAlphaDropped,
+
+    // ---- Netpbm ----------------------------------------------------------
+    //
+    // Five leniencies; a cut-off raster reuses [`Warning::TruncatedInput`]
+    // and bytes after a raster that begin no image reuse
+    // [`Warning::TrailingGarbage`].
+    /// Netpbm: a sample above the header's maxval, which every description
+    /// puts samples at or below. It was read as the maxval.
+    NetpbmSampleAboveMaxval,
+    /// Netpbm: the file holds more than one image. The first is the picture;
+    /// the rest are not decoded.
+    NetpbmImagesIgnored,
+    /// PAM: a depth greater than the tuple type uses. The higher planes were
+    /// ignored, as the PAM description advises.
+    NetpbmPlanesIgnored,
+    /// Netpbm: a plain raster held a byte that is neither white space nor a
+    /// sample. A `#` was read as a comment to its line's end and skipped;
+    /// anything else ends the raster there.
+    NetpbmRasterJunk,
+    /// PAM: a header line of a type the description does not define, a
+    /// `TUPLTYPE` with nothing after it, or tokens after a field's value, was
+    /// passed over.
+    NetpbmHeaderLineIgnored,
 }
 
 impl Warning {
@@ -523,6 +555,11 @@ impl Warning {
             Self::WebpCorruptData => "webp-corrupt-data",
             Self::WebpFramesIgnored => "webp-frames-ignored",
             Self::WebpAlphaDropped => "webp-alpha-dropped",
+            Self::NetpbmSampleAboveMaxval => "netpbm-sample-above-maxval",
+            Self::NetpbmImagesIgnored => "netpbm-images-ignored",
+            Self::NetpbmPlanesIgnored => "netpbm-planes-ignored",
+            Self::NetpbmRasterJunk => "netpbm-raster-junk",
+            Self::NetpbmHeaderLineIgnored => "netpbm-header-line-ignored",
         }
     }
 }
@@ -586,6 +623,11 @@ impl fmt::Display for Warning {
             Self::WebpCorruptData => "WebP pixel data refers outside the image; decode stopped",
             Self::WebpFramesIgnored => "WebP animation frames after the first are not decoded",
             Self::WebpAlphaDropped => "WebP alpha chunk undecodable; picture drawn opaque",
+            Self::NetpbmSampleAboveMaxval => "Netpbm sample above its maxval, read as the maxval",
+            Self::NetpbmImagesIgnored => "Netpbm images after the first are not decoded",
+            Self::NetpbmPlanesIgnored => "PAM planes past what its tuple type uses ignored",
+            Self::NetpbmRasterJunk => "Netpbm plain raster held a byte that is no sample",
+            Self::NetpbmHeaderLineIgnored => "PAM header line not read here passed over",
         };
         f.write_str(s)
     }

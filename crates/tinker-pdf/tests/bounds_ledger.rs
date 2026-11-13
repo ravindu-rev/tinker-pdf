@@ -603,8 +603,8 @@ use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
     MAX_BMP_SAMPLES, MAX_GIF_SAMPLES, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
-    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_JBIG2_WORK_MULTIPLE, MAX_PNG_SAMPLES,
-    MAX_WEBP_SAMPLES,
+    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_JBIG2_WORK_MULTIPLE, MAX_NETPBM_SAMPLES,
+    MAX_PNG_SAMPLES, MAX_WEBP_SAMPLES,
 };
 use tinker_pdf_layout::limits as layout_limits;
 use tinker_pdf_xml::limits as xml_limits;
@@ -654,6 +654,9 @@ const GIF: &str = include_str!("../../tinker-pdf-filters/src/gif.rs");
 const GIF_TESTS: &str = include_str!("../../tinker-pdf-filters/src/gif/tests.rs");
 const WEBP: &str = include_str!("../../tinker-pdf-filters/src/webp.rs");
 const WEBP_TESTS: &str = include_str!("../../tinker-pdf-filters/src/webp/tests.rs");
+/// The formats-in tier's Netpbm decoder, which keeps its cap beside it too.
+const NETPBM: &str = include_str!("../../tinker-pdf-filters/src/netpbm.rs");
+const NETPBM_TESTS: &str = include_str!("../../tinker-pdf-filters/src/netpbm/tests.rs");
 const INLINE_IMAGE_TESTS: &str = include_str!("inline_images.rs");
 /// The annotation payloads' copy budget: declared beside the payload readers
 /// that spend it, and fired by a test beside the listing that owns the budget.
@@ -2368,6 +2371,33 @@ fn ledger() -> Vec<Bound> {
                 WEBP_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_NETPBM_SAMPLES",
+            cap: MAX_NETPBM_SAMPLES as u128,
+            published: "67 108 864",
+            // The 13 x 24 CMYK-and-alpha PAM `netpbm/tests.rs` writes, at its
+            // five components.
+            fixtures: 13 * 24 * 5,
+            // A 2000 x 3000 page in CMYK with alpha, the widest a Netpbm
+            // picture is charged: five components, one more than a PNG page's
+            // four, and no pass-through to spend less.
+            comic: 30_000_000,
+            // Zero: ECMA-388 admits no Netpbm image part.
+            document: 0,
+            // Zero again: no Netpbm format is one of EPUB 3.3 §3.2's core
+            // image media types, and `epub::read`'s `<img>` path places only
+            // those, so a book's Netpbm image is refused by name undecoded.
+            book: 0,
+            // A width and a height are decimal fields of any length, read up
+            // to `u32::MAX` each, charged at five components.
+            reachable: 0xFFFF_FFFFu128 * 0xFFFF_FFFF * 5,
+            reachable_because: "two decimal dimensions up to u32::MAX, times five components",
+            declared_in: NETPBM,
+            fires_in: (
+                "an_image_past_the_sample_cap_is_refused_before_it_allocates",
+                NETPBM_TESTS,
+            ),
+        },
         // ---- lane 4C's review: what a page's drawing allocates ----------
         //
         // A process's bound again, like the two above, and the first whose
@@ -2801,7 +2831,8 @@ fn segment_size() -> u128 {
 /// `MAX_CSS_FEATURE_SETTINGS`, and its gradients `MAX_CSS_GRADIENT_STOPS`;
 /// and the review of lane 8C adds `MAX_EMBEDDING_DEPTH`; and the `jbig2` fuzz
 /// sweep adds `MAX_JBIG2_WORK_MULTIPLE`; and the OCR import seam adds
-/// `MAX_IMPORTED_WORDS`. All **sixty-seven** are here, and a bound added
+/// `MAX_IMPORTED_WORDS`; and the formats-in tier's Netpbm decoder adds
+/// `MAX_NETPBM_SAMPLES`. All **sixty-eight** are here, and a bound added
 /// without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2860,6 +2891,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_BMP_SAMPLES",
             "MAX_GIF_SAMPLES",
             "MAX_WEBP_SAMPLES",
+            "MAX_NETPBM_SAMPLES",
             "MAX_SVG_BYTES",
             "MAX_DISPLAY_LIST_BYTES",
             "MAX_MARKDOWN_NESTING",
@@ -2981,7 +3013,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 66, "the ledger is sixty-six rows");
+    assert_eq!(measured, 68, "the ledger is sixty-eight rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -3013,7 +3045,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 66, "the ledger is sixty-six rows");
+    assert_eq!(ledger().len(), 68, "the ledger is sixty-eight rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

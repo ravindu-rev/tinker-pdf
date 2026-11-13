@@ -1047,6 +1047,43 @@ tags `2019-07-15_2` and `2019-07-15_3` and on `master` (now the 2024-07-15
 schema) differ from the served file's bytes, so the licence is not shown to
 cover the file the namespace names. The XLink schema states none.
 
+### The Netpbm family's published definitions
+
+Transcribed into `crates/tinker-pdf-filters/src/netpbm.rs`'s module note,
+which names each format by its role; the sources are named here (ruling 21).
+PBM, PGM, PPM, PAM and PFM are read from the Netpbm project's format
+descriptions. The portable inkmap, PKM, has no description of its own, only
+two producers' published documentation of their output, which ruling 21 lets
+an implementer read and never the producers' code; nothing of either was read
+but the pages below. Nothing is vendored: what was taken is each format's
+layout — magic numbers, header fields and their white space, sample widths,
+byte orders, row order and tuple types — and the module note records it. Every
+source was read on 2026-11-13.
+
+| Format | What was read | Revision | SHA-256 |
+| --- | --- | --- | --- |
+| PBM | *pbm — Netpbm bi-level image format*, <https://netpbm.sourceforge.net/doc/pbm.html>: the layout, plain PBM and the comment rule | updated 07 November 2025 | `b56089e0c386e2cc43e44a8124569185b7b1db863daed19da27c3045ca64e9d9` |
+| PGM | *PGM Format Specification*, <https://netpbm.sourceforge.net/doc/pgm.html> | updated 07 November 2025 | `b9c11d3613c1953e5e77e93ef4c0f4a010cd55138e1c4710a14e913f0f38f3de` |
+| PPM | *PPM Format Specification*, <https://netpbm.sourceforge.net/doc/ppm.html> | updated 07 November 2025 | `d029cd9c665322af35f94f77097aa0c6f02829ce8a9e5ffb1bcd3abbdd3a3805` |
+| PNM | *The PNM Format*, <https://netpbm.sourceforge.net/doc/pnm.html> | updated 27 November 2013 | `5aa17b2f873aa5312a3ff801742fea59ca202a91610d74100bbf7c9d79d483a8` |
+| PAM | *PAM format specification*, <https://netpbm.sourceforge.net/doc/pam.html>: the header lines, the raster and the defined tuple types | updated 27 November 2013 | `a5616fea88fdfc2a635f7188043574bcf50d7f360f08d9332084b57837dda8bb` |
+| PFM | *PFM Format Description*, <https://netpbm.sourceforge.net/doc/pfm.html>, the PFM of the project's `pamtopfm` and `pfmtopam` | updated 27 February 2024 | `e9356180c21576d8002789385fdfb9ad1a65200ce2e70b0c9ef1f3bd4e68f1fa` |
+| PKM as RGB | The PostScript interpreter Ghostscript's *Ghostscript User Manual* by Thomas Merz, version 1.3, covering Ghostscript 5.01, <https://ftp.gwdg.de/pub/misc/ghostscript/gs5man_e.pdf>, read with this repository's own `tpdf text`: chapter 4's table of file-format drivers, whose rows are "PKM (Portable Inkmap), CMYK internally, RGB output, ASCII" for the `pkm` device and "PKM, (raw format)" for `pkmraw` | 1.3 (1997) | `0d7ffdaeeae5b4bab90557ad83b0368df931b1323f64946f88b400b1aeaab48b` |
+| PKM as RGB | The same manual's version 1.2, covering Ghostscript 4.03, <https://mirror.gutenberg-asso.fr/pub/GUTenberg/doc/gsman_e.pdf>: the same two rows | 1.2 | `13a155cfe330dca615b17fc46b6b843afef4d376b1f3abac2174bb0fe5af4987` |
+| PKM as RGB | Ghostscript's *Details of Ghostscript Output Devices*, <https://ghostscript.readthedocs.io/en/latest/Devices.html>, section "PNM": the device names `pkm` and `pkmraw`, and nothing of their files | as served | `377da32192d00475a727a722ac4a8d6b1a925165ca5d83e13c832734b8b79464` |
+| PKM as a PAM | The PDF library MuPDF's guide *MuPDF Explored* by Robin Watts, section 14.6 "PKM", <https://ghostscript.com/~robin/mupdf_explored/mupdf_exploredse64.html>: bitmaps drawn to CMYK and halftoned "to give 1bpc cmyk", saved "as a PAM image file" | as served | `c0d5ae85b11098de527b1d82d78e4e4af535f470c2dcd9f2fd399c219b16446c` |
+| PKM as a PAM | The same guide's section 14.4 "PAM", <https://ghostscript.com/~robin/mupdf_explored/mupdf_exploredse62.html>: the tuple type "reflects the color and alpha configuration", the string not given | as served | `e94552705c118284506a9d6b0c4d7d9404bde3d8dc8d7439ef600e55fde37558` |
+| PKM as a PAM | The same guide's section 10.4 "Bitmaps", <https://ghostscript.com/~robin/mupdf_explored/mupdf_exploredse40.html>: one bit a component, components packed into a byte, most significant bit first | as served | `8426e71b6a192454fc1d1f12dd07628ceb1edc4575f2cc0a0c2dec25adf17d56` |
+| PKM as a PAM | MuPDF's *mutool draw* and *Document Writer Options* pages, <https://mupdf.readthedocs.io/en/latest/tools/mutool-draw.html> and <https://mupdf.readthedocs.io/en/1.28.0/reference/common/document-writer-options.html>: `pkm` in the list of raster formats, and nothing of its file | as served | `876deae8bd97eef9e6bc1fad178816201a649efbaa1d1d0b25433eabf768b0f1`, `f814d36b0ac9494ca5ed7a0532c185e6f30ee982e076b2d8b6dc87d77d613d47` |
+
+**The two inkmaps are two files.** The interpreter's manual makes one an RGB
+file in the ASCII and the raw form of the family, which is a plain or a raw
+PPM; the library's guide makes the other a PAM of one-bit CMYK, and neither
+source writes down a header byte, the CMYK-to-RGB conversion or the PAM tuple
+type. So the reader decodes each as the file it is — a PPM, and a PAM read
+where its tuple type is `CMYK` — and nothing in it claims more about either
+producer than the rows above say.
+
 ## Test fixtures
 
 `testdata/` holds PDFs written by mutool, copied from Tinker; see

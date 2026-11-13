@@ -36,12 +36,12 @@ use tinker_pdf_filters::{
     ccitt_g4_encode, flate_decode, flate_decode_counted, gif_decode, gif_decode_counted,
     jbig2_decode, jbig2_decode_measured, jbig2_generic_region_segment, jpeg_decode,
     jpeg_decode_counted, jpeg_encode, jpx_decode, jpx_decode_counted, jxr_decode,
-    jxr_decode_counted, lzw_decode, lzw_decode_counted, png_decode, png_decode_counted, png_encode,
-    predictor_decode, predictor_decode_counted, run_length_decode, run_length_decode_counted,
-    tiff_decode, tiff_decode_counted, webp_decode, webp_decode_counted, zlib_compress, CcittParams,
-    CcittSource, ImagePixels, Jbig2GenericSource, Jbig2Params, JpegColor, JpegOptions,
-    JpegQuantisation, JpegSampling, JpegSource, JpegSourceColour, Limits, MqEncoder, PngColour,
-    PngSource, PredictorParams,
+    jxr_decode_counted, lzw_decode, lzw_decode_counted, netpbm_decode, netpbm_decode_counted,
+    png_decode, png_decode_counted, png_encode, predictor_decode, predictor_decode_counted,
+    run_length_decode, run_length_decode_counted, tiff_decode, tiff_decode_counted, webp_decode,
+    webp_decode_counted, zlib_compress, CcittParams, CcittSource, ImagePixels, Jbig2GenericSource,
+    Jbig2Params, JpegColor, JpegOptions, JpegQuantisation, JpegSampling, JpegSource,
+    JpegSourceColour, Limits, MqEncoder, PngColour, PngSource, PredictorParams,
 };
 
 /// Four times the size: the factor the law is stated for.
@@ -752,6 +752,55 @@ fn bmp_costs_work_linear_in_its_rows() {
         steps
     };
     holds_the_law("BMP", at(100), at(400));
+}
+
+// ---------------------------------------------------------------------------
+// Netpbm.
+// ---------------------------------------------------------------------------
+
+/// A raw PPM 64 pixels wide, and a plain PGM of the same samples' first
+/// third, each written from its format description: a header, then the
+/// raster.
+fn ppm(height: u32, raster: &[u8]) -> Vec<u8> {
+    let mut out = format!("P6\n64 {height}\n255\n").into_bytes();
+    out.extend_from_slice(raster);
+    out
+}
+
+fn plain_pgm(height: u32, samples: &[u8]) -> Vec<u8> {
+    let mut out = format!("P2\n64 {height}\n255\n").into_bytes();
+    for (i, sample) in samples.iter().enumerate() {
+        out.extend_from_slice(sample.to_string().as_bytes());
+        out.push(if i % 16 == 15 { b'\n' } else { b' ' });
+    }
+    out
+}
+
+#[test]
+fn netpbm_costs_work_linear_in_its_rows() {
+    let raw = |height: u32| {
+        let raster = text((64 * 3 * height) as usize);
+        let file = ppm(height, &raster);
+        let (image, steps) = netpbm_decode_counted(&file, &ROOM);
+        let image = image.expect("the file decodes");
+        assert_eq!(image.height, height);
+        // Under a maxval of 255 the samples come back as they were written.
+        assert_eq!(image.data, raster);
+        assert_eq!(netpbm_decode(&file, &ROOM), Ok(image));
+        steps
+    };
+    holds_the_law("Netpbm raw", raw(100), raw(400));
+
+    let plain = |height: u32| {
+        let samples = text((64 * height) as usize);
+        let file = plain_pgm(height, &samples);
+        let (image, steps) = netpbm_decode_counted(&file, &ROOM);
+        let image = image.expect("the file decodes");
+        assert_eq!(image.data, samples);
+        assert_eq!(netpbm_decode(&file, &ROOM), Ok(image));
+        steps
+    };
+    holds_the_law("Netpbm plain", plain(100), plain(400));
 }
 
 // ---------------------------------------------------------------------------

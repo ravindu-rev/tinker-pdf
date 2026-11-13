@@ -104,6 +104,17 @@ pub(crate) const fn scale_to_8(value: u32, max: u32) -> u8 {
     ((v as u64 * 255 + max as u64 / 2) / max as u64) as u8
 }
 
+/// Scales a value on `0..=max` to sixteen bits, rounding to nearest — the
+/// same definition as [`scale_to_8`] over `0..=65535`, for a sample too wide
+/// for a byte. A value past `max` is `max`.
+pub(crate) const fn scale_to_16(value: u32, max: u32) -> u16 {
+    if max == 0 {
+        return 0;
+    }
+    let v = if value > max { max } else { value };
+    ((v as u64 * 65_535 + max as u64 / 2) / max as u64) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +129,20 @@ mod tests {
         assert_eq!(scale_to_8(1023, 1023), 255);
         assert_eq!(scale_to_8(512, 1023), 128);
         assert_eq!(scale_to_8(7, 0), 0);
+    }
+
+    #[test]
+    fn the_sixteen_bit_scaling_is_exact_at_both_ends_and_rounds_between() {
+        assert_eq!(scale_to_16(0, 1000), 0);
+        assert_eq!(scale_to_16(1000, 1000), 65_535);
+        // 500 x 65535 / 1000 = 32767.5, which rounds up.
+        assert_eq!(scale_to_16(500, 1000), 32_768);
+        // 1 x 65535 / 1000 = 65.535, which rounds up.
+        assert_eq!(scale_to_16(1, 1000), 66);
+        assert_eq!(scale_to_16(65_535, 65_535), 65_535);
+        assert_eq!(scale_to_16(12_345, 65_535), 12_345);
+        assert_eq!(scale_to_16(300, 256), 65_535);
+        assert_eq!(scale_to_16(7, 0), 0);
     }
 
     #[test]

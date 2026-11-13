@@ -176,7 +176,6 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-05.1 | build | Netpbm decoded: PBM, PGM and PPM in plain and raw forms, PAM with its tuple types, PFM, and PKM's 1-bit CMYK. | `crates/tinker-pdf-filters/src/netpbm.rs` (new), `crates/tinker-pdf-filters/src/lib.rs` | Unit tests: fixtures generated in the test from the format description decode to their samples. | — |
 | FI-05.2 | build | PSD's composite image decoded: raw and PackBits data in its colour modes and depths. | `crates/tinker-pdf-filters/src/psd.rs` (new), `crates/tinker-pdf-filters/src/lib.rs` | Unit tests: fixtures generated once (dated, bytes only) decode to their known samples. | H-106 |
 | FI-05.3 | build | Netpbm and PSD opened as documents and recognised inside archives and books. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/tests/netpbm_psd.rs` (new), `docs/features/filters.md` | `netpbm_psd.rs` (new): each opens by `Document::open` and as a CBZ page. | FI-05.1, FI-05.2 |
 

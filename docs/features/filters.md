@@ -846,6 +846,39 @@ gradient filter undone; one that will not decode leaves the picture opaque
 with `Warning::WebpAlphaDropped`, where libwebp refuses the whole file — the
 colour is still the picture, which is ruling 2's trade.
 
+**Netpbm** is the sixth container decoder: PBM, PGM and PPM in their plain
+(`P1` to `P3`) and raw (`P4` to `P6`) forms, PAM (`P7`) and PFM (`PF`, `Pf`),
+read from the family's format descriptions, whose revisions `THIRDPARTY.md`
+records. `netpbm_decode` returns a `NetpbmImage` in `PngImage`'s and
+`TiffImage`'s shape rather than `ImagePixels`, because the family carries
+sixteen-bit, CMYK and floating-point samples `ImagePixels` cannot hold: grey,
+RGB or CMYK, each with or without alpha, at eight or sixteen bits, with the
+file's maxval and PFM's scale factor beside the samples. A sample is scaled
+from its maxval by rounding, to eight bits under a maxval below 256 and to
+sixteen above it (`raster.rs`'s definition, exact in integers), and PBM's `1`
+and PAM's `BLACKANDWHITE` `0` both come back as black. A PAM is read by its
+tuple type: the six visual ones its description defines, and `CMYK` and
+`CMYK_ALPHA` — ink amounts, zero no ink, as `/DeviceCMYK` means them — which
+its rule for a user's own tuple type admits. A tuple type the reader does not
+know, the null one included, is refused by name, and a depth past what the
+tuple type uses has its higher planes ignored, as the description advises.
+PFM's floats are mapped as TIFF's are, `[0, 1]` onto sixteen bits and clamped
+outside it, a NaN black; its rows run bottom to top in the file and come back
+top first, and its scale factor is handed back unapplied. A raw raster starts
+after exactly one white-space byte, which is the descriptions' rule, so
+`255\n\n` opens its raster with a sample of ten. **The portable inkmap**, PKM,
+has no description of its own: its two producers document two files, a PPM of
+the RGB a CMYK rendering became and a PAM of one-bit CMYK, and the reader
+decodes each as the file it is (the module note and `THIRDPARTY.md` give both
+sources). Damage costs pixels: a raster cut short keeps what it held, the rest
+the sample value zero, with `Warning::TruncatedInput`; a sample past its maxval
+is the maxval, with `Warning::NetpbmSampleAboveMaxval`; a byte in a plain
+raster that is neither white space nor a sample stops it, and a comment there
+is skipped, both with `Warning::NetpbmRasterJunk`; images after the first are
+not decoded, with `Warning::NetpbmImagesIgnored`; a PAM depth past its tuple
+type's is `Warning::NetpbmPlanesIgnored`; and a PAM header line the reader does
+not read is passed over with `Warning::NetpbmHeaderLineIgnored`.
+
 ## API
 
 The filters never appear on the facade — ruling 11 makes `tinker_pdf` the
@@ -868,8 +901,8 @@ Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 `predictor_decode`. Each has a counted sibling — `flate_decode_counted` and
 so on, with `brotli_decode_counted`, `ccitt_decode_counted`,
 `png_decode_counted` (and `PngScan::decode_counted`), `tiff_decode_counted`
-(and `TiffScan::decode_counted`), `gif_decode_counted` and
-`bmp_decode_counted` beside them — that returns its uncounted sibling's answer
+(and `TiffScan::decode_counted`), `gif_decode_counted`, `bmp_decode_counted`
+and `netpbm_decode_counted` beside them — that returns its uncounted sibling's answer
 and the steps the decode took ([resource
 exhaustion](../design/resource-exhaustion.md), "The counters"): each
 symbol, code, field or length byte read, each byte a row unfiltered, each row,
@@ -926,8 +959,9 @@ interchange datastream or a `JpegEncodeError`); the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
 `inflate_raw`, `crc32`, `xxh64`, `jxr_decode` (returns `JxrImage`), `bmp_decode`
 (returns `BmpImage`, whose pixels are an `ImagePixels`), `gif_decode`
-(returns `GifImage`, the same pixels) and `webp_decode` (returns `WebpImage`,
-the same pixels, never indexed).
+(returns `GifImage`, the same pixels), `webp_decode` (returns `WebpImage`,
+the same pixels, never indexed) and `netpbm_decode` (returns `NetpbmImage`, an
+interleaved raster at eight or sixteen bits).
 
 Every one of those six takes plain numbers and a borrowed byte slice and
 returns bytes, which is all ruling 8 asks of a leaf. The parameter names
@@ -1037,6 +1071,10 @@ applied, so it keeps the empty dependency row it has.
 | A VP8L stream that breaks a rule of RFC 9649 §3: no `0x2f` signature, a version other than 0, a transform used twice, a colour cache outside 1 to 11 bits, a prefix code that is empty, over-subscribed or incomplete, a `max_symbol` or a repeated length past the alphabet | `WebpError::Lossless(&str)`, the rule named | §3.7.2.1: "The described tree must be a complete binary tree"; a stream that says how to read its pixels wrongly has no pixels to read | — |
 | A WebP with no `VP8 `, `VP8L` or `ANMF` chunk, or a `VP8X` or `VP8L` header cut off | `WebpError::NoImage`, `Truncated` | There is no picture, as distinct from a damaged one | — |
 | WebP past `MAX_WEBP_SAMPLES` or the caller's ceiling | `WebpError::TooManySamples`, `ExceedsOutputLimit` | Five bytes of VP8L header or seven of VP8 ask for 16 384 x 16 384, and a `VP8X` canvas for 2^24 on a side; charged at four samples, before allocation (ruling 1) | [rulings](../rulings.md) |
+| A Netpbm file whose header says nothing usable: no `P1` to `P7`, `PF` or `Pf` magic number, a header cut off, a field that is no decimal number, a PAM line missing or given twice, a `P7` not followed by a newline | `NetpbmError::NotNetpbm`, `TruncatedHeader`, `BadHeader` | There is no picture, as distinct from a damaged one | — |
+| A Netpbm width or height of zero or past 32 bits, a maxval of zero or past 65 535, a PAM depth below its tuple type's, a PFM scale factor of zero | `NetpbmError::BadDimensions`, `BadMaxval`, `BadDepth`, `BadScale` | The descriptions bound each, and a sample read past one is another number | — |
+| A PAM tuple type other than `BLACKANDWHITE`, `GRAYSCALE` and `RGB`, each with or without `_ALPHA`, and `CMYK` and `CMYK_ALPHA` — the null one, of a header with no `TUPLTYPE`, among them | `NetpbmError::UnknownTupleType`, the type as written | The PAM description: a process "must further define the format to specify the meanings of the data", and a depth is not a meaning | — |
+| Netpbm past `MAX_NETPBM_SAMPLES` or the caller's ceiling | `NetpbmError::TooManySamples`, `ExceedsOutputLimit` | A width and a height are decimal fields of any length; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPEG XR fixed-point, half-float and 32-bit float pixel formats (Table A.6's SINT and Float rows) | `JxrRefusal::FloatOrFixedPointFormat` | 9.10.7's postscaling makes those numbers mean something `JxrImage`'s 8- and 16-bit unsigned samples cannot say; reinterpreting them returns a picture whose values are a different quantity | [design](../design/jpeg-xr.md) |
 | JPEG XR CMYK, CMYKDIRECT, NCOMPONENT and RGBE output formats | `JxrRefusal::UnsupportedColourFormat` | A colour pipeline with no consumer in this engine; a CMYK image read as RGB is a different picture, not a degraded one | [design](../design/jpeg-xr.md) |
 | A Table A.6 GUID this build has no row for | `JxrRefusal::UnknownPixelFormat` | The GUID is what names the channel order, so an unknown one cannot be guessed at | [design](../design/jpeg-xr.md) |
