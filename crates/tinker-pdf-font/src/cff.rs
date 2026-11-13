@@ -642,6 +642,21 @@ impl<'a> Cff<'a> {
         Some(ctx.width.unwrap_or(ctx.private.default_width))
     }
 
+    /// One glyph run as the reader runs it, with every token it reads written
+    /// to `tape`, its calls inlined (`cff_subset.rs`'s flattening): the first
+    /// bound the run met, `None` inside for none, and `None` for a glyph the
+    /// font does not have.
+    pub(crate) fn run_taped(&self, glyph: u16, tape: &mut Tape) -> Option<Option<Bound>> {
+        let charstring = self.charstrings.get(usize::from(glyph))?;
+        let mut outline = Outline::default();
+        let mut stack = Vec::with_capacity(MAX_OPERANDS);
+        let mut ctx = self
+            .charstring_context(glyph, Some(&mut outline), &mut stack)
+            .taped(tape);
+        ctx.run(charstring);
+        Some(ctx.met)
+    }
+
     /// The first bound a glyph's run meets, or `None` for a run that meets
     /// none and for a glyph the font does not have.
     #[cfg(test)]
@@ -2098,6 +2113,59 @@ fn storage(
     met
 }
 
+/// What flattening (`cff_subset.rs`; `docs/design/subsetting.md`,
+/// *Flattening*) reads of one glyph's run: every token the machine read, in
+/// order, as one body. A call is written as nothing together with the number
+/// written immediately before it, where that is the number it popped, and
+/// otherwise as `drop`; `return` is written as nothing; `endchar` is written.
+/// So the stack depths, stem counts, widths and `random`'s draws of the body
+/// are the run's at every token.
+#[derive(Debug, Default)]
+pub(crate) struct Tape {
+    /// The flattened charstring so far.
+    pub(crate) bytes: Vec<u8>,
+    /// Whether `endchar` ran.
+    pub(crate) ended: bool,
+    /// The StandardEncoding codes of `seac`'s two components, where
+    /// `endchar` carried four or five operands.
+    pub(crate) seac: Option<(u8, u8)>,
+    /// The first thing that keeps the run from being written as one
+    /// charstring.
+    pub(crate) flaw: Option<Flaw>,
+}
+
+/// Why a run read onto a [`Tape`] is not one charstring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flaw {
+    /// A token read after `endchar`.
+    AfterEndchar,
+    /// A token cut by the end of its body.
+    Cut,
+    /// More than the 65 535 bytes a charstring holds (5177, appendix B).
+    TooLong,
+}
+
+impl Tape {
+    /// The most bytes a charstring holds (5177, appendix B).
+    pub(crate) const LIMIT: usize = 65_535;
+
+    /// Writes one token, or notes one cut short by its body; answers where
+    /// it starts when it is an operand the stack took.
+    fn write(&mut self, token: Option<&[u8]>, operand: bool) -> Option<usize> {
+        let Some(token) = token else {
+            self.flaw.get_or_insert(Flaw::Cut);
+            return None;
+        };
+        let at = self.bytes.len();
+        if at.saturating_add(token.len()) > Self::LIMIT {
+            self.flaw.get_or_insert(Flaw::TooLong);
+            return None;
+        }
+        self.bytes.extend_from_slice(token);
+        operand.then_some(at)
+    }
+}
+
 /// What a CFF2 `blend` reads (CFF2 chapter, 'Variation operators'): each
 /// item variation data subtable's region count — the `k` a `blend` pops —
 /// and, at an instance, each subtable's region scalars in column order. At
@@ -2274,6 +2342,9 @@ pub(crate) struct Charstring<'a, 'b> {
     /// CFF2: the bound the run stopped at, which refuses the glyph. CFF never
     /// sets it.
     stop: Option<Stop>,
+    /// Flattening (`cff_subset.rs`): where every token the run reads is
+    /// written, its calls inlined. `None` for every other run.
+    tape: Option<&'b mut Tape>,
 }
 
 impl<'a, 'b> Charstring<'a, 'b> {
@@ -2308,7 +2379,14 @@ impl<'a, 'b> Charstring<'a, 'b> {
             vsindex_set: false,
             blended: false,
             stop: None,
+            tape: None,
         }
+    }
+
+    /// The same machine, writing every token it reads to `tape`.
+    pub(crate) fn taped(mut self, tape: &'b mut Tape) -> Charstring<'a, 'b> {
+        self.tape = Some(tape);
+        self
     }
 
     /// Runs a whole charstring, closing a contour left open, and says where
@@ -2468,6 +2546,10 @@ impl Charstring<'_, '_> {
             return;
         }
         let mut at = 0usize;
+        // Flattening: where on the tape the token this body read last
+        // starts, while that token is an operand the stack took, so a call
+        // that pops it takes it back off.
+        let mut operand: Option<usize> = None;
 
         while at < code.len() {
             // Checked before the next byte is read, so a width settled inside
@@ -2486,24 +2568,41 @@ impl Charstring<'_, '_> {
                 return;
             }
 
+            let start = at;
             let Some(&b) = code.get(at) else { return };
             at += 1;
+            let depth = self.stack.len();
+            // Whether the tape takes the token as it was read: a call is
+            // written otherwise, and `return` and `endchar` write themselves.
+            let mut verbatim = true;
+            if let Some(tape) = self.tape.as_deref_mut() {
+                if tape.ended {
+                    tape.flaw.get_or_insert(Flaw::AfterEndchar);
+                }
+            }
 
             match b {
                 // Operands.
                 32..=246 => self.push(f64::from(b) - 139.0),
                 247..=250 => {
-                    let Some(&next) = code.get(at) else { return };
+                    let Some(&next) = code.get(at) else {
+                        self.cut();
+                        return;
+                    };
                     at += 1;
                     self.push((f64::from(b) - 247.0) * 256.0 + f64::from(next) + 108.0);
                 }
                 251..=254 => {
-                    let Some(&next) = code.get(at) else { return };
+                    let Some(&next) = code.get(at) else {
+                        self.cut();
+                        return;
+                    };
                     at += 1;
                     self.push(-(f64::from(b) - 251.0) * 256.0 - f64::from(next) - 108.0);
                 }
                 28 => {
                     let (Some(&hi), Some(&lo)) = (code.get(at), code.get(at + 1)) else {
+                        self.cut();
                         return;
                     };
                     at += 2;
@@ -2511,6 +2610,7 @@ impl Charstring<'_, '_> {
                 }
                 255 => {
                     let Some(bytes) = code.get(at..at + 4) else {
+                        self.cut();
                         return;
                     };
                     at += 4;
@@ -2671,6 +2771,8 @@ impl Charstring<'_, '_> {
                     let Some(index) = self.stack.pop() else {
                         return;
                     };
+                    verbatim = false;
+                    self.call_taped(operand);
                     let biased = index as i32 + self.private.local_bias;
                     let subroutine = usize::try_from(biased)
                         .ok()
@@ -2689,6 +2791,8 @@ impl Charstring<'_, '_> {
                     let Some(index) = self.stack.pop() else {
                         return;
                     };
+                    verbatim = false;
+                    self.call_taped(operand);
                     let biased = index as i32 + self.global_bias;
                     let subroutine = usize::try_from(biased)
                         .ok()
@@ -2710,6 +2814,7 @@ impl Charstring<'_, '_> {
                 // CFF2 has none either: a charstring ends where its data
                 // does.
                 14 if self.flavour == Flavour::Cff => {
+                    self.end_taped();
                     let expected = if self.stack.len() >= 4 { 4 } else { 0 };
                     self.take_width_for(expected);
                     if self.open {
@@ -2724,14 +2829,70 @@ impl Charstring<'_, '_> {
                 16 if self.flavour == Flavour::Cff2 => self.blend_operands(),
 
                 12 => {
-                    let Some(&second) = code.get(at) else { return };
+                    let Some(&second) = code.get(at) else {
+                        self.cut();
+                        return;
+                    };
                     at += 1;
                     self.escaped(second);
                 }
 
                 _ => self.stack.clear(),
             }
+
+            operand = match self.tape.as_deref_mut() {
+                Some(tape) if verbatim => {
+                    let taken = (b == 28 || b >= 32) && self.stack.len() > depth;
+                    tape.write(code.get(start..at), taken)
+                }
+                _ => None,
+            };
         }
+    }
+
+    /// Flattening: a token cut by the end of its body.
+    fn cut(&mut self) {
+        if let Some(tape) = self.tape.as_deref_mut() {
+            tape.flaw.get_or_insert(Flaw::Cut);
+        }
+    }
+
+    /// Flattening: a call. Where the number it popped is the operand written
+    /// immediately before it in the same body, both are written as nothing;
+    /// otherwise the call is `drop` (12 18), which pops the number as the
+    /// call did.
+    fn call_taped(&mut self, operand: Option<usize>) {
+        let Some(tape) = self.tape.as_deref_mut() else {
+            return;
+        };
+        match operand {
+            Some(at) => tape.bytes.truncate(at),
+            None => {
+                tape.write(Some(&[12, 18]), false);
+            }
+        }
+    }
+
+    /// Flattening: `endchar`, written, with `seac`'s two components where
+    /// its operands are four or five: the last two, as StandardEncoding
+    /// codes.
+    fn end_taped(&mut self) {
+        let Some(tape) = self.tape.as_deref_mut() else {
+            return;
+        };
+        let n = self.stack.len();
+        if n == 4 || n == 5 {
+            let code = |at: usize| {
+                self.stack
+                    .get(at)
+                    .and_then(|&value| u8::try_from(value as i64).ok())
+            };
+            if let (Some(bchar), Some(achar)) = (code(n - 2), code(n - 1)) {
+                tape.seac = Some((bchar, achar));
+            }
+        }
+        tape.write(Some(&[14]), false);
+        tape.ended = true;
     }
 
     /// The two-byte operators: the flex operators, and in CFF 5177's

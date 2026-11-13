@@ -486,7 +486,16 @@ glyph to the wrong name. A `callsubr` operand is recomputed from the new index
 and the **new bias** rather than adjusted, since subsetting can move an INDEX
 across the 1 240 and 33 900 thresholds. A global subroutine reached from two
 Font DICTs is written twice, because the local subroutines it calls are the
-caller's. The subsetter checks its own output: `verify` outlines every
+caller's. Two shapes have no such rewrite — a `callsubr` whose operand is not
+the number written just before it (computed, or left by a caller), and a
+subroutine entered in two hint states so that it reads two ways — and for
+those the subset is **flattened**: each kept glyph's charstring is what the
+reader runs, every call inlined (a call and the number written just before
+it as nothing, any other call as `drop`, `return` as nothing), with no
+subroutine left. Its stack depths, stem counts, widths and `random`'s draws
+are the original's at every token, so a flattened charstring carries the
+hints its glyph executed, and the advances are checked beside the outlines.
+The subsetter checks its own output: `verify` outlines every
 retained glyph in both programs and compares the segments, and a subset that
 disagrees is not used.
 
@@ -1683,7 +1692,7 @@ corpora already vendored here. So every name stays on the list.
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent; shaping to *produce* a document is `tinker-pdf-shape`, above | [shaping](../design/shaping.md) |
 | A face whose only layout tables are a **Graphite** description: a `Silf`, with no readable `GSUB` or `GPOS` and no `morx` beside it | `tinker_pdf_shape::Warning::TableNotRun { table: Silf }`, once a run; the run is shaped by the face's `cmap` and `hmtx` alone, as a face with no layout tables is | Graphite shaping is a capability not yet built, and refuses by name until its row closes (ruling 3); a face carrying `GSUB` or `GPOS` as well shapes through them as before | [shaping](../design/shaping.md), *Graphite shaping*; [ROADMAP](../ROADMAP.md) FT-07d |
 | A face whose layout is **AAT**'s: a `morx` with no readable `GSUB` or `GPOS` beside it, or a `mort` with none of those and no `Silf` | `tinker_pdf_shape::Warning::TableNotRun { table: morx }`, or `{ table: mort }`, once a run; the run is shaped by the face's `cmap` and `hmtx` alone, as a face with no layout tables is | AAT shaping is a capability not yet built, and refuses by name until its row closes (ruling 3); `mort`, the table `morx` extends, is a stated non-goal and stays refused, and a face carrying both is named by its `morx`, the manual having it ignore the `mort`; a face carrying `GSUB` or `GPOS` as well shapes through them as before | [shaping](../design/shaping.md), *AAT shaping*; [ROADMAP](../ROADMAP.md) FT-07c |
-| A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
+| A CFF that calls a subroutine it does not carry, whose subroutine calls itself, or that declares `CharstringType 1`; or one whose flattening a kept glyph refuses — a run that meets the reader's stack, transient-array, depth or operation bound, that does not end in `endchar` or reads past it or past the end of a body, a flattened charstring past 65 535 bytes, or flattened charstrings past the program's own length | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
 | A **CID-keyed** CFF under `add_cid_font` whose charset is not one-to-one | `add_cid_font` returns false | 9.7.4.2 reads a CID through the charset, which answers with the first glyph claiming it, so a glyph whose CID another also claims is one no code reaches. A one-to-one charset is accepted and each glyph written as its CID | this page |
 | EPUB text past 224 characters outside `WinAnsiEncoding` in one standard face, in a build **without** `bundled-fonts` | `ArchiveWarning::UnrepresentedCharacters` | a simple font has 256 codes and that build carries no face to key a composite font to; with the feature, the Liberation stand-in is embedded as an `/Identity-H` composite font for every character it covers | [epub](epub.md) |
@@ -1979,7 +1988,11 @@ corpora already vendored here. So every name stays on the list.
   byte: local and global subroutine renumbering, a global subroutine reached
   from two Font DICTs, `hintmask` counting stems a subroutine declared and
   stems the arithmetic computed, a `put` short of its operands read on as the
-  reader reads, `seac` components kept, and the four refusals. Two of them cross a **bias
+  reader reads, `seac` components kept; flattening a computed subroutine
+  number and a subroutine entered in two hint states, each flattened
+  charstring pinned byte for byte and a flattened `seac` keeping its
+  components; and every refusal by name — a missing subroutine, a
+  self-calling one, `CharstringType 1`, and each of flattening's. Two of them cross a **bias
   threshold**: 1 300 local subroutines cut to one (1 131 → 107), and 34 000 cut
   to 1 300 (32 768 → 1 131), the second keeping a non-prefix, non-contiguous
   range so the renumbering is the identity nowhere and every operand form

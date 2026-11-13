@@ -135,6 +135,38 @@ fn the_cff_subset_seeds_reach_the_subsetter() {
     report("cff_subset", files.len(), reached, &missed);
 }
 
+/// Two `cff_subset` seeds are programs renumbering declines — a computed
+/// subroutine number, and one subroutine entered in two hint states — so the
+/// target reaches flattening through them: each subsets, and every glyph it
+/// keeps draws as the original's.
+#[test]
+fn the_cff_subset_seeds_reach_flattening() {
+    let Some(files) = seeds("cff_subset") else {
+        println!("cff_subset-flattening: SKIPPED (no fuzz/corpus/cff_subset)");
+        return;
+    };
+    let glyphs: BTreeSet<u16> = BTreeSet::from([1, 2]);
+    for name in ["computed_call.cff", "two_hint_states.cff"] {
+        let (_, data) = files
+            .iter()
+            .find(|(label, _)| label == name)
+            .unwrap_or_else(|| panic!("fuzz/corpus/cff_subset/{name} is committed"));
+        let subset = tinker_pdf_font::subset(data, &glyphs)
+            .unwrap_or_else(|| panic!("{name}: flattening takes it"));
+        let before = Cff::parse(data).expect("the seed parses");
+        let after = Cff::parse(&subset).expect("the subset parses");
+        for &glyph in &glyphs {
+            assert_eq!(
+                before.outline(glyph).map(|outline| outline.segments),
+                after.outline(glyph).map(|outline| outline.segments),
+                "{name}, glyph {glyph}"
+            );
+        }
+        assert!(subset.len() < data.len(), "{name}: the subset is smaller");
+    }
+    println!("RAN cff_subset-flattening: 2 seeds flattened");
+}
+
 #[test]
 fn the_sfnt_seeds_reach_the_directory_walk() {
     let Some(files) = seeds("sfnt") else {

@@ -1,12 +1,13 @@
 //! FT-11's subsets on save, through the facade (`docs/design/subsetting.md`):
-//! a Type 1 program cut down to the glyphs its pages draw. Each saved document
-//! is re-read and drawn page by page against the original, held to the
-//! strict validator, and its report read.
+//! a Type 1 program cut down to the glyphs its pages draw, and a CFF whose
+//! subroutine calls renumbering cannot rewrite, flattened. Each saved
+//! document is re-read and drawn page by page against the original, held to
+//! the strict validator, and its report read.
 //!
-//! Every program is built byte by byte in the test through
-//! `tinker_pdf_font::type1`'s own cipher (`type1_support`), so which glyphs a
-//! page draws, which subroutines they reach and what must leave the program
-//! are all known in advance.
+//! Every program is built byte by byte in the test — a Type 1 program
+//! through `tinker_pdf_font::type1`'s own cipher (`type1_support`) — so which
+//! glyphs a page draws, which subroutines they reach and what must leave the
+//! program are all known in advance.
 
 mod render_support;
 mod type1_support;
@@ -16,7 +17,7 @@ use tinker_pdf::subset::{SubsetReport, UntouchedReason};
 use tinker_pdf::write::{save, SaveOptions, SubsetOutcome};
 use tinker_pdf::{Document, RenderOptions};
 use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object, XrefEntry};
-use tinker_pdf_font::Type1;
+use tinker_pdf_font::{Cff, Type1};
 
 use type1_support::{
     n, rect, CALLOTHERSUBR, CALLSUBR, CLOSEPATH, ENDCHAR, HLINETO, HSBW, POP, RETURN, RMOVETO,
@@ -272,7 +273,7 @@ fn saved(bytes: &[u8]) -> (Vec<u8>, SubsetReport) {
         SubsetOutcome::Cut(report) => report,
         other => panic!("a default save cuts: {other:?}"),
     };
-    written_support::rewritten("a Type 1 subset on save", bytes, &saved.bytes);
+    written_support::rewritten("a subset on save", bytes, &saved.bytes);
     (saved.bytes, report)
 }
 
@@ -535,4 +536,203 @@ fn a_type1_program_the_subsetter_refuses_is_left_whole() {
     let (_, before, _, _) = only_program(&original);
     let (_, after, _, _) = only_program(&bytes);
     assert_eq!(after, before);
+}
+
+// ---------------------------------------------------------------------------
+// FT-11.6: a CFF renumbering cannot rewrite, flattened.
+// ---------------------------------------------------------------------------
+
+/// A CFF INDEX of `items`, with four-byte offsets.
+fn cff_index(items: &[Vec<u8>]) -> Vec<u8> {
+    if items.is_empty() {
+        return vec![0, 0];
+    }
+    let mut out = (items.len() as u16).to_be_bytes().to_vec();
+    out.push(4);
+    let mut offset = 1u32;
+    out.extend_from_slice(&offset.to_be_bytes());
+    for item in items {
+        offset += item.len() as u32;
+        out.extend_from_slice(&offset.to_be_bytes());
+    }
+    for item in items {
+        out.extend_from_slice(item);
+    }
+    out
+}
+
+/// One DICT entry, its operands in the fixed five-byte form, so the fixture
+/// can compute its own offsets.
+fn cff_entry(op: u8, operands: &[i32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in operands {
+        out.push(29);
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+    out.push(op);
+    out
+}
+
+/// A Type 2 number in the three-byte form.
+fn t2(value: i16) -> Vec<u8> {
+    let mut out = vec![28u8];
+    out.extend_from_slice(&value.to_be_bytes());
+    out
+}
+
+/// Three sides of a box `size` units on a side, from the pen: the lines
+/// `endchar` closes.
+fn box_sides(size: i16) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (dx, dy) in [(size, 0), (0, size), (-size, 0)] {
+        out.extend(t2(dx));
+        out.extend(t2(dy));
+        out.push(5); // rlineto
+    }
+    out
+}
+
+/// A bare CFF of `.notdef` and `A` to `D` over four local subroutines, three
+/// of them boxes. `A` computes its subroutine's number — `-100 -7 add
+/// callsubr`, subroutine 0 — so renumbering declines and the subset is
+/// flattened; `B` and `D` call theirs by number, and `C` calls none.
+fn flattened_cff() -> Vec<u8> {
+    let start = [t2(0), t2(0), vec![21]].concat(); // 0 0 rmoveto
+    let charstrings = vec![
+        vec![14],
+        [start.clone(), t2(-100), t2(-7), vec![12, 10, 10, 14]].concat(),
+        [start.clone(), t2(-106), vec![10, 14]].concat(),
+        [start.clone(), box_sides(450), vec![14]].concat(),
+        [start, t2(-105), vec![10, 14]].concat(),
+    ];
+    let subrs = vec![
+        [box_sides(600), vec![11]].concat(),
+        [box_sides(300), vec![11]].concat(),
+        [box_sides(200), vec![11]].concat(),
+        vec![11],
+    ];
+    // defaultWidthX and nominalWidthX 600, then Subrs: the INDEX follows the
+    // DICT, six bytes on.
+    let mut private = cff_entry(20, &[600]);
+    private.extend(cff_entry(21, &[600]));
+    private.extend(cff_entry(19, &[private.len() as i32 + 6]));
+
+    let header = [1u8, 0, 4, 4];
+    let names = cff_index(&[b"Fixture".to_vec()]);
+    let strings = cff_index(&[]);
+    let gsubrs = cff_index(&[]);
+    // Format 0: SIDs 34 to 37 are `A` to `D` among the standard strings.
+    let charset = [0u8, 0, 34, 0, 35, 0, 36, 0, 37];
+    let charstring_index = cff_index(&charstrings);
+    let top = |charset_at: usize, charstrings_at: usize, private_at: usize| {
+        [
+            cff_entry(15, &[charset_at as i32]),
+            cff_entry(17, &[charstrings_at as i32]),
+            cff_entry(18, &[private.len() as i32, private_at as i32]),
+        ]
+        .concat()
+    };
+    // One Top DICT in an INDEX: a count, an offset size, two offsets.
+    let top_index_len = 2 + 1 + 8 + top(0, 0, 0).len();
+    let charset_at = header.len() + names.len() + top_index_len + strings.len() + gsubrs.len();
+    let charstrings_at = charset_at + charset.len();
+    let private_at = charstrings_at + charstring_index.len();
+
+    let mut out = header.to_vec();
+    out.extend(names);
+    out.extend(cff_index(&[top(charset_at, charstrings_at, private_at)]));
+    out.extend(strings);
+    out.extend(gsubrs);
+    assert_eq!(out.len(), charset_at, "the charset lands where it was put");
+    out.extend(charset);
+    out.extend(charstring_index);
+    assert_eq!(out.len(), private_at);
+    out.extend(private);
+    out.extend(cff_index(&subrs));
+    out
+}
+
+/// One page showing `ABC` in a simple font over `flattened_cff`, embedded
+/// as a `/FontFile3` of `/Subtype /Type1C`.
+fn cff_document() -> Vec<u8> {
+    render_support::raw_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 130] \
+          /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        render_support::raw_stream("", b"BT /F0 40 Tf 10 40 Td (ABC) Tj ET"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /FirstChar 65 \
+          /LastChar 68 /Widths [600 600 600 600] /FontDescriptor 6 0 R >>"
+            .to_vec(),
+        b"<< /Type /FontDescriptor /FontName /Fixture /Flags 32 \
+          /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0 \
+          /CapHeight 700 /StemV 80 /FontFile3 7 0 R >>"
+            .to_vec(),
+        render_support::raw_stream("/Subtype /Type1C", &flattened_cff()),
+    ])
+}
+
+/// The one `/FontFile3` program in a document, decoded.
+fn cff_program(bytes: &[u8]) -> Vec<u8> {
+    let doc = CosDocument::open(bytes.to_vec()).expect("it opens");
+    let mut found = Vec::new();
+    for (number, entry) in doc.xref().iter() {
+        if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
+            continue;
+        }
+        let Ok(object) = doc.get(ObjRef::new(number, 0)) else {
+            continue;
+        };
+        let Object::Dict(descriptor) = object.as_ref() else {
+            continue;
+        };
+        if let Some(program) = descriptor.get_ref(doc.intern(b"FontFile3")) {
+            found.push(doc.stream_decoded(program).expect("it decodes"));
+        }
+    }
+    assert_eq!(found.len(), 1, "one program");
+    found.remove(0)
+}
+
+/// **A flattened CFF subset draws as the original did.** `A` computes its
+/// subroutine's number, so renumbering declines and the save writes the
+/// subset with every call inlined: the page draws pixel for pixel as it did,
+/// `D` is gone, the program is reported cut and smaller, and the saved
+/// document passes the strict validator.
+#[test]
+fn a_flattened_cff_subset_draws_the_used_glyphs_identically() {
+    let original = cff_document();
+    let (bytes, report) = saved(&original);
+    assert_eq!(pages_drawn(&bytes), pages_drawn(&original));
+
+    assert_eq!(report.untouched, Vec::new(), "nothing is left whole");
+    assert_eq!(report.subsetted.len(), 1);
+    let cut = &report.subsetted[0];
+    assert!(cut.after < cut.before, "{} -> {}", cut.before, cut.after);
+    assert_eq!(cut.glyphs, 3, "A, B and C were shown");
+
+    let before = flattened_cff();
+    let program = cff_program(&bytes);
+    assert_eq!(program.len(), cut.after);
+    let (original_font, subset) = (
+        Cff::parse(&before).expect("the fixture is a CFF"),
+        Cff::parse(&program).expect("the subset is a CFF"),
+    );
+    assert_eq!(subset.glyph_count(), 5, "glyph identifiers do not move");
+    for glyph in 0..4 {
+        assert_eq!(
+            subset.outline(glyph).map(|outline| outline.segments),
+            original_font.outline(glyph).map(|outline| outline.segments),
+            "glyph {glyph}"
+        );
+        assert_eq!(subset.advance(glyph), original_font.advance(glyph));
+    }
+    assert!(
+        subset.outline(4).expect("D answers").is_empty(),
+        "D is nobody's"
+    );
+
+    let doc = Document::open(bytes).expect("it opens");
+    assert_eq!(doc.validate(), Vec::new());
 }

@@ -48,21 +48,38 @@
 //! INDEX. Duplicating costs the bytes of the subroutine; sharing would cost
 //! the wrong glyph.
 //!
+//! # Flattening
+//!
+//! Two shapes have no static rewrite: a `callsubr` whose operand is not the
+//! token immediately before it (so the number was computed, or left by a
+//! caller), and a subroutine reached with two different hint states, so that
+//! its `hintmask` lengths or its calls disagree. For those the walk declines
+//! ([`Decline`]) and the subset is written flattened instead: each kept
+//! glyph's charstring is what the reader runs (`cff.rs`'s `Tape`), every call
+//! inlined — a call and the number written immediately before it as nothing,
+//! any other call as `drop`, `return` as nothing — with every subroutine
+//! INDEX empty and `Subrs` gone from every Private DICT. The stack depths,
+//! stem counts, widths and `random`'s draws are the original's at every
+//! token, so a flattened charstring carries the hints its glyph executed, and
+//! the writer checks advances as well as outlines before answering.
+//!
 //! # When this declines
 //!
 //! Returning `None` embeds the whole face, which is larger and correct
 //! (ruling 2). It happens when the program says something this cannot rewrite
-//! without guessing: a `callsubr` whose operand is not the token immediately
-//! before it (so the number was computed, and no static rewrite can know it),
-//! a call to a subroutine that is not there, a subroutine reached with two
-//! different hint states so that its `hintmask` lengths disagree, a
-//! subroutine that calls itself, or `CharstringType 1`. Every one of those is
-//! a font this code would have to invent an answer for.
+//! without guessing: a call to a subroutine that is not there, a subroutine
+//! that calls itself, `CharstringType 1`, or a walk past its own bounds; and,
+//! where flattening runs, a kept glyph that meets one of the reader's bounds,
+//! does not end in `endchar`, reads past it or past the end of a body, or
+//! flattens past 65 535 bytes, or flattened charstrings that together pass the
+//! program's length ([`Unflattened`]). Every one of those is a font this code
+//! would have to invent an answer for.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cff::{
-    bias, compute, dict_get, parse_dict, read_fd_select, Cff, Index, Random, TRANSIENT_ELEMENTS,
+    bias, compute, dict_get, parse_dict, read_fd_select, Bound, Cff, Flaw, Index, Random, Tape,
+    TRANSIENT_ELEMENTS,
 };
 
 /// The operands the Type 2 stack holds (5177, appendix B), as the reader's.
@@ -616,10 +633,46 @@ struct Walk<'a, 'b> {
     /// The transient array and `random`'s sequence of the glyph being walked.
     scratch: Scratch,
     budget: u32,
-    refused: bool,
+    /// Why the walk stopped short, where it did: the first decline wins.
+    declined: Option<Decline>,
+}
+
+/// Why the renumbering walk declined a program (`docs/design/subsetting.md`,
+/// *Every `ProgramNotRebuildable` cause*). The first two are flattened; the
+/// rest leave the program whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Decline {
+    /// A `callsubr` whose operand is not the number written immediately
+    /// before it: computed, or left by a caller.
+    Computed,
+    /// A subroutine read two ways, its `hintmask` lengths or its calls
+    /// differing between two states it is entered in.
+    TwoStates,
+    /// A call to a subroutine the INDEX does not hold, or an operand naming
+    /// none: the new bias would make the same operand name one that exists.
+    MissingSubroutine,
+    /// A subroutine that reaches itself in the same state, which the reader
+    /// stops at its depth cap.
+    SelfCall,
+    /// The memo past [`MAX_STATES`].
+    States,
+    /// The walk past [`WALK_BUDGET`].
+    Budget,
+}
+
+impl Decline {
+    /// Whether flattening takes a program the walk declined so.
+    fn flattens(self) -> bool {
+        matches!(self, Decline::Computed | Decline::TwoStates)
+    }
 }
 
 impl Walk<'_, '_> {
+    /// Stops the walk, keeping the first reason it was given.
+    fn decline(&mut self, why: Decline) {
+        self.declined.get_or_insert(why);
+    }
+
     fn want(&mut self, glyph: u16) {
         if usize::from(glyph) < self.charstrings.len() && self.keep.insert(glyph) {
             self.pending.push(glyph);
@@ -635,7 +688,7 @@ impl Walk<'_, '_> {
         depth: u32,
         machine: &mut Machine,
     ) {
-        if self.refused || depth > MAX_DEPTH {
+        if self.declined.is_some() || depth > MAX_DEPTH {
             return;
         }
         let state = (ctx, kind, index, machine.stems, machine.stack.len());
@@ -643,7 +696,7 @@ impl Walk<'_, '_> {
             // A subroutine that reaches itself in the same state never
             // terminates on paper; the reader stops it with a depth cap and
             // draws whatever it had. Rewriting that is guesswork.
-            self.refused = true;
+            self.decline(Decline::SelfCall);
             return;
         }
         if let Some(exit) = self.memo.get(&state) {
@@ -651,7 +704,7 @@ impl Walk<'_, '_> {
             return;
         }
         if self.memo.len() >= MAX_STATES {
-            self.refused = true;
+            self.decline(Decline::States);
             return;
         }
         self.active.insert(state);
@@ -665,7 +718,7 @@ impl Walk<'_, '_> {
 
         while at < code.len() {
             if self.budget == 0 {
-                self.refused = true;
+                self.decline(Decline::Budget);
                 break;
             }
             self.budget -= 1;
@@ -707,7 +760,7 @@ impl Walk<'_, '_> {
                     // arithmetic operators, or one left on the stack by the
                     // caller — has no byte to rewrite.
                     let Some((start, end)) = operand.filter(|(_, end)| *end == token.start) else {
-                        self.refused = true;
+                        self.decline(Decline::Computed);
                         break;
                     };
                     operand = None;
@@ -718,7 +771,7 @@ impl Walk<'_, '_> {
                         self.local_bias.get(ctx).copied().unwrap_or(107)
                     };
                     let Some(target) = f64_to_index(number, applied) else {
-                        self.refused = true;
+                        self.decline(Decline::MissingSubroutine);
                         break;
                     };
                     let source = if global {
@@ -731,7 +784,7 @@ impl Walk<'_, '_> {
                         // reader skips it; a subset cannot, because the new
                         // bias would make the same operand name a different
                         // subroutine — one that exists.
-                        self.refused = true;
+                        self.decline(Decline::MissingSubroutine);
                         break;
                     };
 
@@ -748,7 +801,7 @@ impl Walk<'_, '_> {
                     }
                     let kind = if global { Kind::Global } else { Kind::Local };
                     self.body(ctx, kind, target, source, depth + 1, machine);
-                    if self.refused {
+                    if self.declined.is_some() {
                         break;
                     }
                 }
@@ -761,10 +814,10 @@ impl Walk<'_, '_> {
         // The same body read in two different hint states can tokenize two
         // different ways — a `hintmask` is as long as the stems declared
         // before it, and those can come from the caller. One body cannot have
-        // two subset forms, so disagreement is a refusal rather than a coin
-        // toss.
+        // two subset forms, so disagreement declines renumbering rather than
+        // tossing a coin, and the program is flattened instead.
         match self.plans.get(&(ctx, kind, index)) {
-            Some(existing) if *existing != plan => self.refused = true,
+            Some(existing) if *existing != plan => self.decline(Decline::TwoStates),
             Some(_) => {}
             None => {
                 self.plans.insert((ctx, kind, index), plan);
@@ -788,10 +841,11 @@ fn f64_to_index(number: f64, applied: i32) -> Option<usize> {
 // ---------------------------------------------------------------------------
 
 /// Builds a CFF program holding only `glyphs`, their `seac` components and the
-/// subroutines they reach.
+/// subroutines they reach — or, where renumbering those subroutines cannot be
+/// done without guessing, the same glyphs with every call inlined.
 ///
-/// Returns `None` when the program says something that cannot be rewritten
-/// without guessing — see the module documentation for the list — so a caller
+/// Returns `None` when the program says something that can be rewritten
+/// neither way — see the module documentation for the list — so a caller
 /// embeds the original instead of a subset that renders *almost* right.
 ///
 /// Glyph identifiers are unchanged, and so are the charset, the encoding and
@@ -812,7 +866,8 @@ pub fn subset_cff(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
 /// difference is one, a 16.16 fraction where it is not. A charstring whose
 /// first operator is a subroutine call, or any operator but a stack-clearing
 /// one, states its width where a static rewrite cannot reach, and a width
-/// asked of it declines the subset. A glyph the subset does not keep has no
+/// asked of it declines the subset; a flattened charstring has no call, and
+/// its width is set as any other's. A glyph the subset does not keep has no
 /// width to set, and its entry is passed over. Every width set is read back
 /// from the output before it is answered, as every kept outline is.
 #[must_use]
@@ -820,6 +875,45 @@ pub fn subset_cff_with(
     program: &[u8],
     glyphs: &BTreeSet<u16>,
     widths: &BTreeMap<u16, f64>,
+) -> Option<Vec<u8>> {
+    subset_explained(program, glyphs, widths, &mut Explained::default())
+}
+
+/// Why [`subset_cff`] declined, where the walk or flattening said, by name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Explained {
+    /// Why the renumbering walk declined, where it did.
+    pub(crate) walk: Option<Decline>,
+    /// Why flattening refused, where it ran and did.
+    pub(crate) flattening: Option<Unflattened>,
+}
+
+/// Why flattening refused a program the walk declined
+/// (`docs/design/subsetting.md`, *Flattening*); the program is then embedded
+/// whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unflattened {
+    /// A kept glyph's run met one of the reader's bounds — its stack, the
+    /// transient array, the subroutine depth or the operation budget — or
+    /// called a subroutine the INDEX does not hold. What a reader draws past
+    /// one is that reader's, not the program's.
+    Bound(Bound),
+    /// A kept glyph's run read a token cut by the end of its body or a token
+    /// after `endchar`, or came to more than 65 535 bytes.
+    Flaw(Flaw),
+    /// A kept glyph's run did not end in `endchar`.
+    NoEndchar,
+    /// The flattened charstrings together pass the program's own length, so
+    /// the subset would be no smaller than the face.
+    NotSmaller,
+}
+
+/// [`subset_cff_with`], with why it declined written to `why`.
+pub(crate) fn subset_explained(
+    program: &[u8],
+    glyphs: &BTreeSet<u16>,
+    widths: &BTreeMap<u16, f64>,
+    why: &mut Explained,
 ) -> Option<Vec<u8>> {
     let cff = Cff::parse(program)?;
 
@@ -906,7 +1000,7 @@ pub fn subset_cff_with(
         active: BTreeSet::new(),
         scratch: Scratch::default(),
         budget: WALK_BUDGET,
-        refused: false,
+        declined: None,
     };
     // Glyph 0 is `.notdef` and is what a reader draws for anything the font
     // does not cover, so it is never optional.
@@ -931,12 +1025,34 @@ pub fn subset_cff_with(
             0,
             &mut machine,
         );
-        if walk.refused {
-            return None;
+        if walk.declined.is_some() {
+            break;
         }
     }
-    if walk.refused {
-        return None;
+
+    // ---- flattening, where renumbering declined ---------------------------
+
+    let mut flat = match walk.declined {
+        None => None,
+        Some(decline) => {
+            why.walk = Some(decline);
+            if !decline.flattens() {
+                return None;
+            }
+            match flatten(&cff, program.len(), glyphs) {
+                Ok(flat) => Some(flat),
+                Err(refusal) => {
+                    why.flattening = Some(refusal);
+                    return None;
+                }
+            }
+        }
+    };
+    if flat.is_some() {
+        // No subroutine survives a flattening: every INDEX of them is
+        // written empty, and every Private DICT without `Subrs`.
+        walk.used_local.clear();
+        walk.used_global.clear();
     }
 
     // ---- renumber --------------------------------------------------------
@@ -997,17 +1113,22 @@ pub fn subset_cff_with(
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(glyph_count);
     for gid in 0..glyph_count {
         let glyph = u16::try_from(gid).ok()?;
-        if !walk.keep.contains(&glyph) {
+        let ctx = context.get(gid).copied().unwrap_or(top_context);
+        let kept = match flat.as_mut() {
+            Some(flat) => flat.charstrings.remove(&glyph),
+            None if walk.keep.contains(&glyph) => {
+                Some(rewrite(ctx, Kind::Charstring, gid, charstrings.get(gid)?)?)
+            }
+            None => None,
+        };
+        let Some(rewritten) = kept else {
             // A single `endchar`: a well-formed charstring that draws nothing
             // and takes the default width. A zero-length entry would be the
             // exact analogue of the dropped `loca` entry, and it would also be
             // a charstring with no terminating operator.
             new_charstrings.push(vec![14]);
             continue;
-        }
-        let code = charstrings.get(gid)?;
-        let ctx = context.get(gid).copied().unwrap_or(top_context);
-        let rewritten = rewrite(ctx, Kind::Charstring, gid, code)?;
+        };
         new_charstrings.push(match widths.get(&glyph) {
             Some(&width) => {
                 let nominal = privates
@@ -1216,20 +1337,24 @@ pub fn subset_cff_with(
         out.extend_from_slice(&write_index(&items)?);
     }
 
+    let keep = match &flat {
+        Some(flat) => &flat.keep,
+        None => &walk.keep,
+    };
     let widths_hold = || {
         let Some(after) = Cff::parse(&out) else {
             return false;
         };
         widths
             .iter()
-            .filter(|(glyph, _)| walk.keep.contains(glyph))
+            .filter(|(glyph, _)| keep.contains(glyph))
             .all(|(&glyph, &width)| {
                 after
                     .advance(glyph)
                     .is_some_and(|advance| (advance - width).abs() < WIDTH_EPSILON)
             })
     };
-    (verify(program, &out, &walk.keep) && widths_hold()).then_some(out)
+    (verify(program, &out, keep, flat.is_some(), widths) && widths_hold()).then_some(out)
 }
 
 /// How far a width read back may be from the width set: a 16.16 fraction's
@@ -1330,13 +1455,83 @@ fn with_width(code: &[u8], value: f64) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Outlines every retained glyph in both programs and compares the segments.
+/// The kept glyphs flattened: each one's charstring, and the glyphs kept.
+struct Flat {
+    charstrings: BTreeMap<u16, Vec<u8>>,
+    keep: BTreeSet<u16>,
+}
+
+/// Flattening (`docs/design/subsetting.md`, *Flattening*): each kept glyph's
+/// charstring as the reader runs it, every call inlined — `.notdef`, the
+/// glyphs asked for, and the `seac` components of each in turn — or the name
+/// of what keeps one from being written so.
+///
+/// The reader runs each glyph with its stack, transient array, depth and
+/// budget bounds, so every glyph's work is bounded by its own, and the bytes
+/// held are bounded by the program: flattened charstrings that together pass
+/// its length are refused before the next is run.
+fn flatten(cff: &Cff<'_>, program_len: usize, glyphs: &BTreeSet<u16>) -> Result<Flat, Unflattened> {
+    /// Keeps `glyph`, once, where the font has it.
+    fn want(glyph: u16, count: usize, keep: &mut BTreeSet<u16>, pending: &mut Vec<u16>) {
+        if usize::from(glyph) < count && keep.insert(glyph) {
+            pending.push(glyph);
+        }
+    }
+    let count = cff.glyph_count();
+    let mut keep: BTreeSet<u16> = BTreeSet::new();
+    let mut pending: Vec<u16> = Vec::new();
+    want(0, count, &mut keep, &mut pending);
+    for &glyph in glyphs {
+        want(glyph, count, &mut keep, &mut pending);
+    }
+    let mut charstrings: BTreeMap<u16, Vec<u8>> = BTreeMap::new();
+    let mut total = 0usize;
+    while let Some(glyph) = pending.pop() {
+        let mut tape = Tape::default();
+        let Some(met) = cff.run_taped(glyph, &mut tape) else {
+            continue;
+        };
+        if let Some(bound) = met {
+            return Err(Unflattened::Bound(bound));
+        }
+        if let Some(flaw) = tape.flaw {
+            return Err(Unflattened::Flaw(flaw));
+        }
+        if !tape.ended {
+            return Err(Unflattened::NoEndchar);
+        }
+        total = total.saturating_add(tape.bytes.len());
+        if total > program_len {
+            return Err(Unflattened::NotSmaller);
+        }
+        // The components are named by StandardEncoding codes, and a reader
+        // that honours `seac` draws them beside the glyph that names them.
+        if let Some((bchar, achar)) = tape.seac {
+            for code in [bchar, achar] {
+                if let Some(component) = cff.gid_for_standard_code(code) {
+                    want(component, count, &mut keep, &mut pending);
+                }
+            }
+        }
+        charstrings.insert(glyph, tape.bytes);
+    }
+    Ok(Flat { charstrings, keep })
+}
+
+/// Outlines every retained glyph in both programs and compares the segments,
+/// and for a flattened subset the advances too, but where `widths` set one.
 ///
 /// This is the property the whole exercise rests on, checked by the writer on
 /// its own output rather than only in a test: a subset that renders one glyph
 /// differently is worse than a font that is merely large (ruling 2), and the
 /// cost here is proportional to the subset rather than to the face.
-fn verify(original: &[u8], subset: &[u8], keep: &BTreeSet<u16>) -> bool {
+fn verify(
+    original: &[u8],
+    subset: &[u8],
+    keep: &BTreeSet<u16>,
+    advances: bool,
+    widths: &BTreeMap<u16, f64>,
+) -> bool {
     let (Some(before), Some(after)) = (Cff::parse(original), Cff::parse(subset)) else {
         return false;
     };
@@ -1351,6 +1546,10 @@ fn verify(original: &[u8], subset: &[u8], keep: &BTreeSet<u16>) -> bool {
             return false;
         }
         if before.font_matrix_for(glyph) != after.font_matrix_for(glyph) {
+            return false;
+        }
+        if advances && !widths.contains_key(&glyph) && before.advance(glyph) != after.advance(glyph)
+        {
             return false;
         }
     }

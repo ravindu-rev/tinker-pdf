@@ -1042,28 +1042,363 @@ fn the_fonts_own_encoding_is_carried_through() {
     assert_eq!(after.gid_for_code(0x43), Some(1));
 }
 
-/// A `callsubr` whose number was computed rather than written down has no byte
-/// to rewrite. Refusing embeds the whole face, which is larger and correct.
-#[test]
-fn a_computed_subroutine_number_is_refused() {
-    // `0 get callsubr`: the number comes off the transient array, so the token
-    // before the call is an operator and not the number it pops.
-    let mut drawn = t2(0);
-    drawn.extend([12, 21]); // get
-    drawn.push(10); // callsubr
-    drawn.push(14);
+/// Subsets `glyphs` of `program`, and answers what came out and why the walk
+/// or flattening declined, if either did.
+fn explained(program: &[u8], glyphs: &[u16]) -> (Option<Vec<u8>>, Explained) {
+    let mut why = Explained::default();
+    let subset = subset_explained(
+        program,
+        &glyphs.iter().copied().collect(),
+        &BTreeMap::new(),
+        &mut why,
+    );
+    (subset, why)
+}
 
+/// Two glyphs whose subroutine numbers are computed, and a third that calls
+/// nothing. `fuzz/corpus/cff_subset/computed_call.cff`.
+fn computed_call_font() -> Vec<u8> {
+    // Glyph 1, `0 get callsubr`: the number comes off the transient array, so
+    // the token before the call is an operator and not the number it pops;
+    // 0 biased by 107 is subroutine 107, a line 117 long.
+    let mut first = t2(0);
+    first.extend([12, 21]); // get
+    first.push(10); // callsubr
+    first.push(14);
+    // Glyph 2, `50 -100 -7 add callsubr`: subroutine 0, whose `rmoveto`
+    // finds three operands and takes the first as the width.
+    let mut second = t2(50);
+    second.extend(t2(-100));
+    second.extend(t2(-7));
+    second.extend([12, 10]); // add
+    second.push(10); // callsubr
+    second.push(14);
+
+    let mut subrs: Vec<Vec<u8>> = (0..200).map(|i| line_subr(10 + i, 0)).collect();
+    subrs[0] = [t2(0), t2(0), vec![21, 11]].concat(); // 0 0 rmoveto return
+    Font {
+        charset: vec![34, 35, 36],
+        charstrings: vec![vec![14], first, second, box_glyph(300)],
+        subrs,
+        ..Font::default()
+    }
+    .build()
+}
+
+/// `count` stem hints, `hstemhm`.
+fn stems(count: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..count {
+        out.extend(t2(20 + i * 4));
+        out.extend(t2(2));
+    }
+    out.push(18); // hstemhm
+    out
+}
+
+/// Two glyphs that enter one subroutine after eight stems and after nine.
+/// `fuzz/corpus/cff_subset/two_hint_states.cff`.
+fn two_hint_states_font() -> Vec<u8> {
+    let glyph = |count: i32| {
+        [
+            stems(count),
+            t2(0),
+            t2(0),
+            vec![21], // rmoveto
+            call_local(0, 2),
+            vec![14],
+        ]
+        .concat()
+    };
+    // `hintmask 0xFF`, then `0x21 0x0A`: `-106 callsubr`, or a second mask
+    // byte and `callsubr` on nothing.
+    let two_way = vec![19, 0xFF, 0x21, 0x0A, 0x0B];
+    Font {
+        charset: vec![34, 35],
+        charstrings: vec![vec![14], glyph(8), glyph(9)],
+        subrs: vec![two_way, line_subr(250, 40)],
+        ..Font::default()
+    }
+    .build()
+}
+
+/// Writes the seeds `fuzz/corpus/cff_subset/` carries for flattening, so the
+/// seeds and the fixtures cannot drift apart.
+///
+/// Run with `--ignored` when a fixture changes; the corpus is committed, and
+/// a run that rewrites it is a diff to look at rather than to apply blindly.
+#[test]
+#[ignore = "writes into fuzz/corpus/cff_subset, which is committed"]
+fn write_the_fuzz_seeds() {
+    let base =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/cff_subset");
+    for (name, bytes) in [
+        ("computed_call.cff", computed_call_font()),
+        ("two_hint_states.cff", two_hint_states_font()),
+    ] {
+        std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
+    }
+}
+
+/// A `callsubr` whose number was computed rather than written down has no
+/// byte to rewrite, so the walk declines to renumber and the subset is
+/// written flattened: each kept glyph's charstring is what the reader ran,
+/// the call written as `drop` in front of the subroutine's own tokens.
+#[test]
+fn a_computed_subroutine_number_is_flattened() {
+    let program = computed_call_font();
+    let (subset, why) = explained(&program, &[1, 2]);
+    let subset = subset.expect("it is flattened");
+    assert_eq!(
+        why,
+        Explained {
+            walk: Some(Decline::Computed),
+            flattening: None,
+        }
+    );
+    outlines_agree(&program, &subset, &[0, 1, 2]);
+
+    // `0 get drop 117 0 rlineto endchar`.
+    let flattened = [t2(0), vec![12, 21, 12, 18], t2(117), t2(0), vec![5, 14]].concat();
+    assert_eq!(charstring_of(&subset, 1), flattened);
+    // `50 -100 -7 add drop 0 0 rmoveto endchar`.
+    let flattened = [
+        t2(50),
+        t2(-100),
+        t2(-7),
+        vec![12, 10, 12, 18],
+        t2(0),
+        t2(0),
+        vec![21, 14],
+    ]
+    .concat();
+    assert_eq!(charstring_of(&subset, 2), flattened);
+    assert_eq!(charstring_of(&subset, 3), [14], "a glyph nobody kept");
+    assert_eq!(
+        (local_subr_count(&subset), global_subr_count(&subset)),
+        (0, 0),
+        "no subroutine survives a flattening"
+    );
+    assert!(subset.len() < program.len());
+
+    let (before, after) = (
+        Cff::parse(&program).expect("it parses"),
+        Cff::parse(&subset).expect("the subset parses"),
+    );
+    assert_eq!(after.advance(2), Some(650.0), "nominalWidthX and 50");
+    assert_eq!(after.advance(2), before.advance(2));
+    assert_eq!(
+        subset_cff(&program, &[1u16, 2].into_iter().collect()),
+        Some(subset),
+        "the same bytes every time"
+    );
+}
+
+/// One subroutine read two ways: after eight stems its `hintmask` takes one
+/// byte and the next is `-106 callsubr`; after nine it takes two, and the
+/// call finds an empty stack, which ends the subroutine. No single rewrite
+/// of it serves both glyphs, so each is flattened as the reader ran it.
+#[test]
+fn a_subroutine_reached_with_two_hint_states_is_flattened() {
+    let program = two_hint_states_font();
+    let (subset, why) = explained(&program, &[1, 2]);
+    let subset = subset.expect("it is flattened");
+    assert_eq!(why.walk, Some(Decline::TwoStates));
+    assert_eq!(why.flattening, None);
+    outlines_agree(&program, &subset, &[0, 1, 2]);
+
+    let start = [t2(0), t2(0), vec![21]].concat();
+    // Eight stems: the mask's one byte, then subroutine 1's line in place
+    // of `-106 callsubr`.
+    let eight = [
+        stems(8),
+        start.clone(),
+        vec![19, 0xFF],
+        t2(250),
+        t2(40),
+        vec![5, 14],
+    ]
+    .concat();
+    // Nine: the mask's two bytes, and the call on an empty stack, which
+    // pops nothing and writes nothing.
+    let nine = [stems(9), start, vec![19, 0xFF, 0x21, 14]].concat();
+    assert_eq!(charstring_of(&subset, 1), eight);
+    assert_eq!(charstring_of(&subset, 2), nine);
+    assert_eq!(local_subr_count(&subset), 0);
+}
+
+/// Flattening keeps a `seac` glyph's components, which it finds from the
+/// operands the reader's run leaves at `endchar`.
+#[test]
+fn a_flattened_seac_glyph_keeps_its_components() {
+    // `-100 -7 add callsubr`, a line, then `0 0 65 194 endchar`: `A` and
+    // `acute` in StandardEncoding.
+    let accented = [
+        t2(-100),
+        t2(-7),
+        vec![12, 10, 10],
+        t2(0),
+        t2(0),
+        t2(65),
+        t2(194),
+        vec![14],
+    ]
+    .concat();
     let program = Font {
-        charset: vec![34],
-        charstrings: vec![vec![14], drawn],
-        subrs: (0..200).map(|i| line_subr(10 + i, 0)).collect(),
+        strings: vec![b"Aacute".to_vec()],
+        charset: vec![34, 125, 391, 35],
+        charstrings: vec![
+            vec![14],
+            box_glyph(600),
+            box_glyph(120),
+            accented,
+            box_glyph(300),
+        ],
+        subrs: vec![line_subr(30, 0)],
         ..Font::default()
     }
     .build();
-    assert!(Cff::parse(&program).is_some(), "the reader accepts it");
+
+    let (subset, why) = explained(&program, &[3]);
+    let subset = subset.expect("it is flattened");
+    assert_eq!(why.walk, Some(Decline::Computed));
+    outlines_agree(&program, &subset, &[0, 1, 2, 3]);
+    assert_eq!(charstring_of(&subset, 1), box_glyph(600), "A is kept");
+    assert_eq!(charstring_of(&subset, 2), box_glyph(120), "acute is kept");
+    assert_eq!(charstring_of(&subset, 4), [14], "B is nobody's");
+}
+
+/// A width asked of a flattened glyph is set in its flattened charstring, as
+/// in any other, and read back; a glyph no width is asked of keeps its own.
+#[test]
+fn a_flattened_glyph_takes_the_width_it_is_given() {
+    let program = two_hint_states_font();
+    let widths: BTreeMap<u16, f64> = [(1u16, 650.0)].into_iter().collect();
+    let mut why = Explained::default();
+    let subset = subset_explained(
+        &program,
+        &[1u16, 2].into_iter().collect(),
+        &widths,
+        &mut why,
+    )
+    .expect("it is flattened");
+    assert_eq!(why.walk, Some(Decline::TwoStates));
+    outlines_agree(&program, &subset, &[1, 2]);
+    let before = Cff::parse(&program).expect("it parses");
+    let after = Cff::parse(&subset).expect("the subset parses");
+    assert_eq!(after.advance(1), Some(650.0), "nominalWidthX and 50");
+    assert_eq!(after.advance(2), before.advance(2));
+    // Glyph 1 took `defaultWidthX`, so the width is written before its first
+    // operand.
+    assert_eq!(charstring_of(&subset, 1)[..1], t2(50)[..]);
+}
+
+/// A flattened glyph whose first operator computes states its width where no
+/// static rewrite reaches, as a renumbered one does, and a width asked of it
+/// declines the subset.
+#[test]
+fn a_width_asked_of_a_glyph_that_computes_first_declines() {
+    let program = computed_call_font();
+    let widths: BTreeMap<u16, f64> = [(1u16, 700.0)].into_iter().collect();
+    let mut why = Explained::default();
+    assert!(subset_explained(&program, &[1u16].into_iter().collect(), &widths, &mut why).is_none());
+    assert_eq!(why.walk, Some(Decline::Computed));
     assert!(
-        subset_cff(&program, &[1u16].into_iter().collect()).is_none(),
-        "and the writer will not guess which subroutine it meant"
+        subset_cff(&program, &[1u16].into_iter().collect()).is_some(),
+        "without the width it is flattened"
+    );
+}
+
+/// Subsets glyph 1 of a font of `drawn` over the local subroutines `subrs`,
+/// which flattening refuses: why the walk declined and flattening refused.
+#[track_caller]
+fn unflattened(drawn: Vec<u8>, subrs: Vec<Vec<u8>>) -> Option<Unflattened> {
+    let program = Font {
+        charset: vec![34],
+        charstrings: vec![vec![14], drawn],
+        subrs,
+        ..Font::default()
+    }
+    .build();
+    let (subset, why) = explained(&program, &[1]);
+    assert!(subset.is_none(), "the program is written whole: {why:?}");
+    assert_eq!(why.walk, Some(Decline::Computed), "the walk declined first");
+    why.flattening
+}
+
+/// Every glyph flattening cannot write as the one charstring the reader ran
+/// is refused by name, and the program is embedded whole.
+#[test]
+fn a_glyph_flattening_cannot_write_is_refused_by_name() {
+    // `-100 -7 add callsubr`: subroutine 0, computed.
+    let computed = || [t2(-100), t2(-7), vec![12, 10, 10]].concat();
+    let line = || vec![line_subr(10, 0)];
+
+    // A computed number naming no subroutine: -97 is subroutine 10 of one.
+    let missing = [t2(-90), t2(-7), vec![12, 10, 10, 14]].concat();
+    assert_eq!(
+        unflattened(missing, line()),
+        Some(Unflattened::Bound(Bound::MissingSubroutine))
+    );
+    // Forty-nine operands after the call, one past the stack.
+    let overflow = [computed(), vec![139; 49], vec![14]].concat();
+    assert_eq!(
+        unflattened(overflow, line()),
+        Some(Unflattened::Bound(Bound::StackOverflow))
+    );
+    // `1 32 put`, past the transient array.
+    let transient = [computed(), vec![140, 171, 12, 20, 14]].concat();
+    assert_eq!(
+        unflattened(transient, line()),
+        Some(Unflattened::Bound(Bound::TransientIndex))
+    );
+    // A subroutine that calls itself by a computed number, until the cap.
+    let recursive = vec![[computed(), vec![11]].concat()];
+    assert_eq!(
+        unflattened([computed(), vec![14]].concat(), recursive),
+        Some(Unflattened::Bound(Bound::SubroutineDepth))
+    );
+    // 64 001 operators after the call, past the operation budget.
+    let spent = [computed(), vec![5; 64_001], vec![14]].concat();
+    assert_eq!(
+        unflattened(spent, line()),
+        Some(Unflattened::Bound(Bound::Budget))
+    );
+    // The glyph's data runs out with no `endchar`.
+    assert_eq!(
+        unflattened(computed(), line()),
+        Some(Unflattened::NoEndchar)
+    );
+    // The subroutine ends the glyph, and its caller reads on.
+    let ending = vec![[t2(0), t2(0), vec![21, 14]].concat()];
+    let after = [computed(), t2(10), t2(0), vec![5, 14]].concat();
+    assert_eq!(
+        unflattened(after, ending),
+        Some(Unflattened::Flaw(Flaw::AfterEndchar))
+    );
+    // The subroutine ends inside a three-byte number.
+    assert_eq!(
+        unflattened([computed(), vec![14]].concat(), vec![vec![28, 1]]),
+        Some(Unflattened::Flaw(Flaw::Cut))
+    );
+    // A subroutine of 1 101 bytes: a hundred `1 0 rlineto` in 16.16 numbers.
+    let mut long = Vec::new();
+    for _ in 0..100 {
+        long.extend([255, 0, 1, 0, 0, 255, 0, 0, 0, 0, 5]);
+    }
+    long.push(11);
+    // Sixty calls of it and `endchar` flatten to 66 361 bytes, past one
+    // charstring's 65 535.
+    let sixty = [computed().repeat(60), vec![14]].concat();
+    assert_eq!(
+        unflattened(sixty, vec![long.clone()]),
+        Some(Unflattened::Flaw(Flaw::TooLong))
+    );
+    // Forty flatten to 44 241, within one charstring and past the program.
+    let forty = [computed().repeat(40), vec![14]].concat();
+    assert_eq!(
+        unflattened(forty, vec![long]),
+        Some(Unflattened::NotSmaller)
     );
 }
 
@@ -1087,6 +1422,15 @@ fn a_call_to_a_subroutine_that_is_not_there_is_refused() {
     .build();
     assert!(Cff::parse(&program).is_some(), "the reader accepts it");
     assert!(subset_cff(&program, &[1u16].into_iter().collect()).is_none());
+    let (_, why) = explained(&program, &[1]);
+    assert_eq!(
+        why,
+        Explained {
+            walk: Some(Decline::MissingSubroutine),
+            flattening: None,
+        },
+        "refused by name, and not flattened"
+    );
 }
 
 /// A subroutine that calls itself never terminates on paper; the reader stops
@@ -1121,6 +1465,15 @@ fn a_self_recursive_subroutine_is_refused() {
         "the reader draws something for it"
     );
     assert!(subset_cff(&program, &[1u16].into_iter().collect()).is_none());
+    let (_, why) = explained(&program, &[1]);
+    assert_eq!(
+        why,
+        Explained {
+            walk: Some(Decline::SelfCall),
+            flattening: None,
+        },
+        "refused by name, and not flattened"
+    );
 }
 
 /// `CharstringType 1` means the CharStrings INDEX holds a different language,

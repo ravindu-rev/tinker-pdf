@@ -22,6 +22,12 @@
 //!   repository's own `Cff::parse` refuses has produced a document no
 //!   consumer can use, and nothing else in the pipeline would notice: the
 //!   embed path takes the bytes and writes them into a `/FontFile3`.
+//! - **Flattening.** A program whose calls renumbering cannot rewrite — a
+//!   computed subroutine number, or one subroutine entered in two hint
+//!   states — is written with every call inlined as the reader ran it, and
+//!   no subroutine left. `computed_call.cff` and `two_hint_states.cff` seed
+//!   that path, and each kept glyph's run is bounded by the reader's own
+//!   stack, transient array, depth and operation budget.
 //!
 //! So the assertion is not "it did not panic". It is that whatever comes out
 //! parses, and that every glyph asked for is still there — because a subset

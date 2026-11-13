@@ -296,7 +296,8 @@ charstring is what the reader runs, with every call inlined —
 - a call whose operand is the number written immediately before it in the
   same body, which the stack took, is written as nothing, and the number goes
   with it; any other call is written as `drop` (12 18), which pops the number
-  as the call popped it;
+  as the call popped it; a call that finds the stack empty pops nothing and
+  ends its body, as the reader's does, and is written as nothing;
 - `return` is written as nothing; `endchar` is written and ends the glyph;
 
 and every subroutine INDEX empty, `Subrs` gone from every Private DICT, and
@@ -306,14 +307,14 @@ original's at every token, so the flattened charstring carries the hints its
 glyph executed. A glyph nobody keeps is `endchar`, as today. The writer
 outlines and advances every kept glyph in both programs before answering.
 
-**Flattening refuses**, by name, the program then written whole: a kept
-glyph whose run meets a bound (`StackOverflow`, `TransientIndex`,
-`SubroutineDepth`, `Budget`) or calls a missing subroutine; one that does not
-end in `endchar`, or reads a token after it; a token cut by the end of its
-body; a flattened charstring past appendix B's 65 535 bytes; and flattened
-charstrings that together pass the program's own length, since a subset no
-smaller than its face is never used (`SubsetNotSmaller`) — which also bounds
-what flattening holds by its input (ruling 1).
+**Flattening refuses** (`Unflattened`), by name, the program then written
+whole: a kept glyph whose run meets a bound (`StackOverflow`,
+`TransientIndex`, `SubroutineDepth`, `Budget`) or calls a missing subroutine;
+one that does not end in `endchar`, or reads a token after it; a token cut by
+the end of its body; a flattened charstring past appendix B's 65 535 bytes;
+and flattened charstrings that together pass the program's own length, since
+a subset no smaller than its face is never used (`SubsetNotSmaller`) — which
+also bounds what flattening holds by its input (ruling 1).
 
 ### Every `ProgramNotRebuildable` cause, before and after
 
