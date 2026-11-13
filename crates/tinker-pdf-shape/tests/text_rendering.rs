@@ -1015,19 +1015,22 @@ fn verdict(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> Wr
 ///   4, and it reads monotonically across the whole Tai Tham block:
 ///   U+1A78 to gid311, U+1A7B to gid314, neighbours either side in step.
 ///
-/// What is left is a lookup that does not *match* the glyph sequence this
-/// crate hands it — a context, an order, or a boundary — which is inside
-/// USE's cluster grammar and is the item `docs/design/shaping.md` calls
-/// effectively unbounded.
+/// The third explanation is the face's own, and FT-08.1's trace
+/// (`src/trace.rs`, read in `docs/design/shaping.md`'s *The traced rows*)
+/// settles it: **the vendored face cannot produce gid311 from these texts.**
+/// No sequence of its lookups — under any script, language system or
+/// feature, every alternate taken and every context set aside — puts gid311 in
+/// a buffer that starts as any of the fifteen texts' glyphs, while each
+/// fixture draws gid311's outline and not gid314's.
 ///
-/// One measurement supports that and is worth having: **removing the
-/// per-syllable `GSUB` restriction entirely gains three cases and costs
-/// none** — `SHLANA-3/3`, `SHLANA-4/2` and `SHLANA-7/5`, one of which is an
-/// `order` verdict that turns out to be a blocked lookup rather than a
-/// reordering. It was not taken: three is not a reason to drop a rule USE
-/// states and `Buffer::set_syllable` argues for, and what those three
-/// actually say is that *this crate's syllable boundaries* are in the wrong
-/// place, which is the grammar again.
+/// The same trace says what the per-syllable `GSUB` restriction costs:
+/// **removing it entirely gains three cases and costs none** — `SHLANA-3/3`,
+/// `SHLANA-4/2` and `SHLANA-7/5`, one of which is an `order` verdict that turns
+/// out to be a blocked lookup rather than a reordering. In two a mark typed
+/// between `SAKOT` and its consonant starts a new syllable at the consonant,
+/// which is *this crate's syllable boundary* in the wrong place; in the third
+/// the face's presentation lookups are confined where the specification
+/// applies them to the whole run.
 const TRIAGE: &[(&str, Wrong)] = &[
     ("SHBALI-1/14", Wrong::Set),
     ("SHBALI-1/15", Wrong::Set),

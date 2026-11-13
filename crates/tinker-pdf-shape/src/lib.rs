@@ -99,6 +99,8 @@ pub mod jstf;
 pub mod limits;
 pub mod read;
 pub mod shape;
+#[cfg(test)]
+mod trace;
 pub mod unicode;
 mod universal;
 

@@ -440,6 +440,29 @@ impl<'a> Skipper<'a> {
             .is_none_or(|syllable| props.syllable == syllable)
     }
 
+    /// Why the glyph at `at` is passed over, for `crate::trace`.
+    #[cfg(test)]
+    fn passed_because(&self, buffer: &Buffer, at: usize) -> &'static str {
+        if self.skips(buffer, at) {
+            "the lookup's flags skip it"
+        } else if buffer.props(at).mask & self.mask == 0 {
+            "the feature's mask does not reach it"
+        } else {
+            "in another cluster"
+        }
+    }
+
+    /// Which half of [`Skipper::reaches`] refused the glyph at `at`, for
+    /// `crate::trace`.
+    #[cfg(test)]
+    fn unreached(&self, buffer: &Buffer, at: usize) -> crate::trace::Cause {
+        if buffer.props(at).mask & self.mask == 0 {
+            crate::trace::Cause::Mask
+        } else {
+            crate::trace::Cause::Syllable
+        }
+    }
+
     /// Whether this lookup steps over the glyph at `at`.
     fn skips(&self, buffer: &Buffer, at: usize) -> bool {
         let props = buffer.props(at);
@@ -582,6 +605,10 @@ impl<'a, 'g> Runner<'a, 'g> {
     /// `GPOS` is never confined; [`crate::buffer::Buffer::set_syllable`] says
     /// why the two tables differ here.
     fn per_syllable(&self, buffer: &Buffer, at: usize) -> u16 {
+        #[cfg(test)]
+        if crate::trace::unconfined() {
+            return 0;
+        }
         match self.table {
             Table::Gsub => buffer.props(at).syllable,
             Table::Gpos => 0,
@@ -680,7 +707,13 @@ impl<'a, 'g> Runner<'a, 'g> {
                 .get(place)
                 .and_then(Option::as_deref)
                 .filter(|held| held.answers_under(&self.limits));
+            #[cfg(test)]
+            let before = crate::trace::recording().then(|| buffer.clone());
             self.run_lookup(buffer, *index, *mask, held);
+            #[cfg(test)]
+            if let Some(before) = before {
+                crate::trace::lookup_ran(self.table, *index, *mask, &before, buffer);
+            }
         }
     }
 
@@ -756,6 +789,8 @@ impl<'a, 'g> Runner<'a, 'g> {
         let mut at = 0usize;
         while at < buffer.len() {
             if skipper.skips(buffer, at) || !skipper.reaches(buffer, at) {
+                #[cfg(test)]
+                crate::trace::passed_over(at, skipper.passed_because(buffer, at));
                 at += 1;
                 continue;
             }
@@ -766,9 +801,15 @@ impl<'a, 'g> Runner<'a, 'g> {
             // The rule matches inside the cluster it started in. In a run with
             // no clusters — every Latin, Arabic and Han run — this is `None`
             // and restricts nothing.
-            let skipper = &skipper.in_syllable(self.per_syllable(buffer, at));
+            let syllable = self.per_syllable(buffer, at);
+            let skipper = &skipper.in_syllable(syllable);
             let before = buffer.len();
-            match self.apply_held(buffer, lookup, index, skipper, at, 0, held) {
+            #[cfg(test)]
+            let glyph = buffer.glyph_id(at).unwrap_or(0);
+            let applied = self.apply_held(buffer, lookup, index, skipper, at, 0, held);
+            #[cfg(test)]
+            crate::trace::attempted(at, glyph, syllable, applied.is_some());
+            match applied {
                 // A subtable that neither consumed a glyph nor shortened the
                 // buffer would leave the cursor where it was, and the same
                 // subtable would match again for ever. The operation budget
@@ -792,13 +833,22 @@ impl<'a, 'g> Runner<'a, 'g> {
         while at > 0 {
             at -= 1;
             if skipper.skips(buffer, at) || !skipper.reaches(buffer, at) {
+                #[cfg(test)]
+                crate::trace::passed_over(at, skipper.passed_because(buffer, at));
                 continue;
             }
             if self.passes(buffer, at, index, held) {
                 continue;
             }
-            let skipper = &skipper.in_syllable(self.per_syllable(buffer, at));
-            let _ = self.apply_held(buffer, lookup, index, skipper, at, 0, held);
+            let syllable = self.per_syllable(buffer, at);
+            let skipper = &skipper.in_syllable(syllable);
+            #[cfg(test)]
+            let glyph = buffer.glyph_id(at).unwrap_or(0);
+            let applied = self.apply_held(buffer, lookup, index, skipper, at, 0, held);
+            #[cfg(test)]
+            crate::trace::attempted(at, glyph, syllable, applied.is_some());
+            #[cfg(not(test))]
+            let _ = applied;
         }
     }
 
@@ -992,18 +1042,40 @@ impl<'a, 'g> Runner<'a, 'g> {
         count: usize,
         wanted: impl Fn(usize, u16) -> bool,
     ) -> Option<Matched> {
+        #[cfg(test)]
+        use crate::trace::{Cause, Part};
         if count > self.limits.max_context_length {
             self.warn(Warning::ContextTooLong { table: self.table });
+            #[cfg(test)]
+            crate::trace::missed(Part::Input, 0, Some(at), None, Cause::TooLong);
             return None;
         }
         let mut positions = Vec::with_capacity(count);
         let mut cursor = at;
         for step in 0..count {
             if step > 0 {
-                cursor = self.step_forward(buffer, skipper, cursor)?;
+                let Some(next) = self.step_forward(buffer, skipper, cursor) else {
+                    #[cfg(test)]
+                    crate::trace::missed(Part::Input, step, None, None, Cause::End);
+                    return None;
+                };
+                cursor = next;
             }
             let glyph = buffer.glyph_id(cursor)?;
-            if !wanted(step, glyph) || !skipper.reaches(buffer, cursor) {
+            if !wanted(step, glyph) {
+                #[cfg(test)]
+                crate::trace::missed(Part::Input, step, Some(cursor), Some(glyph), Cause::Glyph);
+                return None;
+            }
+            if !skipper.reaches(buffer, cursor) {
+                #[cfg(test)]
+                crate::trace::missed(
+                    Part::Input,
+                    step,
+                    Some(cursor),
+                    Some(glyph),
+                    skipper.unreached(buffer, cursor),
+                );
                 return None;
             }
             positions.push(cursor);
@@ -1034,9 +1106,28 @@ impl<'a, 'g> Runner<'a, 'g> {
         let mut positions = Vec::with_capacity(count);
         let mut cursor = at;
         for step in 0..count {
-            cursor = self.step_backward(buffer, skipper, cursor)?;
+            let Some(next) = self.step_backward(buffer, skipper, cursor) else {
+                #[cfg(test)]
+                crate::trace::missed(
+                    crate::trace::Part::Backtrack,
+                    step,
+                    None,
+                    None,
+                    crate::trace::Cause::End,
+                );
+                return None;
+            };
+            cursor = next;
             let glyph = buffer.glyph_id(cursor)?;
             if !wanted(step, glyph) {
+                #[cfg(test)]
+                crate::trace::missed(
+                    crate::trace::Part::Backtrack,
+                    step,
+                    Some(cursor),
+                    Some(glyph),
+                    crate::trace::Cause::Glyph,
+                );
                 return None;
             }
             positions.push(cursor);
@@ -1070,9 +1161,28 @@ impl<'a, 'g> Runner<'a, 'g> {
         // forward rather than reading `from` directly.
         let mut cursor = from.checked_sub(1)?;
         for step in 0..count {
-            cursor = self.step_forward(buffer, skipper, cursor)?;
+            let Some(next) = self.step_forward(buffer, skipper, cursor) else {
+                #[cfg(test)]
+                crate::trace::missed(
+                    crate::trace::Part::Lookahead,
+                    step,
+                    None,
+                    None,
+                    crate::trace::Cause::End,
+                );
+                return None;
+            };
+            cursor = next;
             let glyph = buffer.glyph_id(cursor)?;
             if !wanted(step, glyph) {
+                #[cfg(test)]
+                crate::trace::missed(
+                    crate::trace::Part::Lookahead,
+                    step,
+                    Some(cursor),
+                    Some(glyph),
+                    crate::trace::Cause::Glyph,
+                );
                 return None;
             }
             positions.push(cursor);
@@ -1174,6 +1284,8 @@ impl<'a, 'g> Runner<'a, 'g> {
             }
             let before = buffer.len();
             if !self.recurse(buffer, lookup_index, at, depth) {
+                #[cfg(test)]
+                crate::trace::nested_missed(lookup_index, at);
                 continue;
             }
             let after = buffer.len();

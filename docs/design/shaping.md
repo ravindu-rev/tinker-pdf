@@ -639,6 +639,42 @@ column whose face has no `GPOS` writes no number.
 | The grapheme cluster is approximated | A base and the marks and inherited characters after it; UAX #29's other extensions are not computed. Of what that leaves out only an emoji tag sequence — its tag characters `R` beside an upright base — splits; Hangul syllable sequences and regional-indicator pairs are upright on both sides. Named in [features/fonts.md](../features/fonts.md) |
 | `Tr`'s rotated fallback is never taken | CSS §5.1.1 does not expect it of a layout engine and the itemizer sees no face; a `Tr` character with no vertical form stands upright, named in [features/fonts.md](../features/fonts.md) |
 
+## The Universal Shaping Engine's remainder
+
+*For ROADMAP row FT-08: milestone 5's remainder.*
+
+### The traced rows (FT-08.1)
+
+`crates/tinker-pdf-shape/src/trace.rs` is a test-only record of what
+`Shaper::shape` does to a run: the buffer after `cmap`, after each `GSUB`
+stage, after the reordering pause and after `GPOS`, and the buffer either side
+of every lookup the runner runs. Its `#[ignore]`d
+`every_unexplained_triage_row_is_traced` shapes the twenty-six rows of
+`tests/text_rendering.rs`'s `TRIAGE` whose cause the tree did not record and
+prints, per row, each stage's glyphs, syllables and categories; for each glyph
+the fixture wants and the run lacks, every lookup of the face that can emit it,
+directly or through a lookup its rules name, replayed over the buffer it saw
+with the first place each rule stops matching, as the runner's own matcher
+reports it; the same text shaped with the per-syllable confinement lifted, and
+the lookups only that run applies; and, for a glyph drawn where the fixture
+does not draw it, every mark lookup of the face that could attach it, with the
+position each would give it beside the position it takes unattached. It
+regenerates with `cargo test -p tinker-pdf-shape --lib -- --ignored
+trace::tests::every_unexplained_triage_row_is_traced --exact --nocapture`.
+`SHKNDA-2`'s six are not traced: `universal.rs` records their cause and its
+price.
+
+Each row is attributed to one mechanism:
+
+| Rows | Mechanism | What the trace shows | Closed by |
+| --- | --- | --- | --- |
+| `SHLANA-2/2`, `/3`, `/4`; `SHLANA-7/17`; `SHLANA-8/5`, `/6`; `SHLANA-10/8`, `/30`, `/38`, `/39`, `/40`, `/42`, `/45`, `/46`, `/47` | A glyph the vendored face cannot produce from the text | Each case types U+1A7B and wants gid311 (`uni1A78`) at its place, and the fixture's outline for that glyph is gid311's, a cross, not gid314's, the glyph `cmap` gives U+1A7B. **No sequence of the face's `lana` lookups yields gid311 from U+1A7B**, and none of all its lookups does either: taken over every script, language system and feature, every alternate of an alternate set, and with every context set aside, no substitution of the face puts gid311 in a buffer that starts as any of the fifteen texts' glyphs. The face's only substitutions that make gid311 out of another glyph take gid23, gid23 and gid46, or gid293, and none of those is derivable from these texts. Where the order differs as well (`SHLANA-2/3`), it is the face's `abvs` lookup 68 moving gid314 after the vowel that follows it, a rule gid311 would not match | H-146: nothing is declined; the fifteen stay in `TRIAGE` and `PASSING`'s shortfall (FT-08.9) |
+| `SHBALI-1/14`, `/15` | A broken cluster with no dotted circle | `KA ULU TALING` and `KA SUKU TALING`: each fixture ends with gid128, U+25CC in the face's `cmap`, which no lookup of the face emits. A pre-base vowel typed after an above or below vowel is a broken cluster of its own under USE's grammar, drawn before the dotted circle the shaper inserts for it; this crate keeps it in the base's syllable and moves it in front of the base | FT-08.5's grammar, FT-08.7's dotted circle |
+| `SHLANA-3/3`, `SHLANA-7/5` | A cluster boundary between a halant and the base it stacks | `U+1A43 U+1A60 U+1A7A U+1A3C` and `U+1A37 U+1A60 U+1A76 U+1A3E`: a mark is typed between `SAKOT` and its consonant, the one-character halant lookback starts a new syllable at the consonant, and `blwf`'s lookup 13, which forms the subjoined consonant, stops at it as in another cluster. With the confinement lifted both rows reproduce, and only `blwf` and the `blws` lookups that follow from it apply differently. They are the only two cases in either corpus with a mark between a halant and its base | FT-08.5's grammar |
+| `SHLANA-4/2` | The presentation features confined to a cluster | `abvs` lookups 48 and 51 and `blws` lookup 71 move `U+1A58` past the next consonant, across a syllable boundary, and the confinement stops them. With it lifted the row reproduces. The specification applies the presentation group to the whole run | FT-08.6 |
+| `SHLANA-10/28` | `CGJ` ending a cluster | U+034F is `Other` to the cluster model, so the pre-base vowel typed after it is in a syllable of its own and is not moved in front of the base. Lifting the confinement changes nothing | FT-08.5 places `CGJ` inside its cluster and FT-08.8 removes it after `GSUB`; it then shapes as `SHLANA-10/29` |
+| `SHLANA-1/35`, `SHLANA-2/7`, `SHLANA-2/35`, `SHLANA-10/29` (`Advance`); `SHLANA-10/4` (`Offset`) | A mark attachment the fixture does not draw | The glyphs and their order are the fixture's. Each mark the fixture places elsewhere is where it is drawn **unattached** — at the pen, with no offset — and each mark stacked on it moves with it. The face's lookup 1 under `mark` is the only lookup that attaches it to its base, it applies as ISO/IEC 14496-22 states (the mark covered, the base the nearest glyph before it that is not a mark and covered, no lookup flag), and no mark lookup of the face attaches the mark where the fixture draws it. Each such syllable has a pre-base character typed after another of its marks, but cases of the same shape attach in their fixtures (`SHLANA-1/26`, `SHLANA-2/36`), so no rule the syllable's shape states separates them | FT-08.10, as FT-08.3 names it |
+
 ## AAT shaping
 
 *For ROADMAP row FT-07c.* A face built for Apple's layout carries its

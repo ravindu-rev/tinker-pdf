@@ -1809,19 +1809,21 @@ What it does **not** do, each named so it is a backlog and not a mystery:
   §3.12) and `UnicodeData.txt` lists none, so a Hangul syllable is not
   decomposed. Hangul does not reach the Brahmic plan anyway; the row is here
   so the absence is a decision.
-- **Tai Tham's residue is mostly one glyph.** `TestShapeLana`'s gid311
-  (`uni1A78`) is expected where this crate produces gid314, the glyph `cmap`
-  gives U+1A7B. It is **not** a feature this crate fails to ask for:
-  requesting all twenty-four the face declares still produces gid314. It is
-  not a `cmap` difference either; the face has one subtable and it reads
-  monotonically across the block. What is left is a lookup that does not match
-  the glyph sequence this crate hands it, which is inside USE's cluster
-  grammar. `TRIAGE` in `crates/tinker-pdf-shape/tests/text_rendering.rs` holds
-  the case list and both refutations.
+- **Tai Tham's residue is mostly one glyph, and the face cannot make it.**
+  `TestShapeLana`'s gid311 (`uni1A78`) is expected where this crate produces
+  gid314, the glyph `cmap` gives U+1A7B, in fifteen cases, and the fixtures
+  draw gid311's outline there. No sequence of the face's lookups — under any
+  script, language system or feature, every alternate taken and every context
+  set aside — puts gid311 in a buffer that starts as those texts' glyphs.
+  [design/shaping.md](../design/shaping.md)'s *The traced rows* holds the
+  trace, and `TRIAGE` in `crates/tinker-pdf-shape/tests/text_rendering.rs`
+  the case list.
 - **The per-syllable `GSUB` confinement stays**, though it gains nothing in
-  this corpus and costs cases. What those cases say is that this crate's
-  syllable *boundaries* are in the wrong place, not that confining a lookup to
-  a cluster is wrong; `Buffer::set_syllable` has the measurement.
+  this corpus and costs three cases. Two say a syllable *boundary* is in the
+  wrong place: a mark typed between a halant and the base it stacks starts a
+  new syllable at the base (`SHLANA-3/3`, `SHLANA-7/5`). The third says the
+  presentation features are confined where the specification applies them to
+  the whole run (`SHLANA-4/2`). *The traced rows* has the trace.
 - **Dotted circles.** USE inserts one into a cluster that its grammar calls
   broken. This crate never inserts a glyph the text did not ask for, so a
   malformed cluster renders as its parts.

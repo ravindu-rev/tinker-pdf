@@ -1280,6 +1280,11 @@ impl<'a> Shaper<'a> {
         if opentype && plan == Plan::Universal {
             self.mark_syllables(&characters, &from, &mut buffer);
         }
+        #[cfg(test)]
+        {
+            crate::trace::note(format!("plan {plan:?}"));
+            crate::trace::stage("cmap", &buffer);
+        }
 
         let limits = self
             .limits
@@ -1298,6 +1303,8 @@ impl<'a> Shaper<'a> {
             self.run_chain(&morx, feat.as_ref(), &mut buffer, &limits, &mut warnings);
         } else if let Some(gsub) = self.layout.gsub() {
             let script = self.script_tag(gsub, run.script);
+            #[cfg(test)]
+            crate::trace::note(format!("GSUB asked for script {script}"));
             let stages = self.gsub_plan(
                 self.oriented_stages(plan, orientation, gsub, script),
                 self.excluded(plan, orientation),
@@ -1317,6 +1324,18 @@ impl<'a> Shaper<'a> {
                     lookups.covered(),
                     limits,
                 ));
+                #[cfg(test)]
+                crate::trace::stage(
+                    &format!(
+                        "GSUB {index}: {}",
+                        stage
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                    &buffer,
+                );
                 // Which syllables actually got a reph, asked here and nowhere
                 // else because here is the only moment the answer is
                 // unambiguous; see [`Buffer::set_repha`] and [`mark_repha`].
@@ -1329,6 +1348,8 @@ impl<'a> Shaper<'a> {
                 // order; see `crate::universal`.
                 if plan == Plan::Universal && index == USE_REORDER_AFTER {
                     reorder_syllables(&mut buffer);
+                    #[cfg(test)]
+                    crate::trace::stage("reorder", &buffer);
                 }
             }
         }
@@ -1404,6 +1425,8 @@ impl<'a> Shaper<'a> {
                 self.layout.zero_marks(&mut buffer);
             }
         }
+        #[cfg(test)]
+        crate::trace::stage("GPOS", &buffer);
 
         ShapedRun {
             glyphs: buffer.glyphs().to_vec(),
