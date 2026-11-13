@@ -135,6 +135,7 @@ pub use crate::recode::{
 };
 use crate::stats::{self, Stats};
 use crate::subset::{self, SubsetReport};
+use crate::Parallelism;
 
 /// What a save does to the document's embedded font programs.
 ///
@@ -188,6 +189,16 @@ pub struct SaveOptions {
     /// Off by default. A counted save writes the same bytes and reports the
     /// same passes as an uncounted one.
     pub stats: bool,
+    /// The threads the save may spend. [`Parallelism::Serial`] by default.
+    ///
+    /// Spent on the font pass's walk of the pages: with `Threads(n)` each
+    /// page and its annotation appearances are walked on a thread of the
+    /// engine's own pool, and what they show is folded in page order, so the
+    /// programs cut, the [`SubsetReport`] and every saved byte are the serial
+    /// save's. A counted save then counts where each page was walked
+    /// ([`crate::Stats::pool_items_on_workers`]); a save asked for no threads
+    /// walks on the calling thread and counts no part.
+    pub parallelism: Parallelism,
 }
 
 /// What the image pass did, reported by [`save`]: [`SubsetOutcome`]'s three
@@ -374,7 +385,7 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
     let fonts = match options.fonts {
         FontPolicy::Keep => SubsetOutcome::Kept,
         FontPolicy::Subset => {
-            let report = subset::apply_counting(editor, work.as_ref());
+            let report = subset::apply_counting(editor, work.as_ref(), options.parallelism);
             match options.write.mode {
                 WriteMode::Rewrite => SubsetOutcome::Cut(report),
                 // 7.5.6: the original bytes are the output's prefix, the

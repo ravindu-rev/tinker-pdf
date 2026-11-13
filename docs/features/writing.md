@@ -218,7 +218,8 @@ cutting every embedded program down to the glyphs the document still draws
 ([fonts](fonts.md), [editing](editing.md)). `SaveOptions` is `WriteOptions`
 verbatim plus `fonts: FontPolicy`, whose default is `FontPolicy::Subset` —
 `FontPolicy::Keep` is the other value and there is no third — `images`, below,
-and `stats`, which counts the save's work.
+`stats`, which counts the save's work, and `parallelism`, the threads the
+font pass's walk may spend.
 
 ```rust
 use tinker_pdf::write::{save, SaveOptions};
@@ -278,6 +279,30 @@ failure: it is an instruction to read the report, which names each one
 `DocumentEditor::save_signed` has no facade door of its own for the same
 reason: signing is incremental by definition, so subsetting into it could never
 remove anything.
+
+**The font pass's walk on the pool, when asked.** `SaveOptions::parallelism`
+is `Parallelism::Serial` by default, and the walk reads each page and its
+annotation appearances in turn on the calling thread. With `Threads(n)` each
+page is walked on a thread of the engine's own pool (`tinker-pdf-pool`) into
+a usage of its own — the glyphs each font shows, the fonts each scope names,
+what cannot be bounded and why — and the usages are folded in page order,
+never in the order the pages finished: the walk keeps the first reason a font
+was refused for and names a program a directly written font embeds after the
+first such font in page order, so a fold in completion order would change the
+report. The pages read their streams through the pass's one set of decoded
+streams, which is single-flight (`tinker_pdf_cos::DecodedStreams` over
+`tinker_pdf_cos::Flights`): the first page to read a stream decodes it and a
+page asking for it meanwhile waits for that decode, so each stream is still
+decoded once. The programs cut, the report and every byte saved are the
+serial save's at any thread count, and a counted save asked for threads counts
+where each page was walked (`Stats::pool_items_on_workers` and
+`pool_items_on_caller`, [rendering](rendering.md)); a save asked for none
+counts no part. `parallelism.rs`'s
+`a_subset_walk_on_2_3_4_and_7_threads_cuts_what_the_serial_walk_cuts` holds a
+document of shared fonts, a redacted page, a tiling cell, an appearance and
+two fonts written directly into resource dictionaries to that, and
+`a_subset_walk_on_four_threads_walks_no_page_on_the_caller` reads where the
+pages ran from the save's stats.
 
 **Images, on the same door, off by default.** `SaveOptions::images` is an
 `ImagePolicy`, `Keep` by default — the pass is not entered and every image

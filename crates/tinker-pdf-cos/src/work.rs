@@ -303,17 +303,20 @@ pub struct Stats {
     pub jpeg_held: u64,
     /// Parts of a pooled operation that ran on one of the pool's worker
     /// threads (`tinker_pdf_pool::on_worker`): a page of a page walk, counted
-    /// into that page's own operation, whose bitmap or text it is. Where a
-    /// part ran rather than a step it took, so [`Stats::work`] leaves it out;
-    /// with every worker started, every part is a worker's, whichever worker
-    /// took it.
+    /// into that page's own operation, whose bitmap or text it is; and a page
+    /// of a save's subset walk asked for threads, counted into the save's.
+    /// Where a part ran rather than a step it took, so [`Stats::work`] leaves
+    /// it out; with every worker started, every part is a worker's, whichever
+    /// worker took it.
     ///
-    /// Counted by the facade's page walk.
+    /// Counted by the facade's page walk and its subset walk.
     pub pool_items_on_workers: u64,
     /// Parts of a pooled operation that ran on the caller's own thread: every
-    /// part of one run `Serial`, and the share of a worker that would not
-    /// start — every part on wasm32. Left out of [`Stats::work`] as
-    /// `pool_items_on_workers` is.
+    /// page of a page walk run `Serial`, and the share of a worker that would
+    /// not start — every part on wasm32, and a lone page, for which no thread
+    /// starts. A save asked for no threads walks its pages on the caller and
+    /// counts no part. Left out of [`Stats::work`] as `pool_items_on_workers`
+    /// is.
     ///
     /// Counted with `pool_items_on_workers`.
     pub pool_items_on_caller: u64,

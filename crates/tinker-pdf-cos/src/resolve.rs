@@ -4,10 +4,10 @@
 //! Feature documentation: `docs/features/editing.md`.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::doc::{CosDocument, CosError};
+use crate::flight::{Filled, Flights};
 use crate::limits;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
@@ -221,12 +221,14 @@ type Decode = Result<Arc<Vec<u8>>, CosError>;
 ///
 /// One an operation, made by the door the operation goes through and dropped
 /// when it returns: it holds every stream the operation reads until then.
-/// Behind one lock, held for one lookup or one insertion and never while a
-/// chain runs; a lock that will not open keeps nothing, and every read then
-/// decodes.
+/// **Single-flight** ([`Flights`]): the threads of one pooled operation that
+/// read one stream at once decode it once — the first runs the chain, outside
+/// the lock, and the others wait for its answer — and a read made inside
+/// another fill never waits, so no read can deadlock, a stream whose own
+/// `/Length` points into it included.
 #[derive(Debug, Default)]
 pub struct DecodedStreams {
-    streams: Mutex<HashMap<ObjRef, Decode>>,
+    streams: Flights<ObjRef, Decode>,
 }
 
 impl DecodedStreams {
@@ -241,8 +243,9 @@ impl DecodedStreams {
     /// what `decode` answers, kept when a chain ran — the bytes, or the
     /// chain's refusal ([`CosError::Filter`]).
     ///
-    /// Two threads that read one stream at once may each run `decode`; the
-    /// answer kept first is the one every read hands out.
+    /// Two threads that read one stream at once run `decode` once: the
+    /// second waits for the first's answer, unless it is itself decoding a
+    /// stream, when it decodes this one for itself and keeps nothing.
     ///
     /// # Errors
     /// What `decode` answered, now or at the first read.
@@ -251,22 +254,16 @@ impl DecodedStreams {
         r: ObjRef,
         decode: impl FnOnce() -> Result<Vec<u8>, CosError>,
     ) -> Result<Arc<Vec<u8>>, CosError> {
-        if let Some(kept) = self
-            .streams
-            .lock()
-            .ok()
-            .and_then(|streams| streams.get(&r).cloned())
-        {
-            return kept;
-        }
-        let read = decode().map(Arc::new);
-        if !matches!(read, Ok(_) | Err(CosError::Filter(_))) {
-            return read;
-        }
-        match self.streams.lock() {
-            Ok(mut streams) => streams.entry(r).or_insert(read).clone(),
-            Err(_) => read,
-        }
+        self.streams.read(r, || {
+            let read = decode().map(Arc::new);
+            // A reference that names no stream ran no chain: nothing is kept,
+            // and the next read asks again.
+            if matches!(read, Ok(_) | Err(CosError::Filter(_))) {
+                Filled::Keep(read)
+            } else {
+                Filled::Once(read)
+            }
+        })
     }
 }
 

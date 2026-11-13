@@ -52,6 +52,7 @@ pub mod dest;
 pub mod doc;
 pub mod edit;
 pub mod fill;
+pub mod flight;
 pub mod font;
 pub mod form;
 pub mod gif_embed;
@@ -129,6 +130,7 @@ pub use edit::{
     PageLabelRange, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport, SaveRefusal,
 };
 pub use fill::{text_appearance, TextLayout};
+pub use flight::{Filled, Flights};
 pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
 pub use form::{
     acro_form, calculation_order, catalog_scripts, catalog_scripts_within, document_scripts,

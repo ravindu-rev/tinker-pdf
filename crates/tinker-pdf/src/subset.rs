@@ -240,7 +240,8 @@ use tinker_pdf_cos::{
 };
 
 use crate::resources::{Operation, PageResources};
-use crate::stats::Work;
+use crate::stats::{Counter, Work};
+use crate::Parallelism;
 
 /// How many objects the font sweep will look at.
 ///
@@ -487,15 +488,17 @@ impl SubsetReport {
 /// cuts that the walk did not read.
 pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
     let work = editor.work().cloned();
-    apply_counting(editor, work.as_ref())
+    apply_counting(editor, work.as_ref(), Parallelism::Serial)
 }
 
-/// [`apply`], counting into `work` when the operation is counting: the save
+/// [`apply`], counting into `work` when the operation is counting — the save
 /// door's tally, which is the editor's when it is counting and the save's own
-/// when it is not.
+/// when it is not — and walking the pages on the threads `parallelism` names
+/// ([`collect`]).
 pub(crate) fn apply_counting(
     editor: &mut DocumentEditor,
     work: Option<&Arc<Work>>,
+    parallelism: Parallelism,
 ) -> SubsetReport {
     let op = Operation::new(work.cloned());
     // Everything the walk reads, it reads from the view and nothing else: the
@@ -505,7 +508,7 @@ pub(crate) fn apply_counting(
     // shares with the editor by construction — and so are the streams the
     // walk decoded, which the view keys by the editor's numbers.
     let usage = match editor.view() {
-        Ok(view) => collect(&view, &op),
+        Ok(view) => collect(&view, &op, parallelism),
         Err(_) => Usage::default(),
     };
     let doc = editor.shared_document();
@@ -569,6 +572,34 @@ impl Usage {
         self.unbounded.entry(font).or_insert(reason);
     }
 
+    /// Folds in what a later page's walk learned, as the serial walk would
+    /// have met it after everything already here: every set is a union, and
+    /// where the walk keeps the first value a key met — a refusal's reason
+    /// ([`Usage::refuse`]), the font a direct program is keyed by, a direct
+    /// Type 3 font's procedures — the value already here stands. Folded in
+    /// page order, the per-page walks are the serial walk exactly.
+    fn fold(&mut self, page: Usage) {
+        for (font, glyphs) in page.glyphs {
+            self.glyphs.entry(font).or_default().extend(glyphs);
+        }
+        self.seen.extend(page.seen);
+        for (font, reason) in page.unbounded {
+            self.refuse(font, reason);
+        }
+        for (program, base_font) in page.direct {
+            self.direct.entry(program).or_insert(base_font);
+        }
+        for (font, codes) in page.type3 {
+            self.type3.entry(font).or_default().extend(codes);
+        }
+        for (font, kind) in page.kinds {
+            self.kinds.entry(font).or_insert(kind);
+        }
+        for (first, procedures) in page.direct_type3 {
+            self.direct_type3.entry(first).or_insert(procedures);
+        }
+    }
+
     /// Whether a font object is a Type 3 font, read once per object.
     fn is_type3(&mut self, doc: &CosDocument, font: ObjRef) -> bool {
         *self.kinds.entry(font).or_insert_with(|| {
@@ -593,25 +624,42 @@ impl Usage {
 /// each stream through the pass's decoded streams, so a stream two pages read
 /// is decoded once, and counts into its tally when the save is counting, as
 /// does the walk of the page tree.
-fn collect(doc: &Arc<CosDocument>, op: &Operation) -> Usage {
+///
+/// **On the pool where the save asks for threads.** With
+/// `Parallelism::Threads(n)` each page and its annotation appearances are
+/// walked on a thread of the engine's pool into a [`Usage`] of its own, and
+/// the usages are folded in page order ([`Usage::fold`]) — never in the order
+/// the pages finished, because the walk keeps the first refusal reason a font
+/// met and keys a direct program by the first font that named it. The pages
+/// share the pass's decoded streams, which are single-flight
+/// (`tinker_pdf_cos::DecodedStreams`), so a stream two pages read at once is
+/// still decoded once, and each page counts where it ran into the pass's
+/// tally (`Stats::pool_items_on_workers`). `Serial` walks the pages on the
+/// caller into one usage and counts no part.
+fn collect(doc: &Arc<CosDocument>, op: &Operation, parallelism: Parallelism) -> Usage {
+    let pages = crate::stats::pages(doc, op.work());
     let mut usage = Usage::default();
 
-    for page in crate::stats::pages(doc, op.work()) {
-        let resources = Arc::new(PageResources::new_in(doc, &page, None, op.clone()));
-        let content = crate::stats::content(doc, &page, op.work());
-        walk(&mut usage, doc, &content, resources);
-
-        for appearance in appearances_of(doc, page.reference) {
-            let Ok(content) = op.decoded(doc, appearance.stream) else {
-                continue;
+    if matches!(parallelism, Parallelism::Threads(threads) if threads > 0) {
+        let walked = tinker_pdf_pool::map(&parallelism, pages.len(), |index| {
+            let here = if tinker_pdf_pool::on_worker() {
+                Counter::PoolItemsOnWorkers
+            } else {
+                Counter::PoolItemsOnCaller
             };
-            let resources = Arc::new(PageResources::from_dict_in(
-                doc,
-                appearance.resources,
-                None,
-                op.clone(),
-            ));
-            walk(&mut usage, doc, &content, resources);
+            crate::stats::count(op.work().map(|work| &**work), here);
+            let mut page_usage = Usage::default();
+            if let Some(page) = pages.get(index) {
+                walk_page(&mut page_usage, doc, page, op);
+            }
+            page_usage
+        });
+        for page_usage in walked {
+            usage.fold(page_usage);
+        }
+    } else {
+        for page in &pages {
+            walk_page(&mut usage, doc, page, op);
         }
     }
 
@@ -622,6 +670,32 @@ fn collect(doc: &Arc<CosDocument>, op: &Operation) -> Usage {
     }
 
     usage
+}
+
+/// Walks one page's content, and each of its annotation appearances, into
+/// `usage`.
+fn walk_page(
+    usage: &mut Usage,
+    doc: &Arc<CosDocument>,
+    page: &tinker_pdf_cos::pages::Page,
+    op: &Operation,
+) {
+    let resources = Arc::new(PageResources::new_in(doc, page, None, op.clone()));
+    let content = crate::stats::content(doc, page, op.work());
+    walk(usage, doc, &content, resources);
+
+    for appearance in appearances_of(doc, page.reference) {
+        let Ok(content) = op.decoded(doc, appearance.stream) else {
+            continue;
+        };
+        let resources = Arc::new(PageResources::from_dict_in(
+            doc,
+            appearance.resources,
+            None,
+            op.clone(),
+        ));
+        walk(usage, doc, &content, resources);
+    }
 }
 
 /// Interprets one content stream, and every tiling pattern's cell and soft
@@ -1918,6 +1992,86 @@ mod tests {
     fn an_untagged_name_is_returned_whole() {
         assert_eq!(strip_tag(b"Times-Roman"), b"Times-Roman");
         assert_eq!(strip_tag(b""), b"");
+    }
+
+    /// **Pages' usages folded in page order are the serial walk's.** Two
+    /// pages that disagree about a font's refusal reason, about the font a
+    /// direct program is keyed by and about a direct Type 3 font's
+    /// procedures: the fold keeps the first page's, as the walk into one
+    /// usage does, and joins every glyph, code and font seen. Folded the
+    /// other way round it keeps the other page's, which is why the fold is
+    /// in page order and never in the order the pages finished.
+    #[test]
+    fn a_fold_in_page_order_keeps_what_the_serial_walk_met_first() {
+        let (font, program, type3) = (ObjRef::new(5, 0), ObjRef::new(9, 0), ObjRef::new(12, 0));
+        let page = |reason, base_font: &[u8], procedures: Vec<ObjRef>, glyph, code| {
+            let mut usage = Usage::default();
+            usage.refuse(font, reason);
+            usage.direct.insert(program, base_font.to_vec());
+            usage
+                .direct_type3
+                .insert(type3, (base_font.to_vec(), procedures));
+            usage.glyphs.entry(font).or_default().insert(glyph);
+            usage.type3.entry(type3).or_default().insert(code);
+            usage.seen.insert(ObjRef::new(u32::from(glyph), 0));
+            usage.kinds.insert(type3, true);
+            usage
+        };
+        let first = || {
+            page(
+                UntouchedReason::Type3Resource,
+                b"DirectA",
+                vec![ObjRef::new(12, 0)],
+                3,
+                65,
+            )
+        };
+        let second = || {
+            page(
+                UntouchedReason::CodeNotMapped,
+                b"DirectB",
+                vec![ObjRef::new(13, 0)],
+                7,
+                66,
+            )
+        };
+
+        // The serial walk: both pages into one usage.
+        let mut serial = Usage::default();
+        for walked in [first(), second()] {
+            for (font, reason) in walked.unbounded {
+                serial.refuse(font, reason);
+            }
+            for (program, base_font) in walked.direct {
+                serial.direct.entry(program).or_insert(base_font);
+            }
+            for (first, procedures) in walked.direct_type3 {
+                serial.direct_type3.entry(first).or_insert(procedures);
+            }
+        }
+
+        let mut folded = Usage::default();
+        folded.fold(first());
+        folded.fold(second());
+        assert_eq!(folded.unbounded, serial.unbounded);
+        assert_eq!(folded.unbounded[&font], UntouchedReason::Type3Resource);
+        assert_eq!(folded.direct, serial.direct);
+        assert_eq!(folded.direct[&program], b"DirectA".to_vec());
+        assert_eq!(folded.direct_type3, serial.direct_type3);
+        assert_eq!(folded.glyphs[&font], BTreeSet::from([3, 7]));
+        assert_eq!(folded.type3[&type3], BTreeSet::from([65, 66]));
+        assert_eq!(folded.seen.len(), 2);
+        assert!(folded.kinds[&type3], "the kind read is kept");
+
+        let mut backwards = Usage::default();
+        backwards.fold(second());
+        backwards.fold(first());
+        assert_eq!(
+            backwards.unbounded[&font],
+            UntouchedReason::CodeNotMapped,
+            "folded in another order, the report would change"
+        );
+        assert_eq!(backwards.direct[&program], b"DirectB".to_vec());
     }
 }
 
