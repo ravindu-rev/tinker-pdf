@@ -56,9 +56,12 @@ books.
   no instance, so an embedded variable face is drawn at its default, and an
   instance reaches a page only as a static face this engine or another
   producer wrote.
-- **Hinting at an instance on a page.** The varied `cvt ` values are computed
-  here; running the bytecode over them is FT-04b's, and a static instance
-  carries them for whichever reader hints it.
+- **Hinting a variable face at an instance.** No page draws one: a PDF names
+  no instance, and an instance reaches a page as a static face. So the
+  bytecode interpreter (`docs/design/hinting.md`) hints a static face, or a
+  variable face at its default, and its `GETINFO` answers that variations are
+  not supported; this design's part of hinting is the static instance's
+  varied `cvt ` and its `GETVARIATION` IDEF, for whichever reader hints it.
 - **Variations inside tables this design does not name**: `COLR`'s are
   FT-06.20's; `BASE` and `JSTF` keep their default values in a static
   instance.
@@ -214,13 +217,15 @@ FT-04b's.
 
 **`gvar`** (`variation/gvar.rs`, FT-05.4): `glyf::outline_at` applies a
 glyph's tuples to its **raw points** — the form FT-04b's interpreter works on
-too, which `docs/design/hinting.md` adopts: a simple glyph's contour end
-indices, its flags with `REPEAT` expanded, its absolute coordinates in font
-units as `i32`, and the four phantom points appended in the order the
-'Phantom points' section of *Instructing TrueType Glyphs* numbers them —
-left side bearing point `(xMin − lsb, 0)`, advance point
-`(xMin − lsb + advance, 0)`, top origin and advance-height point from `vmtx`,
-at `(0, 0)` where there is none. The varied points are 16.16 values in font
+too, unscaled: a simple glyph's contour end indices, its flags with `REPEAT`
+expanded, its absolute coordinates in font units as `i32`, and the four
+phantom points appended where `docs/design/hinting.md`'s 'Zones, points and
+the graphics state' places them, in the order the 'Phantom points' section
+of *Instructing TrueType Glyphs* numbers them — the horizontal origin
+`(xMin − lsb, 0)`, the advance width past it, the vertical origin at `yMax`
+plus the top side bearing and the advance height below it, the vertical
+metrics `vmtx`'s or, where the face has none, `hhea`'s ascender and
+descender as that design chooses. The varied points are 16.16 values in font
 units, and the implied midpoints are resolved after the deltas are added, so
 `glyf::outline` keeps its output for every face. Untouched points take the
 deltas the `gvar` chapter's 'Inferred deltas for un-referenced point numbers'
@@ -489,5 +494,5 @@ reused.
 | A region that is zero on every axis moves the default instance | The algorithm is followed and the case recorded above; no font producing one was seen, and the instance at the default of a face without one is its default |
 | Changing the shared Type 2 interpreter moves a CFF outline | The flavour gates every CFF2 difference, CFF's silent stops are untouched, and every `cff.rs` and `cff_subset/tests.rs` test is held unchanged |
 | A static CFF exceeds Type 2's limits | Operators are split at their operand groups and subroutines inlined; FT-05.11 re-reads every instance through `Cff` |
-| The raw-point form drifts between this design and the hinting design | One form, stated here; `docs/design/hinting.md` adopts it, and FT-05.4 depends on FT-04b.1 so the two land agreeing |
+| The raw-point form drifts between this design and the hinting design | One form: the points this design varies are the ones `docs/design/hinting.md` scales into zone 1, its phantom points placed as that design places them, and FT-05.4 lands after it |
 | A book's variable face moves a committed book's pages | The committed books carry static faces only; FT-05.15 holds their page counts, conservation results and fingerprints |
