@@ -186,6 +186,13 @@ does not decode draws a placeholder and is named; an image that decoded with
 damage tolerated is drawn *and* reported, so a half-decoded fax stays
 distinguishable from a blank one.
 
+An image XObject and an inline image are read by one sample loop. An 8-bit
+DeviceGray or DeviceRGB image whose `/Decode` pairs are each `[0 1]` or
+absent, with no colour key and no `/ImageMask`, is its own colour: its
+samples are copied, a grey replicated to three, and none is converted
+(`an_eight_bit_device_image_converts_by_identity`); every other image is read
+a sample at a time through its space.
+
 **JPEG and JPEG 2000 images** are drawn in the `/ColorSpace` their
 dictionary names (8.9.5) — a codestream's own colour specification gives way
 to it (7.4.9) — and their samples are read through the space as a sampled

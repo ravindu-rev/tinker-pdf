@@ -711,6 +711,192 @@ fn samples_in_space(
     rgb
 }
 
+/// How the sample loop reads one image's samples (8.9.3, 8.9.5): everything
+/// it needs besides the bytes, the same for an image XObject and an inline
+/// image.
+#[derive(Clone, Copy)]
+struct SampleLayout<'a> {
+    /// Samples across.
+    width: u32,
+    /// Samples down.
+    height: u32,
+    /// Bits a component, 1 to 16.
+    bpc: u32,
+    /// Components a sample.
+    n: usize,
+    /// The space the components are in.
+    space: &'a ColorSpace,
+    /// `/Decode`, a pair a component; a component past the array takes Table
+    /// 90's default.
+    decode: &'a [(f64, f64)],
+    /// An `/ImageMask`: a sample is paint or not, and has no colour (8.9.6.2).
+    mask: bool,
+    /// 8.9.6.4's colour key: one inclusive range of raw values a component.
+    color_key: Option<&'a [(u32, u32)]>,
+}
+
+/// An image's samples as RGB, three bytes a sample, with an alpha byte a
+/// sample where a mask or a colour key gives one: the sample loop both image
+/// paths share.
+///
+/// An 8-bit device image is its own colour and is copied rather than read
+/// ([`identity_pixels`]); everything else is read sample by sample
+/// ([`general_pixels`]).
+fn image_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) {
+    if let Some(rgb) = identity_pixels(data, layout) {
+        return (rgb, Vec::new());
+    }
+    general_pixels(data, layout)
+}
+
+/// An 8-bit DeviceGray or DeviceRGB image whose samples are its colour,
+/// copied — or `None` where the loop has to read them.
+///
+/// Every `/Decode` pair `[0 1]` or absent, no colour key and no
+/// `/ImageMask`. The loop would read a sample `v` as `v / 255.0`, a `[0 1]`
+/// pair would map it to `0 + raw × 1`, which is `raw` exactly, and
+/// `ColorSpace::to_rgb` would answer `round(raw × 255)`, which is within
+/// 1e-13 of `v` before it is rounded and so is `v`: the sample is the byte. A
+/// grey is replicated to three. Rows of 8-bit samples are whole bytes with
+/// nothing between them, so the image is one run of bytes, and a sample the
+/// stream stops short of is zero, as `read_bits` reads it.
+fn identity_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<Vec<u8>> {
+    let grey = match layout.space {
+        ColorSpace::DeviceGray => true,
+        ColorSpace::DeviceRgb => false,
+        _ => return None,
+    };
+    if layout.mask
+        || layout.color_key.is_some()
+        || layout.bpc != 8
+        || layout.n != layout.space.components()
+        || layout
+            .decode
+            .iter()
+            .take(layout.n)
+            .any(|&(low, high)| low != 0.0 || high != 1.0)
+    {
+        return None;
+    }
+    let pixels = (layout.width as usize).checked_mul(layout.height as usize)?;
+    let length = pixels.checked_mul(3)?;
+    let samples = data.get(..pixels.checked_mul(layout.n)?).unwrap_or(data);
+    let mut rgb = Vec::with_capacity(length);
+    if grey {
+        for &value in samples {
+            rgb.extend_from_slice(&[value, value, value]);
+        }
+    } else {
+        rgb.extend_from_slice(samples);
+    }
+    rgb.resize(length, 0);
+    Some(rgb)
+}
+
+/// The sample loop, a sample at a time: each component read through
+/// [`read_bits`], scaled and decoded by [`component`], tested against the
+/// colour key on its raw value, and the sample converted by
+/// `ColorSpace::to_rgb` — or, for a mask, painted where its component is below
+/// one half.
+fn general_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) {
+    let SampleLayout {
+        width,
+        height,
+        bpc,
+        n,
+        space,
+        decode,
+        mask,
+        color_key,
+    } = *layout;
+    let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
+    let mut alpha = Vec::new();
+    let row_bits = (width as usize) * n * (bpc as usize);
+    let row_bytes = row_bits.div_ceil(8);
+    let max = ((1u32 << bpc.min(16)) - 1) as f64;
+    let mut remembered = if mask {
+        None
+    } else {
+        Remembered::for_image(space, n, bpc)
+    };
+    let mut components = Vec::with_capacity(n);
+
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            components.clear();
+            let mut samples = 0u128;
+            // "Shall be masked ... if min_i <= sample_i <= max_i for *all*
+            // i" — one component outside its range paints the pixel, which
+            // is why this starts true and is narrowed rather than widened.
+            let mut keyed = color_key.is_some();
+            for c in 0..n {
+                let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
+                let value = read_bits(data, bit, bpc);
+                samples = Remembered::key(samples, c, value);
+                if let Some(ranges) = color_key {
+                    // An absent range can never match, so a short array
+                    // masks nothing rather than everything.
+                    let (lo, hi) = ranges.get(c).copied().unwrap_or((1, 0));
+                    keyed &= value >= lo && value <= hi;
+                }
+                components.push(component(space, decode, c, value, max));
+            }
+
+            if mask {
+                // A zero sample paints, a one does not (8.9.6.2).
+                let paints = components.first().copied().unwrap_or(0.0) < 0.5;
+                rgb.extend_from_slice(&[0, 0, 0]);
+                alpha.push(if paints { 255 } else { 0 });
+            } else {
+                let (r, g, b) = match remembered.as_mut() {
+                    Some(table) => table.convert(samples, || converted(space, &components)),
+                    None => converted(space, &components),
+                };
+                rgb.extend_from_slice(&[r, g, b]);
+                if color_key.is_some() {
+                    alpha.push(if keyed { 0 } else { 255 });
+                }
+            }
+        }
+    }
+    (rgb, alpha)
+}
+
+/// Component `c` of a sample whose raw value is `value`, as the sample loop
+/// reads it: scaled into 0..1 by `max`, the depth's largest value — an indexed
+/// space's component is the index itself — then through `/Decode`, or Table
+/// 90's default where the array stops short of it.
+fn component(space: &ColorSpace, decode: &[(f64, f64)], c: usize, value: u32, max: f64) -> f64 {
+    let indexed = matches!(space, ColorSpace::Indexed { .. });
+    let raw = if indexed {
+        f64::from(value)
+    } else {
+        f64::from(value) / max
+    };
+    match decode.get(c).copied().or_else(|| default_decode(space, c)) {
+        // The interpolation is over the *sample* range, so an indexed image
+        // maps its index rather than a fraction.
+        Some((dmin, dmax)) if indexed => dmin + raw * (dmax - dmin) / max.max(1.0),
+        Some((dmin, dmax)) => dmin + raw * (dmax - dmin),
+        None => raw,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Samples the sample loop has converted through `ColorSpace::to_rgb` on
+    /// this thread: what `an_eight_bit_device_image_converts_by_identity`
+    /// counts.
+    static SAMPLE_CONVERSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// `space.to_rgb(components)` for the sample loop, counted under `cfg(test)`.
+fn converted(space: &ColorSpace, components: &[f64]) -> (u8, u8, u8) {
+    #[cfg(test)]
+    SAMPLE_CONVERSIONS.with(|count| count.set(count.get() + 1));
+    space.to_rgb(components)
+}
+
 /// What a JBIG2 image's decode is allowed to cost, as the pixels
 /// [`Jbig2Params::work_ceiling`] measures it against: the image's own
 /// `/Width` x `/Height`, plus a floor that holds one shared dictionary.
@@ -4704,72 +4890,19 @@ impl PageResources {
         // because it is a test on the *raw* samples.
         let color_key = self.color_key(&dict, n, bpc);
 
-        let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
-        let mut alpha = Vec::new();
-        let row_bits = (width as usize) * n * (bpc as usize);
-        let row_bytes = row_bits.div_ceil(8);
-        let max = ((1u32 << bpc.min(16)) - 1) as f64;
-        let mut remembered = if is_mask {
-            None
-        } else {
-            Remembered::for_image(&space, n, bpc)
-        };
-
-        for y in 0..height as usize {
-            for x in 0..width as usize {
-                let mut components = Vec::with_capacity(n);
-                let mut samples = 0u128;
-                // "Shall be masked ... if min_i <= sample_i <= max_i for *all*
-                // i" — one component outside its range paints the pixel, which
-                // is why this starts true and is narrowed rather than widened.
-                let mut keyed = color_key.is_some();
-                for c in 0..n {
-                    let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
-                    let value = read_bits(&data, bit, bpc);
-                    samples = Remembered::key(samples, c, value);
-                    if let Some(ranges) = &color_key {
-                        // An absent range can never match, so a short array
-                        // masks nothing rather than everything.
-                        let (lo, hi) = ranges.get(c).copied().unwrap_or((1, 0));
-                        keyed &= value >= lo && value <= hi;
-                    }
-                    let raw = match &space {
-                        // An indexed space's component is the index itself.
-                        ColorSpace::Indexed { .. } => f64::from(value),
-                        _ => f64::from(value) / max,
-                    };
-                    components.push(
-                        match decode.get(c).copied().or_else(|| default_decode(&space, c)) {
-                            // The interpolation is over the *sample* range, so an
-                            // indexed image maps its index rather than a fraction.
-                            Some((dmin, dmax)) => match &space {
-                                ColorSpace::Indexed { .. } => {
-                                    dmin + raw * (dmax - dmin) / max.max(1.0)
-                                }
-                                _ => dmin + raw * (dmax - dmin),
-                            },
-                            None => raw,
-                        },
-                    );
-                }
-
-                if is_mask {
-                    // A zero sample paints, a one does not (8.9.6.2).
-                    let paints = components.first().copied().unwrap_or(0.0) < 0.5;
-                    rgb.extend_from_slice(&[0, 0, 0]);
-                    alpha.push(if paints { 255 } else { 0 });
-                } else {
-                    let (r, g, b) = match remembered.as_mut() {
-                        Some(table) => table.convert(samples, || space.to_rgb(&components)),
-                        None => space.to_rgb(&components),
-                    };
-                    rgb.extend_from_slice(&[r, g, b]);
-                    if color_key.is_some() {
-                        alpha.push(if keyed { 0 } else { 255 });
-                    }
-                }
-            }
-        }
+        let (rgb, alpha) = image_pixels(
+            &data,
+            &SampleLayout {
+                width,
+                height,
+                bpc,
+                n,
+                space: &space,
+                decode: &decode,
+                mask: is_mask,
+                color_key: color_key.as_deref(),
+            },
+        );
 
         Ok(DecodedImage {
             width,
@@ -5031,54 +5164,20 @@ impl PageResources {
         let space = self.inline_space(dict).unwrap_or(ColorSpace::DeviceGray);
         let n = if is_mask { 1 } else { space.components() };
 
-        let row_bytes = ((width as usize) * n * (bpc as usize)).div_ceil(8);
-        let max = ((1u32 << bpc.min(16)) - 1) as f64;
-        let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
-        let mut alpha = Vec::new();
-        let mut remembered = if is_mask {
-            None
-        } else {
-            Remembered::for_image(&space, n, bpc)
-        };
-
-        for y in 0..height as usize {
-            for x in 0..width as usize {
-                let mut components = Vec::with_capacity(n);
-                let mut samples = 0u128;
-                for c in 0..n {
-                    let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
-                    let value = read_bits(&bytes, bit, bpc);
-                    samples = Remembered::key(samples, c, value);
-                    let raw = match &space {
-                        ColorSpace::Indexed { .. } => f64::from(value),
-                        _ => f64::from(value) / max,
-                    };
-                    components.push(
-                        match decode.get(c).copied().or_else(|| default_decode(&space, c)) {
-                            Some((dmin, dmax)) => match &space {
-                                ColorSpace::Indexed { .. } => {
-                                    dmin + raw * (dmax - dmin) / max.max(1.0)
-                                }
-                                _ => dmin + raw * (dmax - dmin),
-                            },
-                            None => raw,
-                        },
-                    );
-                }
-
-                if is_mask {
-                    let paints = components.first().copied().unwrap_or(0.0) < 0.5;
-                    rgb.extend_from_slice(&[0, 0, 0]);
-                    alpha.push(if paints { 255 } else { 0 });
-                } else {
-                    let (r, g, b) = match remembered.as_mut() {
-                        Some(table) => table.convert(samples, || space.to_rgb(&components)),
-                        None => space.to_rgb(&components),
-                    };
-                    rgb.extend_from_slice(&[r, g, b]);
-                }
-            }
-        }
+        // An inline image is read with no colour key.
+        let (rgb, alpha) = image_pixels(
+            &bytes,
+            &SampleLayout {
+                width,
+                height,
+                bpc,
+                n,
+                space: &space,
+                decode: &decode,
+                mask: is_mask,
+                color_key: None,
+            },
+        );
 
         Ok(DecodedImage {
             width,
@@ -6082,6 +6181,104 @@ mod tests {
 
         assert!(Remembered::for_image(&ColorSpace::DeviceCmyk, 4, 8).is_none());
         assert!(Remembered::for_image(&lab, 9, 8).is_none());
+    }
+
+    /// **An 8-bit DeviceGray or DeviceRGB image is its own samples.**
+    ///
+    /// Every one of the 256 values, through both spaces, with `/Decode`
+    /// absent and with each pair written out as `[0 1]`, comes out as
+    /// `ColorSpace::to_rgb` gives it and as the general loop gives it, and the
+    /// sample loop converts not one of them. A stream that stops short gives
+    /// the zeros the loop reads past its end. A `/Decode` that is not the
+    /// default and a colour key each keep the loop, which converts every
+    /// sample.
+    #[test]
+    fn an_eight_bit_device_image_converts_by_identity() {
+        use super::{general_pixels, image_pixels, SampleLayout, SAMPLE_CONVERSIONS};
+        let conversions = || SAMPLE_CONVERSIONS.with(std::cell::Cell::get);
+
+        let grey: Vec<u8> = (0..=255).collect();
+        // Each channel walks the values in its own order.
+        let rgb: Vec<u8> = (0..=255u8)
+            .flat_map(|v| [v, 255 - v, v.wrapping_mul(7)])
+            .collect();
+        let written = [(0.0, 1.0); 3];
+        for (space, samples) in [
+            (ColorSpace::DeviceGray, &grey),
+            (ColorSpace::DeviceRgb, &rgb),
+        ] {
+            let n = space.components();
+            for decode in [&[][..], &written[..n]] {
+                let layout = SampleLayout {
+                    width: 16,
+                    height: 16,
+                    bpc: 8,
+                    n,
+                    space: &space,
+                    decode,
+                    mask: false,
+                    color_key: None,
+                };
+                let before = conversions();
+                let (pixels, alpha) = image_pixels(samples, &layout);
+                assert_eq!(
+                    conversions(),
+                    before,
+                    "{space:?}, /Decode {decode:?}: the loop converted a sample"
+                );
+                assert!(alpha.is_empty(), "an opaque image has no alpha");
+                assert_eq!(pixels.len(), 256 * 3);
+                for (sample, pixel) in samples.chunks(n).zip(pixels.chunks(3)) {
+                    let components: Vec<f64> =
+                        sample.iter().map(|v| f64::from(*v) / 255.0).collect();
+                    let (r, g, b) = space.to_rgb(&components);
+                    assert_eq!(pixel, [r, g, b], "{space:?}: the sample {sample:?}");
+                }
+                assert_eq!(
+                    general_pixels(samples, &layout),
+                    (pixels, alpha),
+                    "{space:?}, /Decode {decode:?}: the general loop disagrees"
+                );
+            }
+        }
+
+        // A stream that stops short: the samples past its end are zeros.
+        let layout = SampleLayout {
+            width: 16,
+            height: 16,
+            bpc: 8,
+            n: 3,
+            space: &ColorSpace::DeviceRgb,
+            decode: &[],
+            mask: false,
+            color_key: None,
+        };
+        let short = &rgb[..100];
+        assert_eq!(image_pixels(short, &layout), general_pixels(short, &layout));
+
+        // What keeps the loop: the loop converts every sample of each.
+        let inverted = [(1.0, 0.0)];
+        let key = [(0, 9)];
+        for layout in [
+            SampleLayout {
+                decode: &inverted,
+                ..layout
+            },
+            SampleLayout {
+                color_key: Some(&key),
+                ..layout
+            },
+        ] {
+            let layout = SampleLayout {
+                n: 1,
+                space: &ColorSpace::DeviceGray,
+                ..layout
+            };
+            let before = conversions();
+            let read = image_pixels(&grey, &layout);
+            assert_eq!(conversions() - before, 256, "the loop reads each of these");
+            assert_eq!(read, general_pixels(&grey, &layout));
+        }
     }
 
     fn expand(dict: &str) -> String {
