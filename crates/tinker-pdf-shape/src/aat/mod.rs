@@ -30,6 +30,7 @@
 //! this crate refuses is a [`crate::Warning`] naming where in the table it
 //! was asked ([`Site`]), recorded once a run (ruling 10).
 
+mod contextual;
 mod feat;
 mod lookup;
 mod morx;

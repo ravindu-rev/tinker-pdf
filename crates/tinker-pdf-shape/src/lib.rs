@@ -312,6 +312,16 @@ pub enum Warning {
         /// The chain, counting from zero.
         chain: u32,
     },
+    /// A contextual subtable's entry named a substitution table the
+    /// subtable does not hold — its offset past the array of offsets, which
+    /// ends where the first table begins, or past the subtable — so the glyph
+    /// it would have substituted stands.
+    SubstitutionTableMissing {
+        /// The subtable.
+        site: aat::Site,
+        /// The index the entry named.
+        index: u16,
+    },
     /// An OpenType feature tag a caller asked for that no AAT feature
     /// answers (`docs/design/shaping.md`, *The mapping*), so it asked a
     /// `morx` chain for nothing.

@@ -53,8 +53,10 @@
 //! that maps a single glyph index into another glyph index", a value of 0
 //! meaning "do nothing" ("Lookup tables in a 'morx'"). Types 0, 1, 2 and 5 are
 //! state machines on the shared driver ([`super::StateTable::run`]), and the
-//! rearrangement subtable, type 0, runs (`super::rearrangement`); a machine
-//! runs only over a run holding a glyph its class table names (`machine`).
+//! rearrangement subtable, type 0, and the contextual glyph substitution
+//! subtable, type 1, run (`super::rearrangement`, `super::contextual`); a
+//! machine runs only over a run holding a glyph its class table names
+//! (`machine`).
 //! Type 3 is reserved and a type above 5 unknown, and each such subtable, and
 //! each of a type this crate does not run yet, is skipped and named. A glyph
 //! a subtable makes `0xFFFF` is deleted: the later subtables see it as the
@@ -62,9 +64,9 @@
 
 use super::feat::Feat;
 use super::lookup::{Lookup, LookupError};
-use super::rearrangement;
 use super::state::{StateTable, DELETED};
 use super::Site;
+use super::{contextual, rearrangement};
 use crate::buffer::{Buffer, Direction};
 use crate::common::Tag;
 use crate::limits::Limits;
@@ -311,6 +313,24 @@ impl<'a> Morx<'a> {
                         &mut warnings,
                     ) {
                         Some(table) => rearrangement::run(&table, buffer, traversal, limits, site),
+                        None => Ok(()),
+                    },
+                    CONTEXTUAL => match machine(
+                        subtable.body,
+                        contextual::ENTRY_SIZE,
+                        buffer,
+                        site,
+                        &mut warnings,
+                    ) {
+                        Some(table) => contextual::run(
+                            &table,
+                            subtable.body,
+                            buffer,
+                            traversal,
+                            limits,
+                            site,
+                            &mut warnings,
+                        ),
                         None => Ok(()),
                     },
                     kind => Err(Warning::SubtableTypeNotRun { site, kind }),

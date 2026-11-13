@@ -21,8 +21,8 @@ use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::aat::{
     aat_setting, AatSetting, Cursor, Entry, Feat, FeatureEntry, Lookup, LookupError, LookupFormat,
     Morx, Selection, Site, StateError, StateTable, Traversal, ANY_ORIENTATION, CONTEXTUAL, DELETED,
-    DELETED_GLYPH, DESCENDING, END_OF_TEXT, INSERTION, LIGATURE, NONCONTEXTUAL, OUT_OF_BOUNDS,
-    REARRANGEMENT, VERTICAL,
+    DELETED_GLYPH, DESCENDING, END_OF_TEXT, INSERTION, LIGATURE, LOGICAL, NONCONTEXTUAL,
+    OUT_OF_BOUNDS, REARRANGEMENT, VERTICAL,
 };
 use tinker_pdf_shape::bidi::{BaseDirection, Level};
 use tinker_pdf_shape::shape::Run;
@@ -2124,7 +2124,7 @@ fn a_reserved_unknown_or_unbuilt_subtable_type_is_skipped_and_named() {
     }
     // Each type of the chapter's not run yet leaves this list when its
     // machine lands.
-    for kind in [CONTEXTUAL, LIGATURE, INSERTION] {
+    for kind in [LIGATURE, INSERTION] {
         let table = morx_table(
             2,
             &[chain(
@@ -2434,10 +2434,9 @@ struct Worked {
     /// The subtable, every byte as the manual gives it, its corrections named
     /// where it is built.
     subtable: fn() -> Vec<u8>,
-    /// The glyphs in, and the run's direction.
-    input: &'static [u16],
-    /// The glyphs out.
-    output: &'static [u16],
+    /// The glyphs in and out of each case the example states, over a
+    /// left-to-right run.
+    cases: &'static [(&'static [u16], &'static [u16])],
 }
 
 /// The rearrangement subtable's worked examples: none. The verb table
@@ -2453,14 +2452,21 @@ const REARRANGEMENT_EXAMPLES: &[Worked] = &[];
 fn hold_to_worked_examples(examples: &[Worked]) -> usize {
     for example in examples {
         let table = morx_table(2, &[chain(1, &[], &[(example.subtable)()])]);
-        let (out, warnings) = chained(
-            &table,
-            example.input,
-            Direction::LeftToRight,
-            &Selection::defaults(),
+        assert!(
+            !example.cases.is_empty(),
+            "{} states a case",
+            example.source
         );
-        assert_eq!(out, example.output, "{}", example.source);
-        assert!(warnings.is_empty(), "{}: {warnings:?}", example.source);
+        for (input, output) in example.cases {
+            let (out, warnings) = chained(
+                &table,
+                input,
+                Direction::LeftToRight,
+                &Selection::defaults(),
+            );
+            assert_eq!(out, *output, "{}, {input:?}", example.source);
+            assert!(warnings.is_empty(), "{}: {warnings:?}", example.source);
+        }
     }
     examples.len()
 }
@@ -2876,4 +2882,459 @@ fn a_rearrangement_that_loops_or_cannot_be_read_is_named() {
             format: 9
         }]
     );
+}
+
+// --- the contextual glyph substitution subtable (FT-07c.7) ---------------
+//
+// A mark the machine sets and moves, and the per-glyph substitution tables
+// its entries name for the marked glyph and the current one.
+
+/// No substitution table: the value an index takes for none.
+const NO_TABLE: u16 = 0xFFFF;
+
+/// A contextual subtable over coverage `orientation`'s bits under flag 1:
+/// `classes` gives glyphs their classes, `lines` the state array, `entries`
+/// each entry's new state, flags, mark index and current index, and
+/// `tables` the per-glyph substitution tables, each `(glyph, glyph)` pairs
+/// read as a format 6 lookup table. The tables follow the entry table, the
+/// array of their offsets first, and `substitutionTable` names where.
+fn contextual_subtable(
+    orientation: u32,
+    classes: &[(u16, u16)],
+    lines: &[&[u16]],
+    entries: &[[u16; 4]],
+    tables: &[&[(u16, u16)]],
+) -> Vec<u8> {
+    let entries: Vec<&[u16]> = entries.iter().map(|entry| &entry[..]).collect();
+    let classes_count = lines.first().map_or(4, |line| line.len());
+    let mut body = stx(
+        count32(classes_count),
+        1,
+        &lookup_single(classes),
+        lines,
+        &entries,
+    );
+    let space = body.len();
+    put32(&mut body, 16, count32(space));
+    let array = 4 * tables.len();
+    let mut lookups: Vec<u8> = Vec::new();
+    for table in tables {
+        body.extend(count32(array + lookups.len()).to_be_bytes());
+        lookups.extend(lookup_single(table));
+        pad4(&mut lookups);
+    }
+    body.extend(lookups);
+    subtable(orientation | u32::from(CONTEXTUAL), 1, &body)
+}
+
+/// The `morx` chapter's *Examples*, "1. A contextual substitution table":
+/// glyphs 50, 51, 201 and 202 after glyph 80 become the swashes 600, 601, 602
+/// and 900, every byte at its offset as the example prints it, but for three
+/// corrections. `nClasses`, printed 5, is 6: the state array's lines, printed
+/// at 56, 68 and 80, are six entry indices, twelve bytes, apart, and the
+/// example's own classes run to 5. The offset at 16, printed `xxx`, is 116,
+/// where the example starts its per-glyph tables. And the per-glyph lookup's
+/// units, printed at 132, 136, 144 and 148 with the guard at 152, are the
+/// contiguous units they must be, 132 to 147 with the guard at 148: the
+/// lookup's header ends at 132 and its units are four bytes.
+fn swash_example() -> Vec<u8> {
+    let mut body = u32s(&[6, 20, 56, 92, 116]);
+    // The class lookup: format 6, unit size 4, five units, search range 16,
+    // entry selector 2, range shift 4; then the units and the guard.
+    body.extend(u16s(&[6, 4, 5, 16, 2, 4]));
+    body.extend(u16s(&[50, 4, 51, 4, 80, 5, 201, 4, 202, 4]));
+    body.extend(u16s(&[0xFFFF, 1]));
+    // The state array: start of text, start of line, and "saw 80".
+    body.extend(u16s(&[0, 0, 0, 0, 0, 1]));
+    body.extend(u16s(&[0, 0, 0, 0, 0, 1]));
+    body.extend(u16s(&[0, 0, 0, 0, 2, 1]));
+    // The entries: back to state 0; to "saw 80"; back to state 0, the current
+    // glyph put through per-glyph lookup 0.
+    body.extend(u16s(&[0, 0, NO_TABLE, NO_TABLE]));
+    body.extend(u16s(&[2, 0, NO_TABLE, NO_TABLE]));
+    body.extend(u16s(&[0, 0, NO_TABLE, 0]));
+    // The per-glyph tables: the offset of lookup 0 from here, then lookup 0.
+    body.extend(u32s(&[4]));
+    body.extend(u16s(&[6, 4, 4, 16, 2, 0]));
+    body.extend(u16s(&[50, 600, 51, 601, 201, 602, 202, 900]));
+    body.extend(u16s(&[0xFFFF, 1]));
+    assert_eq!(body.len(), 152, "the example's bytes, 0 to 151");
+    subtable(ANY_ORIENTATION | u32::from(CONTEXTUAL), 1, &body)
+}
+
+/// The capitalising machine of the *AAT special tables* chapter, "State
+/// Tables": figure FF30's states, START and IN WORD, figure FF31's four
+/// entries — START with no action, IN WORD with `<UPPER>`, IN WORD with
+/// none, IN WORD with `<LOWER>` — and figure FF32's state array, out of
+/// bounds to entry 0 in either state, a lower-case letter to 1 from START
+/// and 2 in a word, an upper-case one to 2 from START and 3 in a word;
+/// encoded as a contextual subtable with `UPPER` and `LOWER` as current-glyph
+/// substitution tables. The letters `a` to `f` are glyphs 1 to 6 and `A` to
+/// `F` 11 to 16, and a space is glyph 20, out of bounds. START is state 0,
+/// and state 1, the start of line, a copy of it; IN WORD is state 2. The
+/// classes the figures leave out are this transcription's: the end of text
+/// and of a line return to START, and a deleted glyph keeps the state it
+/// meets.
+fn capitalising_example() -> Vec<u8> {
+    let lower: Vec<(u16, u16)> = (1..=6).map(|glyph| (glyph, 4)).collect();
+    let upper: Vec<(u16, u16)> = (11..=16).map(|glyph| (glyph, 5)).collect();
+    let classes: Vec<(u16, u16)> = lower.into_iter().chain(upper).collect();
+    let to_upper: Vec<(u16, u16)> = (1..=6).map(|glyph| (glyph, glyph + 10)).collect();
+    let to_lower: Vec<(u16, u16)> = (11..=16).map(|glyph| (glyph, glyph - 10)).collect();
+    contextual_subtable(
+        ANY_ORIENTATION,
+        &classes,
+        &[
+            &[0, 0, 0, 0, 1, 2],
+            &[0, 0, 0, 0, 1, 2],
+            &[0, 0, 2, 0, 2, 3],
+        ],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [2, 0, NO_TABLE, 0],
+            [2, 0, NO_TABLE, NO_TABLE],
+            [2, 0, NO_TABLE, 1],
+        ],
+        &[to_upper.as_slice(), to_lower.as_slice()],
+    )
+}
+
+/// The contextual subtable's worked examples, as `docs/design/shaping.md`
+/// lists them for type 1: two.
+const CONTEXTUAL_EXAMPLES: &[Worked] = &[
+    Worked {
+        source: "the morx chapter, Examples, 1. A contextual substitution table",
+        subtable: swash_example,
+        cases: &[
+            (&[80, 50], &[80, 600]),
+            (&[80, 51], &[80, 601]),
+            (&[80, 201], &[80, 602]),
+            (&[80, 202], &[80, 900]),
+            (&[50, 51, 201, 202], &[50, 51, 201, 202]),
+            (&[80, 80, 50], &[80, 80, 600]),
+            (&[80, 50, 51], &[80, 600, 51]),
+            (&[7, 80, 202, 80, 51], &[7, 80, 900, 80, 601]),
+        ],
+    },
+    Worked {
+        source: "AAT special tables, State Tables, figures FF30, FF31 and FF32",
+        subtable: capitalising_example,
+        // Figure FF30's input and output: `abC deF` becomes `Abc Def`.
+        cases: &[(&[1, 2, 13, 20, 4, 5, 16], &[11, 2, 3, 20, 14, 5, 6])],
+    },
+];
+
+/// The contextual subtable reproduces each worked example
+/// `docs/design/shaping.md` lists for type 1, and there are two.
+#[test]
+fn contextual_substitution_reproduces_the_manuals_worked_examples() {
+    assert_eq!(hold_to_worked_examples(CONTEXTUAL_EXAMPLES), 2);
+}
+
+/// A machine marking glyph 1 and substituting the marked glyph through
+/// table 0 at glyph 9.
+fn marking_machine() -> Vec<u8> {
+    contextual_subtable(
+        ANY_ORIENTATION,
+        &[(1, 4), (9, 5)],
+        &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [0, 0x8000, NO_TABLE, NO_TABLE],
+            [0, 0, 0, NO_TABLE],
+        ],
+        &[&[(1, 101), (5, 105)]],
+    )
+}
+
+/// The marked glyph is substituted wherever the machine has moved since
+/// marking it, `setMark` moves the mark, the mark stays where it was after
+/// a substitution, and where no glyph was marked the mark is the first glyph
+/// the machine met (`MORX-19`).
+#[test]
+fn a_marked_glyph_is_substituted_after_the_machine_has_moved_past_it() {
+    assert_eq!(
+        glyphs_through(marking_machine(), &[1, 5, 6, 7, 9]),
+        [101, 5, 6, 7, 9]
+    );
+    assert_eq!(
+        glyphs_through(marking_machine(), &[1, 5, 1, 9]),
+        [1, 5, 101, 9],
+        "the second mark is the one substituted"
+    );
+    assert_eq!(
+        glyphs_through(marking_machine(), &[1, 9, 9]),
+        [101, 9, 9],
+        "the mark stays on its glyph, whose new value the table does not map"
+    );
+    assert_eq!(
+        glyphs_through(marking_machine(), &[5, 9]),
+        [105, 9],
+        "no mark set: the first glyph met"
+    );
+}
+
+/// The marked glyph is substituted before the current one, so both indices
+/// on one glyph chain (`MORX-22`); `setMark` takes the current glyph after
+/// the substitutions are made (`MORX-21`).
+#[test]
+fn the_mark_is_substituted_first_and_set_after() {
+    // A marks itself, holds and moves to state 2, where A puts the marked
+    // glyph through table 0 (A to B) and the current one through table 1
+    // (B to C).
+    let chaining = contextual_subtable(
+        ANY_ORIENTATION,
+        &[(1, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1], &[2, 2, 2, 2, 3]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [2, 0xC000, NO_TABLE, NO_TABLE],
+            [2, 0, NO_TABLE, NO_TABLE],
+            [0, 0, 0, 1],
+        ],
+        &[&[(1, 2)], &[(2, 3)]],
+    );
+    assert_eq!(glyphs_through(chaining, &[1]), [3]);
+
+    // B marks itself; D marks itself and puts the marked glyph through
+    // table 0: B is substituted, not D.
+    let resetting = contextual_subtable(
+        ANY_ORIENTATION,
+        &[(2, 4), (4, 5)],
+        &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [0, 0x8000, NO_TABLE, NO_TABLE],
+            [0, 0x8000, 0, NO_TABLE],
+        ],
+        &[&[(2, 12), (4, 14)]],
+    );
+    assert_eq!(
+        glyphs_through(resetting, &[1, 2, 3, 4, 5]),
+        [1, 12, 3, 4, 5]
+    );
+}
+
+/// At the end of text the current glyph is the last one met, and the mark
+/// is substituted before it (`MORX-20`); a run holding no glyph the machine
+/// names takes no end of text at all.
+#[test]
+fn the_end_of_text_substitutes_the_mark_and_the_last_glyph() {
+    // A, B and C mark themselves; the end of text puts the marked glyph
+    // through table 0 and the current one through table 1.
+    let machine = || {
+        contextual_subtable(
+            ANY_ORIENTATION,
+            &[(1, 4), (2, 4), (3, 4)],
+            &[&[0, 1, 1, 1, 2], &[0, 1, 1, 1, 2]],
+            &[
+                [0, 0, 0, 1],
+                [0, 0, NO_TABLE, NO_TABLE],
+                [0, 0x8000, NO_TABLE, NO_TABLE],
+            ],
+            &[
+                &[(1, 11), (2, 12), (3, 13), (4, 14), (5, 15)],
+                &[(1, 21), (2, 22), (3, 23), (4, 24), (5, 25)],
+            ],
+        )
+    };
+    for (input, output) in [
+        (vec![1u16, 2, 3, 4, 5], vec![1u16, 2, 13, 4, 25]),
+        (vec![1, 2, 3], vec![1, 2, 13]),
+        (vec![1, 2, 5], vec![1, 12, 25]),
+        (vec![1, 5], vec![11, 25]),
+        (vec![1], vec![11]),
+        (vec![5, 5], vec![5, 5]),
+        (vec![5], vec![5]),
+    ] {
+        assert_eq!(glyphs_through(machine(), &input), output, "{input:?}");
+    }
+}
+
+/// A current substitution with `dontAdvance` looks at the glyph again until
+/// it leaves the classes that hold it (`MORX-23`); one that never lets go
+/// stops at the ceiling, named, the run as it stood (`MORX-24`).
+#[test]
+fn dont_advance_holds_until_the_glyph_changes_and_no_further_than_the_ceiling() {
+    let ladder = contextual_subtable(
+        ANY_ORIENTATION,
+        &[(1, 4), (2, 4), (3, 4), (4, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[[0, 0, NO_TABLE, NO_TABLE], [0, 0x4000, NO_TABLE, 0]],
+        &[&[(1, 2), (2, 3), (3, 4), (4, 5)]],
+    );
+    assert_eq!(glyphs_through(ladder, &[1, 2, 3, 4, 5]), [5, 5, 5, 5, 5]);
+
+    let forever = contextual_subtable(
+        ANY_ORIENTATION,
+        &[(1, 4), (2, 4), (3, 4), (4, 4), (5, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[[0, 0, NO_TABLE, NO_TABLE], [0, 0x4000, NO_TABLE, 0]],
+        &[&[(1, 2), (2, 3), (3, 4), (4, 5), (5, 1)]],
+    );
+    let limits = Limits {
+        max_transitions: 6,
+        ..Limits::DEFAULT
+    };
+    let (out, warnings) = through(forever, &[1, 2], &limits);
+    // Six substitutions of the first glyph: 1, 2, 3, 4, 5, 1, 2.
+    assert_eq!(out, vec![(2, 0), (2, 1)]);
+    assert_eq!(
+        warnings,
+        vec![Warning::TransitionBudgetExceeded { site: site(0) }]
+    );
+}
+
+/// An index past the substitution tables the subtable holds substitutes
+/// nothing and is named once, the machine going on; a glyph substituted to
+/// `0xFFFF` is deleted and leaves the run when the chains end.
+#[test]
+fn a_missing_table_is_named_and_a_deleted_glyph_leaves() {
+    // Glyph 1 names table 3 of two; glyph 2 names table 1; glyph 3 table 0.
+    let machine = contextual_subtable(
+        ANY_ORIENTATION,
+        &[(1, 4), (2, 5), (3, 6)],
+        &[&[0, 0, 0, 0, 1, 2, 3], &[0, 0, 0, 0, 1, 2, 3]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [0, 0, NO_TABLE, 3],
+            [0, 0, NO_TABLE, 1],
+            [0, 0, NO_TABLE, 0],
+        ],
+        &[&[(3, DELETED)], &[(2, 22)]],
+    );
+    let (out, warnings) = through(machine, &[1, 2, 1, 3, 9], &Limits::DEFAULT);
+    assert_eq!(out, vec![(1, 0), (22, 1), (1, 2), (9, 4)]);
+    assert_eq!(
+        warnings,
+        vec![Warning::SubstitutionTableMissing {
+            site: site(0),
+            index: 3
+        }]
+    );
+}
+
+/// A subtable with no `substitutionTable` offset, a substitution table of a
+/// format the manual does not define, and a value no glyph index holds are
+/// each named, and substitute nothing.
+#[test]
+fn a_contextual_subtable_that_cannot_be_read_is_named() {
+    // An `STXHeader` whose three parts all sit at its own start, sixteen
+    // bytes long: its class table reads as format 0 and gives glyph 0 class
+    // 4, but there is no word at 16 for the substitution tables' offset.
+    let headless = subtable(
+        ANY_ORIENTATION | u32::from(CONTEXTUAL),
+        1,
+        &u32s(&[4, 0, 0, 0]),
+    );
+    let (out, warnings) = through(headless, &[0], &Limits::DEFAULT);
+    assert_eq!(out, vec![(0, 0)]);
+    assert_eq!(
+        warnings,
+        vec![Warning::MalformedAatSubtable { site: site(0) }]
+    );
+
+    // Table 0 of an undefined format, and table 1 of four-byte values, one
+    // too large for a glyph index.
+    let mut machine = contextual_subtable(
+        ANY_ORIENTATION,
+        &[(1, 4), (2, 5)],
+        &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [0, 0, NO_TABLE, 0],
+            [0, 0, NO_TABLE, 1],
+        ],
+        &[&[(1, 11)], &[(2, 12)]],
+    );
+    // The first table's format, at the start of the lookups: the subtable
+    // header is 12 bytes, and its state table's `substitutionTable` word
+    // says where the offsets are.
+    let space = 12
+        + usize::try_from(u32::from_be_bytes(
+            machine[12 + 16..12 + 20].try_into().expect("four bytes"),
+        ))
+        .expect("small");
+    let first = space
+        + usize::try_from(u32::from_be_bytes(
+            machine[space..space + 4].try_into().expect("four bytes"),
+        ))
+        .expect("small");
+    machine[first..first + 2].copy_from_slice(&3u16.to_be_bytes());
+    let (out, warnings) = through(machine, &[1, 2], &Limits::DEFAULT);
+    assert_eq!(out, vec![(1, 0), (12, 1)]);
+    assert_eq!(
+        warnings,
+        vec![Warning::UnknownLookupFormat {
+            site: site(0),
+            format: 3
+        }]
+    );
+
+    let wide = {
+        let entries: [&[u16]; 2] = [&[0, 0, NO_TABLE, NO_TABLE], &[0, 0, NO_TABLE, 0]];
+        let mut body = stx(
+            5,
+            1,
+            &lookup_single(&[(1, 4), (2, 4)]),
+            &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+            &entries,
+        );
+        let space = body.len();
+        put32(&mut body, 16, count32(space));
+        body.extend(4u32.to_be_bytes());
+        body.extend(lookup_pairs(4, &[(1, 0x0001_0000), (2, 22)]));
+        subtable(ANY_ORIENTATION | u32::from(CONTEXTUAL), 1, &body)
+    };
+    let (out, warnings) = through(wide, &[1, 2], &Limits::DEFAULT);
+    assert_eq!(out, vec![(1, 0), (22, 1)]);
+    assert_eq!(
+        warnings,
+        vec![Warning::MalformedAatSubtable { site: site(0) }]
+    );
+}
+
+/// The four processing orders bits 30 and 28 choose, over a left-to-right
+/// run and a right-to-left one (`MORX-37` to `MORX-40`): A marks itself and
+/// B, met after it, substitutes both, so a pair is substituted only where the
+/// walk meets A first.
+#[test]
+fn each_processing_order_meets_the_glyphs_its_coverage_says() {
+    let machine = |order: u32| {
+        contextual_subtable(
+            ANY_ORIENTATION | order,
+            &[(1, 4), (2, 5)],
+            &[&[0, 0, 0, 0, 1, 0], &[0, 0, 0, 0, 0, 2]],
+            &[
+                [0, 0, NO_TABLE, NO_TABLE],
+                [1, 0x8000, NO_TABLE, NO_TABLE],
+                [0, 0, 0, 0],
+            ],
+            &[&[(1, 11), (2, 12)]],
+        )
+    };
+    let ltr = Direction::LeftToRight;
+    let rtl = Direction::RightToLeft;
+    // Each order, and for each run its logical glyphs and what they become:
+    // `AB` and `BA` typed left to right, and right to left.
+    let orders: [(u32, [[u16; 2]; 4]); 4] = [
+        (0, [[11, 12], [2, 1], [1, 2], [12, 11]]),
+        (LOGICAL, [[11, 12], [2, 1], [11, 12], [2, 1]]),
+        (DESCENDING, [[1, 2], [12, 11], [11, 12], [2, 1]]),
+        (DESCENDING | LOGICAL, [[1, 2], [12, 11], [1, 2], [12, 11]]),
+    ];
+    for (order, expected) in orders {
+        let runs = [
+            ([1u16, 2], ltr),
+            ([2, 1], ltr),
+            ([1, 2], rtl),
+            ([2, 1], rtl),
+        ];
+        for ((glyphs, direction), want) in runs.iter().zip(expected) {
+            let table = morx_table(2, &[chain(1, &[], &[machine(order)])]);
+            let (out, warnings) = chained(&table, glyphs, *direction, &Selection::defaults());
+            assert_eq!(out, want, "order {order:#x}, {glyphs:?} {direction:?}");
+            assert!(warnings.is_empty());
+        }
+    }
 }

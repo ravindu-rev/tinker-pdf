@@ -979,8 +979,14 @@ What it does:
   marked first, no span where none was marked last, the last glyph met being
   the current one at the end of text — and each of the sixteen verbs moves
   the glyphs it names, a span too short for its verb left as it is, the
-  marks kept after a verb, and a rearranged span's clusters merged. A state
-  machine runs only over a run holding a glyph its class table names. A
+  marks kept after a verb, and a rearranged span's clusters merged. The
+  contextual substitution subtable runs too: its entries put the marked
+  glyph, then the current one, through the per-glyph lookup tables their
+  indices name, `setMark` marks the current glyph after the substitutions,
+  the mark is the first glyph met where none was set and keeps its glyph
+  wherever the machine moves, and an index past the subtable's tables is
+  named (`Warning::SubstitutionTableMissing`). A state machine runs only over
+  a run holding a glyph its class table names. A
   reserved, unknown or not yet built type is skipped and named
   (`Warning::SubtableTypeNotRun`). `aat::Selection::from_opentype` turns a
   caller's `with_features` and `with_settings` into the settings asked for,

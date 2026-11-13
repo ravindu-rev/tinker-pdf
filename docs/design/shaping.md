@@ -794,8 +794,12 @@ skipped and recorded.
   subtable's `substitutionTable` — for the marked glyph and the current one,
   `0xFFFF` naming none; `setMark` makes the current glyph the marked one
   "after the substitutions are made". The marked glyph is substituted wherever
-  the machine has moved since marking it. An index past the offsets the table
-  holds substitutes nothing and is recorded.
+  the machine has moved since marking it, the marked glyph before the current
+  one, so both indices on one glyph chain (`MORX-22`). The chapter gives the
+  offsets no count; the array ends where the first table it names begins at
+  the latest, so an index whose offset would lie at or past that point — or
+  that cannot be read — substitutes nothing and is recorded
+  (`Warning::SubstitutionTableMissing`).
 - **Ligature (2).** `setComponent` pushes the current glyph on the component
   stack and `performAction` runs the actions from `ligActionIndex`: each pops a
   component and adds its glyph index to the action's 30-bit offset, sign
@@ -972,7 +976,7 @@ By chapter and figure, for each of the six state machines:
 | Machine | Worked examples the manual gives | Transcribed by |
 | --- | --- | --- |
 | `morx` type 0, rearrangement | **None.** The verb table defines each verb's effect and is held by `every_rearrangement_verb_moves_what_it_names`; it shows no machine | H-142 |
-| `morx` type 1, contextual | (1) `morx` chapter, *Examples*, "1. A contextual substitution table": glyphs 50, 51, 201 and 202 after glyph 80 become 600, 601, 602 and 900, every byte from offset 0 given — its per-glyph lookup's units, printed at offsets 132, 136, 144 and 148 with the guard at 152, are read as the contiguous units they must be, 132 to 147 with the guard at 148. (2) *AAT special tables*, "State Tables": the capitalising machine of figure FF30, its four entries in figure FF31 and its state array in figure FF32 — a word's first letter upper case and the rest lower, an out-of-bounds glyph starting a word again — encoded as a contextual subtable with `UPPER` and `LOWER` as current-glyph substitution tables. Figures FF27 and FF29 draw earlier forms of the machine and give no table | FT-07c.7 |
+| `morx` type 1, contextual | (1) `morx` chapter, *Examples*, "1. A contextual substitution table": glyphs 50, 51, 201 and 202 after glyph 80 become 600, 601, 602 and 900, every byte from offset 0 given but three, each corrected: its `nClasses`, printed 5, is read as the 6 its state array's lines hold, printed twelve bytes apart at 56, 68 and 80; its substitution tables' offset at 16, printed `xxx`, as 116, where the example starts them; and its per-glyph lookup's units, printed at offsets 132, 136, 144 and 148 with the guard at 152, as the contiguous units they must be, 132 to 147 with the guard at 148. (2) *AAT special tables*, "State Tables": the capitalising machine of figure FF30, its four entries in figure FF31 and its state array in figure FF32 — a word's first letter upper case and the rest lower, an out-of-bounds glyph starting a word again — encoded as a contextual subtable with `UPPER` and `LOWER` as current-glyph substitution tables. Figures FF27 and FF29 draw earlier forms of the machine and give no table | FT-07c.7 |
 | `morx` type 2, ligature | `morx` chapter, *Examples*, "2. A ligature table": the 24 ligatures of `a`, `b` or `c`, `d` or `e`, and `f` to `i` (glyphs 20 to 28) to glyphs 1000 to 1015 and 1500 to 1511, every byte at offsets 0 to 221 given — its class lookup's third segment, printed with the second's values `24, 23, 5`, is read as glyphs 25 to 28 in class 6, as its comment states. The `mort` chapter's figure FF38 works the same component sums in `mort`'s byte offsets and is not transcribed | FT-07c.8 |
 | `morx` type 5, insertion | **None** | H-142 |
 | `kerx` format 1, contextual kerning | **None** in the `kerx` chapter. The `kern` chapter's *Kerning Table Example* (figures FF48, FF78 and FF45) is a `kern` format-1 machine whose value lists end in an odd value and reset the cross-stream baseline with `0x8000`, conventions `kerx`'s value list does not share, and is not transcribed | H-142 |
@@ -1089,7 +1093,7 @@ row here reads.
 
 | Risk | Mitigation |
 | --- | --- |
-| The manual's worked examples carry misprints, and a transcription that copies one tests the misprint | Each correction is named here and in its test: the contextual example's offset, the ligature example's third segment, the `trak` example's offset, the `feat` example's count, the noncontextual example's comment |
+| The manual's worked examples carry misprints, and a transcription that copies one tests the misprint | Each correction is named here and in its test: the contextual example's class count, substitution-table offset and unit offsets, the ligature example's third segment, the `trak` example's offset, the `feat` example's count, the noncontextual example's comment |
 | A behaviour the manual leaves open is read one way where a face expects another | The default mark, the end-of-text entry and an insertion's advance are pinned by named test sections; the rest are stated here as this engine's readings |
 | A rearrangement under a reverse traversal reads its span the other way | Spans are layout positions whatever the traversal; no test section rearranges in reverse, so `MORX-37` to `MORX-40` hold the traversal and FT-07c.6's verb test the spans |
 | `kerx` format 2's two sentences on where a value lies disagree | The `kern` chapter's statement of the same layout decides; a face built the other way kerns by the wrong cell, never out of bounds |
