@@ -503,6 +503,49 @@ store with none shared, and point numbers or deltas that end early, run past
 their count or add up past 65 535. The varied `cvt ` reaches no page by
 itself.
 
+`variation::gvar::Gvar` reads `gvar`: its header, the shared tuples and one
+`GlyphVariationData` a glyph by 16-bit halved or 32-bit offsets, a glyph past
+the table's count or of size zero being the same outline everywhere.
+`glyf::simple_glyph` is the raw-point form a glyph's points are read in —
+its contour ends, its flags with `REPEAT` expanded, its absolute coordinates
+in font units and its four phantom points after them, which
+`glyf::phantom_points` places as the hinting design does: the horizontal
+origin at `xMin` less `hmtx`'s left side bearing and the advance width past
+it, both at `y = 0`, and the vertical origin at `yMax` plus `vmtx`'s top side
+bearing and the advance height below it, both at `x = 0`, or `hhea`'s
+ascender and descender where the face has no vertical metrics.
+`glyf::components` gives a composite's records in order, the order `gvar`
+numbers them in. `Gvar::simple_deltas` sums, for each point and phantom
+point, every table's scalar times its delta in 16.16 — a number listed twice
+taking both deltas, one past the items moving nothing — and infers the
+deltas of the points a table does not list, contour by contour, from the
+points' default positions as the `gvar` chapter's 'Inferred deltas for
+un-referenced point numbers' does: the same delta where the two nearest
+listed points stand at one coordinate and agree, none where they disagree,
+the nearer one's outside them, and between them the linear interpolation,
+its exact value rounded to 16.16 once and its product with the scalar
+rounded; a contour none of whose points is listed, and every phantom point,
+moves only where listed. `Gvar::composite_deltas` gives a composite's
+components and phantom points their listed deltas, the horizontal phantom
+points their X deltas and the vertical ones their Y. `glyf::outline_at` adds
+them at a `Location` before the implied midpoints are resolved, through the
+same contour reading as `glyf::outline`, so a glyph where nothing moves — the
+default location, or no `gvar` — draws exactly what `glyf::outline` draws; a
+component placed by an offset is placed at the offset plus its delta, and
+one placed by matching points ignores its delta. `glyf::phantom_points_at`
+gives the four phantom points there, the advances and side bearings of a
+face without `HVAR`: the advance width the horizontal pair's distance and the
+advance height the vertical pair's, a composite with a `USE_MY_METRICS`
+component taking that component's — the last such one's — and not its own.
+Every table is decoded at every location and charged, a table times its
+points, to an outline's budget of `MAX_GLYPH_DELTA_WORK` (2²²) across every
+glyph it draws, so a glyph is refused at every location or at none. Refused
+by name: a header or the offset array past the table, a version other than
+1, an axis count other than `fvar`'s, shared tuples past the table, a glyph's
+offsets decreasing or its data past the table, the tuple store's refusals,
+and an outline past its budget; a caller draws a refused glyph at its
+default.
+
 `variation::item_store` reads the item variation store — the region list and
 its item variation data subtables, rows of 8- and 16-bit deltas or, under
 `LONG_WORDS`, 16- and 32-bit ones, a NULL offset and the index 0xFFFF/0xFFFF
@@ -594,7 +637,9 @@ tally: `Sfnt::parse_counted` (a table record read, a record compared) and
 `Sfnt::glyph_for_char_counted` (an encoding record weighed and the subtable's
 order checked, at a face's first lookup; an entry examined, at each);
 `glyf::outline_counted` (a glyph appended, a component read, each contour end,
-flag, coordinate and emitted point); `Cff::parse_counted` (each INDEX offset,
+flag, coordinate and emitted point) and `glyf::outline_at_counted` (those,
+each record a composite's numbering reads, and each point delta a glyph's
+`gvar` tables decode, a table times its points); `Cff::parse_counted` (each INDEX offset,
 charset, encoding and FDSelect entry and Font DICT) and `Cff::outline_counted`
 (each operand and operator the Type 2 machine read, its subroutines' included);
 `Type1::parse_counted` (each byte of the `eexec` section and of each
@@ -1330,8 +1375,9 @@ corpora already vendored here. So every name stays on the list.
   [resource exhaustion](../design/resource-exhaustion.md)'s size-scaling law
   through their counted siblings, in both feature builds: the work of a font
   at four times a size is at most 4.4 times the work at that size — for a
-  directory of more tables, a simple glyph of more points and a composite of
-  more components, a CFF of more glyphs, a longer charstring and more
+  directory of more tables, a simple glyph of more points, the same glyph
+  moved by `gvar` tables that list every point and every third, and a
+  composite of more components, a CFF of more glyphs, a longer charstring and more
   subroutine calls, a longer `eexec` section and a Type 1 font of more
   charstrings, WOFF and WOFF 2.0 files of more tables, and an embedded CMap of
   more `bfchar` mappings — and, where a lookup bisects, at most 4.4 times the
@@ -1466,7 +1512,25 @@ corpora already vendored here. So every name stays on the list.
   DICT's blended values equal to the default plus the deltas times the
   scalars the specification computes in the test; the default location
   drawing the unblended outline; and a design space of another axis count
-  refused.
+  refused. `gvar`'s: a face of a space, simple glyphs, a glyph whose listed
+  points leave others to every case of the inference, a composite placed by
+  an offset, a scaled offset and matched points, and a composite of a
+  composite, written with both offset widths and with and without vertical
+  metrics — every point's delta and every outline at every named instance and
+  at coordinates no instance names equal to the points plus the deltas the
+  specification's inference and scaling give in the test, the contour reading
+  written a second time there; the raw-point form and the phantom points as
+  the metrics place them; the default location and a missing `gvar` drawing
+  `glyf::outline`'s outline and counting its steps; the phantom points, and
+  the advances they give without `HVAR`, a `USE_MY_METRICS` composite's its
+  component's; every refusal by name, an outline's budget held at its bound
+  and one table past it and across a composite's components; and every
+  truncation and single-byte change of the table read or refused without a
+  panic. `TestGPOSFour.ttf`'s thirteen glyphs at its thirty-six named
+  instances — inferred points, intermediate regions, shared tuples and
+  `USE_MY_METRICS` composites among them — equal a second reader's outlines
+  and phantom points, that reader decoding `glyf`, `loca`, `hmtx`, `hhea` and
+  `gvar` from the chapters' field lists.
 - `crates/tinker-pdf-font/tests/colour_tables.rs` — the colour tables over
   bytes the test writes from the OpenType chapters' layouts: COLR version 0's
   layers bottom first with each palette's colours, a slice two glyphs share,

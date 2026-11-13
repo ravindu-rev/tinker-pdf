@@ -15,6 +15,8 @@
 //! alike. No clock is read here. Nothing here depends on a feature, so the
 //! file runs alike with and without the default ones.
 
+mod variable_support;
+
 use tinker_pdf_font::outline::{Outline, Segment};
 use tinker_pdf_font::{cmap, glyf, woff, Cff, Sfnt, Type1};
 
@@ -356,6 +358,83 @@ fn a_composite_of_more_components_costs_work_linear_in_its_components() {
         composite_outline(12),
         composite_outline(48),
     );
+}
+
+/// [`simple_glyph`] in a face of one axis whose `gvar` moves it by two
+/// tables, one listing every point and one listing every third, so that
+/// the rest are inferred, outlined where both tables apply.
+fn varied_outline(n: usize) -> u64 {
+    use tinker_pdf_font::variation::gvar::Gvar;
+    use tinker_pdf_font::variation::{DesignSpace, Location};
+    use variable_support::{AxisSpec, GlyphVariation, Points, TupleSpec};
+
+    let every: Vec<i32> = (0..(n + 4) * 2)
+        .map(|i| i32::try_from(i % 7).expect("small") - 3)
+        .collect();
+    let listed: Vec<u16> = (0..n)
+        .step_by(3)
+        .map(|i| u16::try_from(i).expect("few points"))
+        .collect();
+    let some: Vec<i32> = (0..listed.len() * 2)
+        .map(|i| i32::try_from(i % 5).expect("small"))
+        .collect();
+    let variation = GlyphVariation {
+        shared_points: None,
+        tuples: vec![
+            TupleSpec::new(&[16_384], Some(Points::All), &every),
+            TupleSpec::new(&[8_192], Some(Points::Listed(listed)), &some).between(&[0], &[16_384]),
+        ],
+    };
+    let mut glyf = simple_glyph(n);
+    while glyf.len() % 4 != 0 {
+        glyf.push(0);
+    }
+    let mut loca = Vec::new();
+    loca.extend_from_slice(&0u32.to_be_bytes());
+    loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+    let face = sfnt(&[
+        (
+            *b"fvar",
+            variable_support::fvar(&[AxisSpec::new(*b"wght", 100.0, 400.0, 900.0, 256)], &[]),
+        ),
+        (*b"glyf", glyf),
+        (
+            *b"gvar",
+            variable_support::gvar(1, &[], &[Some(variation)], true),
+        ),
+        (*b"head", head()),
+        (*b"loca", loca),
+    ]);
+    let font = Sfnt::parse(&face).expect("the face parses");
+    let space = DesignSpace::read(&font).expect("its design space");
+    let gvar = Gvar::read(&font, &space)
+        .expect("gvar is read")
+        .expect("the face carries one");
+    let location = Location::new(vec![8_192]);
+    let (outline, steps) = glyf::outline_at_counted(&font, 0, Some(&gvar), &location);
+    let outline = outline.expect("an outline");
+    let lines = outline
+        .segments
+        .iter()
+        .filter(|s| matches!(s, Segment::LineTo { .. }))
+        .count();
+    assert_eq!(lines, n, "every point drawn, moved");
+    assert_ne!(
+        Some(outline.segments.clone()),
+        glyf::outline(&font, 0).map(|o| o.segments),
+        "the tables move it"
+    );
+    assert_eq!(
+        glyf::outline_at(&font, 0, Some(&gvar), &location).map(|o| o.segments),
+        Ok(outline.segments),
+        "alike uncounted"
+    );
+    steps
+}
+
+#[test]
+fn a_varied_glyph_of_more_points_costs_work_linear_in_its_points() {
+    holds_the_law("glyf varied", varied_outline(1_000), varied_outline(4_000));
 }
 
 // ---------------------------------------------------------------------------

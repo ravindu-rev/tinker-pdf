@@ -4,9 +4,7 @@ A variable face carries one design and the arithmetic that moves it: `fvar`
 names the axes, `avar` bends their scales, and the delta stores — `gvar` and
 `cvar` for a `glyf` face, `HVAR`, `VVAR` and `MVAR` for its metrics, and the
 `blend` operands of a `CFF2` table — say how far each value moves at each
-position. Today `tinker-pdf-font` reads none of that: a `glyf` face draws its
-default design whatever it carries, and a face whose outlines are in `CFF2`
-draws nothing. This document settles how the engine reads the design space,
+position. This document settles how the engine reads the design space,
 evaluates both delta stores, interprets `CFF2`, writes a static instance of
 either flavour, and who asks for one — with one property the rest rests on:
 **every value at an instance is computed by one integer model, transcribed
@@ -222,22 +220,38 @@ expanded, its absolute coordinates in font units as `i32`, and the four
 phantom points appended where `docs/design/hinting.md`'s 'Zones, points and
 the graphics state' places them, in the order the 'Phantom points' section
 of *Instructing TrueType Glyphs* numbers them — the horizontal origin
-`(xMin − lsb, 0)`, the advance width past it, the vertical origin at `yMax`
-plus the top side bearing and the advance height below it, the vertical
+`(xMin − lsb, 0)`, the advance width past it on the same line, the vertical
+origin at `(0, yMax + tsb)` and the advance height below it, the vertical
 metrics `vmtx`'s or, where the face has none, `hhea`'s ascender and
-descender as that design chooses. The varied points are 16.16 values in font
-units, and the implied midpoints are resolved after the deltas are added, so
+descender as that design chooses; `xMin` and `yMax` are the glyph header's,
+zero for a glyph with no outline, whose phantom points are all it has. The
+chapter gives the horizontal pair `y = 0` (its Skia example) and the
+vertical pair no other coordinate, so they stand at `x = 0`. The varied
+points are 16.16 values in font units, and the implied midpoints are
+resolved after the deltas are added, through the one contour reading, so
 `glyf::outline` keeps its output for every face. Untouched points take the
 deltas the `gvar` chapter's 'Inferred deltas for un-referenced point numbers'
 computes, contour by contour, from the default positions and the unscaled
-deltas: the inferred delta is `ref.delta + proportion × (comp.delta −
-ref.delta)`, with the exact ratio rounded to 16.16 once, which the model's 7
-then scales. A composite's point numbers are its components and phantom
-points ('Point numbers and processing for composite glyphs'): a component
-with `ARGS_ARE_XY_VALUES` moves by its delta, scaled with it where its
-transform scales its offset; one placed by point numbers ignores its delta;
-`USE_MY_METRICS` takes the component's phantom points. The phantom points
-give the advance and side bearings where `HVAR` is absent.
+deltas: the same delta where the two neighbours stand at one coordinate and
+agree, none where they disagree, the nearer one's outside them, and between
+them `ref.delta + proportion × (comp.delta − ref.delta)`, whose exact value
+— the same whichever neighbour is the reference — is rounded to 16.16 once
+and then scaled as the model's 7 says. A point number listed twice takes
+both deltas; a phantom point is in no contour and is moved only where
+listed. A composite's point numbers are its components and phantom points
+('Point numbers and processing for composite glyphs'), nothing inferred,
+the horizontal phantom points taking their X deltas and the vertical ones
+their Y: a component with `ARGS_ARE_XY_VALUES` moves by its delta, its
+offset as written plus the delta placed as the offset is — this reader's
+composite does not scale an offset by its component's transform, so neither
+is the delta; one placed by point numbers ignores its delta;
+`USE_MY_METRICS` takes the component's phantom points, the last flagged
+component's, as that component computes them. The phantom points give the
+advance and side bearings where `HVAR` is absent. Every table is decoded at
+every location, as `cvar`'s are, and an outline is charged a table times its
+points for each glyph it draws, refused by name past `MAX_GLYPH_DELTA_WORK`
+(2²²): a few bytes of point numbers can otherwise ask for a contour of
+sixty-five thousand points to be inferred four thousand times.
 
 ### The item variation store (`variation/item_store.rs`, FT-05.5)
 
@@ -490,7 +504,7 @@ reused.
 | --- | --- |
 | Two implementations of the arithmetic disagree in the last bit — the font crate's and the shaper's, or an outline's and a static instance's | One integer model, its every rounding stated above and transcribed from the overview; the shaper calls the font crate's store evaluator rather than a twin, and the module denies float arithmetic |
 | A test that computes its expectation with the code under test proves nothing | The tests compute every expected value from the specification's formulas in their own integer arithmetic, over faces whose every byte the builder states |
-| A hostile face spends without bound: axes, tuples, point runs, regions, delta rows, a CFF2 INDEX, blend operands, subroutine depth | Each is bounded — 64 axes, the format's 4 095 tuples and 15-bit point counts, fewer than 32 768 regions, a 65 536-entry INDEX, a 513-operand stack, ten levels of subroutines, the 64 000-operation budget, each Private DICT read once — and refused by name past its bound (ruling 1); FT-05.9 fuzzes them |
+| A hostile face spends without bound: axes, tuples, point runs, regions, delta rows, a CFF2 INDEX, blend operands, subroutine depth | Each is bounded — 64 axes, the format's 4 095 tuples and 15-bit point counts, an outline's 2²² point deltas across the glyphs it draws, fewer than 32 768 regions, a 65 536-entry INDEX, a 513-operand stack, ten levels of subroutines, the 64 000-operation budget, each Private DICT read once — and refused by name past its bound (ruling 1); FT-05.9 fuzzes them |
 | A region that is zero on every axis moves the default instance | The algorithm is followed and the case recorded above; no font producing one was seen, and the instance at the default of a face without one is its default |
 | Changing the shared Type 2 interpreter moves a CFF outline | The flavour gates every CFF2 difference, CFF's silent stops are untouched, and every `cff.rs` and `cff_subset/tests.rs` test is held unchanged |
 | A static CFF exceeds Type 2's limits | Operators are split at their operand groups and subroutines inlined; FT-05.11 re-reads every instance through `Cff` |

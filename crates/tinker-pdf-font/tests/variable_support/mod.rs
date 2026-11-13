@@ -768,6 +768,218 @@ pub fn gasp(ranges: &[(u16, u16)]) -> Vec<u8> {
     out
 }
 
+// ---- glyf, loca and gvar ----------------------------------------------------
+
+/// One point of a simple glyph as a test states it: its position in font
+/// units and whether it is on the curve.
+pub type GlyphPoint = (i32, i32, bool);
+
+/// A simple glyph's `glyf` data (`glyf`, 'Simple glyph description'): the
+/// contour count, the bounding box of its points, each contour's last point,
+/// no instructions, one flag a point — on the curve or not, both coordinates
+/// signed words — and the coordinates, each the difference from the point
+/// before it.
+pub fn simple_glyph(contours: &[Vec<GlyphPoint>]) -> Vec<u8> {
+    let points: Vec<GlyphPoint> = contours.iter().flatten().copied().collect();
+    let mut out = Vec::new();
+    push_i16(&mut out, i16::try_from(contours.len()).expect("few"));
+    let word = |v: i32| i16::try_from(v).expect("a word");
+    let xs = points.iter().map(|p| p.0);
+    let ys = points.iter().map(|p| p.1);
+    push_i16(&mut out, word(xs.clone().min().unwrap_or(0)));
+    push_i16(&mut out, word(ys.clone().min().unwrap_or(0)));
+    push_i16(&mut out, word(xs.max().unwrap_or(0)));
+    push_i16(&mut out, word(ys.max().unwrap_or(0)));
+    let mut end = 0usize;
+    for contour in contours {
+        end += contour.len();
+        push16(&mut out, u16::try_from(end - 1).expect("few points"));
+    }
+    push16(&mut out, 0); // instructionLength
+    for point in &points {
+        out.push(u8::from(point.2));
+    }
+    let mut last = 0;
+    for point in &points {
+        push_i16(&mut out, word(point.0 - last));
+        last = point.0;
+    }
+    last = 0;
+    for point in &points {
+        push_i16(&mut out, word(point.1 - last));
+        last = point.1;
+    }
+    out
+}
+
+/// One component record as a test states it.
+#[derive(Clone, Debug)]
+pub struct ComponentSpec {
+    /// The flags, `MORE_COMPONENTS` aside, which the builder sets.
+    pub flags: u16,
+    /// The glyph drawn.
+    pub glyph: u16,
+    /// The two arguments, written as words when `ARG_1_AND_2_ARE_WORDS` is
+    /// set and as bytes otherwise.
+    pub arguments: (i32, i32),
+    /// The F2Dot14 values the transform flags call for: none, one, two or
+    /// four.
+    pub transform: Vec<i16>,
+}
+
+impl ComponentSpec {
+    /// A component placed at an offset given in words, with no transform.
+    pub fn at(glyph: u16, x: i32, y: i32) -> ComponentSpec {
+        ComponentSpec {
+            flags: 0x0003,
+            glyph,
+            arguments: (x, y),
+            transform: Vec::new(),
+        }
+    }
+}
+
+/// A composite glyph's `glyf` data (`glyf`, 'Composite glyph description'):
+/// a contour count of −1, the box given, then the records, every one but the
+/// last with `MORE_COMPONENTS`.
+pub fn composite_glyph(bounds: [i16; 4], components: &[ComponentSpec]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_i16(&mut out, -1);
+    for value in bounds {
+        push_i16(&mut out, value);
+    }
+    for (index, component) in components.iter().enumerate() {
+        let more = if index + 1 < components.len() {
+            0x0020
+        } else {
+            0
+        };
+        push16(&mut out, (component.flags & !0x0020) | more);
+        push16(&mut out, component.glyph);
+        let (a1, a2) = component.arguments;
+        if component.flags & 0x0001 != 0 {
+            if component.flags & 0x0002 != 0 {
+                push_i16(&mut out, i16::try_from(a1).expect("a word"));
+                push_i16(&mut out, i16::try_from(a2).expect("a word"));
+            } else {
+                push16(&mut out, u16::try_from(a1).expect("a point number"));
+                push16(&mut out, u16::try_from(a2).expect("a point number"));
+            }
+        } else if component.flags & 0x0002 != 0 {
+            out.push(i8::try_from(a1).expect("a byte") as u8);
+            out.push(i8::try_from(a2).expect("a byte") as u8);
+        } else {
+            out.push(u8::try_from(a1).expect("a point number"));
+            out.push(u8::try_from(a2).expect("a point number"));
+        }
+        for value in &component.transform {
+            push_i16(&mut out, *value);
+        }
+    }
+    out
+}
+
+/// `glyf` and its long `loca`, the glyphs in order, each padded to an even
+/// length as a producer pads them; an empty glyph is an empty range.
+pub fn glyf_and_loca(glyphs: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+    let mut glyf = Vec::new();
+    let mut loca = Vec::new();
+    push32(&mut loca, 0);
+    for glyph in glyphs {
+        glyf.extend_from_slice(glyph);
+        if glyf.len() % 2 != 0 {
+            glyf.push(0);
+        }
+        push32(&mut loca, u32::try_from(glyf.len()).expect("small"));
+    }
+    (glyf, loca)
+}
+
+/// A `head` table, version 1.0, its units per em stated and
+/// `indexToLocFormat` 1, long offsets.
+pub fn head(units_per_em: u16) -> Vec<u8> {
+    let mut out = vec![0u8; 54];
+    out[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    out[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes()); // magicNumber
+    out[18..20].copy_from_slice(&units_per_em.to_be_bytes());
+    out[50..52].copy_from_slice(&1i16.to_be_bytes());
+    out
+}
+
+/// A `maxp` table, version 0.5: the glyph count alone.
+pub fn maxp(glyphs: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    push32(&mut out, 0x0000_5000);
+    push16(&mut out, glyphs);
+    out
+}
+
+/// One glyph's variation data as a test states it: its shared point numbers,
+/// where its tables share them, and its tables.
+#[derive(Clone, Debug)]
+pub struct GlyphVariation {
+    /// The point numbers tables without private ones take.
+    pub shared_points: Option<Points>,
+    /// The tuple variation tables.
+    pub tuples: Vec<TupleSpec>,
+}
+
+/// A `gvar` table (`gvar`, its header, shared tuples and glyph variation data
+/// array): version 1.0, the shared tuples after the offsets, and one
+/// `GlyphVariationData` a glyph, `None` writing an empty range. Offsets are
+/// 32-bit under `long_offsets` and halved 16-bit ones otherwise, each glyph's
+/// data padded to an even length so that a halved offset can reach it.
+pub fn gvar(
+    axis_count: u16,
+    shared: &[Vec<i16>],
+    glyphs: &[Option<GlyphVariation>],
+    long_offsets: bool,
+) -> Vec<u8> {
+    let mut array = Vec::new();
+    let mut offsets = vec![0usize];
+    for glyph in glyphs {
+        if let Some(variation) = glyph {
+            array.extend(tuple_store(
+                0,
+                variation.shared_points.as_ref(),
+                &variation.tuples,
+            ));
+            if array.len() % 2 != 0 {
+                array.push(0);
+            }
+        }
+        offsets.push(array.len());
+    }
+    let width = if long_offsets { 4 } else { 2 };
+    let shared_at = 20 + offsets.len() * width;
+    let shared_len: usize = shared.iter().map(|t| t.len() * 2).sum();
+    let array_at = shared_at + shared_len;
+    let mut out = Vec::new();
+    push16(&mut out, 1);
+    push16(&mut out, 0);
+    push16(&mut out, axis_count);
+    push16(&mut out, u16::try_from(shared.len()).expect("few"));
+    push32(&mut out, u32::try_from(shared_at).expect("small"));
+    push16(&mut out, u16::try_from(glyphs.len()).expect("few"));
+    push16(&mut out, u16::from(long_offsets));
+    push32(&mut out, u32::try_from(array_at).expect("small"));
+    for offset in offsets {
+        if long_offsets {
+            push32(&mut out, u32::try_from(offset).expect("small"));
+        } else {
+            push16(&mut out, u16::try_from(offset / 2).expect("small"));
+        }
+    }
+    for tuple in shared {
+        assert_eq!(tuple.len(), usize::from(axis_count), "a coordinate an axis");
+        for coordinate in tuple {
+            push_i16(&mut out, *coordinate);
+        }
+    }
+    out.extend(array);
+    out
+}
+
 // ---- CFF2 -----------------------------------------------------------------
 
 /// One item of a charstring as a test writes it.
@@ -1278,6 +1490,126 @@ pub mod spec {
                 region_scalar(&regions[usize::from(*region)], coordinates) * i64::from(*delta)
             })
             .sum()
+    }
+
+    /// The net deltas of a glyph's items at 2.14 coordinates, in 16.16, as
+    /// the `gvar` chapter computes them from the tables a test stated.
+    ///
+    /// Each table's region's scalar times each delta it lists — the sum of
+    /// its deltas for a number listed more than once, a number past the
+    /// items moving nothing. For a simple glyph, whose `contours` are given
+    /// as `(first, last)` pairs, the points a table lists none of in a
+    /// contour that holds some of its points take the delta 'Inferred deltas
+    /// for un-referenced point numbers' gives them: from the nearest listed
+    /// point before in point order (or the contour's highest listed one) and
+    /// the nearest after (or its lowest), each axis on its own — that delta
+    /// where the two stand at one coordinate and agree, nothing where they
+    /// disagree, the nearer one's outside them, and between them `(1 −
+    /// proportion) · before + proportion · after`, its exact value rounded
+    /// to 16.16 once and then times the scalar, rounded. For a composite
+    /// (`contours` of `None`) nothing is inferred and the phantom points keep
+    /// the X deltas of the first two and the Y deltas of the last two.
+    pub fn glyph_deltas(
+        points: &[(i32, i32)],
+        contours: Option<&[(usize, usize)]>,
+        variation: &super::GlyphVariation,
+        coordinates: &[i16],
+    ) -> Vec<[i64; 2]> {
+        let items = points.len();
+        let mut net = vec![[0i64; 2]; items];
+        for tuple in &variation.tuples {
+            let scalar = region_scalar(&tuple.region(), coordinates);
+            let numbers: Option<Vec<usize>> = match tuple
+                .points
+                .as_ref()
+                .or(variation.shared_points.as_ref())
+                .expect("private or shared points")
+            {
+                super::Points::All => None,
+                super::Points::Listed(numbers) => {
+                    Some(numbers.iter().map(|n| usize::from(*n)).collect())
+                }
+            };
+            let listed: Vec<usize> = numbers.clone().unwrap_or_else(|| (0..items).collect());
+            assert_eq!(
+                tuple.deltas.len(),
+                2 * listed.len(),
+                "an X and a Y a number"
+            );
+            let half = listed.len();
+            let mut stated: Vec<Option<[i64; 2]>> = vec![None; items];
+            for (k, item) in listed.iter().enumerate() {
+                if *item < items {
+                    let sum = stated[*item].get_or_insert([0, 0]);
+                    sum[0] += i64::from(tuple.deltas[k]);
+                    sum[1] += i64::from(tuple.deltas[half + k]);
+                }
+            }
+            for (slot, delta) in net.iter_mut().zip(&stated) {
+                if let Some(delta) = delta {
+                    slot[0] += scalar * delta[0];
+                    slot[1] += scalar * delta[1];
+                }
+            }
+            let (Some(_), Some(contours)) = (&numbers, contours) else {
+                continue;
+            };
+            for &(first, last) in contours {
+                let referenced: Vec<usize> =
+                    (first..=last).filter(|i| stated[*i].is_some()).collect();
+                if referenced.is_empty() {
+                    continue;
+                }
+                for target in first..=last {
+                    if stated[target].is_some() {
+                        continue;
+                    }
+                    let before = *referenced
+                        .iter()
+                        .rev()
+                        .find(|r| **r < target)
+                        .or(referenced.last())
+                        .expect("a referenced point");
+                    let after = *referenced
+                        .iter()
+                        .find(|r| **r > target)
+                        .or(referenced.first())
+                        .expect("a referenced point");
+                    for axis in 0..2 {
+                        let coordinate = |i: usize| {
+                            i128::from(if axis == 0 { points[i].0 } else { points[i].1 })
+                        };
+                        let delta =
+                            |i: usize| i128::from(stated[i].expect("a referenced point")[axis]);
+                        let (t, p, n) = (coordinate(target), coordinate(before), coordinate(after));
+                        let (dp, dn) = (delta(before), delta(after));
+                        let inferred = if p == n {
+                            if dp == dn {
+                                dp * 65_536
+                            } else {
+                                0
+                            }
+                        } else if t <= p.min(n) {
+                            (if p < n { dp } else { dn }) * 65_536
+                        } else if t >= p.max(n) {
+                            (if p > n { dp } else { dn }) * 65_536
+                        } else {
+                            // The preceding point is the reference: the
+                            // proportion is (t − p) / (n − p).
+                            nearest(((n - t) * dp + (t - p) * dn) * 65_536, n - p)
+                        };
+                        net[target][axis] += nearest(inferred * i128::from(scalar), 65_536) as i64;
+                    }
+                }
+            }
+        }
+        if contours.is_none() && items >= 4 {
+            net[items - 4][1] = 0;
+            net[items - 3][1] = 0;
+            net[items - 2][0] = 0;
+            net[items - 1][0] = 0;
+        }
+        net
     }
 
     /// The overview's normalisation of user values on axes stated as

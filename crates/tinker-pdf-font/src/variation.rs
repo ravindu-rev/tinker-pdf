@@ -41,6 +41,7 @@
 #![deny(clippy::float_arithmetic)]
 
 pub mod cvar;
+pub mod gvar;
 pub mod item_store;
 pub mod metrics;
 pub mod tuple;
@@ -1085,6 +1086,29 @@ pub enum VariationError {
         /// The count it declares.
         count: u16,
     },
+    /// `gvar`'s offset array, one entry a glyph and one more, runs past the
+    /// table's end.
+    GlyphOffsetsPastEnd {
+        /// The glyph count it declares.
+        count: u16,
+    },
+    /// A glyph's two `gvar` offsets decrease.
+    GlyphDataOffsets {
+        /// The glyph.
+        glyph: u16,
+    },
+    /// A glyph's `GlyphVariationData` runs past the `gvar` table's end.
+    GlyphDataPastEnd {
+        /// The glyph.
+        glyph: u16,
+    },
+    /// The glyphs an outline draws ask for more point deltas than
+    /// [`gvar::MAX_GLYPH_DELTA_WORK`] between them: their tuple variation
+    /// tables times their points.
+    GlyphDeltaWork {
+        /// The glyph whose tables passed the bound.
+        glyph: u16,
+    },
 }
 
 /// A tag as the four characters it is, for a message.
@@ -1239,6 +1263,22 @@ impl core::fmt::Display for VariationError {
             VariationError::ValueRecordsPastEnd { count } => {
                 write!(f, "MVAR's {count} value records run past the table's end")
             }
+            VariationError::GlyphOffsetsPastEnd { count } => write!(
+                f,
+                "gvar's offsets for {count} glyphs run past the table's end"
+            ),
+            VariationError::GlyphDataOffsets { glyph } => {
+                write!(f, "gvar's offsets for glyph {glyph} decrease")
+            }
+            VariationError::GlyphDataPastEnd { glyph } => write!(
+                f,
+                "glyph {glyph}'s variation data runs past the gvar table's end"
+            ),
+            VariationError::GlyphDeltaWork { glyph } => write!(
+                f,
+                "glyph {glyph}'s variation tables ask for more than {} point deltas",
+                gvar::MAX_GLYPH_DELTA_WORK
+            ),
         }
     }
 }

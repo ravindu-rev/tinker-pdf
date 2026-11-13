@@ -262,7 +262,10 @@ them: `n` at the horizontal origin, `xMin` less the left side bearing; `n+1`
 the advance width past it; `n+2` the vertical origin, `yMax` plus the top
 side bearing; `n+3` the advance height below it. Horizontal metrics are
 `hmtx`'s; vertical ones `vmtx`'s, or `hhea`'s ascender and descender where the
-face has none, this engine's choice. Each is scaled as the points are.
+face has none, this engine's choice. The horizontal pair stands at `y = 0`
+and the vertical pair at `x = 0`, the same choice, which
+`glyf::phantom_points` makes and `gvar` moves
+([variable fonts](variable-fonts.md)). Each is scaled as the points are.
 
 **The graphics state** starts each program at the defaults the *Graphics State
 Summary* gives: `auto_flip` on, `control_value_cut_in` 17/16 pixel,

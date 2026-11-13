@@ -9,9 +9,25 @@
 //! large surface with a patent history and a habit of making small text
 //! *differently* wrong rather than better; every modern renderer at these
 //! resolutions runs unhinted with good anti-aliasing instead.
+//!
+//! # The raw-point form, and a variable face's instances
+//!
+//! [`simple_glyph`] gives a simple glyph as its entry states it: the contour
+//! end indices, the flags with `REPEAT` expanded, the absolute coordinates in
+//! font units, and the four phantom points after them ([`phantom_points`]),
+//! where `docs/design/hinting.md`'s zone 1 places them. It is the one form a
+//! glyph's points are read in — [`outline`] resolves its implied midpoints,
+//! and a variable face's `gvar` moves it (`docs/design/variable-fonts.md`).
+//! [`outline_at`] adds a glyph's deltas at a [`Location`] to those points
+//! before the midpoints are resolved, and to a composite's component offsets,
+//! through the same contour reading, so at a location where nothing moves it
+//! draws exactly what [`outline`] draws. [`phantom_points_at`] gives the
+//! advance and side bearings at a location where a face has no `HVAR`.
 
 use crate::outline::{Outline, Segment};
 use crate::sfnt::Sfnt;
+use crate::variation::gvar::Gvar;
+use crate::variation::{Fixed, Location, VariationError};
 
 /// How deep a composite glyph may nest before recursion is refused.
 const MAX_COMPONENT_DEPTH: u32 = 8;
@@ -23,6 +39,15 @@ const MAX_COMPONENT_DEPTH: u32 = 8;
 /// asking for 64^8 glyphs. The budget bounds the *work*, which is the thing
 /// that actually has to be finite.
 const MAX_COMPONENTS: u32 = 256;
+
+/// How many records of one composite are drawn.
+const MAX_RECORDS: u32 = 64;
+
+const TAG_GLYF: u32 = 0x676C_7966;
+const TAG_HHEA: u32 = 0x6868_6561;
+
+/// The identity placement, `[dx, dy, a, b, c, d]`.
+const IDENTITY: [f64; 6] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
 
 fn be16(data: &[u8], at: usize) -> Option<u16> {
     let b = data.get(at..at + 2)?;
@@ -96,7 +121,7 @@ pub struct Bounds {
 /// whose data is too short to hold the header.
 #[must_use]
 pub fn bounds(sfnt: &Sfnt, glyph: u16) -> Option<Bounds> {
-    let glyf = sfnt.table(0x676C_7966)?;
+    let glyf = sfnt.table(TAG_GLYF)?;
     let (start, end) = glyph_slot(sfnt, glyph)?;
     if end <= start {
         // `glyph_range` reads the same two entries as no outline, and an
@@ -110,6 +135,243 @@ pub fn bounds(sfnt: &Sfnt, glyph: u16) -> Option<Bounds> {
         x_max: i16_at(data, 6)?,
         y_max: i16_at(data, 8)?,
     })
+}
+
+/// A glyph's four phantom points at the default instance, in font units:
+/// where `docs/design/hinting.md`'s zone 1 places them after the contour
+/// points, in the order *Instructing TrueType Glyphs* numbers them.
+///
+/// - the horizontal origin, `(xMin − lsb, 0)`, its left side bearing `hmtx`'s;
+/// - the advance width point, `hmtx`'s advance past it on the same line;
+/// - the vertical origin, `(0, yMax + tsb)`, its top side bearing `vmtx`'s;
+/// - the advance height point, `vmtx`'s advance height below it.
+///
+/// `xMin` and `yMax` are the header's ([`bounds`]), zero for a glyph with no
+/// outline. A face without `vmtx` metrics for the glyph takes `hhea`'s
+/// ascender as the vertical origin and its descender as the advance height
+/// point; a face without `hmtx` ones puts the horizontal origin at `x = 0`
+/// with no advance. The two vertical points stand at `x = 0` and the two
+/// horizontal ones at `y = 0`, this engine's choice where the specification
+/// gives the points no other coordinate.
+#[must_use]
+pub fn phantom_points(sfnt: &Sfnt, glyph: u16) -> [[i32; 2]; 4] {
+    let bounds = bounds(sfnt, glyph).unwrap_or_default();
+    let origin = sfnt
+        .left_side_bearing(glyph)
+        .map_or(0, |lsb| i32::from(bounds.x_min) - i32::from(lsb));
+    let advance = sfnt.advance(glyph).map_or(0, i32::from);
+    let (top, height) = match (sfnt.top_side_bearing(glyph), sfnt.vertical_advance(glyph)) {
+        (Some(tsb), Some(height)) => (i32::from(bounds.y_max) + i32::from(tsb), i32::from(height)),
+        _ => {
+            let hhea = sfnt.table(TAG_HHEA);
+            let ascender = hhea.and_then(|t| i16_at(t, 4)).map_or(0, i32::from);
+            let descender = hhea.and_then(|t| i16_at(t, 6)).map_or(0, i32::from);
+            (ascender, ascender - descender)
+        }
+    };
+    [
+        [origin, 0],
+        [origin + advance, 0],
+        [0, top],
+        [0, top - height],
+    ]
+}
+
+/// A simple glyph in the raw-point form: what its `glyf` entry states, read
+/// once for every reading of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimpleGlyph<'a> {
+    /// Each contour's last point, as written.
+    pub ends: Vec<u16>,
+    /// Each contour point's flags, `REPEAT` expanded: one a contour point.
+    pub flags: Vec<u8>,
+    /// The contour points' positions in font units, absolute, and then the
+    /// four phantom points ([`phantom_points`]): `flags.len() + 4` of them.
+    pub points: Vec<[i32; 2]>,
+    /// The glyph's instructions, which nothing here runs.
+    pub instructions: &'a [u8],
+}
+
+impl SimpleGlyph<'_> {
+    /// How many contour points there are: the points before the phantom
+    /// ones.
+    #[must_use]
+    pub fn contour_points(&self) -> usize {
+        self.flags.len()
+    }
+
+    /// The contours, each its first and last point, as [`outline`] reads
+    /// them: in order, stopping at the first end that does not follow the
+    /// one before it or that passes the points.
+    #[must_use]
+    pub fn contours(&self) -> Vec<(usize, usize)> {
+        let count = self.flags.len();
+        let mut out = Vec::with_capacity(self.ends.len());
+        let mut first = 0usize;
+        for &end in &self.ends {
+            let end = usize::from(end);
+            if end < first || end >= count {
+                break;
+            }
+            out.push((first, end));
+            first = end + 1;
+        }
+        out
+    }
+}
+
+/// A simple glyph in the raw-point form, or a glyph with no outline as one
+/// with no contour points and its four phantom points.
+///
+/// `None` for a composite, a glyph past the end of `loca`, a face with no
+/// `glyf`, and a glyph whose data ends before its points do — the glyphs
+/// [`outline`] draws nothing of.
+#[must_use]
+pub fn simple_glyph<'a>(sfnt: &Sfnt<'a>, glyph: u16) -> Option<SimpleGlyph<'a>> {
+    let glyf = sfnt.table(TAG_GLYF)?;
+    let (start, end) = glyph_slot(sfnt, glyph)?;
+    let phantom = phantom_points(sfnt, glyph);
+    if end <= start {
+        return Some(SimpleGlyph {
+            ends: Vec::new(),
+            flags: Vec::new(),
+            points: phantom.to_vec(),
+            instructions: &[],
+        });
+    }
+    let data = glyf.get(start..end)?;
+    let contours = i16_at(data, 0)?;
+    if contours < 0 {
+        return None;
+    }
+    let parsed = parse_simple(data, contours as usize, &mut 0)?;
+    Some(parsed.into_raw(phantom))
+}
+
+/// One component record of a composite glyph (`glyf`, 'Composite glyph
+/// description').
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Component {
+    /// The record's flags.
+    pub flags: u16,
+    /// The glyph it draws.
+    pub glyph: u16,
+    /// Its two arguments: a signed offset where `ARGS_ARE_XY_VALUES` is set,
+    /// and the two unsigned point numbers to match where it is not.
+    pub arguments: [i32; 2],
+    /// Its own 2×2, `[xscale, scale01, scale10, yscale]` in F2Dot14 as
+    /// written — a single scale on both axes, an x and a y scale, or the
+    /// whole matrix — and the identity, `[16384, 0, 0, 16384]`, where it has
+    /// none.
+    pub transform: [i16; 4],
+}
+
+impl Component {
+    /// `ARG_1_AND_2_ARE_WORDS`.
+    pub const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+    /// `ARGS_ARE_XY_VALUES`: the arguments are an offset.
+    pub const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+    /// `WE_HAVE_A_SCALE`.
+    pub const WE_HAVE_A_SCALE: u16 = 0x0008;
+    /// `MORE_COMPONENTS`.
+    pub const MORE_COMPONENTS: u16 = 0x0020;
+    /// `WE_HAVE_AN_X_AND_Y_SCALE`.
+    pub const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+    /// `WE_HAVE_A_TWO_BY_TWO`.
+    pub const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+    /// `USE_MY_METRICS`: the composite's metrics are this component's.
+    pub const USE_MY_METRICS: u16 = 0x0200;
+
+    /// Whether the arguments are an offset, rather than points to match.
+    #[must_use]
+    pub fn offset_is_xy(&self) -> bool {
+        self.flags & Component::ARGS_ARE_XY_VALUES != 0
+    }
+}
+
+/// Reads the component record at `at`, and where the record after it starts.
+fn read_component(data: &[u8], at: usize) -> Option<(Component, usize)> {
+    let (flags, glyph) = (be16(data, at)?, be16(data, at + 2)?);
+    let mut at = at + 4;
+    // ARG_1_AND_2_ARE_WORDS decides the argument width; ARGS_ARE_XY_VALUES
+    // decides whether they are signed offsets or unsigned point numbers.
+    let xy = flags & Component::ARGS_ARE_XY_VALUES != 0;
+    let arguments = if flags & Component::ARG_1_AND_2_ARE_WORDS != 0 {
+        let (a1, a2) = (be16(data, at)?, be16(data, at + 2)?);
+        at += 4;
+        if xy {
+            [i32::from(a1 as i16), i32::from(a2 as i16)]
+        } else {
+            [i32::from(a1), i32::from(a2)]
+        }
+    } else {
+        let (a1, a2) = (*data.get(at)?, *data.get(at + 1)?);
+        at += 2;
+        if xy {
+            [i32::from(a1 as i8), i32::from(a2 as i8)]
+        } else {
+            [i32::from(a1), i32::from(a2)]
+        }
+    };
+    let transform = if flags & Component::WE_HAVE_A_SCALE != 0 {
+        let scale = i16_at(data, at)?;
+        at += 2;
+        [scale, 0, 0, scale]
+    } else if flags & Component::WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+        let (x, y) = (i16_at(data, at)?, i16_at(data, at + 2)?);
+        at += 4;
+        [x, 0, 0, y]
+    } else if flags & Component::WE_HAVE_A_TWO_BY_TWO != 0 {
+        let matrix = [
+            i16_at(data, at)?,
+            i16_at(data, at + 2)?,
+            i16_at(data, at + 4)?,
+            i16_at(data, at + 6)?,
+        ];
+        at += 8;
+        matrix
+    } else {
+        [16_384, 0, 0, 16_384]
+    };
+    Some((
+        Component {
+            flags,
+            glyph,
+            arguments,
+            transform,
+        },
+        at,
+    ))
+}
+
+/// Every record of a composite's data, in order: until one without
+/// `MORE_COMPONENTS`, or the last whole one where the data ends first. A
+/// record is at least six bytes, so the count is bounded by the data.
+fn all_components(data: &[u8]) -> Vec<Component> {
+    let mut records = Vec::new();
+    let mut at = 10usize;
+    while let Some((component, next)) = read_component(data, at) {
+        records.push(component);
+        if component.flags & Component::MORE_COMPONENTS == 0 {
+            break;
+        }
+        at = next;
+    }
+    records
+}
+
+/// A composite glyph's component records, every one of them in order — the
+/// order `gvar` numbers them in. `None` for a glyph that is not a
+/// composite, past the end of `loca`, or in a face with no `glyf`.
+#[must_use]
+pub fn components(sfnt: &Sfnt, glyph: u16) -> Option<Vec<Component>> {
+    let glyf = sfnt.table(TAG_GLYF)?;
+    let (start, end) = glyph_range(sfnt, glyph)?;
+    let data = glyf.get(start..end)?;
+    if i16_at(data, 0)? >= 0 {
+        return None;
+    }
+    Some(all_components(data))
 }
 
 /// Reads one glyph's outline in font units.
@@ -132,16 +394,157 @@ pub fn outline_counted(sfnt: &Sfnt, glyph: u16) -> (Option<Outline>, u64) {
 fn outline_with(sfnt: &Sfnt, glyph: u16, steps: &mut u64) -> Option<Outline> {
     let mut out = Outline::default();
     let mut budget = MAX_COMPONENTS;
-    append(
-        sfnt,
-        glyph,
-        [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-        0,
-        &mut budget,
-        &mut out,
-        steps,
-    );
+    // With nothing to vary, nothing is refused: the result is always `Ok`.
+    let _ = append(sfnt, glyph, IDENTITY, 0, &mut budget, &mut out, steps, None);
     Some(out)
+}
+
+/// One glyph's outline in font units at a location of its face's design
+/// space: each glyph it draws moved by `gvar`'s deltas there before its
+/// implied midpoints are resolved, and each component offset by its own —
+/// [`outline`] where `gvar` is `None` or nothing moves.
+///
+/// # Errors
+///
+/// A `gvar` refusal for a glyph the outline draws ([`Gvar::glyph`],
+/// [`Gvar::simple_deltas`], [`Gvar::composite_deltas`]), and
+/// [`VariationError::GlyphDeltaWork`] where the glyphs it draws pass
+/// [`crate::variation::gvar::MAX_GLYPH_DELTA_WORK`] between them. A caller
+/// draws such a glyph at its default.
+pub fn outline_at(
+    sfnt: &Sfnt,
+    glyph: u16,
+    gvar: Option<&Gvar>,
+    location: &Location,
+) -> Result<Outline, VariationError> {
+    outline_at_counted(sfnt, glyph, gvar, location).0
+}
+
+/// [`outline_at`], and the steps it took: [`outline_counted`]'s, a component
+/// record read for each record a composite's numbering reads, and the point
+/// deltas its glyphs' tables decode, a table times its points each.
+#[must_use]
+pub fn outline_at_counted(
+    sfnt: &Sfnt,
+    glyph: u16,
+    gvar: Option<&Gvar>,
+    location: &Location,
+) -> (Result<Outline, VariationError>, u64) {
+    let mut steps = 0u64;
+    let mut out = Outline::default();
+    let mut budget = MAX_COMPONENTS;
+    let result = match gvar {
+        None => append(
+            sfnt,
+            glyph,
+            IDENTITY,
+            0,
+            &mut budget,
+            &mut out,
+            &mut steps,
+            None,
+        ),
+        Some(gvar) => {
+            let mut vary = Varying {
+                gvar,
+                location,
+                work: 0,
+            };
+            let result = append(
+                sfnt,
+                glyph,
+                IDENTITY,
+                0,
+                &mut budget,
+                &mut out,
+                &mut steps,
+                Some(&mut vary),
+            );
+            steps = steps.saturating_add(vary.work);
+            result
+        }
+    };
+    (result.map(|()| out), steps)
+}
+
+/// A glyph's four phantom points at a location, in 16.16 font units: the
+/// default ones ([`phantom_points`]) moved by the deltas `gvar` gives them,
+/// which give the advances and side bearings where a face has no `HVAR` —
+/// the advance width the first two's difference in x, the advance height the
+/// last two's in y. A composite with a `USE_MY_METRICS` component takes that
+/// component's phantom points, the last such component's where several
+/// carry the flag, and its own deltas for them are not used (`gvar`, 'Point
+/// numbers and processing for composite glyphs'); they are the component's
+/// own, not moved by its offset.
+///
+/// # Errors
+///
+/// As [`outline_at`].
+pub fn phantom_points_at(
+    sfnt: &Sfnt,
+    glyph: u16,
+    gvar: Option<&Gvar>,
+    location: &Location,
+) -> Result<[[Fixed; 2]; 4], VariationError> {
+    phantoms_at(sfnt, glyph, gvar, location, 0)
+}
+
+fn phantoms_at(
+    sfnt: &Sfnt,
+    glyph: u16,
+    gvar: Option<&Gvar>,
+    location: &Location,
+    depth: u32,
+) -> Result<[[Fixed; 2]; 4], VariationError> {
+    let mut phantom =
+        phantom_points(sfnt, glyph).map(|[x, y]| [Fixed::from_int(x), Fixed::from_int(y)]);
+    let data = sfnt
+        .table(TAG_GLYF)
+        .zip(glyph_range(sfnt, glyph))
+        .and_then(|(glyf, (start, end))| glyf.get(start..end));
+    let (points, composite) = match data.and_then(|data| Some((data, i16_at(data, 0)?))) {
+        Some((data, contours)) if contours < 0 => {
+            let records = all_components(data);
+            if depth < MAX_COMPONENT_DEPTH {
+                if let Some(metrics) = records
+                    .iter()
+                    .rev()
+                    .find(|c| c.flags & Component::USE_MY_METRICS != 0)
+                {
+                    return phantoms_at(sfnt, metrics.glyph, gvar, location, depth + 1);
+                }
+            }
+            (records.len(), true)
+        }
+        // The points a simple glyph declares: one past its last contour's
+        // end, which is where `gvar` numbers its phantom points from.
+        Some((data, contours)) => {
+            let last = usize::try_from(contours)
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|n| be16(data, 10 + n * 2));
+            (last.map_or(0, |end| usize::from(end) + 1), false)
+        }
+        // No outline: the four phantom points are all there is.
+        None => (0, false),
+    };
+    let Some(gvar) = gvar else {
+        return Ok(phantom);
+    };
+    let deltas = gvar.phantom_deltas(glyph, points, composite, location)?;
+    for (point, delta) in phantom.iter_mut().zip(deltas) {
+        point[0] = point[0].saturating_add(delta[0]);
+        point[1] = point[1].saturating_add(delta[1]);
+    }
+    Ok(phantom)
+}
+
+/// What a glyph is varied by while its outline is drawn at a location, and
+/// the delta work its glyphs have charged so far.
+struct Varying<'v, 'a> {
+    gvar: &'v Gvar<'a>,
+    location: &'v Location,
+    work: u64,
 }
 
 /// One step more, saturating.
@@ -150,7 +553,9 @@ fn step(steps: &mut u64, n: usize) {
 }
 
 /// Appends a glyph's contours, transformed by the given 2×3 matrix, written
-/// `[dx, dy, a, b, c, d]`.
+/// `[dx, dy, a, b, c, d]` — at a location where `vary` says one, which is
+/// the only way this refuses.
+#[allow(clippy::too_many_arguments)]
 fn append(
     sfnt: &Sfnt,
     glyph: u16,
@@ -159,76 +564,117 @@ fn append(
     budget: &mut u32,
     out: &mut Outline,
     steps: &mut u64,
-) {
+    vary: Option<&mut Varying>,
+) -> Result<(), VariationError> {
     let [dx, dy, a, b, c, d] = matrix;
     if depth > MAX_COMPONENT_DEPTH || *budget == 0 {
-        return;
+        return Ok(());
     }
     *budget -= 1;
     step(steps, 1);
-    let Some(glyf) = sfnt.table(0x676C_7966) else {
-        return;
+    let Some(glyf) = sfnt.table(TAG_GLYF) else {
+        return Ok(());
     };
     let Some((start, end)) = glyph_range(sfnt, glyph) else {
-        return; // No outline: a space, or a glyph past the end.
+        return Ok(()); // No outline: a space, or a glyph past the end.
     };
     let Some(data) = glyf.get(start..end) else {
-        return;
+        return Ok(());
     };
 
     let Some(contours) = i16_at(data, 0) else {
-        return;
+        return Ok(());
     };
 
     let transform = |x: f64, y: f64| (a * x + c * y + dx, b * x + d * y + dy);
 
     if contours >= 0 {
-        simple(data, contours as usize, &transform, out, steps);
+        simple(
+            sfnt,
+            glyph,
+            data,
+            contours as usize,
+            &transform,
+            out,
+            steps,
+            vary,
+        )
     } else {
-        composite(sfnt, data, matrix, depth, budget, out, steps);
+        composite(sfnt, glyph, data, matrix, depth, budget, out, steps, vary)
     }
 }
 
-/// A simple glyph: contours of on- and off-curve points.
-fn simple(
-    data: &[u8],
-    contours: usize,
-    transform: &dyn Fn(f64, f64) -> (f64, f64),
-    out: &mut Outline,
-    steps: &mut u64,
-) {
+/// What a simple glyph's data states.
+struct Parsed<'a> {
+    ends: Vec<usize>,
+    flags: Vec<u8>,
+    xs: Vec<i32>,
+    ys: Vec<i32>,
+    instructions: &'a [u8],
+}
+
+impl<'a> Parsed<'a> {
+    /// The raw-point form, the phantom points after the contour points.
+    fn into_raw(self, phantom: [[i32; 2]; 4]) -> SimpleGlyph<'a> {
+        let mut points: Vec<[i32; 2]> = self
+            .xs
+            .iter()
+            .zip(&self.ys)
+            .map(|(x, y)| [*x, *y])
+            .collect();
+        points.extend(phantom);
+        SimpleGlyph {
+            // Each end was read as sixteen bits.
+            ends: self
+                .ends
+                .iter()
+                .map(|e| u16::try_from(*e).unwrap_or(u16::MAX))
+                .collect(),
+            flags: self.flags,
+            points,
+            instructions: self.instructions,
+        }
+    }
+}
+
+/// Reads a simple glyph's contour ends, flags, coordinates and instructions,
+/// counting [`outline_counted`]'s steps for each; `None` where the data ends
+/// before its points do. A glyph of no contours has no points.
+fn parse_simple<'a>(data: &'a [u8], contours: usize, steps: &mut u64) -> Option<Parsed<'a>> {
     // The header is 10 bytes, then one end-point index per contour.
     let mut ends = Vec::with_capacity(contours.min(256));
     for i in 0..contours {
         step(steps, 1);
-        let Some(end) = be16(data, 10 + i * 2) else {
-            return;
-        };
-        ends.push(usize::from(end));
+        ends.push(usize::from(be16(data, 10 + i * 2)?));
     }
-    let Some(&last) = ends.last() else { return };
+    let Some(&last) = ends.last() else {
+        return Some(Parsed {
+            ends,
+            flags: Vec::new(),
+            xs: Vec::new(),
+            ys: Vec::new(),
+            instructions: &[],
+        });
+    };
     let count = last + 1;
     if count > 1 << 16 {
-        return;
+        return None;
     }
 
-    // Skip the instructions: hinting bytecode, which is not interpreted.
-    let Some(instruction_len) = be16(data, 10 + contours * 2) else {
-        return;
-    };
-    let mut at = 10 + contours * 2 + 2 + usize::from(instruction_len);
+    // The instructions: hinting bytecode, which is not interpreted.
+    let instruction_len = usize::from(be16(data, 10 + contours * 2)?);
+    let program = 10 + contours * 2 + 2;
+    let mut at = program + instruction_len;
 
     // Flags, run-length encoded by the REPEAT bit: a step a flag, however
     // it was spelled.
     let mut flags = Vec::with_capacity(count);
     while flags.len() < count {
-        let Some(&flag) = data.get(at) else { return };
+        let flag = *data.get(at)?;
         at += 1;
         flags.push(flag);
         if flag & 0x08 != 0 {
-            let Some(&repeats) = data.get(at) else {
-                return;
-            };
+            let repeats = *data.get(at)?;
             at += 1;
             for _ in 0..repeats {
                 if flags.len() >= count {
@@ -246,7 +692,7 @@ fn simple(
     let mut x = 0i32;
     for &flag in &flags {
         if flag & 0x02 != 0 {
-            let Some(&delta) = data.get(at) else { return };
+            let delta = *data.get(at)?;
             at += 1;
             x += if flag & 0x10 != 0 {
                 i32::from(delta)
@@ -254,9 +700,7 @@ fn simple(
                 -i32::from(delta)
             };
         } else if flag & 0x10 == 0 {
-            let Some(delta) = i16_at(data, at) else {
-                return;
-            };
+            let delta = i16_at(data, at)?;
             at += 2;
             x += i32::from(delta);
         }
@@ -269,7 +713,7 @@ fn simple(
     let mut y = 0i32;
     for &flag in &flags {
         if flag & 0x04 != 0 {
-            let Some(&delta) = data.get(at) else { return };
+            let delta = *data.get(at)?;
             at += 1;
             y += if flag & 0x20 != 0 {
                 i32::from(delta)
@@ -277,9 +721,7 @@ fn simple(
                 -i32::from(delta)
             };
         } else if flag & 0x20 == 0 {
-            let Some(delta) = i16_at(data, at) else {
-                return;
-            };
+            let delta = i16_at(data, at)?;
             at += 2;
             y += i32::from(delta);
         }
@@ -288,22 +730,89 @@ fn simple(
 
     step(steps, ys.len());
 
+    // The flags were read past the program, so it is inside the data.
+    let instructions = data.get(program..program + instruction_len).unwrap_or(&[]);
+    Some(Parsed {
+        ends,
+        flags,
+        xs,
+        ys,
+        instructions,
+    })
+}
+
+/// A simple glyph: contours of on- and off-curve points, each moved by its
+/// delta where the glyph is drawn at a location.
+#[allow(clippy::too_many_arguments)]
+fn simple(
+    sfnt: &Sfnt,
+    glyph: u16,
+    data: &[u8],
+    contours: usize,
+    transform: &dyn Fn(f64, f64) -> (f64, f64),
+    out: &mut Outline,
+    steps: &mut u64,
+    vary: Option<&mut Varying>,
+) -> Result<(), VariationError> {
+    let Some(parsed) = parse_simple(data, contours, steps) else {
+        return Ok(());
+    };
+    let Some(vary) = vary else {
+        let (xs, ys) = (&parsed.xs, &parsed.ys);
+        let position = |i: usize| Some((f64::from(*xs.get(i)?), f64::from(*ys.get(i)?)));
+        emit_contours(
+            &parsed.ends,
+            &parsed.flags,
+            &position,
+            transform,
+            out,
+            steps,
+        );
+        return Ok(());
+    };
+    let ends = parsed.ends.clone();
+    let raw = parsed.into_raw(phantom_points(sfnt, glyph));
+    let deltas = vary
+        .gvar
+        .simple_deltas_charged(glyph, &raw, vary.location, &mut vary.work)?;
+    let position = |i: usize| {
+        let [x, y] = *raw.points.get(i)?;
+        let [dx, dy] = *deltas.get(i)?;
+        Some((
+            Fixed::from_int(x).saturating_add(dx).to_f64(),
+            Fixed::from_int(y).saturating_add(dy).to_f64(),
+        ))
+    };
+    emit_contours(&ends, &raw.flags, &position, transform, out, steps);
+    Ok(())
+}
+
+/// Emits each contour in order, stopping at the first end that does not
+/// follow the one before it or that passes the points.
+fn emit_contours<P: Fn(usize) -> Option<(f64, f64)>>(
+    ends: &[usize],
+    flags: &[u8],
+    position: &P,
+    transform: &dyn Fn(f64, f64) -> (f64, f64),
+    out: &mut Outline,
+    steps: &mut u64,
+) {
+    let count = flags.len();
     let mut first = 0usize;
-    for &end in &ends {
+    for &end in ends {
         if end < first || end >= count {
             break;
         }
-        emit_contour(&flags, &xs, &ys, first, end, transform, out);
+        emit_contour(flags, position, first, end, transform, out);
         step(steps, end + 1 - first);
         first = end + 1;
     }
 }
 
 /// Emits one closed contour, resolving implied on-curve midpoints.
-fn emit_contour(
+fn emit_contour<P: Fn(usize) -> Option<(f64, f64)>>(
     flags: &[u8],
-    xs: &[i32],
-    ys: &[i32],
+    position: &P,
     first: usize,
     last: usize,
     transform: &dyn Fn(f64, f64) -> (f64, f64),
@@ -317,8 +826,7 @@ fn emit_contour(
     let point = |i: usize| -> Option<(f64, f64, bool)> {
         let index = first + (i % len);
         let on_curve = flags.get(index)? & 0x01 != 0;
-        let x = f64::from(*xs.get(index)?);
-        let y = f64::from(*ys.get(index)?);
+        let (x, y) = position(index)?;
         Some((x, y, on_curve))
     };
 
@@ -403,80 +911,69 @@ fn emit_contour(
 }
 
 /// A composite glyph: other glyphs, each with a placement, under the matrix
-/// `[dx, dy, a, b, c, d]` the glyph is drawn with.
+/// `[dx, dy, a, b, c, d]` the glyph is drawn with. At a location, each
+/// component placed by an offset has its offset moved by its delta — the
+/// offset as written plus the delta, placed as the offset is — and one
+/// placed by matching points ignores its delta (`gvar`, 'Point numbers and
+/// processing for composite glyphs').
+#[allow(clippy::too_many_arguments)]
 fn composite(
     sfnt: &Sfnt,
+    glyph: u16,
     data: &[u8],
     matrix: [f64; 6],
     depth: u32,
     budget: &mut u32,
     out: &mut Outline,
     steps: &mut u64,
-) {
+    mut vary: Option<&mut Varying>,
+) -> Result<(), VariationError> {
     let [dx, dy, a, b, c, d] = matrix;
+    // At a location, every record is read first: a component's delta is its
+    // place among all of them, and the phantom points' follow the last.
+    let deltas = match vary.as_deref_mut() {
+        Some(vary) => {
+            let count = all_components(data).len();
+            step(steps, count);
+            Some(
+                vary.gvar
+                    .composite_deltas_charged(glyph, count, vary.location, &mut vary.work)?,
+            )
+        }
+        None => None,
+    };
     let mut at = 10usize;
     let mut guard = 0u32;
+    let mut index = 0usize;
 
     loop {
         guard += 1;
-        if guard > 64 {
-            return;
+        if guard > MAX_RECORDS {
+            return Ok(());
         }
         step(steps, 1);
-        let (Some(flags), Some(index)) = (be16(data, at), be16(data, at + 2)) else {
-            return;
+        let Some((component, next)) = read_component(data, at) else {
+            return Ok(());
         };
-        at += 4;
+        at = next;
 
-        // ARG_1_AND_2_ARE_WORDS decides the argument width; ARGS_ARE_XY_VALUES
-        // decides whether they are offsets or point indices to match.
-        let words = flags & 0x0001 != 0;
-        let xy_values = flags & 0x0002 != 0;
-
-        let (arg1, arg2) = if words {
-            let (Some(a1), Some(a2)) = (i16_at(data, at), i16_at(data, at + 2)) else {
-                return;
-            };
-            at += 4;
-            (f64::from(a1), f64::from(a2))
-        } else {
-            let (Some(&a1), Some(&a2)) = (data.get(at), data.get(at + 1)) else {
-                return;
-            };
-            at += 2;
-            (f64::from(a1 as i8), f64::from(a2 as i8))
-        };
-
-        // A component's own 2×2, in F2Dot14.
-        let f2dot14 = |at: usize| i16_at(data, at).map(|v| f64::from(v) / 16384.0);
-        let (ca, cb, cc, cd) = if flags & 0x0008 != 0 {
-            let Some(scale) = f2dot14(at) else { return };
-            at += 2;
-            (scale, 0.0, 0.0, scale)
-        } else if flags & 0x0040 != 0 {
-            let (Some(sx), Some(sy)) = (f2dot14(at), f2dot14(at + 2)) else {
-                return;
-            };
-            at += 4;
-            (sx, 0.0, 0.0, sy)
-        } else if flags & 0x0080 != 0 {
-            let (Some(m0), Some(m1), Some(m2), Some(m3)) = (
-                f2dot14(at),
-                f2dot14(at + 2),
-                f2dot14(at + 4),
-                f2dot14(at + 6),
-            ) else {
-                return;
-            };
-            at += 8;
-            (m0, m1, m2, m3)
-        } else {
-            (1.0, 0.0, 0.0, 1.0)
-        };
+        // A component's own 2×2, from F2Dot14.
+        let [ca, cb, cc, cd] = component.transform.map(|v| f64::from(v) / 16384.0);
 
         // Point-matching placement is rare and needs both glyphs' points; an
         // offset of zero is a better answer than refusing the glyph.
-        let (ox, oy) = if xy_values { (arg1, arg2) } else { (0.0, 0.0) };
+        let (ox, oy) = if component.offset_is_xy() {
+            let [x, y] = component.arguments;
+            match deltas.as_ref().and_then(|deltas| deltas.get(index)) {
+                Some([delta_x, delta_y]) => (
+                    Fixed::from_int(x).saturating_add(*delta_x).to_f64(),
+                    Fixed::from_int(y).saturating_add(*delta_y).to_f64(),
+                ),
+                None => (f64::from(x), f64::from(y)),
+            }
+        } else {
+            (0.0, 0.0)
+        };
 
         // Compose the component's transform with the one already in effect.
         let na = ca * a + cb * c;
@@ -488,20 +985,22 @@ fn composite(
 
         append(
             sfnt,
-            index,
+            component.glyph,
             [ndx, ndy, na, nb, nc, nd],
             depth + 1,
             budget,
             out,
             steps,
-        );
+            vary.as_deref_mut(),
+        )?;
         if *budget == 0 {
-            return;
+            return Ok(());
         }
 
-        if flags & 0x0020 == 0 {
-            return; // No MORE_COMPONENTS.
+        if component.flags & Component::MORE_COMPONENTS == 0 {
+            return Ok(()); // No MORE_COMPONENTS.
         }
+        index += 1;
     }
 }
 

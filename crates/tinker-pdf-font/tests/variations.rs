@@ -12,7 +12,9 @@ mod variable_support;
 
 use tinker_pdf_font::cff::Machine;
 use tinker_pdf_font::cff2::{Cff2, Cff2Error, Cff2Index};
+use tinker_pdf_font::glyf;
 use tinker_pdf_font::variation::cvar::{cvt_at, Cvar};
+use tinker_pdf_font::variation::gvar::{Gvar, MAX_GLYPH_DELTA_WORK};
 use tinker_pdf_font::variation::item_store::{DeltaSetIndex, DeltaSetIndexMap, ItemVariationStore};
 use tinker_pdf_font::variation::metrics::{metric_default, Hvar, Mvar, Vvar, METRIC_FIELDS};
 use tinker_pdf_font::variation::tuple::{
@@ -24,10 +26,11 @@ use tinker_pdf_font::variation::{
 };
 use tinker_pdf_font::{Outline, Segment, Sfnt};
 use variable_support::{
-    avar, cff2_index, charstring, cvar, cvt, dict_entry, f2dot14, fvar, fvar_with_sizes, gasp,
-    hhea, hvar, identity_map, index_map, ints, item_store, metrics, mvar, op, os2, pack_deltas,
-    pack_points, post, spec, tuple_store, vhea, vorg, vvar, AxisSpec, Cff2Spec, Cs, DataSpec, Face,
-    FdSelectSpec, InstanceSpec, Points, PrivateSpec, RegionSpec, TupleSpec,
+    avar, cff2_index, charstring, composite_glyph, cvar, cvt, dict_entry, f2dot14, fvar,
+    fvar_with_sizes, gasp, glyf_and_loca, head, hhea, hvar, identity_map, index_map, ints,
+    item_store, maxp, metrics, mvar, op, os2, pack_deltas, pack_points, post, spec, tuple_store,
+    vhea, vorg, vvar, AxisSpec, Cff2Spec, ComponentSpec, Cs, DataSpec, Face, FdSelectSpec,
+    GlyphPoint, GlyphVariation, InstanceSpec, Points, PrivateSpec, RegionSpec, TupleSpec,
 };
 
 // ---- The design space (FT-05.2) --------------------------------------------
@@ -3048,4 +3051,1504 @@ fn the_default_instance_is_the_unblended_outline() {
         cff2.outline_at(0, &Location::new(vec![16_384, 0])).err(),
         Some(Cff2Error::NoVariationStore)
     );
+}
+
+// ---- gvar applied to glyf (FT-05.4) ------------------------------------------
+
+/// One glyph of the `gvar` face as the test states it; the face and every
+/// expectation below are built from this statement.
+#[derive(Clone, Debug)]
+enum Stated {
+    /// No outline: a space, whose `gvar` data moves its phantom points.
+    Empty,
+    /// A simple glyph's contours.
+    Simple(Vec<Vec<GlyphPoint>>),
+    /// A composite's header box and its records.
+    Composite([i16; 4], Vec<ComponentSpec>),
+}
+
+/// The glyphs: a space; a box and a curve whose off-curve pair implies a
+/// midpoint; a glyph whose listed points leave others untouched, in a
+/// contour that takes every case of the inference, a contour none of whose
+/// points is listed and one with a single listed point; a composite placed
+/// by an offset, by a scaled offset and by matching points, the first with
+/// `USE_MY_METRICS`; a composite of that composite and the space; and a
+/// glyph with no variation data.
+fn gvar_glyphs() -> Vec<Stated> {
+    let box_and_curve = vec![
+        vec![
+            (0, 0, true),
+            (400, 0, true),
+            (400, 700, true),
+            (0, 700, true),
+        ],
+        vec![
+            (100, 100, true),
+            (150, 300, false),
+            (250, 300, false),
+            (300, 100, true),
+            (200, 50, false),
+        ],
+    ];
+    let untouched = vec![
+        vec![
+            (0, 0, true),
+            (100, 0, true),
+            (300, 0, true),
+            (350, 50, false),
+            (270, 200, false),
+            (250, 400, true),
+            (-50, 400, true),
+            (-50, 200, false),
+        ],
+        vec![
+            (500, 500, true),
+            (600, 500, true),
+            (600, 600, true),
+            (500, 600, true),
+        ],
+        vec![(700, 0, true), (800, 0, true), (750, 90, true)],
+    ];
+    let mut scaled = ComponentSpec::at(2, 500, -20);
+    scaled.flags |= 0x0008; // WE_HAVE_A_SCALE
+    scaled.transform = vec![8_192];
+    let mut metrics = ComponentSpec::at(1, 50, 0);
+    metrics.flags |= 0x0200; // USE_MY_METRICS
+    let matched = ComponentSpec {
+        flags: 0x0001, // words, and ARGS_ARE_XY_VALUES clear
+        glyph: 1,
+        arguments: (0, 3),
+        transform: Vec::new(),
+    };
+    let lifted = ComponentSpec {
+        flags: 0x0002, // byte offsets
+        glyph: 3,
+        arguments: (0, 100),
+        transform: Vec::new(),
+    };
+    vec![
+        Stated::Empty,
+        Stated::Simple(box_and_curve.clone()),
+        Stated::Simple(untouched),
+        Stated::Composite([0, -20, 1_250, 700], vec![metrics, scaled, matched]),
+        Stated::Composite(
+            [0, 80, 1_250, 800],
+            vec![lifted, ComponentSpec::at(0, 10, 10)],
+        ),
+        Stated::Simple(box_and_curve),
+    ]
+}
+
+/// The shared tuples: the weight's maximum, the width's, and their corner.
+fn gvar_shared_tuples() -> Vec<Vec<i16>> {
+    vec![vec![16_384, 0], vec![0, 16_384], vec![16_384, 16_384]]
+}
+
+/// A table whose peak is a shared tuple's, the peak kept for the test's
+/// arithmetic.
+fn shared_peak(index: u16, points: Option<Points>, deltas: &[i32]) -> TupleSpec {
+    let mut tuple = TupleSpec::new(&gvar_shared_tuples()[usize::from(index)], points, deltas);
+    tuple.shared_peak = Some(index);
+    tuple
+}
+
+/// Each glyph's variation data. Every point-number form appears: every
+/// item, private lists with a number repeated and phantom points among them,
+/// a glyph's shared points, an intermediate region, peaks embedded and
+/// shared, and deltas in bytes, words and zero runs.
+fn gvar_variations() -> Vec<Option<GlyphVariation>> {
+    let space = GlyphVariation {
+        shared_points: None,
+        tuples: vec![
+            TupleSpec::new(
+                &[16_384, 0],
+                Some(Points::All),
+                &[-5, 40, 0, 0, 0, 0, 10, -10],
+            ),
+            shared_peak(1, Some(Points::Listed(vec![1, 3])), &[25, 3, 7, -30]),
+        ],
+    };
+    // Nine contour points and four phantom points.
+    let box_and_curve = GlyphVariation {
+        shared_points: Some(Points::Listed(vec![0, 2, 5, 9, 10])),
+        tuples: vec![
+            TupleSpec::new(
+                &[16_384, 0],
+                Some(Points::All),
+                &[
+                    20, 30, 30, 20, 10, 12, 14, 16, 18, 0, 60, 0, 0, //
+                    0, 0, 50, 50, 5, 9, -9, -5, 0, 0, 0, 40, -40,
+                ],
+            ),
+            shared_peak(1, None, &[-8, -16, 24, 3, 77, 0, 6, -6, 0, 0]),
+            TupleSpec::new(
+                &[8_192, -8_192],
+                Some(Points::Listed(vec![3, 3, 4, 7, 11, 12])),
+                &[1, 2, -3, 4, 0, 0, 300, -200, 5, -7, 33, -33],
+            )
+            .between(&[0, -16_384], &[16_384, 0]),
+            TupleSpec::new(
+                &[-16_384, 0],
+                Some(Points::All),
+                &[
+                    -150, -150, -150, -150, -40, -40, -40, -40, -40, 0, -300, 0, 0, //
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+        ],
+    };
+    // Fifteen contour points and four phantom points.
+    let untouched = GlyphVariation {
+        shared_points: None,
+        tuples: vec![
+            TupleSpec::new(
+                &[16_384, 0],
+                Some(Points::Listed(vec![0, 2, 5, 13])),
+                &[10, 30, -7, 4, 20, 25, 13, -9],
+            ),
+            TupleSpec::new(
+                &[8_192, 16_384],
+                Some(Points::Listed(vec![2, 6, 13, 13, 16])),
+                &[3, -11, 2, 2, 40, 7, 0, -1, -1, 0],
+            )
+            .between(&[0, 0], &[16_384, 16_384]),
+            TupleSpec::new(
+                &[0, -16_384],
+                Some(Points::All),
+                &[
+                    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, //
+                    -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16, -17,
+                    -18, -19,
+                ],
+            ),
+        ],
+    };
+    // Three components and four phantom points; the matched component's
+    // delta is stated and must move nothing, and so must the phantom
+    // points' ignored axes.
+    let placed = GlyphVariation {
+        shared_points: None,
+        tuples: vec![
+            TupleSpec::new(
+                &[16_384, 0],
+                Some(Points::All),
+                &[30, -10, 999, 70, 90, 11, 12, 5, 7, 999, 13, 14, -40, 40],
+            ),
+            shared_peak(1, Some(Points::Listed(vec![1, 4])), &[-60, 25, 8, -3]),
+        ],
+    };
+    // Two components and four phantom points.
+    let nested = GlyphVariation {
+        shared_points: None,
+        tuples: vec![shared_peak(
+            2,
+            Some(Points::All),
+            &[0, 15, 20, 20, 20, 20, -12, 0, 1, 1, 1, 1],
+        )],
+    };
+    vec![
+        Some(space),
+        Some(box_and_curve),
+        Some(untouched),
+        Some(placed),
+        Some(nested),
+        None,
+    ]
+}
+
+/// The glyphs' horizontal metrics, a left side bearing that is not `xMin`
+/// among them so that a horizontal origin stands away from zero.
+fn gvar_horizontal() -> Vec<(u16, i16)> {
+    vec![(250, 0), (600, 0), (500, -40), (800, 0), (820, 0), (300, 0)]
+}
+
+/// The glyphs' vertical metrics, for the face that carries them.
+fn gvar_vertical() -> Vec<(u16, i16)> {
+    vec![
+        (1_000, 0),
+        (1_000, 100),
+        (900, 300),
+        (1_100, 100),
+        (1_200, 120),
+        (1_000, 200),
+    ]
+}
+
+/// `hhea`'s ascender and descender, which stand in for vertical metrics in
+/// the face without them.
+const GVAR_ASCENDER: i16 = 800;
+const GVAR_DESCENDER: i16 = -200;
+
+/// The glyph's `glyf` data.
+fn stated_bytes(glyph: &Stated) -> Vec<u8> {
+    match glyph {
+        Stated::Empty => Vec::new(),
+        Stated::Simple(contours) => variable_support::simple_glyph(contours),
+        Stated::Composite(bounds, components) => composite_glyph(*bounds, components),
+    }
+}
+
+/// The `gvar` face: `fvar`'s two axes, `glyf`, `loca`, `head`, `maxp`,
+/// `hhea` with its ascender and descender, `hmtx`, and `vhea` and `vmtx`
+/// where `vertical`; `gvar` with long or halved short offsets.
+fn gvar_face(long_offsets: bool, vertical: bool) -> Vec<u8> {
+    let glyphs: Vec<Vec<u8>> = gvar_glyphs().iter().map(stated_bytes).collect();
+    let (glyf, loca) = glyf_and_loca(&glyphs);
+    let count = u16::try_from(glyphs.len()).expect("few");
+    let mut horizontal = hhea(count, (1, 0, 0));
+    horizontal[4..6].copy_from_slice(&GVAR_ASCENDER.to_be_bytes());
+    horizontal[6..8].copy_from_slice(&GVAR_DESCENDER.to_be_bytes());
+    let mut face = Face::truetype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"glyf", glyf)
+        .with(*b"loca", loca)
+        .with(*b"head", head(1_000))
+        .with(*b"maxp", maxp(count))
+        .with(*b"hhea", horizontal)
+        .with(*b"hmtx", metrics(&gvar_horizontal(), &[]))
+        .with(
+            *b"gvar",
+            variable_support::gvar(2, &gvar_shared_tuples(), &gvar_variations(), long_offsets),
+        );
+    if vertical {
+        face = face
+            .with(*b"vhea", vhea(count, (900, -100, 0), (0, 1, 0)))
+            .with(*b"vmtx", metrics(&gvar_vertical(), &[]));
+    }
+    face.build()
+}
+
+/// Every form of the face: both offset widths, with and without vertical
+/// metrics.
+fn gvar_faces() -> Vec<(bool, bool, Vec<u8>)> {
+    let mut out = Vec::new();
+    for long_offsets in [false, true] {
+        for vertical in [false, true] {
+            out.push((long_offsets, vertical, gvar_face(long_offsets, vertical)));
+        }
+    }
+    out
+}
+
+/// A stated glyph's header box: its points', a composite's as written, and
+/// zero for a space.
+fn stated_bounds(glyph: &Stated) -> [i32; 4] {
+    match glyph {
+        Stated::Empty => [0; 4],
+        Stated::Simple(contours) => {
+            let points: Vec<&GlyphPoint> = contours.iter().flatten().collect();
+            [
+                points.iter().map(|p| p.0).min().unwrap_or(0),
+                points.iter().map(|p| p.1).min().unwrap_or(0),
+                points.iter().map(|p| p.0).max().unwrap_or(0),
+                points.iter().map(|p| p.1).max().unwrap_or(0),
+            ]
+        }
+        Stated::Composite(bounds, _) => bounds.map(i32::from),
+    }
+}
+
+/// A stated glyph's default phantom points, from the metrics the face was
+/// written with: the horizontal origin at `xMin` less the left side bearing
+/// and the advance past it, both at `y = 0`; the vertical origin at `yMax`
+/// plus the top side bearing and the advance height below it, both at
+/// `x = 0` — or, with no vertical metrics, at the ascender and the
+/// descender.
+fn stated_phantoms(index: usize, vertical: bool) -> [(i32, i32); 4] {
+    let [x_min, _, _, y_max] = stated_bounds(&gvar_glyphs()[index]);
+    let (advance, lsb) = gvar_horizontal()[index];
+    let origin = x_min - i32::from(lsb);
+    let (top, bottom) = if vertical {
+        let (height, tsb) = gvar_vertical()[index];
+        let top = y_max + i32::from(tsb);
+        (top, top - i32::from(height))
+    } else {
+        (i32::from(GVAR_ASCENDER), i32::from(GVAR_DESCENDER))
+    };
+    [
+        (origin, 0),
+        (origin + i32::from(advance), 0),
+        (0, top),
+        (0, bottom),
+    ]
+}
+
+/// The contours of a stated simple glyph as `(first, last)` pairs.
+fn contour_ranges(contours: &[Vec<GlyphPoint>]) -> Vec<(usize, usize)> {
+    let mut first = 0;
+    contours
+        .iter()
+        .map(|contour| {
+            let range = (first, first + contour.len() - 1);
+            first += contour.len();
+            range
+        })
+        .collect()
+}
+
+/// A stated glyph's items with their default positions — its contour
+/// points, or one placeholder a component — and its phantom points after.
+fn stated_items(index: usize, vertical: bool) -> Vec<(i32, i32)> {
+    let mut items: Vec<(i32, i32)> = match &gvar_glyphs()[index] {
+        Stated::Empty => Vec::new(),
+        Stated::Simple(contours) => contours.iter().flatten().map(|p| (p.0, p.1)).collect(),
+        Stated::Composite(_, components) => vec![(0, 0); components.len()],
+    };
+    items.extend(stated_phantoms(index, vertical));
+    items
+}
+
+/// A stated glyph's net deltas at 2.14 coordinates, from the specification.
+fn stated_deltas(index: usize, vertical: bool, coordinates: &[i16]) -> Vec<[i64; 2]> {
+    let items = stated_items(index, vertical);
+    let Some(variation) = &gvar_variations()[index] else {
+        return vec![[0, 0]; items.len()];
+    };
+    match &gvar_glyphs()[index] {
+        Stated::Simple(contours) => spec::glyph_deltas(
+            &items,
+            Some(&contour_ranges(contours)),
+            variation,
+            coordinates,
+        ),
+        Stated::Empty => spec::glyph_deltas(&items, Some(&[]), variation, coordinates),
+        Stated::Composite(..) => spec::glyph_deltas(&items, None, variation, coordinates),
+    }
+}
+
+/// A 16.16 value as the `f64` it is exactly.
+fn units(bits: i64) -> f64 {
+    bits as f64 / 65_536.0
+}
+
+/// The segments the `glyf` chapter's contour reading draws from final
+/// positions, placed by `place`: each contour from its first on-curve point,
+/// a line to an on-curve point, a quadratic through an off-curve point to
+/// the next on-curve one or to the midpoint of two off-curve ones, and back
+/// to the start. Every contour this file states holds an on-curve point.
+fn drawn(
+    positions: &[(f64, f64)],
+    on: &[bool],
+    contours: &[(usize, usize)],
+    place: &dyn Fn(f64, f64) -> (f64, f64),
+    out: &mut Vec<Segment>,
+) {
+    for &(first, last) in contours {
+        let ring: Vec<usize> = (first..=last).collect();
+        let len = ring.len();
+        let start = (0..len)
+            .find(|k| on[ring[*k]])
+            .expect("a contour with an on-curve point");
+        let at = |k: usize| ring[(start + k) % len];
+        let (sx, sy) = place(positions[at(0)].0, positions[at(0)].1);
+        out.push(Segment::MoveTo { x: sx, y: sy });
+        let mut control: Option<(f64, f64)> = None;
+        for k in 1..=len {
+            let (x, y) = positions[at(k)];
+            if on[at(k)] {
+                let (px, py) = place(x, y);
+                match control.take() {
+                    None => out.push(Segment::LineTo { x: px, y: py }),
+                    Some((cx, cy)) => {
+                        let (cx, cy) = place(cx, cy);
+                        out.push(Segment::QuadTo {
+                            cx,
+                            cy,
+                            x: px,
+                            y: py,
+                        });
+                    }
+                }
+            } else {
+                if let Some((cx, cy)) = control {
+                    let (mx, my) = place((cx + x) / 2.0, (cy + y) / 2.0);
+                    let (cx, cy) = place(cx, cy);
+                    out.push(Segment::QuadTo {
+                        cx,
+                        cy,
+                        x: mx,
+                        y: my,
+                    });
+                }
+                control = Some((x, y));
+            }
+        }
+        out.push(Segment::Close);
+    }
+}
+
+/// A placement `[dx, dy, a, b, c, d]`: a point goes to `(a x + c y + dx,
+/// b x + d y + dy)`.
+type Placement = [f64; 6];
+
+const UNPLACED: Placement = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+
+fn placed(m: Placement) -> impl Fn(f64, f64) -> (f64, f64) {
+    move |x, y| (m[2] * x + m[4] * y + m[0], m[3] * x + m[5] * y + m[1])
+}
+
+/// A component's placement inside its parent's: its own 2×2 after the
+/// parent's, and its offset placed by the parent's — the composite reading
+/// the `glyf` chapter gives, where a component's own transform does not
+/// scale its offset.
+fn component_placement(parent: Placement, transform: [f64; 4], offset: (f64, f64)) -> Placement {
+    let [dx, dy, a, b, c, d] = parent;
+    let [ca, cb, cc, cd] = transform;
+    [
+        offset.0 * a + offset.1 * c + dx,
+        offset.0 * b + offset.1 * d + dy,
+        ca * a + cb * c,
+        ca * b + cb * d,
+        cc * a + cd * c,
+        cc * b + cd * d,
+    ]
+}
+
+/// A record's 2×2 from the F2Dot14 values its flags call for.
+fn component_transform(component: &ComponentSpec) -> [f64; 4] {
+    let f = |v: i16| f64::from(v) / 16_384.0;
+    match component.transform.as_slice() {
+        [] => [1.0, 0.0, 0.0, 1.0],
+        [s] => [f(*s), 0.0, 0.0, f(*s)],
+        [x, y] => [f(*x), 0.0, 0.0, f(*y)],
+        [a, b, c, d] => [f(*a), f(*b), f(*c), f(*d)],
+        other => panic!("a transform of {} values", other.len()),
+    }
+}
+
+/// The outline the specification gives a stated glyph at 2.14 coordinates:
+/// each point at its default plus its net delta, each component's offset
+/// likewise where it is placed by an offset, drawn by the contour reading.
+fn expected_gvar_outline(
+    index: usize,
+    vertical: bool,
+    coordinates: &[i16],
+    placement: Placement,
+    out: &mut Vec<Segment>,
+) {
+    let glyphs = gvar_glyphs();
+    let deltas = stated_deltas(index, vertical, coordinates);
+    let items = stated_items(index, vertical);
+    match &glyphs[index] {
+        Stated::Empty => {}
+        Stated::Simple(contours) => {
+            let on: Vec<bool> = contours.iter().flatten().map(|p| p.2).collect();
+            let positions: Vec<(f64, f64)> = items
+                .iter()
+                .zip(&deltas)
+                .map(|(p, d)| {
+                    (
+                        units(i64::from(p.0) * 65_536 + d[0]),
+                        units(i64::from(p.1) * 65_536 + d[1]),
+                    )
+                })
+                .collect();
+            drawn(
+                &positions,
+                &on,
+                &contour_ranges(contours),
+                &placed(placement),
+                out,
+            );
+        }
+        Stated::Composite(_, components) => {
+            for (p, component) in components.iter().enumerate() {
+                let offset = if component.flags & 0x0002 != 0 {
+                    (
+                        units(i64::from(component.arguments.0) * 65_536 + deltas[p][0]),
+                        units(i64::from(component.arguments.1) * 65_536 + deltas[p][1]),
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
+                let child = component_placement(placement, component_transform(component), offset);
+                expected_gvar_outline(
+                    usize::from(component.glyph),
+                    vertical,
+                    coordinates,
+                    child,
+                    out,
+                );
+            }
+        }
+    }
+}
+
+/// Every location the `gvar` tests read: each named instance and the
+/// metric tests' grid, with the 2.14 coordinates the specification computes
+/// for it.
+fn gvar_locations() -> Vec<(Instance, Vec<i16>)> {
+    let ranges = axis_ranges();
+    metric_locations()
+        .into_iter()
+        .map(|(instance, user)| (instance, spec::location(&ranges, &user)))
+        .collect()
+}
+
+#[test]
+fn instance_outlines_equal_the_deltas_applied_in_the_test() {
+    let glyphs = gvar_glyphs();
+    for (long_offsets, vertical, face) in gvar_faces() {
+        let sfnt = Sfnt::parse(&face).expect("a face");
+        let space = DesignSpace::read(&sfnt).expect("a design space");
+        let gvar = Gvar::read(&sfnt, &space)
+            .expect("gvar is read")
+            .expect("the face carries one");
+        assert_eq!(gvar.glyph_count(), 6);
+        assert_eq!(gvar.shared_tuples().len(), 3);
+        for (instance, coordinates) in gvar_locations() {
+            let location = space.location(&instance).expect("a location");
+            assert_eq!(location.coordinates(), coordinates, "at {instance:?}");
+            for (index, stated) in glyphs.iter().enumerate() {
+                let glyph = u16::try_from(index).expect("few");
+                let what = format!(
+                    "glyph {index} at {coordinates:?}, long {long_offsets}, vertical {vertical}"
+                );
+                // The deltas, item by item, before anything is drawn.
+                let expected_deltas = stated_deltas(index, vertical, &coordinates);
+                let deltas: Vec<[i64; 2]> = match stated {
+                    Stated::Composite(_, components) => gvar
+                        .composite_deltas(glyph, components.len(), &location)
+                        .expect("the deltas"),
+                    _ => {
+                        let raw = glyf::simple_glyph(&sfnt, glyph).expect("a simple glyph");
+                        gvar.simple_deltas(glyph, &raw, &location)
+                            .expect("the deltas")
+                    }
+                }
+                .iter()
+                .map(|d| [d[0].bits(), d[1].bits()])
+                .collect();
+                assert_eq!(deltas, expected_deltas, "{what}: the deltas");
+                // And the outline they draw.
+                let mut expected = Vec::new();
+                expected_gvar_outline(index, vertical, &coordinates, UNPLACED, &mut expected);
+                let outline =
+                    glyf::outline_at(&sfnt, glyph, Some(&gvar), &location).expect("an outline");
+                assert_eq!(outline.segments, expected, "{what}: the outline");
+                let (counted, steps) =
+                    glyf::outline_at_counted(&sfnt, glyph, Some(&gvar), &location);
+                assert_eq!(
+                    counted.map(|o| o.segments),
+                    Ok(outline.segments),
+                    "{what}: alike counted"
+                );
+                assert!(steps > 0, "{what}: the work was counted");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_raw_point_form_is_the_glyphs_points_and_its_phantom_points() {
+    for (_, vertical, face) in gvar_faces() {
+        let sfnt = Sfnt::parse(&face).expect("a face");
+        for (index, stated) in gvar_glyphs().iter().enumerate() {
+            let glyph = u16::try_from(index).expect("few");
+            let phantoms: Vec<[i32; 2]> = stated_phantoms(index, vertical)
+                .iter()
+                .map(|p| [p.0, p.1])
+                .collect();
+            assert_eq!(
+                glyf::phantom_points(&sfnt, glyph).to_vec(),
+                phantoms,
+                "glyph {index}'s phantom points, vertical {vertical}"
+            );
+            match stated {
+                Stated::Composite(_, components) => {
+                    assert_eq!(glyf::simple_glyph(&sfnt, glyph), None);
+                    let read = glyf::components(&sfnt, glyph).expect("a composite");
+                    assert_eq!(read.len(), components.len());
+                    for (record, component) in read.iter().zip(components) {
+                        assert_eq!(record.glyph, component.glyph);
+                        assert_eq!(
+                            record.arguments,
+                            [component.arguments.0, component.arguments.1]
+                        );
+                        assert_eq!(record.offset_is_xy(), component.flags & 0x0002 != 0);
+                        let transform = match component.transform.as_slice() {
+                            [] => [16_384, 0, 0, 16_384],
+                            [s] => [*s, 0, 0, *s],
+                            [x, y] => [*x, 0, 0, *y],
+                            [a, b, c, d] => [*a, *b, *c, *d],
+                            other => panic!("a transform of {} values", other.len()),
+                        };
+                        assert_eq!(record.transform, transform);
+                    }
+                }
+                Stated::Empty => {
+                    let raw = glyf::simple_glyph(&sfnt, glyph).expect("an empty glyph");
+                    assert_eq!(raw.contour_points(), 0);
+                    assert!(raw.ends.is_empty() && raw.contours().is_empty());
+                    assert_eq!(raw.points, phantoms);
+                    assert_eq!(glyf::components(&sfnt, glyph), None);
+                }
+                Stated::Simple(contours) => {
+                    let raw = glyf::simple_glyph(&sfnt, glyph).expect("a simple glyph");
+                    let points: Vec<[i32; 2]> = contours
+                        .iter()
+                        .flatten()
+                        .map(|p| [p.0, p.1])
+                        .chain(phantoms.iter().copied())
+                        .collect();
+                    assert_eq!(raw.points, points);
+                    let flags: Vec<u8> = contours.iter().flatten().map(|p| u8::from(p.2)).collect();
+                    assert_eq!(raw.flags, flags);
+                    assert_eq!(raw.contours(), contour_ranges(contours));
+                    assert!(raw.instructions.is_empty());
+                    assert_eq!(glyf::components(&sfnt, glyph), None);
+                }
+            }
+        }
+        // A glyph past the end of `loca` has no form at all.
+        assert_eq!(glyf::simple_glyph(&sfnt, 6), None);
+        assert_eq!(glyf::components(&sfnt, 6), None);
+    }
+}
+
+#[test]
+fn the_default_instance_is_the_static_outline() {
+    for (_, _, face) in gvar_faces() {
+        let sfnt = Sfnt::parse(&face).expect("a face");
+        let space = DesignSpace::read(&sfnt).expect("a design space");
+        let gvar = Gvar::read(&sfnt, &space)
+            .expect("gvar is read")
+            .expect("the face carries one");
+        for glyph in 0u16..6 {
+            let unvaried = glyf::outline(&sfnt, glyph).expect("an outline").segments;
+            for location in [space.default_location(), Location::default()] {
+                assert_eq!(
+                    glyf::outline_at(&sfnt, glyph, Some(&gvar), &location).map(|o| o.segments),
+                    Ok(unvaried.clone()),
+                    "glyph {glyph} at the default"
+                );
+            }
+            // With no `gvar` nothing moves, wherever it is asked.
+            assert_eq!(
+                glyf::outline_at(&sfnt, glyph, None, &Location::new(vec![16_384, -8_192]))
+                    .map(|o| o.segments),
+                Ok(unvaried.clone())
+            );
+            let (outline, steps) = glyf::outline_counted(&sfnt, glyph);
+            let (counted, counted_steps) =
+                glyf::outline_at_counted(&sfnt, glyph, None, &space.default_location());
+            assert_eq!(
+                counted.map(|o| o.segments),
+                Ok(outline.expect("an outline").segments)
+            );
+            assert_eq!(
+                counted_steps, steps,
+                "with no gvar, outline_at counts what outline counts"
+            );
+        }
+    }
+    // A face that does not vary has no `gvar` to read, whatever it carries.
+    let face = Face::truetype()
+        .with(*b"gvar", variable_support::gvar(2, &[], &[None], false))
+        .build();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    assert!(Gvar::read(&sfnt, &DesignSpace::default())
+        .expect("not read")
+        .is_none());
+    // And `TestGPOSFour.ttf` draws every glyph at its default as it draws
+    // it statically.
+    let sfnt = Sfnt::parse(TEST_GPOS_FOUR).expect("the face parses");
+    let space = DesignSpace::read(&sfnt).expect("its design space");
+    let gvar = Gvar::read(&sfnt, &space)
+        .expect("gvar is read")
+        .expect("it carries one");
+    for glyph in 0u16..13 {
+        assert_eq!(
+            glyf::outline_at(&sfnt, glyph, Some(&gvar), &space.default_location())
+                .map(|o| o.segments),
+            Ok(glyf::outline(&sfnt, glyph).expect("an outline").segments),
+            "TestGPOSFour glyph {glyph}"
+        );
+    }
+}
+
+/// The phantom points the specification gives a stated glyph: its default
+/// ones plus its deltas, or, for a composite with a `USE_MY_METRICS`
+/// component, that component's.
+fn expected_phantoms(index: usize, vertical: bool, coordinates: &[i16]) -> [[i64; 2]; 4] {
+    if let Stated::Composite(_, components) = &gvar_glyphs()[index] {
+        if let Some(metrics) = components.iter().rev().find(|c| c.flags & 0x0200 != 0) {
+            return expected_phantoms(usize::from(metrics.glyph), vertical, coordinates);
+        }
+    }
+    let defaults = stated_phantoms(index, vertical);
+    let deltas = stated_deltas(index, vertical, coordinates);
+    let last = &deltas[deltas.len() - 4..];
+    let mut out = [[0i64; 2]; 4];
+    for (k, slot) in out.iter_mut().enumerate() {
+        *slot = [
+            i64::from(defaults[k].0) * 65_536 + last[k][0],
+            i64::from(defaults[k].1) * 65_536 + last[k][1],
+        ];
+    }
+    out
+}
+
+#[test]
+fn phantom_points_give_the_advance_without_hvar() {
+    for (_, vertical, face) in gvar_faces() {
+        let sfnt = Sfnt::parse(&face).expect("a face");
+        assert!(sfnt.table(u32::from_be_bytes(*b"HVAR")).is_none());
+        let space = DesignSpace::read(&sfnt).expect("a design space");
+        let gvar = Gvar::read(&sfnt, &space)
+            .expect("gvar is read")
+            .expect("the face carries one");
+        for (instance, coordinates) in gvar_locations() {
+            let location = space.location(&instance).expect("a location");
+            for index in 0..6 {
+                let glyph = u16::try_from(index).expect("few");
+                let expected = expected_phantoms(index, vertical, &coordinates);
+                let phantom =
+                    glyf::phantom_points_at(&sfnt, glyph, Some(&gvar), &location).expect("points");
+                let bits = phantom.map(|p| [p[0].bits(), p[1].bits()]);
+                assert_eq!(bits, expected, "glyph {index} at {coordinates:?}");
+                // The advance width is the two horizontal points' distance,
+                // and the advance height the two vertical ones'.
+                assert_eq!(
+                    phantom[1][0].saturating_sub(phantom[0][0]).bits(),
+                    expected[1][0] - expected[0][0]
+                );
+                assert_eq!(
+                    phantom[2][1].saturating_sub(phantom[3][1]).bits(),
+                    expected[2][1] - expected[3][1]
+                );
+            }
+        }
+        // At the default, and with no gvar, the phantom points are the
+        // metrics' — glyph 3's those of its `USE_MY_METRICS` component.
+        for index in 0..6 {
+            let glyph = u16::try_from(index).expect("few");
+            let expected = expected_phantoms(index, vertical, &[0, 0]);
+            for gvar in [Some(&gvar), None] {
+                let phantom =
+                    glyf::phantom_points_at(&sfnt, glyph, gvar, &space.default_location())
+                        .expect("points");
+                assert_eq!(phantom.map(|p| [p[0].bits(), p[1].bits()]), expected);
+            }
+        }
+    }
+}
+
+// ---- TestGPOSFour.ttf's outlines, through a second reader --------------------
+
+/// A second reader of `glyf`, `loca`, `hmtx`, `hhea` and `gvar`, decoding
+/// each from its chapter's field list by index arithmetic, with no code
+/// shared with the crate; its arithmetic is `variable_support::spec`'s.
+mod outline_reader {
+    use super::second_reader::table;
+    use crate::variable_support::{GlyphVariation, Points, TupleSpec};
+
+    fn u16_at(data: &[u8], at: usize) -> u16 {
+        u16::from_be_bytes([data[at], data[at + 1]])
+    }
+
+    fn i16_at(data: &[u8], at: usize) -> i16 {
+        u16_at(data, at) as i16
+    }
+
+    fn u32_at(data: &[u8], at: usize) -> u32 {
+        u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
+    }
+
+    /// One component: its flags, the glyph it draws and its offset.
+    pub struct Component {
+        pub flags: u16,
+        pub glyph: u16,
+        pub x: i32,
+        pub y: i32,
+    }
+
+    /// One glyph: a simple glyph's contours, on-curve flags and points, or a
+    /// composite's components, and the header's `xMin`.
+    pub struct Glyph {
+        pub contours: Vec<(usize, usize)>,
+        pub on: Vec<bool>,
+        pub points: Vec<(i32, i32)>,
+        pub components: Vec<Component>,
+        pub x_min: i32,
+    }
+
+    /// The glyph's `glyf` entry, `None` for an empty one.
+    pub fn glyph(face: &[u8], index: u16) -> Option<Glyph> {
+        let head = table(face, b"head").expect("head");
+        let loca = table(face, b"loca").expect("loca");
+        let glyf = table(face, b"glyf").expect("glyf");
+        let i = usize::from(index);
+        let (start, end) = if i16_at(head, 50) == 0 {
+            (
+                usize::from(u16_at(loca, i * 2)) * 2,
+                usize::from(u16_at(loca, i * 2 + 2)) * 2,
+            )
+        } else {
+            (
+                u32_at(loca, i * 4) as usize,
+                u32_at(loca, i * 4 + 4) as usize,
+            )
+        };
+        if end <= start {
+            return None;
+        }
+        let data = &glyf[start..end];
+        let contour_count = i16_at(data, 0);
+        let x_min = i32::from(i16_at(data, 2));
+        if contour_count < 0 {
+            let mut components = Vec::new();
+            let mut at = 10;
+            loop {
+                let flags = u16_at(data, at);
+                let glyph = u16_at(data, at + 2);
+                at += 4;
+                assert!(flags & 0x0002 != 0, "TestGPOSFour places by offsets");
+                assert!(flags & 0x00C8 == 0, "and has no component transform");
+                let (x, y) = if flags & 0x0001 != 0 {
+                    let v = (i32::from(i16_at(data, at)), i32::from(i16_at(data, at + 2)));
+                    at += 4;
+                    v
+                } else {
+                    let v = (i32::from(data[at] as i8), i32::from(data[at + 1] as i8));
+                    at += 2;
+                    v
+                };
+                components.push(Component { flags, glyph, x, y });
+                if flags & 0x0020 == 0 {
+                    break;
+                }
+            }
+            return Some(Glyph {
+                contours: Vec::new(),
+                on: Vec::new(),
+                points: Vec::new(),
+                components,
+                x_min,
+            });
+        }
+        let count = usize::try_from(contour_count).expect("simple");
+        let ends: Vec<usize> = (0..count)
+            .map(|c| usize::from(u16_at(data, 10 + c * 2)))
+            .collect();
+        let points = ends.last().map_or(0, |e| e + 1);
+        let mut at = 10 + count * 2;
+        let program = usize::from(u16_at(data, at));
+        at += 2 + program;
+        let mut flags = Vec::with_capacity(points);
+        while flags.len() < points {
+            let flag = data[at];
+            at += 1;
+            let repeat = if flag & 0x08 != 0 {
+                at += 1;
+                usize::from(data[at - 1])
+            } else {
+                0
+            };
+            for _ in 0..=repeat {
+                flags.push(flag);
+            }
+        }
+        flags.truncate(points);
+        let mut read_axis = |short: u8, same: u8| {
+            let mut value = 0i32;
+            let mut out = Vec::with_capacity(points);
+            for flag in &flags {
+                if flag & short != 0 {
+                    let magnitude = i32::from(data[at]);
+                    at += 1;
+                    value += if flag & same != 0 {
+                        magnitude
+                    } else {
+                        -magnitude
+                    };
+                } else if flag & same == 0 {
+                    value += i32::from(i16_at(data, at));
+                    at += 2;
+                }
+                out.push(value);
+            }
+            out
+        };
+        let xs = read_axis(0x02, 0x10);
+        let ys = read_axis(0x04, 0x20);
+        let mut contours = Vec::new();
+        let mut first = 0;
+        for end in ends {
+            contours.push((first, end));
+            first = end + 1;
+        }
+        Some(Glyph {
+            contours,
+            on: flags.iter().map(|f| f & 1 != 0).collect(),
+            points: xs.into_iter().zip(ys).collect(),
+            components: Vec::new(),
+            x_min,
+        })
+    }
+
+    /// The glyph's advance and left side bearing, from `hhea` and `hmtx`.
+    pub fn horizontal(face: &[u8], index: u16) -> (i32, i32) {
+        let hhea = table(face, b"hhea").expect("hhea");
+        let hmtx = table(face, b"hmtx").expect("hmtx");
+        let long = usize::from(u16_at(hhea, 34));
+        let i = usize::from(index);
+        if i < long {
+            (
+                i32::from(u16_at(hmtx, i * 4)),
+                i32::from(i16_at(hmtx, i * 4 + 2)),
+            )
+        } else {
+            (
+                i32::from(u16_at(hmtx, (long - 1) * 4)),
+                i32::from(i16_at(hmtx, long * 4 + (i - long) * 2)),
+            )
+        }
+    }
+
+    /// `hhea`'s ascender and descender.
+    pub fn ascender_descender(face: &[u8]) -> (i32, i32) {
+        let hhea = table(face, b"hhea").expect("hhea");
+        (i32::from(i16_at(hhea, 4)), i32::from(i16_at(hhea, 6)))
+    }
+
+    /// Packed point numbers at `at`: `None` for every point.
+    fn points(data: &[u8], at: &mut usize) -> Option<Vec<u16>> {
+        let first = data[*at];
+        *at += 1;
+        if first == 0 {
+            return None;
+        }
+        let count = if first & 0x80 != 0 {
+            let low = data[*at];
+            *at += 1;
+            (usize::from(first & 0x7F) << 8) | usize::from(low)
+        } else {
+            usize::from(first)
+        };
+        let mut numbers = Vec::with_capacity(count);
+        let mut value = 0u16;
+        while numbers.len() < count {
+            let control = data[*at];
+            *at += 1;
+            for _ in 0..=(control & 0x7F) {
+                let step = if control & 0x80 != 0 {
+                    let v = u16_at(data, *at);
+                    *at += 2;
+                    v
+                } else {
+                    let v = u16::from(data[*at]);
+                    *at += 1;
+                    v
+                };
+                value += step;
+                numbers.push(value);
+            }
+        }
+        Some(numbers)
+    }
+
+    /// `count` packed deltas at `at`.
+    fn deltas(data: &[u8], at: &mut usize, count: usize) -> Vec<i32> {
+        let mut out = Vec::with_capacity(count);
+        while out.len() < count {
+            let control = data[*at];
+            *at += 1;
+            let run = usize::from(control & 0x3F) + 1;
+            for _ in 0..run {
+                let value = if control & 0x80 != 0 {
+                    0
+                } else if control & 0x40 != 0 {
+                    let v = i32::from(i16_at(data, *at));
+                    *at += 2;
+                    v
+                } else {
+                    let v = i32::from(data[*at] as i8);
+                    *at += 1;
+                    v
+                };
+                out.push(value);
+            }
+        }
+        out
+    }
+
+    /// The glyph's variation data over `items` items, every peak resolved,
+    /// as the test's tables state theirs.
+    pub fn variations(face: &[u8], index: u16, items: usize) -> Option<GlyphVariation> {
+        let gvar = table(face, b"gvar").expect("gvar");
+        let axes = usize::from(u16_at(gvar, 4));
+        let shared_count = usize::from(u16_at(gvar, 6));
+        let shared_at = u32_at(gvar, 8) as usize;
+        let glyphs = usize::from(u16_at(gvar, 12));
+        let long = u16_at(gvar, 14) & 1 != 0;
+        let array_at = u32_at(gvar, 16) as usize;
+        let i = usize::from(index);
+        if i >= glyphs {
+            return None;
+        }
+        let offset = |k: usize| {
+            if long {
+                u32_at(gvar, 20 + k * 4) as usize
+            } else {
+                usize::from(u16_at(gvar, 20 + k * 2)) * 2
+            }
+        };
+        let (start, end) = (offset(i), offset(i + 1));
+        if end == start {
+            return None;
+        }
+        let data = &gvar[array_at + start..array_at + end];
+        let tuple =
+            |at: usize| -> Vec<i16> { (0..axes).map(|a| i16_at(data, at + a * 2)).collect() };
+        let shared_tuple = |k: usize| -> Vec<i16> {
+            assert!(k < shared_count, "a shared tuple");
+            (0..axes)
+                .map(|a| i16_at(gvar, shared_at + (k * axes + a) * 2))
+                .collect()
+        };
+        let packed = u16_at(data, 0);
+        let mut serialized = usize::from(u16_at(data, 2));
+        let shared_points = if packed & 0x8000 != 0 {
+            Some(points(data, &mut serialized))
+        } else {
+            None
+        };
+        let mut at = 4;
+        let mut tuples = Vec::new();
+        for _ in 0..(packed & 0x0FFF) {
+            let size = usize::from(u16_at(data, at));
+            let flags = u16_at(data, at + 2);
+            at += 4;
+            let peak = if flags & 0x8000 != 0 {
+                let peak = tuple(at);
+                at += axes * 2;
+                peak
+            } else {
+                shared_tuple(usize::from(flags & 0x0FFF))
+            };
+            let intermediate = (flags & 0x4000 != 0).then(|| {
+                let between = (tuple(at), tuple(at + axes * 2));
+                at += axes * 4;
+                between
+            });
+            let mut cursor = serialized;
+            let private = (flags & 0x2000 != 0).then(|| points(data, &mut cursor));
+            let numbers = private
+                .clone()
+                .or_else(|| shared_points.clone())
+                .expect("points, private or shared");
+            let count = numbers.as_ref().map_or(items, Vec::len);
+            let values = deltas(data, &mut cursor, count * 2);
+            serialized += size;
+            tuples.push(TupleSpec {
+                peak,
+                intermediate,
+                shared_peak: None,
+                points: private.map(|p| p.map_or(Points::All, Points::Listed)),
+                deltas: values,
+            });
+        }
+        Some(GlyphVariation {
+            shared_points: shared_points.map(|p| p.map_or(Points::All, Points::Listed)),
+            tuples,
+        })
+    }
+}
+
+/// A `TestGPOSFour.ttf` glyph's items with their default positions — its
+/// points, or one placeholder a component — and its phantom points, from the
+/// second reader's `hmtx` metrics and `hhea`'s ascender and descender.
+fn gpos_four_items(glyph: Option<&outline_reader::Glyph>, index: u16) -> Vec<(i32, i32)> {
+    let (advance, lsb) = outline_reader::horizontal(TEST_GPOS_FOUR, index);
+    let (ascender, descender) = outline_reader::ascender_descender(TEST_GPOS_FOUR);
+    let (mut items, x_min) = match glyph {
+        Some(g) if g.components.is_empty() => (g.points.clone(), g.x_min),
+        Some(g) => (vec![(0, 0); g.components.len()], g.x_min),
+        None => (Vec::new(), 0),
+    };
+    items.extend([
+        (x_min - lsb, 0),
+        (x_min - lsb + advance, 0),
+        (0, ascender),
+        (0, descender),
+    ]);
+    items
+}
+
+/// A `TestGPOSFour.ttf` glyph's net deltas over its items at 2.14
+/// coordinates, from what the second reader decoded.
+fn gpos_four_deltas(
+    glyph: Option<&outline_reader::Glyph>,
+    index: u16,
+    items: &[(i32, i32)],
+    coordinates: &[i16],
+) -> Vec<[i64; 2]> {
+    let Some(variation) = outline_reader::variations(TEST_GPOS_FOUR, index, items.len()) else {
+        return vec![[0, 0]; items.len()];
+    };
+    let contours = match glyph {
+        Some(g) if !g.components.is_empty() => None,
+        Some(g) => Some(g.contours.clone()),
+        None => Some(Vec::new()),
+    };
+    spec::glyph_deltas(items, contours.as_deref(), &variation, coordinates)
+}
+
+/// A `TestGPOSFour.ttf` glyph's phantom points at 2.14 coordinates, from the
+/// second reader: its default ones moved by its deltas, or its
+/// `USE_MY_METRICS` component's.
+fn gpos_four_phantoms(index: u16, coordinates: &[i16]) -> [[i64; 2]; 4] {
+    let glyph = outline_reader::glyph(TEST_GPOS_FOUR, index);
+    if let Some(metrics) = glyph
+        .as_ref()
+        .and_then(|g| g.components.iter().rev().find(|c| c.flags & 0x0200 != 0))
+    {
+        return gpos_four_phantoms(metrics.glyph, coordinates);
+    }
+    let items = gpos_four_items(glyph.as_ref(), index);
+    let deltas = gpos_four_deltas(glyph.as_ref(), index, &items, coordinates);
+    let n = items.len() - 4;
+    let mut out = [[0i64; 2]; 4];
+    for (k, slot) in out.iter_mut().enumerate() {
+        *slot = [
+            i64::from(items[n + k].0) * 65_536 + deltas[n + k][0],
+            i64::from(items[n + k].1) * 65_536 + deltas[n + k][1],
+        ];
+    }
+    out
+}
+
+/// A `TestGPOSFour.ttf` glyph's outline at 2.14 coordinates, from the second
+/// reader: its points, or its components' offsets, plus the deltas the
+/// specification computes from what that reader decoded.
+fn gpos_four_outline(
+    index: u16,
+    coordinates: &[i16],
+    placement: Placement,
+    out: &mut Vec<Segment>,
+) {
+    let Some(glyph) = outline_reader::glyph(TEST_GPOS_FOUR, index) else {
+        return;
+    };
+    let items = gpos_four_items(Some(&glyph), index);
+    let deltas = gpos_four_deltas(Some(&glyph), index, &items, coordinates);
+    if !glyph.components.is_empty() {
+        for (p, component) in glyph.components.iter().enumerate() {
+            let offset = (
+                units(i64::from(component.x) * 65_536 + deltas[p][0]),
+                units(i64::from(component.y) * 65_536 + deltas[p][1]),
+            );
+            let child = component_placement(placement, [1.0, 0.0, 0.0, 1.0], offset);
+            gpos_four_outline(component.glyph, coordinates, child, out);
+        }
+        return;
+    }
+    let positions: Vec<(f64, f64)> = glyph
+        .points
+        .iter()
+        .zip(&deltas)
+        .map(|(p, d)| {
+            (
+                units(i64::from(p.0) * 65_536 + d[0]),
+                units(i64::from(p.1) * 65_536 + d[1]),
+            )
+        })
+        .collect();
+    drawn(
+        &positions,
+        &glyph.on,
+        &glyph.contours,
+        &placed(placement),
+        out,
+    );
+}
+
+#[test]
+fn test_gpos_fours_glyphs_at_its_named_instances_equal_a_second_readers() {
+    let sfnt = Sfnt::parse(TEST_GPOS_FOUR).expect("the face parses");
+    let space = DesignSpace::read(&sfnt).expect("its design space");
+    let gvar = Gvar::read(&sfnt, &space)
+        .expect("gvar is read")
+        .expect("it carries one");
+    assert_eq!(gvar.glyph_count(), 13);
+    assert!(
+        sfnt.table(u32::from_be_bytes(*b"HVAR")).is_none(),
+        "no HVAR"
+    );
+    let mut moved = 0usize;
+    for index in 0..u16::try_from(space.instances().len()).expect("few") {
+        let location = space.location(&Instance::Named(index)).expect("a location");
+        let coordinates = location.coordinates().to_vec();
+        for glyph in 0u16..13 {
+            let mut expected = Vec::new();
+            gpos_four_outline(glyph, &coordinates, UNPLACED, &mut expected);
+            let outline =
+                glyf::outline_at(&sfnt, glyph, Some(&gvar), &location).expect("an outline");
+            assert_eq!(
+                outline.segments, expected,
+                "glyph {glyph} at named instance {index}"
+            );
+            if outline.segments != glyf::outline(&sfnt, glyph).expect("an outline").segments {
+                moved += 1;
+            }
+            let phantom =
+                glyf::phantom_points_at(&sfnt, glyph, Some(&gvar), &location).expect("points");
+            assert_eq!(
+                phantom.map(|p| [p[0].bits(), p[1].bits()]),
+                gpos_four_phantoms(glyph, &coordinates),
+                "glyph {glyph}'s phantom points at named instance {index}"
+            );
+        }
+    }
+    assert!(moved > 0, "the named instances move the outlines");
+}
+
+// ---- gvar's refusals and bounds ------------------------------------------------
+
+#[test]
+fn hostile_gvar_tables_are_refused_by_name() {
+    let good = variable_support::gvar(2, &gvar_shared_tuples(), &gvar_variations(), false);
+    assert!(Gvar::parse(&good, 2).is_ok());
+    let tag = *b"gvar";
+    assert_eq!(
+        Gvar::parse(&good[..19], 2).err(),
+        Some(VariationError::HeaderPastEnd { table: tag })
+    );
+    let mut version = good.clone();
+    version[0..2].copy_from_slice(&2u16.to_be_bytes());
+    assert_eq!(
+        Gvar::parse(&version, 2).err(),
+        Some(VariationError::UnknownVersion {
+            table: tag,
+            major: 2,
+            minor: 0
+        })
+    );
+    assert_eq!(
+        Gvar::parse(&good, 3).err(),
+        Some(VariationError::AxisCount {
+            table: tag,
+            found: 2,
+            expected: 3
+        })
+    );
+    // Offsets for more glyphs than the table holds.
+    let mut glyphs = good.clone();
+    glyphs[12..14].copy_from_slice(&40_000u16.to_be_bytes());
+    assert_eq!(
+        Gvar::parse(&glyphs, 2).err(),
+        Some(VariationError::GlyphOffsetsPastEnd { count: 40_000 })
+    );
+    // Shared tuples past the end, by their count and by their offset.
+    let mut shared = good.clone();
+    shared[6..8].copy_from_slice(&30_000u16.to_be_bytes());
+    assert_eq!(
+        Gvar::parse(&shared, 2).err(),
+        Some(VariationError::SharedTuplesPastEnd { count: 30_000 })
+    );
+    let mut shared_at = good.clone();
+    shared_at[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert_eq!(
+        Gvar::parse(&shared_at, 2).err(),
+        Some(VariationError::SharedTuplesPastEnd { count: 3 })
+    );
+    // Glyph 1's offsets decreasing, and its data past the table.
+    let mut decreasing = good.clone();
+    decreasing[22..24].copy_from_slice(&u16::MAX.to_be_bytes());
+    let parsed = Gvar::parse(&decreasing, 2).expect("the header is sound");
+    assert_eq!(
+        parsed.glyph(1).err(),
+        Some(VariationError::GlyphDataOffsets { glyph: 1 })
+    );
+    let mut past = good.clone();
+    past[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
+    let parsed = Gvar::parse(&past, 2).expect("the header is sound");
+    assert_eq!(
+        parsed.glyph(1).err(),
+        Some(VariationError::GlyphDataPastEnd { glyph: 1 })
+    );
+    assert!(
+        parsed.glyph(5).expect("no data").is_none(),
+        "a glyph with no data reads none"
+    );
+    // A glyph past the table's count has no data.
+    let parsed = Gvar::parse(&good, 2).expect("parses");
+    assert!(parsed.glyph(6).expect("none").is_none());
+    assert!(parsed.glyph(u16::MAX).expect("none").is_none());
+    // A refusal reaches the outline and the phantom points, which a caller
+    // then draws at its default.
+    let face = gvar_face(false, false);
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let gvar = Gvar::parse(&past, 2).expect("the header is sound");
+    let location = Location::new(vec![16_384, 0]);
+    for glyph in [1u16, 3, 4] {
+        assert_eq!(
+            glyf::outline_at(&sfnt, glyph, Some(&gvar), &location).err(),
+            Some(VariationError::GlyphDataPastEnd { glyph }),
+            "glyph {glyph}"
+        );
+        assert_eq!(
+            glyf::phantom_points_at(&sfnt, glyph, Some(&gvar), &location).err(),
+            Some(VariationError::GlyphDataPastEnd {
+                glyph: if glyph == 3 { 1 } else { glyph }
+            }),
+            "glyph {glyph}'s phantom points, glyph 3's its USE_MY_METRICS component's"
+        );
+    }
+    assert!(
+        glyf::outline_at(&sfnt, 5, Some(&gvar), &location).is_ok(),
+        "a glyph with no data draws"
+    );
+    // A component's refusal is the composite's: glyph 3's own data reads,
+    // and glyph 1's offsets decrease.
+    let gvar = Gvar::parse(&decreasing, 2).expect("the header is sound");
+    assert!(gvar.glyph(3).is_ok());
+    assert_eq!(
+        glyf::outline_at(&sfnt, 3, Some(&gvar), &location).err(),
+        Some(VariationError::GlyphDataOffsets { glyph: 1 })
+    );
+}
+
+/// A one-contour glyph of `points` on-curve points, and variation data of
+/// `tables` tables each moving every point by nothing.
+fn heavy_glyph(points: usize, tables: usize) -> (Vec<u8>, GlyphVariation) {
+    let contour: Vec<GlyphPoint> = (0..points)
+        .map(|i| {
+            (
+                i32::try_from(i % 500).expect("small"),
+                i32::try_from(i / 500).expect("small"),
+                true,
+            )
+        })
+        .collect();
+    let deltas = vec![0; (points + 4) * 2];
+    let tuples = (0..tables)
+        .map(|_| TupleSpec::new(&[16_384, 0], Some(Points::All), &deltas))
+        .collect();
+    (
+        variable_support::simple_glyph(&[contour]),
+        GlyphVariation {
+            shared_points: None,
+            tuples,
+        },
+    )
+}
+
+/// A face of the heavy glyph and a composite drawing it `draws` times.
+fn heavy_face(points: usize, tables: usize, draws: usize) -> Vec<u8> {
+    let (glyph, variation) = heavy_glyph(points, tables);
+    let records: Vec<ComponentSpec> = (0..draws)
+        .map(|i| ComponentSpec::at(0, i32::try_from(i).expect("few"), 0))
+        .collect();
+    let composite = composite_glyph([0, 0, 500, 10], &records);
+    let (glyf, loca) = glyf_and_loca(&[glyph, composite]);
+    Face::truetype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .with(*b"glyf", glyf)
+        .with(*b"loca", loca)
+        .with(*b"head", head(1_000))
+        .with(*b"maxp", maxp(2))
+        .with(*b"hhea", hhea(2, (1, 0, 0)))
+        .with(*b"hmtx", metrics(&[(500, 0), (500, 0)], &[]))
+        .with(
+            *b"gvar",
+            variable_support::gvar(2, &[], &[Some(variation), None], true),
+        )
+        .build()
+}
+
+#[test]
+fn the_delta_work_of_an_outline_is_bounded() {
+    // 1 024 tables over 4 092 points and four phantom points is the bound
+    // exactly, and one table more passes it.
+    assert_eq!(MAX_GLYPH_DELTA_WORK, 1_024 * 4_096);
+    for (tables, refused) in [(1_024usize, false), (1_025, true)] {
+        let face = heavy_face(4_092, tables, 1);
+        let sfnt = Sfnt::parse(&face).expect("a face");
+        let space = DesignSpace::read(&sfnt).expect("a design space");
+        let gvar = Gvar::read(&sfnt, &space).expect("read").expect("present");
+        // Refused or not wherever it is asked, the default included.
+        for location in [space.default_location(), Location::new(vec![16_384, 0])] {
+            let outline = glyf::outline_at(&sfnt, 0, Some(&gvar), &location);
+            let raw = glyf::simple_glyph(&sfnt, 0).expect("a simple glyph");
+            if refused {
+                assert_eq!(
+                    outline.err(),
+                    Some(VariationError::GlyphDeltaWork { glyph: 0 })
+                );
+                assert_eq!(
+                    gvar.simple_deltas(0, &raw, &location).err(),
+                    Some(VariationError::GlyphDeltaWork { glyph: 0 })
+                );
+            } else {
+                assert_eq!(
+                    outline.expect("an outline").segments,
+                    glyf::outline(&sfnt, 0).expect("an outline").segments,
+                    "zero deltas move nothing"
+                );
+                assert!(gvar.simple_deltas(0, &raw, &location).is_ok());
+            }
+        }
+    }
+    // The bound is the whole outline's: a composite that draws a glyph of
+    // two thirds of it twice is refused, and once is not.
+    for (draws, refused) in [(1usize, false), (2, true)] {
+        let face = heavy_face(4_092, 700, draws);
+        let sfnt = Sfnt::parse(&face).expect("a face");
+        let space = DesignSpace::read(&sfnt).expect("a design space");
+        let gvar = Gvar::read(&sfnt, &space).expect("read").expect("present");
+        let location = Location::new(vec![16_384, 0]);
+        let outline = glyf::outline_at(&sfnt, 1, Some(&gvar), &location);
+        if refused {
+            assert_eq!(
+                outline.err(),
+                Some(VariationError::GlyphDeltaWork { glyph: 0 }),
+                "{draws} draws"
+            );
+        } else {
+            assert!(outline.is_ok(), "{draws} draws");
+        }
+        // The glyph alone stays within it however often it is asked for.
+        assert!(glyf::outline_at(&sfnt, 0, Some(&gvar), &location).is_ok());
+    }
+}
+
+#[test]
+fn every_truncation_and_byte_change_of_a_gvar_is_read_or_refused_without_panicking() {
+    let table = variable_support::gvar(2, &gvar_shared_tuples(), &gvar_variations(), false);
+    let face = gvar_face(false, true);
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let locations = [
+        Location::new(vec![16_384, 0]),
+        Location::new(vec![-8_192, 12_000]),
+        Location::new(vec![4_096, -16_384]),
+    ];
+    let exercise = |bytes: &[u8]| {
+        let Ok(gvar) = Gvar::parse(bytes, 2) else {
+            return;
+        };
+        for glyph in 0u16..7 {
+            let _ = gvar.glyph(glyph);
+            for location in &locations {
+                let _ = glyf::outline_at(&sfnt, glyph, Some(&gvar), location);
+                let _ = glyf::phantom_points_at(&sfnt, glyph, Some(&gvar), location);
+                if let Some(raw) = glyf::simple_glyph(&sfnt, glyph) {
+                    let _ = gvar.simple_deltas(glyph, &raw, location);
+                }
+                let _ = gvar.composite_deltas(glyph, 3, location);
+                let _ = gvar.phantom_deltas(glyph, 9, false, location);
+            }
+        }
+    };
+    for cut in 0..table.len() {
+        exercise(&table[..cut]);
+    }
+    for at in 0..table.len() {
+        for value in [0x00, 0x7F, 0x80, 0xFF] {
+            let mut changed = table.clone();
+            changed[at] = value;
+            exercise(&changed);
+        }
+    }
 }
