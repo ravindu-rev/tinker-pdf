@@ -46,6 +46,11 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "a_display_list_replays_every_fingerprinted_page_byte_for_byte",
     },
+    // The SVG writer's output for every fingerprinted page.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "svg_output_is_stable_across_targets",
+    },
     // The archival packet's hash.
     Fingerprint {
         file: "crates/tinker-pdf/tests/pdfa_writer.rs",

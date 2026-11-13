@@ -60,6 +60,7 @@ use std::sync::Arc;
 
 use tinker_pdf::{
     Document, DocumentBuilder, OpenOptions, RenderOptions, RenderWarning, SimpleFontProvider,
+    SvgOptions, SvgWarning,
 };
 
 mod render_support;
@@ -127,9 +128,9 @@ fn book_face() -> Arc<SimpleFontProvider> {
     Arc::new(SimpleFontProvider::new(curvy_font()))
 }
 
-/// The rendered bytes of one page, hashed.
-fn fingerprint(fixture: &Fixture) -> String {
-    let (document, at) = match fixture.open {
+/// A fixture's document, opened as [`Open`] says, and the page it hashes.
+fn opened(fixture: &Fixture) -> (Document, u32) {
+    match fixture.open {
         Open::Closed => (Document::open((fixture.build)()).expect("it opens"), 0),
         Open::Book { page, at } => (
             Document::open_with(
@@ -139,7 +140,12 @@ fn fingerprint(fixture: &Fixture) -> String {
             .expect("it opens"),
             at,
         ),
-    };
+    }
+}
+
+/// The rendered bytes of one page, hashed.
+fn fingerprint(fixture: &Fixture) -> String {
+    let (document, at) = opened(fixture);
     let bitmap = document
         .page(at)
         .expect("a page")
@@ -2467,6 +2473,184 @@ fn rendering_is_stable_across_targets() {
     );
 }
 
+/// One fingerprinted page written as SVG with the default [`SvgOptions`], its
+/// markup hashed.
+///
+/// The page is the one [`fingerprint`] renders, held to the same two guards
+/// before it is hashed: it draws something, and nothing it draws is missing
+/// for want of a face. An SVG that holds no drawing element is this format's
+/// blank page, and as stable on every target as a blank render is. A third
+/// guard is the format's own: a document cut off at its budget is a hash of
+/// part of the page.
+fn svg_fingerprint(fixture: &Fixture) -> String {
+    let (document, at) = opened(fixture);
+    let svg = document
+        .page(at)
+        .expect("a page")
+        .to_svg(&SvgOptions::default());
+    let drawn: usize = ["<path", "<image", "<use"]
+        .iter()
+        .map(|element| svg.markup.matches(element).count())
+        .sum();
+    assert!(
+        drawn > 0,
+        "the {} fixture's SVG holds no drawing element, so its hash is not \
+         evidence about anything. Warnings: {:?}",
+        fixture.name,
+        svg.warnings,
+    );
+    assert!(
+        !svg.warnings
+            .contains(&SvgWarning::Render(RenderWarning::UnreadableFont)),
+        "the {} fixture's SVG names a font this build cannot draw, so its \
+         glyphs are missing from the hash",
+        fixture.name,
+    );
+    assert!(
+        !svg.warnings
+            .iter()
+            .any(|warning| matches!(warning, SvgWarning::Truncated { .. })),
+        "the {} fixture's SVG reached its budget, so the hash is of part of \
+         the page",
+        fixture.name,
+    );
+    sha(svg.markup.as_bytes())
+}
+
+/// **`Page::to_svg` writes the same bytes on every target**: every page the
+/// render fingerprints cover, written as SVG with the default [`SvgOptions`],
+/// hashes to the value committed here.
+///
+/// What the markup is made of is arithmetic a render does not show: every
+/// coordinate rounded to four places through `f64::round` and printed at its
+/// shortest, each stroke's pen measured through the transform, and what the
+/// writer rasterises — a mesh, a tiling pattern, a shading no gradient states
+/// exactly — drawn by the renderer at `raster_scale` and written through the
+/// PNG encoder into a `data:` URI. Text is written as the outlines of the
+/// fixtures' own faces, so one table serves the default and `bundled-fonts`
+/// builds.
+#[test]
+fn svg_output_is_stable_across_targets() {
+    // A mismatch prints the replacement lines ready to paste; the length check
+    // is there because an empty table would pass by not looking.
+    let expected: &[(&str, &str)] = &[
+        (
+            "text",
+            "8cc277d52c2fa5ac801cd27120f9adbd2943f71ed5b3d69bc30b0a6e046f1a1a",
+        ),
+        (
+            "gs_text",
+            "8cc277d52c2fa5ac801cd27120f9adbd2943f71ed5b3d69bc30b0a6e046f1a1a",
+        ),
+        (
+            "curves",
+            "ca9b075cb334ca5e8dd8401d395f06f7da5af0df021c31493fa9aac497344b27",
+        ),
+        (
+            "shading",
+            "34ca88c83c577afe0f14c9b38f2b2dc9c3155a10b004889a625df8854622b07b",
+        ),
+        (
+            "blend",
+            "06aa852116a67b121d1f7ccdbde7aea0aabdf8596d19a1c9afcd8afc28c65b50",
+        ),
+        (
+            "pattern",
+            "5494551e8a1e1dca71ab8ff7e94cd9e5c5ec260221ec8cddd8c8c6dae841e8fc",
+        ),
+        (
+            "optional",
+            "358782a7a63e63938294c0323e349d293a25d8c1d7303e5e099ac26aee8b8ace",
+        ),
+        (
+            "image",
+            "f3a3492d5d30bec7cb3b531e7e5241e504d55a86c6b668fe9951ac23e6e2315e",
+        ),
+        (
+            "transparency",
+            "510840230ffef1ffda567ce242181acd3b4082e851c97dcdbed84b7d9cf96070",
+        ),
+        (
+            "tiling",
+            "b61ee3c2e2fdf8d84b62f925bce7c910f5b942e77aaa4299b3b50837bafddbde",
+        ),
+        (
+            "jbig2",
+            "53f4ce1899c7b06c31a69c19f7efe663bffd5b4eaca430d4ef9e20d41d223ad6",
+        ),
+        (
+            "mesh",
+            "ac3f390525f659fd802f3b6f7002752f727fefc2cd5bb9cc5294a79316de1654",
+        ),
+        (
+            "jpx",
+            "ab8df2a73b15a4b922dd286b603cadcab7c6c137f0558584817140a31c4ab1ec",
+        ),
+        (
+            "cbz",
+            "77aad756a02f1f5431828bddcb50c1cdd555a406c099fa7e1735e0981cd23e92",
+        ),
+        (
+            "xps",
+            "7002837758fdfcf2bb8a3753f44a4c2f53f0385546704109d421986df6531840",
+        ),
+        (
+            "epub",
+            "ef3c3ae7ddc44f2d8a22b0b0589efde0d1d09894217ae9afeb6cbea3705f9a30",
+        ),
+        (
+            "analytic_axial",
+            "1e554b33f30b7f6ee657b6099ad1611567158a1114c3cced45d46db58fdbbe0c",
+        ),
+        (
+            "analytic_radial",
+            "1da7340a402730866089f55876f6542de0abbde845e8458692c473317fca84da",
+        ),
+        (
+            "analytic_blend",
+            "4c809ac3056a114c1d7004cac59ca93a3c4e6e925db3a82b1b2aa08fba8fa085",
+        ),
+        (
+            "analytic_image",
+            "5d845a5952a5c2bd8577dfc61e14765a8da52ae6bb921e0f3f77be096fa4d7b3",
+        ),
+        (
+            "default_spaces",
+            "25633d01d2416d190d121513c742c7e4ba02034096fbe9146639bd7473b93ee3",
+        ),
+    ];
+    assert_eq!(
+        expected.len(),
+        GOLDEN.len(),
+        "every page has an SVG hash, or the test passes by not looking"
+    );
+
+    let mut wrong = Vec::new();
+    for fixture in GOLDEN {
+        let actual = svg_fingerprint(fixture);
+        let want = expected
+            .iter()
+            .find(|(n, _)| *n == fixture.name)
+            .map(|(_, h)| *h)
+            .unwrap_or_default();
+        if actual != want {
+            let name = fixture.name;
+            wrong.push(format!("        (\"{name}\", \"{actual}\"),"));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the SVG output does not match the committed hashes.\n\n\
+         If two targets disagree, this is a determinism bug — find the \
+         arithmetic that is not target-stable, do not update the table.\n\
+         If the SVG writer or the renderer changed deliberately, write the \
+         page out with `Page::to_svg` and read the difference first, then \
+         paste these in:\n\n{}\n",
+        wrong.join("\n")
+    );
+}
+
 /// The bytes the CBZ synthesiser hands `CosDocument::open`, hashed.
 ///
 /// *Added August 2026, with gap 29 milestone 6.* The `cbz` fingerprint above
@@ -2767,17 +2951,7 @@ fn rendering_is_stable_within_one_process() {
 #[test]
 fn a_display_list_replays_every_fingerprinted_page_byte_for_byte() {
     for fixture in GOLDEN {
-        let (document, at) = match fixture.open {
-            Open::Closed => (Document::open((fixture.build)()).expect("it opens"), 0),
-            Open::Book { page, at } => (
-                Document::open_with(
-                    (fixture.build)(),
-                    &OpenOptions::at_page(page.0, page.1).with_fonts(book_face()),
-                )
-                .expect("it opens"),
-                at,
-            ),
-        };
+        let (document, at) = opened(fixture);
         let page = document.page(at).expect("a page");
         let list = page.display_list();
         assert!(

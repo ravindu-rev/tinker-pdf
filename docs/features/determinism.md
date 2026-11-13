@@ -87,6 +87,17 @@ same file holds that the defaults did not move: the blend grid's default render
 there is this table's `analytic_blend`, copied. The local `wasm32-wasip1` run
 takes that file as well.
 
+**The SVG writer's output** is pinned beside the render fingerprints:
+`svg_output_is_stable_across_targets` writes every page of the table with the
+default `SvgOptions` and holds the SHA-256 of its markup to a committed value.
+The markup carries arithmetic a render does not show — each coordinate
+rounded to four places and printed at its shortest, each pen measured
+through its transform — and what the writer rasterises reaches it through the
+renderer and the PNG encoder. Text is written as the outlines of the
+fixtures' own faces, so one table serves both builds. Each page is held to
+write at least one drawing element, and to report neither an unreadable font
+nor a truncation, before it is hashed.
+
 Beside them, **document byte-hashes** pin the writer as well as the renderer:
 a synthesised PDF, a synthesised fixed-layout document and a synthesised book
 are each hashed as *bytes*, which is where object numbering, dictionary key
@@ -128,8 +139,9 @@ file. That is
 not green".
 
 **The determinism roster** (`xtask/src/determinism.rs`) names them:
-`determinism.rs`'s render fingerprints, its three synthesised documents'
-byte hashes and its display list's replay of every fingerprinted page;
+`determinism.rs`'s render fingerprints, its SVG output's hashes, its three
+synthesised documents' byte hashes and its display list's replay of every
+fingerprinted page;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, and
 hard-edged output; the shaper's two fingerprints; and the guard suite's

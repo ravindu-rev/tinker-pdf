@@ -758,10 +758,11 @@ written) and accuracy, a type 5's halftone per colorant, a threshold
 halftone's dimensions — with each threshold array kept by its stream's
 reference, decoded only where a render screens with it; a halftone of the
 wrong shape is absent, never a refusal of the page.
-The output is the same bytes every time, and nothing on its path calls a
-transcendental, so ruling 4's argument covers it; no SVG fingerprint is
-committed beside `determinism.rs`'s, so the cross-target claim is argued
-rather than measured.
+The output is the same bytes every time and on every target that runs the
+fingerprints: `determinism.rs`'s `svg_output_is_stable_across_targets` writes
+every page the render fingerprints cover with the default `SvgOptions` and
+holds the SHA-256 of its markup to a committed value, on Linux, Windows and
+`wasm32-wasip1` ([determinism](determinism.md)).
 
 `Page::render_form(name, options)` and `Page::render_annotation(index,
 options)` return `Result<Bitmap, RenderPartError>`: one part of the page,
