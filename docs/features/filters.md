@@ -62,7 +62,11 @@ takes a longer match one byte on, the byte before it a literal, and drops a
 three-byte match further back than 4 096 bytes. `ZlibDeflater` wraps it in
 RFC 1950's header and a running Adler-32, and `deflate_at` and
 `zlib_compress_at` feed either one a whole input. LZWDecode (7.4.4) covers 9-to-12-bit variable codes, Clear/EOD and
-both `/EarlyChange` values. ASCIIHexDecode (7.4.2), ASCII85Decode (7.4.3) and
+both `/EarlyChange` values. Its table keeps each code's prefix code, last
+byte and string length, so a code's string is written from its last byte to
+its first straight into room made for it at the output's end, each output
+byte written once, and codes come out of a 64-bit buffer refilled eight
+bytes at a time. ASCIIHexDecode (7.4.2), ASCII85Decode (7.4.3) and
 RunLengthDecode (7.4.5) round out the set, and the Table 10 predictors
 (7.4.4.4) implement `/Predictor 2` (TIFF horizontal) and the five PNG row
 filters. `apply_chain` runs a `/Filter` chain in order; an image codec

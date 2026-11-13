@@ -18,7 +18,9 @@
 //!   different code paths rather than four names for one.
 //! - [`encode_lzw`] emits both bit orders and both width rules from one code
 //!   stream, which is the only way to test [`super::transcode_old_style_lzw`]
-//!   against something that is not itself.
+//!   against something that is not itself. Its packer, [`pack_lzw`], is the
+//!   crate's one LZW encoder, and `lzw.rs`'s tests pack their code streams
+//!   with it.
 //! - [`flat_jpeg`] is a baseline T.81 datastream in the abbreviated form
 //!   TIFF Technical Note 2 describes, so the `JPEGTables` splice has two halves
 //!   to put together.
@@ -374,6 +376,25 @@ fn encode_packbits(input: &[u8]) -> Vec<u8> {
 /// the two width rules still diverge, which is the whole of the difference
 /// between the two forms.
 fn encode_lzw(input: &[u8], msb_first: bool, early_change: bool) -> Vec<u8> {
+    // Each literal after the first adds an entry from 258 on, and the
+    // fixture stays clear of a full table.
+    assert!(input.len() < 3_743, "the fixture would fill the table");
+    let mut codes = vec![256];
+    codes.extend(input.iter().map(|&byte| u16::from(byte)));
+    codes.push(257);
+    pack_lzw(&codes, msb_first, early_change)
+}
+
+/// `codes` packed in whichever bit order and under whichever width rule is
+/// asked for, each at the width a decoder reads it at: the decoder's table
+/// gains an entry for each code after the first since a Clear, up to 4 096
+/// codes, a Clear empties it, and its size sets the width (`width_for`).
+///
+/// [`encode_lzw`] packs its literals with it, and `lzw.rs`'s tests their
+/// random code streams, whose codes name entries, the one code not yet
+/// defined, Clear codes and a full table, so one encoder writes every LZW
+/// stream the crate's tests decode.
+pub(crate) fn pack_lzw(codes: &[u16], msb_first: bool, early_change: bool) -> Vec<u8> {
     let early = u32::from(early_change);
     let mut out: Vec<u8> = Vec::new();
     let mut acc = 0u32;
@@ -400,23 +421,18 @@ fn encode_lzw(input: &[u8], msb_first: bool, early_change: bool) -> Vec<u8> {
         }
     };
 
-    push(256, width_for(next, early), &mut out, &mut acc, &mut bits);
-    for &byte in input {
-        push(
-            u16::from(byte),
-            width_for(next, early),
-            &mut out,
-            &mut acc,
-            &mut bits,
-        );
-        if seen {
-            next += 1;
-        } else {
-            seen = true;
+    for &code in codes {
+        push(code, width_for(next, early), &mut out, &mut acc, &mut bits);
+        match code {
+            256 => {
+                next = 258;
+                seen = false;
+            }
+            257 => {}
+            _ if seen => next = (next + 1).min(4096),
+            _ => seen = true,
         }
-        assert!(next < 4000, "the fixture would fill the table");
     }
-    push(257, width_for(next, early), &mut out, &mut acc, &mut bits);
     if bits > 0 {
         if msb_first {
             out.push((acc << (8 - bits)) as u8);
