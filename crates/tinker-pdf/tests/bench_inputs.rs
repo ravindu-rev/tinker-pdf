@@ -454,6 +454,138 @@ fn the_column_face_shapes_its_paragraph_as_a_column() {
     }
 }
 
+/// **The variable faces hold the instances the fonts group names**
+/// (FT-05.17a): `inputs::variable_face` reads the two faces
+/// `tinker-pdf-font` commits for its variation tests, and the fifth named
+/// instance of each, which the group's four variable operations draw and
+/// write, is the one their names give — `Condensed Bold`, `wght` 700 and
+/// `wdth` 75, in the `glyf` face, and `Wide Black`, `wght` 900 and `wdth`
+/// 125, in the CFF2 face — standing away from the face's default. Each face
+/// has the glyphs the operations count, every one of them outlined there
+/// and all but the space drawing contours, and its instance is written as a
+/// face with no variation table, its outlines in `glyf` or `CFF `. The two
+/// static-instance operations' lists count a whole number of the face's
+/// bytes an iteration.
+#[test]
+fn the_variable_faces_hold_the_instances_the_fonts_group_names() {
+    use tinker_pdf_font::cff::Machine;
+    use tinker_pdf_font::variation::gvar::Gvar;
+    use tinker_pdf_font::variation::{DesignSpace, Fixed, Instance};
+    use tinker_pdf_font::{glyf, instance, Cff, Cff2, Outline, Sfnt};
+
+    let listed = list::committed("fonts");
+    let bytes_listed = |name: &str| {
+        listed
+            .iter()
+            .find(|operation| operation.name == name)
+            .unwrap_or_else(|| panic!("the fonts list holds `{name}`"))
+            .per_iteration
+    };
+    for (file, glyphs, coordinates, outlines, written) in [
+        (
+            "variable-glyf.ttf",
+            8u16,
+            vec![700, 75, 0, 12],
+            *b"glyf",
+            "a static Condensed Bold instance of variable-glyf.ttf",
+        ),
+        (
+            "variable-cff2.otf",
+            7,
+            vec![900, 125],
+            *b"CFF ",
+            "a static Wide Black instance of variable-cff2.otf",
+        ),
+    ] {
+        let bytes = inputs::variable_face(file);
+        let face = Sfnt::parse(&bytes).unwrap_or_else(|| panic!("{file} parses"));
+        assert_eq!(face.glyph_count(), Some(glyphs), "{file}'s glyphs");
+        let space = DesignSpace::read(&face).expect("its design space is read");
+        let named = space
+            .instances()
+            .get(4)
+            .unwrap_or_else(|| panic!("{file} names a fifth instance"));
+        let expected: Vec<Fixed> = coordinates
+            .iter()
+            .map(|&value| Fixed::from_int(value))
+            .collect();
+        assert_eq!(named.coordinates, expected, "{file}'s fifth instance");
+        let location = space
+            .location(&Instance::Named(4))
+            .expect("the instance is located");
+        assert!(
+            !location.is_default(),
+            "{file}'s instance is not its default"
+        );
+
+        // Every glyph outlined at the instance, all but the space drawing.
+        let drawn: Vec<bool> = if let Some(table) = face.table(u32::from_be_bytes(*b"CFF2")) {
+            let cff2 = Cff2::parse(table).expect("the CFF2 table parses");
+            let blends = cff2
+                .blends_in(&space, &location)
+                .expect("the store's axes are fvar's");
+            let mut machine = Machine::new();
+            let mut outline = Outline::default();
+            (0..glyphs)
+                .map(|glyph| {
+                    cff2.outline_with(glyph, &blends, &mut outline, &mut machine)
+                        .unwrap_or_else(|error| panic!("{file}'s glyph {glyph}: {error}"));
+                    !outline.is_empty()
+                })
+                .collect()
+        } else {
+            let gvar = Gvar::read(&face, &space)
+                .expect("gvar is read")
+                .expect("the face carries gvar");
+            (0..glyphs)
+                .map(|glyph| {
+                    !glyf::outline_at(&face, glyph, Some(&gvar), &location)
+                        .unwrap_or_else(|error| panic!("{file}'s glyph {glyph}: {error}"))
+                        .is_empty()
+                })
+                .collect()
+        };
+        let space_glyph = usize::from(face.glyph_for_char(' ').expect("a space"));
+        for (glyph, draws) in drawn.iter().enumerate() {
+            assert_eq!(
+                *draws,
+                glyph != space_glyph,
+                "{file}'s glyph {glyph} at the instance, the space alone drawing nothing"
+            );
+        }
+
+        // The instance written static, with no variation table.
+        let static_bytes = instance::instantiate(&bytes, &Instance::Named(4))
+            .unwrap_or_else(|error| panic!("{file}'s instance: {error:?}"));
+        let static_face = Sfnt::parse(&static_bytes).expect("the instance parses");
+        assert_eq!(static_face.glyph_count(), Some(glyphs), "{file}'s instance");
+        assert!(static_face.table(u32::from_be_bytes(outlines)).is_some());
+        for tag in instance::DROPPED.iter().chain([b"CFF2"]) {
+            assert!(
+                static_face.table(u32::from_be_bytes(*tag)).is_none(),
+                "{file}'s instance carries no {}",
+                String::from_utf8_lossy(tag)
+            );
+        }
+        if outlines == *b"CFF " {
+            let cff = Cff::parse(
+                static_face
+                    .table(u32::from_be_bytes(outlines))
+                    .expect("CFF"),
+            )
+            .expect("the instance's CFF parses");
+            assert_eq!(cff.glyph_count(), usize::from(glyphs));
+        }
+
+        // An iteration of the static-instance operation writes the face a
+        // whole number of times.
+        let per_iteration = bytes_listed(written);
+        let size = u64::try_from(bytes.len()).expect("a small face");
+        assert_eq!(per_iteration % size, 0, "`{written}` counts whole faces");
+        assert!(per_iteration / size >= 1, "`{written}` writes the face");
+    }
+}
+
 /// **The hyphenated book is a page a chapter, and breaks at its
 /// dictionary's points** (FT-15.8): `inputs::hyphenated_book` writes the same
 /// bytes every time, and at the layout group's box its ten chapters open to

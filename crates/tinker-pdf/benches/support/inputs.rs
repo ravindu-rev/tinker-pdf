@@ -2589,6 +2589,16 @@ pub fn liberation(name: &str) -> Vec<u8> {
         .unwrap_or_else(|error| panic!("the committed face {}: {error}", path.display()))
 }
 
+/// One of the two variable faces `tinker-pdf-font` commits for its variation
+/// tests (`tests/variable/`, written by `tests/variable_fixtures.rs` from the
+/// statements in `tests/variable_support/mod.rs`), by file name: the `glyf`
+/// face and the CFF2 face the fonts group outlines and instances.
+pub fn variable_face(name: &str) -> Vec<u8> {
+    let path = in_tree("../tinker-pdf-font/tests/variable").join(name);
+    std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("the committed face {}: {error}", path.display()))
+}
+
 /// A face under `tinker-pdf-shape/data/`, by its path there.
 pub fn shape_face(path: &str) -> Vec<u8> {
     let path = in_tree("../tinker-pdf-shape/data").join(path);

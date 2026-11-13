@@ -1,11 +1,14 @@
-//! The fonts group: paragraphs shaped and glyph outlines read.
+//! The fonts group: paragraphs shaped, glyph outlines read, and variable
+//! faces drawn and written at a named instance.
 //!
 //! The harness, the sampling and the rules every name here keeps are
 //! `support/mod.rs`'s; `baseline.json`'s `fonts` list names these operations
 //! in this order. Each input is asserted before its operation is timed: every
 //! paragraph shapes to glyphs and no `.notdef`, the column to runs standing
-//! upright and sideways, every face has its glyph count, and every glyph of
-//! every program yields an outline.
+//! upright and sideways, every face has its glyph count, every glyph of
+//! every program yields an outline, each variable face's instance stands
+//! away from its default and draws every glyph but the space, and each
+//! static instance is a face with no variation table.
 
 mod support;
 
@@ -15,7 +18,11 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
 use support::{inputs, Group, Per};
 use tinker_pdf_font::cff::Machine;
+#[cfg(not(tinker_planning_baseline))]
+use tinker_pdf_font::variation::{gvar::Gvar, DesignSpace, Instance};
 use tinker_pdf_font::{glyf, Cff, Outline, Sfnt};
+#[cfg(not(tinker_planning_baseline))]
+use tinker_pdf_font::{instance, Cff2};
 use tinker_pdf_shape::bidi::BaseDirection;
 use tinker_pdf_shape::{Plans, ShapedRun, Shaper};
 
@@ -147,6 +154,169 @@ fn outline_programs(programs: &[&[u8]]) -> usize {
     outlines
 }
 
+/// The named instance the variable operations draw and write, by its index
+/// among each face's `fvar` instances: the fifth of both, `Condensed Bold`
+/// (`wght` 700, `wdth` 75) in the `glyf` face and `Wide Black` (`wght` 900,
+/// `wdth` 125) in the CFF2 face, each away from its face's default on two
+/// axes.
+const NAMED_INSTANCE: u16 = 4;
+
+/// Calls an iteration of each variable outline operation makes.
+const VARIABLE_OUTLINE_CALLS: u64 = 5000;
+
+/// Calls an iteration of each static-instance operation makes.
+const INSTANCE_CALLS: u64 = 700;
+
+/// One call of the variable `glyf` outline operation: the face parsed, its
+/// design space and `gvar` read and the named instance's location found
+/// there, then every glyph's outline read at it. How many of them have
+/// contours.
+#[cfg(not(tinker_planning_baseline))]
+fn outline_glyf_instance(bytes: &[u8], named: u16) -> usize {
+    let face = Sfnt::parse(bytes).expect("the face parses");
+    let space = DesignSpace::read(&face).expect("the face's design space is read");
+    let gvar = Gvar::read(&face, &space).expect("the face's gvar is read");
+    let location = space
+        .location(&Instance::Named(named))
+        .expect("the face names the instance");
+    (0..glyph_count(&face))
+        .filter(|&glyph| {
+            !black_box(
+                glyf::outline_at(&face, glyph, gvar.as_ref(), &location).expect("an outline"),
+            )
+            .is_empty()
+        })
+        .count()
+}
+
+/// The planning baseline reads no variation table: its arm outlines every
+/// glyph of the same face at its default, the outlines `glyf` holds.
+#[cfg(tinker_planning_baseline)]
+fn outline_glyf_instance(bytes: &[u8], _named: u16) -> usize {
+    outline_face(bytes)
+}
+
+/// One call of the variable CFF2 outline operation: the face parsed, its
+/// design space read and the named instance's location found there, its
+/// `CFF2` table parsed and the scalars every `blend` reads there computed
+/// once, then every glyph's outline read into one outline through one
+/// machine (`Cff2::outline_with`), as a caller reading a whole instance
+/// keeps them. How many of them have contours.
+#[cfg(not(tinker_planning_baseline))]
+fn outline_cff2_instance(bytes: &[u8], named: u16) -> usize {
+    let face = Sfnt::parse(bytes).expect("the face parses");
+    let space = DesignSpace::read(&face).expect("the face's design space is read");
+    let location = space
+        .location(&Instance::Named(named))
+        .expect("the face names the instance");
+    let table = face
+        .table(u32::from_be_bytes(*b"CFF2"))
+        .expect("a CFF2 table");
+    let cff2 = Cff2::parse(table).expect("the CFF2 table parses");
+    let blends = cff2
+        .blends_in(&space, &location)
+        .expect("the variation store's axes are fvar's");
+    let mut machine = Machine::new();
+    let mut outline = Outline::default();
+    let mut drawn = 0;
+    for glyph in 0..cff2.glyph_count() {
+        let glyph = u16::try_from(glyph).expect("a CFF2 glyph index fits 16 bits");
+        cff2.outline_with(glyph, &blends, &mut outline, &mut machine)
+            .expect("an outline");
+        if !black_box(&outline).is_empty() {
+            drawn += 1;
+        }
+    }
+    drawn
+}
+
+/// The planning baseline reads no `CFF2` table: its arm is the `glyf`
+/// operation's, handed the `glyf` face, the operation the gate pairs this
+/// one with.
+#[cfg(tinker_planning_baseline)]
+fn outline_cff2_instance(bytes: &[u8], named: u16) -> usize {
+    outline_glyf_instance(bytes, named)
+}
+
+/// One call of a static-instance operation: the face written whole at its
+/// named instance as a face with no variation table
+/// (`instance::instantiate`), its `CFF2` outlines as `CFF ` where it has
+/// them.
+#[cfg(not(tinker_planning_baseline))]
+fn write_instance(bytes: &[u8], named: u16) -> Vec<u8> {
+    instance::instantiate(bytes, &Instance::Named(named))
+        .expect("the instancer writes the instance")
+}
+
+/// The planning baseline has no instancer: its arm writes the same face
+/// whole through the one face writer that revision has, its subsetter,
+/// keeping every glyph.
+#[cfg(tinker_planning_baseline)]
+fn write_instance(bytes: &[u8], _named: u16) -> Vec<u8> {
+    let face = Sfnt::parse(bytes).expect("the face parses");
+    let every: std::collections::BTreeSet<u16> = (0..glyph_count(&face)).collect();
+    tinker_pdf_font::subset(bytes, &every).expect("the subsetter writes the face whole")
+}
+
+/// A variable face outlined in the setup: its `glyphs`, its named instance
+/// away from its default, and every glyph but the space drawing contours
+/// there through `outline`, the operation's own call.
+#[cfg(not(tinker_planning_baseline))]
+fn assert_variable_outlines(
+    bytes: &[u8],
+    glyphs: u16,
+    name: &str,
+    outline: fn(&[u8], u16) -> usize,
+) {
+    let face = Sfnt::parse(bytes).expect("the face parses");
+    assert_eq!(glyph_count(&face), glyphs, "{name}'s glyphs");
+    let space = DesignSpace::read(&face).expect("the face's design space is read");
+    assert!(
+        space.is_variable(),
+        "{name} varies, so its instance is not the face itself"
+    );
+    let location = space
+        .location(&Instance::Named(NAMED_INSTANCE))
+        .unwrap_or_else(|error| panic!("{name} names its instance {NAMED_INSTANCE}: {error}"));
+    assert!(
+        !location.is_default(),
+        "{name}'s instance {NAMED_INSTANCE} stands away from its default"
+    );
+    assert_eq!(
+        outline(bytes, NAMED_INSTANCE),
+        usize::from(glyphs) - 1,
+        "{name}'s outlines at its instance: every glyph but the space has contours"
+    );
+}
+
+/// A static instance written in the setup: a face that parses, has the
+/// variable face's glyphs, carries its outlines in `outlines` and no table a
+/// static instance drops, and is not the variable face's bytes.
+#[cfg(not(tinker_planning_baseline))]
+fn assert_instance(bytes: &[u8], outlines: [u8; 4], name: &str) {
+    let written = write_instance(bytes, NAMED_INSTANCE);
+    assert_ne!(written, bytes, "{name}'s instance is written, not copied");
+    let face = Sfnt::parse(bytes).expect("the face parses");
+    let static_face = Sfnt::parse(&written).unwrap_or_else(|| panic!("{name}'s instance parses"));
+    assert_eq!(
+        glyph_count(&static_face),
+        glyph_count(&face),
+        "{name}'s instance keeps every glyph"
+    );
+    assert!(
+        static_face.table(u32::from_be_bytes(outlines)).is_some(),
+        "{name}'s instance carries its outlines in {}",
+        String::from_utf8_lossy(&outlines)
+    );
+    for tag in instance::DROPPED.iter().chain([b"CFF2"]) {
+        assert!(
+            static_face.table(u32::from_be_bytes(*tag)).is_none(),
+            "{name}'s instance carries no {}",
+            String::from_utf8_lossy(tag)
+        );
+    }
+}
+
 /// One of the faces the group reads, by its file name, from where `read`
 /// finds it in the tree.
 fn face(name: &str, read: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
@@ -173,6 +343,19 @@ fn fonts(c: &mut Criterion) {
     });
     let column = LazyCell::new(|| face("column-face.ttf", inputs::column_face));
     let cff = LazyCell::new(|| inputs::store().set("cff-programs.bundle", inputs::cff_programs));
+    let variable_glyf = LazyCell::new(|| {
+        face("variable-glyf.ttf", || {
+            inputs::variable_face("variable-glyf.ttf")
+        })
+    });
+    // The planning baseline reads no `CFF2` table, so its build never reads
+    // this face (its operations' arms read the `glyf` face).
+    #[cfg_attr(tinker_planning_baseline, allow(unused_variables))]
+    let variable_cff2 = LazyCell::new(|| {
+        face("variable-cff2.otf", || {
+            inputs::variable_face("variable-cff2.otf")
+        })
+    });
 
     let mut group = Group::new(c, "fonts");
 
@@ -291,6 +474,70 @@ fn fonts(c: &mut Criterion) {
         op.iter(move || {
             for _ in 0..2 {
                 black_box(outline_programs(&programs));
+            }
+        });
+    });
+
+    // The variable faces at a named instance (FT-05.17a): the two faces
+    // `tinker-pdf-font` commits for its variation tests, read by path, every
+    // glyph outlined at the instance through the readers a page or a book
+    // draws it by, and the instance written static as the builder embeds it.
+    group.operation("outlines of variable-glyf.ttf at Condensed Bold", |op| {
+        let face: &[u8] = &variable_glyf;
+        #[cfg(not(tinker_planning_baseline))]
+        assert_variable_outlines(face, 8, "variable-glyf.ttf", outline_glyf_instance);
+        op.per(Per::Outlines(VARIABLE_OUTLINE_CALLS * 8));
+        op.iter(move || {
+            for _ in 0..VARIABLE_OUTLINE_CALLS {
+                black_box(outline_glyf_instance(face, NAMED_INSTANCE));
+            }
+        });
+    });
+    group.operation("outlines of variable-cff2.otf at Wide Black", |op| {
+        #[cfg(not(tinker_planning_baseline))]
+        let face: &[u8] = &variable_cff2;
+        #[cfg(not(tinker_planning_baseline))]
+        assert_variable_outlines(face, 7, "variable-cff2.otf", outline_cff2_instance);
+        // The planning baseline reads no `CFF2` table: its arm outlines the
+        // `glyf` face at its default in this one's place, as the operation
+        // its gate pairs this one with does there.
+        #[cfg(tinker_planning_baseline)]
+        let face: &[u8] = &variable_glyf;
+        op.per(Per::Outlines(VARIABLE_OUTLINE_CALLS * 7));
+        op.iter(move || {
+            for _ in 0..VARIABLE_OUTLINE_CALLS {
+                black_box(outline_cff2_instance(face, NAMED_INSTANCE));
+            }
+        });
+    });
+    group.operation(
+        "a static Condensed Bold instance of variable-glyf.ttf",
+        |op| {
+            let face: &[u8] = &variable_glyf;
+            #[cfg(not(tinker_planning_baseline))]
+            assert_instance(face, *b"glyf", "variable-glyf.ttf");
+            op.per(Per::Bytes(INSTANCE_CALLS * face.len() as u64));
+            op.iter(move || {
+                for _ in 0..INSTANCE_CALLS {
+                    black_box(write_instance(face, NAMED_INSTANCE));
+                }
+            });
+        },
+    );
+    group.operation("a static Wide Black instance of variable-cff2.otf", |op| {
+        #[cfg(not(tinker_planning_baseline))]
+        let face: &[u8] = &variable_cff2;
+        #[cfg(not(tinker_planning_baseline))]
+        assert_instance(face, *b"CFF ", "variable-cff2.otf");
+        // The planning baseline reads no `CFF2` table: its arm writes the
+        // `glyf` face whole in this one's place, as the operation its gate
+        // pairs this one with does there.
+        #[cfg(tinker_planning_baseline)]
+        let face: &[u8] = &variable_glyf;
+        op.per(Per::Bytes(INSTANCE_CALLS * face.len() as u64));
+        op.iter(move || {
+            for _ in 0..INSTANCE_CALLS {
+                black_box(write_instance(face, NAMED_INSTANCE));
             }
         });
     });

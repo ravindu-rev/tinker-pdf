@@ -536,7 +536,19 @@
         { "name": "outlines of Liberation Mono Regular", "unit": "outlines",
           "per_iteration": 123573, "calls": 51, "gate": { "held": true } },
         { "name": "outlines of every committed CFF program", "unit": "outlines",
-          "per_iteration": 37058, "calls": 2, "gate": { "calibrated_per_second": 1000000 } }
+          "per_iteration": 37058, "calls": 2, "gate": { "calibrated_per_second": 1000000 } },
+        { "name": "outlines of variable-glyf.ttf at Condensed Bold", "unit": "outlines",
+          "per_iteration": 40000, "calls": 5000, "gate": { "floor": 1 } },
+        { "name": "outlines of variable-cff2.otf at Wide Black", "unit": "outlines",
+          "per_iteration": 35000, "calls": 5000,
+          "gate": { "floor": 1,
+                    "paired_with": "outlines of variable-glyf.ttf at Condensed Bold" } },
+        { "name": "a static Condensed Bold instance of variable-glyf.ttf", "unit": "bytes",
+          "per_iteration": 3197600, "calls": 700, "gate": { "floor": 1 } },
+        { "name": "a static Wide Black instance of variable-cff2.otf", "unit": "bytes",
+          "per_iteration": 2004800, "calls": 700,
+          "gate": { "floor": 1,
+                    "paired_with": "a static Condensed Bold instance of variable-glyf.ttf" } }
       ]
     },
     {
@@ -754,6 +766,10 @@
         "fonts/outlines of Liberation Sans Regular",
         "fonts/outlines of Liberation Mono Regular",
         "fonts/outlines of every committed CFF program",
+        "fonts/outlines of variable-glyf.ttf at Condensed Bold",
+        "fonts/outlines of variable-cff2.otf at Wide Black",
+        "fonts/a static Condensed Bold instance of variable-glyf.ttf",
+        "fonts/a static Wide Black instance of variable-cff2.otf",
         "threads/24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI",
         "threads/24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI",
         "threads/24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI",

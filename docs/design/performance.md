@@ -943,7 +943,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 189 operations over inputs the benches
+each, MS-09's `threads` among them: 193 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1172,7 +1172,7 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | `html_report()`, `markdown()` | 20 pages each at the default page box. The report is 20 sections, each a heading, two paragraphs and a ruled table of six rows on a page of its own; the Markdown is 20 sections, each a heading, three paragraphs and a list of five items, in one flow, CommonMark having no table | `FromHtml` (`crates/tinker-pdf/src/html.rs:181`); CommonMark for `Document::open_markdown` (`crates/tinker-pdf/src/lib.rs:1472`) | "a generated 20-page HTML report / 20-page Markdown document" |
 | `message()` | 10 000 000 seeded bytes, and their RSA-2048 PKCS #1 v1.5 signature made in the bench with `pss-vect.txt`'s Example 10 key (`crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt`) through `Modulus::pow` (`crates/tinker-pdf-crypto/src/bignum.rs:468`) | `inputs.rs` | "over 10 MB" |
 | `colour_face()`, `colour_lines()` | a TrueType face whose 26 capitals are each a `COLR` version 1 graph of three layers — a disc under a radial gradient, two eyes in a solid of the brown at one or three quarters, a mouth under a linear gradient — over a `CPAL` of eight entries, and their outlines the discs; and 25 lines of 21 of them, the `j`th of line `k` the `(7k + 11j) mod 26`th | `inputs.rs`, by integer formula | — (FT-06.17a's page of colour glyphs) |
-| committed | the nine books (`crates/tinker-pdf/tests/epub/`); the mesh and transparency fixtures (`fuzz/corpus/render_page/`); every `.svg` in `crates/tinker-pdf-svg/tests/fixtures/` (17), every `.xps` and `.oxps` under `crates/tinker-pdf/tests/` (19) and every `.cbz` in `crates/tinker-pdf/tests/cbz/` (9); the three Liberation Regular faces; the four bare CFF programs in `fuzz/corpus/cff/` and the `CFF ` tables of the 189 committed OpenType files (185 in `crates/tinker-pdf-shape/data/aots/fonts/`, three text-rendering-tests faces and `fuzz/corpus/sfnt/opentype-cff.otf`); `TestShapeAran.ttf`; `data/`'s four codestreams; the vendored Devanagari face | read by path | as named |
+| committed | the nine books (`crates/tinker-pdf/tests/epub/`); the mesh and transparency fixtures (`fuzz/corpus/render_page/`); every `.svg` in `crates/tinker-pdf-svg/tests/fixtures/` (17), every `.xps` and `.oxps` under `crates/tinker-pdf/tests/` (19) and every `.cbz` in `crates/tinker-pdf/tests/cbz/` (9); the three Liberation Regular faces; the four bare CFF programs in `fuzz/corpus/cff/` and the `CFF ` tables of the 189 committed OpenType files (185 in `crates/tinker-pdf-shape/data/aots/fonts/`, three text-rendering-tests faces and `fuzz/corpus/sfnt/opentype-cff.otf`); `TestShapeAran.ttf`; the two variable faces in `crates/tinker-pdf-font/tests/variable/`; `data/`'s four codestreams; the vendored Devanagari face | read by path | as named |
 
 #### The operations
 
@@ -1468,9 +1468,12 @@ and the group's setup asserts the three counts.
 
 **fonts** — `Sfnt::parse` and `glyf::outline`
 (`crates/tinker-pdf-font/src/sfnt.rs:46`, `glyf.rs:67`), `Cff::parse` and
-`Cff::outline` (`cff.rs:218`, `:414`), and a fresh `Shaper` a call as every
+`Cff::outline` (`cff.rs:218`, `:414`), a fresh `Shaper` a call as every
 caller makes one (`crates/tinker-pdf-shape/src/shape.rs:270`, `:426`;
-`crates/tinker-pdf/src/shaping.rs:198`).
+`crates/tinker-pdf/src/shaping.rs:198`), and for a variable face
+`DesignSpace::location`, `glyf::outline_at` over `Gvar`,
+`Cff2::outline_with` over the blends computed once, and
+`instance::instantiate` (`docs/design/variable-fonts.md`).
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
@@ -1478,6 +1481,10 @@ caller makes one (`crates/tinker-pdf-shape/src/shape.rs:270`, `:426`;
 | `fonts/outlines of Liberation Sans Regular` | outlines · 49 × 2 620 | the same | 3.0; held | ×49 | built |
 | `fonts/outlines of Liberation Mono Regular` | outlines · 51 × 2 423 | the same | 1.8; held | ×51 | built |
 | `fonts/outlines of every committed CFF program` | outlines · 2 × every program's | the 193 programs | not measured → ≥ 1 M outlines a second; calibrated | ×2 | built |
+| `fonts/outlines of variable-glyf.ttf at Condensed Bold` | outlines · 5 000 × 8 | `crates/tinker-pdf-font/tests/variable/variable-glyf.ttf`, parsed, its design space and `gvar` read and its fifth named instance (`wght` 700, `wdth` 75) located a call, every glyph outlined there; held before it is timed to stand away from the default and to draw every glyph but the space; the planning baseline, which reads no variation table, outlines the face at its default in its place | not in tier P's table; floor 1 | untimed | built |
+| `fonts/outlines of variable-cff2.otf at Wide Black` | outlines · 5 000 × 7 | `variable-cff2.otf` beside it, parsed, its design space read, its fifth named instance (`wght` 900, `wdth` 125) located and its blends computed a call, every glyph outlined there through one machine; held as the `glyf` face is; the planning baseline, which reads no `CFF2`, runs the `glyf` face's operation in its place (`paired_with`) | not in tier P's table; floor 1 | untimed | built |
+| `fonts/a static Condensed Bold instance of variable-glyf.ttf` | bytes · 700 × the face's | the `glyf` face written static at that instance; held before it is timed to keep every glyph, carry `glyf` and no table an instance drops; the planning baseline, which has no instancer, writes the face whole through its subsetter in its place | not in tier P's table; floor 1 | untimed | built |
+| `fonts/a static Wide Black instance of variable-cff2.otf` | bytes · 700 × the face's | the CFF2 face written static at that instance, its outlines as `CFF `; held as the `glyf` face's instance is; the planning baseline runs the `glyf` face's operation in its place (`paired_with`) | not in tier P's table; floor 1 | untimed | built |
 | `fonts/shape 1000 characters of Latin` | none · 125 calls | Liberation Serif Regular | not measured → ≤ 0.2; calibrated | ×125 | built |
 | `fonts/shape 1000 characters of Arabic` | none · 50 calls | `TestShapeAran.ttf` | not measured → ≤ 0.5; calibrated | ×50 | built |
 | `fonts/shape 1000 characters of Devanagari` | none · 8 calls | the vendored face | not measured → ≤ 0.6; calibrated | ×8 | built |

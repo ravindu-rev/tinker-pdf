@@ -524,10 +524,16 @@ refused by name.
     `rendering_is_stable_across_targets` with the `variable` fixtures' hashes,
     in both builds, natively and on `wasm32-wasip1`.
 16. **FT-05.17a, the speed rows, unmeasured.** In MS-04's fonts group, every
-    outline of the committed `glyf` face and of the CFF2 face at a named
-    instance, and writing a static instance of each; `xtask/src/bench.rs`'s
-    `the_committed_baseline_agrees_with_the_tree`. FT-05.17b takes their
-    figures in the timing phase.
+    outline of the committed `glyf` face and of the CFF2 face at their fifth
+    named instance, and writing a static instance of each:
+    `outlines of variable-glyf.ttf at Condensed Bold`,
+    `outlines of variable-cff2.otf at Wide Black`,
+    `a static Condensed Bold instance of variable-glyf.ttf` and
+    `a static Wide Black instance of variable-cff2.otf`, each gated at a floor
+    of 1; `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree`
+    and `tests/bench_inputs.rs`'s
+    `the_variable_faces_hold_the_instances_the_fonts_group_names`. FT-05.17b
+    takes their figures in the timing phase.
 
 ## Risks
 
