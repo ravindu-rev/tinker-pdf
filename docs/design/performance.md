@@ -3351,3 +3351,287 @@ render that decoded it.
 | A mode 2 glyph's fill and stroke part | Mode 2 keeps the path route for both |
 | What the glyph source reports depends on hits | The outline is asked for at every glyph, hit or miss |
 | The quantisation moves pixels nobody reviews | It moves them once, in P-06.2, in the pins above, under H-76 and H-133; a later step that moves a glyph pin is a finding |
+
+## P-16 — Caches with byte budgets and a caller memory budget
+
+*For [ROADMAP](../ROADMAP.md) row P-16.* Every cache this engine keeps today
+lives as long as one operation: a page's `PageResources` keeps its decoded
+images, compiled ICC transforms, font programs, outlines and form scopes
+(`Caches` in `crates/tinker-pdf/src/resources.rs`), a render keeps its glyph
+masks (P-06), and an operation's decoded streams are its own (P-03). So a
+second render of a page at another resolution decodes every image again, and
+a form stamped on a hundred pages is interpreted a hundred times. This
+section fixes one cache a document keeps across its renders, what it holds
+and what each entry is charged, the budget a caller states and where, the one
+order everything in it is evicted in and what that order means when threads
+share it, why a hit is the bytes a miss computes, what an image too large for
+the budget becomes in place of a refusal, how parsed objects leave the object
+store under the same budget, how MS-05 reads resident memory against it, and
+what a second render at another dpi reuses.
+
+### Scope
+
+- **The document cache** (P-16.2): one per document, shared by every clone of
+  a `Document` and its pages, of typed entries each charged its bytes —
+  decoded images keyed by the image object and its decode request (P-16.2),
+  compiled ICC transforms (P-16.4), form recordings (P-16.5, P-16.6) and
+  P-06's glyph masks (P-16.7), with room for P-22.7's re-keyed transforms and
+  P-23.2's tiling cells.
+- **`CacheLimits { bytes }`**, where a caller states it, and what holds with
+  none stated.
+- **The eviction order**, one for every kind, and what a counted guard reads.
+- **Reduced-resolution decode** in place of the placeholder (P-16.9).
+- **Parsed objects dropped under pressure** in `tinker-pdf-cos`'s store
+  (P-16.8).
+- **MS-05's reading** of resident memory against a stated budget, and the
+  second render at another dpi (P-16.10a, P-16.11).
+
+### Non-goals
+
+- **A default budget.** A cache kept with none stated would hold memory a
+  document never held before, which is a price under H-77's memory ceilings
+  and the owner's to set. With no budget stated, every entry lives as long as
+  the render or display list that made it, as today, so nothing a document
+  holds grows unasked.
+- **A cache across documents.** Two documents never share an entry: an
+  entry's key names objects of one document's bytes.
+- **Inline images.** One has no object to key it by, and stays the render's,
+  as today.
+- **Eviction by size, cost or frequency.** One order, the sequence of
+  requests, is the whole policy; a cleverer one would make which entry
+  survives depend on more than what was asked, and buys nothing a counted
+  guard can show.
+- **Threads.** P-15's pool is how renders run at once; this section says only
+  what the cache promises them.
+
+### Design
+
+#### The cache and its entries
+
+`crates/tinker-pdf/src/cache.rs` (new, P-16.2) holds a document's cache
+behind the `Arc` every clone of the `Document` shares, so a page handed out
+and the document it came from meet one cache. An entry is a typed value under
+a typed key:
+
+| Kind | Key | Charged | Row |
+| --- | --- | --- | --- |
+| a decoded image | the image's object and its decode request: full, or reduced by a factor (*Reduced-resolution decode*) | its samples and its soft mask's, at the decoded size | P-16.2, P-16.9 |
+| a compiled ICC transform | today's key, the profile stream's object; P-22.7 re-keys it by the profile's bytes, intent and black-point compensation | its tables, three 4 096-entry ones for an RGB output | P-16.4, P-22.7 |
+| a form recording | the form's object and the parts of the invoking state its drawing reads (P-16.5 settles them) | the recorded calls, as a display list counts its own | P-16.5, P-16.6 |
+| a glyph mask | P-06.3's key: font identity, code, quantised 2x2 and phase | P-06.3's charge, its pixels and 64 bytes | P-16.7 |
+| a tiling cell | P-23.2's | its pixels | P-23.2 |
+
+Each kind is a map from its key to its value, so a lookup is one hash of the
+key, and a failure is kept as firmly as a success, in the words the decode
+used: an image that would not decode, or a profile that would not parse, is
+refused once per document, and every render that meets it reports it again,
+as `CachedImage` reports what its decode reported today. Every entry is
+charged at least 64 bytes beside its payload, P-06.3's `ENTRY_BYTES`, so a
+document of empty entries is bounded too.
+
+**Filled single-flight.** A miss fills by `docs/design/parallelism.md`'s
+rule, through `tinker_pdf_cos::Flights`: one thread fills a slot and the
+threads that want it wait, unless a thread is itself in the middle of a fill,
+in which case it computes the value for itself and publishes nothing — the
+re-entry rule, for the reason `crates/tinker-pdf-cos/src/store.rs` gives at
+its head, that a `/Length` pointing into its own stream re-enters. A fill that
+unwinds or is cancelled publishes nothing, so a cancelled render's partial
+decode is never kept.
+
+#### `CacheLimits { bytes }`, and where a caller states it
+
+`CacheLimits { bytes: u64 }` is a document's budget: the most bytes its cache
+and its object store's dropped kinds hold at once. A caller states it where a
+document's other document-wide choices are stated: on `OpenOptions`, beside
+its fonts (`OpenOptions::with_cache_limits`), and on an open document by
+`Document::with_cache_limits`, which hands back a document sharing the bytes
+with a cache of its own, as `Document::with_fonts` does. The C ABI and the
+bindings project the two 1:1 (ruling 11), in the row that lands each.
+
+With none stated the cache keeps nothing past the render or display list that
+made an entry: the render's own resources hold what they hold today, under
+P-06.3's per-render bound for masks, and are dropped with the render.
+`a_document_with_no_budget_keeps_nothing_past_its_render` pins it. A budget
+of zero is stated, and keeps nothing at all: every request misses, which is
+what P-16.3's starved render is.
+
+#### The eviction order
+
+**One order for every kind: least recently requested first.** The cache keeps
+one request counter. Every request — a hit or a miss, of any kind — takes the
+counter's next number, and the entry it reaches records it. A fill that would
+take the bytes held past the budget evicts entries in the order of the
+numbers they record, oldest first, through one ordered index from number to
+key across every kind, until the new entry fits; an entry larger than the
+whole budget is never kept, and is used once by the request that made it.
+Each kind's map is a `HashMap` that is only ever looked up and never iterated,
+since its order is seeded per process: which entries are evicted is decided
+by the index alone.
+
+**What deterministic means.** Three promises, of which only the first is
+about pixels:
+
+1. **What a render draws never depends on what is held.** A hit is the value a
+   miss computes for the same key (*A hit is the bytes a miss computes*), so
+   the same page draws the same bytes whatever was rendered before it, under
+   any budget, warm or starved, on every target. P-16.3 holds every
+   fingerprint to it.
+2. **On one thread, the evictions are a function of the requests.** A serial
+   caller asking the same sequence of things evicts the same entries on every
+   run and target: `eviction_follows_the_request_sequence_and_never_passes_the_budget`
+   scripts one sequence and pins the evictions.
+3. **On several threads, the counts are the schedule's.** When renders share
+   the cache, the order their requests take numbers is the order the
+   scheduler gave them, so which entry a full cache evicts, and how many hits
+   a render scores, can differ between runs. Nothing a caller reads otherwise
+   moves — pixels, text and every warning are the same, by the first promise —
+   and a counted guard reads a serial run, as `docs/design/parallelism.md`
+   says every guard does.
+
+**The bytes never pass the budget.** A charge is taken before an entry is
+published, under the lock the index is kept under, and an entry is published
+only once enough is evicted for it; so the bytes held, read at any moment,
+are at most the budget, and an entry a render is still drawing from is held
+by its own `Arc` and freed when that render lets it go, which is the one way
+the resident bytes can briefly exceed the held ones.
+
+#### A hit is the bytes a miss computes
+
+Every value is a function of its key and the document's immutable bytes: a
+decode of one image at one request, a transform of one profile, a recording of
+one form under the state its key names, a mask of one quantised glyph. So
+whether a request hits moves no pixel. Two rules keep it so:
+
+- **Nothing outside the key reaches the value.** A form whose drawing reads a
+  part of the invoking state its key leaves out must miss (P-16.5); a mask is
+  P-06.3's function of its key.
+- **A reduced decode is keyed by its reduction.** A reduced image is another
+  entry from the full one, under its own request, and a request for the full
+  decode is never served a reduced one, or the reverse.
+
+#### Reduced-resolution decode
+
+Today an image is decoded whole, whatever memory it takes, under the decode
+ceiling every stream decodes under (`MAX_DECODED_STREAM`); a decode that
+reaches the ceiling is drawn as far as it got and named by `DamagedImage`, and
+a codec this build refuses draws ruling 2's placeholder, named by
+`UnsupportedImage`. Nothing measures the image against memory, so there is
+nothing yet that "aborts": the refusal a budget-bound engine would otherwise
+reach for is the placeholder, and this replaces it with a smaller picture.
+
+With a budget stated, **an image whose full decode is larger than the budget
+itself** is decoded at the largest reduction whose bytes fit it — a DCT
+image's scaled decode (P-09), a JPEG 2000 image's discarded levels (P-10) —
+and drawn from that, named by a new typed `RenderWarning`,
+`ReducedImage { name, factor }`, which joins rendering's refusal table
+(ruling 10). The reduction is a function of the image's size and the stated
+budget, never of what else the cache holds, so a page draws the same pixels
+whatever was rendered before it; an image the budget can hold whole is
+decoded whole, and room is made for it by eviction. An image no reduction
+fits — a codec with no reduced decode of its own, or a factor past what its
+codec can give — is decoded whole and drawn as today, and not kept: it is
+used once by the request that made it, as every entry larger than the budget
+is. With no budget stated nothing changes, and every fingerprint and
+`render_regions.rs` pass as they are.
+
+#### Parsed objects under pressure
+
+`tinker-pdf-cos`'s slot store (`crates/tinker-pdf-cos/src/store.rs`) keeps
+every parsed object for the document's life. P-16.8 charges each object an
+estimate of its bytes — its tokens' and its stream's extent, a count the
+parser already keeps — against the same budget, which the facade passes down
+from `CacheLimits`, through one accountant that both the store and the
+facade's cache charge. Every object a read reaches takes a number from the
+accountant's counter as an entry of the cache does, so one order covers both
+holders, and past the budget the oldest objects that **no caller holds** — an
+`Arc<Object>` whose only owner is the store — are dropped. A later read parses
+again, from the same immutable bytes, so it gets an equal value
+(`store.rs`'s purity, `a_store_over_its_budget_drops_objects_and_parses_them_again_equal`).
+
+Never dropped: the cross-reference table and the object-stream index, which
+the reader cannot find anything without; an object a caller holds; and,
+with no budget stated, anything at all, so the parse count is today's. A
+streamed document whose object is dropped may fetch the object's bytes again
+from its source on the next read: the fetch is counted as every fetch is
+(`docs/design/streaming-open.md`), and is the price of the budget.
+
+#### MS-05's reading, and a stated budget
+
+MS-05's probe (`crates/tinker-pdf/tests/peak_memory.rs`) runs each case in a
+child of its own and reads its peak resident memory, `VmHWM`, from `/proc`.
+A budget bounds the bytes the caches hold, not what a case must hold to run —
+its input, its canvas, a decoder's working set — so each case is run under
+its stated budget beside its unbudgeted figure, as P-16.10a records them. The
+case holds its budget when its peak under the budget is at most its
+unbudgeted peak plus the budget: the caches it held unasked move under the
+budget, and nothing they hold passes it. P-16.11's exit holds every case to
+that, at the figures P-16.10a commits, and a case whose peak passes is a
+finding against the kind that held the bytes, never a larger budget.
+
+#### What a second render at another dpi reuses
+
+A second render of a page under a stated budget large enough for the page
+reuses every decoded image (a full decode is the same samples at every
+resolution, and the resampler draws from it), every compiled transform, every
+form recording (a recording is a function of the stream and the invoking
+state, never of the canvas — ruling 5 — so a tile and the page hit it too),
+every parsed object and every font program; it rasterises its glyph masks
+again, since a mask's key is its quantised 2x2 and the dpi moves it, and it
+fills, composites and encodes the page again. The images are what the first
+render spent most of its time on in MS-04's 'a second render at another dpi',
+which P-16.11 holds at 30 % of the first.
+
+### Milestones
+
+1. **P-16.1: this section.**
+2. **P-16.2: the cache and decoded images.** Exit: `caches.rs`
+   `a_second_render_at_another_dpi_decodes_no_image` and
+   `pages_sharing_an_image_object_decode_it_once` (MS-01's decode stats),
+   `eviction_follows_the_request_sequence_and_never_passes_the_budget` and
+   `a_document_with_no_budget_keeps_nothing_past_its_render`; `render_regions.rs`,
+   `determinism.rs` and the display-list replay unchanged, in both builds.
+3. **P-16.3: determinism for the caches.** Exit: `determinism.rs`
+   `warm_and_starved_caches_render_the_fingerprints` in both builds on linux,
+   windows and `wasm32-wasip1`, the `GOLDEN` table untouched.
+4. **P-16.4: ICC transforms.** Exit: `caches.rs`
+   `a_profile_named_on_every_page_compiles_once`; `colour_spaces.rs` and the
+   starved render unchanged.
+5. **P-16.5: kept form recordings in the interpreter.** Exit: `interpret.rs`
+   `a_kept_form_recording_replays_as_the_form_interprets` and
+   `a_kept_form_is_interpreted_once_per_key`; `cargo test -p tinker-pdf-content`.
+6. **P-16.6: form recordings per document.** Exit: `caches.rs`
+   `a_form_stamped_on_a_hundred_pages_is_interpreted_once`; `form_xobjects.rs`,
+   `render_regions.rs`, the display-list replay and the starved render
+   unchanged, in both builds.
+7. **P-16.7: glyph masks under the document's budget.** Exit: `caches.rs`
+   `glyph_masks_share_the_documents_budget`; guard A4 and the starved render
+   unchanged, in both builds.
+8. **P-16.8: parsed objects dropped under pressure.** Exit: `store.rs`
+   `a_store_over_its_budget_drops_objects_and_parses_them_again_equal`;
+   `cargo test -p tinker-pdf-cos`.
+9. **P-16.9: reduced-resolution decode.** Exit: `caches.rs`
+   `an_image_past_the_budget_draws_at_a_reduced_resolution_and_says_so`; with
+   no budget every fingerprint and `render_regions.rs` unchanged.
+10. **P-16.10a: the rows' operations**, unmeasured: MS-04's second render under
+    a stated budget, and MS-05's cases under their budgets beside their
+    unbudgeted figures;
+    `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree`.
+    **P-16.10b** takes the figures in the timing phase.
+11. **P-16.11: the row's close.** Exit: MS-02's paired run green with the
+    second render at most 30 % of the first; MS-05 holding every case within
+    its budget as *MS-05's reading* states it; `caches.rs`'s guards in
+    `cargo test` on linux and windows and on `wasm32-wasip1`.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A hit draws other pixels than its miss | Every value is a function of its key and the document's bytes, a cancelled fill publishes nothing, and a reduced decode is keyed by its reduction; P-16.3 renders every fingerprint warm and starved |
+| What a page draws depends on what was rendered before it | The only budget-dependent choice, a reduction, is a function of the image and the stated budget, never of what the cache holds |
+| Eviction depends on hash order | One request counter and one ordered index decide it; the maps are looked up and never iterated |
+| Threads make a counted guard flake | The fills are single-flight, and the guards read a serial run; on threads only the counts move, never a pixel, a text or a warning |
+| A thread waits on a fill that waits on it | `Flights`' rules: only a thread with no fill open waits, and re-entry computes |
+| A dropped object reads back other than it was | Parsing is pure over immutable bytes; an object a caller holds is never dropped, and the table and the object-stream index never are |
+| A budget is read as a bound on the whole process | It bounds the caches; MS-05 reads it as the peak under the budget less the unbudgeted peak, and says so |
+| A document grows memory it never held, unasked | No default budget: with none stated an entry lives as long as its render, as today |
+| A streamed document fetches again what it dropped | Counted as every fetch is; it is the price of a budget, and with none nothing is dropped |
