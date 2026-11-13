@@ -1308,3 +1308,567 @@ fn simple_glyph_points(data: &[u8]) -> Option<Vec<(i64, i64)>> {
     let ys = axis(4, 32);
     Some(xs.into_iter().zip(ys).collect())
 }
+
+// --- features and languages (FT-07d.5) ------------------------------------
+//
+// `feat_table` and `sill_table` write the two tables from what a test states
+// — each feature's id, flags and settings in order, each language's code and
+// settings — and the values the shaper gives are compared with what the
+// statements and the design's order make of them.
+
+/// A `Feat` 2 of `features`, each its id, flags and setting values in order.
+fn feat_table(features: &[(u32, u16, &[i16])]) -> Vec<u8> {
+    let mut out = 0x0002_0000u32.to_be_bytes().to_vec();
+    out.extend(u16s(&[
+        u16::try_from(features.len()).expect("a few features"),
+        0,
+        0,
+        0,
+    ]));
+    let mut offset = 12 + features.len() * 16;
+    let mut settings: Vec<u8> = Vec::new();
+    for (index, (id, flags, values)) in features.iter().enumerate() {
+        out.extend(id.to_be_bytes());
+        out.extend(u16s(&[u16::try_from(values.len()).expect("a few"), 0]));
+        out.extend(u32::try_from(offset).expect("small").to_be_bytes());
+        let label = 256 + u16::try_from(index).expect("small");
+        out.extend(u16s(&[*flags, label]));
+        for (n, value) in values.iter().enumerate() {
+            settings.extend(value.to_be_bytes());
+            settings.extend((label * 16 + u16::try_from(n).expect("small")).to_be_bytes());
+        }
+        offset += values.len() * 4;
+    }
+    out.extend(settings);
+    out
+}
+
+/// A `Sill` of `languages`, each its code and its settings, and the GTF's
+/// one entry more.
+fn sill_table(languages: &[([u8; 4], &[(u32, i16)])]) -> Vec<u8> {
+    let count = u16::try_from(languages.len()).expect("a few");
+    let mut out = 0x0001_0000u32.to_be_bytes().to_vec();
+    out.extend(u16s(&[count, 0, 0, 0]));
+    let mut offset = 12 + (languages.len() + 1) * 8;
+    let mut settings: Vec<u8> = Vec::new();
+    for (code, values) in languages {
+        out.extend_from_slice(code);
+        out.extend(u16s(&[
+            u16::try_from(values.len()).expect("a few"),
+            u16::try_from(offset).expect("small"),
+        ]));
+        for (id, value) in values.iter() {
+            settings.extend(id.to_be_bytes());
+            settings.extend(value.to_be_bytes());
+            settings.extend([0, 0]);
+        }
+        offset += values.len() * 8;
+    }
+    // The bogus entry, whose offset finds the last language's end.
+    out.extend(*b"+1\0\0");
+    out.extend(u16s(&[0, u16::try_from(offset).expect("small")]));
+    out.extend(settings);
+    out
+}
+
+/// A feature id from its four characters.
+fn id(tag: &[u8; 4]) -> u32 {
+    u32::from_be_bytes(*tag)
+}
+
+/// The Graphite face with `feat` and `sill` in place of its own.
+fn face_with(feat: Vec<u8>, sill: Vec<u8>) -> Face {
+    graphite_face().with(b"Feat", feat).with(b"Sill", sill)
+}
+
+/// The features most tests ask about: a boolean pair, one whose default is
+/// listed first and is not 0, one of three values, the language feature of
+/// no settings, and one whose flags name its default by index.
+fn five_features() -> Vec<u8> {
+    feat_table(&[
+        (id(b"ss01"), 0x8000, &[0, 1]),
+        (id(b"hehk"), 0x8000, &[1, 0]),
+        (id(b"punc"), 0x8000, &[0, 1, 2]),
+        (1, 0x8000, &[]),
+        (id(b"cv78"), 0xC001, &[1, 2]),
+    ])
+}
+
+/// The languages most tests ask about.
+fn two_languages() -> Vec<u8> {
+    sill_table(&[
+        (*b"ks\0\0", &[(id(b"punc"), 1), (id(b"ss01"), 1)]),
+        (*b"urd\0", &[(id(b"hehk"), 0)]),
+    ])
+}
+
+/// What a test asks a shaper for: its settings, its own features where it
+/// names them, and its language.
+#[derive(Clone, Copy, Debug, Default)]
+struct Ask<'a> {
+    settings: &'a [(Tag, u32)],
+    features: Option<(&'a [Tag], &'a [Tag])>,
+    language: Option<Tag>,
+}
+
+impl<'a> Ask<'a> {
+    fn settings(settings: &'a [(Tag, u32)]) -> Ask<'a> {
+        Ask {
+            settings,
+            ..Ask::default()
+        }
+    }
+
+    fn language(tag: &[u8; 4]) -> Ask<'a> {
+        Ask {
+            language: Some(Tag::new(tag)),
+            ..Ask::default()
+        }
+    }
+}
+
+/// The feature values and refusals of the face `bytes` through a shaper
+/// asked for `ask`.
+fn values_in(bytes: &[u8], ask: &Ask<'_>) -> (Vec<i16>, Vec<Refusal>) {
+    let sfnt = Sfnt::parse(bytes).expect("the face parses");
+    let mut shaper = Shaper::new(&sfnt).with_settings(ask.settings);
+    if let Some((gsub, gpos)) = ask.features {
+        shaper = shaper.with_features(gsub, gpos);
+    }
+    if let Some(language) = ask.language {
+        shaper = shaper.with_language(language);
+    }
+    let (values, refusals) = shaper.graphite_features().expect("a Graphite description");
+    (values.as_slice().to_vec(), refusals)
+}
+
+/// [`values_in`] for a face this test describes.
+fn values_of(face: &Face, ask: &Ask<'_>) -> (Vec<i16>, Vec<Refusal>) {
+    values_in(&face.build(), ask)
+}
+
+/// A feature keeps its default — its first setting, or the one its flags
+/// name — unless a setting or a turned-on feature names it, and a face with
+/// no `Silf` has no Graphite features to value at all.
+#[test]
+fn a_feature_keeps_its_default_unless_a_setting_names_it() {
+    let face = face_with(five_features(), two_languages());
+    let defaults = vec![0, 1, 0, 0, 2];
+    assert_eq!(
+        values_of(&face, &Ask::default()),
+        (defaults.clone(), vec![])
+    );
+
+    let punc = [(Tag::new(b"punc"), 2)];
+    assert_eq!(
+        values_of(&face, &Ask::settings(&punc)),
+        (vec![0, 1, 2, 0, 2], vec![])
+    );
+    let hehk = [(Tag::new(b"hehk"), 0)];
+    assert_eq!(
+        values_of(&face, &Ask::settings(&hehk)),
+        (vec![0, 0, 0, 0, 2], vec![])
+    );
+    // The language feature has no settings: the GDL's boolean, 0 or 1.
+    let lang = [(Tag(1), 1)];
+    assert_eq!(
+        values_of(&face, &Ask::settings(&lang)),
+        (vec![0, 1, 0, 1, 2], vec![])
+    );
+    // A turned-on feature is set to 1, and every other keeps its default.
+    let on = [Tag::new(b"ss01")];
+    assert_eq!(
+        values_of(
+            &face,
+            &Ask {
+                features: Some((&on[..], &[][..])),
+                ..Ask::default()
+            }
+        ),
+        (vec![1, 1, 0, 0, 2], vec![])
+    );
+    assert_eq!(
+        values_of(
+            &face,
+            &Ask {
+                features: Some((&[][..], &on[..])),
+                ..Ask::default()
+            }
+        ),
+        (vec![1, 1, 0, 0, 2], vec![])
+    );
+    // Settings over a turned-on feature: the setting is the later word.
+    let off = [(Tag::new(b"ss01"), 0)];
+    assert_eq!(
+        values_of(
+            &face,
+            &Ask {
+                settings: &off,
+                features: Some((&on[..], &[][..])),
+                language: None,
+            }
+        ),
+        (defaults, vec![])
+    );
+
+    // A face with no `Silf` is no Graphite description.
+    let plain = face.clone().without(b"Silf");
+    let bytes = plain.build();
+    let sfnt = Sfnt::parse(&bytes).expect("parses");
+    assert!(Shaper::new(&sfnt).graphite_features().is_none());
+    // One with a `Silf` and no `Feat` has none to value.
+    let bare = face.without(b"Feat");
+    assert_eq!(values_of(&bare, &Ask::default()), (vec![], vec![]));
+}
+
+/// A language `Sill` lists takes its settings, asked for by a tag whose
+/// letters are its code; one `Sill` does not list takes the defaults and is
+/// not named; and the caller's settings stand over the language's.
+#[test]
+fn a_language_takes_its_sill_settings() {
+    let face = face_with(five_features(), two_languages());
+    assert_eq!(
+        values_of(&face, &Ask::language(b"URD ")),
+        (vec![0, 0, 0, 0, 2], vec![])
+    );
+    assert_eq!(
+        values_of(&face, &Ask::language(b"urd ")),
+        (vec![0, 0, 0, 0, 2], vec![])
+    );
+    assert_eq!(
+        values_of(&face, &Ask::language(b"ks  ")),
+        (vec![1, 1, 1, 0, 2], vec![])
+    );
+    // An OpenType language tag whose letters are not a code `Sill` lists
+    // selects nothing, and nothing is named: most languages are not listed.
+    assert_eq!(
+        values_of(&face, &Ask::language(b"TRK ")),
+        (vec![0, 1, 0, 0, 2], vec![])
+    );
+    let hehk = [(Tag::new(b"hehk"), 1)];
+    assert_eq!(
+        values_of(
+            &face,
+            &Ask {
+                settings: &hehk,
+                ..Ask::language(b"urd ")
+            }
+        ),
+        (vec![0, 1, 0, 0, 2], vec![])
+    );
+    let on = [Tag::new(b"ss01")];
+    assert_eq!(
+        values_of(
+            &face,
+            &Ask {
+                features: Some((&on[..], &[][..])),
+                ..Ask::language(b"urd ")
+            }
+        ),
+        (vec![1, 0, 0, 0, 2], vec![])
+    );
+    // A `Sill` value is the face's own statement, taken as written even
+    // where the feature does not declare it.
+    let odd = face_with(
+        five_features(),
+        sill_table(&[(*b"xyz\0", &[(id(b"punc"), 9)])]),
+    );
+    assert_eq!(
+        values_of(&odd, &Ask::language(b"xyz ")),
+        (vec![0, 1, 9, 0, 2], vec![])
+    );
+}
+
+/// A tag naming no feature the face declares, and a value a feature does not
+/// declare, is ignored and named, each once; what is declared still applies.
+#[test]
+fn a_setting_the_face_does_not_declare_is_ignored_and_named() {
+    let face = face_with(five_features(), two_languages());
+    let settings = [
+        (Tag::new(b"kern"), 0),
+        (Tag::new(b"punc"), 7),
+        (Tag::new(b"ss01"), 1),
+        (Tag::new(b"kern"), 0),
+        (Tag::new(b"hehk"), 70_000),
+    ];
+    assert_eq!(
+        values_of(&face, &Ask::settings(&settings)),
+        (
+            vec![1, 1, 0, 0, 2],
+            vec![
+                Refusal::UndeclaredFeature {
+                    feature: id(b"kern")
+                },
+                Refusal::UndeclaredSetting {
+                    feature: id(b"punc"),
+                    value: 7
+                },
+                Refusal::UndeclaredSetting {
+                    feature: id(b"hehk"),
+                    value: 70_000
+                },
+            ]
+        )
+    );
+    // `with_features` names OpenType's features, and a Graphite face has
+    // none of them: each is named once, whichever list names it.
+    let gsub = [Tag::new(b"liga"), Tag::new(b"ccmp")];
+    let gpos = [Tag::new(b"kern"), Tag::new(b"liga")];
+    assert_eq!(
+        values_of(
+            &face,
+            &Ask {
+                features: Some((&gsub[..], &gpos[..])),
+                ..Ask::default()
+            }
+        ),
+        (
+            vec![0, 1, 0, 0, 2],
+            vec![
+                Refusal::UndeclaredFeature {
+                    feature: id(b"liga")
+                },
+                Refusal::UndeclaredFeature {
+                    feature: id(b"ccmp")
+                },
+                Refusal::UndeclaredFeature {
+                    feature: id(b"kern")
+                },
+            ]
+        )
+    );
+    // A feature declaring 2 and not 1 is not turned on by being named.
+    let two = face_with(
+        feat_table(&[(id(b"alts"), 0x8000, &[0, 2])]),
+        two_languages(),
+    );
+    let on = [Tag::new(b"alts")];
+    assert_eq!(
+        values_of(
+            &two,
+            &Ask {
+                features: Some((&on[..], &[][..])),
+                ..Ask::default()
+            }
+        ),
+        (
+            vec![0],
+            vec![Refusal::UndeclaredSetting {
+                feature: id(b"alts"),
+                value: 1
+            }]
+        )
+    );
+    // A language's setting naming a feature `Feat` does not declare.
+    let stray = face_with(
+        five_features(),
+        sill_table(&[(*b"xx\0\0", &[(id(b"zzzz"), 1), (id(b"ss01"), 1)])]),
+    );
+    assert_eq!(
+        values_of(&stray, &Ask::language(b"xx  ")),
+        (
+            vec![1, 1, 0, 0, 2],
+            vec![Refusal::UndeclaredFeature {
+                feature: id(b"zzzz")
+            }]
+        )
+    );
+    // A `Feat` or `Sill` that cannot be read is answered without, and named.
+    let mut broken = five_features();
+    broken[1] = 9;
+    let unreadable = face_with(broken, two_languages());
+    assert_eq!(
+        values_of(&unreadable, &Ask::default()),
+        (
+            vec![],
+            vec![Refusal::UnknownVersion {
+                table: graphite::FEAT,
+                version: 0x0009_0000
+            }]
+        )
+    );
+    let mut broken = two_languages();
+    broken[1] = 7;
+    let unreadable = face_with(five_features(), broken);
+    assert_eq!(
+        values_of(&unreadable, &Ask::language(b"ks  ")),
+        (
+            vec![0, 1, 0, 0, 2],
+            vec![Refusal::UnknownVersion {
+                table: graphite::SILL,
+                version: 0x0007_0000
+            }]
+        )
+    );
+}
+
+/// The `feat` chapter's and the GDL's feature examples, transcribed as
+/// `Feat` bytes and counted.
+#[test]
+fn the_feat_examples_hold() {
+    let mut held = 0usize;
+
+    // The `feat` chapter: "number spacing", flags 0xC001 — exclusive, with
+    // the default named by its low byte, setting 1: proportional numbers.
+    let spacing = face_with(
+        feat_table(&[(id(b"nspc"), 0xC001, &[0, 1])]),
+        two_languages(),
+    );
+    assert_eq!(values_of(&spacing, &Ask::default()), (vec![1], vec![]));
+    held += 1;
+
+    // The GDL's `ligatures`: settings all 3, std 2, min 1 and no 0, the
+    // default std, which a compiled `Feat` lists first.
+    let ligatures = face_with(
+        feat_table(&[(id(b"ligs"), 0x8000, &[2, 3, 1, 0])]),
+        two_languages(),
+    );
+    assert_eq!(values_of(&ligatures, &Ask::default()), (vec![2], vec![]));
+    let none = [(Tag::new(b"ligs"), 0)];
+    assert_eq!(
+        values_of(&ligatures, &Ask::settings(&none)),
+        (vec![0], vec![])
+    );
+    held += 1;
+
+    // The GDL's `eng`: its public id `cv43` and its hidden `Engs`, two
+    // features, the second an alias, each keeping a value of its own.
+    let eng = feat_table(&[
+        (id(b"cv43"), 0x8000, &[0, 1, 2, 3]),
+        (id(b"Engs"), 0x8001, &[0, 1, 2, 3]),
+    ]);
+    let features = graphite::Features::parse(&eng).expect("readable");
+    assert!(!features.feature(0).expect("cv43").is_alias());
+    assert!(features.feature(1).expect("Engs").is_alias());
+    let face = face_with(eng, two_languages());
+    let capital = [(Tag::new(b"Engs"), 2)];
+    assert_eq!(
+        values_of(&face, &Ask::settings(&capital)),
+        (vec![0, 2], vec![])
+    );
+    held += 1;
+
+    assert_eq!(held, 3, "the Feat examples the design counts");
+}
+
+/// The GTF's and the GDL's language examples, transcribed as `Sill` bytes
+/// and counted.
+#[test]
+fn the_sill_examples_hold() {
+    let mut held = 0usize;
+
+    // "The code “en” is represented by the four bytes [101, 110, 0, 0]."
+    assert_eq!(
+        graphite::Languages::code_for(Tag::new(b"en  ")),
+        [101, 110, 0, 0]
+    );
+    let english = face_with(
+        five_features(),
+        sill_table(&[([101, 110, 0, 0], &[(id(b"ss01"), 1)])]),
+    );
+    assert_eq!(
+        values_of(&english, &Ask::language(b"en  ")),
+        (vec![1, 1, 0, 0, 2], vec![])
+    );
+    held += 1;
+
+    // The GDL's language table for Arabic script: three groups, each a list
+    // of codes and the settings they share. Its settings are names; here
+    // each feature's values number them: `meem` none 0 and sindhi 1, `edig`
+    // none 0, sindhi 1 and urdu 2, `shkr` none 0 and sindhiUrdu 1, `hehA`
+    // none 0, kurdish 1 and urdu 2.
+    let features = feat_table(&[
+        (id(b"meem"), 0x8000, &[0, 1]),
+        (id(b"edig"), 0x8000, &[0, 1, 2]),
+        (id(b"shkr"), 0x8000, &[0, 1]),
+        (id(b"hehA"), 0x8000, &[0, 1, 2]),
+    ]);
+    let sindhi: &[(u32, i16)] = &[(id(b"meem"), 1), (id(b"edig"), 1), (id(b"shkr"), 1)];
+    let kurdish: &[(u32, i16)] = &[(id(b"hehA"), 1)];
+    let urdu: &[(u32, i16)] = &[(id(b"hehA"), 2), (id(b"edig"), 2), (id(b"shkr"), 1)];
+    let groups: [(&[&[u8; 4]], &[(u32, i16)], [i16; 4]); 3] = [
+        (&[b"snd\0", b"sd\0\0"], sindhi, [1, 1, 1, 0]),
+        (
+            &[b"bdh\0", b"ckb\0", b"kmr\0", b"kur\0", b"sdh\0"],
+            kurdish,
+            [0, 0, 0, 1],
+        ),
+        (&[b"urd\0", b"ur\0\0"], urdu, [0, 2, 1, 2]),
+    ];
+    let mut entries: Vec<([u8; 4], &[(u32, i16)])> = Vec::new();
+    for (codes, settings, _) in &groups {
+        for code in *codes {
+            entries.push((**code, *settings));
+        }
+    }
+    entries.sort_by_key(|(code, _)| *code);
+    let face = face_with(features, sill_table(&entries));
+    for (codes, _, expected) in &groups {
+        for code in *codes {
+            let mut tag = **code;
+            for byte in &mut tag {
+                if *byte == 0 {
+                    *byte = b' ';
+                }
+            }
+            assert_eq!(
+                values_of(&face, &Ask::language(&tag)),
+                (expected.to_vec(), vec![]),
+                "{}",
+                String::from_utf8_lossy(&tag)
+            );
+        }
+    }
+    held += 1;
+
+    assert_eq!(held, 2, "the Sill examples the design counts");
+}
+
+/// The vendored faces' `Feat` and `Sill` read as their authors compiled
+/// them: Dai Banna SIL's `Feat` 1 holds the language feature alone, and
+/// Awami Nastaliq's twelve features take their first settings as defaults
+/// and its languages their `Sill` settings.
+#[test]
+fn the_vendored_faces_features_and_languages_read() {
+    assert_eq!(values_in(DAI_BANNA, &Ask::default()), (vec![0], vec![]));
+    let face = Sfnt::parse(DAI_BANNA).expect("parses");
+    let feat = face.table(tag(b"Feat")).expect("a Feat");
+    let features = graphite::Features::parse(feat).expect("Feat 1 reads");
+    let only = features.feature(0).expect("one feature");
+    assert_eq!((only.id, only.settings), (1, 0));
+
+    assert_eq!(
+        values_in(TAGMUKAY, &Ask::default()),
+        (vec![0, 0, 0], vec![])
+    );
+    let ss01 = [(Tag::new(b"ss01"), 1)];
+    assert_eq!(
+        values_in(TAGMUKAY, &Ask::settings(&ss01)),
+        (vec![1, 0, 0], vec![])
+    );
+
+    // hehk hedo lamv cv85 punc cv78 hamz hihm wdsp shrt agca, and the
+    // language feature.
+    let defaults = vec![1, 0, 0, 0, 0, 1, 0, 0, 2, 3, 3, 0];
+    assert_eq!(
+        values_in(AWAMI, &Ask::default()),
+        (defaults.clone(), vec![])
+    );
+    let mut kashmiri = defaults.clone();
+    kashmiri[6] = 1;
+    assert_eq!(
+        values_in(AWAMI, &Ask::language(b"ks  ")),
+        (kashmiri.clone(), vec![])
+    );
+    assert_eq!(
+        values_in(AWAMI, &Ask::language(b"kas ")),
+        (kashmiri, vec![])
+    );
+    let mut gujari = defaults.clone();
+    gujari[2] = 1;
+    assert_eq!(values_in(AWAMI, &Ask::language(b"gju ")), (gujari, vec![]));
+    let mut malay = defaults;
+    malay[6] = 1;
+    malay[7] = 1;
+    assert_eq!(values_in(AWAMI, &Ask::language(b"msa ")), (malay, vec![]));
+}

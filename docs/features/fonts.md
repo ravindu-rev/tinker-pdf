@@ -861,9 +861,18 @@ What it does:
   runs than `Limits::max_attribute_runs`, is refused by name for every
   attribute alike. A `Glat` 3 block's octabox is read too, its four diagonal
   bytes the least and greatest x + y and x − y over the outline, as the
-  vendored Awami Nastaliq's outlines bear out. No run is shaped through any
-  of it yet: the refused-by-name table below says what a run over such a
-  face does.
+  vendored Awami Nastaliq's outlines bear out. `graphite::Features` and
+  `graphite::Languages` read `Feat` 1 (the TrueType `feat` layout) and 2 and
+  `Sill` 1, and `Shaper::graphite_features` gives the value each feature
+  takes for a run, each over the last: its default — its first setting, or
+  the one its flags name by index — the `Sill` settings of the language
+  `with_language`'s tag names (its letters lowercased, trailing spaces as
+  NULs, so `urd ` asks for `urd`), every feature whose id a tag of
+  `with_features` spells set to 1, and `with_settings`, the last setting of a
+  tag winning. A tag naming no declared feature, and a value a feature does
+  not declare, is ignored and named (`graphite::Refusal::UndeclaredFeature`,
+  `UndeclaredSetting`). No run is shaped through any of it yet: the
+  refused-by-name table below says what a run over such a face does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

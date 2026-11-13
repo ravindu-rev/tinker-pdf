@@ -71,6 +71,7 @@ use crate::arabic;
 use crate::bidi::{BaseDirection, Level, Paragraph};
 use crate::buffer::{Buffer, Direction, ShapedGlyph};
 use crate::common::Tag;
+use crate::graphite::{self, FeatureValues, Features, Languages, Refusal};
 use crate::limits::Limits;
 use crate::read::Bytes;
 use crate::unicode::{self, Script};
@@ -976,6 +977,62 @@ impl<'a> Shaper<'a> {
     #[must_use]
     pub const fn layout(&self) -> &Layout<'a> {
         &self.layout
+    }
+
+    /// The value each of the face's Graphite features takes for a run this
+    /// shaper shapes, and what was ignored on the way; `None` where the face
+    /// carries no `Silf` and so is no Graphite description.
+    ///
+    /// Made, each over the last, from the face's `Feat` defaults, the `Sill`
+    /// settings of the language [`Shaper::with_language`] names, every
+    /// feature whose id a tag of [`Shaper::with_features`] spells set to 1,
+    /// and [`Shaper::with_settings`] (`docs/design/shaping.md`, *Feature
+    /// values, from the shaper's settings*). A tag naming no feature the face
+    /// declares, and a value the feature does not declare, is ignored and
+    /// named. A face with a `Silf` and no `Feat` has no features to value; a
+    /// `Feat` or `Sill` that cannot be read is answered without, and says
+    /// why. No run reads these values yet: the face's passes are not run.
+    #[must_use]
+    pub fn graphite_features(&self) -> Option<(FeatureValues, Vec<Refusal>)> {
+        self.face.table(SILF)?;
+        let mut refusals: Vec<Refusal> = Vec::new();
+        let features = match self.face.table(graphite::FEAT.0).map(Features::parse) {
+            Some(Ok(features)) => features,
+            Some(Err(refusal)) => return Some((FeatureValues::default(), vec![refusal])),
+            None => return Some((FeatureValues::default(), refusals)),
+        };
+        let languages = match self.face.table(graphite::SILL.0).map(Languages::parse) {
+            Some(Ok(languages)) => Some(languages),
+            Some(Err(refusal)) => {
+                refusals.push(refusal);
+                None
+            }
+            None => None,
+        };
+        let mut turned_on: Vec<Tag> = Vec::new();
+        for tag in self
+            .gsub_features
+            .unwrap_or(&[])
+            .iter()
+            .chain(self.gpos_features.unwrap_or(&[]))
+        {
+            if !turned_on.contains(tag) {
+                turned_on.push(*tag);
+            }
+        }
+        let (values, ignored) = FeatureValues::resolve(
+            &features,
+            languages.as_ref(),
+            self.language,
+            &turned_on,
+            self.settings,
+        );
+        for refusal in ignored {
+            if !refusals.contains(&refusal) {
+                refusals.push(refusal);
+            }
+        }
+        Some((values, refusals))
     }
 
     /// Resolves a paragraph, itemizes it, and shapes every run.

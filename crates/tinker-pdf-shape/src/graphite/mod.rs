@@ -7,8 +7,11 @@
 //! features a caller sets and `Sill` for each language's settings.
 //!
 //! What is here so far is the reading of the tables — a face's view
-//! ([`Tables`]), with its compressed tables decoded once ([`decompress`]),
-//! and its glyph attributes ([`Attributes`]). A face whose only layout
+//! ([`Tables`]), with its compressed tables decoded once ([`decompress`]);
+//! its glyph attributes ([`Attributes`]); and its features and languages
+//! ([`Features`], [`Languages`]), and the value each feature takes for a run
+//! ([`FeatureValues`], which `Shaper::graphite_features` makes from a
+//! shaper's settings, features and language). A face whose only layout
 //! tables are these is still shaped as though it carried none, and every run
 //! over it says so (`crate::Warning::TableNotRun`).
 //!
@@ -28,9 +31,11 @@ use crate::common::Tag;
 use crate::limits::Limits;
 use crate::read::Bytes;
 
+pub mod feat;
 pub mod glat;
 mod lz4;
 
+pub use feat::{Feature, FeatureValues, Features, Languages, Setting};
 pub use glat::{Attributes, GlatVersion, Octabox, Subbox};
 
 /// `Silf`, a Graphite description's rules.
@@ -99,6 +104,21 @@ pub enum Refusal {
     TooManyAttributeRuns {
         /// The glyph.
         glyph: u16,
+    },
+    /// A caller's setting, a caller's turned-on feature or a language's
+    /// `Sill` setting names a feature the face's `Feat` does not declare; it
+    /// was ignored.
+    UndeclaredFeature {
+        /// The id named: four characters, or a number.
+        feature: u32,
+    },
+    /// A caller's value for a feature is not one of the values the feature
+    /// declares; it was ignored, and the feature kept the value it had.
+    UndeclaredSetting {
+        /// The feature's id.
+        feature: u32,
+        /// The value asked for.
+        value: u32,
     },
 }
 
@@ -276,6 +296,26 @@ impl<'a> Tables<'a> {
     #[must_use]
     pub fn refusals(&self) -> &[Refusal] {
         &self.refusals
+    }
+
+    /// The face's features, read from its `Feat`; `None` where it carries
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// The refusal [`Features::parse`] gives for a table it cannot read.
+    pub fn features(&self) -> Option<Result<Features<'a>, Refusal>> {
+        self.feat.map(Features::parse)
+    }
+
+    /// The face's languages, read from its `Sill`; `None` where it carries
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// The refusal [`Languages::parse`] gives for a table it cannot read.
+    pub fn languages(&self) -> Option<Result<Languages<'a>, Refusal>> {
+        self.sill.map(Languages::parse)
     }
 
     /// The face's glyph attributes, read from its `Gloc` and `Glat`.
