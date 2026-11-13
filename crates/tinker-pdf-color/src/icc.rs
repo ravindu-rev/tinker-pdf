@@ -1030,6 +1030,14 @@ impl Lut {
         (encoding.encode(r), encoding.encode(g), encoding.encode(b))
     }
 
+    /// [`Lut::to_rgb`] at sixteen bits: the same light, each channel held to
+    /// the byte [`Lut::to_rgb`] encodes it as ([`Encoding::encode16`]).
+    fn to_rgb16(&self, components: &[f64], media: Option<[f64; 3]>) -> [u16; 3] {
+        let light = self.to_linear(components, media);
+        let encoding = self.encoding();
+        light.map(|channel| encoding.encode16(channel))
+    }
+
     /// The linear sRGB this table's connection-space value is, scaled by
     /// `media` as [`Lut::to_rgb`] scales it, before it is encoded and
     /// unclamped: the light [`Lut::to_rgb`] encodes, and what a grid's node
@@ -1102,6 +1110,13 @@ impl Encoding {
             Encoding::Lab => crate::srgb_encode(linear),
             Encoding::Xyz => encode_component(linear),
         }
+    }
+
+    /// One channel of linear light at sixteen bits: IEC 61966-2-1's transfer
+    /// of it, held to the byte [`Encoding::encode`] gives it, so its top byte
+    /// is that byte under either encoding (`docs/design/sixteen-bit.md`).
+    fn encode16(self, linear: f64) -> u16 {
+        crate::held16(crate::srgb_transfer(linear), self.encode(linear))
     }
 
     /// This encoding sampled at every 16-bit value of light, built once: what
@@ -1324,6 +1339,26 @@ impl Grid {
     /// the nodes around it interpolated in fixed point, the light encoded as
     /// the pipeline encodes it.
     fn read(&self, source: Light<'_>, components: &[f64]) -> (u8, u8, u8) {
+        let (cells, fractions) = self.located(components);
+        self.read_at(source, &cells, &fractions)
+    }
+
+    /// [`Grid::read`] at sixteen bits: the same interpolated light, each
+    /// channel encoded as [`Grid::read`] encodes it and held to that byte
+    /// (`docs/design/sixteen-bit.md`).
+    fn read16(&self, source: Light<'_>, components: &[f64]) -> [u16; 3] {
+        let (cells, fractions) = self.located(components);
+        let table = self.encoding.table();
+        let light = self.light_with(source, self.nodes(), &cells, &fractions);
+        light.map(|value| {
+            let byte = table.encode(value);
+            let linear = value.clamp(0, LIGHT_ONE) as f64 / LIGHT_ONE as f64;
+            crate::held16(crate::srgb_transfer(linear), byte)
+        })
+    }
+
+    /// Each component located on its axis: its cell and its fraction in it.
+    fn located(&self, components: &[f64]) -> ([usize; 4], [i64; 4]) {
         let mut cells = [0usize; 4];
         let mut fractions = [0i64; 4];
         for (axis, (cell, fraction)) in cells
@@ -1335,7 +1370,7 @@ impl Grid {
             let x = components.get(axis).copied().unwrap_or(0.0);
             (*cell, *fraction) = locate(x, self.points);
         }
-        self.read_at(source, &cells, &fractions)
+        (cells, fractions)
     }
 
     /// The grid read at `cells` and `fractions`, one of each an input: the
@@ -1360,8 +1395,27 @@ impl Grid {
         cells: &[usize; 4],
         fractions: &[i64; 4],
     ) -> (u8, u8, u8) {
+        let light = self.light_with(source, nodes, cells, fractions);
+        (
+            table.encode(light[0]),
+            table.encode(light[1]),
+            table.encode(light[2]),
+        )
+    }
+
+    /// The light the grid holds at `cells` and `fractions`, interpolated
+    /// from `nodes` and not yet encoded, in [`LIGHT_ONE`]'s unit: what
+    /// [`Grid::read_with`] encodes as bytes and [`Grid::read16`] at sixteen
+    /// bits.
+    fn light_with(
+        &self,
+        source: Light<'_>,
+        nodes: &[AtomicU64],
+        cells: &[usize; 4],
+        fractions: &[i64; 4],
+    ) -> [i64; 3] {
         let points = self.points;
-        let light = match self.inputs {
+        match self.inputs {
             1 => {
                 let low = self.node(source, nodes, cells[0]);
                 let high = self.node(source, nodes, cells[0] + 1);
@@ -1391,12 +1445,7 @@ impl Grid {
                 [0, 1, 2]
                     .map(|c| round_shift((low[c] << 16) + fractions[3] * (high[c] - low[c]), 32))
             }
-        };
-        (
-            table.encode(light[0]),
-            table.encode(light[1]),
-            table.encode(light[2]),
-        )
+        }
     }
 
     /// From node `base`, a step along each of three axes in turn, the
@@ -1566,6 +1615,14 @@ fn pcs_to_rgb(pcs: [f64; 3], lab: bool, media: Option<[f64; 3]>) -> (u8, u8, u8)
     let [r, g, b] = pcs_to_linear(pcs, lab, media);
     let encoding = Encoding::of(lab);
     (encoding.encode(r), encoding.encode(g), encoding.encode(b))
+}
+
+/// [`pcs_to_rgb`] at sixteen bits: the same light, each channel held to the
+/// byte [`pcs_to_rgb`] encodes it as.
+fn pcs_to_rgb16(pcs: [f64; 3], lab: bool, media: Option<[f64; 3]>) -> [u16; 3] {
+    let light = pcs_to_linear(pcs, lab, media);
+    let encoding = Encoding::of(lab);
+    light.map(|channel| encoding.encode16(channel))
 }
 
 /// Linear light to an sRGB byte, through the same table the matrix path uses.
@@ -2654,6 +2711,34 @@ impl Transform {
         self.evaluate(components)
     }
 
+    /// [`Transform::apply`] at sixteen bits (`docs/design/sixteen-bit.md`):
+    /// the same evaluation — the grid's interpolated light, the table's, the
+    /// pipeline's or the matrix's — encoded by IEC 61966-2-1's transfer and
+    /// held to the byte [`Transform::apply`] gives each channel, so its top
+    /// bytes are that colour's bytes and a second transform never runs.
+    #[must_use]
+    pub fn apply16(&self, components: &[f64]) -> [u16; 3] {
+        if let (Some(source), Some(grid)) = (self.light_source(), &self.grid) {
+            return grid.read16(source, components);
+        }
+        self.evaluate16(components)
+    }
+
+    /// [`Transform::evaluate`] at sixteen bits, as [`Transform::apply16`]
+    /// quantises it.
+    pub(crate) fn evaluate16(&self, components: &[f64]) -> [u16; 3] {
+        if let Some(lut) = &self.lut {
+            return lut.to_rgb16(components, self.media);
+        }
+        if let Some(pipeline) = &self.pipeline {
+            return pcs_to_rgb16(pipeline.evaluate(components), pipeline.lab(), self.media);
+        }
+        self.matrix_light(components).map(|sum| {
+            let linear = sum.clamp(0, ONE) as f64 / ONE as f64;
+            crate::held16(crate::srgb_transfer(linear), encode_srgb(sum))
+        })
+    }
+
     /// The transform's whole pipeline for one colour, with no grid: what a
     /// grid's node is evaluated as, and what the tests hold a grid to.
     pub(crate) fn evaluate(&self, components: &[f64]) -> (u8, u8, u8) {
@@ -2665,6 +2750,14 @@ impl Transform {
             tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
             return pcs_to_rgb(pipeline.evaluate(components), pipeline.lab(), self.media);
         }
+        let [r, g, b] = self.matrix_light(components).map(encode_srgb);
+        (r, g, b)
+    }
+
+    /// A matrix/TRC or grey transform's linear light for one colour, in
+    /// s15.16, before it is encoded: each component through its curve, then
+    /// the matrix.
+    fn matrix_light(&self, components: &[f64]) -> [i64; 3] {
         let mut linear = [0i64; 3];
         for (channel, slot) in linear.iter_mut().enumerate() {
             let index = if self.inputs == 1 { 0 } else { channel };
@@ -2683,15 +2776,15 @@ impl Transform {
             *slot = i64::from(sampled) * ONE / 65535;
         }
 
-        let mut out = [0u8; 3];
+        let mut out = [0i64; 3];
         for (row, slot) in out.iter_mut().enumerate() {
             let mut sum = 0i64;
             for (column, value) in linear.iter().enumerate() {
                 sum += i64::from(self.matrix[row][column]) * value / ONE;
             }
-            *slot = encode_srgb(sum);
+            *slot = sum;
         }
-        (out[0], out[1], out[2])
+        out
     }
 }
 
@@ -7039,6 +7132,161 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             let after = transforms.bytes_bound();
             assert!(after <= bound, "{what}: the bound only falls");
             assert!(after >= held, "{what}: and stays a bound");
+        }
+    }
+
+    // ---- sixteen bits a channel (docs/design/sixteen-bit.md) ---------------
+
+    /// A profile over each path [`Transform::apply16`] reads, by name: a
+    /// matrix/TRC model and a grey curve, which build no grid; tables over
+    /// one, three and four inputs, under an XYZ and a Lab connection space,
+    /// read through their grids; a `D2B1` pipeline over three inputs, read
+    /// through its grid, and one over two, read through its elements; and
+    /// tables over two and seven inputs, which build no grid. Shared with the
+    /// colour spaces' own sixteen-bit test.
+    pub(crate) fn sixteen_bit_profiles() -> Vec<(&'static str, Vec<u8>)> {
+        let two_inputs: Vec<[u16; 3]> = (0..9usize)
+            .map(|node| {
+                [
+                    (node * 3_571 % 32_768) as u16,
+                    (node * 2_903 % 32_768) as u16,
+                    (node * 1_499 % 32_768) as u16,
+                ]
+            })
+            .collect();
+        let two_elements = mpet(
+            2,
+            3,
+            &[matf(
+                &[vec![0.5, 0.4], vec![0.3, 0.6], vec![0.1, 0.7]],
+                &[0.0, 0.01, 0.0],
+            )],
+        );
+        vec![
+            ("matrix/TRC, gamma 2.2", matrix_trc(2.2)),
+            ("grey under Lab, gamma 1.0", grey(b"Lab ", 1.0)),
+            ("mft2 grey to XYZ", grey_table()),
+            (
+                "mAB RGB to XYZ",
+                lut_profile(b"RGB ", b"XYZ ", mab_every_stage()),
+            ),
+            ("mft2 CMYK to Lab", cmyk_table(true)),
+            ("mft2 CMYK to XYZ", cmyk_table(false)),
+            (
+                "D2B1 over three inputs",
+                build(b"RGB ", b"XYZ ", &[(*b"D2B1", Chain { t: 1.0 }.tag())]),
+            ),
+            (
+                "D2B1 over two inputs",
+                build(b"2CLR", b"XYZ ", &[(*b"D2B1", two_elements)]),
+            ),
+            (
+                "mft2 over two inputs",
+                lut_profile(b"2CLR", b"XYZ ", mft2(2, 3, &two_inputs)),
+            ),
+            (
+                "mft2 over seven inputs",
+                build(b"CMYK", b"XYZ ", &[(*b"A2B0", wide_table(7))]),
+            ),
+        ]
+    }
+
+    /// The inputs a transform is held to its bytes over: every 8-bit value
+    /// over one input, every fifteenth over two, every seventeenth over
+    /// three, every fifty-first over four and nought, a half and one over
+    /// more, every combination of them, the last component varying fastest.
+    fn sixteen_bit_inputs(inputs: usize) -> Vec<Vec<f64>> {
+        let axis: Vec<f64> = match inputs {
+            1 => (0..=255u32).map(|v| f64::from(v) / 255.0).collect(),
+            2 | 3 | 4 => {
+                let step = [15, 17, 51][inputs - 2];
+                (0..=255u32)
+                    .step_by(step)
+                    .map(|v| f64::from(v) / 255.0)
+                    .collect()
+            }
+            _ => vec![0.0, 0.5, 1.0],
+        };
+        (0..axis.len().pow(inputs as u32))
+            .map(|index| {
+                let mut x = vec![0.0; inputs];
+                let mut rest = index;
+                for slot in x.iter_mut().rev() {
+                    *slot = axis[rest % axis.len()];
+                    rest /= axis.len();
+                }
+                x
+            })
+            .collect()
+    }
+
+    /// The top byte of each channel of a 16-bit colour.
+    fn top_bytes(wide: [u16; 3]) -> (u8, u8, u8) {
+        let [r, g, b] = wide.map(|channel| (channel >> 8) as u8);
+        (r, g, b)
+    }
+
+    /// **A transform at sixteen bits tops out at its bytes**
+    /// (`docs/design/sixteen-bit.md`, "Resolved colour"). For each profile
+    /// [`sixteen_bit_profiles`] names, in every intent, every input of
+    /// [`sixteen_bit_inputs`] converts through [`Transform::apply16`] to
+    /// channels whose top bytes are [`Transform::apply`]'s — read from the
+    /// grid where `apply` reads one, from the table, the elements or the
+    /// matrix where it does not — and a component between two 8-bit values,
+    /// 0.1981, does too. A grey ramp of 4 097 steps through the matrix/TRC
+    /// model, the one-input grid and the two-input elements takes more
+    /// 16-bit colours than 8-bit ones: the low bytes refine the bytes rather
+    /// than repeat them.
+    #[test]
+    fn a_transform_at_sixteen_bits_tops_out_at_its_bytes() {
+        for (name, bytes) in sixteen_bit_profiles() {
+            let profile = Profile::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let transforms =
+                Transforms::compile(profile).unwrap_or_else(|| panic!("{name}: no transforms"));
+            let inputs = transforms.inputs();
+            for intent in Intent::ALL {
+                let transform = transforms.get(intent);
+                let mut between = vec![0.1981; inputs];
+                for x in sixteen_bit_inputs(inputs)
+                    .into_iter()
+                    .chain([between.clone()])
+                {
+                    assert_eq!(
+                        top_bytes(transform.apply16(&x)),
+                        transform.apply(&x),
+                        "{name}, {intent:?}, at {x:?}"
+                    );
+                }
+                between[0] = 0.8019;
+                assert_eq!(
+                    top_bytes(transform.apply16(&between)),
+                    transform.apply(&between),
+                    "{name}, {intent:?}, at {between:?}"
+                );
+            }
+            if ![
+                "matrix/TRC, gamma 2.2",
+                "mft2 grey to XYZ",
+                "D2B1 over two inputs",
+            ]
+            .contains(&name)
+            {
+                continue;
+            }
+            let transform = transforms.get(Intent::RelativeColorimetric);
+            let mut wide = std::collections::BTreeSet::new();
+            let mut narrow = std::collections::BTreeSet::new();
+            for step in 0..=4096u32 {
+                let x = vec![f64::from(step) / 4096.0; inputs];
+                wide.insert(transform.apply16(&x));
+                narrow.insert(transform.apply(&x));
+            }
+            assert!(
+                wide.len() > narrow.len(),
+                "{name}: {} colours at sixteen bits and {} at eight over a grey ramp",
+                wide.len(),
+                narrow.len()
+            );
         }
     }
 }

@@ -125,6 +125,24 @@ space of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the
 paint. Initial colours follow 8.6.8 — CMYK starts at full black ink, not all
 zeros. Out-of-range components clamp rather than wrap.
 
+**Every space answers at sixteen bits a channel beside its bytes**
+(`docs/design/sixteen-bit.md`, ruling 23). `ColorSpace::to_rgb16_in`
+evaluates a colour as `to_rgb_in` does and quantises each channel twice: to
+the byte `to_rgb_in` gives it, and to `round(65 535·x)` of the value `x`
+that byte is rounded from — a device component, or IEC 61966-2-1's transfer
+of the light — held to `256·byte ..= 256·byte + 255`. The top byte of each
+16-bit channel is `to_rgb_in`'s byte, bit for bit, and the low byte refines
+it (`every_space_at_sixteen_bits_tops_out_at_its_eight_bit_colour`,
+`device_spaces_at_sixteen_bits_are_their_relations`). An ICC colour is its
+transform's one evaluation at both widths — a grid's interpolated light, a
+table's or a pipeline's linear light, a matrix's sum — through
+`Transform::apply16`, never a second transform. `lab_to_srgb16` is
+`lab_to_srgb`'s evaluation quantised the same way, and `srgb_to_lab16` reads
+a 16-bit sRGB colour by `srgb_to_lab`'s evaluation, each sample over
+65 535, so a byte widened to sixteen bits, `257·v`, reads exactly as the
+byte does. The renderer paints the bytes; nothing on a page asks for the
+sixteen bits.
+
 **Default colour spaces** (8.6.5.6). A scope's `/DefaultGray`, `/DefaultRGB`
 and `/DefaultCMYK` — entries of the `/ColorSpace` subdictionary of a page's, a
 form's, a tiling cell's or an appearance stream's resources — stand in for

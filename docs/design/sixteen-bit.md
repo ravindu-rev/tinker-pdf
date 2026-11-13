@@ -264,12 +264,17 @@ is today's byte; where P-14's sampled function tables land, they carry a
 
 `tinker-pdf-color` answers every space at sixteen bits beside its bytes
 (RC-07.7): `ColorSpace::to_rgb16_in` evaluates the components exactly as
-`to_rgb_in` does — the device relations, the CIE-based closed forms,
+`to_rgb_in` does — the device relations, the CIE-based closed forms, `/Lab`,
 `/Indexed` through its base, `/Separation` and `/DeviceN` through their
-alternates, an ICC transform to its `f64` components — and quantises each
-component by `q16` against the byte `to_rgb_in` gives, so an ICC colour is
-one evaluation quantised twice, never a second transform. `lab_to_srgb16` and
-`srgb_to_lab16` are the same: one evaluation, two quantisations.
+alternates, an ICC transform to its light: a grid's interpolated light, a
+table's or a pipeline's, a matrix's sum — and quantises each channel by
+`q16` against the byte `to_rgb_in` gives, `x` being the value that byte is
+rounded from: a device component, or IEC 61966-2-1's transfer of the light.
+An ICC colour is one evaluation quantised twice (`Transform::apply16`), never
+a second transform. `lab_to_srgb16` is the same, one evaluation and two
+quantisations; `srgb_to_lab16` reads a 16-bit colour by `srgb_to_lab`'s own
+evaluation, each sample over 65 535, so a byte widened by `widen` reads
+exactly as the byte does.
 
 The interpreter carries a 16-bit colour beside each 8-bit one (RC-07.10):
 `GraphicsState` keeps `fill_color` and `stroke_color` as they are, every

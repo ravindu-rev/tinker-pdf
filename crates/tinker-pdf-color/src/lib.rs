@@ -326,27 +326,11 @@ impl ColorSpace {
             }
             ColorSpace::DeviceRgb => (byte(at(0)), byte(at(1)), byte(at(2))),
             ColorSpace::DeviceCmyk => {
-                // 8.6.4.4: the additive complement, with black applied.
-                let (c, m, y, k) = (at(0), at(1), at(2), at(3));
-                (
-                    byte((1.0 - c) * (1.0 - k)),
-                    byte((1.0 - m) * (1.0 - k)),
-                    byte((1.0 - y) * (1.0 - k)),
-                )
+                let [r, g, b] = cmyk_light(at(0), at(1), at(2), at(3)).map(byte);
+                (r, g, b)
             }
             ColorSpace::Indexed { base, lookup, high } => {
-                let index = components
-                    .first()
-                    .copied()
-                    .unwrap_or(0.0)
-                    .clamp(0.0, f64::from(*high))
-                    .round() as usize;
-                let n = base.components();
-                let start = index.saturating_mul(n);
-                let entry: Vec<f64> = (0..n)
-                    .map(|i| lookup.get(start + i).map_or(0.0, |&b| f64::from(b) / 255.0))
-                    .collect();
-                base.to_rgb_in(&entry, conversion)
+                base.to_rgb_in(&palette_entry(base, lookup, *high, components), conversion)
             }
             ColorSpace::Separation {
                 alternate, tint, ..
@@ -355,36 +339,15 @@ impl ColorSpace {
                 alternate.to_rgb_in(&converted, conversion)
             }
             ColorSpace::CalGray { white, gamma } => {
-                // 8.6.5.2: A^G scales the white point. `at` clamps to 0..1,
-                // which is this space's own range.
-                let a = math::pow(at(0), *gamma);
-                xyz_to_rgb([white[0] * a, white[1] * a, white[2] * a], *white)
+                xyz_to_rgb(cal_gray_xyz(*white, *gamma, at(0)), *white)
             }
             ColorSpace::CalRgb {
                 white,
                 gamma,
                 matrix,
-            } => {
-                // 8.6.5.3: each component through its own gamma, then Table
-                // 64's matrix — which is written column by column, so the
-                // first three numbers are the *A* column and not the X row.
-                let a = math::pow(at(0), gamma[0]);
-                let b = math::pow(at(1), gamma[1]);
-                let c = math::pow(at(2), gamma[2]);
-                let xyz = [
-                    matrix[0] * a + matrix[3] * b + matrix[6] * c,
-                    matrix[1] * a + matrix[4] * b + matrix[7] * c,
-                    matrix[2] * a + matrix[5] * b + matrix[8] * c,
-                ];
-                xyz_to_rgb(xyz, *white)
-            }
+            } => xyz_to_rgb(cal_rgb_xyz(*gamma, matrix, [at(0), at(1), at(2)]), *white),
             ColorSpace::Lab { range } => {
-                // Raw, not `at`: these components are not in 0..1, and
-                // clamping them there is precisely the bug this variant fixes.
-                let raw = |i: usize| components.get(i).copied().unwrap_or(0.0);
-                let l = raw(0).clamp(0.0, 100.0);
-                let a = within(raw(1), range[0], range[1]);
-                let b = within(raw(2), range[2], range[3]);
+                let [l, a, b] = lab_components(range, components);
                 lab_to_rgb(l, a, b)
             }
             // The profile's own transform, which is what this whole module
@@ -437,6 +400,132 @@ impl ColorSpace {
             other => other.to_rgb_in(components, conversion),
         }
     }
+
+    /// [`ColorSpace::to_rgb`] at sixteen bits a channel, an ICC colour in
+    /// relative colorimetric as `to_rgb` converts it.
+    #[must_use]
+    pub fn to_rgb16(&self, components: &[f64]) -> [u16; 3] {
+        self.to_rgb16_in(components, icc::Conversion::default())
+    }
+
+    /// [`ColorSpace::to_rgb_in`] at sixteen bits a channel
+    /// (`docs/design/sixteen-bit.md`, "Resolved colour").
+    ///
+    /// The components are evaluated exactly as `to_rgb_in` evaluates them —
+    /// the device relations, the CIE-based closed forms, `/Lab`, an
+    /// `/Indexed` entry through its base, a `/Separation` or `/DeviceN`
+    /// colour through its alternate, an ICC colour through its transform —
+    /// and each channel is quantised twice: to the byte `to_rgb_in` gives
+    /// it, and to sixteen bits held to that byte (the design's `q16`), the
+    /// relation ruling 23 settles. The top byte of each channel is
+    /// `to_rgb_in`'s byte, bit for bit, and the low byte refines it. An ICC
+    /// colour is its transform's one evaluation
+    /// ([`icc::Transform::apply16`]), never a second transform.
+    #[must_use]
+    pub fn to_rgb16_in(&self, components: &[f64], conversion: icc::Conversion) -> [u16; 3] {
+        let at = |i: usize| components.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+
+        match self {
+            ColorSpace::DeviceGray => [sample16(at(0)); 3],
+            ColorSpace::DeviceRgb => [sample16(at(0)), sample16(at(1)), sample16(at(2))],
+            ColorSpace::DeviceCmyk => cmyk_light(at(0), at(1), at(2), at(3)).map(sample16),
+            ColorSpace::Indexed { base, lookup, high } => {
+                base.to_rgb16_in(&palette_entry(base, lookup, *high, components), conversion)
+            }
+            ColorSpace::Separation {
+                alternate, tint, ..
+            } => {
+                let converted = tint.eval(components);
+                alternate.to_rgb16_in(&converted, conversion)
+            }
+            ColorSpace::CalGray { white, gamma } => {
+                xyz_to_rgb16(cal_gray_xyz(*white, *gamma, at(0)), *white)
+            }
+            ColorSpace::CalRgb {
+                white,
+                gamma,
+                matrix,
+            } => xyz_to_rgb16(cal_rgb_xyz(*gamma, matrix, [at(0), at(1), at(2)]), *white),
+            ColorSpace::Lab { range } => {
+                let [l, a, b] = lab_components(range, components);
+                lab_to_rgb16(l, a, b)
+            }
+            ColorSpace::Icc { transforms, .. } => {
+                transforms.get(conversion.intent).apply16(components)
+            }
+            ColorSpace::Approximated { components: n } => match n {
+                1 => ColorSpace::DeviceGray.to_rgb16(components),
+                4 => ColorSpace::DeviceCmyk.to_rgb16(components),
+                _ => ColorSpace::DeviceRgb.to_rgb16(components),
+            },
+            ColorSpace::Pattern { base } => match base {
+                Some(base) => base.to_rgb16_in(components, conversion),
+                None => [0; 3],
+            },
+        }
+    }
+}
+
+/// 8.6.4.4's relation: each ink's additive complement, with black applied,
+/// the components already in `0..=1`.
+fn cmyk_light(c: f64, m: f64, y: f64, k: f64) -> [f64; 3] {
+    [
+        (1.0 - c) * (1.0 - k),
+        (1.0 - m) * (1.0 - k),
+        (1.0 - y) * (1.0 - k),
+    ]
+}
+
+/// The base-space components an `/Indexed` colour names (8.6.6.3): the
+/// entry its index rounds to, held to `0..=high`, each byte over 255, and
+/// zero past the end of `lookup`.
+fn palette_entry(base: &ColorSpace, lookup: &[u8], high: u32, components: &[f64]) -> Vec<f64> {
+    let index = components
+        .first()
+        .copied()
+        .unwrap_or(0.0)
+        .clamp(0.0, f64::from(high))
+        .round() as usize;
+    let n = base.components();
+    let start = index.saturating_mul(n);
+    (0..n)
+        .map(|i| lookup.get(start + i).map_or(0.0, |&b| f64::from(b) / 255.0))
+        .collect()
+}
+
+/// A `CalGray` component as XYZ (8.6.5.2): `A^G` scales the white point. `a`
+/// is already in `0..=1`, which is this space's own range.
+fn cal_gray_xyz(white: [f64; 3], gamma: f64, a: f64) -> [f64; 3] {
+    let a = math::pow(a, gamma);
+    [white[0] * a, white[1] * a, white[2] * a]
+}
+
+/// `CalRGB` components as XYZ (8.6.5.3): each component through its own
+/// gamma, then Table 64's matrix — which is written column by column, so the
+/// first three numbers are the *A* column and not the X row. The components
+/// are already in `0..=1`.
+fn cal_rgb_xyz(gamma: [f64; 3], matrix: &[f64; 9], abc: [f64; 3]) -> [f64; 3] {
+    let a = math::pow(abc[0], gamma[0]);
+    let b = math::pow(abc[1], gamma[1]);
+    let c = math::pow(abc[2], gamma[2]);
+    [
+        matrix[0] * a + matrix[3] * b + matrix[6] * c,
+        matrix[1] * a + matrix[4] * b + matrix[7] * c,
+        matrix[2] * a + matrix[5] * b + matrix[8] * c,
+    ]
+}
+
+/// A `/Lab` colour's `L*`, `a*` and `b*` as the space reads them: raw, not in
+/// 0..1 — clamping them there is precisely the bug [`ColorSpace::Lab`]
+/// fixes — `L*` held to 0..100 and `a*` and `b*` to `range`, in whichever
+/// order its pairs come.
+fn lab_components(range: &[f64; 4], components: &[f64]) -> [f64; 3] {
+    let raw = |i: usize| components.get(i).copied().unwrap_or(0.0);
+    [
+        raw(0).clamp(0.0, 100.0),
+        within(raw(1), range[0], range[1]),
+        within(raw(2), range[2], range[3]),
+    ]
 }
 
 fn byte(value: f64) -> u8 {
@@ -444,6 +533,31 @@ fn byte(value: f64) -> u8 {
         return 0;
     }
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// A value in `0..=1` at sixteen bits, held to `byte`, the byte the 8-bit
+/// arithmetic rounds it to: `docs/design/sixteen-bit.md`'s `q16`, the
+/// relation ruling 23 settles.
+///
+/// `round(65 535·value)` clamped into `256·byte ..= 256·byte + 255`, so the
+/// top byte is `byte` exactly, and the low byte is the value's own 16-bit
+/// rounding wherever that falls inside the interval and the interval's
+/// nearer end where it does not. A value that is no number is nought before
+/// it is held.
+pub(crate) fn held16(value: f64, byte: u8) -> u16 {
+    let wide = if value.is_finite() {
+        (value.clamp(0.0, 1.0) * 65_535.0).round() as u16
+    } else {
+        0
+    };
+    let low = u16::from(byte) << 8;
+    wide.clamp(low, low | 0xff)
+}
+
+/// A component in `0..=1` at sixteen bits, held to the byte [`byte`] rounds
+/// it to: a device relation's quantisation at sixteen bits.
+fn sample16(value: f64) -> u16 {
+    held16(value, byte(value))
 }
 
 /// XYZ at D50 to linear sRGB, Bradford-adapted.
@@ -500,6 +614,19 @@ pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
 /// space a producer chose over an ICC profile, and this is the accuracy that
 /// choice buys.
 fn xyz_to_rgb(xyz: [f64; 3], white: [f64; 3]) -> (u8, u8, u8) {
+    let [r, g, b] = xyz_to_linear_srgb(xyz, white);
+    (srgb_encode(r), srgb_encode(g), srgb_encode(b))
+}
+
+/// [`xyz_to_rgb`] at sixteen bits a channel: the same light, each channel
+/// held to the byte `xyz_to_rgb` encodes it as ([`srgb_encode16`]).
+fn xyz_to_rgb16(xyz: [f64; 3], white: [f64; 3]) -> [u16; 3] {
+    xyz_to_linear_srgb(xyz, white).map(srgb_encode16)
+}
+
+/// XYZ relative to `white` as linear sRGB, before it is encoded: the light
+/// [`xyz_to_rgb`] encodes, adapted to D50 von Kries' way.
+fn xyz_to_linear_srgb(xyz: [f64; 3], white: [f64; 3]) -> [f64; 3] {
     const D50: [f64; 3] = [0.964_212, 1.0, 0.825_188];
     let scale = |v: f64, from: f64, to: f64| if from > 0.0 { v * to / from } else { v };
     let adapted = [
@@ -507,21 +634,33 @@ fn xyz_to_rgb(xyz: [f64; 3], white: [f64; 3]) -> (u8, u8, u8) {
         scale(xyz[1], white[1], D50[1]),
         scale(xyz[2], white[2], D50[2]),
     ];
-    let [r, g, b] = xyz_d50_to_linear_srgb(adapted[0], adapted[1], adapted[2]);
-    (srgb_encode(r), srgb_encode(g), srgb_encode(b))
+    xyz_d50_to_linear_srgb(adapted[0], adapted[1], adapted[2])
 }
 
 /// One linear-light channel as an sRGB byte (IEC 61966-2-1).
 pub(crate) fn srgb_encode(v: f64) -> u8 {
+    byte(srgb_transfer(v))
+}
+
+/// [`srgb_encode`] at sixteen bits: the same transfer, held to the byte
+/// `srgb_encode` rounds it to.
+fn srgb_encode16(v: f64) -> u16 {
+    let encoded = srgb_transfer(v);
+    held16(encoded, byte(encoded))
+}
+
+/// IEC 61966-2-1's transfer function: one linear-light channel, clamped to
+/// `0..=1`, as its encoded value in `0..=1`, before it is rounded to any
+/// width.
+pub(crate) fn srgb_transfer(v: f64) -> f64 {
     let v = v.clamp(0.0, 1.0);
     // Linear near zero, so the gradient stays finite where a plain power
     // would flatten.
-    let s = if v <= 0.003_130_8 {
+    if v <= 0.003_130_8 {
         12.92 * v
     } else {
         1.055 * math::pow(v, 1.0 / 2.4) - 0.055
-    };
-    byte(s)
+    }
 }
 
 /// **An sRGB triple as CIE L*a*b*** (8.6.5.4), relative to D50.
@@ -535,9 +674,29 @@ pub(crate) fn srgb_encode(v: f64) -> u8 {
 /// cannot use the 0..1 buffers every other space does.
 #[must_use]
 pub fn srgb_to_lab(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    let encoded = |v: u8| f64::from(v) / 255.0;
+    encoded_srgb_to_lab([encoded(r), encoded(g), encoded(b)])
+}
+
+/// [`srgb_to_lab`] for an sRGB colour at sixteen bits a channel: the same
+/// evaluation, each sample over 65 535 where `srgb_to_lab`'s is over 255.
+///
+/// A byte widened to sixteen bits, `257·v`, is the same value over 65 535 as
+/// `v` over 255, and each division is correctly rounded, so a widened colour
+/// reads as its bytes do, exactly; the low bytes of any other colour move it
+/// between them (`docs/design/sixteen-bit.md`, "Resolved colour").
+#[must_use]
+pub fn srgb_to_lab16(r: u16, g: u16, b: u16) -> (f64, f64, f64) {
+    let encoded = |v: u16| f64::from(v) / 65_535.0;
+    encoded_srgb_to_lab([encoded(r), encoded(g), encoded(b)])
+}
+
+/// An sRGB colour, each channel its encoded value in `0..=1`, as CIE
+/// L*a*b* relative to D50: what [`srgb_to_lab`] and [`srgb_to_lab16`] each
+/// evaluate.
+fn encoded_srgb_to_lab(encoded: [f64; 3]) -> (f64, f64, f64) {
     const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
-    let linear = |v: u8| -> f64 {
-        let v = f64::from(v) / 255.0;
+    let linear = |v: f64| -> f64 {
         // The inverse of the sRGB transfer function, linear near zero.
         if v <= 0.040_45 {
             v / 12.92
@@ -545,7 +704,7 @@ pub fn srgb_to_lab(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
             math::pow((v + 0.055) / 1.055, 2.4)
         }
     };
-    let (lr, lg, lb) = (linear(r), linear(g), linear(b));
+    let (lr, lg, lb) = (linear(encoded[0]), linear(encoded[1]), linear(encoded[2]));
     let row = |i: usize| {
         SRGB_TO_XYZ_D50[i][0] * lr + SRGB_TO_XYZ_D50[i][1] * lg + SRGB_TO_XYZ_D50[i][2] * lb
     };
@@ -573,11 +732,26 @@ pub fn lab_to_srgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     lab_to_rgb(l, a, b)
 }
 
+/// [`lab_to_srgb`] at sixteen bits a channel: the same evaluation quantised
+/// twice, each channel held to the byte `lab_to_srgb` gives it, so its top
+/// byte is that byte and its low byte refines it
+/// (`docs/design/sixteen-bit.md`, "Resolved colour").
+#[must_use]
+pub fn lab_to_srgb16(l: f64, a: f64, b: f64) -> [u16; 3] {
+    lab_to_rgb16(l, a, b)
+}
+
 /// A CIE L*a*b* triple, relative to D50, as sRGB: [`lab_to_linear_srgb`],
 /// encoded.
 pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     let [r, g, bl] = lab_to_linear_srgb(l, a, b);
     (srgb_encode(r), srgb_encode(g), srgb_encode(bl))
+}
+
+/// [`lab_to_rgb`] at sixteen bits a channel: [`lab_to_linear_srgb`],
+/// encoded by [`srgb_encode16`].
+fn lab_to_rgb16(l: f64, a: f64, b: f64) -> [u16; 3] {
+    lab_to_linear_srgb(l, a, b).map(srgb_encode16)
 }
 
 /// A CIE L*a*b* triple, relative to D50, as linear sRGB before it is
@@ -1113,6 +1287,411 @@ mod tests {
                     (l, a, bb)
                 );
             }
+        }
+    }
+
+    // ---- sixteen bits a channel (docs/design/sixteen-bit.md) ---------------
+
+    /// `x`, a value in `0..=1`, at sixteen bits by the design's relation,
+    /// computed here from its definition: `round(65 535·x)` held to the
+    /// interval of `round(255·x)`, the byte the 8-bit relation gives it,
+    /// `256·byte ..= 256·byte + 255`.
+    fn q16(x: f64) -> u16 {
+        let byte = (x * 255.0).round() as u32;
+        let wide = (x * 65_535.0).round() as u32;
+        wide.clamp(256 * byte, 256 * byte + 255) as u16
+    }
+
+    /// The values a component is swept over: every sixty-fourth from nought
+    /// to one, a third, and 0.1981 and 0.8019, which the 8-bit and the
+    /// 16-bit roundings part on.
+    fn component_axis() -> Vec<f64> {
+        let mut axis: Vec<f64> = (0..=64u32).map(|i| f64::from(i) / 64.0).collect();
+        axis.extend([1.0 / 3.0, 0.1981, 0.8019]);
+        axis
+    }
+
+    /// **The device spaces at sixteen bits are their relations** (8.6.4,
+    /// 8.6.4.4): grey and RGB the components themselves and CMYK each ink's
+    /// complement with black applied, each value at sixteen bits by the
+    /// design's relation, computed here ([`q16`]). A component on which the
+    /// two roundings part is held to its byte — 0.1981 is 51 at eight bits
+    /// and 12 982 at sixteen, whose top byte is 50, so it is 13 056,
+    /// `256·51` — the ends are exact, and out-of-range, missing and NaN
+    /// components read as the bytes read them.
+    #[test]
+    fn device_spaces_at_sixteen_bits_are_their_relations() {
+        assert_eq!(q16(0.1981), 13_056, "the relation holds the parting value");
+        assert_eq!(ColorSpace::DeviceGray.to_rgb16(&[0.1981]), [13_056; 3]);
+        assert_eq!(ColorSpace::DeviceGray.to_rgb16(&[0.0]), [0; 3]);
+        assert_eq!(ColorSpace::DeviceGray.to_rgb16(&[1.0]), [65_535; 3]);
+
+        let axis = component_axis();
+        for &v in &axis {
+            assert_eq!(
+                ColorSpace::DeviceGray.to_rgb16(&[v]),
+                [q16(v); 3],
+                "grey {v}"
+            );
+        }
+        for &r in &axis {
+            for &g in axis.iter().step_by(5) {
+                for &b in axis.iter().step_by(7) {
+                    assert_eq!(
+                        ColorSpace::DeviceRgb.to_rgb16(&[r, g, b]),
+                        [q16(r), q16(g), q16(b)],
+                        "rgb {r} {g} {b}"
+                    );
+                }
+            }
+        }
+        for &c in axis.iter().step_by(3) {
+            for &m in axis.iter().step_by(7) {
+                for &y in axis.iter().step_by(11) {
+                    for &k in axis.iter().step_by(4) {
+                        let light = |ink: f64| q16((1.0 - ink) * (1.0 - k));
+                        assert_eq!(
+                            ColorSpace::DeviceCmyk.to_rgb16(&[c, m, y, k]),
+                            [light(c), light(m), light(y)],
+                            "cmyk {c} {m} {y} {k}"
+                        );
+                    }
+                }
+            }
+        }
+
+        assert_eq!(ColorSpace::DeviceGray.to_rgb16(&[5.0]), [65_535; 3]);
+        assert_eq!(ColorSpace::DeviceGray.to_rgb16(&[-5.0]), [0; 3]);
+        assert_eq!(ColorSpace::DeviceGray.to_rgb16(&[f64::NAN]), [0; 3]);
+        assert_eq!(ColorSpace::DeviceRgb.to_rgb16(&[]), [0; 3]);
+        assert_eq!(
+            ColorSpace::DeviceCmyk.to_rgb16(&[0.5]),
+            [q16(0.5), 65_535, 65_535]
+        );
+    }
+
+    /// The top byte of each channel of a 16-bit colour.
+    fn top_bytes(wide: [u16; 3]) -> (u8, u8, u8) {
+        let [r, g, b] = wide.map(|channel| (channel >> 8) as u8);
+        (r, g, b)
+    }
+
+    /// Every combination of `axis`'s values over `inputs` components, the
+    /// last varying fastest.
+    fn combinations(inputs: usize, axis: &[f64]) -> Vec<Vec<f64>> {
+        (0..axis.len().pow(inputs as u32))
+            .map(|index| {
+                let mut x = vec![0.0; inputs];
+                let mut rest = index;
+                for slot in x.iter_mut().rev() {
+                    *slot = axis[rest % axis.len()];
+                    rest /= axis.len();
+                }
+                x
+            })
+            .collect()
+    }
+
+    /// The grid a space of `inputs` components in `0..=1` is swept over:
+    /// fewer steps an axis the more components, and 0.1981, between two
+    /// 8-bit values, on every axis of four or fewer.
+    fn component_grid(inputs: usize) -> Vec<Vec<f64>> {
+        let steps: u32 = match inputs {
+            0 | 1 => 64,
+            2 => 16,
+            3 => 8,
+            4 => 4,
+            _ => 2,
+        };
+        let mut axis: Vec<f64> = (0..=steps)
+            .map(|i| f64::from(i) / f64::from(steps))
+            .collect();
+        if inputs <= 4 {
+            axis.push(0.1981);
+        }
+        combinations(inputs.max(1), &axis)
+    }
+
+    /// **Every space at sixteen bits tops out at its 8-bit colour**
+    /// (`docs/design/sixteen-bit.md`, ruling 23). Over a grid of components
+    /// per space — the device spaces; `CalGray` and `CalRGB` under a white
+    /// other than D50; `/Lab` over its range and past it; `/Indexed` over an
+    /// RGB, a CMYK and an ICC palette; a `/Separation` and a `/DeviceN`
+    /// through their tint transforms; each `Approximated` count; an
+    /// uncoloured pattern's underlying space; and an ICC space over each path
+    /// its transform takes — in every intent, the top byte of each channel
+    /// `to_rgb16_in` gives is the byte `to_rgb_in` gives, and `to_rgb16` is
+    /// `to_rgb16_in` in relative colorimetric. The low bytes refine: in every
+    /// space but the RGB palette, whose entries are bytes and so widen
+    /// exactly, some colour has a low byte that is not its top byte
+    /// repeated, which is all a byte widened to sixteen bits would carry.
+    #[test]
+    fn every_space_at_sixteen_bits_tops_out_at_its_eight_bit_colour() {
+        let d65 = [0.950_47, 1.0, 1.088_83];
+        let ink = |c0: f64, c1: f64| Function::Exponential {
+            domain: (0.0, 1.0),
+            c0: vec![c0],
+            c1: vec![c1],
+            n: 2.2,
+        };
+        let mut lab_inputs: Vec<Vec<f64>> = Vec::new();
+        let axis = [-150.0, -128.0, -64.0, -10.0, 0.0, 10.0, 64.0, 127.0, 150.0];
+        for l in [0.0, 12.5, 25.0, 37.5, 50.0, 62.5, 75.0, 87.5, 100.0, 120.0] {
+            for a in axis {
+                for b in axis {
+                    lab_inputs.push(vec![l, a, b]);
+                }
+            }
+        }
+        let index_inputs: Vec<Vec<f64>> = [-1.0, 0.0, 0.4, 1.0, 1.6, 2.0, 3.0, 99.0, f64::NAN]
+            .iter()
+            .map(|&i| vec![i])
+            .collect();
+        let palette_icc = {
+            let profile =
+                icc::Profile::parse(&icc::tests::three_intents_profile()).expect("three tables");
+            ColorSpace::Icc {
+                transforms: std::sync::Arc::new(
+                    icc::Transforms::compile(profile).expect("a transform"),
+                ),
+                components: 3,
+            }
+        };
+
+        let mut spaces: Vec<(String, ColorSpace, Vec<Vec<f64>>, bool)> = vec![
+            (
+                "DeviceGray".into(),
+                ColorSpace::DeviceGray,
+                component_grid(1),
+                true,
+            ),
+            (
+                "DeviceRGB".into(),
+                ColorSpace::DeviceRgb,
+                component_grid(3),
+                true,
+            ),
+            (
+                "DeviceCMYK".into(),
+                ColorSpace::DeviceCmyk,
+                component_grid(4),
+                true,
+            ),
+            (
+                "CalGray".into(),
+                ColorSpace::CalGray {
+                    white: d65,
+                    gamma: 2.2,
+                },
+                component_grid(1),
+                true,
+            ),
+            (
+                "CalRGB".into(),
+                ColorSpace::CalRgb {
+                    white: d65,
+                    gamma: [1.8, 2.2, 2.4],
+                    matrix: [
+                        0.4124, 0.2126, 0.0193, 0.3576, 0.7152, 0.1192, 0.1805, 0.0722, 0.9505,
+                    ],
+                },
+                component_grid(3),
+                true,
+            ),
+            (
+                "Lab".into(),
+                ColorSpace::Lab {
+                    range: [-128.0, 127.0, -100.0, 100.0],
+                },
+                lab_inputs,
+                true,
+            ),
+            (
+                "an RGB palette".into(),
+                ColorSpace::Indexed {
+                    base: Box::new(ColorSpace::DeviceRgb),
+                    lookup: vec![12, 200, 71, 255, 0, 0, 0, 0, 0, 200, 40, 130],
+                    high: 3,
+                },
+                index_inputs.clone(),
+                false,
+            ),
+            (
+                "a CMYK palette".into(),
+                ColorSpace::Indexed {
+                    base: Box::new(ColorSpace::DeviceCmyk),
+                    lookup: vec![12, 200, 71, 33, 255, 0, 0, 128, 90, 90, 90, 90],
+                    high: 2,
+                },
+                index_inputs.clone(),
+                true,
+            ),
+            (
+                "an ICC palette".into(),
+                ColorSpace::Indexed {
+                    base: Box::new(palette_icc.clone()),
+                    lookup: vec![12, 200, 71, 255, 0, 0, 0, 0, 0, 200, 40, 130],
+                    high: 3,
+                },
+                index_inputs,
+                true,
+            ),
+            (
+                "a Separation".into(),
+                ColorSpace::Separation {
+                    components: 1,
+                    alternate: Box::new(ColorSpace::DeviceCmyk),
+                    tint: Box::new(Function::Exponential {
+                        domain: (0.0, 1.0),
+                        c0: vec![0.0, 0.0, 0.0, 0.0],
+                        c1: vec![0.1, 0.9, 0.3, 0.05],
+                        n: 1.0,
+                    }),
+                    colorants: Colorants::default(),
+                },
+                component_grid(1),
+                true,
+            ),
+            (
+                "a DeviceN".into(),
+                ColorSpace::Separation {
+                    components: 2,
+                    alternate: Box::new(ColorSpace::DeviceCmyk),
+                    tint: Box::new(Function::Array(vec![
+                        ink(0.0, 0.9),
+                        ink(0.1, 0.4),
+                        ink(0.0, 0.0),
+                        ink(0.2, 0.7),
+                    ])),
+                    colorants: Colorants::default(),
+                },
+                component_grid(2),
+                true,
+            ),
+            (
+                "one approximated component".into(),
+                ColorSpace::Approximated { components: 1 },
+                component_grid(1),
+                true,
+            ),
+            (
+                "three approximated components".into(),
+                ColorSpace::Approximated { components: 3 },
+                component_grid(3),
+                true,
+            ),
+            (
+                "four approximated components".into(),
+                ColorSpace::Approximated { components: 4 },
+                component_grid(4),
+                true,
+            ),
+            (
+                "an uncoloured pattern over CMYK".into(),
+                ColorSpace::Pattern {
+                    base: Some(Box::new(ColorSpace::DeviceCmyk)),
+                },
+                component_grid(4),
+                true,
+            ),
+            (
+                "a bare pattern".into(),
+                ColorSpace::Pattern { base: None },
+                component_grid(1),
+                false,
+            ),
+        ];
+        for (name, bytes) in icc::tests::sixteen_bit_profiles() {
+            let profile = icc::Profile::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let transforms =
+                icc::Transforms::compile(profile).unwrap_or_else(|| panic!("{name}: no transform"));
+            let components = transforms.inputs();
+            spaces.push((
+                format!("ICC, {name}"),
+                ColorSpace::Icc {
+                    transforms: std::sync::Arc::new(transforms),
+                    components,
+                },
+                component_grid(components),
+                true,
+            ));
+        }
+
+        for (name, space, inputs, refines) in &spaces {
+            let mut refined = false;
+            for intent in icc::Intent::ALL {
+                let conversion = icc::Conversion { intent };
+                for x in inputs {
+                    let wide = space.to_rgb16_in(x, conversion);
+                    assert_eq!(
+                        top_bytes(wide),
+                        space.to_rgb_in(x, conversion),
+                        "{name}, {intent:?}, at {x:?}"
+                    );
+                    refined |= wide.iter().any(|&channel| channel & 0xff != channel >> 8);
+                }
+            }
+            for x in inputs {
+                assert_eq!(
+                    space.to_rgb16(x),
+                    space.to_rgb16_in(x, icc::Conversion::default()),
+                    "{name} at {x:?}"
+                );
+            }
+            assert_eq!(
+                refined, *refines,
+                "{name}: whether a low byte refines its top byte"
+            );
+        }
+    }
+
+    /// **The Lab conversions at sixteen bits keep their bytes.**
+    /// `lab_to_srgb16` tops out at `lab_to_srgb` over `L*` from 0 to 100 and
+    /// `a*` and `b*` from −128 to 127, and some colour's low byte refines its
+    /// top byte; `srgb_to_lab16` of a colour whose bytes are widened, `257·v`,
+    /// is `srgb_to_lab` of those bytes exactly, and a 16-bit colour between
+    /// two 8-bit ones reads between their readings: its lightness between
+    /// theirs, for a grey.
+    #[test]
+    fn the_lab_conversions_at_sixteen_bits_keep_their_bytes() {
+        let mut refined = false;
+        for l in (0..=20u32).map(|i| f64::from(i) * 5.0) {
+            for a in (-128..=127i32).step_by(17).map(f64::from) {
+                for b in (-128..=127i32).step_by(15).map(f64::from) {
+                    let wide = lab_to_srgb16(l, a, b);
+                    assert_eq!(top_bytes(wide), lab_to_srgb(l, a, b), "{l} {a} {b}");
+                    refined |= wide.iter().any(|&channel| channel & 0xff != channel >> 8);
+                }
+            }
+        }
+        assert!(refined, "no low byte refines its top byte");
+
+        for r in (0..=255u16).step_by(5) {
+            for g in (0..=255u16).step_by(15) {
+                for b in (0..=255u16).step_by(17) {
+                    let widened = srgb_to_lab16(257 * r, 257 * g, 257 * b);
+                    let narrow = srgb_to_lab(r as u8, g as u8, b as u8);
+                    assert_eq!(
+                        (
+                            widened.0.to_bits(),
+                            widened.1.to_bits(),
+                            widened.2.to_bits()
+                        ),
+                        (narrow.0.to_bits(), narrow.1.to_bits(), narrow.2.to_bits()),
+                        "{r} {g} {b}"
+                    );
+                }
+            }
+        }
+        for v in 0..255u16 {
+            let below = srgb_to_lab(v as u8, v as u8, v as u8).0;
+            let above = srgb_to_lab(v as u8 + 1, v as u8 + 1, v as u8 + 1).0;
+            let between = 257 * v + 128;
+            let lightness = srgb_to_lab16(between, between, between).0;
+            assert!(
+                below < lightness && lightness < above,
+                "grey {between}: L* {lightness}, not between {below} and {above}"
+            );
         }
     }
 }
