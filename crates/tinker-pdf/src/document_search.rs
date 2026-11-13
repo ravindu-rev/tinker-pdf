@@ -40,14 +40,28 @@
 //! occurrence crosses, read off the needle's length less one on either side,
 //! or a run's start — from which the hits after it are the run's whatever
 //! came before. `next` keeps its scan between calls.
+//!
+//! # The sources
+//!
+//! A document's text is read as stretches in a fixed order: its pages, its
+//! annotations, its form fields, its outline and its attachments, each but
+//! the first a list of strings read through what the facade lists. A
+//! stretch's reader reads each string as a page of one block, its lines split
+//! at line ends and each character a glyph of its own, so the same joins,
+//! folding and matching read it; a boundary stands between two strings, each
+//! its own run.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::ops::Range;
 use std::sync::Arc;
 
 use tinker_pdf_content::{
-    hyphen_join, word_boundaries, Needle, Quad, SearchOptions, TextChar, TextLine, TextPage,
+    hyphen_join, word_boundaries, Needle, Quad, SearchOptions, TextBlock, TextChar, TextLine,
+    TextPage, WritingMode,
 };
+use tinker_pdf_cos::{FieldKind, FieldValue, ObjRef, OutlineItem};
 
+use crate::annotations::RichText;
 use crate::{Document, DocumentError};
 
 /// How [`Document::search`] reads a document: the page search's options, and
@@ -73,6 +87,80 @@ pub struct DocumentSearchOptions {
     /// Keep a hyphen where the page draws it: no line is rejoined at a
     /// hyphen, and a soft hyphen is a character like any other.
     pub keep_hyphens: bool,
+    /// Which of the document's sources are searched; every one by default.
+    pub sources: SearchSources,
+}
+
+/// Which of a document's sources a [`DocumentSearch`] reads, in the order it
+/// reads them: the page text, then each other source's strings
+/// (`docs/design/document-search.md`, "The sources").
+///
+/// `Default` is [`SearchSources::ALL`]; [`SearchSources::PAGES`] is the page
+/// text alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchSources {
+    /// The page text.
+    pub pages: bool,
+    /// Each page's annotations' text: `/Contents`, the text of `/RC`, `/Subj`
+    /// and a markup annotation's author, `/T`.
+    pub annotations: bool,
+    /// The form fields' values: a field's text value, or each value a list box
+    /// holds.
+    pub form_fields: bool,
+    /// The outline items' titles.
+    pub outline: bool,
+    /// The attachments' names, file names and descriptions.
+    pub attachments: bool,
+}
+
+impl SearchSources {
+    /// Every source.
+    pub const ALL: SearchSources = SearchSources {
+        pages: true,
+        annotations: true,
+        form_fields: true,
+        outline: true,
+        attachments: true,
+    };
+
+    /// The page text alone.
+    pub const PAGES: SearchSources = SearchSources {
+        pages: true,
+        annotations: false,
+        form_fields: false,
+        outline: false,
+        attachments: false,
+    };
+}
+
+impl Default for SearchSources {
+    fn default() -> SearchSources {
+        SearchSources::ALL
+    }
+}
+
+/// Which of an annotation's strings a hit was found in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationText {
+    /// `/Contents` (Table 164).
+    Contents,
+    /// The character data of `/RC`'s rich text (Table 170).
+    RichText,
+    /// `/Subj` (Table 170).
+    Subject,
+    /// A markup annotation's `/T`, its author (Table 170).
+    Author,
+}
+
+/// Which of an attachment's strings a hit was found in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentText {
+    /// The name it is filed under in `/Names /EmbeddedFiles`.
+    Name,
+    /// `/UF` or `/F`, where it is not the name.
+    FileName,
+    /// `/Desc`.
+    Description,
 }
 
 /// How many characters of a hit's first line before it, and of its last line
@@ -91,12 +179,59 @@ pub struct PageQuads {
 }
 
 /// Where a hit was found.
+///
+/// Each source beside the page text names the string it was found in and
+/// `range`, the bytes of that string the hit covers as the string states it.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum HitPlace {
     /// In the page text: each page the hit covers, in order — two or more
     /// for a hit that crosses a page break.
     Pages(Vec<PageQuads>),
+    /// In an annotation's text: the page's annotation `index`, in `/Annots`
+    /// order as [`crate::Page::annotations`] lists it, with its `/Rect`.
+    Annotation {
+        /// The page, zero-based.
+        page: u32,
+        /// The annotation's index in the page's listing.
+        index: usize,
+        /// Its `/Rect`, as the listing reads it.
+        rect: (f64, f64, f64, f64),
+        /// Which of its strings.
+        text: AnnotationText,
+        /// The bytes of that string the hit covers.
+        range: Range<usize>,
+    },
+    /// In a form field's value.
+    FormField {
+        /// The field's fully qualified name.
+        name: String,
+        /// The widget annotations that draw it.
+        widgets: Vec<ObjRef>,
+        /// Which of its values: 0 for a single value, each of a list box's in
+        /// turn.
+        value: usize,
+        /// The bytes of that value the hit covers.
+        range: Range<usize>,
+    },
+    /// In an outline item's title.
+    Outline {
+        /// The item's index among its siblings at each depth, from the top.
+        path: Vec<usize>,
+        /// The titles from the top to the item, its own last.
+        titles: Vec<String>,
+        /// The bytes of its title the hit covers.
+        range: Range<usize>,
+    },
+    /// In an attachment's name, file name or description.
+    Attachment {
+        /// The name it is filed under.
+        name: String,
+        /// Which of its strings.
+        text: AttachmentText,
+        /// The bytes of that string the hit covers.
+        range: Range<usize>,
+    },
 }
 
 /// One hit of a [`DocumentSearch`].
@@ -104,8 +239,9 @@ pub enum HitPlace {
 pub struct SearchHit {
     /// Where it was found.
     pub place: HitPlace,
-    /// The text it covers as the page states it: the text of every glyph it
-    /// covers, the lines it crosses joined as the search joined them.
+    /// The text it covers as the source states it: the text of every glyph
+    /// or character it covers, the lines it crosses joined as the search
+    /// joined them.
     pub text: String,
     /// Up to [`HIT_CONTEXT`] characters of its first line before it, as
     /// stated.
@@ -204,16 +340,29 @@ pub enum UnsearchedReason {
 /// A page is extracted only when the search reaches it, and the cursor keeps
 /// the few pages it stands on.
 pub struct DocumentSearch {
-    reader: Reader,
+    doc: Document,
+    options: DocumentSearchOptions,
+    /// The folded needle; `None` finds nothing.
+    needle: Option<Needle>,
+    /// Each stretch's reader — the page text's, then each other source's —
+    /// built when the cursor first reaches it; `None` for a stretch left out.
+    readers: [Option<Reader>; STRETCHES],
+    /// Whether each stretch's reader has been built.
+    built: [bool; STRETCHES],
     /// The cursor's position.
     position: Spot,
-    /// The scan `next` continues, while the position is where it left it.
-    stream: Option<Stream>,
+    /// The scan `next` continues, and its stretch, while the position is
+    /// where it left it.
+    stream: Option<(usize, Stream)>,
     /// Hits the scan decided that `next` has not returned.
     pending: VecDeque<SearchHit>,
     /// What the search could not read.
     unsearched: Vec<Unsearched>,
 }
+
+/// How many stretches one document's text is read as: its pages, its
+/// annotations, its form fields, its outline and its attachments.
+const STRETCHES: usize = 5;
 
 impl Document {
     /// A search of the document's text for `needle`, as `options` read it,
@@ -242,14 +391,11 @@ impl Document {
             }
         };
         DocumentSearch {
-            reader: Reader {
-                needle: Needle::new(needle, &options.search).filter(|_| readable),
-                page_count: if readable { self.page_count() } else { 0 },
-                doc: self.clone(),
-                options: options.clone(),
-                pages: BTreeMap::new(),
-                pages_read: 0,
-            },
+            doc: self.clone(),
+            options: options.clone(),
+            needle: Needle::new(needle, &options.search).filter(|_| readable),
+            readers: Default::default(),
+            built: [false; STRETCHES],
             position: Spot::START,
             stream: None,
             pending: VecDeque::new(),
@@ -265,9 +411,24 @@ impl DocumentSearch {
     pub fn previous(&mut self) -> Option<SearchHit> {
         self.stream = None;
         self.pending.clear();
-        let hit = self.reader.previous_before(&self.position);
-        self.position = hit.as_ref().map_or(Spot::START, |hit| hit.start.0.clone());
-        hit
+        let (from, local) = split(&self.position).unwrap_or((STRETCHES - 1, Spot::End));
+        for stretch in (0..=from).rev() {
+            let to = if stretch == from {
+                local.clone()
+            } else {
+                Spot::End
+            };
+            let Some(reader) = self.reader(stretch) else {
+                continue;
+            };
+            if let Some(raw) = reader.previous_before(&to) {
+                let hit = reader.hit(stretch, raw);
+                self.position = hit.start.0.clone();
+                return Some(hit);
+            }
+        }
+        self.position = Spot::START;
+        None
     }
 
     /// The cursor's position.
@@ -288,6 +449,70 @@ impl DocumentSearch {
     pub fn unsearched(&self) -> &[Unsearched] {
         &self.unsearched
     }
+
+    /// Stretch `stretch`'s reader, built now where the cursor has not reached
+    /// it; `None` for a stretch the options leave out, or of a document that
+    /// is not read.
+    fn reader(&mut self, stretch: usize) -> Option<&mut Reader> {
+        let needle = self.needle.clone()?;
+        if !self.built.get(stretch).copied().unwrap_or(true) {
+            if let Some(built) = self.built.get_mut(stretch) {
+                *built = true;
+            }
+            let sources = &self.options.sources;
+            let reader = match stretch {
+                0 if sources.pages => Some(Reader::pages(&self.doc, &self.options, needle)),
+                1 if sources.annotations => Some(Reader::items(
+                    &self.doc,
+                    &self.options,
+                    needle,
+                    annotation_items(&self.doc),
+                )),
+                2 if sources.form_fields => Some(Reader::items(
+                    &self.doc,
+                    &self.options,
+                    needle,
+                    field_items(&self.doc),
+                )),
+                3 if sources.outline => Some(Reader::items(
+                    &self.doc,
+                    &self.options,
+                    needle,
+                    outline_items(&self.doc),
+                )),
+                4 if sources.attachments => Some(Reader::items(
+                    &self.doc,
+                    &self.options,
+                    needle,
+                    attachment_items(&self.doc),
+                )),
+                _ => None,
+            };
+            if let Some(slot) = self.readers.get_mut(stretch) {
+                *slot = reader;
+            }
+        }
+        self.readers.get_mut(stretch)?.as_mut()
+    }
+
+    /// The scan `next` reads from `local` in stretch `from`, or from the start
+    /// of the first stretch after it that holds anything after it.
+    fn stream_from(&mut self, from: usize, local: &Spot) -> Option<(usize, Stream)> {
+        for stretch in from..STRETCHES {
+            let start = if stretch == from {
+                local.clone()
+            } else {
+                Spot::START
+            };
+            let Some(reader) = self.reader(stretch) else {
+                continue;
+            };
+            if let Some(stream) = reader.stream_from(&start) {
+                return Some((stretch, stream));
+            }
+        }
+        None
+    }
 }
 
 impl Iterator for DocumentSearch {
@@ -300,7 +525,10 @@ impl Iterator for DocumentSearch {
         let from = self.position.clone();
         if self.stream.is_none() {
             self.pending.clear();
-            self.stream = self.reader.stream_from(&from);
+            self.stream = match split(&from) {
+                Some((stretch, local)) => self.stream_from(stretch, &local),
+                None => None,
+            };
         }
         loop {
             while let Some(hit) = self.pending.pop_front() {
@@ -309,16 +537,73 @@ impl Iterator for DocumentSearch {
                     return Some(hit);
                 }
             }
-            let more = match self.stream.as_mut() {
-                Some(stream) => stream.pump(&mut self.reader, &mut self.pending),
-                None => false,
-            };
-            if !more && self.pending.is_empty() {
-                self.stream = None;
+            let Some((stretch, mut stream)) = self.stream.take() else {
                 self.position = Spot::End;
                 return None;
+            };
+            let Some(reader) = self.readers.get_mut(stretch).and_then(Option::as_mut) else {
+                self.position = Spot::End;
+                return None;
+            };
+            let mut decided = VecDeque::new();
+            let more = stream.pump(reader, &mut decided);
+            for raw in decided {
+                self.pending.push_back(reader.hit(stretch, raw));
             }
+            self.stream = if more {
+                Some((stretch, stream))
+            } else {
+                // The stretch is read: the next one's scan, from its start.
+                self.stream_from(stretch + 1, &Spot::START)
+            };
         }
+    }
+}
+
+/// Which stretch a position is in, and where in it as the stretch's reader
+/// reads it: the page text's positions as they are, another stretch's with its
+/// item for the page; `None` at the document's end.
+fn split(spot: &Spot) -> Option<(usize, Spot)> {
+    match *spot {
+        Spot::Text { .. } => Some((0, spot.clone())),
+        Spot::Item {
+            stretch,
+            item,
+            line,
+            unit,
+            within,
+        } => Some((
+            stretch.index(),
+            Spot::Text {
+                page: item,
+                line,
+                unit,
+                within,
+            },
+        )),
+        Spot::End => None,
+    }
+}
+
+/// A position a stretch's reader read, as the document's.
+fn joined(stretch: usize, local: Spot) -> Spot {
+    match (Stretch::of(stretch), local) {
+        (
+            Some(kind),
+            Spot::Text {
+                page,
+                line,
+                unit,
+                within,
+            },
+        ) => Spot::Item {
+            stretch: kind,
+            item: page,
+            line,
+            unit,
+            within,
+        },
+        (_, local) => local,
     }
 }
 
@@ -335,6 +620,15 @@ enum Spot {
         unit: u32,
         within: u32,
     },
+    /// In another stretch: before byte `within` of character `unit`'s
+    /// folded piece in line `line` of its string `item`.
+    Item {
+        stretch: Stretch,
+        item: u32,
+        line: u32,
+        unit: u32,
+        within: u32,
+    },
     /// The end of the document's text.
     End,
 }
@@ -346,6 +640,270 @@ impl Spot {
         unit: 0,
         within: 0,
     };
+}
+
+/// The stretches after the page text, in the order a search reads them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Stretch {
+    Annotations,
+    Fields,
+    Outline,
+    Attachments,
+}
+
+impl Stretch {
+    /// The stretch's index among a document's, the page text's 0.
+    const fn index(self) -> usize {
+        match self {
+            Stretch::Annotations => 1,
+            Stretch::Fields => 2,
+            Stretch::Outline => 3,
+            Stretch::Attachments => 4,
+        }
+    }
+
+    /// The stretch of index `index`; `None` for the page text's and past the
+    /// last.
+    const fn of(index: usize) -> Option<Stretch> {
+        match index {
+            1 => Some(Stretch::Annotations),
+            2 => Some(Stretch::Fields),
+            3 => Some(Stretch::Outline),
+            4 => Some(Stretch::Attachments),
+            _ => None,
+        }
+    }
+}
+
+/// One string a source beside the page text holds, and where it is.
+struct Item {
+    text: String,
+    place: ItemPlace,
+}
+
+/// Where an [`Item`] is: a [`HitPlace`] but for the range a hit covers.
+#[derive(Clone)]
+enum ItemPlace {
+    Annotation {
+        page: u32,
+        index: usize,
+        rect: (f64, f64, f64, f64),
+        text: AnnotationText,
+    },
+    FormField {
+        name: String,
+        widgets: Vec<ObjRef>,
+        value: usize,
+    },
+    Outline {
+        path: Vec<usize>,
+        titles: Vec<String>,
+    },
+    Attachment {
+        name: String,
+        text: AttachmentText,
+    },
+}
+
+impl ItemPlace {
+    /// The place of a hit covering `range` of the item's string.
+    fn with(self, range: Range<usize>) -> HitPlace {
+        match self {
+            ItemPlace::Annotation {
+                page,
+                index,
+                rect,
+                text,
+            } => HitPlace::Annotation {
+                page,
+                index,
+                rect,
+                text,
+                range,
+            },
+            ItemPlace::FormField {
+                name,
+                widgets,
+                value,
+            } => HitPlace::FormField {
+                name,
+                widgets,
+                value,
+                range,
+            },
+            ItemPlace::Outline { path, titles } => HitPlace::Outline {
+                path,
+                titles,
+                range,
+            },
+            ItemPlace::Attachment { name, text } => HitPlace::Attachment { name, text, range },
+        }
+    }
+}
+
+/// Each page's annotations' strings, in page and `/Annots` order: each
+/// annotation's `/Contents`, the text of its `/RC`, its `/Subj` and, for a
+/// markup annotation, its `/T`. A pop-up's text is its parent's, read there,
+/// so a pop-up is passed over; a widget's `/T` is its field's partial name,
+/// which no source searches.
+fn annotation_items(doc: &Document) -> Vec<Item> {
+    let mut items = Vec::new();
+    for index in 0..doc.page_count() {
+        let Some(page) = doc.page(index) else {
+            continue;
+        };
+        for (at, annotation) in page.annotations().into_iter().enumerate() {
+            if annotation.kind == crate::AnnotationKind::Popup {
+                continue;
+            }
+            let rich = annotation.rich_text.as_ref().map(|rich| match rich {
+                RichText::Text(markup) => rich_text(markup),
+                RichText::Stream(stream) => doc
+                    .cos()
+                    .stream_decoded(*stream)
+                    .map(|bytes| rich_text(&String::from_utf8_lossy(&bytes)))
+                    .unwrap_or_default(),
+            });
+            let author = annotation
+                .kind
+                .is_markup()
+                .then(|| annotation.title.clone())
+                .flatten();
+            for (text, string) in [
+                (AnnotationText::Contents, annotation.contents.clone()),
+                (AnnotationText::RichText, rich),
+                (AnnotationText::Subject, annotation.subject.clone()),
+                (AnnotationText::Author, author),
+            ] {
+                if let Some(string) = string {
+                    items.push(Item {
+                        text: string,
+                        place: ItemPlace::Annotation {
+                            page: index,
+                            index: at,
+                            rect: annotation.rect,
+                            text,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    items
+}
+
+/// The elements whose end ends a line of rich text: XHTML's blocks and its
+/// line break.
+const RICH_TEXT_BLOCKS: [&str; 13] = [
+    "p", "div", "li", "br", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "dt", "dd",
+];
+
+/// `/RC`'s text: the character data of its XHTML (Table 170), each end of a
+/// block element or a line break a line's end; text that does not parse as
+/// XML, as it stands.
+fn rich_text(markup: &str) -> String {
+    let Ok(source) = tinker_pdf_xml::Source::new(markup.as_bytes()) else {
+        return markup.to_string();
+    };
+    let mut out = String::new();
+    for event in source.reader(&tinker_pdf_xml::Limits::DEFAULT) {
+        match event {
+            Ok(tinker_pdf_xml::Event::Text(text) | tinker_pdf_xml::Event::Cdata(text)) => {
+                out.push_str(&text);
+            }
+            Ok(tinker_pdf_xml::Event::End(name)) if RICH_TEXT_BLOCKS.contains(&name.local()) => {
+                out.push('\n');
+            }
+            Ok(_) => {}
+            Err(_) => return markup.to_string(),
+        }
+    }
+    out
+}
+
+/// The form fields' values, in `Document::form_fields` order: a field's text
+/// value, or each value a list box holds, one item each. A check box's, a
+/// radio button's or a push button's state and a signature are no text.
+fn field_items(doc: &Document) -> Vec<Item> {
+    let mut items = Vec::new();
+    for field in doc.form_fields() {
+        if matches!(
+            field.kind,
+            FieldKind::Checkbox | FieldKind::Radio | FieldKind::PushButton | FieldKind::Signature
+        ) {
+            continue;
+        }
+        let values = match &field.value {
+            FieldValue::Text(text) => vec![text.clone()],
+            FieldValue::Many(values) => values.clone(),
+            FieldValue::State(_) | FieldValue::None => Vec::new(),
+        };
+        for (value, text) in values.into_iter().enumerate() {
+            items.push(Item {
+                text,
+                place: ItemPlace::FormField {
+                    name: field.name.clone(),
+                    widgets: field.widgets.clone(),
+                    value,
+                },
+            });
+        }
+    }
+    items
+}
+
+/// Every outline item's title, depth first.
+fn outline_items(doc: &Document) -> Vec<Item> {
+    fn walk(
+        items: &[OutlineItem],
+        path: &mut Vec<usize>,
+        titles: &mut Vec<String>,
+        out: &mut Vec<Item>,
+    ) {
+        for (index, item) in items.iter().enumerate() {
+            path.push(index);
+            titles.push(item.title.clone());
+            out.push(Item {
+                text: item.title.clone(),
+                place: ItemPlace::Outline {
+                    path: path.clone(),
+                    titles: titles.clone(),
+                },
+            });
+            walk(&item.children, path, titles, out);
+            path.pop();
+            titles.pop();
+        }
+    }
+    let mut out = Vec::new();
+    walk(&doc.outline(), &mut Vec::new(), &mut Vec::new(), &mut out);
+    out
+}
+
+/// Each attachment's strings, in name order: its name, its file name where
+/// it is not the name, and its description.
+fn attachment_items(doc: &Document) -> Vec<Item> {
+    let mut items = Vec::new();
+    for attachment in doc.attachments() {
+        let file_name =
+            (attachment.filename != attachment.name).then(|| attachment.filename.clone());
+        for (text, string) in [
+            (AttachmentText::Name, Some(attachment.name.clone())),
+            (AttachmentText::FileName, file_name),
+            (AttachmentText::Description, attachment.description.clone()),
+        ] {
+            if let Some(string) = string {
+                items.push(Item {
+                    text: string,
+                    place: ItemPlace::Attachment {
+                        name: attachment.name.clone(),
+                        text,
+                    },
+                });
+            }
+        }
+    }
+    items
 }
 
 /// A line of the page text, by its page and its index in `TextPage::lines`.
@@ -375,6 +933,10 @@ struct LineInfo {
     last: u32,
     /// Its glyphs' texts, joined.
     stated: String,
+    /// For a line of an item's string, where each character starts in the
+    /// string and where the line ends: one more entry than it has
+    /// characters. Empty for a page's line.
+    offsets: Vec<usize>,
 }
 
 impl LineInfo {
@@ -388,6 +950,30 @@ impl LineInfo {
 /// Whether a glyph's text is white space, or empty: one a join sets aside.
 fn white(c: &TextChar) -> bool {
     c.text.chars().all(char::is_whitespace)
+}
+
+/// A quad that places nothing: an item's characters are no glyphs on a page.
+const ZERO_QUAD: Quad = Quad {
+    ul: (0.0, 0.0),
+    ur: (0.0, 0.0),
+    ll: (0.0, 0.0),
+    lr: (0.0, 0.0),
+};
+
+/// One character of an item's string, as a glyph the search reads.
+fn char_unit(c: char) -> TextChar {
+    TextChar {
+        text: c.to_string(),
+        quad: ZERO_QUAD,
+        size: 0.0,
+        origin: (0.0, 0.0),
+        mcid: None,
+        stream: 0,
+        font: None,
+        stated: None,
+        artifact: false,
+        glyph: None,
+    }
 }
 
 /// A count of glyphs or lines as a position holds it.
@@ -414,10 +1000,64 @@ impl PageText {
                     first: index_u32(first),
                     last: index_u32(last),
                     stated: line.chars.iter().map(|c| c.text.as_str()).collect(),
+                    offsets: Vec::new(),
                 });
             }
         }
         PageText { text, lines }
+    }
+
+    /// An item's string read as a page of one block: its lines split at
+    /// `\r\n`, `\r` and `\n`, each character a glyph of its own, so the
+    /// search reads it as it reads a page, its characters folded one at a
+    /// time.
+    fn of_item(item: &str) -> PageText {
+        let mut lines = Vec::new();
+        let mut offsets = Vec::new();
+        let mut start = 0usize;
+        let bytes = item.as_bytes();
+        let mut at = 0usize;
+        while at <= bytes.len() {
+            let end_here = at == bytes.len() || matches!(bytes.get(at), Some(b'\r' | b'\n'));
+            if end_here {
+                let line = item.get(start..at).unwrap_or("");
+                let chars: Vec<TextChar> = line.chars().map(char_unit).collect();
+                let mut starts: Vec<usize> = line.char_indices().map(|(i, _)| start + i).collect();
+                starts.push(at);
+                offsets.push(starts);
+                lines.push(TextLine {
+                    text: line.to_string(),
+                    chars,
+                    quad: ZERO_QUAD,
+                    wmode: WritingMode::Horizontal,
+                    rtl: false,
+                    size: 0.0,
+                });
+                // `\r\n` is one line end.
+                at += if bytes.get(at) == Some(&b'\r') && bytes.get(at + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = at;
+            } else {
+                at += 1;
+            }
+        }
+        let text = TextPage::new(
+            vec![TextBlock {
+                lines,
+                quad: ZERO_QUAD,
+            }],
+            BTreeMap::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut page = PageText::read(text);
+        for (info, starts) in page.lines.iter_mut().zip(offsets) {
+            info.offsets = starts;
+        }
+        page
     }
 
     fn info(&self, line: u32) -> Option<&LineInfo> {
@@ -515,14 +1155,20 @@ impl Chunk {
     }
 }
 
-/// What a search reads through: the document, its pages as it reaches them,
-/// the needle and the options.
+/// What a search reads one stretch through: the document's pages as it
+/// reaches them, or a source's strings, each read as a page of its own; the
+/// needle and the options.
 struct Reader {
     doc: Document,
     options: DocumentSearchOptions,
     /// The folded needle; `None` finds nothing.
     needle: Option<Needle>,
+    /// How many pages the stretch has: the document's, or the source's
+    /// strings.
     page_count: u32,
+    /// A source's strings, for a stretch beside the page text; `None` for
+    /// the page text, whose pages are the document's.
+    items: Option<Vec<Item>>,
     /// The pages the search keeps, by index.
     pages: BTreeMap<u32, Arc<PageText>>,
     /// How many pages the search has extracted.
@@ -533,18 +1179,82 @@ struct Reader {
 const KEPT_PAGES: usize = 8;
 
 impl Reader {
-    /// Page `index`'s text, extracted now where the search keeps none.
+    /// The page text's reader.
+    fn pages(doc: &Document, options: &DocumentSearchOptions, needle: Needle) -> Reader {
+        Reader {
+            doc: doc.clone(),
+            options: options.clone(),
+            needle: Some(needle),
+            page_count: doc.page_count(),
+            items: None,
+            pages: BTreeMap::new(),
+            pages_read: 0,
+        }
+    }
+
+    /// The reader of a source's strings, each its own page and its own run.
+    fn items(
+        doc: &Document,
+        options: &DocumentSearchOptions,
+        needle: Needle,
+        items: Vec<Item>,
+    ) -> Reader {
+        Reader {
+            doc: doc.clone(),
+            options: options.clone(),
+            needle: Some(needle),
+            page_count: index_u32(items.len()),
+            items: Some(items),
+            pages: BTreeMap::new(),
+            pages_read: 0,
+        }
+    }
+
+    /// `raw`, a hit this reader's stream decided in stretch `stretch`, as the
+    /// document's: its positions the document's, and its place a source's
+    /// string and the bytes of it the hit covers where it is not the page
+    /// text's.
+    fn hit(&self, stretch: usize, raw: RawHit) -> SearchHit {
+        let item = self
+            .items
+            .as_ref()
+            .and_then(|items| items.get(raw.item as usize));
+        let place = match (item, raw.range) {
+            (Some(item), Some(range)) => item.place.clone().with(range),
+            _ => HitPlace::Pages(raw.pages),
+        };
+        SearchHit {
+            place,
+            text: raw.text,
+            before: raw.before,
+            after: raw.after,
+            start: SearchPosition(joined(stretch, raw.start)),
+            end: SearchPosition(joined(stretch, raw.end)),
+        }
+    }
+
+    /// Page `index`'s text, extracted now where the search keeps none; a
+    /// source's string read as a page.
     fn page(&mut self, index: u32) -> Arc<PageText> {
         if let Some(page) = self.pages.get(&index) {
             return Arc::clone(page);
         }
-        let text = self
-            .doc
-            .page(index)
-            .map(|page| page.text())
-            .unwrap_or_default();
-        self.pages_read += 1;
-        let page = Arc::new(PageText::read(text));
+        let page = match self.items.as_ref() {
+            Some(items) => Arc::new(PageText::of_item(
+                items
+                    .get(index as usize)
+                    .map_or("", |item| item.text.as_str()),
+            )),
+            None => {
+                let text = self
+                    .doc
+                    .page(index)
+                    .map(|page| page.text())
+                    .unwrap_or_default();
+                self.pages_read += 1;
+                Arc::new(PageText::read(text))
+            }
+        };
         if self.pages.len() >= KEPT_PAGES {
             // The kept page farthest from this one goes; a scan still
             // standing on it holds it.
@@ -616,11 +1326,12 @@ impl Reader {
         self.last_line_to(at.page, at.line)
     }
 
-    /// The line `spot` stands in, or the first line with text after it.
+    /// The line `spot` stands in, or the first line with text after it. A
+    /// reader reads its stretch's positions as the page text's.
     fn line_at_or_after(&mut self, spot: &Spot) -> Option<LineAt> {
         match *spot {
             Spot::Text { page, line, .. } => self.first_line_from(page, line),
-            Spot::End => None,
+            Spot::Item { .. } | Spot::End => None,
         }
     }
 
@@ -653,9 +1364,10 @@ impl Reader {
         !(self.options.keep_paragraphs && ends_block(page, at.line))
     }
 
-    /// The join between `a` and the line with text after it, `b`.
+    /// The join between `a` and the line with text after it, `b`: a
+    /// boundary between two of a source's strings, each its own run.
     fn join(&mut self, a: LineAt, b: LineAt) -> Join {
-        if self.options.keep_lines {
+        if self.options.keep_lines || (self.items.is_some() && a.page != b.page) {
             return Join::Boundary;
         }
         let (first, second) = (self.page(a.page), self.page(b.page));
@@ -905,7 +1617,7 @@ impl Reader {
     }
 
     /// The last hit that ends at or before `to`.
-    fn previous_before(&mut self, to: &Spot) -> Option<SearchHit> {
+    fn previous_before(&mut self, to: &Spot) -> Option<RawHit> {
         self.needle.as_ref()?;
         let line = self.line_at_or_before(to)?;
         let mut last_chunk = self.chunk_start_of(line);
@@ -914,7 +1626,7 @@ impl Reader {
             let side = self.side_before(start);
             let first = self.chunk(start, side);
             let mut stream = Stream::over(VecDeque::from([first]));
-            let mut found: Option<SearchHit> = None;
+            let mut found: Option<RawHit> = None;
             let mut decided = VecDeque::new();
             loop {
                 let reached = stream.feeding() == Some(last_chunk) && stream.fed_whole();
@@ -923,7 +1635,7 @@ impl Reader {
                 }
                 let more = stream.pump(self, &mut decided);
                 for hit in decided.drain(..) {
-                    if hit.end.0 <= *to {
+                    if hit.end <= *to {
                         found = Some(hit);
                     }
                 }
@@ -1067,7 +1779,7 @@ impl Stream {
     /// Feeds the scan on: the newest chunk's bytes, or the space after it and
     /// the next chunk, or the next run's first chunk; every hit decided on the
     /// way pushed onto `out`. `false` once the text is read.
-    fn pump(&mut self, reader: &mut Reader, out: &mut VecDeque<SearchHit>) -> bool {
+    fn pump(&mut self, reader: &mut Reader, out: &mut VecDeque<RawHit>) -> bool {
         let Some(length) = reader.needle.as_ref().map(Needle::len) else {
             return false;
         };
@@ -1130,7 +1842,7 @@ impl Stream {
     fn step(
         &mut self,
         reader: &Reader,
-        out: &mut VecDeque<SearchHit>,
+        out: &mut VecDeque<RawHit>,
         byte: u8,
         at: u64,
         length: usize,
@@ -1265,7 +1977,7 @@ impl Stream {
 
     /// The hit over the bytes `s..e`, or `None` where they cover no glyph — a
     /// needle of one space, matching a join alone.
-    fn hit(&self, reader: &Reader, s: u64, e: u64) -> Option<SearchHit> {
+    fn hit(&self, reader: &Reader, s: u64, e: u64) -> Option<RawHit> {
         let covered = self.covered(s, e);
         let (first_chunk, first) = *covered.first()?;
         let (last_chunk, last) = *covered.last()?;
@@ -1345,15 +2057,52 @@ impl Stream {
                 .take(HIT_CONTEXT)
                 .collect()
         });
-        Some(SearchHit {
-            place: HitPlace::Pages(pages),
+        // For a source's string, the bytes of it the hit covers: from where
+        // its first character starts to where its last ends.
+        let range = match (
+            line_of(first_chunk, first.line),
+            line_of(last_chunk, last.line),
+        ) {
+            (Some(one), Some(two)) => {
+                let start = one
+                    .page
+                    .info(one.at.line)
+                    .and_then(|info| info.offsets.get(first.unit as usize).copied());
+                let end = two
+                    .page
+                    .info(two.at.line)
+                    .and_then(|info| info.offsets.get(last.unit as usize + 1).copied());
+                start.zip(end).map(|(start, end)| start..end.max(start))
+            }
+            _ => None,
+        };
+        let item = line_of(first_chunk, first.line).map_or(0, |line| line.at.page);
+        Some(RawHit {
+            pages,
             text,
             before,
             after,
-            start: SearchPosition(self.spot_at(s)?),
-            end: SearchPosition(self.spot_after(e)?),
+            start: self.spot_at(s)?,
+            end: self.spot_after(e)?,
+            item,
+            range,
         })
     }
+}
+
+/// A hit as a stretch's scan decides it, in the stretch's own positions,
+/// before [`Reader::hit`] makes it the document's.
+struct RawHit {
+    pages: Vec<PageQuads>,
+    text: String,
+    before: String,
+    after: String,
+    start: Spot,
+    end: Spot,
+    /// The page it starts on — for a source, its string.
+    item: u32,
+    /// The bytes of a source's string it covers; `None` in the page text.
+    range: Option<Range<usize>>,
 }
 
 /// Glyph `unit`'s text on `line` as a hit states it: soft hyphens removed
@@ -1408,6 +2157,13 @@ mod tests {
         crate::subset::tests_support::written_support::authored("a document search", &bytes)
     }
 
+    /// How many pages `search`'s page text reader has extracted.
+    fn pages_read(search: &DocumentSearch) -> u64 {
+        search.readers[0]
+            .as_ref()
+            .map_or(0, |reader| reader.pages_read)
+    }
+
     /// **A forward search extracts the pages up to its hit and no further**:
     /// a hit in the middle of the fourth of eight pages extracts four; the
     /// next, on the sixth, two more; a needle on no page extracts every page
@@ -1436,29 +2192,29 @@ mod tests {
         assert_eq!(hit.text, "needle");
         assert_eq!(hit.before, "first ");
         assert_eq!(hit.after, " here");
-        assert_eq!(search.reader.pages_read, 4, "pages 1 to 4, and not 5");
+        assert_eq!(pages_read(&search), 4, "pages 1 to 4, and not 5");
         let second = search.next().expect("the second needle");
         assert!(
             matches!(&second.place, HitPlace::Pages(pages) if pages.len() == 1 && pages[0].page == 5)
         );
-        assert_eq!(search.reader.pages_read, 6, "two more pages");
+        assert_eq!(pages_read(&search), 6, "two more pages");
         assert!(search.next().is_none());
-        assert_eq!(search.reader.pages_read, 8, "every page read once");
+        assert_eq!(pages_read(&search), 8, "every page read once");
 
         let mut nowhere = doc.search("absent", &DocumentSearchOptions::default());
         assert!(nowhere.next().is_none());
-        assert_eq!(nowhere.reader.pages_read, 8, "each page once");
+        assert_eq!(pages_read(&nowhere), 8, "each page once");
 
         // The join at a page's end ending in a hyphen is the next page's to
         // decide, so a hit on that line reads one page more.
         let hyphenated = document(&["the hyphen-", "ation of it"]);
         let mut search = hyphenated.search("the", &DocumentSearchOptions::default());
         assert!(search.next().is_some());
-        assert_eq!(search.reader.pages_read, 2);
+        assert_eq!(pages_read(&search), 2);
         let plain = document(&["the line", "after it"]);
         let mut search = plain.search("the", &DocumentSearchOptions::default());
         assert!(search.next().is_some());
-        assert_eq!(search.reader.pages_read, 1, "no hyphen, no next page");
+        assert_eq!(pages_read(&search), 1, "no hyphen, no next page");
     }
 
     /// The pages a search keeps are bounded, whatever it reads.
@@ -1469,8 +2225,52 @@ mod tests {
         let doc = document(&pages);
         let mut search = doc.search("text", &DocumentSearchOptions::default());
         assert_eq!(search.by_ref().count(), 20);
-        assert!(search.reader.pages.len() <= KEPT_PAGES);
-        assert_eq!(search.reader.pages_read, 20);
+        assert!(
+            search.readers[0]
+                .as_ref()
+                .map_or(0, |reader| reader.pages.len())
+                <= KEPT_PAGES
+        );
+        assert_eq!(pages_read(&search), 20);
+    }
+
+    /// `/RC`'s text is its character data, a block or a line break a line's
+    /// end, references resolved; text that is not XML is read as it stands.
+    #[test]
+    fn rich_text_reads_its_character_data_a_block_a_line() {
+        assert_eq!(
+            rich_text("<body><p>One <b>two</b></p><p>three</p></body>"),
+            "One two\nthree\n"
+        );
+        assert_eq!(rich_text("<body>a<br/>b</body>"), "a\nb");
+        assert_eq!(rich_text("<p>fish &amp; chips</p>"), "fish & chips\n");
+        assert_eq!(rich_text("not <xml"), "not <xml");
+        assert_eq!(rich_text("<p>unclosed"), "<p>unclosed");
+    }
+
+    /// An item's string is read as lines split at `\r\n`, `\r` and `\n`, each
+    /// character a glyph, each knowing where it starts in the string.
+    #[test]
+    fn an_items_lines_and_offsets_are_its_strings() {
+        let page = PageText::of_item("one\r\ntwo\rthree\nf\u{e9}");
+        let stated: Vec<&str> = page.lines.iter().map(|info| info.stated.as_str()).collect();
+        assert_eq!(stated, ["one", "two", "three", "f\u{e9}"]);
+        assert_eq!(page.lines[0].offsets, [0, 1, 2, 3]);
+        assert_eq!(page.lines[1].offsets, [5, 6, 7, 8]);
+        assert_eq!(page.lines[2].offsets, [9, 10, 11, 12, 13, 14]);
+        assert_eq!(
+            page.lines[3].offsets,
+            [15, 16, 18],
+            "a character of two bytes"
+        );
+        assert!(page.lines.iter().all(|info| info.block == 0), "one block");
+        let trailing = PageText::of_item("end\n");
+        assert_eq!(trailing.lines.len(), 2);
+        assert!(
+            trailing.lines[1].blank(),
+            "the empty last line holds no text"
+        );
+        assert!(PageText::of_item("").lines[0].blank());
     }
 
     /// Positions order as the document reads: page, line, glyph, byte.

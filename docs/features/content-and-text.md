@@ -975,6 +975,28 @@ empties, finds nothing. A document no password has opened is not read: the
 search finds nothing in it and `unsearched()` names it, with
 `UnsearchedReason::PasswordRequired` or `UnsupportedEncryption` (ruling 10).
 
+**The sources beside the page text.** `DocumentSearchOptions::sources`, a
+`SearchSources`, says which of a document's sources are read — every one by
+default, `SearchSources::PAGES` the page text alone — and they are read in a
+fixed order, so the hits have one order and `previous` crosses from one to
+the one before: the page text, then each page's annotations in `/Annots`
+order, the form fields, the outline depth first, and the attachments in name
+order. Each source is read through what the facade lists, and each of its
+strings is a run of its own, its lines split at line ends and its characters
+folded one at a time as a page's glyphs are, the keep- options joining its
+lines as they join a page's:
+
+| Source | Strings | `HitPlace` |
+| --- | --- | --- |
+| `annotations` | `/Contents`; `/RC`'s character data, each end of an XHTML block or line break a line's end, so no tag is ever found; `/Subj`; and a markup annotation's author, `/T`. A pop-up's text is its parent's and is read there | `Annotation { page, index, rect, text, range }` |
+| `form_fields` | a field's text value, or each value a list box holds; a button's state and a signature are no text | `FormField { name, widgets, value, range }` |
+| `outline` | every item's title | `Outline { path, titles, range }` |
+| `attachments` | an attachment's name, its file name where it is not the name, and its description | `Attachment { name, text, range }` |
+
+`range` is the bytes of the string the hit covers as the string states it —
+for `/RC`, in its character data — and `AnnotationText` and `AttachmentText`
+name which string.
+
 ```rust
 let options = DocumentSearchOptions { keep_paragraphs: true, ..Default::default() };
 for hit in doc.search("quarterly results", &options) {
@@ -1580,8 +1602,13 @@ a page break, each keep- option against its default, the hits of
 right-to-left line continued across a page break found as read, a soft hyphen
 ending a page, the page search's options across a break, seeking and
 alternating as a list iterator, empty needles and pages, white space set
-aside at a join, and an encrypted document named in `unsearched`; the module's
-own tests count the pages a forward search extracts.
+aside at a join, an encrypted document named in `unsearched`, each source
+found once where it is and not when it is left out (a built annotation's
+`/Contents`, a value set through `set_field_value`, `outline-3level.pdf`'s
+`Chapter 1` on none of its pages, an attachment's name and description), an
+annotation's rich text, subject and author with its pop-up passed over, and
+the sources read in order and backwards in reverse; the module's own tests
+count the pages a forward search extracts.
 
 The `text` and `optional` determinism render fingerprints in
 `crates/tinker-pdf/tests/determinism.rs` exercise this path directly. The

@@ -270,14 +270,14 @@ never crosses from one item to the next. An item's lines are its own,
 split at `\r\n`, `\r` and `\n`, one block; its units are its characters,
 each folded alone as a page's glyphs are; the keep- options join its lines
 as they join a page's. A hit names its item and the byte range it covers in
-the item's string as stated.
+the item's string as stated — for `/RC`, in its character data.
 
 | Source | `SearchSources` | Items, in order | `HitPlace` |
 | --- | --- | --- | --- |
 | Annotations | `annotations` | each page's `Page::annotations`, in `/Annots` order: `/Contents`, then the text of `/RC`, then `/Subj`, then a markup annotation's `/T` (its author); a pop-up's text is its parent's, so a pop-up is passed over | `Annotation { page, index, rect, text, range }`, `text` an `AnnotationText` naming which string |
 | Form fields | `form_fields` | each of `Document::form_fields`, in its order: a field's text value, or each value a list box holds, one item each; a check box's, a radio button's or a push button's state and a signature are no text | `FormField { name, widgets, value, range }`, `value` the item's index among the field's values |
 | Outline | `outline` | every outline item's title, depth first | `Outline { path, titles, range }`, `path` the item's index among its siblings at each depth and `titles` the titles from the top to it |
-| Attachments | `attachments` | each of `Document::attachments`, in name order: its name, its file name, then its description | `Attachment { name, text, range }`, `text` an `AttachmentText` naming which string |
+| Attachments | `attachments` | each of `Document::attachments`, in name order: its name, its file name where it is not the name, then its description | `Attachment { name, text, range }`, `text` an `AttachmentText` naming which string |
 
 `/RC` is XHTML (Table 170). Its text is its character data, read by
 `tinker-pdf-xml`, with each end of a `p`, `div`, `li`, `br` or heading

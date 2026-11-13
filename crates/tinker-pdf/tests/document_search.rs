@@ -14,7 +14,7 @@ mod written_support;
 use epub_support::typeface::Face;
 use tinker_pdf::{
     Document, DocumentSearchOptions, HitPlace, PageQuads, Quad, SearchHit, SearchOptions,
-    SearchPosition, UnsearchedReason,
+    SearchPosition, SearchSources, UnsearchedReason,
 };
 use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PlacedGlyph};
 
@@ -119,6 +119,7 @@ const KEEP_LINES: DocumentSearchOptions = DocumentSearchOptions {
     keep_lines: true,
     keep_paragraphs: false,
     keep_hyphens: false,
+    sources: SearchSources::ALL,
 };
 
 /// **A phrase broken across a page break is one hit, forwards and
@@ -711,4 +712,358 @@ fn an_encrypted_document_no_password_opened_is_named_not_searched() {
     let mut open = doc.search("AES-256", &default);
     assert!(open.next().is_some(), "read once it is open");
     assert!(open.unsearched().is_empty());
+}
+
+// ---- the sources beside the page text (FT-21.3) ------------------------------
+
+use tinker_pdf::{
+    AnnotationText, AttachmentText, DocumentEditor, EmbeddedFile, WriteMode, WriteOptions,
+};
+use tinker_pdf_cos::edit::annot;
+use tinker_pdf_cos::pages::Rect;
+use tinker_pdf_cos::{Dict, Object, PdfString};
+
+/// A committed fixture under `testdata/`, by name.
+fn testdata(name: &str) -> Vec<u8> {
+    std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata")
+            .join(name),
+    )
+    .expect("the committed fixture")
+}
+
+/// What `editor` writes, rewritten from `input` and held to the
+/// validate-on-save helper, opened.
+fn saved(label: &str, input: &[u8], editor: &DocumentEditor) -> Document {
+    let bytes = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    written_support::rewritten(label, input, &bytes);
+    Document::open(bytes).expect("the saved document opens")
+}
+
+/// A one-page Helvetica document's bytes, held as authored.
+fn page_bytes(label: &str, lines: &[&str]) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F0", b"Helvetica");
+    let mut content = String::from("BT /F0 12 Tf ");
+    for (row, line) in lines.iter().enumerate() {
+        let y = 760.0 - 14.0 * row as f64;
+        content.push_str(&format!("1 0 0 1 40 {y} Tm ({}) Tj ", escape(line)));
+    }
+    content.push_str("ET");
+    builder.add_page(612.0, 792.0, |page| page.raw(content.as_bytes()));
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// The options with every source but the ones `off` turns off.
+fn without(off: fn(&mut SearchSources)) -> DocumentSearchOptions {
+    let mut sources = SearchSources::ALL;
+    off(&mut sources);
+    DocumentSearchOptions {
+        sources,
+        ..DocumentSearchOptions::default()
+    }
+}
+
+/// **Each source is searched with a known hit** (FT-21.3): a built
+/// annotation's `/Contents`, a value set through
+/// `DocumentEditor::set_field_value`, `testdata/outline-3level.pdf`'s outline
+/// title `Chapter 1`, and an attachment's name and description added through
+/// `DocumentEditor::attach_file` — each found once, where it is, and not
+/// found when its source is left out.
+#[test]
+fn each_source_is_searched_with_a_known_hit() {
+    let default = DocumentSearchOptions::default();
+
+    // An annotation's `/Contents`.
+    let base = page_bytes("a page to annotate", &["the page text"]);
+    let doc = Document::open(base.clone()).expect("it opens");
+    let mut editor = doc.editor();
+    let rect = Rect {
+        x0: 20.0,
+        y0: 30.0,
+        x1: 40.0,
+        y1: 50.0,
+    };
+    let note = annot::text_note(doc.cos(), rect, "A remark on the margin", false);
+    editor.add_annotation(0, note).expect("page one is there");
+    let annotated = saved("an annotated page", &base, &editor);
+    let hits = forwards(&annotated, "remark", &default);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(
+        hits[0].place,
+        HitPlace::Annotation {
+            page: 0,
+            index: 0,
+            rect: (20.0, 30.0, 40.0, 50.0),
+            text: AnnotationText::Contents,
+            range: 2..8,
+        }
+    );
+    assert_eq!(hits[0].text, "remark");
+    assert_eq!(hits[0].before, "A ");
+    assert_eq!(hits[0].after, " on the margin");
+    assert!(forwards(&annotated, "remark", &without(|s| s.annotations = false)).is_empty());
+
+    // A field's value.
+    let form = testdata("form-fields.pdf");
+    let doc = Document::open(form.clone()).expect("the form opens");
+    let mut editor = doc.editor();
+    assert!(editor.set_field_value("notes", "Please call before noon"));
+    let filled = saved("the form filled", &form, &editor);
+    let hits = forwards(&filled, "call before", &default);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    let widgets = filled
+        .form_fields()
+        .into_iter()
+        .find(|field| field.name == "notes")
+        .expect("the field")
+        .widgets;
+    assert!(!widgets.is_empty());
+    assert_eq!(
+        hits[0].place,
+        HitPlace::FormField {
+            name: "notes".to_string(),
+            widgets,
+            value: 0,
+            range: 7..18,
+        }
+    );
+    assert!(forwards(&filled, "call before", &without(|s| s.form_fields = false)).is_empty());
+
+    // An outline title, and on none of the pages.
+    let outlined = Document::open(testdata("outline-3level.pdf")).expect("it opens");
+    let hits = forwards(&outlined, "Chapter 1", &default);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(
+        hits[0].place,
+        HitPlace::Outline {
+            path: vec![0, 0],
+            titles: vec!["Part One".to_string(), "Chapter 1".to_string()],
+            range: 0..9,
+        }
+    );
+    let pages_only = DocumentSearchOptions {
+        sources: SearchSources::PAGES,
+        ..DocumentSearchOptions::default()
+    };
+    assert!(
+        forwards(&outlined, "Chapter 1", &pages_only).is_empty(),
+        "no page holds it"
+    );
+    assert!(forwards(&outlined, "Chapter 1", &without(|s| s.outline = false)).is_empty());
+
+    // An attachment's name and description.
+    let doc = Document::open(base.clone()).expect("it opens");
+    let mut editor = doc.editor();
+    editor
+        .attach_file(&EmbeddedFile {
+            name: "figures-2026.csv".to_string(),
+            filename: "figures-2026.csv".to_string(),
+            description: Some("The quarterly figures, as a table".to_string()),
+            mime_type: Some("text/csv".to_string()),
+            created: None,
+            modified: None,
+            data: b"quarter,value\nQ1,12\n".to_vec(),
+        })
+        .expect("attachable");
+    let attached = saved("a page with an attachment", &base, &editor);
+    let hits = forwards(&attached, "figures", &default);
+    let places: Vec<&HitPlace> = hits.iter().map(|hit| &hit.place).collect();
+    assert_eq!(
+        places,
+        [
+            &HitPlace::Attachment {
+                name: "figures-2026.csv".to_string(),
+                text: AttachmentText::Name,
+                range: 0..7,
+            },
+            &HitPlace::Attachment {
+                name: "figures-2026.csv".to_string(),
+                text: AttachmentText::Description,
+                range: 14..21,
+            },
+        ],
+        "the name and the description once each, the file name being the name"
+    );
+    assert!(forwards(&attached, "figures", &without(|s| s.attachments = false)).is_empty());
+}
+
+/// **An annotation's strings**: `/RC`'s character data — its paragraphs read
+/// as lines, no tag ever found — `/Subj` and a markup annotation's author;
+/// a pop-up, whose text is its parent's, passed over so the parent's is
+/// found once.
+#[test]
+fn an_annotations_rich_text_subject_and_author_are_searched() {
+    let base = page_bytes("a page to annotate richly", &["plain page"]);
+    let doc = Document::open(base.clone()).expect("it opens");
+    let cos = doc.cos();
+    let mut editor = doc.editor();
+    let rect = Rect {
+        x0: 10.0,
+        y0: 10.0,
+        x1: 30.0,
+        y1: 30.0,
+    };
+    let mut note = annot::text_note(cos, rect, "The note's own words", true);
+    note.insert(
+        cos.intern(b"RC"),
+        Object::String(PdfString::literal(
+            b"<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\"><p>Some <b>bold words</b></p><p>a second paragraph</p></body>"
+                .to_vec(),
+        )),
+    );
+    note.insert(
+        cos.intern(b"Subj"),
+        Object::String(PdfString::literal(b"Margin query".to_vec())),
+    );
+    note.insert(
+        cos.intern(b"T"),
+        Object::String(PdfString::literal(b"A. Reviewer".to_vec())),
+    );
+    let parent = editor.add_annotation(0, note).expect("page one");
+    let mut popup = Dict::new();
+    popup.insert(cos.intern(b"Type"), Object::Name(cos.intern(b"Annot")));
+    popup.insert(cos.intern(b"Subtype"), Object::Name(cos.intern(b"Popup")));
+    popup.insert(
+        cos.intern(b"Rect"),
+        Object::Array(vec![
+            Object::Real(40.0),
+            Object::Real(40.0),
+            Object::Real(140.0),
+            Object::Real(90.0),
+        ]),
+    );
+    popup.insert(cos.intern(b"Parent"), Object::Ref(parent));
+    editor.add_annotation(0, popup).expect("page one");
+    let annotated = saved("a richly annotated page", &base, &editor);
+
+    let default = DocumentSearchOptions::default();
+    let text_of = |needle: &str| -> Vec<(AnnotationText, std::ops::Range<usize>)> {
+        forwards(&annotated, needle, &default)
+            .into_iter()
+            .map(|hit| match hit.place {
+                HitPlace::Annotation {
+                    index, text, range, ..
+                } => {
+                    assert_eq!(index, 0, "the note, never its pop-up");
+                    (text, range)
+                }
+                other => panic!("an annotation hit, not {other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(text_of("own words"), [(AnnotationText::Contents, 11..20)]);
+    assert_eq!(text_of("bold words"), [(AnnotationText::RichText, 5..15)]);
+    assert_eq!(
+        text_of("words a second"),
+        [(AnnotationText::RichText, 10..24)],
+        "two paragraphs of rich text are two lines, joined"
+    );
+    assert!(text_of("xmlns").is_empty(), "no markup is text");
+    assert!(text_of("body").is_empty());
+    assert_eq!(text_of("query"), [(AnnotationText::Subject, 7..12)]);
+    assert_eq!(text_of("reviewer"), [(AnnotationText::Author, 3..11)]);
+    let lines = DocumentSearchOptions {
+        keep_lines: true,
+        ..DocumentSearchOptions::default()
+    };
+    assert!(forwards(&annotated, "words a second", &lines).is_empty());
+}
+
+/// **The sources are read in their order**, the page text first and the
+/// attachments last, so backwards is forwards in reverse across them, and a
+/// file name that is not the name is searched.
+#[test]
+fn the_sources_are_read_in_order_and_backwards_in_reverse() {
+    let form = testdata("form-fields.pdf");
+    let doc = Document::open(form.clone()).expect("the form opens");
+    let mut editor = doc.editor();
+    assert!(editor.set_field_value("notes", "the fixture value"));
+    let rect = Rect {
+        x0: 20.0,
+        y0: 20.0,
+        x1: 40.0,
+        y1: 40.0,
+    };
+    editor
+        .add_annotation(
+            0,
+            annot::text_note(doc.cos(), rect, "a fixture remark", false),
+        )
+        .expect("page one");
+    assert!(editor.set_outline(&[tinker_pdf::OutlineEntry {
+        title: "The fixture".to_string(),
+        target: None,
+        open: false,
+        children: Vec::new(),
+    }]));
+    editor
+        .attach_file(&EmbeddedFile {
+            name: "data".to_string(),
+            filename: "fixture-data.csv".to_string(),
+            description: None,
+            mime_type: None,
+            created: None,
+            modified: None,
+            data: b"a,b\n".to_vec(),
+        })
+        .expect("attachable");
+    let all = saved("a form with every source", &form, &editor);
+
+    let default = DocumentSearchOptions::default();
+    let hits = forwards(&all, "fixture", &default);
+    let kinds: Vec<&str> = hits
+        .iter()
+        .map(|hit| match &hit.place {
+            HitPlace::Pages(_) => "page",
+            HitPlace::Annotation { .. } => "annotation",
+            HitPlace::FormField { .. } => "field",
+            HitPlace::Outline { .. } => "outline",
+            HitPlace::Attachment { text, .. } => {
+                assert_eq!(*text, AttachmentText::FileName);
+                "attachment"
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["page", "annotation", "field", "outline", "attachment"]
+    );
+    let mut behind = backwards(&all, "fixture", &default);
+    behind.reverse();
+    assert_eq!(behind, hits);
+    for pair in hits.windows(2) {
+        assert!(pair[0].end() <= pair[1].start());
+    }
+
+    // Seeking a page's start passes over the page text before it, never a
+    // source after the pages.
+    let mut search = all.search("fixture", &default);
+    search.seek(SearchPosition::page(1));
+    assert_eq!(
+        search.next(),
+        Some(hits[1].clone()),
+        "the annotation, after every page"
+    );
+    assert_eq!(search.previous(), Some(hits[1].clone()));
+    assert_eq!(search.previous(), Some(hits[0].clone()));
+    assert!(search.previous().is_none());
+
+    // The page text alone.
+    let pages_only = DocumentSearchOptions {
+        sources: SearchSources::PAGES,
+        ..DocumentSearchOptions::default()
+    };
+    assert_eq!(
+        forwards(&all, "fixture", &pages_only),
+        vec![hits[0].clone()]
+    );
+    assert_eq!(SearchSources::default(), SearchSources::ALL);
 }

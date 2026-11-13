@@ -297,8 +297,8 @@ pub use display::DisplayList;
 /// pages — through a cursor that finds the next or previous hit:
 /// [`Document::search`] (`docs/design/document-search.md`).
 pub use document_search::{
-    DocumentSearch, DocumentSearchOptions, HitPlace, PageQuads, SearchHit, SearchPosition,
-    Unsearched, UnsearchedReason, HIT_CONTEXT,
+    AnnotationText, AttachmentText, DocumentSearch, DocumentSearchOptions, HitPlace, PageQuads,
+    SearchHit, SearchPosition, SearchSources, Unsearched, UnsearchedReason, HIT_CONTEXT,
 };
 /// Images a page draws, with their samples before any colour conversion and
 /// the space they are in, behind [`Page::images`].
