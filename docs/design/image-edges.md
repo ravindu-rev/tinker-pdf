@@ -301,7 +301,18 @@ sub-square of the unit square it covers, drawn through the transform composed
 with that sub-square's own map. The size asked for is, per image axis, the
 device length of the unit square's side, which is what `sample_ratios` already
 measures, and a decoder reduces an axis only while it keeps at least that many
-samples, so no reduced grid is drawn magnified.
+samples, so no reduced grid is drawn magnified. `image_requests.rs` holds the
+handshake end to end: a 203 by 157 RGB JPEG at 4:2:0 at each of the three
+scales and a 99 by 61 grey one at two, and codestreams of both wavelets with
+one, two and three levels dropped and with windows, drawn axis-aligned,
+flipped, quarter-turned and sheared at the sizes that pick each answer. Each draw is
+held to the same draw of its full decode — the image under a `/Mask` whose
+colour-key ranges run backwards, which keeps the decode whole and masks
+nothing — for the pixels it reaches and covers wholly, its edge's coverage,
+and where its picture's weight lands; the answer each decode chose is read
+from the render's counted work and the samples it leaves along each axis
+from T.81's and T.800's size rules, never fewer than the drawn pixels; and a
+page of the answers is byte-equal tile by tile.
 
 ### Milestones
 

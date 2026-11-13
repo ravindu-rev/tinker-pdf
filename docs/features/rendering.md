@@ -454,6 +454,19 @@ holds it: `a_region_render_decodes_only_the_code_blocks_its_window_reaches`,
 `a_region_of_a_jpx_page_is_the_crop_of_the_whole_page` tiles a page of
 windowed draws, a clipped run among them, at lattices that do not divide it.
 
+**The handshake, end to end.** `image_requests.rs` draws every answer a
+decode gives a drawn size — a JPEG at a half, a quarter and an eighth, a
+JPEG 2000 codestream with one, two and three levels dropped and with a
+window — at the sizes that pick it, axis-aligned, flipped, quarter-turned and sheared, the
+images odd in size, and holds each to the same draw of its full decode, which
+a `/Mask` of backwards colour-key ranges asks for without masking anything:
+`every_reduced_answer_lands_where_the_full_decode_does` (the pixels reached
+and covered wholly, the edge's coverage and where the picture's weight lands)
+and `a_reduced_answer_is_never_magnified` (the answer read from
+`Stats::jpeg_samples_transformed` and `Stats::jpx_levels_discarded`, its
+samples along each axis at least the drawn pixels, A7's bounds beside it);
+`every_tile_of_the_answers_is_the_page_under_it` tiles a page of them.
+
 **Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
 pasted in from another document resolves its names in the dictionary it brought
 rather than in the page's. Both seams change scope together — the interpreter
