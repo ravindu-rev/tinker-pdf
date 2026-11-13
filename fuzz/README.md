@@ -8,6 +8,7 @@ Policy: [`docs/verification.md`](../docs/verification.md). Among them:
 | --- | --- |
 | `cos_document` | The whole file parser: every rung of the leniency ladder, then the page tree and every stream |
 | `cos_object` | The object grammar of 7.3 alone, with no file around it |
+| `cos_syntax` | Whole files a generator writes from a model (`src/cos.rs`): every object type of 7.3, each token spelled one of the ways the clause allows, in one to four sections — tables, cross-reference streams and object streams, updates that redefine, free and reuse objects, `/Length` direct or indirect, honest or lying. **Structure-aware**: the input is read as choices, so a mutation changes a decision rather than breaking the syntax, and because the target knows what it wrote it asserts the reader read it back — every object as written, a clean file on `Trust` with no warning and no structure-tier defect, and a lying length recovered wherever 7.3.8.2 leaves it recoverable |
 | `annotation_appearance` | Appearance synthesis (12.5.5, 12.5.6) for one annotation dictionary parsed from the bytes, against a fixed form whose `/DR` holds four fonts so `/DA` reaches every free text branch: what is written must stay bounded by the input and lex with no leniency |
 | `inflate` | Own inflate, including truncated and corrupt streams |
 | `lzw` | LZW with and without early change |
@@ -49,6 +50,12 @@ xtask check` — does it:
 cargo check --manifest-path fuzz/Cargo.toml --all-targets
 ```
 
+The crate's library has unit tests of its own, and they run on stable too:
+
+```sh
+cargo test --manifest-path fuzz/Cargo.toml --lib
+```
+
 That distinction is not academic. This crate sits outside the workspace, so
 `cargo check --workspace` never looks at it, and anything unrunnable in the
 normal loop needs *something* in the normal loop that would notice it
@@ -84,6 +91,19 @@ parameter first — and the third checks what it wrote: each target's binary
 an ELF file, its seed archive exactly its corpus, file for file, and its
 options the sessions' timeout. Nothing in the three runs a target.
 
+## Structure-aware targets
+
+`src/lib.rs` is the crate's library: `Choices`, the reader a structure-aware
+target reads its input through, and the generators more than one target
+builds on. An input that has run out reads as zeros, and zero is the plainest
+choice wherever a generator asks one, so every input — the empty one
+included — is a well-formed structure, and a mutation changes one decision
+rather than breaking the syntax. Such a target's seeds are choice sequences,
+each written by its generator's `write_the_fuzz_seeds` and named for the
+feature it reaches; a change to what a generator reads first runs the writer
+again. [`docs/design/structured-fuzzing.md`](../docs/design/structured-fuzzing.md)
+is the design.
+
 ## What runs without nightly
 
 Because these targets need a toolchain nobody has by accident, they cannot be
@@ -113,6 +133,7 @@ account for:
 | `content_tokenizer` | Hand-written operator streams: text, paths, an inline image, escapes, comments |
 | `cos_document` | `testdata/` PDFs and the pages `determinism.rs` builds |
 | `cos_object` | Hand-written 7.3 objects: dictionary, stream, nested array, every number form, two unterminated |
+| `cos_syntax` | Choice sequences, written by `cargo test --release --manifest-path fuzz/Cargo.toml --lib write_the_fuzz_seeds -- --ignored`: each is the first input of a fixed pseudo-random sequence whose file has the feature it is named for, cut to the bytes the generator read — one table, one cross-reference stream, an object stream plain and compressed, rows under the Up predictor, four sections, a number freed and used again, a lying `/Length` direct and indirect, every kind of value, nesting to the cap — and `plain`, the empty input, which reads as zeros throughout and so is the plainest file the generator writes |
 | `inflate` | Our own `zlib_compress` output, including an empty stream and an incompressible one |
 | `jpeg` | `jpeg.rs`'s `tiny_gray`, `sequential_block` and both progressive fixtures |
 | `jpx` | Codestreams `opj_compress` made from *our own* 32 x 32 images — LRCP through CPRL, a boxed JP2, RGB with the RCT and with the ICT, a lossy 9/7 at a rate and truncated, two layers, explicit precincts, tiles with SOP and EPH, a subsampled component and segmentation symbols — plus hand-built ones the writer in `jpx/tests/writer.rs` emits, including 16-bit signed samples, a `pclr` palette and a `cdef` opacity channel that `opj_compress` cannot write at all, and an RGN a conformant encoder will not produce. A tool's output on our input is ours to commit; ISO/IEC 15444-4's conformance codestreams stay out, and no part of openjpeg is vendored, linked or invoked (ruling 13). Each seed carries the target's control byte in front. `narrow-precision-crash` is the one a *run* produced: a six-bit codestream, which holds `JpxImage` to its contract of a `precision` of 8 or 16 |

@@ -37,6 +37,13 @@ members = ["."]
 [profile.release]
 debug = true
 
+# The choice reader and the generators more than one target builds on
+# (`docs/design/structured-fuzzing.md`). Its tests run on stable:
+# `cargo test --manifest-path fuzz/Cargo.toml --lib`.
+[lib]
+path = "src/lib.rs"
+doc = false
+
 [[bin]]
 name = "cos_document"
 path = "fuzz_targets/cos_document.rs"
@@ -340,5 +347,11 @@ doc = false
 [[bin]]
 name = "annotation_appearance"
 path = "fuzz_targets/annotation_appearance.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cos_syntax"
+path = "fuzz_targets/cos_syntax.rs"
 test = false
 doc = false

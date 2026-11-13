@@ -131,10 +131,12 @@ UTF-16 document, which XML permits, and `css/repeated-class` carries raw
 exception list is a check that has been talked out of firing. `svg` has a
 replay of its own in `crates/tinker-pdf-svg/src/tests.rs`.
 
-`crypt`, `crypt_ciphers`, `form_script`, `layout`, `render_page` and
-`signatures` are structured generators: the body is carved into fields rather
-than parsed as a format, so every seed reaches the code by construction and
-there is no reachability question of this shape to ask. `cos_document`,
+`cos_syntax`, `crypt`, `crypt_ciphers`, `form_script`, `layout`, `render_page`
+and `signatures` are structured generators: the body is carved into fields
+rather than parsed as a format, so every seed reaches the code by construction
+and there is no reachability question of this shape to ask. `cos_syntax`'s
+seeds are choice sequences its generator's `write_the_fuzz_seeds` writes, each
+named for the feature it reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
 `cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
 by the signature check above or have no gate to fail at.
 
@@ -155,7 +157,8 @@ release blocker, and **a fuzzer that does not build cannot crash**: the rule
 would read as satisfied while being unenforceable.
 
 So `cargo xtask fuzz` — and therefore `cargo xtask check` — runs `cargo check`
-over `fuzz/`'s own manifest and fails with the compiler's own error. It is
+over `fuzz/`'s own manifest, every target, the crate's library and its unit
+tests included, and fails with the compiler's own error. It is
 `cargo check` rather than `cargo fuzz build` because the question is whether
 the *types* still agree; it runs on stable and needs no sanitizer, and
 `cargo fuzz build` builds them for real.
@@ -186,6 +189,15 @@ Three are worth singling out:
 - **`pki_cms`** enforces X.690's clauses about encoding and nothing about what
   the encoding says — and for a signature reader, a wrong answer reported
   confidently is worse than a refusal.
+
+**The structure-aware targets assert what their generator wrote.**
+`cos_syntax` writes files from a model of 7.3's objects and 7.5's sections and
+holds the reader to reading them back: every object as written, a file written
+clean on `Trust` with no warning and no structure-tier defect, and a lying
+`/Length` recovered wherever 7.3.8.2 leaves it recoverable. Its residual is
+`cff_subset`'s: the writer and the reader are both this repository's, so a
+clause both misread round-trips perfectly; the corpus ratchet is what holds the
+reader to files other producers wrote.
 
 `cff_subset` is the strongest target and still not exempt: it fuzzes a
 *writer*, and its round trip goes through **this repository's own** parser, so

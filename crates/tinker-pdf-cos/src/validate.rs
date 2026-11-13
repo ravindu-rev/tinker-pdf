@@ -3400,13 +3400,24 @@ fn header_at(buf: &[u8], offset: u64) -> Option<ObjRef> {
         }
         (len > 0).then_some((value, len))
     };
+    // White space, and comments, which 7.2.4 makes single white-space
+    // characters wherever they stand between two tokens.
     let space = |from: usize| -> Option<usize> {
         let mut len = 0usize;
-        while rest
-            .get(from + len)
-            .is_some_and(|b| matches!(*b, b' ' | 13 | 10 | 9 | 0 | 12))
-        {
-            len += 1;
+        loop {
+            match rest.get(from + len) {
+                Some(b' ' | 13 | 10 | 9 | 0 | 12) => len += 1,
+                Some(b'%') => {
+                    len += 1;
+                    while rest
+                        .get(from + len)
+                        .is_some_and(|b| *b != b'\r' && *b != b'\n')
+                    {
+                        len += 1;
+                    }
+                }
+                _ => break,
+            }
         }
         (len > 0).then_some(len)
     };
@@ -3619,6 +3630,20 @@ mod tests {
         assert_eq!(header_at(buf, 8), None);
         assert_eq!(header_at(buf, 0), None);
         assert_eq!(header_at(buf, 9999), None);
+    }
+
+    #[test]
+    fn a_comment_between_a_headers_tokens_is_white_space() {
+        // 7.2.4: a comment separates the tokens either side of it as one
+        // white-space character does, so it may stand between the number,
+        // the generation and `obj` as white space may.
+        assert_eq!(header_at(b"7 %c\n0 obj", 0), Some(ObjRef::new(7, 0)));
+        assert_eq!(header_at(b"7 0%c\robj", 0), Some(ObjRef::new(7, 0)));
+        assert_eq!(header_at(b"7%a\r\n%b\n0\tobj", 0), Some(ObjRef::new(7, 0)));
+        // The header still begins at the offset itself, and a comment that
+        // runs to the end of the buffer separates nothing from `obj`.
+        assert_eq!(header_at(b"%c\n7 0 obj", 0), None);
+        assert_eq!(header_at(b"7 0 %obj", 0), None);
     }
 
     #[test]

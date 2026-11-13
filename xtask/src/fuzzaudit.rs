@@ -168,6 +168,10 @@ const UNSIGNED: &[(&str, &str)] = &[
     ),
     ("cos_object", "one COS object, which has no file header"),
     (
+        "cos_syntax",
+        "a structured generator: the body chooses a file's objects, sections and spellings",
+    ),
+    (
         "crypt",
         "a structured generator: the body is carved into fields",
     ),
@@ -480,15 +484,16 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
 /// unenforceable.
 ///
 /// `cargo check` rather than `cargo fuzz build`: this is about the *types*
-/// agreeing, it runs on stable, and it needs no sanitizer. CI still builds
-/// them for real.
+/// agreeing, it runs on stable, and it needs no sanitizer; `cargo fuzz build`
+/// builds them for real, locally (`docs/verification.md`). Every target, so
+/// the crate's library and its unit tests are checked beside the binaries.
 fn compiles(root: &Path) -> Result<(), Vec<String>> {
     let manifest = root.join("fuzz").join("Cargo.toml");
     if !manifest.is_file() {
         return Err(vec![format!("{} is missing", manifest.display())]);
     }
     let out = std::process::Command::new("cargo")
-        .args(["check", "--quiet", "--bins", "--manifest-path"])
+        .args(["check", "--quiet", "--all-targets", "--manifest-path"])
         .arg(&manifest)
         .output();
     let out = match out {
