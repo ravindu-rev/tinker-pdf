@@ -1638,6 +1638,7 @@ fn draw_text(
                         matrix: [1.0, 0.0, 0.0, 1.0, pen, 0.0],
                         text: slice,
                         direction: BaseDirection::Auto,
+                        colour: None,
                     },
                 );
                 if written {

@@ -28,6 +28,7 @@ mod annots;
 mod associated_files;
 mod cache;
 pub mod cbz;
+pub mod colour_glyphs;
 mod command_stream;
 mod copies;
 mod display;

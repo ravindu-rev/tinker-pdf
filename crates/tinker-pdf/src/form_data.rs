@@ -877,7 +877,7 @@ fn write_string(out: &mut Vec<u8>, string: &PdfString) {
 
 /// A name as 7.3.5 spells it: regular characters as themselves, everything
 /// else — delimiters, whitespace, `#` and bytes outside `!`..`~` — as `#xx`.
-fn write_name(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn write_name(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(b'/');
     for &byte in bytes {
         let regular = (0x21..0x7F).contains(&byte)

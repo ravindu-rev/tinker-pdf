@@ -61,6 +61,43 @@ fn box_glyph(side: i16) -> Vec<u8> {
     glyph
 }
 
+/// One glyph's outline: a rectangle `[x0, y0, x1, y1]` in font units, one
+/// contour of four on-curve points, counter-clockwise as `box_glyph`'s.
+fn rectangle_glyph(rect: [i16; 4]) -> Vec<u8> {
+    let [x0, y0, x1, y1] = rect;
+    let mut glyph = Vec::new();
+    glyph.extend_from_slice(&1i16.to_be_bytes()); // one contour
+    for value in rect {
+        glyph.extend_from_slice(&value.to_be_bytes()); // xMin, yMin, xMax, yMax
+    }
+    glyph.extend_from_slice(&3u16.to_be_bytes()); // last point of contour 0
+    glyph.extend_from_slice(&0u16.to_be_bytes()); // no instructions
+    glyph.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]); // on-curve, word deltas
+                                                        // From (x0, y0) along the bottom, up the right, back along the top.
+    for dx in [x0, x1 - x0, 0, x0 - x1] {
+        glyph.extend_from_slice(&dx.to_be_bytes());
+    }
+    for dy in [y0, 0, y1 - y0, 0] {
+        glyph.extend_from_slice(&dy.to_be_bytes());
+    }
+    glyph
+}
+
+/// A colour face's tables (`docs/design/colour-fonts.md`): the outline glyphs
+/// its colour descriptions draw, and the `COLR` and `CPAL` a test writes byte
+/// by byte from the chapters' layouts.
+#[derive(Clone, Debug, Default)]
+pub struct Colour {
+    /// Outline glyphs after every other glyph of the face, each a rectangle
+    /// `[x0, y0, x1, y1]` in font units: the layers and clips a colour
+    /// description names, at the ids [`Face::colour_glyph`] gives them.
+    pub rectangles: Vec<[i16; 4]>,
+    /// The `COLR` table, written as given.
+    pub colr: Vec<u8>,
+    /// The `CPAL` table, written as given.
+    pub cpal: Vec<u8>,
+}
+
 /// How a synthesised face is described: what it covers and how wide it is.
 ///
 /// A struct rather than four positional arguments, because two of the four are
@@ -150,6 +187,11 @@ pub struct Face {
     /// line not, and under `kern` the other way round. `None` is a face with
     /// none; every other `GPOS` field wins over it, one lookup per face.
     pub vertical_kern: Option<VerticalKern>,
+    /// Colour tables, `COLR` and `CPAL`, and the outline glyphs they draw.
+    ///
+    /// `None` — the default — is a face with no colour glyph; `Some` is one a
+    /// colour run draws in colour, its descriptions written by the test.
+    pub colour: Option<Colour>,
 }
 
 /// The first glyph of one pair re-spaced along both axes, by a `GPOS`
@@ -322,7 +364,36 @@ impl Face {
             pair: None,
             kern: None,
             vertical_kern: None,
+            colour: None,
         }
+    }
+
+    /// The same face, with colour tables.
+    #[must_use]
+    pub fn with_colour(mut self, colour: Colour) -> Face {
+        self.colour = Some(colour);
+        self
+    }
+
+    /// The glyph id of [`Colour::rectangles`]' entry `n`, after every glyph
+    /// the face has without it.
+    #[must_use]
+    pub fn colour_glyph(&self, n: usize) -> u16 {
+        u16::try_from(self.base_glyph_count() + n).unwrap_or(u16::MAX)
+    }
+
+    /// The glyphs the face has before its colour tables' outlines: `.notdef`,
+    /// one a covered character, the ligature's, and the joining forms'.
+    fn base_glyph_count(&self) -> usize {
+        let order = self.glyph_order();
+        order.len()
+            + 1
+            + usize::from(self.ligature.is_some())
+            + if self.joining.is_some() {
+                order.len() * Form::ALL.len()
+            } else {
+                0
+            }
     }
 
     /// The same face, kerning one pair through `GPOS`.
@@ -459,14 +530,12 @@ fn build(face: &Face) -> Vec<u8> {
     // that `Face::glyph_of` keeps answering for the characters. A joining face
     // needs three more blocks of the same size after that, one per form, which
     // is what `Face::form_glyph` predicts.
-    let glyph_count = order.len()
-        + 1
-        + usize::from(face.ligature.is_some())
-        + if face.joining.is_some() {
-            order.len() * Form::ALL.len()
-        } else {
-            0
-        };
+    let base_count = face.base_glyph_count();
+    let rectangles: &[[i16; 4]] = face
+        .colour
+        .as_ref()
+        .map_or(&[], |colour| colour.rectangles.as_slice());
+    let glyph_count = base_count + rectangles.len();
 
     // ---- glyf and loca ------------------------------------------------------
     //
@@ -478,8 +547,13 @@ fn build(face: &Face) -> Vec<u8> {
     let outline = box_glyph(i16::try_from(face.units_per_em * 7 / 10).unwrap_or(700));
     let mut glyf = Vec::with_capacity(outline.len() * glyph_count);
     let mut loca = vec![0u32];
-    for _ in 1..glyph_count {
+    for _ in 1..base_count {
         glyf.extend_from_slice(&outline);
+        loca.push(u32::try_from(glyf.len()).unwrap_or(0));
+    }
+    // A colour face's own outlines, after every other glyph.
+    for rect in rectangles {
+        glyf.extend_from_slice(&rectangle_glyph(*rect));
         loca.push(u32::try_from(glyf.len()).unwrap_or(0));
     }
     let loca: Vec<u8> = loca.iter().flat_map(|o| o.to_be_bytes()).collect();
@@ -558,7 +632,11 @@ fn build(face: &Face) -> Vec<u8> {
     // `GSUB` are independent: a face may have either, both or neither, and the
     // four cases written out would be four places to forget a table.
     // Alphabetical by tag, which is where the two upper-case ones sort.
-    let mut tables: Vec<(&[u8; 4], &Vec<u8>)> = Vec::with_capacity(10);
+    let mut tables: Vec<(&[u8; 4], &Vec<u8>)> = Vec::with_capacity(12);
+    if let Some(colour) = face.colour.as_ref() {
+        tables.push((b"COLR", &colour.colr));
+        tables.push((b"CPAL", &colour.cpal));
+    }
     if let Some(gpos) = gpos.as_ref() {
         tables.push((b"GPOS", gpos));
     }

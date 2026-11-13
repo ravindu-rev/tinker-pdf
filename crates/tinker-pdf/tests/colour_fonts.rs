@@ -2,16 +2,29 @@
 //!
 //! `DocumentBuilder` writes a colour face as Type 3 fonts whose glyph
 //! procedures the caller draws, and a run writer that places them where the
-//! caller says and records each glyph's text. Every assertion reads the
-//! written file back through this engine — its structure, its text, where its
-//! glyphs stand and the pixels they paint — against numbers the test computes
-//! from what it wrote (ruling 13).
+//! caller says and records each glyph's text; `tinker_pdf::colour_glyphs`
+//! turns a face's colour tables into those procedures, and
+//! `shaping::write_run` writes a run in a colour face through it. Every
+//! assertion reads the written file back through this engine — its
+//! structure, its text, where its glyphs stand and the pixels they paint —
+//! against numbers the test computes from what it wrote: a layer's colour
+//! from the palette and simple alpha compositing, a transformed shape's
+//! place from the matrix (ruling 13). The faces are synthesised
+//! (`epub_support::typeface`), their colour tables written here field by
+//! field from the OpenType chapters' layouts.
 
+mod epub_support;
 mod pdfa_support;
 
+use epub_support::typeface::{Colour, Face};
+use tinker_pdf::colour_glyphs::{ColourFace, ColourWarning};
+use tinker_pdf::shaping::{write_run, Run};
 use tinker_pdf::{Bitmap, Document, FontKind, RenderOptions};
 use tinker_pdf_cos::build::{ColourGlyph, DocumentBuilder, Glyph, PlacedGlyph};
 use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object};
+use tinker_pdf_font::{PaletteChoice, Sfnt};
+use tinker_pdf_shape::bidi::BaseDirection;
+use tinker_pdf_shape::Shaper;
 
 /// The face's em: a TrueType face's usual 2048, so each glyph's form maps its
 /// units into the font's glyph space by a `/Matrix` that is not the identity.
@@ -777,4 +790,343 @@ fn a_colour_run_refuses_what_it_cannot_write() {
     assert!(builder.colour_glyph_run(&mut out, b"C0", 10.0, identity, &[placed(1)]));
     let text = String::from_utf8(out).expect("text");
     assert!(text.contains("[<00>] TJ"), "{text}");
+}
+
+// ---- COLR version 0, through `shaping::write_run` --------------------------
+
+/// A version 0 `COLR` (*COLR header*, *BaseGlyph and Layer records*): each
+/// base glyph with its layers, bottom first, as glyph ids and palette
+/// indices, the records in increasing glyph order as the chapter requires.
+fn colr_v0(bases: &[(u16, Vec<(u16, u16)>)]) -> Vec<u8> {
+    let layer_count: usize = bases.iter().map(|(_, layers)| layers.len()).sum();
+    let base_at = 14usize;
+    let layers_at = base_at + 6 * bases.len();
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&(bases.len() as u16).to_be_bytes());
+    out.extend_from_slice(&(base_at as u32).to_be_bytes());
+    out.extend_from_slice(&(layers_at as u32).to_be_bytes());
+    out.extend_from_slice(&(layer_count as u16).to_be_bytes());
+    let mut first = 0u16;
+    for (glyph, layers) in bases {
+        out.extend_from_slice(&glyph.to_be_bytes());
+        out.extend_from_slice(&first.to_be_bytes());
+        out.extend_from_slice(&(layers.len() as u16).to_be_bytes());
+        first += layers.len() as u16;
+    }
+    for (_, layers) in bases {
+        for (glyph, index) in layers {
+            out.extend_from_slice(&glyph.to_be_bytes());
+            out.extend_from_slice(&index.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// A version 0 `CPAL` (*Palette table header*, *Palette entries and color
+/// records*): palettes of the same number of entries, each given as RGBA and
+/// written in the table's blue-green-red-alpha order, each palette's records
+/// after the one before.
+fn cpal(palettes: &[Vec<[u8; 4]>]) -> Vec<u8> {
+    let entries = palettes.first().map_or(0, Vec::len);
+    let records_at = 12 + 2 * palettes.len();
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&(entries as u16).to_be_bytes());
+    out.extend_from_slice(&(palettes.len() as u16).to_be_bytes());
+    out.extend_from_slice(&((entries * palettes.len()) as u16).to_be_bytes());
+    out.extend_from_slice(&(records_at as u32).to_be_bytes());
+    for palette in 0..palettes.len() {
+        out.extend_from_slice(&((palette * entries) as u16).to_be_bytes());
+    }
+    for palette in palettes {
+        for [r, g, b, a] in palette {
+            out.extend_from_slice(&[*b, *g, *r, *a]);
+        }
+    }
+    out
+}
+
+/// The palette index that is no index: the text's own colour.
+const FOREGROUND: u16 = 0xFFFF;
+
+/// Half an alpha: 128 of 255.
+const HALF: u8 = 128;
+
+/// A face covering `A` and `B` at a thousand units, each a full em wide:
+/// `A` the colour glyph of three layers — a red em, a half-transparent blue
+/// square over its middle, and a bar in the text's colour down the centre —
+/// and `B` a plain box, which no table describes. Palette 1 gives the same
+/// layers yellow and cyan.
+fn layered_face() -> Face {
+    let base = Face::new("Fixture Colour", "AB").with_advance(1000);
+    let em = base.colour_glyph(0);
+    let square = base.colour_glyph(1);
+    let bar = base.colour_glyph(2);
+    let a = base.glyph_of('A').expect("A is covered");
+    base.with_colour(Colour {
+        rectangles: vec![
+            [0, 0, 1000, 1000],
+            [250, 250, 750, 750],
+            [400, 100, 600, 900],
+        ],
+        colr: colr_v0(&[(a, vec![(em, 0), (square, 1), (bar, FOREGROUND)])]),
+        cpal: cpal(&[
+            vec![[255, 0, 0, 255], [0, 0, 255, HALF]],
+            vec![[255, 255, 0, 255], [0, 255, 255, HALF]],
+        ]),
+    })
+}
+
+/// The run [`colour_document`] writes: 50 points to the em, its origin at
+/// (20, 20) on a 200 by 100 page, in a text colour of `0 0.5 0`.
+const RUN_SIZE: f64 = 50.0;
+const RUN_ORIGIN: (f64, f64) = (20.0, 20.0);
+const TEXT_GREEN: [u8; 3] = [0, 128, 0];
+
+/// `text` in `face`, written through `shaping::write_run` as a colour run in
+/// `palette`, under `builder`; what the face warned, and the document.
+fn colour_document(
+    face: &Face,
+    text: &str,
+    palette: PaletteChoice,
+    mut builder: DocumentBuilder,
+) -> (Vec<u8>, Vec<ColourWarning>) {
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("the fixture face is a valid sfnt");
+    let colour = ColourFace::new(&sfnt, palette);
+    assert!(colour.has_colour());
+    assert!(colour.register(&mut builder, b"C0", b"FixtureColour"));
+    let mut content = b"0 0.5 0 rg\n".to_vec();
+    assert!(write_run(
+        &mut builder,
+        &mut content,
+        &Run {
+            font: b"C0",
+            shaper: Shaper::new(&sfnt),
+            size: RUN_SIZE,
+            matrix: [1.0, 0.0, 0.0, 1.0, RUN_ORIGIN.0, RUN_ORIGIN.1],
+            text,
+            direction: BaseDirection::LeftToRight,
+            colour: Some(&colour),
+        },
+    ));
+    builder.add_page(200.0, 100.0, |page| page.raw(&content));
+    (builder.finish(), colour.warnings())
+}
+
+/// A point of the glyph at `pen` ems along the run, in font units.
+fn at_units(pen: f64, unit: [f64; 2]) -> (f64, f64) {
+    (
+        RUN_ORIGIN.0 + (pen + unit[0] / 1000.0) * RUN_SIZE,
+        RUN_ORIGIN.1 + unit[1] / 1000.0 * RUN_SIZE,
+    )
+}
+
+/// `source` at `alpha` over `backdrop` — W3C Compositing Level 1 5.1's simple
+/// alpha compositing, which COLR's *Compositing and blending* names — with
+/// both opaque underneath, rounded to eight bits.
+fn over(source: [u8; 3], alpha: u8, backdrop: [u8; 3]) -> [u8; 3] {
+    let a = f64::from(alpha) / 255.0;
+    let mut out = [0u8; 3];
+    for i in 0..3 {
+        let value = f64::from(source[i]) * a + f64::from(backdrop[i]) * (1.0 - a);
+        out[i] = value.round() as u8;
+    }
+    out
+}
+
+/// The rendered page and its text.
+fn rendered(bytes: Vec<u8>) -> (Bitmap, String) {
+    let document = Document::open(bytes).expect("the written document opens");
+    let page = document.page(0).expect("a page");
+    let bitmap = page.render(&RenderOptions {
+        scale: SCALE,
+        ..RenderOptions::default()
+    });
+    let text = page
+        .text()
+        .plain_text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    (bitmap, text)
+}
+
+/// **FT-06.11's exit.** A synthetic face's colour glyph, written through
+/// `shaping::write_run` and rendered: in each layer the colour the palette
+/// gives, composited over the layers below — the red em, the blue square at
+/// half over it, the bar in the text's own green over both — in either
+/// palette; the plain glyph beside it in the text's colour; and the text
+/// `AB` extracting.
+#[test]
+fn colr_v0_layers_draw_their_palette_colours() {
+    let face = layered_face();
+    for (palette, em_colour, square_colour) in [
+        (PaletteChoice::Default, [255, 0, 0], [0, 0, 255]),
+        (PaletteChoice::Index(1), [255, 255, 0], [0, 255, 255]),
+    ] {
+        let (bytes, warnings) = colour_document(&face, "AB", palette, DocumentBuilder::new());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (bitmap, text) = rendered(bytes);
+        assert_eq!(text, "AB");
+        let samples = [
+            // The em alone, in a corner.
+            (at_units(0.0, [100.0, 100.0]), em_colour),
+            (at_units(0.0, [900.0, 900.0]), em_colour),
+            // The square over the em, beside the bar.
+            (
+                at_units(0.0, [300.0, 500.0]),
+                over(square_colour, HALF, em_colour),
+            ),
+            (
+                at_units(0.0, [700.0, 300.0]),
+                over(square_colour, HALF, em_colour),
+            ),
+            // The bar over the em, below the square, and over both.
+            (at_units(0.0, [500.0, 175.0]), TEXT_GREEN),
+            (at_units(0.0, [500.0, 500.0]), TEXT_GREEN),
+            // `B`, the plain box from 0 to 700, in the text's colour.
+            (at_units(1.0, [350.0, 350.0]), TEXT_GREEN),
+            // Above the box and past the run: the page.
+            (at_units(1.0, [350.0, 850.0]), [255, 255, 255]),
+            (at_units(2.5, [500.0, 500.0]), [255, 255, 255]),
+        ];
+        for (point, want) in samples {
+            let got = pixel(&bitmap, point, 100.0);
+            assert!(
+                close(got, want, 2),
+                "{palette:?}: {point:?} is {got:?}, not {want:?}"
+            );
+        }
+    }
+}
+
+/// The foreground layer is the text's colour wherever the text is shown in a
+/// colour: the same glyph shown in red has a red bar and the same red em and
+/// square.
+#[test]
+fn a_foreground_layer_takes_whatever_colour_the_text_is_in() {
+    let face = layered_face();
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("a valid sfnt");
+    let colour = ColourFace::new(&sfnt, PaletteChoice::Default);
+    let mut builder = DocumentBuilder::new();
+    assert!(colour.register(&mut builder, b"C0", b"FixtureColour"));
+    let mut content = Vec::new();
+    for (line, fill) in [(0.0, "0 0 1 rg"), (1.0, "1 0.5 0 rg")] {
+        content.extend_from_slice(fill.as_bytes());
+        content.push(b'\n');
+        assert!(write_run(
+            &mut builder,
+            &mut content,
+            &Run {
+                font: b"C0",
+                shaper: Shaper::new(&sfnt),
+                size: 20.0,
+                matrix: [1.0, 0.0, 0.0, 1.0, 20.0 + 40.0 * line, 20.0],
+                text: "A",
+                direction: BaseDirection::LeftToRight,
+                colour: Some(&colour),
+            },
+        ));
+    }
+    builder.add_page(200.0, 100.0, |page| page.raw(&content));
+    let (bitmap, text) = rendered(builder.finish());
+    assert_eq!(text, "AA");
+    // The bar's middle in each, and the em's corner, which no text colour
+    // reaches.
+    for (x, bar) in [(20.0, [0, 0, 255]), (60.0, [255, 128, 0])] {
+        let middle = (x + 10.0, 20.0 + 3.5);
+        assert!(close(pixel(&bitmap, middle, 100.0), bar, 2), "{x}");
+        let corner = (x + 2.0, 20.0 + 2.0);
+        assert!(close(pixel(&bitmap, corner, 100.0), [255, 0, 0], 2), "{x}");
+    }
+}
+
+/// One glyph drawn twice is one procedure and one form, and each layer alpha
+/// one `/ExtGState`, however many runs draw it.
+#[test]
+fn a_colour_glyph_drawn_twice_is_one_form() {
+    let face = layered_face();
+    let (bytes, _) = colour_document(
+        &face,
+        "AABA",
+        PaletteChoice::Default,
+        DocumentBuilder::new(),
+    );
+    let fonts = type3_fonts(&bytes);
+    assert_eq!(fonts.len(), 1);
+    let cos = CosDocument::open(bytes).expect("opens");
+    let font = written_font(&cos, fonts[0].1);
+    assert_eq!(font.procedures.len(), 2, "A and B");
+    assert_eq!(font.forms.len(), 2);
+    // `A`'s form names its alpha's state once; `B`'s names none.
+    let a = font
+        .forms
+        .iter()
+        .find(|(name, _)| name == b"g1")
+        .expect("A's form");
+    let states = entry(&cos, &a.1, b"Resources");
+    let states = states
+        .as_dict()
+        .map(|resources| entry(&cos, resources, b"ExtGState"))
+        .and_then(|states| states.as_dict().cloned())
+        .expect("A's form names its states");
+    assert!(states
+        .entries()
+        .iter()
+        .any(|(key, _)| cos.name_bytes(*key).as_deref() == Some(&b"C0.ca128"[..])));
+}
+
+/// Under a profile that admits no transparency, a glyph whose layers need an
+/// alpha below one is drawn as its outline, in the text's colour, and named;
+/// the builder refuses nothing, so the document is still the profile's.
+#[test]
+fn a_translucent_layer_under_a_profile_without_transparency_is_drawn_as_the_outline() {
+    let builder = DocumentBuilder::archival(tinker_pdf_cos::ArchivalProfile {
+        part: tinker_pdf_cos::ArchivalPart::One,
+        level: Some(tinker_pdf_cos::ArchivalLevel::B),
+        destination_profile: pdfa_support::srgb_like(),
+        destination_space: tinker_pdf_cos::DeviceSpace::Rgb,
+        output_condition: "Custom".to_string(),
+        language: None,
+    });
+    let face = layered_face();
+    let (bytes, warnings) = colour_document(&face, "A", PaletteChoice::Default, builder);
+    let glyph = face.glyph_of('A').expect("A is covered");
+    assert_eq!(warnings, [ColourWarning::TransparencyForbidden { glyph }]);
+    let (bitmap, text) = rendered(bytes);
+    assert_eq!(text, "A");
+    // `A`'s own outline, the box from 0 to 700, in green; the em's corner past
+    // it, white.
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, [350.0, 350.0]), 100.0),
+        TEXT_GREEN,
+        2
+    ));
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, [900.0, 900.0]), 100.0),
+        [255, 255, 255],
+        2
+    ));
+}
+
+/// A face with no colour tables draws every glyph as its outline in the
+/// text's colour, and a `COLR` with no `CPAL` is no colour table, as the
+/// chapter's *Overview* says.
+#[test]
+fn a_face_without_a_palette_has_no_colour_glyph() {
+    let plain = Face::new("Fixture Plain", "AB").with_advance(1000);
+    let program = plain.build();
+    let sfnt = Sfnt::parse(&program).expect("a valid sfnt");
+    assert!(!ColourFace::new(&sfnt, PaletteChoice::Default).has_colour());
+
+    let mut no_palette = layered_face();
+    if let Some(colour) = no_palette.colour.as_mut() {
+        colour.cpal = Vec::new();
+    }
+    let program = no_palette.build();
+    let sfnt = Sfnt::parse(&program).expect("a valid sfnt");
+    assert!(!ColourFace::new(&sfnt, PaletteChoice::Default).has_colour());
 }

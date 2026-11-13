@@ -67,6 +67,7 @@ fn document(face: &Face, text: &str, direction: BaseDirection) -> Vec<u8> {
                 matrix: [1.0, 0.0, 0.0, 1.0, 20.0, 40.0],
                 text,
                 direction,
+                colour: None,
             },
         ),
         "the run was written"
@@ -102,6 +103,7 @@ fn runs_written_in_one_face_share_its_plans() {
                         matrix: [1.0, 0.0, 0.0, 1.0, 20.0, 20.0 + 14.0 * f64::from(line)],
                         text: SALAM,
                         direction: BaseDirection::RightToLeft,
+                        colour: None,
                     },
                 ),
                 "run {line} was written"

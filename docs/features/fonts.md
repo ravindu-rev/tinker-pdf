@@ -1086,6 +1086,25 @@ What it does:
   cluster to its first. An Arabic string built that way extracts back to
   itself, in reading order, through the `/ToUnicode` the writer wrote, across
   a ligature, and the document is clean under the strict structural validator.
+- **Colour glyphs into a document.** `tinker_pdf::colour_glyphs::ColourFace`
+  reads a face's `COLR` and `CPAL` once, under the `PaletteChoice` its caller
+  names — a `COLR` with no `CPAL` is no colour table — and `register` makes it
+  a colour face of a `DocumentBuilder` (`add_colour_font`, its Type 3 fonts in
+  [creation](creation.md)). A `shaping::Run` naming it in `colour` is written
+  as its Type 3 glyphs: `write_run` shapes the run as any other, has the face
+  add the procedure of each glyph the builder has none for, and writes it
+  through `colour_glyph_run`. A glyph's procedure is the first of
+  [the design](../design/colour-fonts.md)'s tables that describes it, in font
+  units: COLR version 0's layers bottom first, each layer's outline — from
+  `glyf`, or `CFF ` in a face without one — filled under `q`/`Q` in its
+  palette colour, an alpha below one through an `/ExtGState` the face
+  registers once per value, a foreground layer setting no colour so it paints
+  in the text's own; and for a glyph no table describes, its outline in the
+  text's colour. Every number is rounded once to a ten-thousandth of a unit,
+  so the procedures are the same bytes on every target. Under a profile that
+  forbids transparency a glyph whose layers need an alpha is drawn as its
+  outline and named, `ColourWarning::TransparencyForbidden`, on
+  `ColourFace::warnings`, and the builder refuses nothing.
 
 - **Shaped values into a form field.** `tinker_pdf_cos::Font::program` walks
   `/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`, or
@@ -1755,6 +1774,13 @@ corpora already vendored here. So every name stays on the list.
   without a panic. The `sfnt` fuzz target's `colr-v0.ttf`, `colr-v1.ttf`,
   `sbix.ttf`, `cbdt.ttf` and `svg.ttf` seeds are written by the same
   builders, and read back through their directories.
+- `crates/tinker-pdf/tests/colour_fonts.rs` — colour glyphs written through
+  `shaping::write_run` and rendered by this engine: at sample points in each
+  layer of a synthetic face's COLR version 0 glyph, the colour the test
+  composites from either palette over the layers below, the foreground layer
+  in the text's colour, the text extracting; one form for a glyph drawn
+  twice; a translucent layer under a part 1 profile drawn as the outline and
+  named.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

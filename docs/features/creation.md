@@ -112,7 +112,10 @@ gets `/CharProcs` and `/Encoding` for its codes, `/Widths` (0 at 32), a
 `/ToUnicode`, so the run extracts and is found as a composite run is
 (FT-06.2's Type 3 text). A run naming a glyph with no procedure, a face never
 registered, no glyphs, or a size, matrix or placement that is not a number is
-refused having written nothing.
+refused having written nothing. The procedures of a face's colour tables are
+`tinker_pdf::colour_glyphs::ColourFace`'s ([fonts](fonts.md)), and
+`shaping::write_run` writes a run whose `Run::colour` names one through
+`colour_glyph_run`, each glyph's procedure added first.
 
 **Images.** `add_image(resource, &ImageData)` with four shapes: `Jpeg`
 (bytes placed verbatim, never re-encoded — recompression is generational
@@ -462,7 +465,13 @@ outside any `/AF` sequence, and the call answers `false`
   profile; three hundred glyphs in one run spill into a second font and
   round-trip in order; a glyph that draws nothing is its width alone, the
   first text a glyph is drawn with stands, a rise is drawn and read off the
-  baseline, and every refusal writes nothing.
+  baseline, and every refusal writes nothing. Through `shaping::write_run`, a
+  synthetic face's COLR version 0 glyph paints each layer in the colour the
+  test composites from either palette over the layers below, its foreground
+  layer in whatever colour the text is shown in, the plain glyph beside it in
+  the text's colour, its text extracting; a glyph drawn twice is one form and
+  one alpha state; and under a part 1 profile a translucent layer is drawn as
+  the outline and named.
 - `crates/tinker-pdf-cos/tests/page_operations.rs` covers embedded and
   subset fonts: subsetting is asserted by glyph count
   (`the_glyphs_that_were_drawn_survive_subsetting`), by the 9.6.4 tag

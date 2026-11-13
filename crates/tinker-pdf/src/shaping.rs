@@ -45,6 +45,7 @@
 //! coverage indexed once for the face, not once a run
 //! (`docs/design/shaping.md`, *Lookup plans and coverage indexes*).
 
+use crate::colour_glyphs::ColourFace;
 use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PlacedGlyph};
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::itemize;
@@ -176,10 +177,21 @@ pub struct Run<'a> {
     pub text: &'a str,
     /// The paragraph direction UAX #9 should resolve from.
     pub direction: BaseDirection,
+    /// The colour face [`Run::font`] was registered as, through
+    /// [`ColourFace::register`], or `None` for a composite font
+    /// `DocumentBuilder::add_cid_font` registered.
+    ///
+    /// A run in a colour face is written as the face's Type 3 glyphs
+    /// (`docs/design/colour-fonts.md`): every glyph it draws gets its
+    /// procedure from the face first, and the run goes through
+    /// `DocumentBuilder::colour_glyph_run`. The shaper is the same either
+    /// way — a colour glyph's advances are its outline's (`hmtx`).
+    pub colour: Option<&'a ColourFace<'a>>,
 }
 
 /// Shapes a run and writes it as one composite-font text object, **as one
-/// line in visual order**.
+/// line in visual order** — or, for a run in a colour face, as one text
+/// object of the face's Type 3 glyphs ([`Run::colour`]).
 ///
 /// The whole of milestone 7 in one call, for a caller that has a face, a
 /// string and a content stream.
@@ -195,7 +207,8 @@ pub struct Run<'a> {
 /// for a page that is drawn right.
 ///
 /// Returns false, having written nothing, for the reasons
-/// [`DocumentBuilder::glyph_run`] returns false, and for text that shaped to no
+/// [`DocumentBuilder::glyph_run`] returns false — and for a colour run,
+/// `DocumentBuilder::colour_glyph_run` — and for text that shaped to no
 /// glyphs at all.
 pub fn write_run(builder: &mut DocumentBuilder, out: &mut Vec<u8>, run: &Run<'_>) -> bool {
     let &Run {
@@ -205,6 +218,7 @@ pub fn write_run(builder: &mut DocumentBuilder, out: &mut Vec<u8>, run: &Run<'_>
         matrix,
         text,
         direction,
+        colour,
     } = run;
     let paragraph = Paragraph::new(text, direction);
     let items = itemize(text, &paragraph);
@@ -246,5 +260,15 @@ pub fn write_run(builder: &mut DocumentBuilder, out: &mut Vec<u8>, run: &Run<'_>
         return false;
     }
     let borrowed: Vec<PlacedGlyph<'_>> = placed.iter().map(Placed::as_glyph).collect();
-    builder.glyph_run(out, font, size, matrix, &borrowed)
+    match colour {
+        Some(face) => {
+            // Every glyph's procedure first, so the run names none the
+            // builder lacks; a run refused for one writes nothing.
+            if !face.add_glyphs(builder, font, placed.iter().map(|glyph| glyph.id)) {
+                return false;
+            }
+            builder.colour_glyph_run(out, font, size, matrix, &borrowed)
+        }
+        None => builder.glyph_run(out, font, size, matrix, &borrowed),
+    }
 }
