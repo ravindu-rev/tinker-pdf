@@ -194,8 +194,10 @@ page's numbers (ruling 5).
 `sum over ty of oy * (sum over tx of ox)` over the samples present is the
 per-pixel filter's weight, so the quotient `(S + W / 2) / W` is the same
 number. A sample a short buffer does not hold drops out of both sums, as `area`
-and `texel` drop it. Bilinear's four taps and its `u32` weights do not change;
-only where they come from does.
+and `texel` drop it. A span's ends saturate at `i64`'s range, which only an
+axis of one sample squashed past 10^14 samples a pixel reaches, and there the
+one sample is read whole. Bilinear's four taps and its `u32` weights do not
+change; only where they come from does.
 
 **The bound that keeps the sums in `u64`.** An overlap is at most 2^16. Along
 one axis a pixel's overlaps sum to at most its footprint, which is at most 128

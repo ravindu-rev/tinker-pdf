@@ -289,7 +289,14 @@ element its own shape.
 integers, because `log2` is a transcendental and a count one different is not a
 rounding difference — it is a different image. The averaging weights are
 integers for the same reason: an area is a product of two overlaps, and in
-floats the accumulation order would decide the last bit. So is the run's
+floats the accumulation order would decide the last bit. A draw with no shear
+or rotation term — every axis-aligned placement, flipped or not — works out
+each column's taps and each row's once, from the page-frame pixel centres, and
+each pixel sums integer weights over them in `u64`, a row at a time; a rotated
+or sheared draw maps each pixel through the inverse on its own, with the same
+sums. Neither multiplies in `u128` or calls `floor` per pixel, and
+[design/image-edges.md](../design/image-edges.md) shows both give the numbers
+one pixel mapped on its own gives. So is the run's
 accumulation, and so is the coverage the quad contributes. The only floats left
 on the path are `sqrt`, division and `round`, which IEEE 754 pins exactly
 (ruling 4). The pyramid belongs to the caller, so an image's lifetime is
@@ -395,7 +402,11 @@ tiny pattern over a long line cannot generate millions of pieces.
   dash phase; `blend.rs` pins all sixteen modes in integers; `image.rs`
   measures the sampling policy against numbers — a magnified gradient's
   largest step, a 2:1 checkerboard averaging to uniform 128, and an image
-  wholly off the canvas costing nothing; `mesh.rs`
+  wholly off the canvas costing nothing — holds the planned walk pixel for
+  pixel to every pixel mapped on its own, from 8:1 magnified to past 128:1
+  minified, flipped, short and turned
+  (`the_column_plan_is_the_per_pixel_sampler`), and counts one plan a column
+  and one a row (`a_draw_plans_its_weights_once_per_column_and_row`); `mesh.rs`
   proves shared edges leave no seam; `canvas.rs` covers formats, backdrops
   and bounded compositing, holds the opaque composite to the general blend
   byte for byte — exhaustively over coverage, source and destination channel

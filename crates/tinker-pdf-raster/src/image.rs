@@ -757,35 +757,43 @@ fn walk(
     }
 
     let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
-    let filter = sampling.filter;
     // Borrowed for the rest of the draw: the level, or the image itself when
     // the policy asked for no reduction.
     let image = &pyramid.reduce(image, sampling.halvings);
+    let plan = Plan::new(image, &inverse, sampling, (x0, x1), (y0, y1));
+    // The per-pixel area filter's two lines of taps, reused by every pixel of
+    // a draw that is not planned rather than allocated by each.
+    let mut scratch = (Vec::new(), Vec::new());
 
     for py in y0..y1 {
         if draw.stop.is_some_and(|stop| stop()) {
             return;
         }
+        // Inside `y0..y1` and `x0..x1`, so neither difference can wrap.
+        let row = py.abs_diff(y0) as usize;
         for px in x0..x1 {
             let covered = shape.at(px, py);
             if covered == 0 {
                 continue;
             }
+            let column = px.abs_diff(x0) as usize;
 
-            // Sample at the pixel's centre, clamped into the unit square. The
-            // quad above decided how *much* of the pixel the image reaches; a
-            // centre just outside it still needs a colour, and an image has
-            // none outside itself, so the nearest edge is the answer — which
-            // is what `bilinear` already does between samples. A centre inside
-            // is untouched, so this reaches only the pixels the old
-            // containment test dropped whole.
-            let (u, v) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
-            let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
-
-            let sample = match filter {
-                Filter::Nearest => nearest(image, u, v),
-                Filter::Bilinear => bilinear(image, u, v),
-                Filter::Area => area(image, u, v, sampling.footprint),
+            let sample = match &plan {
+                Plan::Area { columns, rows } => {
+                    area_taps(image, columns.line(column), rows.line(row))
+                }
+                Plan::Bilinear { columns, rows } => match (columns.get(column), rows.get(row)) {
+                    (Some(across), Some(down)) => bilinear_taps(image, *across, *down),
+                    _ => None,
+                },
+                Plan::PerPixel => {
+                    let (u, v) = centre(&inverse, px, py);
+                    match sampling.filter {
+                        Filter::Nearest => nearest(image, u, v),
+                        Filter::Bilinear => bilinear(image, u, v),
+                        Filter::Area => area(image, u, v, sampling.footprint, &mut scratch),
+                    }
+                }
             };
             let Some((r, g, b, own)) = sample else {
                 continue;
@@ -800,6 +808,161 @@ fn walk(
                 covered,
                 own,
             );
+        }
+    }
+}
+
+/// Where a pixel samples: its centre mapped into the unit square and clamped
+/// there, as `(u, v)`.
+///
+/// The quad decided how *much* of the pixel the image reaches; a centre just
+/// outside it still needs a colour, and an image has none outside itself, so
+/// the nearest edge is the answer — which is what `bilinear` already does
+/// between samples. A centre inside is untouched.
+fn centre(inverse: &Transform, px: i32, py: i32) -> (f64, f64) {
+    let (u, v) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
+    (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Columns and rows planned on this thread, one for each line of every
+    /// planned draw: what `a_draw_plans_its_weights_once_per_column_and_row`
+    /// counts.
+    static PLANNED_LINES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// Counts one planned column or row, under `cfg(test)` only.
+#[inline]
+fn planned_line() {
+    #[cfg(test)]
+    PLANNED_LINES.with(|lines| lines.set(lines.get() + 1));
+}
+
+/// What a draw's pixels read, planned before the first of them is visited.
+///
+/// # Which draws are planned
+///
+/// [`Transform::invert`] maps a pixel centre `(x, y)` back to the unit square
+/// as `u = a·x + c·y + e` and `v = b·x + d·y + f`. Where the inverse's `b` and
+/// `c` are both zero — no shear and no rotation, though either axis may be
+/// flipped — `c·y` and `b·x` are signed zeros at every finite centre, so `u`
+/// is the same number on every row and `v` the same number in every column,
+/// up to the sign of a zero, which nothing downstream reads: the area filter
+/// truncates `u·w·65536` and bilinear subtracts a half. So each column's taps
+/// and each row's are worked out once, from the page-frame centres the
+/// per-pixel map would use (ruling 5), and a pixel only sums them. Every other
+/// draw maps each pixel on its own, and so does [`Filter::Nearest`], which
+/// [`sampling_for`] never chooses. `docs/design/image-edges.md`, P-08, has the
+/// argument in full.
+enum Plan {
+    /// Each pixel is mapped through the inverse on its own.
+    PerPixel,
+    /// The area filter's taps, for every column and every row.
+    Area {
+        /// One line of taps a column, left to right.
+        columns: Lines,
+        /// One line of taps a row, top to bottom.
+        rows: Lines,
+    },
+    /// Bilinear's two taps and weight, for every column and every row.
+    Bilinear {
+        /// One a column, left to right.
+        columns: Vec<Pair>,
+        /// One a row, top to bottom.
+        rows: Vec<Pair>,
+    },
+}
+
+impl Plan {
+    /// The plan for a draw over columns `x0..x1` and rows `y0..y1` of the
+    /// page frame, sampling `image`: the level, where the pyramid reduced.
+    fn new(
+        image: &ImageSource<'_>,
+        inverse: &Transform,
+        sampling: Sampling,
+        (x0, x1): (i32, i32),
+        (y0, y1): (i32, i32),
+    ) -> Plan {
+        if inverse.b != 0.0 || inverse.c != 0.0 {
+            return Plan::PerPixel;
+        }
+        // Any row's centre gives a column its `u`, and any column's a row its
+        // `v`; the first of each is as good as every other.
+        let across = |px: i32| centre(inverse, px, y0).0;
+        let down = |py: i32| centre(inverse, x0, py).1;
+        let (width, height) = (image.width, image.height);
+        match sampling.filter {
+            Filter::Area => {
+                let (hx, hy) = half_footprint(sampling.footprint);
+                Plan::Area {
+                    columns: Lines::planned(x0..x1, width, |px| {
+                        let cx = area_centre(across(px), width);
+                        (cx.saturating_sub(hx), cx.saturating_add(hx))
+                    }),
+                    rows: Lines::planned(y0..y1, height, |py| {
+                        let cy = area_centre(1.0 - down(py), height);
+                        (cy.saturating_sub(hy), cy.saturating_add(hy))
+                    }),
+                }
+            }
+            Filter::Bilinear => Plan::Bilinear {
+                columns: (x0..x1)
+                    .map(|px| {
+                        planned_line();
+                        pair(across(px) * f64::from(width) - 0.5, width)
+                    })
+                    .collect(),
+                rows: (y0..y1)
+                    .map(|py| {
+                        planned_line();
+                        pair((1.0 - down(py)) * f64::from(height) - 0.5, height)
+                    })
+                    .collect(),
+            },
+            Filter::Nearest => Plan::PerPixel,
+        }
+    }
+}
+
+/// One of the area filter's taps along an axis: a texel, and how much of it a
+/// pixel's span covers in 1/65536ths, never zero.
+type Tap = (u32, u32);
+
+/// Every line's area taps along one axis, end to end, and where each line's
+/// begin.
+struct Lines {
+    /// Every line's taps, one line after another.
+    taps: Vec<Tap>,
+    /// Where line `i`'s taps begin; line `i` ends where line `i + 1` begins,
+    /// and the last entry is the end of them all.
+    starts: Vec<usize>,
+}
+
+impl Lines {
+    /// One line for each of `lines`, whose 16.16 span `ends` gives.
+    fn planned(
+        lines: core::ops::Range<i32>,
+        extent: u32,
+        ends: impl Fn(i32) -> (i64, i64),
+    ) -> Lines {
+        let mut taps = Vec::new();
+        let mut starts = Vec::with_capacity(lines.len() + 1);
+        for line in lines {
+            starts.push(taps.len());
+            planned_line();
+            let (lo, hi) = ends(line);
+            area_line(lo, hi, extent, &mut taps);
+        }
+        starts.push(taps.len());
+        Lines { taps, starts }
+    }
+
+    /// Line `index`'s taps; none for a line the plan does not hold.
+    fn line(&self, index: usize) -> &[Tap] {
+        match (self.starts.get(index), self.starts.get(index + 1)) {
+            (Some(&from), Some(&to)) => self.taps.get(from..to).unwrap_or(&[]),
+            _ => &[],
         }
     }
 }
@@ -921,36 +1084,60 @@ fn nearest(image: &ImageSource<'_>, u: f64, v: f64) -> Option<(u8, u8, u8, u8)> 
 /// itself. Samples off the edge clamp to the edge rather than fading out,
 /// because an image has no defined colour outside itself and fading to one
 /// would put a dark rim on every magnified picture.
+fn bilinear(image: &ImageSource<'_>, u: f64, v: f64) -> Option<(u8, u8, u8, u8)> {
+    bilinear_taps(
+        image,
+        pair(u * f64::from(image.width) - 0.5, image.width),
+        pair((1.0 - v) * f64::from(image.height) - 0.5, image.height),
+    )
+}
+
+/// Bilinear's share of one axis: the tap below the point and the tap above
+/// it, both clamped into the image, and how far past the first the point lies
+/// in 1/256ths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pair {
+    /// The tap at or below the point.
+    near: u32,
+    /// The tap above it.
+    far: u32,
+    /// How far past `near` the point lies, 0..=255.
+    weight: u32,
+}
+
+/// The pair a coordinate in texels, sample centres at half-integers, reads
+/// along an axis of `extent` samples.
+fn pair(position: f64, extent: u32) -> Pair {
+    let (index, weight) = split(position);
+    // `extent` is at least one: an empty image is refused before any plan.
+    let last = i64::from(extent) - 1;
+    Pair {
+        near: index.clamp(0, last) as u32,
+        far: index.saturating_add(1).clamp(0, last) as u32,
+        weight,
+    }
+}
+
+/// Four taps, weighted.
 ///
 /// # Why the weights are integers
 ///
 /// Ruling 4. The two fractions are the only float arithmetic here, and they
-/// become 0..=255 immediately; everything after that is a `u32` multiply-add
+/// became 0..=255 in [`split`]; everything after that is a `u32` multiply-add
 /// with round-half-up, so the result cannot depend on how a target rounds. The
 /// four weights sum to exactly 65 536, which is what keeps four identical
 /// samples returning that sample rather than one level below it.
-fn bilinear(image: &ImageSource<'_>, u: f64, v: f64) -> Option<(u8, u8, u8, u8)> {
-    let x = u * f64::from(image.width) - 0.5;
-    let y = (1.0 - v) * f64::from(image.height) - 0.5;
-
-    let (x0, wx) = split(x);
-    let (y0, wy) = split(y);
-    let last_x = i64::from(image.width) - 1;
-    let last_y = i64::from(image.height) - 1;
-    let cx0 = x0.clamp(0, last_x) as u32;
-    let cx1 = (x0 + 1).clamp(0, last_x) as u32;
-    let cy0 = y0.clamp(0, last_y) as u32;
-    let cy1 = (y0 + 1).clamp(0, last_y) as u32;
-
+fn bilinear_taps(image: &ImageSource<'_>, x: Pair, y: Pair) -> Option<(u8, u8, u8, u8)> {
     // The nearer of the two rows and columns decides whether the pixel is on
     // the image at all; the other three fall back to it where the buffer is
     // shorter than the dimensions claim, so a truncated image blurs into its
     // own last sample rather than into black.
-    let anchor = image.texel(cx0, cy0)?;
-    let t10 = image.texel(cx1, cy0).unwrap_or(anchor);
-    let t01 = image.texel(cx0, cy1).unwrap_or(anchor);
-    let t11 = image.texel(cx1, cy1).unwrap_or(anchor);
+    let anchor = image.texel(x.near, y.near)?;
+    let t10 = image.texel(x.far, y.near).unwrap_or(anchor);
+    let t01 = image.texel(x.near, y.far).unwrap_or(anchor);
+    let t11 = image.texel(x.far, y.far).unwrap_or(anchor);
 
+    let (wx, wy) = (x.weight, y.weight);
     let w00 = (256 - wx) * (256 - wy);
     let w10 = wx * (256 - wy);
     let w01 = (256 - wx) * wy;
@@ -970,16 +1157,10 @@ fn bilinear(image: &ImageSource<'_>, u: f64, v: f64) -> Option<(u8, u8, u8, u8)>
 }
 
 /// Every sample the destination pixel covers, weighted by how much of it the
-/// pixel covers.
+/// pixel covers: the area filter for a pixel mapped on its own.
 ///
-/// ## Why this is integers
-///
-/// The weights are areas, and an area is a product of two overlaps. In floats
-/// the accumulation order would decide the last bit, and ruling 4 says a last
-/// bit is a different image. So the footprint arrives in 16.16, every overlap
-/// is an integer subtraction, and the products accumulate in `u128` — which is
-/// exact for anything this can reach, since the pyramid caps the footprint at
-/// two texels per axis and therefore at nine taps.
+/// `scratch` holds the pixel's two lines of taps, and is the caller's so that
+/// a draw allocates them once rather than once a pixel.
 ///
 /// ## Why samples outside the image are dropped rather than clamped
 ///
@@ -994,48 +1175,111 @@ fn area(
     u: f64,
     v: f64,
     footprint: (u64, u64),
+    scratch: &mut (Vec<Tap>, Vec<Tap>),
 ) -> Option<(u8, u8, u8, u8)> {
     // The pixel's centre in texels, 16.16. `v` counts up the image and texel
     // rows count down it, which is the flip every sampler here performs.
-    let cx = (u * f64::from(image.width) * 65536.0) as i64;
-    let cy = ((1.0 - v) * f64::from(image.height) * 65536.0) as i64;
-    let (hx, hy) = (
+    let cx = area_centre(u, image.width);
+    let cy = area_centre(1.0 - v, image.height);
+    let (hx, hy) = half_footprint(footprint);
+    let (columns, rows) = scratch;
+    columns.clear();
+    rows.clear();
+    area_line(
+        cx.saturating_sub(hx),
+        cx.saturating_add(hx),
+        image.width,
+        columns,
+    );
+    area_line(
+        cy.saturating_sub(hy),
+        cy.saturating_add(hy),
+        image.height,
+        rows,
+    );
+    area_taps(image, columns, rows)
+}
+
+/// A position `t` of the way along an axis of `extent` samples, in 16.16
+/// texels.
+fn area_centre(t: f64, extent: u32) -> i64 {
+    (t * f64::from(extent) * 65536.0) as i64
+}
+
+/// Half a 16.16 footprint, per axis: how far a pixel's source span reaches
+/// either side of its centre.
+fn half_footprint(footprint: (u64, u64)) -> (i64, i64) {
+    (
         (footprint.0 / 2).min(i64::MAX as u64) as i64,
         (footprint.1 / 2).min(i64::MAX as u64) as i64,
-    );
-    let (x0, x1) = (cx - hx, cx + hx);
-    let (y0, y1) = (cy - hy, cy + hy);
+    )
+}
 
-    let mut sum = [0u128; 4];
-    let mut weight = 0u128;
-    let mut any = false;
-    for ty in span(y0, y1, image.height) {
-        let oy = overlap(y0, y1, ty);
-        if oy == 0 {
-            continue;
+/// Appends to `out` the texels the 16.16 span `[lo, hi)` touches along an axis
+/// of `extent` samples, each with how much of it the span covers, leaving out
+/// any it covers none of.
+///
+/// A span's ends saturate at `i64`'s range rather than wrapping, which only an
+/// axis of one sample squashed past 10^14 samples a pixel reaches.
+fn area_line(lo: i64, hi: i64, extent: u32, out: &mut Vec<Tap>) {
+    for index in span(lo, hi, extent) {
+        let covered = overlap(lo, hi, index);
+        if covered != 0 {
+            // At most a whole texel, 65 536.
+            out.push((index, covered as u32));
         }
-        for tx in span(x0, x1, image.width) {
-            let ox = overlap(x0, x1, tx);
-            if ox == 0 {
-                continue;
-            }
+    }
+}
+
+/// The area filter over two lines of taps: every sample present, weighted by
+/// the product of its two overlaps.
+///
+/// ## Why this is integers, and why `u64` holds it
+///
+/// The weights are areas, and an area is a product of two overlaps. In floats
+/// the accumulation order would decide the last bit, and ruling 4 says a last
+/// bit is a different image. So every overlap is an integer and so is every
+/// sum, gathered a row at a time: `oy × (Σ ox × t)` over the rows is
+/// `Σ (ox × oy) × t` exactly, and the weight beside it sums `ox × oy` over the
+/// samples the buffer holds, so a sample a short buffer stops before drops out
+/// of both.
+///
+/// An overlap is at most 2^16, and a pixel's overlaps along one axis sum to at
+/// most its footprint: 128 texels to 128:1, where nothing is reduced, and past
+/// it 4 texels, a level of two samples, or after sixteen halvings a level of
+/// at most 2^16 samples. A channel's sum is at most `255 × Σox × Σoy`: under
+/// 2^54 to 128:1 and under 2^63 with one axis halved sixteen times. A sum past
+/// 2^64 needs both axes halved sixteen times and still thousands of samples
+/// wide — an image of 2^56 samples, whose first pyramid level no address space
+/// holds. `docs/design/image-edges.md`, P-08, says the same at more length.
+fn area_taps(image: &ImageSource<'_>, columns: &[Tap], rows: &[Tap]) -> Option<(u8, u8, u8, u8)> {
+    let mut sum = [0u64; 4];
+    let mut weight = 0u64;
+    for &(ty, oy) in rows {
+        let mut line = [0u64; 4];
+        let mut line_weight = 0u64;
+        for &(tx, ox) in columns {
             let Some(texel) = image.texel(tx, ty) else {
                 continue;
             };
-            any = true;
-            let w = u128::from(ox) * u128::from(oy);
-            weight += w;
-            sum[0] += w * u128::from(texel.0);
-            sum[1] += w * u128::from(texel.1);
-            sum[2] += w * u128::from(texel.2);
-            sum[3] += w * u128::from(texel.3);
+            let ox = u64::from(ox);
+            line_weight += ox;
+            line[0] += ox * u64::from(texel.0);
+            line[1] += ox * u64::from(texel.1);
+            line[2] += ox * u64::from(texel.2);
+            line[3] += ox * u64::from(texel.3);
+        }
+        let oy = u64::from(oy);
+        weight += oy * line_weight;
+        for (total, part) in sum.iter_mut().zip(line) {
+            *total += oy * part;
         }
     }
-    if !any || weight == 0 {
+    if weight == 0 {
         return None;
     }
     let half = weight / 2;
-    let mix = |channel: u128| ((channel + half) / weight) as u8;
+    let mix = |channel: u64| ((channel + half) / weight) as u8;
     Some((mix(sum[0]), mix(sum[1]), mix(sum[2]), mix(sum[3])))
 }
 
@@ -1063,10 +1307,22 @@ fn overlap(lo: i64, hi: i64, index: u32) -> u64 {
 
 /// A coordinate as the sample below it and how far past it the point lies, in
 /// 1/256ths.
+///
+/// The floor without calling `floor`: a truncating cast, one less where the
+/// cast rounded up, which it does for a negative value that is not whole. That
+/// is `value.floor()` for every `|value| < 2^52` and for NaN, and the value is
+/// a clamped `u` or `v` times the image's extent less a half, so it lies in
+/// `[-0.5, 2^32]`. The fraction is then the same subtraction of the same two
+/// numbers `floor` would have made.
 fn split(value: f64) -> (i64, u32) {
-    let floor = value.floor();
+    let truncated = (value as i64) as f64;
+    let floor = if truncated > value {
+        truncated - 1.0
+    } else {
+        truncated
+    };
     // Saturating: a placement far outside the canvas still has to produce an
-    // index, and the clamp above turns any of them into an edge sample.
+    // index, and the clamp in `pair` turns any of them into an edge sample.
     let index = floor as i64;
     let fraction = ((value - floor) * 256.0) as u32;
     (index, fraction.min(255))
@@ -1887,5 +2143,460 @@ mod tests {
         assert!((back_x - 1.25).abs() < 1e-12, "{back_x}");
         assert!((back_y + 0.5).abs() < 1e-12, "{back_y}");
         assert!(Transform::IDENTITY.invert().is_some());
+    }
+
+    /// The per-pixel sampler: every pixel mapped through the inverse on its
+    /// own, the area filter's products accumulated in `u128` and `split`
+    /// through `floor`. What the planned walk is held to.
+    mod per_pixel {
+        use super::super::*;
+
+        pub(super) fn walk(
+            draw: &ImageDraw<'_>,
+            pyramid: &mut Pyramid,
+            scratch: &mut FillScratch,
+            rect: (i32, i32, u32, u32),
+            mut emit: impl FnMut(i32, i32, Color, u8, u8),
+        ) {
+            let image = &draw.image;
+            if image.width == 0 || image.height == 0 {
+                return;
+            }
+            let Some(inverse) = draw.unit_to_device.invert() else {
+                return;
+            };
+            let Some((x0, x1, y0, y1)) = device_bounds(&draw.unit_to_device, rect) else {
+                return;
+            };
+            if x1 <= x0 || y1 <= y0 {
+                return;
+            }
+            let mut shape = unit_quad(
+                scratch,
+                &draw.unit_to_device,
+                (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)),
+                draw.stop,
+            );
+            if !draw.antialias {
+                shape.harden();
+            }
+            let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
+            let filter = sampling.filter;
+            let image = &pyramid.reduce(image, sampling.halvings);
+            for py in y0..y1 {
+                if draw.stop.is_some_and(|stop| stop()) {
+                    return;
+                }
+                for px in x0..x1 {
+                    let covered = shape.at(px, py);
+                    if covered == 0 {
+                        continue;
+                    }
+                    let (u, v) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
+                    let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+                    let sample = match filter {
+                        Filter::Nearest => nearest(image, u, v),
+                        Filter::Bilinear => bilinear(image, u, v),
+                        Filter::Area => area(image, u, v, sampling.footprint),
+                    };
+                    let Some((r, g, b, own)) = sample else {
+                        continue;
+                    };
+                    if own == 0 {
+                        continue;
+                    }
+                    emit(
+                        px,
+                        py,
+                        draw.tint.unwrap_or(Color::rgb(r, g, b)),
+                        covered,
+                        own,
+                    );
+                }
+            }
+        }
+
+        fn bilinear(image: &ImageSource<'_>, u: f64, v: f64) -> Option<(u8, u8, u8, u8)> {
+            let x = u * f64::from(image.width) - 0.5;
+            let y = (1.0 - v) * f64::from(image.height) - 0.5;
+
+            let (x0, wx) = split(x);
+            let (y0, wy) = split(y);
+            let last_x = i64::from(image.width) - 1;
+            let last_y = i64::from(image.height) - 1;
+            let cx0 = x0.clamp(0, last_x) as u32;
+            let cx1 = (x0 + 1).clamp(0, last_x) as u32;
+            let cy0 = y0.clamp(0, last_y) as u32;
+            let cy1 = (y0 + 1).clamp(0, last_y) as u32;
+
+            let anchor = image.texel(cx0, cy0)?;
+            let t10 = image.texel(cx1, cy0).unwrap_or(anchor);
+            let t01 = image.texel(cx0, cy1).unwrap_or(anchor);
+            let t11 = image.texel(cx1, cy1).unwrap_or(anchor);
+
+            let w00 = (256 - wx) * (256 - wy);
+            let w10 = wx * (256 - wy);
+            let w01 = (256 - wx) * wy;
+            let w11 = wx * wy;
+            let mix = |a: u8, b: u8, c: u8, d: u8| {
+                let total = u32::from(a) * w00
+                    + u32::from(b) * w10
+                    + u32::from(c) * w01
+                    + u32::from(d) * w11;
+                ((total + 32768) >> 16) as u8
+            };
+
+            Some((
+                mix(anchor.0, t10.0, t01.0, t11.0),
+                mix(anchor.1, t10.1, t01.1, t11.1),
+                mix(anchor.2, t10.2, t01.2, t11.2),
+                mix(anchor.3, t10.3, t01.3, t11.3),
+            ))
+        }
+
+        fn area(
+            image: &ImageSource<'_>,
+            u: f64,
+            v: f64,
+            footprint: (u64, u64),
+        ) -> Option<(u8, u8, u8, u8)> {
+            let cx = (u * f64::from(image.width) * 65536.0) as i64;
+            let cy = ((1.0 - v) * f64::from(image.height) * 65536.0) as i64;
+            let (hx, hy) = (
+                (footprint.0 / 2).min(i64::MAX as u64) as i64,
+                (footprint.1 / 2).min(i64::MAX as u64) as i64,
+            );
+            let (x0, x1) = (cx - hx, cx + hx);
+            let (y0, y1) = (cy - hy, cy + hy);
+
+            let mut sum = [0u128; 4];
+            let mut weight = 0u128;
+            let mut any = false;
+            for ty in span(y0, y1, image.height) {
+                let oy = overlap(y0, y1, ty);
+                if oy == 0 {
+                    continue;
+                }
+                for tx in span(x0, x1, image.width) {
+                    let ox = overlap(x0, x1, tx);
+                    if ox == 0 {
+                        continue;
+                    }
+                    let Some(texel) = image.texel(tx, ty) else {
+                        continue;
+                    };
+                    any = true;
+                    let w = u128::from(ox) * u128::from(oy);
+                    weight += w;
+                    sum[0] += w * u128::from(texel.0);
+                    sum[1] += w * u128::from(texel.1);
+                    sum[2] += w * u128::from(texel.2);
+                    sum[3] += w * u128::from(texel.3);
+                }
+            }
+            if !any || weight == 0 {
+                return None;
+            }
+            let half = weight / 2;
+            let mix = |channel: u128| ((channel + half) / weight) as u8;
+            Some((mix(sum[0]), mix(sum[1]), mix(sum[2]), mix(sum[3])))
+        }
+
+        fn split(value: f64) -> (i64, u32) {
+            let floor = value.floor();
+            let index = floor as i64;
+            let fraction = ((value - floor) * 256.0) as u32;
+            (index, fraction.min(255))
+        }
+    }
+
+    /// One pixel a walk hands its consumer: where, its colour, the quad's
+    /// coverage and the sample's own alpha.
+    type Emitted = (i32, i32, Color, u8, u8);
+
+    /// Everything the planned walk hands its consumer, in order.
+    fn planned_walk(draw: &ImageDraw<'_>, rect: (i32, i32, u32, u32)) -> Vec<Emitted> {
+        let mut out = Vec::new();
+        walk(
+            draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+            rect,
+            |px, py, color, covered, own| {
+                out.push((px, py, color, covered, own));
+            },
+        );
+        out
+    }
+
+    /// Everything the per-pixel walk hands its consumer, in order.
+    fn per_pixel_walk(draw: &ImageDraw<'_>, rect: (i32, i32, u32, u32)) -> Vec<Emitted> {
+        let mut out = Vec::new();
+        per_pixel::walk(
+            draw,
+            &mut Pyramid::new(),
+            &mut FillScratch::new(),
+            rect,
+            |px, py, color, covered, own| {
+                out.push((px, py, color, covered, own));
+            },
+        );
+        out
+    }
+
+    /// Bytes from a linear congruential generator: no structure a filter could
+    /// get right by accident, and the same bytes on every target.
+    fn noise(count: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(17);
+        (0..count)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// Holds one draw's two walks to each other, naming the first pixel they
+    /// part at.
+    fn assert_same_walk(draw: &ImageDraw<'_>, rect: (i32, i32, u32, u32), what: &str) -> usize {
+        let planned = planned_walk(draw, rect);
+        let per_pixel = per_pixel_walk(draw, rect);
+        if planned != per_pixel {
+            let at = planned
+                .iter()
+                .zip(&per_pixel)
+                .position(|(a, b)| a != b)
+                .unwrap_or(planned.len().min(per_pixel.len()));
+            panic!(
+                "{what}: the planned walk parts from the per-pixel one at pixel {at} of \
+                 {} against {}: {:?} against {:?}",
+                planned.len(),
+                per_pixel.len(),
+                planned.get(at),
+                per_pixel.get(at),
+            );
+        }
+        planned.len()
+    }
+
+    /// **The planned walk is the per-pixel walk, pixel for pixel.**
+    ///
+    /// Axis-aligned draws from 8:1 magnified to past 128:1 minified, where the
+    /// pyramid reduces first and, on an axis of three samples, stops at a
+    /// level of two; every flip of the two axes; offsets off the pixel grid;
+    /// a buffer shorter than its dimensions, sample alpha and alpha cut short;
+    /// both values of `/Interpolate`, a hard edge and a tint; and canvases
+    /// standing at three places in the page frame, so a plan made over a
+    /// region is the page's plan there (ruling 5). Rotated, sheared and
+    /// quarter-turned draws take the per-pixel map, and it is held to the walk
+    /// it replaced as well: its `u64` sums and its floor-free split.
+    #[test]
+    fn the_column_plan_is_the_per_pixel_sampler() {
+        let rects = [(0, 0, 64, 64), (5, -3, 23, 17), (-20, 11, 50, 30)];
+        let images: [(u32, u32); 7] = [
+            (1, 1),
+            (2, 3),
+            (7, 5),
+            (16, 9),
+            (33, 21),
+            (600, 3),
+            (3, 600),
+        ];
+        // Device pixels a sample, along x and along y.
+        let scales = [
+            (8.0, 8.0),
+            (3.7, 0.73),
+            (1.0, 1.0),
+            (0.5, 1.0 / 3.0),
+            (1.0 / 7.3, 2.25),
+            (1.0 / 150.0, 1.0 / 150.0),
+        ];
+        PLANNED_LINES.with(|lines| lines.set(0));
+        let (mut cases, mut pixels) = (0usize, 0usize);
+        for (index, &(width, height)) in images.iter().enumerate() {
+            let samples = (width * height) as usize;
+            let rgb = noise(samples * 3, index as u32);
+            let alpha = noise(samples, 100 + index as u32);
+            let sources = [
+                ImageSource {
+                    width,
+                    height,
+                    rgb: &rgb,
+                    alpha: &[],
+                },
+                // Two thirds of the samples the dimensions claim.
+                ImageSource {
+                    width,
+                    height,
+                    rgb: &rgb[..rgb.len() * 2 / 3],
+                    alpha: &[],
+                },
+                // Alpha for the first half of them, opaque after.
+                ImageSource {
+                    width,
+                    height,
+                    rgb: &rgb,
+                    alpha: &alpha[..alpha.len().div_ceil(2)],
+                },
+            ];
+            for source in sources {
+                for &(sx, sy) in &scales {
+                    let (w, h) = (f64::from(width) * sx, f64::from(height) * sy);
+                    for (flip_x, flip_y) in
+                        [(false, false), (true, false), (false, true), (true, true)]
+                    {
+                        let (left, bottom) = (3.37, 2.61);
+                        let placement = Transform {
+                            a: if flip_x { -w } else { w },
+                            b: 0.0,
+                            c: 0.0,
+                            d: if flip_y { h } else { -h },
+                            e: if flip_x { left + w } else { left },
+                            f: if flip_y { bottom } else { bottom + h },
+                        };
+                        for interpolate in [false, true] {
+                            let mut draw = ImageDraw::new(source, placement);
+                            draw.interpolate = interpolate;
+                            draw.antialias = cases % 5 != 0;
+                            if cases % 7 == 0 {
+                                draw.tint = Some(Color::rgb(200, 30, 90));
+                            }
+                            let rect = rects[cases % rects.len()];
+                            pixels += assert_same_walk(
+                                &draw,
+                                rect,
+                                &format!(
+                                    "{width}x{height} ({} rgb bytes, {} alpha) at {sx}x{sy}, \
+                                     flipped {flip_x}/{flip_y}, interpolate {interpolate}, \
+                                     over {rect:?}",
+                                    source.rgb.len(),
+                                    source.alpha.len()
+                                ),
+                            );
+                            cases += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let planned = PLANNED_LINES.with(core::cell::Cell::get);
+
+        // The draws no plan serves: a rotation, a shear and a quarter turn.
+        let turned = [
+            Transform {
+                a: 20.0,
+                b: 11.0,
+                c: -11.0,
+                d: 20.0,
+                e: 17.3,
+                f: 4.6,
+            },
+            Transform {
+                a: 30.0,
+                b: 0.0,
+                c: 7.5,
+                d: -20.0,
+                e: 5.2,
+                f: 31.7,
+            },
+            Transform {
+                a: 0.0,
+                b: 23.5,
+                c: 31.25,
+                d: 0.0,
+                e: 2.5,
+                f: 3.75,
+            },
+        ];
+        for (index, &(width, height)) in images.iter().enumerate() {
+            let samples = (width * height) as usize;
+            let rgb = noise(samples * 3, 200 + index as u32);
+            let alpha = noise(samples, 300 + index as u32);
+            let source = ImageSource {
+                width,
+                height,
+                rgb: &rgb,
+                alpha: &alpha,
+            };
+            for placement in turned {
+                for interpolate in [false, true] {
+                    let mut draw = ImageDraw::new(source, placement);
+                    draw.interpolate = interpolate;
+                    pixels += assert_same_walk(
+                        &draw,
+                        (0, 0, 64, 64),
+                        &format!("{width}x{height} under {placement:?}, interpolate {interpolate}"),
+                    );
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(
+            PLANNED_LINES.with(core::cell::Cell::get),
+            planned,
+            "a turned draw plans nothing"
+        );
+        assert!(
+            planned > 10_000,
+            "the axis-aligned draws planned: {planned} lines"
+        );
+        assert!(
+            pixels > 200_000,
+            "{cases} draws compared {pixels} pixels, which is too few to say anything"
+        );
+    }
+
+    /// A draw works out its weights once a column and once a row, rather than
+    /// once a pixel: the plan is what each pixel sums.
+    ///
+    /// Two draws, one per filter the plan serves — the area filter on a 3:1
+    /// minification, bilinear on a magnification that asked for it — each
+    /// planning exactly as many lines as it has columns and rows, which its
+    /// pixels outnumber many times over.
+    #[test]
+    fn a_draw_plans_its_weights_once_per_column_and_row() {
+        let rgb = noise(40 * 30 * 3, 9);
+        let image = ImageSource {
+            width: 40,
+            height: 30,
+            rgb: &rgb,
+            alpha: &[],
+        };
+        let rect = (0, 0, 128, 128);
+        for (w, h, interpolate) in [(13.3, 10.0, false), (97.0, 71.3, true)] {
+            let placement = Transform {
+                a: w,
+                b: 0.0,
+                c: 0.0,
+                d: -h,
+                e: 2.6,
+                f: 3.1 + h,
+            };
+            let mut draw = ImageDraw::new(image, placement);
+            draw.interpolate = interpolate;
+            let filter = sampling_for(&image, &placement, interpolate).filter;
+            let (x0, x1, y0, y1) = device_bounds(&placement, rect).expect("on the canvas");
+            let lines = x1.abs_diff(x0) as usize + y1.abs_diff(y0) as usize;
+
+            PLANNED_LINES.with(|planned| planned.set(0));
+            let mut pixels = 0usize;
+            walk(
+                &draw,
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+                rect,
+                |_, _, _, _, _| pixels += 1,
+            );
+            let planned = PLANNED_LINES.with(core::cell::Cell::get);
+
+            assert_eq!(
+                planned, lines,
+                "{filter:?}: one plan a column and one a row"
+            );
+            assert!(
+                pixels > 4 * planned,
+                "{filter:?}: the pixels, {pixels}, outnumber the plans, {planned}"
+            );
+        }
     }
 }
