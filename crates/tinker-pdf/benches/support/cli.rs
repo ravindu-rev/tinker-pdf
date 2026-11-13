@@ -11,7 +11,8 @@
 //! operation's own directory, and its exit status is checked every time, so a
 //! child that fails panics the bench and is never timed. What an operation
 //! asserts after it ran reads those files and what the child wrote, so the
-//! run that is timed and the run that is checked are the same run.
+//! run that is timed and the run that is checked are the same run. The files
+//! a child reads are `inputs.rs`' ([`super::inputs::Store::file`]).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -41,39 +42,11 @@ pub fn tpdf() -> PathBuf {
     tpdf
 }
 
-/// The directory a CLI operation's input files are written into: the one
-/// `TINKER_BENCH_FIXTURES` names, which is how a paired job hands two builds
-/// the same bytes, or `bench-fixtures/` under the directory cargo gives every
-/// bench target for its own files.
-fn fixtures() -> (PathBuf, bool) {
-    let (dir, shared) = match std::env::var_os("TINKER_BENCH_FIXTURES") {
-        Some(dir) => (PathBuf::from(dir), true),
-        None => (
-            Path::new(env!("CARGO_TARGET_TMPDIR")).join("bench-fixtures"),
-            false,
-        ),
-    };
-    std::fs::create_dir_all(&dir)
-        .unwrap_or_else(|error| panic!("the fixture directory {}: {error}", dir.display()));
-    (dir, shared)
-}
-
-/// The input file `name`, holding `bytes`, written once a process, and its
-/// path. In a directory `TINKER_BENCH_FIXTURES` names a file already there is
-/// kept, so the first process to need an input writes it for every build
-/// timed on it.
-pub fn fixture(name: &str, bytes: impl FnOnce() -> Vec<u8>) -> PathBuf {
-    let (dir, shared) = fixtures();
-    let path = dir.join(name);
-    if !(shared && path.is_file()) {
-        std::fs::write(&path, bytes())
-            .unwrap_or_else(|error| panic!("the fixture {}: {error}", path.display()));
-    }
-    path
-}
-
 /// One CLI operation's runner: the binary, and the operation's own directory,
-/// where its children's output files and everything they write go.
+/// where its children's output files and everything they write go. A clone
+/// runs and reads in the same directory, so an operation's routine and what
+/// it checks after its runs can each hold one.
+#[derive(Clone)]
 pub struct Cli {
     tpdf: PathBuf,
     dir: PathBuf,

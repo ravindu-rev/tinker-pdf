@@ -53,13 +53,30 @@
 //! and `cargo xtask bench-check` reads such a directory back as the name it
 //! was made from.
 //!
-//! # Inputs are built when an operation needs them
+//! # An operation is defined the first time criterion calls it
 //!
-//! A group file builds each input in a `LazyCell` and checks it there, so an
-//! input is built the first time an operation reads it. Criterion runs every
-//! operation, so it builds every input, in the order the operations first
-//! read them; count mode runs one operation, so it builds that operation's
-//! inputs and no others.
+//! [`Group::operation`] runs an operation's definition — what it builds and
+//! checks, its unit, its routine — the first time criterion calls the
+//! operation's routine, outside the time criterion takes, and keeps what it
+//! built for the rest of the process; an operation criterion leaves out is
+//! never defined. A group file builds each input its operations share in a
+//! `LazyCell` and checks it there, so an input is built the first time a
+//! defined operation reads it. A run of the whole set builds every input, in
+//! the order the operations first read them; a process started for one
+//! operation, as the paired run starts each (`--bench --exact <id>`), builds
+//! that operation's inputs and nothing for the rest of its group; `--list`
+//! builds nothing; count mode builds the one operation's. What an operation's
+//! last run left is checked after its runs ([`Op::after`]), and every input
+//! comes through `inputs.rs`' store, which with `TINKER_BENCH_FIXTURES` set
+//! hands every build of a paired run the bytes its first process wrote.
+//!
+//! Criterion takes the figure it reports a rate in when an operation starts,
+//! before the operation is defined, so the harness hands it the figure the
+//! group's list in `baseline.json` commits ([`list`]) and holds what the
+//! definition declares through [`Op::per`] to it: a generator and its list
+//! cannot drift apart unseen. The planning baseline's build is the one that
+//! holds nothing to it, since its own engine computes what it declares — a
+//! render's pixels, a book's pages — and the list is the head's.
 //!
 //! # Count mode
 //!
@@ -128,13 +145,14 @@
 
 pub mod cli;
 pub mod inputs;
+pub mod list;
 
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::measurement::WallTime;
-use criterion::{BatchSize, BenchmarkGroup, Criterion, SamplingMode, Throughput};
+use criterion::{BatchSize, Bencher, BenchmarkGroup, Criterion, SamplingMode, Throughput};
 use tinker_pdf::Bitmap;
 
 /// The sampling of every group but sign, fonts and scripts: ten samples, the
@@ -165,7 +183,7 @@ pub fn fine_config() -> Criterion {
 ///
 /// An operation whose input is none of these — a private-key operation, a
 /// shaped paragraph — declares nothing and reports milliseconds alone.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Per {
     /// Pages read, written or laid out.
     Pages(u64),
@@ -184,6 +202,19 @@ impl Per {
             Per::Pages(n) | Per::Pixels(n) | Per::Outlines(n) => Throughput::Elements(n),
             Per::Bytes(n) => Throughput::BytesDecimal(n),
         }
+    }
+
+    /// The figure a list commits: `per_iteration` of `unit`, or nothing for
+    /// the unit `none`; `None` outside, for a unit no list may give.
+    fn listed(unit: &str, per_iteration: u64) -> Option<Option<Per>> {
+        Some(match unit {
+            "none" => None,
+            "pages" => Some(Per::Pages(per_iteration)),
+            "pixels" => Some(Per::Pixels(per_iteration)),
+            "bytes" => Some(Per::Bytes(per_iteration)),
+            "outlines" => Some(Per::Outlines(per_iteration)),
+            _ => return None,
+        })
     }
 }
 
@@ -289,26 +320,33 @@ fn record_host(group: &str) {
 }
 
 /// One group of the set as its file declares it: criterion's group, flat
-/// sampled, or in count mode the one operation `TINKER_BENCH_COUNT` names.
+/// sampled, with its list from `baseline.json`; or in count mode the one
+/// operation `TINKER_BENCH_COUNT` names.
 pub struct Group<'c> {
     id: String,
     mode: Mode<'c>,
-    /// Whether an operation before this one declared a unit. Criterion keeps
-    /// a group's throughput from one operation to the next and cannot clear
-    /// it, so an operation that declared none after one that did would be
-    /// reported in the earlier one's unit.
+    /// Whether an operation before this one is listed with a unit.
+    /// Criterion keeps a group's throughput from one operation to the next
+    /// and cannot clear it, so an operation with none after one that had
+    /// one would be reported in the earlier one's unit.
     united: bool,
 }
 
 enum Mode<'c> {
-    Measure(BenchmarkGroup<'c, WallTime>),
-    Count { operation: String, iterations: u64 },
+    Measure {
+        group: BenchmarkGroup<'c, WallTime>,
+        listed: Vec<list::Listed>,
+    },
+    Count {
+        operation: String,
+        iterations: u64,
+    },
 }
 
 impl<'c> Group<'c> {
     /// The group `id`: criterion's group, sampled flat, its host recorded
-    /// beside its estimates, or in count mode the group's one operation asked
-    /// for, run outside criterion.
+    /// beside its estimates and its list read, or in count mode the group's
+    /// one operation asked for, run outside criterion.
     pub fn new(c: &'c mut Criterion, id: &str) -> Group<'c> {
         let mode = match count_mode() {
             Some((operation, iterations)) => Mode::Count {
@@ -319,7 +357,10 @@ impl<'c> Group<'c> {
                 record_host(id);
                 let mut group = c.benchmark_group(id);
                 group.sampling_mode(SamplingMode::Flat);
-                Mode::Measure(group)
+                Mode::Measure {
+                    group,
+                    listed: list::committed(id),
+                }
             }
         };
         Group {
@@ -330,13 +371,15 @@ impl<'c> Group<'c> {
     }
 
     /// The operation `name`: `define` builds what it reads, declares its unit
-    /// and runs its routine once through the [`Op`] it is handed, then checks
-    /// what that run wrote. In count mode `define` is called for the
-    /// operation asked for alone, and the process exits when it returns.
-    pub fn operation(&mut self, name: &str, define: impl FnOnce(&mut Op<'_, 'c>)) {
+    /// and its routine through the [`Op`] it is handed, and what the routine's
+    /// last run leaves is checked after its runs. It is called the first time
+    /// criterion calls the routine, outside the time criterion takes, and
+    /// never for an operation criterion does not run; in count mode it is
+    /// called for the operation asked for alone, and the process exits when
+    /// that operation has run.
+    pub fn operation<'d>(&mut self, name: &str, define: impl FnOnce(&mut Op<'d>)) {
         let id = format!("{}/{name}", self.id);
-        let run = match &mut self.mode {
-            Mode::Measure(group) => Run::Measure(group),
+        match &mut self.mode {
             Mode::Count {
                 operation,
                 iterations,
@@ -344,27 +387,59 @@ impl<'c> Group<'c> {
                 if *operation != id {
                     return;
                 }
-                Run::Count(*iterations)
+                let iterations = *iterations;
+                let mut op = Op::defined(&id, define);
+                op.run(Exec::Count(iterations));
+                op.check();
+                println!("count-mode: RAN {id} {iterations}");
+                std::process::exit(0);
             }
-        };
-        let mut op = Op {
-            name,
-            run,
-            per: false,
-            ran: false,
-        };
-        define(&mut op);
-        assert!(op.ran, "{id} declares no routine");
-        if let Run::Count(iterations) = op.run {
-            println!("count-mode: RAN {id} {iterations}");
-            std::process::exit(0);
+            Mode::Measure { group, listed } => {
+                let listed = listed
+                    .iter()
+                    .find(|listed| listed.name == name)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{id}: baseline.json's `{}` list does not hold it, and `cargo xtask \
+                             baseline` holds every group file to its list",
+                            self.id
+                        )
+                    });
+                let committed =
+                    Per::listed(&listed.unit, listed.per_iteration).unwrap_or_else(|| {
+                        panic!("{id}: its list gives it the unit `{}`", listed.unit)
+                    });
+                assert!(
+                    committed.is_some() || !self.united,
+                    "{id} is listed with no unit after an operation that has one, so criterion \
+                     would report it in that one's: list it before the first that has one"
+                );
+                self.united |= committed.is_some();
+                if let Some(per) = committed {
+                    group.throughput(per.throughput());
+                }
+                let mut define = Some(define);
+                let mut defined: Option<Op<'d>> = None;
+                group.bench_function(name, |b| {
+                    let op = defined.get_or_insert_with(|| {
+                        let define = define.take().expect("an operation is defined once");
+                        let op = Op::defined(&id, define);
+                        if !cfg!(tinker_planning_baseline) {
+                            assert_eq!(
+                                op.per, committed,
+                                "{id}: what it declares an iteration processes, and what its \
+                                 list in baseline.json commits"
+                            );
+                        }
+                        op
+                    });
+                    op.run(Exec::Bench(b));
+                });
+                if let Some(op) = defined {
+                    op.check();
+                }
+            }
         }
-        assert!(
-            op.per || !self.united,
-            "{id} declares no unit after an operation that did, so criterion would report it \
-             in that one's: declare its own, or move it before the first that has one"
-        );
-        self.united |= op.per;
     }
 
     /// The operation `name`, which the planning baseline lacks: declared as
@@ -372,7 +447,7 @@ impl<'c> Group<'c> {
     /// build (`tinker_planning_baseline`), which leaves it out, since its
     /// gate in `baseline.json` holds it against the calibration operation
     /// that build times instead.
-    pub fn calibrated(&mut self, name: &str, define: impl FnOnce(&mut Op<'_, 'c>)) {
+    pub fn calibrated<'d>(&mut self, name: &str, define: impl FnOnce(&mut Op<'d>)) {
         if !cfg!(tinker_planning_baseline) {
             self.operation(name, define);
         }
@@ -382,7 +457,7 @@ impl<'c> Group<'c> {
     /// operation asked for, which is none of this group's.
     pub fn finish(self) {
         match self.mode {
-            Mode::Measure(group) => group.finish(),
+            Mode::Measure { group, .. } => group.finish(),
             Mode::Count { operation, .. } => {
                 eprintln!(
                     "count-mode: {operation} is no operation of the {} group",
@@ -394,97 +469,126 @@ impl<'c> Group<'c> {
     }
 }
 
-/// One operation's run: criterion's sampler, or in count mode its routine
-/// exactly n times, with no clock read.
-pub struct Op<'g, 'c> {
-    name: &'g str,
-    run: Run<'g, 'c>,
-    per: bool,
-    ran: bool,
-}
-
-enum Run<'g, 'c> {
-    Measure(&'g mut BenchmarkGroup<'c, WallTime>),
+/// One way an operation's routine is run: by criterion's sampler, through
+/// the bencher of one of its calls, or in count mode exactly n times with no
+/// clock read.
+enum Exec<'x, 'b> {
+    Bench(&'x mut Bencher<'b, WallTime>),
     Count(u64),
 }
 
-impl Op<'_, '_> {
+/// An operation's routine, as each of the iteration shapes runs it.
+type Routine<'d> = Box<dyn FnMut(Exec<'_, '_>) + 'd>;
+
+/// One operation as its definition declares it: what an iteration
+/// processes, its routine, and what is checked after the routine's runs.
+pub struct Op<'d> {
+    id: String,
+    per: Option<Per>,
+    routine: Option<Routine<'d>>,
+    checks: Vec<Box<dyn FnOnce() + 'd>>,
+}
+
+impl<'d> Op<'d> {
+    /// The operation `id` as `define` declares it, which must declare its
+    /// routine.
+    fn defined(id: &str, define: impl FnOnce(&mut Op<'d>)) -> Op<'d> {
+        let mut op = Op {
+            id: id.to_string(),
+            per: None,
+            routine: None,
+            checks: Vec::new(),
+        };
+        define(&mut op);
+        assert!(op.routine.is_some(), "{id} declares no routine");
+        op
+    }
+
+    /// The routine run once as `exec` asks.
+    fn run(&mut self, exec: Exec<'_, '_>) {
+        if let Some(routine) = &mut self.routine {
+            routine(exec);
+        }
+    }
+
+    /// What the routine's last run left, checked.
+    fn check(self) {
+        for check in self.checks {
+            check();
+        }
+    }
+
     /// What one iteration processes, the unit criterion reports a rate in.
     pub fn per(&mut self, per: Per) {
-        if let Run::Measure(group) = &mut self.run {
-            group.throughput(per.throughput());
-        }
-        self.per = true;
+        self.per = Some(per);
     }
 
     /// `routine`, once an iteration.
-    pub fn iter<R>(&mut self, mut routine: impl FnMut() -> R) {
-        self.runs();
-        match &mut self.run {
-            Run::Measure(group) => {
-                group.bench_function(self.name, |b| b.iter(&mut routine));
-            }
-            Run::Count(iterations) => {
-                for _ in 0..*iterations {
+    pub fn iter<R>(&mut self, mut routine: impl FnMut() -> R + 'd) {
+        self.declare(Box::new(move |exec: Exec<'_, '_>| match exec {
+            Exec::Bench(b) => b.iter(&mut routine),
+            Exec::Count(iterations) => {
+                for _ in 0..iterations {
                     black_box(routine());
                 }
             }
-        }
+        }));
     }
 
     /// `routine` once an iteration on an input `setup` makes for it, which
     /// criterion leaves out of the time and count mode counts with it.
     pub fn iter_batched<I, R>(
         &mut self,
-        mut setup: impl FnMut() -> I,
-        mut routine: impl FnMut(I) -> R,
+        mut setup: impl FnMut() -> I + 'd,
+        mut routine: impl FnMut(I) -> R + 'd,
         size: BatchSize,
     ) {
-        self.runs();
-        match &mut self.run {
-            Run::Measure(group) => {
-                group.bench_function(self.name, |b| {
-                    b.iter_batched(&mut setup, &mut routine, size);
-                });
-            }
-            Run::Count(iterations) => {
-                for _ in 0..*iterations {
+        self.declare(Box::new(move |exec: Exec<'_, '_>| match exec {
+            Exec::Bench(b) => b.iter_batched(&mut setup, &mut routine, size),
+            Exec::Count(iterations) => {
+                for _ in 0..iterations {
                     black_box(routine(setup()));
                 }
             }
-        }
+        }));
     }
 
     /// `routine`, once an iteration, timed as its own run plus the duration
     /// it answers: a figure part measured and part computed, as a link's
     /// latency and bandwidth are from the requests and bytes a run counted.
     /// Count mode runs it `n` times and reads no clock.
-    pub fn iter_plus(&mut self, mut routine: impl FnMut() -> std::time::Duration) {
-        self.runs();
-        match &mut self.run {
-            Run::Measure(group) => {
-                group.bench_function(self.name, |b| {
-                    b.iter_custom(|iterations| {
-                        let mut total = std::time::Duration::ZERO;
-                        for _ in 0..iterations {
-                            let started = std::time::Instant::now();
-                            let computed = black_box(routine());
-                            total += started.elapsed() + computed;
-                        }
-                        total
-                    });
-                });
-            }
-            Run::Count(iterations) => {
-                for _ in 0..*iterations {
+    pub fn iter_plus(&mut self, mut routine: impl FnMut() -> Duration + 'd) {
+        self.declare(Box::new(move |exec: Exec<'_, '_>| match exec {
+            Exec::Bench(b) => b.iter_custom(|iterations| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iterations {
+                    let started = Instant::now();
+                    let computed = black_box(routine());
+                    total += started.elapsed() + computed;
+                }
+                total
+            }),
+            Exec::Count(iterations) => {
+                for _ in 0..iterations {
                     black_box(routine());
                 }
             }
-        }
+        }));
     }
 
-    fn runs(&mut self) {
-        assert!(!self.ran, "{} declares a second routine", self.name);
-        self.ran = true;
+    /// `check`, run once the routine has run as often as it will: what its
+    /// last run wrote, read and held to what the operation should have done.
+    pub fn after(&mut self, check: impl FnOnce() + 'd) {
+        self.checks.push(Box::new(check));
+    }
+
+    /// The operation's one routine, declared.
+    fn declare(&mut self, routine: Routine<'d>) {
+        assert!(
+            self.routine.is_none(),
+            "{} declares a second routine",
+            self.id
+        );
+        self.routine = Some(routine);
     }
 }

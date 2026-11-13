@@ -72,18 +72,20 @@ fn deflate_fast(data: &[u8]) -> Vec<u8> {
 }
 
 fn encode(c: &mut Criterion) {
+    // A render's bitmap, which crosses a paired run as its pixels.
     let text = LazyCell::new(|| {
-        let text = at_150(inputs::dense(1, 0));
+        let text = inputs::store().bitmap("dense-1-at-150.pixels", || at_150(inputs::dense(1, 0)));
         png_round_trip(&text);
         text
     });
     let blank = LazyCell::new(|| {
-        let blank = at_150(inputs::near_blank());
+        let blank =
+            inputs::store().bitmap("near-blank-at-150.pixels", || at_150(inputs::near_blank()));
         png_round_trip(&blank);
         blank
     });
     let page_like = LazyCell::new(|| {
-        let page_like = inputs::page_like();
+        let page_like = inputs::store().bytes("page-like.rgb", inputs::page_like);
         assert_eq!(page_like.len(), inputs::PAGE_BYTES);
         let inked = page_like.chunks(3).filter(|pixel| pixel[0] < 128).count();
         assert!(
@@ -94,7 +96,7 @@ fn encode(c: &mut Criterion) {
         page_like
     });
     let photo_like = LazyCell::new(|| {
-        let photo_like = inputs::photo_like();
+        let photo_like = inputs::store().bytes("photo-like.rgb", inputs::photo_like);
         assert_eq!(photo_like.len(), inputs::PAGE_BYTES);
         deflate_round_trip(&photo_like, deflate_ratio);
         photo_like

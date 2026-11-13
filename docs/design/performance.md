@@ -631,26 +631,38 @@ samples an operation a round, the least it allows.
 A paired ratio compares two times of one input, and two engines generating
 "one" input write two. Every generator not pinned by formula writes through
 the tree's own builder, encoders and editor (MS-04, "The inputs"), and
-`scan()` through its renderer, so a head that changes any of them would be
-timed on other bytes than its base, and `61adcde` on other bytes again. So the
-run sets `TINKER_BENCH_FIXTURES` for
-every process, and with it set `support/inputs.rs` reads every input —
-generated, or committed and read by path — from that directory, writing it
-there first if it is absent. Round 1 runs the head first, so the first
-process to need an input is the head's: all three builds are timed on the
-head's bytes, and each generator runs once in the whole run rather than once
-a process. The calibration's input is the one left each build's own:
-`calibration.rs` is frozen, and `61adcde`'s figure for it measures the
-machine, which a later change to the head's builder must not move (H-77).
-An input a base or `61adcde` process cannot read leaves that operation's
-rounds missing on that side. MS-04 left this to MS-02 (its "Files" and
-"Risks"); it widens MS-04's directory from the CLI operations' files to
-every input, and MS-02.4b writes it.
+`scan()` and the encode group's bitmaps through its renderer, so a head that
+changes any of them would be timed on other bytes than its base, and
+`61adcde` on other bytes again; and a committed file is read from each
+build's own checkout, so `61adcde` would read its own tree's. So the run sets
+`TINKER_BENCH_FIXTURES` for every process, to a directory that starts empty,
+and every group file takes each input through `support/inputs.rs`' store:
+with the variable set, an input — generated, or committed and read by path —
+is read from the file of its name there, and written there first when the
+directory holds none. Round 1 runs the head first, so the first process to
+need an input is the head's: all three builds are timed on the head's bytes,
+and each generator runs once in the whole run rather than once a process. A
+render's bitmap crosses as its pixels, a set of files as one bundle of them
+by name, and a CLI operation's child reads the directory's file itself. A
+generator builds from other generators, never from the directory, so a
+process writes the inputs its operation reads and no other's. The
+calibration's input is the one left each build's own: `calibration.rs` is
+frozen and calls its generator itself, and `61adcde`'s figure for it measures
+the machine, which a later change to the head's builder must not move
+(H-77). An input a base or `61adcde` process cannot read fails that
+operation's process, and so leaves its rounds missing on that side.
 
-A process that times one operation must build nothing for the rest of its
-group, so an operation's input and any state it starts from are built the
-first time criterion calls its routine and kept for the rest of the process
-(MS-02.4b again).
+A process that times one operation builds nothing for the rest of its
+group: the harness defines an operation — builds what it reads and the
+state it starts from, checks them, declares its routine — the first time
+criterion calls the operation's routine, outside the time criterion takes,
+and keeps what it built for the rest of the process. An operation criterion
+leaves out is never defined, so `--bench --exact <id>` builds that
+operation's inputs alone and `--list` builds nothing; what the routine's
+last run wrote is checked after its runs. Criterion takes the figure it
+reports a rate in when an operation starts, before the definition, so the
+harness hands it the one the group's list commits (MS-04, "`baseline.json`'s
+lists").
 
 #### The verdict
 
@@ -776,9 +788,12 @@ places.
   fail it. Its `tpdf` builds in the same target directory under the same
   flags, so the engine compiles once for both. Under the `cfg` each bench
   file's operation bodies call `61adcde`'s facade; the generators need no
-  arm, calling only what that revision exposes (MS-04, "Files"). An
-  operation that revision lacks altogether is declared with
-  `Group::calibrated`, which the build leaves out.
+  arm, calling only what that revision exposes (MS-04, "Files"), and the
+  store's one, the bitmap it builds by hand from stored pixels, since that
+  revision's `Bitmap` carries no statistics. An operation that revision
+  lacks altogether is declared with `Group::calibrated`, which the build
+  leaves out. That build holds nothing an operation declares it processes
+  to the head's lists, since its own engine computes what it declares.
 - **The declaration.** The head declares the `cfg` to `check-cfg` in
   `crates/tinker-pdf/Cargo.toml`, or `unexpected_cfgs` fails its clippy
   under `-D warnings`: a `[lints.rust]` table, the one in the tree, standing
@@ -890,7 +905,7 @@ column, before MS-02.6 builds the run.
 | A floor of 1 fails about half the runs of a head that matches `61adcde` | The gates take the band and the sign test, H-78's to approve; until then the run prints both readings |
 | A head is slower than `61adcde` on the day the floors are set | A finding against that operation's row; the floor stays 1 unless H-78 grants less |
 | An operation the base or `61adcde` cannot express | One the base lacks is reported, not judged; one `61adcde` lacks runs the operation its Gate column pairs it with, or is calibrated (MS-02.4) |
-| `61adcde` cannot read an input the head writes | Its rounds of that operation are missing, and an operation whose gate names a baseline side it lacks is refused, so the run fails on MS-02.4's mapping rather than passing the operation unjudged |
+| `61adcde` cannot read an input the head writes | Its process of that operation fails, its rounds are missing, and an operation whose gate names a baseline side it lacks is refused, so the run fails on MS-02.4's mapping rather than passing the operation unjudged |
 | The calibration moves within a round | Each calibrated ratio is taken against the same round's calibration, and the band absorbs what moves between the two |
 | A lint a later stable adds fails the frozen baseline | Its build carries no `-D warnings` |
 | A round writes nothing and reads as a pass | A directory a round and never `--discard-baseline`; the guard counts every operation in all ten rounds of every build (MS-02.6) |
@@ -961,7 +976,9 @@ to it in the commit that adds the capability.
 crates/tinker-pdf/benches/
   support/mod.rs     the harness: each group's sampling, the iteration shapes,
                      what an operation declares, and count mode
-  support/inputs.rs  every generator, and the two level-6 byte counts
+  support/inputs.rs  every generator, the store every input is read
+                     through, and the two level-6 byte counts
+  support/list.rs    the reader of baseline.json's lists
   support/cli.rs     the one spawner: this revision's tpdf, as a child
   open.rs  text.rs  analysis.rs  render.rs  encode.rs  decode.rs  write.rs
   sign.rs  layout.rs  fonts.rs  threads.rs  scripts.rs  ocr.rs
@@ -974,14 +991,19 @@ One `[[bench]]` per group file, `harness = false`. `inputs.rs`
 holds no criterion type, no clock and no spawn, so a test reaches it by path
 alone — MS-05's probe, `tests/peak_memory.rs`, for its cases, and
 `tests/level_six_counts.rs` and P-04.4's `deflate_size.rs` for the level-6
-counts — without compiling the harness or the child. `cli.rs` is the only file here that calls `Command::new`, so it is the
+counts, and `tests/bench_inputs.rs` for the store — without compiling the
+harness or the child; `list.rs` holds none either, and that test reaches it
+the same way. `cli.rs` is the only file here that calls `Command::new`, so it is the
 one `SPAWNERS` row `cargo xtask oracles` needs (`xtask/src/main.rs:984-1048`,
 `:1076-1079`). Every input is generated in memory except what `data/` and
-the tree already hold, and a CLI operation's files are written once a process
-into `CARGO_TARGET_TMPDIR`'s `bench-fixtures/`, a directory cargo gives every
-bench target, or into the one `TINKER_BENCH_FIXTURES` names: that is how a
-paired run hands two builds the same bytes (MS-02, "The inputs both sides
-are timed on").
+the tree already hold, and each group file takes every input through the
+store: with `TINKER_BENCH_FIXTURES` naming a directory, each is read from
+the file of its name there and written there first when the directory holds
+none, which is how a paired run hands its three builds the same bytes
+(MS-02, "The inputs both sides are timed on"); without it, an input is
+generated in memory, and a file a CLI operation's child reads is written
+into `CARGO_TARGET_TMPDIR`'s `bench-fixtures/`, a directory cargo gives
+every bench target, each time the operation is defined.
 
 The generators call only what `61adcde` already exposes — the builder calls
 used below (`archival`, `tagged`, `output_intent`, `add_embedded_font`,
@@ -990,7 +1012,9 @@ used below (`archival`, `tagged`, `output_intent`, `add_embedded_font`,
 `jbig2_generic_encode`, `png_encode`, `deflate`, `zlib_compress`),
 `BilevelCodec::Jbig2Generic`, `add_annotation`, `annot::square`, `FromHtml`
 and `Document::open_markdown` are all public at that revision — so MS-02.4's
-mapping onto the planning baseline covers operation bodies only.
+mapping onto the planning baseline covers operation bodies only, and the one
+`Bitmap` the store builds by hand from a render's stored pixels, which at
+that revision carries no statistics.
 `PageBuilder::text_pieces` is not in `61adcde`, which is why producer-style
 lines are
 written through `raw`.
@@ -1046,9 +1070,15 @@ operation measures.
   mean over its `calls`, so each side of one keeps its own.
 - **A child.** A CLI operation runs `tpdf` once a call (below).
 
-Each input is built in a `LazyCell` the first time an operation reads it, and
-checked there, so criterion, which runs every operation, builds every input,
-and count mode builds only what its one operation reads.
+An operation is defined — what it reads built and checked, its unit and its
+routine declared — the first time criterion calls its routine, outside the
+time criterion takes, and what it built is kept for the rest of the process;
+an operation criterion leaves out is never defined, and what its routine's
+last run wrote is checked after its runs. An input several operations read
+is built in a `LazyCell` the first time a defined operation reads it, and
+checked there. So criterion, which runs every operation, builds every input;
+a process started for one, `--exact <id>`, builds that one's; `--list` builds
+nothing; and count mode builds only what its one operation reads.
 
 #### Count mode
 
@@ -1491,11 +1521,15 @@ them:
 
 `per_iteration` is an integer in the unit's base — pages, pixels, bytes,
 outlines — covering every call, so throughput is `per_iteration` over the
-mean and a call is the mean over `calls`; the bench file declares the same
-figure through criterion's `Throughput`, criterion records it in each
-operation's `benchmark.json`, and `bench-check` refuses a run whose recorded
-figure is not the committed one, so a generator and its list cannot drift
-apart unseen on any machine. An operation the owner names outside the
+mean and a call is the mean over `calls`. Criterion takes the figure it
+reports a rate in, and records in each operation's `benchmark.json`, when the
+operation starts, before the operation is defined, so the harness reads the
+group's list (`support/list.rs`) and hands criterion the committed figure;
+the bench file declares the same figure, and once the operation is defined
+the harness refuses one whose declaration is not its list's, so a generator
+and its list cannot drift apart unseen on any machine. The planning
+baseline's build holds nothing to the list, since its own engine computes
+what its operations declare and the list is the head's. An operation the owner names outside the
 window carries `"outside_window"`, its reason, which `bench-check --sizes`
 reports instead of failing; the set names none. A machine entry carries `"unmeasured"`, the ids it has no figure
 for, ahead of its `"operations"`, so a hole is named and never silent. The
@@ -1648,7 +1682,7 @@ to.
 | An input an engine encoder writes moves when the encoder changes (P-04.7's deflate, the JPEG encoder) | The row that changes the encoder names the operations it moved in its commit; the two inputs the level-6 counts describe are formulas pinned by length and digest, so they never move |
 | A run of the set takes too long to make as a change's proof | Every operation sized into 20–300 ms, so the set measures for about eleven and a half minutes before a build |
 | Tier P's figures are the planning machine's, so the budget and the window's list are predictions | The set is sized from the hosted runner's own figures, and MS-04.10's fifteen runs hold every operation inside on every run before any figure is committed |
-| A repetition count and its committed `per_iteration` drift apart | Criterion's recorded `Throughput` is checked against the list on every run |
+| A repetition count and its committed `per_iteration` drift apart | Criterion records the list's figure, and the harness holds each operation's own declaration to it whenever the operation is defined |
 | A CLI operation times a failed child, or a stale `tpdf` | The exit status is checked on every call and a failure panics the bench; `tpdf` is resolved beside the bench binary and built from the same checkout in the same run |
 | The committed codestreams grow the repository and come from a program this project does not own | Four files with their bytes, digests, coding and sources recorded; their decodes are checked first-party, the reversible one against the generator's input and the progressive one against the baseline decode |
 | A format's aggregate hides one container fixture's regression | Every fixture is opened and rendered in the operation and asserted in test mode; a figure for each fixture would take ninety operations, which a row that needs one adds |

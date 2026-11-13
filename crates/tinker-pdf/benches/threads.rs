@@ -21,7 +21,7 @@ use std::cell::LazyCell;
 use std::path::Path;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use support::cli::{self, Cli};
+use support::cli::Cli;
 use support::{inputs, Group, Op, Per};
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
 
@@ -30,7 +30,9 @@ const PAGES: u32 = 24;
 
 fn threads(c: &mut Criterion) {
     let pages = LazyCell::new(|| {
-        let bytes = inputs::dense_part(PAGES as usize, 0, 4);
+        let bytes = inputs::store().bytes(&format!("dense-quarter-{PAGES}.pdf"), || {
+            inputs::dense_part(PAGES as usize, 0, 4)
+        });
         let doc = Document::open(bytes.clone()).expect("the pages open");
         assert_eq!(doc.page_count(), PAGES, "the input's pages");
         let drawn = doc
@@ -48,7 +50,9 @@ fn threads(c: &mut Criterion) {
         );
         bytes
     });
-    let pdf = LazyCell::new(|| cli::fixture("dense-quarter-24.pdf", || pages.clone()));
+    let pdf = LazyCell::new(|| {
+        inputs::store().file(&format!("dense-quarter-{PAGES}.pdf"), || pages.clone())
+    });
     let size = LazyCell::new(|| {
         let bitmap = Document::open(pages.clone())
             .expect("the pages open")
@@ -83,21 +87,24 @@ fn threads(c: &mut Criterion) {
 /// `tpdf render` of every page of `pdf` at 150 dpi on `jobs` jobs, one
 /// child a call, its run kept under `slug`; then the PNGs the last call
 /// wrote, one a page, in order, each the page's `size`.
-fn render_on(op: &mut Op<'_, '_>, pdf: &Path, slug: &str, jobs: &str, size: (u32, u32)) {
+fn render_on<'d>(op: &mut Op<'d>, pdf: &'d Path, slug: &str, jobs: &'d str, size: (u32, u32)) {
     let cli = Cli::new(slug);
     let out = cli.out("png");
+    let (ran, written) = (cli.clone(), out.clone());
     op.per(Per::Pages(u64::from(PAGES)));
-    op.iter(|| {
+    op.iter(move || {
         cli.run(&[
             &"render", &pdf, &"--out", &out, &"--dpi", &"150", &"--jobs", &jobs,
         ])
     });
-    let pngs = cli.pngs(&out);
-    assert_eq!(pngs.len(), PAGES as usize, "a PNG a page on {jobs} jobs");
-    for (at, (name, width, height)) in pngs.iter().enumerate() {
-        assert_eq!(name, &format!("dense-quarter-24-{:04}.png", at + 1));
-        assert_eq!((*width, *height), size, "{name} is the page at 150 dpi");
-    }
+    op.after(move || {
+        let pngs = ran.pngs(&written);
+        assert_eq!(pngs.len(), PAGES as usize, "a PNG a page on {jobs} jobs");
+        for (at, (name, width, height)) in pngs.iter().enumerate() {
+            assert_eq!(name, &format!("dense-quarter-24-{:04}.png", at + 1));
+            assert_eq!((*width, *height), size, "{name} is the page at 150 dpi");
+        }
+    });
 }
 
 criterion_group! {

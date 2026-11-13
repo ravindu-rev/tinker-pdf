@@ -16,10 +16,11 @@ mod support;
 
 use std::cell::LazyCell;
 use std::hint::black_box;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use support::cli::{self, Cli};
+use support::cli::Cli;
 use support::{inputs, Group, Per};
 use tinker_pdf::{
     Bitmap, Document, Page, PixelRegion, RenderOptions, RenderWarning, SampleCodec, WriteMode,
@@ -35,14 +36,15 @@ fn renders(page: &Page, dpi: f64, times: u64) -> Per {
     }
 }
 
-/// The first page of a fixture under `fuzz/corpus/render_page/`.
+/// One of the fixtures committed under `fuzz/corpus/render_page/`, opened.
 fn fixture(name: &str) -> Document {
-    let path = format!(
-        "{}/../../fuzz/corpus/render_page/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("the fixture {path}: {error}"));
+    let bytes = inputs::store().bytes(name, || inputs::render_fixture(name));
     Document::open(bytes).expect("the fixture opens")
+}
+
+/// The input `name`, stored as `generate` writes it.
+fn stored(name: &str, generate: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
+    inputs::store().bytes(name, generate)
 }
 
 /// How many of a bitmap's pixels are not white paper.
@@ -143,19 +145,19 @@ fn every_page_on(doc: &Document, dpi: f64, jobs: usize) -> usize {
 
 fn render(c: &mut Criterion) {
     let page = LazyCell::new(|| {
-        Document::open(inputs::three_pages())
+        Document::open(stored("three-pages.pdf", inputs::three_pages))
             .expect("it opens")
             .page(0)
             .expect("a page")
     });
     let shaded_page = LazyCell::new(|| {
-        Document::open(inputs::axial())
+        Document::open(stored("axial.pdf", inputs::axial))
             .expect("it opens")
             .page(0)
             .expect("a page")
     });
     let shaded_half = LazyCell::new(|| {
-        Document::open(inputs::axial_part(2))
+        Document::open(stored("axial-half.pdf", || inputs::axial_part(2)))
             .expect("it opens")
             .page(0)
             .expect("a page")
@@ -164,7 +166,7 @@ fn render(c: &mut Criterion) {
     // The dense page embeds its face, so unlike the seven's text page every
     // glyph is an outline the rasteriser fills.
     let text_page = LazyCell::new(|| {
-        let text_page = Document::open(inputs::dense(1, 0))
+        let text_page = Document::open(stored("dense-1.pdf", || inputs::dense(1, 0)))
             .expect("the text page opens")
             .page(0)
             .expect("a page");
@@ -182,29 +184,41 @@ fn render(c: &mut Criterion) {
         text_page
     });
     let paths_page = |count: usize| {
-        Document::open(inputs::paths(count))
-            .expect("the paths open")
-            .page(0)
-            .expect("a page")
+        Document::open(stored(&format!("paths-{count}.pdf"), || {
+            inputs::paths(count)
+        }))
+        .expect("the paths open")
+        .page(0)
+        .expect("a page")
     };
     let mesh_page = LazyCell::new(|| fixture("mesh-shadings.pdf").page(0).expect("a page"));
     let eight = LazyCell::new(|| {
-        let eight = Document::open(inputs::dense_part(8, 0, 2)).expect("the dense pages open");
+        let eight = Document::open(stored("dense-half-8.pdf", || inputs::dense_part(8, 0, 2)))
+            .expect("the dense pages open");
         assert_eq!(every_page_on(&eight, 150.0, 4), 8, "every page draws");
         eight
     });
+    // Written from the dense page's own generator, not from the stored one,
+    // so a process timing one of its operations writes its own input alone.
     let annotated = LazyCell::new(|| {
-        Document::open(inputs::annotated(&inputs::dense(1, 0))).expect("the annotated page")
+        Document::open(stored("dense-1-annotated.pdf", || {
+            inputs::annotated(&inputs::dense(1, 0))
+        }))
+        .expect("the annotated page")
     });
-    let jpeg_quarter_bytes = LazyCell::new(|| inputs::jpeg_page_part(4));
+    let jpeg_quarter_bytes =
+        LazyCell::new(|| stored("jpeg-quarter.pdf", || inputs::jpeg_page_part(4)));
     let jpeg_quarter = LazyCell::new(|| image_page(jpeg_quarter_bytes.clone(), SampleCodec::Dct));
-    let half_text = LazyCell::new(|| inputs::dense_part(1, 0, 2));
-    let quarter_text = LazyCell::new(|| inputs::dense_part(1, 0, 4));
-    let quarter_eight = LazyCell::new(|| inputs::dense_part(8, 0, 4));
-    let half_pdf = LazyCell::new(|| cli::fixture("dense-half-1.pdf", || half_text.clone()));
+    let half_text = LazyCell::new(|| stored("dense-half-1.pdf", || inputs::dense_part(1, 0, 2)));
+    let quarter_text =
+        LazyCell::new(|| stored("dense-quarter-1.pdf", || inputs::dense_part(1, 0, 4)));
+    let quarter_eight =
+        LazyCell::new(|| stored("dense-quarter-8.pdf", || inputs::dense_part(8, 0, 4)));
+    let half_pdf = LazyCell::new(|| inputs::store().file("dense-half-1.pdf", || half_text.clone()));
     let quarter_pdf =
-        LazyCell::new(|| cli::fixture("dense-quarter-1.pdf", || quarter_text.clone()));
-    let eight_pdf = LazyCell::new(|| cli::fixture("dense-quarter-8.pdf", || quarter_eight.clone()));
+        LazyCell::new(|| inputs::store().file("dense-quarter-1.pdf", || quarter_text.clone()));
+    let eight_pdf =
+        LazyCell::new(|| inputs::store().file("dense-quarter-8.pdf", || quarter_eight.clone()));
 
     let mut group = Group::new(c, "render");
 
@@ -223,14 +237,14 @@ fn render(c: &mut Criterion) {
     });
 
     group.operation("fill 300 anti-aliased paths at 150 dpi", |op| {
-        let paths_page = Document::open(inputs::triangles())
+        let paths_page = Document::open(stored("triangles.pdf", inputs::triangles))
             .expect("it opens")
             .page(0)
             .expect("a page");
         op.per(support::pixels(
             &paths_page.render(&RenderOptions::at_dpi(150.0)),
         ));
-        op.iter(|| black_box(paths_page.render(&RenderOptions::at_dpi(150.0))));
+        op.iter(move || black_box(paths_page.render(&RenderOptions::at_dpi(150.0))));
     });
 
     // ---- the text page, its glyphs drawn ---------------------------------
@@ -269,21 +283,21 @@ fn render(c: &mut Criterion) {
     group.operation("250 paths at 150 dpi", |op| {
         let many_page = paths_page(250);
         op.per(renders(&many_page, 150.0, 1));
-        op.iter(|| black_box(many_page.render(&RenderOptions::at_dpi(150.0))));
+        op.iter(move || black_box(many_page.render(&RenderOptions::at_dpi(150.0))));
     });
     group.operation("100 paths at 300 dpi", |op| {
         let many_page = paths_page(100);
         op.per(renders(&many_page, 300.0, 1));
-        op.iter(|| black_box(many_page.render(&RenderOptions::at_dpi(300.0))));
+        op.iter(move || black_box(many_page.render(&RenderOptions::at_dpi(300.0))));
     });
     // The 250 paths' curves: two in five of them.
     group.operation("the 100 stroked curves alone at 150 dpi", |op| {
-        let curves_page = Document::open(inputs::curves(100))
+        let curves_page = Document::open(stored("curves-100.pdf", || inputs::curves(100)))
             .expect("the curves open")
             .page(0)
             .expect("a page");
         op.per(renders(&curves_page, 150.0, 1));
-        op.iter(|| black_box(curves_page.render(&RenderOptions::at_dpi(150.0))));
+        op.iter(move || black_box(curves_page.render(&RenderOptions::at_dpi(150.0))));
     });
 
     // ---- shadings, the committed fixtures and tiling ----------------------
@@ -313,7 +327,7 @@ fn render(c: &mut Criterion) {
     group.operation("the transparency fixture at 150 dpi", |op| {
         let glass_page = fixture("transparency.pdf").page(0).expect("a page");
         op.per(renders(&glass_page, 150.0, 9));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..9 {
                 black_box(glass_page.render(&RenderOptions::at_dpi(150.0)));
             }
@@ -323,28 +337,29 @@ fn render(c: &mut Criterion) {
     // The fifty strips cover exactly what the one rectangle covers, so the
     // two pages paint the same area through the same pattern.
     group.operation("a page tiled by one pattern fill at 150 dpi", |op| {
-        let once_page = Document::open(inputs::tiling(1))
+        let once_page = Document::open(stored("tiling-1.pdf", || inputs::tiling(1)))
             .expect("the tiled page opens")
             .page(0)
             .expect("a page");
         op.per(renders(&once_page, 150.0, 1));
-        op.iter(|| black_box(once_page.render(&RenderOptions::at_dpi(150.0))));
+        op.iter(move || black_box(once_page.render(&RenderOptions::at_dpi(150.0))));
     });
     group.operation("a page tiled by 50 pattern fills at 150 dpi", |op| {
-        let fifty_page = Document::open(inputs::tiling(50))
+        let fifty_page = Document::open(stored("tiling-50.pdf", || inputs::tiling(50)))
             .expect("the tiled page opens")
             .page(0)
             .expect("a page");
         op.per(renders(&fifty_page, 150.0, 1));
-        op.iter(|| black_box(fifty_page.render(&RenderOptions::at_dpi(150.0))));
+        op.iter(move || black_box(fifty_page.render(&RenderOptions::at_dpi(150.0))));
     });
 
     // ---- threads ----------------------------------------------------------
 
     // Ruling 5: the four bands, put back together, are the page.
     group.operation("the 300-dpi text page in 4 bands on 4 threads", |op| {
+        let text_page: &Page = &text_page;
         let whole = text_page.render(&RenderOptions::at_dpi(300.0));
-        let bands = in_bands(&text_page, 300.0, whole.width, whole.height);
+        let bands = in_bands(text_page, 300.0, whole.width, whole.height);
         let mut rows: Vec<u8> = Vec::with_capacity(whole.data.len());
         for band in &bands {
             assert_eq!(band.stride, whole.stride, "a band is the page's width");
@@ -354,8 +369,9 @@ fn render(c: &mut Criterion) {
             rows == whole.data,
             "the four bands reassemble to the whole page byte for byte"
         );
-        op.per(renders(&text_page, 300.0, 1));
-        op.iter(|| black_box(in_bands(&text_page, 300.0, whole.width, whole.height)));
+        op.per(renders(text_page, 300.0, 1));
+        let (width, height) = (whole.width, whole.height);
+        op.iter(move || black_box(in_bands(text_page, 300.0, width, height)));
     });
 
     group.operation("8 half-size text pages at 150 dpi on 1 thread", |op| {
@@ -421,10 +437,13 @@ fn render(c: &mut Criterion) {
     group.operation(
         "replay the half-size Flate RGB image page at 150 dpi",
         |op| {
-            let flate_half = image_page(inputs::flate_page(2), SampleCodec::Stream);
+            let flate_half = image_page(
+                stored("flate-half.pdf", || inputs::flate_page(2)),
+                SampleCodec::Stream,
+            );
             let replayed = flate_half.display_list();
             op.per(renders(&flate_half, 150.0, 1));
-            op.iter(|| black_box(replayed.render(&RenderOptions::at_dpi(150.0))));
+            op.iter(move || black_box(replayed.render(&RenderOptions::at_dpi(150.0))));
         },
     );
     // Drawn at the image's own resolution, so each sample is converted once:
@@ -432,16 +451,22 @@ fn render(c: &mut Criterion) {
     group.calibrated(
         "a quarter-size ICC-based CMYK image to sRGB at 300 dpi",
         |op| {
-            let cmyk_page = image_page(inputs::cmyk_page(4), SampleCodec::Stream);
+            let cmyk_page = image_page(
+                stored("cmyk-quarter.pdf", || inputs::cmyk_page(4)),
+                SampleCodec::Stream,
+            );
             let (width, height) = inputs::scan_part(4);
             op.per(Per::Pixels(u64::from(width) * u64::from(height)));
-            op.iter(|| black_box(cmyk_page.render(&RenderOptions::at_dpi(300.0))));
+            op.iter(move || black_box(cmyk_page.render(&RenderOptions::at_dpi(300.0))));
         },
     );
     group.operation("the half-size JPEG page at 72 dpi", |op| {
-        let jpeg_half = image_page(inputs::jpeg_page_part(2), SampleCodec::Dct);
+        let jpeg_half = image_page(
+            stored("jpeg-half.pdf", || inputs::jpeg_page_part(2)),
+            SampleCodec::Dct,
+        );
         op.per(renders(&jpeg_half, 72.0, 1));
-        op.iter(|| black_box(jpeg_half.render(&RenderOptions::at_dpi(72.0))));
+        op.iter(move || black_box(jpeg_half.render(&RenderOptions::at_dpi(72.0))));
     });
     group.operation("the quarter-size JPEG page at 300 dpi", |op| {
         op.per(renders(&jpeg_quarter, 300.0, 1));
@@ -468,69 +493,92 @@ fn render(c: &mut Criterion) {
         },
     );
     group.operation("the quarter-size JPEG 2000 page at 72 dpi", |op| {
-        let jpx_page = image_page(inputs::jpx_page_part(), SampleCodec::Jpx);
+        let jpx_page = image_page(
+            stored("jpx-quarter.pdf", inputs::jpx_page_part),
+            SampleCodec::Jpx,
+        );
         op.per(renders(&jpx_page, 72.0, 1));
-        op.iter(|| black_box(jpx_page.render(&RenderOptions::at_dpi(72.0))));
+        op.iter(move || black_box(jpx_page.render(&RenderOptions::at_dpi(72.0))));
     });
     group.operation("the half-size G4 scan page at 150 dpi", |op| {
-        let g4_page = image_page(inputs::g4_page(2), SampleCodec::CcittFax);
+        let g4_page = image_page(
+            stored("g4-half.pdf", || inputs::g4_page(2)),
+            SampleCodec::CcittFax,
+        );
         op.per(renders(&g4_page, 150.0, 1));
-        op.iter(|| black_box(g4_page.render(&RenderOptions::at_dpi(150.0))));
+        op.iter(move || black_box(g4_page.render(&RenderOptions::at_dpi(150.0))));
     });
     group.operation("the half-size JBIG2 scan page at 150 dpi", |op| {
-        let jbig2_page = image_page(inputs::jbig2_page(2), SampleCodec::Jbig2);
+        let jbig2_page = image_page(
+            stored("jbig2-half.pdf", || inputs::jbig2_page(2)),
+            SampleCodec::Jbig2,
+        );
         op.per(renders(&jbig2_page, 150.0, 1));
-        op.iter(|| black_box(jbig2_page.render(&RenderOptions::at_dpi(150.0))));
+        op.iter(move || black_box(jbig2_page.render(&RenderOptions::at_dpi(150.0))));
     });
     group.operation("the quarter-size Flate RGB image page at 72 dpi", |op| {
-        let flate_quarter = image_page(inputs::flate_page(4), SampleCodec::Stream);
+        let flate_quarter = image_page(
+            stored("flate-quarter.pdf", || inputs::flate_page(4)),
+            SampleCodec::Stream,
+        );
         op.per(renders(&flate_quarter, 72.0, 1));
-        op.iter(|| black_box(flate_quarter.render(&RenderOptions::at_dpi(72.0))));
+        op.iter(move || black_box(flate_quarter.render(&RenderOptions::at_dpi(72.0))));
     });
 
     // ---- through the CLI: the PNGs `tpdf render` writes ------------------
 
     group.operation("the half-size text page to PNG at 150 dpi, CLI", |op| {
+        let (width, height) = rendered_size(&half_text, 150.0);
+        let half_pdf: &Path = &half_pdf;
         let at_150 = Cli::new("render-text-150");
         let out_150 = at_150.out("png");
-        let (width, height) = rendered_size(&half_text, 150.0);
+        let (ran, written) = (at_150.clone(), out_150.clone());
         op.per(Per::Pixels(u64::from(width) * u64::from(height)));
-        op.iter(|| at_150.run(&[&"render", &*half_pdf, &"--out", &out_150, &"--dpi", &"150"]));
-        assert_eq!(
-            at_150.pngs(&out_150),
-            [("dense-half-1-0001.png".to_string(), width, height)],
-            "one PNG, the page at 150 dpi"
-        );
+        op.iter(move || at_150.run(&[&"render", &half_pdf, &"--out", &out_150, &"--dpi", &"150"]));
+        op.after(move || {
+            assert_eq!(
+                ran.pngs(&written),
+                [("dense-half-1-0001.png".to_string(), width, height)],
+                "one PNG, the page at 150 dpi"
+            );
+        });
     });
     group.operation("the quarter-size text page to PNG at 300 dpi, CLI", |op| {
+        let (width, height) = rendered_size(&quarter_text, 300.0);
+        let quarter_pdf: &Path = &quarter_pdf;
         let at_300 = Cli::new("render-text-300");
         let out_300 = at_300.out("png");
-        let (width, height) = rendered_size(&quarter_text, 300.0);
+        let (ran, written) = (at_300.clone(), out_300.clone());
         op.per(Per::Pixels(u64::from(width) * u64::from(height)));
-        op.iter(|| {
+        op.iter(move || {
             at_300.run(&[
                 &"render",
-                &*quarter_pdf,
+                &quarter_pdf,
                 &"--out",
                 &out_300,
                 &"--dpi",
                 &"300",
             ])
         });
-        assert_eq!(
-            at_300.pngs(&out_300),
-            [("dense-quarter-1-0001.png".to_string(), width, height)],
-            "one PNG, the page at 300 dpi"
-        );
+        op.after(move || {
+            assert_eq!(
+                ran.pngs(&written),
+                [("dense-quarter-1-0001.png".to_string(), width, height)],
+                "one PNG, the page at 300 dpi"
+            );
+        });
     });
     group.operation("8 quarter-size pages to PNG at 150 dpi, 1 job, CLI", |op| {
+        let quarter_eight: &[u8] = &quarter_eight;
+        let eight_pdf: &Path = &eight_pdf;
         let serial = Cli::new("render-8-jobs-1");
         let out_serial = serial.out("png");
+        let (ran, written) = (serial.clone(), out_serial.clone());
         op.per(Per::Pages(8));
-        op.iter(|| {
+        op.iter(move || {
             serial.run(&[
                 &"render",
-                &*eight_pdf,
+                &eight_pdf,
                 &"--out",
                 &out_serial,
                 &"--dpi",
@@ -539,18 +587,21 @@ fn render(c: &mut Criterion) {
                 &"1",
             ])
         });
-        assert_eight_pngs(&serial, &out_serial, &quarter_eight);
+        op.after(move || assert_eight_pngs(&ran, &written, quarter_eight));
     });
     group.operation(
         "8 quarter-size pages to PNG at 150 dpi, 4 jobs, CLI",
         |op| {
+            let quarter_eight: &[u8] = &quarter_eight;
+            let eight_pdf: &Path = &eight_pdf;
             let parallel = Cli::new("render-8-jobs-4");
             let out_parallel = parallel.out("png");
+            let (ran, written) = (parallel.clone(), out_parallel.clone());
             op.per(Per::Pages(8));
-            op.iter(|| {
+            op.iter(move || {
                 parallel.run(&[
                     &"render",
-                    &*eight_pdf,
+                    &eight_pdf,
                     &"--out",
                     &out_parallel,
                     &"--dpi",
@@ -559,7 +610,7 @@ fn render(c: &mut Criterion) {
                     &"4",
                 ])
             });
-            assert_eight_pngs(&parallel, &out_parallel, &quarter_eight);
+            op.after(move || assert_eight_pngs(&ran, &written, quarter_eight));
         },
     );
 

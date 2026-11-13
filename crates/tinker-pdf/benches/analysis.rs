@@ -33,13 +33,19 @@ fn text_of(doc: &Document) -> usize {
 
 fn analysis(c: &mut Criterion) {
     let report = LazyCell::new(|| {
-        let report = Document::open(inputs::report(PAGES)).expect("the report opens");
+        let report = Document::open(
+            inputs::store().bytes(&format!("report-{PAGES}.pdf"), || inputs::report(PAGES)),
+        )
+        .expect("the report opens");
         assert_eq!(report.page_count() as usize, PAGES);
         report
     });
     // Each validator reads the claim it is given, so each runs its rules.
     let claiming = LazyCell::new(|| {
-        let claiming = Document::open(inputs::claiming(PAGES)).expect("the claiming file opens");
+        let claiming = Document::open(
+            inputs::store().bytes(&format!("claiming-{PAGES}.pdf"), || inputs::claiming(PAGES)),
+        )
+        .expect("the claiming file opens");
         assert_eq!(claiming.page_count() as usize, PAGES);
         assert!(claiming.validate_pdfa().flavour.is_some(), "a PDF/A claim");
         assert!(claiming.validate_pdfua().part.is_some(), "a PDF/UA claim");
@@ -57,6 +63,7 @@ fn analysis(c: &mut Criterion) {
     // The rectangle over each page's running head, so every page has text
     // to cut; the editor is not saved, which is the write group's.
     group.operation("redact a rectangle on each of 5 pages", |op| {
+        let report: &Document = &report;
         let head = Redaction {
             area: Rect {
                 x0: 40.0,
@@ -81,7 +88,7 @@ fn analysis(c: &mut Criterion) {
             "the redaction removed the text under it: {cut}"
         );
         op.per(Per::Pages(14 * PAGES as u64));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..14 {
                 let mut editor = report.editor();
                 for page in 0..PAGES as u32 {
@@ -96,11 +103,12 @@ fn analysis(c: &mut Criterion) {
     });
 
     group.operation("reading order inferred over 5 pages", |op| {
+        let report: &Document = &report;
         let options = InferenceOptions::default();
         let pages = 0..PAGES as u32;
         assert_eq!(report.inferred_orders(pages.clone(), &options).len(), PAGES);
         op.per(Per::Pages(PAGES as u64));
-        op.iter(|| black_box(report.inferred_orders(pages.clone(), &options)));
+        op.iter(move || black_box(report.inferred_orders(pages.clone(), &options)));
     });
 
     group.operation("tables inferred over 5 pages", |op| {

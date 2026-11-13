@@ -940,11 +940,40 @@ between operations of one run. Their figures include the process, and
 `benches/support/cli.rs` runs this revision's binary from beside the bench
 binary's profile directory, one child per call, its output kept in the
 operation's own directory and its exit status checked every time, and the
-operation's assertions read what that child wrote. It is the one file under
-`benches/` that `cargo xtask oracles` lets start a program: the child is this
-repository's own, so it hosts and adjudicates nothing. A timed run needs the
-release `tpdf` built before it measures, and `cargo test --benches` needs a
-debug one built first.
+operation's assertions read what that child wrote, after its runs. It is the
+one file under `benches/` that `cargo xtask oracles` lets start a program:
+the child is this repository's own, so it hosts and adjudicates nothing. A
+timed run needs the release `tpdf` built before it measures, and
+`cargo test --benches` needs a debug one built first.
+
+**An operation is defined when criterion first runs it.** The harness runs an
+operation's definition — what it builds and checks, its routine — the first
+time criterion calls the routine, outside the time criterion takes, and keeps
+what it built; an operation criterion leaves out is never defined. So a
+binary started for one operation, `--exact <group>/<name>` as the paired run
+starts each, builds that operation's inputs and nothing for the rest of its
+group, and `--list` builds nothing. Criterion takes the figure it reports a
+rate in before the definition runs, so the harness hands it the one the
+group's list in `baseline.json` commits, and refuses an operation whose own
+declaration is not that figure, outside the planning baseline's build.
+
+**Every build of a pair is timed on the head's inputs.** Each group file
+takes every input through `benches/support/inputs.rs`' store. With
+`TINKER_BENCH_FIXTURES` naming a directory, an input, generated or committed,
+is read from the file of its name there, and written there first when the
+directory holds none, whole or not at all; a render's bitmap crosses as its
+pixels and a set of files as one bundle. A relative path is refused, since
+each checkout's processes would resolve it in their own directory. The run
+sets it, to a directory that starts empty, for every process of every build,
+and the head's process of each operation runs first, so the base and the
+planning baseline read the bytes the head wrote rather than writing their
+own, and a process writes the inputs its operation reads and no other's.
+The calibration operation's input stays each build's own, since its frozen
+file generates it itself. Without the variable an input is generated in
+memory, and a file a child reads is written into `bench-fixtures/` under the
+directory cargo gives the bench target. `tests/bench_inputs.rs` reaches the
+store by path and holds an input written into a directory once and read back
+by every later call.
 
 **A bench binary also counts.** Started with
 `TINKER_BENCH_COUNT=<group>/<name>` and `TINKER_BENCH_ITERATIONS=<n>`, it
@@ -1360,6 +1389,9 @@ operations. Nothing here is a spawner: the checkout and the builds are the
 local run's own commands.
 
 ```sh
+export TINKER_BENCH_FIXTURES="$(mktemp -d)"
+cargo build -p tpdf
+cargo test -p tinker-pdf --benches
 git worktree add --detach ../planning 61adcde
 rm -r ../planning/crates/tinker-pdf/benches
 cp -r crates/tinker-pdf/benches ../planning/crates/tinker-pdf/benches
@@ -1372,8 +1404,10 @@ cargo test -p tinker-pdf --benches
 ```
 
 The two `sed` lines rely on the `[[bench]]` entries being the last of each
-manifest. The last command runs every operation with a side on the planning
-baseline once, beside a debug `tpdf`; a timed run builds both with
+manifest. The head's `cargo test --benches` runs every operation once and
+writes every input into the directory; the planning baseline's then runs
+every operation with a side on it once, beside a debug `tpdf`, on those
+bytes, and writes none of its own. A timed run builds both with
 `--release`.
 
 **A pinned machine names its host.** An entry for one host held still

@@ -16,6 +16,7 @@
 
 mod support;
 
+use std::borrow::Borrow;
 use std::cell::LazyCell;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -39,7 +40,9 @@ struct Book {
 /// A committed book, by file name, asserted to paginate and to render every
 /// page.
 fn committed(name: &str) -> Book {
-    let bytes: Arc<[u8]> = inputs::committed_book(name).into();
+    let bytes: Arc<[u8]> = inputs::store()
+        .bytes(name, || inputs::committed_book(name))
+        .into();
     let doc = Document::open_with(Arc::clone(&bytes), &at_box()).expect("the book opens");
     let pages = doc.page_count();
     assert!(pages > 0, "{name} paginates");
@@ -66,9 +69,9 @@ fn render_every_page(doc: &Document) -> u32 {
 
 /// `calls` opens of `book` at [`at_box`], each paginating it: every page
 /// each call laid out.
-fn paginate(op: &mut Op<'_, '_>, book: &Book, calls: u64) {
+fn paginate<'d>(op: &mut Op<'d>, book: &'d Book, calls: u64) {
     op.per(Per::Pages(calls * book.pages));
-    op.iter(|| {
+    op.iter(move || {
         for _ in 0..calls {
             black_box(
                 Document::open_with(Arc::clone(&book.bytes), &at_box())
@@ -81,39 +84,45 @@ fn paginate(op: &mut Op<'_, '_>, book: &Book, calls: u64) {
 
 /// Every one of the `pages` of `doc`, opened once untimed, rendered at
 /// 72 dpi, `calls` times.
-fn render(op: &mut Op<'_, '_>, doc: &Document, pages: u64, calls: u64) {
+fn render<'d>(op: &mut Op<'d>, doc: impl Borrow<Document> + 'd, pages: u64, calls: u64) {
     op.per(Per::Pages(calls * pages));
-    op.iter(|| {
+    op.iter(move || {
         for _ in 0..calls {
-            black_box(render_every_page(doc));
+            black_box(render_every_page(doc.borrow()));
         }
     });
 }
 
 /// `tpdf render` over the committed book `name` at 72 dpi, `calls` times,
-/// then what it wrote held to the book's pages: a PNG a page, in order.
-fn render_book_cli(op: &mut Op<'_, '_>, name: &str, book: &Book, calls: u64) {
+/// then what it wrote held to the book's pages: a PNG a page, in order. The
+/// child reads the book from the store, as `book`'s bytes were read.
+fn render_book_cli<'d>(op: &mut Op<'d>, name: &str, book: &'d Book, calls: u64) {
     let cli = Cli::new(&format!("layout-render-{name}"));
     let out = cli.out("png");
-    let path = inputs::committed_book_path(&format!("{name}.epub"));
+    let path = inputs::store().file(&format!("{name}.epub"), || book.bytes.to_vec());
+    let (ran, written, name) = (cli.clone(), out.clone(), name.to_string());
     op.per(Per::Pages(calls * book.pages));
-    op.iter(|| {
+    op.iter(move || {
         for _ in 0..calls {
             cli.run(&[&"render", &path, &"--out", &out, &"--dpi", &"72"]);
         }
     });
-    let pngs = cli.pngs(&out);
-    assert_eq!(pngs.len() as u64, book.pages, "{name}: a PNG a page");
-    for (at, (png, width, height)) in pngs.iter().enumerate() {
-        assert_eq!(png, &format!("{name}-{:04}.png", at + 1));
-        assert!(*width > 0 && *height > 0, "{png} has pixels");
-    }
+    op.after(move || {
+        let pngs = ran.pngs(&written);
+        assert_eq!(pngs.len() as u64, book.pages, "{name}: a PNG a page");
+        for (at, (png, width, height)) in pngs.iter().enumerate() {
+            assert_eq!(png, &format!("{name}-{:04}.png", at + 1));
+            assert!(*width > 0 && *height > 0, "{png} has pixels");
+        }
+    });
 }
 
 /// A generated book of `chapters` chapters, asserted to have a page a
 /// chapter, and the document it opens to.
 fn generated(chapters: usize) -> (Arc<[u8]>, Document) {
-    let bytes: Arc<[u8]> = inputs::book(chapters).into();
+    let bytes: Arc<[u8]> = inputs::store()
+        .bytes(&format!("book-{chapters}.epub"), || inputs::book(chapters))
+        .into();
     let doc = Document::open_with(Arc::clone(&bytes), &at_box()).expect("the book opens");
     assert_eq!(
         doc.page_count() as usize,
@@ -124,9 +133,9 @@ fn generated(chapters: usize) -> (Arc<[u8]>, Document) {
 }
 
 /// [`open_and_render`] `calls` times an iteration, a page a fixture a call.
-fn containers_rendered(op: &mut Op<'_, '_>, fixtures: &[inputs::Fixture], calls: u64) {
+fn containers_rendered<'d>(op: &mut Op<'d>, fixtures: &'d [inputs::Fixture], calls: u64) {
     op.per(Per::Pages(calls * fixtures.len() as u64));
-    op.iter(|| {
+    op.iter(move || {
         for _ in 0..calls {
             black_box(open_and_render(fixtures));
         }
@@ -162,22 +171,27 @@ fn synthesised(fixtures: &[inputs::Fixture]) -> Vec<inputs::Fixture> {
         .collect()
 }
 
-/// A format's fixtures and their synthesised PDFs, each asserted to render
-/// its first page.
-fn containers(fixtures: Vec<inputs::Fixture>, count: usize) -> [Vec<inputs::Fixture>; 2] {
+/// A format's `count` fixtures, each asserted to render its first page.
+fn containers(fixtures: Vec<inputs::Fixture>, count: usize) -> Vec<inputs::Fixture> {
     assert_eq!(fixtures.len(), count, "the committed fixtures");
-    let pdfs = synthesised(&fixtures);
     assert_eq!(
         open_and_render(&fixtures),
         count,
         "each renders its first page"
     );
+    fixtures
+}
+
+/// The PDFs the facade synthesised for a format's `count` fixtures, each
+/// asserted to render its first page.
+fn synthesised_pdfs(pdfs: Vec<inputs::Fixture>, count: usize) -> Vec<inputs::Fixture> {
+    assert_eq!(pdfs.len(), count, "the synthesised PDFs");
     assert_eq!(
         open_and_render(&pdfs),
         count,
         "and from its synthesised PDF"
     );
-    [fixtures, pdfs]
+    pdfs
 }
 
 fn layout(c: &mut Criterion) {
@@ -197,9 +211,37 @@ fn layout(c: &mut Criterion) {
     let thirty = LazyCell::new(|| generated(30));
     let ten = LazyCell::new(|| generated(10));
 
-    let svg = LazyCell::new(|| containers(inputs::svg_fixtures(), 17));
-    let xps = LazyCell::new(|| containers(inputs::xps_fixtures(), 19));
-    let cbz = LazyCell::new(|| containers(inputs::cbz_fixtures(), 9));
+    // Each set of fixtures, and the PDFs the facade synthesised for it, which
+    // are written from the committed fixtures themselves, so a process timing
+    // the synthesised set writes that set alone.
+    let store = inputs::store();
+    let svg = LazyCell::new(|| containers(store.set("svg.bundle", inputs::svg_fixtures), 17));
+    let svg_pdfs = LazyCell::new(|| {
+        synthesised_pdfs(
+            store.set("svg-synthesised.bundle", || {
+                synthesised(&inputs::svg_fixtures())
+            }),
+            17,
+        )
+    });
+    let xps = LazyCell::new(|| containers(store.set("xps.bundle", inputs::xps_fixtures), 19));
+    let xps_pdfs = LazyCell::new(|| {
+        synthesised_pdfs(
+            store.set("xps-synthesised.bundle", || {
+                synthesised(&inputs::xps_fixtures())
+            }),
+            19,
+        )
+    });
+    let cbz = LazyCell::new(|| containers(store.set("cbz.bundle", inputs::cbz_fixtures), 9));
+    let cbz_pdfs = LazyCell::new(|| {
+        synthesised_pdfs(
+            store.set("cbz-synthesised.bundle", || {
+                synthesised(&inputs::cbz_fixtures())
+            }),
+            9,
+        )
+    });
 
     let mut group = Group::new(c, "layout");
 
@@ -207,12 +249,13 @@ fn layout(c: &mut Criterion) {
     // is a function of the box it is asked for (ruling 4's second half), so
     // this measures pagination rather than parsing.
     group.operation("paginate a book at 432x648 pt", |op| {
-        let epub = inputs::committed_book("pandoc-book-cover.epub");
+        let name = "pandoc-book-cover.epub";
+        let epub = store.bytes(name, || inputs::committed_book(name));
         let pages = Document::open_with(epub.clone(), &OpenOptions::at_page(432.0, 648.0))
             .expect("it opens")
             .page_count();
         op.per(Per::Pages(u64::from(pages)));
-        op.iter(|| {
+        op.iter(move || {
             black_box(
                 Document::open_with(epub.clone(), &OpenOptions::at_page(432.0, 648.0))
                     .expect("it opens")
@@ -267,7 +310,7 @@ fn layout(c: &mut Criterion) {
         |op| {
             render(
                 op,
-                &opened(&calibre_book_cover),
+                opened(&calibre_book_cover),
                 calibre_book_cover.pages,
                 12,
             )
@@ -278,7 +321,7 @@ fn layout(c: &mut Criterion) {
         |op| {
             render(
                 op,
-                &opened(&calibre_book_nocover),
+                opened(&calibre_book_nocover),
                 calibre_book_nocover.pages,
                 15,
             )
@@ -289,7 +332,7 @@ fn layout(c: &mut Criterion) {
         |op| {
             render(
                 op,
-                &opened(&calibre_embedded_font),
+                opened(&calibre_embedded_font),
                 calibre_embedded_font.pages,
                 7,
             )
@@ -297,22 +340,22 @@ fn layout(c: &mut Criterion) {
     );
     group.operation(
         "render every page of kcc-fixed-layout.epub at 72 dpi",
-        |op| render(op, &opened(&kcc_fixed_layout), kcc_fixed_layout.pages, 32),
+        |op| render(op, opened(&kcc_fixed_layout), kcc_fixed_layout.pages, 32),
     );
     group.operation(
         "render every page of pandoc-book-cover.epub at 72 dpi",
-        |op| render(op, &opened(&pandoc_book_cover), pandoc_book_cover.pages, 9),
+        |op| render(op, opened(&pandoc_book_cover), pandoc_book_cover.pages, 9),
     );
     group.operation(
         "render every page of pandoc-book-epub2.epub at 72 dpi",
-        |op| render(op, &opened(&pandoc_book_epub2), pandoc_book_epub2.pages, 9),
+        |op| render(op, opened(&pandoc_book_epub2), pandoc_book_epub2.pages, 9),
     );
     group.operation(
         "render every page of pandoc-book-nocover.epub at 72 dpi",
         |op| {
             render(
                 op,
-                &opened(&pandoc_book_nocover),
+                opened(&pandoc_book_nocover),
                 pandoc_book_nocover.pages,
                 11,
             )
@@ -323,14 +366,14 @@ fn layout(c: &mut Criterion) {
         |op| {
             render(
                 op,
-                &opened(&pandoc_embedded_font),
+                opened(&pandoc_embedded_font),
                 pandoc_embedded_font.pages,
                 5,
             )
         },
     );
     group.operation("render every page of pandoc-plates.epub at 72 dpi", |op| {
-        render(op, &opened(&pandoc_plates), pandoc_plates.pages, 13)
+        render(op, opened(&pandoc_plates), pandoc_plates.pages, 13)
     });
 
     // The generated books: a page a chapter, so thirty chapters against ten
@@ -338,7 +381,7 @@ fn layout(c: &mut Criterion) {
     group.calibrated("open and paginate the 30-chapter book", |op| {
         let (bytes, _) = &*thirty;
         op.per(Per::Pages(30));
-        op.iter(|| {
+        op.iter(move || {
             black_box(
                 Document::open_with(Arc::clone(bytes), &at_box())
                     .expect("it opens")
@@ -352,7 +395,7 @@ fn layout(c: &mut Criterion) {
     group.operation("open and paginate the 10-chapter book", |op| {
         let (bytes, _) = &*ten;
         op.per(Per::Pages(2 * 10));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..2 {
                 black_box(
                     Document::open_with(Arc::clone(bytes), &at_box())
@@ -368,13 +411,13 @@ fn layout(c: &mut Criterion) {
 
     // Markup laid out and written as a PDF.
     group.calibrated("the 20-page HTML report to PDF", |op| {
-        let report = inputs::html_report();
+        let report = store.text("report.html", inputs::html_report);
         let page_box = inputs::default_box();
         let (_, laid) =
             DocumentBuilder::from_html(&report, "", page_box).expect("the report lays out");
         assert_eq!(laid.pages(), 20, "the HTML report's pages");
         op.per(Per::Pages(3 * 20));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..3 {
                 let (builder, _) =
                     DocumentBuilder::from_html(&report, "", page_box).expect("it lays out");
@@ -383,7 +426,7 @@ fn layout(c: &mut Criterion) {
         });
     });
     group.calibrated("the 20-page Markdown document to PDF", |op| {
-        let markdown = inputs::markdown();
+        let markdown = store.text("report.md", inputs::markdown);
         let markdown_doc =
             Document::open_markdown(markdown.as_bytes().to_vec(), &OpenOptions::default())
                 .expect("the Markdown document lays out");
@@ -393,7 +436,7 @@ fn layout(c: &mut Criterion) {
             "the Markdown document's pages"
         );
         op.per(Per::Pages(3 * 20));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..3 {
                 black_box(
                     Document::open_markdown(markdown.as_bytes().to_vec(), &OpenOptions::default())
@@ -406,26 +449,26 @@ fn layout(c: &mut Criterion) {
     // Each format a set at a time, every fixture of it in one iteration,
     // beside the same pages from the PDF the facade synthesised for each.
     group.operation("open each SVG fixture, render page 1", |op| {
-        containers_rendered(op, &svg[0], 4)
+        containers_rendered(op, &svg, 4)
     });
     group.operation("render each SVG fixture's synthesised PDF", |op| {
-        containers_rendered(op, &svg[1], 5)
+        containers_rendered(op, &svg_pdfs, 5)
     });
     group.operation("open each XPS fixture, render page 1", |op| {
-        containers_rendered(op, &xps[0], 1)
+        containers_rendered(op, &xps, 1)
     });
     group.operation("render each XPS fixture's synthesised PDF", |op| {
-        containers_rendered(op, &xps[1], 1)
+        containers_rendered(op, &xps_pdfs, 1)
     });
     group.operation("open each CBZ fixture, render page 1", |op| {
-        containers_rendered(op, &cbz[0], 8)
+        containers_rendered(op, &cbz, 8)
     });
     group.operation("render each CBZ fixture's synthesised PDF", |op| {
-        containers_rendered(op, &cbz[1], 14)
+        containers_rendered(op, &cbz_pdfs, 14)
     });
 
-    // Each committed book's every page through the CLI, read from where it
-    // is committed: a PNG a page, as `tpdf render` writes them.
+    // Each committed book's every page through the CLI, read from the
+    // store: a PNG a page, as `tpdf render` writes them.
     group.operation(
         "render every page of calibre-book-cover.epub at 72 dpi, CLI",
         |op| render_book_cli(op, "calibre-book-cover", &calibre_book_cover, 1),

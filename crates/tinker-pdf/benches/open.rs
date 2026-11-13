@@ -18,19 +18,32 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use support::cli::{self, Cli};
+use support::cli::Cli;
 use support::{inputs, Group, Per};
 use tinker_pdf::{CountingSource, Document, RenderOptions, SliceSource};
 
 fn open(c: &mut Criterion) {
+    let image: LazyCell<Arc<[u8]>> = LazyCell::new(|| {
+        inputs::store()
+            .bytes("image.pdf", || inputs::image_file().to_vec())
+            .into()
+    });
     let small_3000 = LazyCell::new(|| small(3000));
     let small_10000 = LazyCell::new(|| small(10000));
 
     let mut group = Group::new(c, "open");
 
+    // Written from the image file's own generator, not from the stored one,
+    // so this operation's process writes its own input alone.
     group.operation("open the AES-256 file", |op| {
-        let aes = inputs::aes_file();
-        op.iter(|| {
+        let aes: Arc<[u8]> = inputs::store()
+            .bytes("aes.pdf", || inputs::aes_file().to_vec())
+            .into();
+        Document::open(Arc::clone(&aes))
+            .expect("the AES-256 file opens")
+            .authenticate("")
+            .expect("the AES-256 file authenticates with the empty password");
+        op.iter(move || {
             for _ in 0..6 {
                 let doc = Document::open(Arc::clone(&aes)).expect("it opens");
                 doc.authenticate("").expect("the empty password opens it");
@@ -40,13 +53,12 @@ fn open(c: &mut Criterion) {
     });
 
     group.operation("open a 3-page document", |op| {
-        let text = inputs::three_pages();
+        let text = inputs::store().bytes("three-pages.pdf", inputs::three_pages);
         op.per(Per::Bytes(text.len() as u64));
-        op.iter(|| black_box(Document::open(text.clone()).expect("it opens")));
+        op.iter(move || black_box(Document::open(text.clone()).expect("it opens")));
     });
 
     group.operation("open and count the 23 MB image file", |op| {
-        let image = inputs::image_file();
         op.per(Per::Bytes(100 * image.len() as u64));
         op.iter(|| {
             for _ in 0..100 {
@@ -80,22 +92,25 @@ fn open(c: &mut Criterion) {
     // The image file through the CLI, twenty-four children an iteration:
     // tier P's figure includes the process.
     group.operation("open and count the 23 MB image file, CLI", |op| {
-        let image = inputs::image_file();
-        let image_pdf = cli::fixture("image.pdf", || image.to_vec());
+        let image: &Arc<[u8]> = &image;
+        let image_pdf = inputs::store().file("image.pdf", || image.to_vec());
         let info = Cli::new("open-image-info");
+        let ran = info.clone();
         op.per(Per::Bytes(24 * image.len() as u64));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..24 {
                 info.run(&[&"info", &image_pdf]);
             }
         });
-        let pages = Document::open(Arc::clone(&image))
-            .expect("it opens")
-            .page_count();
-        assert!(
-            info.stdout().contains(&format!("  pages       {pages}\n")),
-            "tpdf info counts the image file's {pages} pages"
-        );
+        op.after(move || {
+            let pages = Document::open(Arc::clone(image))
+                .expect("it opens")
+                .page_count();
+            assert!(
+                ran.stdout().contains(&format!("  pages       {pages}\n")),
+                "tpdf info counts the image file's {pages} pages"
+            );
+        });
     });
 
     // Tier P's time to first page over a slow link (MS-08): each iteration
@@ -106,9 +121,11 @@ fn open(c: &mut Criterion) {
     group.operation(
         "first page of the 60-page linearized fixture over a slow link",
         |op| {
-            let fixture: Arc<[u8]> = inputs::linearized(60).into();
+            let fixture: Arc<[u8]> = inputs::store()
+                .bytes("linearized-60.pdf", || inputs::linearized(60))
+                .into();
             op.per(Per::Pages(1));
-            op.iter_plus(|| {
+            op.iter_plus(move || {
                 let source = Arc::new(CountingSource::new(SliceSource::new(fixture.to_vec())));
                 let doc = Document::open_streaming(source.clone()).expect("it opens");
                 black_box(
@@ -146,7 +163,11 @@ fn link_time(source: &CountingSource<SliceSource>) -> Duration {
 
 /// `small(pages)`, its page count asserted.
 fn small(pages: u32) -> Arc<[u8]> {
-    let bytes: Arc<[u8]> = inputs::small(pages as usize).into();
+    let bytes: Arc<[u8]> = inputs::store()
+        .bytes(&format!("small-{pages}.pdf"), || {
+            inputs::small(pages as usize)
+        })
+        .into();
     let doc = Document::open(Arc::clone(&bytes)).expect("the small pages open");
     assert_eq!(doc.page_count(), pages, "the small document's pages");
     bytes

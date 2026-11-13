@@ -15,15 +15,39 @@
 //! Beside the encode group's two deflate inputs sit the level-6 byte counts
 //! tier P holds their deflate to ([`LevelSix`]), which a test reads by the
 //! same path.
+//!
+//! # The inputs a paired run hands every build
+//!
+//! A generator not pinned by formula writes through the engine's own
+//! builder, encoders, editor or renderer, so two builds that each generate
+//! "one" input time two; and a committed file is read from each build's own
+//! checkout. So every group file takes each input through a [`Store`]
+//! (`docs/design/performance.md`, MS-02, "The inputs both sides are timed
+//! on"): with [`SHARED`] naming a directory, an input is read from the file
+//! there of its name, and generated — or read from where the tree commits it
+//! — and written there first when the directory holds none, so the first
+//! process of a run to need an input writes it for every build the run times.
+//! Without it, an input is generated in memory, and a file a child reads is
+//! this process's own. A name says which generator wrote the input and with
+//! what: `dense-5.pdf` is [`dense`]'s five pages at seed 0, `dense-50-3.pdf`
+//! its fifty at seed 3, `dense-quarter-8.pdf` [`dense_part`]'s eight
+//! quarter-size pages.
+//!
+//! The generators themselves never read the directory: an input built from
+//! another is built from the other's generator, so a process writes the
+//! inputs its operation reads and no other's, and the calibration operation,
+//! which calls [`dense`] itself, keeps its own build's bytes.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use tinker_pdf::write::{self, SaveOptions};
 use tinker_pdf::{
-    ArchivalLevel, ArchivalPart, ArchivalProfile, BilevelCodec, CcittParams, CompressedImage,
-    ContinuousCodec, DeviceSpace, Document, DocumentBuilder, Encryption, Function, ImageColorSpace,
-    ImageData, ImageFilter, ImagePolicy, ImageRecoding, OpenOptions, PageBox, PageBuilder,
-    RenderOptions, Shading, TilingPattern, TilingType, WriteMode, WriteOptions,
+    ArchivalLevel, ArchivalPart, ArchivalProfile, BilevelCodec, Bitmap, CcittParams,
+    CompressedImage, ContinuousCodec, DeviceSpace, Document, DocumentBuilder, Encryption, Function,
+    ImageColorSpace, ImageData, ImageFilter, ImagePolicy, ImageRecoding, OpenOptions, PageBox,
+    PageBuilder, PixelFormat, RenderOptions, Shading, TilingPattern, TilingType, WriteMode,
+    WriteOptions,
 };
 use tinker_pdf_cos::edit::annot::{self, Color};
 use tinker_pdf_cos::pages::Rect;
@@ -40,6 +64,329 @@ use tinker_pdf_font::Sfnt;
 mod epub_support;
 
 use epub_support::{ocf_zip, OcfEntry, OCF_MEDIA_TYPE};
+
+/// The variable naming the directory every process of a paired run reads
+/// its inputs from. The run sets it, to a directory that starts empty, for
+/// every process of all three builds.
+pub const SHARED: &str = "TINKER_BENCH_FIXTURES";
+
+/// Where a group file's inputs come from: the directory [`SHARED`] names,
+/// or none.
+pub struct Store {
+    dir: Option<PathBuf>,
+}
+
+/// The store this process's environment names: the directory [`SHARED`]
+/// names, or none when it is unset. Set to nothing, or to a path relative to
+/// the directory a process runs in, which differs from one checkout to the
+/// next, it is refused, since a run that meant to share and did not would
+/// time two inputs in silence.
+pub fn store() -> Store {
+    let Some(dir) = std::env::var_os(SHARED) else {
+        return Store { dir: None };
+    };
+    let dir = PathBuf::from(dir);
+    assert!(
+        dir.is_absolute(),
+        "{SHARED} is {:?}, and names no directory every build's processes share: \
+         set it to an absolute path",
+        dir
+    );
+    Store { dir: Some(dir) }
+}
+
+impl Store {
+    /// The store over `dir`, as a run that sets [`SHARED`] to it has.
+    pub fn shared(dir: impl Into<PathBuf>) -> Store {
+        Store {
+            dir: Some(dir.into()),
+        }
+    }
+
+    /// The input `name`: the file of that name in the shared directory, or,
+    /// when the directory holds none, `generate`d and written there first,
+    /// so every later call, in this process or another, reads it back.
+    /// Without a shared directory, `generate`d.
+    pub fn bytes(&self, name: &str, generate: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
+        let Some(dir) = &self.dir else {
+            return generate();
+        };
+        let path = dir.join(name);
+        match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let bytes = generate();
+                write_whole(&path, &bytes);
+                bytes
+            }
+            Err(error) => panic!("the input {}: {error}", path.display()),
+        }
+    }
+
+    /// The input `name` as a file a child reads, and its path: the shared
+    /// directory's, `generate`d and written there first when it holds none;
+    /// without one, this process's own, written into `bench-fixtures/` under
+    /// the directory cargo gives every bench target each time it is asked
+    /// for, so no earlier build's bytes are read in its place.
+    pub fn file(&self, name: &str, generate: impl FnOnce() -> Vec<u8>) -> PathBuf {
+        match &self.dir {
+            Some(dir) => {
+                let path = dir.join(name);
+                if !path.is_file() {
+                    write_whole(&path, &generate());
+                }
+                path
+            }
+            None => {
+                let path = Path::new(env!("CARGO_TARGET_TMPDIR"))
+                    .join("bench-fixtures")
+                    .join(name);
+                write_whole(&path, &generate());
+                path
+            }
+        }
+    }
+
+    /// [`Store::bytes`] for text: the input `name` as UTF-8.
+    pub fn text(&self, name: &str, generate: impl FnOnce() -> String) -> String {
+        String::from_utf8(self.bytes(name, || generate().into_bytes()))
+            .unwrap_or_else(|_| panic!("the input {name} is not UTF-8"))
+    }
+
+    /// [`Store::bytes`] for a set of files: the input `name` holds every
+    /// file of the set, by name and in order, as one [`bundle`].
+    pub fn set(&self, name: &str, generate: impl FnOnce() -> Vec<Fixture>) -> Vec<Fixture> {
+        let bytes = self.bytes(name, || {
+            let set = generate();
+            let parts: Vec<(&str, &[u8])> = set
+                .iter()
+                .map(|fixture| (fixture.name.as_str(), &fixture.bytes[..]))
+                .collect();
+            bundle(&parts)
+        });
+        unbundle(&bytes, name)
+            .into_iter()
+            .map(|(name, bytes)| Fixture {
+                name,
+                bytes: bytes.into(),
+            })
+            .collect()
+    }
+
+    /// [`Store::bytes`] for a [`scan`]: its width, its height and its bits,
+    /// as one [`bundle`].
+    pub fn scan(
+        &self,
+        name: &str,
+        generate: impl FnOnce() -> (u32, u32, Arc<[u8]>),
+    ) -> (u32, u32, Arc<[u8]>) {
+        let bytes = self.bytes(name, || {
+            let (width, height, bits) = generate();
+            bundle(&[
+                ("width", &width.to_le_bytes()),
+                ("height", &height.to_le_bytes()),
+                ("bits", &bits),
+            ])
+        });
+        let [width, height, bits] = parts(&bytes, name, ["width", "height", "bits"]);
+        let (width, height) = (
+            u32::from_le_bytes(fixed(&width, name)),
+            u32::from_le_bytes(fixed(&height, name)),
+        );
+        assert_eq!(
+            bits.len(),
+            width.div_ceil(8) as usize * height as usize,
+            "the scan {name} holds every row of its bits"
+        );
+        (width, height, bits.into())
+    }
+
+    /// [`Store::bytes`] for a bitmap a render draws, which crosses as its
+    /// pixels: its size, format, stride and alpha, and its rows, as one
+    /// [`bundle`]. What comes back is a bitmap of those pixels with no
+    /// warnings, whether this process rendered it or read it.
+    pub fn bitmap(&self, name: &str, render: impl FnOnce() -> Bitmap) -> Bitmap {
+        let bytes = self.bytes(name, || {
+            let drawn = render();
+            let format = format!("{:?}", drawn.format);
+            bundle(&[
+                ("width", &drawn.width.to_le_bytes()),
+                ("height", &drawn.height.to_le_bytes()),
+                ("format", format.as_bytes()),
+                ("stride", &(drawn.stride as u64).to_le_bytes()),
+                ("premultiplied", &[u8::from(drawn.premultiplied)]),
+                ("pixels", &drawn.data),
+            ])
+        });
+        let [width, height, format, stride, premultiplied, pixels] = parts(
+            &bytes,
+            name,
+            [
+                "width",
+                "height",
+                "format",
+                "stride",
+                "premultiplied",
+                "pixels",
+            ],
+        );
+        let format = FORMATS
+            .into_iter()
+            .find(|known| format!("{known:?}").as_bytes() == format.as_slice())
+            .unwrap_or_else(|| panic!("the bitmap {name} names no pixel format the facade has"));
+        let [premultiplied] = fixed(&premultiplied, name);
+        bitmap(
+            u32::from_le_bytes(fixed(&width, name)),
+            u32::from_le_bytes(fixed(&height, name)),
+            format,
+            usize::try_from(u64::from_le_bytes(fixed(&stride, name)))
+                .unwrap_or_else(|_| panic!("the bitmap {name}'s stride fits no address")),
+            premultiplied != 0,
+            pixels,
+        )
+    }
+}
+
+/// `bytes` written as the file `path`, whole or not at all: into a file of
+/// this process's own beside it, then renamed onto it, so no process reads
+/// half an input another is writing.
+fn write_whole(path: &Path, bytes: &[u8]) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        panic!("the input {} names no file in a directory", path.display());
+    };
+    // A process's partial file carries its id, so two writing the same input
+    // at once each write their own; `wasm32-wasip1` has no process ids, and
+    // `std::process::id` panics there.
+    let writer = if cfg!(target_os = "wasi") {
+        "wasi".to_string()
+    } else {
+        std::process::id().to_string()
+    };
+    let part = dir.join(format!(".{}.{writer}.part", name.to_string_lossy()));
+    std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&part, bytes))
+        .and_then(|()| std::fs::rename(&part, path))
+        .unwrap_or_else(|error| panic!("the input {}: {error}", path.display()));
+}
+
+/// What every bundle starts with, so a file that is none is refused by name.
+const BUNDLE: &[u8] = b"tinker-pdf bench bundle\n";
+
+/// Named parts as one file: [`BUNDLE`], then each part's name and its bytes,
+/// each after its length as eight little-endian bytes.
+pub fn bundle(parts: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = BUNDLE.to_vec();
+    for (name, bytes) in parts {
+        for piece in [name.as_bytes(), *bytes] {
+            out.extend_from_slice(&(piece.len() as u64).to_le_bytes());
+            out.extend_from_slice(piece);
+        }
+    }
+    out
+}
+
+/// A [`bundle`]'s parts, by name and in order; one that is not a whole
+/// bundle panics, naming `what`.
+pub fn unbundle(bytes: &[u8], what: &str) -> Vec<(String, Vec<u8>)> {
+    let mut rest = bytes
+        .strip_prefix(BUNDLE)
+        .unwrap_or_else(|| panic!("the input {what} is no bundle"));
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let name = String::from_utf8(piece(&mut rest, what).to_vec())
+            .unwrap_or_else(|_| panic!("the bundle {what} names a part in other than UTF-8"));
+        out.push((name, piece(&mut rest, what).to_vec()));
+    }
+    out
+}
+
+/// The next piece of a bundle, after its length, `rest` moved past it.
+fn piece<'b>(rest: &mut &'b [u8], what: &str) -> &'b [u8] {
+    let Some((length, after)) = rest.split_first_chunk::<8>() else {
+        panic!("the bundle {what} ends inside a length");
+    };
+    let Some((piece, after)) = usize::try_from(u64::from_le_bytes(*length))
+        .ok()
+        .and_then(|length| after.split_at_checked(length))
+    else {
+        panic!("the bundle {what} ends inside a part");
+    };
+    *rest = after;
+    piece
+}
+
+/// The parts of the bundle `bytes` when they are `names`, in that order.
+fn parts<const N: usize>(bytes: &[u8], what: &str, names: [&str; N]) -> [Vec<u8>; N] {
+    let found = unbundle(bytes, what);
+    let named: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(named, names, "the parts of the bundle {what}");
+    let parts: Vec<Vec<u8>> = found.into_iter().map(|(_, bytes)| bytes).collect();
+    parts
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("the names were counted"))
+}
+
+/// A part that is a number of `B` bytes, as `B` bytes.
+fn fixed<const B: usize>(part: &[u8], what: &str) -> [u8; B] {
+    part.try_into()
+        .unwrap_or_else(|_| panic!("a part of {what} is {} bytes, not {B}", part.len()))
+}
+
+/// Every pixel format the facade has, which a stored bitmap names by its
+/// `Debug` name.
+const FORMATS: [PixelFormat; 6] = [
+    PixelFormat::Gray8,
+    PixelFormat::GrayA8,
+    PixelFormat::Rgb8,
+    PixelFormat::Rgba8,
+    PixelFormat::CmykA8,
+    PixelFormat::LabA8,
+];
+
+/// A bitmap of `data`, with no warnings and no statistics, as a caller
+/// builds one by hand.
+#[cfg(not(tinker_planning_baseline))]
+fn bitmap(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    stride: usize,
+    premultiplied: bool,
+    data: Vec<u8>,
+) -> Bitmap {
+    Bitmap {
+        width,
+        height,
+        format,
+        stride,
+        data,
+        warnings: Vec::new(),
+        premultiplied,
+        stats: None,
+    }
+}
+
+/// The same bitmap on the planning baseline, whose `Bitmap` carries no
+/// statistics.
+#[cfg(tinker_planning_baseline)]
+fn bitmap(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    stride: usize,
+    premultiplied: bool,
+    data: Vec<u8>,
+) -> Bitmap {
+    Bitmap {
+        width,
+        height,
+        format,
+        stride,
+        data,
+        warnings: Vec::new(),
+        premultiplied,
+    }
+}
 
 /// Three A4 pages of forty lines each in standard-14 Helvetica, unembedded.
 ///
@@ -139,20 +486,24 @@ pub fn triangles() -> Vec<u8> {
     builder.finish()
 }
 
-/// Where one of the books committed under `crates/tinker-pdf/tests/epub/`
-/// is, by its file name.
-pub fn committed_book_path(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/epub")
-        .join(name)
-}
-
 /// One of the books committed under `crates/tinker-pdf/tests/epub/`, by its
 /// file name.
 pub fn committed_book(name: &str) -> Vec<u8> {
-    let path = committed_book_path(name);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/epub")
+        .join(name);
     std::fs::read(&path)
         .unwrap_or_else(|error| panic!("the committed book {}: {error}", path.display()))
+}
+
+/// One of the fixtures committed under `fuzz/corpus/render_page/`, by its
+/// file name.
+pub fn render_fixture(name: &str) -> Vec<u8> {
+    let path = format!(
+        "{}/../../fuzz/corpus/render_page/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read(&path).unwrap_or_else(|error| panic!("the fixture {path}: {error}"))
 }
 
 /// The integer stream every seeded input draws from: SplitMix64, so an input
@@ -1500,17 +1851,22 @@ pub struct RsaKey {
     pub private_exponent: Vec<u8>,
 }
 
-/// Example 10's key, read from its block's private-key section, where
-/// `Modulus` is `n`, `Public exponent` is `e` and `Exponent` is `d` — the
-/// label the public-key section above it gives `e`.
-pub fn example_10() -> RsaKey {
+/// `pss-vect.txt`, as the crypto crate's tests commit it.
+pub fn pss_vectors() -> String {
     let path = format!(
         "{}/../tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt",
         env!("CARGO_MANIFEST_DIR")
     );
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("the committed vectors {path}: {error}"));
-    let block = text.split("# Example 10:").nth(1).expect("Example 10");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("the committed vectors {path}: {error}"))
+}
+
+/// Example 10's key, read from its block of `vectors`, [`pss_vectors`]'s
+/// text: its private-key section, where `Modulus` is `n`, `Public exponent`
+/// is `e` and `Exponent` is `d` — the label the public-key section above it
+/// gives `e`.
+pub fn example_10(vectors: &str) -> RsaKey {
+    let block = vectors.split("# Example 10:").nth(1).expect("Example 10");
     let private = block
         .split("# Private key")
         .nth(1)
@@ -1541,20 +1897,22 @@ pub fn example_10() -> RsaKey {
 /// The bytes [`message`] signs: 10 MB.
 pub const MESSAGE_BYTES: usize = 10_000_000;
 
-/// [`MESSAGE_BYTES`] seeded bytes, and their RSA-2048 PKCS #1 v1.5 signature
-/// under [`example_10`] with SHA-256, made here: the crypto crate has no
-/// signing path, so the signature is [`pkcs1_encoded`]'s representative
-/// through [`rsa_private`].
-pub fn message() -> (Vec<u8>, Vec<u8>) {
+/// [`MESSAGE_BYTES`] seeded bytes.
+pub fn message() -> Vec<u8> {
     let mut seed = Seeded::new(17);
     let mut bytes = Vec::with_capacity(MESSAGE_BYTES + 8);
     while bytes.len() < MESSAGE_BYTES {
         bytes.extend_from_slice(&seed.next().to_le_bytes());
     }
     bytes.truncate(MESSAGE_BYTES);
-    let key = example_10();
-    let signature = rsa_private(&key, &pkcs1_encoded(&key, &bytes));
-    (bytes, signature)
+    bytes
+}
+
+/// `message`'s RSA-2048 PKCS #1 v1.5 signature under `key` with SHA-256,
+/// made here: the crypto crate has no signing path, so the signature is
+/// [`pkcs1_encoded`]'s representative through [`rsa_private`].
+pub fn signature(key: &RsaKey, message: &[u8]) -> Vec<u8> {
+    rsa_private(key, &pkcs1_encoded(key, message))
 }
 
 /// RFC 8017 §9.2's EMSA-PKCS1-v1_5 encoding of `message`'s SHA-256 digest at
@@ -1862,7 +2220,7 @@ pub fn shape_face(path: &str) -> Vec<u8> {
 /// fuzz target seeds with, and the `CFF ` table of every committed OpenType
 /// face — aots's 185, text-rendering-tests' three and the `sfnt` target's
 /// `opentype-cff.otf`.
-pub fn cff_programs() -> Vec<(String, Vec<u8>)> {
+pub fn cff_programs() -> Vec<Fixture> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut out = Vec::new();
     let mut read = |dir: &str, extension: &str, whole: bool| {
@@ -1889,7 +2247,10 @@ pub fn cff_programs() -> Vec<(String, Vec<u8>)> {
                 .and_then(|name| name.to_str())
                 .expect("a UTF-8 file name")
                 .to_string();
-            out.push((name, program));
+            out.push(Fixture {
+                name,
+                bytes: program.into(),
+            });
         }
     };
     read("../../fuzz/corpus/cff", "cff", true);

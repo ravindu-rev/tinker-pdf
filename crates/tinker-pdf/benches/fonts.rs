@@ -88,8 +88,31 @@ fn outline_programs(programs: &[&[u8]]) -> usize {
     outlines
 }
 
+/// One of the faces the group reads, by its file name, from where `read`
+/// finds it in the tree.
+fn face(name: &str, read: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
+    inputs::store().bytes(name, read)
+}
+
 fn fonts(c: &mut Criterion) {
-    let serif = LazyCell::new(|| inputs::liberation("LiberationSerif-Regular.ttf"));
+    // The faces a routine parses once and shapes through, and the programs it
+    // outlines, outlive the routine, so each is kept here.
+    let serif = LazyCell::new(|| {
+        face("LiberationSerif-Regular.ttf", || {
+            inputs::liberation("LiberationSerif-Regular.ttf")
+        })
+    });
+    let arabic = LazyCell::new(|| {
+        face("TestShapeAran.ttf", || {
+            inputs::shape_face("text-rendering-tests/fonts/TestShapeAran.ttf")
+        })
+    });
+    let devanagari = LazyCell::new(|| {
+        face("NotoSansDevanagari-Regular.ttf", || {
+            inputs::shape_face("devanagari/NotoSansDevanagari-Regular.ttf")
+        })
+    });
+    let cff = LazyCell::new(|| inputs::store().set("cff-programs.bundle", inputs::cff_programs));
 
     let mut group = Group::new(c, "fonts");
 
@@ -98,31 +121,30 @@ fn fonts(c: &mut Criterion) {
     // units.
     group.calibrated("shape 1000 characters of Latin", |op| {
         let face = Sfnt::parse(&serif).expect("Liberation Serif parses");
-        let latin_text = inputs::latin_paragraph();
+        let latin_text = inputs::store().text("latin-1000.txt", inputs::latin_paragraph);
         assert_shapes(&face, &latin_text, "Latin");
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..125 {
                 black_box(shape(&face, &latin_text));
             }
         });
     });
     group.calibrated("shape 1000 characters of Arabic", |op| {
-        let arabic = inputs::shape_face("text-rendering-tests/fonts/TestShapeAran.ttf");
         let face = Sfnt::parse(&arabic).expect("TestShapeAran parses");
-        let arabic_text = inputs::arabic_paragraph();
+        let arabic_text = inputs::store().text("arabic-1000.txt", inputs::arabic_paragraph);
         assert_shapes(&face, &arabic_text, "Arabic");
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..50 {
                 black_box(shape(&face, &arabic_text));
             }
         });
     });
     group.calibrated("shape 1000 characters of Devanagari", |op| {
-        let devanagari = inputs::shape_face("devanagari/NotoSansDevanagari-Regular.ttf");
         let face = Sfnt::parse(&devanagari).expect("Noto Sans Devanagari parses");
-        let devanagari_text = inputs::devanagari_paragraph();
+        let devanagari_text =
+            inputs::store().text("devanagari-1000.txt", inputs::devanagari_paragraph);
         assert_shapes(&face, &devanagari_text, "Devanagari");
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..8 {
                 black_box(shape(&face, &devanagari_text));
             }
@@ -139,34 +161,38 @@ fn fonts(c: &mut Criterion) {
         });
     });
     group.operation("outlines of Liberation Sans Regular", |op| {
-        let sans = inputs::liberation("LiberationSans-Regular.ttf");
+        let sans = face("LiberationSans-Regular.ttf", || {
+            inputs::liberation("LiberationSans-Regular.ttf")
+        });
         assert_outlines(&sans, 2620, "Liberation Sans Regular");
         op.per(Per::Outlines(49 * 2620));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..49 {
                 black_box(outline_face(&sans));
             }
         });
     });
     group.operation("outlines of Liberation Mono Regular", |op| {
-        let mono = inputs::liberation("LiberationMono-Regular.ttf");
+        let mono = face("LiberationMono-Regular.ttf", || {
+            inputs::liberation("LiberationMono-Regular.ttf")
+        });
         assert_outlines(&mono, 2423, "Liberation Mono Regular");
         op.per(Per::Outlines(51 * 2423));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..51 {
                 black_box(outline_face(&mono));
             }
         });
     });
     group.calibrated("outlines of every committed CFF program", |op| {
-        let named = inputs::cff_programs();
+        let named: &[inputs::Fixture] = &cff;
         assert_eq!(named.len(), 193, "the committed CFF programs");
         let refused: Vec<&str> = named
             .iter()
-            .filter(|(_, program)| Cff::parse(program).is_none())
-            .map(|(name, _)| name.as_str())
+            .filter(|program| Cff::parse(&program.bytes).is_none())
+            .map(|program| program.name.as_str())
             .collect();
-        let programs: Vec<&[u8]> = named.iter().map(|(_, program)| &program[..]).collect();
+        let programs: Vec<&[u8]> = named.iter().map(|program| &program.bytes[..]).collect();
         let glyphs: usize = programs
             .iter()
             .filter_map(|program| Cff::parse(program))
@@ -184,7 +210,7 @@ fn fonts(c: &mut Criterion) {
         assert_eq!(glyphs, 18_529, "the 192 programs' glyphs");
         assert_eq!(outlines, glyphs, "every glyph of them yields an outline");
         op.per(Per::Outlines(2 * outlines as u64));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..2 {
                 black_box(outline_programs(&programs));
             }

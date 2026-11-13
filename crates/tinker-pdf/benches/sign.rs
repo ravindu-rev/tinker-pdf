@@ -18,15 +18,20 @@ use tinker_pdf_crypto::rsa::{DigestAlgorithm, RsaPublicKey};
 use tinker_pdf_crypto::sha2::sha256;
 
 fn sign(c: &mut Criterion) {
-    let key = LazyCell::new(inputs::example_10);
+    let store = inputs::store();
+    let key =
+        LazyCell::new(|| inputs::example_10(&store.text("pss-vect.txt", inputs::pss_vectors)));
     let public = LazyCell::new(|| {
         let public =
             RsaPublicKey::new(&key.modulus, &key.public_exponent).expect("Example 10's public key");
         assert_eq!(public.modulus_bits(), 2048, "Example 10 is a 2048-bit key");
         public
     });
+    // The signature is made through the crypto crate's own arithmetic, so it
+    // crosses a paired run beside the message it signs.
     let signed = LazyCell::new(|| {
-        let (message, signature) = inputs::message();
+        let message = store.bytes("message.bin", inputs::message);
+        let signature = store.bytes("message.sig", || inputs::signature(&key, &message));
         assert_eq!(message.len(), inputs::MESSAGE_BYTES);
         assert!(
             public
@@ -46,7 +51,7 @@ fn sign(c: &mut Criterion) {
         let (message, _) = &*signed;
         let (modulus, d, representative) =
             inputs::private_operands(&key, &inputs::pkcs1_encoded(&key, message));
-        op.iter(|| {
+        op.iter(move || {
             for _ in 0..13 {
                 black_box(modulus.pow(black_box(&representative), &d));
             }
@@ -54,15 +59,16 @@ fn sign(c: &mut Criterion) {
     });
     group.operation("verify an RSA-2048 signature over 10 MB", |op| {
         let (message, signature) = &*signed;
+        let public: &RsaPublicKey = &public;
         op.per(Per::Bytes(message.len() as u64));
-        op.iter(|| {
+        op.iter(move || {
             black_box(public.verify_pkcs1_v15_message(DigestAlgorithm::Sha256, message, signature))
         });
     });
     group.operation("SHA-256 of 10 MB", |op| {
         let (message, _) = &*signed;
         op.per(Per::Bytes(message.len() as u64));
-        op.iter(|| black_box(sha256(message)));
+        op.iter(move || black_box(sha256(message)));
     });
 
     group.finish();
