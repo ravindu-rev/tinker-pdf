@@ -86,6 +86,11 @@ impl Recipe {
         usize::from(self.sampling.iter().map(|s| s.1).max().unwrap_or(1))
     }
 
+    /// Whether the frame is sequential.
+    pub(super) fn sequential(&self) -> bool {
+        matches!(self.frame, 0xC0 | 0xC1 | 0xC9)
+    }
+
     /// Whether the frame is arithmetic-coded.
     fn arithmetic(&self) -> bool {
         matches!(self.frame, 0xC9 | 0xCA)

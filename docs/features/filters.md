@@ -82,12 +82,18 @@ A.3.1's level shift is `2^(P-1)` rather than 128, and the samples are narrowed
 to eight on the way out with `JpegPrecisionNarrowed` recorded, because every
 `PixelFormat` this engine rasters into is eight bits deep and a wider sample
 path is a change to the raster rather than to this codec. `JpegImage::precision`
-says what the frame declared. Every mode
-fills the same per-component coefficient buffer, which is then rendered a
+says what the frame declared. Pixels are made a
 strip at a time: one MCU row of each component dequantised, transformed by an
 integer separable IDCT, replicated across the image's width and
 colour-converted into the strip, so no whole-image plane is held beside the
-output (`docs/design/jpeg-speed.md`). Huffman codes are read through
+output (`docs/design/jpeg-speed.md`). A progressive frame, and a sequential
+one in several scans, fills a coefficient buffer covering the whole image and
+is painted at the end. **A sequential frame whose components all arrive in
+its one scan streams** — entropy-decoded one MCU row at a time into one MCU
+row of coefficients, each row painted as it completes — when its sampling
+ratios divide and nothing after the scan (a frame header, a scan, a `DQT`, an
+Adobe marker) changes what the end of the decode reads; the test build decodes
+every sequential stream both ways and holds them equal. Huffman codes are read through
 two-level lookup tables over a 64-bit word of bits, and the transform makes
 each of its cosine table's products once, in `i32` lanes for every block whose
 coefficients are within its bound and in `i64` past it; both give the bytes

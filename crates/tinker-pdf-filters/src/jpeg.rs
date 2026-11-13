@@ -47,13 +47,20 @@
 //! G.2, checked against the document a second time, and pinned against
 //! hand-derived decision sequences. [`arith`] says what that is worth.
 //!
-//! Every mode decodes into the same per-component coefficient buffer, which is
-//! rendered at the end a strip at a time — one MCU row of each component
+//! Pixels are made a strip at a time — one MCU row of each component
 //! dequantised, transformed, replicated and colour-converted — and handed to a
 //! [`JpegSink`] or painted into the image ([`decode_strips`], [`decode`];
-//! `docs/design/jpeg-speed.md`). Progressive forces that shape — a coefficient is refined by later scans, so
-//! nothing can be turned into a pixel until the last scan has been read — and
-//! baseline shares it rather than keeping a second path that could drift.
+//! `docs/design/jpeg-speed.md`). Most frames decode every scan into one
+//! per-component coefficient buffer covering the whole image and paint it at
+//! the end. Progressive forces that shape — a coefficient is refined by later
+//! scans, so nothing can be turned into a pixel until the last scan has been
+//! read — and so does a sequential frame in several scans. **A sequential
+//! frame whose components all arrive in its one scan streams**: it is
+//! entropy-decoded one MCU row at a time into one MCU row of coefficients,
+//! each row painted as it completes, when nothing after the scan changes what
+//! the end of the decode reads ([`streamable`], [`the_rest_is_inert`]). The
+//! two paths cannot drift apart unseen: the test build decodes every
+//! sequential stream both ways and holds them equal.
 //!
 //! The IDCT is the integer separable transform. That means output can differ
 //! from libjpeg's by a least-significant bit on some coefficients — there is no
@@ -160,7 +167,9 @@ pub trait JpegSink {
 /// beside the image it handed out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JpegHeld {
-    /// Coefficients: the whole image's.
+    /// Coefficients: the whole image's, or one MCU row's for a frame that
+    /// streams — a sequential frame whose components all arrive in its one
+    /// scan.
     pub coefficients: usize,
     /// Component samples: the block rows of each component one strip reads,
     /// replicated across the image's width.
@@ -261,26 +270,43 @@ struct Component {
     /// Zig-zag rather than natural order because spectral selection names its
     /// band in zig-zag indices; storing them any other way would mean
     /// converting on every scan instead of once at the end. `i16` because that
-    /// is the range a coefficient occupies, and the buffer covers the whole
-    /// image.
+    /// is the range a coefficient occupies. The buffer covers the whole image,
+    /// or, for a frame that streams, the one MCU row being decoded.
     coeffs: Vec<i16>,
+    /// The first block row `coeffs` holds, and how many it holds: zero and
+    /// `blocks_y` for a whole image, `V` rows from the MCU row being decoded
+    /// for a frame that streams.
+    row_base: usize,
+    rows_held: usize,
 }
 
 impl Component {
-    fn block(&self, bx: usize, by: usize) -> Option<&[i16]> {
-        if bx >= self.blocks_x || by >= self.blocks_y {
+    /// Where block `(bx, by)` starts in `coeffs`, when `coeffs` holds it.
+    fn at(&self, bx: usize, by: usize) -> Option<usize> {
+        if bx >= self.blocks_x || by >= self.blocks_y || by < self.row_base {
             return None;
         }
-        let at = (by * self.blocks_x + bx).checked_mul(64)?;
+        let row = by - self.row_base;
+        if row >= self.rows_held {
+            return None;
+        }
+        (row * self.blocks_x + bx).checked_mul(64)
+    }
+
+    fn block(&self, bx: usize, by: usize) -> Option<&[i16]> {
+        let at = self.at(bx, by)?;
         self.coeffs.get(at..at + 64)
     }
 
     fn block_mut(&mut self, bx: usize, by: usize) -> Option<&mut [i16]> {
-        if bx >= self.blocks_x || by >= self.blocks_y {
-            return None;
-        }
-        let at = (by * self.blocks_x + bx).checked_mul(64)?;
+        let at = self.at(bx, by)?;
         self.coeffs.get_mut(at..at + 64)
+    }
+
+    /// Clears a streaming frame's coefficients for the next MCU row.
+    fn next_row(&mut self) {
+        self.coeffs.fill(0);
+        self.row_base += self.rows_held;
     }
 }
 
@@ -716,7 +742,8 @@ fn next_marker(data: &[u8], from: usize) -> usize {
     data.len()
 }
 
-/// Sizes the coefficient buffers, returning the MCU grid.
+/// Sizes the coefficient buffers, returning the MCU grid: the whole image's,
+/// or one MCU row's when the frame `streams`.
 ///
 /// Returns `None` when the image would exceed the output cap, which is checked
 /// here rather than after decoding because the buffers are the allocation that
@@ -726,6 +753,7 @@ fn allocate(
     width: usize,
     height: usize,
     max_output: usize,
+    streams: bool,
 ) -> Option<(usize, usize)> {
     if width
         .saturating_mul(height)
@@ -750,16 +778,106 @@ fn allocate(
         component.scan_x = own_w.div_ceil(8).min(component.blocks_x);
         component.scan_y = own_h.div_ceil(8).min(component.blocks_y);
 
-        component.coeffs = vec![0i16; component.blocks_x * component.blocks_y * 64];
+        component.row_base = 0;
+        component.rows_held = if streams {
+            component.v.min(component.blocks_y)
+        } else {
+            component.blocks_y
+        };
+        component.coeffs = vec![0i16; component.blocks_x * component.rows_held * 64];
     }
 
     Some((mcus_x, mcus_y))
 }
 
+/// Whether a frame can stream from its first scan, which names `parts`
+/// (`docs/design/jpeg-speed.md`, "Which frames stream"): a sequential frame
+/// that [`finish`] accepts, every component in the scan once, every sampling
+/// ratio dividing the largest. Whether the rest of the stream lets it is
+/// [`the_rest_is_inert`]'s.
+fn streamable(
+    components: &[Component],
+    parts: &[usize],
+    progressive: bool,
+    width: usize,
+    height: usize,
+) -> bool {
+    let n = components.len();
+    if progressive || width == 0 || height == 0 || !matches!(n, 1 | 3 | 4) {
+        return false;
+    }
+    if parts.len() != n || !(0..n).all(|index| parts.contains(&index)) {
+        return false;
+    }
+    let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
+    let v_max = components.iter().map(|c| c.v).max().unwrap_or(1).max(1);
+    components
+        .iter()
+        .all(|c| h_max % c.h.max(1) == 0 && v_max % c.v.max(1) == 0)
+}
+
+/// Whether nothing from `at` on changes what the end of the decode reads:
+/// the marker walk [`scan_frame`] makes, run ahead of it from where it will
+/// resume, meets no frame header, no further scan, no quantisation table and
+/// no Adobe marker before EOI or the end. A later `DQT` would change the
+/// dequantisation and a later Adobe marker the colour, both of which the end
+/// of a decode reads, and a later scan or frame anything at all.
+fn the_rest_is_inert(data: &[u8], mut at: usize) -> bool {
+    while at + 1 < data.len() {
+        if data.get(at) != Some(&0xFF) {
+            at += 1;
+            continue;
+        }
+        let Some(&marker) = data.get(at + 1) else {
+            break;
+        };
+        at += 2;
+        match marker {
+            0x01 | 0xD0..=0xD7 | 0xFF => continue,
+            0xD9 => return true,
+            _ => {}
+        }
+        let Some(length) = data
+            .get(at..at + 2)
+            .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
+        else {
+            return true;
+        };
+        let segment_end = at + length.max(2);
+        let Some(segment) = data.get(at + 2..segment_end.min(data.len())) else {
+            return true;
+        };
+        match marker {
+            0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF | 0xDA | 0xDB => {
+                return false;
+            }
+            0xEE if segment.starts_with(b"Adobe") => return false,
+            _ => {}
+        }
+        at = segment_end;
+    }
+    true
+}
+
+/// The colour a frame's components mean, or `None` for a count no colour
+/// model covers.
+fn colour_of(components: usize, adobe_seen: bool) -> Option<JpegColor> {
+    match components {
+        1 => Some(JpegColor::Gray),
+        3 => Some(JpegColor::Rgb),
+        // Adobe transform 2 is YCCK; 0 is plain CMYK. Photoshop writes CMYK
+        // inverted, which the Adobe marker's presence signals.
+        4 if adobe_seen => Some(JpegColor::CmykInverted),
+        4 => Some(JpegColor::Cmyk),
+        _ => None,
+    }
+}
+
 /// Decodes a JPEG.
 pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     let mut image = Collected::default();
-    let frame = finish(scan_frame(data, max_output)?, max_output, &mut image)?;
+    let scanned = scan_frame(data, max_output, Some(&mut image))?;
+    let frame = finish(scanned, max_output, &mut image)?;
     Ok(JpegImage {
         width: frame.layout.width,
         height: frame.layout.height,
@@ -787,7 +905,8 @@ pub fn decode_strips(
         strip: Vec::new(),
         held: 0,
     };
-    finish(scan_frame(data, max_output)?, max_output, &mut forwarded)
+    let scanned = scan_frame(data, max_output, Some(&mut forwarded))?;
+    finish(scanned, max_output, &mut forwarded)
 }
 
 /// What the marker walk leaves for the end of a decode.
@@ -802,11 +921,20 @@ struct Scanned {
     precision: u8,
     /// What the scans tolerated.
     warnings: Vec<Warning>,
+    /// The layout and what was held, for a frame that streamed: its strips
+    /// were painted as its scan was decoded.
+    streamed: Option<(JpegLayout, JpegHeld)>,
 }
 
 /// Reads every marker segment and decodes every scan into the frame's
-/// coefficients.
-fn scan_frame(data: &[u8], max_output: usize) -> Result<Scanned, JpegError> {
+/// coefficients, or, for a frame that streams and a `stream` to paint into,
+/// paints each MCU row as it is decoded (`docs/design/jpeg-speed.md`,
+/// "Which frames stream").
+fn scan_frame(
+    data: &[u8],
+    max_output: usize,
+    mut stream: Option<&mut dyn Rows>,
+) -> Result<Scanned, JpegError> {
     if data.get(..2) != Some(&[0xFF, 0xD8]) {
         return Err(JpegError::NotJpeg);
     }
@@ -828,6 +956,7 @@ fn scan_frame(data: &[u8], max_output: usize) -> Result<Scanned, JpegError> {
     let mut mcus = (0usize, 0usize);
     let mut allocated = false;
     let mut truncated = false;
+    let mut painting: Option<(Painter, JpegLayout)> = None;
 
     let mut at = 2usize;
     while at + 1 < data.len() {
@@ -1031,32 +1160,109 @@ fn scan_frame(data: &[u8], max_output: usize) -> Result<Scanned, JpegError> {
                 let (ah, al) = (u32::from(a >> 4), u32::from(a & 0x0F));
 
                 if !allocated {
-                    let Some(grid) = allocate(&mut components, width, height, max_output) else {
+                    let streams = stream.is_some()
+                        && streamable(&components, &parts, progressive, width, height)
+                        && the_rest_is_inert(data, next_marker(data, segment_end));
+                    let Some(grid) = allocate(&mut components, width, height, max_output, streams)
+                    else {
                         warnings.push(Warning::OutputCapHit);
                         return Err(JpegError::Truncated);
                     };
                     mcus = grid;
                     allocated = true;
+                    let colour = colour_of(components.len(), adobe_seen);
+                    if let (true, Some(colour), Some(target)) =
+                        (streams, colour, stream.as_deref_mut())
+                    {
+                        let layout = JpegLayout {
+                            width: width as u32,
+                            height: height as u32,
+                            color: colour,
+                            precision: sample_precision,
+                        };
+                        target.begin(layout);
+                        let painter = Painter::new(
+                            &components,
+                            width,
+                            height,
+                            colour,
+                            adobe_transform.unwrap_or(0),
+                            sample_precision,
+                        );
+                        painting = Some((painter, layout));
+                    }
                 }
 
                 let scan = data.get(segment_end..).unwrap_or_default();
-                let complete = decode_scan(
-                    scan,
-                    &mut components,
-                    &parts,
-                    Entropy {
-                        arithmetic,
-                        dc_tables: &dc_tables,
-                        ac_tables: &ac_tables,
-                        conditioning: &conditioning,
-                        stats: &mut arith_stats,
-                    },
-                    restart_interval,
-                    progressive,
-                    (ss, se.max(ss)),
-                    (ah, al),
-                    mcus,
-                );
+                let entropy = Entropy {
+                    arithmetic,
+                    dc_tables: &dc_tables,
+                    ac_tables: &ac_tables,
+                    conditioning: &conditioning,
+                    stats: &mut arith_stats,
+                };
+                let band = (ss, se.max(ss));
+                let complete = match (painting.as_mut(), stream.as_deref_mut()) {
+                    (Some((painter, _)), Some(target)) => {
+                        // One MCU row of coefficients at a time: a row is
+                        // painted when its last unit is decoded, and the rows
+                        // a scan that stopped never reached are painted from
+                        // what they hold, as the whole image's buffer held it.
+                        let alone = parts.len() == 1;
+                        let units_y = match parts.first().and_then(|&part| components.get(part)) {
+                            Some(component) if alone => component.scan_y,
+                            _ => mcus.1,
+                        };
+                        let v = components.first().map_or(1, |c| c.v.max(1));
+                        let mut next = 0usize;
+                        let complete = {
+                            let quant = &quant;
+                            let mut row = |uy: usize, components: &mut [Component]| {
+                                let done = if !alone {
+                                    Some(uy)
+                                } else if (uy + 1) % v == 0 || uy + 1 == units_y {
+                                    Some(uy / v)
+                                } else {
+                                    None
+                                };
+                                if let Some(strip) = done {
+                                    painter.paint(strip, components, quant, &mut *target);
+                                    components.iter_mut().for_each(Component::next_row);
+                                    next = strip + 1;
+                                }
+                            };
+                            decode_scan(
+                                scan,
+                                &mut components,
+                                &parts,
+                                entropy,
+                                restart_interval,
+                                progressive,
+                                band,
+                                (ah, al),
+                                mcus,
+                                Some(&mut row),
+                            )
+                        };
+                        for strip in next..painter.strips() {
+                            painter.paint(strip, &components, &quant, &mut *target);
+                            components.iter_mut().for_each(Component::next_row);
+                        }
+                        complete
+                    }
+                    _ => decode_scan(
+                        scan,
+                        &mut components,
+                        &parts,
+                        entropy,
+                        restart_interval,
+                        progressive,
+                        band,
+                        (ah, al),
+                        mcus,
+                        None,
+                    ),
+                };
                 truncated |= !complete;
 
                 // Entropy data carries no length; the next segment starts at
@@ -1079,6 +1285,22 @@ fn scan_frame(data: &[u8], max_output: usize) -> Result<Scanned, JpegError> {
         warnings.push(Warning::TruncatedInput);
     }
 
+    let streamed = match (painting, stream) {
+        (Some((painter, layout)), Some(target)) => {
+            let coefficients = components
+                .iter()
+                .map(|component| component.coeffs.len().saturating_mul(2))
+                .fold(0, usize::saturating_add);
+            let held = JpegHeld {
+                coefficients,
+                planes: painter.held(),
+                strip: target.held(),
+            };
+            Some((layout, held))
+        }
+        _ => None,
+    };
+
     Ok(Scanned {
         components,
         quant,
@@ -1088,6 +1310,7 @@ fn scan_frame(data: &[u8], max_output: usize) -> Result<Scanned, JpegError> {
         adobe_transform,
         precision: sample_precision,
         warnings,
+        streamed,
     })
 }
 
@@ -1106,6 +1329,10 @@ struct Entropy<'a> {
     conditioning: &'a arith::Conditioning,
     stats: &'a mut arith::Stats,
 }
+
+/// What a scan calls when every unit of a row is decoded: the row, and the
+/// components it was decoded into.
+type RowDone<'a> = &'a mut dyn FnMut(usize, &mut [Component]);
 
 /// The live entropy decoder for one scan: one or the other, never both.
 enum Coder<'a> {
@@ -1133,6 +1360,7 @@ fn decode_scan(
     band: (usize, usize),
     approximation: (u32, u32),
     mcus: (usize, usize),
+    mut row_done: Option<RowDone<'_>>,
 ) -> bool {
     if parts.is_empty() {
         return false;
@@ -1260,6 +1488,10 @@ fn decode_scan(
                     }
                 }
             }
+        }
+        // Every unit of row `uy` is decoded.
+        if let Some(row_done) = row_done.as_mut() {
+            row_done(uy, components);
         }
     }
 
@@ -1694,24 +1926,25 @@ fn finish(
         adobe_transform,
         precision,
         mut warnings,
+        streamed,
     } = scanned;
+    if let Some((layout, held)) = streamed {
+        // Painted as its scan was decoded, every check below made first.
+        if precision > 8 {
+            warnings.push(Warning::JpegPrecisionNarrowed);
+        }
+        return Ok(JpegFrame {
+            layout,
+            warnings,
+            held,
+        });
+    }
     if width == 0 || height == 0 || components.is_empty() {
         return Err(JpegError::Truncated);
     }
 
-    let color = match components.len() {
-        1 => JpegColor::Gray,
-        3 => JpegColor::Rgb,
-        4 => {
-            // Adobe transform 2 is YCCK; 0 is plain CMYK. Photoshop writes
-            // CMYK inverted, which the Adobe marker's presence signals.
-            if adobe_seen {
-                JpegColor::CmykInverted
-            } else {
-                JpegColor::Cmyk
-            }
-        }
-        _ => return Err(JpegError::UnsupportedComponents),
+    let Some(color) = colour_of(components.len(), adobe_seen) else {
+        return Err(JpegError::UnsupportedComponents);
     };
 
     let needed = width
@@ -4829,9 +5062,30 @@ mod tests {
     /// The ceiling every equality test decodes under.
     const CEILING: usize = 1 << 24;
 
-    /// [`decode`] with whole-image planes in place of the strips.
+    /// [`decode`] with no frame streaming: every frame's whole-image
+    /// coefficients, painted a strip at a time at the end.
+    fn decode_buffered(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
+        let mut image = Collected::default();
+        let scanned = scan_frame(data, max_output, None)?;
+        assert!(
+            scanned.streamed.is_none(),
+            "nothing streams with nowhere to"
+        );
+        let frame = finish(scanned, max_output, &mut image)?;
+        Ok(JpegImage {
+            width: frame.layout.width,
+            height: frame.layout.height,
+            color: frame.layout.color,
+            data: image.data,
+            precision: frame.layout.precision,
+            warnings: frame.warnings,
+        })
+    }
+
+    /// [`decode`] with whole-image coefficients and whole-image planes in
+    /// place of the strips.
     fn decode_through_planes(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
-        let scanned = scan_frame(data, max_output)?;
+        let scanned = scan_frame(data, max_output, None)?;
         direct::finish_planes(
             &scanned.components,
             &scanned.quant,
@@ -4932,7 +5186,8 @@ mod tests {
 
     /// **A strip decode gives the image the whole-image decode gives**, row
     /// for row: through the sink and through [`decode`], against the
-    /// whole-image planes, for every frame type and both coders, 8 and 12
+    /// whole-image planes, and a frame that streams against the same frame's
+    /// whole-image coefficients, for every frame type and both coders, 8 and 12
     /// bits, every sampling the generator draws — 4:4:4, 4:2:2, 4:2:0, 4:1:1,
     /// 4:4:0 and ratios that do not divide — odd sizes, Gray, YCbCr, CMYK,
     /// YCCK and inverted CMYK, restarts and cuts, beside the encoder's
@@ -4947,6 +5202,9 @@ mod tests {
             let planes = decode_through_planes(&bytes, CEILING);
             let whole = decode(&bytes, CEILING);
             same(&label, &whole, &planes);
+            // The drift guard: a frame that streams decodes to what its
+            // whole-image coefficients give.
+            same(&label, &decode_buffered(&bytes, CEILING), &whole);
 
             let mut kept = Kept::default();
             let frame = decode_strips(&bytes, CEILING, &mut kept);
@@ -5082,5 +5340,63 @@ mod tests {
             assert_eq!(frame.held.strip, largest, "{recipe:?}: the strip buffer");
         }
         assert!(taller > 30, "{taller} images were taller than two MCU rows");
+    }
+
+    // ---- Streaming ------------------------------------------------------------
+
+    /// **A single-scan sequential frame holds one MCU row of coefficients**,
+    /// Huffman-coded and arithmetic-coded alike, where every other frame — a
+    /// progressive one, one in several scans, one whose ratios do not divide
+    /// — holds the whole image's (`docs/design/jpeg-speed.md`, "Which frames
+    /// stream"). What each decodes to is the strip test's: the same frame
+    /// with its whole-image coefficients.
+    #[test]
+    fn a_single_scan_sequential_frame_holds_one_mcu_row_of_coefficients() {
+        let mut noise = Noise(0x57AE_A111_0FF0_0001);
+        let (mut huffman, mut arithmetic, mut whole_images) = (0usize, 0usize, 0usize);
+        for _ in 0..600 {
+            let recipe = streams::random_recipe(&mut noise);
+            let bytes = streams::stream(&recipe, &mut noise);
+            let mut kept = Kept::default();
+            let Ok(frame) = decode_strips(&bytes, CEILING, &mut kept) else {
+                continue;
+            };
+            let h_max = usize::from(recipe.sampling.iter().map(|s| s.0).max().unwrap_or(1));
+            let v_max = recipe.v_max();
+            let mcus_x = usize::from(recipe.width).div_ceil(8 * h_max);
+            let mcus_y = usize::from(recipe.height).div_ceil(8 * v_max);
+            let row: usize = recipe
+                .sampling
+                .iter()
+                .map(|&(h, v)| mcus_x * usize::from(h) * usize::from(v) * 64 * 2)
+                .sum();
+            let streams = recipe.sequential()
+                && recipe.scans == streams::Scans::Interleaved
+                && recipe.divides();
+            if streams {
+                assert_eq!(
+                    frame.held.coefficients, row,
+                    "{recipe:?}: one MCU row of coefficients"
+                );
+                if recipe.frame == 0xC9 {
+                    arithmetic += 1;
+                } else {
+                    huffman += 1;
+                }
+            } else {
+                assert_eq!(
+                    frame.held.coefficients,
+                    row * mcus_y,
+                    "{recipe:?}: the whole image's coefficients"
+                );
+                whole_images += 1;
+            }
+        }
+        assert!(huffman > 60, "{huffman} Huffman frames streamed");
+        assert!(arithmetic > 20, "{arithmetic} arithmetic frames streamed");
+        assert!(
+            whole_images > 60,
+            "{whole_images} frames kept the whole image"
+        );
     }
 }
