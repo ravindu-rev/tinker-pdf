@@ -264,11 +264,17 @@ the flag nowhere, and both places default to true.
 ## Verified
 
 Published vectors are merge gates, in-module in `tinker-pdf-crypto`:
-FIPS 197 appendix C known-answer blocks and NIST SP 800-38A F.2 CBC
-vectors (`aes.rs`), FIPS 180-4 examples for SHA-256/384/512 and **NIST CAVP's
-byte-oriented SHAVS files** for SHA-224, SHA-512/224 and SHA-512/256 — every
-short message length, the long messages and the Monte Carlo chain, from the
-committed `tests/data/cavp/sha*.rsp` (`sha2.rs`), the two SHA-512/t initial
+FIPS 197 appendix C known-answer blocks, NIST SP 800-38A F.2 CBC vectors and
+**NIST CAVP's AESAVS files** for CBC under 128- and 256-bit keys — the GFSbox,
+KeySbox, VarKey and VarTxt known answers, the multi-block messages and the
+Monte Carlo test's chained checkpoints, every record of both sections in both
+directions, from the committed `tests/data/cavp/aes_cbc_*.rsp`
+(`aesavs_known_answer_and_cbc_vectors_pass` in `aes.rs`) — FIPS 180-4 examples
+for SHA-256/384/512 and **NIST CAVP's byte-oriented SHAVS files** for SHA-224,
+SHA-256, SHA-512/224 and SHA-512/256 — every short message length, the long
+messages and the Monte Carlo chain, from the committed
+`tests/data/cavp/sha*.rsp`, SHA-256's messages also fed in pieces around a
+block (`sha2.rs`), the two SHA-512/t initial
 values recomputed by FIPS 180-4 5.3.6's IV generation function beside them —
 and for SHA-1 including the million-`a` vector (`sha1.rs`), RFC 6229
 keystream vectors (`rc4.rs`), the complete RFC 1321 appendix A.5 suite

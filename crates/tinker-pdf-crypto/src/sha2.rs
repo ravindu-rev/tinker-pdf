@@ -737,6 +737,63 @@ mod tests {
         assert_eq!(run_monte_carlo(monte, hash), 100, "Monte Carlo checkpoints");
     }
 
+    /// The `MD` lines a SHAVS file holds, counted from its lines alone, so
+    /// that a parser that matched nothing cannot agree with it.
+    fn digests_held(source: &str) -> usize {
+        source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("MD = "))
+            .count()
+    }
+
+    /// **NIST CAVP's byte-oriented SHA-256 files pass** (P-13.2): every
+    /// message length from 0 to 64 bytes, 64 long messages of many blocks,
+    /// and the Monte Carlo chain of a hundred thousand digests, each run
+    /// counted against the digests its file holds and the published
+    /// inventory. Each message also goes through [`Sha256::update`] in pieces
+    /// of every size around a block — one byte, a block less one, a block, a
+    /// block and one, two blocks and seven, its whole — so that the buffered
+    /// path meets a published answer and not only the one-shot one.
+    #[test]
+    fn shavs_sha256_vectors_pass() {
+        let hash = |data: &[u8]| sha256(data).to_vec();
+        let short = include_str!("../tests/data/cavp/sha256_short_msg.rsp");
+        let long = include_str!("../tests/data/cavp/sha256_long_msg.rsp");
+        let monte = include_str!("../tests/data/cavp/sha256_monte.rsp");
+        assert_eq!(run_messages(short, hash), 65, "short messages");
+        assert_eq!(digests_held(short), 65, "the short file's digests");
+        assert_eq!(run_messages(long, hash), 64, "long messages");
+        assert_eq!(digests_held(long), 64, "the long file's digests");
+        assert_eq!(run_monte_carlo(monte, hash), 100, "Monte Carlo checkpoints");
+        assert_eq!(
+            digests_held(monte),
+            100,
+            "the Monte Carlo file's checkpoints"
+        );
+
+        let mut pieces = 0usize;
+        for (message, digest) in messages(short).into_iter().chain(messages(long)) {
+            for size in [1usize, 63, 64, 65, 135, message.len().max(1)] {
+                let mut state = Sha256::new();
+                for piece in message.chunks(size) {
+                    state.update(piece);
+                }
+                assert_eq!(
+                    hex(&state.finish()),
+                    digest,
+                    "{} bytes in pieces of {size}",
+                    message.len()
+                );
+                pieces += 1;
+            }
+        }
+        assert_eq!(
+            pieces,
+            (65 + 64) * 6,
+            "every message in every size of piece"
+        );
+    }
+
     /// The same three files for SHA-512/224: messages of 0 to 128 bytes, 128
     /// long ones, and the chain.
     #[test]

@@ -445,6 +445,330 @@ mod tests {
         }
     }
 
+    /// A field of an AESAVS file, hex to bytes, refusing anything else: a
+    /// vector that does not parse is a failure, never a skipped one.
+    fn field(value: &str) -> Vec<u8> {
+        let digits = value.trim();
+        assert!(
+            digits.len() % 2 == 0,
+            "an even count of hex digits: {digits}"
+        );
+        (0..digits.len() / 2)
+            .map(|at| {
+                let pair = digits.get(2 * at..2 * at + 2).expect("a pair of digits");
+                u8::from_str_radix(pair, 16).expect("a hex byte")
+            })
+            .collect()
+    }
+
+    /// One record of an AESAVS response file: its section and its fields.
+    struct Record {
+        encrypt: bool,
+        count: usize,
+        key: Vec<u8>,
+        iv: [u8; 16],
+        plaintext: Vec<u8>,
+        ciphertext: Vec<u8>,
+    }
+
+    /// Every record of an AESAVS response file, in the file's order. Lines of
+    /// the header and the file's own comments start with `#` and are passed
+    /// over; a record is its `COUNT` and the fields after it.
+    fn records(source: &str) -> Vec<Record> {
+        let mut out: Vec<Record> = Vec::new();
+        let mut encrypt = None;
+        for line in source.lines().map(str::trim) {
+            if line.starts_with('#') {
+                continue;
+            }
+            match line {
+                "[ENCRYPT]" => encrypt = Some(true),
+                "[DECRYPT]" => encrypt = Some(false),
+                _ => {}
+            }
+            let Some((name, value)) = line.split_once(" = ") else {
+                continue;
+            };
+            if name == "COUNT" {
+                out.push(Record {
+                    encrypt: encrypt.expect("every record is in a section"),
+                    count: value.trim().parse().expect("a count"),
+                    key: Vec::new(),
+                    iv: [0; 16],
+                    plaintext: Vec::new(),
+                    ciphertext: Vec::new(),
+                });
+                continue;
+            }
+            let record = out.last_mut().expect("every field follows its COUNT");
+            match name {
+                "KEY" => record.key = field(value),
+                "IV" => record.iv = field(value).try_into().expect("a 16-byte IV"),
+                "PLAINTEXT" => record.plaintext = field(value),
+                "CIPHERTEXT" => record.ciphertext = field(value),
+                other => panic!("an AESAVS field this test does not know: {other}"),
+            }
+        }
+        out
+    }
+
+    /// The records a file holds in each section, counted from its lines
+    /// alone, so that a parser that matched nothing cannot agree with it.
+    fn held(source: &str) -> (usize, usize) {
+        let (mut encrypt, mut decrypt, mut section) = (0, 0, None);
+        for line in source.lines().map(str::trim) {
+            match line {
+                "[ENCRYPT]" => section = Some(true),
+                "[DECRYPT]" => section = Some(false),
+                _ if line.starts_with("COUNT = ") => match section {
+                    Some(true) => encrypt += 1,
+                    Some(false) => decrypt += 1,
+                    None => panic!("a COUNT outside a section"),
+                },
+                _ => {}
+            }
+        }
+        (encrypt, decrypt)
+    }
+
+    /// A known-answer or multi-block message file: each record's plaintext
+    /// encrypts to its ciphertext and its ciphertext decrypts to its
+    /// plaintext, CBC with the record's IV and no padding, whichever section
+    /// it is in; an encryption record's ciphertext is also what the
+    /// IV-prefixed encryption writes after the IV, before the block of
+    /// padding a whole number of blocks gains. Returns the records each
+    /// section ran.
+    fn run_messages(name: &str, source: &str) -> (usize, usize) {
+        let (mut encrypt, mut decrypt) = (0, 0);
+        for record in records(source) {
+            let label = format!(
+                "{name}, {} record {}",
+                if record.encrypt { "encrypt" } else { "decrypt" },
+                record.count
+            );
+            assert_eq!(record.plaintext.len(), record.ciphertext.len(), "{label}");
+            assert!(
+                !record.plaintext.is_empty() && record.plaintext.len() % 16 == 0,
+                "{label}: whole blocks"
+            );
+            let sealed = cbc_encrypt_no_padding(&record.key, &record.iv, &record.plaintext)
+                .expect("the record's key expands");
+            assert_eq!(hex(&sealed), hex(&record.ciphertext), "{label}: encrypt");
+            let opened = cbc_decrypt_no_padding(&record.key, &record.iv, &record.ciphertext)
+                .expect("the record's key expands");
+            assert_eq!(hex(&opened), hex(&record.plaintext), "{label}: decrypt");
+            if record.encrypt {
+                let prefixed =
+                    cbc_encrypt_with_iv_prefix(&record.key, &record.iv, &record.plaintext)
+                        .expect("the record's key expands");
+                let length = record.ciphertext.len();
+                assert_eq!(prefixed.len(), 16 + length + 16, "{label}: prefixed length");
+                assert_eq!(prefixed.get(..16), Some(&record.iv[..]), "{label}: the IV");
+                assert_eq!(
+                    prefixed.get(16..16 + length),
+                    Some(&record.ciphertext[..]),
+                    "{label}: prefixed"
+                );
+                encrypt += 1;
+            } else {
+                decrypt += 1;
+            }
+        }
+        (encrypt, decrypt)
+    }
+
+    /// One block through an expanded key, forward.
+    fn forward(aes: &Aes, block: [u8; 16]) -> [u8; 16] {
+        let mut block = block;
+        aes.encrypt_block(&mut block);
+        block
+    }
+
+    /// One block through an expanded key, back.
+    fn backward(aes: &Aes, inverse: &[u8; 256], block: [u8; 16]) -> [u8; 16] {
+        let mut block = block;
+        aes.decrypt_block(&mut block, inverse);
+        block
+    }
+
+    fn xor16(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
+        let mut out = a;
+        for (byte, other) in out.iter_mut().zip(b) {
+            *byte ^= other;
+        }
+        out
+    }
+
+    /// AESAVS 6.4.2's Monte Carlo test for CBC, both sections of a file.
+    ///
+    /// From each section's first record, a text is a thousand blocks under
+    /// one key in one CBC chain from the text's IV, the first block the
+    /// record's input and each later one the IV (the second) or the output
+    /// two blocks back (every other); the record's output is the thousandth.
+    /// The next record's key is this one's XORed with the last output (a
+    /// 128-bit key) or the last two (a 256-bit key), its IV the last output
+    /// and its input the one before. Decryption is the same with the roles
+    /// of plaintext and ciphertext exchanged (6.4). Every record's key, IV
+    /// and input are held to the chain's and its output to the chain's, so
+    /// one wrong block fails the record it lands in. Returns the records
+    /// each section ran.
+    fn run_monte_carlo(name: &str, source: &str) -> (usize, usize) {
+        let all = records(source);
+        let inverse = inv_sbox();
+        let mut ran = (0, 0);
+        for encrypt in [true, false] {
+            let section: Vec<&Record> = all.iter().filter(|r| r.encrypt == encrypt).collect();
+            let first = section.first().expect("a section of checkpoints");
+            let input_of = |r: &Record| -> [u8; 16] {
+                let bytes = if encrypt { &r.plaintext } else { &r.ciphertext };
+                bytes.as_slice().try_into().expect("one block")
+            };
+            let output_of = |r: &Record| -> [u8; 16] {
+                let bytes = if encrypt { &r.ciphertext } else { &r.plaintext };
+                bytes.as_slice().try_into().expect("one block")
+            };
+            let (mut key, mut iv, mut input) = (first.key.clone(), first.iv, input_of(first));
+            for (at, record) in section.iter().enumerate() {
+                let label = format!(
+                    "{name}, {} checkpoint {at}",
+                    if encrypt { "encrypt" } else { "decrypt" }
+                );
+                assert_eq!(record.count, at, "{label}: in order");
+                assert_eq!(hex(&record.key), hex(&key), "{label}: key");
+                assert_eq!(hex(&record.iv), hex(&iv), "{label}: IV");
+                assert_eq!(hex(&input_of(record)), hex(&input), "{label}: input");
+                let aes = Aes::new(&key).expect("the checkpoint's key expands");
+                let (mut chain, mut block) = (iv, input);
+                let (mut before, mut last) = ([0u8; 16], [0u8; 16]);
+                for step in 0..1000 {
+                    let out = if encrypt {
+                        forward(&aes, xor16(block, chain))
+                    } else {
+                        xor16(backward(&aes, &inverse, block), chain)
+                    };
+                    let next = if step == 0 { iv } else { last };
+                    before = last;
+                    last = out;
+                    chain = if encrypt { out } else { block };
+                    block = next;
+                }
+                assert_eq!(hex(&last), hex(&output_of(record)), "{label}: output");
+                match key.len() {
+                    16 => {
+                        for (byte, out) in key.iter_mut().zip(last) {
+                            *byte ^= out;
+                        }
+                    }
+                    32 => {
+                        for (byte, out) in key.iter_mut().zip(before.iter().chain(&last)) {
+                            *byte ^= out;
+                        }
+                    }
+                    other => panic!("{label}: a {other}-byte key"),
+                }
+                iv = last;
+                input = before;
+                if encrypt {
+                    ran.0 += 1;
+                } else {
+                    ran.1 += 1;
+                }
+            }
+        }
+        ran
+    }
+
+    /// **NIST CAVP's AESAVS files for CBC under 128- and 256-bit keys pass**
+    /// (P-13.2): the four known-answer tests (GFSbox, KeySbox, VarKey,
+    /// VarTxt; AESAVS 6.2), the multi-block messages of one to ten blocks
+    /// (6.3) and the Monte Carlo test's hundred checkpoints of a thousand
+    /// chained blocks (6.4.2), each file's encrypt and decrypt sections both.
+    /// Every record runs, the count each section ran is the count its lines
+    /// hold, and both are the files' published inventory. Read through
+    /// `include_str!`, so a missing file fails the build rather than skips.
+    #[test]
+    fn aesavs_known_answer_and_cbc_vectors_pass() {
+        let messages: [(&str, &str, usize); 10] = [
+            (
+                "CBCGFSbox128",
+                include_str!("../tests/data/cavp/aes_cbc_gfsbox128.rsp"),
+                7,
+            ),
+            (
+                "CBCGFSbox256",
+                include_str!("../tests/data/cavp/aes_cbc_gfsbox256.rsp"),
+                5,
+            ),
+            (
+                "CBCKeySbox128",
+                include_str!("../tests/data/cavp/aes_cbc_keysbox128.rsp"),
+                21,
+            ),
+            (
+                "CBCKeySbox256",
+                include_str!("../tests/data/cavp/aes_cbc_keysbox256.rsp"),
+                16,
+            ),
+            (
+                "CBCVarKey128",
+                include_str!("../tests/data/cavp/aes_cbc_varkey128.rsp"),
+                128,
+            ),
+            (
+                "CBCVarKey256",
+                include_str!("../tests/data/cavp/aes_cbc_varkey256.rsp"),
+                256,
+            ),
+            (
+                "CBCVarTxt128",
+                include_str!("../tests/data/cavp/aes_cbc_vartxt128.rsp"),
+                128,
+            ),
+            (
+                "CBCVarTxt256",
+                include_str!("../tests/data/cavp/aes_cbc_vartxt256.rsp"),
+                128,
+            ),
+            (
+                "CBCMMT128",
+                include_str!("../tests/data/cavp/aes_cbc_mmt128.rsp"),
+                10,
+            ),
+            (
+                "CBCMMT256",
+                include_str!("../tests/data/cavp/aes_cbc_mmt256.rsp"),
+                10,
+            ),
+        ];
+        let mut total = 0;
+        for (name, source, each) in messages {
+            let ran = run_messages(name, source);
+            assert_eq!(ran, held(source), "{name}: every record its lines hold");
+            assert_eq!(ran, (each, each), "{name}: the published inventory");
+            total += ran.0 + ran.1;
+        }
+        assert_eq!(
+            total,
+            2 * (7 + 5 + 21 + 16 + 128 + 256 + 128 + 128) + 4 * 10
+        );
+
+        let monte_carlo = [
+            (
+                "CBCMCT128",
+                include_str!("../tests/data/cavp/aes_cbc_mct128.rsp"),
+            ),
+            (
+                "CBCMCT256",
+                include_str!("../tests/data/cavp/aes_cbc_mct256.rsp"),
+            ),
+        ];
+        for (name, source) in monte_carlo {
+            let ran = run_monte_carlo(name, source);
+            assert_eq!(ran, held(source), "{name}: every checkpoint its lines hold");
+            assert_eq!(ran, (100, 100), "{name}: the published inventory");
+        }
+    }
+
     #[test]
     fn damage_returns_notes_not_panics() {
         let key = [1u8; 16];
