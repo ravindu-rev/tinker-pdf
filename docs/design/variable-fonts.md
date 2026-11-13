@@ -383,15 +383,31 @@ back to that is not a different face.
 **CFF2 to CFF** (FT-05.11). Each glyph's charstring is re-encoded as Type 2:
 its blends resolved, its subroutines inlined — a CFF2 subroutine blends under
 its caller's `vsindex`, so one subroutine can blend two ways for two glyphs —
-its width written first against `nominalWidthX`, `endchar` added, and each
-operator whose operands pass Type 2's 48 split where its operands repeat, as
-the overview's paragraph on converting CFF2 charstrings asks; stems and masks
-are kept for FT-04c. Each Private DICT is written with its blended values.
-The CFF is **CID-keyed**, ROS `Adobe-Identity-0` with each CID its glyph id,
+its width written first against a `nominalWidthX` of zero where the width is
+not zero, `endchar` added, and each operator whose operands pass Type 2's 48
+split where its operands repeat, as the overview's paragraph on converting
+CFF2 charstrings asks; stems and masks are kept for FT-04c. The machine
+records each operator it runs with the operands on its stack, and each is
+written with the operands it consumed: a stem operator its pairs, its
+continuation's first edge restated from zero because each stem operator's
+edges are relative from zero; an implicit `hintmask` stem's overflow as
+`vstemhm` before it; an alternating line or curve operator's continuation as
+the other operator where the piece starts on the other axis; `hhcurveto`'s and
+`vvcurveto`'s odd first operand in the first piece and `hvcurveto`'s fifth in
+the last; `rcurveline`'s and `rlinecurve`'s overflow as `rrcurveto` and
+`rlineto` before them. Each Private DICT is written with its blended values,
+the operators a CFF Private DICT shares with a CFF2 one, and no `Subrs`. The
+CFF is **CID-keyed**, ROS `Adobe-Identity-0` with each CID its glyph id,
 when the CFF2 has more than one Font DICT or `post` names no glyphs; with one
-Font DICT and `post` version 2 names it is **name-keyed**, its charset those
-names — the overview's rule. `cff_subset.rs`'s INDEX and DICT writers are
-reused.
+Font DICT and `post` names every glyph apart it is **name-keyed**, its charset
+those names — the overview's rule. `cff_subset.rs`'s INDEX and DICT writers are
+reused, and the CFF is read back through `Cff` before it is returned, every
+glyph held to the outline the CFF2 draws at the instance and to its width; a
+CFF2 face's top side bearings are measured from its `VORG` origin as `VVAR`
+moves it, or from the origin the default instance gives it. More than 256
+Font DICTs, which a CFF's FDSelect cannot name, more than 65 535 glyphs, an
+operand no Type 2 charstring carries, and a CFF that does not read back are
+refused by name.
 
 ### Who asks for an instance
 

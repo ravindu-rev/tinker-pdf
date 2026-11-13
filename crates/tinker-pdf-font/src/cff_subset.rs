@@ -106,7 +106,7 @@ const MAX_STATES: usize = 1 << 20;
 
 /// Wraps `items` as a CFF INDEX, with the narrowest offsets that reach the
 /// end of the data.
-fn write_index(items: &[Vec<u8>]) -> Option<Vec<u8>> {
+pub(crate) fn write_index(items: &[Vec<u8>]) -> Option<Vec<u8>> {
     // A CFF INDEX states its count in two bytes, and an empty one is those
     // two bytes and nothing else.
     let count = u16::try_from(items.len()).ok()?;
@@ -149,7 +149,7 @@ fn write_index(items: &[Vec<u8>]) -> Option<Vec<u8>> {
 /// five and push the INDEX two bytes further along, which moves it again.
 /// Five bytes always means the DICT written with zeroes is exactly as long as
 /// the DICT written with the answer, so one measuring pass settles the layout.
-fn dict_int(value: i32) -> [u8; 5] {
+pub(crate) fn dict_int(value: i32) -> [u8; 5] {
     let b = value.to_be_bytes();
     [29, b[0], b[1], b[2], b[3]]
 }
@@ -200,7 +200,7 @@ fn dict_real(value: f64) -> Vec<u8> {
 }
 
 /// One DICT operand, integral where it can be and real where it cannot.
-fn dict_operand(value: f64) -> Vec<u8> {
+pub(crate) fn dict_operand(value: f64) -> Vec<u8> {
     if !value.is_finite() {
         // The reader turns an unparsable real into zero; writing one back is
         // the only value that does not invent something.
@@ -213,7 +213,7 @@ fn dict_operand(value: f64) -> Vec<u8> {
 }
 
 /// A DICT operator, one byte or two.
-fn dict_op(op: u16) -> Vec<u8> {
+pub(crate) fn dict_op(op: u16) -> Vec<u8> {
     if op > 0xFF {
         vec![12, (op & 0xFF) as u8]
     } else {
@@ -228,7 +228,7 @@ fn dict_op(op: u16) -> Vec<u8> {
 /// bounded by the 65 535 an INDEX can hold, less a bias of at most 32 768, so
 /// it always fits — and the 16.16 fixed form would make a *fraction* of a
 /// subroutine number, which is not a thing.
-fn charstring_int(value: i32) -> Option<Vec<u8>> {
+pub(crate) fn charstring_int(value: i32) -> Option<Vec<u8>> {
     match value {
         -107..=107 => Some(vec![(value + 139) as u8]),
         108..=1131 => {

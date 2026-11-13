@@ -825,12 +825,41 @@ checksum. `fvar`, `avar`, `gvar`, `cvar`, `HVAR`, `VVAR`, `MVAR`, `STAT`,
 `DSIG`, `hdmx` and `VDMX` are dropped (`instance::DROPPED`); every other
 table — `cmap`, `name`, `fpgm`, `GSUB`, `GPOS` and `GDEF` with their
 variation data unapplied, and tables this reader does not know — is copied as
-it is. A face that does not vary is returned as it is. Refused by name
-(`InstanceError`): bytes that are no sfnt, a named instance the face does not
-have, a variation table or one glyph's variation data a reader refuses, a
-missing `head` or `maxp`, a point, a difference between two points, an
-offset or a box the instance would move past sixteen bits, and outlines in
-`CFF2`, which this instancer does not convert.
+it is. A face that does not vary is returned as it is.
+
+A face whose outlines are in `CFF2` becomes a face with a `CFF ` table. Each
+glyph's charstring is re-encoded as Type 2 at the instance
+(`Cff2::type2_charstring`): run through the one machine with every operator
+recorded, its blends resolved and its subroutines inlined — a CFF2
+subroutine blends under its caller's `vsindex` — each operator written with
+the operands the machine consumed, split where they pass the 48 a Type 2
+stack holds at a point where they repeat (a stem operator's continuation
+restating its first edge from zero, an implicit `hintmask` stem's overflow
+written as `vstemhm` before it, an alternating curve or line operator's
+continuation taking the other operator where its axis turns), the width
+first against a `nominalWidthX` of zero where it is not zero, and `endchar`
+added; stems, hint masks and counter masks are kept with their blended
+values for FT-04c. The CFF is name-keyed where the face has one Font DICT
+and `post` names every glyph apart, its charset those names, and CID-keyed
+otherwise, ROS `Adobe-Identity-0` with each glyph's CID its index and a
+format 3 FDSelect; each Private DICT carries its blended values — the zones,
+standard stems, snaps, blue scale, shift and fuzz, language group and
+expansion factor — and no `Subrs`; `cff_subset.rs`'s INDEX and DICT writers
+write it, and it is read back through `Cff` before it is returned, every
+glyph held to the outline `Cff2` draws at the instance, its width and its
+matrix. Each advance is `HVAR`'s, each left side bearing the glyph's tight
+`xMin`, each top side bearing measured from its `VORG` origin as `VVAR` moves
+it, or from the origin the default instance gives it where the face has no
+`VORG`. `Cff::charstring` gives a glyph's Type 2 bytes, and
+`Sfnt::post_names` every glyph's `post` name.
+
+Refused by name (`InstanceError`): bytes that are no sfnt, a named instance
+the face does not have, a variation table or one glyph's variation data a
+reader refuses, a missing `head` or `maxp`, a point, a difference between two
+points, an offset or a box the instance would move past sixteen bits; and for
+a CFF2 face a `CFF2` table or a glyph's charstring `Cff2` refuses, an
+operand no Type 2 charstring carries, more than 256 Font DICTs or 65 535
+glyphs, and a CFF that does not read back to the instance.
 
 **The committed variable faces.** `crates/tinker-pdf-font/tests/variable/`
 holds two faces this repository wrote and no outside program made, so that a
@@ -2017,6 +2046,22 @@ corpora already vendored here. So every name stays on the list.
   moved past a byte written in words; unknown tables copied and the dropped
   ones gone; every refusal by name; and every prefix and changed byte of the
   committed face instanced or refused without a panic.
+- `crates/tinker-pdf-font/tests/variations.rs`'s CFF2 instances: the committed
+  CFF2 face at every named instance, at the default and at coordinates no
+  instance names re-read as CFF to the outlines `Cff2::outline_at` draws
+  there, its widths, `hmtx` advances, tight side bearings, font box and every
+  `MVAR` metric as the variable face gives them rounded; CFF2 become `CFF `
+  and no variation table left; CID-keyed with ROS `Adobe-Identity-0`, each
+  CID its glyph, and each Font DICT's Private DICT its blended values, read
+  by a DICT reader written in the test; the stems, hint mask and counter mask
+  each glyph states, with the values blended in the test, and no call, blend
+  or `vsindex` left; a face of one Font DICT naming its glyphs written
+  name-keyed and one whose `post` names none or names two alike CID-keyed;
+  no operator past 48 operands, over the committed face and a glyph of every
+  operator that can pass them, each still drawing what the CFF2 draws; the
+  default instance drawing the default outlines; `subset_cff` and `subset`
+  cutting the instance like any CFF; every refusal by name; and every prefix
+  and changed byte of the face instanced or refused without a panic.
 - `crates/tinker-pdf-font/tests/colour_tables.rs` — the colour tables over
   bytes the test writes from the OpenType chapters' layouts: COLR version 0's
   layers bottom first with each palette's colours, a slice two glyphs share,

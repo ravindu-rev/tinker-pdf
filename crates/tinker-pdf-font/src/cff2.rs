@@ -20,6 +20,12 @@
 //! caller selects glyphs through the face's `cmap`, or by CID as the glyph
 //! index.
 //!
+//! **At an instance, as Type 2.** A static instance re-encodes each glyph's
+//! charstring through the same machine, recording every operator it runs
+//! with its blends resolved, and writes the record as a Type 2 charstring
+//! within that format's 48 operands (`docs/design/variable-fonts.md`,
+//! 'CFF2 to CFF'); [`crate::instance`] wraps the charstrings in a CFF.
+//!
 //! **Every bound refuses by name** ([`Cff2Error`]), where CFF's reader stops
 //! silently: an INDEX past 65 536 entries before its offsets are read, a
 //! stack past 513, a `blend` short of its operands, subroutines nested past
@@ -30,9 +36,10 @@
 use std::collections::BTreeMap;
 
 use crate::cff::{
-    bias, dict_get, dict_token, Blend, Charstring, DictToken, Flavour, Index, IndexRefusal,
-    Machine, Private, Stop, Subroutines, CFF2_MAX_OPERANDS,
+    bias, dict_get, dict_token, Blend, Charstring, Command, DictToken, Flavour, Index,
+    IndexRefusal, Machine, Private, Stop, Subroutines, CFF2_MAX_OPERANDS,
 };
+use crate::cff_subset::charstring_int;
 use crate::outline::Outline;
 use crate::variation::item_store::ItemVariationStore;
 use crate::variation::{DesignSpace, Location, VariationError};
@@ -757,6 +764,289 @@ impl<'a> Cff2<'a> {
             scalars,
         };
         read_dict(dict, Some(blend)).map_err(Cff2Error::from)
+    }
+}
+
+/// The operands a Type 2 charstring's stack holds (Type 2 charstring
+/// specification, appendix B), the width among them where it is written.
+const TYPE2_OPERANDS: usize = 48;
+
+/// Why one glyph's charstring was not written as Type 2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Type2Error {
+    /// The CFF2 charstring is refused.
+    Charstring(Cff2Error),
+    /// An operand no Type 2 charstring carries: a whole number past sixteen
+    /// bits, or a fraction past the 16.16 form's range.
+    Operand,
+}
+
+impl Cff2<'_> {
+    /// One glyph's charstring at the instance `blends` were computed for,
+    /// written as a Type 2 charstring (the overview, 'Dynamic Generation of
+    /// Static Instance Fonts'): its blends resolved and its subroutines
+    /// inlined, since a CFF2 subroutine blends under its caller's `vsindex`;
+    /// `width`, where it is given, written first against a `nominalWidthX`
+    /// of zero; every operator the machine ran, `blend` and `vsindex` gone,
+    /// with the operands it consumed — a stem operator its pairs, a drawing
+    /// operator its whole groups — and each split where its operands pass the
+    /// 48 a Type 2 stack holds, where they repeat, so that the pieces run as
+    /// the whole did; and `endchar`. Stems, hint masks and counter masks are
+    /// kept as the charstring states them, with their blended values.
+    pub(crate) fn type2_charstring(
+        &self,
+        glyph: u16,
+        blends: &Blends,
+        width: Option<f64>,
+    ) -> Result<Vec<u8>, Type2Error> {
+        let private = self.private_for(glyph).map_err(Type2Error::Charstring)?;
+        let charstring = self
+            .charstrings
+            .get(usize::from(glyph))
+            .ok_or(Type2Error::Charstring(Cff2Error::NoSuchGlyph { glyph }))?;
+        let mut stack = Vec::with_capacity(CFF2_MAX_OPERANDS);
+        let mut commands = Vec::new();
+        let blend = Blend {
+            region_counts: &self.region_counts,
+            scalars: Some(&blends.per_data),
+        };
+        let stop = {
+            let mut ctx = Charstring::new(
+                Flavour::Cff2,
+                Subroutines {
+                    global: &self.global_subrs,
+                    global_bias: self.global_bias,
+                    private,
+                },
+                None,
+                &mut stack,
+                Some(blend),
+            )
+            .recording(&mut commands);
+            ctx.run_glyph(charstring)
+        };
+        if let Some(stop) = stop {
+            return Err(Type2Error::Charstring(stop.into()));
+        }
+        let mut encoder = Type2 {
+            out: Vec::new(),
+            width,
+        };
+        for command in &commands {
+            encoder.command(command).ok_or(Type2Error::Operand)?;
+        }
+        encoder.finish().ok_or(Type2Error::Operand)
+    }
+}
+
+/// A Type 2 charstring being written, and the width its first width-taking
+/// operator still owes.
+struct Type2 {
+    out: Vec<u8>,
+    width: Option<f64>,
+}
+
+impl Type2 {
+    /// One number as a Type 2 operand: a whole one in its narrowest form,
+    /// anything else as a 16.16 number; `None` past what either holds.
+    fn operand(&mut self, value: f64) -> Option<()> {
+        if value.fract() == 0.0 && (-32_768.0..=32_767.0).contains(&value) {
+            // Integral and inside sixteen bits, so the cast is exact.
+            self.out.extend(charstring_int(value as i32)?);
+            return Some(());
+        }
+        let scaled = value * 65_536.0;
+        if scaled.fract() != 0.0 || !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&scaled) {
+            return None;
+        }
+        self.out.push(255);
+        // Integral and inside 32 bits.
+        self.out.extend_from_slice(&(scaled as i32).to_be_bytes());
+        Some(())
+    }
+
+    /// How many operands the next operator may carry: 48, less one where it
+    /// takes a width still owed.
+    fn room(&self, takes_width: bool) -> usize {
+        if takes_width && self.width.is_some() {
+            TYPE2_OPERANDS - 1
+        } else {
+            TYPE2_OPERANDS
+        }
+    }
+
+    /// Writes one operator and its operands, the width first where the
+    /// operator is the first to take one.
+    fn emit(&mut self, operands: &[f64], op: u16, takes_width: bool) -> Option<()> {
+        if takes_width {
+            if let Some(width) = self.width.take() {
+                self.operand(width)?;
+            }
+        }
+        for value in operands {
+            self.operand(*value)?;
+        }
+        if op > 0xFF {
+            self.out.push(12);
+            self.out.push((op & 0xFF) as u8);
+        } else {
+            self.out.push(op as u8);
+        }
+        Some(())
+    }
+
+    /// Stem pairs, split where they pass the stack: each operator's values
+    /// are relative from zero, so a continuation's first value is the edge
+    /// the pairs before it reached. The last piece is written as `last`, and
+    /// the ones before it as `rest`.
+    fn stems(&mut self, values: &[f64], rest: u16, last: u16) -> Option<()> {
+        if values.is_empty() {
+            return self.emit(&[], last, true);
+        }
+        let mut at = 0;
+        let mut position = 0.0;
+        while at < values.len() {
+            let room = self.room(true) / 2 * 2;
+            let end = (at + room).min(values.len());
+            let mut piece = values[at..end].to_vec();
+            piece[0] += position;
+            position += values[at..end].iter().sum::<f64>();
+            let op = if end == values.len() { last } else { rest };
+            self.emit(&piece, op, true)?;
+            at = end;
+        }
+        Some(())
+    }
+
+    /// Operands in groups of `group`, split into pieces of whole groups that
+    /// fit the stack, each written as `op_at(first operand's index)`.
+    fn groups(&mut self, values: &[f64], group: usize, op_at: impl Fn(usize) -> u16) -> Option<()> {
+        let room = TYPE2_OPERANDS / group * group;
+        let mut at = 0;
+        while at < values.len() {
+            let end = (at + room).min(values.len());
+            self.emit(&values[at..end], op_at(at), false)?;
+            at = end;
+        }
+        Some(())
+    }
+
+    /// One command, its operands as the machine consumed them.
+    fn command(&mut self, command: &Command) -> Option<()> {
+        let args = command.operands.as_slice();
+        let n = args.len();
+        let arg = |i: usize| args.get(i).copied().unwrap_or(0.0);
+        match command.op {
+            // hstem, vstem, hstemhm, vstemhm: every whole pair.
+            op @ (1 | 3 | 18 | 23) => self.stems(&args[..n / 2 * 2], op, op),
+            // hintmask, cntrmask: an implicit vstem of every whole pair, its
+            // overflow written as vstemhm before it, then the mask.
+            op @ (19 | 20) => {
+                self.stems(&args[..n / 2 * 2], 23, op)?;
+                self.out.extend_from_slice(&command.mask);
+                Some(())
+            }
+            // rmoveto, hmoveto, vmoveto: exactly the operands they read.
+            21 => self.emit(&[arg(0), arg(1)], 21, true),
+            op @ (4 | 22) => self.emit(&[arg(0)], op, true),
+            // rlineto: whole pairs.
+            5 => self.groups(&args[..n / 2 * 2], 2, |_| 5),
+            // hlineto, vlineto: every operand, alternating axes, so a piece
+            // starting at an odd operand starts on the other axis.
+            op @ (6 | 7) => {
+                let other = if op == 6 { 7 } else { 6 };
+                self.groups(args, 1, |at| if at % 2 == 0 { op } else { other })
+            }
+            // rrcurveto: whole curves.
+            8 => self.groups(&args[..n / 6 * 6], 6, |_| 8),
+            // hhcurveto, vvcurveto: an odd operand out is the first curve's
+            // dy1 or dx1, which only the first piece carries.
+            op @ (26 | 27) => {
+                let (first, curves) = if n % 4 == 1 {
+                    (Some(args[0]), &args[1..])
+                } else {
+                    (None, &args[..n / 4 * 4])
+                };
+                let Some(first) = first else {
+                    return self.groups(curves, 4, |_| op);
+                };
+                let lead = ((TYPE2_OPERANDS - 1) / 4 * 4).min(curves.len());
+                let mut piece = vec![first];
+                piece.extend_from_slice(&curves[..lead]);
+                self.emit(&piece, op, false)?;
+                self.groups(&curves[lead..], 4, |_| op)
+            }
+            // hvcurveto, vhcurveto: groups of four alternating their first
+            // axis, the last group's fifth operand its extra, which only the
+            // last piece carries.
+            op @ (30 | 31) => {
+                let other = if op == 30 { 31 } else { 30 };
+                let curves = n / 4;
+                if curves == 0 {
+                    return Some(());
+                }
+                let extra = (n % 4 == 1).then(|| args[curves * 4]);
+                let mut at = 0;
+                while at < curves {
+                    let mut take = (curves - at).min(TYPE2_OPERANDS / 4);
+                    let last = at + take == curves;
+                    if last && extra.is_some() && take * 4 + 1 > TYPE2_OPERANDS {
+                        take -= 1;
+                    }
+                    let mut piece = args[at * 4..(at + take) * 4].to_vec();
+                    if at + take == curves {
+                        if let Some(extra) = extra {
+                            piece.push(extra);
+                        }
+                    }
+                    self.emit(&piece, if at % 2 == 0 { op } else { other }, false)?;
+                    at += take;
+                }
+                Some(())
+            }
+            // rcurveline: whole curves, then a line; the curves past what one
+            // operator holds written as rrcurveto before it.
+            24 => {
+                if n < 2 {
+                    return Some(());
+                }
+                let curves = (n - 2) / 6;
+                let keep = curves.min((TYPE2_OPERANDS - 2) / 6);
+                self.groups(&args[..(curves - keep) * 6], 6, |_| 8)?;
+                let start = (curves - keep) * 6;
+                self.emit(&args[start..curves * 6 + 2], 24, false)
+            }
+            // rlinecurve: whole lines, then a curve; the lines past what one
+            // operator holds written as rlineto before it.
+            25 => {
+                if n < 6 {
+                    return Some(());
+                }
+                let lines = (n - 6) / 2;
+                let keep = lines.min((TYPE2_OPERANDS - 6) / 2);
+                self.groups(&args[..(lines - keep) * 2], 2, |_| 5)?;
+                let start = (lines - keep) * 2;
+                self.emit(&args[start..lines * 2 + 6], 25, false)
+            }
+            // flex, hflex, hflex1, flex1: the operands each reads; flex's
+            // depth with them where the charstring gave it.
+            0x0C23 if n >= 12 => self.emit(&args[..n.min(13)], 0x0C23, false),
+            0x0C22 if n >= 7 => self.emit(&args[..7], 0x0C22, false),
+            0x0C24 if n >= 9 => self.emit(&args[..9], 0x0C24, false),
+            0x0C25 if n >= 11 => self.emit(&args[..11], 0x0C25, false),
+            // A flex too short to draw draws nothing, and nor does anything
+            // else the machine noted.
+            _ => Some(()),
+        }
+    }
+
+    /// `endchar`, with the width where no operator before it took one.
+    fn finish(mut self) -> Option<Vec<u8>> {
+        if let Some(width) = self.width.take() {
+            self.operand(width)?;
+        }
+        self.out.push(14);
+        Some(self.out)
     }
 }
 

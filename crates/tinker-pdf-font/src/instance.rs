@@ -35,9 +35,21 @@
 //!   the instance's normalised coordinates, with `maxp`'s
 //!   `maxInstructionDefs` and `maxStackElements` raised to cover it, as the
 //!   *TrueType Instruction Set*'s notes on the instruction ask of an instance.
+//! - **`CFF2` becomes `CFF `**: each glyph's charstring re-encoded as Type 2
+//!   at the instance by `Cff2::type2_charstring` — blends resolved,
+//!   subroutines inlined, its width first, `endchar` added and every
+//!   operator kept within Type 2's 48 operands, stems and masks kept — under
+//!   a CFF that is name-keyed where the face has one Font DICT and `post`
+//!   names every glyph apart, its charset those names, and CID-keyed with ROS
+//!   `Adobe-Identity-0` and each glyph's CID its index otherwise (the
+//!   overview's rule), each Private DICT written with its blended values. The
+//!   CFF is read back before it is returned, every glyph held to the outline
+//!   `Cff2` draws at the instance and to its width.
 //! - **`head`**: the glyphs' union as the font box, `indexToLocFormat` the new
 //!   `loca`'s, and `checkSumAdjustment` rewritten with every directory
-//!   checksum; **`VORG`** its origins as `VVAR` moves them.
+//!   checksum; **`VORG`** its origins as `VVAR` moves them, and a CFF2 face's
+//!   top side bearings measured from them, or from the origin the default
+//!   instance has where there is no `VORG`.
 //! - **Dropped**: `fvar`, `avar`, `gvar`, `cvar`, `HVAR`, `VVAR`, `MVAR`,
 //!   `STAT`; `DSIG`, which signs bytes that changed; `hdmx` and `VDMX`, which
 //!   describe no instance.
@@ -51,7 +63,11 @@
 //! A table a reader refuses refuses the instance, by name ([`InstanceError`]):
 //! a writer has no default to fall back to that is not a different face.
 
+use crate::cff::{Cff, Machine, STANDARD_STRINGS};
+use crate::cff2::{Blends, Cff2, Cff2Error, Type2Error};
+use crate::cff_subset::{dict_int, dict_op, dict_operand, write_index};
 use crate::glyf::{self, Component};
+use crate::outline::{Outline, Segment};
 use crate::sfnt::Sfnt;
 use crate::subset::assemble;
 use crate::variation::cvar::cvt_at;
@@ -75,6 +91,8 @@ const TAG_FPGM: Tag = *b"fpgm";
 const TAG_PREP: Tag = *b"prep";
 const TAG_VORG: Tag = *b"VORG";
 const TAG_CFF2: Tag = *b"CFF2";
+const TAG_CFF: Tag = *b"CFF ";
+const TAG_NAME: Tag = *b"name";
 
 /// The tables a static instance does not carry: the variation tables, `STAT`,
 /// which names styles for a menu, `DSIG`, which signs bytes that changed, and
@@ -130,9 +148,39 @@ pub enum InstanceError {
         /// The glyph.
         glyph: u16,
     },
-    /// The face's outlines are in `CFF2`, whose static instance is a `CFF `
-    /// face this instancer does not write.
-    Cff2Outlines,
+    /// The `CFF2` table is refused, or its variation store's axes are not
+    /// the design space's.
+    Cff2(Cff2Error),
+    /// One glyph's CFF2 charstring is refused.
+    Cff2Glyph {
+        /// The glyph.
+        glyph: u16,
+        /// Why.
+        error: Cff2Error,
+    },
+    /// A glyph's charstring at the instance carries an operand no Type 2
+    /// charstring can: a whole number past sixteen bits, or a value past the
+    /// 16.16 form's range.
+    CharstringOperand {
+        /// The glyph.
+        glyph: u16,
+    },
+    /// More Font DICTs than a CFF's FDSelect, a byte a glyph, can name.
+    TooManyFontDicts {
+        /// How many the `CFF2` table holds.
+        count: usize,
+    },
+    /// More glyphs than a CFF INDEX, counting in sixteen bits, holds.
+    TooManyGlyphs {
+        /// How many the `CFF2` table holds.
+        count: usize,
+    },
+    /// The `CFF ` table written for the instance does not read back to the
+    /// outline or the width the `CFF2` gives a glyph there.
+    CffRereading {
+        /// The glyph.
+        glyph: u16,
+    },
 }
 
 impl core::fmt::Display for InstanceError {
@@ -152,9 +200,25 @@ impl core::fmt::Display for InstanceError {
                 f,
                 "glyph {glyph} at the instance has a coordinate past sixteen bits"
             ),
-            InstanceError::Cff2Outlines => write!(
+            InstanceError::Cff2(error) => write!(f, "the CFF2 table: {error}"),
+            InstanceError::Cff2Glyph { glyph, error } => {
+                write!(f, "glyph {glyph}'s CFF2 charstring: {error}")
+            }
+            InstanceError::CharstringOperand { glyph } => write!(
                 f,
-                "the face's outlines are CFF2, which this instancer does not convert"
+                "glyph {glyph} at the instance has an operand no Type 2 charstring carries"
+            ),
+            InstanceError::TooManyFontDicts { count } => write!(
+                f,
+                "the CFF2 table has {count} Font DICTs, more than a CFF's 256"
+            ),
+            InstanceError::TooManyGlyphs { count } => write!(
+                f,
+                "the CFF2 table has {count} glyphs, more than a CFF INDEX holds"
+            ),
+            InstanceError::CffRereading { glyph } => write!(
+                f,
+                "the instance's CFF does not draw glyph {glyph} as the CFF2 does"
             ),
         }
     }
@@ -214,27 +278,50 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
         return Ok(program.to_vec());
     }
     let user = space.user_coordinates(instance)?;
-    let has_glyf = sfnt.table(tag_value(TAG_GLYF)).is_some();
-    if !has_glyf && sfnt.table(tag_value(TAG_CFF2)).is_some() {
-        return Err(InstanceError::Cff2Outlines);
-    }
-
     let tables = Tables::read(&sfnt, &space)?;
     let glyph_count = sfnt
         .glyph_count()
         .ok_or(InstanceError::MissingTable { table: TAG_MAXP })?;
 
-    let glyphs = if has_glyf {
-        Some(GlyfInstance::read(
+    // The outlines at the location: `glyf`'s, or `CFF2`'s.
+    let outlines = if sfnt.table(tag_value(TAG_GLYF)).is_some() {
+        Outlines::Glyf(GlyfInstance::read(
             &sfnt,
             tables.gvar.as_ref(),
             &location,
             glyph_count,
         )?)
+    } else if let Some(table) = sfnt.table(tag_value(TAG_CFF2)) {
+        Outlines::Cff2(Cff2Instance::read(table, &space, &location, glyph_count)?)
     } else {
-        None
+        Outlines::None
     };
-    let metrics = Metrics::read(&sfnt, &tables, glyphs.as_ref(), &location, glyph_count)?;
+    let gvar = tables.gvar.as_ref();
+    let vvar_scalars = tables.vvar.as_ref().map(|vvar| vvar.scalars(&location));
+    // Where each glyph's vertical origin stands at the location: the third
+    // phantom point of a glyph `gvar` moves, and for a CFF2 face its `VORG`
+    // origin as `VVAR` moves it, or the default instance's origin.
+    let vertical_origin = |glyph: u16| -> Result<Option<i64>, InstanceError> {
+        match &outlines {
+            Outlines::Glyf(_) if gvar.is_some() => {
+                let p = glyf::phantom_points_at(&sfnt, glyph, gvar, &location)
+                    .map_err(|error| InstanceError::Glyph { glyph, error })?;
+                Ok(Some(p[2][1].round()))
+            }
+            Outlines::Cff2(cff2) => {
+                cff2.vertical_origin(&sfnt, &tables, vvar_scalars.as_deref(), glyph)
+            }
+            _ => Ok(None),
+        }
+    };
+    let metrics = Metrics::read(
+        &sfnt,
+        &tables,
+        outlines.boxes(glyph_count),
+        &vertical_origin,
+        &location,
+        glyph_count,
+    )?;
 
     let mut out: Vec<(u32, Vec<u8>)> = Vec::new();
     let replaced = |tag: Tag| -> bool {
@@ -255,8 +342,9 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
                     | b"prep"
                     | b"maxp"
                     | b"VORG"
+                    | b"CFF2"
             )
-            || (has_glyf && tag == TAG_CFF2)
+            || (matches!(outlines, Outlines::Cff2(_)) && tag == TAG_CFF)
     };
     for (tag, data) in sfnt_tables(&sfnt) {
         if !replaced(tag) {
@@ -273,13 +361,23 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
     put32(&mut head, 8, 0); // checkSumAdjustment, which `assemble` fills in
     let mut hinted =
         sfnt.table(tag_value(TAG_FPGM)).is_some() || sfnt.table(tag_value(TAG_PREP)).is_some();
-    if let Some(glyphs) = &glyphs {
-        hinted |= glyphs.instructed;
-        let (glyf, loca, long) = glyphs.encode();
-        out.push((tag_value(TAG_GLYF), glyf));
-        out.push((tag_value(TAG_LOCA), loca));
-        put16(&mut head, 50, u16::from(long));
-        if let Some(union) = glyphs.union() {
+    let union = union_of(&outlines.boxes(glyph_count));
+    match &outlines {
+        Outlines::Glyf(glyphs) => {
+            hinted |= glyphs.instructed;
+            let (glyf, loca, long) = glyphs.encode();
+            out.push((tag_value(TAG_GLYF), glyf));
+            out.push((tag_value(TAG_LOCA), loca));
+            put16(&mut head, 50, u16::from(long));
+        }
+        Outlines::Cff2(cff2) => {
+            let cff = cff2.write(&sfnt, &space, instance, &metrics.widths(), union)?;
+            out.push((tag_value(TAG_CFF), cff));
+        }
+        Outlines::None => {}
+    }
+    if !matches!(outlines, Outlines::None) {
+        if let Some(union) = union {
             for (i, value) in union.iter().enumerate() {
                 put16(&mut head, 36 + i * 2, *value as u16);
             }
@@ -288,7 +386,7 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
     out.push((tag_value(TAG_HEAD), head));
 
     // hmtx and hhea, vmtx and vhea.
-    metrics.write(&sfnt, &tables, &location, &mut out);
+    metrics.write(&sfnt, &tables, &location, &mut out)?;
 
     // OS/2, post and gasp: MVAR's values and the axes' own fields.
     let axis_value = |tag: Tag| -> Option<Fixed> {
@@ -298,7 +396,7 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
     };
     if let Some(os2) = sfnt.table(tag_value(TAG_OS2)) {
         let mut os2 = os2.to_vec();
-        tables.vary_fields(&sfnt, TAG_OS2, &location, &mut os2);
+        tables.vary_fields(&sfnt, TAG_OS2, &location, &mut os2)?;
         if let Some(weight) = axis_value(*b"wght") {
             put16(&mut os2, 4, clamp_u16(weight.round()).clamp(1, 1_000));
         }
@@ -314,7 +412,7 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
     }
     if let Some(post) = sfnt.table(tag_value(TAG_POST)) {
         let mut post = post.to_vec();
-        tables.vary_fields(&sfnt, TAG_POST, &location, &mut post);
+        tables.vary_fields(&sfnt, TAG_POST, &location, &mut post)?;
         if let Some(slant) = axis_value(*b"slnt") {
             // A 16.16 Fixed both ways, so the axis value is the angle exactly.
             put32(
@@ -327,7 +425,7 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
     }
     if let Some(gasp) = sfnt.table(tag_value(TAG_GASP)) {
         let mut gasp = gasp.to_vec();
-        tables.vary_fields(&sfnt, TAG_GASP, &location, &mut gasp);
+        tables.vary_fields(&sfnt, TAG_GASP, &location, &mut gasp)?;
         out.push((tag_value(TAG_GASP), gasp));
     }
 
@@ -440,9 +538,19 @@ impl<'a> Tables<'a> {
     /// its default plus its delta, rounded and held to its field's range;
     /// `gasp`'s last range, which is 0xFFFF whatever a record says, is left
     /// alone.
-    fn vary_fields(&self, sfnt: &Sfnt, table: Tag, location: &Location, data: &mut [u8]) {
+    ///
+    /// # Errors
+    ///
+    /// The store's refusals for the index a record names.
+    fn vary_fields(
+        &self,
+        sfnt: &Sfnt,
+        table: Tag,
+        location: &Location,
+        data: &mut [u8],
+    ) -> Result<(), InstanceError> {
         let Some(mvar) = &self.mvar else {
-            return;
+            return Ok(());
         };
         let scalars = mvar.scalars(location);
         let ranges = if table == TAG_GASP {
@@ -454,9 +562,9 @@ impl<'a> Tables<'a> {
             if table == TAG_GASP && (field.offset - 4) / 4 + 1 >= ranges {
                 continue;
             }
-            let (Some(default), Ok(Some(delta))) = (
+            let (Some(default), Some(delta)) = (
                 metric_default(sfnt, field.tag),
-                mvar.delta(field.tag, &scalars),
+                mvar.delta(field.tag, &scalars)?,
             ) else {
                 continue;
             };
@@ -468,6 +576,7 @@ impl<'a> Tables<'a> {
             };
             put16(data, field.offset, bits);
         }
+        Ok(())
     }
 
     /// `VORG` with its origins as `VVAR` moves them, where `VVAR` maps
@@ -710,20 +819,6 @@ impl GlyfInstance {
             }
             _ => {}
         }
-    }
-
-    /// The union of every glyph's box, or `None` where no glyph draws.
-    fn union(&self) -> Option<[i16; 4]> {
-        let drawn: Vec<&[i16; 4]> = self.boxes.iter().flatten().collect();
-        if drawn.is_empty() {
-            return None;
-        }
-        Some([
-            drawn.iter().map(|b| b[0]).min().unwrap_or(0),
-            drawn.iter().map(|b| b[1]).min().unwrap_or(0),
-            drawn.iter().map(|b| b[2]).max().unwrap_or(0),
-            drawn.iter().map(|b| b[3]).max().unwrap_or(0),
-        ])
     }
 
     /// `glyf` and `loca`, and whether `loca` is the long form: short where
@@ -1044,14 +1139,11 @@ impl Metrics {
     fn read(
         sfnt: &Sfnt,
         tables: &Tables,
-        glyphs: Option<&GlyfInstance>,
+        boxes: Vec<Option<[i16; 4]>>,
+        vertical_origin: &dyn Fn(u16) -> Result<Option<i64>, InstanceError>,
         location: &Location,
         count: u16,
     ) -> Result<Metrics, InstanceError> {
-        let boxes: Vec<Option<[i16; 4]>> = match glyphs {
-            Some(glyphs) => glyphs.boxes.clone(),
-            None => vec![None; usize::from(count)],
-        };
         let gvar = tables.gvar.as_ref();
         let has = |tag: Tag| sfnt.table(tag_value(tag)).is_some();
         let phantoms = |glyph: u16| -> Result<[[Fixed; 2]; 4], InstanceError> {
@@ -1104,16 +1196,16 @@ impl Metrics {
                     (_, _, Some(p)) => p[2][1].saturating_sub(p[3][1]),
                     _ => Fixed::from_int(i32::from(sfnt.vertical_advance(glyph).unwrap_or(0))),
                 };
-                // The vertical origin is the third phantom point, which
-                // `gvar` moves; a face whose outlines do not vary keeps its
-                // own.
+                // Each top side bearing is measured from the glyph's vertical
+                // origin at the location down to its top; a face whose
+                // origins do not move keeps its own bearings.
                 let top = boxes
                     .get(usize::from(glyph))
                     .copied()
                     .flatten()
                     .map_or(0, |b| i64::from(b[3]));
-                let tsb = match &p {
-                    Some(p) => clamp_i16(p[2][1].round() - top),
+                let tsb = match vertical_origin(glyph)? {
+                    Some(origin) => clamp_i16(origin - top),
                     None => sfnt.top_side_bearing(glyph).unwrap_or(0),
                 };
                 out.push((clamp_u16(height.round()), tsb));
@@ -1126,6 +1218,17 @@ impl Metrics {
             horizontal,
             vertical,
             boxes,
+        })
+    }
+
+    /// Each glyph's width as a CFF charstring states it: its advance, or
+    /// `None` for an advance of zero, which is the default width.
+    fn widths(&self) -> Vec<Option<f64>> {
+        self.horizontal.as_ref().map_or_else(Vec::new, |metrics| {
+            metrics
+                .iter()
+                .map(|(advance, _)| (*advance != 0).then(|| f64::from(*advance)))
+                .collect()
         })
     }
 
@@ -1146,13 +1249,17 @@ impl Metrics {
 
     /// Writes `hmtx` and `hhea`, and `vmtx` and `vhea`, where the face has
     /// them.
+    ///
+    /// # Errors
+    ///
+    /// `MVAR`'s refusals for the fields the headers carry.
     fn write(
         &self,
         sfnt: &Sfnt,
         tables: &Tables,
         location: &Location,
         out: &mut Vec<(u32, Vec<u8>)>,
-    ) {
+    ) -> Result<(), InstanceError> {
         let pairs = [
             (TAG_HHEA, TAG_HMTX, &self.horizontal, 0usize),
             (TAG_VHEA, TAG_VMTX, &self.vertical, 1usize),
@@ -1186,7 +1293,7 @@ impl Metrics {
                 table.extend_from_slice(&bearing.to_be_bytes());
             }
             let mut header = header.to_vec();
-            tables.vary_fields(sfnt, header_tag, location, &mut header);
+            tables.vary_fields(sfnt, header_tag, location, &mut header)?;
             // The extents are over the glyphs with contours, as both
             // chapters define them.
             let drawn: Vec<(usize, [i16; 4])> = self
@@ -1236,5 +1343,638 @@ impl Metrics {
             out.push((tag_value(header_tag), header));
             out.push((tag_value(table_tag), table));
         }
+        Ok(())
+    }
+}
+
+/// The instance's outlines: `glyf`'s, `CFF2`'s, or none — a face whose
+/// outlines are in a table that does not vary, copied as it is.
+enum Outlines<'a> {
+    Glyf(GlyfInstance),
+    Cff2(Cff2Instance<'a>),
+    None,
+}
+
+impl Outlines<'_> {
+    /// Each glyph's box at the location, `None` for one that draws nothing,
+    /// one a glyph of `maxp`'s count.
+    fn boxes(&self, count: u16) -> Vec<Option<[i16; 4]>> {
+        let mut out = match self {
+            Outlines::Glyf(glyphs) => glyphs.boxes.clone(),
+            Outlines::Cff2(cff2) => cff2.boxes.clone(),
+            Outlines::None => Vec::new(),
+        };
+        out.resize(usize::from(count), None);
+        out
+    }
+}
+
+/// The union of every box, or `None` where no glyph draws.
+fn union_of(boxes: &[Option<[i16; 4]>]) -> Option<[i16; 4]> {
+    let drawn: Vec<&[i16; 4]> = boxes.iter().flatten().collect();
+    if drawn.is_empty() {
+        return None;
+    }
+    Some([
+        drawn.iter().map(|b| b[0]).min().unwrap_or(0),
+        drawn.iter().map(|b| b[1]).min().unwrap_or(0),
+        drawn.iter().map(|b| b[2]).max().unwrap_or(0),
+        drawn.iter().map(|b| b[3]).max().unwrap_or(0),
+    ])
+}
+
+/// A box in `f64` widened to hold one point more.
+fn include(bounds: &mut Option<[f64; 4]>, x: f64, y: f64) {
+    *bounds = Some(match *bounds {
+        None => [x, y, x, y],
+        Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
+    });
+}
+
+/// Where a quadratic's coordinate turns, as `t` in (0, 1), if it does.
+fn quadratic_turn(p0: f64, c: f64, p1: f64) -> Option<f64> {
+    let denominator = p0 - 2.0 * c + p1;
+    if denominator == 0.0 {
+        return None;
+    }
+    let t = (p0 - c) / denominator;
+    (t > 0.0 && t < 1.0).then_some(t)
+}
+
+/// Where a cubic's coordinate turns, as up to two `t` in (0, 1): the roots
+/// of its derivative, `a t² + b t + c` over the control polygon.
+fn cubic_turns(p0: f64, p1: f64, p2: f64, p3: f64) -> [Option<f64>; 2] {
+    let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+    let b = 2.0 * (p0 - 2.0 * p1 + p2);
+    let c = p1 - p0;
+    let inside = |t: f64| (t > 0.0 && t < 1.0).then_some(t);
+    if a == 0.0 {
+        if b == 0.0 {
+            return [None, None];
+        }
+        return [inside(-c / b), None];
+    }
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return [None, None];
+    }
+    // `sqrt` is correctly rounded on every target (ruling 4).
+    let root = discriminant.sqrt();
+    [
+        inside((-b + root) / (2.0 * a)),
+        inside((-b - root) / (2.0 * a)),
+    ]
+}
+
+/// An outline's tight box — its curves' turning points, not their control
+/// points — as a CFF face's metrics measure it; `None` for an outline that
+/// draws nothing.
+fn outline_box(outline: &Outline) -> Option<[f64; 4]> {
+    let mut bounds = None;
+    let mut current = (0.0, 0.0);
+    let mut start: Option<(f64, f64)> = None;
+    for segment in &outline.segments {
+        // A contour's start counts once the contour draws.
+        let mut drawing = |bounds: &mut Option<[f64; 4]>| {
+            if let Some((x, y)) = start.take() {
+                include(bounds, x, y);
+            }
+        };
+        match *segment {
+            Segment::MoveTo { x, y } => {
+                current = (x, y);
+                start = Some((x, y));
+            }
+            Segment::LineTo { x, y } => {
+                drawing(&mut bounds);
+                include(&mut bounds, x, y);
+                current = (x, y);
+            }
+            Segment::QuadTo { cx, cy, x, y } => {
+                drawing(&mut bounds);
+                let (x0, y0) = current;
+                let at = |t: f64, a: f64, c: f64, b: f64| {
+                    (1.0 - t) * (1.0 - t) * a + 2.0 * (1.0 - t) * t * c + t * t * b
+                };
+                if let Some(t) = quadratic_turn(x0, cx, x) {
+                    include(&mut bounds, at(t, x0, cx, x), at(t, y0, cy, y));
+                }
+                if let Some(t) = quadratic_turn(y0, cy, y) {
+                    include(&mut bounds, at(t, x0, cx, x), at(t, y0, cy, y));
+                }
+                include(&mut bounds, x, y);
+                current = (x, y);
+            }
+            Segment::CurveTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                drawing(&mut bounds);
+                let (x0, y0) = current;
+                let at = |t: f64, a: f64, b: f64, c: f64, d: f64| {
+                    let s = 1.0 - t;
+                    s * s * s * a + 3.0 * s * s * t * b + 3.0 * s * t * t * c + t * t * t * d
+                };
+                for t in cubic_turns(x0, c1x, c2x, x)
+                    .into_iter()
+                    .chain(cubic_turns(y0, c1y, c2y, y))
+                    .flatten()
+                {
+                    include(&mut bounds, at(t, x0, c1x, c2x, x), at(t, y0, c1y, c2y, y));
+                }
+                include(&mut bounds, x, y);
+                current = (x, y);
+            }
+            Segment::Close => {}
+        }
+    }
+    bounds
+}
+
+/// A box floored and ceiled to font units, held to sixteen bits.
+fn whole_box(bounds: [f64; 4], glyph: u16) -> Result<[i16; 4], InstanceError> {
+    let edge = |value: f64| -> Result<i16, InstanceError> {
+        if (f64::from(i16::MIN)..=f64::from(i16::MAX)).contains(&value) {
+            // Inside the range and integral, so the cast is exact.
+            Ok(value as i16)
+        } else {
+            Err(InstanceError::CoordinateRange { glyph })
+        }
+    };
+    Ok([
+        edge(bounds[0].floor())?,
+        edge(bounds[1].floor())?,
+        edge(bounds[2].ceil())?,
+        edge(bounds[3].ceil())?,
+    ])
+}
+
+/// The Private DICT operators a CFF carries that a CFF2 Private DICT can:
+/// the alignment zones, the standard stems, the snaps, the blue scale, shift
+/// and fuzz, and the language group and expansion factor.
+const PRIVATE_OPERATORS: &[u16] = &[
+    6, 7, 8, 9, 10, 11, 0x0C09, 0x0C0A, 0x0C0B, 0x0C0C, 0x0C0D, 0x0C11, 0x0C12,
+];
+
+/// A CFF Private DICT of blended entries: the operators both formats share,
+/// with no `Subrs` — the charstrings call none — and no `vsindex`.
+fn private_dict(entries: &[(u16, Vec<f64>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (op, operands) in entries {
+        if !PRIVATE_OPERATORS.contains(op) {
+            continue;
+        }
+        for value in operands {
+            out.extend(dict_operand(*value));
+        }
+        out.extend(dict_op(*op));
+    }
+    out
+}
+
+/// A `name` table string by name ID: a Windows or Unicode record's
+/// UTF-16BE, or a Macintosh Roman one's ASCII.
+fn name_string(sfnt: &Sfnt, id: u16) -> Option<String> {
+    let name = sfnt.table(tag_value(TAG_NAME))?;
+    let count = usize::from(be16(name, 2)?);
+    let storage = usize::from(be16(name, 4)?);
+    let mut fallback = None;
+    for record in 0..count {
+        let at = 6 + record * 12;
+        let (platform, encoding) = (be16(name, at)?, be16(name, at + 2)?);
+        if be16(name, at + 6)? != id {
+            continue;
+        }
+        let length = usize::from(be16(name, at + 8)?);
+        let offset = usize::from(be16(name, at + 10)?);
+        let Some(bytes) = name.get(storage + offset..storage + offset + length) else {
+            continue;
+        };
+        if platform == 3 || platform == 0 {
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+                .collect();
+            if let Ok(text) = String::from_utf16(&units) {
+                return Some(text);
+            }
+        } else if platform == 1 && encoding == 0 && bytes.is_ascii() {
+            fallback = core::str::from_utf8(bytes).ok().map(str::to_string);
+        }
+    }
+    fallback
+}
+
+/// The instance's PostScript name for its CFF's Name INDEX: a named
+/// instance's own where `fvar` gives it one, else the face's name ID 6, kept
+/// to the characters a PostScript name may hold and to 63 of them.
+fn font_name(sfnt: &Sfnt, space: &DesignSpace, instance: &Instance) -> Vec<u8> {
+    let named = match instance {
+        Instance::Named(index) => space
+            .instances()
+            .get(usize::from(*index))
+            .and_then(|named| named.postscript_name_id)
+            .filter(|id| *id != 0xFFFF),
+        Instance::User(_) => None,
+    };
+    let text = named
+        .and_then(|id| name_string(sfnt, id))
+        .or_else(|| name_string(sfnt, 6))
+        .unwrap_or_default();
+    let name: Vec<u8> = text
+        .bytes()
+        .filter(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        .take(63)
+        .collect();
+    if name.is_empty() {
+        b"Instance".to_vec()
+    } else {
+        name
+    }
+}
+
+/// What a CFF table for an instance is made of.
+struct CffParts<'p> {
+    name: Vec<u8>,
+    charstrings: Vec<Vec<u8>>,
+    /// One Private DICT a Font DICT.
+    privates: Vec<Vec<u8>>,
+    /// Each glyph's Font DICT.
+    fd_select: Vec<u8>,
+    /// Each glyph's name, for a name-keyed CFF; `None` for a CID-keyed one.
+    names: Option<Vec<&'p str>>,
+    bbox: [i16; 4],
+    matrix: [f64; 6],
+}
+
+/// The default `FontMatrix`, which a Top DICT need not state.
+const DEFAULT_MATRIX: [f64; 6] = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
+
+/// A CFF table (Adobe Technical Note 5176): a four-byte header, the Name,
+/// Top DICT, String and Global Subr INDEXes, the charset, FDSelect for a
+/// CID-keyed font, the CharStrings INDEX, the Private DICTs and the FDArray
+/// — every offset in the Top DICT a five-byte integer, so the DICT's length
+/// is known before the offsets in it are. `None` past what an INDEX holds.
+fn cff_table(parts: &CffParts) -> Option<Vec<u8>> {
+    let count = parts.charstrings.len();
+    let cid = parts.names.is_none();
+    let mut strings: Vec<Vec<u8>> = Vec::new();
+    let charset: Vec<u8> = match &parts.names {
+        None => {
+            // ROS's registry and ordering are the first strings, SIDs 391
+            // and 392; every glyph after `.notdef` is the CID its index is,
+            // one range.
+            strings.push(b"Adobe".to_vec());
+            strings.push(b"Identity".to_vec());
+            if count >= 2 {
+                let left = u16::try_from(count - 2).ok()?;
+                let mut out = vec![2, 0, 1];
+                out.extend_from_slice(&left.to_be_bytes());
+                out
+            } else {
+                vec![0]
+            }
+        }
+        Some(names) => {
+            let mut out = vec![0];
+            for name in names.iter().skip(1) {
+                let sid = match STANDARD_STRINGS.iter().position(|s| s == name) {
+                    Some(sid) => sid,
+                    None => {
+                        let own = match strings.iter().position(|s| s == name.as_bytes()) {
+                            Some(at) => at,
+                            None => {
+                                strings.push(name.as_bytes().to_vec());
+                                strings.len() - 1
+                            }
+                        };
+                        STANDARD_STRINGS.len() + own
+                    }
+                };
+                out.extend_from_slice(&u16::try_from(sid).ok()?.to_be_bytes());
+            }
+            out
+        }
+    };
+    let fd_select: Option<Vec<u8>> = if cid {
+        // Format 3: a range wherever the Font DICT changes, then the
+        // sentinel.
+        let mut ranges: Vec<(u16, u8)> = Vec::new();
+        for (glyph, fd) in parts.fd_select.iter().enumerate() {
+            if ranges.last().map(|r| r.1) != Some(*fd) {
+                ranges.push((u16::try_from(glyph).ok()?, *fd));
+            }
+        }
+        let mut out = vec![3];
+        out.extend_from_slice(&u16::try_from(ranges.len()).ok()?.to_be_bytes());
+        for (first, fd) in ranges {
+            out.extend_from_slice(&first.to_be_bytes());
+            out.push(fd);
+        }
+        out.extend_from_slice(&u16::try_from(count).ok()?.to_be_bytes());
+        Some(out)
+    } else {
+        None
+    };
+
+    let name_index = write_index(&[parts.name.clone()])?;
+    let string_index = write_index(&strings)?;
+    let gsubrs = write_index(&[])?;
+    let charstrings = write_index(&parts.charstrings)?;
+
+    let top = |charset_at: usize,
+               charstrings_at: usize,
+               private: (usize, usize),
+               fd_array_at: usize,
+               fd_select_at: usize|
+     -> Option<Vec<u8>> {
+        let int = |value: usize| -> Option<[u8; 5]> { Some(dict_int(i32::try_from(value).ok()?)) };
+        let mut out = Vec::new();
+        if cid {
+            out.extend(int(391)?);
+            out.extend(int(392)?);
+            out.extend(int(0)?);
+            out.extend(dict_op(0x0C1E)); // ROS
+            out.extend(int(count)?);
+            out.extend(dict_op(0x0C22)); // CIDCount
+        }
+        for value in parts.bbox {
+            out.extend(dict_int(i32::from(value)));
+        }
+        out.push(5); // FontBBox
+        if parts.matrix != DEFAULT_MATRIX {
+            for value in parts.matrix {
+                out.extend(dict_operand(value));
+            }
+            out.extend(dict_op(0x0C07)); // FontMatrix
+        }
+        out.extend(int(charset_at)?);
+        out.push(15); // charset
+        out.extend(int(charstrings_at)?);
+        out.push(17); // CharStrings
+        if cid {
+            out.extend(int(fd_array_at)?);
+            out.extend(dict_op(0x0C24)); // FDArray
+            out.extend(int(fd_select_at)?);
+            out.extend(dict_op(0x0C25)); // FDSelect
+        } else {
+            out.extend(int(private.0)?);
+            out.extend(int(private.1)?);
+            out.push(18); // Private
+        }
+        Some(out)
+    };
+    let top_len = top(0, 0, (0, 0), 0, 0)?.len();
+    let top_index_len = write_index(&[vec![0; top_len]])?.len();
+
+    let mut at = 4 + name_index.len() + top_index_len + string_index.len() + gsubrs.len();
+    let charset_at = at;
+    at += charset.len();
+    let fd_select_at = at;
+    at += fd_select.as_ref().map_or(0, Vec::len);
+    let charstrings_at = at;
+    at += charstrings.len();
+    let mut private_at: Vec<(usize, usize)> = Vec::with_capacity(parts.privates.len());
+    for private in &parts.privates {
+        private_at.push((private.len(), at));
+        at += private.len();
+    }
+    let fd_array_at = at;
+    let fd_array = if cid {
+        let mut dicts = Vec::with_capacity(private_at.len());
+        for (size, offset) in &private_at {
+            let mut dict = Vec::new();
+            dict.extend(dict_int(i32::try_from(*size).ok()?));
+            dict.extend(dict_int(i32::try_from(*offset).ok()?));
+            dict.push(18); // Private
+            dicts.push(dict);
+        }
+        write_index(&dicts)?
+    } else {
+        Vec::new()
+    };
+    let top_dict = top(
+        charset_at,
+        charstrings_at,
+        private_at.first().copied().unwrap_or((0, at)),
+        fd_array_at,
+        fd_select_at,
+    )?;
+    let top_index = write_index(&[top_dict])?;
+    if top_index.len() != top_index_len {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(at + fd_array.len());
+    // Major 1, minor 0, a four-byte header, and offsets of four bytes.
+    out.extend_from_slice(&[1, 0, 4, 4]);
+    out.extend(name_index);
+    out.extend(top_index);
+    out.extend(string_index);
+    out.extend(gsubrs);
+    out.extend(charset);
+    if let Some(fd_select) = fd_select {
+        out.extend(fd_select);
+    }
+    out.extend(charstrings);
+    for private in &parts.privates {
+        out.extend_from_slice(private);
+    }
+    if out.len() != fd_array_at {
+        return None;
+    }
+    out.extend(fd_array);
+    Some(out)
+}
+
+/// A CFF2 face's outlines at the location, read once: each glyph's outline
+/// and box there, and where its vertical origin stands at the default.
+struct Cff2Instance<'a> {
+    cff2: Cff2<'a>,
+    blends: Blends,
+    outlines: Vec<Outline>,
+    /// One a glyph of `maxp`'s count, `None` past the `CFF2`'s glyphs.
+    boxes: Vec<Option<[i16; 4]>>,
+    /// Each glyph's top at the default instance.
+    default_tops: Vec<Option<i64>>,
+}
+
+impl<'a> Cff2Instance<'a> {
+    fn read(
+        table: &'a [u8],
+        space: &DesignSpace,
+        location: &Location,
+        count: u16,
+    ) -> Result<Cff2Instance<'a>, InstanceError> {
+        let cff2 = Cff2::parse(table).map_err(InstanceError::Cff2)?;
+        let blends = cff2
+            .blends_in(space, location)
+            .map_err(InstanceError::Cff2)?;
+        let glyphs = cff2.glyph_count();
+        if glyphs > usize::from(u16::MAX) {
+            return Err(InstanceError::TooManyGlyphs { count: glyphs });
+        }
+        let mut machine = Machine::new();
+        let mut outlines = Vec::with_capacity(glyphs);
+        let mut boxes = Vec::with_capacity(glyphs);
+        let mut default_tops = Vec::with_capacity(glyphs);
+        for index in 0..glyphs {
+            // At most 65 535 glyphs, held above.
+            let glyph = u16::try_from(index).unwrap_or(u16::MAX);
+            let refused = |error: Cff2Error| InstanceError::Cff2Glyph { glyph, error };
+            let mut outline = Outline::default();
+            cff2.outline_with(glyph, &blends, &mut outline, &mut machine)
+                .map_err(refused)?;
+            boxes.push(match outline_box(&outline) {
+                Some(bounds) => Some(whole_box(bounds, glyph)?),
+                None => None,
+            });
+            let default = cff2.outline(glyph).map_err(refused)?;
+            default_tops.push(outline_box(&default).map(|b| b[3].ceil() as i64));
+            outlines.push(outline);
+        }
+        boxes.resize(boxes.len().max(usize::from(count)), None);
+        default_tops.resize(default_tops.len().max(usize::from(count)), None);
+        Ok(Cff2Instance {
+            cff2,
+            blends,
+            outlines,
+            boxes,
+            default_tops,
+        })
+    }
+
+    /// A glyph's vertical origin at the location: its `VORG` origin moved by
+    /// `VVAR` where the face has a `VORG`, and otherwise the origin the
+    /// default instance gives it — its top there plus its top side bearing —
+    /// which the instance keeps; `None` where there is neither.
+    fn vertical_origin(
+        &self,
+        sfnt: &Sfnt,
+        tables: &Tables,
+        scalars: Option<&[Fixed]>,
+        glyph: u16,
+    ) -> Result<Option<i64>, InstanceError> {
+        if let Some(origin) = sfnt.vorg_origin(glyph) {
+            let delta = match (&tables.vvar, scalars) {
+                (Some(vvar), Some(scalars)) => {
+                    vvar.origin_delta(glyph, scalars)?.unwrap_or(Fixed::ZERO)
+                }
+                _ => Fixed::ZERO,
+            };
+            return Ok(Some(
+                Fixed::from_int(i32::from(origin))
+                    .saturating_add(delta)
+                    .round(),
+            ));
+        }
+        let top = self.default_tops.get(usize::from(glyph)).copied().flatten();
+        Ok(match (top, sfnt.top_side_bearing(glyph)) {
+            (Some(top), Some(tsb)) => Some(top + i64::from(tsb)),
+            _ => None,
+        })
+    }
+
+    /// The instance's `CFF ` table: each glyph's charstring at the location
+    /// as Type 2 with its width, each Private DICT blended, name-keyed or
+    /// CID-keyed by the overview's rule — and read back, every glyph held to
+    /// the outline and the width it has here.
+    fn write(
+        &self,
+        sfnt: &Sfnt,
+        space: &DesignSpace,
+        instance: &Instance,
+        widths: &[Option<f64>],
+        union: Option<[i16; 4]>,
+    ) -> Result<Vec<u8>, InstanceError> {
+        let glyphs = self.cff2.glyph_count();
+        let mut charstrings = Vec::with_capacity(glyphs);
+        let mut fd_select = Vec::with_capacity(glyphs);
+        let font_dicts = self.cff2.font_dict_count();
+        if font_dicts > 256 {
+            return Err(InstanceError::TooManyFontDicts { count: font_dicts });
+        }
+        for index in 0..glyphs {
+            // At most 65 535 glyphs, held when the outlines were read.
+            let glyph = u16::try_from(index).unwrap_or(u16::MAX);
+            let width = widths.get(index).copied().flatten();
+            let charstring = self
+                .cff2
+                .type2_charstring(glyph, &self.blends, width)
+                .map_err(|error| match error {
+                    Type2Error::Charstring(error) => InstanceError::Cff2Glyph { glyph, error },
+                    Type2Error::Operand => InstanceError::CharstringOperand { glyph },
+                })?;
+            charstrings.push(charstring);
+            let fd = self
+                .cff2
+                .font_dict_for(glyph)
+                .map_err(|error| InstanceError::Cff2Glyph { glyph, error })?;
+            // At most 256 Font DICTs, held above.
+            fd_select.push(u8::try_from(fd).unwrap_or(u8::MAX));
+        }
+        let mut privates = Vec::with_capacity(font_dicts);
+        for fd in 0..font_dicts {
+            // At most 256.
+            let fd = u16::try_from(fd).unwrap_or(u16::MAX);
+            let entries = self
+                .cff2
+                .private_dict_at(fd, &self.blends)
+                .map_err(InstanceError::Cff2)?;
+            privates.push(private_dict(&entries));
+        }
+        // Name-keyed where one Font DICT and `post` names every glyph apart.
+        let names = if font_dicts == 1 {
+            sfnt.post_names().filter(|names| {
+                names.len() == glyphs
+                    && names
+                        .iter()
+                        .enumerate()
+                        .all(|(i, name)| !names[..i].contains(name))
+            })
+        } else {
+            None
+        };
+        let parts = CffParts {
+            name: font_name(sfnt, space, instance),
+            charstrings,
+            privates,
+            fd_select,
+            names,
+            bbox: union.unwrap_or([0; 4]),
+            matrix: self.cff2.font_matrix(),
+        };
+        let cff = cff_table(&parts).ok_or(InstanceError::TooManyGlyphs { count: glyphs })?;
+        self.verify(&cff, widths)?;
+        Ok(cff)
+    }
+
+    /// The `CFF ` table read back: as many glyphs, each drawing the outline
+    /// the `CFF2` draws at the location, through its own Font DICT's matrix,
+    /// and advancing its width.
+    fn verify(&self, cff: &[u8], widths: &[Option<f64>]) -> Result<(), InstanceError> {
+        let read = Cff::parse(cff).ok_or(InstanceError::CffRereading { glyph: 0 })?;
+        if read.glyph_count() != self.outlines.len() {
+            return Err(InstanceError::CffRereading { glyph: 0 });
+        }
+        let mut machine = Machine::new();
+        let mut outline = Outline::default();
+        for (index, expected) in self.outlines.iter().enumerate() {
+            // At most 65 535 glyphs.
+            let glyph = u16::try_from(index).unwrap_or(u16::MAX);
+            let width = widths.get(index).copied().flatten().unwrap_or(0.0);
+            if !read.outline_into(glyph, &mut outline, &mut machine)
+                || outline.segments != expected.segments
+                || read.advance(glyph) != Some(width)
+                || read.font_matrix_for(glyph) != self.cff2.font_matrix()
+            {
+                return Err(InstanceError::CffRereading { glyph });
+            }
+        }
+        Ok(())
     }
 }

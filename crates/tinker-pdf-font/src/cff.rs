@@ -628,6 +628,13 @@ impl<'a> Cff<'a> {
         Some(u64::from(CHARSTRING_BUDGET - ctx.budget))
     }
 
+    /// A glyph's Type 2 charstring as the CharStrings INDEX holds it, before
+    /// any subroutine it calls is followed.
+    #[must_use]
+    pub fn charstring(&self, glyph: u16) -> Option<&'a [u8]> {
+        self.charstrings.get(usize::from(glyph))
+    }
+
     /// A glyph's advance, when the charstring declares one.
     ///
     /// The width is settled by the first stack-clearing operator and nothing
@@ -1069,7 +1076,7 @@ fn be16(data: &[u8], at: usize) -> Option<u16> {
 /// charset entry and a glyph name. Compiled in rather than generated: 391
 /// fixed strings are not worth a build step, and four kilobytes is not a
 /// number the wasm budget notices.
-const STANDARD_STRINGS: &[&str; 391] = &[
+pub(crate) const STANDARD_STRINGS: &[&str; 391] = &[
     ".notdef",
     "space",
     "exclam",
@@ -2233,6 +2240,19 @@ pub(crate) fn round_to_fixed(value: f64) -> f64 {
     (value * 65_536.0 + 0.5).floor() / 65_536.0
 }
 
+/// One operator a CFF2 charstring ran, as a static instance re-encodes it:
+/// the operator — a two-byte one as `0x0C00` and its second byte — the
+/// operands on the stack when it ran, every `blend` before it resolved, and
+/// a mask operator's mask bytes. Calls, `vsindex`, `blend` and operators
+/// that only clear the stack are not commands: they draw nothing, and the
+/// stack the next command finds says what they left.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Command {
+    pub(crate) op: u16,
+    pub(crate) operands: Vec<f64>,
+    pub(crate) mask: Vec<u8>,
+}
+
 /// The subroutines a charstring calls: the global INDEX and its bias, and
 /// the Private DICT its local ones come from.
 #[derive(Clone, Copy)]
@@ -2345,6 +2365,10 @@ pub(crate) struct Charstring<'a, 'b> {
     /// Flattening (`cff_subset.rs`): where every token the run reads is
     /// written, its calls inlined. `None` for every other run.
     tape: Option<&'b mut Tape>,
+    /// Where each operator the run executes is recorded, for a static
+    /// instance to re-encode; `None` everywhere else, which records nothing
+    /// and changes nothing the machine does.
+    commands: Option<&'b mut Vec<Command>>,
 }
 
 impl<'a, 'b> Charstring<'a, 'b> {
@@ -2380,12 +2404,19 @@ impl<'a, 'b> Charstring<'a, 'b> {
             blended: false,
             stop: None,
             tape: None,
+            commands: None,
         }
     }
 
     /// The same machine, writing every token it reads to `tape`.
     pub(crate) fn taped(mut self, tape: &'b mut Tape) -> Charstring<'a, 'b> {
         self.tape = Some(tape);
+        self
+    }
+
+    /// This machine, recording every operator it runs into `commands`.
+    pub(crate) fn recording(mut self, commands: &'b mut Vec<Command>) -> Charstring<'a, 'b> {
+        self.commands = Some(commands);
         self
     }
 
@@ -2427,6 +2458,17 @@ impl Charstring<'_, '_> {
     /// Records the first bound the run meets, in either flavour.
     fn meet(&mut self, bound: Bound) {
         self.met.get_or_insert(bound);
+    }
+
+    /// Records the operator about to run, with the stack as it finds it.
+    fn note(&mut self, op: u16, mask: &[u8]) {
+        if let Some(commands) = self.commands.as_deref_mut() {
+            commands.push(Command {
+                op,
+                operands: self.stack.to_vec(),
+                mask: mask.to_vec(),
+            });
+        }
     }
 
     /// CFF2's `vsindex`: one operand, the item variation data a later
@@ -2581,6 +2623,12 @@ impl Charstring<'_, '_> {
                 }
             }
 
+            // A recording run notes each stem and drawing operator before it
+            // runs; the mask operators and the flex family note themselves.
+            if self.commands.is_some() && matches!(b, 1 | 3..=8 | 18 | 21..=27 | 30 | 31) {
+                self.note(u16::from(b), &[]);
+            }
+
             match b {
                 // Operands.
                 32..=246 => self.push(f64::from(b) - 139.0),
@@ -2631,6 +2679,11 @@ impl Charstring<'_, '_> {
                 // desynchronizes the whole charstring.
                 19 | 20 => {
                     self.take_width(true);
+                    if self.commands.is_some() {
+                        let length = (self.stems + self.stack.len() / 2).div_ceil(8).max(1);
+                        let mask = code.get(at..at + length).unwrap_or(&[]).to_vec();
+                        self.note(u16::from(b), &mask);
+                    }
                     self.stems += self.stack.len() / 2;
                     self.stack.clear();
                     at += self.stems.div_ceil(8).max(1);
@@ -2834,6 +2887,9 @@ impl Charstring<'_, '_> {
                         return;
                     };
                     at += 1;
+                    if (34..=37).contains(&second) {
+                        self.note(0x0C00 | u16::from(second), &[]);
+                    }
                     self.escaped(second);
                 }
 

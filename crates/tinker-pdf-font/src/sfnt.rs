@@ -557,6 +557,51 @@ impl<'a> Sfnt<'a> {
         }
     }
 
+    /// Every glyph's name as `post` gives it, one a glyph of `maxp`'s count:
+    /// version 1.0's standard Macintosh order, or version 2.0's indices into
+    /// that order and into the table's own strings. `None` for any other
+    /// version, a table cut short, an index naming a string the table does
+    /// not hold, or a name that is not ASCII — a face whose glyphs are not
+    /// all named, which is how a reader choosing between names and CIDs
+    /// needs to know it.
+    #[must_use]
+    pub fn post_names(&self) -> Option<Vec<&'a str>> {
+        let post = self.table(TAG_POST)?;
+        let glyphs = usize::from(self.glyph_count()?);
+        match be32(post, 0)? {
+            0x0001_0000 => {
+                (glyphs <= MAC_STANDARD_NAMES.len()).then(|| MAC_STANDARD_NAMES[..glyphs].to_vec())
+            }
+            0x0002_0000 => {
+                let count = usize::from(be16(post, 32)?);
+                if count < glyphs {
+                    return None;
+                }
+                let strings = 34usize.checked_add(count.checked_mul(2)?)?;
+                let mut own: Vec<&'a str> = Vec::new();
+                let mut at = strings;
+                while let Some(&len) = post.get(at) {
+                    let text = post.get(at + 1..at + 1 + usize::from(len))?;
+                    if !text.is_ascii() {
+                        return None;
+                    }
+                    own.push(core::str::from_utf8(text).ok()?);
+                    at += 1 + usize::from(len);
+                }
+                (0..glyphs)
+                    .map(|glyph| {
+                        let index = usize::from(be16(post, 34 + glyph * 2)?);
+                        match index.checked_sub(MAC_STANDARD_NAMES.len()) {
+                            None => MAC_STANDARD_NAMES.get(index).copied(),
+                            Some(ordinal) => own.get(ordinal).copied(),
+                        }
+                    })
+                    .collect()
+            }
+            _ => None,
+        }
+    }
+
     /// A character's glyph through the face's Unicode subtable alone: (3,10),
     /// else (3,1), else a platform 0 subtable of encoding 0 to 4 or 6, chosen
     /// once and kept. Encoding 5 maps variation sequences rather than

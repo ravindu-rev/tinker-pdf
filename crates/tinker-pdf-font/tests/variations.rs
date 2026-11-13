@@ -25,14 +25,14 @@ use tinker_pdf_font::variation::{
     AxisValueMap, DesignSpace, Fixed, Instance, Location, Tag, UserCoordinate, VariationError,
     MAX_AXES,
 };
-use tinker_pdf_font::{Outline, Segment, Sfnt};
+use tinker_pdf_font::{Cff, Outline, Segment, Sfnt};
 use variable_support::{
-    avar, cff2_index, charstring, composite_glyph, cvar, cvt, dict_entry, f2dot14, fvar,
-    fvar_with_sizes, gasp, glyf_and_loca, glyf_fixture, head, hhea, hvar, identity_map, index_map,
-    ints, item_store, maxp, metrics, mvar, op, os2, pack_deltas, pack_points, post, spec,
-    tuple_store, vhea, vorg, vvar, AxisSpec, Cff2Spec, ComponentSpec, Cs, DataSpec, Face,
-    FdSelectSpec, GlyphPoint, GlyphVariation, InstanceSpec, Points, PrivateSpec, RegionSpec,
-    TupleSpec,
+    avar, cff2_fixture, cff2_index, charstring, composite_glyph, cvar, cvt, dict_entry, f2dot14,
+    fvar, fvar_with_sizes, gasp, glyf_and_loca, glyf_fixture, head, hhea, hvar, identity_map,
+    index_map, ints, item_store, maxp, metrics, mvar, op, os2, pack_deltas, pack_points, post,
+    post_table, spec, tuple_store, vhea, vorg, vvar, AxisSpec, Cff2Spec, ComponentSpec, Cs,
+    DataSpec, Face, FdSelectSpec, GlyphPoint, GlyphVariation, InstanceSpec, Points, PostName,
+    PrivateSpec, RegionSpec, TupleSpec,
 };
 
 // ---- The design space (FT-05.2) --------------------------------------------
@@ -5876,6 +5876,948 @@ fn every_truncation_and_byte_change_of_the_face_is_instanced_or_refused() {
     }
     for at in 0..GLYF_FACE.len() {
         let mut changed = GLYF_FACE.to_vec();
+        changed[at] ^= 0xFF;
+        if let Ok(bytes) = instantiate(&changed, &instances[0]) {
+            assert!(Sfnt::parse(&bytes).is_some(), "byte {at} changed");
+        }
+    }
+}
+
+// ---- The static instancer for CFF2 faces (FT-05.11) ---------------------------
+
+/// The committed CFF2 face (`tests/variable/`, FT-05.8).
+const CFF2_FACE: &[u8] = include_bytes!("variable/variable-cff2.otf");
+
+/// One operator of a Type 2 charstring as the test reads it.
+#[derive(Clone, Debug, PartialEq)]
+struct Type2Op {
+    op: u16,
+    operands: Vec<f64>,
+    mask: Vec<u8>,
+}
+
+/// A Type 2 charstring read operator by operator, from the Type 2
+/// charstring specification's encoding: its width, where the first
+/// width-taking operator carries one operand more than it reads, and its
+/// operators with their operands and mask bytes.
+fn read_type2(code: &[u8]) -> (Option<f64>, Vec<Type2Op>) {
+    let mut stack: Vec<f64> = Vec::new();
+    let mut ops = Vec::new();
+    let mut stems = 0usize;
+    let mut width = None;
+    let mut width_seen = false;
+    let mut at = 0;
+    while at < code.len() {
+        let b = code[at];
+        at += 1;
+        match b {
+            32..=246 => stack.push(f64::from(b) - 139.0),
+            247..=250 => {
+                stack.push((f64::from(b) - 247.0) * 256.0 + f64::from(code[at]) + 108.0);
+                at += 1;
+            }
+            251..=254 => {
+                stack.push(-(f64::from(b) - 251.0) * 256.0 - f64::from(code[at]) - 108.0);
+                at += 1;
+            }
+            28 => {
+                stack.push(f64::from(i16::from_be_bytes([code[at], code[at + 1]])));
+                at += 2;
+            }
+            255 => {
+                let bits = i32::from_be_bytes(code[at..at + 4].try_into().expect("four bytes"));
+                stack.push(f64::from(bits) / 65_536.0);
+                at += 4;
+            }
+            _ => {
+                let op = if b == 12 {
+                    at += 1;
+                    0x0C00 | u16::from(code[at - 1])
+                } else {
+                    u16::from(b)
+                };
+                if !width_seen && matches!(op, 1 | 3 | 4 | 14 | 18 | 19 | 20 | 21 | 22 | 23) {
+                    width_seen = true;
+                    let extra = match op {
+                        1 | 3 | 18 | 23 | 19 | 20 => stack.len() % 2 == 1,
+                        21 => stack.len() > 2,
+                        4 | 22 => stack.len() > 1,
+                        _ => stack.len() == 1 || stack.len() == 5,
+                    };
+                    if extra {
+                        width = Some(stack.remove(0));
+                    }
+                }
+                let mut mask = Vec::new();
+                match op {
+                    1 | 3 | 18 | 23 => stems += stack.len() / 2,
+                    19 | 20 => {
+                        stems += stack.len() / 2;
+                        let length = stems.div_ceil(8).max(1);
+                        mask = code[at..at + length].to_vec();
+                        at += length;
+                    }
+                    _ => {}
+                }
+                ops.push(Type2Op {
+                    op,
+                    operands: std::mem::take(&mut stack),
+                    mask,
+                });
+            }
+        }
+    }
+    (width, ops)
+}
+
+/// A CFF INDEX at `at`, from Technical Note 5176's layout: a 16-bit count,
+/// an offset size, the offsets and the data; and where it ends.
+fn cff_index(data: &[u8], at: usize) -> (Vec<&[u8]>, usize) {
+    let count = usize::from(u16::from_be_bytes([data[at], data[at + 1]]));
+    if count == 0 {
+        return (Vec::new(), at + 2);
+    }
+    let size = usize::from(data[at + 2]);
+    let offset = |i: usize| {
+        let start = at + 3 + i * size;
+        data[start..start + size]
+            .iter()
+            .fold(0usize, |value, byte| (value << 8) | usize::from(*byte))
+    };
+    let base = at + 3 + (count + 1) * size - 1;
+    let items = (0..count)
+        .map(|i| &data[base + offset(i)..base + offset(i + 1)])
+        .collect();
+    (items, base + offset(count))
+}
+
+/// A CFF DICT's entries, from Technical Note 5176's operand encodings —
+/// integers in every form and reals as nibbles — and its operators, a
+/// two-byte one as `0x0C00` and its second byte.
+fn cff_dict(data: &[u8]) -> Vec<(u16, Vec<f64>)> {
+    let mut out = Vec::new();
+    let mut operands = Vec::new();
+    let mut at = 0;
+    while at < data.len() {
+        let b = data[at];
+        at += 1;
+        match b {
+            0..=11 | 13..=21 => out.push((u16::from(b), std::mem::take(&mut operands))),
+            12 => {
+                out.push((0x0C00 | u16::from(data[at]), std::mem::take(&mut operands)));
+                at += 1;
+            }
+            28 => {
+                operands.push(f64::from(i16::from_be_bytes([data[at], data[at + 1]])));
+                at += 2;
+            }
+            29 => {
+                operands.push(f64::from(i32::from_be_bytes(
+                    data[at..at + 4].try_into().expect("four bytes"),
+                )));
+                at += 4;
+            }
+            30 => {
+                let mut text = String::new();
+                'nibbles: while at < data.len() {
+                    let byte = data[at];
+                    at += 1;
+                    for nibble in [byte >> 4, byte & 0x0F] {
+                        match nibble {
+                            0..=9 => text.push(char::from(b'0' + nibble)),
+                            0x0A => text.push('.'),
+                            0x0B => text.push('E'),
+                            0x0C => text.push_str("E-"),
+                            0x0E => text.push('-'),
+                            0x0F => break 'nibbles,
+                            _ => panic!("a reserved nibble"),
+                        }
+                    }
+                }
+                operands.push(text.parse().expect("a real"));
+            }
+            32..=246 => operands.push(f64::from(b) - 139.0),
+            247..=250 => {
+                operands.push((f64::from(b) - 247.0) * 256.0 + f64::from(data[at]) + 108.0);
+                at += 1;
+            }
+            251..=254 => {
+                operands.push(-(f64::from(b) - 251.0) * 256.0 - f64::from(data[at]) - 108.0);
+                at += 1;
+            }
+            _ => panic!("a reserved DICT byte {b}"),
+        }
+    }
+    out
+}
+
+/// A CFF table's Top DICT and its Private DICTs — a CID-keyed font's one a
+/// Font DICT, a name-keyed font's one — read as the test reads them.
+fn cff_dicts(cff: &[u8]) -> (Vec<(u16, Vec<f64>)>, Vec<Vec<(u16, Vec<f64>)>>) {
+    let (_, names_end) = cff_index(cff, usize::from(cff[2]));
+    let (tops, _) = cff_index(cff, names_end);
+    let top = cff_dict(tops[0]);
+    let get = |dict: &[(u16, Vec<f64>)], op: u16| {
+        dict.iter().find(|(o, _)| *o == op).map(|(_, v)| v.clone())
+    };
+    let private = |dict: &[(u16, Vec<f64>)]| {
+        let operands = get(dict, 18).expect("a Private entry");
+        let (size, offset) = (operands[0] as usize, operands[1] as usize);
+        cff_dict(&cff[offset..offset + size])
+    };
+    let privates = match get(&top, 0x0C24) {
+        Some(at) => cff_index(cff, at[0] as usize)
+            .0
+            .iter()
+            .map(|fd| private(&cff_dict(fd)))
+            .collect(),
+        None => vec![private(&top)],
+    };
+    (top, privates)
+}
+
+/// The Private DICT operators a CFF2 Private DICT and a CFF one share.
+const SHARED_PRIVATE_OPERATORS: [u16; 13] = [
+    6, 7, 8, 9, 10, 11, 0x0C09, 0x0C0A, 0x0C0B, 0x0C0C, 0x0C0D, 0x0C11, 0x0C12,
+];
+
+/// A cubic's or a line's tight box, from the turning points of each
+/// coordinate — the roots of the derivative — written in the test.
+fn tight_box(outline: &Outline) -> Option<[f64; 4]> {
+    let mut bounds: Option<[f64; 4]> = None;
+    let mut grow = |x: f64, y: f64| {
+        bounds = Some(match bounds {
+            None => [x, y, x, y],
+            Some(b) => [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)],
+        });
+    };
+    let mut pen = (0.0, 0.0);
+    let mut start: Option<(f64, f64)> = None;
+    for segment in &outline.segments {
+        match *segment {
+            Segment::MoveTo { x, y } => {
+                pen = (x, y);
+                start = Some((x, y));
+            }
+            Segment::LineTo { x, y } => {
+                if let Some(s) = start.take() {
+                    grow(s.0, s.1);
+                }
+                grow(x, y);
+                pen = (x, y);
+            }
+            Segment::CurveTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                if let Some(s) = start.take() {
+                    grow(s.0, s.1);
+                }
+                let point = |t: f64| {
+                    let s = 1.0 - t;
+                    let f = |a: f64, b: f64, c: f64, d: f64| {
+                        s * s * s * a + 3.0 * s * s * t * b + 3.0 * s * t * t * c + t * t * t * d
+                    };
+                    (f(pen.0, c1x, c2x, x), f(pen.1, c1y, c2y, y))
+                };
+                for (p0, p1, p2, p3) in [(pen.0, c1x, c2x, x), (pen.1, c1y, c2y, y)] {
+                    let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+                    let b = 2.0 * (p0 - 2.0 * p1 + p2);
+                    let c = p1 - p0;
+                    let mut roots = Vec::new();
+                    if a == 0.0 {
+                        if b != 0.0 {
+                            roots.push(-c / b);
+                        }
+                    } else {
+                        let d = b * b - 4.0 * a * c;
+                        if d >= 0.0 {
+                            roots.push((-b + d.sqrt()) / (2.0 * a));
+                            roots.push((-b - d.sqrt()) / (2.0 * a));
+                        }
+                    }
+                    for t in roots.into_iter().filter(|t| *t > 0.0 && *t < 1.0) {
+                        let (px, py) = point(t);
+                        grow(px, py);
+                    }
+                }
+                grow(x, y);
+                pen = (x, y);
+            }
+            Segment::QuadTo { .. } => panic!("a CFF outline holds no quadratics"),
+            Segment::Close => {}
+        }
+    }
+    bounds
+}
+
+/// A blend at 2.14 coordinates as the CFF2 chapter's `blend` and the
+/// numeric model give it: the default plus each delta times its region's
+/// scalar, exactly.
+fn blended_at(
+    regions: &[RegionSpec],
+    data_regions: &[u16],
+    default: i32,
+    deltas: &[i32],
+    coordinates: &[i16],
+) -> f64 {
+    let sum: i64 = data_regions
+        .iter()
+        .zip(deltas)
+        .map(|(region, delta)| {
+            spec::region_scalar(&regions[usize::from(*region)], coordinates) * i64::from(*delta)
+        })
+        .sum();
+    (i64::from(default) * 65_536 + sum) as f64 / 65_536.0
+}
+
+/// The instance's `CFF ` table.
+fn instance_cff(bytes: &[u8]) -> &[u8] {
+    Sfnt::parse(bytes)
+        .expect("the instance parses")
+        .table(u32::from_be_bytes(*b"CFF "))
+        .expect("the instance carries CFF")
+}
+
+#[test]
+fn a_cff2_instance_re_reads_as_cff_to_the_blended_outlines() {
+    let sfnt = Sfnt::parse(CFF2_FACE).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let cff2 = Cff2::parse(sfnt.table(u32::from_be_bytes(*b"CFF2")).expect("CFF2")).expect("CFF2");
+    let hvar = Hvar::read(&sfnt, &space).expect("HVAR").expect("HVAR");
+    let mvar = Mvar::read(&sfnt, &space).expect("MVAR").expect("MVAR");
+    for instance in instancer_instances(CFF2_FACE) {
+        let what = format!("{instance:?}");
+        let location = space.location(&instance).expect("a location");
+        let bytes = instance_of("variable-cff2.otf", CFF2_FACE, &instance);
+        checksums_hold(&what, &bytes);
+        let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+        let cff = Cff::parse(instance_cff(&bytes)).expect("the instance's CFF parses");
+        assert_eq!(cff.glyph_count(), cff2.glyph_count(), "{what}: the glyphs");
+        let mut union: Option<[f64; 4]> = None;
+        for glyph in 0..7u16 {
+            let expected = cff2.outline_at(glyph, &location).expect("the CFF2 outline");
+            let outline = cff.outline(glyph).expect("the CFF outline");
+            assert_eq!(
+                outline.segments, expected.segments,
+                "{what}: glyph {glyph}'s outline"
+            );
+            assert_eq!(
+                cff.font_matrix_for(glyph),
+                cff2.font_matrix(),
+                "{what}: glyph {glyph}'s matrix"
+            );
+            let advance = to_units(
+                hvar.advance_at(&sfnt, glyph, &location)
+                    .expect("an advance")
+                    .expect("hmtx states one")
+                    .bits(),
+            );
+            assert_eq!(
+                static_face.advance(glyph).map(i64::from),
+                Some(advance),
+                "{what}: glyph {glyph}'s hmtx advance"
+            );
+            assert_eq!(
+                cff.advance(glyph),
+                Some(advance as f64),
+                "{what}: glyph {glyph}'s charstring width"
+            );
+            match tight_box(&expected) {
+                Some(bounds) => {
+                    assert_eq!(
+                        static_face.left_side_bearing(glyph).map(i64::from),
+                        Some(bounds[0].floor() as i64),
+                        "{what}: glyph {glyph}'s bearing is its xMin"
+                    );
+                    union = Some(match union {
+                        None => bounds,
+                        Some(u) => [
+                            u[0].min(bounds[0]),
+                            u[1].min(bounds[1]),
+                            u[2].max(bounds[2]),
+                            u[3].max(bounds[3]),
+                        ],
+                    });
+                }
+                None => assert!(expected.segments.is_empty(), "{what}: the space"),
+            }
+        }
+        let head = static_face
+            .table(u32::from_be_bytes(*b"head"))
+            .expect("head");
+        let s16 = |at: usize| i16::from_be_bytes([head[at], head[at + 1]]);
+        let union = union.expect("glyphs draw");
+        assert_eq!(
+            [s16(36), s16(38), s16(40), s16(42)],
+            [
+                union[0].floor() as i16,
+                union[1].floor() as i16,
+                union[2].ceil() as i16,
+                union[3].ceil() as i16
+            ],
+            "{what}: the font box"
+        );
+        for tag in mvar.tags() {
+            let value = mvar
+                .value_at(&sfnt, tag, &location)
+                .expect("an MVAR value")
+                .expect("a default");
+            assert_eq!(
+                metric_default(&static_face, tag).map(i64::from),
+                Some(held_to_field(tag, to_units(value.bits()))),
+                "{what}: {}",
+                String::from_utf8_lossy(&tag)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_cff2_instance_carries_no_variation_table() {
+    let original = Sfnt::parse(CFF2_FACE).expect("a face");
+    let space = DesignSpace::read(&original).expect("a design space");
+    let cff2 =
+        Cff2::parse(original.table(u32::from_be_bytes(*b"CFF2")).expect("CFF2")).expect("CFF2");
+    for instance in instancer_instances(CFF2_FACE) {
+        let what = format!("{instance:?}");
+        let location = space.location(&instance).expect("a location");
+        let blends = cff2.blends_in(&space, &location).expect("the blends");
+        let bytes = instance_of("variable-cff2.otf", CFF2_FACE, &instance);
+        let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+        let mut expected: Vec<[u8; 4]> = original
+            .tags()
+            .into_iter()
+            .filter(|tag| !DROPPED.contains(tag) && tag != b"CFF2")
+            .collect();
+        expected.push(*b"CFF ");
+        expected.sort_unstable();
+        let mut written = static_face.tags();
+        written.sort_unstable();
+        assert_eq!(
+            written, expected,
+            "{what}: CFF2 became CFF and the rest stayed"
+        );
+        assert!(!DesignSpace::read(&static_face)
+            .expect("no fvar")
+            .is_variable());
+        for tag in [b"cmap", b"name"] {
+            let tag = u32::from_be_bytes(*tag);
+            assert_eq!(
+                static_face.table(tag),
+                original.table(tag),
+                "{what}: copied"
+            );
+        }
+        // Two Font DICTs make it CID-keyed, ROS Adobe-Identity-0, each
+        // glyph's CID its index.
+        let cff_bytes = instance_cff(&bytes);
+        let cff = Cff::parse(cff_bytes).expect("the CFF parses");
+        assert!(cff.is_cid(), "{what}: CID-keyed");
+        assert_eq!(cff.registry_ordering(), Some(("Adobe", "Identity")));
+        for glyph in 0..7u16 {
+            assert_eq!(
+                cff.cid_for_gid(glyph),
+                Some(glyph),
+                "{what}: glyph {glyph}'s CID"
+            );
+        }
+        // Each Font DICT's Private DICT holds its values blended there.
+        let (top, privates) = cff_dicts(cff_bytes);
+        assert!(top.iter().any(|(op, _)| *op == 0x0C1E), "{what}: ROS");
+        assert_eq!(privates.len(), 2, "{what}: two Font DICTs");
+        for (fd, private) in privates.iter().enumerate() {
+            let blended: Vec<(u16, Vec<f64>)> = cff2
+                .private_dict_at(u16::try_from(fd).expect("few"), &blends)
+                .expect("the Private DICT")
+                .into_iter()
+                .filter(|(op, _)| SHARED_PRIVATE_OPERATORS.contains(op))
+                .collect();
+            assert_eq!(private, &blended, "{what}: Font DICT {fd}'s Private DICT");
+            assert!(
+                private
+                    .iter()
+                    .all(|(op, _)| *op != 19 && *op != 22 && *op != 23),
+                "{what}: no Subrs, vsindex or blend"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_cff2_instance_keeps_its_stems_and_masks_blended() {
+    let statement = cff2_fixture();
+    let space = space_of(CFF2_FACE);
+    for instance in instancer_instances(CFF2_FACE) {
+        let what = format!("{instance:?}");
+        let location = space.location(&instance).expect("a location");
+        let c = location.coordinates();
+        let bytes = instance_of("variable-cff2.otf", CFF2_FACE, &instance);
+        let cff = Cff::parse(instance_cff(&bytes)).expect("the CFF parses");
+        // Font DICT 1's glyphs blend over its vsindex, 1.
+        let at = |default: i32, deltas: &[i32]| {
+            blended_at(&statement.regions, &statement.data[1], default, deltas, c)
+        };
+        let hints = |glyph: u16| -> Vec<Type2Op> {
+            read_type2(cff.charstring(glyph).expect("a charstring"))
+                .1
+                .into_iter()
+                .filter(|op| matches!(op.op, 1 | 3 | 18 | 19 | 20 | 23))
+                .collect()
+        };
+        assert_eq!(
+            hints(4),
+            vec![
+                Type2Op {
+                    op: 18,
+                    operands: vec![at(310, &[-10, 0]), at(80, &[20, 0])],
+                    mask: Vec::new(),
+                },
+                Type2Op {
+                    op: 23,
+                    operands: vec![
+                        at(100, &[0, 0]),
+                        at(100, &[60, 0]),
+                        at(350, &[0, 40]),
+                        at(100, &[60, 0])
+                    ],
+                    mask: Vec::new(),
+                },
+                Type2Op {
+                    op: 19,
+                    operands: Vec::new(),
+                    mask: vec![0xE0],
+                },
+                Type2Op {
+                    op: 20,
+                    operands: Vec::new(),
+                    mask: vec![0x60],
+                },
+            ],
+            "{what}: H's stems and masks"
+        );
+        assert_eq!(
+            hints(5),
+            vec![Type2Op {
+                op: 19,
+                operands: vec![at(100, &[0, 0]), at(100, &[60, 0])],
+                mask: vec![0x80],
+            }],
+            "{what}: I's implicit stem and mask"
+        );
+        assert_eq!(
+            hints(6),
+            vec![Type2Op {
+                op: 1,
+                operands: vec![-10.0, 20.0, 680.0, 20.0],
+                mask: Vec::new(),
+            }],
+            "{what}: O's stems"
+        );
+        // No blend, vsindex or call survives, and endchar ends each glyph.
+        for glyph in 0..7u16 {
+            let ops = read_type2(cff.charstring(glyph).expect("a charstring")).1;
+            assert!(
+                ops.iter().all(|op| !matches!(op.op, 10 | 15 | 16 | 29)),
+                "{what}: glyph {glyph} calls and blends nothing"
+            );
+            assert_eq!(
+                ops.last().map(|op| op.op),
+                Some(14),
+                "{what}: glyph {glyph}'s endchar"
+            );
+        }
+    }
+}
+
+/// A CFF2 face of one axis built in the test: the glyphs given, `fonts`
+/// Font DICTs with empty Private DICTs, every glyph 500 wide, and `post`
+/// naming the glyphs where `names` are given.
+fn small_cff2_face(charstrings: Vec<Vec<u8>>, fonts: usize, names: Option<&[PostName]>) -> Vec<u8> {
+    let count = u16::try_from(charstrings.len()).expect("few");
+    let store = item_store(
+        1,
+        &[vec![(0, 16_384, 16_384)]],
+        &[Some(DataSpec {
+            regions: vec![0],
+            word_count: 0,
+            long_words: false,
+            rows: Vec::new(),
+        })],
+    );
+    let table = Cff2Spec {
+        charstrings,
+        global_subrs: Vec::new(),
+        privates: vec![PrivateSpec::default(); fonts],
+        fd_select: (fonts > 1).then(|| FdSelectSpec::Format4(vec![(0, 0)], u32::from(count))),
+        store: Some(store),
+    }
+    .build();
+    let advances: Vec<(u16, i16)> = (0..count).map(|_| (500, 0)).collect();
+    Face::opentype()
+        .with(*b"CFF2", table)
+        .with(
+            *b"fvar",
+            fvar(
+                &[AxisSpec::new(*b"wght", 100.0, 400.0, 900.0, 256)],
+                &[InstanceSpec::new(257, &[900.0], 258)],
+            ),
+        )
+        .with(*b"head", head(1_000))
+        .with(*b"hhea", hhea(count, (1, 0, 0)))
+        .with(*b"hmtx", metrics(&advances, &[]))
+        .with(*b"maxp", maxp(count))
+        .with(*b"post", post_table(0, (-100, 50), names))
+        .build()
+}
+
+/// A box drawn by a CFF2 charstring, its right edge blended for the axis.
+fn box_glyph(left: i32, width: i32, delta: i32) -> Vec<u8> {
+    let mut items = ints(&[left, 0]);
+    items.push(Cs::Op(op::RMOVETO));
+    items.extend(variable_support::blend_items(
+        &[width, 600],
+        &[&[delta], &[0]],
+    ));
+    items.push(Cs::Op(op::RLINETO));
+    items.extend(ints(&[0, 0, -width, 0]));
+    items.push(Cs::Op(op::RLINETO));
+    charstring(&items)
+}
+
+#[test]
+fn a_cff2_face_of_one_font_dict_and_named_glyphs_instances_name_keyed() {
+    let glyphs = vec![
+        box_glyph(50, 400, 0),
+        box_glyph(100, 300, 60),
+        box_glyph(80, 340, -20),
+    ];
+    let names = [
+        PostName::Standard(0),
+        PostName::Standard(36),
+        PostName::Custom("uni0416"),
+    ];
+    let face = small_cff2_face(glyphs.clone(), 1, Some(&names));
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let cff2 = Cff2::parse(sfnt.table(u32::from_be_bytes(*b"CFF2")).expect("CFF2")).expect("CFF2");
+    for instance in [Instance::default(), Instance::Named(0)] {
+        let location = space.location(&instance).expect("a location");
+        let bytes = instantiate(&face, &instance).expect("an instance");
+        let cff = Cff::parse(instance_cff(&bytes)).expect("the CFF parses");
+        assert!(!cff.is_cid(), "{instance:?}: name-keyed");
+        assert_eq!(cff.glyph_name(1), Some("A"), "a standard name");
+        assert_eq!(
+            cff.glyph_name(2),
+            Some("uni0416"),
+            "a name of the face's own"
+        );
+        assert_eq!(cff.gid_for_name("uni0416"), Some(2));
+        for glyph in 0..3u16 {
+            assert_eq!(
+                cff.outline(glyph).expect("an outline").segments,
+                cff2.outline_at(glyph, &location)
+                    .expect("the CFF2")
+                    .segments,
+                "{instance:?}: glyph {glyph}"
+            );
+        }
+        let (top, privates) = cff_dicts(instance_cff(&bytes));
+        assert!(top.iter().all(|(op, _)| *op != 0x0C1E), "no ROS");
+        assert_eq!(privates.len(), 1, "one Private DICT");
+    }
+    // With post naming none, or naming two glyphs alike, it is CID-keyed.
+    let unnamed = small_cff2_face(glyphs.clone(), 1, None);
+    let bytes = instantiate(&unnamed, &Instance::Named(0)).expect("an instance");
+    assert!(
+        Cff::parse(instance_cff(&bytes)).expect("a CFF").is_cid(),
+        "post 3.0"
+    );
+    let alike = [
+        PostName::Standard(0),
+        PostName::Standard(36),
+        PostName::Standard(36),
+    ];
+    let twice = small_cff2_face(glyphs, 1, Some(&alike));
+    let bytes = instantiate(&twice, &Instance::Named(0)).expect("an instance");
+    assert!(
+        Cff::parse(instance_cff(&bytes)).expect("a CFF").is_cid(),
+        "a name twice"
+    );
+}
+
+#[test]
+fn no_operator_of_a_cff2_instance_passes_type_2s_stack() {
+    // The committed face: its .notdef draws one rlineto of fifty operands.
+    let space = space_of(CFF2_FACE);
+    for instance in instancer_instances(CFF2_FACE) {
+        let bytes = instance_of("variable-cff2.otf", CFF2_FACE, &instance);
+        let cff = Cff::parse(instance_cff(&bytes)).expect("the CFF parses");
+        for glyph in 0..7u16 {
+            let (width, ops) = read_type2(cff.charstring(glyph).expect("a charstring"));
+            for (index, op) in ops.iter().enumerate() {
+                let carried = op.operands.len() + usize::from(index == 0 && width.is_some());
+                assert!(
+                    carried <= 48,
+                    "{instance:?}: glyph {glyph} op {} holds {carried}",
+                    op.op
+                );
+            }
+        }
+        assert!(space.location(&instance).is_ok());
+    }
+    // A glyph of every operator that can pass 48 operands, each past it.
+    let mut items: Vec<Cs> = ints(&[10, 10]);
+    items.push(Cs::Op(op::RMOVETO));
+    let curve = |i: i32| ints(&[10 + i, 0, 10, 10, 0, 10]);
+    let mut stems: Vec<i32> = Vec::new();
+    for i in 0..26 {
+        stems.extend([20 * i + 1, 5]);
+    }
+    let mut hinted = ints(&stems);
+    hinted.push(Cs::Op(op::VSTEMHM));
+    let mut implicit: Vec<i32> = Vec::new();
+    for i in 0..25 {
+        implicit.extend([20 * i + 3, 4]);
+    }
+    hinted.extend(ints(&implicit));
+    hinted.push(Cs::Op(op::HINTMASK));
+    // 51 stems: a mask of seven bytes.
+    hinted.push(Cs::Bytes(vec![0xFF; 7]));
+    hinted.extend(items);
+    let mut long = hinted;
+    // hvcurveto: thirteen curves and the last's extra, 53 operands.
+    for _ in 0..13 {
+        long.extend(ints(&[10, 10, 10, 10]));
+    }
+    long.push(Cs::Int(3));
+    long.push(Cs::Op(op::HVCURVETO));
+    // hhcurveto: a dy1 and twelve curves, 49.
+    long.push(Cs::Int(2));
+    for _ in 0..12 {
+        long.extend(ints(&[10, 5, 5, 10]));
+    }
+    long.push(Cs::Op(27));
+    // rcurveline: nine curves and a line, 56.
+    for i in 0..9 {
+        long.extend(curve(i));
+    }
+    long.extend(ints(&[5, 5]));
+    long.push(Cs::Op(24));
+    // rlinecurve: 25 lines and a curve, 56.
+    for _ in 0..25 {
+        long.extend(ints(&[3, 2]));
+    }
+    long.extend(curve(0));
+    long.push(Cs::Op(25));
+    // hlineto: 49 operands, so a piece starts on the other axis.
+    long.extend(ints(&vec![4; 49]));
+    long.push(Cs::Op(op::HLINETO));
+    // rrcurveto: nine curves, 54.
+    for i in 0..9 {
+        long.extend(curve(i));
+    }
+    long.push(Cs::Op(op::RRCURVETO));
+    let glyphs = vec![box_glyph(50, 400, 0), charstring(&long)];
+    let face = small_cff2_face(glyphs, 1, None);
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let cff2 = Cff2::parse(sfnt.table(u32::from_be_bytes(*b"CFF2")).expect("CFF2")).expect("CFF2");
+    let location = space.location(&Instance::Named(0)).expect("a location");
+    let bytes = instantiate(&face, &Instance::Named(0)).expect("an instance");
+    let cff = Cff::parse(instance_cff(&bytes)).expect("the CFF parses");
+    assert_eq!(
+        cff.outline(1).expect("an outline").segments,
+        cff2.outline_at(1, &location).expect("the CFF2").segments,
+        "the long glyph draws as the CFF2 does"
+    );
+    let (width, ops) = read_type2(cff.charstring(1).expect("a charstring"));
+    assert_eq!(width, Some(500.0));
+    for (index, op) in ops.iter().enumerate() {
+        let carried = op.operands.len() + usize::from(index == 0 && width.is_some());
+        assert!(carried <= 48, "op {} holds {carried}", op.op);
+    }
+    // The stems kept: 26 explicit pairs and 25 implicit, the mask as given.
+    let pairs: usize = ops
+        .iter()
+        .filter(|op| matches!(op.op, 1 | 3 | 18 | 19 | 20 | 23))
+        .map(|op| op.operands.len() / 2)
+        .sum();
+    assert_eq!(pairs, 51);
+    assert_eq!(
+        ops.iter().find(|op| op.op == 19).map(|op| op.mask.clone()),
+        Some(vec![0xFF; 7])
+    );
+}
+
+#[test]
+fn the_cff2_default_instance_keeps_the_default_outlines() {
+    let sfnt = Sfnt::parse(CFF2_FACE).expect("a face");
+    let cff2 = Cff2::parse(sfnt.table(u32::from_be_bytes(*b"CFF2")).expect("CFF2")).expect("CFF2");
+    let bytes = instance_of("variable-cff2.otf", CFF2_FACE, &Instance::default());
+    let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+    let cff = Cff::parse(instance_cff(&bytes)).expect("the CFF parses");
+    for glyph in 0..7u16 {
+        assert_eq!(
+            cff.outline(glyph).expect("an outline").segments,
+            cff2.outline(glyph).expect("the default").segments,
+            "glyph {glyph}"
+        );
+        assert_eq!(
+            static_face.advance(glyph),
+            sfnt.advance(glyph),
+            "glyph {glyph}'s advance"
+        );
+    }
+}
+
+#[test]
+fn subset_cff_cuts_the_instance_like_any_cff() {
+    let bytes = instance_of("variable-cff2.otf", CFF2_FACE, &Instance::Named(2));
+    let cff_bytes = instance_cff(&bytes);
+    let instance = Cff::parse(cff_bytes).expect("the CFF parses");
+    let keep: std::collections::BTreeSet<u16> = [2u16, 4, 6].into_iter().collect();
+    let subset = tinker_pdf_font::subset_cff(cff_bytes, &keep).expect("the instance's CFF subsets");
+    let cut = Cff::parse(&subset).expect("the subset parses");
+    assert_eq!(
+        cut.glyph_count(),
+        instance.glyph_count(),
+        "glyph ids do not move"
+    );
+    for glyph in 0..7u16 {
+        let kept = keep.contains(&glyph) || glyph == 0;
+        let segments = cut.outline(glyph).expect("an outline").segments;
+        if kept {
+            assert_eq!(
+                segments,
+                instance.outline(glyph).expect("an outline").segments,
+                "glyph {glyph} kept"
+            );
+        } else {
+            assert!(segments.is_empty(), "glyph {glyph} dropped");
+        }
+    }
+    // And the whole face, through the one subsetting door.
+    let face = tinker_pdf_font::subset(&bytes, &keep).expect("the instance subsets");
+    let reread = Cff::parse(instance_cff(&face)).expect("its CFF parses");
+    assert_eq!(
+        reread.outline(4).expect("an outline").segments,
+        instance.outline(4).expect("an outline").segments
+    );
+}
+
+#[test]
+fn a_cff2_instance_the_face_cannot_give_is_refused_by_name() {
+    // A CFF2 table of another major version.
+    let bad = with_table_bytes(CFF2_FACE, b"CFF2", |table| table[0] = 3);
+    assert_eq!(
+        instantiate(&bad, &Instance::Named(1)),
+        Err(InstanceError::Cff2(Cff2Error::Version {
+            major: 3,
+            minor: 0
+        }))
+    );
+    // A glyph whose blend lacks its operands.
+    let mut short = ints(&[10, 10]);
+    short.push(Cs::Op(op::RMOVETO));
+    short.extend(ints(&[100, 5]));
+    short.push(Cs::Int(3));
+    short.push(Cs::Op(op::BLEND));
+    short.push(Cs::Op(op::RLINETO));
+    let face = small_cff2_face(vec![box_glyph(50, 400, 0), charstring(&short)], 1, None);
+    assert_eq!(
+        instantiate(&face, &Instance::Named(0)),
+        Err(InstanceError::Cff2Glyph {
+            glyph: 1,
+            error: Cff2Error::BlendOperands
+        })
+    );
+    // An operand the instance blends past what Type 2 carries: a stem's,
+    // which no box measures.
+    let mut far = variable_support::blend_items(&[30_000, 10], &[&[20_000], &[0]]);
+    far.push(Cs::Op(op::HSTEM));
+    far.extend(ints(&[10, 10]));
+    far.push(Cs::Op(op::RMOVETO));
+    far.extend(ints(&[100, 0, 0, 100]));
+    far.push(Cs::Op(op::RLINETO));
+    let face = small_cff2_face(vec![box_glyph(50, 400, 0), charstring(&far)], 1, None);
+    assert_eq!(
+        instantiate(&face, &Instance::Named(0)),
+        Err(InstanceError::CharstringOperand { glyph: 1 })
+    );
+    assert!(
+        instantiate(&face, &Instance::default()).is_ok(),
+        "at the default the operand fits"
+    );
+    // More Font DICTs than a CFF's FDSelect can name.
+    let crowded = small_cff2_face(vec![box_glyph(50, 400, 0)], 300, None);
+    assert_eq!(
+        instantiate(&crowded, &Instance::Named(0)),
+        Err(InstanceError::TooManyFontDicts { count: 300 })
+    );
+    // A store over two axes in a space of one.
+    let store = item_store(
+        2,
+        &[vec![(0, 16_384, 16_384), (0, 0, 0)]],
+        &[Some(DataSpec {
+            regions: vec![0],
+            word_count: 0,
+            long_words: false,
+            rows: Vec::new(),
+        })],
+    );
+    let table = Cff2Spec {
+        charstrings: vec![box_glyph(50, 400, 0)],
+        global_subrs: Vec::new(),
+        privates: vec![PrivateSpec::default()],
+        fd_select: None,
+        store: Some(store),
+    }
+    .build();
+    let wide = Face::opentype()
+        .with(*b"CFF2", table)
+        .with(
+            *b"fvar",
+            fvar(&[AxisSpec::new(*b"wght", 100.0, 400.0, 900.0, 256)], &[]),
+        )
+        .with(*b"head", head(1_000))
+        .with(*b"hhea", hhea(1, (1, 0, 0)))
+        .with(*b"hmtx", metrics(&[(500, 0)], &[]))
+        .with(*b"maxp", maxp(1))
+        .build();
+    assert!(
+        matches!(
+            instantiate(&wide, &Instance::default()),
+            Err(InstanceError::Cff2(Cff2Error::VariationStore(
+                VariationError::AxisCount { .. }
+            )))
+        ),
+        "the store's axes are not the space's"
+    );
+}
+
+#[test]
+fn every_truncation_and_byte_change_of_the_cff2_face_is_instanced_or_refused() {
+    let instances = [
+        Instance::Named(4),
+        Instance::User(vec![
+            UserCoordinate::new(*b"wght", 650.0),
+            UserCoordinate::new(*b"wdth", 80.0),
+        ]),
+    ];
+    for instance in &instances {
+        for end in 0..CFF2_FACE.len() {
+            if let Ok(bytes) = instantiate(&CFF2_FACE[..end], instance) {
+                assert!(Sfnt::parse(&bytes).is_some(), "a prefix of {end} bytes");
+            }
+        }
+    }
+    for at in 0..CFF2_FACE.len() {
+        let mut changed = CFF2_FACE.to_vec();
         changed[at] ^= 0xFF;
         if let Ok(bytes) = instantiate(&changed, &instances[0]) {
             assert!(Sfnt::parse(&bytes).is_some(), "byte {at} changed");
