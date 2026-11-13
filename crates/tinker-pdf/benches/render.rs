@@ -17,15 +17,19 @@ mod support;
 use std::cell::LazyCell;
 use std::hint::black_box;
 use std::path::Path;
+#[cfg(tinker_planning_baseline)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use support::cli::Cli;
 use support::{inputs, Group, Per};
+#[cfg(tinker_planning_baseline)]
+use tinker_pdf::PixelRegion;
 use tinker_pdf::{
-    Bitmap, Document, Page, PixelRegion, RenderOptions, RenderWarning, SampleCodec, WriteMode,
-    WriteOptions,
+    Bitmap, Document, Page, RenderOptions, RenderWarning, SampleCodec, WriteMode, WriteOptions,
 };
+#[cfg(not(tinker_planning_baseline))]
+use tinker_pdf::{DisplayList, Parallelism};
 
 /// `page` at `dpi`, `times` times: the unit is every bitmap's pixels.
 fn renders(page: &Page, dpi: f64, times: u64) -> Per {
@@ -81,11 +85,40 @@ fn image_page(bytes: Vec<u8>, codec: SampleCodec) -> Page {
     page
 }
 
-/// `page` at `dpi` in four horizontal bands, each rendered on its own scoped
-/// thread through `RenderOptions::region`, and put back together.
-fn in_bands(page: &Page, dpi: f64, width: u32, height: u32) -> Vec<Bitmap> {
+/// What the four-band operation draws from: the page's display list, kept,
+/// which the facade draws in bands on the engine's pool — the retained list
+/// tier P times bands over (`docs/design/parallelism.md`).
+#[cfg(not(tinker_planning_baseline))]
+fn band_source(page: &Page) -> DisplayList {
+    page.display_list()
+}
+
+/// `list` at `dpi` in four horizontal bands on four threads of the engine's
+/// own pool (`DisplayList::render` with `Threads(4)`), written into one
+/// bitmap: the page's bytes.
+#[cfg(not(tinker_planning_baseline))]
+fn in_bands(list: &DisplayList, dpi: f64, _width: u32, _height: u32) -> Vec<u8> {
+    list.render(&RenderOptions {
+        parallelism: Parallelism::Threads(4),
+        ..RenderOptions::at_dpi(dpi)
+    })
+    .data
+}
+
+/// The planning baseline has no bands of its own: its arm draws the page.
+#[cfg(tinker_planning_baseline)]
+fn band_source(page: &Page) -> Page {
+    page.clone()
+}
+
+/// The planning baseline has no bands of its own: its arm draws `page` at
+/// `dpi` as four horizontal regions, each on a scoped thread of the
+/// caller's, and stacks their rows — the caller-thread operation the tier's
+/// relation was measured on.
+#[cfg(tinker_planning_baseline)]
+fn in_bands(page: &Page, dpi: f64, width: u32, height: u32) -> Vec<u8> {
     let band = height.div_ceil(4);
-    std::thread::scope(|scope| {
+    let bands: Vec<Bitmap> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..4)
             .map(|at| {
                 scope.spawn(move || {
@@ -105,7 +138,8 @@ fn in_bands(page: &Page, dpi: f64, width: u32, height: u32) -> Vec<Bitmap> {
             .into_iter()
             .map(|worker| worker.join().expect("a band renders"))
             .collect()
-    })
+    });
+    bands.into_iter().flat_map(|band| band.data).collect()
 }
 
 /// The size `bytes`' first page renders to at `dpi`, which `tpdf render`
@@ -119,8 +153,30 @@ fn rendered_size(bytes: &[u8], dpi: f64) -> (u32, u32) {
     (bitmap.width, bitmap.height)
 }
 
-/// Every page of `doc` at `dpi` on `jobs` scoped threads, each taking the
-/// next page as it frees, as `examples/parallel.rs` does.
+/// Every page of `doc` at `dpi` on `threads` threads of the engine's own
+/// pool: the facade's page walk (`Document::render_pages`), each page drawn
+/// on the worker that takes it and handed back in page order.
+#[cfg(not(tinker_planning_baseline))]
+fn every_page_on(doc: &Document, dpi: f64, threads: usize) -> usize {
+    let options = RenderOptions {
+        parallelism: Parallelism::Threads(threads),
+        ..RenderOptions::at_dpi(dpi)
+    };
+    let mut drawn = 0usize;
+    doc.render_pages(0..doc.page_count(), &options, |_, bitmap| {
+        if let Some(bitmap) = bitmap {
+            black_box(bitmap);
+            drawn += 1;
+        }
+    });
+    drawn
+}
+
+/// The planning baseline has no page walk: its arm draws every page of `doc`
+/// at `dpi` on `jobs` scoped threads of the caller's, each taking the next
+/// page as it frees — the serial and caller-thread operations the tier's
+/// factors were measured on.
+#[cfg(tinker_planning_baseline)]
 fn every_page_on(doc: &Document, dpi: f64, jobs: usize) -> usize {
     let pages = doc.page_count() as usize;
     let next = AtomicUsize::new(0);
@@ -359,19 +415,14 @@ fn render(c: &mut Criterion) {
     group.operation("the 300-dpi text page in 4 bands on 4 threads", |op| {
         let text_page: &Page = &text_page;
         let whole = text_page.render(&RenderOptions::at_dpi(300.0));
-        let bands = in_bands(text_page, 300.0, whole.width, whole.height);
-        let mut rows: Vec<u8> = Vec::with_capacity(whole.data.len());
-        for band in &bands {
-            assert_eq!(band.stride, whole.stride, "a band is the page's width");
-            rows.extend_from_slice(&band.data);
-        }
+        let (width, height) = (whole.width, whole.height);
+        let source = band_source(text_page);
         assert!(
-            rows == whole.data,
-            "the four bands reassemble to the whole page byte for byte"
+            in_bands(&source, 300.0, width, height) == whole.data,
+            "the four bands are the whole page byte for byte"
         );
         op.per(renders(text_page, 300.0, 1));
-        let (width, height) = (whole.width, whole.height);
-        op.iter(move || black_box(in_bands(text_page, 300.0, width, height)));
+        op.iter(move || black_box(in_bands(&source, 300.0, width, height)));
     });
 
     group.operation("8 half-size text pages at 150 dpi on 1 thread", |op| {

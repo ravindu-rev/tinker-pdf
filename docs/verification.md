@@ -1200,11 +1200,19 @@ cargo bench -p tinker-pdf -- --baseline before
 
 and `--bench <group>` narrows either to one group's file.
 
-Twenty-eight operations time `tpdf` itself: those tier P marks CLI, and the
-`threads` group's four, which time the CLI's page walk, `tpdf render --jobs`,
-on the engine's pool on 1, 2, 4 and 8 jobs over one input, so that how the
-pool scales is a ratio between operations of one run. Their figures include the process, and
-`tpdf` has no library half.
+Twenty-eight operations time `tpdf` itself: those tier P marks CLI — the
+render group's eight quarter-size pages to PNG on 1 and 4 jobs among them —
+and the `threads` group's four, which time the CLI's page walk,
+`tpdf render --jobs`, on the engine's pool on 1, 2, 4 and 8 jobs over one
+input, so that how the pool scales is a ratio between operations of one run.
+Their figures include the process, and `tpdf` has no library half. The render
+group's in-process pool operations go through the facade: its eight
+half-size text pages at 150 dpi on 1 and 4 threads are a page walk,
+`Document::render_pages` with `Threads(n)`, and its 300-dpi text page in 4
+bands on 4 threads is a retained display list drawn in bands,
+`DisplayList::render` with `Threads(4)`. The planning baseline has neither,
+so its arms of the three draw on scoped threads of the caller's, the serial
+and caller-thread operations tier P's figures for them were measured on.
 `benches/support/cli.rs` runs this revision's binary from beside the bench
 binary's profile directory, one child per call, its output kept in the
 operation's own directory and its exit status checked every time, and the
