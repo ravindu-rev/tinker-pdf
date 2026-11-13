@@ -1096,12 +1096,20 @@ fn report(task: &str, outcome: Result<(), Vec<String>>) -> ExitCode {
 /// check for as long as the crate had one file in it. It passes on the day it
 /// is added, which is the point: a list a crate joins only once it has already
 /// broken the rule is a list that ratifies the breakage.
+///
+/// **`tinker-pdf-font` is the sixth, joining with its TrueType interpreter**
+/// (`docs/design/hinting.md`, "`cargo xtask libm`"). A hinted glyph's points
+/// are where its pixels land, so the interpreter is a pixel path. Its
+/// arithmetic is integer 26.6, and the design's one floating-point step, a
+/// unit vector's length, is a `sqrt`, which IEEE 754 rounds correctly. The
+/// crate called no transcendental when it joined, so it joined clean.
 const PIXEL_PATHS: &[&str] = &[
     "tinker-pdf-raster",
     "tinker-pdf-color",
     "tinker-pdf-render",
     "tinker-pdf-content",
     "tinker-pdf-svg",
+    "tinker-pdf-font",
 ];
 
 /// Method calls that are not correctly rounded, and so differ between

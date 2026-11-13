@@ -193,17 +193,21 @@ never as the specification's.
 
 The interpreter is `tinker-pdf-font`'s `hint` module, a leaf like the rest of
 the crate (ruling 8): `hint/mod.rs` the face, size and glyph entry points,
-`hint/vm.rs` the stack, decoding and dispatch, then a file a family —
-`flow.rs`, `storage.rs`, `state.rs`, `moves.rs`, `shift.rs`, `iup.rs`,
-`glyph.rs` — and `hint/tests/` a file a family.
+`hint/fixed.rs` the 26.6 arithmetic, `hint/vm.rs` the stack, decoding and
+dispatch, then a file a family — `flow.rs`, `storage.rs`, `state.rs`,
+`moves.rs`, `shift.rs`, `iup.rs`, `glyph.rs` — and `hint/tests/` a file a
+family.
 
 ### Numbers
 
-- **The stack holds 32-bit two's-complement values.** A coordinate, a
-  distance and a CVT value are F26Dot6 (26.6); a vector component is F2Dot14
-  (2.14); a count, an index, a flag word and a selector are integers. The
-  instruction tables label some stack elements `uint32`, a width; every
-  comparison (`LT` to `NEQ`, `MAX`, `MIN`) is signed, as a distance is.
+- **The stack holds 32-bit two's-complement values**, and each run of a
+  program starts it empty. A coordinate, a distance and a CVT value are
+  F26Dot6 (26.6); a vector component is F2Dot14 (2.14); a count, an index, a
+  flag word and a selector are integers. The instruction tables label some
+  stack elements `uint32`, a width; every comparison (`LT` to `NEQ`, `MAX`,
+  `MIN`) is signed, as a distance is. A pushed byte is padded to 32 bits
+  unsigned and a pushed word sign-extended, as *Pushing data onto the
+  interpreter stack* states.
 - **`ADD`, `SUB` and `NEG` wrap**: the specification gives these instructions
   no overflow protection, and wrapping is the two's-complement answer on every
   target. `ABS` of the most negative value is itself.
@@ -346,7 +350,7 @@ a panic and never a wait:
 | --- | --- |
 | The stack | `maxStackElements` plus 32 entries, at least 256 and at most 65 536: a producer that under-declares still runs, and a hostile `maxp` holds 256 KiB |
 | The storage area, the CVT, the function and instruction definitions, the twilight zone | `maxStorage`, the `cvt ` table's entries, `maxFunctionDefs`, `maxInstructionDefs` (an opcode is a byte, so at most 256), `maxTwilightPoints` capped at 16 384; an index past any of them |
-| Instructions a run executes | 1 048 576 (2^20) for each run of `fpgm`, `prep`, a glyph's or a component's program, counting each instruction dispatched, each point a loop-counted instruction moves, and each call `LOOPCALL` makes |
+| Instructions a run executes | 1 048 576 (2^20) for each run of `fpgm`, `prep`, a glyph's or a component's program, counting each instruction dispatched, each stack element `MINDEX` moves, each point a loop-counted instruction moves, and each call `LOOPCALL` makes |
 | Call depth | 64: `CALL`, `LOOPCALL` and a dispatch to an `IDEF` nest no deeper |
 | The instruction stream | a push that runs past its program's end, a jump outside it, an `IF` with no `EIF` or a definition with no `ENDF` |
 | Where definitions may stand | `FDEF` and `IDEF` in a glyph program, and `ENDF` outside a definition |

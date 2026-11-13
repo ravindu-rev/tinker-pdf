@@ -18,6 +18,7 @@ pub mod colr;
 pub mod cpal;
 pub mod encoding;
 pub mod glyf;
+pub mod hint;
 pub mod outline;
 mod predefined;
 pub mod sbix;
