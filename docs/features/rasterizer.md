@@ -140,6 +140,16 @@ stroke, whatever paths are filled through the scratch meanwhile.
 way, and the SVG writer calls only `dash`, so no outline is built as a path
 on the way to a page.
 
+*Dashes are outlined as they are cut.* The walk cuts each flattened segment
+into the dash in hand, one buffer the stroke keeps for all its subpaths, and
+hands it to the outliner the moment it ends, then clears it; so a stroke
+holds one piece at a time however many it cuts, and once the buffer is as
+long as the longest piece no piece allocates — the outliner drops repeated
+points in place, and a pen in another space carries the piece to the device
+for its floor in a second buffer kept the same way. The stop predicate is
+asked every 1 024 steps as before, and a stop keeps every piece already
+outlined and the one in hand.
+
 **A pen in another space.** `stroke_mapped` is 8.4.3.2 read literally for
 a map that is not a similarity: the path, the width and the dashes are in
 the pen's own space, the outline is built there exactly as `stroke` builds
@@ -438,9 +448,11 @@ tiny pattern over a long line cannot generate millions of pieces.
   open, closed, curved, degenerate and far-flung paths, partial outlines a
   stop leaves, and an outline cut at `MAX_VERBS`
   (`the_direct_outline_fills_as_the_path_outline_did`,
-  `an_outline_stops_where_its_path_reaches_the_verb_bound`), and counts
+  `an_outline_stops_where_its_path_reaches_the_verb_bound`), counts
   flattening passes, one a stroke written and filled
-  (`a_stroke_is_flattened_once`); `blend.rs` pins all sixteen modes in integers; `image.rs`
+  (`a_stroke_is_flattened_once`), and gauges what dashes hold: one piece at
+  a time, and buffers that grow for the first piece and not for the ten
+  thousandth (`a_dashed_stroke_holds_one_piece_at_a_time`); `blend.rs` pins all sixteen modes in integers; `image.rs`
   measures the sampling policy against numbers — a magnified gradient's
   largest step, a 2:1 checkerboard averaging to uniform 128, and an image
   wholly off the canvas costing nothing — holds the planned walk pixel for

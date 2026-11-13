@@ -152,13 +152,18 @@ fn outline(
     let radius = width / 2.0;
 
     let mut sink = Sink { out, map: None };
-    for poly in flatten(path, tolerance) {
+    // The dash in hand, for every subpath: each piece is outlined as soon as
+    // it is cut, so one buffer holds them all in turn.
+    let mut held = Vec::new();
+    for mut poly in flatten(path, tolerance) {
         if stop.is_some_and(|stop| stop()) {
             return;
         }
-        for piece in apply_dashes(&poly, style, stop) {
-            stroke_polyline(&piece, radius, style, &mut sink);
-        }
+        each_dash(&mut poly, style, stop, &mut held, &mut |piece| {
+            stroke_polyline(piece, radius, style, &mut sink);
+            gauge::released();
+            true
+        });
     }
 }
 
@@ -264,33 +269,44 @@ fn outline_mapped(
     } else {
         0.1
     };
-    for poly in flatten_mapped(path, tolerance / largest) {
+    // The dash in hand, and the same piece carried to the device for the
+    // floor: one buffer each, reused for every piece of every subpath.
+    let (mut held, mut carried) = (Vec::new(), Vec::new());
+    for mut poly in flatten_mapped(path, tolerance / largest) {
         if stop.is_some_and(|stop| stop()) {
             return;
         }
-        for piece in apply_dashes(&poly, style, stop) {
+        each_dash(&mut poly, style, stop, &mut held, &mut |piece| {
+            // Carried before the pen strokes it: the pen drops repeated
+            // points in place, and the floor reads the piece as it was cut.
+            if floored {
+                #[cfg(test)]
+                let room = carried.capacity();
+                carried.clear();
+                carried.extend(piece.iter().map(|p| {
+                    let (x, y) = map.apply(p.x, p.y);
+                    Point::new(x, y)
+                }));
+                #[cfg(test)]
+                gauge::grew(carried.capacity() != room);
+            }
             if width > 0.0 {
                 let mut sink = Sink {
                     out: &mut *out,
                     map: Some(map),
                 };
-                stroke_polyline(&piece, width / 2.0, style, &mut sink);
+                stroke_polyline(piece, width / 2.0, style, &mut sink);
             }
             if floored {
-                let mapped: Vec<Point> = piece
-                    .iter()
-                    .map(|p| {
-                        let (x, y) = map.apply(p.x, p.y);
-                        Point::new(x, y)
-                    })
-                    .collect();
                 let mut sink = Sink {
                     out: &mut *out,
                     map: None,
                 };
-                stroke_polyline(&mapped, floor / 2.0, style, &mut sink);
+                stroke_polyline(&mut carried, floor / 2.0, style, &mut sink);
             }
-        }
+            gauge::released();
+            true
+        });
     }
 }
 
@@ -331,8 +347,14 @@ pub fn dash(
         dash_phase: phase,
         ..StrokeStyle::default()
     };
-    for poly in flatten_mapped(path, tolerance) {
-        if !each_dash(&poly, &style, None, &mut |cut| piece(&cut)) {
+    let mut held = Vec::new();
+    for mut poly in flatten_mapped(path, tolerance) {
+        let whole = each_dash(&mut poly, &style, None, &mut held, &mut |cut| {
+            let more = piece(cut);
+            gauge::released();
+            more
+        });
+        if !whole {
             return false;
         }
     }
@@ -361,29 +383,26 @@ pub fn stretches(map: &Transform) -> (f64, f64) {
     (q + r, (q - r).abs())
 }
 
-/// Splits a polyline into the pieces a dash pattern leaves visible.
-fn apply_dashes(
-    poly: &[Point],
-    style: &StrokeStyle,
-    stop: Option<&dyn Fn() -> bool>,
-) -> Vec<Vec<Point>> {
-    let mut pieces = Vec::new();
-    each_dash(poly, style, stop, &mut |piece| {
-        pieces.push(piece);
-        true
-    });
-    pieces
-}
-
-/// [`apply_dashes`]' walk, handing each piece to `piece` as it is cut, in
-/// the same order, and stopping as soon as `piece` answers `false` — which
-/// is what this returns — or `stop` answers `true`, after the piece in hand.
+/// Cuts a polyline into the pieces a dash pattern leaves visible, handing
+/// each to `piece` as soon as it is cut, in order along the line, and
+/// stopping as soon as `piece` answers `false` — which is what this returns —
+/// or `stop` answers `true`, after the piece in hand.
+///
+/// **One piece at a time.** The dash in hand is written into `held`, a buffer
+/// the caller keeps for every subpath of a stroke, and handed over from there
+/// the moment it ends, then cleared: no piece waits for the next to be cut,
+/// and once `held` is as long as the longest piece none allocates. `piece` may
+/// change what it is handed — the outliner drops repeated points in place —
+/// since it is cleared after. A solid line is the polyline itself, handed over
+/// whole.
 fn each_dash(
-    poly: &[Point],
+    poly: &mut Vec<Point>,
     style: &StrokeStyle,
     stop: Option<&dyn Fn() -> bool>,
-    piece: &mut dyn FnMut(Vec<Point>) -> bool,
+    held: &mut Vec<Point>,
+    piece: &mut dyn FnMut(&mut Vec<Point>) -> bool,
 ) -> bool {
+    held.clear();
     let pattern: Vec<f64> = style
         .dashes
         .iter()
@@ -392,8 +411,10 @@ fn each_dash(
         .collect();
     // 8.4.3.6: an empty array, or one summing to zero, is a solid line.
     if pattern.is_empty() || pattern.iter().sum::<f64>() <= 0.0 {
-        return piece(poly.to_vec());
+        gauge::cut();
+        return piece(poly);
     }
+    let poly: &[Point] = poly;
     // The entries the walk below ever treats as dashes are the even ones of
     // an even-length pattern, and every one of an odd-length pattern, whose
     // roles swap each time round. When none of them has length — `[0 0.01]`
@@ -404,8 +425,6 @@ fn each_dash(
     if pattern.len() % 2 == 0 && !pattern.iter().step_by(2).any(|d| *d > 0.0) {
         return true;
     }
-
-    let mut current: Vec<Point> = Vec::new();
 
     // Where in the pattern the phase starts.
     let total: f64 = pattern.iter().sum();
@@ -432,7 +451,7 @@ fn each_dash(
 
     if on {
         if let Some(first) = poly.first() {
-            current.push(*first);
+            push(held, *first);
         }
     }
 
@@ -457,11 +476,13 @@ fn each_dash(
         let mut guard = 0u32;
         while segment_left > 0.0 && guard < 100_000 {
             if steps % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
-                // The pieces already measured, and the one in hand, rather
+                // The pieces already outlined, and the one in hand, rather
                 // than nothing: the same partial answer `fill` gives.
-                if current.len() > 1 {
-                    piece(current);
+                if held.len() > 1 {
+                    gauge::cut();
+                    piece(held);
                 }
+                held.clear();
                 return true;
             }
             steps = steps.wrapping_add(1);
@@ -471,13 +492,16 @@ fn each_dash(
                 left = pattern.get(index % pattern.len()).copied().unwrap_or(0.0);
                 on = index % 2 == 0;
                 if on {
-                    current.push(at);
-                } else if current.len() > 1 {
-                    if !piece(std::mem::take(&mut current)) {
+                    push(held, at);
+                } else if held.len() > 1 {
+                    gauge::cut();
+                    let more = piece(held);
+                    held.clear();
+                    if !more {
                         return false;
                     }
                 } else {
-                    current.clear();
+                    held.clear();
                 }
                 if left <= 0.0 {
                     // A zero-length entry would spin; treat it as consumed.
@@ -488,7 +512,7 @@ fn each_dash(
             let step = left.min(segment_left);
             let next = Point::new(at.x + dx * step, at.y + dy * step);
             if on {
-                current.push(next);
+                push(held, next);
             }
             at = next;
             left -= step;
@@ -496,10 +520,93 @@ fn each_dash(
         }
     }
 
-    if current.len() > 1 {
-        return piece(current);
+    let whole = if held.len() > 1 {
+        gauge::cut();
+        piece(held)
+    } else {
+        true
+    };
+    held.clear();
+    whole
+}
+
+/// Puts `p` on the end of the dash in hand, counting for the dash guard
+/// whether its buffer had to grow to take it.
+fn push(held: &mut Vec<Point>, p: Point) {
+    #[cfg(test)]
+    let room = held.capacity();
+    held.push(p);
+    #[cfg(test)]
+    gauge::grew(held.capacity() != room);
+}
+
+/// What cutting dashes holds and allocates, measured for the dash guard:
+/// compiled only under `cfg(test)` and kept per thread, as the fill's
+/// counters are. A piece is held from the moment it is cut until whatever it
+/// was handed to — the outliner, or [`dash`]'s caller — is done with it.
+#[cfg(test)]
+pub(crate) mod gauge {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static HELD: Cell<u64> = const { Cell::new(0) };
+        static MOST: Cell<u64> = const { Cell::new(0) };
+        static CUT: Cell<u64> = const { Cell::new(0) };
+        static GROWN: Cell<u64> = const { Cell::new(0) };
     }
-    true
+
+    /// A piece cut and handed over, held until it is released.
+    pub(crate) fn cut() {
+        let held = HELD.with(|held| {
+            held.set(held.get() + 1);
+            held.get()
+        });
+        MOST.with(|most| most.set(most.get().max(held)));
+        CUT.with(|cut| cut.set(cut.get() + 1));
+    }
+
+    /// The piece handed over last is done with.
+    pub(crate) fn released() {
+        HELD.with(|held| held.set(held.get().saturating_sub(1)));
+    }
+
+    /// A buffer a piece is cut or carried in, which grew or did not.
+    pub(crate) fn grew(grew: bool) {
+        if grew {
+            GROWN.with(|grown| grown.set(grown.get() + 1));
+        }
+    }
+
+    /// What was measured on this thread since the last call, which starts
+    /// every count again from zero.
+    pub(crate) fn take() -> Gauge {
+        Gauge {
+            pieces: CUT.with(|cut| cut.replace(0)),
+            most_held: MOST.with(|most| most.replace(0)),
+            grown: GROWN.with(|grown| grown.replace(0)),
+            still_held: HELD.with(|held| held.replace(0)),
+        }
+    }
+
+    /// What [`take`] reads.
+    pub(crate) struct Gauge {
+        /// Pieces cut.
+        pub(crate) pieces: u64,
+        /// The most pieces held at once.
+        pub(crate) most_held: u64,
+        /// Times a buffer a piece is cut or carried in grew.
+        pub(crate) grown: u64,
+        /// Pieces cut and not yet released.
+        pub(crate) still_held: u64,
+    }
+}
+
+/// The gauge outside tests: nothing.
+#[cfg(not(test))]
+mod gauge {
+    pub(crate) fn cut() {}
+
+    pub(crate) fn released() {}
 }
 
 /// `pattern` with its dashes of no length taken out and the gaps either
@@ -561,7 +668,7 @@ fn without_empty_dashes(pattern: &[f64], phase: f64) -> Option<(Vec<f64>, f64)> 
     ))
 }
 
-fn stroke_polyline(poly: &[Point], radius: f64, style: &StrokeStyle, out: &mut Sink<'_>) {
+fn stroke_polyline(poly: &mut Vec<Point>, radius: f64, style: &StrokeStyle, out: &mut Sink<'_>) {
     // A point repeated has no direction between its copies, so a join or a
     // cap that reads one off them finds none and draws nothing. The commonest
     // repeat is the close: `flatten` ends a closed subpath on its start point
@@ -570,25 +677,16 @@ fn stroke_polyline(poly: &[Point], radius: f64, style: &StrokeStyle, out: &mut S
     // corner again before closing — lost the join at its start, a notch in
     // the outline 8.4.3.4 says is joined. Repeats are dropped while two
     // distinct points are left; a subpath of one point repeated is still the
-    // degenerate one 8.5.3.2 describes, and is handled as it was.
-    let distinct: Vec<Point>;
-    let poly = if poly.windows(2).any(|pair| pair.first() == pair.get(1)) {
-        distinct = poly
-            .iter()
-            .fold(Vec::with_capacity(poly.len()), |mut kept, &p| {
-                if kept.last() != Some(&p) {
-                    kept.push(p);
-                }
-                kept
-            });
-        if distinct.len() >= 2 {
-            &distinct[..]
-        } else {
-            poly
-        }
-    } else {
-        poly
-    };
+    // degenerate one 8.5.3.2 describes, and is handled as it was. Dropped in
+    // place, since the piece is the caller's to clear: two distinct points are
+    // left exactly when some point is not the first, a point being kept when
+    // it is not the last one kept.
+    if poly.windows(2).any(|pair| pair.first() == pair.get(1))
+        && poly.iter().any(|p| Some(p) != poly.first())
+    {
+        poly.dedup();
+    }
+    let poly: &[Point] = poly;
     if poly.len() < 2 {
         // 8.4.3.3: a degenerate subpath draws a dot under a round cap, and
         // nothing at all under a butt cap.
@@ -1559,6 +1657,28 @@ mod tests {
         );
     }
 
+    /// The pieces [`each_dash`] cuts of a polyline, each copied out as it is
+    /// handed over: what the tests that compare two walks set side by side.
+    fn apply_dashes(
+        poly: &[Point],
+        style: &StrokeStyle,
+        stop: Option<&dyn Fn() -> bool>,
+    ) -> Vec<Vec<Point>> {
+        let mut pieces = Vec::new();
+        each_dash(
+            &mut poly.to_vec(),
+            style,
+            stop,
+            &mut Vec::new(),
+            &mut |piece| {
+                pieces.push(piece.clone());
+                gauge::released();
+                true
+            },
+        );
+        pieces
+    }
+
     /// The pieces two walks cut, side by side: as many, and each point
     /// within a nanometre of its twin.
     fn same_pieces(left: &[Vec<Point>], right: &[Vec<Point>], what: &str) {
@@ -2162,5 +2282,128 @@ mod tests {
                 what,
             );
         }
+    }
+
+    // ---- dashes cut one piece at a time -------------------------------------
+
+    /// **A dashed stroke holds one piece at a time.** Each dash is outlined
+    /// as soon as it is cut, from the one buffer the walk keeps for a stroke,
+    /// so however many pieces a stroke cuts one is held at once, and the
+    /// buffers a piece is cut and carried in grow for the first piece and
+    /// never again — as much for ten thousand pieces as for a hundred, so no
+    /// piece allocates. Into a path and into a fill's edges, in the device's
+    /// space and carried out of the pen's with a floor; a solid stroke hands
+    /// its subpaths over whole; and `dash` hands its caller one at a time too.
+    #[test]
+    fn a_dashed_stroke_holds_one_piece_at_a_time() {
+        let dashed = StrokeStyle {
+            width: 1.5,
+            cap: LineCap::Round,
+            dashes: vec![2.0, 1.0],
+            ..StrokeStyle::default()
+        };
+        // Under the floor once carried through the stretch, so every piece
+        // is stroked twice: by the pen, and carried to the device by the
+        // floor.
+        let thin = StrokeStyle {
+            width: 0.25,
+            ..dashed.clone()
+        };
+        let stretch = map(1.0, 0.0, 0.0, 3.0, 0.0, 0.0);
+        let routes = [
+            "into a path",
+            "into a fill's edges",
+            "carried into a path",
+            "carried into a fill's edges",
+        ];
+        let mut scratch = FillScratch::new();
+        // How much each route's buffers grew for a hundred pieces, and for
+        // ten thousand.
+        let mut grown = [[0u64; 4]; 2];
+        for (row, length) in [300.0, 30_000.0].into_iter().enumerate() {
+            let line = segment(0.0, 5.0, length, 5.0);
+            // `[2 1]`: a dash every three units, the last ending at
+            // `length − 1`.
+            let pieces = (length / 3.0) as u64;
+            for (route, what) in routes.into_iter().enumerate() {
+                let _ = gauge::take();
+                match route {
+                    0 => {
+                        let _ = stroke(&line, &dashed, 0.1, None);
+                    }
+                    1 => stroke_with(&mut scratch, &line, &dashed, 0.1, None),
+                    2 => {
+                        let _ = stroke_mapped(&line, &thin, &stretch, 1.0, 0.1, None);
+                    }
+                    _ => stroke_mapped_with(&mut scratch, &line, &thin, &stretch, 1.0, 0.1, None),
+                }
+                let measured = gauge::take();
+                assert_eq!(
+                    measured.pieces, pieces,
+                    "{what}, {length} long: the pieces cut"
+                );
+                assert_eq!(
+                    measured.most_held, 1,
+                    "{what}, {length} long: the pieces held at once"
+                );
+                assert_eq!(
+                    measured.still_held, 0,
+                    "{what}, {length} long: every piece let go"
+                );
+                if let Some(slot) = grown.get_mut(row).and_then(|row| row.get_mut(route)) {
+                    *slot = measured.grown;
+                }
+            }
+        }
+        let [hundred, ten_thousand] = grown;
+        assert_eq!(
+            hundred, ten_thousand,
+            "the buffers grow for the first piece, not for the ten thousandth"
+        );
+        assert_eq!(
+            hundred,
+            [1, 1, 2, 2],
+            "the dash in hand grows once, and the floor's carried copy once"
+        );
+
+        let mut three = Path::new();
+        for i in 0..3 {
+            let y = f64::from(i) * 10.0;
+            three.move_to(0.0, y);
+            three.line_to(40.0, y);
+        }
+        let _ = gauge::take();
+        let _ = stroke(&three, &StrokeStyle::default(), 0.1, None);
+        let measured = gauge::take();
+        assert_eq!(
+            (measured.pieces, measured.most_held, measured.grown),
+            (3, 1, 0),
+            "a solid stroke: each subpath whole, with no buffer of its own"
+        );
+
+        let _ = gauge::take();
+        let mut handed = 0u64;
+        let whole = dash(
+            &segment(0.0, 0.0, 300.0, 0.0),
+            &[2.0, 1.0],
+            0.0,
+            0.1,
+            &mut |_| {
+                handed += 1;
+                true
+            },
+        );
+        let measured = gauge::take();
+        assert!(whole, "every piece was handed over");
+        assert_eq!(
+            (
+                handed,
+                measured.pieces,
+                measured.most_held,
+                measured.still_held
+            ),
+            (100, 100, 1, 0),
+            "dash: a hundred pieces, one at a time"
+        );
     }
 }
