@@ -1012,6 +1012,41 @@ current revision, on which every shared property kept its form, and the eleven
 files the agreement gained are eleven `fail` fixtures whose properties the
 cited revisions name and the current tables had dropped.
 
+### The word-box formats' published definitions
+
+Transcribed into [docs/design/word-boxes.md](docs/design/word-boxes.md), which
+names each format by its role; the sources are named here (ruling 21). Two of
+the five formats have no specification of their own, only another tool's
+published documentation of its output, which ruling 21 lets an implementer
+read and never the tool's code; nothing of either tool was read but the pages
+below. Nothing is vendored: what was taken is the formats' vocabulary — column,
+element, attribute, class and property names, levels and number forms — and
+the design's tables record it. Every source was read on 2026-11-13.
+
+| Format | What was read | Revision | SHA-256 |
+| --- | --- | --- | --- |
+| TSV word boxes | The OCR engine Tesseract's documentation, `Command-Line-Usage.md` in [tesseract-ocr/tessdoc](https://github.com/tesseract-ocr/tessdoc), section "TSV output": the header line and the example rows | `f619d6e` (2023-12-05) | `0651b96b22813bb686b027f5d28882955e0b85e0c466897dc30394fc8433d2df` |
+| TSV word boxes | Tesseract's manual, `doc/tesseract.1.asc` in [tesseract-ocr/tesseract](https://github.com/tesseract-ocr/tesseract): the `tsv` configuration and `tessedit_create_tsv`, one row a word with its box, confidence and text | `6e5ad3d` (2026-11-06) | `6ed807fab73352de42812522d74d117c593218198618ee8bf3f34f4353cdb640` |
+| TSV's encoding | The IANA registration of the media type [`text/tab-separated-values`](https://www.iana.org/assignments/media-types/text/tab-separated-values) | as served | — |
+| bbox HTML | The PDF text converter `pdftotext`'s manual, `pdftotext(1)` of poppler-utils 22.12.0 as [Debian bookworm](https://manpages.debian.org/bookworm/poppler-utils/pdftotext.1.en.html) publishes it, the page dated 15 August 2011: `-bbox`, `-bbox-layout`, `-cropbox` and `-r` | 22.12.0-2+deb12u1 | — |
+| bbox HTML | A published sample of `pdftotext -bbox`'s output, in the README of [MrOrz/pdftojson](https://github.com/MrOrz/pdftojson), a wrapper that reads it: the `word` element and its `xMin`, `yMin`, `xMax` and `yMax` | `200eaec` (2015-07-11) | `687106a000f6199d70df274fd0b065383cc90daad439670cac35627bab2c74d9` |
+| hOCR | *hOCR — OCR Workflow and Output embedded in HTML*, version 1.2, the Living Standard of 26 February 2020, <https://kba.github.io/hocr-spec/1.2/>, which its editors place under CC0 and the Open Web Foundation Agreement 1.0 | as served | `f21f8debe655bd2d53faaa4f219a79a65ed79d754b55b77ed99c84759e7758a0` |
+| ALTO v4 | The ALTO schema 4.4, <https://www.loc.gov/standards/alto/v4/alto-4-4.xsd>, 65 111 bytes | 4.4 | `5564fd29d2dd090d8102b8a0aa081906afd677cd5ecc632312e56f21ea14702b` |
+| ALTO v4 | The XLink schema it imports, <http://www.loc.gov/standards/xlink/xlink.xsd>, "METS XLink Schema, v. 2", 3 180 bytes | v. 2 | `f1f5bb6003165cdd8f6c1fcc32f8fd1f965e1681010f3b9806d9460bcffa8a3c` |
+| PAGE XML | The PAGE content schema 2019-07-15, <https://www.primaresearch.org/schema/PAGE/gts/pagecontent/2019-07-15/pagecontent.xsd>, 85 826 bytes | 2019-07-15 | `5d7da5af5f5e06d3b9cd1e78b407ffca1862f78ad9823ed89c302fb6409932d5` |
+
+**The three schemas are fetched, never committed** (ROADMAP step FT-24.2),
+for their licences. ALTO 4.4's file names Creative Commons
+Attribution-ShareAlike 4.0 as its licence, which `deny.toml` does not admit;
+the sentence beside it, that the editorial board has waived all rights to it,
+names no licence, and which of the two governs is the owner's to read before
+anything is committed (ruling 18). PAGE XML's file, as served at its namespace,
+states no licence; [PRImA-Research-Lab/PAGE-XML](https://github.com/PRImA-Research-Lab/PAGE-XML),
+which publishes the schema's releases, is Apache-2.0, and its copies at the
+tags `2019-07-15_2` and `2019-07-15_3` and on `master` (now the 2024-07-15
+schema) differ from the served file's bytes, so the licence is not shown to
+cover the file the namespace names. The XLink schema states none.
+
 ## Test fixtures
 
 `testdata/` holds PDFs written by mutool, copied from Tinker; see
