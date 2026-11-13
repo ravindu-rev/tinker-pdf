@@ -7,14 +7,21 @@
 //!
 //! # A script list is a query, not a tree
 //!
-//! Nothing here builds a map. A [`ScriptList`] is the bytes; asking it for
-//! `latn` is a linear scan of a list that a real font keeps under twenty
-//! entries long, and the alternative — a `HashMap` built at parse time —
-//! would cost an allocation per face for a question most callers ask twice.
+//! Nothing here builds a map at parse. A [`ScriptList`] is the bytes; asking
+//! it for `latn` is a linear scan of a list that a real font keeps under
+//! twenty entries long, and the alternative — a `HashMap` built at parse time
+//! — would cost an allocation per face for a question most callers ask twice.
 //! The same reasoning runs all the way down: [`Coverage`] binary-searches the
 //! font's own sorted array rather than inflating it into a set, which is what
 //! makes a face with a thousand lookups cost a thousand bounds checks instead
 //! of a thousand allocations.
+//!
+//! The one question asked more than twice is whether a planned lookup's
+//! subtables cover the glyph at a position: a paragraph asks it per glyph per
+//! lookup. Its answer is kept, but not here and not at parse: a
+//! [`crate::Plans`] a caller keeps beside a face builds a [`GlyphSet`] per
+//! subtable from [`Coverage::ranges`] the first time a plan names the lookup,
+//! and a lookup nobody plans is never read that way.
 //!
 //! # What the ordering rules are, and which of them are trusted
 //!
@@ -616,6 +623,48 @@ impl<'a> Coverage<'a> {
         None
     }
 
+    /// Appends to `out` every glyph this table could answer for, as
+    /// inclusive ranges: each glyph a format 1 array lists and each range a
+    /// format 2 table gives, read as far as the table's bytes go.
+    ///
+    /// A superset of what [`Coverage::index_of`] finds, whatever the table
+    /// says: a binary search finds only what is listed, and a listing that
+    /// is unsorted, overlapping or wrapping past index 65 535 only makes the
+    /// search find less. A range whose end is below its start lists nothing.
+    ///
+    /// The entries read are charged to `budget` first, two bytes a glyph and
+    /// six a range, and `None` — with nothing appended — is a table whose
+    /// entries cost more than is left. A format this crate does not read
+    /// answers for no glyph and costs nothing.
+    pub(crate) fn ranges(&self, out: &mut Vec<(u16, u16)>, budget: &mut usize) -> Option<()> {
+        let (size, start) = match self.data.u16(0) {
+            Some(1) => (2usize, 4usize),
+            Some(2) => (6, 4),
+            _ => return Some(()),
+        };
+        let Some(count) = self.data.u16(2).map(usize::from) else {
+            return Some(());
+        };
+        let readable = self.data.len().saturating_sub(start) / size;
+        let entries = count.min(readable);
+        let cost = entries.checked_mul(size)?;
+        *budget = budget.checked_sub(cost)?;
+        out.reserve(entries);
+        for entry in 0..entries {
+            let at = start.checked_add(entry.checked_mul(size)?)?;
+            let range = if size == 2 {
+                let glyph = self.data.u16(at)?;
+                (glyph, glyph)
+            } else {
+                (self.data.u16(at)?, self.data.u16(at.checked_add(2)?)?)
+            };
+            if range.0 <= range.1 {
+                out.push(range);
+            }
+        }
+        Some(())
+    }
+
     /// Format 2: sorted ranges, each carrying the coverage index its first
     /// glyph has.
     fn index_of_format2(&self, glyph: u16) -> Option<u16> {
@@ -641,6 +690,112 @@ impl<'a> Coverage<'a> {
             }
         }
         None
+    }
+}
+
+/// A set of glyph indices, as a bitmap over the 64-glyph blocks from its
+/// lowest glyph's to its highest's.
+///
+/// What a coverage index is made of (`docs/design/shaping.md`, *Lookup plans
+/// and coverage indexes*): asking about a glyph is a subtraction, a load and
+/// a shift, where asking the coverage table it came from is a binary search
+/// of bounds-checked reads. Blocks are aligned to multiples of 64, so two
+/// sets combine word for word, and a set spanning the whole 16-bit glyph
+/// space is 1 024 words.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GlyphSet {
+    /// The block of the set's first word: its lowest glyph divided by 64.
+    base: u16,
+    words: Vec<u64>,
+}
+
+impl GlyphSet {
+    /// The set of every glyph `ranges` covers, each `(first, last)`
+    /// inclusive.
+    ///
+    /// The ranges are sorted and merged first unless they already ascend
+    /// without overlapping, which is what a well-formed coverage gives and
+    /// what keeps the fill linear: a hostile table of overlapping ranges
+    /// would otherwise set the same words once per range.
+    pub(crate) fn from_ranges(ranges: &mut Vec<(u16, u16)>) -> GlyphSet {
+        let ascending = ranges
+            .windows(2)
+            .all(|pair| matches!(pair, [one, two] if one.1 < two.0));
+        if !ascending {
+            ranges.sort_unstable();
+            let mut merged: Vec<(u16, u16)> = Vec::with_capacity(ranges.len());
+            for &(first, last) in ranges.iter() {
+                match merged.last_mut() {
+                    Some(top) if u32::from(first) <= u32::from(top.1) + 1 => {
+                        top.1 = top.1.max(last);
+                    }
+                    _ => merged.push((first, last)),
+                }
+            }
+            *ranges = merged;
+        }
+        let (Some(&(low, _)), Some(&(_, high))) = (ranges.first(), ranges.last()) else {
+            return GlyphSet::default();
+        };
+        let base = low >> 6;
+        let mut words = vec![0u64; usize::from((high >> 6) - base) + 1];
+        for &(first, last) in ranges.iter() {
+            let (first, last) = (usize::from(first), usize::from(last));
+            for block in (first >> 6)..=(last >> 6) {
+                let low_bit = if block == first >> 6 { first & 63 } else { 0 };
+                let high_bit = if block == last >> 6 { last & 63 } else { 63 };
+                // Bits `low_bit..=high_bit`: between one and sixty-four of
+                // them, so neither shift reaches 64.
+                let mask = (!0u64 >> (63 - (high_bit - low_bit))) << low_bit;
+                if let Some(word) = block
+                    .checked_sub(usize::from(base))
+                    .and_then(|slot| words.get_mut(slot))
+                {
+                    *word |= mask;
+                }
+            }
+        }
+        GlyphSet { base, words }
+    }
+
+    /// The union of `sets`.
+    pub(crate) fn union(sets: &[GlyphSet]) -> GlyphSet {
+        let mut held = sets.iter().filter(|set| !set.words.is_empty());
+        let Some(first) = held.next() else {
+            return GlyphSet::default();
+        };
+        let mut base = first.base;
+        let mut end = first.end();
+        for set in held {
+            base = base.min(set.base);
+            end = end.max(set.end());
+        }
+        let mut words = vec![0u64; end.saturating_sub(usize::from(base))];
+        for set in sets {
+            let from = usize::from(set.base).saturating_sub(usize::from(base));
+            for (slot, word) in words.iter_mut().skip(from).zip(&set.words) {
+                *slot |= word;
+            }
+        }
+        GlyphSet { base, words }
+    }
+
+    /// One past the set's last block.
+    fn end(&self) -> usize {
+        usize::from(self.base) + self.words.len()
+    }
+
+    /// Whether `glyph` is in the set.
+    pub(crate) fn holds(&self, glyph: u16) -> bool {
+        usize::from(glyph >> 6)
+            .checked_sub(usize::from(self.base))
+            .and_then(|slot| self.words.get(slot))
+            .is_some_and(|word| (word >> (glyph & 63)) & 1 != 0)
+    }
+
+    /// The bytes the set's bitmap holds.
+    pub(crate) fn bytes(&self) -> usize {
+        self.words.len().saturating_mul(8)
     }
 }
 
@@ -779,8 +934,132 @@ impl<'a> Device<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassDef, Coverage, Device, Tag};
+    use super::{ClassDef, Coverage, Device, GlyphSet, Tag};
     use crate::read::Bytes;
+
+    /// A bitmap holds exactly the glyphs its ranges cover — sorted or not,
+    /// overlapping or not, across a block's edge and at both ends of the
+    /// glyph space.
+    #[test]
+    fn a_glyph_set_holds_exactly_its_ranges() {
+        let cases: [&[(u16, u16)]; 10] = [
+            &[],
+            &[(5, 5)],
+            &[(0, 0), (65535, 65535)],
+            &[(10, 70), (60, 200), (3, 4)],
+            &[(1, 1), (2, 2), (3, 3)],
+            &[(64, 127)],
+            &[(63, 64)],
+            &[(0, 65535)],
+            &[(9, 9), (9, 9), (8, 10)],
+            &[(65000, 65535), (0, 63), (1000, 1000)],
+        ];
+        for ranges in cases {
+            let set = GlyphSet::from_ranges(&mut ranges.to_vec());
+            for glyph in 0..=u16::MAX {
+                let expected = ranges
+                    .iter()
+                    .any(|(first, last)| (*first..=*last).contains(&glyph));
+                assert_eq!(set.holds(glyph), expected, "{ranges:?} at {glyph}");
+            }
+            assert!(set.bytes() <= 1024 * 8, "{ranges:?}: {} bytes", set.bytes());
+        }
+        assert_eq!(GlyphSet::from_ranges(&mut Vec::new()).bytes(), 0);
+        assert_eq!(
+            GlyphSet::from_ranges(&mut vec![(70, 80)]).bytes(),
+            8,
+            "one block"
+        );
+    }
+
+    #[test]
+    fn a_union_holds_what_any_of_its_sets_holds() {
+        let a = GlyphSet::from_ranges(&mut vec![(3, 9), (200, 210)]);
+        let b = GlyphSet::from_ranges(&mut vec![(100, 130), (65000, 65535)]);
+        let c = GlyphSet::from_ranges(&mut vec![(5, 6)]);
+        let empty = GlyphSet::default();
+        let union = GlyphSet::union(&[a.clone(), empty.clone(), b.clone(), c.clone()]);
+        for glyph in 0..=u16::MAX {
+            let expected = a.holds(glyph) || b.holds(glyph) || c.holds(glyph);
+            assert_eq!(union.holds(glyph), expected, "{glyph}");
+        }
+        assert_eq!(GlyphSet::union(&[]), GlyphSet::default());
+        assert_eq!(
+            GlyphSet::union(&[empty.clone(), empty]),
+            GlyphSet::default()
+        );
+        assert_eq!(GlyphSet::union(&[c.clone()]), c);
+    }
+
+    /// `Coverage::ranges` lists every glyph the search can find, whatever
+    /// shape the table is in, and charges two bytes a glyph and six a range
+    /// as far as the table's bytes go.
+    #[test]
+    fn a_coverage_lists_everything_its_search_finds() {
+        let tables: [&[u8]; 9] = [
+            &[0, 1, 0, 3, 0, 5, 0, 9, 0, 20],
+            // Unsorted: the search finds less than is listed.
+            &[0, 1, 0, 3, 0, 20, 0, 5, 0, 9],
+            &[0, 2, 0, 1, 0, 10, 0, 13, 0, 7],
+            // A start index that wraps past 65 535.
+            &[0, 2, 0, 1, 0, 10, 0, 13, 0xFF, 0xFE],
+            // Ranges out of order.
+            &[0, 2, 0, 2, 0, 50, 0, 60, 0, 0, 0, 10, 0, 20, 0, 11],
+            // A range that ends below its start lists nothing.
+            &[0, 2, 0, 1, 0, 13, 0, 10, 0, 0],
+            // A count past the table's bytes.
+            &[0, 1, 0, 9, 0, 5],
+            // A format nothing reads.
+            &[0, 3, 0, 1, 0, 5],
+            // No count at all.
+            &[0, 1],
+        ];
+        for bytes in tables {
+            let coverage = Coverage::new(Bytes::new(bytes));
+            let mut ranges = Vec::new();
+            let mut budget = usize::MAX;
+            assert_eq!(coverage.ranges(&mut ranges, &mut budget), Some(()));
+            let set = GlyphSet::from_ranges(&mut ranges);
+            for glyph in 0..=u16::MAX {
+                if coverage.index_of(glyph).is_some() {
+                    assert!(
+                        set.holds(glyph),
+                        "{bytes:?} finds {glyph}, the ranges miss it"
+                    );
+                }
+            }
+        }
+        let reversed: [u8; 10] = [0, 2, 0, 1, 0, 13, 0, 10, 0, 0];
+        let mut ranges = Vec::new();
+        let mut budget = usize::MAX;
+        let _ = Coverage::new(Bytes::new(&reversed)).ranges(&mut ranges, &mut budget);
+        assert!(ranges.is_empty(), "a reversed range is no range");
+
+        let unsorted: [u8; 16] = [0, 2, 0, 2, 0, 50, 0, 60, 0, 0, 0, 10, 0, 20, 0, 11];
+        let coverage = Coverage::new(Bytes::new(&unsorted));
+        let (mut ranges, mut budget) = (Vec::new(), 12usize);
+        assert_eq!(coverage.ranges(&mut ranges, &mut budget), Some(()));
+        assert_eq!((budget, ranges), (0, vec![(50, 60), (10, 20)]));
+        let (mut ranges, mut budget) = (Vec::new(), 11usize);
+        assert_eq!(coverage.ranges(&mut ranges, &mut budget), None);
+        assert_eq!(
+            (budget, ranges),
+            (11, Vec::new()),
+            "refused, and nothing read or charged"
+        );
+
+        let truncated: [u8; 6] = [0, 1, 0, 9, 0, 5];
+        let (mut ranges, mut budget) = (Vec::new(), 2usize);
+        assert_eq!(
+            Coverage::new(Bytes::new(&truncated)).ranges(&mut ranges, &mut budget),
+            Some(())
+        );
+        assert_eq!(
+            (budget, ranges),
+            (0, vec![(5, 5)]),
+            "as far as the bytes go"
+        );
+    }
 
     #[test]
     fn a_tag_prints_its_four_bytes() {

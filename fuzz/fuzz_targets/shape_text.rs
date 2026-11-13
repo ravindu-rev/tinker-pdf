@@ -49,6 +49,12 @@
 //!   backwards. This is what milestone 7's `/ToUnicode` is built on: after a
 //!   ligature there is nothing left but the cluster to say which characters
 //!   went into it.
+//! - **A kept `Plans` changes nothing.** The paragraph is shaped again
+//!   through one `Plans` — once building it and once reading it back — and
+//!   through one whose index ceiling is too small to hold anything, and every
+//!   run's glyphs and warnings must be the ones the shaper with no `Plans`
+//!   gives: the lookup plans and coverage indexes may change how fast a face
+//!   shapes and never what it shapes to, on whatever face a mutator writes.
 //! - **Substitution does not run away.** A shaped run is never longer than
 //!   the greater of [`Limits::max_glyphs`] and the run's own byte length —
 //!   the ceiling is a budget for what `GSUB` *adds*, and the buffer it is
@@ -81,7 +87,7 @@ use libfuzzer_sys::fuzz_target;
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::bidi::{self, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::{itemize, Shaper};
-use tinker_pdf_shape::{Limits, ShapedGlyph};
+use tinker_pdf_shape::{Limits, Plans, ShapedGlyph, Warning};
 
 /// The three base directions, so P2/P3's own resolution and the two
 /// overrides are all on the path an ordinary input takes.
@@ -220,15 +226,24 @@ fn check_glyphs(run: &tinker_pdf_shape::shape::Run, glyphs: &[ShapedGlyph], limi
     }
 }
 
-/// Shapes one paragraph and returns everything that came out, so the whole of
-/// it can be compared against a second run.
+/// One shaped run's level, glyphs and warnings.
+type Shaped = (u8, Vec<ShapedGlyph>, Vec<Warning>);
+
+/// Shapes one paragraph, through `plans` where it is given, and returns
+/// everything that came out, so the whole of it can be compared against a
+/// second run.
 fn shape_all(
     face: &Sfnt<'_>,
     text: &str,
     direction: BaseDirection,
     limits: Limits,
-) -> Vec<(u8, Vec<ShapedGlyph>)> {
+    plans: Option<&Plans>,
+) -> Vec<Shaped> {
     let shaper = Shaper::new(face).with_limits(limits);
+    let shaper = match plans {
+        Some(plans) => shaper.with_plans(plans),
+        None => shaper,
+    };
     let paragraph = Paragraph::new(text, direction);
     check_paragraph(text, &paragraph);
 
@@ -244,7 +259,11 @@ fn shape_all(
             run.text,
             "a shaped run reported a different range than it was asked for"
         );
-        out.push((run.level.number(), shaped.glyphs().to_vec()));
+        out.push((
+            run.level.number(),
+            shaped.glyphs().to_vec(),
+            shaped.warnings().to_vec(),
+        ));
     }
     out
 }
@@ -278,6 +297,13 @@ fuzz_target!(|data: &[u8]| {
             0 => 8,
             _ => 65_536,
         },
+        max_index_bytes: Limits::DEFAULT.max_index_bytes,
+    };
+    // The same ceilings with an index ceiling too small to keep anything, so
+    // every stage falls back to resolving per run.
+    let starved = Limits {
+        max_index_bytes: 96,
+        ..limits
     };
 
     // Bidi and itemization do not need a face at all, and most inputs will
@@ -296,9 +322,22 @@ fuzz_target!(|data: &[u8]| {
     let Some(sfnt) = Sfnt::parse(face) else {
         return;
     };
+    let kept = Plans::new();
+    let small = Plans::new();
     for direction in DIRECTIONS {
-        let once = shape_all(&sfnt, &text, direction, limits);
-        let twice = shape_all(&sfnt, &text, direction, limits);
+        let once = shape_all(&sfnt, &text, direction, limits, None);
+        let twice = shape_all(&sfnt, &text, direction, limits, None);
         assert!(once == twice, "shaping is not deterministic");
+        // Building the plans and indexes, and then reading them back.
+        let built = shape_all(&sfnt, &text, direction, limits, Some(&kept));
+        let read = shape_all(&sfnt, &text, direction, limits, Some(&kept));
+        assert!(once == built, "a Plans being built changed the shaping");
+        assert!(once == read, "a kept Plans changed the shaping");
+        let starving = shape_all(&sfnt, &text, direction, starved, Some(&small));
+        let plain = shape_all(&sfnt, &text, direction, starved, None);
+        assert!(
+            plain == starving,
+            "a Plans past its ceiling changed the shaping"
+        );
     }
 });

@@ -50,9 +50,12 @@
 //! written up in `lib.rs`.
 
 use core::ops::Range;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tinker_pdf_font::Sfnt;
 
+use crate::apply::LookupIndex;
 use crate::arabic;
 use crate::bidi::{BaseDirection, Level, Paragraph};
 use crate::buffer::{Buffer, Direction, ShapedGlyph};
@@ -61,7 +64,7 @@ use crate::limits::Limits;
 use crate::read::Bytes;
 use crate::unicode::{self, Script};
 use crate::universal;
-use crate::{Layout, MarkWidths, Warning};
+use crate::{Layout, LayoutTable, MarkWidths, Table, Warning};
 
 /// The `GSUB` features the default shaper turns on, in the order they are
 /// requested.
@@ -246,6 +249,236 @@ impl ShapedRun {
     }
 }
 
+/// A face's lookup plans and coverage indexes, built when first asked and
+/// kept for every [`Shaper`] made over the face with [`Shaper::with_plans`].
+///
+/// `docs/design/shaping.md`, *Lookup plans and coverage indexes*. A **plan**
+/// is the lookups one stage resolves for one `(table, script, language,
+/// features)`, and an **index**, built with the first plan that names a
+/// lookup, is the glyphs each of its subtables' coverage holds, so the
+/// runner passes a position no subtable could apply at without resolving or
+/// probing one. Both are kept here rather than in the [`Shaper`], which is
+/// `Copy` and made afresh at every call site: a `Plans` holds no borrow, so
+/// it sits beside the face's bytes in whatever owns them, and every shaper
+/// made over the face borrows it.
+///
+/// It answers for the face it was first used with. It keeps the address and
+/// length of that face's `GSUB` and `GPOS`, and starts again when a shaper
+/// hands it other tables, so a `Plans` used with the wrong face costs time
+/// and never output. What it holds and reads is bounded by
+/// [`Limits::max_index_bytes`], past which a stage is resolved per run and a
+/// lookup probed at every position, as with no `Plans` at all.
+///
+/// The store is behind a `Mutex`, so a `Plans` may be shared by shapers on
+/// several threads; each entry is an `Arc`, handed out under the lock and
+/// read outside it. A clone starts empty: what a `Plans` holds is a cache of
+/// its face, not a value of its own.
+#[derive(Debug, Default)]
+pub struct Plans {
+    store: Mutex<Store>,
+}
+
+impl Clone for Plans {
+    fn clone(&self) -> Plans {
+        Plans::new()
+    }
+}
+
+impl Plans {
+    /// An empty store, which builds as shapers ask.
+    #[must_use]
+    pub fn new() -> Plans {
+        Plans::default()
+    }
+
+    /// How many plans have been built: one for each distinct `(table,
+    /// script, language, features)` a stage has asked for, and again for
+    /// each after the store started over for another face.
+    #[must_use]
+    pub fn plans_built(&self) -> u64 {
+        self.lock().plans_built
+    }
+
+    /// How many lookups' indexes have been built — once per lookup a plan
+    /// names, shared by every plan naming it — counting a lookup that turned
+    /// out to have none.
+    #[must_use]
+    pub fn indexes_built(&self) -> u64 {
+        self.lock().indexes_built
+    }
+
+    /// The store, whatever a thread that panicked holding it left: every
+    /// entry is complete when it is inserted, so a store is never half
+    /// written.
+    fn lock(&self) -> MutexGuard<'_, Store> {
+        self.store.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The lookups one stage of `table` runs, with their indexes: the kept
+    /// plan for the key, or one built now and kept, or — past
+    /// [`Limits::max_index_bytes`] — resolved for this run alone.
+    fn lookups(
+        &self,
+        layout: &Layout<'_>,
+        table: &LayoutTable<'_>,
+        script: Tag,
+        language: Option<Tag>,
+        features: Vec<(Tag, u32)>,
+        limits: &Limits,
+    ) -> Lookups {
+        let mut store = self.lock();
+        store.adopt(layout);
+        let key = PlanKey {
+            table: table.table(),
+            script,
+            language,
+            features,
+        };
+        if let Some(kept) = store.plans.get(&key) {
+            return Lookups::Kept(Arc::clone(kept));
+        }
+        let lookups = table.lookups_for_masked(script, language, &key.features);
+        let cost = plan_cost(&key, &lookups);
+        let left = limits.max_index_bytes.saturating_sub(store.spent);
+        if cost > left {
+            return Lookups::Fresh(lookups);
+        }
+        store.spent = store.spent.saturating_add(cost);
+        store.plans_built = store.plans_built.saturating_add(1);
+        let covered = lookups
+            .iter()
+            .map(|(lookup, _)| store.index(table, *lookup, limits))
+            .collect();
+        let plan = Arc::new(LookupPlan { lookups, covered });
+        store.plans.insert(key, Arc::clone(&plan));
+        Lookups::Kept(plan)
+    }
+
+    /// Every lookup index the store holds, by table and lookup, for the
+    /// tests that ask which planned lookups have one.
+    #[cfg(test)]
+    pub(crate) fn indexes(&self) -> Vec<((Table, u16), bool)> {
+        self.lock()
+            .indexes
+            .iter()
+            .map(|(key, index)| (*key, index.is_some()))
+            .collect()
+    }
+}
+
+/// What a [`Plans`] holds, behind its lock.
+#[derive(Debug, Default)]
+struct Store {
+    /// The address and length of the `GSUB` and `GPOS` the entries were
+    /// built from; zero for a table the face has not.
+    face: Option<[(usize, usize); 2]>,
+    plans: BTreeMap<PlanKey, Arc<LookupPlan>>,
+    /// Each lookup indexed, by table and lookup; `None` for one a probe must
+    /// visit everywhere, or whose index the budget could not pay for.
+    indexes: BTreeMap<(Table, u16), Option<Arc<LookupIndex>>>,
+    /// The bytes charged against [`Limits::max_index_bytes`].
+    spent: usize,
+    plans_built: u64,
+    indexes_built: u64,
+}
+
+impl Store {
+    /// Takes the face `layout` was read from as the store's, starting again
+    /// if the store's entries were built from another face's tables.
+    fn adopt(&mut self, layout: &Layout<'_>) {
+        let face = [
+            layout.gsub().map_or((0, 0), LayoutTable::key),
+            layout.gpos().map_or((0, 0), LayoutTable::key),
+        ];
+        if self.face != Some(face) {
+            if self.face.is_some() {
+                self.plans.clear();
+                self.indexes.clear();
+                self.spent = 0;
+            }
+            self.face = Some(face);
+        }
+    }
+
+    /// The index of `lookup` in `table`, built if it is the first plan to
+    /// name it. Whatever building it read is charged, built or not.
+    fn index(
+        &mut self,
+        table: &LayoutTable<'_>,
+        lookup: u16,
+        limits: &Limits,
+    ) -> Option<Arc<LookupIndex>> {
+        let key = (table.table(), lookup);
+        if let Some(kept) = self.indexes.get(&key) {
+            return kept.clone();
+        }
+        self.indexes_built = self.indexes_built.saturating_add(1);
+        let left = limits.max_index_bytes.saturating_sub(self.spent);
+        let mut budget = left;
+        let built = table
+            .lookups()
+            .get(usize::from(lookup))
+            .and_then(|found| LookupIndex::build(table.table(), &found, &mut budget))
+            .map(Arc::new);
+        self.spent = self.spent.saturating_add(left.saturating_sub(budget));
+        self.indexes.insert(key, built.clone());
+        built
+    }
+}
+
+/// What a plan is asked with: the stage's table, script, language and
+/// requested `(feature, mask)` pairs, in the order asked.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PlanKey {
+    table: Table,
+    script: Tag,
+    language: Option<Tag>,
+    features: Vec<(Tag, u32)>,
+}
+
+/// What a plan costs against [`Limits::max_index_bytes`]: a fixed part, its
+/// key's features, and for each lookup its pair, its index slot and the
+/// store's entry for its index.
+fn plan_cost(key: &PlanKey, lookups: &[(u16, u32)]) -> usize {
+    64usize
+        .saturating_add(key.features.len().saturating_mul(8))
+        .saturating_add(lookups.len().saturating_mul(64))
+}
+
+/// One stage's lookups, and each one's index where it has one.
+#[derive(Debug)]
+pub(crate) struct LookupPlan {
+    lookups: Vec<(u16, u32)>,
+    covered: Vec<Option<Arc<LookupIndex>>>,
+}
+
+/// The lookups a stage runs: a kept plan, or resolved for one run.
+pub(crate) enum Lookups {
+    /// Resolved for this run alone, with no index.
+    Fresh(Vec<(u16, u32)>),
+    /// A [`Plans`] entry.
+    Kept(Arc<LookupPlan>),
+}
+
+impl Lookups {
+    /// The `(lookup, mask)` pairs, in the order they run.
+    pub(crate) fn lookups(&self) -> &[(u16, u32)] {
+        match self {
+            Lookups::Fresh(lookups) => lookups,
+            Lookups::Kept(plan) => &plan.lookups,
+        }
+    }
+
+    /// Each lookup's index, by its place in [`Lookups::lookups`]; empty for
+    /// a run with none.
+    pub(crate) fn covered(&self) -> &[Option<Arc<LookupIndex>>] {
+        match self {
+            Lookups::Fresh(_) => &[],
+            Lookups::Kept(plan) => &plan.covered,
+        }
+    }
+}
+
 /// One face, ready to shape runs.
 #[derive(Clone, Copy, Debug)]
 pub struct Shaper<'a> {
@@ -262,6 +495,9 @@ pub struct Shaper<'a> {
     /// the default plan with changes rather than a plan of their own. See
     /// [`Shaper::with_settings`].
     settings: &'a [(Tag, u32)],
+    /// The face's kept lookup plans and coverage indexes, where the caller
+    /// keeps them. See [`Shaper::with_plans`].
+    plans: Option<&'a Plans>,
 }
 
 impl<'a> Shaper<'a> {
@@ -276,7 +512,24 @@ impl<'a> Shaper<'a> {
             gsub_features: None,
             gpos_features: None,
             settings: &[],
+            plans: None,
         }
+    }
+
+    /// The face's [`Plans`], which this shaper reads its lookup plans and
+    /// coverage indexes from, and builds into where one is missing.
+    ///
+    /// A caller keeps one `Plans` per face beside the face's bytes and makes
+    /// every shaper over the face with it, so a plan is resolved and an
+    /// index built once however many shapers, runs and feature settings
+    /// follow. The output is what the same shaper without it gives, glyph
+    /// for glyph and warning for warning: a plan is a pure function of the
+    /// table and what is asked of it, and an index passes only positions
+    /// where a probe could do nothing.
+    #[must_use]
+    pub const fn with_plans(mut self, plans: &'a Plans) -> Self {
+        self.plans = Some(plans);
+        self
     }
 
     /// Features other than [`DEFAULT_GSUB_FEATURES`] and
@@ -473,8 +726,13 @@ impl<'a> Shaper<'a> {
                 }
                 let wanted: Vec<(Tag, u32)> =
                     stage.iter().map(|tag| (*tag, feature_mask(*tag))).collect();
-                let lookups = gsub.lookups_for_masked(script, self.language, &wanted);
-                warnings.extend(self.layout.substitute_masked(&mut buffer, &lookups, limits));
+                let lookups = self.lookups_for(gsub, script, wanted, &limits);
+                warnings.extend(self.layout.substitute_planned(
+                    &mut buffer,
+                    lookups.lookups(),
+                    lookups.covered(),
+                    limits,
+                ));
                 // Which syllables actually got a reph, asked here and nowhere
                 // else because here is the only moment the answer is
                 // unambiguous; see [`Buffer::set_repha`] and [`mark_repha`].
@@ -523,10 +781,11 @@ impl<'a> Shaper<'a> {
                 .into_iter()
                 .map(|tag| (tag, Buffer::GLOBAL))
                 .collect();
-            let lookups = gpos.lookups_for_masked(script, self.language, &wanted);
-            warnings.extend(self.layout.position_masked(
+            let lookups = self.lookups_for(gpos, script, wanted, &limits);
+            warnings.extend(self.layout.position_planned(
                 &mut buffer,
-                &lookups,
+                lookups.lookups(),
+                lookups.covered(),
                 limits,
                 plan.mark_widths(),
             ));
@@ -548,6 +807,24 @@ impl<'a> Shaper<'a> {
             units_per_em: self.face.units_per_em,
             text: run.text.clone(),
             warnings,
+        }
+    }
+
+    /// The lookups one stage of `table` runs for `wanted`, and their coverage
+    /// indexes: from the face's [`Plans`] where the caller keeps one, and
+    /// resolved for this run alone, with no index, where it does not.
+    fn lookups_for(
+        &self,
+        table: &LayoutTable<'a>,
+        script: Tag,
+        wanted: Vec<(Tag, u32)>,
+        limits: &Limits,
+    ) -> Lookups {
+        match self.plans {
+            Some(plans) => {
+                plans.lookups(&self.layout, table, script, self.language, wanted, limits)
+            }
+            None => Lookups::Fresh(table.lookups_for_masked(script, self.language, &wanted)),
         }
     }
 
@@ -1320,11 +1597,151 @@ fn variation_glyph(data: Bytes<'_>, base: char, selector: char, face: &Sfnt<'_>)
 
 #[cfg(test)]
 mod tests {
-    use super::{is_joiner, is_variation_selector, itemize, Plan};
+    use super::{is_joiner, is_variation_selector, itemize, Plan, Plans, ShapedRun, Shaper};
     use crate::bidi::{BaseDirection, Paragraph};
+    use crate::buffer::ShapedGlyph;
     use crate::common::Tag;
+    use crate::limits::Limits;
     use crate::unicode::Script;
-    use crate::MarkWidths;
+    use crate::{MarkWidths, Warning};
+    use tinker_pdf_font::Sfnt;
+
+    /// The Nasta'liq test face, and Urdu in the letters it maps.
+    const ARABIC_FACE: &[u8] =
+        include_bytes!("../data/text-rendering-tests/fonts/TestShapeAran.ttf");
+    const URDU: &str = "\u{646}\u{633}\u{62a}\u{639}\u{644}\u{6cc}\u{642} \u{62e}\u{637} \
+                        \u{641}\u{646} \u{642}\u{627}\u{646}\u{648}\u{646} \u{6a9}\u{644}";
+
+    /// A Kannada face, and Kannada with a reph and a conjunct.
+    const KANNADA_FACE: &[u8] =
+        include_bytes!("../data/text-rendering-tests/fonts/NotoSansKannada-Regular.ttf");
+    const KANNADA: &str = "\u{c95}\u{cb0}\u{ccd}\u{ca8}\u{cbe}\u{c9f}\u{c95} \
+                           \u{caa}\u{cc1}\u{cb8}\u{ccd}\u{ca4}\u{c95}";
+
+    /// Each run's glyphs and warnings.
+    fn output(runs: &[ShapedRun]) -> Vec<(Vec<ShapedGlyph>, Vec<Warning>)> {
+        runs.iter()
+            .map(|run| (run.glyphs().to_vec(), run.warnings().to_vec()))
+            .collect()
+    }
+
+    /// `text` shaped through `face`, with `plans` where it is given.
+    fn shaped(
+        face: &Sfnt<'_>,
+        text: &str,
+        limits: Limits,
+        plans: Option<&Plans>,
+    ) -> Vec<(Vec<ShapedGlyph>, Vec<Warning>)> {
+        let shaper = Shaper::new(face).with_limits(limits);
+        let shaper = match plans {
+            Some(plans) => shaper.with_plans(plans),
+            None => shaper,
+        };
+        output(&shaper.shape_text(text, BaseDirection::Auto).1)
+    }
+
+    /// Past its ceiling a `Plans` keeps less or nothing, and the text shapes
+    /// as it does with none, whatever the ceiling.
+    #[test]
+    fn a_plans_past_its_ceiling_shapes_as_one_never_kept() {
+        let face = Sfnt::parse(ARABIC_FACE).expect("the face parses");
+        for ceiling in [0usize, 1, 100, 300, 1_000, 4_000, 20_000, usize::MAX] {
+            let limits = Limits {
+                max_index_bytes: ceiling,
+                ..Limits::DEFAULT
+            };
+            let plans = Plans::new();
+            let plain = shaped(&face, URDU, limits, None);
+            assert_eq!(
+                shaped(&face, URDU, limits, Some(&plans)),
+                plain,
+                "{ceiling}"
+            );
+            assert_eq!(
+                shaped(&face, URDU, limits, Some(&plans)),
+                plain,
+                "{ceiling}"
+            );
+            if ceiling < 64 {
+                assert_eq!(
+                    plans.plans_built(),
+                    0,
+                    "a plan no ceiling of {ceiling} pays for"
+                );
+                assert_eq!(plans.indexes_built(), 0);
+            }
+        }
+        let ample = Plans::new();
+        let _ = shaped(&face, URDU, Limits::DEFAULT, Some(&ample));
+        assert!(ample.plans_built() > 0 && ample.indexes_built() > 0);
+        assert!(ample.indexes().iter().all(|(_, has)| *has));
+    }
+
+    /// A `Plans` handed a shaper over another face starts again, so each
+    /// face shapes as it would with none, and back again.
+    #[test]
+    fn a_plans_handed_another_face_starts_again() {
+        let arabic = Sfnt::parse(ARABIC_FACE).expect("the Arabic face parses");
+        let kannada = Sfnt::parse(KANNADA_FACE).expect("the Kannada face parses");
+        let limits = Limits::DEFAULT;
+        let plans = Plans::new();
+        let urdu = shaped(&arabic, URDU, limits, None);
+        let indic = shaped(&kannada, KANNADA, limits, None);
+
+        assert_eq!(shaped(&arabic, URDU, limits, Some(&plans)), urdu);
+        let first = plans.plans_built();
+        assert_eq!(shaped(&kannada, KANNADA, limits, Some(&plans)), indic);
+        let second = plans.plans_built();
+        assert!(second > first, "the Kannada face built plans of its own");
+        assert_eq!(shaped(&arabic, URDU, limits, Some(&plans)), urdu);
+        assert!(plans.plans_built() > second, "and the Arabic face's again");
+
+        // The same bytes parsed twice are the same face.
+        let again = Sfnt::parse(ARABIC_FACE).expect("the Arabic face parses");
+        let built = plans.plans_built();
+        assert_eq!(shaped(&again, URDU, limits, Some(&plans)), urdu);
+        assert_eq!(
+            plans.plans_built(),
+            built,
+            "a second parse of one face rebuilt"
+        );
+    }
+
+    #[test]
+    fn a_clone_of_a_plans_starts_empty() {
+        let face = Sfnt::parse(ARABIC_FACE).expect("the face parses");
+        let plans = Plans::new();
+        let plain = shaped(&face, URDU, Limits::DEFAULT, None);
+        let _ = shaped(&face, URDU, Limits::DEFAULT, Some(&plans));
+        let copy = plans.clone();
+        assert_eq!((copy.plans_built(), copy.indexes_built()), (0, 0));
+        assert_eq!(shaped(&face, URDU, Limits::DEFAULT, Some(&copy)), plain);
+        assert!(plans.plans_built() > 0, "the original keeps its own");
+    }
+
+    /// One `Plans` serves shapers on several threads at once, each shaping
+    /// as it would with none.
+    #[test]
+    fn one_plans_serves_shapers_on_several_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Plans>();
+        shared::<Shaper<'static>>();
+
+        let face = Sfnt::parse(KANNADA_FACE).expect("the face parses");
+        let plain = shaped(&face, KANNADA, Limits::DEFAULT, None);
+        let plans = Plans::new();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| shaped(&face, KANNADA, Limits::DEFAULT, Some(&plans))))
+                .collect();
+            for handle in handles {
+                assert_eq!(handle.join().expect("a shaping thread"), plain);
+            }
+        });
+        let built = plans.plans_built();
+        let _ = shaped(&face, KANNADA, Limits::DEFAULT, Some(&plans));
+        assert_eq!(plans.plans_built(), built, "every plan was kept once");
+    }
 
     /// Two stage indices point into [`USE_GSUB_STAGES`], and this is what
     /// stops either drifting off it.

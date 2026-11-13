@@ -501,6 +501,23 @@ What it does:
   width. `rphf` is offered only where the syllable has a base for the repha to
   sit on, so a word-final `RA` and halant is a dead consonant and not a reph.
   The table below says how much of it is adjudicated.
+- **Plans and coverage indexes kept per face.** A caller that keeps a
+  `tinker_pdf_shape::Plans` beside a face and makes its shapers with it
+  (`Shaper::with_plans`) has each stage's lookups resolved once per
+  `(table, script, language, features)` and, for each planned lookup, a bitmap
+  of the glyphs each subtable's first coverage holds, built the first time a
+  plan names the lookup. The runner still runs every lookup over the whole
+  run in list order; at a position no subtable of a lookup holds, it charges
+  the operation budget what a probe would have cost and moves on without
+  resolving or probing a subtable, so the glyphs, positions and warnings are
+  the ones shaping without a `Plans` gives. A lookup whose probe warns
+  whatever the glyph has no index, and an index is set aside for a run whose
+  `Limits` would make a probe warn (`max_extension_depth`,
+  `max_context_length`). What a `Plans` holds and reads is bounded by
+  `Limits::max_index_bytes`, past which it falls back to probing; it starts
+  again when handed another face's tables; and it counts what it built
+  (`plans_built`, `indexes_built`). A shaper with no `Plans` resolves and
+  probes as it always has.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

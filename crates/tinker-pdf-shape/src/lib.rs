@@ -99,9 +99,11 @@ pub use common::{
 };
 pub use gdef::{AttachList, Caret, Gdef, GlyphClass, LigCaretList};
 pub use limits::Limits;
-pub use shape::{ShapedRun, Shaper};
+pub use shape::{Plans, ShapedRun, Shaper};
 
-use apply::Runner;
+use std::sync::Arc;
+
+use apply::{LookupIndex, Runner};
 use read::Bytes;
 use tinker_pdf_font::Sfnt;
 
@@ -270,6 +272,13 @@ impl<'a> LayoutTable<'a> {
     #[must_use]
     pub const fn table(&self) -> Table {
         self.which
+    }
+
+    /// Where the table's bytes are, and how many: what [`Plans`] tells one
+    /// face's tables from another's by.
+    pub(crate) fn key(&self) -> (usize, usize) {
+        let bytes = self.data.as_slice();
+        (bytes.as_ptr() as usize, bytes.len())
     }
 
     /// The table's minor version: 0, or 1 where it carries feature
@@ -520,10 +529,23 @@ impl<'a> Layout<'a> {
         lookups: &[(u16, u32)],
         limits: Limits,
     ) -> Vec<Warning> {
+        self.substitute_planned(buffer, lookups, &[], limits)
+    }
+
+    /// [`Layout::substitute_masked`], passing the positions `covered` — one
+    /// entry per lookup, from a [`Plans`] — says a lookup cannot apply at.
+    pub(crate) fn substitute_planned(
+        &self,
+        buffer: &mut Buffer,
+        lookups: &[(u16, u32)],
+        covered: &[Option<Arc<LookupIndex>>],
+        limits: Limits,
+    ) -> Vec<Warning> {
         let Some(gsub) = self.gsub else {
             return Vec::new();
         };
-        let mut runner = Runner::new(Table::Gsub, gsub.lookups(), self.gdef.as_ref(), limits);
+        let mut runner = Runner::new(Table::Gsub, gsub.lookups(), self.gdef.as_ref(), limits)
+            .with_index(covered);
         runner.run(buffer, lookups);
         runner.warnings
     }
@@ -568,10 +590,24 @@ impl<'a> Layout<'a> {
         limits: Limits,
         marks: MarkWidths,
     ) -> Vec<Warning> {
+        self.position_planned(buffer, lookups, &[], limits, marks)
+    }
+
+    /// [`Layout::position_masked`], passing the positions `covered` says a
+    /// lookup cannot apply at. See [`Layout::substitute_planned`].
+    pub(crate) fn position_planned(
+        &self,
+        buffer: &mut Buffer,
+        lookups: &[(u16, u32)],
+        covered: &[Option<Arc<LookupIndex>>],
+        limits: Limits,
+        marks: MarkWidths,
+    ) -> Vec<Warning> {
         let Some(gpos) = self.gpos else {
             return Vec::new();
         };
-        let mut runner = Runner::new(Table::Gpos, gpos.lookups(), self.gdef.as_ref(), limits);
+        let mut runner = Runner::new(Table::Gpos, gpos.lookups(), self.gdef.as_ref(), limits)
+            .with_index(covered);
         runner.run(buffer, lookups);
         buffer.propagate_attachments();
         if marks == MarkWidths::ZeroByGdef {

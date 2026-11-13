@@ -99,6 +99,24 @@ pub struct Limits {
     /// The `shape_text` fuzz target asserted the other reading and failed on
     /// every run of more than eight characters.
     pub max_glyphs: usize,
+
+    /// How many bytes a face's [`crate::Plans`] may hold and read.
+    ///
+    /// **Eight mebibytes.** Everything a `Plans` keeps is charged here — a
+    /// plan its lookup pairs and its key, an index its glyph bitmaps and a
+    /// fixed cost per subtable — and so is every coverage byte read to build
+    /// an index, because a face may name one coverage of 65 535 ranges from
+    /// every subtable of every lookup, and reading it each time is the cost
+    /// a hostile face would choose. A shipped face's indexes are a few
+    /// hundred kilobytes at most; past this a plan is resolved per run and a
+    /// lookup probed at every position, exactly as with no `Plans`, so the
+    /// ceiling changes how fast a face shapes and never what it shapes to.
+    ///
+    /// A ceiling on a face rather than a run, which is why
+    /// [`Limits::for_glyphs`] leaves it alone: the charge is the shaper's at
+    /// the moment it builds, and a `Plans` holds no more than the largest
+    /// ceiling any shaper over it carried.
+    pub max_index_bytes: usize,
 }
 
 impl Limits {
@@ -115,6 +133,7 @@ impl Limits {
         max_context_length: 64,
         max_operations: 500_000,
         max_glyphs: 65_536,
+        max_index_bytes: 8 << 20,
     };
 
     /// The default ceilings, with the two work numbers scaled to a run of
@@ -182,5 +201,16 @@ mod tests {
         let huge = Limits::for_glyphs(usize::MAX);
         assert_eq!(huge.max_operations, u32::MAX);
         assert!(huge.max_glyphs >= Limits::DEFAULT.max_glyphs);
+    }
+
+    /// The index ceiling is a face's, not a run's: no run length moves it.
+    #[test]
+    fn scaling_leaves_the_index_ceiling_alone() {
+        for count in [0usize, 1, 1_000, 1 << 20, usize::MAX] {
+            assert_eq!(
+                Limits::for_glyphs(count).max_index_bytes,
+                Limits::DEFAULT.max_index_bytes
+            );
+        }
     }
 }

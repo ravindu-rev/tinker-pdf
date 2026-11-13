@@ -36,10 +36,23 @@
 //! difference between a shaper that sets Arabic and one that mostly does:
 //! every joining rule in every Arabic face is written assuming the vowel
 //! signs are invisible to it.
+//!
+//! # Passing what no subtable covers
+//!
+//! A runner handed a [`LookupIndex`] for a lookup does not probe a position
+//! whose glyph none of the lookup's subtables could apply at: it charges the
+//! operation budget what the probe would have cost and moves on. Everything
+//! else — the order lookups run in, the positions visited, every warning —
+//! is the probing runner's, because the index is built only where skipping a
+//! probe can change nothing but the time it takes (`docs/design/shaping.md`,
+//! *Lookup plans and coverage indexes*).
+
+use std::sync::Arc;
 
 use crate::buffer::Buffer;
 use crate::common::{
-    ClassDef, Coverage, Lookup, LookupList, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES, IGNORE_MARKS,
+    ClassDef, Coverage, GlyphSet, Lookup, LookupList, IGNORE_BASE_GLYPHS, IGNORE_LIGATURES,
+    IGNORE_MARKS,
 };
 use crate::gdef::{Gdef, GlyphClass};
 use crate::limits::Limits;
@@ -65,6 +78,256 @@ pub(crate) struct Runner<'a, 'g> {
     /// The feature mask of the lookup currently running. See
     /// [`Runner::skipper`].
     mask: u32,
+    /// The coverage index of each lookup [`Runner::run`] is handed, by its
+    /// place in that list; empty, or `None` at a place, where there is none.
+    covered: &'g [Option<Arc<LookupIndex>>],
+}
+
+/// What a lookup's subtables could apply at, so a position none of them
+/// could is passed without resolving or probing one.
+///
+/// Built once per face and lookup ([`crate::Plans`]) from each subtable's
+/// [`Gate`]: the coverage it reads first at a position, as its kind reads it.
+/// A lookup some subtable of which warns whatever the glyph has none.
+#[derive(Debug)]
+pub(crate) struct LookupIndex {
+    /// The glyphs some subtable could apply at.
+    any: GlyphSet,
+    /// Each subtable's own, where the lookup has more than one; empty where
+    /// it has one, whose set is `any`.
+    each: Vec<GlyphSet>,
+    /// The lookup's `subTableCount`, which a passed position is charged.
+    subtables: usize,
+    /// The most extension indirections one subtable takes to resolve:
+    /// `Runner::resolve` warns past [`Limits::max_extension_depth`].
+    extension_hops: u32,
+    /// The longest input a format 3 rule matches: `Runner::match_input`
+    /// warns past [`Limits::max_context_length`] wherever it starts.
+    longest_input: usize,
+}
+
+/// A fixed charge for each subtable an index records, beside its bitmap, so
+/// a lookup of 65 535 empty subtables is not free to index.
+const SUBTABLE_COST: usize = 32;
+
+impl LookupIndex {
+    /// The index of `lookup`, read from table `table`, its coverage bytes
+    /// and everything it keeps charged to `budget`; `None` where some
+    /// subtable's probe warns whatever the glyph, or the budget runs out.
+    pub(crate) fn build(table: Table, lookup: &Lookup<'_>, budget: &mut usize) -> Option<Self> {
+        let subtables = lookup.len();
+        *budget = budget.checked_sub(subtables.checked_mul(SUBTABLE_COST)?)?;
+        let mut each: Vec<GlyphSet> = Vec::new();
+        let mut every: Vec<(u16, u16)> = Vec::new();
+        let mut extension_hops = 0u32;
+        let mut longest_input = 0usize;
+        for sub in 0..subtables {
+            let traced = trace(table, lookup, sub)?;
+            extension_hops = extension_hops.max(traced.hops);
+            let mut ranges: Vec<(u16, u16)> = Vec::new();
+            if let Some((kind, data)) = traced.resolved {
+                match gate(table, kind, data) {
+                    Gate::Everywhere => return None,
+                    Gate::Never => {}
+                    Gate::Coverage(coverage, input) => {
+                        longest_input = longest_input.max(input);
+                        if let Some(coverage) = coverage {
+                            coverage.ranges(&mut ranges, budget)?;
+                        }
+                    }
+                }
+            }
+            every.extend_from_slice(&ranges);
+            if subtables > 1 {
+                let set = GlyphSet::from_ranges(&mut ranges);
+                *budget = budget.checked_sub(set.bytes())?;
+                each.push(set);
+            }
+        }
+        let any = if subtables > 1 {
+            GlyphSet::union(&each)
+        } else {
+            GlyphSet::from_ranges(&mut every)
+        };
+        *budget = budget.checked_sub(any.bytes())?;
+        Some(Self {
+            any,
+            each,
+            subtables,
+            extension_hops,
+            longest_input,
+        })
+    }
+
+    /// Whether this index answers for a run under `limits`: it is set aside
+    /// where the limits would make a probe warn whatever the glyph.
+    pub(crate) fn answers_under(&self, limits: &Limits) -> bool {
+        self.extension_hops <= limits.max_extension_depth
+            && self.longest_input <= limits.max_context_length
+    }
+
+    /// Whether subtable `sub` could apply at `glyph`.
+    fn subtable_holds(&self, sub: usize, glyph: u16) -> bool {
+        if self.each.is_empty() {
+            return self.any.holds(glyph);
+        }
+        self.each.get(sub).is_some_and(|set| set.holds(glyph))
+    }
+
+    /// How many subtables could apply at `glyph`.
+    #[cfg(test)]
+    pub(crate) fn holding(&self, glyph: u16) -> usize {
+        (0..self.subtables)
+            .filter(|sub| self.subtable_holds(*sub, glyph))
+            .count()
+    }
+}
+
+/// What a resolved subtable needs of the glyph where it is tried before it
+/// can apply or warn.
+///
+/// Read off the subtable as `gsub.rs`, `gpos.rs` and the contextual matchers
+/// below read it first, before anything that could apply or warn, so that a
+/// glyph its coverage does not hold is one where the probe returns
+/// [`Applied::No`] and says nothing.
+pub(crate) enum Gate<'a> {
+    /// The subtable applies, or warns, only at a glyph this coverage holds;
+    /// with the input count a format 3 rule matches, which warns past
+    /// [`Limits::max_context_length`] wherever it is tried. No coverage is a
+    /// subtable that holds no glyph but may still warn.
+    Coverage(Option<Coverage<'a>>, usize),
+    /// It never applies and says nothing, whatever the glyph.
+    Never,
+    /// A probe warns whatever the glyph: a type this crate does not read.
+    Everywhere,
+}
+
+/// The [`Gate`] of a subtable of resolved `kind` in `table`.
+pub(crate) fn gate(table: Table, kind: u16, data: Bytes<'_>) -> Gate<'_> {
+    // The coverage at offset 2, read first by every simple subtable.
+    let first = Gate::Coverage(data.offset16(2).map(Coverage::new), 0);
+    match (table, kind) {
+        (Table::Gsub, 1) | (Table::Gpos, 1 | 2) => first,
+        // The same, after a format check that refuses anything but format 1.
+        (Table::Gsub, 2 | 3 | 4 | 8) | (Table::Gpos, 3..=6) => {
+            if data.u16(0) == Some(1) {
+                first
+            } else {
+                Gate::Never
+            }
+        }
+        (Table::Gsub, 5) | (Table::Gpos, 7) => context_gate(data),
+        (Table::Gsub, 6) | (Table::Gpos, 8) => chain_gate(data),
+        _ => Gate::Everywhere,
+    }
+}
+
+/// [`apply_context`]'s first reads.
+fn context_gate(data: Bytes<'_>) -> Gate<'_> {
+    match data.u16(0) {
+        Some(1 | 2) => Gate::Coverage(data.offset16(2).map(Coverage::new), 0),
+        Some(3) => {
+            // `context_format3`: the counts, then `match_input` over the
+            // whole input from the first coverage.
+            let (Some(glyphs), Some(_)) = (data.u16(2), data.u16(4)) else {
+                return Gate::Never;
+            };
+            if glyphs == 0 {
+                return Gate::Never;
+            }
+            Gate::Coverage(
+                data.offset16_at(6, 0).map(Coverage::new),
+                usize::from(glyphs),
+            )
+        }
+        _ => Gate::Never,
+    }
+}
+
+/// [`apply_chain_context`]'s first reads.
+fn chain_gate(data: Bytes<'_>) -> Gate<'_> {
+    match data.u16(0) {
+        Some(1 | 2) => Gate::Coverage(data.offset16(2).map(Coverage::new), 0),
+        Some(3) => {
+            // `chain_format3`: every count it reads before `match_input`,
+            // the same way, so a table it refuses is one this refuses.
+            let gate = || -> Option<Gate<'_>> {
+                let backtrack = usize::from(data.u16(2)?);
+                let input_count_at = 4usize.checked_add(backtrack.saturating_mul(2))?;
+                let input = usize::from(data.u16(input_count_at)?);
+                let input_at = input_count_at + 2;
+                let lookahead_count_at = input_at.checked_add(input.saturating_mul(2))?;
+                let lookahead = usize::from(data.u16(lookahead_count_at)?);
+                let lookahead_at = lookahead_count_at + 2;
+                let records_count_at = lookahead_at.checked_add(lookahead.saturating_mul(2))?;
+                data.u16(records_count_at)?;
+                if input == 0 {
+                    return None;
+                }
+                Some(Gate::Coverage(
+                    data.offset16_at(input_at, 0).map(Coverage::new),
+                    input,
+                ))
+            };
+            gate().unwrap_or(Gate::Never)
+        }
+        _ => Gate::Never,
+    }
+}
+
+/// Where [`Runner::resolve`] would take a subtable, and how far.
+struct Traced<'a> {
+    /// The extension indirections it entered, each checked against
+    /// [`Limits::max_extension_depth`] as it is entered.
+    hops: u32,
+    /// The type and subtable it resolves to, or `None` for one it cannot
+    /// read, which never applies and says nothing.
+    resolved: Option<(u16, Bytes<'a>)>,
+}
+
+/// [`Runner::resolve`], warning nothing: `None` where it would warn
+/// whatever the limits — an extension of a format other than 1, or one
+/// naming the extension type — since a probe of that subtable always speaks.
+fn trace<'a>(table: Table, lookup: &Lookup<'a>, sub: usize) -> Option<Traced<'a>> {
+    let extension = match table {
+        Table::Gsub => 7,
+        Table::Gpos => 9,
+    };
+    let mut kind = lookup.kind();
+    let Some(mut data) = lookup.subtable(sub) else {
+        return Some(Traced {
+            hops: 0,
+            resolved: None,
+        });
+    };
+    let mut hops = 0u32;
+    while kind == extension {
+        hops += 1;
+        let unread = Some(Traced {
+            hops,
+            resolved: None,
+        });
+        match data.u16(0) {
+            Some(1) => {}
+            Some(_) => return None,
+            None => return unread,
+        }
+        let Some(inner) = data.u16(2) else {
+            return unread;
+        };
+        if inner == extension {
+            return None;
+        }
+        let Some(next) = data.offset32(4) else {
+            return unread;
+        };
+        data = next;
+        kind = inner;
+    }
+    Some(Traced {
+        hops,
+        resolved: Some((kind, data)),
+    })
 }
 
 /// Which glyphs a lookup can see.
@@ -233,7 +496,16 @@ impl<'a, 'g> Runner<'a, 'g> {
             warnings: Vec::new(),
             ops: 0,
             mask: !0,
+            covered: &[],
         }
+    }
+
+    /// The same runner, passing over what `covered` says the lookups of
+    /// [`Runner::run`]'s list cannot apply at: one entry per lookup, in that
+    /// list's order.
+    pub(crate) fn with_index(mut self, covered: &'g [Option<Arc<LookupIndex>>]) -> Self {
+        self.covered = covered;
+        self
     }
 
     /// Records a refusal, once.
@@ -400,12 +672,25 @@ impl<'a, 'g> Runner<'a, 'g> {
     /// the glyphs its own mask reaches.
     pub(crate) fn run(&mut self, buffer: &mut Buffer, lookups: &[(u16, u32)]) {
         self.classify(buffer);
-        for (index, mask) in lookups {
-            self.run_lookup(buffer, *index, *mask);
+        let covered = self.covered;
+        for (place, (index, mask)) in lookups.iter().enumerate() {
+            // An index this run's limits would make a probe warn past is set
+            // aside, and the lookup probed as though it had none.
+            let held = covered
+                .get(place)
+                .and_then(Option::as_deref)
+                .filter(|held| held.answers_under(&self.limits));
+            self.run_lookup(buffer, *index, *mask, held);
         }
     }
 
-    fn run_lookup(&mut self, buffer: &mut Buffer, index: u16, mask: u32) {
+    fn run_lookup(
+        &mut self,
+        buffer: &mut Buffer,
+        index: u16,
+        mask: u32,
+        held: Option<&LookupIndex>,
+    ) {
         let Some(lookup) = self.lookups.get(usize::from(index)) else {
             self.warn(Warning::MissingLookup {
                 table: self.table,
@@ -421,10 +706,43 @@ impl<'a, 'g> Runner<'a, 'g> {
         // lookahead is the text it has not rewritten yet, so a forward pass
         // would match against glyphs it was about to replace.
         if self.table == Table::Gsub && kind == 8 {
-            self.run_backward(buffer, &lookup, index, &skipper);
+            self.run_backward(buffer, &lookup, index, &skipper, held);
         } else {
-            self.run_forward(buffer, &lookup, index, &skipper);
+            self.run_forward(buffer, &lookup, index, &skipper, held);
         }
+    }
+
+    /// Whether the index says no subtable could apply at `at`, having
+    /// charged the budget what probing there would have cost: one operation
+    /// per subtable and at least one, as [`Runner::apply_at`] charges a
+    /// probe none of whose subtables applies.
+    fn passes(
+        &mut self,
+        buffer: &Buffer,
+        at: usize,
+        index: u16,
+        held: Option<&LookupIndex>,
+    ) -> bool {
+        let Some(held) = held else {
+            return false;
+        };
+        let glyph = buffer.glyph_id(at);
+        if glyph.is_some_and(|glyph| held.any.holds(glyph)) {
+            return false;
+        }
+        self.charge(held.subtables.max(1));
+        #[cfg(test)]
+        probes::record(probes::Probe {
+            table: self.table,
+            lookup: index,
+            glyph: glyph.unwrap_or(0),
+            resolved: 0,
+            probed: 0,
+            holding: Some(0),
+        });
+        #[cfg(not(test))]
+        let _ = index;
+        true
     }
 
     fn run_forward(
@@ -433,10 +751,15 @@ impl<'a, 'g> Runner<'a, 'g> {
         lookup: &Lookup<'a>,
         index: u16,
         skipper: &Skipper<'a>,
+        held: Option<&LookupIndex>,
     ) {
         let mut at = 0usize;
         while at < buffer.len() {
             if skipper.skips(buffer, at) || !skipper.reaches(buffer, at) {
+                at += 1;
+                continue;
+            }
+            if self.passes(buffer, at, index, held) {
                 at += 1;
                 continue;
             }
@@ -445,7 +768,7 @@ impl<'a, 'g> Runner<'a, 'g> {
             // and restricts nothing.
             let skipper = &skipper.in_syllable(self.per_syllable(buffer, at));
             let before = buffer.len();
-            match self.apply_at(buffer, lookup, index, skipper, at, 0) {
+            match self.apply_held(buffer, lookup, index, skipper, at, 0, held) {
                 // A subtable that neither consumed a glyph nor shortened the
                 // buffer would leave the cursor where it was, and the same
                 // subtable would match again for ever. The operation budget
@@ -463,6 +786,7 @@ impl<'a, 'g> Runner<'a, 'g> {
         lookup: &Lookup<'a>,
         index: u16,
         skipper: &Skipper<'a>,
+        held: Option<&LookupIndex>,
     ) {
         let mut at = buffer.len();
         while at > 0 {
@@ -470,8 +794,11 @@ impl<'a, 'g> Runner<'a, 'g> {
             if skipper.skips(buffer, at) || !skipper.reaches(buffer, at) {
                 continue;
             }
+            if self.passes(buffer, at, index, held) {
+                continue;
+            }
             let skipper = &skipper.in_syllable(self.per_syllable(buffer, at));
-            let _ = self.apply_at(buffer, lookup, index, skipper, at, 0);
+            let _ = self.apply_held(buffer, lookup, index, skipper, at, 0, held);
         }
     }
 
@@ -487,6 +814,18 @@ impl<'a, 'g> Runner<'a, 'g> {
             return false;
         }
         true
+    }
+
+    /// Charges `count` operations at once: what `count` calls of
+    /// [`Runner::spend`] leave behind, once the first refusal is reached —
+    /// the count past the ceiling and its one warning.
+    fn charge(&mut self, count: usize) {
+        self.ops = self
+            .ops
+            .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+        if self.ops > self.limits.max_operations {
+            self.warn(Warning::OperationBudgetExceeded { table: self.table });
+        }
     }
 
     /// Tries every subtable of one lookup at one position.
@@ -522,6 +861,41 @@ impl<'a, 'g> Runner<'a, 'g> {
         at: usize,
         depth: u32,
     ) -> Option<usize> {
+        self.apply_held(buffer, lookup, index, skipper, at, depth, None)
+    }
+
+    /// [`Runner::apply_at`], resolving and probing only the subtables `held`
+    /// says could apply at the glyph here, with the same charge before each
+    /// subtable either way.
+    ///
+    /// A subtable that does not apply leaves the buffer as it was, so the
+    /// glyph asked about is the same one for every subtable of the lookup.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_held(
+        &mut self,
+        buffer: &mut Buffer,
+        lookup: &Lookup<'a>,
+        index: u16,
+        skipper: &Skipper<'a>,
+        at: usize,
+        depth: u32,
+        held: Option<&LookupIndex>,
+    ) -> Option<usize> {
+        let glyph = buffer.glyph_id(at);
+        // What this attempt resolves and probes, recorded when it returns,
+        // for the tests that hold a probe to the index.
+        #[cfg(test)]
+        let mut recorder = probes::Recorder {
+            probe: probes::Probe {
+                table: self.table,
+                lookup: index,
+                glyph: glyph.unwrap_or(0),
+                resolved: 0,
+                probed: 0,
+                holding: held.zip(glyph).map(|(held, glyph)| held.holding(glyph)),
+            },
+            depth,
+        };
         if !self.spend() {
             return None;
         }
@@ -529,9 +903,22 @@ impl<'a, 'g> Runner<'a, 'g> {
             if sub > 0 && !self.spend() {
                 return None;
             }
+            if let (Some(held), Some(glyph)) = (held, glyph) {
+                if !held.subtable_holds(sub, glyph) {
+                    continue;
+                }
+            }
+            #[cfg(test)]
+            {
+                recorder.probe.resolved += 1;
+            }
             let Some((kind, data)) = self.resolve(lookup, sub, index) else {
                 continue;
             };
+            #[cfg(test)]
+            {
+                recorder.probe.probed += 1;
+            }
             let applied = match self.table {
                 Table::Gsub => crate::gsub::apply(self, buffer, kind, data, skipper, at, depth),
                 Table::Gpos => crate::gpos::apply(self, buffer, kind, data, skipper, at, depth),
@@ -1281,4 +1668,802 @@ fn rule_set(data: Bytes<'_>, at: usize, index: u16) -> Option<Bytes<'_>> {
         return None;
     }
     data.offset16_at(at.checked_add(2)?, index)
+}
+
+/// What the tests read of the runner's probing: an entry for each lookup
+/// tried at a position from the top of a run, kept per thread so tests run
+/// side by side see their own.
+#[cfg(test)]
+pub(crate) mod probes {
+    use std::cell::RefCell;
+
+    use crate::Table;
+
+    /// One lookup tried, or passed, at one position.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Probe {
+        pub(crate) table: Table,
+        pub(crate) lookup: u16,
+        pub(crate) glyph: u16,
+        /// Subtables the attempt resolved.
+        pub(crate) resolved: usize,
+        /// Subtables it probed: resolved and handed the position, which
+        /// reads their coverage first.
+        pub(crate) probed: usize,
+        /// For a lookup with an index, how many of its subtables' sets hold
+        /// the glyph; `None` for a lookup probed without one.
+        pub(crate) holding: Option<usize>,
+    }
+
+    thread_local! {
+        static LOG: RefCell<Vec<Probe>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record(probe: Probe) {
+        LOG.with(|log| log.borrow_mut().push(probe));
+    }
+
+    /// Every entry recorded on this thread since the last call.
+    pub(crate) fn take() -> Vec<Probe> {
+        LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
+    }
+
+    /// Records its probe when the attempt returns, by whichever return, if
+    /// the attempt was a run's own rather than a nested lookup's.
+    pub(crate) struct Recorder {
+        pub(crate) probe: Probe,
+        pub(crate) depth: u32,
+    }
+
+    impl Drop for Recorder {
+        fn drop(&mut self) {
+            if self.depth == 0 {
+                record(self.probe);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tinker_pdf_font::Sfnt;
+
+    use super::{probes, LookupIndex, Runner};
+    use crate::bidi::BaseDirection;
+    use crate::buffer::{Buffer, ShapedGlyph};
+    use crate::common::{LookupList, Tag};
+    use crate::limits::Limits;
+    use crate::read::Bytes;
+    use crate::shape::ShapedRun;
+    use crate::{Plans, Shaper, Table, Warning};
+
+    // --- a small table assembler -------------------------------------------
+
+    fn u16s(values: &[u16]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    /// A header with `slots[i]` patched to the offset of `parts[i]`, the
+    /// parts appended after it in order.
+    fn assemble(mut head: Vec<u8>, slots: &[usize], parts: &[Vec<u8>]) -> Vec<u8> {
+        let mut body: Vec<u8> = Vec::new();
+        for (slot, part) in slots.iter().zip(parts) {
+            let offset = u16::try_from(head.len() + body.len()).expect("a table under 64 KB");
+            head[*slot..*slot + 2].copy_from_slice(&offset.to_be_bytes());
+            body.extend_from_slice(part);
+        }
+        head.extend(body);
+        head
+    }
+
+    /// Coverage format 1: the glyphs, in the order given.
+    fn coverage(glyphs: &[u16]) -> Vec<u8> {
+        let mut out = u16s(&[1, glyphs.len() as u16]);
+        out.extend(u16s(glyphs));
+        out
+    }
+
+    /// Coverage format 2: `(first, last, startCoverageIndex)`, in the order
+    /// given, sorted or not.
+    fn coverage_ranges(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
+        let mut out = u16s(&[2, ranges.len() as u16]);
+        for (first, last, index) in ranges {
+            out.extend(u16s(&[*first, *last, *index]));
+        }
+        out
+    }
+
+    /// ClassDef format 2: `(first, last, class)` ranges.
+    fn class_def(ranges: &[(u16, u16, u16)]) -> Vec<u8> {
+        let mut out = u16s(&[2, ranges.len() as u16]);
+        for (first, last, class) in ranges {
+            out.extend(u16s(&[*first, *last, *class]));
+        }
+        out
+    }
+
+    fn lookup(kind: u16, subtables: &[Vec<u8>]) -> Vec<u8> {
+        let mut head = u16s(&[kind, 0, subtables.len() as u16]);
+        head.extend(vec![0u8; subtables.len() * 2]);
+        let slots: Vec<usize> = (0..subtables.len()).map(|i| 6 + i * 2).collect();
+        assemble(head, &slots, subtables)
+    }
+
+    fn lookup_list(lookups: &[Vec<u8>]) -> Vec<u8> {
+        let mut head = u16s(&[lookups.len() as u16]);
+        head.extend(vec![0u8; lookups.len() * 2]);
+        let slots: Vec<usize> = (0..lookups.len()).map(|i| 2 + i * 2).collect();
+        assemble(head, &slots, lookups)
+    }
+
+    /// `SingleSubstFormat2` over `glyphs`, each replaced by its `to`.
+    fn single2(glyphs: &[u16], to: &[u16]) -> Vec<u8> {
+        let mut head = u16s(&[2, 0, to.len() as u16]);
+        head.extend(u16s(to));
+        assemble(head, &[2], &[coverage(glyphs)])
+    }
+
+    /// `SingleSubstFormat1`: `delta` added to every glyph `coverage` holds.
+    fn single1(coverage: Vec<u8>, delta: i16) -> Vec<u8> {
+        assemble(u16s(&[1, 0, delta as u16]), &[2], &[coverage])
+    }
+
+    /// `MultipleSubstFormat1`, or a format no reader takes.
+    fn multiple(format: u16, from: u16, to: &[u16]) -> Vec<u8> {
+        let mut sequence = u16s(&[to.len() as u16]);
+        sequence.extend(u16s(to));
+        assemble(
+            u16s(&[format, 0, 1, 0]),
+            &[2, 6],
+            &[coverage(&[from]), sequence],
+        )
+    }
+
+    fn alternate(from: u16, alternates: &[u16]) -> Vec<u8> {
+        let mut set = u16s(&[alternates.len() as u16]);
+        set.extend(u16s(alternates));
+        assemble(u16s(&[1, 0, 1, 0]), &[2, 6], &[coverage(&[from]), set])
+    }
+
+    fn ligature(first: u16, rest: &[u16], out: u16) -> Vec<u8> {
+        let mut entry = u16s(&[out, rest.len() as u16 + 1]);
+        entry.extend(u16s(rest));
+        let set = assemble(u16s(&[1, 0]), &[2], &[entry]);
+        assemble(u16s(&[1, 0, 1, 0]), &[2, 6], &[coverage(&[first]), set])
+    }
+
+    /// A format 3 context rule: a coverage per input glyph.
+    fn context3(positions: &[Vec<u16>], records: &[(u16, u16)]) -> Vec<u8> {
+        let mut head = u16s(&[3, positions.len() as u16, records.len() as u16]);
+        head.extend(vec![0u8; positions.len() * 2]);
+        for (sequence, lookup) in records {
+            head.extend(u16s(&[*sequence, *lookup]));
+        }
+        let slots: Vec<usize> = (0..positions.len()).map(|i| 6 + i * 2).collect();
+        let parts: Vec<Vec<u8>> = positions.iter().map(|glyphs| coverage(glyphs)).collect();
+        assemble(head, &slots, &parts)
+    }
+
+    /// A format 3 chained context rule.
+    fn chain3(
+        backtrack: &[Vec<u16>],
+        input: &[Vec<u16>],
+        lookahead: &[Vec<u16>],
+        records: &[(u16, u16)],
+    ) -> Vec<u8> {
+        let mut head = u16s(&[3]);
+        let mut slots = Vec::new();
+        let mut parts = Vec::new();
+        for sequence in [backtrack, input, lookahead] {
+            head.extend(u16s(&[sequence.len() as u16]));
+            for glyphs in sequence {
+                slots.push(head.len());
+                head.extend(u16s(&[0]));
+                parts.push(coverage(glyphs));
+            }
+        }
+        head.extend(u16s(&[records.len() as u16]));
+        for (sequence, lookup) in records {
+            head.extend(u16s(&[*sequence, *lookup]));
+        }
+        assemble(head, &slots, &parts)
+    }
+
+    /// `ReverseChainSingleSubstFormat1` with no backtrack.
+    fn reverse(map: &[(u16, u16)], lookahead: &[Vec<u16>]) -> Vec<u8> {
+        let glyphs: Vec<u16> = map.iter().map(|(from, _)| *from).collect();
+        let subs: Vec<u16> = map.iter().map(|(_, to)| *to).collect();
+        let mut head = u16s(&[1, 0, 0, lookahead.len() as u16]);
+        head.extend(vec![0u8; lookahead.len() * 2]);
+        head.extend(u16s(&[subs.len() as u16]));
+        head.extend(u16s(&subs));
+        let mut slots = vec![2usize];
+        slots.extend((0..lookahead.len()).map(|i| 8 + i * 2));
+        let mut parts = vec![coverage(&glyphs)];
+        parts.extend(lookahead.iter().map(|glyphs| coverage(glyphs)));
+        assemble(head, &slots, &parts)
+    }
+
+    /// An extension subtable of `format` declaring `kind`, pointing at
+    /// `inner`.
+    fn extension(format: u16, kind: u16, inner: Vec<u8>) -> Vec<u8> {
+        let mut out = u16s(&[format, kind]);
+        out.extend(8u32.to_be_bytes());
+        out.extend(inner);
+        out
+    }
+
+    /// An `Anchor` of format 1.
+    fn anchor(x: i16, y: i16) -> Vec<u8> {
+        u16s(&[1, x as u16, y as u16])
+    }
+
+    // --- the tables ---------------------------------------------------------
+
+    /// A `GSUB` lookup list reaching every kind, every format the gate reads
+    /// and every way a probe can warn whatever the glyph, over glyphs 0 to 9
+    /// and 65 535.
+    fn gsub_list() -> Vec<u8> {
+        let mut unreadable = u16s(&[1, 0, 1]);
+        unreadable.extend(u16s(&[0xFFF0]));
+        lookup_list(&[
+            // 0: single, format 2.
+            lookup(1, &[single2(&[1, 2], &[3, 4])]),
+            // 1: single, format 1, over ranges that are unsorted and overlap,
+            // so the search finds less than they list.
+            lookup(
+                1,
+                &[single1(
+                    coverage_ranges(&[(5, 6, 0), (2, 3, 2), (5, 5, 1)]),
+                    10,
+                )],
+            ),
+            // 2 and 3: multiple, and a format nothing reads.
+            lookup(2, &[multiple(1, 3, &[7, 8])]),
+            lookup(2, &[multiple(2, 4, &[7, 8])]),
+            // 4: alternate.
+            lookup(3, &[alternate(4, &[9, 6])]),
+            // 5: ligature of two.
+            lookup(4, &[ligature(7, &[8], 9)]),
+            // 6: context, format 3, two inputs, running lookup 0.
+            lookup(5, &[context3(&[vec![1, 3], vec![2, 4]], &[(0, 0)])]),
+            // 7: chained context, format 3, running lookup 4.
+            lookup(6, &[chain3(&[vec![3]], &[vec![4]], &[vec![5]], &[(0, 4)])]),
+            // 8: reverse chaining.
+            lookup(8, &[reverse(&[(6, 1)], &[vec![2]])]),
+            // 9: one extension hop to a single substitution.
+            lookup(7, &[extension(1, 1, single2(&[9], &[5]))]),
+            // 10: an extension naming the extension type.
+            lookup(7, &[extension(1, 7, extension(1, 1, single2(&[9], &[5])))]),
+            // 11: an extension of a format other than 1.
+            lookup(7, &[extension(2, 1, single2(&[9], &[5]))]),
+            // 12: a type GSUB does not have.
+            lookup(9, &[single2(&[1], &[2])]),
+            // 13: three subtables over glyph 5: a ligature it may fail, then
+            // two single substitutions.
+            lookup(
+                4,
+                &[
+                    ligature(5, &[6], 0),
+                    single2(&[5], &[2]),
+                    single2(&[5, 65535], &[1, 0]),
+                ],
+            ),
+            // 14: no subtables at all.
+            lookup(1, &[]),
+            // 15: a subtable offset past the end of the table.
+            unreadable,
+            // 16: context, format 3, three inputs.
+            lookup(
+                5,
+                &[context3(&[vec![1, 2], vec![3, 4], vec![5]], &[(1, 0)])],
+            ),
+            // 17: the two ends of the glyph space.
+            lookup(1, &[single2(&[0, 65535], &[1, 2])]),
+            // 18: three subtables, the middle one of a format the gate
+            // refuses, each over its own glyph.
+            lookup(
+                2,
+                &[
+                    multiple(1, 1, &[2, 2]),
+                    multiple(2, 2, &[1]),
+                    multiple(1, 3, &[]),
+                ],
+            ),
+        ])
+    }
+
+    /// A `GPOS` lookup list reaching every positioning kind the gate
+    /// distinguishes.
+    fn gpos_list() -> Vec<u8> {
+        let mark_array = assemble(u16s(&[1, 0, 0]), &[4], &[anchor(10, 20)]);
+        let base_array = assemble(u16s(&[2, 0, 0]), &[2, 4], &[anchor(5, 50), anchor(6, 60)]);
+        let mark_to_base = assemble(
+            u16s(&[1, 0, 0, 1, 0, 0]),
+            &[2, 4, 8, 10],
+            &[coverage(&[2]), coverage(&[1, 3]), mark_array, base_array],
+        );
+        let cursive = assemble(
+            u16s(&[1, 0, 2, 0, 0, 0, 0]),
+            &[2, 6, 8, 10, 12],
+            &[
+                coverage(&[8, 9]),
+                anchor(0, 0),
+                anchor(400, 30),
+                anchor(0, 10),
+                anchor(300, 0),
+            ],
+        );
+        let pair1 = assemble(
+            u16s(&[1, 0, 4, 0, 1, 0]),
+            &[2, 10],
+            &[coverage(&[3]), u16s(&[1, 4, (-20i16) as u16])],
+        );
+        let pair2 = assemble(
+            u16s(&[2, 0, 4, 0, 0, 0, 2, 2, 0, 0, 0, (-30i16) as u16]),
+            &[2, 8, 10],
+            &[
+                coverage(&[5, 6]),
+                class_def(&[(5, 6, 1)]),
+                class_def(&[(7, 7, 1)]),
+            ],
+        );
+        let single = assemble(u16s(&[1, 0, 4, 50]), &[2], &[coverage(&[1, 2])]);
+        lookup_list(&[
+            lookup(1, &[single.clone()]),
+            lookup(2, &[pair1, pair2]),
+            lookup(3, &[cursive]),
+            lookup(4, &[mark_to_base]),
+            lookup(7, &[context3(&[vec![1], vec![2]], &[(1, 0)])]),
+            lookup(8, &[chain3(&[vec![1]], &[vec![2]], &[], &[(0, 0)])]),
+            lookup(9, &[extension(1, 1, single)]),
+            // A type GPOS does not have.
+            lookup(10, &[u16s(&[1, 0])]),
+            // Cursive of a format nothing reads.
+            lookup(3, &[assemble(u16s(&[2, 0, 0]), &[2], &[coverage(&[8])])]),
+        ])
+    }
+
+    /// The index of each lookup in `list`.
+    fn indexes(table: Table, list: &[u8]) -> Vec<Option<Arc<LookupIndex>>> {
+        let lookups = LookupList::new(Bytes::new(list));
+        let mut budget = Limits::DEFAULT.max_index_bytes;
+        (0..lookups.len())
+            .map(|at| {
+                lookups
+                    .get(at)
+                    .and_then(|lookup| LookupIndex::build(table, &lookup, &mut budget))
+                    .map(Arc::new)
+            })
+            .collect()
+    }
+
+    /// What one run of every lookup of `list` leaves: the glyphs and their
+    /// positions, the warnings, and the operations charged.
+    fn run(
+        table: Table,
+        list: &[u8],
+        covered: &[Option<Arc<LookupIndex>>],
+        glyphs: &[u16],
+        limits: Limits,
+    ) -> (Vec<ShapedGlyph>, Vec<Warning>, u32) {
+        let lookups: Vec<(u16, u32)> = (0..LookupList::new(Bytes::new(list)).len())
+            .map(|at| (at as u16, !0))
+            .collect();
+        let mut buffer = Buffer::from_glyphs(glyphs);
+        for at in 0..buffer.len() {
+            if let Some(glyph) = buffer.glyph_mut(at) {
+                glyph.x_advance = 100;
+            }
+        }
+        let mut runner =
+            Runner::new(table, LookupList::new(Bytes::new(list)), None, limits).with_index(covered);
+        runner.run(&mut buffer, &lookups);
+        if table == Table::Gpos {
+            buffer.propagate_attachments();
+        }
+        (buffer.glyphs().to_vec(), runner.warnings, runner.ops)
+    }
+
+    /// The limits each comparison runs under: the defaults, and each ceiling
+    /// a probe can warn past set where some lookup reaches it.
+    fn limit_sets() -> Vec<Limits> {
+        let mut out = vec![Limits::DEFAULT];
+        for depth in [0, 1] {
+            out.push(Limits {
+                max_extension_depth: depth,
+                ..Limits::DEFAULT
+            });
+        }
+        for length in [1, 2] {
+            out.push(Limits {
+                max_context_length: length,
+                ..Limits::DEFAULT
+            });
+        }
+        for operations in [0, 5, 40, 120] {
+            out.push(Limits {
+                max_operations: operations,
+                ..Limits::DEFAULT
+            });
+        }
+        out.push(Limits {
+            max_nesting_depth: 0,
+            ..Limits::DEFAULT
+        });
+        out.push(Limits {
+            max_glyphs: 3,
+            ..Limits::DEFAULT
+        });
+        out
+    }
+
+    /// Buffers over the tables' glyphs, drawn by a fixed sequence.
+    fn buffers() -> Vec<Vec<u16>> {
+        let alphabet = [0u16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 65535];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut out: Vec<Vec<u16>> = vec![Vec::new()];
+        out.extend(alphabet.iter().map(|glyph| vec![*glyph]));
+        for length in 2..=10 {
+            for _ in 0..24 {
+                let glyphs = (0..length)
+                    .map(|_| {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        alphabet[((state >> 33) as usize) % alphabet.len()]
+                    })
+                    .collect();
+                out.push(glyphs);
+            }
+        }
+        out
+    }
+
+    /// The runner with an index answers as the runner without one, glyph for
+    /// glyph, position for position and warning for warning, and charges the
+    /// same operations — past the ceiling, both past it.
+    fn assert_index_changes_nothing(table: Table, list: &[u8]) {
+        let covered = indexes(table, list);
+        for limits in limit_sets() {
+            for glyphs in buffers() {
+                let probed = run(table, list, &[], &glyphs, limits);
+                let indexed = run(table, list, &covered, &glyphs, limits);
+                assert_eq!(probed.0, indexed.0, "{table} {glyphs:?} under {limits:?}");
+                assert_eq!(probed.1, indexed.1, "{table} {glyphs:?} under {limits:?}");
+                if probed.2 <= limits.max_operations || indexed.2 <= limits.max_operations {
+                    assert_eq!(probed.2, indexed.2, "{table} {glyphs:?} under {limits:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_index_changes_no_substitution() {
+        let list = gsub_list();
+        assert_index_changes_nothing(Table::Gsub, &list);
+    }
+
+    #[test]
+    fn an_index_changes_no_position() {
+        let list = gpos_list();
+        assert_index_changes_nothing(Table::Gpos, &list);
+    }
+
+    /// Which lookups get an index, what each holds, and what sets one aside.
+    #[test]
+    fn the_index_is_each_subtables_first_coverage() {
+        let list = gsub_list();
+        let covered = indexes(Table::Gsub, &list);
+        let index = |at: usize| covered[at].as_deref().expect("an index");
+        let holds = |at: usize| -> Vec<u16> {
+            (0..=u16::MAX)
+                .filter(|glyph| index(at).any.holds(*glyph))
+                .collect()
+        };
+        assert_eq!(holds(0), [1, 2]);
+        // Everything the ranges list, though the search finds less.
+        assert_eq!(holds(1), [2, 3, 5, 6]);
+        assert_eq!(holds(2), [3]);
+        assert_eq!(holds(3), Vec::<u16>::new(), "a format nothing reads");
+        assert_eq!(holds(4), [4]);
+        assert_eq!(holds(5), [7]);
+        assert_eq!(holds(6), [1, 3], "a format 3 rule's first input");
+        assert_eq!(holds(7), [4], "a chained rule's first input");
+        assert_eq!(holds(8), [6]);
+        assert_eq!(holds(9), [9], "through the extension");
+        assert!(
+            covered[10].is_none(),
+            "an extension naming the extension type"
+        );
+        assert!(covered[11].is_none(), "an extension of another format");
+        assert!(covered[12].is_none(), "a type GSUB does not have");
+        assert_eq!(holds(13), [5, 65535]);
+        assert_eq!(index(13).each.len(), 3);
+        assert_eq!(index(13).holding(5), 3);
+        assert_eq!(index(13).holding(65535), 1);
+        assert_eq!(holds(14), Vec::<u16>::new(), "no subtables");
+        assert_eq!(holds(15), Vec::<u16>::new(), "an unreadable subtable");
+        assert_eq!(holds(17), [0, 65535]);
+        assert_eq!(holds(18), [1, 3]);
+        assert_eq!(index(18).holding(2), 0, "the refused format holds nothing");
+
+        // The two limit-dependent warnings set an index aside, and only
+        // under the limits that would fire them.
+        assert_eq!(index(9).extension_hops, 1);
+        assert!(index(9).answers_under(&Limits::DEFAULT));
+        let shallow = Limits {
+            max_extension_depth: 0,
+            ..Limits::DEFAULT
+        };
+        assert!(!index(9).answers_under(&shallow));
+        assert!(index(0).answers_under(&shallow));
+        assert_eq!(index(16).longest_input, 3);
+        let short = Limits {
+            max_context_length: 2,
+            ..Limits::DEFAULT
+        };
+        assert!(!index(16).answers_under(&short));
+        assert!(index(6).answers_under(&short));
+
+        let positioning = gpos_list();
+        let covered = indexes(Table::Gpos, &positioning);
+        let holds = |at: usize| -> Vec<u16> {
+            let index = covered[at].as_deref().expect("an index");
+            (0..=u16::MAX)
+                .filter(|glyph| index.any.holds(*glyph))
+                .collect()
+        };
+        assert_eq!(holds(0), [1, 2]);
+        assert_eq!(holds(1), [3, 5, 6], "both pair formats' first coverage");
+        assert_eq!(holds(2), [8, 9]);
+        assert_eq!(holds(3), [2], "the mark coverage, not the base's");
+        assert_eq!(holds(4), [1]);
+        assert_eq!(holds(5), [2], "a chained rule's input, not its backtrack");
+        assert_eq!(holds(6), [1, 2], "through the extension");
+        assert!(covered[7].is_none(), "a type GPOS does not have");
+        assert_eq!(holds(8), Vec::<u16>::new(), "a format nothing reads");
+    }
+
+    /// The bound: an index costs what it reads and keeps, and one the budget
+    /// cannot pay for is not built.
+    #[test]
+    fn an_index_past_its_budget_is_not_built() {
+        let list = gsub_list();
+        let lookups = LookupList::new(Bytes::new(&list));
+        let one = lookups.get(13).expect("lookup 13");
+        let mut ample = usize::MAX;
+        assert!(LookupIndex::build(Table::Gsub, &one, &mut ample).is_some());
+        let cost = usize::MAX - ample;
+        assert!(cost > 0);
+        for short in [0, cost / 2, cost - 1] {
+            let mut budget = short;
+            assert!(
+                LookupIndex::build(Table::Gsub, &one, &mut budget).is_none(),
+                "{short} of {cost} bytes"
+            );
+        }
+        let mut exact = cost;
+        assert!(LookupIndex::build(Table::Gsub, &one, &mut exact).is_some());
+        assert_eq!(exact, 0);
+    }
+
+    // --- shaping a paragraph ----------------------------------------------
+
+    /// 1 000 characters of `words`, a space between each, drawn by a fixed
+    /// sequence from `seed`.
+    fn paragraph(words: &[&str], seed: u64) -> String {
+        let mut state = seed;
+        let mut text = String::new();
+        while text.chars().count() < 1000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(words[((state >> 33) as usize) % words.len()]);
+        }
+        text.chars().take(1000).collect()
+    }
+
+    const LATIN: [&str; 24] = [
+        "the",
+        "of",
+        "and",
+        "a",
+        "to",
+        "in",
+        "is",
+        "that",
+        "office",
+        "affine",
+        "flight",
+        "waffle",
+        "AVATAR",
+        "Toyota",
+        "caf\u{e9}",
+        "na\u{ef}ve",
+        "fa\u{e7}ade",
+        "\u{fc}ber",
+        "1984",
+        "(see",
+        "it).",
+        "Wave",
+        "LT",
+        "yoyo",
+    ];
+
+    /// Urdu in the seventeen letters `TestShapeAran.ttf` maps.
+    const URDU: [&str; 16] = [
+        "\u{646}\u{633}\u{62a}\u{639}\u{644}\u{6cc}\u{642}",
+        "\u{62e}\u{637}",
+        "\u{641}\u{646}",
+        "\u{637}\u{648}\u{637}\u{6cc}",
+        "\u{62a}\u{62e}\u{62a}\u{6cc}",
+        "\u{646}\u{642}\u{644}",
+        "\u{642}\u{633}\u{637}",
+        "\u{6a9}\u{644}",
+        "\u{67e}\u{62a}\u{627}",
+        "\u{679}\u{6a9}\u{679}",
+        "\u{688}\u{627}\u{6a9}",
+        "\u{633}\u{627}\u{644}",
+        "\u{646}\u{6cc}\u{627}",
+        "\u{642}\u{627}\u{646}\u{648}\u{646}",
+        "\u{627}\u{646}\u{633}\u{627}\u{646}",
+        "\u{644}\u{6cc}\u{6a9}\u{646}",
+    ];
+
+    /// Kannada, with conjuncts, a reph and pre-base and two-part vowels.
+    const KANNADA: [&str; 15] = [
+        "\u{c95}\u{ca8}\u{ccd}\u{ca8}\u{ca1}",
+        "\u{cad}\u{cbe}\u{cb7}\u{cc6}",
+        "\u{cae}\u{ca8}\u{cc6}",
+        "\u{cb6}\u{cbe}\u{cb2}\u{cc6}",
+        "\u{caa}\u{cc1}\u{cb8}\u{ccd}\u{ca4}\u{c95}",
+        "\u{ca8}\u{cc0}\u{cb0}\u{cc1}",
+        "\u{c95}\u{cb0}\u{ccd}\u{ca8}\u{cbe}\u{c9f}\u{c95}",
+        "\u{cae}\u{cbe}\u{cb0}\u{ccd}\u{c9a}\u{ccd}",
+        "\u{cac}\u{cc6}\u{c82}\u{c97}\u{cb3}\u{cc2}\u{cb0}\u{cc1}",
+        "\u{c95}\u{ccd}\u{cb7}\u{cae}\u{cc6}",
+        "\u{cb5}\u{cbf}\u{ca6}\u{ccd}\u{caf}\u{cc6}",
+        "\u{cb9}\u{cac}\u{ccd}\u{cac}",
+        "\u{c8a}\u{cb0}\u{cc1}",
+        "\u{cb8}\u{ccd}\u{ca8}\u{cc7}\u{cb9}",
+        "\u{ca6}\u{cc7}\u{cb5}\u{cb0}\u{cc1}",
+    ];
+
+    /// The three faces and their paragraphs, or `None` where this checkout
+    /// does not have the font crate's Liberation faces beside this crate.
+    fn faces() -> Option<Vec<(&'static str, Vec<u8>, String)>> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |path: &str| std::fs::read(root.join(path)).ok();
+        Some(vec![
+            (
+                "Liberation Serif",
+                read("../tinker-pdf-font/data/liberation/LiberationSerif-Regular.ttf")?,
+                paragraph(&LATIN, 1),
+            ),
+            (
+                "TestShapeAran",
+                read("data/text-rendering-tests/fonts/TestShapeAran.ttf")?,
+                paragraph(&URDU, 2),
+            ),
+            (
+                "Noto Sans Kannada",
+                read("data/text-rendering-tests/fonts/NotoSansKannada-Regular.ttf")?,
+                paragraph(&KANNADA, 3),
+            ),
+        ])
+    }
+
+    /// Everything a shaped paragraph is: each run's glyphs and warnings.
+    fn output(runs: &[ShapedRun]) -> Vec<(Vec<ShapedGlyph>, Vec<Warning>)> {
+        runs.iter()
+            .map(|run| (run.glyphs().to_vec(), run.warnings().to_vec()))
+            .collect()
+    }
+
+    /// P-26.3: through a kept `Plans`, a position no subtable of a lookup
+    /// covers is passed without a subtable resolved or probed, and the
+    /// paragraph shapes as it does with none.
+    #[test]
+    fn a_glyph_no_subtable_covers_is_never_probed() {
+        let Some(faces) = faces() else {
+            println!("shape-index-probes: SKIPPED (no Liberation faces beside this crate)");
+            return;
+        };
+        for (name, bytes, text) in &faces {
+            assert_eq!(text.chars().count(), 1000, "{name}'s paragraph");
+            let face = Sfnt::parse(bytes).unwrap_or_else(|| panic!("{name} parses"));
+            let plain = Shaper::new(&face).shape_text(text, BaseDirection::Auto).1;
+            let _ = probes::take();
+            let plans = Plans::new();
+            let kept = Shaper::new(&face)
+                .with_plans(&plans)
+                .shape_text(text, BaseDirection::Auto)
+                .1;
+            let log = probes::take();
+            assert_eq!(
+                output(&plain),
+                output(&kept),
+                "{name}: the index moved the output"
+            );
+
+            let indexed = plans.indexes();
+            assert!(!indexed.is_empty(), "{name}: no lookup was planned");
+            assert!(
+                indexed.iter().all(|(_, has)| *has),
+                "{name}: a planned lookup has no index: {indexed:?}"
+            );
+            let (mut passed, mut tried) = (0usize, 0usize);
+            for probe in &log {
+                let holding = probe
+                    .holding
+                    .unwrap_or_else(|| panic!("{name}: probed without an index: {probe:?}"));
+                assert!(
+                    probe.resolved <= holding && probe.probed <= holding,
+                    "{name}: more subtables resolved or probed than hold the glyph: {probe:?}"
+                );
+                if holding == 0 {
+                    passed += 1;
+                } else {
+                    tried += 1;
+                }
+            }
+            assert!(passed > 0, "{name}: the index passed no position");
+            assert!(tried > 0, "{name}: no lookup was tried at all");
+            println!("RAN shape-index-probes: {name}, {passed} passed, {tried} tried");
+        }
+    }
+
+    /// P-26.3: one `Plans` builds each plan and index once, however many runs
+    /// follow, and another feature set builds plans of its own and indexes no
+    /// lookup twice.
+    #[test]
+    fn a_plan_is_built_once_per_face_and_feature_set() {
+        let Some(faces) = faces() else {
+            println!("shape-plans-once: SKIPPED (no Liberation faces beside this crate)");
+            return;
+        };
+        for (name, bytes, text) in &faces {
+            let face = Sfnt::parse(bytes).unwrap_or_else(|| panic!("{name} parses"));
+            let plans = Plans::new();
+            let shaper = Shaper::new(&face).with_plans(&plans);
+            let first = output(&shaper.shape_text(text, BaseDirection::Auto).1);
+            let (built, indexed) = (plans.plans_built(), plans.indexes_built());
+            assert!(built > 0 && indexed > 0, "{name}: nothing was built");
+            for run in 1..100 {
+                let again = output(&shaper.shape_text(text, BaseDirection::Auto).1);
+                assert_eq!(again, first, "{name}: run {run} shaped otherwise");
+            }
+            assert_eq!(plans.plans_built(), built, "{name}: a plan was built again");
+            assert_eq!(
+                plans.indexes_built(),
+                indexed,
+                "{name}: an index was built again"
+            );
+
+            let off = [(Tag::new(b"kern"), 0)];
+            let other = Shaper::new(&face).with_plans(&plans).with_settings(&off);
+            let plain = Shaper::new(&face).with_settings(&off);
+            assert_eq!(
+                output(&other.shape_text(text, BaseDirection::Auto).1),
+                output(&plain.shape_text(text, BaseDirection::Auto).1),
+                "{name}: the second feature set shaped otherwise"
+            );
+            assert!(
+                plans.plans_built() > built,
+                "{name}: no plan for the second set"
+            );
+            assert_eq!(
+                plans.indexes_built(),
+                indexed,
+                "{name}: the second set indexed a lookup again"
+            );
+            println!("RAN shape-plans-once: {name}, {built} plans, {indexed} indexes");
+        }
+    }
 }

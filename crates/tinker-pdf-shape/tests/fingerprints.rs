@@ -41,9 +41,11 @@
 //! because the fourth target is `wasm32-wasip1` under wasmtime and it has no
 //! filesystem unless somebody remembers to grant one.
 
+use std::collections::BTreeMap;
+
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::bidi::{BaseDirection, Paragraph};
-use tinker_pdf_shape::Shaper;
+use tinker_pdf_shape::{Plans, Shaper};
 
 /// FNV-1a, 64 bits. Integer, associative over a byte stream, and identical on
 /// every target because it is `u64` multiplication and exclusive-or.
@@ -170,6 +172,13 @@ const PARAGRAPHS: &[&str] = &[
 
 /// The shaping fingerprint, and how many glyphs went into it.
 fn shaping() -> (String, usize) {
+    shaping_with(None)
+}
+
+/// [`shaping`], with every shaper over a face made with that face's entry
+/// in `kept` where one is given — what a caller that keeps a face's
+/// [`Plans`] does.
+fn shaping_with(kept: Option<&BTreeMap<String, Plans>>) -> (String, usize) {
     let mut digest = Digest::new();
     let mut glyphs = 0usize;
     for fixture in FIXTURES {
@@ -179,6 +188,10 @@ fn shaping() -> (String, usize) {
             };
             let face = Sfnt::parse(bytes).expect("a fixture font is a valid sfnt");
             let shaper = Shaper::new(&face);
+            let shaper = match kept.and_then(|kept| kept.get(&font)) {
+                Some(plans) => shaper.with_plans(plans),
+                None => shaper,
+            };
             // The font name and the text go into the digest as well, so that a
             // corpus that lost a case is a different fingerprint rather than a
             // shorter one that happens to collide.
@@ -374,8 +387,31 @@ fn bidi_is_stable_across_targets() {
 /// A cheap check for the class of bug a fingerprint alone cannot see: state
 /// left over between runs. Shaping the same corpus twice in one process has to
 /// give the same answer as shaping it once.
+///
+/// It is also the kept plans' determinism check: the corpus is shaped again
+/// through one [`Plans`] per face, which the first pass builds and the second
+/// reads back, and both give the answer shaping with none gives — so a plan
+/// or an index carried from one case to the next moves nothing.
 #[test]
 fn shaping_twice_gives_the_same_answer() {
     assert_eq!(shaping(), shaping());
     assert_eq!(bidi(), bidi());
+
+    let kept: BTreeMap<String, Plans> = FIXTURES
+        .iter()
+        .flat_map(|fixture| cases(fixture))
+        .map(|(font, _)| font)
+        .filter(|font| face_bytes(font).is_some())
+        .map(|font| (font, Plans::new()))
+        .collect();
+    let plain = shaping();
+    assert_eq!(shaping_with(Some(&kept)), plain, "a Plans being built");
+    let built: u64 = kept.values().map(Plans::plans_built).sum();
+    assert!(built > 0, "no face was shaped through its Plans");
+    assert_eq!(shaping_with(Some(&kept)), plain, "a kept Plans read back");
+    assert_eq!(
+        kept.values().map(Plans::plans_built).sum::<u64>(),
+        built,
+        "the second pass built a plan again"
+    );
 }

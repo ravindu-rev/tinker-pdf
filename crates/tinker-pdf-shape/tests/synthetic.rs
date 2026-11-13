@@ -730,6 +730,7 @@ fn the_lookup_list_storm_reaches_the_operation_ceiling_and_returns() {
         max_context_length: 64,
         max_operations: 500_000,
         max_glyphs: 65_536,
+        max_index_bytes: Limits::DEFAULT.max_index_bytes,
     };
     let glyphs = [1u16, 1, 1];
     let face = &bytes[2 + glyphs.len() * 2..];
@@ -1046,6 +1047,7 @@ fn every_fuzz_seed_shapes_without_panicking() {
                 max_context_length: 1,
                 max_operations: 1,
                 max_glyphs: 1,
+                max_index_bytes: 0,
             },
         ] {
             for layout in [
