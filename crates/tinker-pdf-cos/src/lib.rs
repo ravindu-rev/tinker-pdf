@@ -177,3 +177,10 @@ pub use webp_embed::webp_image;
 pub use work::{Counter, Stats, Work};
 pub use write::{Encryption, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 pub use xref::{Revision, XrefEntry, XrefTable};
+
+// The validate-on-save helper's cos reading names this crate, and a test module
+// under `src` cannot otherwise name the crate it is in; in this crate's own
+// unit-test build the name is the crate itself, and nowhere else
+// (`docs/design/validate-on-save.md`).
+#[cfg(test)]
+extern crate self as tinker_pdf_cos;

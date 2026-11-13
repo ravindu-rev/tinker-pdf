@@ -735,6 +735,30 @@ put into a document this engine wrote, which must be refused by the rule's
 name, and asserts the undamaged twin clean in the same file.
 `tpdf check --strict` exits by the verdict.
 
+A test that writes a document holds it to this validator, and to each
+profile the document claims, through one helper, `written_support`
+([design/validate-on-save.md](design/validate-on-save.md)). It has four
+doors: `authored`, for a document this engine wrote from nothing it did not
+write, which every verdict must leave empty; `rewritten`, for a save of a
+file this engine did not write, which owns the structure it wrote — all of
+a full rewrite's, and everything past an incremental update's input — and
+leaves every other class of finding no worse than its input; `expecting`,
+for damage written on purpose, which must find exactly the defects the test
+lists; and the facade's `synthesised`, which holds the PDF a conversion
+wrote as authored.
+A PDF/A, PDF/UA or PDF/X claim is held to its own validator within the
+coverage this build implements. Each door's rule is written once, in
+`crates/tinker-pdf-cos/tests/written_support/held.rs`, which names no crate;
+two readings open the bytes and hand it their findings — the cos reading
+beside it, for the cos crate's tests, and the facade reading in
+`crates/tinker-pdf/tests/written_support/mod.rs`, for the facade's, the C
+ABI's and the CLI's — and a `src` test module reaches its crate's reading
+through a `#[cfg(test)]` self-alias in that crate's `lib.rs`. The profile
+validators are the facade's, so the cos reading refuses a document that
+might claim a profile and names the facade tree.
+`crates/tinker-pdf/tests/written_helper.rs` holds each door to its form, and
+the two readings to one verdict for the same bytes.
+
 ### XPS conservation
 
 `xps_conservation.rs` asks one question of every committed package: **does the

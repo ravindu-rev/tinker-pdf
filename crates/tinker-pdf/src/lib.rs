@@ -2851,6 +2851,13 @@ impl core::fmt::Debug for Page {
     }
 }
 
+// The validate-on-save helper's facade reading names this crate, and a test
+// module under `src` cannot otherwise name the crate it is in; in this crate's
+// own unit-test build the name is the crate itself, and nowhere else
+// (`docs/design/validate-on-save.md`).
+#[cfg(test)]
+extern crate self as tinker_pdf;
+
 #[cfg(test)]
 mod tests {
     use super::*;

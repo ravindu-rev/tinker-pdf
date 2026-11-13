@@ -72,7 +72,7 @@ enforced:
    `internal_dependencies` counts a dev-dependency as an edge
    (`xtask/src/version.rs:373-382`), so the cos crate may not take
    `tinker-pdf` even for its tests — and the profile validators are the
-   facade's (`crates/tinker-pdf/src/lib.rs:2020-2081`).
+   facade's (`crates/tinker-pdf/src/lib.rs:2060-2157`).
 2. The C ABI and the CLI reach the facade and nothing under it:
    `("tinker-pdf-ffi", &["tinker-pdf"])` (`xtask/src/main.rs:807`) and
    `TOOLS` (`xtask/src/main.rs:836`), ruling 11. Their test modules can name
@@ -125,11 +125,12 @@ How each tree reaches it:
   after the file before them — the reference's rule for path attributes
   inside inline module blocks — so from `tools/tpdf/src/writing.rs`'s test
   module the include climbs from `src/writing/tests/`.
-- **The `src` test modules of the cos crate and of the facade**: K-03.2 adds
-  `#[cfg(test)] extern crate self as tinker_pdf_cos;` and
-  `#[cfg(test)] extern crate self as tinker_pdf;` to the two crates'
-  `lib.rs`, so a reading's paths resolve to the crate itself in its own
-  unit-test build and nowhere else.
+- **The `src` test modules of the cos crate and of the facade**: the two
+  crates' `lib.rs` carry `#[cfg(test)] extern crate self as tinker_pdf_cos;`
+  and `#[cfg(test)] extern crate self as tinker_pdf;`, so a reading's paths
+  resolve to the crate itself in its own unit-test build and nowhere else.
+  Each stands after every item but the file's own test module, so no line a
+  document cites in either file moved to make room for it.
 
 A packaged crate's tests therefore name a file outside the package. That is
 already so — `crates/tinker-pdf/tests/pubsec_write.rs:36` takes
@@ -158,8 +159,8 @@ over one parse, in every tree.
 A door takes the bytes with a label, or `Locked { bytes, key }`, where `key`
 is `Key::Password` or `Key::Recipient` — the two ways a document is opened
 (`CosDocument::authenticate` and `authenticate_with_recipient`,
-`crates/tinker-pdf-cos/src/doc.rs:1147` and `:1172`, and the facade's at
-`lib.rs:1752` and `:1955`). `validate` wants an authenticated document,
+`crates/tinker-pdf-cos/src/doc.rs:1171` and `:1196`, and the facade's at
+`lib.rs:1752` and `:1995`). `validate` wants an authenticated document,
 because a stream it cannot decrypt reads as one that does not decode
 (`validate.rs:764-771`). An encrypted document handed over with no key is
 tried with the empty user password, which `Document::open` leaves untried
@@ -249,20 +250,20 @@ its claim whatever groups it is asked for, and the helper takes the claim
 from the verdict it holds — one reading, the one the findings come from.
 
 - **PDF/A.** `validate_counting` reads the claim before any rule runs
-  (`crates/tinker-pdf/src/pdfa.rs:2268-2276`), through `flavour_of`
-  (`pdfa.rs:2330`). A document claims PDF/A unless its verdict's `flavour`
+  (`crates/tinker-pdf/src/pdfa.rs:2274-2282`), through `flavour_of`
+  (`pdfa.rs:2336`). A document claims PDF/A unless its verdict's `flavour`
   is `None` and the verdict holds `FindingKind::MetadataMissing` or
   `FindingKind::NoFlavourClaimed` (`pdfa.rs:1219`, `:1221`): no packet, or a
   packet that names no part. A `pdfaid:part` naming no part ISO 19005
   defines is a claim and a finding (`PartUnknown`), and the door fails it.
   The rule is written as the absence of a claim so that a malformed-claim
   kind added later is held rather than passed.
-- **PDF/UA.** `claim_of` (`crates/tinker-pdf/src/pdfua.rs:870`) reports
+- **PDF/UA.** `claim_of` (`crates/tinker-pdf/src/pdfua.rs:878`) reports
   `PdfUaIdentifierMissing` when the packet carries no `pdfuaid:part`
-  (`pdfua.rs:895-900`). A document claims PDF/UA unless its verdict holds
+  (`pdfua.rs:907-913`). A document claims PDF/UA unless its verdict holds
   that finding; `PdfUaPartUnknown` is a claim, held and failed.
 - **PDF/X.** `GTS_PDFXVersion` in `/Info`, as a text string
-  (`crates/tinker-pdf/src/pdfx.rs:939`): the verdict's `claim` is `Some`, or
+  (`crates/tinker-pdf/src/pdfx.rs:947`): the verdict's `claim` is `Some`, or
   the document claims nothing. A value that is not a string is no claim, as
   the validator reads it.
 
@@ -271,14 +272,14 @@ Held within the implemented coverage: `validate_pdfa`, `validate_pdfua` and
 (`PdfACoverage::IMPLEMENTED` and its two counterparts), and the door holds
 their `findings`. It never fails on what the build does not decide — PDF/A's
 staged rules, PDF/UA's and PDF/X's `abstained`, a claimed PDF/X level that
-`XFlavour::is_validated` (`pdfx.rs:139`) does not run — and prints them only
+`XFlavour::is_validated` (`pdfx.rs:140`) does not run — and prints them only
 beside a failure. A claimed level no rule runs under is held to nothing.
 
 The cos reading cannot run these validators, and it does not pass what it
 cannot hold. It refuses a document it is asked to hold that might claim a
 profile, by a test that over-reads every claim the facade's readers make:
 the catalog's decoded `/Metadata` packet (`tinker_pdf_cos::xmp_metadata`,
-`crates/tinker-pdf-cos/src/outline.rs:625`) containing `pdfaid`, `pdfuaid`
+`crates/tinker-pdf-cos/src/outline.rs:626`) containing `pdfaid`, `pdfuaid`
 or either identification namespace (`www.aiim.org/pdfa/ns/id/`,
 `www.aiim.org/pdfua/ns/id/`), in ASCII or in UTF-16 of either byte order;
 or a `/GTS_PDFXVersion` key in `/Info`, whatever its value. The refusal
@@ -336,7 +337,7 @@ The entry points are the public functions that hand back a document's
 bytes: `DocumentBuilder::finish`, `finish_reporting` and `finish_archival`
 (`crates/tinker-pdf-cos/src/build.rs:8322`, `:8335`, `:9219`);
 `DocumentEditor::save` and `save_sealed`
-(`crates/tinker-pdf-cos/src/edit/save.rs:261`, `:284`); `save_signed` and
+(`crates/tinker-pdf-cos/src/edit/save.rs:265`, `:297`); `save_signed` and
 `save_timestamped` (`crates/tinker-pdf-cos/src/edit/signing.rs:38`, `:97`);
 `tinker_pdf::write::save` (`crates/tinker-pdf/src/write.rs:337`);
 `write::incremental_update` and `linearize::linearize`
