@@ -9,8 +9,8 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** Six calls,
-//! every one discarded. Both layers of the stream cipher make this worse than
+//! **Only that the code did not panic, hang, or exhaust memory.** Every call
+//! is discarded. Both layers of the stream cipher make this worse than
 //! usual, as this target's own header says: every byte of a damaged program
 //! decrypts to *something*, so a wrong key yields a plausible charstring
 //! rather than a failure. So a run that returned the *wrong* answer passes
@@ -53,6 +53,11 @@ fuzz_target!(|data: &[u8]| {
     for code in [0u8, 32, 65, 127, 128, 255] {
         let _ = font.glyph_for_code(code);
     }
+
+    // The style the font measurement API reads, which `parse` read from
+    // the cleartext's `/FontBBox` and `/FontInfo` and the Private
+    // dictionary's entries.
+    let _ = font.style();
 
     for glyph in 0..count as u16 {
         // `seac`, `flex` and hint replacement all live behind `outline`;

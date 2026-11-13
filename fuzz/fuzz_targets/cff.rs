@@ -99,4 +99,9 @@ fuzz_target!(|data: &[u8]| {
         let _ = cff.gid_for_name(name);
     }
     let _ = cff.is_cid();
+
+    // The Top DICT's and the Private DICT's style entries the font
+    // measurement API reads, `Weight` through the string INDEX and a
+    // CID-keyed font's first Font DICT's Private DICT.
+    let _ = cff.style();
 });

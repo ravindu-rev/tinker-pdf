@@ -84,6 +84,54 @@ pub struct Cff<'a> {
     /// Whether the Top DICT stated the matrix above, rather than it being the
     /// default. A CID-keyed font may put the real one in its Font DICTs.
     top_has_matrix: bool,
+    /// The Top DICT's style entries, each its default where absent.
+    facts: TopFacts,
+}
+
+/// The Top DICT's entries [`Cff::style`] answers, read when the font is
+/// parsed: Table 9 of TN #5176, each absent or unreadable entry its default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TopFacts {
+    font_bbox: [f64; 4],
+    is_fixed_pitch: bool,
+    italic_angle: f64,
+    underline_position: f64,
+    underline_thickness: f64,
+    /// `Weight`'s SID.
+    weight: Option<u16>,
+}
+
+/// What a CFF font's Top DICT and Private DICT state of its style
+/// ([`Cff::style`]): the entries the font flags and the font measurement API
+/// read (`docs/design/font-metrics.md`), each absent entry its default as
+/// TN #5176 states it — section 9's Table 9 for the Top DICT, section 15's
+/// Table 23 for the Private DICT.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Style<'a> {
+    /// `FontBBox` (5) as `[llx, lly, urx, ury]`, in glyph space: Table 9's
+    /// `0 0 0 0` where it is absent or not four finite numbers.
+    pub font_bbox: [f64; 4],
+    /// `isFixedPitch` (12 1), a boolean written as a number, not zero: Table
+    /// 9's `0 (false)` where absent.
+    pub is_fixed_pitch: bool,
+    /// `ItalicAngle` (12 2), degrees counterclockwise from the vertical:
+    /// Table 9's `0` where absent.
+    pub italic_angle: f64,
+    /// `UnderlinePosition` (12 3): Table 9's `-100` where absent.
+    pub underline_position: f64,
+    /// `UnderlineThickness` (12 4): Table 9's `50` where absent.
+    pub underline_thickness: f64,
+    /// `Weight` (4), its SID read through the standard strings and the
+    /// string INDEX: `None` where absent, which Table 9 gives no default.
+    pub weight: Option<&'a str>,
+    /// The Private DICT's `ForceBold` (12 14) not zero: Table 23's `false`
+    /// where absent. A CID-keyed font, whose Top DICT names no Private DICT,
+    /// reads its first Font DICT's.
+    pub force_bold: bool,
+    /// The Private DICT's `StdVW` (11), the dominant vertical stem's width
+    /// in glyph space, where it is a finite number; Table 23 gives it no
+    /// default. A CID-keyed font reads its first Font DICT's.
+    pub std_vw: Option<f64>,
 }
 
 /// A Private DICT's contribution to running a charstring.
@@ -100,6 +148,10 @@ pub(crate) struct Private<'a> {
     /// CFF2's `vsindex` key: the item variation data a glyph's blends read
     /// unless the glyph names another. Zero, and unread, in CFF.
     pub(crate) vsindex: u16,
+    /// `ForceBold` (12 14) not zero; Table 23's default is false.
+    pub(crate) force_bold: bool,
+    /// `StdVW` (11), where it is a finite number.
+    pub(crate) std_vw: Option<f64>,
 }
 
 impl Default for Private<'_> {
@@ -111,6 +163,8 @@ impl Default for Private<'_> {
             default_width: 0.0,
             nominal_width: 0.0,
             vsindex: 0,
+            force_bold: false,
+            std_vw: None,
         }
     }
 }
@@ -429,6 +483,7 @@ impl<'a> Cff<'a> {
             Some(m) if m.len() >= 6 => ([m[0], m[1], m[2], m[3], m[4], m[5]], true),
             _ => ([0.001, 0.0, 0.0, 0.001, 0.0, 0.0], false),
         };
+        let facts = top_facts(&top);
 
         Some(Cff {
             charstrings,
@@ -445,7 +500,32 @@ impl<'a> Cff<'a> {
             fds,
             font_matrix,
             top_has_matrix,
+            facts,
         })
+    }
+
+    /// The font's style as its Top DICT and Private DICT state it, each
+    /// absent entry its default (TN #5176 Tables 9 and 23): what the font
+    /// flags and the font measurement API read (`docs/design/font-metrics.md`).
+    #[must_use]
+    pub fn style(&self) -> Style<'a> {
+        // A CID-keyed font's Top DICT names no Private DICT of its own; its
+        // first Font DICT's stands for the font's.
+        let private = if self.is_cid {
+            self.fds.first().map(|(private, _)| private)
+        } else {
+            Some(&self.private)
+        };
+        Style {
+            font_bbox: self.facts.font_bbox,
+            is_fixed_pitch: self.facts.is_fixed_pitch,
+            italic_angle: self.facts.italic_angle,
+            underline_position: self.facts.underline_position,
+            underline_thickness: self.facts.underline_thickness,
+            weight: self.facts.weight.and_then(|sid| self.sid_name(sid)),
+            force_bold: private.is_some_and(|private| private.force_bold),
+            std_vw: private.and_then(|private| private.std_vw),
+        }
     }
 
     /// How many glyphs the font holds.
@@ -735,6 +815,35 @@ impl<'a> Cff<'a> {
     }
 }
 
+/// The Top DICT's style entries, each absent or unreadable entry the
+/// default TN #5176's Table 9 gives it.
+fn top_facts(top: &[(u16, Vec<f64>)]) -> TopFacts {
+    let number = |op: u16, default: f64| {
+        dict_get(top, op)
+            .and_then(<[f64]>::first)
+            .copied()
+            .filter(|value| value.is_finite())
+            .unwrap_or(default)
+    };
+    let font_bbox = match dict_get(top, 5) {
+        Some(&[llx, lly, urx, ury]) if [llx, lly, urx, ury].iter().all(|v| v.is_finite()) => {
+            [llx, lly, urx, ury]
+        }
+        _ => [0.0; 4],
+    };
+    TopFacts {
+        font_bbox,
+        is_fixed_pitch: number(0x0C01, 0.0) != 0.0,
+        italic_angle: number(0x0C02, 0.0),
+        underline_position: number(0x0C03, -100.0),
+        underline_thickness: number(0x0C04, 50.0),
+        weight: dict_get(top, 4)
+            .and_then(<[f64]>::first)
+            .filter(|sid| sid.fract() == 0.0 && (0.0..=65_535.0).contains(*sid))
+            .map(|sid| *sid as u16),
+    }
+}
+
 /// Reads a Private DICT from its `(size, offset)` operand pair.
 fn read_private<'a>(data: &'a [u8], operands: &[f64]) -> Option<Private<'a>> {
     let (Some(&size), Some(&offset)) = (operands.first(), operands.get(1)) else {
@@ -755,6 +864,14 @@ fn read_private<'a>(data: &'a [u8], operands: &[f64]) -> Option<Private<'a>> {
             .and_then(<[f64]>::first)
             .copied()
             .unwrap_or(0.0);
+        // 12 14 is ForceBold, a boolean written as a number (Table 23).
+        private.force_bold = dict_get(&dict, 0x0C0E)
+            .and_then(<[f64]>::first)
+            .is_some_and(|value| *value != 0.0);
+        private.std_vw = dict_get(&dict, 11)
+            .and_then(<[f64]>::first)
+            .copied()
+            .filter(|value| value.is_finite());
         // 19 is Subrs, whose offset is measured from the Private DICT rather
         // than from the start of the font.
         if let Some(&subrs) = dict_get(&dict, 19).and_then(<[f64]>::first) {
@@ -3165,11 +3282,14 @@ mod tests {
         fd_select: Vec<u8>,
         /// A Top DICT `FontMatrix`, for the CID-keyed matrix rules.
         font_matrix: Option<[i32; 6]>,
+        /// Top DICT entries written first, as given: the style entries
+        /// `Cff::style` reads.
+        top_extra: Vec<u8>,
     }
 
     impl Fixture {
         fn top_dict(&self, at: &Offsets) -> Vec<u8> {
-            let mut out = Vec::new();
+            let mut out = self.top_extra.clone();
             if self.cid {
                 // The registry and ordering SIDs are the first two custom
                 // strings; the supplement is zero.
@@ -4958,5 +5078,121 @@ mod tests {
         };
         assert_eq!(draw(Flavour::Cff), [Segment::LineTo { x: 100.0, y: 0.0 }]);
         assert!(draw(Flavour::Cff2).is_empty());
+    }
+
+    // ---- FT-16.3: the Top DICT's and the Private DICT's style --------------
+
+    /// `ItalicAngle` −12.5 as a DICT real: 30, then the nibbles of `-12.5`
+    /// (`e` the minus, `a` the point, `f` the end), then the two-byte
+    /// operator 12 2 (TN #5176 section 4, Table 5).
+    const MINUS_TWELVE_AND_A_HALF: [u8; 6] = [30, 0xE1, 0x2A, 0x5F, 12, 2];
+
+    /// FT-16.3: the Top DICT's `FontBBox`, `isFixedPitch`, `ItalicAngle`,
+    /// `UnderlinePosition`, `UnderlineThickness` and `Weight`, and the
+    /// Private DICT's `ForceBold` and `StdVW`, read as the operands written
+    /// in the test; every absent one its Table 9 or Table 23 default; and the
+    /// committed `three_glyphs.cff`, whose Top DICT states none of them.
+    #[test]
+    fn the_top_dicts_box_and_style_entries_are_read() {
+        let mut top = entry(5, &[-50, -250, 1050, 900]);
+        top.extend(entry(0x0C01, &[1]));
+        top.extend_from_slice(&MINUS_TWELVE_AND_A_HALF);
+        top.extend(entry(0x0C03, &[-75]));
+        top.extend(entry(0x0C04, &[40]));
+        // SID 384 is the standard string `Bold` (Appendix A).
+        top.extend(entry(4, &[384]));
+        let mut private = private_dict(600, 600, false);
+        private.extend(entry(0x0C0E, &[1]));
+        private.extend(entry(11, &[88]));
+        let data = Fixture {
+            top_extra: top,
+            private,
+            ..abc(Table::default())
+        }
+        .build();
+        let cff = Cff::parse(&data).expect("the fixture parses");
+        assert_eq!(
+            cff.style(),
+            Style {
+                font_bbox: [-50.0, -250.0, 1050.0, 900.0],
+                is_fixed_pitch: true,
+                italic_angle: -12.5,
+                underline_position: -75.0,
+                underline_thickness: 40.0,
+                weight: Some("Bold"),
+                force_bold: true,
+                std_vw: Some(88.0),
+            }
+        );
+
+        // Nothing stated: every default Table 9 and Table 23 give.
+        let defaults = Style {
+            font_bbox: [0.0; 4],
+            is_fixed_pitch: false,
+            italic_angle: 0.0,
+            underline_position: -100.0,
+            underline_thickness: 50.0,
+            weight: None,
+            force_bold: false,
+            std_vw: None,
+        };
+        let data = abc(Table::default()).build();
+        assert_eq!(Cff::parse(&data).expect("abc parses").style(), defaults);
+
+        // A box of three numbers is no box, a false pitch and a false
+        // ForceBold are false, and a Weight that is no whole SID, or one past
+        // the strings, names nothing; a Weight from the string INDEX reads it.
+        let mut top = entry(5, &[1, 2, 3]);
+        top.extend(entry(0x0C01, &[0]));
+        top.extend(entry(4, &[391]));
+        let mut private = private_dict(600, 600, false);
+        private.extend(entry(0x0C0E, &[0]));
+        let data = Fixture {
+            strings: vec![b"Demibold".to_vec()],
+            top_extra: top,
+            private,
+            ..abc(Table::default())
+        }
+        .build();
+        let style = Cff::parse(&data).expect("parses").style();
+        assert_eq!(style.font_bbox, [0.0; 4]);
+        assert!(!style.is_fixed_pitch);
+        assert!(!style.force_bold);
+        assert_eq!(style.weight, Some("Demibold"));
+        let data = Fixture {
+            top_extra: entry(4, &[392]),
+            ..abc(Table::default())
+        }
+        .build();
+        assert_eq!(Cff::parse(&data).expect("parses").style().weight, None);
+        let mut half = vec![30, 0x3A, 0x5F]; // 3.5
+        half.push(4);
+        let data = Fixture {
+            top_extra: half,
+            ..abc(Table::default())
+        }
+        .build();
+        assert_eq!(Cff::parse(&data).expect("parses").style().weight, None);
+
+        // A CID-keyed font reads its first Font DICT's Private DICT.
+        let mut font = cid_fixture(vec![0, 0, 0, 1, 1]);
+        font.fds[0].private.extend(entry(0x0C0E, &[1]));
+        font.fds[0].private.extend(entry(11, &[70]));
+        font.fds[1].private.extend(entry(11, &[99]));
+        let data = font.build();
+        let style = Cff::parse(&data).expect("the CID fixture parses").style();
+        assert!(style.force_bold, "the first Font DICT's ForceBold");
+        assert_eq!(style.std_vw, Some(70.0));
+
+        // The committed seed is the program `three_glyph_program` builds:
+        // its Top DICT holds CharStrings and Private alone, and its Private
+        // DICT the two widths and Subrs, so every entry is its default.
+        let seed = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fuzz/corpus/cff/three_glyphs.cff"),
+        )
+        .expect("the committed seed");
+        assert_eq!(seed, three_glyph_program(), "the seed is the fixture");
+        assert_eq!(Cff::parse(&seed).expect("it parses").style(), defaults);
     }
 }

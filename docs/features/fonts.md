@@ -119,6 +119,16 @@ height) and `head` (`macStyle`), each `None` where its table does not hold
 it. `Sfnt::parse_face` reads a collection's face by index and `Sfnt::faces`
 counts them, no more than its header has room for; face 0 is the one
 `Sfnt::parse` reads.
+`Cff::style` answers the Top DICT's `FontBBox`, `isFixedPitch`,
+`ItalicAngle`, `UnderlinePosition`, `UnderlineThickness` and `Weight`, through
+the string INDEX, and the Private DICT's `ForceBold` and `StdVW` — a CID-keyed
+font's first Font DICT's — each absent or unreadable entry the default TN
+#5176's Tables 9 and 23 give it. `Type1::style` answers the cleartext's
+`/FontBBox`, in an array or a procedure, the same `/FontInfo` entries, and the
+Private dictionary's `/ForceBold` and `/StdVW`, read before its `/Subrs` and
+`/CharStrings`; a key is read where a definition places its value, so
+`/WeightVector` and `/BlendAxisTypes [/Weight …]` define no `/Weight`, and an
+absent entry takes the same defaults, the Type 1 book stating none.
 
 **Colour tables** (OpenType 1.9.1's CPAL and COLR chapters,
 [design](../design/colour-fonts.md)). `Cpal` reads both versions of the
@@ -1937,6 +1947,17 @@ corpora already vendored here. So every name stays on the list.
   of `OS/2` versions 0 to 2, `post` and `head`; a collection's faces by index;
   and a proptest that none of them panics on arbitrary bytes or on a directory
   of arbitrary tables. The `sfnt` fuzz target calls each.
+- `crates/tinker-pdf-font/src/cff.rs` and `type1.rs` — the style entries: a
+  Top DICT and Private DICT written in the test, a real `ItalicAngle` among
+  them, read back; every absent one its default; a box of three numbers, a
+  `Weight` that is no whole SID or names no string, and a `Weight` from the
+  string INDEX; a CID-keyed font's first Font DICT; a cleartext and Private
+  dictionary written in the test, `/FontBBox` as a procedure and as an array,
+  values that are not what their keys take, a `/Weight` string with escapes
+  and a balanced pair, and names that only begin as a key's; and the
+  committed `three_glyphs.cff` and `square.pfb`, each the program its test
+  builds, and `multiple-master.t1`, none of which states the entries. The
+  `cff` and `type1` fuzz targets call both.
 - `crates/tinker-pdf-font/src/type1.rs` — a two-axis, four-master program
   built in the test, its masters at the corners out of their order and a
   procedure naming `/WeightVector` before the definition, reads its blend

@@ -128,7 +128,62 @@ pub struct Type1<'a> {
     /// The weights the blend othersubrs blend with: the default instance's
     /// until [`Type1::instance`] sets another.
     weights: Option<Vec<f64>>,
+    /// What the cleartext's `/FontBBox` and `/FontInfo` and the Private
+    /// dictionary state of the program's style.
+    style: Style,
     _marker: core::marker::PhantomData<&'a ()>,
+}
+
+/// What a Type 1 program states of its style ([`Type1::style`]): the font
+/// dictionary's `/FontBBox`, `/FontInfo`'s entries (the Type 1 book's
+/// chapter 2) and the Private dictionary's `/ForceBold` and `/StdVW`
+/// (chapter 5), the entries the font flags and the font measurement API read
+/// (`docs/design/font-metrics.md`).
+///
+/// **An absent entry reads as TN #5176 Table 9's default for the same key.**
+/// The Type 1 book states no default for one — `/FontBBox` is required, and
+/// section 2.3 allows it all zeros; the `/FontInfo` entries are optional —
+/// and CFF, which carries Type 1's keys over with their names, states one
+/// for each.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Style {
+    /// `/FontBBox`, four numbers in an array or a procedure: `0 0 0 0` where
+    /// it is absent or is not four finite numbers.
+    pub font_bbox: [f64; 4],
+    /// `/FontInfo`'s `/isFixedPitch true`: false where absent.
+    pub is_fixed_pitch: bool,
+    /// `/FontInfo`'s `/ItalicAngle`, degrees counterclockwise from the
+    /// vertical: 0 where absent.
+    pub italic_angle: f64,
+    /// `/FontInfo`'s `/UnderlinePosition`: -100 where absent.
+    pub underline_position: f64,
+    /// `/FontInfo`'s `/UnderlineThickness`: 50 where absent.
+    pub underline_thickness: f64,
+    /// `/FontInfo`'s `/Weight`, a string: `None` where absent, not a
+    /// string, or not UTF-8.
+    pub weight: Option<String>,
+    /// The Private dictionary's `/ForceBold true` (section 5.10): false where
+    /// absent.
+    pub force_bold: bool,
+    /// The Private dictionary's `/StdVW`, an array of one number (section
+    /// 5.9): the dominant vertical stem's width in character space.
+    pub std_vw: Option<f64>,
+}
+
+impl Default for Style {
+    /// Every entry absent: Table 9's defaults.
+    fn default() -> Style {
+        Style {
+            font_bbox: [0.0; 4],
+            is_fixed_pitch: false,
+            italic_angle: 0.0,
+            underline_position: -100.0,
+            underline_thickness: 50.0,
+            weight: None,
+            force_bold: false,
+            std_vw: None,
+        }
+    }
 }
 
 /// A multiple-master program's blend design, as the supplement's section 3.5
@@ -421,8 +476,16 @@ impl Type1<'_> {
             blend: read_blend(clear),
             weights: weight_vector.clone(),
             weight_vector,
+            style: read_style(clear, &layout.private),
             _marker: core::marker::PhantomData,
         })
+    }
+
+    /// What the program states of its style, each absent entry its default
+    /// ([`Style`]).
+    #[must_use]
+    pub fn style(&self) -> &Style {
+        &self.style
     }
 
     /// Whether this is a multiple-master program this crate blends: one with
@@ -1206,6 +1269,128 @@ fn read_font_matrix(clear: &[u8]) -> Option<[f64; 6]> {
     })
 }
 
+/// The style the cleartext's `/FontBBox` and `/FontInfo` and the Private
+/// dictionary state, each absent entry its default ([`Style`]).
+///
+/// The Private dictionary's entries are read before its `/Subrs` and
+/// `/CharStrings`, whose binary charstrings could spell anything.
+fn read_style(clear: &[u8], private: &[u8]) -> Style {
+    let entries_end = [find(private, b"/Subrs"), find(private, b"/CharStrings")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(private.len());
+    let entries = &private[..entries_end];
+    let defaults = Style::default();
+    Style {
+        font_bbox: read_bbox(clear).unwrap_or(defaults.font_bbox),
+        is_fixed_pitch: value_after(clear, b"/isFixedPitch", boolean).unwrap_or(false),
+        italic_angle: value_after(clear, b"/ItalicAngle", number).unwrap_or(0.0),
+        underline_position: value_after(clear, b"/UnderlinePosition", number)
+            .unwrap_or(defaults.underline_position),
+        underline_thickness: value_after(clear, b"/UnderlineThickness", number)
+            .unwrap_or(defaults.underline_thickness),
+        weight: value_after(clear, b"/Weight", string),
+        force_bold: value_after(entries, b"/ForceBold", boolean).unwrap_or(false),
+        std_vw: read_array(entries, b"/StdVW").and_then(|value| value.array()?.first()?.number()),
+    }
+}
+
+/// The first value `read` takes from where a definition of `key` places
+/// one: each occurrence of `key` that ends where a name ends — so
+/// `/Weight` is not `/WeightVector`'s first seven bytes — and after white
+/// space a value `read` reads; an occurrence after which `read` reads
+/// nothing, as `/BlendAxisTypes [/Weight /Width]` names `/Weight` and
+/// defines nothing, is passed over.
+fn value_after<T>(data: &[u8], key: &[u8], read: impl Fn(&[u8]) -> Option<T>) -> Option<T> {
+    let mut from = 0usize;
+    while let Some(found) = find(data.get(from..)?, key) {
+        let after = from + found + key.len();
+        from = after;
+        if regular_end(data, after) != after {
+            continue;
+        }
+        let rest = data.get(after..)?;
+        let Some(start) = rest.iter().position(|b| !b.is_ascii_whitespace()) else {
+            return None;
+        };
+        if let Some(value) = read(&rest[start..]) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// A PostScript number at the start of `data`.
+fn number(data: &[u8]) -> Option<f64> {
+    ps_number(data.get(..regular_end(data, 0))?)
+}
+
+/// `true` or `false` at the start of `data`, as a whole token.
+fn boolean(data: &[u8]) -> Option<bool> {
+    match data.get(..regular_end(data, 0))? {
+        b"true" => Some(true),
+        b"false" => Some(false),
+        _ => None,
+    }
+}
+
+/// A PostScript string at the start of `data`, `(` to its balancing `)`,
+/// a backslash taking the byte after it as it is, as UTF-8: `None` past 256
+/// bytes, which no `/Weight` reaches.
+fn string(data: &[u8]) -> Option<String> {
+    if data.first() != Some(&b'(') {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut depth = 0u32;
+    let mut escaped = false;
+    for &byte in data.get(1..)? {
+        if out.len() > 256 {
+            return None;
+        }
+        if escaped {
+            out.push(byte);
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'(' => {
+                depth += 1;
+                out.push(byte);
+            }
+            b')' if depth == 0 => return String::from_utf8(out).ok(),
+            b')' => {
+                depth -= 1;
+                out.push(byte);
+            }
+            _ => out.push(byte),
+        }
+    }
+    None
+}
+
+/// `/FontBBox`: four finite numbers in an array, `[` to `]`, or in a
+/// procedure, `{` to `}`, as the Type 1 book's example writes it.
+fn read_bbox(clear: &[u8]) -> Option<[f64; 4]> {
+    value_after(clear, b"/FontBBox", |rest| {
+        let close = match rest.first()? {
+            b'[' => b']',
+            b'{' => b'}',
+            _ => return None,
+        };
+        let end = rest.iter().position(|b| *b == close)?;
+        let values: Vec<f64> = rest
+            .get(1..end)?
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|token| !token.is_empty())
+            .map(ps_number)
+            .collect::<Option<_>>()?;
+        <[f64; 4]>::try_from(values).ok()
+    })
+}
+
 /// A value of the cleartext arrays the multiple-master keys are written as.
 #[derive(Clone, Debug, PartialEq)]
 enum Value {
@@ -1789,6 +1974,13 @@ mod tests {
     /// A minimal but genuine Type 1 program: one glyph, a square, placed by
     /// `hsbw` and drawn with the relative operators.
     fn font_with_square() -> Vec<u8> {
+        square_with("", "")
+    }
+
+    /// [`font_with_square`]'s program with `cleartext` written before its
+    /// `/FontMatrix` and `private_entries` at the head of its Private
+    /// dictionary: the entries `Type1::style` reads.
+    fn square_with(cleartext: &str, private_entries: &str) -> Vec<u8> {
         // hsbw 50 600, rmoveto 0 0, then a 500-unit box, closepath, endchar.
         let mut cs: Vec<u8> = Vec::new();
         num(50, &mut cs);
@@ -1810,6 +2002,7 @@ mod tests {
 
         let mut private = Vec::new();
         private.extend_from_slice(b"dup /Private 8 dict dup begin\n/lenIV 4 def\n");
+        private.extend_from_slice(private_entries.as_bytes());
         private.extend_from_slice(b"/Subrs 0 array ND\n");
         private.extend_from_slice(b"/CharStrings 1 dict dup begin\n");
         private.extend_from_slice(format!("/square {} RD ", encrypted.len()).as_bytes());
@@ -1818,6 +2011,7 @@ mod tests {
 
         let mut out = Vec::new();
         out.extend_from_slice(b"%!PS-AdobeFont-1.0: Test\n");
+        out.extend_from_slice(cleartext.as_bytes());
         out.extend_from_slice(b"/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n");
         out.extend_from_slice(b"/Encoding 256 array\ndup 65 /square put\nreadonly def\n");
         out.extend_from_slice(b"currentfile eexec\n");
@@ -1930,6 +2124,7 @@ mod tests {
             weight_vector: None,
             blend: None,
             weights: None,
+            style: Style::default(),
             _marker: core::marker::PhantomData,
         };
         // The side bearing lands at 2000, not at 2000/65536.
@@ -2845,5 +3040,128 @@ mod tests {
         let font = Type1::parse(&overflowing).expect("it parses");
         let (trace, _) = font.trace_glyph(0).expect("the glyph is there");
         assert_eq!(trace.bound, Some(Bound::Budget));
+    }
+
+    // ---- FT-16.3: `/FontBBox`, `/FontInfo` and the Private dictionary -----
+
+    /// FT-16.3: `/FontBBox`, `/FontInfo`'s `/isFixedPitch`, `/ItalicAngle`,
+    /// `/UnderlinePosition`, `/UnderlineThickness` and `/Weight`, and the
+    /// Private dictionary's `/ForceBold` and `/StdVW`, read as the cleartext
+    /// and the Private dictionary written in the test state them; every
+    /// absent one its default; and the committed `square.pfb`, whose
+    /// cleartext, read here, states none of them.
+    #[test]
+    fn font_bbox_and_font_info_are_read() {
+        let program = square_with(
+            "/FontInfo 6 dict dup begin\n\
+             /version (001.000) readonly def\n\
+             /Weight (Bold) readonly def\n\
+             /ItalicAngle -12.5 def\n\
+             /isFixedPitch true def\n\
+             /UnderlinePosition -75 def\n\
+             /UnderlineThickness 40 def\n\
+             end readonly def\n\
+             /FontBBox {-50 -250 1050 900} readonly def\n",
+            "/ForceBold true def\n/StdVW [88] def\n",
+        );
+        let font = Type1::parse(&program).expect("it parses");
+        assert_eq!(
+            font.style(),
+            &Style {
+                font_bbox: [-50.0, -250.0, 1050.0, 900.0],
+                is_fixed_pitch: true,
+                italic_angle: -12.5,
+                underline_position: -75.0,
+                underline_thickness: 40.0,
+                weight: Some("Bold".to_string()),
+                force_bold: true,
+                std_vw: Some(88.0),
+            }
+        );
+        assert_eq!(font.glyph_count(), 1, "the program still reads whole");
+
+        // An array, rather than a procedure, and a real in it.
+        let font = Type1::parse(&square_with(
+            "/FontBBox [0 -10 500.5 700] readonly def\n",
+            "/ForceBold false def\n",
+        ))
+        .expect("it parses");
+        assert_eq!(font.style().font_bbox, [0.0, -10.0, 500.5, 700.0]);
+        assert!(!font.style().force_bold);
+        assert_eq!(font.style().std_vw, None);
+
+        // Values that are not what their keys take read as absent, and a
+        // name that only begins as a key's does, or a key that defines
+        // nothing, is passed over for the definition after it.
+        let font = Type1::parse(&square_with(
+            "/FontBBox {1 2 3} readonly def\n\
+             /isFixedPitch maybe def\n\
+             /ItalicAngle x def\n\
+             /WeightVector [0.5 0.5] def\n\
+             /BlendAxisTypes [/Weight /Width] def\n\
+             /Weight (Extra \\(Semi\\) (light)) readonly def\n",
+            "",
+        ))
+        .expect("it parses");
+        assert_eq!(font.style().font_bbox, [0.0; 4]);
+        assert!(!font.style().is_fixed_pitch);
+        assert_eq!(font.style().italic_angle, 0.0);
+        assert_eq!(
+            font.style().weight.as_deref(),
+            Some("Extra (Semi) (light)"),
+            "escapes taken as written, a balanced pair kept"
+        );
+        let font = Type1::parse(&square_with("/Weight /Bold def\n", "")).expect("it parses");
+        assert_eq!(font.style().weight, None, "a name is no string");
+
+        // Nothing stated: Table 9's defaults.
+        let defaults = Style {
+            font_bbox: [0.0; 4],
+            is_fixed_pitch: false,
+            italic_angle: 0.0,
+            underline_position: -100.0,
+            underline_thickness: 50.0,
+            weight: None,
+            force_bold: false,
+            std_vw: None,
+        };
+        assert_eq!(Style::default(), defaults);
+        let font = Type1::parse(&font_with_square()).expect("it parses");
+        assert_eq!(font.style(), &defaults);
+
+        // The committed seed is that program, and its cleartext — before
+        // `eexec` — names none of the keys, so every value is its default.
+        let seed = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fuzz/corpus/type1/square.pfb"),
+        )
+        .expect("the committed seed");
+        assert_eq!(seed, font_with_square(), "the seed is the fixture");
+        let clear = &seed[..find(&seed, b"eexec").expect("a cleartext half")];
+        for key in [
+            &b"/FontBBox"[..],
+            b"/FontInfo",
+            b"/ItalicAngle",
+            b"/isFixedPitch",
+            b"/Underline",
+            b"/Weight",
+        ] {
+            assert!(
+                find(clear, key).is_none(),
+                "{}",
+                String::from_utf8_lossy(key)
+            );
+        }
+        assert_eq!(Type1::parse(&seed).expect("it parses").style(), &defaults);
+
+        // The multiple-master seed's `/FontInfo` holds its blend design and
+        // nothing a style reads; `/BlendAxisTypes` names `/Weight` and
+        // `/WeightVector` begins with it, and neither is a `/Weight`.
+        let seed = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fuzz/corpus/type1/multiple-master.t1"),
+        )
+        .expect("the committed seed");
+        assert_eq!(Type1::parse(&seed).expect("it parses").style(), &defaults);
     }
 }
