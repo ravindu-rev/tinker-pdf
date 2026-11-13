@@ -955,11 +955,16 @@ does not say whether a shift carries to the glyphs after it.
   coordinates (2). "The current glyph is positioned so that the two
   control/anchor points overlap": its offset is the marked glyph's point,
   where the marked glyph stands in the run, less the current glyph's point.
-  Control points are a TrueType glyph's points as stored (FT-07c.13): a simple
-  glyph's in point-number order, a composite's its components' in component
-  order, each moved by its offset and 2×2 in integer arithmetic, rounded half
-  away from zero — the numbering a composite's instructions see. A CFF face has
-  no such points, and a control-point action on one is refused by name.
+  Control points are a TrueType glyph's points as stored, which
+  `tinker_pdf_font::glyf::points` answers in integer font units: a simple
+  glyph's contour points in point-number order, no phantom point among them,
+  and a composite's its components' in component order, each moved by its
+  2×2 in integer arithmetic, rounded half away from zero, and then by its
+  offset as `glyf::outline` places it — none for a component placed by
+  matching points — the numbering a composite's instructions see. A glyph
+  past the outline's bounds, cut short or of more than 65 536 points has no
+  numbering to answer. A CFF face has no such points, and a control-point
+  action on one is refused by name.
   Anchor points are `ankr`'s: a lookup of 16-bit offsets into its glyph data
   table, each glyph's entry a count and that many `x`, `y` pairs. An
   attachment is resolved by `Buffer::propagate_attachments`, as a `GPOS` mark's

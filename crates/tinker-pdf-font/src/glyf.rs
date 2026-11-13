@@ -23,6 +23,11 @@
 //! through the same contour reading, so at a location where nothing moves it
 //! draws exactly what [`outline`] draws. [`phantom_points_at`] gives the
 //! advance and side bearings at a location where a face has no `HVAR`.
+//!
+//! [`points`] numbers a glyph's points as they are stored, a composite's
+//! through its components placed as [`outline`] places them, in integer font
+//! units and with no midpoint resolved: the points an AAT `kerx` control
+//! point names by number.
 
 use crate::outline::{Outline, Segment};
 use crate::sfnt::Sfnt;
@@ -460,6 +465,119 @@ pub fn composite_glyph<'a>(sfnt: &Sfnt<'a>, glyph: u16) -> Option<CompositeGlyph
         components,
         instructions,
     })
+}
+
+/// The most points [`points`] answers for one glyph: a point number is
+/// sixteen bits wherever one is written, so no point past these can be named.
+const MAX_POINTS: usize = 1 << 16;
+
+/// A glyph's points as stored, in font units and point-number order — the
+/// numbering a composite's instructions see, and a `kerx` control-point
+/// action names (`docs/design/shaping.md`, *AAT shaping*, *`kerx`*):
+///
+/// - a simple glyph's contour points, on and off the curve, at the absolute
+///   coordinates [`simple_glyph`] reads; the phantom points after them are
+///   not stored, and are not among them;
+/// - a composite's, its components' in record order, each component glyph's
+///   points moved by the component's own 2×2, `[xscale, scale01, scale10,
+///   yscale]` in F2Dot14 — `x' = xscale·x + scale10·y` and
+///   `y' = scale01·x + yscale·y`, rounded half away from zero to a whole
+///   unit — and then by its offset, which [`outline`] places it by: in the
+///   composite's space, unscaled by the component's 2×2, and none for a
+///   component placed by matching points, which `outline` draws at no offset;
+/// - a glyph with no outline, none.
+///
+/// Integer arithmetic throughout, so a caller under a no-float contract can
+/// ask. `None` for a face with no `glyf`, `loca` or `head`, a glyph past the
+/// end of `loca` or whose data runs past `glyf`, a glyph whose data ends
+/// before its points or its records do, a composite nested deeper than eight
+/// levels, drawing more than 256 glyphs in all or holding more than 64
+/// records — [`outline`]'s bounds — and a glyph of more than 65 536 points.
+/// Where `outline` draws what it can of such a glyph, this answers nothing:
+/// a list missing what was refused would number every point after it
+/// wrongly.
+#[must_use]
+pub fn points(sfnt: &Sfnt, glyph: u16) -> Option<Vec<[i32; 2]>> {
+    let mut budget = MAX_COMPONENTS;
+    glyph_points(sfnt, glyph, 0, &mut budget)
+}
+
+/// [`points`] for a glyph met at `depth`, `budget` the glyphs it may still
+/// draw.
+fn glyph_points(sfnt: &Sfnt, glyph: u16, depth: u32, budget: &mut u32) -> Option<Vec<[i32; 2]>> {
+    if depth > MAX_COMPONENT_DEPTH || *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    let glyf = sfnt.table(TAG_GLYF)?;
+    let (start, end) = glyph_slot(sfnt, glyph)?;
+    if end <= start {
+        return Some(Vec::new());
+    }
+    let data = glyf.get(start..end)?;
+    let contours = i16_at(data, 0)?;
+    if let Ok(contours) = usize::try_from(contours) {
+        let parsed = parse_simple(data, contours, &mut 0)?;
+        return Some(
+            parsed
+                .xs
+                .iter()
+                .zip(&parsed.ys)
+                .map(|(x, y)| [*x, *y])
+                .collect(),
+        );
+    }
+    let mut points: Vec<[i32; 2]> = Vec::new();
+    let mut at = 10usize;
+    for _ in 0..MAX_RECORDS {
+        let (component, next) = read_component(data, at)?;
+        at = next;
+        let placed = glyph_points(sfnt, component.glyph, depth + 1, budget)?;
+        if points.len().saturating_add(placed.len()) > MAX_POINTS {
+            return None;
+        }
+        let offset = if component.offset_is_xy() {
+            component.arguments
+        } else {
+            [0, 0]
+        };
+        points.extend(
+            placed
+                .into_iter()
+                .map(|point| place(point, component.transform, offset)),
+        );
+        if component.flags & Component::MORE_COMPONENTS == 0 {
+            return Some(points);
+        }
+    }
+    None
+}
+
+/// A component's point in its composite: moved by the component's 2×2 in
+/// F2Dot14, rounded half away from zero, then by its offset.
+fn place(point: [i32; 2], transform: [i16; 4], offset: [i32; 2]) -> [i32; 2] {
+    let [x, y] = point.map(i64::from);
+    let [xscale, scale01, scale10, yscale] = transform.map(i64::from);
+    let moved_x = from_f2dot14(xscale * x + scale10 * y) + i64::from(offset[0]);
+    let moved_y = from_f2dot14(scale01 * x + yscale * y) + i64::from(offset[1]);
+    [saturate(moved_x), saturate(moved_y)]
+}
+
+/// A sum of F2Dot14 products back in whole font units: `value / 16384`,
+/// rounded half away from zero. A product of an `i16` and an `i32` is under
+/// 2⁴⁶, so the sum of two cannot overflow.
+fn from_f2dot14(value: i64) -> i64 {
+    const ONE: i64 = 1 << 14;
+    if value >= 0 {
+        (value + ONE / 2) / ONE
+    } else {
+        -((-value + ONE / 2) / ONE)
+    }
+}
+
+/// `value` as an `i32`, held at the type's ends.
+fn saturate(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
 /// Reads one glyph's outline in font units.
@@ -1666,5 +1784,212 @@ mod tests {
             deep.segments.len() > shallow.segments.len(),
             "four levels of nesting drew no more than one"
         );
+    }
+
+    /// One contour of on-curve points at `at`, every flag spelled out and
+    /// every delta a signed word.
+    fn contour(at: &[[i16; 2]]) -> Vec<u8> {
+        let mut g = Vec::new();
+        g.extend_from_slice(&1i16.to_be_bytes()); // numberOfContours
+        g.extend_from_slice(&[0; 8]); // bounding box, unread
+        g.extend_from_slice(&(at.len() as u16 - 1).to_be_bytes());
+        g.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        let mut previous = [0i16; 2];
+        for point in at {
+            g.push(0x01);
+            xs.extend_from_slice(&(point[0] - previous[0]).to_be_bytes());
+            ys.extend_from_slice(&(point[1] - previous[1]).to_be_bytes());
+            previous = *point;
+        }
+        g.extend(xs);
+        g.extend(ys);
+        g
+    }
+
+    /// `n` records drawing `glyph` at no offset, each but the last saying
+    /// more follow.
+    fn records(n: usize, glyph: u16) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| {
+                let more = if i + 1 < n { 0x0020 } else { 0 };
+                component(0x0003 | more, glyph, 0, 0, &[])
+            })
+            .collect()
+    }
+
+    /// A simple glyph's points are its stored coordinates in point-number
+    /// order: its off-curve points among them and no implied midpoint, the
+    /// numbering running on through a second contour, the compact encodings
+    /// read as the spelled-out ones. A glyph with no outline has none, and a
+    /// glyph cut short anywhere, past `loca`, or in a face with no `glyf`
+    /// answers `None`.
+    #[test]
+    fn points_are_a_simple_glyphs_stored_coordinates() {
+        let data = simple_contours_seed();
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(points(&sfnt, 0), Some(vec![[0, 0], [100, 0], [0, 100]]));
+        assert_eq!(
+            points(&sfnt, 1),
+            Some(vec![[0, 0], [50, 150], [150, 150], [200, 0]]),
+            "the two off-curve points, and not the midpoint they imply"
+        );
+        assert_eq!(
+            points(&sfnt, 2),
+            Some(vec![
+                [30, 30],
+                [60, 60],
+                [90, 90],
+                [120, 60],
+                [150, 30],
+                [180, 0]
+            ])
+        );
+        assert_eq!(points(&sfnt, 3), None, "past the end of loca");
+
+        let empty = font_with_glyph(&[]);
+        let sfnt = Sfnt::parse(&empty).expect("a font");
+        assert_eq!(
+            points(&sfnt, 0),
+            Some(Vec::new()),
+            "a glyph with no outline"
+        );
+
+        let whole = triangle();
+        for cut in 1..whole.len() {
+            let data = font_with_glyph(&whole[..cut]);
+            let sfnt = Sfnt::parse(&data).expect("a font");
+            assert_eq!(points(&sfnt, 0), None, "cut at {cut}");
+        }
+
+        let cff = opentype_cff();
+        let sfnt = Sfnt::parse(&cff).expect("the sfnt parser accepts OTTO");
+        assert_eq!(points(&sfnt, 0), None, "no glyf");
+    }
+
+    /// A composite's points are its components' in record order, each moved
+    /// by its 2×2 and then by its offset — a scale on both axes, one on each,
+    /// a quarter turn, and a component placed by matching points at none, as
+    /// `outline` draws it — half a unit rounding away from zero; a nested
+    /// composite's follow its components down every level. Past `outline`'s
+    /// bounds — the nesting depth, the 256 glyphs drawn, the 64 records — and
+    /// past 65 536 points, or with its records cut short, a composite answers
+    /// `None`.
+    #[test]
+    fn a_composites_points_follow_its_components() {
+        let data = composite_transforms_seed();
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(
+            points(&sfnt, 2),
+            Some(vec![
+                // The triangle, offset by (200, 0).
+                [200, 0],
+                [300, 0],
+                [200, 100],
+                // The curve at half size, lifted by 400.
+                [0, 400],
+                [25, 475],
+                [75, 475],
+                [100, 400],
+                // The triangle half again as wide and half as tall, at 500.
+                [500, 0],
+                [650, 0],
+                [500, 50],
+                // The curve turned a quarter, (x, y) to (−y, x), down 300.
+                [0, -300],
+                [-150, -250],
+                [-150, -150],
+                [0, -100],
+                // The triangle placed by matching points: where it is stored.
+                [0, 0],
+                [100, 0],
+                [0, 100],
+            ])
+        );
+
+        let data = composite_nested_seed();
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(
+            points(&sfnt, 3),
+            Some(vec![
+                [0, 200],
+                [100, 200],
+                [0, 300],
+                [300, 200],
+                [300, 300],
+                [200, 200]
+            ]),
+            "glyph 2's two triangles, the second turned and moved, lifted"
+        );
+
+        // Halves, either side of zero: 0.5, 1.5 and 3.5 up, −0.5, −1.5 and
+        // −2.5 down.
+        let odd = contour(&[[1, -1], [3, -3], [-5, 7]]);
+        let halved = composite_glyph(&[component(0x000B, 0, 0, 0, &[8192])]);
+        let data = font_with_glyphs(&[&odd, &halved]);
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(points(&sfnt, 1), Some(vec![[1, -1], [2, -2], [-3, 4]]));
+
+        // A composite drawing itself is past the nesting depth.
+        let looping = composite_glyph(&records(2, 0));
+        let data = font_with_glyph(&looping);
+        assert_eq!(points(&Sfnt::parse(&data).expect("a font"), 0), None);
+
+        // Sixty-four records are read, and a sixty-fifth is refused.
+        let data = font_with_glyphs(&[
+            &triangle(),
+            &composite_glyph(&records(64, 0)),
+            &composite_glyph(&records(65, 0)),
+        ]);
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(points(&sfnt, 1).map(|p| p.len()), Some(64 * 3));
+        assert_eq!(points(&sfnt, 2), None);
+
+        // Sixteen of a composite of sixteen triangles asks for 273 glyphs.
+        let data = font_with_glyphs(&[
+            &triangle(),
+            &composite_glyph(&records(16, 0)),
+            &composite_glyph(&records(16, 1)),
+        ]);
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(points(&sfnt, 1).map(|p| p.len()), Some(48));
+        assert_eq!(points(&sfnt, 2), None);
+
+        // A glyph of 65 536 points, every one at the origin — 256 flags of
+        // ON | REPEAT | X_SAME | Y_SAME, each repeated 255 times — is answered
+        // alone and as one component, and two of it are past every point
+        // number.
+        let mut many = Vec::new();
+        many.extend_from_slice(&1i16.to_be_bytes());
+        many.extend_from_slice(&[0; 8]);
+        many.extend_from_slice(&u16::MAX.to_be_bytes()); // the last point
+        many.extend_from_slice(&0u16.to_be_bytes());
+        for _ in 0..256 {
+            many.extend_from_slice(&[0x39, 255]);
+        }
+        let data = font_with_glyphs(&[
+            &many,
+            &composite_glyph(&records(1, 0)),
+            &composite_glyph(&records(2, 0)),
+        ]);
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(points(&sfnt, 0).map(|p| p.len()), Some(65_536));
+        assert_eq!(points(&sfnt, 1).map(|p| p.len()), Some(65_536));
+        assert_eq!(points(&sfnt, 2), None);
+
+        // A record list ending where a record says more follow, and one cut
+        // in the middle of a record's 2×2.
+        let two = composite_glyph(&[
+            component(0x0023, 0, 200, 0, &[]),
+            component(0x00A3, 0, 0, -300, &TURN),
+        ]);
+        let data = font_with_glyphs(&[&triangle(), &two]);
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(points(&sfnt, 1).map(|p| p.len()), Some(6));
+        for cut in [18, 30] {
+            let data = font_with_glyphs(&[&triangle(), &two[..cut]]);
+            let sfnt = Sfnt::parse(&data).expect("a font");
+            assert_eq!(points(&sfnt, 1), None, "cut at {cut}");
+        }
     }
 }

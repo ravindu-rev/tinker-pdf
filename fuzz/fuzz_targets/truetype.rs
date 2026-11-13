@@ -1,18 +1,19 @@
 //! TrueType: the table directory, `cmap` in every format read, and `glyf`
-//! outlines including composites, whose recursion is the interesting part —
-//! and a variable face's: its design space, its outlines and phantom points
-//! as `gvar` moves them, and its `HVAR`, `VVAR`, `MVAR` and `cvt ` values, at
-//! its default, at each named instance and at its design space's corners.
+//! outlines and points including composites, whose recursion is the
+//! interesting part — and a variable face's: its design space, its outlines
+//! and phantom points as `gvar` moves them, and its `HVAR`, `VVAR`, `MVAR`
+//! and `cvt ` values, at its default, at each named instance and at its
+//! design space's corners.
 //!
 //! # What this target checks, and what it does not
 //!
 //! **Only that the code did not panic, hang, or exhaust memory.** Every call
 //! is discarded. A composite glyph assembled with the wrong component
 //! transform, a `cmap` subtable read in the wrong format, or a delta scaled by
-//! the wrong region produces wrong outlines and metrics rather than a crash.
-//! So a run that returned the *wrong* answer passes this target exactly as a
-//! correct one does, and a green `cargo fuzz` here is evidence about ruling 1
-//! and about nothing else.
+//! the wrong region produces wrong outlines, points and metrics rather than a
+//! crash. So a run that returned the *wrong* answer passes this target
+//! exactly as a correct one does, and a green `cargo fuzz` here is evidence
+//! about ruling 1 and about nothing else.
 //!
 //! That is worth writing down rather than leaving implied. Correctness lives
 //! in `crates/tinker-pdf-font`'s own tests — `variations.rs` for the variable
@@ -55,6 +56,7 @@ fuzz_target!(|data: &[u8]| {
     for glyph in 0..64u16 {
         let _ = font.advance(glyph);
         let _ = glyf::outline(&font, glyph);
+        let _ = glyf::points(&font, glyph);
     }
 
     // A refused design space, or a face that does not vary, is drawn at its

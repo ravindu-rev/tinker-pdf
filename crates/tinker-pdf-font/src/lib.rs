@@ -1,4 +1,6 @@
-//! Font-program parsing: bytes in, metrics and outlines out; no PDF types.
+//! Font-program parsing: bytes in, metrics and outlines out — and a TrueType
+//! glyph's points as stored, in integer font units, for the shaper's AAT
+//! attachments (`glyf::points`); no PDF types.
 //!
 //! Feature documentation: `docs/features/fonts.md`.
 

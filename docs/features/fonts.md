@@ -19,7 +19,16 @@ reads outlines from `glyf`/`loca`, including the implied on-curve midpoints
 between consecutive off-curve points. Composite glyphs are followed, bounded
 two ways: a nesting depth of 8 and a total budget of 256 components, because a
 depth cap alone leaves a 64-component self-referencing glyph asking for 64^8
-outlines (ruling 1). Character lookup goes through the font's `cmap`,
+outlines (ruling 1). `glyf::points` numbers a glyph's points as stored, in
+integer font units, for the shaper's AAT `kerx` control points: a simple
+glyph's contour points, on and off the curve, with no implied midpoint and no
+phantom point, and a composite's its components' in record order, each moved
+by its own 2×2 in F2Dot14, rounded half away from zero, and then by its offset
+as the outline places it, a component placed by matching points at none.
+Where the outline draws what it can of a glyph past those bounds or of 64
+records, or one cut short, `points` answers `None`, as it does past 65 536
+points: a list missing a component would number every point after it
+wrongly. Character lookup goes through the font's `cmap`,
 including the 9.6.6.4 route for symbolic fonts whose (3,0) subtable maps codes
 into the private-use block. A symbolic font asks its `cmap` for the code
 first and for the character its `/ToUnicode` names after, a non-symbolic font
