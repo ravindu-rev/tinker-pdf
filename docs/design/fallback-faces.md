@@ -256,10 +256,13 @@ candidate. The runs' revision, machine and day go in that commit's message.
 **The `cjk` capability.** `tpdf probe`'s object scan prints `cap cjk` for a
 file holding a composite font whose descendant's `/CIDSystemInfo` reads, as
 the seam reads it, registry `Adobe` and one of the five orderings, and whose
-descendant's descriptor names no `/FontFile`, `/FontFile2` or `/FontFile3`. A
-font that embeds a program, an `Identity` ordering and a simple font are not
-`cjk`. `corpus-run` counts, per capability, the files that rendered with
-something reported, which is the figure FT-01's exit falls from.
+descendant's descriptor names no `/FontFile`, `/FontFile2` or `/FontFile3`
+reference, which is what the seam reads as an embedded program. A font that
+embeds a program, an `Identity` ordering, another registry and a simple font
+are not `cjk`. The record's version does not move, since the runner reads
+every `cap` line by its name, whatever the name. `corpus-run` counts, per
+capability, the files that rendered with something reported, which is the
+figure FT-01's exit falls from.
 
 ## Milestones
 

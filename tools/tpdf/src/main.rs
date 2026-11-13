@@ -3697,10 +3697,71 @@ fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'
                     found.insert("mesh-shading");
                 }
             }
+            b"Subtype" => {
+                // 9.7.1: a composite font, the files a CJK fallback face is
+                // for (`docs/design/fallback-faces.md`, FT-01).
+                let subtype = cos.resolve(value);
+                let named = subtype
+                    .as_name()
+                    .and_then(|name| cos.name_bytes(name))
+                    .is_some_and(|name| &*name == b"Type0".as_slice());
+                if named && is_unembedded_cjk(cos, dict) {
+                    found.insert("cjk");
+                }
+            }
             _ => {}
         }
         scan_capabilities(cos, value, depth + 1, found);
     }
+}
+
+/// The orderings of the registry's CJK collections a substituted face is
+/// read through (`docs/design/fallback-faces.md`): Adobe-Japan1, Adobe-GB1,
+/// Adobe-CNS1, Adobe-Korea1 and Adobe-KR.
+const CJK_ORDERINGS: [&[u8]; 5] = [b"Japan1", b"GB1", b"CNS1", b"Korea1", b"KR"];
+
+/// Whether a `/Type0` font dictionary is a composite font a CJK fallback face
+/// is for: its descendant — the first entry of `/DescendantFonts` (9.7.1) —
+/// names in `/CIDSystemInfo` the registry `Adobe` and one of
+/// [`CJK_ORDERINGS`], read as the font seam reads them, each a string or a
+/// name; and that descendant's `/FontDescriptor` embeds no program, holding
+/// no `/FontFile`, `/FontFile2` or `/FontFile3` reference (9.9). A font that
+/// embeds one draws by it, and an `Identity` ordering is no collection.
+fn is_unembedded_cjk(cos: &CosDocument, font: &Dict) -> bool {
+    let descendants = cos.resolve_key(font, cos.intern(b"DescendantFonts"));
+    let Some(first) = descendants.as_array().and_then(<[Object]>::first) else {
+        return false;
+    };
+    let descendant = cos.resolve(first);
+    let Some(descendant) = descendant.as_dict() else {
+        return false;
+    };
+    let info = cos.resolve_key(descendant, cos.intern(b"CIDSystemInfo"));
+    let Some(info) = info.as_dict() else {
+        return false;
+    };
+    let text = |key: &[u8]| -> Option<Vec<u8>> {
+        let value = cos.resolve_key(info, cos.intern(key));
+        match value.as_ref() {
+            Object::String(string) => Some(string.bytes.clone()),
+            Object::Name(name) => cos.name_bytes(*name).map(|bytes| bytes.to_vec()),
+            _ => None,
+        }
+    };
+    if text(b"Registry").as_deref() != Some(b"Adobe".as_slice()) {
+        return false;
+    }
+    let ordering = text(b"Ordering");
+    if !ordering.is_some_and(|ordering| CJK_ORDERINGS.contains(&ordering.as_slice())) {
+        return false;
+    }
+    let descriptor = cos.resolve_key(descendant, cos.intern(b"FontDescriptor"));
+    let embeds = descriptor.as_dict().is_some_and(|descriptor| {
+        [b"FontFile".as_slice(), b"FontFile2", b"FontFile3"]
+            .into_iter()
+            .any(|key| descriptor.get_ref(cos.intern(key)).is_some())
+    });
+    !embeds
 }
 
 /// Whether a `/ColorSpace` value names an `ICCBased` space.
@@ -3884,6 +3945,172 @@ mod tests {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// A file of `objects`, numbered from 1, the first its catalog, with a
+    /// cross-reference table stating each one's offset.
+    fn file_of(objects: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (at, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", at + 1).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let table = out.len();
+        let size = objects.len() + 1;
+        out.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f\r\n").as_bytes());
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n\r\n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n")
+                .as_bytes(),
+        );
+        out
+    }
+
+    /// A stream object of `data`, its dictionary's other entries `entries`.
+    fn stream_of(entries: &str, data: &[u8]) -> Vec<u8> {
+        let mut out = format!("<< /Length {} {entries} >>\nstream\n", data.len()).into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\nendstream");
+        out
+    }
+
+    /// A one-page file whose page shows a code in `font`, written verbatim as
+    /// object 5, with `more` as objects 6 on: the page's content stream is
+    /// object 4.
+    fn font_file(font: &str, more: &[Vec<u8>]) -> Vec<u8> {
+        let mut objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
+              /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>"
+                .to_vec(),
+            stream_of("", b"BT /F0 12 Tf 10 50 Td <0022> Tj ET"),
+            font.as_bytes().to_vec(),
+        ];
+        objects.extend(more.iter().cloned());
+        file_of(&objects)
+    }
+
+    /// A Type 0 font over a `CIDFontType0` descendant (object 6) whose
+    /// `/CIDSystemInfo` is `info` and whose descriptor (object 7) ends with
+    /// `program`, both written verbatim, and `more` as objects 8 on.
+    fn composite_file(info: &str, program: &str, more: &[Vec<u8>]) -> Vec<u8> {
+        let mut objects = vec![
+            format!(
+                "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Census-CJK {info} \
+                 /FontDescriptor 7 0 R /DW 1000 >>"
+            )
+            .into_bytes(),
+            format!(
+                "<< /Type /FontDescriptor /FontName /Census-CJK /Flags 4 \
+                 /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 \
+                 /CapHeight 740 /StemV 80{program} >>"
+            )
+            .into_bytes(),
+        ];
+        objects.extend(more.iter().cloned());
+        font_file(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /Census-CJK /Encoding /Identity-H \
+             /DescendantFonts [6 0 R] >>",
+            &objects,
+        )
+    }
+
+    /// The capabilities a record names.
+    fn caps(record: &[String]) -> Vec<&str> {
+        record
+            .iter()
+            .filter_map(|line| line.strip_prefix("cap "))
+            .collect()
+    }
+
+    /// Whether the probe of `bytes` names the `cjk` capability.
+    fn names_cjk(bytes: &[u8], name: &str) -> bool {
+        let record = probe_record(bytes, &["--dpi", "72"], name);
+        assert!(
+            record.iter().any(|line| line == "opened yes"),
+            "{name} opens: {record:?}"
+        );
+        caps(&record).contains(&"cjk")
+    }
+
+    /// **An unembedded CJK font is the `cjk` capability**
+    /// (`docs/design/fallback-faces.md`, FT-01.5): a composite font whose
+    /// descendant's `/CIDSystemInfo` reads `Adobe` and one of the registry's
+    /// five CJK orderings, and whose descriptor embeds no program, prints
+    /// `cap cjk` — each ordering, the entries as names as the seam reads them
+    /// too, the dictionary behind a reference, no supplement, and a
+    /// `/FontFile3` that is no reference. The same font embedding a program,
+    /// an `Identity` ordering, another registry, a descendant naming no
+    /// collection, and a simple font that embeds nothing do not.
+    #[test]
+    fn an_unembedded_cjk_font_is_the_cjk_capability() {
+        let japan1 = "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >>";
+        assert!(names_cjk(&composite_file(japan1, "", &[]), "cjk-japan1"));
+        for ordering in ["GB1", "CNS1", "Korea1", "KR"] {
+            let info = format!(
+                "/CIDSystemInfo << /Registry (Adobe) /Ordering ({ordering}) /Supplement 0 >>"
+            );
+            assert!(
+                names_cjk(&composite_file(&info, "", &[]), &format!("cjk-{ordering}")),
+                "{ordering}"
+            );
+        }
+        let names = "/CIDSystemInfo << /Registry /Adobe /Ordering /Korea1 /Supplement 2 >>";
+        assert!(names_cjk(&composite_file(names, "", &[]), "cjk-names"));
+        let referenced = composite_file(
+            "/CIDSystemInfo 8 0 R",
+            "",
+            &[b"<< /Registry (Adobe) /Ordering (CNS1) /Supplement 7 >>".to_vec()],
+        );
+        assert!(names_cjk(&referenced, "cjk-referenced"));
+        let unsupplemented = "/CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) >>";
+        assert!(names_cjk(
+            &composite_file(unsupplemented, "", &[]),
+            "cjk-unsupplemented"
+        ));
+        assert!(names_cjk(
+            &composite_file(japan1, " /FontFile3 null", &[]),
+            "cjk-null-program"
+        ));
+
+        let embedded = composite_file(
+            japan1,
+            " /FontFile3 8 0 R",
+            &[stream_of("/Subtype /CIDFontType0C", b"not a program")],
+        );
+        assert!(!names_cjk(&embedded, "cjk-embedded"), "embeds a program");
+        let embedded_sfnt = composite_file(
+            japan1,
+            " /FontFile2 8 0 R",
+            &[stream_of("", b"not a program")],
+        );
+        assert!(!names_cjk(&embedded_sfnt, "cjk-embedded-sfnt"));
+        let identity = "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>";
+        assert!(!names_cjk(
+            &composite_file(identity, "", &[]),
+            "cjk-identity"
+        ));
+        let other = "/CIDSystemInfo << /Registry (Example) /Ordering (Japan1) /Supplement 0 >>";
+        assert!(!names_cjk(&composite_file(other, "", &[]), "cjk-other"));
+        assert!(!names_cjk(&composite_file("", "", &[]), "cjk-uncollected"));
+
+        let simple = font_file(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Census-Sans /FirstChar 34 \
+             /LastChar 34 /Widths [500] /FontDescriptor 6 0 R >>",
+            &[
+                b"<< /Type /FontDescriptor /FontName /Census-Sans /Flags 32 \
+                /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200 \
+                /CapHeight 700 /StemV 80 >>"
+                    .to_vec(),
+            ],
+        );
+        assert!(!names_cjk(&simple, "cjk-simple"), "a simple font");
     }
 
     /// The stage lines of a record, `phase <stage>` and `time <stage>`, in
