@@ -293,11 +293,13 @@ Two rules decide each door's shape, and the tree decides which applies.
 **The ask.** A door whose options value every caller builds from a base takes
 a flag on it, off by default: `RenderOptions::stats` and `SaveOptions::stats`.
 Every `RenderOptions` literal in the tree but its own `Default`
-(`lib.rs:705-718`) names a base, and so does every `SaveOptions` literal. A
-door with no options value, or one whose callers write it out whole, gets a
-counted sibling instead. `TextOptions` is written out whole by its callers, so a field on it
-breaks every one of them, which is the constraint FT-17.1 is already designing
-around (`text_order.rs:128`).
+(`impl Default for RenderOptions` in `lib.rs`) names a base, and so does every
+`SaveOptions` literal. A door with no options value, or one whose callers write
+it out whole, gets a counted sibling instead. Every `TextOptions` literal names
+a base too, and the text door is a counted sibling all the same:
+`TextOptions` says which text a page's read gives and what threads a walk of
+it spends, its fields the extraction options
+([extraction-options](extraction-options.md)), and nothing about counting.
 `Document::page` and `Page::images` take no options at all, and the validators
 take only the rule groups to run, a value each verdict reports back as what
 ran and no place for a flag.
