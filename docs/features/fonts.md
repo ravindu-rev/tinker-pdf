@@ -797,6 +797,32 @@ axis count to a design space's, refusing a mismatch by name. At the default
 location every scalar is zero, so a face whose regions all peak away from
 zero draws there exactly what `Cff2::outline` draws.
 
+**The committed variable faces.** `crates/tinker-pdf-font/tests/variable/`
+holds two faces this repository wrote and no outside program made, so that a
+test in any crate can embed, draw or set text in a variable face through
+`include_bytes!`. `variable-glyf.ttf` has TrueType outlines over `wght`,
+`wdth`, `slnt` and `opsz` and seven named instances: an `avar` bending the
+weight, `gvar` over simple, composite and empty glyphs — shared and embedded
+peaks, an intermediate region, shared and private point numbers, points left
+to the inference, a scaled component and a `USE_MY_METRICS` one — `cvar`
+over a `cvt `, `HVAR` through an advance map, `VVAR` by glyph id and `MVAR`
+over seventeen metrics, with `fpgm`, `prep` and `gasp` beside them.
+`variable-cff2.otf` has CFF2 outlines over `wght` and `wdth` and five named
+instances: two Font DICTs chosen by an FDSelect, two blend data sets that
+glyphs and Private DICTs switch between with `vsindex`, blends in
+charstrings, in local and global subroutines and in Private DICTs — one
+global subroutine blending under whichever `vsindex` its caller has — stems,
+a hint mask and a counter mask, an `rlineto` of fifty operands, more than a
+Type 2 charstring holds, `HVAR` by glyph id and `MVAR`. Both cover the space,
+the full stop, the colon and `H`, `I` and `O`, and carry `cmap`, `name`,
+`OS/2`, `post` and `STAT`. `tests/variable_support/mod.rs` states each table
+by table (`glyf_fixture`, `cff2_fixture`); the `glyf` face's `HVAR` and `VVAR`
+rows are derived from its phantom points' deltas, so both sources of an
+advance give one number. `tests/variable_fixtures.rs`'s ignored writer
+writes the faces and `PROVENANCE.tsv`, and the directory is `binary` in
+`.gitattributes`, since a rewritten line ending would move every table
+offset after it.
+
 ## API
 
 Everything reaches callers through the facade (ruling 11). Reading:
@@ -1928,6 +1954,16 @@ corpora already vendored here. So every name stays on the list.
   `USE_MY_METRICS` composites among them — equal a second reader's outlines
   and phantom points, that reader decoding `glyf`, `loca`, `hmtx`, `hhea` and
   `gvar` from the chapters' field lists.
+- `crates/tinker-pdf-font/tests/variable_fixtures.rs` — the committed
+  variable faces equal, byte for byte, to what `variable_support` builds from
+  their statements; `PROVENANCE.tsv` naming every file in `tests/variable/`
+  once, each row's size, CRC-32, outline table, tables, axes, named instance
+  count and glyph count recomputed from its file; and each face carrying
+  exactly the tables it claims — every directory checksum its table's, the
+  whole face summing to 0xB1B0AFBA, its `cmap` and `post` names, every
+  variation table read, and every glyph outlined and every `cvt `, `MVAR` and
+  Private DICT value read at each named instance and at the default — with the
+  `glyf` face's `HVAR` and `VVAR` advances equal to its phantom points' there.
 - `crates/tinker-pdf-font/tests/colour_tables.rs` — the colour tables over
   bytes the test writes from the OpenType chapters' layouts: COLR version 0's
   layers bottom first with each palette's colours, a slice two glyphs share,

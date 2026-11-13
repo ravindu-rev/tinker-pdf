@@ -157,6 +157,14 @@ crates/tinker-pdf-crypto/tests/data/wycheproof/** -text linguist-vendored
 *.woff2 binary
 crates/tinker-pdf-font/tests/woff/*.ttf binary
 
+# The committed variable faces (`crates/tinker-pdf-font/tests/variable/`).
+# Two sfnts `tests/variable_support/mod.rs` builds and its ignored writer
+# writes, and the record that describes them. A table directory carries byte
+# offsets and lengths, so a rewritten line ending moves every table after it
+# and the face stops parsing; the record is the writer's bytes too, held to
+# the files by the test beside them, so the whole directory is left as written.
+crates/tinker-pdf-font/tests/variable/** binary
+
 # The container images the tier-4 archive row's decoders are held to
 # (`crates/tinker-pdf-filters/tests/images/`). Bytes a third-party encoder
 # wrote once from authored pixels; a normalised line ending inside one is a

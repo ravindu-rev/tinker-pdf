@@ -1,0 +1,7 @@
+# Written by tests/variable_fixtures.rs's write_the_committed_faces from the
+# statements in tests/variable_support/mod.rs. First-party bytes: no outside
+# program made these faces, and the tests beside them hold each to its
+# builder byte for byte and this record to the files.
+file	bytes	crc32	outlines	tables	axes	named_instances	glyphs	built_by	role
+variable-glyf.ttf	4568	21f39c79	glyf	HVAR,MVAR,OS/2,STAT,VVAR,avar,cmap,cvar,cvt ,fpgm,fvar,gasp,glyf,gvar,head,hhea,hmtx,loca,maxp,name,post,prep,vhea,vmtx	wght:100:400:900 wdth:75:100:125 slnt:-12:0:0 opsz:8:12:72	7	8	variable_support::glyf_fixture	TrueType outlines over four axes: gvar over simple, composite and empty glyphs, an avar, cvar over cvt, HVAR, VVAR and MVAR, with fpgm, prep and gasp
+variable-cff2.otf	2864	fd7e0091	CFF2	CFF2,HVAR,MVAR,OS/2,STAT,cmap,fvar,head,hhea,hmtx,maxp,name,post	wght:200:400:900 wdth:75:100:125	5	7	variable_support::cff2_fixture	CFF2 outlines over two axes: two Font DICTs and two blend data sets, blends in charstrings, subroutines and Private DICTs, hints, HVAR and MVAR
