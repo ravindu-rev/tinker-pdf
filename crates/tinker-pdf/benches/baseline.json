@@ -378,7 +378,13 @@
         { "name": "deflate page-like data", "unit": "bytes",
           "per_iteration": 6528600, "calls": 1, "gate": { "floor": 1 } },
         { "name": "deflate photo-like data", "unit": "bytes",
-          "per_iteration": 6528600, "calls": 1, "gate": { "floor": 1 } }
+          "per_iteration": 6528600, "calls": 1, "gate": { "floor": 1 } },
+        { "name": "deflate page-like data, fast level", "unit": "bytes",
+          "per_iteration": 6528600, "calls": 1,
+          "gate": { "floor": 1, "paired_with": "deflate page-like data" } },
+        { "name": "deflate photo-like data, fast level", "unit": "bytes",
+          "per_iteration": 6528600, "calls": 1,
+          "gate": { "floor": 1, "paired_with": "deflate photo-like data" } }
       ]
     },
     {
@@ -589,6 +595,8 @@
         "encode/PNG of the near-blank page",
         "encode/deflate page-like data",
         "encode/deflate photo-like data",
+        "encode/deflate page-like data, fast level",
+        "encode/deflate photo-like data, fast level",
         "decode/inflate page-like data",
         "decode/inflate near-incompressible data",
         "decode/LZW decode page-like data",

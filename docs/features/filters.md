@@ -17,11 +17,28 @@ build refuses by name.
 fixed-Huffman and dynamic-Huffman blocks (RFC 1951), the zlib wrapper
 (RFC 1950) with Adler-32 verified and a raw-deflate fallback when the header
 is absent. The encoder exists too: `deflate.rs` is a hash-chain LZ77 match
-finder feeding fixed Huffman codes, with a stored block whenever that is
-smaller — it is what compresses every stream the writer emits, object streams
-included. The finder's chains live in two tables of one window's entries, a
-bucket's newest position and a ring of each position's predecessor, so what
-it holds is the same 256 KiB whatever the input's length. LZWDecode (7.4.4) covers 9-to-12-bit variable codes, Clear/EOD and
+finder whose chains live in two tables of one window's entries, a bucket's
+newest position and a ring of each position's predecessor, so what it holds
+is the same 256 KiB whatever the input's length. `deflate` and
+`zlib_compress` feed it fixed Huffman codes over the whole input, with stored
+blocks whenever those are smaller — they compress every stream the writer
+emits, object streams included. `Deflater` is the streaming encoder: input is
+fed in pieces into a window buffer of two windows, 64 KiB, and each block, of
+16 384 symbols or what the input's end leaves, is appended to the caller's
+output as it completes, stored or fixed-coded, whichever is fewer bits, and
+stored only while its input is still in the buffer. Its bytes are a function
+of the input alone, never of how the input was cut into writes (ruling 4):
+block boundaries follow symbol counts, a position is searched only with 262
+bytes ahead of it or at the input's end, and the buffer slides only when it
+is full and more input waits, keeping the window behind the scan. It runs at
+one of two `DeflateLevel`s, which differ in how far a position searches:
+`Fast` is greedy over four candidates, a search ending at a match of 8;
+`Ratio` tries 128, a quarter once the match in hand reaches 8, ends a search
+at 128, holds a match shorter than 16 while the next position searches and
+takes a longer match one byte on, the byte before it a literal, and drops a
+three-byte match further back than 4 096 bytes. `ZlibDeflater` wraps it in
+RFC 1950's header and a running Adler-32, and `deflate_at` and
+`zlib_compress_at` feed either one a whole input. LZWDecode (7.4.4) covers 9-to-12-bit variable codes, Clear/EOD and
 both `/EarlyChange` values. ASCIIHexDecode (7.4.2), ASCII85Decode (7.4.3) and
 RunLengthDecode (7.4.5) round out the set, and the Table 10 predictors
 (7.4.4.4) implement `/Predictor 2` (TIFF horizontal) and the five PNG row
@@ -689,7 +706,9 @@ tier-2 and none after, returning a `JpxHeader` — the geometry, output channel
 count, precision, stated colour and opacity a decode would produce. The comic
 path places a `.jp2` page's own bytes as `/JPXDecode` on the strength of it,
 and `jpx_reference.rs`, the seed replay and the `jpx` fuzz target each hold it
-to agree with the decode it stands in for. The encoder half is `deflate`, `zlib_compress`, `png_encode`
+to agree with the decode it stands in for. The encoder half is `deflate`,
+`zlib_compress`, the streaming `Deflater` and `ZlibDeflater` and their
+whole-input `deflate_at` and `zlib_compress_at`, each at a `DeflateLevel`, `png_encode`
 (takes a `PngSource`, returns the file or a `PngEncodeError`), `ccitt_g4_encode`
 (takes a `CcittSource`, returns the coded bits or a `CcittEncodeError`),
 `jbig2_generic_encode` / `jbig2_generic_region_segment` (take a

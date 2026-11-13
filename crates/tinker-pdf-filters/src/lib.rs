@@ -75,7 +75,9 @@ pub use ccitt::{
     CcittSource, T6Rows,
 };
 pub use crc32::{crc32, Crc32};
-pub use deflate::{deflate, zlib_compress};
+pub use deflate::{
+    deflate, deflate_at, zlib_compress, zlib_compress_at, DeflateLevel, Deflater, ZlibDeflater,
+};
 pub use gif::{gif_decode, GifError, GifImage, MAX_GIF_SAMPLES};
 pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{

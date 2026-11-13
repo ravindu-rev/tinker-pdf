@@ -1,27 +1,31 @@
 //! Own deflate encoder (RFC 1951), with the zlib wrapper of RFC 1950.
 //!
-//! The decoder has always been here; this is the other half, and without it
-//! every byte the engine wrote was uncompressed — `WriteOptions::compress` had
-//! no reader, and object streams, whose whole purpose is to compress many
-//! small objects together, made files *larger* than not using them.
+//! Two encoders live here, both hash-chain LZ77 over one window.
 //!
-//! The strategy is deliberately modest: a hash-chain LZ77 match finder feeding
-//! fixed Huffman codes, with a stored block whenever that would be smaller.
-//! Dynamic Huffman tables would buy perhaps another ten per cent and cost a
-//! code-length encoder, a package-merge, and a second set of edge cases; the
-//! ratio that matters is "much smaller than nothing", and fixed codes reach it.
+//! [`deflate`] and [`zlib_compress`] compress every stream the writer emits:
+//! one fixed-Huffman block over the whole input, or stored blocks wherever
+//! those are smaller.
 //!
-//! Correctness is what is not modest: every output is checked against this
-//! crate's own inflate by proptest, over generated inputs rather than chosen
-//! ones.
+//! [`Deflater`] is the streaming one (`docs/design/performance.md`, P-04):
+//! input is fed in pieces into a window buffer of two windows, and whole
+//! blocks are appended to the caller's output as they complete, each written
+//! stored or fixed-coded, whichever is fewer bits. It runs at one of two
+//! levels ([`DeflateLevel`]): fast, greedy over a short chain, or ratio, over
+//! a long chain with a lazy step. [`ZlibDeflater`] wraps it in RFC 1950's
+//! header and a running Adler-32, and [`deflate_at`] and [`zlib_compress_at`]
+//! feed it a whole input at once.
 //!
-//! It once said "and against zlib in CI (ruling 9)" as well. No such check
-//! ever existed in any workflow — corrected August 2026 with the ruling-13
-//! sweep, and worth recording rather than quietly deleting, because a claim
-//! about a check that does not run is the failure mode that sweep exists to
-//! find. Under ruling 13 no such check may be added: the round trip against
-//! our own inflate is what there is, and what it cannot catch is a bug the
-//! encoder and the decoder share.
+//! **Arrival is not an input** (ruling 4). A block ends at
+//! [`BLOCK_SYMBOLS`] symbols or at the end of the input, a position is
+//! searched only with [`LOOKAHEAD`] bytes ahead of it or at the end, and the
+//! buffer slides only when it is full and more input waits, so the bytes
+//! written are a function of the input alone, never of how it was cut into
+//! writes.
+//!
+//! Correctness is checked against this crate's own inflate, over generated
+//! inputs rather than chosen ones. No other deflate decides it (ruling 13), so
+//! what the round trip cannot catch is a bug the encoder and the decoder
+//! share.
 
 /// How far back a match may reach (RFC 1951 §3.2.5).
 const WINDOW: usize = 32_768;
@@ -43,6 +47,19 @@ const HASH_SIZE: usize = 1 << 15;
 const EMPTY: u32 = u32::MAX;
 /// The offset no position is held at: one about to reach it moves the base.
 const OFFSET_LIMIT: usize = 1 << 31;
+/// The bytes a position is searched with ahead of it, short of the input's
+/// end: a match's reach forward, a hash's three, and the next position's.
+const LOOKAHEAD: usize = MAX_MATCH + MIN_MATCH + 1;
+/// The streaming deflater's window buffer: two windows, so a match may always
+/// reach a whole window back from anywhere a position is searched.
+const BUFFER: usize = 2 * WINDOW;
+/// The symbols, literals and matches, a block holds before it is written.
+const BLOCK_SYMBOLS: usize = 16_384;
+/// How far back a three-byte match may be at the ratio level: further, its
+/// distance's extra bits cost more than its three literals do.
+const TOO_FAR: usize = 4_096;
+/// The longest stored block (RFC 1951 §3.2.4): `LEN` is sixteen bits.
+const STORED_MAX: usize = 65_535;
 
 /// The match finder's tables: `head`, the newest position of each hash
 /// bucket, and the ring, the position before each one in its bucket, at slot
@@ -268,9 +285,13 @@ fn distance_symbol(distance: usize) -> (u16, u32, usize) {
 /// Three bytes hashed into a bucket. Collisions are fine: a candidate is
 /// always verified before it is used.
 fn hash3(data: &[u8], at: usize) -> usize {
-    let a = u32::from(data.get(at).copied().unwrap_or(0));
-    let b = u32::from(data.get(at + 1).copied().unwrap_or(0));
-    let c = u32::from(data.get(at + 2).copied().unwrap_or(0));
+    let byte = |i: usize| data.get(at + i).copied().unwrap_or(0);
+    hash(byte(0), byte(1), byte(2))
+}
+
+/// The bucket of the three bytes `a`, `b` and `c`.
+fn hash(a: u8, b: u8, c: u8) -> usize {
+    let (a, b, c) = (u32::from(a), u32::from(b), u32::from(c));
     (((a << 10) ^ (b << 5) ^ c).wrapping_mul(2_654_435_761) >> 17) as usize % HASH_SIZE
 }
 
@@ -307,17 +328,41 @@ pub fn zlib_compress(input: &[u8]) -> Vec<u8> {
 
 /// RFC 1950 §9.
 fn adler32(data: &[u8]) -> u32 {
+    let mut adler = Adler32::new();
+    adler.update(data);
+    adler.value()
+}
+
+/// RFC 1950 §9's checksum, kept as it runs: the two sums are reduced at least
+/// every 5 552 bytes, the most that cannot overflow a `u32`, so pieces of any
+/// size give the value the whole input gives.
+#[derive(Clone, Copy)]
+struct Adler32 {
+    a: u32,
+    b: u32,
+}
+
+impl Adler32 {
     const MOD: u32 = 65_521;
-    let (mut a, mut b) = (1u32, 0u32);
-    for chunk in data.chunks(5552) {
-        for byte in chunk {
-            a += u32::from(*byte);
-            b += a;
-        }
-        a %= MOD;
-        b %= MOD;
+
+    fn new() -> Adler32 {
+        Adler32 { a: 1, b: 0 }
     }
-    (b << 16) | a
+
+    fn update(&mut self, data: &[u8]) {
+        for chunk in data.chunks(5552) {
+            for &byte in chunk {
+                self.a += u32::from(byte);
+                self.b += self.a;
+            }
+            self.a %= Self::MOD;
+            self.b %= Self::MOD;
+        }
+    }
+
+    fn value(self) -> u32 {
+        (self.b << 16) | self.a
+    }
 }
 
 /// Stored (uncompressed) blocks, which cost five bytes per 65535.
@@ -422,10 +467,758 @@ fn deflate_fixed(input: &[u8]) -> Vec<u8> {
     w.finish()
 }
 
+// ---- The streaming deflater -------------------------------------------------
+
+/// How hard a [`Deflater`] looks for matches (`docs/design/performance.md`,
+/// P-04, "The two levels"). Both levels are the same hash-chain LZ77 over the
+/// same window, inserting every position a match covers; they differ in how
+/// far a position searches and whether it looks one byte on. The numbers are
+/// level 1's and level 6's published parameters, taken as numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeflateLevel {
+    /// Greedy: four candidates a position, and a search ends at a match of 8.
+    /// For output written once and read once, a rendered page among them.
+    Fast,
+    /// 128 candidates a position, a quarter of them once the match in hand
+    /// reaches 8, and a search ends at a match of 128; a match shorter than
+    /// 16 is held while the next position searches, and a longer match one
+    /// byte on wins, the byte before it a literal. A three-byte match further
+    /// back than 4 096 bytes is dropped. For documents, written once and read
+    /// many times.
+    Ratio,
+}
+
+/// A level's numbers.
+#[derive(Clone, Copy)]
+struct Params {
+    /// The candidates a position tries.
+    chain: usize,
+    /// The match in hand at which a position tries a quarter of them.
+    good: usize,
+    /// The length that ends a search.
+    nice: usize,
+    /// A match in hand shorter than this waits while the next position
+    /// searches; at none, the level is greedy.
+    lazy: usize,
+}
+
+impl DeflateLevel {
+    const fn params(self) -> Params {
+        match self {
+            Self::Fast => Params {
+                chain: 4,
+                good: MAX_MATCH,
+                nice: 8,
+                lazy: 0,
+            },
+            Self::Ratio => Params {
+                chain: MAX_CHAIN,
+                good: 8,
+                nice: 128,
+                lazy: 16,
+            },
+        }
+    }
+}
+
+/// A match: its length and how far back it reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Match {
+    len: usize,
+    dist: usize,
+}
+
+/// Each match length's index into [`LENGTH_TABLE`], from 3 to 258.
+const LENGTH_INDEX: [u8; MAX_MATCH + 1] = length_index();
+
+const fn length_index() -> [u8; MAX_MATCH + 1] {
+    let mut index = [0u8; MAX_MATCH + 1];
+    let mut i = 0;
+    while i < LENGTH_TABLE.len() {
+        let (_, extra, base) = LENGTH_TABLE[i];
+        let mut length = base;
+        // Symbol 284's extra bits reach 258, which is 285's alone: 285 comes
+        // last and takes it.
+        while length < base + (1 << extra) && length <= MAX_MATCH {
+            index[length] = i as u8;
+            length += 1;
+        }
+        i += 1;
+    }
+    index
+}
+
+/// Each distance from 1 to 256's index into [`DISTANCE_TABLE`], by
+/// `distance - 1`.
+const DISTANCE_LOW: [u8; 256] = distance_low();
+/// Each distance past 256's index into [`DISTANCE_TABLE`], by
+/// `(distance - 1) >> 7`: every code past 256 spans a multiple of 128.
+const DISTANCE_HIGH: [u8; 256] = distance_high();
+
+const fn distance_low() -> [u8; 256] {
+    let mut index = [0u8; 256];
+    let mut i = 0;
+    while i < DISTANCE_TABLE.len() {
+        let (_, extra, base) = DISTANCE_TABLE[i];
+        let mut distance = base;
+        while distance < base + (1 << extra) && distance <= 256 {
+            index[distance - 1] = i as u8;
+            distance += 1;
+        }
+        i += 1;
+    }
+    index
+}
+
+const fn distance_high() -> [u8; 256] {
+    let mut index = [0u8; 256];
+    let mut i = 0;
+    while i < DISTANCE_TABLE.len() {
+        let (_, extra, base) = DISTANCE_TABLE[i];
+        if base > 256 {
+            let mut distance = base;
+            while distance < base + (1 << extra) {
+                index[(distance - 1) >> 7] = i as u8;
+                distance += 128;
+            }
+        }
+        i += 1;
+    }
+    index
+}
+
+/// `distance`'s index into [`DISTANCE_TABLE`], for a distance from 1 to the
+/// window.
+fn distance_index(distance: usize) -> usize {
+    let index = if distance <= 256 {
+        DISTANCE_LOW[distance - 1]
+    } else {
+        DISTANCE_HIGH[(distance - 1) >> 7]
+    };
+    usize::from(index)
+}
+
+/// `code`'s low `length` bits in the other order: a Huffman code is packed
+/// from its most significant bit (RFC 1951 §3.1.1), and the writer writes
+/// from the least.
+const fn reversed(code: u16, length: u8) -> u16 {
+    let mut out = 0u16;
+    let mut i = 0;
+    while i < length {
+        out |= ((code >> i) & 1) << (length - 1 - i);
+        i += 1;
+    }
+    out
+}
+
+/// A code as the writer writes it: reversed, and its length.
+type Code = (u16, u8);
+
+/// The fixed literal/length code of RFC 1951 §3.2.6, reversed for writing.
+const FIXED_LITERALS: [Code; 288] = fixed_literals();
+/// The fixed distance code: five bits, reversed for writing.
+const FIXED_DISTANCES: [Code; 30] = fixed_distances();
+
+const fn fixed_literals() -> [Code; 288] {
+    let mut codes = [(0u16, 0u8); 288];
+    let mut symbol = 0u16;
+    while symbol < 288 {
+        let (code, length) = match symbol {
+            0..=143 => (0b0011_0000 + symbol, 8),
+            144..=255 => (0b1_1001_0000 + (symbol - 144), 9),
+            256..=279 => (symbol - 256, 7),
+            _ => (0b1100_0000 + (symbol - 280), 8),
+        };
+        codes[symbol as usize] = (reversed(code, length), length);
+        symbol += 1;
+    }
+    codes
+}
+
+const fn fixed_distances() -> [Code; 30] {
+    let mut codes = [(0u16, 0u8); 30];
+    let mut symbol = 0;
+    while symbol < 30 {
+        codes[symbol] = (reversed(symbol as u16, 5), 5);
+        symbol += 1;
+    }
+    codes
+}
+
+/// The streaming writer's bits, low bit first, into the caller's output: at
+/// most 31 are held between writes, fewer than 8 between blocks.
+#[derive(Default)]
+struct Bits {
+    held: u64,
+    count: u32,
+}
+
+impl Bits {
+    /// Writes the low `count` bits of `value`, `count` at most 16.
+    fn put(&mut self, out: &mut Vec<u8>, value: u32, count: u32) {
+        self.held |= (u64::from(value) & ((1u64 << count) - 1)) << self.count;
+        self.count += count;
+        if self.count >= 32 {
+            out.extend_from_slice(&(self.held as u32).to_le_bytes());
+            self.held >>= 32;
+            self.count -= 32;
+        }
+    }
+
+    /// Writes a code.
+    fn code(&mut self, out: &mut Vec<u8>, (code, length): Code) {
+        self.put(out, u32::from(code), u32::from(length));
+    }
+
+    /// Writes the whole bytes held, keeping fewer than eight bits.
+    fn bytes(&mut self, out: &mut Vec<u8>) {
+        while self.count >= 8 {
+            out.push(self.held as u8);
+            self.held >>= 8;
+            self.count -= 8;
+        }
+    }
+
+    /// Pads to a byte and writes everything held.
+    fn align(&mut self, out: &mut Vec<u8>) {
+        self.bytes(out);
+        if self.count > 0 {
+            out.push(self.held as u8);
+            self.held = 0;
+            self.count = 0;
+        }
+    }
+}
+
+/// The block being gathered: its symbols, their counts and the input it
+/// covers.
+struct Block {
+    /// Each symbol, its value in the high half — a literal's byte or a
+    /// match's length — and a match's distance in the low half, zero for a
+    /// literal.
+    symbols: Vec<u32>,
+    /// Each literal/length symbol's count; 256, the end of the block, is
+    /// counted when it is written.
+    literals: [u32; 286],
+    /// Each distance symbol's count.
+    distances: [u32; 30],
+    /// The position of the block's first byte.
+    start: usize,
+    /// The input bytes the block's symbols cover.
+    len: usize,
+}
+
+impl Block {
+    fn new() -> Block {
+        Block {
+            symbols: Vec::new(),
+            literals: [0; 286],
+            distances: [0; 30],
+            start: 0,
+            len: 0,
+        }
+    }
+
+    fn literal(&mut self, byte: u8) {
+        self.symbols.push(u32::from(byte) << 16);
+        self.literals[usize::from(byte)] += 1;
+        self.len += 1;
+    }
+
+    fn matched(&mut self, found: Match) {
+        // A length is at most 258 and a distance at most 32 768: both fit
+        // their sixteen bits.
+        self.symbols
+            .push(((found.len as u32) << 16) | found.dist as u32);
+        self.literals[257 + usize::from(LENGTH_INDEX[found.len])] += 1;
+        self.distances[distance_index(found.dist)] += 1;
+        self.len += found.len;
+    }
+
+    fn full(&self) -> bool {
+        self.symbols.len() == BLOCK_SYMBOLS
+    }
+
+    /// Empties the block, which starts where it ended.
+    fn reset(&mut self) {
+        self.symbols.clear();
+        self.literals = [0; 286];
+        self.distances = [0; 30];
+        self.start += self.len;
+        self.len = 0;
+    }
+}
+
+/// The bits a block costs fixed-coded, header and end included.
+fn fixed_bits(block: &Block) -> u64 {
+    let mut bits = 3 + u64::from(FIXED_LITERALS[256].1);
+    for (symbol, &count) in block.literals.iter().enumerate() {
+        let extra = match symbol.checked_sub(257) {
+            Some(index) => LENGTH_TABLE[index].1,
+            None => 0,
+        };
+        bits += u64::from(count) * u64::from(u32::from(FIXED_LITERALS[symbol].1) + extra);
+    }
+    for (index, &count) in block.distances.iter().enumerate() {
+        bits += u64::from(count) * u64::from(5 + DISTANCE_TABLE[index].1);
+    }
+    bits
+}
+
+/// The bits `len` bytes cost as stored blocks, written after `pending` bits
+/// of a byte: each block's three header bits, its padding to a byte, its
+/// `LEN` and `NLEN`, and its bytes.
+fn stored_bits(len: usize, pending: u32) -> u64 {
+    let blocks = len.div_ceil(STORED_MAX).max(1) as u64;
+    let first = 3 + (8 - (pending + 3) % 8) % 8 + 32;
+    u64::from(first) + (blocks - 1) * 40 + 8 * len as u64
+}
+
+/// Writes `data` as stored blocks, the last final if `last` is.
+fn write_stored(bits: &mut Bits, out: &mut Vec<u8>, data: &[u8], last: bool) {
+    let mut rest = data;
+    loop {
+        let (now, after) = rest.split_at(rest.len().min(STORED_MAX));
+        bits.put(out, u32::from(last && after.is_empty()), 1);
+        bits.put(out, 0b00, 2);
+        bits.align(out);
+        // At most `STORED_MAX`, so it fits.
+        let len = now.len() as u16;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(now);
+        rest = after;
+        if rest.is_empty() {
+            return;
+        }
+    }
+}
+
+/// Writes `block`'s symbols and its end in `literals` and `distances`.
+fn write_symbols(
+    bits: &mut Bits,
+    out: &mut Vec<u8>,
+    block: &Block,
+    literals: &[Code],
+    distances: &[Code],
+) {
+    for &symbol in &block.symbols {
+        let (value, dist) = ((symbol >> 16) as usize, (symbol & 0xFFFF) as usize);
+        if dist == 0 {
+            bits.code(out, literals[value]);
+            continue;
+        }
+        let index = usize::from(LENGTH_INDEX[value]);
+        let (_, extra, base) = LENGTH_TABLE[index];
+        bits.code(out, literals[257 + index]);
+        if extra > 0 {
+            bits.put(out, (value - base) as u32, extra);
+        }
+        let index = distance_index(dist);
+        let (_, extra, base) = DISTANCE_TABLE[index];
+        bits.code(out, distances[index]);
+        if extra > 0 {
+            bits.put(out, (dist - base) as u32, extra);
+        }
+    }
+    bits.code(out, literals[256]);
+}
+
+/// The length of the run `here` and `there` share, both the same length.
+fn common(here: &[u8], there: &[u8]) -> usize {
+    let mut len = 0;
+    for (a, b) in here.chunks_exact(8).zip(there.chunks_exact(8)) {
+        let word = |bytes: &[u8]| <[u8; 8]>::try_from(bytes).map_or(0, u64::from_le_bytes);
+        let differ = word(a) ^ word(b);
+        if differ != 0 {
+            // Little-endian: the first byte that differs is the lowest.
+            return len + (differ.trailing_zeros() / 8) as usize;
+        }
+        len += 8;
+    }
+    len + here[len..]
+        .iter()
+        .zip(&there[len..])
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
+/// A raw deflate stream (RFC 1951), written as its input arrives.
+///
+/// [`Deflater::write`] takes input in pieces of any size and appends each
+/// block to `out` as it completes; [`Deflater::finish`] writes the rest, the
+/// last block final and the stream padded to a byte. The bytes written are
+/// the same however the input is cut into writes. It keeps at most a window
+/// buffer of two windows of input, 64 KiB, and a block of symbols beside the
+/// finder's two tables; `out` is the caller's.
+pub struct Deflater {
+    level: DeflateLevel,
+    params: Params,
+    finder: Finder,
+    /// The input from `start` on: the window behind the scan and what has
+    /// arrived ahead of it, at most [`BUFFER`] bytes.
+    buffer: Vec<u8>,
+    /// The position of the buffer's first byte.
+    start: usize,
+    /// The next position to search.
+    scan: usize,
+    /// The ratio level's match found at `scan - 1`, held while `scan`
+    /// searches.
+    held: Option<Match>,
+    /// The ratio level's byte at `scan - 1` is not written yet: a literal,
+    /// or the start of the match held.
+    waiting: bool,
+    block: Block,
+    bits: Bits,
+}
+
+impl Deflater {
+    /// A deflater at `level`.
+    #[must_use]
+    pub fn new(level: DeflateLevel) -> Deflater {
+        Deflater {
+            level,
+            params: level.params(),
+            finder: Finder::new(),
+            buffer: Vec::new(),
+            start: 0,
+            scan: 0,
+            held: None,
+            waiting: false,
+            block: Block::new(),
+            bits: Bits::default(),
+        }
+    }
+
+    /// Takes `input`, appending to `out` each block it completes.
+    pub fn write(&mut self, mut input: &[u8], out: &mut Vec<u8>) {
+        while !input.is_empty() {
+            if self.buffer.len() == BUFFER {
+                self.slide();
+            }
+            let take = (BUFFER - self.buffer.len()).min(input.len());
+            let (now, rest) = input.split_at(take);
+            self.reserve(take);
+            self.buffer.extend_from_slice(now);
+            input = rest;
+            self.run(out, false);
+        }
+    }
+
+    /// Writes what is left: the last block, final, and the stream padded to
+    /// a byte.
+    pub fn finish(mut self, out: &mut Vec<u8>) {
+        self.drain(out);
+        self.flush(out, true);
+        self.bits.align(out);
+    }
+
+    /// Searches every position left and writes the byte still waiting, so
+    /// that every symbol is in a block.
+    fn drain(&mut self, out: &mut Vec<u8>) {
+        self.run(out, true);
+        if self.waiting {
+            self.waiting = false;
+            let byte = self.buffer[self.scan - 1 - self.start];
+            self.literal(out, byte);
+        }
+    }
+
+    /// The position one past the last byte that has arrived.
+    fn end(&self) -> usize {
+        self.start + self.buffer.len()
+    }
+
+    /// Grows the buffer to hold `more` bytes, by powers of two up to
+    /// [`BUFFER`], so a short input holds a short buffer.
+    fn reserve(&mut self, more: usize) {
+        let need = self.buffer.len() + more;
+        if need > self.buffer.capacity() {
+            let size = need.next_power_of_two().min(BUFFER);
+            self.buffer.reserve_exact(size - self.buffer.len());
+        }
+    }
+
+    /// Drops what is more than a window behind the scan. The buffer is full
+    /// and the scan within [`LOOKAHEAD`] of its end, so more than a window is
+    /// behind it and the drop makes room.
+    fn slide(&mut self) {
+        let keep = self.scan.saturating_sub(WINDOW).max(self.start);
+        let drop = keep - self.start;
+        self.buffer.copy_within(drop.., 0);
+        self.buffer.truncate(self.buffer.len() - drop);
+        self.start = keep;
+    }
+
+    /// Searches positions while each has [`LOOKAHEAD`] bytes ahead of it, or,
+    /// `finishing`, any.
+    fn run(&mut self, out: &mut Vec<u8>, finishing: bool) {
+        let reach = if finishing { 1 } else { LOOKAHEAD };
+        while self.end() - self.scan >= reach {
+            match self.level {
+                DeflateLevel::Fast => self.greedy(out),
+                DeflateLevel::Ratio => self.lazy(out),
+            }
+        }
+    }
+
+    /// The bucket of the position `at`, unless too few bytes follow it.
+    fn bucket(&self, at: usize) -> Option<usize> {
+        let i = at - self.start;
+        match self.buffer.get(i..i + MIN_MATCH)? {
+            &[a, b, c] => Some(hash(a, b, c)),
+            _ => None,
+        }
+    }
+
+    /// Enters the positions from `from` up to `to` that a hash reaches.
+    fn insert(&mut self, from: usize, to: usize) {
+        for position in from..to {
+            match self.bucket(position) {
+                Some(bucket) => self.finder.insert(bucket, position),
+                None => return,
+            }
+        }
+    }
+
+    /// One position at the fast level: its longest match, or its byte.
+    fn greedy(&mut self, out: &mut Vec<u8>) {
+        let at = self.scan;
+        let found = self.bucket(at).and_then(|bucket| {
+            let first = self.finder.first(bucket);
+            let found = self.longest(first, at, MIN_MATCH - 1, self.params.chain);
+            self.finder.insert(bucket, at);
+            found
+        });
+        match found {
+            Some(found) => {
+                self.matched(out, found);
+                self.insert(at + 1, at + found.len);
+                self.scan = at + found.len;
+            }
+            None => {
+                let byte = self.buffer[at - self.start];
+                self.literal(out, byte);
+                self.scan = at + 1;
+            }
+        }
+    }
+
+    /// One position at the ratio level: a match held from the position before
+    /// is written unless this one finds a longer, which is held in its place
+    /// and the byte before it written as a literal.
+    fn lazy(&mut self, out: &mut Vec<u8>) {
+        let at = self.scan;
+        let in_hand = self.held.map_or(MIN_MATCH - 1, |held| held.len);
+        let found = self.bucket(at).and_then(|bucket| {
+            let found = if in_hand < self.params.lazy {
+                let chain = if in_hand >= self.params.good {
+                    self.params.chain / 4
+                } else {
+                    self.params.chain
+                };
+                let first = self.finder.first(bucket);
+                self.longest(first, at, in_hand, chain)
+                    .filter(|found| found.len > MIN_MATCH || found.dist <= TOO_FAR)
+            } else {
+                None
+            };
+            self.finder.insert(bucket, at);
+            found
+        });
+        match (self.held, found) {
+            (Some(held), None) => {
+                // The match from `at - 1` stands; `at - 1` and `at` are in
+                // the chain already.
+                self.matched(out, held);
+                let past = at - 1 + held.len;
+                self.insert(at + 1, past);
+                self.scan = past;
+                self.held = None;
+                self.waiting = false;
+            }
+            (_, found) => {
+                if self.waiting {
+                    let byte = self.buffer[at - 1 - self.start];
+                    self.literal(out, byte);
+                }
+                self.waiting = true;
+                self.held = found;
+                self.scan = at + 1;
+            }
+        }
+    }
+
+    /// The longest match for the bytes at `at` longer than `best`, among at
+    /// most `chain` candidates from `first` within the window; the search
+    /// ends at the level's `nice` length. Of two the same length the nearer,
+    /// which the chain visits first, is kept.
+    fn longest(&self, first: Option<usize>, at: usize, best: usize, chain: usize) -> Option<Match> {
+        let most = MAX_MATCH.min(self.end() - at);
+        if most <= best {
+            return None;
+        }
+        let nice = self.params.nice.min(most);
+        let from = at - self.start;
+        let here = &self.buffer[from..from + most];
+        // The window behind the scan is held whole (`slide`), so every
+        // candidate a walk accepts is in the buffer.
+        let limit = at.saturating_sub(WINDOW);
+        let (mut best_len, mut best_dist) = (best, 0);
+        let mut next = first;
+        let mut tries = 0;
+        while let Some(candidate) = next.filter(|&candidate| candidate >= limit) {
+            if tries == chain {
+                break;
+            }
+            tries += 1;
+            let from = candidate - self.start;
+            let there = &self.buffer[from..from + most];
+            // Only a candidate that agrees at `best_len` can be longer.
+            if there[best_len] == here[best_len] {
+                let len = common(here, there);
+                if len > best_len {
+                    best_len = len;
+                    best_dist = at - candidate;
+                    if len >= nice {
+                        break;
+                    }
+                }
+            }
+            next = self.finder.next(candidate);
+        }
+        (best_dist != 0).then_some(Match {
+            len: best_len,
+            dist: best_dist,
+        })
+    }
+
+    fn literal(&mut self, out: &mut Vec<u8>, byte: u8) {
+        self.block.literal(byte);
+        if self.block.full() {
+            self.flush(out, false);
+        }
+    }
+
+    fn matched(&mut self, out: &mut Vec<u8>, found: Match) {
+        self.block.matched(found);
+        if self.block.full() {
+            self.flush(out, false);
+        }
+    }
+
+    /// Writes the block stored or fixed-coded, whichever is fewer bits, stored
+    /// on a tie and only while its input is still in the buffer; then the
+    /// whole bytes of it.
+    fn flush(&mut self, out: &mut Vec<u8>, last: bool) {
+        let block = &self.block;
+        let stored = block
+            .start
+            .checked_sub(self.start)
+            .and_then(|from| self.buffer.get(from..from + block.len));
+        let fixed = fixed_bits(block);
+        match stored {
+            Some(data) if stored_bits(data.len(), self.bits.count) <= fixed => {
+                write_stored(&mut self.bits, out, data, last);
+            }
+            _ => {
+                self.bits.put(out, u32::from(last), 1);
+                self.bits.put(out, 0b01, 2);
+                write_symbols(
+                    &mut self.bits,
+                    out,
+                    block,
+                    &FIXED_LITERALS,
+                    &FIXED_DISTANCES,
+                );
+            }
+        }
+        self.bits.bytes(out);
+        self.block.reset();
+    }
+
+    /// The bytes of input held.
+    #[cfg(test)]
+    fn retained(&self) -> usize {
+        self.buffer.capacity()
+    }
+}
+
+/// A zlib stream (RFC 1950): the two-byte header, a [`Deflater`]'s stream and
+/// the input's Adler-32, kept as it arrives.
+pub struct ZlibDeflater {
+    deflater: Deflater,
+    adler: Adler32,
+    level: DeflateLevel,
+    header: bool,
+}
+
+impl ZlibDeflater {
+    /// A zlib stream at `level`.
+    #[must_use]
+    pub fn new(level: DeflateLevel) -> ZlibDeflater {
+        ZlibDeflater {
+            deflater: Deflater::new(level),
+            adler: Adler32::new(),
+            level,
+            header: false,
+        }
+    }
+
+    /// Takes `input`, appending to `out` the header first and each block the
+    /// deflater completes.
+    pub fn write(&mut self, input: &[u8], out: &mut Vec<u8>) {
+        self.header(out);
+        self.adler.update(input);
+        self.deflater.write(input, out);
+    }
+
+    /// Writes the deflater's rest and the checksum.
+    pub fn finish(mut self, out: &mut Vec<u8>) {
+        self.header(out);
+        self.deflater.finish(out);
+        out.extend_from_slice(&self.adler.value().to_be_bytes());
+    }
+
+    /// CMF: deflate with a 32 KiB window. FLG: no dictionary, `FLEVEL` the
+    /// fastest or the default, and check bits making the pair a multiple of
+    /// 31 (RFC 1950 §2.2).
+    fn header(&mut self, out: &mut Vec<u8>) {
+        if !self.header {
+            let flags = match self.level {
+                DeflateLevel::Fast => 0x01,
+                DeflateLevel::Ratio => 0x9C,
+            };
+            out.extend_from_slice(&[0x78, flags]);
+            self.header = true;
+        }
+    }
+}
+
+/// `input` as a raw deflate stream at `level`, through a [`Deflater`].
+#[must_use]
+pub fn deflate_at(input: &[u8], level: DeflateLevel) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut deflater = Deflater::new(level);
+    deflater.write(input, &mut out);
+    deflater.finish(&mut out);
+    out
+}
+
+/// `input` as a zlib stream at `level`, through a [`ZlibDeflater`].
+#[must_use]
+pub fn zlib_compress_at(input: &[u8], level: DeflateLevel) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut zlib = ZlibDeflater::new(level);
+    zlib.write(input, &mut out);
+    zlib.finish(&mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{flate_decode, Limits};
+    use crate::{flate_decode, inflate_raw, Limits};
     use std::cell::Cell;
 
     thread_local! {
@@ -522,9 +1315,16 @@ mod tests {
     /// multiple of 31.
     #[test]
     fn the_zlib_header_checksums() {
-        let out = zlib_compress(b"anything");
-        let header = (u16::from(out[0]) << 8) | u16::from(out[1]);
-        assert_eq!(header % 31, 0);
+        let mut outs = vec![zlib_compress(b"anything")];
+        for level in LEVELS {
+            outs.push(zlib_compress_at(b"anything", level));
+        }
+        for out in outs {
+            let header = (u16::from(out[0]) << 8) | u16::from(out[1]);
+            assert_eq!(header % 31, 0);
+            assert_eq!(out[0], 0x78, "deflate, a 32 KiB window");
+            assert_eq!(out[1] & 0x20, 0, "no preset dictionary");
+        }
     }
 
     /// The Adler-32 trailer is what tells a decoder the data survived.
@@ -685,5 +1485,372 @@ mod tests {
             "the window's positions, newest first, and not the old one"
         );
         assert_eq!(finder.base, OFFSET_LIMIT - WINDOW, "the base moved once");
+    }
+
+    // ---- The streaming deflater ---------------------------------------------
+
+    const LEVELS: [DeflateLevel; 2] = [DeflateLevel::Fast, DeflateLevel::Ratio];
+
+    /// A seeded stream of numbers.
+    fn seeded(mut state: u64) -> impl FnMut() -> u64 {
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    /// `len` seeded bytes with structure at every reach: letters of a
+    /// sixteen-letter alphabet, and copies of 3 to 300 bytes from as far back
+    /// as 40 000, beyond the window as well as inside it.
+    fn random(len: usize, seed: u64) -> Vec<u8> {
+        let mut next = seeded(seed);
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            if next() % 3 == 0 && out.len() > 3 {
+                let length = 3 + (next() % 298) as usize;
+                let from = out.len() - 1 - (next() as usize % 40_000) % out.len();
+                for i in 0..length {
+                    let byte = out[from + i];
+                    out.push(byte);
+                }
+            } else {
+                out.push(b'a' + (next() % 16) as u8);
+            }
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// Text repeated, a run of one byte longer than the buffer, and a
+    /// window's noise repeated, whose matches reach back a whole window.
+    fn repetitive() -> Vec<u8> {
+        let mut out = b"the quick brown fox ".repeat(2_000);
+        out.extend(std::iter::repeat_n(0u8, BUFFER + 1_000));
+        out.extend(noise(WINDOW, 3).repeat(3));
+        out
+    }
+
+    /// The three kinds of input the stream is fed.
+    fn inputs() -> [(&'static str, Vec<u8>); 3] {
+        [
+            ("random", random(3 * WINDOW + 1_234, 7)),
+            ("repetitive", repetitive()),
+            (
+                "incompressible",
+                noise(3 * WINDOW + 999, 0x2545_F491_4F6C_DD1D),
+            ),
+        ]
+    }
+
+    /// Splits `input` at the sizes `sizes` gives, an empty piece among them
+    /// where it gives none, the rest in one piece.
+    fn pieces(input: &[u8], mut sizes: impl FnMut() -> usize) -> Vec<&[u8]> {
+        let mut out = Vec::new();
+        let mut rest = input;
+        while !rest.is_empty() {
+            let (now, after) = rest.split_at(sizes().min(rest.len()));
+            out.push(now);
+            rest = after;
+        }
+        out
+    }
+
+    /// Random piece sizes, most of them small and some empty.
+    fn random_sizes(seed: u64) -> impl FnMut() -> usize {
+        let mut next = seeded(seed);
+        move || match next() % 4 {
+            0 => 0,
+            1 => (next() % 8) as usize,
+            2 => (next() % 600) as usize,
+            _ => (next() % 20_000) as usize,
+        }
+    }
+
+    /// `pieces` fed to a deflater at `level`, one write each.
+    fn fed(pieces: &[&[u8]], level: DeflateLevel) -> Vec<u8> {
+        let mut deflater = Deflater::new(level);
+        let mut out = Vec::new();
+        for piece in pieces {
+            deflater.write(piece, &mut out);
+        }
+        deflater.finish(&mut out);
+        out
+    }
+
+    /// `pieces` fed to a zlib stream at `level`, one write each.
+    fn fed_zlib(pieces: &[&[u8]], level: DeflateLevel) -> Vec<u8> {
+        let mut zlib = ZlibDeflater::new(level);
+        let mut out = Vec::new();
+        for piece in pieces {
+            zlib.write(piece, &mut out);
+        }
+        zlib.finish(&mut out);
+        out
+    }
+
+    /// Random, repetitive and incompressible inputs, each fed whole, a byte at
+    /// a time and in random pieces, empty ones among them, give the same bytes
+    /// at both levels however they are fed, and inflate to themselves: raw,
+    /// and in the zlib wrapper with its checksum read back. Block boundaries
+    /// follow the symbols, never the writes (ruling 4).
+    #[test]
+    fn the_stream_round_trips_however_it_is_fed() {
+        for (name, input) in inputs() {
+            let feeds = [
+                vec![&input[..]],
+                pieces(&input, || 1),
+                pieces(&input, random_sizes(input.len() as u64)),
+            ];
+            for level in LEVELS {
+                let whole = deflate_at(&input, level);
+                for (feed, pieces) in ["whole", "a byte at a time", "random pieces"]
+                    .iter()
+                    .zip(&feeds)
+                {
+                    assert_eq!(
+                        fed(pieces, level),
+                        whole,
+                        "{name} at {level:?}, fed {feed}, wrote other bytes"
+                    );
+                    assert_eq!(
+                        fed_zlib(pieces, level),
+                        zlib_compress_at(&input, level),
+                        "{name} at {level:?}, fed {feed} to the zlib wrapper"
+                    );
+                }
+                let back = inflate_raw(&whole, &Limits::new(2 * input.len() + 64));
+                assert!(back.complete, "{name} at {level:?} inflates whole");
+                assert!(back.warnings.is_empty(), "{name}: {:?}", back.warnings);
+                assert_eq!(back.data, input, "{name} at {level:?} inflates to itself");
+
+                let zlib = zlib_compress_at(&input, level);
+                let back = flate_decode(&zlib, &Limits::new(2 * input.len() + 64), None)
+                    .expect("it decodes");
+                assert!(back.complete, "{name} at {level:?} in zlib inflates whole");
+                assert!(
+                    back.warnings.is_empty(),
+                    "{name} at {level:?} in zlib: {:?}",
+                    back.warnings
+                );
+                assert_eq!(back.data, input);
+            }
+        }
+        for level in LEVELS {
+            let empty = deflate_at(b"", level);
+            let back = inflate_raw(&empty, &Limits::new(16));
+            assert!(back.complete && back.data.is_empty(), "{level:?}: empty");
+        }
+    }
+
+    /// The input a deflater holds is its window buffer, 64 KiB, however much
+    /// it is fed and however that is cut: the buffer reaches the bound and
+    /// never passes it.
+    #[test]
+    fn the_window_is_all_the_deflater_keeps() {
+        let mut input = random(1 << 20, 11);
+        input.extend(noise(1 << 18, 5));
+        for level in LEVELS {
+            let mut deflater = Deflater::new(level);
+            let mut out = Vec::new();
+            let mut most = 0;
+            for piece in pieces(&input, random_sizes(level as u64 + 1)) {
+                deflater.write(piece, &mut out);
+                most = most.max(deflater.retained());
+                assert!(
+                    deflater.block.symbols.len() < BLOCK_SYMBOLS,
+                    "a full block is written"
+                );
+            }
+            assert_eq!(most, BUFFER, "{level:?} held more or less than its buffer");
+            deflater.finish(&mut out);
+            let back = inflate_raw(&out, &Limits::new(2 * input.len()));
+            assert_eq!(back.data, input, "{level:?} inflates to itself");
+        }
+    }
+
+    /// A symbol of a block, as a test reads it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Symbol {
+        Literal(u8),
+        Matched { len: usize, dist: usize },
+    }
+    use Symbol::{Literal, Matched};
+
+    /// Literals of each byte of `bytes`.
+    fn literals(bytes: &[u8]) -> Vec<Symbol> {
+        bytes.iter().map(|&byte| Literal(byte)).collect()
+    }
+
+    /// Each symbol a deflater at `level` finds in `input`, which is one
+    /// block.
+    fn symbols(input: &[u8], level: DeflateLevel) -> Vec<Symbol> {
+        let mut deflater = Deflater::new(level);
+        let mut out = Vec::new();
+        deflater.write(input, &mut out);
+        deflater.drain(&mut out);
+        assert!(out.is_empty(), "the input is one block");
+        deflater
+            .block
+            .symbols
+            .iter()
+            .map(|&symbol| match (symbol >> 16, symbol & 0xFFFF) {
+                (byte, 0) => Literal(byte as u8),
+                (len, dist) => Matched {
+                    len: len as usize,
+                    dist: dist as usize,
+                },
+            })
+            .collect()
+    }
+
+    /// At `abcdefghijk`, `abc` matches 16 back and `bcdefghijk` 12 back, one
+    /// byte on. The ratio level holds the three bytes, finds the ten, writes
+    /// `a` as a literal and takes the ten; the fast level takes the three and
+    /// then `defghijk`. No three bytes repeat before it.
+    #[test]
+    fn lazy_matching_takes_the_longer_match_one_byte_on() {
+        let input = b"abcQ-bcdefghijk+abcdefghijk!";
+
+        let mut ratio = literals(&input[..16]);
+        ratio.extend([Literal(b'a'), Matched { len: 10, dist: 12 }, Literal(b'!')]);
+        assert_eq!(symbols(input, DeflateLevel::Ratio), ratio);
+
+        let mut fast = literals(&input[..16]);
+        fast.extend([
+            Matched { len: 3, dist: 16 },
+            Matched { len: 8, dist: 12 },
+            Literal(b'!'),
+        ]);
+        assert_eq!(symbols(input, DeflateLevel::Fast), fast);
+
+        for level in LEVELS {
+            let back = inflate_raw(&deflate_at(input, level), &Limits::new(64));
+            assert_eq!(back.data, input, "{level:?}");
+        }
+    }
+
+    /// The match a held match waits for must be longer, not as long: at
+    /// `PQRST`, `PQRS` matches 10 back and `QRST` 6 back, one byte on, and
+    /// the first stands.
+    #[test]
+    fn a_match_one_byte_on_as_long_leaves_the_first() {
+        let input = b"PQRS-QRST+PQRST!";
+        let mut want = literals(b"PQRS-");
+        // `QRS` repeats 4 back inside the sources themselves.
+        want.extend([Matched { len: 3, dist: 4 }]);
+        want.extend(literals(b"T+"));
+        want.extend([Matched { len: 4, dist: 10 }]);
+        want.extend(literals(b"T!"));
+        assert_eq!(symbols(input, DeflateLevel::Ratio), want);
+    }
+
+    /// At the ratio level a three-byte match further back than 4 096 bytes
+    /// is dropped and a four-byte one kept; the fast level keeps both.
+    #[test]
+    fn the_ratio_level_drops_a_far_three_byte_match() {
+        let filler = noise(TOO_FAR + 10, 9)
+            .into_iter()
+            .map(|byte| b'0' + byte % 10)
+            .collect::<Vec<u8>>();
+        for (head, len) in [(&b"XYZ"[..], 3), (&b"XYZW"[..], 4)] {
+            let mut input = head.to_vec();
+            input.push(b'+');
+            input.extend(&filler);
+            input.extend(head);
+            input.push(b'!');
+            let dist = head.len() + 1 + filler.len();
+            for level in LEVELS {
+                let found = symbols(&input, level).contains(&Matched { len, dist });
+                let want = level == DeflateLevel::Fast || len > MIN_MATCH;
+                assert_eq!(found, want, "{level:?}, a match of {len} {dist} back");
+            }
+        }
+    }
+
+    /// `len` seeded bytes in which no three in a row repeat, so that a finder
+    /// finds no match in them.
+    fn unrepeated(len: usize, seed: u64) -> Vec<u8> {
+        let mut next = seeded(seed);
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<u8> = Vec::with_capacity(len);
+        while out.len() < len {
+            let byte = next() as u8;
+            if let [.., a, b] = out[..] {
+                if !seen.insert([a, b, byte]) {
+                    continue;
+                }
+            }
+            out.push(byte);
+        }
+        out
+    }
+
+    /// Seeded literals with no three bytes repeated are written as stored
+    /// blocks, and a block's boundaries are its symbols': 16 384 literals a
+    /// block, then the rest.
+    #[test]
+    fn literals_are_stored_a_block_of_symbols_at_a_time() {
+        let tail = 1_000;
+        let input = unrepeated(3 * BLOCK_SYMBOLS + tail, 21);
+        for level in LEVELS {
+            assert!(
+                symbols(&input[..BLOCK_SYMBOLS - 1], level)
+                    .iter()
+                    .all(|symbol| matches!(symbol, Literal(_))),
+                "{level:?} finds no match"
+            );
+            let out = deflate_at(&input, level);
+            // Four stored blocks, each five bytes of header and its bytes.
+            assert_eq!(out.len(), input.len() + 4 * 5, "{level:?}");
+            let mut at = 0;
+            for (index, len) in [BLOCK_SYMBOLS, BLOCK_SYMBOLS, BLOCK_SYMBOLS, tail]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(out[at], u8::from(index == 3), "{level:?}: BFINAL, BTYPE 00");
+                assert_eq!(
+                    u16::from_le_bytes([out[at + 1], out[at + 2]]) as usize,
+                    len,
+                    "{level:?}: block {index}'s LEN"
+                );
+                assert_eq!(&out[at + 5..at + 5 + len], &input[at - 5 * index..][..len]);
+                at += 5 + len;
+            }
+        }
+    }
+
+    /// The tables a writer codes from: every length and distance reaches the
+    /// symbol whose range holds it, and each fixed code is RFC 1951 3.2.6's
+    /// reversed.
+    #[test]
+    fn the_symbol_tables_are_the_rfcs() {
+        for length in MIN_MATCH..=MAX_MATCH {
+            let (symbol, _, _) = length_symbol(length);
+            assert_eq!(
+                LENGTH_TABLE[usize::from(LENGTH_INDEX[length])].0,
+                symbol,
+                "length {length}"
+            );
+        }
+        for distance in 1..=WINDOW {
+            let (symbol, _, _) = distance_symbol(distance);
+            assert_eq!(
+                DISTANCE_TABLE[distance_index(distance)].0,
+                symbol,
+                "distance {distance}"
+            );
+        }
+        for symbol in 0..288u16 {
+            let (code, length) = fixed_literal_code(symbol);
+            assert_eq!(
+                FIXED_LITERALS[usize::from(symbol)],
+                (reversed(code, length as u8), length as u8),
+                "literal/length {symbol}"
+            );
+        }
+        assert_eq!(reversed(0b0011_0000, 8), 0b0000_1100);
+        assert_eq!(FIXED_DISTANCES[1], (0b10000, 5));
     }
 }

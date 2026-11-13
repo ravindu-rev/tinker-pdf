@@ -1092,7 +1092,7 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | `image_file()` | as many A4 pages as reach 23 000 000 bytes, each covered by its own image, `photo(2480, 3508, page)` DCT-coded, so no two pages share an image a writer could deduplicate | `jpeg_encode`, `add_image` (`build.rs:7206`) | "a 23 MB file", "a 23 MB image file" |
 | `small_image_file()` | the first page of `image_file()`'s pages alone, 2 496 733 bytes | the same | "a 2.5 MB image file", and the CBC pair's bytes |
 | `aes_file()` | `image_file()` saved at R6 with both passwords empty and fixed entropy, the file `tpdf encrypt` writes with neither password | `WriteOptions::encryption` (`crates/tinker-pdf-cos/src/write.rs:30-55`, `:124`) | the Item's "an AES-256 file" |
-| `jpeg_page()`, `jpeg_page_part(d)`, `flate_page(d)`, `cmyk_page(d)` | a page a d-th of A4 each way (`jpeg_page()` A4 itself) covered by one image at `scan_part(d)`'s size: `baseline_jpeg()` or `baseline_jpeg_part(d)`; `photo` at that size, seed 1, through `zlib_compress` (`deflate.rs:218`); `photo` converted to CMYK by formula and Flate-coded under `/ICCBased` with `cmyk-lut.icc` (`add_icc_color_space`, `build.rs:6356`) | `add_image` | "half-size JPEG page", "quarter-size JPEG page", "Flate RGB image page", "an ICC-based CMYK image"; the CMYK image is not DCT-coded, so its operation times the conversion and no JPEG decode; `jpeg_page()` is the peak test's |
+| `jpeg_page()`, `jpeg_page_part(d)`, `flate_page(d)`, `cmyk_page(d)` | a page a d-th of A4 each way (`jpeg_page()` A4 itself) covered by one image at `scan_part(d)`'s size: `baseline_jpeg()` or `baseline_jpeg_part(d)`; `photo` at that size, seed 1, through `zlib_compress` (`deflate.rs:318`); `photo` converted to CMYK by formula and Flate-coded under `/ICCBased` with `cmyk-lut.icc` (`add_icc_color_space`, `build.rs:6356`) | `add_image` | "half-size JPEG page", "quarter-size JPEG page", "Flate RGB image page", "an ICC-based CMYK image"; the CMYK image is not DCT-coded, so its operation times the conversion and no JPEG decode; `jpeg_page()` is the peak test's |
 | `jpx_page()`, `jpx_page_part()` | an A4 page covered by `data/`'s 2480×3508 irreversible codestream, the peak test's; and a page a quarter of A4 each way covered by its 620×877 one | `ImageFilter::Jpx` (`build.rs:438`) | "full-page JPEG 2000" |
 | `g4_page(d)`, `jbig2_page(d)` | a page a d-th of A4 each way covered by `scan_at(300 / d)`: G4-coded (`ccitt_g4_encode`, `ccitt/encode.rs:386`, as `ImageFilter::CcittFax`); and the same page saved through the image pass's `BilevelCodec::Jbig2Generic` (`crates/tinker-pdf/src/recode.rs:188-197`), the builder having no JBIG2 filter | the builder, then `write::save` | "G4 / JBIG2 scan page" |
 | `paths(n)`, `curves(n)` | three in five of n filled polygons and closed curves at fractional coordinates, as `triangles()` draws them, and two in five stroked cubic curves, 0.5 to 4 pt wide, each of the nine cap-and-join pairs in turn, every fifth dashed; `curves(n)` is n such curves alone | `raw` | "250 paths", "100 paths", "the 250-path page's 100 stroked curves alone" |
@@ -1213,8 +1213,15 @@ text of the document the operation reads, so all six stay inside the group.
 | --- | --- | --- | --- | --- | --- |
 | `encode/PNG of the 1240x1755 text page` | pixels · 1240×1755 | the text page's 150-dpi bitmap, rendered once, `Bitmap::to_png` (`lib.rs:832`) | 269 → 40; 6.72× | in | built |
 | `encode/PNG of the near-blank page` | pixels · 2 × 1240×1755 | a 150-dpi bitmap of a page holding one line | 145 → 15; 9.66× | ×2 | built |
-| `encode/deflate page-like data` | bytes · 6 528 600 | `page_like()`, `deflate` (`deflate.rs:200`) | 40 → 120 MB/s (163 → 54); 3×; size ≤ 1.02 × level 6's, exact | in | built |
+| `encode/deflate page-like data` | bytes · 6 528 600 | `page_like()`, `deflate` (`deflate.rs:300`) | 40 → 120 MB/s (163 → 54); 3×; size ≤ 1.02 × level 6's, exact | in | built |
 | `encode/deflate photo-like data` | bytes · 6 528 600 | `photo_like()` | 28 → 40 MB/s (233 → 163); 1.4×; size likewise | in | built |
+| `encode/deflate page-like data, fast level` | bytes · 6 528 600 | `page_like()`, `deflate_at` at `DeflateLevel::Fast` (`deflate.rs:1205`); the planning baseline runs `deflate` in its place | ≥ 300 MB/s; 7.5×, paired with the baseline's deflate, at floor 1 until P-04.6 | untimed | built |
+| `encode/deflate photo-like data, fast level` | bytes · 6 528 600 | `photo_like()`, the same | ≥ 150 MB/s; 5.27×, paired likewise, at floor 1 until P-04.6 | untimed | built |
+
+The fast level's two operations take one call on the ratio level's inputs.
+No run has timed them, so the named machine's entry names both unmeasured,
+and their window is *untimed*: MS-04.10's fifteen runs size them as they
+size the set.
 
 **decode** — each through its `tinker-pdf-filters` entry point
 (`crates/tinker-pdf-filters/src/lib.rs:70-93`, `:721`, `:738`).
@@ -1618,7 +1625,6 @@ the set's are. Tier P's table and the Item name these:
 | P-09, P-09.9 | `decode/JPEG decode at quarter scale` | decode | 22.3×, paired with the baseline's full-size decode; `calls` 2 |
 | P-10, P-10.4 | `decode/irreversible JPEG 2000, two levels discarded`, `decode/reversible JPEG 2000, two levels discarded`, and a window decode of each | decode | 25.6× and 36.2×, paired with the baseline's full decode; the windows recorded ungated (H-77) |
 | P-10, P-10.12 | `decode/irreversible JPEG 2000 620x877 on 4 threads` | decode | 7.33×, paired with the baseline's one-thread decode |
-| P-04's fast level, P-04.3 | `encode/deflate page-like data, fast level`, `encode/deflate photo-like data, fast level` | encode | 7.5× and 5.27×, at floor 1 until P-04.6 |
 | MS-08, MS-08.4 | `open/first page of the 60-page linearized fixture over a slow link` | open | counted; the time follows from MS-08.3's counts, never slept |
 | P-21, P-21.1 | `open/open a small file, CLI`; `decode/extract a Flate image with predictors`; `write/no-op incremental save of 100 pages` | open, decode, write | held |
 
@@ -2879,14 +2885,15 @@ A `Deflater` at one level takes input in pieces and appends whole blocks to
 the caller's output as they complete: `write(input, out)` and
 `finish(out)`, the last block final and the stream aligned; a zlib wrapper
 around it keeps the header and a running Adler-32. It keeps a **window
-buffer of 2 × 32 KiB**: input is copied in at the scan's end, and when the
-scan comes within 262 bytes of the buffer's end — a match's reach forward
-plus a hash's three — the upper half slides down, so the 32 KiB a match may
-reach back is always held and no more than 64 KiB of input is ever retained.
-Positions are absolute offsets, so a slide moves the buffer and no table
-entry. Beside the window, the block's symbols, at most 16 384 of them; the
-output is the caller's. P-04.3 lands it with stored and fixed blocks, and
-P-04.4 adds dynamic ones.
+buffer of 2 × 32 KiB**: input is copied in at its end, a position is
+searched only while 262 bytes follow it — a match's reach forward, a hash's
+three and the next position's — or at the input's end, and when the buffer
+is full and more input waits, what lies more than a window behind the scan
+slides out, so the 32 KiB a match may reach back is always held and no more
+than 64 KiB of input is ever retained. Positions are absolute offsets, so a
+slide moves the buffer and no table entry. Beside the window, the block's
+symbols, at most 16 384 of them; the output is the caller's. P-04.3 lands it
+with stored and fixed blocks, and P-04.4 adds dynamic ones.
 
 #### The PNG writer's one pass, and IDAT as the deflater emits
 

@@ -35,14 +35,27 @@ fn png_round_trip(bitmap: &Bitmap) -> Vec<u8> {
     png
 }
 
-/// `data` deflated, inflated back to itself.
-fn deflate_round_trip(data: &[u8]) {
-    let coded = deflate(data);
+/// `data` deflated by `code`, inflated back to itself.
+fn deflate_round_trip(data: &[u8], code: fn(&[u8]) -> Vec<u8>) {
+    let coded = code(data);
     let back = inflate_raw(&coded, &Limits::new(data.len() * 2));
     assert!(
         back.complete && back.data == data,
         "inflate gives the input back"
     );
+}
+
+/// `data` deflated at the fast level.
+#[cfg(not(tinker_planning_baseline))]
+fn deflate_fast(data: &[u8]) -> Vec<u8> {
+    tinker_pdf_filters::deflate_at(data, tinker_pdf_filters::DeflateLevel::Fast)
+}
+
+/// The planning baseline has no fast level: its arm runs the deflate the
+/// gate pairs the operation with (`baseline.json`'s `paired_with`).
+#[cfg(tinker_planning_baseline)]
+fn deflate_fast(data: &[u8]) -> Vec<u8> {
+    deflate(data)
 }
 
 fn encode(c: &mut Criterion) {
@@ -64,13 +77,13 @@ fn encode(c: &mut Criterion) {
             (1240 * 1755 / 20..1240 * 1755 / 6).contains(&inked),
             "about a tenth of the page-like pixels are inked: {inked}"
         );
-        deflate_round_trip(&page_like);
+        deflate_round_trip(&page_like, deflate);
         page_like
     });
     let photo_like = LazyCell::new(|| {
         let photo_like = inputs::photo_like();
         assert_eq!(photo_like.len(), inputs::PAGE_BYTES);
-        deflate_round_trip(&photo_like);
+        deflate_round_trip(&photo_like, deflate);
         photo_like
     });
 
@@ -97,6 +110,16 @@ fn encode(c: &mut Criterion) {
     group.operation("deflate photo-like data", |op| {
         op.per(Per::Bytes(photo_like.len() as u64));
         op.iter(|| black_box(deflate(&photo_like)));
+    });
+    group.operation("deflate page-like data, fast level", |op| {
+        deflate_round_trip(&page_like, deflate_fast);
+        op.per(Per::Bytes(page_like.len() as u64));
+        op.iter(|| black_box(deflate_fast(&page_like)));
+    });
+    group.operation("deflate photo-like data, fast level", |op| {
+        deflate_round_trip(&photo_like, deflate_fast);
+        op.per(Per::Bytes(photo_like.len() as u64));
+        op.iter(|| black_box(deflate_fast(&photo_like)));
     });
 
     group.finish();
