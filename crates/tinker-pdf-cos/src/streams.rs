@@ -315,6 +315,34 @@ impl CosDocument {
         out
     }
 
+    /// [`CosDocument::stream_decoded`], recording nothing: what the filter
+    /// chain tolerates, and what recovering the stream's extent tolerates,
+    /// is dropped rather than added to the document's warnings, and an
+    /// extent recovered here is not kept, so the read that comes after
+    /// recovers it again and records what it would have. The extent a read
+    /// before this one kept is used as it is.
+    ///
+    /// For a read that must leave the document as it found it: the font
+    /// measurement API's (`docs/design/font-metrics.md`), whose answers would
+    /// otherwise depend on whether the document had been rendered first.
+    ///
+    /// # Errors
+    /// As [`CosDocument::stream_decoded`].
+    pub fn stream_decoded_unrecorded(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
+        let object = self.get(r)?;
+        let stream = object.as_stream().ok_or(CosError::NotAStream(r))?;
+        let mut dropped = WarningSink::new();
+        let kept = self.stream_ranges.read_lock().get(&r.num).cloned();
+        let range = match kept {
+            Some(range) => range,
+            None => self
+                .windowed_extent(r, stream, &mut dropped)
+                .unwrap_or(stream.data_start..stream.data_start),
+        };
+        let data = self.decrypted_in(r, stream, &range);
+        self.decode_with(&data, &stream.dict, r.num, &mut dropped)
+    }
+
     /// The bytes an image codec should be handed: decoded through every
     /// filter *before* the codec, and no further.
     ///
@@ -413,6 +441,12 @@ impl CosDocument {
     /// The raw bytes, run through the decryptor unless 7.6.2 exempts them.
     pub(crate) fn decrypted_bytes(&self, r: ObjRef, stream: &StreamObj) -> Vec<u8> {
         let range = self.stream_range(r, stream);
+        self.decrypted_in(r, stream, &range)
+    }
+
+    /// The bytes of `range`, the stream's extent, run through the decryptor
+    /// unless 7.6.2 exempts them.
+    fn decrypted_in(&self, r: ObjRef, stream: &StreamObj, range: &Range<u64>) -> Vec<u8> {
         // One window over the extent rather than the whole document: this is
         // the read a page render spends most of its bytes on, and it is the
         // one the byte budgets measure.
@@ -691,5 +725,86 @@ mod tests {
         let buf = b"HELLO";
         let (range, _) = extent(buf, 999, Some(3));
         assert_eq!(range, 5..5);
+    }
+
+    /// A document whose object 3 is a stream declaring a `/Length` past its
+    /// data, so reading it recovers the extent, and whose object 4 names a
+    /// filter no build has, so decoding it warns `FilterUnknown`.
+    fn tolerated_streams() -> Vec<u8> {
+        b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+3 0 obj\n<< /Length 99 >>\nstream\nhello\nendstream\nendobj\n\
+4 0 obj\n<< /Length 5 /Filter /NoSuchDecode >>\nstream\nworld\nendstream\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n"
+            .to_vec()
+    }
+
+    fn kinds(doc: &CosDocument) -> Vec<WarningKind> {
+        doc.warnings().iter().map(|warning| warning.kind).collect()
+    }
+
+    /// FT-16.4: a decode that records nothing adds no warning, takes none
+    /// from the reads after it — a document read quietly and then aloud
+    /// reports what one read aloud alone reports — and gives the bytes the
+    /// recorded decode gives.
+    #[test]
+    fn an_unrecorded_decode_records_nothing_and_takes_nothing_from_later_reads() {
+        let long = ObjRef::new(3, 0);
+        let unknown = ObjRef::new(4, 0);
+
+        // Each document loads both objects first, as a listing that found
+        // the stream has, so what loading one reports stands before the
+        // reads in both.
+        let opened = || {
+            let doc = CosDocument::open(tolerated_streams()).expect("it opens");
+            let _ = doc.get(long);
+            let _ = doc.get(unknown);
+            doc
+        };
+        let quietly = opened();
+        let before = kinds(&quietly);
+        let quiet_long = quietly.stream_decoded_unrecorded(long).ok();
+        let quiet_unknown = quietly.stream_decoded_unrecorded(unknown).ok();
+        assert_eq!(
+            kinds(&quietly),
+            before,
+            "the unrecorded reads record nothing"
+        );
+        assert!(!before.contains(&WarningKind::FilterUnknown));
+        let loud_long = quietly.stream_decoded(long).ok();
+        let loud_unknown = quietly.stream_decoded(unknown).ok();
+        let after = kinds(&quietly);
+        assert!(
+            after.contains(&WarningKind::FilterUnknown),
+            "the recorded read records the filter it does not know: {after:?}"
+        );
+
+        let aloud = opened();
+        let alone_long = aloud.stream_decoded(long).ok();
+        let alone_unknown = aloud.stream_decoded(unknown).ok();
+        assert_eq!(
+            after,
+            kinds(&aloud),
+            "the quiet reads took nothing from the loud ones"
+        );
+
+        assert_eq!(quiet_long, alone_long);
+        assert_eq!(loud_long, alone_long);
+        assert!(alone_long
+            .as_deref()
+            .is_some_and(|bytes| bytes.starts_with(b"hello")));
+        assert_eq!(quiet_unknown, alone_unknown);
+        assert_eq!(loud_unknown, alone_unknown);
+
+        // Once a read has kept the extent, an unrecorded decode reads it and
+        // still records nothing.
+        let settled = kinds(&quietly);
+        assert_eq!(quietly.stream_decoded_unrecorded(long).ok(), alone_long);
+        assert_eq!(kinds(&quietly), settled);
+        assert!(matches!(
+            quietly.stream_decoded_unrecorded(ObjRef::new(1, 0)),
+            Err(CosError::NotAStream(_))
+        ));
     }
 }

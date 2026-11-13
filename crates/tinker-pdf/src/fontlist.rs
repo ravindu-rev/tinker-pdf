@@ -67,6 +67,8 @@ use tinker_pdf_cos::{
     pages as cos_pages, CosDocument, Dict, FontKind, Name, ObjRef, Object, ProgramKey,
 };
 
+use crate::font_metrics::{FontMetrics, FontMetricsError};
+
 /// How deep the resource walk follows a nested `/Resources`.
 ///
 /// Form XObjects nest, tiling patterns carry resources, and a Type 3 font's
@@ -163,6 +165,30 @@ impl DocumentFont {
     pub fn program_bytes(&self) -> Option<Vec<u8>> {
         let program = self.program?;
         self.doc.stream_decoded(program.stream).ok()
+    }
+
+    /// The embedded program, measured (`docs/design/font-metrics.md`):
+    /// [`FontMetrics::from_bytes`] over the program's decoded bytes.
+    ///
+    /// **This adds nothing to [`crate::Document::warnings`]**, as listing
+    /// does not. The stream is decoded through
+    /// `CosDocument::stream_decoded_unrecorded`, which drops what its filters
+    /// and the recovery of its extent tolerate rather than recording it, and
+    /// keeps no extent it recovered, so a render that reads the stream after
+    /// reports what it would have.
+    ///
+    /// # Errors
+    ///
+    /// [`FontMetricsError::NotEmbedded`] where the document embeds nothing,
+    /// [`FontMetricsError::Undecodable`] where the stream does not decode,
+    /// and [`FontMetrics::from_bytes`]'s.
+    pub fn metrics(&self) -> Result<FontMetrics, FontMetricsError> {
+        let program = self.program.ok_or(FontMetricsError::NotEmbedded)?;
+        let bytes = self
+            .doc
+            .stream_decoded_unrecorded(program.stream)
+            .map_err(|_| FontMetricsError::Undecodable)?;
+        FontMetrics::from_bytes(bytes)
     }
 }
 

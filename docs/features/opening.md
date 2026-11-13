@@ -360,7 +360,10 @@ was appended to stays charged where it is held.
 On `CosDocument`: `get`, `resolve`, `trailer`,
 `revisions`, `xref`, and the tiers `stream_raw_encrypted` / `stream_raw` /
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an
-image codec); `open_appended(original, update)`, the open over an original
+image codec, and `stream_decoded_unrecorded`, `stream_decoded`'s bytes with
+what its filters and the recovery of its extent tolerate dropped rather
+than recorded, and an extent it recovers not kept, so a read after it
+reports what it would have); `open_appended(original, update)`, the open over an original
 and its update section; `reopen(base, update)` and `reopen_counted(base,
 update, &Work)`, the reopen over an update section, which hand back
 `Reopened` — the document, and the `FullOpen` reason when it opened whole;

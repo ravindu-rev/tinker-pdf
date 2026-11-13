@@ -35,6 +35,7 @@ mod display;
 mod embed;
 pub mod epub;
 pub mod fb2;
+mod font_metrics;
 pub mod fontlist;
 pub mod fonts;
 pub mod form_data;
@@ -102,6 +103,10 @@ pub use cbz::{
     ArchiveRefusal, ArchiveReport, ArchiveWarning, ComicInfo, ComicInfoDefect, Container,
     PageDefect, PageOrigin,
 };
+/// Font measurement (`docs/design/font-metrics.md`): a program's advances,
+/// boxes, characters, names and flags, from its bytes or, through
+/// [`DocumentFont::metrics`], a document's embedded program.
+pub use font_metrics::{FontFlags, FontFormat, FontMetrics, FontMetricsError};
 pub use fontlist::{DocumentFont, FontProgram};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 /// HTML and CSS to PDF as a creation API (tier 5): with [`FromHtml`] in scope,

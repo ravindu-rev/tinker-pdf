@@ -1045,6 +1045,60 @@ is used for rendering is not embedded"*, `6-2-10-4-1-t01-pass-a.pdf` says the
 same with *"the text rendering mode is 3"* after it, and `is_embedded()`
 answers `false` for the face in both.
 
+## Measuring a font
+
+`FontMetrics` measures a font program ([design](../design/font-metrics.md)).
+`FontMetrics::from_bytes` takes an sfnt (a collection's first face), a WOFF or
+WOFF 2.0 container's face, a Type 42 program's face, a bare CFF or a Type 1
+program, recognised in that order; `FontMetrics::from_collection` takes a
+collection's face by its index; `DocumentFont::metrics` measures the program a
+document embeds. Each refusal is a `FontMetricsError`: `NotAFont` for bytes no
+reader takes, `Container` for a container that does not decode within the
+16 MiB the EPUB reader holds a book's faces to, `NoSuchFace` with the count of
+faces there are, `NotEmbedded` for a font the document embeds no program for
+and `Undecodable` for a program stream that does not decode.
+
+Each glyph answers in the face's own units (`units_per_em`): `advance`,
+`hmtx`'s or the charstring's width, and `glyph_box`, a `glyf` header as
+written with its corners ordered, or for a CFF, `CFF2` or Type 1 glyph the
+smallest rectangle enclosing the shape its charstring draws (9.2.4) — a
+curve's extremes in it and its control points not — and a glyph that draws
+nothing bounded at its origin. The font answers `format`, `glyph_count`,
+`font_box` (`head`'s, the Top DICT's `FontBBox`, the Type 1 `/FontBBox`) and
+`flags`, 9.8.2's flags each from the table that states it: FixedPitch,
+Serif, Symbolic, Script, Nonsymbolic, Italic and ForceBold from `post`,
+`OS/2`, `head`, the Private DICT and the font dictionary, and AllCap and
+SmallCap, which no table states, clear. Each `_at` answer is the same in text
+space at a size: font units times the glyph's scale — one over the units per
+em, or a CFF's or Type 1 program's font matrix `a`, a CID-keyed CFF's glyph
+taking its Font DICT's — times the size.
+
+`glyph_for_char`, `has_glyph` and `code_points` read an sfnt's text `cmap`
+subtable as the text lookup reads it, and a name-keyed program's glyph names:
+a name of Table D.2's Standard Latin set, D.5's Symbol set or D.6's
+ZapfDingbats set, or the Glyph List's `uniXXXX` and `uXXXX` to `uXXXXXX`
+forms, a suffix from the first period dropped and a ligature's name standing
+for no character; a CID-keyed CFF maps none. D.2's 229 names are transcribed
+into the module, since the base encodings name StandardEncoding's codes and
+the printable ASCII ones alone. `glyph_name` and `glyph_for_name` answer
+names both ways — `post`'s, the charset's or the `/CharStrings` keys, a name
+answering the lowest glyph it is given to — and `text_length` a text's
+unshaped length: each character's glyph, the face's `.notdef` where it has
+none, its advance times its scale summed left to right, times the size, with
+no ligature, kerning or reordering.
+
+**Measuring reports nothing.** A `FontMetrics` holds no document, and
+`DocumentFont::metrics` decodes the stream through
+`CosDocument::stream_decoded_unrecorded`, so `Document::warnings()` answers
+the same whether a font was measured or not, and a render after the
+measurement reports what it would have reported without it.
+
+**What is read when.** The names, the character map, the font's box and its
+flags are read with the bytes, in work linear in the program; advances and
+boxes are read 256 glyphs at a time, at the first question about one of them,
+and kept, and a clone shares what has been read. Every offset and count a
+program states is bounded where `tinker-pdf-font` reads it.
+
 ## What the missing faces cost
 
 This engine bundles no font programs by default, so a document that names
@@ -1958,6 +2012,33 @@ corpora already vendored here. So every name stays on the list.
   committed `three_glyphs.cff` and `square.pfb`, each the program its test
   builds, and `multiple-master.t1`, none of which states the entries. The
   `cff` and `type1` fuzz targets call both.
+- `crates/tinker-pdf/tests/font_metrics.rs` — every answer of the font
+  measurement API, for every committed face (the Liberation faces, the
+  text-rendering-tests and AOTS faces, and the CFF and Type 1 programs under
+  `fuzz/corpus`), held to a reader written in the test that shares no code
+  with `tinker-pdf-font`: its own table directory and `head`, `hhea`, `hmtx`,
+  `maxp`, `loca`, `glyf`, `cmap`, `post` and `OS/2` readers, CFF INDEX, DICT
+  and charset readers with a Type 2 charstring interpreter, and the `eexec`
+  cipher with a Type 1 interpreter and TN #5015's blends; a `RAN` line counts
+  the faces. The WOFF and WOFF 2.0 containers of a committed face answer as
+  the face, `hmtx` transform 1 among them; the Type 42 seeds as the face their
+  strings reassemble, a glyph two keys name answering to both, and one cut
+  inside its strings refused; a collection built from two Liberation faces
+  answers by index and refuses a third; a `DocumentFont` embedding a
+  Liberation face answers as its bytes, its `/Length` right and recovered,
+  with the warnings unchanged across the measurement and a later read
+  reporting what it reports in an unmeasured twin, and a font with no
+  program and one whose stream does not decode refused by name. Proptests
+  feed the constructors arbitrary bytes and committed faces of every format
+  cut short and changed, and ask every answer.
+- `crates/tinker-pdf/src/font_metrics.rs` — a drawn shape's box, a curve's
+  extreme in it and its control points not; the names a character is read
+  from; D.2's set against the font crate's StandardEncoding and
+  WinAnsiEncoding tables, transcribed apart; the flags' bits; and the
+  constructors' refusals.
+- `crates/tinker-pdf-cos/src/streams.rs` — an unrecorded decode records
+  nothing, takes nothing from the reads after it, and gives the bytes a
+  recorded one gives.
 - `crates/tinker-pdf-font/src/type1.rs` — a two-axis, four-master program
   built in the test, its masters at the corners out of their order and a
   procedure naming `/WeightVector` before the definition, reads its blend
