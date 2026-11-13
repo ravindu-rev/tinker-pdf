@@ -22,8 +22,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// `println!` into the probe's record: line-buffered stdout in a run, a
 /// buffer a test reads back. A line that cannot be written is lost as a
@@ -37,8 +36,9 @@ macro_rules! say {
 use tinker_pdf::{
     BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, HeaderEvidence,
     InferenceOptions, InferredOrder, LadderLevel, ObjRef, Object, OrderedText, Page, PageTables,
-    ReadingOrder, RenderOptions, Sanitise, SimpleFontProvider, StreamObj, StructureTree,
-    TableEvidence, TableSource, TextFormat, TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
+    Parallelism, ReadingOrder, RenderOptions, Sanitise, SimpleFontProvider, StreamObj,
+    StructureTree, TableEvidence, TableSource, TextFormat, TextWriter, Tier, WriteMode,
+    WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -161,13 +161,13 @@ Passwords are taken on the command line, where another user of the machine
 can read a running process's arguments and a shell may keep them in its
 history. There is no file, environment or prompt alternative yet.
 
-`--jobs` is the one flag that is meant to change nothing but the clock. A
-`Document` is `Send + Sync` and the pages of one are independent — each
-writes its own file — so `render` walks them on a pool of threads. The pool
-lives here and not in the library: the engine spawns no thread on any
-target, so who renders on what is the caller's business, and this is a
-caller. Every page's output is buffered and printed in page order after the
-join, so `--jobs 8` and `--jobs 1` write the same bytes to the same files
+`--jobs` is the one flag that is meant to change nothing but the clock. The
+pages of one document are independent — each writes its own file — so
+`render` walks them on the engine's own pool, `Document::walk_pages` with
+`--jobs` threads: each page is rendered and written to its PNG on a worker,
+which writes its page before it takes the next, so at most `--jobs` bitmaps
+are in flight, and its lines are handed back in page order and printed after
+the walk, so `--jobs 8` and `--jobs 1` write the same bytes to the same files
 and to stdout. The default is 1.
 
 `check` opens each file and reports its warnings, exiting non-zero if any
@@ -1343,7 +1343,7 @@ fn render(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
     // independent: a full disk on page 3 is no reason to have nothing for
     // pages 4 onwards.
     let mut failed = 0usize;
-    for report in render_pages(options, dir, &stem, doc) {
+    for report in render_walk(options, dir, &stem, doc) {
         match report {
             Ok(lines) => {
                 if !options.quiet {
@@ -1366,82 +1366,74 @@ fn render(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
 
 /// Renders the pages `--jobs` at a time and returns what each one has to say,
 /// in page order, whether or not it succeeded.
-///
-/// **The threads are here and not in the library.** `Document` is
-/// `Send + Sync` and `Document::page` hands back an owned `Page` — it clones
-/// an `Arc` rather than borrowing — so a worker needs one shared `&Document`
-/// and a page index and no lifetime work at all. What the engine will not do
-/// is spawn: it owns no runtime, on any target, wasm included, so the pool
-/// belongs to whoever is calling. See the Concurrency section of
-/// `docs/architecture.md`.
-///
-/// **Ordered afterwards**, for the reason `xtask`'s corpus pool sorts its own
-/// results: output that moves between runs is not diffable. Each worker
-/// buffers its page's lines and this hands them back sorted by the position
-/// they were claimed from the queue, so `--jobs 8` and `--jobs 1` print the
-/// same bytes. A `--jobs` that reordered stdout would be a flag that changes
-/// the answer, and this one is only allowed to change the clock.
-fn render_pages(
+fn render_walk(
     options: &Options,
     dir: &str,
     stem: &str,
     doc: &Document,
 ) -> Vec<Result<String, String>> {
+    walk_to_files(options, dir, stem, doc, false)
+        .into_iter()
+        .map(|(report, _)| report)
+        .collect()
+}
+
+/// One page of a render walk: what it has to say, or why it failed, and its
+/// render's stats where the walk counted them.
+type Walked = (Result<String, String>, Option<tinker_pdf::Stats>);
+
+/// Renders the pages on the facade's page walk (`Document::walk_pages`) with
+/// `--jobs` threads of the engine's own pool, each page rendered and written
+/// to its PNG on the worker that takes it — which writes its page before it
+/// takes the next, so at most `--jobs` bitmaps are in flight — and its lines
+/// handed back in page order, whichever worker finished first. With `counted`
+/// each page's render counts its work, and its stats say where it ran.
+///
+/// **Ordered by the walk**, for the reason `xtask`'s corpus pool sorts its
+/// own results: output that moves between runs is not diffable, and a
+/// `--jobs` that reordered stdout would be a flag that changes the answer,
+/// where this one is only allowed to change the clock.
+fn walk_to_files(
+    options: &Options,
+    dir: &str,
+    stem: &str,
+    doc: &Document,
+    counted: bool,
+) -> Vec<Walked> {
     let pages = options.pages(doc);
-    let next = AtomicUsize::new(0);
-    let reports: Mutex<Vec<(usize, Result<String, String>)>> =
-        Mutex::new(Vec::with_capacity(pages.len()));
     // The workers ask the file's source before they write, and the file is
     // this thread's.
     let reading = reading_now();
-
-    std::thread::scope(|scope| {
-        // Scoped, so the workers borrow the document and the queue rather
-        // than being handed clones of either: a clone per thread would prove
-        // only that a `Document` can be *sent*, and what is being relied on
-        // here is that one can be *shared*.
-        for _ in 0..options.jobs.max(1) {
-            let (next, reports, pages, reading) = (&next, &reports, &pages, &reading);
-            scope.spawn(move || {
-                loop {
-                    let slot = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&index) = pages.get(slot) else {
-                        return;
-                    };
-                    // A page the document will not hand back is skipped
-                    // silently, as it was serially: `pages()` counts what the
-                    // catalog claims, and a page tree that stops short is
-                    // already a warning on the document.
-                    let Some(page) = doc.page(index) else {
-                        continue;
-                    };
-                    let bitmap = page.render(&RenderOptions {
-                        annotations: options.annotations,
-                        ..RenderOptions::at_dpi(options.dpi)
-                    });
-
-                    let out = format!("{dir}/{stem}-{:04}.png", index + 1);
-                    let report = sound_of(reading.as_ref())
-                        .and_then(|()| write_png(&out, &bitmap))
-                        .map(|()| {
-                            let mut lines = format!("{out} {}x{}\n", bitmap.width, bitmap.height);
-                            for warning in &bitmap.warnings {
-                                lines.push_str(&format!("  {warning:?}\n"));
-                            }
-                            lines
-                        });
-                    reports
-                        .lock()
-                        .expect("the reports lock")
-                        .push((slot, report));
-                }
-            });
-        }
-    });
-
-    let mut reports = reports.into_inner().expect("the reports lock");
-    reports.sort_by_key(|(slot, _)| *slot);
-    reports.into_iter().map(|(_, report)| report).collect()
+    let render = RenderOptions {
+        annotations: options.annotations,
+        stats: counted,
+        ..RenderOptions::at_dpi(options.dpi)
+    };
+    let mut walked = Vec::with_capacity(pages.len());
+    doc.walk_pages(
+        pages,
+        Parallelism::Threads(options.jobs.max(1)),
+        |index, page| {
+            // A page the document will not hand back is skipped silently, as
+            // it was serially: `pages()` counts what the catalog claims, and
+            // a page tree that stops short is already a warning on the
+            // document.
+            let bitmap = page?.render(&render);
+            let out = format!("{dir}/{stem}-{:04}.png", index + 1);
+            let report = sound_of(reading.as_ref())
+                .and_then(|()| write_png(&out, &bitmap))
+                .map(|()| {
+                    let mut lines = format!("{out} {}x{}\n", bitmap.width, bitmap.height);
+                    for warning in &bitmap.warnings {
+                        lines.push_str(&format!("  {warning:?}\n"));
+                    }
+                    lines
+                });
+            Some((report, bitmap.stats))
+        },
+        |_, page| walked.extend(page),
+    );
+    walked
 }
 
 /// Writes the page as a PNG, through the facade's own
@@ -4065,7 +4057,7 @@ mod tests {
         let doc = many_pages(48);
         let dir = scratch("identical-output");
 
-        let serial = render_pages(&render_options(&dir, "1"), &dir, "doc", &doc);
+        let serial = render_walk(&render_options(&dir, "1"), &dir, "doc", &doc);
         assert_eq!(serial.len(), 48);
         assert!(
             serial.iter().all(Result::is_ok),
@@ -4088,10 +4080,49 @@ mod tests {
         );
 
         for attempt in 0..5 {
-            let pooled = render_pages(&render_options(&dir, "8"), &dir, "doc", &doc);
+            let pooled = render_walk(&render_options(&dir, "8"), &dir, "doc", &doc);
             assert_eq!(
                 serial, pooled,
                 "attempt {attempt}: `--jobs 8` must print exactly what `--jobs 1` printed"
+            );
+        }
+    }
+
+    /// **`tpdf render` renders on the facade's page walk.** At `--jobs 4`
+    /// each page's render, counted, says one of the engine's pool's workers
+    /// ran it and the caller did not, and at `--jobs 1` the one worker it
+    /// starts; counting changes nothing a page prints or writes, and the
+    /// pages come back in page order.
+    #[test]
+    fn render_goes_through_the_facades_page_walk() {
+        let doc = many_pages(8);
+        for jobs in ["4", "1"] {
+            let dir = scratch(&format!("facade-walk-{jobs}"));
+            let options = render_options(&dir, jobs);
+            let walked = walk_to_files(&options, &dir, "doc", &doc, true);
+            assert_eq!(walked.len(), 8, "--jobs {jobs}: every page");
+            for (index, (report, stats)) in walked.iter().enumerate() {
+                let stats = stats.expect("the walk counted");
+                assert_eq!(
+                    (stats.pool_items_on_workers, stats.pool_items_on_caller),
+                    (1, 0),
+                    "--jobs {jobs}: page {} ran on a worker of the pool",
+                    index + 1
+                );
+                assert!(
+                    report
+                        .as_ref()
+                        .is_ok_and(|lines| lines.contains(&format!("doc-{:04}.png", index + 1))),
+                    "--jobs {jobs}: page {} in its place: {report:?}",
+                    index + 1,
+                );
+            }
+            let counted: Vec<Result<String, String>> =
+                walked.into_iter().map(|(report, _)| report).collect();
+            assert_eq!(
+                counted,
+                render_walk(&options, &dir, "doc", &doc),
+                "--jobs {jobs}: counting changes nothing printed"
             );
         }
     }
@@ -4246,7 +4277,7 @@ mod tests {
         }
     }
 
-    /// **A9 for the CLI's pool: `tpdf render` at `--jobs` 2, 3, 4 and 7
+    /// **A9 for the CLI's walk: `tpdf render` at `--jobs` 2, 3, 4 and 7
     /// writes, byte for byte, the files `--jobs 1` writes.**
     ///
     /// [`jobs_changes_the_clock_and_not_one_byte_of_the_output`] holds what the
@@ -4254,7 +4285,7 @@ mod tests {
     /// of one run are overwritten by the next and never compared. Here each job
     /// count writes into a directory of its own and every file is read back.
     /// Through `run(&options, render)`, which is what `tpdf render` runs once
-    /// its flags are parsed (the open, the pool, the encoder and the write),
+    /// its flags are parsed (the open, the walk, the encoder and the write),
     /// in-process, because no test here may spawn a program.
     ///
     /// `--jobs 1` goes through the same code as every other job count, so a
@@ -4707,7 +4738,7 @@ mod tests {
             std::fs::create_dir_all(format!("{dir}/doc-0002.png")).expect("the blocking directory");
 
             let options = render_options(&dir, jobs);
-            let reports = render_pages(&options, &dir, "doc", &doc);
+            let reports = render_walk(&options, &dir, "doc", &doc);
             assert_eq!(
                 reports.len(),
                 4,

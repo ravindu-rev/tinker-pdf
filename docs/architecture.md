@@ -344,10 +344,11 @@ Three things exercise the claim:
   `Document::render_pages` with `Threads(n)` and checks each against the
   same page drawn serially, byte for byte and warning for warning. The gates
   run it.
-- `tpdf render --jobs N` is a pool of the command-line tool's own, with the
-  property that makes it usable: results are buffered per page and printed
-  in page order after the join, so `--jobs 8` and `--jobs 1` write the same
-  bytes. The flag changes the clock and nothing else, and defaults to 1.
+- `tpdf render --jobs N` is the facade's page walk, `Document::walk_pages`
+  with `Threads(N)`: each page is rendered and written to its PNG on a worker
+  of the engine's pool, its report lines handed back in page order and
+  printed after the walk, so `--jobs 8` and `--jobs 1` write the same bytes.
+  The flag changes the clock and nothing else, and defaults to 1.
 
 ## Outward rounding
 
