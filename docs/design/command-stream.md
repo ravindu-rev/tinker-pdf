@@ -114,14 +114,22 @@ fields, so a binding names a field without knowing the format.
 | 2 | `Halftone` | type (1, 5, 6, 10, 16); 1: frequency, angle, spot function or nothing, spot names, accurate, transfer; 5: names, halftones; 6: width, height, thresholds, transfer; 10: xsquare, ysquare, thresholds, transfer; 16: width, height, second width, second height, thresholds, transfer |
 | 3 | `Stored` | rendering intent, black-point compensation, stroke overprint, fill overprint, overprint mode, alpha is shape, text knockout, flatness, smoothness, stroke adjustment, black generation, undercolour removal, transfer, halftone, halftone origin |
 | 4 | `Colorants` | kind, names, tints, which have their own ink, those inks, alternate, process |
-| 5 | `Source` | family (0 the slot's space, 1 DeviceGray, 2 DeviceRGB, 3 DeviceCMYK), components |
-| 6 | `State` | ctm; text size, character spacing, word spacing, horizontal scale, leading, rise; render mode; font; fill alpha; stroke alpha; fill colour; stroke colour; fill and stroke at sixteen bits; fill and stroke ink; fill and stroke family; fill and stroke colorants; line width, cap, join, miter limit; dashes; dash phase; fill space; stroke space; fill pattern; blend; stroke pattern; stored; fill and stroke source |
+| 5 | `Source` | the device space the components were read in, by name, or nothing for the slot's own; the components |
+| 6 | `State` | ctm; the text numbers — size, character spacing, word spacing, horizontal scale, leading, rise; render mode; font; fill alpha; stroke alpha; fill colour; stroke colour; both at sixteen bits, fill then stroke; fill ink; stroke ink; fill family; stroke family; fill colorants; stroke colorants; line width; line cap; line join; miter limit; dashes; dash phase; fill space; stroke space; fill pattern; blend; stroke pattern; stored; fill source; stroke source |
 
 A calculator's program is a flat code — 0 a number, the next of `numbers`; 1
 an operator, the next of `operators` by its name in 7.10.5; 2 a block opening
 and 3 its end — and a `Transfer` is a `Naturals` of function references: none
 for `/Identity`, one for a single function, four for four, `Nothing` for no
-transfer function at all.
+transfer function at all. A flag is `Unsigned` 0 or 1, a colour three bytes
+and an ink four, and the enumerations are numbers: a render mode its `Tr`
+operand; a line cap and join their `J` and `j` operands; a blend mode 11.3.5's
+sixteen in the order of Tables 136 and 137, Normal 0; a colour family 0 grey,
+1 RGB, 2 CMYK, 3 any other; a rendering intent Table 69's four in its order,
+then 4 for a name it does not list; black-point compensation 0 `/ON`, 1
+`/OFF`, 2 `/Default`; a colorant kind 0 DeviceCMYK, 1 colorants, 2
+`NChannel`, 3 `/All`, 4 `/None`; and a group's space 0 grey, 1 RGB, 2 CMYK, 3
+Lab.
 
 **Commands** (codec), each with its state as a reference to a `State`:
 
@@ -254,10 +262,13 @@ past one is refused by name (`OverBudget`), never read in part:
 | `spaces` | 8 | colour spaces nested in colour spaces, and halftones in halftones |
 
 Every count is checked against the bytes left before anything is allocated,
-so a hostile length costs a comparison. A stream's commands must balance as a
-recording does — a form, group or mask ended only after it began, a glyph run
-with as many of each field as glyphs — and a reference must point at a
-record that precedes it.
+so a hostile length costs a comparison, and every copy a reference makes — a
+state into each command, a function into the function that holds it — is
+checked against the byte budget before it is made. A list of commands must
+nest as a recording's does: each form, group and soft mask entered ends
+inside the ones open around it, and none is left open at the list's end. A
+glyph run carries as many of each field as it has glyphs, and a reference
+points at a record that precedes it.
 
 ### The facade
 

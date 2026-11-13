@@ -371,6 +371,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "command_stream"
+path = "fuzz_targets/command_stream.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "cff_charstrings"
 path = "fuzz_targets/cff_charstrings.rs"
 test = false

@@ -1,12 +1,15 @@
 //! Content-stream tokenizer and interpreter, the `Device` trait seam, the
 //! text-extraction device (which needs no rasterizer), the recording device
-//! every later consumer of a page's content starts from, and the filtering
-//! device that drops classes of content or forces them black.
+//! every later consumer of a page's content starts from, the filtering
+//! device that drops classes of content or forces them black, and the codec
+//! that writes a recording as a command stream and reads it back
+//! (`docs/design/command-stream.md`).
 //!
 //! Feature documentation: `docs/features/content-and-text.md`.
 
 #![forbid(unsafe_code)]
 
+pub mod commands;
 pub mod cull;
 pub mod device;
 pub mod interpret;

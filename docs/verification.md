@@ -220,9 +220,10 @@ ask. The seeds of `cff_charstrings`, `content_stream`, `cos_syntax`,
 `render_rewrite`, `render_tile` and `xml_structured` are choice sequences
 their
 generators' `write_the_fuzz_seeds` write, each named for the feature it
-reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
-`cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
-by the signature check above or have no gate to fail at.
+reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `command_stream`,
+`cos_document`, `cos_object`, `content_tokenizer`, `icc_profile` and
+`zip_archive` are covered by the signature check above or have no gate to fail
+at.
 
 Two seeds look wrong and are not: `shape/gdef-every-structure` and
 `shape_text/bidi-brackets` carry no readable face, and both targets have a

@@ -724,6 +724,7 @@ const FUZZ_BMP: &str = include_str!("../../../fuzz/fuzz_targets/bmp.rs");
 const FUZZ_BROTLI: &str = include_str!("../../../fuzz/fuzz_targets/brotli.rs");
 const FUZZ_BZIP2: &str = include_str!("../../../fuzz/fuzz_targets/bzip2.rs");
 const FUZZ_CCITT: &str = include_str!("../../../fuzz/fuzz_targets/ccitt.rs");
+const FUZZ_COMMAND_STREAM: &str = include_str!("../../../fuzz/fuzz_targets/command_stream.rs");
 const FUZZ_GIF: &str = include_str!("../../../fuzz/fuzz_targets/gif.rs");
 const FUZZ_INFLATE: &str = include_str!("../../../fuzz/fuzz_targets/inflate.rs");
 const FUZZ_JBIG2: &str = include_str!("../../../fuzz/fuzz_targets/jbig2.rs");
@@ -3950,6 +3951,17 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                 (RENDER, "const MAX_TILE_AREA: u64 = 1 << 24;"),
                 (RENDER, "const MAX_PATTERN_DEPTH: u32 = 4;"),
             ],
+        ),
+        written(
+            "command_stream",
+            vec![buffer(
+                Value(1 << 24),
+                1,
+                4,
+                "the events read under the target's byte budget, the stream written from \
+                 them, the events that stream reads back and the stream they write",
+            )],
+            vec![(FUZZ_COMMAND_STREAM, "bytes: 1 << 24")],
         ),
         path(
             "content_tokenizer",

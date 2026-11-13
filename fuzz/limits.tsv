@@ -9,6 +9,7 @@ cff	619	257	512
 cff_charstrings	2448	1025	512
 cff_subset	2068	1025	512
 cmap	1790	257	512
+command_stream	467	33	512
 content_stream	1485	257	512
 content_tokenizer	327	5	512
 cos_document	1223	257	512

@@ -635,6 +635,29 @@ was refused for depth, a cycle or a budget, and one past
 `form_recording_bytes`, counted by `Event::kept_bytes`, the count the
 retained page's cap uses.
 
+**A recording written as bytes.** `commands.rs` is the command stream's codec
+([design](../design/command-stream.md)): `EventWriter` writes a recording's
+events as records — a header with a major and a minor version, then records
+of positional, typed fields, each its kind and its length so a reader can
+step over one, the last `End` — and `EventReader` reads them back, every
+field to the bit, a NaN's payload and a negative zero included. Every value
+has one encoding, so a stream read and written back is the same bytes. The
+state each event carries is written once as a `State` record, and what it
+shares — its stored parameters with their functions and halftones, its
+colours' colorants and sources — once each as definitions it refers to;
+consecutive glyphs of one font, size, writing mode and state are one
+`GlyphRun`, at most 65 536 of them; and every definition precedes the first
+command. `CommandKind` lists every kind of the format by its number and names
+each kind's fields, the facade's page and tables among them, which this
+crate frames and hands back as foreign. A newer minor's unknown kind is
+skipped and a field it appends ignored; an unknown kind in a stream of this
+minor or older, a newer major and bytes that are no stream are refused by
+name (`CommandError`). The reader is total over hostile bytes: every count is
+checked against the bytes left before it is allocated, every copy a reference
+makes is checked against `Budgets` before it is made, and a list of commands
+must nest as a recording's does (`Nesting`). `encode_events` and
+`decode_events` are a stream of events and nothing else.
+
 **The class filter.** `cull.rs` holds a fourth `Device`, `Culled`, which
 stands in front of another and forwards every call but those of the classes
 its `Cull` drops — text, paths, clips, images and shadings, as
@@ -1180,6 +1203,8 @@ crate has an API of its own; see [architecture](../architecture.md).
 | A form, a soft mask's group or a Type 3 glyph procedure run again inside itself, directly or through the others | `Device::recursion_refused` | a cycle has no last run: refused at its first repeat, by the stream's identity, it draws once, where the depth cap ended it only after two or more runs to the sixteenth | 8.10 |
 | Nested runs past 4 MiB and 4 096 bytes for every byte of content reached, each run its stream's length and 256 bytes | `NESTED_WORK_FLOOR`, `NESTED_WORK_RATE`, `NESTED_RUN_COST`, said to the device as `Device::nested_budget_spent` | a tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group, and only a budget bounds it; scaled to what the file holds, it lets a page run its content four thousand times over, and a stream's first run always fits, so only further runs of content already drawn are passed over | 8.10, 9.6.5 |
 | More than 2 000 transparency groups and soft masks' groups run in one stream | `MAX_GROUP_RUNS`, said to the device as `Device::group_budget_spent` | a budget, not a depth: a group that draws itself twice is two to the sixteenth runs inside the depth cap, and a device that declines groups still runs each one's content | 11.6.6 |
+| A command stream that would have its reader hold more than its budgets — 2^24 records, 2^30 bytes, cells nested 8 deep, functions 32 and colour spaces or halftones 8 | `CommandError::OverBudget { budget }`, naming which | a stream is a host's bytes, and every length, count and reference in it is hostile: refused whole rather than read in part, under budgets a caller can set (`Budgets`) | [design](../design/command-stream.md) |
+| A command stream of a newer major version, or of this minor or older carrying a kind it does not define | `CommandError::NewerMajor { found, read }`, `CommandError::UnknownRecord { kind }` | a newer minor only adds kinds and appends fields, which a reader steps over; a newer major may change what any record means, and an unknown kind of a minor this build reads is damage | [design](../design/command-stream.md) |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
 | Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not refused: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
 | L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, on a page that declares no direction for it (a structure element's `/WritingMode`, above), a line of a right-to-left paragraph that holds nothing left to right and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an ellipsis, a straight or closing-form quotation mark used to open; `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's known limit, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark where `/ToUnicode` names the typed character (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`) — where it names the mirrored glyph, `»` for `«`, the line reads like a dash — nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו`. A mark of several characters reads reversed as well, in the order drawn: the line `<p dir="rtl">?! שלום</p>` draws reads `שלום !?` where nothing declares its direction. The EPUB writer's book declares it, and reads `?! שלום` as typed, the mark styled apart or not (`a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`) | ruling 14 |

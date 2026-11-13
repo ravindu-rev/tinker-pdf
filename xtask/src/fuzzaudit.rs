@@ -109,6 +109,8 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
     m.insert("woff", vec![sig(0, b"wOFF"), sig(0, b"wOF2")]);
     m.insert("jpeg", vec![sig(0, b"\xff\xd8\xff")]);
     m.insert("cos_document", vec![sig(0, b"%PDF-")]);
+    // The command stream's magic (`docs/design/command-stream.md`).
+    m.insert("command_stream", vec![sig(0, b"\x89TPCMD\r\n")]);
     // ICC.1's profile signature, at a fixed offset in the 128-byte header.
     m.insert("icc_profile", vec![sig(36, b"acsp")]);
     for name in ["sfnt", "truetype"] {
