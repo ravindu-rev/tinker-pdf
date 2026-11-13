@@ -1150,3 +1150,146 @@ fn an_index_reads_back_as_what_was_written() {
     // 65 536 items is one more than the two-byte count can state.
     assert!(write_index(&vec![vec![0u8]; 65_536]).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Widths set on the way out (FT-12.4, `docs/design/font-embedding.md`).
+// ---------------------------------------------------------------------------
+
+/// A width is set where a charstring states one and where it takes
+/// `defaultWidthX`, as an operand over `nominalWidthX` — an integer where it
+/// is one, a 16.16 fraction where it is not — and reads back as set; a glyph
+/// the subset drops is passed over; and no width to set is the subset
+/// itself, byte for byte.
+#[test]
+fn a_width_is_set_where_the_charstring_states_one_and_where_it_does_not() {
+    // Glyph 1 takes the default, 600; glyph 2 states 50 over the nominal 600.
+    let mut stated = t2(50);
+    stated.extend(box_glyph(300));
+    let program = Font {
+        charset: vec![34, 35, 36],
+        charstrings: vec![vec![14], box_glyph(600), stated, box_glyph(450)],
+        ..Font::default()
+    }
+    .build();
+    let before = Cff::parse(&program).expect("the fixture parses");
+    assert_eq!(before.advance(1), Some(600.0));
+    assert_eq!(before.advance(2), Some(650.0));
+
+    let keep: BTreeSet<u16> = [1u16, 2].into_iter().collect();
+    assert_eq!(
+        subset_cff_with(&program, &keep, &BTreeMap::new()),
+        subset_cff(&program, &keep),
+        "no width to set is the subset itself"
+    );
+
+    let widths = BTreeMap::from([(1u16, 720.0), (2, 555.5), (3, 999.0)]);
+    let out = subset_cff_with(&program, &keep, &widths).expect("it sets the widths");
+    let after = Cff::parse(&out).expect("the output parses");
+    assert_eq!(
+        after.advance(1),
+        Some(720.0),
+        "written where the default stood"
+    );
+    let fraction = after.advance(2).expect("a width");
+    assert!(
+        (fraction - 555.5).abs() < 1e-4,
+        "replaced where one was stated, as a fraction: {fraction}"
+    );
+    assert_eq!(
+        after.advance(3),
+        Some(600.0),
+        "a dropped glyph is an endchar at the default, whatever was asked of it"
+    );
+    outlines_agree(&program, &out, &[1, 2]);
+}
+
+/// A charstring whose first operator is a subroutine call states its width
+/// where no static rewrite reaches: the subset alone is made, and a width
+/// asked of that glyph declines it rather than guessing.
+#[test]
+fn a_width_behind_a_subroutine_call_is_declined() {
+    let mut subr = t2(0);
+    subr.extend(t2(0));
+    subr.push(21); // rmoveto
+    subr.push(11); // return
+    let mut called = call_local(0, 1);
+    called.extend(t2(100));
+    called.extend(t2(0));
+    called.push(5); // rlineto
+    called.push(14); // endchar
+    let program = Font {
+        charset: vec![34],
+        charstrings: vec![vec![14], called],
+        subrs: vec![subr],
+        ..Font::default()
+    }
+    .build();
+    let keep: BTreeSet<u16> = [1u16].into_iter().collect();
+    assert!(
+        subset_cff(&program, &keep).is_some(),
+        "the subset alone is made"
+    );
+    assert_eq!(
+        subset_cff_with(&program, &keep, &BTreeMap::from([(1u16, 700.0)])),
+        None
+    );
+}
+
+/// The width is where the reader takes it: the first operand, where the
+/// first stack-clearing operator has one more than it needs — an odd count
+/// before a stem operator or a hint mask, more than two before `rmoveto`,
+/// more than one before `hmoveto`, none or `seac`'s four before `endchar` —
+/// and nowhere a static reading can name where the first operator is
+/// anything else, or an operand runs off the end.
+#[test]
+fn the_width_site_is_where_the_reader_takes_the_width() {
+    use WidthSite::{Default, Stated};
+    // 139 is the operand 0 and 189 the operand 50, each one byte.
+    for (code, site) in [
+        (&[139u8, 139, 21][..], Some(Default)),
+        (&[189, 139, 139, 21], Some(Stated(0, 1))),
+        (&[139, 22], Some(Default)),
+        (&[189, 139, 22], Some(Stated(0, 1))),
+        (&[139, 4], Some(Default)),
+        (&[139, 139, 1], Some(Default)),
+        (&[189, 139, 139, 1], Some(Stated(0, 1))),
+        (&[189, 139, 139, 19, 0x80], Some(Stated(0, 1))),
+        (&[14], Some(Default)),
+        (&[189, 14], Some(Stated(0, 1))),
+        (&[139, 139, 139, 139, 14], Some(Default)),
+        (&[189, 139, 139, 139, 139, 14], Some(Stated(0, 1))),
+        (&[28, 1, 0, 139, 139, 21], Some(Stated(0, 3))),
+        (&[255, 0, 50, 0x80, 0, 139, 139, 21], Some(Stated(0, 5))),
+        (&[139, 10], None),
+        (&[139, 29], None),
+        (&[139, 139, 5], None),
+        (&[12, 3], None),
+        (&[11], None),
+        (&[28, 1], None),
+        (&[139, 139], None),
+        (&[], None),
+    ] {
+        assert_eq!(width_site(code), site, "{code:?}");
+    }
+}
+
+/// A width operand is the narrowest integer where the width is one and fits,
+/// and a 16.16 fraction otherwise; a value neither holds is refused.
+#[test]
+fn a_width_operand_is_the_narrowest_form_that_holds_it() {
+    assert_eq!(width_operand(50.0), charstring_int(50));
+    assert_eq!(width_operand(-44.0), charstring_int(-44));
+    assert_eq!(width_operand(1200.0), charstring_int(1200));
+    // 555.5 is 0x022B_8000 in 16.16.
+    assert_eq!(
+        width_operand(555.5),
+        Some(vec![255, 0x02, 0x2B, 0x80, 0x00])
+    );
+    assert_eq!(
+        width_operand(40_000.0),
+        None,
+        "past the 16-bit integer and past 16.16"
+    );
+    assert_eq!(width_operand(f64::NAN), None);
+    assert_eq!(width_operand(f64::INFINITY), None);
+}

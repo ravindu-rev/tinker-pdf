@@ -434,13 +434,21 @@ Before a font's objects commit, the font is read back through the editor and
 each drawn code asked what a reader of the new file asks — its glyph, through
 the embedded program's mapping and the renderer's own functions, its width
 and its text — and a code that differs from what the document drew and read
-puts everything back. The new programs are cut by the pass whatever
+puts everything back. Each drawn code's width is measured against its
+glyph's advance in the face, both as ISO 19005's metrics rule reads them: a
+difference past a thousandth of an em, that rule's tolerance, is an
+`EmbedWarning::WidthMismatch` naming the font, the code and both widths, and
+the program's advance is set to the width of the lowest drawn code that chose
+the glyph — its `hmtx` entry for a TrueType face, its charstring's width
+operand for a CFF, through `tinker_pdf_font::subset_with` — so the program
+and `/Widths` agree; the pen moves by `/Widths` either way, so the page draws
+as it did. The new programs are cut by the pass whatever
 `SaveOptions::fonts` says, and the font pass passes over them, so its report
 is of the document's own programs. `Saved::embedded` is `None` for `Leave`,
 and otherwise an `EmbedReport`: `embedded`, each `EmbeddedFont` with its font,
 the `/BaseFont` written, its program, its `EmbeddedFormat` and the face's,
-the cut's and the glyphs' counts; and `left`, each `LeftFont` with its
-`LeftReason` — `Declined`, `Unreadable`, `EmbeddingForbidden` and
+the cut's and the glyphs' counts; `warnings`, by font and code; and `left`,
+each `LeftFont` with its `LeftReason` — `Declined`, `Unreadable`, `EmbeddingForbidden` and
 `SubsettingForbidden` (the face's `OS/2` `fsType`, 9.9.1), `NotAnObject`,
 `FieldResource`, `Type3Resource`, `TooManyCodes`, `NoGlyph { code }`,
 `DrawsOtherwise { code }`, `NotSubsettable` and `Composite`. A font that
@@ -676,7 +684,11 @@ at all: the same fingerprint, the same text, a TrueType font that embeds a
 subset named after the face, and the output held to the strict validator.
 `the_embedded_face_is_cut_to_the_drawn_glyphs` reads the cut back glyph by
 glyph; `a_cff_answer_is_embedded_as_type1c` takes a bare CFF and an
-`OpenType/CFF` face; `the_new_faces_are_cut_whatever_the_font_policy` holds
+`OpenType/CFF` face; `each_width_mismatch_is_a_typed_warning` and
+`a_cff_faces_widths_are_set_too` hold a face two of whose advances differ
+from `/Widths` to exactly two warnings carrying both widths, a
+metric-compatible face to none, the page to its fingerprint and the
+program's advances to the dictionary's; `the_new_faces_are_cut_whatever_the_font_policy` holds
 `FontPolicy::Keep` and `Subset` to one cut and the font pass's report to the
 document's own programs; and the rest reach every `LeftReason` a simple font
 can — a declined request, the three `fsType` refusals beside the permissions

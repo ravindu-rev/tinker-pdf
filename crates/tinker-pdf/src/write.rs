@@ -168,7 +168,7 @@ use std::sync::Arc;
 use tinker_pdf_cos::{DocumentEditor, FullOpen, WriteMode, WriteOptions};
 
 pub use crate::embed::{
-    EmbedReport, EmbeddedFont, EmbeddedFormat, FontEmbedding, LeftFont, LeftReason,
+    EmbedReport, EmbedWarning, EmbeddedFont, EmbeddedFormat, FontEmbedding, LeftFont, LeftReason,
 };
 pub use crate::recode::{
     BilevelCodec, ContinuousCodec, ImageCoding, ImagePolicy, ImageRecoding, ImageReport,
@@ -362,7 +362,7 @@ impl SubsetOutcome {
 /// `#[must_use]`: the bytes are half of it. Dropping this on the floor is
 /// dropping the answer to "is the disclosure out of the file", which is the
 /// question this whole module exists for.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct Saved {
     /// The file.

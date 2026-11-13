@@ -23,7 +23,7 @@
 //! CFF program to that. `post` glyph names are dropped wholesale rather than
 //! subsetted.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cff::Cff;
 use crate::sfnt::Sfnt;
@@ -206,14 +206,121 @@ fn close_over_components(sfnt: &Sfnt, glyphs: &mut BTreeSet<u16>) {
 /// subset that renders wrong is worse than a font that is merely large.
 #[must_use]
 pub fn subset(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
+    subset_with(program, glyphs, &Reshape::default())
+}
+
+/// What [`subset_with`] changes beside the cut.
+///
+/// Empty — the default — changes nothing, and [`subset_with`] is then
+/// [`subset`], byte for byte.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Reshape {
+    /// Advances to set, glyph by glyph, in the outlines' own units: font
+    /// units for a `glyf` face, rounded to the integer `hmtx` holds;
+    /// charstring units for a bare CFF, before its `FontMatrix`. A glyph the
+    /// cut does not keep — one the face lacks among them — has no advance to
+    /// set, and its entry is passed over.
+    pub advances: BTreeMap<u16, f64>,
+}
+
+impl Reshape {
+    fn is_empty(&self) -> bool {
+        self.advances.is_empty()
+    }
+}
+
+/// [`subset`], with the cut's advances set as `reshape` says.
+///
+/// A `glyf` face's `hmtx` takes each advance — widened to an entry for every
+/// glyph where a glyph past `numberOfHMetrics` changes, or the last full
+/// entry they repeat, so every other glyph keeps its own — and `hhea`'s
+/// `numberOfHMetrics` and `advanceWidthMax` follow. A bare CFF's charstrings take each as their width operand
+/// ([`crate::cff_subset::subset_cff_with`]). An `OpenType/CFF` face, whose
+/// advances are two tables' to keep in step, is declined with any advance to
+/// set, as is an advance no `hmtx` entry can hold.
+#[must_use]
+pub fn subset_with(program: &[u8], glyphs: &BTreeSet<u16>, reshape: &Reshape) -> Option<Vec<u8>> {
     let Some(sfnt) = Sfnt::parse(program) else {
         // Not an sfnt at all: a bare CFF program, or nothing this can read.
-        return crate::cff_subset::subset_cff(program, glyphs);
+        return crate::cff_subset::subset_cff_with(program, glyphs, &reshape.advances);
     };
     if sfnt.table(TAG_GLYF).is_none() && sfnt.table(TAG_CFF).is_some() {
+        if !reshape.is_empty() {
+            return None;
+        }
         return subset_opentype_cff(&sfnt, glyphs);
     }
-    subset_truetype(&sfnt, glyphs)
+    subset_truetype(&sfnt, glyphs, reshape)
+}
+
+/// `hhea` and `hmtx` with `advances` set (font units, rounded), every other
+/// glyph's advance and every left side bearing as they were.
+///
+/// `None` where the face's metrics do not read — no `hhea`, no `hmtx`, a
+/// `numberOfHMetrics` of zero or past the glyph count, an `hmtx` shorter than
+/// both say — or an advance is no `u16`.
+fn reshaped_metrics(
+    sfnt: &Sfnt<'_>,
+    glyph_count: u16,
+    advances: &BTreeMap<u16, f64>,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let hhea = sfnt.table(0x6868_6561)?;
+    let hmtx = sfnt.table(0x686D_7478)?;
+    let long = be16(hhea, 34)?;
+    if long == 0 || long > glyph_count {
+        return None;
+    }
+
+    // Every glyph's advance and side bearing, as the table states them: the
+    // glyphs past `numberOfHMetrics` repeat the last advance.
+    let mut metrics: Vec<(u16, u16)> = Vec::with_capacity(usize::from(glyph_count));
+    for glyph in 0..glyph_count {
+        let entry = if glyph < long {
+            let at = usize::from(glyph) * 4;
+            (be16(hmtx, at)?, be16(hmtx, at + 2)?)
+        } else {
+            let last = metrics.get(usize::from(long) - 1)?.0;
+            let at = usize::from(long) * 4 + usize::from(glyph - long) * 2;
+            (last, be16(hmtx, at)?)
+        };
+        metrics.push(entry);
+    }
+
+    let mut widened = false;
+    for (&glyph, &advance) in advances {
+        let units = advance.round();
+        if !advance.is_finite() || !(0.0..=65_535.0).contains(&units) {
+            return None;
+        }
+        let slot = metrics.get_mut(usize::from(glyph))?;
+        slot.0 = units as u16;
+        widened |= glyph + 1 >= long;
+    }
+    // A glyph past `numberOfHMetrics` takes the last long entry's advance, so
+    // changing one there, or that last entry itself, gives every glyph an
+    // entry of its own; otherwise the table keeps its shape.
+    let long = if widened { glyph_count } else { long };
+
+    let mut new_hmtx =
+        Vec::with_capacity(usize::from(long) * 4 + usize::from(glyph_count - long) * 2);
+    for (glyph, (advance, bearing)) in metrics.iter().enumerate() {
+        if glyph < usize::from(long) {
+            new_hmtx.extend_from_slice(&advance.to_be_bytes());
+        }
+        new_hmtx.extend_from_slice(&bearing.to_be_bytes());
+    }
+    let mut new_hhea = hhea.to_vec();
+    let widest = metrics
+        .iter()
+        .map(|(advance, _)| *advance)
+        .max()
+        .unwrap_or(0);
+    if new_hhea.len() < 36 {
+        return None;
+    }
+    new_hhea[10..12].copy_from_slice(&widest.to_be_bytes());
+    new_hhea[34..36].copy_from_slice(&long.to_be_bytes());
+    Some((new_hhea, new_hmtx))
 }
 
 /// The `OpenType/CFF` route: the `CFF ` table subsetted, the sfnt rebuilt.
@@ -246,7 +353,7 @@ fn subset_opentype_cff(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8
 }
 
 /// The `glyf`/`loca` route.
-fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
+fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>, reshape: &Reshape) -> Option<Vec<u8>> {
     let glyf = sfnt.table(TAG_GLYF)?;
     sfnt.table(TAG_LOCA)?;
     let head = sfnt.table(TAG_HEAD)?;
@@ -262,6 +369,20 @@ fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
         .collect();
     keep.insert(0);
     close_over_components(sfnt, &mut keep);
+
+    // The advances asked of the glyphs the cut keeps; a dropped glyph has
+    // none to set.
+    let metrics = if reshape.is_empty() {
+        None
+    } else {
+        let kept: BTreeMap<u16, f64> = reshape
+            .advances
+            .iter()
+            .filter(|(glyph, _)| keep.contains(glyph))
+            .map(|(glyph, advance)| (*glyph, *advance))
+            .collect();
+        Some(reshaped_metrics(sfnt, glyph_count, &kept)?)
+    };
 
     // Rebuild `glyf` in glyph order, with the dropped ones contributing
     // nothing. Offsets are recorded for every glyph, including the dropped
@@ -309,10 +430,12 @@ fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
 
     let mut tables: Vec<(u32, Vec<u8>)> = Vec::new();
     for &tag in KEEP {
-        let data = match tag {
-            0x676C_7966 => new_glyf.clone(),
-            0x6C6F_6361 => new_loca.clone(),
-            0x6865_6164 => new_head.clone(),
+        let data = match (tag, &metrics) {
+            (0x676C_7966, _) => new_glyf.clone(),
+            (0x6C6F_6361, _) => new_loca.clone(),
+            (0x6865_6164, _) => new_head.clone(),
+            (0x6868_6561, Some((hhea, _))) => hhea.clone(),
+            (0x686D_7478, Some((_, hmtx))) => hmtx.clone(),
             _ => match sfnt.table(tag) {
                 Some(data) => data.to_vec(),
                 None => continue,
@@ -558,6 +681,166 @@ mod tests {
             t
         };
         assemble(0x0001_0000, &tables)
+    }
+
+    /// `program` with its `hmtx` holding `long` full entries, the advances
+    /// `advances` gives the first `long` glyphs, and a side bearing of
+    /// `10 * glyph` for every glyph: the shape a face whose last glyphs share
+    /// one advance is stored in.
+    fn compressed(program: &[u8], long: u16, advances: &[u16]) -> Vec<u8> {
+        let sfnt = Sfnt::parse(program).expect("the fixture parses");
+        let count = sfnt.glyph_count().expect("a maxp");
+        let mut tables: Vec<(u32, Vec<u8>)> = Vec::new();
+        for tag in [
+            0x636D_6170u32,
+            0x676C_7966,
+            0x6865_6164,
+            0x6868_6561,
+            0x686D_7478,
+            0x6C6F_6361,
+            0x6D61_7870,
+        ] {
+            let mut data = sfnt.table(tag).expect("the fixture's table").to_vec();
+            if tag == 0x6868_6561 {
+                data[34..36].copy_from_slice(&long.to_be_bytes());
+            }
+            if tag == 0x686D_7478 {
+                data.clear();
+                for glyph in 0..count {
+                    if glyph < long {
+                        data.extend_from_slice(&advances[usize::from(glyph)].to_be_bytes());
+                    }
+                    data.extend_from_slice(&(glyph * 10).to_be_bytes());
+                }
+            }
+            tables.push((tag, data));
+        }
+        tables.sort_by_key(|(tag, _)| *tag);
+        assemble(0x0001_0000, &tables)
+    }
+
+    /// An empty reshape is the cut byte for byte; a reshape sets exactly the
+    /// advances it names, of kept glyphs, rounded to `hmtx`'s integers, and
+    /// leaves every other advance, every side bearing and every outline.
+    #[test]
+    fn advances_are_set_where_asked_and_nowhere_else() {
+        let program = font(8);
+        let keep: BTreeSet<u16> = [1u16, 2, 3].into_iter().collect();
+        assert_eq!(
+            subset_with(&program, &keep, &Reshape::default()),
+            subset(&program, &keep),
+            "nothing to set is the cut itself"
+        );
+
+        let reshape = Reshape {
+            advances: BTreeMap::from([(2u16, 640.4), (3, 610.6), (6, 999.0)]),
+        };
+        let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
+        let before = Sfnt::parse(&program).expect("the fixture parses");
+        let after = Sfnt::parse(&out).expect("the reshaped cut parses");
+        assert_eq!(after.advance(2), Some(640));
+        assert_eq!(after.advance(3), Some(611));
+        for glyph in [0u16, 1, 4, 5, 6, 7] {
+            assert_eq!(
+                after.advance(glyph),
+                Some(500 + glyph),
+                "glyph {glyph}: not asked, or not kept"
+            );
+        }
+        for glyph in [1u16, 2, 3] {
+            assert_eq!(
+                crate::glyf::outline(&after, glyph).map(|o| o.segments),
+                crate::glyf::outline(&before, glyph).map(|o| o.segments),
+                "glyph {glyph} draws as it did"
+            );
+        }
+        let hhea = after.table(0x6868_6561).expect("an hhea");
+        assert_eq!(be16(hhea, 10), Some(640), "advanceWidthMax follows");
+    }
+
+    /// A glyph past `numberOfHMetrics` shares the last full entry's advance,
+    /// so setting one gives every glyph an entry of its own, and the glyphs
+    /// after it keep the advance they had rather than taking the new one.
+    #[test]
+    fn an_advance_past_the_long_entries_widens_hmtx() {
+        let program = compressed(&font(8), 2, &[500, 501]);
+        let source = Sfnt::parse(&program).expect("the fixture parses");
+        assert_eq!(
+            source.advance(6),
+            Some(501),
+            "the fixture repeats its last advance"
+        );
+
+        let keep: BTreeSet<u16> = [1u16, 5].into_iter().collect();
+        let reshape = Reshape {
+            advances: BTreeMap::from([(5u16, 700.0)]),
+        };
+        let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
+        let after = Sfnt::parse(&out).expect("the reshaped cut parses");
+        assert_eq!(after.advance(5), Some(700));
+        for glyph in [1u16, 2, 3, 4, 6, 7] {
+            assert_eq!(after.advance(glyph), Some(501), "glyph {glyph}");
+        }
+        for glyph in 0..8u16 {
+            assert_eq!(
+                after.left_side_bearing(glyph),
+                Some(glyph as i16 * 10),
+                "glyph {glyph} keeps its side bearing"
+            );
+        }
+        let hhea = after.table(0x6868_6561).expect("an hhea");
+        assert_eq!(be16(hhea, 34), Some(8), "every glyph has an entry now");
+        assert_eq!(be16(hhea, 10), Some(700));
+
+        // The last full entry is the one the glyphs after it repeat, so
+        // setting it widens the table too, and they keep theirs.
+        let reshape = Reshape {
+            advances: BTreeMap::from([(1u16, 650.0)]),
+        };
+        let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
+        let after = Sfnt::parse(&out).expect("the reshaped cut parses");
+        assert_eq!(after.advance(1), Some(650));
+        assert_eq!(after.advance(7), Some(501));
+        assert_eq!(
+            be16(after.table(0x6868_6561).expect("an hhea"), 34),
+            Some(8)
+        );
+
+        // Before it, the table keeps its shape.
+        let reshape = Reshape {
+            advances: BTreeMap::from([(0u16, 450.0)]),
+        };
+        let out = subset_with(&program, &keep, &reshape).expect("it reshapes");
+        let after = Sfnt::parse(&out).expect("the reshaped cut parses");
+        assert_eq!(after.advance(0), Some(450));
+        assert_eq!(after.advance(7), Some(501));
+        assert_eq!(
+            be16(after.table(0x6868_6561).expect("an hhea"), 34),
+            Some(2)
+        );
+    }
+
+    /// An advance `hmtx` cannot hold — negative, past 65 535, not a number —
+    /// declines the reshape rather than writing another number, and an
+    /// `OpenType/CFF` face, whose advances are two tables', declines any.
+    #[test]
+    fn an_advance_no_entry_holds_is_declined() {
+        let program = font(8);
+        let keep: BTreeSet<u16> = [1u16].into_iter().collect();
+        for bad in [-1.0, 70_000.0, f64::NAN, f64::INFINITY] {
+            let reshape = Reshape {
+                advances: BTreeMap::from([(1u16, bad)]),
+            };
+            assert_eq!(subset_with(&program, &keep, &reshape), None, "{bad}");
+        }
+        let otto = assemble(
+            0x4F54_544F,
+            &[(TAG_CFF, vec![1, 0, 4, 4]), (TAG_HEAD, vec![0; 54])],
+        );
+        let reshape = Reshape {
+            advances: BTreeMap::from([(1u16, 600.0)]),
+        };
+        assert_eq!(subset_with(&otto, &keep, &reshape), None);
     }
 
     #[test]

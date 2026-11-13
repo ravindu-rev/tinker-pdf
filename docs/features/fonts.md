@@ -478,7 +478,14 @@ or TrueType — whose descriptor names no `/FontFile*` stream, the face cut to
 the glyphs the pages drew through the renderer's own reading of it, a TrueType
 face as `/FontFile2` under `/TrueType` and a CFF one as `/FontFile3 /Type1C`
 under `/Type1`, named after the face behind a subset tag, its encoding and
-`/Widths` kept and checked by reading the font back before it is written. A
+`/Widths` kept and checked by reading the font back before it is written; a
+face whose advances differ from `/Widths` is warned of code by code, and the
+embedded program's advances set to the dictionary's —
+`tinker_pdf_font::subset_with` cuts a face and sets its advances in one call,
+`hmtx` for a `glyf` face, widened where a glyph past `numberOfHMetrics` or
+the last full entry changes, and a charstring's width operand for a CFF,
+replaced where it states one and written where it takes `defaultWidthX`; a
+width stated behind a subroutine call declines the cut. A
 code the face has no glyph for, a face whose `OS/2` `fsType` forbids embedding
 or a subset, and a composite font leave the font as it was, named;
 [writing](writing.md) has the report. `tinker_pdf_font::face_facts` reads what

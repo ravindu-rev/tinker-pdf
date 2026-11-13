@@ -574,10 +574,10 @@ pub use verdict::{
 /// the thing this module exists to make visible. [`write::append`], the
 /// edit-and-reopen door, stays behind it too.
 pub use write::{
-    AppendError, AppendOptions, Appended, BilevelCodec, ContinuousCodec, EmbedReport, EmbeddedFont,
-    EmbeddedFormat, FontEmbedding, FontPolicy, ImageCoding, ImageOutcome, ImagePolicy,
-    ImageRecoding, ImageReport, JpegTables, LeftFont, LeftReason, Recoded, SaveOptions, Saved,
-    SubsetOutcome, UntouchedImage, UntouchedImageReason,
+    AppendError, AppendOptions, Appended, BilevelCodec, ContinuousCodec, EmbedReport, EmbedWarning,
+    EmbeddedFont, EmbeddedFormat, FontEmbedding, FontPolicy, ImageCoding, ImageOutcome,
+    ImagePolicy, ImageRecoding, ImageReport, JpegTables, LeftFont, LeftReason, Recoded,
+    SaveOptions, Saved, SubsetOutcome, UntouchedImage, UntouchedImageReason,
 };
 /// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
 pub use xps::{Dialect, XpsElementDefect, XpsPageDefect};

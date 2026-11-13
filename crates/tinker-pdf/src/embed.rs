@@ -47,6 +47,7 @@ use tinker_pdf_cos::{
 use tinker_pdf_font::{Cff, FaceFacts, Sfnt};
 
 use crate::fonts::{self, FontProvider, FontRequest};
+use crate::pdfa::fonts::{ProgramMetrics, WIDTH_TOLERANCE};
 use crate::resources::{self, Operation, Route};
 use crate::stats::Work;
 use crate::subset::{self, UntouchedReason};
@@ -87,13 +88,60 @@ impl core::fmt::Debug for FontEmbedding {
 /// **Not an error list.** A document whose every font embeds its program, or
 /// is a Type 3 font, reports nothing at all; one whose fonts a provider has
 /// no face for reports each of them in [`EmbedReport::left`], and is right to.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EmbedReport {
     /// Every font embedded, in object order.
     pub embedded: Vec<EmbeddedFont>,
     /// Every font left unembedded, and why: those with an object in object
     /// order, then those written directly into a resource dictionary.
     pub left: Vec<LeftFont>,
+    /// What the pass met in the fonts it embedded and did not stop for, by
+    /// font in object order and then by code (ruling 10).
+    pub warnings: Vec<EmbedWarning>,
+}
+
+/// What the pass met in a font it embedded, worth saying and no reason to
+/// leave the font.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EmbedWarning {
+    /// A drawn code whose glyph's advance in the face differs from the width
+    /// the font lays the code out with by more than a thousandth of an em,
+    /// the tolerance ISO 19005's metrics clause holds the two to: the face is
+    /// not metric-compatible with the font it stands in for. The pen moved
+    /// by the dictionary's width before and moves by it after, so the page
+    /// draws as it did; the embedded program's advance is set to the width
+    /// (`docs/design/font-embedding.md`).
+    WidthMismatch {
+        /// The font dictionary.
+        font: ObjRef,
+        /// The code.
+        code: u32,
+        /// The width the font lays the code out with, in thousandths of an
+        /// em: its `/Widths` entry, or, for the standard 14, the published
+        /// metric the pass writes there.
+        dictionary: f64,
+        /// The advance of the code's glyph in the face, in thousandths of an
+        /// em.
+        program: f64,
+    },
+}
+
+impl core::fmt::Display for EmbedWarning {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            EmbedWarning::WidthMismatch {
+                font,
+                code,
+                dictionary,
+                program,
+            } => write!(
+                f,
+                "font {} {}: code {code} is {dictionary} wide in the dictionary and \
+                 {program} in the face",
+                font.num, font.gen
+            ),
+        }
+    }
 }
 
 /// One font the pass embedded a face for.
@@ -191,8 +239,10 @@ pub enum LeftReason {
         /// The first such code.
         code: u32,
     },
-    /// The cut refused the face: `tinker_pdf_font::subset` would not rebuild
-    /// it to the drawn glyphs.
+    /// The cut refused the face: `tinker_pdf_font::subset_with` would not
+    /// rebuild it to the drawn glyphs with their advances set — a CFF
+    /// charstring whose width must be set and is stated behind a subroutine
+    /// call among the reasons.
     NotSubsettable,
     /// A composite font: the pass embeds simple fonts.
     Composite,
@@ -367,9 +417,10 @@ pub(crate) fn apply(
             }
         };
         match outcome {
-            Ok(embedded) => {
+            Ok((embedded, warnings)) => {
                 written.insert(embedded.program);
                 report.embedded.push(embedded);
+                report.warnings.extend(warnings);
             }
             Err(reason) => report.left.push(LeftFont {
                 font: Some(font),
@@ -458,7 +509,8 @@ fn licence(fs_type: Option<u16>) -> Result<(), LeftReason> {
     Ok(())
 }
 
-/// Embeds the provider's face for one simple font, or says why not.
+/// Embeds the provider's face for one simple font, with the width
+/// mismatches it met, or says why not.
 fn embed_simple(
     editor: &mut DocumentEditor,
     font: ObjRef,
@@ -466,7 +518,7 @@ fn embed_simple(
     codes: &BTreeSet<u32>,
     request: &FontRequest,
     provider: &dyn FontProvider,
-) -> Result<EmbeddedFont, LeftReason> {
+) -> Result<(EmbeddedFont, Vec<EmbedWarning>), LeftReason> {
     let face = provider.substitute(request).ok_or(LeftReason::Declined)?;
     let answer = Answer::simple(&face).ok_or(LeftReason::Unreadable)?;
     let facts = tinker_pdf_font::face_facts(&face).unwrap_or_default();
@@ -492,88 +544,143 @@ fn embed_simple(
     }
 
     let glyphs: BTreeSet<u16> = chosen.values().copied().collect();
-    let cut = tinker_pdf_font::subset(answer.program, &glyphs).ok_or(LeftReason::NotSubsettable)?;
+    let (warnings, advances) = widths(font, &original, answer.program, &chosen);
+    let cut = tinker_pdf_font::subset_with(
+        answer.program,
+        &glyphs,
+        &tinker_pdf_font::Reshape { advances },
+    )
+    .ok_or(LeftReason::NotSubsettable)?;
 
     let mut name = subset_tag(&cut);
     name.extend_from_slice(&stem(&facts, &base_font_of(&*editor, dict)));
     let format = answer.format;
 
-    editor.transaction(|editor| {
-        let program = editor.allocate();
-        let mut stream = Dict::new();
-        match format {
-            // Table 125: `/Length1` is a TrueType program's decoded length.
-            Format::TrueType => {
-                stream.insert(
-                    editor.intern(b"Length1"),
-                    Object::Int(i64::try_from(cut.len()).unwrap_or(i64::MAX)),
-                );
+    editor
+        .transaction(|editor| {
+            let program = editor.allocate();
+            let mut stream = Dict::new();
+            match format {
+                // Table 125: `/Length1` is a TrueType program's decoded length.
+                Format::TrueType => {
+                    stream.insert(
+                        editor.intern(b"Length1"),
+                        Object::Int(i64::try_from(cut.len()).unwrap_or(i64::MAX)),
+                    );
+                }
+                // Table 125: a `/FontFile3`'s `/Subtype` says what it is, and it
+                // has no `/Length1` to `/Length3`.
+                Format::Cff => {
+                    stream.insert(Name::SUBTYPE, Object::Name(editor.intern(b"Type1C")));
+                }
             }
-            // Table 125: a `/FontFile3`'s `/Subtype` says what it is, and it
-            // has no `/Length1` to `/Length3`.
-            Format::Cff => {
-                stream.insert(Name::SUBTYPE, Object::Name(editor.intern(b"Type1C")));
+            editor.put_stream(
+                program,
+                StreamData {
+                    dict: stream,
+                    data: cut.clone(),
+                },
+            );
+
+            let base_font = editor.intern(&name);
+            let (subtype, key) = match format {
+                Format::TrueType => (b"TrueType".as_slice(), Name::FONT_FILE2),
+                Format::Cff => (b"Type1".as_slice(), Name::FONT_FILE3),
+            };
+            let descriptor = editor.allocate();
+            let written = descriptor_for(
+                &*editor,
+                dict,
+                &facts,
+                request,
+                base_font,
+                (key, program),
+                original.is_symbolic(),
+            );
+            editor.put(descriptor, Object::Dict(written));
+
+            let mut rewritten = dict.clone();
+            rewritten.insert(Name::SUBTYPE, Object::Name(editor.intern(subtype)));
+            rewritten.insert(Name::BASE_FONT, Object::Name(base_font));
+            rewritten.insert(Name::FONT_DESCRIPTOR, Object::Ref(descriptor));
+            // 9.6.2.2 lets the standard 14 omit `/Widths`; an embedded font may
+            // not, and the widths are the ones the font was laid out with.
+            if editor.resolve_key(dict, Name::WIDTHS).as_array().is_none() {
+                if let (Some(&first), Some(&last)) = (codes.first(), codes.last()) {
+                    let widths = (first..=last)
+                        .map(|code| number(original.width_of(code).0))
+                        .collect();
+                    rewritten.insert(Name::FIRST_CHAR, Object::Int(i64::from(first)));
+                    rewritten.insert(editor.intern(b"LastChar"), Object::Int(i64::from(last)));
+                    rewritten.insert(Name::WIDTHS, Object::Array(widths));
+                }
             }
-        }
-        editor.put_stream(
-            program,
-            StreamData {
-                dict: stream,
-                data: cut.clone(),
-            },
-        );
+            editor.put(font, Object::Dict(rewritten.clone()));
 
-        let base_font = editor.intern(&name);
-        let (subtype, key) = match format {
-            Format::TrueType => (b"TrueType".as_slice(), Name::FONT_FILE2),
-            Format::Cff => (b"Type1".as_slice(), Name::FONT_FILE3),
-        };
-        let descriptor = editor.allocate();
-        let written = descriptor_for(
-            &*editor,
-            dict,
-            &facts,
-            request,
-            base_font,
-            (key, program),
-            original.is_symbolic(),
-        );
-        editor.put(descriptor, Object::Dict(written));
+            let read = cos_font::read_in(&*editor, &rewritten);
+            read_back(&read, &original, &cut, format, &chosen)?;
 
-        let mut rewritten = dict.clone();
-        rewritten.insert(Name::SUBTYPE, Object::Name(editor.intern(subtype)));
-        rewritten.insert(Name::BASE_FONT, Object::Name(base_font));
-        rewritten.insert(Name::FONT_DESCRIPTOR, Object::Ref(descriptor));
-        // 9.6.2.2 lets the standard 14 omit `/Widths`; an embedded font may
-        // not, and the widths are the ones the font was laid out with.
-        if editor.resolve_key(dict, Name::WIDTHS).as_array().is_none() {
-            if let (Some(&first), Some(&last)) = (codes.first(), codes.last()) {
-                let widths = (first..=last)
-                    .map(|code| number(original.width_of(code).0))
-                    .collect();
-                rewritten.insert(Name::FIRST_CHAR, Object::Int(i64::from(first)));
-                rewritten.insert(editor.intern(b"LastChar"), Object::Int(i64::from(last)));
-                rewritten.insert(Name::WIDTHS, Object::Array(widths));
-            }
-        }
-        editor.put(font, Object::Dict(rewritten.clone()));
-
-        let read = cos_font::read_in(&*editor, &rewritten);
-        read_back(&read, &original, &cut, format, &chosen)?;
-
-        Ok(EmbeddedFont {
-            font,
-            base_font: String::from_utf8_lossy(&name).into_owned(),
-            program,
-            format: match format {
-                Format::TrueType => EmbeddedFormat::TrueType,
-                Format::Cff => EmbeddedFormat::Type1C,
-            },
-            face: face.len(),
-            bytes: cut.len(),
-            glyphs: glyphs.len(),
+            Ok(EmbeddedFont {
+                font,
+                base_font: String::from_utf8_lossy(&name).into_owned(),
+                program,
+                format: match format {
+                    Format::TrueType => EmbeddedFormat::TrueType,
+                    Format::Cff => EmbeddedFormat::Type1C,
+                },
+                face: face.len(),
+                bytes: cut.len(),
+                glyphs: glyphs.len(),
+            })
         })
-    })
+        .map(|embedded| (embedded, warnings))
+}
+
+/// Each drawn code's width against its glyph's advance in `program`, as
+/// ISO 19005's metrics rule reads both ([`ProgramMetrics`]): a warning for
+/// each code past [`WIDTH_TOLERANCE`], and the advance each glyph is to take
+/// in the program's own units — the width of the lowest drawn code that
+/// chose it, where the face's advance is past the tolerance of that width.
+/// A glyph two codes chose at two widths takes the lower code's; the other
+/// stays a warning.
+fn widths(
+    font: ObjRef,
+    original: &cos_font::Font,
+    program: &[u8],
+    chosen: &BTreeMap<u32, u16>,
+) -> (Vec<EmbedWarning>, BTreeMap<u16, f64>) {
+    let mut warnings = Vec::new();
+    let mut advances = BTreeMap::new();
+    let Some(metrics) = ProgramMetrics::read(program) else {
+        return (warnings, advances);
+    };
+    let mut first: BTreeMap<u16, f64> = BTreeMap::new();
+    for (&code, &glyph) in chosen {
+        let width = original.width_of(code).0;
+        let Some(advance) = metrics.advance(glyph) else {
+            continue;
+        };
+        if (advance - width).abs() > WIDTH_TOLERANCE {
+            warnings.push(EmbedWarning::WidthMismatch {
+                font,
+                code,
+                dictionary: width,
+                program: advance,
+            });
+        }
+        first.entry(glyph).or_insert(width);
+    }
+    for (glyph, width) in first {
+        let Some(advance) = metrics.advance(glyph) else {
+            continue;
+        };
+        if (advance - width).abs() > WIDTH_TOLERANCE {
+            if let Some(units) = metrics.units(glyph, width) {
+                advances.insert(glyph, units);
+            }
+        }
+    }
+    (warnings, advances)
 }
 
 /// The difference between two widths, in thousandths of an em, that a

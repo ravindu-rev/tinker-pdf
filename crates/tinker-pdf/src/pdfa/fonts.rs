@@ -830,8 +830,10 @@ const MAX_CODES_PER_FONT: usize = 1 << 12;
 const MAX_WIDTH_FONTS: usize = 1 << 10;
 
 /// The tolerance veraPDF's published test gives the comparison, in 1/1000
-/// em: `Math.abs(widthFromFontProgram - widthFromDictionary) <= 1`.
-const WIDTH_TOLERANCE: f64 = 1.0;
+/// em: `Math.abs(widthFromFontProgram - widthFromDictionary) <= 1`. The save
+/// door's embedding pass warns past it and holds what it writes to it
+/// (`crate::embed`), so a face the warning passes is one this rule passes.
+pub(crate) const WIDTH_TOLERANCE: f64 = 1.0;
 
 /// One font the pages drew with at a visible rendering mode, and the codes.
 struct Drawn {
@@ -961,8 +963,10 @@ fn widths(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>, out: &mut Vec<Raw>) 
     }
 }
 
-/// A font program's advances in 1/1000 em, whichever outline format it is.
-enum ProgramMetrics<'a> {
+/// A font program's advances in 1/1000 em, whichever outline format it is:
+/// what this rule reads a program's width by, and what the embedding pass
+/// measures a face and the program it writes by (`crate::embed`).
+pub(crate) enum ProgramMetrics<'a> {
     /// `glyf` outlines: `hmtx` in font units over `head`'s units per em, for
     /// the `maxp` glyph count's glyphs — `hmtx` repeats its last advance for
     /// every index past `numberOfHMetrics`, and an index past the count is a
@@ -975,7 +979,7 @@ enum ProgramMetrics<'a> {
 }
 
 impl<'a> ProgramMetrics<'a> {
-    fn read(bytes: &'a [u8]) -> Option<ProgramMetrics<'a>> {
+    pub(crate) fn read(bytes: &'a [u8]) -> Option<ProgramMetrics<'a>> {
         const GLYF: u32 = 0x676C_7966;
         const HEAD: u32 = 0x6865_6164;
         const CFF: u32 = 0x4346_4620;
@@ -997,7 +1001,7 @@ impl<'a> ProgramMetrics<'a> {
         tinker_pdf_font::Cff::parse(bytes).map(|cff| ProgramMetrics::Cff(Box::new(cff)))
     }
 
-    fn advance(&self, glyph: u16) -> Option<f64> {
+    pub(crate) fn advance(&self, glyph: u16) -> Option<f64> {
         match self {
             ProgramMetrics::TrueType(sfnt, units, glyphs) => {
                 if glyph >= *glyphs {
@@ -1008,6 +1012,22 @@ impl<'a> ProgramMetrics<'a> {
             ProgramMetrics::Cff(cff) => {
                 let scale = cff.font_matrix_for(glyph).first().copied()?;
                 Some(cff.advance(glyph)? * scale * 1000.0)
+            }
+        }
+    }
+
+    /// A width in thousandths of an em as `glyph`'s advance in the program's
+    /// own units — font units, or charstring units before the font matrix —
+    /// [`ProgramMetrics::advance`] read backwards. `None` for a glyph the
+    /// program does not have, or a matrix that scales nothing.
+    pub(crate) fn units(&self, glyph: u16, width: f64) -> Option<f64> {
+        match self {
+            ProgramMetrics::TrueType(_, units, glyphs) => {
+                (glyph < *glyphs).then(|| width * units / 1000.0)
+            }
+            ProgramMetrics::Cff(cff) => {
+                let scale = cff.font_matrix_for(glyph).first().copied()?;
+                (scale.is_finite() && scale != 0.0).then(|| width / (scale * 1000.0))
             }
         }
     }

@@ -770,6 +770,28 @@ fn f64_to_index(number: f64, applied: i32) -> Option<usize> {
 /// addressing the same one.
 #[must_use]
 pub fn subset_cff(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
+    subset_cff_with(program, glyphs, &BTreeMap::new())
+}
+
+/// [`subset_cff`], with the width of each kept glyph `widths` names set, in
+/// charstring units before the `FontMatrix`.
+///
+/// A width is the first operand of a charstring's first stack-clearing
+/// operator, over its Private DICT's `nominalWidthX` (Type 2 charstring
+/// specification, §3.1): replaced where the charstring states one, and
+/// written there where it takes `defaultWidthX` — an integer where the
+/// difference is one, a 16.16 fraction where it is not. A charstring whose
+/// first operator is a subroutine call, or any operator but a stack-clearing
+/// one, states its width where a static rewrite cannot reach, and a width
+/// asked of it declines the subset. A glyph the subset does not keep has no
+/// width to set, and its entry is passed over. Every width set is read back
+/// from the output before it is answered, as every kept outline is.
+#[must_use]
+pub fn subset_cff_with(
+    program: &[u8],
+    glyphs: &BTreeSet<u16>,
+    widths: &BTreeMap<u16, f64>,
+) -> Option<Vec<u8>> {
     let cff = Cff::parse(program)?;
 
     // The structures, read again here rather than borrowed from the reader:
@@ -952,7 +974,20 @@ pub fn subset_cff(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
         }
         let code = charstrings.get(gid)?;
         let ctx = context.get(gid).copied().unwrap_or(top_context);
-        new_charstrings.push(rewrite(ctx, Kind::Charstring, gid, code)?);
+        let rewritten = rewrite(ctx, Kind::Charstring, gid, code)?;
+        new_charstrings.push(match widths.get(&glyph) {
+            Some(&width) => {
+                let nominal = privates
+                    .get(ctx)
+                    .and_then(Option::as_ref)
+                    .and_then(|private| dict_get(&private.dict, 21))
+                    .and_then(<[f64]>::first)
+                    .copied()
+                    .unwrap_or(0.0);
+                with_width(&rewritten, width - nominal)?
+            }
+            None => rewritten,
+        });
     }
     let charstrings_bytes = write_index(&new_charstrings)?;
 
@@ -1148,7 +1183,118 @@ pub fn subset_cff(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
         out.extend_from_slice(&write_index(&items)?);
     }
 
-    verify(program, &out, &walk.keep).then_some(out)
+    let widths_hold = || {
+        let Some(after) = Cff::parse(&out) else {
+            return false;
+        };
+        widths
+            .iter()
+            .filter(|(glyph, _)| walk.keep.contains(glyph))
+            .all(|(&glyph, &width)| {
+                after
+                    .advance(glyph)
+                    .is_some_and(|advance| (advance - width).abs() < WIDTH_EPSILON)
+            })
+    };
+    (verify(program, &out, &walk.keep) && widths_hold()).then_some(out)
+}
+
+/// How far a width read back may be from the width set: a 16.16 fraction's
+/// rounding, with room.
+const WIDTH_EPSILON: f64 = 1e-4;
+
+/// Where a charstring states its width, read from its start up to its first
+/// operator (Type 2 charstring specification, §3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidthSite {
+    /// The first operand, at these bytes, is the width over `nominalWidthX`.
+    Stated(usize, usize),
+    /// The first stack-clearing operator takes no width operand, and the
+    /// glyph takes `defaultWidthX`.
+    Default,
+}
+
+/// Where `code` states its width, or `None` where no static reading can
+/// say: its first operator is a subroutine call, an escape, `return`, or a
+/// drawing operator before any stack-clearing one, or an operand runs off
+/// its end.
+///
+/// The counts are the reader's (`cff.rs`'s `take_width`): an odd count
+/// before a stem operator or a hint mask, more than two before `rmoveto`,
+/// more than one before `hmoveto` or `vmoveto`, and before `endchar` more
+/// than none, or than four where four or more are there, which is `seac`.
+fn width_site(code: &[u8]) -> Option<WidthSite> {
+    let mut operands: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0usize;
+    loop {
+        let byte = *code.get(at)?;
+        let size = match byte {
+            28 => 3,
+            32..=246 => 1,
+            247..=254 => 2,
+            255 => 5,
+            operator => {
+                let count = operands.len();
+                let stated = match operator {
+                    // hstem, vstem, hstemhm, vstemhm, hintmask, cntrmask.
+                    1 | 3 | 18 | 23 | 19 | 20 => count % 2 == 1,
+                    // rmoveto.
+                    21 => count > 2,
+                    // hmoveto, vmoveto.
+                    22 | 4 => count > 1,
+                    // endchar, with `seac`'s four.
+                    14 => count > if count >= 4 { 4 } else { 0 },
+                    _ => return None,
+                };
+                return Some(match operands.first() {
+                    Some(&(start, end)) if stated => WidthSite::Stated(start, end),
+                    _ => WidthSite::Default,
+                });
+            }
+        };
+        let end = at.checked_add(size)?;
+        code.get(at..end)?;
+        operands.push((at, end));
+        at = end;
+    }
+}
+
+/// `value` as a Type 2 operand: an integer where it is one and fits, a 16.16
+/// fraction otherwise, or `None` where neither holds it.
+fn width_operand(value: f64) -> Option<Vec<u8>> {
+    if !value.is_finite() {
+        return None;
+    }
+    let whole = value.round();
+    if (value - whole).abs() < 1e-9 && (-32_768.0..=32_767.0).contains(&whole) {
+        return charstring_int(whole as i32);
+    }
+    let fixed = (value * 65_536.0).round();
+    if !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&fixed) {
+        return None;
+    }
+    let mut out = vec![255u8];
+    out.extend_from_slice(&(fixed as i32).to_be_bytes());
+    Some(out)
+}
+
+/// `code` with its width operand `value`: the stated one replaced, or one
+/// written before the first operand where the glyph took the default.
+fn with_width(code: &[u8], value: f64) -> Option<Vec<u8>> {
+    let operand = width_operand(value)?;
+    let mut out = Vec::with_capacity(code.len() + operand.len());
+    match width_site(code)? {
+        WidthSite::Stated(start, end) => {
+            out.extend_from_slice(code.get(..start)?);
+            out.extend_from_slice(&operand);
+            out.extend_from_slice(code.get(end..)?);
+        }
+        WidthSite::Default => {
+            out.extend_from_slice(&operand);
+            out.extend_from_slice(code);
+        }
+    }
+    Some(out)
 }
 
 /// Outlines every retained glyph in both programs and compares the segments.

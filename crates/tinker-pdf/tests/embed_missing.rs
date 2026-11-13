@@ -19,9 +19,9 @@ use embed_support::{
 };
 use tinker_pdf::write::{save, SaveOptions, Saved};
 use tinker_pdf::{
-    Document, EmbedReport, EmbeddedFormat, FontEmbedding, FontKind, FontPolicy, FontProvider,
-    FontRequest, LeftFont, LeftReason, ObjRef, ProgramKey, RenderOptions, RenderWarning,
-    SubsetOutcome,
+    Document, EmbedReport, EmbedWarning, EmbeddedFormat, FontEmbedding, FontKind, FontPolicy,
+    FontProvider, FontRequest, LeftFont, LeftReason, ObjRef, ProgramKey, RenderOptions,
+    RenderWarning, SubsetOutcome,
 };
 
 /// What a page draws and reads as.
@@ -727,4 +727,111 @@ fn a_composite_font_is_left_and_named() {
             reason: LeftReason::Composite,
         }]
     );
+}
+
+/// The embedded font's program, as the output holds it.
+fn embedded_program(document: &Document) -> Vec<u8> {
+    document
+        .fonts()
+        .into_iter()
+        .find(|font| font.is_embedded())
+        .and_then(|font| font.program_bytes())
+        .expect("the font embeds a program that decodes")
+}
+
+/// **The row's exit** (FT-12.4): a face whose advances differ from `/Widths`
+/// on two drawn codes gives exactly two warnings, each carrying both widths,
+/// and a metric-compatible face none; the rewritten page still draws as the
+/// provider face drew it — the pen moves by `/Widths` either way — and the
+/// embedded program's advances are the dictionary's.
+#[test]
+fn each_width_mismatch_is_a_typed_warning() {
+    let metric = sans();
+    let source = truetype_page(&metric, "ABBA CAB");
+    let compatible = report_of(&embedded(
+        &source,
+        &provider(metric.truetype()),
+        FontPolicy::Keep,
+    ));
+    assert_eq!(compatible.embedded.len(), 1);
+    assert_eq!(compatible.warnings, [], "a metric-compatible face has none");
+
+    let off = sans().with_advance('A', 650).with_advance('B', 540);
+    let provider = provider(off.truetype());
+    let before = drawn(&opened_with(&source, &provider));
+    let saved = embedded(&source, &provider, FontPolicy::Keep);
+    let report = report_of(&saved);
+    let font = report.embedded.first().expect("the font is embedded").font;
+    assert_eq!(
+        report.warnings,
+        [
+            EmbedWarning::WidthMismatch {
+                font,
+                code: u32::from(b'A'),
+                dictionary: 600.0,
+                program: 650.0,
+            },
+            EmbedWarning::WidthMismatch {
+                font,
+                code: u32::from(b'B'),
+                dictionary: 600.0,
+                program: 540.0,
+            },
+        ]
+    );
+
+    let rewritten = written_support::rewritten("mismatched widths", &source, &saved.bytes);
+    assert_eq!(
+        drawn(&rewritten).fingerprint,
+        before.fingerprint,
+        "the pen moved by /Widths before and moves by it now"
+    );
+    let program = embedded_program(&rewritten);
+    let sfnt = tinker_pdf_font::Sfnt::parse(&program).expect("the cut is an sfnt");
+    for ch in ['A', 'B', 'C', ' '] {
+        let glyph = off.glyph_of(ch).expect("the face has it");
+        assert_eq!(
+            sfnt.advance(glyph),
+            Some(600),
+            "{ch:?}: the program's advance is the dictionary's"
+        );
+    }
+}
+
+/// A CFF face's widths are its charstrings' width operands, and the pass
+/// sets those as it sets `hmtx`: two warnings for two codes off, and a
+/// program whose glyphs advance by the dictionary's widths.
+#[test]
+fn a_cff_faces_widths_are_set_too() {
+    let source = truetype_page(&sans(), "ABBA CAB");
+    let off = sans().with_advance('A', 650).with_advance('B', 540);
+    let provider = provider(off.cff());
+    let before = drawn(&opened_with(&source, &provider));
+    let saved = embedded(&source, &provider, FontPolicy::Keep);
+    let report = report_of(&saved);
+    assert_eq!(report.embedded.len(), 1, "{report:?}");
+    assert_eq!(report.embedded[0].format, EmbeddedFormat::Type1C);
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .map(|warning| match warning {
+                EmbedWarning::WidthMismatch { code, program, .. } => (*code, *program),
+            })
+            .collect::<Vec<_>>(),
+        [(u32::from(b'A'), 650.0), (u32::from(b'B'), 540.0)]
+    );
+
+    let rewritten = written_support::rewritten("a CFF face's widths", &source, &saved.bytes);
+    assert_eq!(drawn(&rewritten).fingerprint, before.fingerprint);
+    let program = embedded_program(&rewritten);
+    let cff = tinker_pdf_font::Cff::parse(&program).expect("the cut is a CFF");
+    for ch in ['A', 'B', 'C'] {
+        let glyph = off.glyph_of(ch).expect("the face has it");
+        assert_eq!(
+            cff.advance(glyph),
+            Some(600.0),
+            "{ch:?}: the charstring's width is the dictionary's"
+        );
+    }
 }
