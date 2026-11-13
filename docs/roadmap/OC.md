@@ -17,13 +17,12 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Exit criterion.** imported layers extract as the imported text in the imported order; every word's box equals the file's; the page renders unchanged
 
-**Doc:** `design/ocr.md` (owed) · **Depends on:** FT-24
+**Doc:** [design/ocr.md](../design/ocr.md) · **Depends on:** FT-24
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| OC-01.1 | design | Create `docs/design/ocr.md`: the tier's in-tree pipeline, the import seam, searchable output, preprocessing, geometry, orientation and script; the glyph-less font fitted to word boxes; first-party synthetic pages as the adjudicator under ruling 13, real scans only with ground truth a person transcribed (H-71); milestones with exit tests. | `docs/design/ocr.md` (new) | The doc exists in the design-doc order, names OC-01.2 and OC-01.3's exit tests. | — |
-| OC-01.2 | build | hOCR, ALTO and PAGE XML read from an outside recogniser into FT-24's word-box model: words, boxes, lines, blocks, order and confidence. | `crates/tinker-pdf/src/ocr/import.rs` (new), `crates/tinker-pdf/src/ocr/mod.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/ocr_import.rs` (new) | `ocr_import.rs` (new): a hand-written file of each format reads to the words, boxes and order it states. | OC-01.1, FT-24.3 |
-| OC-01.3 | build | The imported words written as an invisible text layer, render mode 3, in a glyph-less font whose advances are fitted to each word's box, with `/ToUnicode`. | `crates/tinker-pdf/src/ocr/layer.rs` (new), `crates/tinker-pdf/tests/ocr_import.rs` (new) | The layer extracts as the imported text in the imported order, every word's box equals the file's, and the page renders to the same pixels as before. | OC-01.2 |
+| OC-01.2 | build | hOCR, ALTO and PAGE XML read from an outside recogniser into FT-24's word-box model: words, boxes, lines, blocks, order and confidence. *Note:* The import parses untrusted markup, so it lands with its fuzz target (ruling 1), and `docs/features/ocr.md` describes it. | `crates/tinker-pdf/src/ocr/import.rs` (new), `crates/tinker-pdf/src/ocr/mod.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/ocr_import.rs` (new), `fuzz/fuzz_targets/ocr_import.rs` (new), `fuzz/corpus/ocr_import` (new), `fuzz/Cargo.toml`, `xtask/src/fuzzaudit.rs`, `docs/features/ocr.md` (new), `docs/README.md` | `ocr_import.rs` (new): a hand-written file of each format reads to the words, boxes and order it states, with the tests `docs/design/ocr.md`'s first milestone names; the `ocr_import` fuzz target, seeded with those files, keeps `cargo xtask fuzz` green. | OC-01.1, FT-24.3 |
+| OC-01.3 | build | The imported words written as an invisible text layer, render mode 3, in a glyph-less font whose advances are fitted to each word's box, with `/ToUnicode`. | `crates/tinker-pdf/src/ocr/layer.rs` (new), `crates/tinker-pdf/src/ocr/mod.rs` (new), `crates/tinker-pdf/tests/ocr_import.rs` (new), `docs/features/ocr.md` (new) | The layer extracts as the imported text in the imported order, every word's box equals the file's, and the page renders to the same pixels as before, with the tests `docs/design/ocr.md`'s second milestone names. | OC-01.2 |
 | OC-01.4 | build | Create the crate `tinker-pdf-ocr`: a workspace member with a `[workspace.dependencies]` entry and `#![forbid(unsafe_code)]`, declared in xtask's `ALLOWED` with the edges `docs/design/ocr.md` gives it, added to the libm check's `PIXEL_PATHS` since its arithmetic is pinned, and `docs/architecture.md` amended (the crate count, the graph, the per-crate map). *Note:* As FJ-01.2 creates `tinker-pdf-script`. The crate serves the tier, not this row's exit; every step that adds a file to it waits on this one. | `Cargo.toml`, `crates/tinker-pdf-ocr/Cargo.toml` (new), `crates/tinker-pdf-ocr/src/lib.rs` (new), `xtask/src/main.rs`, `docs/architecture.md` | `cargo xtask check` is green (dag, libm, versions) with the crate in it, and `cargo test -p tinker-pdf-ocr` runs. | OC-01.1 |
 
 ## OC-02 — Searchable-PDF output
@@ -32,11 +31,11 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Exit criterion.** the layer's words fall inside their image boxes (counted in the test); PDF/A output passes SD-01
 
-**Doc:** `design/ocr.md` (owed) · **Depends on:** OC-01
+**Doc:** [design/ocr.md](../design/ocr.md) · **Depends on:** OC-01
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| OC-02.1 | design | Add searchable-PDF output to `docs/design/ocr.md`: the image kept byte for byte, the layer per page or per region, PDF/A on request. | `docs/design/ocr.md` (new) | The section exists, names OC-02.2 and OC-02.3's exit tests. | OC-01.1 |
+| OC-02.1 | design | Add searchable-PDF output to `docs/design/ocr.md`: the image kept byte for byte, the layer per page or per region, PDF/A on request. | `docs/design/ocr.md` | The section exists, names OC-02.2 and OC-02.3's exit tests. | OC-01.1 |
 | OC-02.2 | build | Searchable output: the recognised or imported words layered over the original image, per page or region, through OC-01.3's layer. | `crates/tinker-pdf/src/ocr/layer.rs` (new), `crates/tinker-pdf/tests/ocr_searchable.rs` (new), `docs/features/ocr.md` (new), `docs/README.md` | `ocr_searchable.rs` (new): every word falls inside its image box, counted in the test, and the image stream is byte-identical to the source's. | OC-02.1, OC-01.3 |
 | OC-02.3 | build | PDF/A output on request, the layer carried under the archival profile. | `crates/tinker-pdf/src/ocr/layer.rs` (new), `crates/tinker-pdf/tests/ocr_searchable.rs` (new) | Searchable PDF/A output passes the PDF/A validator at its level with zero findings. | OC-02.2 |
 
@@ -46,11 +45,11 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Exit criterion.** each operation held to its formula computed in the test over generated images; determinism on four targets
 
-**Doc:** `design/ocr.md` (owed) · **Depends on:** —
+**Doc:** [design/ocr.md](../design/ocr.md) · **Depends on:** —
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| OC-03.1 | design | Add preprocessing to `docs/design/ocr.md`: each operation's formula in integer arithmetic, the synthetic page generator the tier tests against, and determinism across targets. | `docs/design/ocr.md` (new) | The section exists, names OC-03.2 to OC-03.6's exit tests. | OC-01.1 |
+| OC-03.1 | design | Add preprocessing to `docs/design/ocr.md`: each operation's formula in integer arithmetic, the synthetic page generator the tier tests against, and determinism across targets. | `docs/design/ocr.md` | The section exists, names OC-03.2 to OC-03.6's exit tests. | OC-01.1 |
 | OC-03.2 | test | The synthetic page generator: known text and layouts rendered through the engine and degraded deterministically, with noise, blur, skew, warp and ink spread, from a seed. | `crates/tinker-pdf/src/ocr/synth.rs` (new), `crates/tinker-pdf/tests/ocr_synth.rs` (new) | `ocr_synth.rs` (new): a page from a seed is byte-identical across runs, and its ground truth lists every word with its box; in the default and `bundled-fonts` builds. | OC-03.1, OC-01.2 |
 | OC-03.3 | build | Binarisation in integer arithmetic: global, Sauvola and adaptive. | `crates/tinker-pdf-ocr/src/preprocess.rs` (new), `crates/tinker-pdf-ocr/src/lib.rs` (new), `crates/tinker-pdf-ocr/tests/preprocess.rs` (new) | `preprocess.rs` (new): each method's output equals its formula computed in the test over generated images. | OC-03.2, OC-01.4 |
 | OC-03.4 | build | Despeckling, border and background removal, and colour dropout. | `crates/tinker-pdf-ocr/src/preprocess.rs` (new), `crates/tinker-pdf-ocr/tests/preprocess.rs` (new) | Each operation's output equals its formula computed in the test over generated images. | OC-03.3 |
@@ -63,11 +62,11 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Exit criterion.** generated pages rotated by known angles recover them within 0.1°; warped quadrilaterals map back within a pixel
 
-**Doc:** `design/ocr.md` (owed) · **Depends on:** —
+**Doc:** [design/ocr.md](../design/ocr.md) · **Depends on:** —
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| OC-04.1 | design | Add skew and geometry to `docs/design/ocr.md`: the skew estimator, the border policy, document detection in photographs and the perspective warp. | `docs/design/ocr.md` (new) | The section exists, names OC-04.2 and OC-04.3's exit tests. | OC-01.1 |
+| OC-04.1 | design | Add skew and geometry to `docs/design/ocr.md`: the skew estimator, the border policy, document detection in photographs and the perspective warp. | `docs/design/ocr.md` | The section exists, names OC-04.2 and OC-04.3's exit tests. | OC-01.1 |
 | OC-04.2 | build | Skew detection and deskew with a border policy. | `crates/tinker-pdf-ocr/src/geometry.rs` (new), `crates/tinker-pdf-ocr/tests/geometry.rs` (new) | `geometry.rs` (new): generated pages rotated by known angles recover them within 0.1°, the border filled as the policy says. | OC-04.1, OC-03.2, OC-01.4 |
 | OC-04.3 | build | Document detection in photographs and the perspective warp back to a flat page. | `crates/tinker-pdf-ocr/src/geometry.rs` (new), `crates/tinker-pdf-ocr/tests/geometry.rs` (new) | Generated warped quadrilaterals map back within a pixel. | OC-04.2 |
 
@@ -77,11 +76,11 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Exit criterion.** generated pages in each orientation and script classified correctly at the rate the design states
 
-**Doc:** `design/ocr.md` (owed) · **Depends on:** OC-07
+**Doc:** [design/ocr.md](../design/ocr.md) · **Depends on:** OC-07
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| OC-05.1 | design | Add orientation and script detection to `docs/design/ocr.md`: the classifier, its model, the rates it must reach, and the auto-rotate threshold. *Note:* Built toward H-38's default scope: printed text first, handwriting last. | `docs/design/ocr.md` (new) | The section exists, states the rates, names OC-05.2 and OC-05.3's exit tests. | OC-01.1 |
+| OC-05.1 | design | Add orientation and script detection to `docs/design/ocr.md`: the classifier, its model, the rates it must reach, and the auto-rotate threshold. *Note:* Built toward H-38's default scope: printed text first, handwriting last. | `docs/design/ocr.md` | The section exists, states the rates, names OC-05.2 and OC-05.3's exit tests. | OC-01.1 |
 | OC-05.2 | build | Orientation detection on the recognition runtime, with an auto-rotate threshold, its model trained by `cargo xtask train`. | `crates/tinker-pdf-ocr/src/orientation.rs` (new), `crates/tinker-pdf-ocr/tests/orientation.rs` (new) | `orientation.rs` (new): generated pages in each orientation are classified at the rate the design states; below the threshold nothing rotates. | OC-05.1, OC-07, OC-08a.2 |
 | OC-05.3 | build | Script detection per page and block over the scripts the models cover. | `crates/tinker-pdf-ocr/src/orientation.rs` (new), `crates/tinker-pdf-ocr/tests/orientation.rs` (new) | Generated pages in each script are classified at the rate the design states. | OC-05.2 |
 
