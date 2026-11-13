@@ -1,0 +1,49 @@
+//! Apple Advanced Typography: the tables a face built for Apple's layout
+//! carries its shaping in.
+//!
+//! `docs/design/shaping.md`, *AAT shaping*, reads them clause by clause from
+//! Apple's *TrueType Reference Manual* and from nothing else (ruling 21): its
+//! *AAT special tables* chapter for the two structures every AAT table is made
+//! of, and the chapters of the tables themselves. This module holds the
+//! shared machinery:
+//!
+//! - [`Lookup`], the lookup table in each of the six formats the manual
+//!   defines, a glyph in and a value out;
+//! - [`StateTable`], the extended state table — its class lookup, its state
+//!   array and its entry table — and [`StateTable::run`], the one driver
+//!   every machine runs on, a subtable's [`Actions`] acting at each
+//!   transition, under the ceiling [`crate::Limits::max_transitions`] puts on
+//!   a machine that never advances.
+//!
+//! Everything is integer, as the rest of the crate is (`lib.rs`), and every
+//! read is a bounds check, so a truncated table or an offset past its end
+//! answers nothing and never panics (ruling 1). What a table asks for that
+//! this crate refuses is a [`crate::Warning`] naming where in the table it
+//! was asked ([`Site`]), recorded once a run (ruling 10).
+
+mod lookup;
+mod state;
+
+pub use lookup::{Lookup, LookupError, LookupFormat};
+pub use state::{
+    Actions, Cursor, Entry, StateError, StateTable, Traversal, DELETED, DELETED_GLYPH,
+    DONT_ADVANCE, END_OF_LINE, END_OF_TEXT, OUT_OF_BOUNDS,
+};
+
+use crate::common::Tag;
+
+/// Where in an AAT table something was refused: the table, by its tag, and
+/// the chain and the subtable, each counted from zero in table order.
+///
+/// Ruling 10's provenance for a table this crate reads by position rather
+/// than by name: "subtable 3 of chain 0 of `morx`" is the sentence a face's
+/// author can find. A table without chains, as `kerx` is, is chain 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Site {
+    /// The table, as the face's table directory spells it.
+    pub table: Tag,
+    /// The chain, counting from zero.
+    pub chain: u32,
+    /// The subtable within its chain, counting from zero.
+    pub subtable: u32,
+}

@@ -8,7 +8,9 @@
 //! which map text to glyphs and decide which features run, and UAX #9
 //! ([`bidi`]). [`graphite`] reads a Graphite description's tables, which no
 //! run is shaped through yet (`docs/design/shaping.md`, *Graphite shaping*),
-//! and the standard's `JSTF`, a face's justification suggestions, is read by
+//! [`aat`] the structures Apple Advanced Typography's tables are built of,
+//! which no run is shaped through yet either (*AAT shaping*), and the
+//! standard's `JSTF`, a face's justification suggestions, is read by
 //! [`jstf`].
 //!
 //! **The eleventh leaf.** Ruling 8's August 2026 amendment makes the test of
@@ -81,6 +83,7 @@
 #![deny(missing_docs)]
 #![deny(clippy::float_arithmetic)]
 
+pub mod aat;
 mod apply;
 mod arabic;
 pub mod bidi;
@@ -247,6 +250,33 @@ pub enum Warning {
     TableNotRun {
         /// The table, as the face's table directory spells it.
         table: Tag,
+    },
+    /// An AAT state machine took [`Limits::max_transitions`] transitions in
+    /// one subtable without finishing its run, so it stopped where it stood
+    /// and the run is as it left it.
+    ///
+    /// What a machine whose entries hold their position with `dontAdvance`
+    /// and never let go produces; text-rendering-tests `MORX-24` and
+    /// `MORX-36` are two (`docs/design/shaping.md`, *Warnings and
+    /// ceilings*).
+    TransitionBudgetExceeded {
+        /// The subtable whose machine stopped.
+        site: aat::Site,
+    },
+    /// An AAT subtable whose header could not be read, or whose machine
+    /// needed a state, an entry or a class column its tables do not hold, so
+    /// the subtable did not run, or stopped where that was asked.
+    MalformedAatSubtable {
+        /// The subtable.
+        site: aat::Site,
+    },
+    /// An AAT lookup table of a format the manual does not define, so it
+    /// answered nothing for any glyph.
+    UnknownLookupFormat {
+        /// The subtable holding the lookup table.
+        site: aat::Site,
+        /// The format it claimed.
+        format: u16,
     },
 }
 

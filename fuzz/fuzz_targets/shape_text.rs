@@ -357,6 +357,7 @@ fuzz_target!(|data: &[u8]| {
         max_attribute_runs: Limits::DEFAULT.max_attribute_runs,
         max_passes: Limits::DEFAULT.max_passes,
         max_rule_candidates: Limits::DEFAULT.max_rule_candidates,
+        max_transitions: Limits::DEFAULT.max_transitions,
     };
     // The same ceilings with an index ceiling too small to keep anything, so
     // every stage falls back to resolving per run.

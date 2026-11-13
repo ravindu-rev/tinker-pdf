@@ -436,6 +436,7 @@ fuzz_target!(|data: &[u8]| {
         max_attribute_runs: Limits::DEFAULT.max_attribute_runs,
         max_passes: Limits::DEFAULT.max_passes,
         max_rule_candidates: Limits::DEFAULT.max_rule_candidates,
+        max_transitions: Limits::DEFAULT.max_transitions,
     };
     let marks = if more & 4 == 0 {
         MarkWidths::ZeroByGdef

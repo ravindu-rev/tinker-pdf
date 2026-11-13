@@ -15,11 +15,17 @@
 //! whose expected output their authors wrote, are what hold the chain to
 //! faces a compiler built (`tests/text_rendering.rs`).
 
+use std::collections::BTreeMap;
 use tinker_pdf_font::Sfnt;
+
+use tinker_pdf_shape::aat::{
+    Cursor, Entry, Lookup, LookupError, LookupFormat, Site, StateError, StateTable, Traversal,
+    DELETED, DELETED_GLYPH, END_OF_TEXT, OUT_OF_BOUNDS,
+};
 use tinker_pdf_shape::bidi::{BaseDirection, Level};
 use tinker_pdf_shape::shape::Run;
 use tinker_pdf_shape::unicode::Script;
-use tinker_pdf_shape::{Orientation, ShapedGlyph, ShapedRun, Shaper, Tag, Warning};
+use tinker_pdf_shape::{Buffer, Limits, Orientation, ShapedGlyph, ShapedRun, Shaper, Tag, Warning};
 
 // --- bytes ---------------------------------------------------------------
 
@@ -672,4 +678,684 @@ fn a_silf_beside_an_aat_table_is_named_once() {
     let sfnt = Sfnt::parse(&bytes).expect("the face parses");
     let runs = line_runs(&Shaper::new(&sfnt), "fix");
     assert_eq!(runs[0].warnings(), &[not_run(b"Silf")]);
+}
+
+// --- the shared machinery (FT-07c.4) -------------------------------------
+//
+// Lookup tables in each format, extended state tables, and the driver every
+// machine runs on, read as *AAT special tables* defines them.
+
+/// `value` as `size` big-endian bytes.
+fn sized(value: u64, size: u16) -> Vec<u8> {
+    let bytes = value.to_be_bytes();
+    bytes[8 - usize::from(size)..].to_vec()
+}
+
+/// A value of `size` bytes with every byte set and none of them a guard's
+/// `0xFF`.
+fn large(size: u16) -> u64 {
+    match size {
+        1 => 0xAB,
+        2 => 0xABCD,
+        4 => 0xABCD_EF01,
+        _ => 0xABCD_EF01_2345_6789,
+    }
+}
+
+/// A format 0 lookup table: one two-byte value a glyph, from glyph 0.
+fn lookup_simple(values: &[u16]) -> Vec<u8> {
+    let mut out = u16s(&[0]);
+    out.extend(u16s(values));
+    out
+}
+
+/// A format 2 lookup table: segments `(first, last, value)`, each sharing
+/// one value of `size` bytes, sorted by last glyph, with the guard.
+fn lookup_segments(size: u16, segments: &[(u16, u16, u64)]) -> Vec<u8> {
+    let unit = 4 + size;
+    let mut sorted = segments.to_vec();
+    sorted.sort_by_key(|(_, last, _)| *last);
+    let units = count16(sorted.len());
+    let [range, selector, shift] = search_fields(unit, units);
+    let mut out = u16s(&[2, unit, units, range, selector, shift]);
+    for (first, last, value) in &sorted {
+        out.extend(u16s(&[*last, *first]));
+        out.extend(sized(*value, size));
+    }
+    out.extend(u16s(&[0xFFFF, 0xFFFF]));
+    out.extend(sized(0, size));
+    out
+}
+
+/// A format 4 lookup table: segments `(first, values)`, in glyph order,
+/// each with a value a glyph in an array after the guard, at the offset the
+/// segment states from the start of the table.
+fn lookup_segment_array(segments: &[(u16, Vec<u16>)]) -> Vec<u8> {
+    let units = count16(segments.len());
+    let [range, selector, shift] = search_fields(6, units);
+    let header = 12 + 6 * (segments.len() + 1);
+    let mut out = u16s(&[4, 6, units, range, selector, shift]);
+    let mut arrays: Vec<u8> = Vec::new();
+    for (first, values) in segments {
+        let last = first + count16(values.len()) - 1;
+        let offset = count16(header + arrays.len());
+        out.extend(u16s(&[last, *first, offset]));
+        arrays.extend(u16s(values));
+    }
+    out.extend(u16s(&[0xFFFF, 0xFFFF, 0]));
+    out.extend(arrays);
+    out
+}
+
+/// A format 6 lookup table: `(glyph, value)` pairs with values of `size`
+/// bytes, sorted, with the guard.
+fn lookup_pairs(size: u16, pairs: &[(u16, u64)]) -> Vec<u8> {
+    let unit = 2 + size;
+    let mut sorted = pairs.to_vec();
+    sorted.sort_unstable();
+    let units = count16(sorted.len());
+    let [range, selector, shift] = search_fields(unit, units);
+    let mut out = u16s(&[6, unit, units, range, selector, shift]);
+    for (glyph, value) in &sorted {
+        out.extend(u16s(&[*glyph]));
+        out.extend(sized(*value, size));
+    }
+    out.extend(u16s(&[0xFFFF]));
+    out.extend(sized(0, size));
+    out
+}
+
+/// A format 8 lookup table: two-byte values from glyph `first`.
+fn lookup_trimmed(first: u16, values: &[u16]) -> Vec<u8> {
+    let mut out = u16s(&[8, first, count16(values.len())]);
+    out.extend(u16s(values));
+    out
+}
+
+/// A format 10 lookup table: values of `size` bytes from glyph `first`.
+fn lookup_extended(size: u16, first: u16, values: &[u64]) -> Vec<u8> {
+    let mut out = u16s(&[10, size, first, count16(values.len())]);
+    for value in values {
+        out.extend(sized(*value, size));
+    }
+    out
+}
+
+/// Pads `bytes` to a multiple of four, as a state table's parts are.
+fn pad4(bytes: &mut Vec<u8>) {
+    while bytes.len() % 4 != 0 {
+        bytes.push(0);
+    }
+}
+
+/// Writes `value` as a `uint32` at `at`.
+fn put32(bytes: &mut [u8], at: usize, value: u32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+/// An extended state table: an `STXHeader` of `classes` and the offsets of
+/// its three parts, then `words` more header words, zero, for the subtable
+/// that embeds it to fill, then the class lookup table, the state array —
+/// one line of entry indices a state — and the entry table, each padded to
+/// four bytes.
+fn stx(
+    classes: u32,
+    words: usize,
+    class_table: &[u8],
+    states: &[&[u16]],
+    entries: &[&[u16]],
+) -> Vec<u8> {
+    let mut out = vec![0u8; 16 + 4 * words];
+    put32(&mut out, 0, classes);
+    let class_at = out.len();
+    out.extend_from_slice(class_table);
+    pad4(&mut out);
+    let state_at = out.len();
+    for line in states {
+        out.extend(u16s(line));
+    }
+    pad4(&mut out);
+    let entry_at = out.len();
+    for entry in entries {
+        out.extend(u16s(entry));
+    }
+    pad4(&mut out);
+    put32(&mut out, 4, count32(class_at));
+    put32(&mut out, 8, count32(state_at));
+    put32(&mut out, 12, count32(entry_at));
+    out
+}
+
+/// Where the tests below say a refusal happens.
+fn site(subtable: u32) -> Site {
+    Site {
+        table: Tag::new(b"morx"),
+        chain: 0,
+        subtable,
+    }
+}
+
+/// One lookup table of the tests below: its format, its bytes, and the
+/// value each glyph it covers answers.
+type LookupCase = (LookupFormat, Vec<u8>, BTreeMap<u16, u64>);
+
+/// Every lookup table the tests below read.
+fn lookup_cases() -> Vec<LookupCase> {
+    let mut cases = Vec::new();
+
+    // Format 0: as long as its table, so glyph 6 on answers nothing; a value
+    // of `0xFFFF` is a value here, there being no search to guard.
+    let values = [7u16, 0, 9, 0xFFFF, 3, 1];
+    cases.push((
+        LookupFormat::SimpleArray,
+        lookup_simple(&values),
+        (0u16..)
+            .zip(values)
+            .map(|(glyph, value)| (glyph, u64::from(value)))
+            .collect(),
+    ));
+
+    // Format 2, at every value size: segments of one glyph and of many, a
+    // gap between two, and fifty more to give the search some depth.
+    for size in [1u16, 2, 4, 8] {
+        let mut segments = vec![(10u16, 19u16, 1u64), (25, 25, 2), (30, 40, large(size))];
+        for n in 0..50u16 {
+            segments.push((1000 + n * 10, 1000 + n * 10 + 4, u64::from(n % 7)));
+        }
+        let expected = segments
+            .iter()
+            .flat_map(|(first, last, value)| (*first..=*last).map(move |glyph| (glyph, *value)))
+            .collect();
+        cases.push((
+            LookupFormat::SegmentSingle,
+            lookup_segments(size, &segments),
+            expected,
+        ));
+    }
+
+    // Format 4: a value a glyph, a zero among them, which is a value.
+    let segments = vec![
+        (50u16, vec![500u16, 501, 502]),
+        (60, vec![600]),
+        (70, vec![0, 701]),
+        (0xFFF0, vec![1, 2]),
+    ];
+    let expected = segments
+        .iter()
+        .flat_map(|(first, values)| {
+            (*first..)
+                .zip(values.clone())
+                .map(|(glyph, value)| (glyph, u64::from(value)))
+        })
+        .collect();
+    cases.push((
+        LookupFormat::SegmentArray,
+        lookup_segment_array(&segments),
+        expected,
+    ));
+
+    // Format 6, at every value size: a hundred pairs, and one at the top of
+    // the glyph range below the guard.
+    for size in [1u16, 2, 4, 8] {
+        let mut pairs: Vec<(u16, u64)> =
+            (0..100u16).map(|n| (n * 2 + 3, u64::from(n) + 1)).collect();
+        pairs.push((0xFFFE, large(size)));
+        let expected = pairs.iter().copied().collect();
+        cases.push((
+            LookupFormat::SingleTable,
+            lookup_pairs(size, &pairs),
+            expected,
+        ));
+    }
+
+    // Format 8: glyphs 100 to 103.
+    let values = [1u16, 0, 3, 0xFFFF];
+    cases.push((
+        LookupFormat::TrimmedArray,
+        lookup_trimmed(100, &values),
+        (100u16..)
+            .zip(values)
+            .map(|(glyph, value)| (glyph, u64::from(value)))
+            .collect(),
+    ));
+
+    // Format 10, at every unit size, and up to the last glyph index.
+    for size in [1u16, 2, 4, 8] {
+        let values = [large(size), 0, 5];
+        cases.push((
+            LookupFormat::ExtendedTrimmedArray,
+            lookup_extended(size, 200, &values),
+            (200u16..).zip(values).collect(),
+        ));
+        cases.push((
+            LookupFormat::ExtendedTrimmedArray,
+            lookup_extended(size, 0xFFFD, &values),
+            (0xFFFDu16..=0xFFFF).zip(values).collect(),
+        ));
+    }
+    cases
+}
+
+/// Each format answers every glyph it covers with its value and every other
+/// glyph with nothing, every glyph index asked.
+#[test]
+fn every_lookup_format_answers_the_glyphs_it_covers_and_no_other() {
+    let cases = lookup_cases();
+    let formats: Vec<u16> = cases.iter().map(|(format, _, _)| format.number()).collect();
+    for number in [0u16, 2, 4, 6, 8, 10] {
+        assert!(formats.contains(&number), "format {number} is held");
+    }
+    for (format, table, expected) in &cases {
+        let lookup = Lookup::parse(table).expect("a readable lookup table");
+        assert_eq!(lookup.format(), *format);
+        for glyph in 0..=u16::MAX {
+            let want = expected.get(&glyph).copied();
+            assert_eq!(lookup.value(glyph), want, "{format:?}, glyph {glyph}");
+            assert_eq!(
+                lookup.value16(glyph),
+                want.and_then(|value| u16::try_from(value).ok()),
+                "{format:?}, glyph {glyph}, as sixteen bits"
+            );
+        }
+    }
+    // A format the manual does not define is named, and a header cut short
+    // is no table.
+    assert_eq!(
+        Lookup::parse(&u16s(&[3, 0, 0])).err(),
+        Some(LookupError::Format(3))
+    );
+    assert_eq!(Lookup::parse(&[0x00]).err(), Some(LookupError::Malformed));
+}
+
+/// A state table reads its class lookup, its state array a line a state and
+/// its entries a field at a time, and answers nothing for a class with no
+/// column, a state line or an entry it does not hold.
+#[test]
+fn a_state_table_reads_its_classes_states_and_entries() {
+    // Seven classes; glyphs 10 to 12 in classes 4 to 6, and glyph 13 in a
+    // class the state array has no column for.
+    let classes = lookup_single(&[(10, 4), (11, 5), (12, 6), (13, 9)]);
+    let lines: [&[u16]; 3] = [
+        &[0, 1, 0, 0, 2, 3, 0],
+        &[0, 1, 0, 0, 2, 3, 0],
+        &[4, 1, 0, 0, 5, 5, 6],
+    ];
+    // Entries of eight bytes: new state, flags and two fields, as a
+    // contextual subtable's are.
+    let entries: [&[u16]; 7] = [
+        &[0, 0, 0xFFFF, 0xFFFF],
+        &[0, 0x4000, 0xFFFF, 0xFFFF],
+        &[2, 0x8000, 0xFFFF, 0xFFFF],
+        &[2, 0, 0, 1],
+        &[0, 0, 1, 0xFFFF],
+        &[2, 0xC000, 0xFFFF, 0],
+        &[0, 0x2000, 3, 4],
+    ];
+    let bytes = stx(7, 1, &classes, &lines, &entries);
+    let table = StateTable::parse(&bytes, 8).expect("a readable state table");
+    assert_eq!(table.class_count(), 7);
+    assert_eq!(table.entry_size(), 8);
+
+    assert_eq!(table.class(10), 4);
+    assert_eq!(table.class(11), 5);
+    assert_eq!(table.class(12), 6);
+    assert_eq!(table.class(13), 9);
+    for glyph in [0u16, 9, 14, 500, 0xFFFE] {
+        assert_eq!(table.class(glyph), OUT_OF_BOUNDS, "glyph {glyph}");
+    }
+    assert_eq!(table.class(DELETED), DELETED_GLYPH);
+
+    for (state, line) in (0u16..).zip(lines) {
+        for (class, index) in (0u32..).zip(line.iter()) {
+            assert_eq!(
+                table.entry_index(state, class),
+                Some(*index),
+                "state {state}, class {class}"
+            );
+        }
+        assert_eq!(table.entry_index(state, 7), None, "no eighth column");
+        assert_eq!(table.entry_index(state, 9), None, "no tenth column");
+    }
+    assert_eq!(table.entry_index(1000, END_OF_TEXT), None, "no such line");
+
+    for (index, fields) in (0u16..).zip(entries) {
+        let entry: Entry<'_> = table.entry(index).expect("an entry");
+        assert_eq!(entry.new_state, fields[0]);
+        assert_eq!(entry.flags, fields[1]);
+        assert_eq!(entry.field(0), Some(fields[2]));
+        assert_eq!(entry.field(1), Some(fields[3]));
+        assert_eq!(entry.field(2), None, "an entry holds two fields");
+        assert_eq!(entry.dont_advance(), fields[1] & 0x4000 != 0);
+    }
+    assert_eq!(table.entry(7), None, "the table holds seven entries");
+    assert_eq!(table.transition(2, 4), table.entry(5));
+    assert_eq!(table.transition(0, 9), None);
+
+    // The same bytes read with four-byte entries give each entry's halves.
+    let narrow = StateTable::parse(&bytes, 4).expect("readable");
+    let second = narrow.entry(1).expect("an entry");
+    assert_eq!((second.new_state, second.flags), (0xFFFF, 0xFFFF));
+    assert_eq!(second.field(0), None);
+}
+
+/// Every transition the machine takes, as `(glyph, end of text)`.
+type Walk = Vec<(Option<usize>, bool)>;
+
+/// Runs `table` over `glyphs` the `traversal` way under `limits`, its actions
+/// recording each transition and doing nothing else.
+fn walk(
+    table: &StateTable<'_>,
+    glyphs: &[u16],
+    traversal: Traversal,
+    limits: &Limits,
+) -> (Result<(), Warning>, Walk) {
+    let mut buffer = Buffer::from_glyphs(glyphs);
+    let mut seen: Walk = Vec::new();
+    let mut record = |_: &mut Buffer, _: &Entry<'_>, cursor: &mut Cursor| -> Result<(), Warning> {
+        seen.push((cursor.glyph, cursor.end_of_text));
+        Ok(())
+    };
+    let result = table.run(&mut buffer, traversal, limits, site(0), &mut record);
+    (result, seen)
+}
+
+/// A machine that holds its position on glyphs 10 and 11, both class 4;
+/// every other glyph advances.
+fn holding_machine() -> Vec<u8> {
+    stx(
+        5,
+        0,
+        &lookup_single(&[(10, 4), (11, 4)]),
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[&[0, 0], &[0, 0x4000]],
+    )
+}
+
+/// A machine whose entries hold their position for ever stops at
+/// `Limits::max_transitions`, with a typed warning naming its subtable and
+/// the buffer as it stood: every action taken before the ceiling kept, and
+/// no end of text taken.
+#[test]
+fn a_machine_that_never_advances_stops_at_its_ceiling() {
+    let bytes = holding_machine();
+    let table = StateTable::parse(&bytes, 4).expect("readable");
+    for ceiling in [0u32, 1, 2, 3, 8, 64, 4_096] {
+        let limits = Limits {
+            max_transitions: ceiling,
+            ..Limits::DEFAULT
+        };
+        let mut buffer = Buffer::from_glyphs(&[5, 10, 6]);
+        let (mut taken, mut ends) = (0u32, 0u32);
+        // Each held transition turns glyph 10 into 11 and back: the class
+        // stays 4, so the machine never lets go.
+        let mut turn =
+            |buffer: &mut Buffer, entry: &Entry<'_>, cursor: &mut Cursor| -> Result<(), Warning> {
+                taken += 1;
+                ends += u32::from(cursor.end_of_text);
+                if entry.dont_advance() {
+                    let at = cursor.glyph.expect("a glyph");
+                    let glyph = buffer.glyph_mut(at).expect("in the run");
+                    glyph.glyph = 21 - glyph.glyph;
+                }
+                Ok(())
+            };
+        let result = table.run(&mut buffer, Traversal::Forward, &limits, site(3), &mut turn);
+        assert_eq!(
+            result,
+            Err(Warning::TransitionBudgetExceeded { site: site(3) }),
+            "ceiling {ceiling}"
+        );
+        assert_eq!(taken, ceiling, "every transition up to the ceiling");
+        assert_eq!(ends, 0, "the end of text is never reached");
+        // The first transition passes glyph 5; each after it turns the
+        // held glyph once.
+        let turns = ceiling.saturating_sub(1);
+        let held = if turns % 2 == 0 { 10 } else { 11 };
+        let glyphs: Vec<u16> = buffer.glyphs().iter().map(|g| g.glyph).collect();
+        assert_eq!(glyphs, vec![5, held, 6], "ceiling {ceiling}");
+    }
+
+    // A run of `n` glyphs the machine walks without holding takes `n + 1`
+    // transitions, the end of text's included: a ceiling of `n + 1` lets it
+    // finish and one of `n` stops it short of the end.
+    let glyphs = [5u16, 6, 7];
+    let exact = Limits {
+        max_transitions: 4,
+        ..Limits::DEFAULT
+    };
+    let (result, seen) = walk(&table, &glyphs, Traversal::Forward, &exact);
+    assert_eq!(result, Ok(()));
+    assert_eq!(seen.len(), 4);
+    let short = Limits {
+        max_transitions: 3,
+        ..Limits::DEFAULT
+    };
+    let (result, seen) = walk(&table, &glyphs, Traversal::Forward, &short);
+    assert_eq!(
+        result,
+        Err(Warning::TransitionBudgetExceeded { site: site(0) })
+    );
+    assert!(seen.iter().all(|(_, end)| !end));
+
+    // The ceiling a run's own limits give it stops the held glyph too, in a
+    // backward walk as in a forward one.
+    let scaled = Limits::for_glyphs(3);
+    let mut buffer = Buffer::from_glyphs(&[5, 10, 6]);
+    let mut noop =
+        |_: &mut Buffer, _: &Entry<'_>, _: &mut Cursor| -> Result<(), Warning> { Ok(()) };
+    assert_eq!(
+        table.run(
+            &mut buffer,
+            Traversal::Backward,
+            &scaled,
+            site(1),
+            &mut noop
+        ),
+        Err(Warning::TransitionBudgetExceeded { site: site(1) })
+    );
+}
+
+/// The driver walks the run forward or backward, glyph by glyph, then takes
+/// the end of text once with the last glyph it met as the current one; an
+/// empty run takes the end of text alone.
+#[test]
+fn a_machine_walks_its_run_either_way_and_takes_the_end_once() {
+    let bytes = holding_machine();
+    let table = StateTable::parse(&bytes, 4).expect("readable");
+    let limits = Limits::DEFAULT;
+    let glyphs = [5u16, 6, 7];
+    let (result, forward) = walk(&table, &glyphs, Traversal::Forward, &limits);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        forward,
+        vec![
+            (Some(0), false),
+            (Some(1), false),
+            (Some(2), false),
+            (Some(2), true)
+        ]
+    );
+    let (result, backward) = walk(&table, &glyphs, Traversal::Backward, &limits);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        backward,
+        vec![
+            (Some(2), false),
+            (Some(1), false),
+            (Some(0), false),
+            (Some(0), true)
+        ]
+    );
+    for traversal in [Traversal::Forward, Traversal::Backward] {
+        let (result, empty) = walk(&table, &[], traversal, &limits);
+        assert_eq!(result, Ok(()));
+        assert_eq!(empty, vec![(None, true)], "{traversal:?}");
+    }
+}
+
+/// A machine sees the deleted glyph as class 2, takes the entry its state
+/// gives that class, and moves to the state each entry names.
+#[test]
+fn a_machine_moves_between_states_and_sees_the_deleted_glyph() {
+    // State 0 moves to state 2 on glyph 10; state 2 marks an out-of-bounds
+    // glyph with flag 0x0001 and a deleted one with 0x0002, and returns to
+    // state 0 on glyph 10 with 0x0008.
+    let bytes = stx(
+        5,
+        0,
+        &lookup_single(&[(10, 4)]),
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1], &[0, 2, 3, 0, 4]],
+        &[&[0, 0], &[2, 0], &[2, 0x0001], &[2, 0x0002], &[0, 0x0008]],
+    );
+    let table = StateTable::parse(&bytes, 4).expect("readable");
+    let mut buffer = Buffer::from_glyphs(&[7, 10, 7, DELETED, 10, DELETED]);
+    let mut flags: Vec<u16> = Vec::new();
+    let mut record = |_: &mut Buffer, entry: &Entry<'_>, _: &mut Cursor| -> Result<(), Warning> {
+        flags.push(entry.flags);
+        Ok(())
+    };
+    let result = table.run(
+        &mut buffer,
+        Traversal::Forward,
+        &Limits::DEFAULT,
+        site(0),
+        &mut record,
+    );
+    assert_eq!(result, Ok(()));
+    // 7 in state 0; 10 moves to 2; 7 out of bounds in 2; the deleted glyph
+    // in 2; 10 back to 0; the deleted glyph in 0; the end of text in 0.
+    assert_eq!(flags, vec![0, 0, 0x0001, 0x0002, 0x0008, 0, 0]);
+}
+
+/// A state or a class the tables do not hold stops the machine where it
+/// stands and names the subtable, the actions before it kept; an action's
+/// own warning stops it the same way.
+#[test]
+fn a_state_or_class_the_table_does_not_hold_stops_the_machine() {
+    // Glyph 10 moves to a state a thousand lines past the array; glyph 11 is
+    // class 9 of five.
+    let bytes = stx(
+        5,
+        0,
+        &lookup_single(&[(10, 4), (11, 9)]),
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[&[0, 0], &[1000, 0]],
+    );
+    let table = StateTable::parse(&bytes, 4).expect("readable");
+    for (glyphs, transitions) in [(vec![5u16, 10, 6], 2usize), (vec![5, 11, 6], 1)] {
+        let (result, seen) = walk(&table, &glyphs, Traversal::Forward, &Limits::DEFAULT);
+        assert_eq!(
+            result,
+            Err(Warning::MalformedAatSubtable { site: site(0) }),
+            "{glyphs:?}"
+        );
+        assert_eq!(seen.len(), transitions, "{glyphs:?}");
+    }
+
+    // An action that refuses stops the walk at the glyph it refused.
+    let bytes = holding_machine();
+    let table = StateTable::parse(&bytes, 4).expect("readable");
+    let mut buffer = Buffer::from_glyphs(&[5, 6, 7, 8]);
+    let mut met = 0usize;
+    let refusal = Warning::UnknownLookupFormat {
+        site: site(5),
+        format: 1,
+    };
+    let mut refuse = |_: &mut Buffer, _: &Entry<'_>, cursor: &mut Cursor| -> Result<(), Warning> {
+        met += 1;
+        if cursor.glyph == Some(1) {
+            return Err(refusal);
+        }
+        Ok(())
+    };
+    assert_eq!(
+        table.run(
+            &mut buffer,
+            Traversal::Forward,
+            &Limits::DEFAULT,
+            site(0),
+            &mut refuse
+        ),
+        Err(refusal)
+    );
+    assert_eq!(met, 2);
+}
+
+/// Every prefix of every lookup table and of a state table reads as far as
+/// it goes: a cut header is no table, a value past the cut answers nothing,
+/// a machine over a cut table stops by name, and nothing panics. An offset
+/// past the table's end is no table either.
+#[test]
+fn a_truncated_table_answers_nothing_and_never_panics() {
+    for (format, table, expected) in lookup_cases() {
+        for cut in 0..table.len() {
+            let Ok(lookup) = Lookup::parse(&table[..cut]) else {
+                continue;
+            };
+            for (glyph, value) in &expected {
+                let answer = lookup.value(*glyph);
+                assert!(
+                    answer.is_none() || answer == Some(*value),
+                    "{format:?} cut at {cut}: glyph {glyph} answered {answer:?}"
+                );
+            }
+            let _ = lookup.value(0);
+            let _ = lookup.value(u16::MAX);
+        }
+    }
+
+    let bytes = stx(
+        7,
+        1,
+        &lookup_single(&[(10, 4), (11, 5), (12, 6)]),
+        &[
+            &[0, 1, 0, 0, 2, 3, 0],
+            &[0, 1, 0, 0, 2, 3, 0],
+            &[0, 1, 0, 0, 0, 0, 0],
+        ],
+        &[
+            &[0, 0, 0, 0],
+            &[0, 0x4000, 0, 0],
+            &[2, 0, 0, 0],
+            &[0, 0, 0, 0],
+        ],
+    );
+    for cut in 0..bytes.len() {
+        match StateTable::parse(&bytes[..cut], 8) {
+            Err(error) => assert_eq!(error, StateError::Malformed, "cut at {cut}"),
+            Ok(table) => {
+                let mut buffer = Buffer::from_glyphs(&[10, 11, 12, 3, DELETED]);
+                let mut noop = |_: &mut Buffer,
+                                _: &Entry<'_>,
+                                _: &mut Cursor|
+                 -> Result<(), Warning> { Ok(()) };
+                let result = table.run(
+                    &mut buffer,
+                    Traversal::Forward,
+                    &Limits::DEFAULT,
+                    site(0),
+                    &mut noop,
+                );
+                assert!(
+                    matches!(
+                        result,
+                        Ok(())
+                            | Err(Warning::MalformedAatSubtable { .. })
+                            | Err(Warning::TransitionBudgetExceeded { .. })
+                    ),
+                    "cut at {cut}: {result:?}"
+                );
+            }
+        }
+    }
+    // Each offset pointed one byte past the table.
+    for slot in [4usize, 8, 12] {
+        let mut past = bytes.clone();
+        put32(&mut past, slot, count32(bytes.len() + 1));
+        assert_eq!(
+            StateTable::parse(&past, 8).err(),
+            Some(StateError::Malformed),
+            "offset at {slot}"
+        );
+    }
 }

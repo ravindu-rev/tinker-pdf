@@ -941,6 +941,30 @@ What it does:
   `Limits::max_rule_candidates` are each refused by name. No rule's code runs
   yet, and no run is shaped through any of it: the refused-by-name table
   below says what a run over such a face does.
+- **AAT tables, read and not yet run.** `tinker_pdf_shape::aat` holds the
+  structures Apple's *TrueType Reference Manual* builds its AAT tables of
+  (*AAT shaping* in the design). `aat::Lookup` reads a lookup table in each
+  of the six formats its *AAT special tables* chapter defines — the simple
+  array (as long as its bytes), the segment single and segment array, the
+  single table, and the trimmed and extended trimmed arrays, values of 1, 2,
+  4 or 8 bytes — the binary-searched ones bisected, their guard answering
+  nothing, and a glyph it does not cover answering nothing; a format it does
+  not define is named (`aat::LookupError::Format`). `aat::StateTable` reads
+  an extended state table: its class lookup, the four predefined classes (a
+  glyph the class table does not cover out of bounds, glyph `0xFFFF`
+  deleted), its state array a line of `nClasses` entry indices a state, and
+  its entries a field at a time. `StateTable::run` is the one driver every
+  machine runs on: from state 0 over the run in layout order, forward or
+  backward, a subtable's `aat::Actions` acting at each transition, the
+  position held where an entry sets `dontAdvance`, and the end of text taken
+  once with the last glyph met as the current one. A machine stops where it
+  stands, its run as it stood, and is named:
+  `Warning::TransitionBudgetExceeded` past `Limits::max_transitions`, which
+  is `max(4 096, 32 × (glyphs + 1))` for a run, and
+  `Warning::MalformedAatSubtable` where it needs a state, an entry or a class
+  column its tables do not hold, each naming the table, chain and subtable
+  (`aat::Site`). No run is shaped through any of it: the refused-by-name
+  table below says what a run over such a face does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

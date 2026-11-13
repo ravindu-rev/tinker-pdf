@@ -734,6 +734,7 @@ fn every_jstf_fuzz_seed_shapes_without_panicking() {
                 max_attribute_runs: 0,
                 max_passes: 0,
                 max_rule_candidates: 0,
+                max_transitions: 0,
             },
         ] {
             let layouts = [

@@ -166,6 +166,24 @@ pub struct Limits {
     /// bound a rule shares with an OpenType lookup's input. A face's ceiling,
     /// which [`Limits::for_glyphs`] leaves alone.
     pub max_rule_candidates: u32,
+
+    /// How many transitions one AAT state machine may take over one
+    /// subtable.
+    ///
+    /// **Four thousand and ninety-six, or thirty-two a glyph.** A machine
+    /// takes one transition a glyph and one more at the end of the text when
+    /// it never holds its position, and an entry with `dontAdvance` set holds
+    /// it — rightly, to look at a glyph again once it has changed it, and for
+    /// ever where the font says so: text-rendering-tests `MORX-24` substitutes
+    /// `A` by `B` through `E` by `A` on transitions that never advance.
+    /// Nothing in the state table bounds that, so the ceiling does: past it
+    /// the machine stops where it stands, the run as it stood, and the
+    /// subtable is named ([`crate::Warning::TransitionBudgetExceeded`]). A
+    /// run's ceiling, which [`Limits::for_glyphs`] scales to
+    /// `max(4 096, 32 × (glyphs + 1))` (`docs/design/shaping.md`, *Warnings
+    /// and ceilings*), so a machine that looks at each glyph a few times
+    /// over a long paragraph is never mistaken for one that loops.
+    pub max_transitions: u32,
 }
 
 impl Limits {
@@ -187,18 +205,20 @@ impl Limits {
         max_attribute_runs: 256,
         max_passes: 64,
         max_rule_candidates: 1_024,
+        max_transitions: 4_096,
     };
 
-    /// The default ceilings, with the two work numbers scaled to a run of
+    /// The default ceilings, with the three work numbers scaled to a run of
     /// `count` glyphs.
     ///
-    /// **A thousand operations and thirty-two glyphs each.** Both multipliers
-    /// are generous on purpose: an Indic cluster of eight code points can
-    /// legitimately cost a few hundred lookup applications, and a
-    /// decomposition-heavy face can double a run's length twice over. What
-    /// they bound is the *shape* of the growth — linear in the input — which
-    /// is the property that makes a paragraph's cost predictable and a
-    /// hostile face's cost finite.
+    /// **A thousand operations, thirty-two glyphs and thirty-two machine
+    /// transitions each.** The multipliers are generous on purpose: an Indic
+    /// cluster of eight code points can legitimately cost a few hundred
+    /// lookup applications, a decomposition-heavy face can double a run's
+    /// length twice over, and an AAT machine may look at each glyph several
+    /// times. What they bound is the *shape* of the growth — linear in the
+    /// input — which is the property that makes a paragraph's cost
+    /// predictable and a hostile face's cost finite.
     #[must_use]
     pub fn for_glyphs(count: usize) -> Self {
         let ops = u32::try_from(count)
@@ -209,9 +229,15 @@ impl Limits {
             .saturating_mul(32)
             .max(Self::DEFAULT.max_glyphs)
             .min(u32::MAX as usize);
+        let transitions = u32::try_from(count)
+            .unwrap_or(u32::MAX)
+            .saturating_add(1)
+            .saturating_mul(32)
+            .max(Self::DEFAULT.max_transitions);
         Self {
             max_operations: ops,
             max_glyphs: glyphs,
+            max_transitions: transitions,
             ..Self::DEFAULT
         }
     }
@@ -232,6 +258,35 @@ mod tests {
         let small = Limits::for_glyphs(0);
         assert_eq!(small.max_operations, Limits::DEFAULT.max_operations);
         assert_eq!(small.max_glyphs, Limits::DEFAULT.max_glyphs);
+        assert_eq!(small.max_transitions, Limits::DEFAULT.max_transitions);
+    }
+
+    /// An AAT machine's ceiling is `max(4 096, 32 × (glyphs + 1))`: the floor
+    /// holds a short run, thirty-two transitions a glyph and one more for the
+    /// end of the text a long one, and no run wraps it.
+    #[test]
+    fn the_transition_ceiling_is_thirty_two_a_glyph_over_its_floor() {
+        assert_eq!(Limits::DEFAULT.max_transitions, 4_096);
+        for (count, ceiling) in [
+            (0usize, 4_096u32),
+            (1, 4_096),
+            (127, 4_096),
+            (128, 4_128),
+            (1_000, 32_032),
+            (100_000, 3_200_032),
+        ] {
+            assert_eq!(
+                Limits::for_glyphs(count).max_transitions,
+                ceiling,
+                "{count}"
+            );
+        }
+        assert_eq!(Limits::for_glyphs(usize::MAX).max_transitions, u32::MAX);
+        for count in [0usize, 7, 64, 2_048, 65_536, 1 << 20] {
+            let ceiling = u64::from(Limits::for_glyphs(count).max_transitions);
+            let walk = u64::try_from(count).expect("small") + 1;
+            assert!(ceiling >= walk, "a run of {count} glyphs cannot be walked");
+        }
     }
 
     /// **A ceiling derived from a run is never below that run**, which is the

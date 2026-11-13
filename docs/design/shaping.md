@@ -924,18 +924,22 @@ non-exclusive except those the registry marks exclusive in the mapping above.
 
 #### Warnings and ceilings
 
-Every refusal is a typed `Warning` recorded once a run (rulings 2 and 10):
-a `mort` table not run (and, until FT-07c.10, `morx` itself — FT-07c.2); a
-subtable type reserved or unknown; a lookup format unknown; a machine stopped
-at its ceiling; a contextual index past its table; a component or kerning stack
-full or empty; a glyph insertion past `Limits::max_glyphs`; a `kerx` variation
-tuple or vertical subtable refused; a control-point action on a CFF face; an
-OpenType tag no AAT feature answers. `Limits` gains the ceiling on one
-machine's transitions in one subtable — `max(4 096, 32 × (glyphs + 1))`, scaled
-as `Limits::for_glyphs` scales the others — past which the subtable stops,
-leaving the run as it stood. The stacks are the chapters' sizes, 16 components
-and 8 kerning glyphs; every read is `read::Bytes`', so a truncated table or an
-offset past its end answers `None` (ruling 1).
+Every refusal is a typed `Warning` recorded once a run (rulings 2 and 10),
+each naming where in its table it was asked, the table, chain and subtable
+(`aat::Site`): a `mort` table not run (and, until FT-07c.10, `morx` itself —
+FT-07c.2, `Warning::TableNotRun`); a subtable type reserved or unknown; a
+lookup format unknown (`Warning::UnknownLookupFormat`); a machine stopped at
+its ceiling (`Warning::TransitionBudgetExceeded`), or at a state, an entry or
+a class column its tables do not hold (`Warning::MalformedAatSubtable`); a
+contextual index past its table; a component or kerning stack full or empty;
+a glyph insertion past `Limits::max_glyphs`; a `kerx` variation tuple or
+vertical subtable refused; a control-point action on a CFF face; an OpenType
+tag no AAT feature answers. `Limits::max_transitions` is the ceiling on one
+machine's transitions in one subtable — `max(4 096, 32 × (glyphs + 1))`,
+scaled as `Limits::for_glyphs` scales the others — past which the subtable
+stops, leaving the run as it stood. The stacks are the chapters' sizes, 16
+components and 8 kerning glyphs; every read is `read::Bytes`', so a truncated
+table or an offset past its end answers `None` (ruling 1).
 
 #### The manual's worked examples
 
