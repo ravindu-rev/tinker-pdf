@@ -271,6 +271,9 @@ cargo test -p tinker-pdf-color --release -- --ignored the_grid_prices_the_design
   exactly, so a grid built or read wrongly fails rather than reporting a
   price.
 
+Which grid the engine builds from these, and how it is read, is
+[P-22's section](#p-22--colour-conversion-throughput) below.
+
 ### Rendering intents (8.6.5.8)
 
 K-01 keeps the intent in the graphics state: `ri` and an ExtGState's `/RI`
@@ -944,3 +947,315 @@ time and shift every colour. It is read by profiles that need to recover the
 | A colour set before `ri` keeps the old intent's light | An intent change re-resolves the fill and stroke colours from the space and components kept beside them; `ri_and_extgstate_ri_are_twins` changes the intent after `scn` |
 | Compiling per intent multiplies what a profile costs | A table is read and compiled on first use, one transform a distinct table; a page that sets no intent parses and compiles what it does today |
 | A profile carrying a matrix or `grayTRC` and `A2B*` tables converts by its matrix, where ICC.1 8.10.2 converts by its tables | Stated as this design's departure, with the owner deciding whether to follow 8.10.2; until then every such profile renders as it does today, whatever the intent |
+
+## P-22 — Colour conversion throughput
+
+*For [ROADMAP](../ROADMAP.md) row P-22.* A colour converts through an ICC
+space by running its transform's whole pipeline (Stage 2), and for a
+lookup-table transform that pipeline is the slow one: `Lut::evaluate` takes
+three allocations and up to sixteen corners of the profile's grid, then the
+connection space goes to sRGB in floating point and each channel is encoded,
+for a Lab connection space through `tinker_pdf_math::pow`. An image pays that
+at every pixel `Remembered` has not seen. This section fixes which transforms
+an integer grid stands in for, its size over each input count, what a node
+holds and how a grid is read, the bound it is held to against today's
+pipeline, which conversions read it and when its nodes are evaluated, how a
+fill and an image pixel of one colour stay alike, the 8-bit row path, the
+per-image converter's arms, the document cache's key and its charge to
+P-16's budget, how hostile profiles are bounded, and the fingerprint page.
+[The price of an integer grid](#the-price-of-an-integer-grid) is what P-22.1
+priced; its table's figures are the end phase's, and the choices below rest
+on what each form and size computes rather than on them.
+
+### Scope
+
+- **The grid** (P-22.4): each lookup-table transform over one, three or four
+  inputs read through an integer grid of its own pipeline's light, in fixed
+  point, its nodes evaluated at first read.
+- **The row path** (P-22.5): a row of 8-bit samples converted to sRGB bytes
+  through per-axis tables, with no float.
+- **The per-image converter** (P-22.6): one converter chosen per image by its
+  space, depth and `/Decode`.
+- **The document cache** (P-22.7): transforms kept per document under the key
+  below, their grids charged to P-16's budget.
+- **The fingerprint page** (P-22.3) and **the close** (P-22.8).
+
+### Non-goals
+
+- **A grid for a matrix/TRC or a grey transform.** Its pipeline is already
+  integer and exact (below); a grid would only add error.
+- **A grid over two, or five to sixteen, inputs.** Such a table converts as
+  today, on its own pipeline.
+- **Another reading of a profile's own table.** `Lut::evaluate`, its 8-bit
+  fractions and its multilinear interpolation stay as they are: the grid
+  samples the pipeline, it does not replace any stage of it.
+- **Intrinsics or `unsafe`** (H-16's default): the loops are plain integer
+  code a target may autovectorise.
+- **A transform shared across documents** (P-16's non-goal).
+- **Destinations other than sRGB, proofing and black-point compensation.**
+  RC-06, RC-05 and RC-02 bring them; each is a stage the grid's nodes
+  evaluate and a value of the cache's key (below), never a per-pixel step.
+
+### Design
+
+#### Which transforms a grid stands in for
+
+A lookup-table transform — `mft1`, `mft2` or `mAB ` at an `A2B*` tag, and
+RC-01.4's `D2B*` elements when they read — over one, three or four inputs
+converts through a grid. A matrix/TRC transform and a grey one keep their
+pipeline: its curves are already sampled into 4 096-entry tables, its matrix
+is s15.16 and its encoding a table, so a conversion is integer work and exact,
+and a grid would add the error between its nodes and save nothing. That error
+is largest exactly there: P-22.1's matrix/TRC rows at gamma 1.0 put a linear
+tone curve under sRGB's toe, whose slope at black is 12.92 times linear
+light's (IEC 61966-2-1), and a chord between two nodes of encoded output
+misses that curve by what the slope multiplies. A table over any other input
+count stays on today's path.
+
+#### The grid's size
+
+- **One input: 256 points**, so every 8-bit input is a node and a row of bytes
+  converts exactly, at 256 evaluations.
+- **Three inputs: 33 points**, 35 937 nodes. Against 17 points it halves a
+  cell's width, which quarters a chord's error, for a grid a thirty-third of
+  the one 33 points over four would be.
+- **Four inputs: 17 points**, 83 521 nodes. 33 points over four would be
+  1 185 921 nodes, more than twice the 543 740 pixels of MS-04's 620 × 877
+  CMYK image, so a grid that fine costs more to fill than the conversions it
+  stands in for; 17 points fill in under a sixth of that image's pixels.
+
+#### What a node holds
+
+The pipeline's light at the node before it is encoded: the linear sRGB its
+connection space converts to, each channel a signed 21-bit integer in which
+65 535 is 1.0, so from −16 up to 16, beside a flag saying the node is filled —
+one 64-bit atomic word a node, filled with no lock.
+
+- **Light, not the encoded byte P-22.1's probe holds.** A printer profile
+  reaches black, where the encoding is steepest, so between two nodes near
+  black a chord of encoded bytes bends where the light does not; the light is
+  the quantity the inks scale, and a chord of it follows a profile's table far
+  more closely there.
+- **Unclamped.** A node outside the gamut keeps its distance from it, so a
+  chord across the gamut's edge stays straight in light and is clamped after
+  it is read, as the pipeline clamps after it computes.
+- **The node reads back the pipeline's byte.** Where a channel's light is
+  within 0..=1, its integer is the one nearest the light among those the read
+  encodes to the pipeline's own byte for that channel (every byte is reached,
+  since the encoding table steps by under a level), so a grid read at a node is
+  the direct pipeline exactly, as P-22.1's probe asserts of its grids.
+
+#### How a grid is read
+
+- **Locating.** Each component is clamped to 0..=1, then
+  `round(x × (points − 1) × 65 536)` is split into its cell (the high bits)
+  and a 16-bit fraction; the top of the last cell reads as that cell at
+  65 536. A missing component reads as 0, as the pipeline reads one, and a
+  NaN locates at 0.
+- **One input** reads linearly between its two nodes. **Three** read
+  tetrahedrally: from the cell's lowest node a step along each axis in turn,
+  the largest fraction first and the earlier axis first between equals, each
+  node weighed by its step's fraction against the one before. **Four** read
+  tetrahedrally over the first three inputs at the two nodes of the fourth
+  either side of it, then linearly between those two — P-22.1's
+  "tetrahedral then linear".
+- **In i64, rounded once** to the light's integer, clamped to 0..=65 535 and
+  encoded through a 65 536-entry table of the pipeline's own encoding, one for
+  each connection space and built once: under Lab the pipeline's
+  `srgb_encode`, under XYZ its `encode_component`, each sampled at the
+  table's 65 536 values. So the read encodes as the pipeline encodes, and the
+  interpolation between nodes is all that is new.
+- **Why that form over four.** Black ink scales the light the other three
+  leave, so within a cell a light that is a function of C, M and Y times one of
+  K is linear in K, which the blend in K reproduces and the 4-simplex, cutting
+  each C–K square on its diagonal, does not; and it reads eight nodes where
+  multilinear reads sixteen.
+
+#### The bound
+
+Every node is the direct pipeline, exactly. Over one input every 8-bit input
+is a node, and a component between two — a fill's `0.3` — is within one level
+of 255 of the pipeline. Over three and four inputs, every input P-22.1's sweep
+reads is within **two levels of 255** of the direct pipeline. P-22.4's test
+holds both for each lookup-table model P-22.1 priced, and P-22.1's probe gains
+the transform's own grid as a form of its own, so its table prices what is
+built beside what it priced; the test's failure prints the worst input it met.
+
+#### Which conversions read it, and when its nodes are evaluated
+
+- **Every conversion through a gridded transform reads its grid**:
+  `Transform::apply`, and with it every `ColorSpace::to_rgb_in` through an ICC
+  space — fills, strokes, glyphs, stencil masks, shading samples and the
+  colour tables P-14 builds from them, `/Indexed` palettes, tint alternates and
+  `/BC` — and the row path. Nothing reads the pipeline directly but a node's
+  evaluation and the tests' reference, `Transform::evaluate`, which is what
+  `apply` is today.
+- **A node is evaluated the first time a conversion reads it** and kept with
+  the transform for every conversion after; the node array is allocated at the
+  first conversion through the grid. So a page painting one colour through a
+  printer profile evaluates the eight nodes that colour reads, where filling
+  the grid when the transform compiles would evaluate all 83 521 at every
+  render that compiles it — once a render today, once a document after
+  P-22.7 — and an image evaluates each node its pixels read once.
+- **What a conversion returns never depends on which nodes were filled before
+  it**: a node is a function of the profile, the conversion and its position,
+  so two threads filling one node at once store one value, a tile reads what
+  its page reads (ruling 5), and a hit in P-16's cache reads what its miss
+  computes. Once every node is filled, no conversion evaluates the pipeline.
+
+#### A fill and an image pixel of one colour
+
+One function locates a component, and every conversion of a gridded
+transform reads the grid through it, so a fill whose components are `k / 255`
+and an image sample `k` read the same nodes at the same fractions and come out
+the same bytes; the row path's axis table is that function evaluated at
+`k / 255` for each byte `k`, so it holds by construction rather than by
+agreement. A matrix/TRC or grey transform's row path is its pipeline's own
+arithmetic, so its fill and its pixel are equal for the same reason.
+
+#### The row path
+
+`Transform::convert_row` converts a row of 8-bit samples, one, three or four a
+pixel, straight onto the end of a buffer of sRGB bytes:
+
+- **A gridded transform** locates each sample through a 256-entry axis table
+  of cell and fraction, one a transform since every axis has the same points,
+  built at its first row; then the read above, in integer loops over
+  `chunks_exact`, the node array's length and the cell strides hoisted, with
+  no float, no allocation and no call of `apply`.
+- **A matrix/TRC transform** indexes each channel's curve through a 256-entry
+  table of the entry `apply` reads for that byte, already in s15.16, then
+  multiplies and encodes as `apply` does, term for term.
+- **A grey transform, and a grid over one input,** read a 256-entry table of
+  the three bytes `apply` gives each byte.
+- **Any other input count** converts a pixel at a time through `apply`.
+
+#### The per-image converter
+
+P-22.6 chooses one converter an image, by its space, depth and `/Decode`,
+where the sample loops call `to_rgb` per pixel today:
+
+| Image | Converter |
+| --- | --- |
+| 8-bit DeviceRGB, and DeviceGray, `/Decode` absent or `[0 1]` | a copy, a grey replicated to three (P-08's identity path) |
+| Any one-component space at up to 8 bits, DeviceGray among them | a table of at most 2^bpc colours, built through `to_rgb` |
+| 8-bit DeviceCMYK, `/Decode` absent or `[0 1]` | one table of 8.6.4.4's `(1 − c)(1 − k)`, 256 × 256 bytes built through `to_rgb`, read for each of C, M and Y against K |
+| 8-bit ICC, `/Decode` absent or `[0 1]`, no colour key | the row path |
+| Everything else | `to_rgb` over one reused buffer, with `Remembered` |
+
+A table built through `to_rgb` is each device pixel's byte by construction,
+and the row path is `apply`'s, so the converter moves no pixel.
+
+#### The document cache: its key and its charge
+
+P-16.1's compiled-ICC kind, re-keyed by P-22.7:
+
+- **The entry** is one profile's `Transforms` toward one destination, keyed by
+  the profile's bytes — their SHA-256 for the map, the bytes compared in full
+  on a hit, so a profile embedded as many objects is one entry — and by the
+  destination, sRGB, the only one this engine converts to.
+- **Inside it** `Transforms` keeps one compiled transform for each
+  `Conversion` asked of it, today one an intent, so a transform's whole key is
+  the profile's bytes, the destination and the conversion: the row's
+  "(profile pair, intent, compensation)", which the guard counts.
+- **What later rows add.** RC-02's black-point compensation is a field of
+  `Conversion` ("The one conversion parameter"), RC-01's intents are its
+  values already, and RC-06's destination profiles are values of the
+  destination, keyed by their bytes as the source is: each adds keys and none
+  reshapes the kind.
+- **A refusal is kept** under the profile's bytes, so a profile that does not
+  parse is refused once a document.
+- **The charge**, taken when the entry is inserted: the parsed profile's
+  tables — its `A2B*` elements as `Profile::parse` holds them, or a
+  matrix/TRC transform's three 4 096-entry curves — and, for each distinct
+  table its conversions can select, a grid's whole node array at eight bytes a
+  node, with P-16.1's 64-byte floor. That is the most the entry can come to
+  hold, charged before any node is filled, so filling never passes the
+  budget. An entry the budget cannot hold is used by the request that made it
+  and not kept, so past the budget a transform compiles per use, as today.
+
+#### Hostile profiles (ruling 1)
+
+A grid exists only over one, three or four inputs, and a table over any other
+count converts as today. A node's evaluation is the pipeline once, whose work
+is bounded by its input count — at most sixteen corners over four inputs —
+and not by how large the profile's own table is, so a grid's whole build is
+at most 83 521 evaluations and its memory at most 668 168 bytes whatever the
+profile declares, under a third of `MAX_ICC_BYTES`, the most a profile itself
+may be. The `icc_profile` fuzz target compiles and applies every intent, so a
+hostile profile builds its grid under it, and P-22.5 has it convert a row of
+every byte value through each transform it compiles.
+
+#### The fingerprint page
+
+`determinism.rs`'s `icc` page (P-22.3) draws an 8-bit CMYK image through a
+four-channel `mft2` profile over a Lab connection space, an RGB image and a
+fill through a matrix/TRC profile, a grey-profile image and a DeviceCMYK
+image beside them, each profile built in the test, and is recorded from
+today's per-pixel pipeline. The CMYK image is its only gridded conversion, so
+P-22.4 moves the page by that image's pixels or not at all, and the rest of
+the page is the control: a move outside the image is a defect, not the grid.
+`default_spaces`, whose `/DefaultCMYK` is an `mft2` profile into XYZ, is the
+other pin P-22.4 may move, and H-76 reviews the two moves together.
+
+### Milestones
+
+1. **P-22.1: the price.** `the_grid_prices_the_design_quotes` and
+   `crates/tinker-pdf-color/data/icc_grid_prices.tsv`.
+2. **P-22.2: this section.**
+3. **P-22.3: the `icc` page.** Exit: `determinism.rs`
+   `rendering_is_stable_across_targets` with the new `icc` entry, recorded from
+   today's per-pixel pipeline, under `cargo test` on linux and windows and
+   under `--target wasm32-wasip1`; `banded_rendering_reproduces_every_fingerprint`,
+   `svg_output_is_stable_across_targets` and
+   `a_display_list_replays_every_fingerprinted_page_byte_for_byte` hold it too.
+4. **P-22.4: the grid.** Exit: `icc.rs`
+   `the_grid_is_the_pipeline_at_its_nodes_and_within_the_bound_between` — for
+   each lookup-table model P-22.1 priced, every node the direct pipeline
+   exactly and the sweep within the bound, and the matrix/TRC and grey models
+   converting as their pipeline does, with no grid;
+   `a_conversion_evaluates_no_pipeline` — pipeline evaluations made by
+   conversions, none once every node is filled and at most one a node before;
+   `icc.rs`'s known-answer tests, `colour_spaces.rs`'s ICC tests and
+   `cargo xtask libm`; the `icc` and `default_spaces` fingerprints, if they
+   move, re-recorded once after H-76's review, the four targets agreeing.
+5. **P-22.5: the row path.** Exit: `icc.rs`
+   `a_row_of_bytes_converts_as_apply_does` — every 8-bit input of a one- and a
+   three-input transform of each model, and a 17-level lattice of a four-input
+   one, converting to the bytes `apply` gives; and
+   `a_row_reads_its_axis_tables_and_no_float` — axis-table builds a
+   transform, one, and `apply` calls a row, none; `cargo xtask libm`.
+6. **P-22.6: the converter.** Exit: `image_conversion.rs`
+   `a_converter_is_chosen_once_per_image` — `to_rgb` calls an image (MS-01's
+   tally) not growing with its pixels, allocations an image O(1) (A10), each
+   device arm's bytes equal to per-pixel `to_rgb` over every input; the
+   image, `jbig2`, `jpx` and `icc` fingerprints unchanged.
+7. **P-22.7: the document cache.** Exit: `icc_cache.rs`
+   `transforms_built_are_at_most_the_distinct_keys` — a generated 20-page
+   document naming one RGB and one CMYK profile through a different object on
+   every page, in a form and in an appearance stream, rendered twice, builds
+   two transforms; under a budget below one grid every page byte-identical;
+   the `icc` page rendered twice through one document hashing to its
+   fingerprint both times.
+8. **P-22.8: the close**, in MS-02's paired run: MS-04's 620 × 877 CMYK image
+   at its calibrated target, at least 100 Mpixel/s, with the row's guards green
+   on every target. The operation draws its image under
+   `fuzz/corpus/icc_profile/cmyk-lut.icc`, a seed `write_the_fuzz_seeds`
+   builds to be refused (`NeedsLut`), so until that operation's profile is one
+   that compiles it times 8.6.5.5's component-count fallback and no
+   transform; P-22.8 gives it a four-input `mft2` profile, and its renders
+   read one grid only through P-22.7's cache under a stated budget.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The grid misses a real profile by more than the bound | The bound is held on every lookup-table model P-22.1 prices, the probe prices the built grid beside its own forms, and the fingerprint moves are the owner's to review (H-76) |
+| A fill and an image pixel of one colour part | One locating function serves both, the axis table is built from it, and P-22.5's test holds every byte to `apply` |
+| What a page draws depends on which nodes were filled | A node is a function of the profile, the conversion and its position; filling is idempotent and order-free, so tiles, threads and cache hits read the same values |
+| A page with one ICC colour pays for a whole grid | Nodes are evaluated at first read; a colour costs the nodes it reads |
+| A hostile profile builds an unbounded grid | A grid exists over one, three or four inputs only, at most 83 521 nodes of bounded work and 668 168 bytes; the fuzz target builds them |
+| A matrix/TRC page moves though nothing was gained | Matrix/TRC and grey transforms build no grid; the `icc` page's matrix/TRC and grey parts are its control |
+| Filling a grid passes P-16's budget | The entry is charged its whole node arrays at insertion, before any node is filled |
+| Until P-22.7, every render rebuilds what it reads | Each render's transforms fill only the nodes it reads, which is at most what today's per-pixel pipeline evaluates for a page of distinct colours, and P-22.7 keeps them per document |
+| The close times no profile at all | P-22.8's milestone names the refused seed and gives the operation a profile that compiles |
