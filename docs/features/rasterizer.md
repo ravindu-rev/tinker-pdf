@@ -351,12 +351,21 @@ colour from a barycentric walk that interpolates the vertex inputs and only
 then asks the caller's closure what colour they are. Each row of a triangle
 walks the columns between its edges' crossings of the row and one more each
 side, not the triangle's whole box, through the same inside test and weights,
-so it paints the pixels a walk of the box paints in the colours it gives them;
-a row within 1/1024 of a pixel of a vertex, a triangle under a quarter of a
-pixel wide and one reaching past 65 536 pixels from the origin, where rounding
-could move the test's answer by a pixel, walk the whole box
+so it paints the pixels a walk of the box paints; a row within 1/1024 of a
+pixel of a vertex, a triangle under a quarter of a pixel wide and one reaching
+past 65 536 pixels from the origin, where rounding could move the test's
+answer by a pixel, walk the whole box through the test at every pixel
 (`a_span_walk_paints_what_the_box_walk_paints`,
-`a_triangle_visits_its_span_not_its_box`). One buffer rather than
+`a_triangle_visits_its_span_not_its_box`). Along a span the weights and the
+interpolated inputs step by their increments a column from every 64th column
+of the page frame, so a part of the page steps as the page does
+(`a_part_of_the_page_steps_as_the_page_does`, ruling 5): one division by the
+area for the triangle (`a_span_divides_once`), and each input as
+`v2 + w0·(v0 − v2) + w1·(v1 − v2)`, so three corners of one value paint it
+exactly. A pixel whose stepped weights are not clear of zero by four times
+their error bound takes the inside test itself, so the pixels painted do not
+change, and a stepped colour is within one level of 255 of the test's
+weights' (ruling 22). One buffer rather than
 one fill per triangle is what removes the lattice of pale seams that
 per-triangle compositing paints along every shared edge. A silhouette pixel no
 triangle's interior reaches takes its colour from a neighbour, spread two

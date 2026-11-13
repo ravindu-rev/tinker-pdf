@@ -469,14 +469,118 @@ impl Spans {
     }
 }
 
+/// The page-frame columns at which a span's stepped weights are taken afresh
+/// from the edge functions: every multiple of this, whatever part of the page
+/// is being drawn, so a tile steps as the page does (ruling 5).
+const RESTART_COLUMNS: i64 = 64;
+
+/// What up to [`RESTART_COLUMNS`] steps can leave in a stepped weight, as a
+/// fraction of the magnitudes it was stepped from: 2^-44, more than 64
+/// roundings of four units in the last place each.
+const STEP_ERROR: f64 = 1.0 / 17_592_186_044_416.0;
+
+/// How many times its error bound a stepped weight must lie from zero for its
+/// sign to decide the inside test; nearer, the pixel takes the test itself.
+const MARGIN: f64 = 4.0;
+
+/// The column a page-frame column's steps start from: the last multiple of
+/// [`RESTART_COLUMNS`] at or before it.
+fn restart_of(px: i64) -> i64 {
+    px - px.rem_euclid(RESTART_COLUMNS)
+}
+
+/// A triangle's barycentric weights and interpolated inputs as planes over
+/// its rows, stepped along a span (8.7.4.5.5's linear interpolation).
+///
+/// One division by the area for the triangle, taken at its first span. Then
+/// each weight is its edge function times the reciprocal at a restart column
+/// and steps by its constant increment a column, and each input is
+/// `v2 + w0·(v0 − v2) + w1·(v1 − v2)`, stepped by its own increment, so three
+/// corners of one value interpolate to that value exactly. A pixel costs
+/// additions where the inside test costs two edge functions and two divisions.
+///
+/// The inside test is the walk's own: a pixel whose stepped weights are all
+/// clear of zero by [`MARGIN`] times their error bound is inside, one with a
+/// weight as far below zero is outside, and any other — a centre on an edge,
+/// within rounding — takes the test itself, so the pixels painted are the
+/// ones the test paints. A stepped pixel's colour comes from weights a few
+/// parts in 10^14 from the test's, and so lands within a level of 255 of its
+/// colour (ruling 22).
+struct Plane {
+    inverse_area: f64,
+    /// Each weight's increase a column.
+    dw0: f64,
+    dw1: f64,
+}
+
+/// The weights and inputs at one column of a span, and their error bounds.
+struct Stepped {
+    column: i64,
+    w0: f64,
+    w1: f64,
+    /// The bounds the block's weights carry, against the test's and against
+    /// the true weights alike.
+    e0: f64,
+    e1: f64,
+    e2: f64,
+}
+
+impl Plane {
+    fn new(corners: &[(f64, f64); 3], area: f64) -> Plane {
+        let [a, b, c] = *corners;
+        count::divided();
+        let inverse_area = 1.0 / area;
+        Plane {
+            inverse_area,
+            dw0: (b.1 - c.1) * inverse_area,
+            dw1: (c.1 - a.1) * inverse_area,
+        }
+    }
+
+    /// The weights afresh at restart column `restart` of the row at `y`, and
+    /// the bounds every column of its block carries.
+    fn restart(&self, corners: &[(f64, f64); 3], y: f64, restart: i64) -> Stepped {
+        let [a, b, c] = *corners;
+        let x = restart as f64 + 0.5;
+        // The inside test's edge functions, in its own order.
+        let e0 = (b.0 - x) * (c.1 - y) - (c.0 - x) * (b.1 - y);
+        let e1 = (c.0 - x) * (a.1 - y) - (a.0 - x) * (c.1 - y);
+        let (w0, w1) = (e0 * self.inverse_area, e1 * self.inverse_area);
+        // The magnitudes the edge functions are taken from anywhere in the
+        // block, the test's at each pixel among them.
+        let span = RESTART_COLUMNS as f64;
+        let t0 =
+            ((b.0 - x).abs() + span) * (c.1 - y).abs() + ((c.0 - x).abs() + span) * (b.1 - y).abs();
+        let t1 =
+            ((c.0 - x).abs() + span) * (a.1 - y).abs() + ((a.0 - x).abs() + span) * (c.1 - y).abs();
+        let reciprocal = self.inverse_area.abs();
+        let e0 = STEP_ERROR * (t0 * reciprocal + w0.abs() + span * self.dw0.abs());
+        let e1 = STEP_ERROR * (t1 * reciprocal + w1.abs() + span * self.dw1.abs());
+        let e2 = e0
+            + e1
+            + STEP_ERROR * (1.0 + w0.abs() + w1.abs() + span * (self.dw0.abs() + self.dw1.abs()));
+        Stepped {
+            column: restart,
+            w0,
+            w1,
+            e0,
+            e1,
+            e2,
+        }
+    }
+}
+
 /// The colour pass: one scanline walk per triangle, interpolating the vertex
 /// inputs and asking the caller what they paint.
 ///
 /// Each row walks its [`Spans::columns`] rather than the whole clamped box,
-/// with the box walk's inside test and weights, so the pixels painted and the
-/// colours they take are the box walk's.
+/// and along it steps the weights and inputs ([`Plane`]); a row the spans
+/// cannot bound walks the whole box through the inside test at every pixel.
 fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut [[u8; 4]]) {
     let mut mixed = vec![0.0f64; draw.components];
+    // Per component: `v0 − v2`, `v1 − v2`, the increment a column, and the
+    // running value.
+    let mut planes = vec![[0.0f64; 4]; draw.components];
     for triangle in draw.triangles {
         if draw.stop.is_some_and(|stop| stop()) {
             return;
@@ -496,9 +600,11 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
             values_of(draw, triangle[1]),
             values_of(draw, triangle[2]),
         ];
+        let at = |v: &[f64], component: usize| v.get(component).copied().unwrap_or(0.0);
 
         let [a, b, c] = corners;
         let spans = Spans::new(&corners, area);
+        let mut plane: Option<Plane> = None;
         let mut painted = false;
         for py in bounds.y0..bounds.y1 {
             // Band granularity rather than row, for the reason `fill` gives:
@@ -509,27 +615,92 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
             }
             count::row();
             let y = py as f64 + 0.5;
-            let (from, to) = match spans.columns(y) {
-                Some((from, to)) => (from.max(bounds.x0), to.min(bounds.x1)),
-                None => (bounds.x0, bounds.x1),
+            let Some((from, to)) = spans.columns(y) else {
+                // The whole box, through the inside test at every pixel.
+                for px in bounds.x0..bounds.x1 {
+                    count::visited();
+                    let x = px as f64 + 0.5;
+                    let Some((w0, w1, w2)) = inside(&corners, area, x, y) else {
+                        continue;
+                    };
+                    count::inside();
+                    for (component, slot) in mixed.iter_mut().enumerate() {
+                        *slot = w0 * at(inputs[0], component)
+                            + w1 * at(inputs[1], component)
+                            + w2 * at(inputs[2], component);
+                    }
+                    write(color, region, width, px, py, (draw.color)(&mixed));
+                    painted = true;
+                }
+                continue;
             };
+            let (from, to) = (from.max(bounds.x0), to.min(bounds.x1));
+            if from >= to {
+                continue;
+            }
+            count::span();
+            let plane = plane.get_or_insert_with(|| {
+                let plane = Plane::new(&corners, area);
+                for (component, entry) in planes.iter_mut().enumerate() {
+                    let v2 = at(inputs[2], component);
+                    let (d0, d1) = (at(inputs[0], component) - v2, at(inputs[1], component) - v2);
+                    *entry = [d0, d1, plane.dw0 * d0 + plane.dw1 * d1, 0.0];
+                }
+                plane
+            });
+            let mut state: Option<Stepped> = None;
             for px in from..to {
                 count::visited();
-                let x = px as f64 + 0.5;
-                // The three barycentric weights, each an edge function over
-                // the same denominator, so their signs agree whichever way the
-                // triangle is wound and the test is one comparison each.
-                let w0 = ((b.0 - x) * (c.1 - y) - (c.0 - x) * (b.1 - y)) / area;
-                let w1 = ((c.0 - x) * (a.1 - y) - (a.0 - x) * (c.1 - y)) / area;
+                let restart = restart_of(px);
+                let current = match state.take() {
+                    Some(current) if current.column >= restart => current,
+                    _ => {
+                        let fresh = plane.restart(&corners, y, restart);
+                        for (component, entry) in planes.iter_mut().enumerate() {
+                            entry[3] = at(inputs[2], component)
+                                + fresh.w0 * entry[0]
+                                + fresh.w1 * entry[1];
+                        }
+                        fresh
+                    }
+                };
+                let mut current = current;
+                while current.column < px {
+                    current.w0 += plane.dw0;
+                    current.w1 += plane.dw1;
+                    for entry in planes.iter_mut() {
+                        entry[3] += entry[2];
+                    }
+                    current.column += 1;
+                }
+                let (w0, w1) = (current.w0, current.w1);
                 let w2 = 1.0 - w0 - w1;
-                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                let (e0, e1, e2) = (
+                    MARGIN * current.e0,
+                    MARGIN * current.e1,
+                    MARGIN * current.e2,
+                );
+                state = Some(current);
+                if w0 < -e0 || w1 < -e1 || w2 < -e2 {
                     continue;
                 }
-                count::inside();
-                for (component, slot) in mixed.iter_mut().enumerate() {
-                    let at = |v: &[f64]| v.get(component).copied().unwrap_or(0.0);
-                    *slot = w0 * at(inputs[0]) + w1 * at(inputs[1]) + w2 * at(inputs[2]);
+                if w0 > e0 && w1 > e1 && w2 > e2 {
+                    for (slot, entry) in mixed.iter_mut().zip(planes.iter()) {
+                        *slot = entry[3];
+                    }
+                } else {
+                    // Within rounding of an edge: the test decides.
+                    let x = px as f64 + 0.5;
+                    let Some((w0, w1, w2)) = inside(&corners, area, x, y) else {
+                        continue;
+                    };
+                    for (component, slot) in mixed.iter_mut().enumerate() {
+                        *slot = w0 * at(inputs[0], component)
+                            + w1 * at(inputs[1], component)
+                            + w2 * at(inputs[2], component);
+                    }
                 }
+                count::inside();
                 write(color, region, width, px, py, (draw.color)(&mixed));
                 painted = true;
             }
@@ -543,8 +714,10 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
             // to work from; the coverage mask still decides what composites.
             let centroid = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
             for (component, slot) in mixed.iter_mut().enumerate() {
-                let at = |v: &[f64]| v.get(component).copied().unwrap_or(0.0);
-                *slot = (at(inputs[0]) + at(inputs[1]) + at(inputs[2])) / 3.0;
+                *slot = (at(inputs[0], component)
+                    + at(inputs[1], component)
+                    + at(inputs[2], component))
+                    / 3.0;
             }
             let px = centroid.0.floor().clamp(-1.0e18, 1.0e18) as i64;
             let py = centroid.1.floor().clamp(-1.0e18, 1.0e18) as i64;
@@ -553,6 +726,23 @@ fn paint_triangles(draw: &MeshDraw<'_>, region: &Region, width: u32, color: &mut
             }
         }
     }
+}
+
+/// The inside test at the pixel centre `(x, y)`: the three barycentric
+/// weights, each an edge function over the same denominator, so their signs
+/// agree whichever way the triangle is wound and the test is one comparison
+/// each; `None` outside.
+fn inside(corners: &[(f64, f64); 3], area: f64, x: f64, y: f64) -> Option<(f64, f64, f64)> {
+    let [a, b, c] = *corners;
+    count::divided();
+    count::divided();
+    let w0 = ((b.0 - x) * (c.1 - y) - (c.0 - x) * (b.1 - y)) / area;
+    let w1 = ((c.0 - x) * (a.1 - y) - (a.0 - x) * (c.1 - y)) / area;
+    let w2 = 1.0 - w0 - w1;
+    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+        return None;
+    }
+    Some((w0, w1, w2))
 }
 
 /// Work the colour pass does, counted for its tests: compiled only under
@@ -566,6 +756,8 @@ mod count {
         static ROWS: Cell<u64> = const { Cell::new(0) };
         static VISITED: Cell<u64> = const { Cell::new(0) };
         static INSIDE: Cell<u64> = const { Cell::new(0) };
+        static SPANS: Cell<u64> = const { Cell::new(0) };
+        static DIVIDED: Cell<u64> = const { Cell::new(0) };
     }
 
     /// One row of a triangle's clamped box, walked or not.
@@ -581,6 +773,25 @@ mod count {
     /// One pixel the inside test accepted.
     pub(super) fn inside() {
         INSIDE.with(|count| count.set(count.get() + 1));
+    }
+
+    /// One span walked by its steps.
+    pub(super) fn span() {
+        SPANS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// One division by the area.
+    pub(super) fn divided() {
+        DIVIDED.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The spans walked and the divisions taken on this thread since the
+    /// last call.
+    pub(super) fn take_steps() -> (u64, u64) {
+        (
+            SPANS.with(|count| count.replace(0)),
+            DIVIDED.with(|count| count.replace(0)),
+        )
     }
 
     /// The counts on this thread since the last call: rows, pixels visited and
@@ -602,6 +813,10 @@ mod count {
     pub(super) fn visited() {}
 
     pub(super) fn inside() {}
+
+    pub(super) fn span() {}
+
+    pub(super) fn divided() {}
 }
 
 /// One vertex's colour inputs.
@@ -1043,15 +1258,16 @@ mod tests {
         }
     }
 
-    /// A colour every input reaches, so two walks that painted different
-    /// pixels, or the same pixel from different weights, paint differently.
+    /// A colour every input reaches, each channel a level of a linear
+    /// mixture of them, so two walks that painted different pixels, or the
+    /// same pixel from weights a level apart, paint differently.
     fn spread(inputs: &[f64]) -> Color {
-        let level =
-            |at: usize| (inputs.get(at).copied().unwrap_or(0.5) * 251.0).clamp(0.0, 255.0) as u8;
+        let input = |at: usize| inputs.get(at).copied().unwrap_or(0.5);
+        let level = |value: f64| (value * 251.0).clamp(0.0, 255.0) as u8;
         Color {
-            r: level(0),
-            g: level(1),
-            b: level(0) ^ level(1).rotate_left(3),
+            r: level(input(0)),
+            g: level(input(1)),
+            b: level(0.75 * input(0) + 0.25 * input(1)),
             a: 0xFF,
         }
     }
@@ -1103,7 +1319,15 @@ mod tests {
         paint_triangles(&draw, &region, rect.2, &mut spans);
         paint_triangles_by_box(&draw, &region, rect.2, &mut boxes);
         let _ = count::take();
-        if let Some(first) = (0..pixels).find(|&at| spans[at] != boxes[at]) {
+        let _ = count::take_steps();
+        // The same pixels painted, and each channel within a level: a span's
+        // stepped weights are a few parts in 10^14 from the test's (ruling
+        // 22).
+        let apart = |at: usize| {
+            let (s, b) = (spans[at], boxes[at]);
+            (s[3] != 0) != (b[3] != 0) || (0..3).any(|channel| s[channel].abs_diff(b[channel]) > 1)
+        };
+        if let Some(first) = (0..pixels).find(|&at| apart(at)) {
             panic!(
                 "{case}: the span walk painted {:?} and the box walk {:?} at pixel {first} of \
                  {rect:?}, over {positions:?} as {triangles:?}",
@@ -1112,8 +1336,9 @@ mod tests {
         }
     }
 
-    /// **The pixels a span walk paints are the box walk's, and so are their
-    /// colours,** wherever rounding decides the inside test: over triangles
+    /// **The pixels a span walk paints are the box walk's, and their colours
+    /// within a level of the box walk's,** wherever rounding decides the
+    /// inside test: over triangles
     /// at random, vertices on and beside pixel centres and pixel edges, edges
     /// a hair from level, slivers, specks, vertices far off the region and
     /// past the span reach, and regions far from the origin.
@@ -1316,6 +1541,113 @@ mod tests {
         assert_eq!(far.columns(5.5), None);
         let deep = spans([(2.3, -70_000.2), (61.7, 9.9), (30.1, 58.3)]);
         assert_eq!(deep.columns(5.5), None);
+    }
+
+    /// **P-14.4's exit.** A span divides once at most: the triangle's one
+    /// division by its area, taken at its first span, and its weights stepped
+    /// from there, over three triangles whose vertices stand clear of every
+    /// row's centre and whose pixel centres stand clear of every edge.
+    #[test]
+    fn a_span_divides_once() {
+        let color = grey;
+        let region = Region::of((0, 0, 64, 64));
+        for corners in [
+            [(2.3, 1.2), (61.7, 9.9), (30.1, 58.3)],
+            [(60.6, 3.7), (4.2, 33.4), (59.1, 62.8)],
+            [(10.2, 2.9), (13.8, 61.1), (52.4, 40.3)],
+        ] {
+            let values = [0.0, 0.5, 1.0];
+            let draw = MeshDraw {
+                positions: &corners,
+                values: &values,
+                components: 1,
+                triangles: &[[0, 1, 2]],
+                color: &color,
+                stop: None,
+                scale: 1.0,
+            };
+            let mut buffer = vec![[0u8; 4]; 64 * 64];
+            let _ = count::take();
+            let _ = count::take_steps();
+            paint_triangles(&draw, &region, 64, &mut buffer);
+            let (spans, divided) = count::take_steps();
+            let (_, _, inside) = count::take();
+            assert!(spans > 40 && inside > 0, "{corners:?} walked {spans} spans");
+            assert!(
+                divided <= spans,
+                "{corners:?}: {divided} divisions over {spans} spans"
+            );
+            assert_eq!(divided, 1, "{corners:?}: the triangle's one division");
+        }
+    }
+
+    /// Three corners of one value paint that value at every pixel, to the
+    /// bit: each input steps as `v2 + w0·(v0 − v2) + w1·(v1 − v2)`, whose
+    /// differences are zero.
+    #[test]
+    fn three_corners_of_one_value_paint_that_value() {
+        let positions = [(1.3, 0.7), (44.9, 6.1), (20.2, 39.6)];
+        let values = [0.4, 0.4, 0.4];
+        let buffer = draw(&positions, &values, &[[0, 1, 2]], 48);
+        let mut seen = 0;
+        for y in 0..48 {
+            for x in 0..48 {
+                if let Some(colour) = buffer.at(x, y) {
+                    assert_eq!(colour.r, 102, "({x}, {y})");
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 500, "{seen} pixels painted");
+    }
+
+    /// **Ruling 5.** A region's pixels are the page's: the weights restart at
+    /// columns of the page frame, never at a region's edge, so a part of the
+    /// page starting at any column paints the colours the whole page paints.
+    #[test]
+    fn a_part_of_the_page_steps_as_the_page_does() {
+        let positions = [(-7.3, 2.2), (150.6, 13.9), (40.1, 70.4), (155.2, 66.0)];
+        let values = [0.0, 0.2, 0.9, 0.3, 0.6, 1.0, 1.0, 0.1];
+        let triangles = [[0, 1, 2], [1, 3, 2]];
+        let color = spread;
+        let draw = MeshDraw {
+            positions: &positions,
+            values: &values,
+            components: 2,
+            triangles: &triangles,
+            color: &color,
+            stop: None,
+            scale: 1.0,
+        };
+        let mut page = vec![[0u8; 4]; 160 * 72];
+        paint_triangles(&draw, &Region::of((0, 0, 160, 72)), 160, &mut page);
+        for part in [
+            (37, 5, 50, 30),
+            (64, 0, 64, 72),
+            (1, 40, 158, 9),
+            (129, 17, 31, 55),
+        ] {
+            let (x0, y0, width, height) = part;
+            let mut tile = vec![[0u8; 4]; (width * height) as usize];
+            paint_triangles(
+                &draw,
+                &Region::of((x0, y0, width, height)),
+                width,
+                &mut tile,
+            );
+            for row in 0..height {
+                for column in 0..width {
+                    let on_page = ((y0 as u32 + row) * 160 + x0 as u32 + column) as usize;
+                    assert_eq!(
+                        tile[(row * width + column) as usize],
+                        page[on_page],
+                        "the part {part:?} at ({column}, {row})"
+                    );
+                }
+            }
+        }
+        let _ = count::take();
+        let _ = count::take_steps();
     }
 
     /// A triangle with no pixel centre inside still puts its centroid's
