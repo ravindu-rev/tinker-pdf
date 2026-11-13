@@ -1,11 +1,13 @@
 //! Content-stream tokenizer and interpreter, the `Device` trait seam, the
-//! text-extraction device (which needs no rasterizer) and the recording
-//! device every later consumer of a page's content starts from.
+//! text-extraction device (which needs no rasterizer), the recording device
+//! every later consumer of a page's content starts from, and the filtering
+//! device that drops classes of content or forces them black.
 //!
 //! Feature documentation: `docs/features/content-and-text.md`.
 
 #![forbid(unsafe_code)]
 
+pub mod cull;
 pub mod device;
 pub mod interpret;
 pub mod plain;
@@ -19,6 +21,7 @@ pub mod tokenizer;
 pub mod word_boxes;
 pub mod words;
 
+pub use cull::{Black, Cull, Culled};
 pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 pub use interpret::{
     interpret, interpret_counted, DeviceDefaults, FontSource, Form, FormDrawn, FormInvocation,

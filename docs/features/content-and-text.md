@@ -580,6 +580,26 @@ was refused for depth, a cycle or a budget, and one past
 `form_recording_bytes`, counted by `Event::kept_bytes`, the count the
 retained page's cap uses.
 
+**The class filter.** `cull.rs` holds a fourth `Device`, `Culled`, which
+stands in front of another and forwards every call but those of the classes
+its `Cull` drops — text, paths, clips, images and shadings, as
+[render controls](../design/render-controls.md) files them — and forces the
+text or the path class black when its `Black` says so (`forced_black`: what
+`0 0 0 1 k` sets — light's black, the `K` plate alone, DeviceCMYK's family,
+no pattern, no named space and no source for a rendering intent to resolve
+again — and every other field of the state as it was). Every call that draws
+or clips inside a text object is the text's, which is what makes a Type 3
+glyph's paints text: they arrive inside the text object that shows the glyph,
+with no `show_glyph` of their own. No text object outlives the stream or the
+`q` it was opened in, so a stream that never ends its text makes nothing after
+it text. The questions — `begin_form`, `begin_group`, `begin_soft_mask`,
+`is_cancelled` and `answers_alike` — are the inner device's, so the
+interpreter runs through the filter exactly what it runs without it, a kept
+drawing of a form replayed where the inner device would answer as it records:
+the recording is of the calls the filter was handed, and its replay is
+filtered as they were; `Cull::TEXT_ONLY` and `Cull::NO_TEXT` are the two
+presets.
+
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a
@@ -1217,8 +1237,18 @@ small stream's whole event list asserted in order including the nesting; two
 paints with different states asserted separately, which is what catches a
 recorder that shares one handle and reports every event with the last state;
 `q`/`Q` one for one; a declined form has no end; a glyph-only capture keeps
-glyphs and copies no state; the per-event size pinned) and `state.rs` (matrix
-convention, render-mode predicates).
+glyphs and copies no state; the per-event size pinned), `cull.rs` (content
+holding every class — a Type 3 glyph among ordinary ones, a text clip, an
+inline image, an image mask, `sh`, a shading-pattern fill, a form, a group
+and a soft mask — recorded through the filter is the unfiltered recording
+less the culled class's events, for each class and both presets, with the
+counts written out by hand; forced black rewrites the colour of its class's
+calls and nothing else; the questions stay the inner device's,
+`answers_alike` among them, and a form's kept drawing replays through the
+filter, filtered as the form's interpretation is; neither a text object a
+form or a glyph procedure leaves open nor a `Q` after the `ET` of a text
+object its `q` was inside makes anything after it text) and
+`state.rs` (matrix convention, render-mode predicates).
 
 Every test in `interpret.rs` drives `RecordingDevice`; the hidden-image test
 asserts that the interpreter hands a hidden image to the device inside a

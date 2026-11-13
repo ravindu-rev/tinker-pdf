@@ -59,11 +59,11 @@ arrives:
 | --- | --- |
 | **Text** | every `show_glyph`, in every text rendering mode 0 to 7; and every `fill_path`, `stroke_path`, `clip_path`, `draw_image` and `draw_shading` that arrives inside a text object — between a `begin_text` and its `end_text` |
 | **Paths** | every `fill_path` and `stroke_path` outside a text object, a fill or a stroke painted with a pattern among them, tiling or shading |
-| **Clips** | every `clip_path` outside a text object: `W` and `W*` |
+| **Clips** | every `clip_path` outside a text object: `W` and `W*`, and the clip a form's or a soft mask group's `/BBox` makes (8.10.1) |
 | **Images** | every `draw_image` outside a text object: an image XObject, an image mask (`/ImageMask`, a stencil painted in the fill colour) and an inline image alike |
 | **Shadings** | every `draw_shading` outside a text object: `sh` |
 
-Three of those lines settle what the calls alone do not:
+These settle what the calls alone do not:
 
 - **A Type 3 glyph is text.** 9.6.5 makes its glyph a content stream: the
   interpreter runs the procedure where the glyph is shown, and its paints
@@ -74,6 +74,16 @@ Three of those lines settle what the calls alone do not:
   the text's — the procedure's own `W n` among it, which its own `q`…`Q`
   bounds. A text object a Type 3 procedure opens inside the one showing it
   counts as one more level, and the rule holds until the outermost `ET`.
+  A glyph a stream shows outside any text object, which 8.2 does not allow
+  and the interpreter still draws, is text as every glyph is; a Type 3
+  glyph's paints shown so arrive in no text object, and each is filed by its
+  call.
+- **No text object outlives the stream it was opened in.** One that a form,
+  a transparency group or a soft mask's group leaves open ends with that
+  stream, and a `Q` — the interpreter's own around a Type 3 procedure among
+  them — ends every text object opened since its `q` and reopens none an `ET`
+  closed. So a damaged stream that never ends its text makes nothing drawn
+  after it text, and *no text* does not take the rest of a page with it.
 - **A text clip is text.** A glyph in modes 4 to 7 adds its outline to the
   clip that 9.3.6 applies at `ET`; it arrives as a `show_glyph`, and the clip
   is the renderer's accumulation of those calls. Culling text drops the glyph
@@ -91,16 +101,22 @@ Three of those lines settle what the calls alone do not:
 Everything else always passes: `begin_text` and `end_text`, `save_state` and
 `restore_state`, marked content, forms, transparency groups, soft masks, the
 budget and recursion notices, and the three questions — `begin_form`,
-`begin_group`, `begin_soft_mask` — and `is_cancelled`, so the inner device
-answers each as it would unwrapped and the interpreter runs what it would have
-run.
+`begin_group`, `begin_soft_mask` — with `is_cancelled` and `answers_alike`, so
+the inner device answers each as it would unwrapped and the interpreter runs
+what it would have run. A form's drawing the interpreter keeps for a later
+invocation is of the calls the filter was handed, before it dropped any, so a
+replay of it is filtered as the drawing was, and one recording serves every
+control.
 
 ### The filter
 
 `tinker_pdf_content::cull::Culled<'d, D>` wraps a `&mut D: Device` with a
 `Cull` — one switch a class, `text`, `paths`, `clips`, `images` and `shadings`,
 each `true` to drop — and a `Black` — `text` and `paths`, each `true` to
-force that class black. It counts the text objects it is inside. A call of a
+force that class black. It counts the text objects it is inside: one more at
+each `begin_text` and one fewer at each `end_text`, the count at an entered
+form, group or mask's group put back at its end, and the count at each
+`save_state` the most its `restore_state` leaves. A call of a
 culled class is not forwarded at all, so it never reaches the renderer: not
 its paint, not its image-run flush, not its warnings. A call of a class forced
 black is forwarded with its state rewritten as *Forced black* says. Every
@@ -122,8 +138,12 @@ Forcing a class black rewrites the colour of each of its calls' states before
 they are forwarded, and nothing else: the fill and stroke colours become
 light's black, `Rgb::BLACK`; the fill and stroke inks become `K` alone,
 `[0, 0, 0, 255]` — 8.6.4.4's `0 0 0 1 k`, never a rich black; the patterns are
-taken away, so a pattern fill paints black; and the colour spaces named are
-cleared, the colour being no longer theirs. The alphas, the blend mode, the
+taken away, so a pattern fill paints black; the colour spaces named are
+cleared, the colour being no longer theirs; and the colour is DeviceCMYK's,
+its family `ColorFamily::Cmyk` and no source kept for a rendering intent to
+resolve again — what `0 0 0 1 k` sets where no default space remaps
+DeviceCMYK, so the device-dependent rules treat a forced mark as that
+operator's (11.7.5.3). The alphas, the blend mode, the
 transform, the text state, the line parameters, the soft mask and the stored
 parameters are the call's own. So a light page paints `(0, 0, 0)`, an ink page
 paints the `K` plate alone at full, and constant alpha still fades a forced
