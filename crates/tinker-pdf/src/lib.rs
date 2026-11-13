@@ -273,6 +273,10 @@ pub use annotations::{
     MAX_ANNOTATION_BYTES,
 };
 /// A page interpreted once and drawn at any scale: [`Page::display_list`].
+pub use command_stream::{
+    CommandBudgets, CommandField, CommandKind, CommandRecord, CommandStream, CommandStreamError,
+    COMMAND_STREAM_MAJOR, COMMAND_STREAM_MINOR,
+};
 pub use display::DisplayList;
 /// Images a page draws, with their samples before any colour conversion and
 /// the space they are in, behind [`Page::images`].
@@ -3082,28 +3086,38 @@ impl Page {
     /// and nothing says so.
     #[must_use]
     pub fn pixel_size(&self, options: &RenderOptions) -> (u32, u32) {
-        let (w, h) = self.size();
-        tinker_pdf_render::page_pixels(w, h, self.scales(options).1)
+        self.sheet().pixel_size(options)
     }
 
-    /// The scale asked for and the scale that will be used, in that order.
-    ///
-    /// One spelling for both, because [`Page::pixel_size`] and [`Page::render`]
-    /// have to agree about the answer exactly — a caller tiles by the first and
-    /// is handed pixels by the second, and a lattice computed against a
-    /// different clamp than the one the renderer applied leaves a strip of the
-    /// page nothing ever asks for.
-    fn scales(&self, options: &RenderOptions) -> (f64, f64) {
-        let (w, h) = self.size();
-        let scale = if options.scale.is_finite() && options.scale > 0.0 {
-            options.scale
-        } else {
-            1.0
-        };
-        // The canvas is clamped for an enormous page; the transform has to be
-        // clamped by the same factor or the content is drawn full-size onto a
-        // smaller surface, which crops instead of scaling.
-        (scale, tinker_pdf_render::page_scale(w, h, scale))
+    /// The scale asked for and the scale that will be used, in that order
+    /// ([`Sheet::scales`]).
+    pub(crate) fn scales(&self, options: &RenderOptions) -> (f64, f64) {
+        self.sheet().scales(options)
+    }
+
+    /// What a render reads of this page's geometry: its crop box and its
+    /// rotation ([`Sheet`]).
+    pub(crate) fn sheet(&self) -> Sheet {
+        Sheet {
+            crop: self.crop_box(),
+            rotation: self.rotation(),
+        }
+    }
+
+    /// The rectangle of the page's pixels a render of `options` draws, and
+    /// the scale it draws them at: its sheet's ([`Sheet::view`]).
+    pub(crate) fn view(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+    ) -> View {
+        self.sheet().view(options, frame)
+    }
+
+    /// The transform from the page's default space to its pixels at
+    /// `applied`: its sheet's ([`Sheet::base_at`]).
+    pub(crate) fn base_at(&self, applied: f64) -> Matrix {
+        self.sheet().base_at(applied)
     }
 
     /// Renders the page to a bitmap.
@@ -3276,61 +3290,10 @@ impl Page {
             .into_bitmap()
     }
 
-    /// The rectangle of the page's pixels a render of `options` draws, and the
-    /// scale it draws them at: [`Page::render_layer_with`]'s view, which a
-    /// render in bands cuts.
-    pub(crate) fn view(
-        &self,
-        options: &RenderOptions,
-        frame: Option<(f64, f64, f64, f64)>,
-    ) -> View {
-        let (w, h) = self.size();
-        let (scale, applied) = self.scales(options);
-
-        // Ruling 5. The whole page's pixel rectangle is computed first,
-        // because it is what a region is a rectangle *of*: the region's
-        // coordinates only mean anything against the bitmap the caller would
-        // otherwise have got, so the clamp needs that size and not the page's
-        // points.
-        //
-        // `None` is not a special case in what follows — it is the region
-        // covering the whole page, whose translation is zero — so a tile and a
-        // page take one code path here as well as in the renderer, and there is
-        // no un-tiled spelling left for a defect to hide in.
-        let (full_width, full_height) = tinker_pdf_render::page_pixels(w, h, applied);
-        let full = PixelRegion::new(0, 0, full_width, full_height);
-        // A part's own rectangle, as the page's pixels it covers, when the
-        // caller named no region. Already trimmed to the page, so it is never
-        // "clamped" in `RegionClamped`'s sense: what lies off the page is what
-        // the page render does not show either.
-        let frame =
-            frame.map(|rect| frame_region(self.crop_box(), self.rotation(), applied, rect, full));
-        let asked = options.region;
-        let view = asked
-            .or(frame)
-            .unwrap_or(full)
-            .clamped_to(full_width, full_height);
-        View {
-            scale,
-            applied,
-            full_width,
-            full_height,
-            view,
-            asked,
-        }
-    }
-
-    /// The transform from the page's default space to its pixels at `applied`
-    /// — rotation and the crop box's origin in it, never a region (ruling 5).
-    pub(crate) fn base_at(&self, applied: f64) -> Matrix {
-        tinker_pdf_render::page_view_transform(self.crop_box(), self.rotation(), applied)
-    }
-
     /// [`Page::render_layer_with`]'s render, its pixels in the format handed
     /// back and what it met kept in the parts its warnings are assembled from
-    /// ([`Met`]), which the bands of one page merge. What the renderer drew
-    /// is counted where `draws` says it is the render's: every band of a page
-    /// drawn in bands draws the same calls, and one of them counts them.
+    /// ([`Met`]), which the bands of one page merge: [`draw_sheet`] over this
+    /// page's sheet and the space its own group composites in.
     pub(crate) fn draw_layer(
         &self,
         options: &RenderOptions,
@@ -3342,157 +3305,16 @@ impl Page {
             &resources::PageResources,
         ),
     ) -> Layer {
-        let View {
-            scale,
-            applied,
-            full_width,
-            full_height,
-            view,
-            asked,
-        } = self.view(options, frame);
-
-        // Ruling 2: the caller gets a whole page rather than a fragment, and
-        // is told the resolution is not the one they asked for.
-        let scaled_down = applied < scale;
-
-        // The rotation and the crop-box origin belong in the transform, not
-        // only in the canvas size: sizing for a rotated page and then drawing
-        // it upright fills a sideways canvas with clipped, upright content.
-        // The region is *not* in the transform: the page is drawn through the
-        // one transform whatever part of it is asked for, and the canvas
-        // stands at the region's corner of the displayed picture (ruling 5).
-        let base = self.base_at(applied);
-
-        // 11.4.7: the page itself may declare a transparency group, and its
-        // `/CS` is the space the *whole page* composites in. Nothing invokes
-        // it, so it is read here rather than reaching the device through a
-        // `Do` — and, unlike a form's group, it decides the format of the page
-        // canvas itself rather than of a buffer over it. The bitmap is
-        // converted back for the caller at the end; 11.4.7 says the page group
-        // is composited and then converted to the output device's space, which
-        // is exactly those two steps.
-        //
-        // Forced colours draw the page's coverage black on white into grey,
-        // whatever space it composites in, and tint it into the format asked
-        // for at the end ([`ForcedColours`]).
-        let forced = options.forced_colours;
-        let page_space = resources.page_group_space(&self.inner);
-        // A blue-first order is an output order: the page composites red
-        // first and is reordered by the `extract` below.
-        let canvas_format = if forced.is_some() {
-            PixelFormat::Gray8
-        } else {
-            page_space
-                .map(tinker_pdf_render::group_format)
-                .unwrap_or_else(|| tinker_pdf_render::canvas_format(options.format))
-        };
-        // What the caller is handed, decided before the canvas exists: a page
-        // may start with nothing on it only if the format it comes back in can
-        // say so. A transparent canvas converted to `Rgb8` at the end would
-        // drop an alpha of zero and keep the black stored under it.
-        let wanted = handed_back(options);
-        let canvas = if options.transparent && wanted.has_alpha() && canvas_format.has_alpha() {
-            tinker_pdf_render::region_canvas_clear(view, canvas_format)
-        } else {
-            tinker_pdf_render::region_canvas_in(view, canvas_format)
-        };
-
-        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, resources)
-            .with_page_size(full_width, full_height)
-            .with_antialias(options.antialias)
-            .with_levels(options.graphics_bits, options.text_bits)
-            .with_hard_edge(options.hard_edge)
-            .with_thinnest_line(options.thinnest_line);
-        if let Some(cancel) = &options.cancel {
-            renderer = renderer.with_cancel(cancel.clone());
-        }
-        if let Some(forced) = forced {
-            renderer = renderer.with_forced_colours(forced.fill_to_stroke);
-        }
-        paint(&mut renderer, resources);
-        let (canvas, warnings, counts, parameters) = renderer.finish_with_parameters();
-        stats::add_render(resources.work().map(|work| &**work), counts, draws);
-        let met = Met {
-            renderer: warnings,
-            missing_fonts: !resources.missing_fonts().is_empty(),
-            damaged: resources.damaged_images(),
-            repaired: resources.repaired_spaces(),
-            reduced: resources.reduced_images(),
-            scaled_down: scaled_down.then_some((scale, applied)),
-            // Ruling 10: a bitmap smaller than the rectangle asked for is a
-            // leniency, and a leniency is named. Only when the trim actually
-            // changed the ask — a region inside the page reports nothing,
-            // which is every tile of a well-formed lattice.
-            clamped: asked
-                .filter(|requested| *requested != view)
-                .map(|requested| (requested, view)),
-            unreadable_configuration: self.unreadable_configuration(options),
-        };
-
-        // Back to something a caller can read. A page group composited over
-        // ink comes back as light, which is 11.4.7's own last step — unless
-        // the caller asked for ink by name *and* said they know it is ink.
-        // Forced colours' black-on-white coverage is tinted into the format
-        // asked for instead, foreground at the dark end — once a pixel, so the
-        // rounding is the tint's alone — and no transfer function applies to
-        // it: the page's colours are what forced colours replace.
-        let (width, height) = (canvas.width, canvas.height);
-        let (format, stride, data) = match forced {
-            Some(forced) => {
-                let grey = tinker_pdf_raster::toolbox::Layout {
-                    format: canvas.format,
-                    width,
-                    height,
-                    stride: canvas.stride,
-                    premultiplied: false,
-                };
-                match tinker_pdf_raster::toolbox::tint_grey(
-                    &grey,
-                    &canvas.data,
-                    forced.foreground,
-                    forced.background,
-                    wanted,
-                ) {
-                    Some((layout, data)) => (wanted, layout.stride, data),
-                    // A region off the page has no pixels to tint.
-                    None => (
-                        wanted,
-                        (width as usize).saturating_mul(wanted.components()),
-                        Vec::new(),
-                    ),
-                }
-            }
-            None => {
-                let mut canvas = if canvas.format == wanted {
-                    canvas
-                } else {
-                    canvas.extract(canvas.origin(), width, height, wanted)
-                };
-                // 10.5 and 11.7.5.2: the transfer functions of each point's
-                // topmost fully opaque object, on the output's own components,
-                // now that the final colour there is known and in the
-                // output's space.
-                if let Some(parameters) = &parameters {
-                    parameters.apply(&mut canvas);
-                }
-                (canvas.format, canvas.stride, canvas.data)
-            }
-        };
-
-        let mut pixels = Bitmap {
-            width,
-            height,
-            format,
-            stride,
-            data,
-            warnings: Vec::new(),
-            premultiplied: false,
-            stats: resources.work().map(|work| work.stats()),
-        };
-        if options.premultiplied {
-            pixels.premultiply();
-        }
-        Layer { pixels, met }
+        draw_sheet(
+            self.sheet(),
+            resources.page_group_space(&self.inner),
+            options,
+            frame,
+            resources,
+            draws,
+            self.unreadable_configuration(options),
+            paint,
+        )
     }
 
     /// The page's link annotations, in `/Annots` order (12.5.6.5).
@@ -3696,6 +3518,319 @@ impl Page {
         let tree = structure::bind(&self.doc)?;
         Some(tree.text_for_page(self.index(), &self.text()))
     }
+}
+
+/// What a render reads of the page it draws, apart from the page: its crop
+/// box and its `/Rotate` — the view a render's pixels are a rectangle of and
+/// the transform it draws through. A page has one ([`Page::sheet`]) and so
+/// does a command stream, whose `Page` record holds both, so both draw through
+/// [`draw_sheet`], the one pipeline (ruling 5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Sheet {
+    /// The crop box, clipped to the media box, as `(x0, y0, x1, y1)`.
+    pub(crate) crop: (f64, f64, f64, f64),
+    /// `/Rotate`, normalized to 0, 90, 180 or 270.
+    pub(crate) rotation: u16,
+}
+
+impl Sheet {
+    /// The size in points after rotation: [`Page::size`]'s.
+    pub(crate) fn size(&self) -> (f64, f64) {
+        let (x0, y0, x1, y1) = self.crop;
+        let (w, h) = (x1 - x0, y1 - y0);
+        if self.rotation == 90 || self.rotation == 270 {
+            (h, w)
+        } else {
+            (w, h)
+        }
+    }
+
+    /// [`Page::pixel_size`]'s answer.
+    pub(crate) fn pixel_size(&self, options: &RenderOptions) -> (u32, u32) {
+        let (w, h) = self.size();
+        tinker_pdf_render::page_pixels(w, h, self.scales(options).1)
+    }
+
+    /// The scale asked for and the scale that will be used, in that order.
+    ///
+    /// One spelling for both, because [`Page::pixel_size`] and [`Page::render`]
+    /// have to agree about the answer exactly — a caller tiles by the first and
+    /// is handed pixels by the second, and a lattice computed against a
+    /// different clamp than the one the renderer applied leaves a strip of the
+    /// page nothing ever asks for.
+    pub(crate) fn scales(&self, options: &RenderOptions) -> (f64, f64) {
+        let (w, h) = self.size();
+        let scale = if options.scale.is_finite() && options.scale > 0.0 {
+            options.scale
+        } else {
+            1.0
+        };
+        // The canvas is clamped for an enormous page; the transform has to be
+        // clamped by the same factor or the content is drawn full-size onto a
+        // smaller surface, which crops instead of scaling.
+        (scale, tinker_pdf_render::page_scale(w, h, scale))
+    }
+
+    /// The rectangle of the page's pixels a render of `options` draws, and
+    /// the scale it draws them at, `frame` a part's own rectangle of default
+    /// user space where the caller names no region.
+    pub(crate) fn view(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+    ) -> View {
+        let (w, h) = self.size();
+        let (scale, applied) = self.scales(options);
+
+        // Ruling 5. The whole page's pixel rectangle is computed first,
+        // because it is what a region is a rectangle *of*: the region's
+        // coordinates only mean anything against the bitmap the caller would
+        // otherwise have got, so the clamp needs that size and not the page's
+        // points.
+        //
+        // `None` is not a special case in what follows — it is the region
+        // covering the whole page, whose translation is zero — so a tile and a
+        // page take one code path here as well as in the renderer, and there is
+        // no un-tiled spelling left for a defect to hide in.
+        let (full_width, full_height) = tinker_pdf_render::page_pixels(w, h, applied);
+        let full = PixelRegion::new(0, 0, full_width, full_height);
+        // A part's own rectangle, as the page's pixels it covers, when the
+        // caller named no region. Already trimmed to the page, so it is never
+        // "clamped" in `RegionClamped`'s sense: what lies off the page is what
+        // the page render does not show either.
+        let frame = frame.map(|rect| frame_region(self.crop, self.rotation, applied, rect, full));
+        let asked = options.region;
+        let view = asked
+            .or(frame)
+            .unwrap_or(full)
+            .clamped_to(full_width, full_height);
+        View {
+            scale,
+            applied,
+            full_width,
+            full_height,
+            view,
+            asked,
+        }
+    }
+
+    /// The transform from the page's default space to its pixels at
+    /// `applied` — rotation and the crop box's origin in it, never a region
+    /// (ruling 5).
+    pub(crate) fn base_at(&self, applied: f64) -> Matrix {
+        tinker_pdf_render::page_view_transform(self.crop, self.rotation, applied)
+    }
+}
+
+/// The resources a render draws through, as the pipeline reads them once the
+/// paint is done ([`draw_sheet`]): a page's resources, or a command stream's
+/// tables.
+pub(crate) trait Drawn: tinker_pdf_render::GlyphSource + Sized {
+    /// Whether the resources met a font they could not resolve.
+    fn met_missing_fonts(&self) -> bool;
+    /// The images they decoded with something tolerated, in the order met.
+    fn damaged_images(&self) -> Vec<(String, String)>;
+    /// The colour spaces they read with a repair, in the order met.
+    fn repaired_spaces(&self) -> Vec<(String, String)>;
+    /// The images they drew from a decode the document's budget reduced, as
+    /// `(resource name, reduction)`, in the order met.
+    fn reduced_images(&self) -> Vec<(String, u32)>;
+    /// The tally they count into, when the render is counting.
+    fn work(&self) -> Option<&Arc<stats::Work>>;
+}
+
+impl Drawn for resources::PageResources {
+    fn met_missing_fonts(&self) -> bool {
+        !self.missing_fonts().is_empty()
+    }
+
+    fn damaged_images(&self) -> Vec<(String, String)> {
+        resources::PageResources::damaged_images(self)
+    }
+
+    fn repaired_spaces(&self) -> Vec<(String, String)> {
+        resources::PageResources::repaired_spaces(self)
+    }
+
+    fn reduced_images(&self) -> Vec<(String, u32)> {
+        resources::PageResources::reduced_images(self)
+    }
+
+    fn work(&self) -> Option<&Arc<stats::Work>> {
+        resources::PageResources::work(self)
+    }
+}
+
+/// **The one pipeline every render goes through**, a page's, a form's, an
+/// annotation's or a command stream's ([`Page::draw_layer`]): `sheet`'s view
+/// at `options`, a canvas in the format `group`, the page group's space
+/// (11.4.7), composites in, a renderer over `source`, `paint`'s calls, and the
+/// bitmap in the format handed back with what the render met. What the
+/// renderer drew is counted where `draws` says it is the render's;
+/// `unreadable` is the optional-content configuration the render named where
+/// the document has none such, so `/D`'s states were drawn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_sheet<S: Drawn>(
+    sheet: Sheet,
+    group: Option<tinker_pdf_content::GroupSpace>,
+    options: &RenderOptions,
+    frame: Option<(f64, f64, f64, f64)>,
+    source: &S,
+    draws: stats::Draws,
+    unreadable: Option<usize>,
+    paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_, S>, &S),
+) -> Layer {
+    let View {
+        scale,
+        applied,
+        full_width,
+        full_height,
+        view,
+        asked,
+    } = sheet.view(options, frame);
+
+    // Ruling 2: the caller gets a whole page rather than a fragment, and
+    // is told the resolution is not the one they asked for.
+    let scaled_down = applied < scale;
+
+    // The rotation and the crop-box origin belong in the transform, not
+    // only in the canvas size: sizing for a rotated page and then drawing
+    // it upright fills a sideways canvas with clipped, upright content.
+    // The region is *not* in the transform: the page is drawn through the
+    // one transform whatever part of it is asked for, and the canvas
+    // stands at the region's corner of the displayed picture (ruling 5).
+    let base = sheet.base_at(applied);
+
+    // 11.4.7: the page itself may declare a transparency group, and its
+    // `/CS` is the space the *whole page* composites in. Nothing invokes
+    // it, so it is read here rather than reaching the device through a
+    // `Do` — and, unlike a form's group, it decides the format of the page
+    // canvas itself rather than of a buffer over it. The bitmap is
+    // converted back for the caller at the end; 11.4.7 says the page group
+    // is composited and then converted to the output device's space, which
+    // is exactly those two steps.
+    //
+    // Forced colours draw the page's coverage black on white into grey,
+    // whatever space it composites in, and tint it into the format asked
+    // for at the end ([`ForcedColours`]).
+    let forced = options.forced_colours;
+    let page_space = group;
+    // A blue-first order is an output order: the page composites red
+    // first and is reordered by the `extract` below.
+    let canvas_format = if forced.is_some() {
+        PixelFormat::Gray8
+    } else {
+        page_space
+            .map(tinker_pdf_render::group_format)
+            .unwrap_or_else(|| tinker_pdf_render::canvas_format(options.format))
+    };
+    // What the caller is handed, decided before the canvas exists: a page
+    // may start with nothing on it only if the format it comes back in can
+    // say so. A transparent canvas converted to `Rgb8` at the end would
+    // drop an alpha of zero and keep the black stored under it.
+    let wanted = handed_back(options);
+    let canvas = if options.transparent && wanted.has_alpha() && canvas_format.has_alpha() {
+        tinker_pdf_render::region_canvas_clear(view, canvas_format)
+    } else {
+        tinker_pdf_render::region_canvas_in(view, canvas_format)
+    };
+
+    let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, source)
+        .with_page_size(full_width, full_height)
+        .with_antialias(options.antialias)
+        .with_levels(options.graphics_bits, options.text_bits)
+        .with_hard_edge(options.hard_edge)
+        .with_thinnest_line(options.thinnest_line);
+    if let Some(cancel) = &options.cancel {
+        renderer = renderer.with_cancel(cancel.clone());
+    }
+    if let Some(forced) = forced {
+        renderer = renderer.with_forced_colours(forced.fill_to_stroke);
+    }
+    paint(&mut renderer, source);
+    let (canvas, warnings, counts, parameters) = renderer.finish_with_parameters();
+    stats::add_render(source.work().map(|work| &**work), counts, draws);
+    let met = Met {
+        renderer: warnings,
+        missing_fonts: source.met_missing_fonts(),
+        damaged: source.damaged_images(),
+        repaired: source.repaired_spaces(),
+        reduced: source.reduced_images(),
+        scaled_down: scaled_down.then_some((scale, applied)),
+        // Ruling 10: a bitmap smaller than the rectangle asked for is a
+        // leniency, and a leniency is named. Only when the trim actually
+        // changed the ask — a region inside the page reports nothing,
+        // which is every tile of a well-formed lattice.
+        clamped: asked
+            .filter(|requested| *requested != view)
+            .map(|requested| (requested, view)),
+        unreadable_configuration: unreadable,
+    };
+
+    // Back to something a caller can read. A page group composited over
+    // ink comes back as light, which is 11.4.7's own last step — unless
+    // the caller asked for ink by name *and* said they know it is ink.
+    // Forced colours' black-on-white coverage is tinted into the format
+    // asked for instead, foreground at the dark end — once a pixel, so the
+    // rounding is the tint's alone — and no transfer function applies to
+    // it: the page's colours are what forced colours replace.
+    let (width, height) = (canvas.width, canvas.height);
+    let (format, stride, data) = match forced {
+        Some(forced) => {
+            let grey = tinker_pdf_raster::toolbox::Layout {
+                format: canvas.format,
+                width,
+                height,
+                stride: canvas.stride,
+                premultiplied: false,
+            };
+            match tinker_pdf_raster::toolbox::tint_grey(
+                &grey,
+                &canvas.data,
+                forced.foreground,
+                forced.background,
+                wanted,
+            ) {
+                Some((layout, data)) => (wanted, layout.stride, data),
+                // A region off the page has no pixels to tint.
+                None => (
+                    wanted,
+                    (width as usize).saturating_mul(wanted.components()),
+                    Vec::new(),
+                ),
+            }
+        }
+        None => {
+            let mut canvas = if canvas.format == wanted {
+                canvas
+            } else {
+                canvas.extract(canvas.origin(), width, height, wanted)
+            };
+            // 10.5 and 11.7.5.2: the transfer functions of each point's
+            // topmost fully opaque object, on the output's own components,
+            // now that the final colour there is known and in the
+            // output's space.
+            if let Some(parameters) = &parameters {
+                parameters.apply(&mut canvas);
+            }
+            (canvas.format, canvas.stride, canvas.data)
+        }
+    };
+
+    let mut pixels = Bitmap {
+        width,
+        height,
+        format,
+        stride,
+        data,
+        warnings: Vec::new(),
+        premultiplied: false,
+        stats: source.work().map(|work| work.stats()),
+    };
+    if options.premultiplied {
+        pixels.premultiply();
+    }
+    Layer { pixels, met }
 }
 
 /// A rectangle of the page's default user space as the pixels of the page's

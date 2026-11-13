@@ -61,8 +61,8 @@ mod written_support;
 use std::sync::Arc;
 
 use tinker_pdf::{
-    Bitmap, CacheLimits, Document, DocumentBuilder, OpenOptions, PixelRegion, RenderOptions,
-    RenderWarning, SimpleFontProvider, SvgOptions, SvgWarning,
+    Bitmap, CacheLimits, CommandStream, Document, DocumentBuilder, OpenOptions, PixelRegion,
+    RenderOptions, RenderWarning, SimpleFontProvider, SvgOptions, SvgWarning,
 };
 
 mod render_support;
@@ -3764,6 +3764,155 @@ fn a_display_list_replays_every_fingerprinted_page_byte_for_byte() {
             }
         }
     }
+}
+
+/// **A command stream is the page** (RC-18.4): every fingerprinted page's
+/// stream, written once with `Page::command_stream`, parsed with
+/// `CommandStream::parse` and replayed through the engine's own renderer at
+/// the fingerprints' own scale and at three others, with and without its
+/// annotations, is byte-equal to a direct render — pixels, size, format and
+/// warnings — and reads back to the bytes it was written as.
+///
+/// **Not a new fingerprint**: an equality between two paths through one
+/// renderer, as the display list's replay above is. The stream holds no
+/// pixel, so one stream serves all four scales — an image's decode at every
+/// reduction a draw can ask for is in it — which is the property RC-18 is
+/// about: a host draws the page with no document behind it.
+#[test]
+fn a_command_stream_replays_every_fingerprinted_page_byte_for_byte() {
+    for fixture in GOLDEN {
+        let (document, at) = opened(fixture);
+        let page = document.page(at).expect("a page");
+        let bytes = page.command_stream();
+        let stream = CommandStream::parse(&bytes)
+            .unwrap_or_else(|error| panic!("{}: the stream does not read: {error}", fixture.name));
+        assert_eq!(
+            stream.to_bytes(),
+            bytes,
+            "{}: the stream reads back to the bytes it was written as",
+            fixture.name
+        );
+        assert_eq!(
+            stream.page_index(),
+            at,
+            "{}: the page it is of",
+            fixture.name
+        );
+        // 1.0 is the scale every fingerprint above is taken at.
+        for scale in [1.0, 0.5, 1.5, 2.25] {
+            for annotations in [true, false] {
+                let options = RenderOptions {
+                    scale,
+                    annotations,
+                    ..RenderOptions::default()
+                };
+                let direct = page.render(&options);
+                let replayed = stream.render(&options);
+                let what = format!("{} at {scale}x, annotations {annotations}", fixture.name);
+                assert_eq!(
+                    (replayed.width, replayed.height, replayed.format),
+                    (direct.width, direct.height, direct.format),
+                    "{what}: a different bitmap shape"
+                );
+                assert_eq!(
+                    stream.pixel_size(&options),
+                    page.pixel_size(&options),
+                    "{what}: a different page size"
+                );
+                if replayed.data != direct.data {
+                    let differing = replayed
+                        .data
+                        .iter()
+                        .zip(direct.data.iter())
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    panic!(
+                        "{what}: the stream is not the page -- {differing} of {} bytes differ",
+                        direct.data.len()
+                    );
+                }
+                assert_eq!(
+                    replayed.warnings, direct.warnings,
+                    "{what}: the stream reported differently"
+                );
+            }
+        }
+    }
+}
+
+/// Every fingerprinted page's command stream, by the SHA-256 of its bytes.
+///
+/// A stream holds every number it carries by its bits — the states' and the
+/// paths' reals, outlines from the faces, images decoded at each reduction,
+/// shadings' coordinates — so a target that computes any of them differently
+/// writes other bytes. The values are a run's, recorded with the four targets
+/// agreeing; [`the_command_stream_is_the_same_bytes_on_every_target`] prints
+/// the lines to paste.
+const COMMAND_STREAMS: &[(&str, &str)] = &[
+    ("text", ""),
+    ("gs_text", ""),
+    ("curves", ""),
+    ("shading", ""),
+    ("blend", ""),
+    ("pattern", ""),
+    ("optional", ""),
+    ("image", ""),
+    ("transparency", ""),
+    ("tiling", ""),
+    ("jbig2", ""),
+    ("mesh", ""),
+    ("jpx", ""),
+    ("cbz", ""),
+    ("xps", ""),
+    ("epub", ""),
+    ("analytic_axial", ""),
+    ("analytic_radial", ""),
+    ("analytic_blend", ""),
+    ("analytic_image", ""),
+    ("default_spaces", ""),
+    ("strokes", ""),
+    ("bilevel", ""),
+    ("icc", ""),
+    ("jpeg_minified", ""),
+    ("jpx_minified", ""),
+    ("intents", ""),
+];
+
+/// **The command stream is the same bytes on every target** (RC-18.4): every
+/// fingerprinted page's stream hashed and held to [`COMMAND_STREAMS`]; a
+/// mismatch prints the lines to paste, under the render fingerprints' rule.
+#[test]
+fn the_command_stream_is_the_same_bytes_on_every_target() {
+    assert_eq!(
+        COMMAND_STREAMS.len(),
+        GOLDEN.len(),
+        "every page has a stream hash, or the test passes by not looking"
+    );
+    let mut wrong = Vec::new();
+    for fixture in GOLDEN {
+        let (document, at) = opened(fixture);
+        let bytes = document.page(at).expect("a page").command_stream();
+        let actual: String = tinker_pdf_crypto::sha2::sha256(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let want = COMMAND_STREAMS
+            .iter()
+            .find(|(n, _)| *n == fixture.name)
+            .map(|(_, h)| *h)
+            .unwrap_or_default();
+        if actual != want {
+            let name = fixture.name;
+            wrong.push(format!("    (\"{name}\", \"{actual}\"),"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the command streams do not match the committed table.\n\n\
+         If two targets disagree, this is a determinism bug: do not update the \
+         table. If the stream changed on purpose, paste these in:\n\n{}\n",
+        wrong.join("\n")
+    );
 }
 
 /// **What a document keeps across its renders draws what computing it again

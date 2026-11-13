@@ -289,11 +289,17 @@ impl CommandStream {
 
 `render` draws as `DisplayList::render` draws, through the same pipeline: the
 scale and its clamp, the region, the format, anti-aliasing and its levels,
-forced colours, a transparent or premultiplied page, cancellation,
-annotations, statistics, and bands on the engine's pool where `parallelism`
-asks for threads. The one option it does not read is `usage`: a stream is the
-drawing of the usage it was written for, which its `Page` record names and
-`usage()` returns, since there is no document to interpret again.
+forced colours, a transparent or premultiplied page, cancellation, the
+content and the appearances by their kind (each `Annotation` record says
+whether it is a widget's), and statistics — drawn whole on the caller, the
+bitmap a render in bands draws. The options it does not read are `usage`,
+`layers` and `magnification`: a stream is the drawing of the usage and the
+optional-content configuration it was written for, which its `Page` record
+names and `usage()` returns, an appearance `/NoZoom` or `/NoRotate` places at
+render time written placed as at magnification 1, since there is no document
+to interpret again. An image XObject's entry holds the room the writing
+document's budget left its decode, so a draw takes the reduction the page's
+resources would and notes it as they do.
 
 ### The C ABI
 

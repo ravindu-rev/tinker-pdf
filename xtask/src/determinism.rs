@@ -58,6 +58,16 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "budgets_stated_at_open_render_the_fingerprints",
     },
+    // Every fingerprinted page's command stream replayed byte for byte, and
+    // its bytes' hash (RC-18.4).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "a_command_stream_replays_every_fingerprinted_page_byte_for_byte",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "the_command_stream_is_the_same_bytes_on_every_target",
+    },
     // Every fingerprinted page's mark box, from the page analysis.
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",

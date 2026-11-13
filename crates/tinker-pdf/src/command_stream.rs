@@ -24,18 +24,234 @@
 //! `DisplayList::to_svg` writes such a page, every note where the
 //! interpretation met it (`write.rs`).
 //!
+//! # Reading and drawing
+//!
+//! [`CommandStream::parse`] reads the bytes under budgets, every cell's
+//! stream with them, refusing by name what the design refuses
+//! ([`CommandStreamError`]), and [`CommandStream::render`] replays the calls
+//! through the engine's own renderer over the stream's tables — the pipeline
+//! a page's render goes through (`draw_sheet`) — so it draws what a render
+//! of the page draws, its warnings included (`replay.rs`).
+//!
 //! [`DisplayList::command_stream`]: crate::DisplayList::command_stream
 
 mod read;
+mod replay;
 mod tables;
 mod write;
 
-pub(crate) use read::{parse, Layer, Note, Parsed};
-pub(crate) use tables::{
-    CellEntry, DecodeEntry, IdentityEntry, ImageAnswer, ImageEntry, ImageKey, Notes, OutlineEntry,
-    PageRecord, PatternAnswer, PatternEntry, ScopeEntry, ShadingAnswer, ShadingEntry, Tables,
-};
+use std::sync::Arc;
+
+use tinker_pdf_content::commands::{write_stream, write_stream_at, Meter};
+use tinker_pdf_render::Renderer;
+
+use read::parse;
+use replay::{replay_layer, Replayable, StreamScope};
+use tables::PageRecord;
 pub(crate) use write::write_list;
+
+use crate::annots::Kinds;
+use crate::{draw_sheet, Bitmap, RenderOptions, Sheet, Usage};
+
+pub use tinker_pdf_content::commands::{
+    Budgets as CommandBudgets, CommandError as CommandStreamError, CommandKind,
+    Field as CommandField, Record as CommandRecord, MAJOR as COMMAND_STREAM_MAJOR,
+    MINOR as COMMAND_STREAM_MINOR,
+};
+
+/// A page's drawing read from its command stream
+/// (`docs/design/command-stream.md`): the page's calls, its appearances', and
+/// the answers to every question a render of them asks, ready to draw with no
+/// document behind it.
+///
+/// Written by [`crate::DisplayList::command_stream`] and
+/// [`crate::Page::command_stream`]; read by [`CommandStream::parse`].
+pub struct CommandStream {
+    stream: Arc<Replayable>,
+}
+
+impl CommandStream {
+    /// Reads `bytes` under the design's budgets ([`CommandBudgets::DEFAULT`]).
+    ///
+    /// # Errors
+    ///
+    /// [`CommandStreamError`]: bytes that are no command stream, a newer
+    /// major version, a stream cut short or running on, a record of a kind no
+    /// version this build reads defines in a stream of this minor or older, a
+    /// record whose fields are not its kind's, a page stream with no page
+    /// record, and a stream past a budget, named.
+    pub fn parse(bytes: &[u8]) -> Result<CommandStream, CommandStreamError> {
+        CommandStream::parse_with(bytes, &CommandBudgets::DEFAULT)
+    }
+
+    /// [`CommandStream::parse`] under `budgets`: what a caller who trusts its
+    /// streams more, or less, holds a read to.
+    ///
+    /// # Errors
+    ///
+    /// As [`CommandStream::parse`].
+    pub fn parse_with(
+        bytes: &[u8],
+        budgets: &CommandBudgets,
+    ) -> Result<CommandStream, CommandStreamError> {
+        let mut meter = Meter::new(*budgets);
+        let parsed = parse(bytes, &mut meter, 0, false)?;
+        Ok(CommandStream {
+            stream: Arc::new(Replayable::of(Arc::new(parsed))),
+        })
+    }
+
+    /// The stream `records` make, at this build's version, read back as
+    /// [`CommandStream::parse`] reads it: the encoder's door, which takes a
+    /// stream's commands back without a caller writing the format.
+    ///
+    /// # Errors
+    ///
+    /// As [`CommandStream::parse`], of the stream the records write.
+    pub fn from_records(records: &[CommandRecord]) -> Result<CommandStream, CommandStreamError> {
+        CommandStream::parse(&write_stream(records))
+    }
+
+    /// Every record of the stream before its end, in order, a kind this build
+    /// does not know kept by its number.
+    #[must_use]
+    pub fn records(&self) -> &[CommandRecord] {
+        &self.stream.parsed.records
+    }
+
+    /// The stream's bytes, written back at its own version: for a stream this
+    /// build wrote, the bytes it was read from.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let (major, minor) = self.stream.parsed.version;
+        write_stream_at(major, minor, self.records())
+    }
+
+    /// The stream's major and minor version.
+    #[must_use]
+    pub fn version(&self) -> (u16, u16) {
+        self.stream.parsed.version
+    }
+
+    /// The page record's: a page stream always holds one.
+    fn page(&self) -> PageRecord {
+        self.stream.parsed.page.unwrap_or(PageRecord {
+            crop: (0.0, 0.0, 0.0, 0.0),
+            rotation: 0,
+            group: None,
+            usage: None,
+            index: 0,
+        })
+    }
+
+    /// The usage whose optional-content states the stream's calls carry
+    /// (`DisplayList::usage`): the one it was written for.
+    #[must_use]
+    pub fn usage(&self) -> Option<Usage> {
+        self.page().usage
+    }
+
+    /// Which page of its document the stream is of.
+    #[must_use]
+    pub fn page_index(&self) -> u32 {
+        self.page().index
+    }
+
+    /// The size in points after rotation of the page drawn, as
+    /// [`crate::Page::size`] gives it.
+    #[must_use]
+    pub fn size(&self) -> (f64, f64) {
+        self.sheet().size()
+    }
+
+    /// The size in pixels of the bitmap [`CommandStream::render`] produces
+    /// for `options`, ignoring `options.region`: [`crate::Page::pixel_size`]'s
+    /// answer for the page.
+    #[must_use]
+    pub fn pixel_size(&self, options: &RenderOptions) -> (u32, u32) {
+        self.sheet().pixel_size(options)
+    }
+
+    /// Draws the page as [`crate::DisplayList::render`] draws it with the same
+    /// `options`, through the same pipeline over the stream's tables: the
+    /// scale and its clamp, the region, the format, anti-aliasing and its
+    /// levels and rule, the thinnest line, forced colours, a transparent or
+    /// premultiplied page, cancellation, the content and the annotations by
+    /// their kind, and statistics — the same bitmap and the same warnings a
+    /// render of the page returns.
+    ///
+    /// Drawn whole on the caller, whatever `options.parallelism` asks: the
+    /// same bitmap a render in bands draws. `options.usage`, `options.layers`
+    /// and `options.magnification` are not read: a stream is the drawing of
+    /// the usage and the optional-content configuration it was written for
+    /// ([`CommandStream::usage`]), its appearances placed as a render at
+    /// magnification 1 places them, and there is no document to interpret
+    /// for another.
+    #[must_use]
+    pub fn render(&self, options: &RenderOptions) -> Bitmap {
+        let source =
+            StreamScope::root(Arc::clone(&self.stream), crate::stats::tally(options.stats));
+        draw_sheet(
+            self.sheet(),
+            self.page().group,
+            options,
+            None,
+            &source,
+            crate::stats::Draws::Counted,
+            None,
+            |renderer, source| self.replay_onto(options, renderer, source),
+        )
+        .into_bitmap()
+    }
+
+    /// What a render reads of the page's geometry: the page record's crop box
+    /// and rotation.
+    fn sheet(&self) -> Sheet {
+        let page = self.page();
+        Sheet {
+            crop: page.crop,
+            rotation: page.rotation,
+        }
+    }
+
+    /// The stream's calls onto `renderer`: the content where `options` draws
+    /// it, each note where the replay reaches it, and after it each
+    /// appearance of a kind `options` draws, in its scope — as a retained
+    /// page's list replays its own.
+    fn replay_onto(
+        &self,
+        options: &RenderOptions,
+        renderer: &mut Renderer<'_, StreamScope>,
+        source: &StreamScope,
+    ) {
+        let parsed = &self.stream.parsed;
+        if options.content {
+            replay_layer(&parsed.content, renderer, source);
+        }
+        let kinds = Kinds::of(options);
+        for layer in &parsed.annotations {
+            if !kinds.draws(layer.widget) {
+                continue;
+            }
+            let scope = Arc::new(source.scoped(layer.scope));
+            renderer.push_resources(Arc::clone(&scope));
+            replay_layer(layer, renderer, &scope);
+            renderer.pop_resources();
+        }
+    }
+}
+
+impl core::fmt::Debug for CommandStream {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let parsed = &self.stream.parsed;
+        f.debug_struct("CommandStream")
+            .field("version", &parsed.version)
+            .field("page", &parsed.page.map(|page| page.index))
+            .field("calls", &parsed.content.events.len())
+            .field("annotations", &parsed.annotations.len())
+            .finish()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -50,6 +266,8 @@ mod tests {
         Tile, TileRequest,
     };
 
+    use super::read::Parsed;
+    use super::tables::ImageKey;
     use super::*;
     use crate::resources::{paint_cell, PageResources};
     use crate::{Document, RenderOptions};
@@ -641,7 +859,7 @@ mod tests {
                     i.scope == scope
                         && i.intent == *intent
                         && matches!(i.key, ImageKey::Inline(o)
-                            if stream.inline.get(o as usize) == Some(&(dict.clone(), data.clone())))
+                            if stream.inline_image(o as usize) == Some((dict.as_slice(), data.as_slice())))
                 });
                 match image {
                     Some(image) => decode(image, request, answer),
@@ -818,7 +1036,7 @@ mod tests {
                 ..RenderOptions::default()
             };
             let (width, height) = page.pixel_size(&options);
-            let base = page.base_at(scale);
+            let base = page.sheet().base_at(scale);
             let canvas = Canvas::new(width, height, PixelFormat::Rgb8, Color::WHITE);
             let mut renderer = Renderer::new(canvas, base, &root);
             replay(list.content(), &mut renderer);

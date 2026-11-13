@@ -46,11 +46,31 @@ pub(crate) struct Parsed {
     pub(crate) tables: Tables,
     /// Each cell's stream read, in the order of the tables' cells.
     pub(crate) cells: Vec<Arc<Parsed>>,
-    /// Every inline image of the stream's calls, in order, by its dictionary
-    /// and data: what an `InlineImage` entry's ordinal names.
-    pub(crate) inline: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Every inline image of the stream's calls, in order, by the list it is
+    /// drawn in — 0 the content, then each appearance's in turn — and its
+    /// place among that list's calls: what an `InlineImage` entry's ordinal
+    /// names ([`Parsed::inline_image`]).
+    pub(crate) inline: Vec<(usize, usize)>,
     /// The records, as read.
     pub(crate) records: Vec<Record>,
+}
+
+impl Parsed {
+    /// Inline image `ordinal` of the stream's calls, as its dictionary and
+    /// its data.
+    pub(crate) fn inline_image(&self, ordinal: usize) -> Option<(&[u8], &[u8])> {
+        let &(list, at) = self.inline.get(ordinal)?;
+        let layer = match list.checked_sub(1) {
+            None => &self.content,
+            Some(appearance) => self.annotations.get(appearance)?,
+        };
+        match layer.events.get(at)? {
+            Event::DrawImage { image, .. } if image.inline => {
+                Some((image.inline_dict.as_slice(), image.inline_data.as_slice()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Reads `bytes`, a page's stream where `nested` is false and a cell's,
@@ -133,15 +153,20 @@ pub(crate) fn parse(
         }
         nesting.close()?;
     }
-    // The inline images the tables name by their place among the calls.
-    let inline: Vec<(Vec<u8>, Vec<u8>)> = std::iter::once(&content)
+    // The inline images the tables name by their place among the calls, each
+    // by where it is drawn rather than by a copy of its bytes.
+    let inline: Vec<(usize, usize)> = std::iter::once(&content)
         .chain(&annotations)
-        .flat_map(|layer| layer.events.iter())
-        .filter_map(|event| match event {
-            Event::DrawImage { image, .. } if image.inline => {
-                Some((image.inline_dict.clone(), image.inline_data.clone()))
-            }
-            _ => None,
+        .enumerate()
+        .flat_map(|(list, layer)| {
+            layer
+                .events
+                .iter()
+                .enumerate()
+                .filter_map(move |(at, event)| match event {
+                    Event::DrawImage { image, .. } if image.inline => Some((list, at)),
+                    _ => None,
+                })
         })
         .collect();
     let wrong = |what: &str| CommandError::Malformed {

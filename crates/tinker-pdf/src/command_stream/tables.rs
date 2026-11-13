@@ -1661,6 +1661,15 @@ impl Tables {
                     .push(ImageEntry::read(fields, kind == CommandKind::InlineImage)?);
             }
             CommandKind::ImageDecode => {
+                // The samples are held a second time, out of the record, as
+                // the decoded image a draw is handed: charged before they are
+                // copied.
+                let samples: u64 = [6, 7, 8]
+                    .into_iter()
+                    .filter_map(|at| fields.optional_bytes(at).ok().flatten())
+                    .map(|bytes| bytes.len() as u64)
+                    .sum();
+                meter.spend(samples)?;
                 self.decodes
                     .push(DecodeEntry::read(fields, self.images.len() as u64)?);
             }

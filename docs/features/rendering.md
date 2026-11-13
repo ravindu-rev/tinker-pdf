@@ -1300,6 +1300,40 @@ question a render of its page asks, with the value the page's resources give
 and a page written either way is one stream
 (`a_page_interpreted_into_the_writer_writes_its_lists_stream`).
 
+**A command stream drawn.** `CommandStream::parse` reads a stream under
+budgets (`CommandBudgets`, the design's unless a caller gives others) and
+refuses by name what the design refuses (`CommandStreamError`): beside the
+codec's refusals, a page's stream with no page record, a page or appearance
+record out of its place, a reference to what the stream has not defined, and
+an image without a decode at each reduction a draw can ask for. Every tiling
+cell's stream is read with it, under the one meter. `CommandStream::render`
+replays the calls through the engine's renderer, through the pipeline a
+page's render goes through (`draw_sheet`, over the stream's `Sheet`), drawn
+whole on the caller whatever `parallelism` asks, with a `GlyphSource` over
+the tables: each question is answered from the scope it is asked in, an
+inline image by the first of the stream's with its bytes, an image's decode
+at the reduction its frame gives the draw under the room its entry holds,
+one the budget took past what the drawn size asks noted as a reduced image,
+each answer's notes are said where a render reaches it, and each tiling cell
+is drawn by replaying its stream at the request's geometry, in a scope of its
+own where the cell brings resources. Every option applies as
+`DisplayList::render` applies it — the content drawn or not, and the
+appearances by their kind — except `usage`, `layers` and `magnification`: a
+stream is the drawing of the usage and the configuration it was written for
+(`CommandStream::usage`), its appearances placed as at magnification 1. What a
+stream draws is what its page draws, in pixels, size, format and warnings:
+every fingerprinted page at four scales with and without its annotations
+(`determinism.rs`'s
+`a_command_stream_replays_every_fingerprinted_page_byte_for_byte`), one page
+under every option a render reads (`command_stream.rs`'s
+`a_stream_draws_what_its_page_draws_under_every_option`), and the pages where
+the renderer declines a group or a render meets a note only some renders
+reach (`command_stream.rs`); each fingerprinted page's stream is pinned by
+the hash of its bytes (`the_command_stream_is_the_same_bytes_on_every_target`).
+`CommandStream::records` hands the records back, a kind this build does not
+know kept by its number, `CommandStream::from_records` takes records back,
+and `CommandStream::to_bytes` writes them at the stream's own version.
+
 **Renders of one list at once fill each cache once.** The five dear caches a
 list's renders share — images, font programs, glyph outlines, ICC transforms
 and form scopes — are single-flight (`tinker_pdf_cos::Flights`): the first

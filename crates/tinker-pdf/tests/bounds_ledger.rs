@@ -3954,14 +3954,53 @@ fn fuzz_paths() -> Vec<FuzzPath> {
         ),
         written(
             "command_stream",
-            vec![buffer(
-                Value(1 << 24),
-                1,
-                4,
-                "the events read under the target's byte budget, the stream written from \
-                 them, the events that stream reads back and the stream they write",
-            )],
-            vec![(FUZZ_COMMAND_STREAM, "bytes: 1 << 24")],
+            vec![
+                buffer(
+                    Value(1 << 24),
+                    1,
+                    4,
+                    "the events read under the target's byte budget, the stream written from \
+                     them, the events that stream reads back and the stream they write",
+                ),
+                buffer(
+                    Value(1 << 24),
+                    1,
+                    8,
+                    "the page stream the facade reads under the same budget -- its records, \
+                     calls and tables, charged to it, and the tables' and the replay's index's \
+                     copies of each name, which are not -- the bytes it writes back, the \
+                     stream those read to, and the bytes it writes",
+                ),
+                buffer(
+                    Value(1 << 24),
+                    1,
+                    3,
+                    "a decode or a shading handed to a draw, each a copy of one the stream \
+                     holds, and the levels an image's pyramid builds from the decode",
+                ),
+                buffer(
+                    Value(64 * 64),
+                    4,
+                    2 + 16,
+                    "the RGBA canvas of the square the page is drawn in and the bitmap made of \
+                     it, and a group buffer for each of the sixteen levels MAX_GROUP_DEPTH lets \
+                     groups nest",
+                ),
+                buffer(
+                    Value(1 << 24),
+                    4,
+                    4,
+                    "a tiling cell's canvas at MAX_TILE_AREA, for each of the four levels \
+                     MAX_PATTERN_DEPTH lets cells nest",
+                ),
+            ],
+            vec![
+                (FUZZ_COMMAND_STREAM, "bytes: 1 << 24"),
+                (FUZZ_COMMAND_STREAM, "const SQUARE: u32 = 64;"),
+                (RENDER, "const MAX_GROUP_DEPTH: usize = 16;"),
+                (RENDER, "const MAX_TILE_AREA: u64 = 1 << 24;"),
+                (RENDER, "const MAX_PATTERN_DEPTH: u32 = 4;"),
+            ],
         ),
         path(
             "content_tokenizer",
