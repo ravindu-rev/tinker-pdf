@@ -10,7 +10,14 @@
 //! printed, because a reader that silently matched no line would otherwise
 //! pass.
 
+use std::collections::BTreeMap;
+
+use tinker_pdf_crypto::bignum::{Modulus, Uint};
+use tinker_pdf_crypto::rsa::RSA_LIMBS;
 use tinker_pdf_crypto::sha2::sha256;
+use tinker_pdf_crypto::{
+    DigestAlgorithm, EntropySource, RsaPrivateComponents, RsaPrivateKey, RsaRefusal,
+};
 
 fn unhex(text: &str) -> Vec<u8> {
     let text = text.trim();
@@ -812,4 +819,348 @@ fn the_signature_generation_vectors_load() {
         wycheproof_tests += tests;
     }
     assert_eq!(wycheproof_tests, 33 + 32 + 43 + 26 + 24);
+}
+
+// ---- Keys from their published numbers ---------------------------------------
+
+type Big = Uint<RSA_LIMBS>;
+
+fn big(bytes: &[u8]) -> Big {
+    Big::from_be_bytes(bytes).expect("fits 4096 bits")
+}
+
+/// A value's big-endian octets, without leading zeros.
+fn octets(value: &Big) -> Vec<u8> {
+    let mut bytes = vec![0u8; RSA_LIMBS * 8];
+    assert!(value.to_be_bytes(&mut bytes));
+    let zeros = bytes.iter().take_while(|&&byte| byte == 0).count();
+    bytes.split_off(zeros.min(bytes.len() - 1))
+}
+
+/// `value >> 1`, through the value's octets: the public `Uint` has no shift
+/// right, and this is test arithmetic on published numbers.
+fn halve(value: &Big) -> Big {
+    let mut bytes = vec![0u8; RSA_LIMBS * 8];
+    assert!(value.to_be_bytes(&mut bytes));
+    let mut carry = 0u8;
+    for byte in &mut bytes {
+        let low = *byte & 1;
+        *byte = (*byte >> 1) | (carry << 7);
+        carry = low;
+    }
+    big(&bytes)
+}
+
+/// `value · small`, by shift and add over the multiplier's bits.
+fn times(value: &Big, small: u64) -> Big {
+    let mut product = Big::zero();
+    let mut addend = *value;
+    for bit in 0..64 {
+        if small >> bit & 1 == 1 {
+            let (sum, carried) = product.add_carry(&addend);
+            assert!(!carried, "the product fits 4096 bits");
+            product = sum;
+        }
+        addend = addend.shl_small(1);
+    }
+    product
+}
+
+/// `gcd(a, b)` for an odd `b`, by Stein's binary algorithm: factors of two
+/// leave `a` freely, because the answer is odd.
+fn gcd(mut a: Big, mut b: Big) -> Big {
+    if a.is_zero() {
+        return b;
+    }
+    while !a.bit(0) {
+        a = halve(&a);
+    }
+    loop {
+        while !b.bit(0) {
+            b = halve(&b);
+        }
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        b = b.sub_borrow(&a).0;
+        if b.is_zero() {
+            return a;
+        }
+    }
+}
+
+/// `value mod modulus`, one bit at a time, for any modulus: `d` is reduced
+/// modulo `p - 1`, which Montgomery cannot take.
+fn remainder(value: &Big, modulus: &Big) -> Big {
+    let mut remainder = Big::zero();
+    for i in (0..value.bits()).rev() {
+        let (doubled, carried) = remainder.add_carry(&remainder);
+        let mut next = doubled;
+        if value.bit(i) {
+            next = next.add_carry(&Big::from_u64(1)).0;
+        }
+        remainder = if carried || next >= *modulus {
+            next.sub_borrow(modulus).0
+        } else {
+            next
+        };
+    }
+    remainder
+}
+
+/// The primes of `n` from `e` and `d`, by the probabilistic factoring of NIST
+/// SP 800-56B Rev. 2 appendix C.2: `e·d - 1 = 2^t · r` with `r` odd is a
+/// multiple of `λ(n)`, so for most `g` some `y = g^(2^i · r)` is a square root
+/// of one that is neither 1 nor `n - 1`, and `gcd(y - 1, n)` and
+/// `gcd(y + 1, n)` are the primes.
+///
+/// CAVP's signature-generation files publish `n`, `e` and `d` and not the
+/// primes; this recovers them so that the key the engine signs with is the
+/// published key, whose published signatures it must then reproduce. A wrong
+/// recovery would be refused by the key's own checks or by its signatures.
+fn primes_of(n: &Big, e: &Big, d: &Big) -> (Big, Big) {
+    let modulus = Modulus::new(*n).expect("an odd modulus");
+    let one = Big::from_u64(1);
+    let (n_minus_one, _) = n.sub_borrow(&one);
+    assert!(e.bits() <= 64, "a public exponent of at most 64 bits");
+    let (k, _) = times(d, e.limb(0)).sub_borrow(&one);
+    let mut r = k;
+    let mut t = 0usize;
+    while !r.bit(0) {
+        r = halve(&r);
+        t += 1;
+    }
+    for g in 2u64..100 {
+        let mut y = modulus.pow(&Big::from_u64(g), &r);
+        if y == one || y == n_minus_one {
+            continue;
+        }
+        for _ in 0..t {
+            let x = modulus.mul_mod(&y, &y);
+            if x == one {
+                let p = gcd(y.sub_borrow(&one).0, *n);
+                let q = gcd(y.add_carry(&one).0, *n);
+                return (p, q);
+            }
+            if x == n_minus_one {
+                break;
+            }
+            y = x;
+        }
+    }
+    panic!("no square root of one gave n's factors");
+}
+
+/// A key's eight parts, from the three a CAVP file publishes: the primes
+/// recovered, `dP` and `dQ` reduced from `d`, `qInv` by Fermat under `p`.
+fn cavp_parts(key: &CavpKey) -> [Vec<u8>; 8] {
+    let (n, e, d) = (big(&key.n), big(&key.e), big(&key.d));
+    let (p, q) = primes_of(&n, &e, &d);
+    let one = Big::from_u64(1);
+    let dp = remainder(&d, &p.sub_borrow(&one).0);
+    let dq = remainder(&d, &q.sub_borrow(&one).0);
+    let q_inv = Modulus::new(p)
+        .and_then(|modulus| modulus.inverse_prime(&q))
+        .expect("q is invertible under the prime p");
+    [
+        key.n.clone(),
+        key.e.clone(),
+        key.d.clone(),
+        octets(&p),
+        octets(&q),
+        octets(&dp),
+        octets(&dq),
+        octets(&q_inv),
+    ]
+}
+
+fn wycheproof_parts(parts: &RsaParts) -> [Vec<u8>; 8] {
+    [
+        parts.n.clone(),
+        parts.e.clone(),
+        parts.d.clone(),
+        parts.p.clone(),
+        parts.q.clone(),
+        parts.dp.clone(),
+        parts.dq.clone(),
+        parts.q_inv.clone(),
+    ]
+}
+
+fn private_key(parts: &[Vec<u8>; 8]) -> RsaPrivateKey {
+    let [n, e, d, p, q, dp, dq, q_inv] = parts;
+    RsaPrivateKey::new(&RsaPrivateComponents {
+        modulus: n,
+        public_exponent: e,
+        private_exponent: d,
+        prime1: p,
+        prime2: q,
+        exponent1: dp,
+        exponent2: dq,
+        coefficient: q_inv,
+    })
+    .expect("a published key is a key")
+}
+
+/// The digest a vector file names, by FIPS 180-4's name.
+fn digest_named(name: &str) -> DigestAlgorithm {
+    match name {
+        "SHA-1" => DigestAlgorithm::Sha1,
+        "SHA-224" => DigestAlgorithm::Sha224,
+        "SHA-256" => DigestAlgorithm::Sha256,
+        "SHA-384" => DigestAlgorithm::Sha384,
+        "SHA-512" => DigestAlgorithm::Sha512,
+        "SHA-512/224" => DigestAlgorithm::Sha512_224,
+        "SHA-512/256" => DigestAlgorithm::Sha512_256,
+        other => panic!("a digest no file was expected to name: {other}"),
+    }
+}
+
+/// A deterministic stand-in for a host's source: SHA-256 over a seed and a
+/// counter. Any source serves — blinding moves no signature — and a fixed one
+/// makes a failure repeatable.
+struct Stream {
+    seed: u64,
+    counter: u64,
+}
+
+impl Stream {
+    fn new(seed: u64) -> Self {
+        Self { seed, counter: 0 }
+    }
+}
+
+impl EntropySource for Stream {
+    fn fill(&mut self, out: &mut [u8]) -> bool {
+        for chunk in out.chunks_mut(32) {
+            let mut input = self.seed.to_be_bytes().to_vec();
+            input.extend_from_slice(&self.counter.to_be_bytes());
+            let block = sha256(&input);
+            chunk.copy_from_slice(block.get(..chunk.len()).expect("a block is 32 octets"));
+            self.counter += 1;
+        }
+        true
+    }
+}
+
+// ---- RSASSA-PKCS1-v1_5 (SG-01.5) ---------------------------------------------
+
+/// SG-01.5's exit, CAVP's half: all 120 of the `SigGen15` files' signatures,
+/// made by the engine from each message under its published key, octet for
+/// octet — ten for each of SHA-224, SHA-256, SHA-384 and SHA-512 and of
+/// SHA-512/224 and SHA-512/256 under a 2048- and a 3072-bit key. Each
+/// published signature also verifies under the key's public half, which is
+/// the verifier's side of the `DigestInfo` prefixes the two share.
+#[test]
+fn cavp_pkcs1_v15_generation_vectors_pass() {
+    let mut entropy = Stream::new(0x5347_2d30_312e_35);
+    let mut by_digest = BTreeMap::<&str, usize>::new();
+    for (name, text, _) in [CAVP[0], CAVP[1]] {
+        for vector in cavp_keys(text) {
+            let key = private_key(&cavp_parts(&vector));
+            assert_eq!(key.modulus_bits(), vector.bits, "{name}");
+            for record in &vector.records {
+                let algorithm = digest_named(record.digest);
+                assert_eq!(
+                    key.sign_pkcs1_v15_message(algorithm, &record.message, &mut entropy)
+                        .as_ref(),
+                    Ok(&record.signature),
+                    "{name}: {} under the {}-bit key",
+                    record.digest,
+                    vector.bits
+                );
+                assert_eq!(
+                    key.public_key().verify_pkcs1_v15_message(
+                        algorithm,
+                        &record.message,
+                        &record.signature
+                    ),
+                    Ok(()),
+                    "{name}: {} verifies",
+                    record.digest
+                );
+                *by_digest.entry(record.digest).or_default() += 1;
+            }
+        }
+    }
+    println!("RAN CAVP SigGen15: {by_digest:?}");
+    let expected: BTreeMap<&str, usize> = [
+        ("SHA-224", 20),
+        ("SHA-256", 20),
+        ("SHA-384", 20),
+        ("SHA-512", 20),
+        ("SHA-512/224", 20),
+        ("SHA-512/256", 20),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(by_digest, expected);
+}
+
+/// SG-01.5's exit, Wycheproof's half: every signature of the five
+/// generation files, 1 024 to 4 096 bits, made under each group's own key —
+/// the acceptable ones among them, a three-exponent key's signatures with
+/// leading zero octets and one close to `n`, which a signer that trimmed its
+/// output or reduced it wrongly would miss — for every SHA-2 digest the files
+/// cover. Their SHA-1 groups are refused by name, the published signatures
+/// still verifying: SHA-1 is read and never written.
+#[test]
+fn wycheproof_rsa_signature_vectors_pass() {
+    let mut entropy = Stream::new(0x7779_6368);
+    let mut signed = BTreeMap::<String, usize>::new();
+    let mut refused = 0usize;
+    for (name, bytes, _) in WYCHEPROOF {
+        let (_, groups) = wycheproof_groups(bytes);
+        for group in &groups {
+            let key = private_key(&wycheproof_parts(&group.parts));
+            let algorithm = digest_named(&group.sha);
+            for test in &group.tests {
+                let made = key.sign_pkcs1_v15_message(algorithm, &test.message, &mut entropy);
+                if algorithm.signs() {
+                    assert_eq!(
+                        made.as_ref(),
+                        Ok(&test.signature),
+                        "{name} #{} ({}, {})",
+                        test.id,
+                        group.sha,
+                        test.result
+                    );
+                    *signed.entry(group.sha.clone()).or_default() += 1;
+                } else {
+                    assert_eq!(
+                        made,
+                        Err(RsaRefusal::DigestNotForSigning),
+                        "{name} #{}",
+                        test.id
+                    );
+                    refused += 1;
+                }
+                assert_eq!(
+                    key.public_key().verify_pkcs1_v15_message(
+                        algorithm,
+                        &test.message,
+                        &test.signature
+                    ),
+                    Ok(()),
+                    "{name} #{} verifies",
+                    test.id
+                );
+            }
+        }
+    }
+    println!("RAN Wycheproof RsassaPkcs1Generate: {signed:?}, {refused} SHA-1 refused");
+    let expected: BTreeMap<String, usize> = [
+        ("SHA-224", 24),
+        ("SHA-256", 44),
+        ("SHA-384", 40),
+        ("SHA-512", 34),
+    ]
+    .into_iter()
+    .map(|(name, count)| (name.to_string(), count))
+    .collect();
+    assert_eq!(signed, expected);
+    assert_eq!(
+        refused, 16,
+        "the SHA-1 groups of the 1024- and 2048-bit files"
+    );
 }

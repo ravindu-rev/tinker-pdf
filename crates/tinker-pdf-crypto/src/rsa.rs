@@ -40,6 +40,14 @@
 //! returned, and one that fails is [`RsaRefusal::FaultDetected`], carrying
 //! nothing of it.
 //!
+//! **The scheme.** [`RsaPrivateKey::sign_pkcs1_v15`] is RSASSA-PKCS1-V1_5-SIGN
+//! (§8.2.1): the same EMSA-PKCS1-v1_5 block the verifier builds and compares
+//! whole, from the same per-digest `DigestInfo` prefixes, signed by the
+//! private operation. The digest is the caller's choice — any SHA-2 member,
+//! never SHA-1 — and the signature is a function of the key and the digest
+//! alone, so blinding moves nothing and the same request signs to the same
+//! bytes on every target.
+//!
 //! # The whole encoding is compared, and that is the point
 //!
 //! RFC 8017 §8.2.2 step 4 says to build the expected encoded message and
@@ -65,14 +73,15 @@
 //! # What it costs
 //!
 //! A digest algorithm [`DigestAlgorithm`] has no member for cannot be
-//! verified: the `DigestInfo` prefix is a constant per algorithm and a guessed
-//! one would accept the wrong thing. SHA-1, SHA-256, SHA-384 and SHA-512 are
-//! the four offered; MD2 and MD5 are not, even though RFC 8017 lists them,
-//! because no signature worth checking uses them and a verifier that accepts
-//! MD5 is a verifier that accepts a chosen-prefix collision. SHA-224,
-//! SHA-512/224 and SHA-512/256, which [`crate::sha2`] computes, are not
-//! offered either: [`DigestAlgorithm`] is also the selector `tinker-pdf-pki`
-//! resolves a CMS digest OID to, and that reader names none of the three.
+//! verified or signed: the `DigestInfo` prefix is a constant per algorithm
+//! and a guessed one would accept the wrong thing. SHA-1 and the whole SHA-2
+//! family — SHA-224, SHA-256, SHA-384, SHA-512, SHA-512/224 and SHA-512/256,
+//! every digest [`crate::sha2`] computes — are offered; MD2 and MD5 are not,
+//! even though RFC 8017 lists them, because no signature worth checking uses
+//! them and a verifier that accepts MD5 is a verifier that accepts a
+//! chosen-prefix collision. SHA-1 is verified and never signed with. The CMS
+//! reader in `tinker-pdf-pki`, which resolves a digest OID to this selector,
+//! names SHA-1, SHA-256, SHA-384 and SHA-512 only.
 //!
 //! A modulus wider than 4096 bits is refused rather than truncated, and so is
 //! a signature whose length is not exactly the modulus's.
@@ -126,12 +135,20 @@ pub enum DigestAlgorithm {
     /// *something*, not that they signed this document. Callers are expected
     /// to say so in their verdict.
     Sha1,
+    /// SHA-224.
+    Sha224,
     /// SHA-256.
     Sha256,
     /// SHA-384.
     Sha384,
     /// SHA-512.
     Sha512,
+    /// SHA-512/224: SHA-512's computation from its own initial value, cut to
+    /// 224 bits.
+    Sha512_224,
+    /// SHA-512/256: SHA-512's computation from its own initial value, cut to
+    /// 256 bits.
+    Sha512_256,
 }
 
 impl DigestAlgorithm {
@@ -140,7 +157,8 @@ impl DigestAlgorithm {
     pub const fn output_len(self) -> usize {
         match self {
             Self::Sha1 => 20,
-            Self::Sha256 => 32,
+            Self::Sha224 | Self::Sha512_224 => 28,
+            Self::Sha256 | Self::Sha512_256 => 32,
             Self::Sha384 => 48,
             Self::Sha512 => 64,
         }
@@ -161,6 +179,10 @@ impl DigestAlgorithm {
                 0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04,
                 0x14,
             ],
+            Self::Sha224 => &[
+                0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                0x04, 0x05, 0x00, 0x04, 0x1c,
+            ],
             Self::Sha256 => &[
                 0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
                 0x01, 0x05, 0x00, 0x04, 0x20,
@@ -172,6 +194,14 @@ impl DigestAlgorithm {
             Self::Sha512 => &[
                 0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
                 0x03, 0x05, 0x00, 0x04, 0x40,
+            ],
+            Self::Sha512_224 => &[
+                0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                0x05, 0x05, 0x00, 0x04, 0x1c,
+            ],
+            Self::Sha512_256 => &[
+                0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                0x06, 0x05, 0x00, 0x04, 0x20,
             ],
         }
     }
@@ -185,11 +215,23 @@ impl DigestAlgorithm {
         };
         match self {
             Self::Sha1 => value.fill(&sha1(data)),
+            Self::Sha224 => value.fill(&sha2::sha224(data)),
             Self::Sha256 => value.fill(&sha2::sha256(data)),
             Self::Sha384 => value.fill(&sha2::sha384(data)),
             Self::Sha512 => value.fill(&sha2::sha512(data)),
+            Self::Sha512_224 => value.fill(&sha2::sha512_224(data)),
+            Self::Sha512_256 => value.fill(&sha2::sha512_256(data)),
         }
         value
+    }
+
+    /// Whether a signature may be made over this digest: every member but
+    /// SHA-1, whose collisions are found by computation, so that a signature
+    /// over its digest binds the signer to a document someone else could
+    /// have chosen a twin of (`docs/design/signing.md`, *The schemes*).
+    #[must_use]
+    pub const fn signs(self) -> bool {
+        !matches!(self, Self::Sha1)
     }
 }
 
@@ -291,6 +333,9 @@ pub enum RsaRefusal {
     /// leaves: the arithmetic went wrong somewhere, and a faulty RSA
     /// signature can reveal a prime. Nothing of it is returned.
     FaultDetected,
+    /// A digest that is verified and never signed with: SHA-1
+    /// ([`DigestAlgorithm::signs`]).
+    DigestNotForSigning,
 }
 
 /// The check an RSA private key failed when it was built.
@@ -790,9 +835,72 @@ impl RsaPrivateKey {
         self.public.modulus_bits()
     }
 
+    /// RSASSA-PKCS1-V1_5-SIGN (RFC 8017 §8.2.1) over a digest the caller has
+    /// already taken with `algorithm`: EMSA-PKCS1-v1_5 (§9.2) builds
+    /// `0x00 0x01 PS 0x00 T`, `T` the `DigestInfo` of the digest from the same
+    /// per-digest prefixes the verifier compares whole, and the private
+    /// operation signs it. The result is `k` octets.
+    ///
+    /// The digest is the caller's choice and nothing picks one for them.
+    /// The signature is a function of the key and the digest alone — blinding
+    /// does not move it — so the same request signs to the same bytes on
+    /// every target.
+    ///
+    /// # Errors
+    ///
+    /// [`RsaRefusal::DigestNotForSigning`] for SHA-1,
+    /// [`RsaRefusal::DigestLength`] for a digest of the wrong length,
+    /// [`RsaRefusal::ModulusTooShort`] for a key that cannot hold the encoding
+    /// with eight octets of padding (§9.2 step 3), and the private
+    /// operation's own refusals.
+    pub fn sign_pkcs1_v15(
+        &self,
+        algorithm: DigestAlgorithm,
+        digest: &[u8],
+        entropy: &mut dyn EntropySource,
+    ) -> Result<Vec<u8>, RsaRefusal> {
+        if !algorithm.signs() {
+            return Err(RsaRefusal::DigestNotForSigning);
+        }
+        if digest.len() != algorithm.output_len() {
+            return Err(RsaRefusal::DigestLength {
+                expected: algorithm.output_len(),
+                found: digest.len(),
+            });
+        }
+        // §8.2.1 step 1: EM is k octets, which keeps OS2IP(EM) below n.
+        let (em, em_len) = encode(algorithm, digest, self.public.modulus.byte_len())?;
+        let em = em.get(..em_len).ok_or(RsaRefusal::ModulusTooShort)?;
+        let representative =
+            Uint::<RSA_LIMBS>::from_be_bytes(em).ok_or(RsaRefusal::ModulusTooWide)?;
+        self.private_operation(&representative, entropy)
+    }
+
+    /// Digests `message` with `algorithm` and signs the digest by
+    /// [`RsaPrivateKey::sign_pkcs1_v15`].
+    ///
+    /// # Errors
+    ///
+    /// As [`RsaPrivateKey::sign_pkcs1_v15`]; a digest that is not signed with
+    /// is refused before the message is read.
+    pub fn sign_pkcs1_v15_message(
+        &self,
+        algorithm: DigestAlgorithm,
+        message: &[u8],
+        entropy: &mut dyn EntropySource,
+    ) -> Result<Vec<u8>, RsaRefusal> {
+        if !algorithm.signs() {
+            return Err(RsaRefusal::DigestNotForSigning);
+        }
+        let digest = algorithm.digest(message);
+        self.sign_pkcs1_v15(algorithm, digest.as_bytes(), entropy)
+    }
+
     /// RSASP1 (RFC 8017 §5.2.1) on a message representative below `n`: `k`
     /// octets, blinded by the caller's entropy and checked with the public
     /// exponent before they leave. The signature schemes are its callers.
+    /// The representative is public — an encoding of the caller's digest —
+    /// so its range check is the one comparison here that may stop early.
     ///
     /// # Errors
     ///
@@ -804,8 +912,6 @@ impl RsaPrivateKey {
         representative: &Uint<RSA_LIMBS>,
         entropy: &mut dyn EntropySource,
     ) -> Result<Vec<u8>, RsaRefusal> {
-        // The representative is public — an encoding of a digest — so this
-        // is the one comparison here that may stop early.
         if representative >= self.public.modulus.value() {
             return Err(RsaRefusal::MessageRepresentativeOutOfRange);
         }
@@ -1216,13 +1322,10 @@ mod tests {
     fn algorithm_named(name: &str) -> Option<DigestAlgorithm> {
         match name {
             "SHA1" => Some(DigestAlgorithm::Sha1),
+            "SHA224" => Some(DigestAlgorithm::Sha224),
             "SHA256" => Some(DigestAlgorithm::Sha256),
             "SHA384" => Some(DigestAlgorithm::Sha384),
             "SHA512" => Some(DigestAlgorithm::Sha512),
-            // SHA-224 groups exist in the file; `DigestAlgorithm` has no
-            // SHA-224 member to carry its DigestInfo prefix, and a prefix
-            // written here alone would be exactly the kind of constant this
-            // module refuses to invent.
             _ => None,
         }
     }
@@ -1237,12 +1340,7 @@ mod tests {
     /// digit transposed while copying the table.
     #[test]
     fn digest_info_prefixes_are_self_consistent_der() {
-        for algorithm in [
-            DigestAlgorithm::Sha1,
-            DigestAlgorithm::Sha256,
-            DigestAlgorithm::Sha384,
-            DigestAlgorithm::Sha512,
-        ] {
+        for algorithm in EVERY_DIGEST {
             let prefix = algorithm.digest_info_prefix();
             let len = algorithm.output_len();
             assert_eq!(prefix.first().copied(), Some(0x30), "DigestInfo SEQUENCE");
@@ -1270,20 +1368,44 @@ mod tests {
             );
         }
         // And the one byte that distinguishes the SHA-2 family members, which
-        // a structural check cannot catch: the last arc of the OID.
-        assert_eq!(
-            DigestAlgorithm::Sha256.digest_info_prefix().get(14),
-            Some(&0x01)
-        );
-        assert_eq!(
-            DigestAlgorithm::Sha384.digest_info_prefix().get(14),
-            Some(&0x02)
-        );
-        assert_eq!(
-            DigestAlgorithm::Sha512.digest_info_prefix().get(14),
-            Some(&0x03)
-        );
+        // a structural check cannot catch: the last arc of the OID, NIST's
+        // hashAlgs arc 1 to 6 (RFC 8017 appendix A.2.4).
+        for (algorithm, arc) in [
+            (DigestAlgorithm::Sha256, 0x01),
+            (DigestAlgorithm::Sha384, 0x02),
+            (DigestAlgorithm::Sha512, 0x03),
+            (DigestAlgorithm::Sha224, 0x04),
+            (DigestAlgorithm::Sha512_224, 0x05),
+            (DigestAlgorithm::Sha512_256, 0x06),
+        ] {
+            assert_eq!(
+                algorithm.digest_info_prefix().get(14),
+                Some(&arc),
+                "{algorithm:?}"
+            );
+        }
+        // No two members share a prefix, and each digest is the length its
+        // own function returns.
+        for (index, algorithm) in EVERY_DIGEST.iter().enumerate() {
+            for other in EVERY_DIGEST.iter().skip(index + 1) {
+                assert_ne!(algorithm.digest_info_prefix(), other.digest_info_prefix());
+            }
+            assert_eq!(
+                algorithm.digest(b"abc").as_bytes().len(),
+                algorithm.output_len()
+            );
+        }
     }
+
+    const EVERY_DIGEST: [DigestAlgorithm; 7] = [
+        DigestAlgorithm::Sha1,
+        DigestAlgorithm::Sha224,
+        DigestAlgorithm::Sha256,
+        DigestAlgorithm::Sha384,
+        DigestAlgorithm::Sha512,
+        DigestAlgorithm::Sha512_224,
+        DigestAlgorithm::Sha512_256,
+    ];
 
     #[test]
     fn the_encoding_has_the_shape_rfc_8017_section_9_2_describes() {
@@ -1564,7 +1686,7 @@ mod tests {
     }
 
     /// NIST CAVP `SigVer15_186-3.rsp` from `186-2rsatestvectors.zip`: every
-    /// vector for a digest this crate implements, positive and negative alike.
+    /// vector, under all five of its digests, positive and negative alike.
     ///
     /// The counts are asserted, not printed, because "the CAVP vectors pass"
     /// means nothing without them — a parser that silently matched no lines
@@ -1585,7 +1707,6 @@ mod tests {
         let mut signature = Vec::new();
 
         let mut ran = 0usize;
-        let mut skipped = 0usize;
         let mut accepted = 0usize;
         let mut rejected = 0usize;
 
@@ -1608,10 +1729,7 @@ mod tests {
                 "Msg" => message = unhex(value),
                 "S" => signature = unhex(value),
                 "Result" => {
-                    let Some(algorithm) = algorithm else {
-                        skipped += 1;
-                        continue;
-                    };
+                    let algorithm = algorithm.expect("every group names a DigestAlgorithm member");
                     let expected_valid = value.starts_with('P');
                     let base = base.as_ref().expect("a modulus precedes every vector");
                     let outcome = base.with_exponent(&exponent).and_then(|key| {
@@ -1633,24 +1751,23 @@ mod tests {
             }
         }
 
-        assert_eq!(ran, 360, "vectors run");
         assert_eq!(
-            skipped, 90,
-            "SHA-224 vectors, which DigestAlgorithm has no member for"
+            ran, 450,
+            "vectors run, the 90 of the SHA-224 groups among them"
         );
-        assert_eq!(accepted, 60, "Result = P");
-        assert_eq!(rejected, 300, "Result = F");
+        assert_eq!(accepted, 75, "Result = P");
+        assert_eq!(rejected, 375, "Result = F");
     }
 
     // ---- RSASSA-PSS ------------------------------------------------------
 
     /// NIST CAVP `SigVerPSS_186-3.rsp`, from the same archive as the PKCS#1
-    /// v1.5 file: every vector for a digest this crate implements.
+    /// v1.5 file: every vector, under all five of its digests.
     ///
     /// The salt length is read from each vector's `SaltVal`, which is ten
     /// octets throughout, and handed to the verifier as the declared length —
     /// the same thing a CMS `RSASSA-PSS-params` does. The negatives are NIST's
-    /// own five kinds, 60 of each across the four digests run: the message
+    /// own five kinds, 75 of each across the five digests: the message
     /// changed, `e` changed, the signature changed, the hash moved left in
     /// the encoded message, and the `0x01` that ends the padding removed. The
     /// last two are forgeries against the unmasking, which is the part of PSS
@@ -1667,7 +1784,6 @@ mod tests {
         let mut salt = Vec::new();
 
         let mut ran = 0usize;
-        let mut skipped = 0usize;
         let mut accepted = 0usize;
         let mut rejected = 0usize;
         let mut by_reason = std::collections::BTreeMap::<String, usize>::new();
@@ -1692,10 +1808,7 @@ mod tests {
                 "S" => signature = unhex(value),
                 "SaltVal" => salt = unhex(value),
                 "Result" => {
-                    let Some(algorithm) = algorithm else {
-                        skipped += 1;
-                        continue;
-                    };
+                    let algorithm = algorithm.expect("every group names a DigestAlgorithm member");
                     let expected_valid = value.starts_with('P');
                     let base = base.as_ref().expect("a modulus precedes every vector");
                     let parameters = PssParameters {
@@ -1725,18 +1838,17 @@ mod tests {
             }
         }
 
-        assert_eq!(ran, 360, "vectors run");
         assert_eq!(
-            skipped, 90,
-            "SHA-224 vectors, which DigestAlgorithm has no member for"
+            ran, 450,
+            "vectors run, the 90 of the SHA-224 groups among them"
         );
-        assert_eq!(accepted, 60, "Result = P");
-        assert_eq!(rejected, 300, "Result = F");
-        // Sixty of each of NIST's five reasons, so a parser that matched only
-        // some of them cannot reach the right total another way.
+        assert_eq!(accepted, 75, "Result = P");
+        assert_eq!(rejected, 375, "Result = F");
+        // Seventy-five of each of NIST's five reasons, so a parser that
+        // matched only some of them cannot reach the right total another way.
         assert_eq!(by_reason.len(), 5, "{by_reason:?}");
         assert!(
-            by_reason.values().all(|&count| count == 60),
+            by_reason.values().all(|&count| count == 75),
             "{by_reason:?}"
         );
     }
@@ -2847,5 +2959,182 @@ mod tests {
             ),
             "{swapped:?}"
         );
+    }
+
+    // ---- RSASSA-PKCS1-v1_5 signing -------------------------------------------
+
+    /// The key every RSA text works by hand — `p = 61`, `q = 53`, `e = 17`,
+    /// `d = 2753`, so `dP = 53`, `dQ = 49` and `qInv = 38` — whose twelve-bit
+    /// modulus shares a factor with one draw in thirty or so, which is the
+    /// blinding's redraw taken often.
+    fn textbook_key() -> RsaPrivateKey {
+        RsaPrivateKey::new(&RsaPrivateComponents {
+            modulus: &3233u16.to_be_bytes(),
+            public_exponent: &[17],
+            private_exponent: &2753u16.to_be_bytes(),
+            prime1: &[61],
+            prime2: &[53],
+            exponent1: &[53],
+            exponent2: &[49],
+            coefficient: &[38],
+        })
+        .expect("the textbook key is a key")
+    }
+
+    /// The private operation on the textbook key, by hand: `2790^2753 mod
+    /// 3233` is 65, the message the texts encrypt to 2790 under `e = 17`. A
+    /// hundred operations under one source keep giving it, through three
+    /// refreshes of a pair whose factor is often a multiple of a prime.
+    #[test]
+    fn the_textbook_key_signs_as_the_texts_do() {
+        let key = textbook_key();
+        assert_eq!(key.modulus_bits(), 12);
+        let mut entropy = Stream::new(65);
+        for _ in 0..100 {
+            assert_eq!(
+                key.private_operation(&Uint::from_u64(2790), &mut entropy),
+                Ok(vec![0x00, 0x41])
+            );
+        }
+        // No digest's encoding fits two octets.
+        for algorithm in EVERY_DIGEST {
+            let digest = algorithm.digest(b"abc");
+            let expected = if algorithm.signs() {
+                RsaRefusal::ModulusTooShort
+            } else {
+                RsaRefusal::DigestNotForSigning
+            };
+            assert_eq!(
+                key.sign_pkcs1_v15(algorithm, digest.as_bytes(), &mut entropy),
+                Err(expected),
+                "{algorithm:?}"
+            );
+        }
+    }
+
+    /// Every SHA-2 digest signs; SHA-1, the one this module verifies and
+    /// never signs with, is refused whichever entry point it comes through
+    /// and whatever else is wrong with the request; a digest of the wrong
+    /// length is refused by name.
+    #[test]
+    fn the_signer_takes_the_sha_2_family_and_refuses_sha_1() {
+        let vector = pss_vector_keys().remove(9);
+        let key = vector.key();
+        assert_eq!(key.modulus_bits(), 2048);
+        let mut entropy = Stream::new(1);
+        for algorithm in EVERY_DIGEST {
+            let digest = algorithm.digest(b"tinker-pdf");
+            let signed = key.sign_pkcs1_v15(algorithm, digest.as_bytes(), &mut entropy);
+            let from_message = key.sign_pkcs1_v15_message(algorithm, b"tinker-pdf", &mut entropy);
+            if algorithm.signs() {
+                let signature = signed.expect("a SHA-2 digest signs");
+                assert_eq!(signature.len(), 256, "k octets");
+                assert_eq!(from_message.as_ref(), Ok(&signature));
+                assert_eq!(
+                    key.public_key()
+                        .verify_pkcs1_v15(algorithm, digest.as_bytes(), &signature),
+                    Ok(())
+                );
+            } else {
+                assert_eq!(signed, Err(RsaRefusal::DigestNotForSigning));
+                assert_eq!(from_message, Err(RsaRefusal::DigestNotForSigning));
+                assert_eq!(
+                    key.sign_pkcs1_v15(algorithm, &[], &mut Exhausted),
+                    Err(RsaRefusal::DigestNotForSigning),
+                    "refused before the digest or the source is looked at"
+                );
+            }
+        }
+        assert_eq!(
+            key.sign_pkcs1_v15(DigestAlgorithm::Sha256, &[0u8; 20], &mut entropy),
+            Err(RsaRefusal::DigestLength {
+                expected: 32,
+                found: 20
+            })
+        );
+        // A key's first operation draws its pair, so a fresh key with a
+        // source that cannot fill signs nothing.
+        assert_eq!(
+            vector
+                .key()
+                .sign_pkcs1_v15_message(DigestAlgorithm::Sha512, b"x", &mut Exhausted),
+            Err(RsaRefusal::EntropyUnavailable)
+        );
+    }
+
+    /// The same request signs to the same bytes whatever the source, which
+    /// is what lets a signed document be identical on every target.
+    #[test]
+    fn a_pkcs1_v15_signature_does_not_depend_on_the_source() {
+        let vector = pss_vector_keys().remove(3);
+        let key = vector.key();
+        let digest = DigestAlgorithm::Sha384.digest(b"the same request");
+        let first = key
+            .sign_pkcs1_v15(
+                DigestAlgorithm::Sha384,
+                digest.as_bytes(),
+                &mut Stream::new(1),
+            )
+            .expect("signs");
+        for seed in 2..6 {
+            assert_eq!(
+                key.sign_pkcs1_v15(
+                    DigestAlgorithm::Sha384,
+                    digest.as_bytes(),
+                    &mut Stream::new(seed)
+                )
+                .as_ref(),
+                Ok(&first)
+            );
+        }
+        // And a 1 027-bit key's signature is its whole k octets, 129 of them,
+        // whatever its leading octet holds.
+        assert_eq!(key.modulus_bits(), 1027);
+        assert_eq!(first.len(), 129);
+    }
+
+    /// The SigVer15 file's positive vectors were made by signing: every one,
+    /// under its own key, is what the signer makes from its message, SHA-224
+    /// among the digests. Published signatures, reproduced octet for octet.
+    #[test]
+    fn the_sigver15_positives_are_what_the_signer_makes() {
+        const VECTORS: &str = include_str!("../tests/data/cavp/rsa_sigver15.rsp");
+        let keys = sigver15_keys();
+        let built: Vec<RsaPrivateKey> = keys.iter().map(VectorKey::key).collect();
+        let mut entropy = Stream::new(15);
+        let (mut e, mut d, mut algorithm, mut message, mut signature) =
+            (Vec::new(), Vec::new(), None, Vec::new(), Vec::new());
+        let mut n = Vec::new();
+        let mut made = 0usize;
+        for line in VECTORS.lines() {
+            let Some((name, value)) = line.trim().split_once(" = ") else {
+                continue;
+            };
+            match name {
+                "n" => n = unhex(value),
+                "e" => e = unhex(value),
+                "d" => d = unhex(value),
+                "SHAAlg" => algorithm = algorithm_named(value.trim()),
+                "Msg" => message = unhex(value),
+                "S" => signature = unhex(value),
+                "Result" if value.starts_with('P') => {
+                    let index = keys
+                        .iter()
+                        .position(|key| key.parts[0] == n && key.parts[1] == e && key.parts[2] == d)
+                        .expect("the key this vector was made under");
+                    let key = built.get(index).expect("one key built a vector key");
+                    let algorithm = algorithm.expect("a digest");
+                    let made_now = key.sign_pkcs1_v15_message(algorithm, &message, &mut entropy);
+                    if algorithm.signs() {
+                        assert_eq!(made_now.as_ref(), Ok(&signature), "{algorithm:?}");
+                    } else {
+                        assert_eq!(made_now, Err(RsaRefusal::DigestNotForSigning));
+                    }
+                    made += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(made, 75, "fifteen keys, five digests each");
     }
 }

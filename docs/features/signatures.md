@@ -1,6 +1,6 @@
 # Digital signatures
 
-Both directions, with the cryptography hand-rolled and verify-only. Opening a
+Both directions, with the cryptography hand-rolled. Opening a
 signed document reports what each signature actually proves — which bytes it
 covers, whether those bytes still hash to what was signed, whether the
 signature was made by the key in the signer's certificate, how far the
@@ -8,7 +8,10 @@ certificate chain reaches toward an anchor the *caller* supplied, and what
 later revisions changed measured against the signature's own `/DocMDP`.
 `DocumentEditor` produces signatures of its own on an incremental save, with
 the private key held by a caller-supplied callback so key material never
-enters the engine.
+enters the engine. One layer down, `tinker-pdf-crypto` signs with a key the
+caller does hand it: `RsaPrivateKey`, RSASSA-PKCS1-v1_5 over any SHA-2 digest
+the caller names, on a constant-time path (`docs/design/signing.md`); no
+`SignedData` is built around it yet.
 
 Every primitive is the project's own: DER, X.509 and CMS in the
 `tinker-pdf-pki` leaf crate, and big-integer arithmetic, RSASSA-PKCS1-v1_5,
@@ -289,7 +292,7 @@ let crl = document.cos().stream_decoded(store.crls[0]);
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| Signing a document with a key the engine holds | none offered — `Signer` returns finished CMS | `tinker-pdf-crypto` holds an RSA private key and runs its private operation, blinded and fault-checked on the constant-time path, but no signature scheme, key import or CMS `SignedData` is built on it yet, and key generation is a roadmap row too | [ROADMAP](../ROADMAP.md) SG-01…SG-09, SG-23 |
+| Signing a document with a key the engine holds | none offered — `Signer` returns finished CMS | `tinker-pdf-crypto` signs RSASSA-PKCS1-v1_5 with an RSA key handed to it as its numbers, blinded and fault-checked on the constant-time path, but no key import or CMS `SignedData` is built on it yet, and key generation is a roadmap row too | [ROADMAP](../ROADMAP.md) SG-01…SG-09, SG-23 |
 | A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them; trust lists the host supplies are a roadmap row | [ROADMAP](../ROADMAP.md) SG-14 |
 | Deciding whether a certificate is expired, unasked | validity reported; judged only against a caller-supplied instant | ruling 4 bans a clock, and "expired" is a claim about *now* — a library that invents one answers differently on different days | [rulings](../rulings.md) ruling 4 |
 | CRL and OCSP fetching | embedded revocation data surfaced, not evaluated | the engine performs no I/O, so fetching stays the host's; parsing and evaluating what the host supplies is a roadmap row | [ROADMAP](../ROADMAP.md) SG-10 |
@@ -302,17 +305,27 @@ let crl = document.cos().stream_decoded(store.crls[0]);
 **Published vectors gate the arithmetic**, as they gate every other primitive
 in this tree ([encryption](encryption.md)): NIST CAVP `SigVer15` for RSA
 (valid vectors and vectors that must be refused, moduli of 1 024 to 4 096 bits
-crossed with SHA-1/256/384/512, forged paddings among them), CAVP `SigVerPSS`
-for RSASSA-PSS (NIST's five negative kinds), CAVP ECDSA `SigVer` and `PKV` for
-P-256 and P-384 (all in `tinker-pdf-crypto/tests/data/cavp/`), RSA
-Laboratories' PSS signatures from `pss-vect.txt` with four spoilings each, and
-RFC 6979's. CAVP's exponents are all large, so it never tests the low-exponent
-forgery; hand-built negatives cover it by choosing a modulus that makes the
-verifier recover any chosen block without a private key. Four more PSS
-signatures, which no published set has, are OpenSSL's: an MGF1 hash other than
-the message hash — SHA-256 under MGF1-SHA-1 among them — each verified under
-its own parameters and refused when unmasked with the message hash
+crossed with SHA-1/224/256/384/512, forged paddings among them), CAVP
+`SigVerPSS` for RSASSA-PSS (NIST's five negative kinds), CAVP ECDSA `SigVer`
+and `PKV` for P-256 and P-384 (all in `tinker-pdf-crypto/tests/data/cavp/`),
+RSA Laboratories' PSS signatures from `pss-vect.txt` with four spoilings each,
+and RFC 6979's. CAVP's exponents are all large, so it never tests the
+low-exponent forgery; hand-built negatives cover it by choosing a modulus that
+makes the verifier recover any chosen block without a private key. Four more
+PSS signatures, which no published set has, are OpenSSL's: an MGF1 hash other
+than the message hash — SHA-256 under MGF1-SHA-1 among them — each verified
+under its own parameters and refused when unmasked with the message hash
 (`tinker-pdf-crypto/tests/data/openssl/pss-mgf1.txt`).
+
+**Signing is held to published signatures**, never to the verifier agreeing
+with it (`tinker-pdf-crypto/tests/rsa_sign.rs`): every signature of NIST CAVP's
+`SigGen15` files — ten for each SHA-2 digest, SHA-512/224 and SHA-512/256
+among them, under a 2048- and a 3072-bit key whose primes the test recovers
+from `n`, `e` and `d` — and every SHA-2 signature of Wycheproof's five
+RSASSA-PKCS1-v1_5 generation files, 1 024 to 4 096 bits, the acceptable ones
+with leading zero octets among them, is made by `RsaPrivateKey` from its
+message and compared octet for octet; their SHA-1 groups are refused by name.
+CAVP's `SigVer15` positives are reproduced the same way under their own keys.
 
 **The corpus adjudicates the parts it can.** Three `#[ignore]`d suites read the
 fetched corpora: the census in `crates/tinker-pdf/tests/signatures.rs`

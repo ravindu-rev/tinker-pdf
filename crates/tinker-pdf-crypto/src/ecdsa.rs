@@ -601,6 +601,7 @@ mod tests {
     fn algorithm_named(name: &str) -> Option<DigestAlgorithm> {
         match name {
             "SHA-1" => Some(DigestAlgorithm::Sha1),
+            "SHA-224" => Some(DigestAlgorithm::Sha224),
             "SHA-256" => Some(DigestAlgorithm::Sha256),
             "SHA-384" => Some(DigestAlgorithm::Sha384),
             "SHA-512" => Some(DigestAlgorithm::Sha512),
@@ -918,10 +919,8 @@ mod tests {
     }
 
     /// NIST CAVP `SigVer.rsp` from `186-3ecdsatestvectors.zip`, P-256 and
-    /// P-384, every vector. A SHA-224 group is verified over the digest
-    /// [`crate::sha2::sha224`] computes, [`DigestAlgorithm`] having no SHA-224
-    /// member, which [`EcPublicKey::verify`] takes as it takes any other
-    /// (FIPS 186-4 §6.4 reads a digest shorter than the order as it stands).
+    /// P-384, every vector. A SHA-224 digest is shorter than either order,
+    /// and [`EcPublicKey::verify`] takes it as it stands (FIPS 186-4 §6.4).
     ///
     /// The failure classes are the file's own: a changed message, a changed
     /// `r`, a changed `s`, and a changed `Q`. The last is the one worth
@@ -974,15 +973,11 @@ mod tests {
                 "Result" => {
                     let curve = curve.expect("every group is P-256 or P-384");
                     let expected_valid = value.starts_with('P');
-                    let outcome = EcPublicKey::new(curve, &qx, &qy).and_then(|key| match digest {
-                        Some("SHA-224") => key.verify(&crate::sha2::sha224(&message), &r, &s),
-                        name => {
-                            let algorithm = name
-                                .and_then(algorithm_named)
-                                .expect("every other group names a member");
-                            key.verify_message(algorithm, &message, &r, &s)
-                        }
-                    });
+                    let algorithm = digest
+                        .and_then(algorithm_named)
+                        .expect("every group names a member");
+                    let outcome = EcPublicKey::new(curve, &qx, &qy)
+                        .and_then(|key| key.verify_message(algorithm, &message, &r, &s));
                     if matches!(
                         outcome,
                         Err(EcdsaRefusal::PointNotOnCurve | EcdsaRefusal::PointAtInfinity)

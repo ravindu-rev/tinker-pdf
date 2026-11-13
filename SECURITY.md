@@ -47,8 +47,8 @@ functionality. That is an unusual choice and it deserves an unusual amount of
 scrutiny, so here is the honest framing:
 
 - **Scope is document decryption, encryption-on-save, signature
-  verification, and the RSA private operation signing stands on.** No TLS, no
-  key exchange, no long-term secret storage, no protocol implementation.
+  verification, and RSA signing with a key the caller hands over.** No TLS,
+  no key exchange, no long-term secret storage, no protocol implementation.
 - **One private-key operation exists, and it is on a constant-time path.**
   The signature code verifies, and a signature written on save is the CMS
   blob a caller-supplied `Signer` returns over the digest. Beside them,
@@ -57,7 +57,8 @@ scrutiny, so here is the honest framing:
   with a factor drawn from the caller's entropy (refreshed every thirty-two
   operations and squared between), and checked with the public exponent
   before a result leaves, so a miscomputed half is refused rather than
-  returned. Every secret operand — the primes, the exponents, the blinding
+  returned; RSASSA-PKCS1-v1_5 signing over any SHA-2 digest the caller names
+  (never SHA-1) is built on it. Every secret operand — the primes, the exponents, the blinding
   factor — takes `bignum`'s second path: a fixed-window exponentiation that
   reads the whole window table every window and reduces without a branch,
   its operation counts held equal over every exponent shape by a test. Key
@@ -87,11 +88,13 @@ scrutiny, so here is the honest framing:
 
   The *signature* primitives are the other exception, and they are gated on
   CAVP itself: `SigVer15` vectors for RSA (moduli of 1024 to 4096 bits
-  crossed with SHA-1/256/384/512, valid ones and ones that must be refused,
-  forged paddings among them), `SigVer` vectors and `PKV` points for ECDSA,
-  and RFC 6979's appendix A.2 signatures. The vector files are committed
-  under `crates/tinker-pdf-crypto/tests/data/cavp/` with their provenance in
-  each file's header.
+  crossed with SHA-1/224/256/384/512, valid ones and ones that must be
+  refused, forged paddings among them), `SigGen15` vectors for RSA signing
+  (every SHA-2 digest, reproduced octet for octet) beside Wycheproof's
+  generation vectors, `SigVer` vectors and `PKV` points for ECDSA, and RFC
+  6979's appendix A.2 signatures. The vector files are committed under
+  `crates/tinker-pdf-crypto/tests/data/` with their provenance in each CAVP
+  file's header and in `THIRDPARTY.md`.
 - **Password comparison is constant-time.**
 
   Decrypt paths **are** fuzzed: `crypt` drives the security handler and

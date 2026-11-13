@@ -13,8 +13,8 @@
 //! RSA private operation by hand is unusual and deserves the scrutiny it
 //! invites. The honest framing, also recorded in `SECURITY.md`: the scope is
 //! document decryption, encryption-on-save (to a password or to a recipient's
-//! public key), signature verification and the private operation signing
-//! stands on, not a protocol;
+//! public key), signature verification and RSA signing with a key the
+//! caller hands over, not a protocol;
 //! correctness is gated on published vectors (FIPS 197, FIPS 180-4, FIPS 46-3,
 //! RFC 6229, RFC 1321, and NIST CAVP for Triple DES, for SHA-224, SHA-512/224
 //! and SHA-512/256, and for the two signature schemes) as merge requirements
@@ -42,9 +42,10 @@
 //! the Chinese remainder theorem, blinded with the caller's entropy and
 //! checked with the public exponent before a result leaves, on [`bignum`]'s
 //! second, constant-time path ([`bignum::Modulus::pow_secret`]), its secrets
-//! in [`bignum::Secret`]s wiped when it drops (`docs/design/signing.md`).
-//! There is no key generation and no key-file parsing: a key arrives as its
-//! numbers.
+//! in [`bignum::Secret`]s wiped when it drops (`docs/design/signing.md`). It
+//! signs RSASSA-PKCS1-v1_5 over any SHA-2 digest the caller names, held to
+//! NIST CAVP's and Wycheproof's signature-generation vectors. There is no key
+//! generation and no key-file parsing: a key arrives as its numbers.
 
 #![forbid(unsafe_code)]
 

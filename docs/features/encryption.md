@@ -348,7 +348,16 @@ Wycheproof's RSASSA-PKCS1-v1_5 generation files for 1 024- to 4 096-bit keys
 reads every file, holds each one to the SHA-256 it was fetched with
 (`THIRDPARTY.md`), and asserts its counts: keys, signatures per digest, salt
 lengths against the file's own header, and every Wycheproof group's PKCS#8 a
-two-prime key whose numbers are the group's.
+two-prime key whose numbers are the group's. RSASSA-PKCS1-v1_5 signing
+reproduces every signature of the `SigGen15` files under its published key —
+whose primes the test recovers from `n`, `e` and `d` by SP 800-56B's
+factoring — and every SHA-2 signature of the Wycheproof files, octet for
+octet, refusing their SHA-1 groups by name
+(`cavp_pkcs1_v15_generation_vectors_pass`,
+`wycheproof_rsa_signature_vectors_pass`); in `rsa.rs` it reproduces CAVP
+`SigVer15`'s positives and signs the textbook twelve-bit key by hand. The
+verifier's `SigVer15` and `SigVerPSS` runs take every digest group,
+SHA-224's among them, `DigestAlgorithm` naming the whole SHA-2 family.
 
 `crates/tinker-pdf-cos/tests/encryption.rs` decrypts real encrypted
 fixtures: user and owner passwords told apart, a wrong password refused,

@@ -8,8 +8,7 @@
 #   b5e040ac5de9489902cacd6395a804182cc28d46de6fe9e2795e4d20e1959aa7
 # Nothing below this header is edited: 450 vectors, mod 1024/1536/2048/3072/4096
 # crossed with SHA-1/224/256/384/512, every one with a 10-octet salt, 75
-# Result = P and 375 Result = F. The SHA-224 groups are skipped at run time,
-# DigestAlgorithm having no SHA-224 member; the test asserts how many it skipped.
+# Result = P and 375 Result = F, every group run.
 # NIST publications are US Government works and carry no copyright.
 # CAVS 11.0
 # "SigVer PKCS#1 RSASSA-PSS" information 

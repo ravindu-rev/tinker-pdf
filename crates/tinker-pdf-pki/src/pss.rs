@@ -27,8 +27,10 @@
 //! - **A mask generation function other than MGF1.** RFC 8017 defines one and
 //!   no other has ever been registered for this structure; its OID is named
 //!   in the refusal so a caller can say which.
-//! - **A digest [`DigestAlgorithm`] has no member for**, in either slot.
-//!   SHA-224 is the one a real signer might choose; it is refused by OID.
+//! - **A digest the CMS reader does not name** ([`digest_algorithm`]), in
+//!   either slot. SHA-224 is the one a real signer might choose; it is
+//!   refused by OID, though the arithmetic computes it, because a document
+//!   digest the object model cannot take would be a verdict half checked.
 //! - **A trailer field that is not 1.** `trailerFieldBC(1)` is the only value
 //!   RFC 4055 defines, and it is what puts `0xbc` at the end of the encoded
 //!   message. Any other number describes an encoding this verifier would not
@@ -62,7 +64,7 @@ pub enum PssError {
     NotPss { oid: String },
     /// No parameters, which RFC 4055 §3.1 forbids beside a signature value.
     ParametersAbsent,
-    /// A hash this crate has no digest for, in `hashAlgorithm` or inside the
+    /// A hash the CMS reader does not name, in `hashAlgorithm` or inside the
     /// mask generation function.
     UnknownHash { oid: String },
     /// A mask generation function that is not MGF1.
@@ -306,7 +308,7 @@ mod tests {
         let pkcs1 = unhex("30 0D 06 09 2A 86 48 86 F7 0D 01 01 0B 05 00");
         assert!(matches!(read(&pkcs1), Err(PssError::NotPss { .. })));
 
-        // SHA-224, which `DigestAlgorithm` has no member for.
+        // SHA-224, which the CMS reader does not name.
         let sha224 = identifier("A0 0D 30 0B 06 09 60 86 48 01 65 03 04 02 04");
         assert_eq!(
             read(&sha224),

@@ -563,7 +563,10 @@ fn document_timestamp(
     let (stamp, authority) = timestamp(
         blob,
         Stamped::Document,
-        &|algorithm| signature.digest(document, cos_digest(cms_digest(algorithm))),
+        &|algorithm| {
+            cos_digest(cms_digest(algorithm))
+                .and_then(|algorithm| signature.digest(document, algorithm))
+        },
         anchors,
     );
     verdict.cms = stamp.token.clone();
@@ -793,7 +796,8 @@ impl<'a> Signed<'a> {
             Signed::Covered {
                 document,
                 signature,
-            } => signature.digest(document, cos_digest(cms_digest(algorithm))),
+            } => cos_digest(cms_digest(algorithm))
+                .and_then(|algorithm| signature.digest(document, algorithm)),
         }
     }
 }
@@ -835,7 +839,12 @@ fn check_document_digest(
     if algorithm == CmsDigest::Sha1 {
         weaknesses.push(Weakness::Sha1Digest);
     }
-    let Some(actual) = signature.digest(document, cos_digest(algorithm)) else {
+    let Some(covered) = cos_digest(algorithm) else {
+        return DocumentDigest::NotChecked(Unchecked::UnsupportedAlgorithm(format!(
+            "{algorithm:?}"
+        )));
+    };
+    let Some(actual) = signature.digest(document, covered) else {
         return DocumentDigest::NotChecked(Unchecked::CoverageUnusable);
     };
     // Not a constant-time comparison, and deliberately: both values are public
@@ -1306,9 +1315,12 @@ fn ec_key(certificate: &Certificate<'_>) -> Result<EcPublicKey, String> {
 fn crypto_digest(digest: CmsDigest) -> CryptoDigest {
     match digest {
         CmsDigest::Sha1 => CryptoDigest::Sha1,
+        CmsDigest::Sha224 => CryptoDigest::Sha224,
         CmsDigest::Sha256 => CryptoDigest::Sha256,
         CmsDigest::Sha384 => CryptoDigest::Sha384,
         CmsDigest::Sha512 => CryptoDigest::Sha512,
+        CmsDigest::Sha512_224 => CryptoDigest::Sha512_224,
+        CmsDigest::Sha512_256 => CryptoDigest::Sha512_256,
     }
 }
 
@@ -1317,24 +1329,32 @@ fn crypto_digest(digest: CmsDigest) -> CryptoDigest {
 fn cms_digest(digest: CryptoDigest) -> CmsDigest {
     match digest {
         CryptoDigest::Sha1 => CmsDigest::Sha1,
+        CryptoDigest::Sha224 => CmsDigest::Sha224,
         CryptoDigest::Sha256 => CmsDigest::Sha256,
         CryptoDigest::Sha384 => CmsDigest::Sha384,
         CryptoDigest::Sha512 => CmsDigest::Sha512,
+        CryptoDigest::Sha512_224 => CmsDigest::Sha512_224,
+        CryptoDigest::Sha512_256 => CmsDigest::Sha512_256,
     }
 }
 
 /// And the same for the object model's, which is what `Signature::digest`
 /// takes because the writer and the reader of a `/ByteRange` share it.
 ///
-/// Three enums naming four hashes is a smell, and it is the right smell: each
+/// Three enums for one concept is a smell, and it is the right smell: each
 /// belongs to a crate that must not depend on the others, and collapsing them
 /// would be an edge in the dependency graph bought to save two `match`es.
-fn cos_digest(digest: CmsDigest) -> tinker_pdf_cos::DigestAlgorithm {
+/// The object model digests the four hashes the CMS reader names; the
+/// arithmetic's other three — SHA-224, SHA-512/224 and SHA-512/256, which the
+/// reader never resolves an OID to — have no `/ByteRange` digest, and a
+/// signature naming one is reported unchecked rather than digested wrongly.
+fn cos_digest(digest: CmsDigest) -> Option<tinker_pdf_cos::DigestAlgorithm> {
     match digest {
-        CmsDigest::Sha1 => tinker_pdf_cos::DigestAlgorithm::Sha1,
-        CmsDigest::Sha256 => tinker_pdf_cos::DigestAlgorithm::Sha256,
-        CmsDigest::Sha384 => tinker_pdf_cos::DigestAlgorithm::Sha384,
-        CmsDigest::Sha512 => tinker_pdf_cos::DigestAlgorithm::Sha512,
+        CmsDigest::Sha1 => Some(tinker_pdf_cos::DigestAlgorithm::Sha1),
+        CmsDigest::Sha256 => Some(tinker_pdf_cos::DigestAlgorithm::Sha256),
+        CmsDigest::Sha384 => Some(tinker_pdf_cos::DigestAlgorithm::Sha384),
+        CmsDigest::Sha512 => Some(tinker_pdf_cos::DigestAlgorithm::Sha512),
+        CmsDigest::Sha224 | CmsDigest::Sha512_224 | CmsDigest::Sha512_256 => None,
     }
 }
 

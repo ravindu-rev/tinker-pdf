@@ -23,7 +23,6 @@ deterministic by default.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SG-01.5 | build | PKCS#1 v1.5 signature generation over SHA-256, SHA-384, SHA-512 and SHA-512/256, the digest the caller's choice. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | `rsa_sign.rs` (new): CAVP's PKCS#1 v1.5 generation vectors and Wycheproof's signature vectors pass for every SHA-2 digest they cover. | SG-01.3, SG-01.4, SG-04.2 |
 | SG-01.6 | build | RSASSA-PSS generation, the salt fixed for vectors or drawn from caller entropy. *Note:* The salt from the caller is H-33's default. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-pki/src/pss.rs`, `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | CAVP's PSS vectors with a fixed salt pass for every SHA-2 digest. | SG-01.5 |
 | SG-01.7 | test | The SHA-3 pairs of both schemes once SG-04's digests exist. | `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | The SHA-3 vectors pass for PKCS#1 v1.5 and PSS. | SG-01.6, SG-04.1 |
 

@@ -5,9 +5,8 @@
 # SHA-256 of the file inside the zip, which follows this header verbatim:
 #   dd8de3c0920e3b75059491e9c5d84f2e399b2a652869977eeb863489eb7dd151
 # Nothing below this header is edited: 450 vectors, mod 1024/1536/2048/3072/4096
-# crossed with SHA-1/224/256/384/512, 75 Result = P and 375 Result = F.
-# The SHA-224 groups are skipped at run time, DigestAlgorithm having no
-# SHA-224 member to carry its DigestInfo; the test asserts how many it skipped.
+# crossed with SHA-1/224/256/384/512, 75 Result = P and 375 Result = F,
+# every group run.
 # NIST publications are US Government works and carry no copyright.
 # CAVS 11.0
 # "SigVer PKCS#1 Ver 1.5" information 
