@@ -29,8 +29,8 @@ use tinker_pdf_color::icc::Conversion;
 
 pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
-use plates::{spotless, PlatePaint};
-pub use plates::{PlatePlan, PlateUse};
+use plates::spotless;
+pub use plates::{PlatePaint, PlatePlan, PlateUse};
 pub use shading::{ColorTable, Shading, ShadingScratch, TABLE_ENTRIES};
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{
@@ -48,8 +48,9 @@ use tinker_pdf_raster::{
     fragments::Fragments,
     geom::{FillRule, Path},
     image::{
-        accumulate_image, draw_image, image_bounds_in, image_coverage, ImageDraw, ImageSource,
-        Pyramid, SourceWindow, Transform, TwoColour,
+        accumulate_image, accumulate_plate_image, draw_image, draw_plate_image, image_bounds_in,
+        image_coverage, ImageDraw, ImageSource, PlatePyramid, PlateSource, Pyramid, SourceWindow,
+        Transform, TwoColour,
     },
     mesh::{draw_mesh_over, MeshDraw},
     stroke::{
@@ -590,6 +591,34 @@ pub struct DecodedImage {
     /// draw is placed and sampled by. `None` where every sample is held,
     /// which is every image but a JPEG 2000 codestream a draw showed part of.
     pub window: Option<SourceWindow>,
+    /// Beside the light, for a draw on plates by a plate plan
+    /// ([`GlyphSource::image_on_plates`]), what the samples put on each plate
+    /// where the image's space names colorants (RC-04.12); `None` for every
+    /// other image and every other draw, which then reaches plates as its
+    /// light turned into ink.
+    pub plates: Option<ImagePlates>,
+}
+
+/// What an image's samples put on the plates of a render by a plate plan
+/// (`docs/design/overprint-separations.md`, "Images on plates"): an image in
+/// DeviceCMYK, a `/Separation`, a `/DeviceN` or an `/Indexed` space over one
+/// of them, each sample's colorant tints kept through its decode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImagePlates {
+    /// `channels` tints a sample, one a colour channel of the plates canvas
+    /// by its index — the four process plates, then the plan's spots — 0 no
+    /// ink and 255 solid, row-major from the top, the rows of
+    /// [`DecodedImage::window`] where it holds less than the image; each
+    /// sample's coverage is [`DecodedImage::alpha`]'s.
+    Tints {
+        /// The tints.
+        tints: Vec<u8>,
+        /// Tints a sample.
+        channels: usize,
+    },
+    /// The image's space names only `/None`: the image has no effect on the
+    /// page (8.6.6.4).
+    Nothing,
 }
 
 /// A rectangle of an image's unit square, `(0, 0)` its bottom-left corner
@@ -844,6 +873,37 @@ pub trait GlyphSource {
     ) -> Result<Option<DecodedImage>, String> {
         let _ = (name, request, intent);
         Ok(None)
+    }
+
+    /// [`GlyphSource::image`] for a draw on plates by `plan`
+    /// ([`Renderer::with_plates`]): the image as `image` decodes it and,
+    /// where its space names colorants, each sample's tints on the plan's
+    /// plates beside its light ([`DecodedImage::plates`]). The default is
+    /// `image`'s decode, its light alone, which the renderer turns into ink.
+    fn image_on_plates(
+        &self,
+        name: &[u8],
+        request: &ImageRequest,
+        intent: RenderingIntent,
+        plan: &Arc<PlatePlan>,
+    ) -> Result<Option<DecodedImage>, String> {
+        let _ = plan;
+        self.image(name, request, intent)
+    }
+
+    /// [`GlyphSource::inline_image`] for a draw on plates by `plan`, as
+    /// [`GlyphSource::image_on_plates`] is `image`'s. The default is
+    /// `inline_image`'s decode.
+    fn inline_image_on_plates(
+        &self,
+        dict: &[u8],
+        data: &[u8],
+        request: &ImageRequest,
+        intent: RenderingIntent,
+        plan: &Arc<PlatePlan>,
+    ) -> Result<Option<DecodedImage>, String> {
+        let _ = plan;
+        self.inline_image(dict, data, request, intent)
     }
 
     /// An inline image (8.9.7), from the bytes between `BI`/`ID` and `EI`,
@@ -1263,6 +1323,14 @@ struct ImageRun {
     /// on every canvas that does not composite ink, so no light page's runs
     /// are split by it.
     ink: Option<[u8; 4]>,
+    /// Whether the run holds images of tints on plates
+    /// ([`ImagePlates::Tints`]), a tint a plate a pixel, rather than light: a
+    /// draw of the other kind ends it.
+    plates: bool,
+    /// The bytes a run of tints is charged against [`MAX_PLATE_BYTES`], at
+    /// the size its canvas has on a render of the whole page; 0 for a run of
+    /// light.
+    plate_bytes: u64,
     /// The device rectangle the run has put coverage in, as
     /// `(x0, y0, x1, y1)` with the far edges exclusive.
     ///
@@ -2351,10 +2419,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
     /// The bytes of plates the render holds live now, each buffer at the size
     /// it has on a render of the whole page: those held outside this
-    /// renderer, its own canvas's and each open group's plates buffer.
+    /// renderer, its own canvas's, each open group's plates buffer and a run
+    /// of images of tints.
     fn plate_bytes_live(&self) -> u64 {
+        let run = self.run.as_ref().map_or(0, |run| run.plate_bytes);
         self.groups.iter().fold(
-            self.held_plates.saturating_add(self.own_plates),
+            self.held_plates
+                .saturating_add(self.own_plates)
+                .saturating_add(run),
             |live, frame| live.saturating_add(frame.plate_bytes),
         )
     }
@@ -4650,6 +4722,23 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if matches!(plating, Plating::Nothing) {
             return;
         }
+        // An image whose samples name colorants is drawn on plates by them
+        // (RC-04.12): in `/None` it has no effect on the page, and otherwise
+        // its tints are sampled plate by plate through the raster's sampler
+        // (`draw_plate_image`). Only on the plates its tints were made for; a
+        // stencil is its fill colour's, above.
+        let tints = match (&image.plates, self.canvas.format, &self.plan) {
+            (Some(plates), PixelFormat::Plates { spots }, Some(_)) if !image.stencil => {
+                match plates {
+                    ImagePlates::Nothing => return,
+                    ImagePlates::Tints { tints, channels } if *channels == 4 + spots.count() => {
+                        Some((tints.as_slice(), *channels))
+                    }
+                    ImagePlates::Tints { .. } => None,
+                }
+            }
+            _ => None,
+        };
         let unit_to_device = transform(&state.ctm.then(&self.base));
         // A reduced decode's samples span a square of their own, which reaches
         // past the unit square where the last column and row stand for less
@@ -4782,14 +4871,36 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // light and ink, never its plates, so a stencil tinting a spot is
         // drawn on its own: a decision of the colour and the plan, which a
         // tile and the page under it take alike.
-        let direct =
-            self.in_knockout() || pixels > MAX_IMAGE_RUN_PIXELS || removing || plates.is_some();
+        //
+        // A run of images of tints holds a byte a plate a pixel, as the
+        // canvas does, and is charged against the plates' byte bound at the
+        // canvas's size on the whole page; past it each draws on its own.
+        let run_bytes = if tints.is_some() {
+            plate_bytes_of(self.canvas.format, pixels)
+        } else {
+            0
+        };
+        // Beside everything live but the run held now, which a run this draw
+        // joins or opens takes the place of.
+        let held_run = self.run.as_ref().map_or(0, |run| run.plate_bytes);
+        let unbound = tints.is_some()
+            && self
+                .plate_bytes_live()
+                .saturating_sub(held_run)
+                .saturating_add(run_bytes)
+                > MAX_PLATE_BYTES;
+        let direct = self.in_knockout()
+            || pixels > MAX_IMAGE_RUN_PIXELS
+            || removing
+            || plates.is_some()
+            || unbound;
         let masks = self.mask_ids();
         let state_changed = self.run.as_ref().is_some_and(|run| {
             run.alpha.to_bits() != state.fill_alpha.to_bits()
                 || run.blend != blend_mode(state.blend)
                 || run.masks != masks
                 || run.ink != ink
+                || run.plates != tints.is_some()
         });
         // The draw's bounds within the frame, which this canvas may cut: what
         // a render of the whole page asks the run about (`RunReach`).
@@ -4866,7 +4977,28 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // function. That identity lives with the resource cache, which is
         // phase 08's, so this deliberately does not invent one.
         let mut pyramid = Pyramid::new();
+        // The samples as tints, where the image's are drawn by plate: the
+        // light's geometry, window and coverage, the plan's channels.
+        let source = tints.map(|(tints, channels)| PlateSource {
+            width: image.width,
+            height: image.height,
+            tints,
+            channels,
+            alpha: &image.alpha,
+            window: image.window,
+        });
+        let mut plate_pyramid = PlatePyramid::new();
         if direct {
+            if let Some(source) = &source {
+                draw_plate_image(
+                    &mut self.canvas,
+                    &draw,
+                    source,
+                    &mut plate_pyramid,
+                    &mut self.scratch,
+                );
+                return;
+            }
             let held = removing.then(|| self.canvas.set_ink_tables(set.removal.clone()));
             draw_image(&mut self.canvas, &draw, &mut pyramid, &mut self.scratch);
             if let Some(previous) = held {
@@ -4877,21 +5009,42 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
         let extent = self.device();
         let run = self.run.get_or_insert_with(|| ImageRun {
-            fragments: Fragments::new(extent.0, extent.1, extent.2, extent.3),
+            fragments: match &source {
+                Some(source) => Fragments::with_channels(
+                    extent.0,
+                    extent.1,
+                    extent.2,
+                    extent.3,
+                    source.channels,
+                ),
+                None => Fragments::new(extent.0, extent.1, extent.2, extent.3),
+            },
             alpha: state.fill_alpha,
             blend: blend_mode(state.blend),
             masks,
             ink,
+            plates: source.is_some(),
+            plate_bytes: run_bytes,
             covered: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
             framed: Bounds::NONE,
         });
-        accumulate_image(
-            &mut run.fragments,
-            &draw,
-            &mut pyramid,
-            extent,
-            &mut self.scratch,
-        );
+        match &source {
+            Some(source) => accumulate_plate_image(
+                &mut run.fragments,
+                &draw,
+                source,
+                &mut plate_pyramid,
+                extent,
+                &mut self.scratch,
+            ),
+            None => accumulate_image(
+                &mut run.fragments,
+                &draw,
+                &mut pyramid,
+                extent,
+                &mut self.scratch,
+            ),
+        }
         if let Some((bx0, by0, bw, bh)) = bounds {
             run.covered = (
                 run.covered.0.min(bx0),
@@ -6046,17 +6199,41 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // names one (8.6.5.8, Table 89).
         let request = self.image_request(&state.ctm.then(&self.base));
         let intent = state.stored_parameters().rendering_intent;
+        // On plates by a plan, the image's samples are asked for by plate too
+        // (RC-04.12); everywhere else as light, as they always were.
+        let plan = match self.canvas.format {
+            PixelFormat::Plates { .. } => self.plan.clone(),
+            _ => None,
+        };
         let decoded = if image.inline {
-            match self
-                .glyphs
-                .inline_image(&image.inline_dict, &image.inline_data, &request, intent)
-            {
+            let answer = match &plan {
+                Some(plan) => self.glyphs.inline_image_on_plates(
+                    &image.inline_dict,
+                    &image.inline_data,
+                    &request,
+                    intent,
+                    plan,
+                ),
+                None => self.glyphs.inline_image(
+                    &image.inline_dict,
+                    &image.inline_data,
+                    &request,
+                    intent,
+                ),
+            };
+            match answer {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err("inline".to_string()),
                 Err(codec) => Err(codec),
             }
         } else {
-            match self.glyphs.image(&image.name, &request, intent) {
+            let answer = match &plan {
+                Some(plan) => self
+                    .glyphs
+                    .image_on_plates(&image.name, &request, intent, plan),
+                None => self.glyphs.image(&image.name, &request, intent),
+            };
+            match answer {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err(String::from_utf8_lossy(&image.name).into_owned()),
                 Err(codec) => Err(codec),
@@ -7807,6 +7984,7 @@ mod tests {
                 two_colour: None,
                 reduced: None,
                 window: None,
+                plates: None,
             }))
         }
     }
@@ -8051,6 +8229,7 @@ mod tests {
                 two_colour: None,
                 reduced: None,
                 window: None,
+                plates: None,
             }))
         }
     }
@@ -8090,6 +8269,7 @@ mod tests {
                 two_colour: None,
                 reduced: None,
                 window: None,
+                plates: None,
             }))
         }
     }
@@ -8158,6 +8338,7 @@ mod tests {
                 family: ColorFamily::Rgb,
                 soft_masked: false,
                 window: None,
+                plates: None,
             })
         }
     }
@@ -8486,6 +8667,7 @@ mod tests {
                 family: ColorFamily::Rgb,
                 soft_masked: false,
                 window: None,
+                plates: None,
             }))
         }
     }
@@ -8899,6 +9081,7 @@ mod tests {
                     },
                     soft_masked: false,
                     window: None,
+                    plates: None,
                 }));
             }
             let mut rgb = Vec::new();
@@ -8924,6 +9107,7 @@ mod tests {
                 },
                 soft_masked: false,
                 window: None,
+                plates: None,
             }))
         }
     }
@@ -10877,6 +11061,7 @@ mod tests {
                 two_colour: None,
                 reduced: None,
                 window: None,
+                plates: None,
             }))
         }
     }
@@ -11268,6 +11453,7 @@ mod snapshot_tests {
                 two_colour: None,
                 reduced: None,
                 window: None,
+                plates: None,
             }))
         }
     }
@@ -11976,6 +12162,7 @@ mod plate_tests {
                 two_colour: None,
                 reduced: None,
                 window: None,
+                plates: None,
             }))
         }
 

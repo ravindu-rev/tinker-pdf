@@ -955,6 +955,37 @@ one, two and eight spots in `/Separation` and `/DeviceN` spaces);
 tile's plates byte-equal to the page's, turned, cropped and at 2x. The
 `render_page` fuzz target draws a page's separations.
 
+**Images on plates** (the design's "Images on plates"). On plates by a plan
+the renderer asks for an image through `GlyphSource::image_on_plates` and
+`inline_image_on_plates`, whose defaults are `image`'s and `inline_image`'s
+decode. A page's resources answer them with the light decode — every image
+as RGB, never as two colours — and, where the image's space names colorants
+(DeviceCMYK, a `/Separation`, a `/DeviceN`, or an `/Indexed` over one of
+them), `DecodedImage::plates`: `ImagePlates::Tints`, a tint for each plate of
+the plan a sample, or `ImagePlates::Nothing` for a space naming only
+`/None`. Each sample's tints are its colour's as a flat colour of the same
+space and components puts them (`colorant_tints`, `PlatePlan::sample_tints`):
+DeviceCMYK's components after `/Decode`, a separation's names on their plates
+or the whole colour through its alternate where one has none, an `NChannel`
+space component by component, an `/Indexed` sample its palette entry's — read
+from the raw values the light's sample loop reads, worked out once for each
+distinct sample up to 4 096 of them, for a stored or inline image of the
+sample loop, a JPEG (a CMYK one drawn in its own colour as DeviceCMYK) and a
+JPEG 2000 codestream (its components taken out of a premultiplied opacity as
+its light is). A decode for plates is the draw's own, at the size the draw
+asks: the scope's and the document's caches keep light. The renderer samples
+the tints plate by plate through `draw_plate_image`, and holds abutting ones in
+a run of plate images (`Fragments::with_channels`) as it holds light, a draw
+of the other kind ending the run; a run of tints is charged against
+`MAX_PLATE_BYTES` at its canvas's size on the whole page, and past it each
+image draws on its own. An image in `/None` has no effect on the page; one in
+any other space reaches the process plates as its light turned into ink, as
+the `CmykA8` page has it; a stencil paints its fill colour's colorants, as
+before (`an_image_in_each_ink_space_lands_on_its_plates`, at 1:1 and 2:1,
+stored and inline, and
+`an_image_of_none_or_of_light_reaches_plates_as_a_light_page_has_it`). A light
+render decodes as it did.
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and

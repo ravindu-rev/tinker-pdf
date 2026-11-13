@@ -32,8 +32,8 @@ use tinker_pdf_raster::canvas::{Canvas, Color};
 use tinker_pdf_raster::fill::Mask;
 use tinker_pdf_raster::image::{sampling_for, ImageSource, SourceWindow, Transform};
 use tinker_pdf_render::{
-    DecodedImage, FontIdentity, GlyphSource, ImageRequest, Mesh, MeshParams, PatternPaint, Reduced,
-    Shading, TilingPattern, TwoColourSamples,
+    DecodedImage, FontIdentity, GlyphSource, ImagePlates, ImageRequest, Mesh, MeshParams,
+    PatternPaint, PlatePlan, Reduced, Shading, TilingPattern, TwoColourSamples,
 };
 
 use crate::cache::{
@@ -338,6 +338,10 @@ struct DecodeAsk<'a> {
     request: &'a ImageRequest,
     conversion: icc::Conversion,
     room: Option<Room>,
+    /// The plate plan of a separations render the image is decoded for,
+    /// whose plates its samples' tints are kept on beside their light
+    /// (RC-04.12, [`ImagePlating`]); `None` for every other decode.
+    plates: Option<&'a PlatePlan>,
 }
 
 /// A JPEG 2000 codestream as its header and its dictionary give it, which
@@ -1555,6 +1559,62 @@ struct SampleLayout<'a> {
     work: Option<&'a Work>,
 }
 
+/// What an image's samples put on the plates of a separations render by
+/// `plan` (RC-04.12): each sample's tints, read from the raw values the light
+/// loop reads ([`read_bits`], a byte at a time where a component is one) and
+/// worked out by [`ImageTints`] beside the sample's light in `rgb`, three
+/// bytes a sample; nothing at all for a space naming only `/None`; `None`
+/// where the space names no colorant and the samples are their light.
+fn plate_samples(
+    data: &[u8],
+    layout: &SampleLayout<'_>,
+    rgb: &[u8],
+    plan: &PlatePlan,
+) -> Option<ImagePlates> {
+    let SampleLayout {
+        width,
+        height,
+        bpc,
+        n,
+        space,
+        decode,
+        ..
+    } = *layout;
+    let mut tints = match ImagePlating::of(space, plan)? {
+        ImagePlating::Nothing => return Some(ImagePlates::Nothing),
+        ImagePlating::Tints(tints) => tints,
+    };
+    let (width, height) = (width as usize, height as usize);
+    let row_bytes = (width * n * bpc as usize).div_ceil(8);
+    let channels = tints.channels();
+    let mut out = Vec::with_capacity(width.saturating_mul(height).saturating_mul(channels));
+    let mut values = Vec::with_capacity(n);
+    for y in 0..height {
+        for x in 0..width {
+            values.clear();
+            for c in 0..n {
+                let value = if bpc == 8 {
+                    let at = y * row_bytes + x * n + c;
+                    u32::from(data.get(at).copied().unwrap_or(0))
+                } else {
+                    read_bits(data, y * row_bytes * 8 + (x * n + c) * bpc as usize, bpc)
+                };
+                values.push(value);
+            }
+            let at = (y * width + x) * 3;
+            let light = match rgb.get(at..at + 3) {
+                Some(&[r, g, b]) => (r, g, b),
+                _ => (255, 255, 255),
+            };
+            tints.push(space, decode, &values, bpc, light, &mut out);
+        }
+    }
+    Some(ImagePlates::Tints {
+        tints: out,
+        channels,
+    })
+}
+
 /// An image's samples as RGB, three bytes a sample, with an alpha byte a
 /// sample where a mask or a colour key gives one: the sample loop both image
 /// paths share.
@@ -2358,6 +2418,16 @@ struct JpegInto<'r, 'd> {
     color: JpegColor,
     width: usize,
     rgb: Vec<u8>,
+    /// The plan of a separations render the image is decoded for (RC-04.12).
+    plates: Option<&'d PlatePlan>,
+    /// Each sample's tints on the plan's plates, worked out by the space
+    /// the samples are drawn in — the dictionary's, or DeviceCMYK for a CMYK
+    /// JPEG drawn in its own colour — where that space names colorants.
+    tints: Option<(ImageTints<'d>, ColorSpace)>,
+    /// Whether that space names only `/None`, so the image paints nothing.
+    nothing: bool,
+    /// The tints, `tints`' channels a sample.
+    plate_tints: Vec<u8>,
 }
 
 impl JpegInto<'_, '_> {
@@ -2386,6 +2456,23 @@ impl JpegSink for JpegInto<'_, '_> {
                 let converter = SpaceSamples::new(&space, 8, self.decode, self.conversion);
                 (space, converter)
             });
+        // The space the samples' tints are read in: the one they are drawn
+        // in, or a CMYK JPEG's own ink.
+        let tinted = match (&self.space, layout.color) {
+            (Some((space, _)), _) => Some(space.clone()),
+            (None, JpegColor::Cmyk | JpegColor::CmykInverted) => Some(ColorSpace::DeviceCmyk),
+            (None, JpegColor::Gray | JpegColor::Rgb) => None,
+        };
+        if let (Some(plan), Some(space)) = (self.plates, tinted) {
+            match ImagePlating::of(&space, plan) {
+                Some(ImagePlating::Tints(tints)) => {
+                    self.plate_tints = Vec::with_capacity(pixels.saturating_mul(tints.channels()));
+                    self.tints = Some((tints, space));
+                }
+                Some(ImagePlating::Nothing) => self.nothing = true,
+                None => {}
+            }
+        }
         self.own = (self.space.is_none()
             && matches!(layout.color, JpegColor::Cmyk | JpegColor::CmykInverted))
         .then(|| {
@@ -2402,6 +2489,32 @@ impl JpegSink for JpegInto<'_, '_> {
 
     fn strip(&mut self, _: u32, rows: u32, data: &[u8]) {
         let pixels = (rows as usize).saturating_mul(self.width);
+        // The strip's light starts where the image's so far ends.
+        let first = self.rgb.len() / 3;
+        self.convert_strip(data, pixels);
+        if let Some((tints, space)) = self.tints.as_mut() {
+            let components = usize::from(jpeg_components(self.color));
+            let mut values = Vec::with_capacity(components);
+            for i in 0..pixels {
+                values.clear();
+                values.extend(
+                    (0..components)
+                        .map(|c| u32::from(data.get(i * components + c).copied().unwrap_or(0))),
+                );
+                let at = (first + i) * 3;
+                let light = match self.rgb.get(at..at + 3) {
+                    Some(&[r, g, b]) => (r, g, b),
+                    _ => (255, 255, 255),
+                };
+                tints.push(space, self.decode, &values, 8, light, &mut self.plate_tints);
+            }
+        }
+    }
+}
+
+impl JpegInto<'_, '_> {
+    /// The light of a strip of `pixels` samples, `data`, appended.
+    fn convert_strip(&mut self, data: &[u8], pixels: usize) {
         match self.space.as_mut() {
             // Drawn in its dictionary's space, a sample takes `/Decode`
             // before the space, as the sample loop's does.
@@ -5234,8 +5347,44 @@ impl GlyphSource for PageResources {
         // in the conversion it asks for.
         let conversion = self.own_intent(dict).unwrap_or(intent).conversion();
         self.count(Counter::ImagesDecoded);
-        self.decode_inline(dict, data, request, conversion)
+        self.decode_inline(dict, data, request, conversion, None)
             .map(|(image, _)| Some(image))
+    }
+
+    fn inline_image_on_plates(
+        &self,
+        dict: &[u8],
+        data: &[u8],
+        request: &ImageRequest,
+        intent: RenderingIntent,
+        plan: &Arc<PlatePlan>,
+    ) -> Result<Option<DecodedImage>, String> {
+        let text = expand_inline_abbreviations(dict);
+        let mut sink = tinker_pdf_cos::WarningSink::new();
+        let parsed = tinker_pdf_cos::parse_object_at(&text, 0, self.doc.names_table(), &mut sink);
+        let Some(dict) = parsed.object.as_dict() else {
+            return Ok(None);
+        };
+        let conversion = self.own_intent(dict).unwrap_or(intent).conversion();
+        self.count(Counter::ImagesDecoded);
+        self.decode_inline(dict, data, request, conversion, Some(plan))
+            .map(|(image, _)| Some(image))
+    }
+
+    fn image_on_plates(
+        &self,
+        name: &[u8],
+        request: &ImageRequest,
+        intent: RenderingIntent,
+        plan: &Arc<PlatePlan>,
+    ) -> Result<Option<DecodedImage>, String> {
+        // A decode for plates is the draw's own: the scope's and the
+        // document's caches keep light, and a decode's tints are those of one
+        // render's plan. It decodes at the size the draw asks, as a render
+        // with no budget does.
+        self.count(Counter::ImagesDecoded);
+        let Decoded { image, .. } = self.decode_image(name, request, intent, None, Some(plan));
+        image.map(Some)
     }
 
     fn image(
@@ -5396,7 +5545,7 @@ impl PageResources {
             image,
             frame,
             colour,
-        } = self.decode_image(name, request, intent, None);
+        } = self.decode_image(name, request, intent, None, None);
         // The damage this decode reported: every entry under this name, which
         // only this image's decode writes.
         let damage: Vec<(Option<String>, String)> = self
@@ -5490,7 +5639,7 @@ impl PageResources {
         let parsed = tinker_pdf_cos::parse_object_at(&text, 0, self.doc.names_table(), &mut sink);
         let dict = parsed.object.as_dict()?;
         let conversion = self.own_intent(dict).unwrap_or(intent).conversion();
-        self.decode_inline(dict, data, &ImageRequest::FULL, conversion)
+        self.decode_inline(dict, data, &ImageRequest::FULL, conversion, None)
             .ok()
             .and_then(|(_, frame)| frame)
     }
@@ -5593,7 +5742,7 @@ impl PageResources {
             self.count(Counter::ImagesDecoded);
             let decoding = self.serving(self.op.clone());
             let Decoded { image, frame, .. } =
-                decoding.decode_image(name, request, intent, Some(room));
+                decoding.decode_image(name, request, intent, Some(room), None);
             (Arc::new(CachedImage::of(&image, &decoding, &label)), frame)
         };
         // What the draw asks, and the reduction the budget took it to past
@@ -7042,6 +7191,7 @@ impl PageResources {
         request: &ImageRequest,
         intent: RenderingIntent,
         room: Option<Room>,
+        plates: Option<&PlatePlan>,
     ) -> Decoded {
         let Some((dict, reference)) = self.xobject(name) else {
             return Decoded {
@@ -7057,7 +7207,9 @@ impl PageResources {
         // composed into its alpha a sample at a time; any other one-bit image
         // of one component is held as its two colours.
         let soft = dict.get_ref(self.name(b"SMask")).is_some();
-        let form = if soft {
+        // And so is one decoded for plates, whose tints sit beside its light
+        // a sample at a time.
+        let form = if soft || plates.is_some() {
             SampleForm::Rgb
         } else {
             SampleForm::TwoColour
@@ -7068,12 +7220,14 @@ impl PageResources {
                 request,
                 conversion,
                 room,
+                plates,
             }
         } else {
             DecodeAsk {
                 request: &ImageRequest::FULL,
                 conversion,
                 room: None,
+                plates,
             }
         };
         let decoded = self
@@ -7368,6 +7522,7 @@ impl PageResources {
             request,
             conversion,
             room,
+            plates,
         } = ask;
         let indexed = matches!(named, Some(ColorSpace::Indexed { .. }));
         let (request, room) = if indexed {
@@ -7386,6 +7541,10 @@ impl PageResources {
             color: JpegColor::Gray,
             width: 0,
             rgb: Vec::new(),
+            plates,
+            tints: None,
+            nothing: false,
+            plate_tints: Vec::new(),
         };
         // The scale is the frame's own size against the drawn size and what
         // the budget leaves its samples, asked when the decode reads the
@@ -7414,6 +7573,21 @@ impl PageResources {
         };
         let mut rgb = into.rgb;
         rgb.resize(pixels * 3, 255);
+        // A strip the decode stopped short of is no ink, as its light is
+        // paper.
+        let plates = match (into.nothing, into.tints) {
+            (true, _) => Some(ImagePlates::Nothing),
+            (false, Some((tints, _))) => {
+                let channels = tints.channels();
+                let mut out = into.plate_tints;
+                out.resize(pixels * channels, 0);
+                Some(ImagePlates::Tints {
+                    tints: out,
+                    channels,
+                })
+            }
+            (false, None) => None,
+        };
         let reduced = (layout.scale != JpegScale::Full).then(|| Reduced {
             full_width: layout.full_width,
             full_height: layout.full_height,
@@ -7436,6 +7610,7 @@ impl PageResources {
             two_colour: None,
             reduced,
             window: None,
+            plates,
         };
         Ok((image, frame))
     }
@@ -7507,6 +7682,7 @@ impl PageResources {
             request,
             conversion,
             room,
+            plates,
         } = ask;
         let smask_in_data = dict.get_int(self.name(b"SMaskInData")).unwrap_or(0);
         let image_mask = dict.get_bool(self.name(b"ImageMask")).unwrap_or(false);
@@ -7586,13 +7762,13 @@ impl PageResources {
             tinker_pdf_content::ColorFamily::Other,
             tinker_pdf_render::color_family,
         );
-        let mut rgb = match drawn {
+        let mut rgb = match &drawn {
             // 8.9.5.4 ignores `/Decode`, so none is applied, and a sixteen-bit
             // codestream is read at its own precision.
             Some(space) => {
                 let bits = if image.precision > 8 { 16 } else { 8 };
                 samples_in_space(
-                    &space,
+                    space,
                     &image.samples,
                     count,
                     bits,
@@ -7646,6 +7822,64 @@ impl PageResources {
             }
         };
 
+        // For plates, each sample's tints beside its light (RC-04.12), read in
+        // the space it is drawn in, or a four-component codestream's own ink:
+        // its raw components, taken out of a premultiplied opacity as its
+        // light is.
+        let premultiplied = smask_in_data == 2
+            || image
+                .opacity
+                .as_ref()
+                .is_some_and(|opacity| opacity.premultiplied);
+        let tinted = match (&drawn, image.components) {
+            (Some(space), _) => Some(space.clone()),
+            (None, 4) => Some(ColorSpace::DeviceCmyk),
+            (None, _) => None,
+        };
+        let plates = match (plates, tinted) {
+            (Some(plan), Some(space)) => match ImagePlating::of(&space, plan) {
+                Some(ImagePlating::Nothing) => Some(ImagePlates::Nothing),
+                Some(ImagePlating::Tints(mut tints)) => {
+                    let per = usize::from(image.components);
+                    let wide = image.precision > 8;
+                    let (bits, max) = if wide { (16, 65535) } else { (8, 255) };
+                    let mut out = Vec::with_capacity(count.saturating_mul(tints.channels()));
+                    let mut values = Vec::with_capacity(per);
+                    for i in 0..count {
+                        let a = alpha.get(i).copied().map_or(255, u32::from);
+                        values.clear();
+                        for c in 0..per {
+                            let at = i * per + c;
+                            let raw = if wide {
+                                let hi = image.samples.get(at * 2).copied().unwrap_or(0);
+                                let lo = image.samples.get(at * 2 + 1).copied().unwrap_or(0);
+                                u32::from(u16::from_be_bytes([hi, lo]))
+                            } else {
+                                u32::from(image.samples.get(at).copied().unwrap_or(0))
+                            };
+                            let value = if premultiplied && a != 0 && a != 255 {
+                                (raw * 255 / a).min(max)
+                            } else {
+                                raw
+                            };
+                            values.push(value);
+                        }
+                        let light = match rgb.get(i * 3..i * 3 + 3) {
+                            Some(&[r, g, b]) => (r, g, b),
+                            _ => (255, 255, 255),
+                        };
+                        tints.push(&space, &[], &values, bits, light, &mut out);
+                    }
+                    Some(ImagePlates::Tints {
+                        channels: tints.channels(),
+                        tints: out,
+                    })
+                }
+                None => None,
+            },
+            _ => None,
+        };
+
         // `/SMaskInData`'s opacity is the only alpha a codestream brings.
         let soft_masked = !alpha.is_empty();
         let decoded = DecodedImage {
@@ -7660,6 +7894,7 @@ impl PageResources {
             two_colour: None,
             reduced,
             window,
+            plates,
         };
         Ok((decoded, frame.map(Frame::Jpx)))
     }
@@ -7938,22 +8173,25 @@ impl PageResources {
         // because it is a test on the *raw* samples.
         let color_key = self.color_key(&dict, n, bpc);
 
-        let (rgb, alpha, two_colour) = decoded_pixels(
-            &data,
-            &SampleLayout {
-                width,
-                height,
-                bpc,
-                n,
-                space: &space,
-                decode: &decode,
-                mask: is_mask,
-                color_key: color_key.as_deref(),
-                conversion,
-                work: self.op.work.as_deref(),
-            },
-            form,
-        );
+        let layout = SampleLayout {
+            width,
+            height,
+            bpc,
+            n,
+            space: &space,
+            decode: &decode,
+            mask: is_mask,
+            color_key: color_key.as_deref(),
+            conversion,
+            work: self.op.work.as_deref(),
+        };
+        let (rgb, alpha, two_colour) = decoded_pixels(&data, &layout, form);
+        // For plates, each sample's tints beside its light (RC-04.12); a
+        // stencil's are its fill colour's.
+        let plates = ask
+            .plates
+            .filter(|_| !is_mask)
+            .and_then(|plan| plate_samples(&data, &layout, &rgb, plan));
 
         let image = DecodedImage {
             width,
@@ -7973,6 +8211,7 @@ impl PageResources {
             },
             soft_masked: false,
             window: None,
+            plates,
         };
         Ok((image, None))
     }
@@ -8159,6 +8398,7 @@ impl PageResources {
         data: &[u8],
         request: &ImageRequest,
         conversion: icc::Conversion,
+        plates: Option<&PlatePlan>,
     ) -> Result<(DecodedImage, Option<Frame>), String> {
         let int = |key: &[u8]| {
             self.doc
@@ -8227,6 +8467,7 @@ impl PageResources {
                         request,
                         conversion,
                         room: None,
+                        plates,
                     },
                 );
             }
@@ -8250,6 +8491,7 @@ impl PageResources {
                         request,
                         conversion,
                         room: None,
+                        plates,
                     },
                 );
             }
@@ -8263,23 +8505,29 @@ impl PageResources {
 
         // An inline image is read with no colour key, and carries no soft
         // mask (Table 93), so a one-bit image of one component is held as its
-        // two colours.
-        let (rgb, alpha, two_colour) = decoded_pixels(
-            &bytes,
-            &SampleLayout {
-                width,
-                height,
-                bpc,
-                n,
-                space: &space,
-                decode: &decode,
-                mask: is_mask,
-                color_key: None,
-                conversion,
-                work: self.op.work.as_deref(),
-            },
-            SampleForm::TwoColour,
-        );
+        // two colours — but as RGB for plates, whose tints sit beside its
+        // light a sample at a time.
+        let layout = SampleLayout {
+            width,
+            height,
+            bpc,
+            n,
+            space: &space,
+            decode: &decode,
+            mask: is_mask,
+            color_key: None,
+            conversion,
+            work: self.op.work.as_deref(),
+        };
+        let form = if plates.is_some() {
+            SampleForm::Rgb
+        } else {
+            SampleForm::TwoColour
+        };
+        let (rgb, alpha, two_colour) = decoded_pixels(&bytes, &layout, form);
+        let plates = plates
+            .filter(|_| !is_mask)
+            .and_then(|plan| plate_samples(&bytes, &layout, &rgb, plan));
 
         Ok((
             DecodedImage {
@@ -8300,6 +8548,7 @@ impl PageResources {
                 },
                 soft_masked: false,
                 window: None,
+                plates,
             },
             None,
         ))
@@ -8343,6 +8592,7 @@ impl PageResources {
                 request: &ImageRequest::FULL,
                 conversion: icc::Conversion::default(),
                 room: None,
+                plates: None,
             },
         )
         .ok()
@@ -9047,6 +9297,117 @@ fn colorant_tints(
     }
 }
 
+/// What an image's samples put on the plates of a separations render
+/// (RC-04.12; `docs/design/overprint-separations.md`, "Images on plates"),
+/// chosen once an image by its space and the render's plan: the tints each
+/// sample's colour puts on every channel of the plates, as a flat colour of
+/// the same space and components puts them ([`colorant_tints`],
+/// [`PlatePlan::sample_tints`]) — so a sample takes the road a fill takes,
+/// and a space whose names the plan cannot all place reverts to its alternate
+/// as a fill's does.
+///
+/// DeviceCMYK's tints are its components, each `round(255 × c)` after
+/// `/Decode`, onto the process plates. Every other space's are worked out
+/// once for each distinct sample, by its raw values, as the light of a
+/// `/DeviceN` image is remembered (`Remembered`), up to
+/// [`REMEMBERED_COLOURS`] of them, and each sample past them by itself.
+pub(crate) struct ImageTints<'p> {
+    plan: &'p PlatePlan,
+    spots: tinker_pdf_raster::Spots,
+    /// Tints a sample: the four process plates and the plan's spots.
+    channels: usize,
+    /// Whether the space is DeviceCMYK, whose components are its tints.
+    cmyk: bool,
+    /// Each distinct sample's tints, by its raw values.
+    remembered: HashMap<Vec<u32>, Vec<u8>>,
+    /// One sample's components, kept between samples.
+    components: Vec<f64>,
+}
+
+/// What an image in `space` puts on the plates of a render by `plan`: its
+/// tints ([`ImageTints`]) where its colours name colorants, nothing at all
+/// where they name only `/None` (8.6.6.4), and `None` — its light, which the
+/// renderer turns into ink — where they name none: a device space but
+/// DeviceCMYK, a CIE-based or ICC space, and an `/Indexed` one over them.
+pub(crate) enum ImagePlating<'p> {
+    /// Each sample's tints.
+    Tints(ImageTints<'p>),
+    /// The image has no effect on the page.
+    Nothing,
+}
+
+impl<'p> ImagePlating<'p> {
+    /// The plating of an image in `space` on a render by `plan`, or `None`
+    /// where its samples are its light.
+    pub(crate) fn of(space: &ColorSpace, plan: &'p PlatePlan) -> Option<ImagePlating<'p>> {
+        // The space's own initial colour, which names the colorants every
+        // colour of it names.
+        let initial = space.initial();
+        let tints = colorant_tints(space, &initial, (255, 255, 255), 0)?;
+        if tints.kind == ColorantKind::None {
+            return Some(ImagePlating::Nothing);
+        }
+        let spots = plan.spots();
+        Some(ImagePlating::Tints(ImageTints {
+            plan,
+            spots,
+            channels: 4 + spots.count(),
+            cmyk: *space == ColorSpace::DeviceCmyk,
+            remembered: HashMap::new(),
+            components: Vec::new(),
+        }))
+    }
+}
+
+impl ImageTints<'_> {
+    /// Tints a sample.
+    pub(crate) fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Appends the tints of the sample whose raw values are `values`, of
+    /// `bpc` bits, in `space` under `decode`, its colour as light `light`:
+    /// `channels` bytes.
+    pub(crate) fn push(
+        &mut self,
+        space: &ColorSpace,
+        decode: &[(f64, f64)],
+        values: &[u32],
+        bpc: u32,
+        light: (u8, u8, u8),
+        out: &mut Vec<u8>,
+    ) {
+        let max = f64::from((1u32 << bpc.min(16)) - 1);
+        let start = out.len();
+        out.resize(start + self.channels, 0);
+        let Some(slot) = out.get_mut(start..) else {
+            return;
+        };
+        if self.cmyk {
+            for (c, tint) in slot.iter_mut().enumerate().take(4) {
+                let value = values.get(c).copied().unwrap_or(0);
+                *tint = tint_byte(component(space, decode, c, value, max));
+            }
+            return;
+        }
+        if let Some(known) = self.remembered.get(values) {
+            slot.copy_from_slice(known);
+            return;
+        }
+        self.components.clear();
+        self.components.extend(
+            (0..values.len())
+                .map(|c| component(space, decode, c, values.get(c).copied().unwrap_or(0), max)),
+        );
+        let colorants = colorant_tints(space, &self.components, light, 0);
+        self.plan
+            .sample_tints(colorants.as_ref(), light, self.spots, slot);
+        if self.remembered.len() < REMEMBERED_COLOURS {
+            self.remembered.insert(values.to_vec(), slot.to_vec());
+        }
+    }
+}
+
 /// [`colorant_tints`] for a `/Separation` or `/DeviceN` space.
 fn separation_tints(
     count: usize,
@@ -9700,9 +10061,10 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 #[cfg(test)]
 mod tests {
     use super::{
-        design_coordinates, expand_inline_abbreviations, jpeg_scale, jpeg_scale_within,
-        jpx_discard, jpx_skip, Answer, Asked, Contents, Frame, JpxFrame, PageResources, Remembered,
-        Room, SourceWindow,
+        colorant_tints, component, design_coordinates, expand_inline_abbreviations, jpeg_scale,
+        jpeg_scale_within, jpx_discard, jpx_skip, tint_byte, Answer, Asked, Contents, Frame,
+        ImagePlating, JpxFrame, PageResources, PlatePlan, Remembered, Room, SourceWindow,
+        REMEMBERED_COLOURS,
     };
     use tinker_pdf_color::{ColorSpace, Colorant, Colorants};
     use tinker_pdf_content::{ColorantKind, FontSource};
@@ -10674,6 +11036,10 @@ mod tests {
                 color: JpegColor::Gray,
                 width: 0,
                 rgb: Vec::new(),
+                plates: None,
+                tints: None,
+                nothing: false,
+                plate_tints: Vec::new(),
             };
             into.begin(JpegLayout {
                 width,
@@ -11367,6 +11733,128 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         let doc = crate::Document::open(bytes.into_bytes()).expect("it opens");
         let page = doc.page(0).expect("a page");
         PageResources::new(&page.doc, &page.inner, None)
+    }
+
+    /// **An image's samples take the road a fill of their colour takes**
+    /// (RC-04.12): through the plan, a DeviceCMYK sample is its components
+    /// after `/Decode`, a `/DeviceN` sample its tints on its plates — and,
+    /// where a name has no plate, the whole colour through its alternate — an
+    /// `NChannel` sample component by component, and an `/Indexed` one its
+    /// palette entry's, each the bytes `PlatePlan::sample_tints` gives the
+    /// colour's own colorants; past the remembered table's 4 096 distinct
+    /// samples each is worked out alike; a space of `/None` alone is nothing
+    /// and a space of light no tints at all.
+    #[test]
+    fn image_tints_are_the_tints_a_fill_of_the_colour_puts() {
+        let ramp =
+            |c1: &str| format!("<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{c1}] /N 1 >>");
+        let spaces = format!(
+            "/DN [/DeviceN [/Gold /Silver] /DeviceCMYK {first}] \
+             /DNT [/DeviceN [/Gold /Teal] /DeviceCMYK {first}] \
+             /NC [/DeviceN [/Gold /Cyan] /DeviceCMYK {first} << /Subtype /NChannel >>] \
+             /Idx [/Indexed [/DeviceN [/Gold /Silver] /DeviceCMYK {first}] 1 <00FF8040>] \
+             /None [/Separation /None /DeviceCMYK {first}] /Cal [/CalRGB << >>]",
+            first = ramp("1 0 0 0.5"),
+        );
+        let resources = resources_of(&spaces);
+        let plan = PlatePlan::new([
+            (&b"Gold"[..], tinker_pdf_render::PlateUse::Spot),
+            (b"Silver", tinker_pdf_render::PlateUse::Spot),
+        ]);
+        let spots = plan.spots();
+        let tints_of = |name: &[u8], values: &[u32], bpc: u32, decode: &[(f64, f64)]| {
+            resources
+                .named_space(name, Answer::Painted, |space| {
+                    let max = f64::from((1u32 << bpc) - 1);
+                    let components: Vec<f64> = values
+                        .iter()
+                        .enumerate()
+                        .map(|(c, v)| component(space, decode, c, *v, max))
+                        .collect();
+                    let mut expected = vec![0u8; 6];
+                    let colorants = colorant_tints(space, &components, (255, 255, 255), 0);
+                    plan.sample_tints(colorants.as_ref(), (255, 255, 255), spots, &mut expected);
+                    let Some(ImagePlating::Tints(mut tints)) = ImagePlating::of(space, &plan)
+                    else {
+                        return None;
+                    };
+                    let mut out = Vec::new();
+                    tints.push(space, decode, values, bpc, (255, 255, 255), &mut out);
+                    // Asked again, from the remembered table.
+                    tints.push(space, decode, values, bpc, (255, 255, 255), &mut out);
+                    Some((out, expected))
+                })
+                .flatten()
+        };
+        for (name, values) in [
+            (&b"DN"[..], vec![51u32, 204]),
+            (b"DNT", vec![51, 204]),
+            (b"NC", vec![102, 153]),
+            (b"Idx", vec![1]),
+        ] {
+            let (out, expected) = tints_of(name, &values, 8, &[]).expect("tints");
+            assert_eq!(out.len(), 12, "two samples of six plates");
+            assert_eq!(out[..6], expected[..], "{}", String::from_utf8_lossy(name));
+            assert_eq!(out[6..], expected[..], "remembered alike");
+        }
+        let (dn, _) = tints_of(b"DN", &[51, 204], 8, &[]).expect("tints");
+        assert_eq!(
+            dn[..6],
+            [0, 0, 0, 0, 51, 204],
+            "on Gold's and Silver's plates"
+        );
+        let (teal, _) = tints_of(b"DNT", &[51, 204], 8, &[]).expect("tints");
+        assert_eq!(
+            teal[..6],
+            [51, 0, 0, 26, 0, 0],
+            "Teal has no plate: the whole colour through its alternate"
+        );
+        let (indexed, _) = tints_of(b"Idx", &[1], 8, &[]).expect("tints");
+        assert_eq!(
+            indexed[..6],
+            [0, 0, 0, 0, 0x80, 0x40],
+            "the palette's entry"
+        );
+        let (cmyk, expected) =
+            tints_of(b"DeviceCMYK", &[255, 0, 128, 64], 8, &[(1.0, 0.0)]).expect("tints");
+        assert_eq!(cmyk[..6], [0, 0, 128, 64, 0, 0], "components after /Decode");
+        assert_eq!(cmyk[..6], expected[..]);
+
+        // Past the remembered table, each sample worked out alike.
+        resources.named_space(b"DN", Answer::Painted, |space| {
+            let Some(ImagePlating::Tints(mut tints)) = ImagePlating::of(space, &plan) else {
+                panic!("a /DeviceN names colorants");
+            };
+            let mut out = Vec::new();
+            for i in 0..(REMEMBERED_COLOURS as u32 + 10) {
+                tints.push(
+                    space,
+                    &[],
+                    &[i % 65536, i / 7],
+                    16,
+                    (255, 255, 255),
+                    &mut out,
+                );
+            }
+            let last = REMEMBERED_COLOURS + 9;
+            let i = last as u32;
+            let gold = tint_byte(f64::from(i % 65536) / 65535.0);
+            let silver = tint_byte(f64::from(i / 7) / 65535.0);
+            assert_eq!(out[last * 6..], [0, 0, 0, 0, gold, silver]);
+        });
+
+        let none = resources
+            .named_space(b"None", Answer::Painted, |space| {
+                matches!(ImagePlating::of(space, &plan), Some(ImagePlating::Nothing))
+            })
+            .expect("a space");
+        assert!(none, "/None alone is nothing");
+        let light = resources
+            .named_space(b"Cal", Answer::Painted, |space| {
+                ImagePlating::of(space, &plan).is_none()
+            })
+            .expect("a space");
+        assert!(light, "a space of light names no tints");
     }
 
     /// The names a colour space keeps, as bytes: an `/Indexed` space's its

@@ -939,3 +939,375 @@ fn a_page_with_no_spots_has_its_process_plates() {
     assert_eq!((off.width, off.height), (0, 0));
     assert!(off.plates.iter().all(|plate| plate.tints.is_empty()));
 }
+
+// ---- images on plates (RC-04.12) --------------------------------------------
+
+/// The spaces the image tests draw in, as the page's `/ColorSpace` names
+/// them: `/G`, a `/Separation` of `Gold` onto cyan; `/V`, one of `Violet`
+/// onto cyan, which the composite case's plan composites; `/DN`, a
+/// `/DeviceN` of `Gold` and `Silver` onto cyan and magenta; `/IN`, an
+/// `/Indexed` over `/DN` of four entries; `/IK`, an `/Indexed` over
+/// DeviceCMYK of three; and `/NO`, `/Separation /None`.
+const IMAGE_SPACES: &str = "/ColorSpace << \
+    /G [/Separation /Gold /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>] \
+    /V [/Separation /Violet /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>] \
+    /DN [/DeviceN [/Gold /Silver] /DeviceCMYK 7 0 R] \
+    /IN [/Indexed [/DeviceN [/Gold /Silver] /DeviceCMYK 7 0 R] 3 <10406080 90A0C0F0>] \
+    /IK [/Indexed /DeviceCMYK 2 <10203040 50607080 90A0B0C0>] \
+    /NO [/Separation /None /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>] >>";
+
+/// `/IN`'s palette, Gold then Silver an entry.
+const DN_PALETTE: [[u8; 2]; 4] = [[0x10, 0x40], [0x60, 0x80], [0x90, 0xA0], [0xC0, 0xF0]];
+
+/// `/IK`'s palette, CMYK an entry.
+const CMYK_PALETTE: [[u8; 4]; 3] = [
+    [0x10, 0x20, 0x30, 0x40],
+    [0x50, 0x60, 0x70, 0x80],
+    [0x90, 0xA0, 0xB0, 0xC0],
+];
+
+/// One image case: its space as an image dictionary writes it, its bits a
+/// component, its `/Decode`, how to make sample `i`'s components, the tints a
+/// sample's components put on each plate they name — every other plate takes
+/// none — and the plan's uses.
+struct ImageCase {
+    what: &'static str,
+    space: &'static str,
+    bpc: u32,
+    decode: &'static str,
+    sample: fn(usize) -> Vec<u8>,
+    tints: fn(&[u8]) -> Vec<(&'static str, u8)>,
+    plates: &'static [(&'static str, PlateUse)],
+}
+
+/// The cases: DeviceCMYK under a `/Decode` that turns cyan over, a
+/// `/Separation`, a `/DeviceN`, an `/Indexed` over each kind, a one-bit
+/// `/Separation` read inverted, and a `/Separation` of a spot the plan
+/// composites, its alternate on the process plates.
+fn image_cases() -> Vec<ImageCase> {
+    vec![
+        ImageCase {
+            what: "DeviceCMYK",
+            space: "/DeviceCMYK",
+            bpc: 8,
+            decode: "/Decode [1 0 0 1 0 1 0 1]",
+            sample: |i| {
+                (0..4)
+                    .map(|c| ((i * 37 + c * 91 + 13) % 251) as u8)
+                    .collect()
+            },
+            tints: |s| {
+                vec![
+                    ("Cyan", 255 - s[0]),
+                    ("Magenta", s[1]),
+                    ("Yellow", s[2]),
+                    ("Black", s[3]),
+                ]
+            },
+            plates: &[],
+        },
+        ImageCase {
+            what: "a /Separation",
+            space: "/G",
+            bpc: 8,
+            decode: "",
+            sample: |i| vec![((i * 53 + 7) % 256) as u8],
+            tints: |s| vec![("Gold", s[0])],
+            plates: &[],
+        },
+        ImageCase {
+            what: "a /DeviceN",
+            space: "/DN",
+            bpc: 8,
+            decode: "",
+            sample: |i| vec![((i * 29 + 3) % 256) as u8, ((i * 71 + 5) % 256) as u8],
+            tints: |s| vec![("Gold", s[0]), ("Silver", s[1])],
+            plates: &[],
+        },
+        ImageCase {
+            what: "an /Indexed over a /DeviceN",
+            space: "/IN",
+            bpc: 8,
+            decode: "",
+            sample: |i| vec![(i % 4) as u8],
+            tints: |s| {
+                let [gold, silver] = DN_PALETTE[usize::from(s[0])];
+                vec![("Gold", gold), ("Silver", silver)]
+            },
+            plates: &[],
+        },
+        ImageCase {
+            what: "an /Indexed over DeviceCMYK",
+            space: "/IK",
+            bpc: 8,
+            decode: "",
+            sample: |i| vec![((i * 7) % 3) as u8],
+            tints: |s| {
+                let [c, m, y, k] = CMYK_PALETTE[usize::from(s[0])];
+                vec![("Cyan", c), ("Magenta", m), ("Yellow", y), ("Black", k)]
+            },
+            plates: &[],
+        },
+        ImageCase {
+            what: "a one-bit /Separation read inverted",
+            space: "/G",
+            bpc: 1,
+            decode: "/Decode [1 0]",
+            sample: |i| vec![u8::from((i * 5 + i / 3) % 2 == 1)],
+            tints: |s| vec![("Gold", if s[0] == 0 { 255 } else { 0 })],
+            plates: &[],
+        },
+        ImageCase {
+            what: "a /Separation of a composited spot",
+            space: "/V",
+            bpc: 8,
+            decode: "",
+            sample: |i| vec![((i * 41 + 11) % 256) as u8],
+            tints: |s| vec![("Cyan", s[0])],
+            plates: &[("Violet", PlateUse::Composite)],
+        },
+    ]
+}
+
+/// `samples`, each a list of components of `bpc` bits, packed as an image
+/// stream packs them (8.9.3): rows of `width` samples, each row on a byte.
+fn packed(samples: &[Vec<u8>], width: usize, bpc: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    for row in samples.chunks(width) {
+        let mut bits: Vec<u8> = Vec::new();
+        for sample in row {
+            for component in sample {
+                for bit in (0..bpc).rev() {
+                    bits.push((component >> bit) & 1);
+                }
+            }
+        }
+        for byte in bits.chunks(8) {
+            let mut value = 0u8;
+            for (at, bit) in byte.iter().enumerate() {
+                value |= bit << (7 - at);
+            }
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// A page of 12 by 8 points over a process backdrop that draws `draw`, an
+/// image of `width` by `height` samples in `case`'s space — stored as
+/// `/Im`, or inline — over the 4 by 2 points from `(2, 3)`.
+fn image_page(case: &ImageCase, width: usize, height: usize, inline: bool) -> Document {
+    let samples: Vec<Vec<u8>> = (0..width * height).map(case.sample).collect();
+    let data = packed(&samples, width, case.bpc);
+    let dict = format!(
+        "/Width {width} /Height {height} /BitsPerComponent {} /ColorSpace {} {}",
+        case.bpc, case.space, case.decode
+    );
+    let mut content = b"0.1 0.2 0.3 0.4 k 0 0 12 8 re f q 4 0 0 2 2 3 cm ".to_vec();
+    if inline {
+        // Hexadecimal, so no run of the samples can read as `EI`.
+        let abbreviated = dict
+            .replace("/Width", "/W")
+            .replace("/Height", "/H")
+            .replace("/BitsPerComponent", "/BPC")
+            .replace("/ColorSpace", "/CS")
+            .replace("/Decode", "/D");
+        content.extend_from_slice(
+            format!("BI {abbreviated} /F /AHx ID {}> EI ", hex(&data)).as_bytes(),
+        );
+    } else {
+        content.extend_from_slice(b"/Im Do ");
+    }
+    content.extend_from_slice(b"Q");
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 12 8] \
+             /Resources << {IMAGE_SPACES} /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        render_support::raw_stream("", &content),
+        render_support::raw_stream(&format!("/Type /XObject /Subtype /Image {dict}"), &data),
+        b"<< >>".to_vec(),
+        render_support::raw_stream(
+            "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+            b"{ 0 0 }",
+        ),
+    ];
+    Document::open(render_support::raw_pdf(&objects)).expect("it opens")
+}
+
+/// **An image in each ink space lands on its plates** (RC-04.12; the
+/// design's "Images on plates").
+///
+/// Stored and inline images in DeviceCMYK under a `/Decode` that turns cyan
+/// over, a `/Separation`, a `/DeviceN`, an `/Indexed` over each kind, a
+/// one-bit `/Separation` read inverted, and a `/Separation` of a spot the
+/// plan composites, drawn at 1:1 and at 2:1 down over a backdrop of process
+/// ink: at 1:1 each pixel holds on each plate the tint the test reads from
+/// its sample, its `/Decode` and its palette, and no ink on every plate its
+/// sample names none for; at 2:1 each holds the area average of the four
+/// samples under it, plate by plate, `(Σ t + 2) / 4`; and beside the image
+/// the backdrop stays.
+#[test]
+fn an_image_in_each_ink_space_lands_on_its_plates() {
+    for case in image_cases() {
+        for inline in [false, true] {
+            for (factor, width, height) in [(1usize, 4usize, 2usize), (2, 8, 4)] {
+                let doc = image_page(&case, width, height, inline);
+                let page = doc.page(0).expect("a page");
+                let plates = separations(&page, &RenderOptions::default(), case.plates);
+                let what = format!(
+                    "{} {} at {factor}:1",
+                    if inline { "an inline" } else { "a stored" },
+                    case.what
+                );
+                assert!(plates.warnings.is_empty(), "{what}: {:?}", plates.warnings);
+                let samples: Vec<Vec<u8>> = (0..width * height).map(case.sample).collect();
+                for py in 0..2usize {
+                    for px in 0..4usize {
+                        let mut sums: std::collections::BTreeMap<String, u32> =
+                            plate_names(&plates)
+                                .into_iter()
+                                .map(|name| (name, 0))
+                                .collect();
+                        for dy in 0..factor {
+                            for dx in 0..factor {
+                                let at = (py * factor + dy) * width + px * factor + dx;
+                                for (name, tint) in (case.tints)(&samples[at]) {
+                                    *sums.entry(name.to_string()).or_insert(0) += u32::from(tint);
+                                }
+                            }
+                        }
+                        let area = (factor * factor) as u32;
+                        for (name, sum) in sums {
+                            let expected = ((sum + area / 2) / area) as u8;
+                            assert_eq!(
+                                tint_at(&plates, &name, 2 + px as u32, 3 + py as u32),
+                                expected,
+                                "{what}: {name} at pixel ({px}, {py}) of the image"
+                            );
+                        }
+                    }
+                }
+                // Beside the image, the backdrop.
+                assert_eq!(
+                    tint_at(&plates, "Cyan", 8, 1),
+                    byte(0.1),
+                    "{what}: the backdrop"
+                );
+                assert_eq!(
+                    tint_at(&plates, "Black", 8, 1),
+                    byte(0.4),
+                    "{what}: the backdrop"
+                );
+            }
+        }
+    }
+}
+
+/// **An image naming only `/None` paints nothing, and one of light is its
+/// light in ink** (RC-04.12): a stored and an inline image in
+/// `/Separation /None` leave every plate as the backdrop left it; an image in
+/// DeviceRGB, which names no colorant, puts on the process plates the ink its
+/// light is on the page asked for in ink, and no ink on any spot.
+#[test]
+fn an_image_of_none_or_of_light_reaches_plates_as_a_light_page_has_it() {
+    let spaces = format!(
+        "/ColorSpace << /G {GOLD} /NO [/Separation /None /DeviceCMYK \
+         << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>] >> \
+         /XObject << /Im 5 0 R >>"
+    );
+    let backdrop = "0.1 0.2 0.3 0.4 k 0 0 10 10 re f /G cs 0.5 scn 0 0 1 1 re f";
+    let plain = separations(
+        &painted_with(
+            &spaces,
+            backdrop,
+            image_of("/NO", &[0x10, 0x80, 0xff, 0x40]),
+        )
+        .page(0)
+        .expect("a page"),
+        &RenderOptions::default(),
+        &[],
+    );
+    for draw in [
+        "q 4 0 0 4 3 3 cm /Im Do Q",
+        "q 4 0 0 4 3 3 cm BI /W 2 /H 2 /BPC 8 /CS /NO /F /AHx ID 1080FF40> EI Q",
+    ] {
+        let doc = painted_with(
+            &spaces,
+            &format!("{backdrop} {draw}"),
+            image_of("/NO", &[0x10, 0x80, 0xff, 0x40]),
+        );
+        let page = doc.page(0).expect("a page");
+        let none = separations(&page, &RenderOptions::default(), &[]);
+        assert_eq!(none.plates, plain.plates, "{draw}: /None paints nothing");
+    }
+
+    let rgb = [200u8, 30, 90, 10, 220, 140, 250, 250, 20, 40, 60, 80];
+    let doc = painted_with(
+        &spaces,
+        &format!("{backdrop} q 4 0 0 4 3 3 cm /Im Do Q"),
+        image_of("/DeviceRGB", &rgb),
+    );
+    let page = doc.page(0).expect("a page");
+    let plates = separations(&page, &RenderOptions::default(), &[]);
+    let ink = page.render(&RenderOptions {
+        format: tinker_pdf::PixelFormat::CmykA8,
+        allow_cmyk: true,
+        ..RenderOptions::default()
+    });
+    // Gold's own pixel, (0, 9), is on its plate here and in ink there.
+    let gold_pixel = 9 * 10;
+    for (channel, name) in PROCESS.iter().enumerate() {
+        let plate = &plate(&plates, name).expect("a process plate").tints;
+        for (at, pixel) in ink.data.chunks_exact(5).enumerate() {
+            if at != gold_pixel {
+                assert_eq!(plate[at], pixel[channel], "{name} at {at}: the light's ink");
+            }
+        }
+    }
+    assert!(
+        plate(&plates, "Gold")
+            .expect("Gold's plate")
+            .tints
+            .iter()
+            .enumerate()
+            .all(|(at, tint)| at == gold_pixel || *tint == 0),
+        "no ink on the spot but at its own pixel"
+    );
+}
+
+/// An image XObject of 2 by 2 eight-bit samples `samples` in `space`.
+fn image_of(space: &str, samples: &[u8]) -> Vec<u8> {
+    render_support::raw_stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 \
+             /ColorSpace {space}"
+        ),
+        samples,
+    )
+}
+
+/// A 10-point page whose resources are `resources` and content `content`,
+/// object 5 `image`, built from bytes.
+fn painted_with(resources: &str, content: &str, image: Vec<u8>) -> Document {
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Resources << {resources} >> \
+             /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        render_support::raw_stream("", content.as_bytes()),
+        image,
+    ];
+    Document::open(render_support::raw_pdf(&objects)).expect("it opens")
+}
+
+/// `bytes` in hexadecimal, as ASCIIHexDecode reads them.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+}

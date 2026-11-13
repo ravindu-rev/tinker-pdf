@@ -692,6 +692,7 @@ fn read_decoded(fields: &Fields<'_>) -> Result<DecodedImage, CommandError> {
             .ok_or_else(|| fields.wrong("a colour family past 3"))?,
         soft_masked: fields.flag(14)?,
         window,
+        plates: None,
     })
 }
 

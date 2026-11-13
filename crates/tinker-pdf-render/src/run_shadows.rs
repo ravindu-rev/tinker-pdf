@@ -572,6 +572,7 @@ mod tests {
             family: ColorFamily::Rgb,
             soft_masked: false,
             window: None,
+            plates: None,
         }
     }
 

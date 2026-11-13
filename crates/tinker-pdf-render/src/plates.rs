@@ -206,7 +206,8 @@ impl PlatePlan {
     ///
     /// Every channel a paint names no tint for takes none, so under `Normal`
     /// the paint knocks it out, as 8.6.7 has a paint do with overprint off.
-    pub(crate) fn paint(&self, colorants: &ColorantTints, spots: Spots) -> Option<PlatePaint> {
+    #[must_use]
+    pub fn paint(&self, colorants: &ColorantTints, spots: Spots) -> Option<PlatePaint> {
         let width = 4 + spots.count();
         // A channel of this canvas: a plan's plate past it is no plate here.
         let placed = |name: &[u8]| self.channel(name).filter(|&channel| channel < width);
@@ -268,11 +269,42 @@ impl PlatePlan {
             }
         }
     }
+
+    /// The tints one sample of an image puts on each channel of a canvas of
+    /// `spots` spot channels, into `out`, one a channel
+    /// (`docs/design/overprint-separations.md`, "Images on plates"): a sample
+    /// naming `colorants` puts what [`PlatePlan::paint`] answers for them,
+    /// and one naming none the plan can place — or none at all — its `light`
+    /// turned into ink on the process plates (8.6.4.4 inverted with maximum
+    /// undercolour removal) and no ink on any spot, as a colour of light
+    /// paints. `false` for a sample that paints nothing at all, 8.6.6.4's
+    /// `/None`, with `out` left at no ink.
+    pub fn sample_tints(
+        &self,
+        colorants: Option<&ColorantTints>,
+        light: (u8, u8, u8),
+        spots: Spots,
+        out: &mut [u8],
+    ) -> bool {
+        out.fill(0);
+        let tints = match colorants.and_then(|colorants| self.paint(colorants, spots)) {
+            Some(PlatePaint::Nothing) => return false,
+            Some(PlatePaint::Ink(ink)) => ink,
+            None => PlateInk::from_light(
+                spots,
+                tinker_pdf_raster::Color::rgb(light.0, light.1, light.2),
+            ),
+        };
+        for (slot, tint) in out.iter_mut().zip(tints.tints()) {
+            *slot = *tint;
+        }
+        true
+    }
 }
 
 /// What a colour puts on a plates canvas ([`PlatePlan::paint`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PlatePaint {
+pub enum PlatePaint {
     /// A tint for each channel, every channel it names none for knocked out.
     Ink(PlateInk),
     /// Nothing at all: 8.6.6.4's `/None`, whose paints have no effect on the
