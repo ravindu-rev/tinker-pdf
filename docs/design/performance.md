@@ -3661,3 +3661,245 @@ which P-16.11 holds at 30 % of the first.
 | A budget is read as a bound on the whole process | It bounds the caches; MS-05 reads it as the peak under the budget less the unbudgeted peak, and says so |
 | A document grows memory it never held, unasked | No default budget: with none stated an entry lives as long as its render, as today |
 | A streamed document fetches again what it dropped | Counted as every fetch is; it is the price of a budget, and with none nothing is dropped |
+
+## P-24 — Search over prebuilt text
+
+*For [ROADMAP](../ROADMAP.md) row P-24.* A `TextPage` is built once and
+searched many times — MS-04's two searches build the 100 pages' text outside
+the timed loop and search it five times and twice an iteration — yet every
+call of `TextPage::search` and `TextPage::search_with` does the whole of its
+work again: it collects the page's lines, folds every glyph's text into a
+`String` of its own and joins them, computes the joined line's UAX #29
+boundaries for a whole-word search, runs `str::find` from each restart, and
+maps each hit back to its glyphs by walking the line from its start
+(`crates/tinker-pdf-content/src/text.rs:281`,
+`crates/tinker-pdf-content/src/search.rs:108`). This section decides where a
+`TextPage` keeps the folded forms and the tables that map them back, when a
+form is built, how kept forms follow the blocks they were folded from, the
+boundaries kept beside them, the matcher that reads them, and the counted door
+the guards read, with the API change each costs.
+
+P-24.1's seven phase operations split the two searches' time into those phases
+(`docs/verification.md`, "Where prebuilt-text search spends its time"), and
+`cargo xtask search-split` prints each phase's share of its search; their
+figures are the timing phase's, recorded in `baseline.json`. The decisions
+below do not wait on the shares: every phase but the matcher's own scan
+computes, on every call, exactly what the call before it computed from the
+same blocks, so keeping its output takes it out of every call after the first
+whatever its share, and the matcher and the mapping are made linear in the
+text and the hits. The split read after P-24.4 shows what remains.
+
+### Scope
+
+- **The kept forms** (P-24.3): for each of the four folds a search can ask
+  for, each line's folded text and the table from its byte offsets to the
+  glyphs they came from, built once a page and fold.
+- **When a form is built**: at the first search that needs it.
+- **How kept forms follow the blocks** (P-24.3): `TextPage::blocks` behind
+  accessors, any change to the blocks dropping the forms, and the API change
+  that is.
+- **The boundaries** (P-24.4): each folded line's UAX #29 boundaries, computed
+  once a form and kept beside it.
+- **The matcher and the mapping** (P-24.4): one scan of a line's kept text for
+  every occurrence of the needle, and each hit mapped to glyphs by a cursor
+  that moves forward along the line.
+- **The counted door and its counters** (P-24.3, P-24.4):
+  `TextPage::search_counted`, through MS-01's tally.
+- **The close** (P-24.5).
+
+### Non-goals
+
+- **Other answers.** `search` stays literal and case-insensitive by
+  `str::to_lowercase`, `search_with` keeps every option's meaning and its
+  overlap rules, and with `SearchOptions::default()` it stays `search`, quad
+  for quad: the parity suite and every search fixture hold both.
+- **A form built at extraction.** `Page::text` would fold every page for every
+  caller, those that never search included, and charge P-02's text target for
+  it (`docs/roadmap/P.md`, "Text, 5 dense pages").
+- **A document-wide index.** Forms are one page's; a search across a document
+  is FT-21's and FT-22's.
+- **Threads.** A search is one thread's; P-15's pool has no part in it.
+- **A regular expression.** The tree has no regex engine (`search.rs`'s
+  documentation), and the matcher is a substring matcher.
+
+### Design
+
+#### What a form is, and where a `TextPage` keeps it
+
+A **fold** is one of the four ways a search folds text: none (case-sensitive,
+accents significant), lower-cased, diacritics removed (case-sensitive) and
+both — `SearchOptions`' `case_sensitive` and `diacritic_insensitive`, and
+`search`'s own lower-casing, which is the second. A **form** is one page's
+text in one fold: for each line, in the order `TextPage::lines` gives them,
+the folded text of every glyph joined into one `String`, and the **offset
+table**, a `Vec<u32>` holding the byte offset in that `String` where each
+glyph's folded piece starts, with the text's length after the last. A glyph
+whose piece folding empties — a combining mark searched without diacritics —
+starts where the next one does, as its piece occupies nothing, which is how
+today's walk treats it. A form costs the page's text once more and four bytes
+a glyph, and a page holds at most four.
+
+`TextPage` gains **one private field**, `forms`, holding the four as
+`std::sync::OnceLock<Form>`, one a fold. A `OnceLock` because `search` and
+`search_with` take `&self` and fill it, and because a `TextPage` is `Send` and
+`Sync` today and a `OnceCell` would take `Sync` away, which is a break of its
+own; it is the same type on `wasm32`. Two threads searching one page in the
+same fold at once build it once, the second waiting for the first. A clone of
+a `TextPage` clones the forms it has built, which describe its blocks as they
+describe the original's; `Default` builds none; the derived `Debug` shows
+them.
+
+#### When a form is built
+
+**At the first search that needs it, never at extraction.** `Page::text`,
+`text_with`, `text_counted` and every other door that builds a `TextPage`
+build no form, so P-02's text target and every caller that never searches
+pays nothing. The first `search` builds the lower-cased form; the first
+`search_with` builds the form its options name, and a later search in the same
+fold reads it. The first search of a page in a fold does today's folding and
+joining once, and writes the offset table beside it; every search after it in
+that fold folds nothing but its needle.
+
+#### How kept forms follow the blocks
+
+A form is a function of the blocks' glyph texts, so it is right only while the
+blocks are the ones it was folded from. Today `blocks` is a public field, and
+it is written after extraction: the facade puts a page into logical order in
+place (`crates/tinker-pdf/src/text_order.rs:211`), places each `/ActualText`
+span's text, dropping its glyphs from every line after the first and lines
+and blocks left empty (`:256`, `:278`), and any caller may edit it. A form
+kept beside a field anyone can write is stale the moment someone does, and
+nothing could tell.
+
+So **`blocks` goes behind accessors**, and the one way to change the blocks
+drops the forms first:
+
+- `TextPage::blocks(&self) -> &[TextBlock]`, to read them;
+- `TextPage::blocks_mut(&mut self) -> &mut Vec<TextBlock>`, which empties
+  every `OnceLock` of the forms before it hands the blocks out, so a search
+  after any change folds the blocks as they now are;
+- `TextPage::into_blocks(self) -> Vec<TextBlock>`;
+- `TextPage::new(blocks, mcid_props, stated, warnings) -> TextPage`, for a
+  page built by hand, with no form built.
+
+`mcid_props`, `stated` and `warnings` stay public fields: no form reads them,
+since the facade has put each `/ActualText` span's text on its glyphs before a
+caller sees the page.
+
+**The API change.** A `TextPage { … }` literal and a read or write of
+`page.blocks` stop compiling, and become `TextPage::new(…)`, `page.blocks()`
+and `page.blocks_mut()`. In the tree that is the content crate's own
+`TextDevice::finish` (`text.rs:523`) and its serialiser's tests; the facade's
+logical order, `/ActualText` placement, reading order, tables, word boxes,
+Markdown and EPUB paths, which read the blocks or reorder them; and the tests that
+build a page by literal, `text_serialize.rs:152` and `text_allocations.rs:62`
+among them. The C ABI and the bindings read no field of a `TextPage` — they
+carry text across as the structured JSON — so nothing outside Rust moves. The
+workspace is at 0.0.1 and SU-18 has fixed no stability yet, so the change
+breaks no promise, and the feature doc, `docs/features/content-and-text.md`,
+states the accessors where it now states the field.
+
+#### The boundaries
+
+A whole-word search reads each folded line's UAX #29 boundaries, and they are a
+function of the folded text, so they belong to the form: a
+`OnceLock<Vec<Vec<usize>>>` beside each, filled at the first whole-word search
+in that fold with `word_boundaries` of every line, and kept. A search in a
+fold whole-word searches never asked for computes none.
+
+#### The matcher
+
+Today a rejected whole-word candidate resumes `str::find` one character on,
+and the scan runs again from there, so a line dense with candidates is
+scanned again from each. P-24.4's matcher scans each line's kept text **once**
+for every occurrence of the folded needle, overlapping ones included, with the
+Knuth–Morris–Pratt automaton over its bytes: the needle's failure table is
+built once a search, and a byte match of a UTF-8 needle in UTF-8 text starts
+and ends on character boundaries, as a `str::find` match does. The
+occurrences come in increasing order, and today's overlap rules decide which
+are hits:
+
+- a hit's end is the first start the next hit may have, so an occurrence that
+  begins inside a hit is passed over, as `find` resuming past the hit passes
+  over it;
+- a whole-word candidate that does not begin and end on a boundary is no hit
+  and holds nothing back, so the next occurrence considered may overlap it —
+  `x x` in `xx x x` — as `find` resuming one character on reaches it.
+
+Whether a candidate's two ends are boundaries is read by a cursor over the
+line's sorted boundaries, which moves forward with the candidates' starts and
+ends, both increasing. So searching a line costs at most a constant times its
+folded length plus its hits.
+
+#### The mapping
+
+Each hit is mapped to its glyphs through the offset table by a **cursor that
+moves forward along the line**: its first glyph is the first whose piece ends
+past the hit's start, and its last the last whose piece starts before the
+hit's end, which is the walk today makes from the line's start for every hit,
+made once along the line for all its hits in order. Its quad is then today's,
+from the same two glyphs.
+
+#### The counted door
+
+`TextPage::search_counted(&self, needle: &str, options: &SearchOptions) ->
+(Vec<Quad>, Stats)` is a counted sibling, as `Page::text_counted` is, by the
+doors' rule (above): `search` takes no options value to carry a flag, and the
+answer is a list. Its quads are the ones `search_with` returns for the same
+arguments, to the bit, and it counts through MS-01's `Work`, which the content
+crate already reaches (`interpret_counted`). Three counters join `Stats`, each
+a step and each in `work()`:
+
+| Counter | One unit is | Step |
+| --- | --- | --- |
+| `text_forms_built` | a page's form folded and joined, its offset table with it | P-24.3 |
+| `word_boundaries_computed` | a form's lines' UAX #29 boundaries computed | P-24.4 |
+| `search_steps` | a byte of a line's kept text the matcher read, or a glyph the mapping cursor moved past | P-24.4 |
+
+### Milestones
+
+1. **P-24.1: the split.** Seven phase operations beside MS-04's two searches
+   and `cargo xtask search-split`; their figures are the timing phase's.
+2. **P-24.2: this section.**
+3. **P-24.3: the kept forms.** The four forms in their `OnceLock`s, built at
+   the first search that needs them; `blocks` behind `blocks`, `blocks_mut`,
+   `into_blocks` and `TextPage::new`, every user in the tree moved to them;
+   `search_counted` and `text_forms_built`. Exit: `search_work.rs` (new)
+   `folding_happens_once_per_page_whatever_the_searches` — ten searches per
+   option set over a generated 100-page document's prebuilt text fold each
+   page at most once per fold, by `text_forms_built`, and a search through
+   kept forms returns the first search's quads bit for bit;
+   `a_form_does_not_outlive_a_change_to_its_blocks` (new) — a search after
+   `blocks_mut` reorders, drops or edits glyphs finds what a fresh page with
+   those blocks finds; `search.rs`'s unit tests, `text_options.rs`,
+   `tinker_parity.rs`, `text_logical_order.rs`, `hostile_input.rs` and
+   `epub_fallback.rs` find the same quads, in the default build and with
+   `--features bundled-fonts`.
+4. **P-24.4: the boundaries, the matcher and the mapping.** Exit:
+   `search_work.rs` `a_search_is_linear_in_its_text_and_its_hits` (new) — the
+   matcher's and the mapping's steps, `search_steps`, at most a constant times
+   the folded length plus the hits on a 4 000-character line of `a a a …`
+   searched for `a` and `a a`, plain and whole-word;
+   `boundaries_are_computed_once_per_page` (new) — `word_boundaries_computed`
+   at most once a page per fold across searches; the overlap rules pinned
+   (`x x` in `xx x x`, a hit resuming past itself); every search fixture's
+   hits unchanged as in P-24.3, both builds.
+5. **P-24.5: the close** in MS-02's paired run: MS-04's two prebuilt-text
+   searches over 100 pages, plain and whole-word diacritic-insensitive, with
+   their floors raised to 6× and 6.41× against the planning baseline, which
+   folds on every search where the head's kept forms leave the matcher; and
+   `search_work.rs`'s guards in `cargo test` on linux and windows, in both
+   builds, and under `--target wasm32-wasip1` locally.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A kept form outlives a change to its blocks, and a search finds text that is gone | `blocks` is private, and `blocks_mut`, the one way to change it, drops every form first; `a_form_does_not_outlive_a_change_to_its_blocks` |
+| A form built at extraction charges P-02's text target | None is: a form is built at the first search that needs it, and `Page::text` builds none |
+| The matcher finds other hits than `find` did | Every occurrence is found and today's two overlap rules choose the hits; `search.rs`'s overlap pins, the parity suite and every search fixture hold each quad, in both builds |
+| A glyph whose piece folds to nothing maps a hit to the wrong glyph | It starts where the next glyph starts, as today's walk counts it, and `options_compose_and_hits_cover_their_glyphs` holds a hit across a folded-away mark |
+| Four forms hold a page's text four times over | A form is built only for a fold a search asks for, and costs the text once more and four bytes a glyph |
+| Two threads search one page at once | A `OnceLock` builds each form once; the second waits for the build, and no lock is held across a search |
+| The accessors break a caller outside the tree | The C ABI and the bindings read no field of a `TextPage`; at 0.0.1, before SU-18, no stability is promised, and the feature doc states the accessors |
+| Counting moves an answer | `search_counted` returns `search_with`'s quads to the bit, which `folding_happens_once_per_page_whatever_the_searches` asserts |
