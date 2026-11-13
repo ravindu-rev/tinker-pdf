@@ -482,7 +482,8 @@ column whose face has no `GPOS` writes no number.
 5. The USE shaper for Indic and Southeast Asian scripts. Exit: every
    text-rendering-tests USE section, counted; scripts with no fixture listed
    by name in the feature doc as shaped-but-unverified rather than counted as
-   done. The price of canonical ordering, which H-145 reads, is measured
+   done. What is left of it is *The Universal Shaping Engine's remainder*,
+   below. The price of canonical ordering, which H-145 reads, is measured
    before anything applies it (FT-08.2): `text_rendering.rs`'s `#[ignore]`d
    `canonical_ordering_price` puts each runnable case's text in
    `Canonical_Combining_Class` order — field 3 of the vendored
@@ -641,9 +642,301 @@ column whose face has no `GPOS` writes no number.
 
 ## The Universal Shaping Engine's remainder
 
-*For ROADMAP row FT-08: milestone 5's remainder.*
+*For ROADMAP row FT-08: milestone 5's remainder.* Milestone 5 built a cluster
+model of five categories, a syllable rule with a one-character halant
+lookback, USE's feature stages, one reordering pause and a per-syllable `GSUB`
+confinement, and called each a simplification. This section reads what is left
+from the specifications that define it — the Universal Shaping Engine's own
+and, for the scripts that engine does not take, the OpenType Indic script
+specifications — and from no implementation of either (ruling 21). The
+vendored corpora are the bar each reading is held to (ruling 13), and where
+the two disagree the disagreement is stated and decided here.
 
-### The traced rows (FT-08.1)
+### Scope
+
+- **USE's character categories** (FT-08.4): the classes and subclasses of
+  *Character classification*, derived from `Indic_Syllabic_Category`,
+  `Indic_Positional_Category`, `General_Category`, `Joining_Type` and
+  `Script`, with the specification's two override tables transcribed.
+- **USE's cluster grammar** (FT-08.5): the cluster types of *Cluster
+  validation*, recognised by a state machine, each glyph carrying its cluster
+  and the cluster's type, `CGJ`, `ZWJ` and `ZWNJ` placed where the grammar
+  puts them.
+- **The confinement USE states** (FT-08.6): per-cluster `GSUB` for exactly the
+  feature groups the specification applies one cluster at a time.
+- **Dotted circles** (FT-08.7) in a cluster the grammar calls broken.
+- **Default-ignorables** (FT-08.8): `Default_Ignorable_Code_Point` in place of
+  the two joiners.
+- **The rows FT-08.1 traced** (FT-08.9, FT-08.10).
+- **The second cluster model** (FT-08.11 to FT-08.14): the OpenType Indic
+  model for the nine scripts its specifications define, with the
+  would-substitute query its base finding asks (FT-08.12).
+- **Hangul** (FT-08.15), **canonical ordering** (FT-08.16), the fingerprint
+  (FT-08.17), the speed rows (FT-08.18a, FT-08.18b) and the row's close
+  (FT-08.19).
+
+### Non-goals
+
+- **USE's list of invalid vowel sequences.** *Independent Vowel (IV) plus
+  Dependent Vowel constraints* refers to a data file of pairs the grammar
+  admits and USE refuses. No case in either corpus types one, so the list is
+  not transcribed, and [features/fonts.md](../features/fonts.md) names it.
+- **A pre-base medial reordered only through `pref`.** *Glyph reordering*
+  moves a `CONS_MED_PRE` only where the face's `pref` substitutes it. This
+  crate moves every pre-base dependent, medials included, because
+  `SHLANA-6/2` and `SHLANA-6/4` expect the medial moved; the reordering
+  pause is unchanged by FT-08.
+- **The topographical features under USE**, which are FT-09.5's.
+- **Normalisation.** Canonical decomposition is done (milestone 5); composition
+  is not, and canonical ordering is H-145's (below).
+- **Hieroglyph shaping beyond the cluster.** The grammar recognises a
+  hieroglyph cluster, since the specification names it; the quadrat layout a
+  hieroglyph face performs is the face's own lookups', and nothing here adds
+  to them.
+
+### Design
+
+#### The specifications this section reads
+
+| Specification | Clauses read | For |
+| --- | --- | --- |
+| *Creating and supporting OpenType fonts for the Universal Shaping Engine* (Microsoft Typography, its Unicode 18.0 revision) | *Character classification* and *Overrides to Unicode categories* with the two override files it names (`IndicSyllabicCategory-Additional.txt`, `IndicPositionalCategory-Additional.txt`); *Split vowel handling*; *Cluster validation* — the seven cluster types, *Combining Grapheme Joiner*, *Zero-width non-joiner*, *Zero-width joiner*, *Standalone characters*, *Defective clusters*, *Cluster length*; *OpenType feature application I* and *II*; *Glyph reordering*; *Handling invalid combining marks*; *Registered tags for the Universal Shaping Engine* | FT-08.4 to FT-08.7 |
+| *Developing OpenType Fonts for Kannada Script* (Microsoft Typography), and the same document for Bengali, Devanagari, Gujarati, Gurmukhi, Malayalam, Odia, Tamil and Telugu | *Analyze the text* — *Retrieving dynamic character properties*, *Find next syllable in the input*, *Identify key positions inside syllable*, the constraints; *Reorder characters*, steps 1 to 4, with each script's *Character reordering classes*; *Shape glyph sequences*; *Position glyph sequences*; *Invalid combining marks*; *Effect of ZWJ, ZWNJ and NBSP* | FT-08.11 to FT-08.14 |
+| The Unicode Standard 17.0 | §3.11 *Normalization Forms*: D108, the reorderable pair, and the Canonical Ordering Algorithm; §3.12 *Conjoining Jamo Behavior*: Hangul syllable decomposition and its worked example | FT-08.16, FT-08.15 |
+| UAX #44 at the pinned 17.0.0 | `Indic_Syllabic_Category`, `Indic_Positional_Category`, `General_Category`, `Canonical_Combining_Class`, and `Default_Ignorable_Code_Point` in `DerivedCoreProperties.txt` | FT-08.4, FT-08.8, FT-08.16 |
+| ISO/IEC 14496-22 | lookup application, as everywhere in this crate | FT-08.6, FT-08.12 |
+
+#### Character categories (FT-08.4)
+
+*Character classification* derives each USE class from Unicode's properties,
+and `universal::Category` becomes those classes in place of milestone 5's
+five. The derivation, transcribed (AJT is `Joining_Type`, UISC
+`Indic_Syllabic_Category`, UIPC `Indic_Positional_Category`, UGC
+`General_Category`):
+
+| Class | Derivation |
+| --- | --- |
+| `B` base | AJT = C, D, L or R; UISC = Number, Consonant, Consonant_Head_Letter, Tone_Letter, Vowel_Independent; UISC = Avagraha, Bindu, Consonant_Final, Consonant_Medial, Consonant_Subjoined, Vowel or Vowel_Dependent where UGC = Lo |
+| `CGJ` | U+034F |
+| `CM` consonant modifier | UISC = Nukta, Gemination_Mark, Consonant_Killer, Symbol_Modifier |
+| `CS` consonant with stacker | UISC = Consonant_With_Stacker |
+| `F` final consonant | UISC = Consonant_Final where UGC ≠ Lo; Consonant_Succeeding_Repha |
+| `FM` final modifier | UISC = Syllable_Modifier |
+| `G`, `HM`, `HR`, `J`, `SB`, `SE` | the hieroglyph classes, from the override file's `Extended_Syllabic_Category` |
+| `GB` generic base | UISC = Consonant_Placeholder; U+2015, U+2022, U+25FB–U+25FE |
+| `H` halant | UISC = Virama, Invisible_Stacker |
+| `HN` number joiner | UISC = Number_Joiner |
+| `IND` independent | UISC = Consonant_Dead, Modifying_Letter, Other; UGC = Po, except U+104E and U+2022 |
+| `M` medial consonant | UISC = Consonant_Medial where UGC ≠ Lo |
+| `N` number base | UISC = Brahmi_Joining_Number |
+| `O` other | any other `Common` character; UGC = Zs |
+| `R` repha | UISC = Consonant_Preceding_Repha, Consonant_Prefixed |
+| `RK` reordering killer | UISC = Reordering_Killer |
+| `Rsv` | a code point not assigned |
+| `S` symbol | UGC = So, except U+25CC; UGC = Sc |
+| `SUB` subjoined consonant | UISC = Consonant_Subjoined where UGC ≠ Lo |
+| `V` vowel | UISC = Vowel or Vowel_Dependent where UGC ≠ Lo; Pure_Killer |
+| `VM` vowel modifier | UISC = Bindu where UGC ≠ Lo; Tone_Mark, Cantillation_Mark, Register_Shifter, Visarga |
+| `VS` | U+FE00–U+FE0F |
+| `WJ` | U+2060 |
+| `ZWJ`, `ZWNJ` | UISC = Joiner, Non_Joiner |
+
+`CM`, `F`, `M`, `V` and `VM` take a subclass from UIPC: `Abv` for Top, `Blw`
+for Bottom, `Pre` for Left and `Pst` for Right; for `V`, the split positions
+the subclass table lists go to their first part in the order pre, above,
+below, post (Top_And_Bottom and Top_And_Right above, Bottom_And_Right below,
+the three with Left pre), and Overstruck is below for `V` and `VM`.
+
+**What the table does not settle, and this crate's reading of it.** The table
+lists its rows without an order, and a character can meet two: Thai's `SARA
+AA` is Vowel_Dependent and Lo and also not Common. They are read in this
+order: the fixed code points (`CGJ`, `VS`, `WJ`, the four `GB` code points);
+then UISC with its UGC split; then, for a character UISC calls Other,
+`Joining_Type` (`B`), UGC (`IND` for Po, `S` for So and Sc, `O` for Zs),
+`Script` (`O` for Common and Inherited, `Rsv` for a code point no script
+holds) and `IND` for the rest. Four cases the table leaves open are read
+here: `Consonant_Initial_Postfixed` (U+1A5A), a value the table predates, is
+`B`, as milestone 5 had it and as `SHLANA-3/6` draws it, on its own advance;
+`Consonant_Final_Modifier`, the override file's own value for U+1C36, is
+`FM`; U+1171E's Top_And_Bottom_And_Left makes it `MPre`, by the split rule
+above; and Overstruck is `CMBlw` for the two Duployan nuktas, as it is below
+for `V` and `VM`.
+
+**The overrides, transcribed.** *Overrides to Unicode categories* replaces a
+character's UISC or UIPC where Unicode's value does not fit the model, and
+supplies one where Unicode gives none. Every range below is assigned at the
+pinned 17.0.0, so the transcription and the vendored UCD agree.
+
+| Property | Value | Code points |
+| --- | --- | --- |
+| UISC | Bindu | 193A, AA29, 10A0D, 113CE |
+| UISC | Consonant | 0800–0815, 0840–0858, 0F00–0F01, 0F04–0F06, 1800, 1807, 180A, 1820–1878, 19C1–19C7, 25CC, 2D30–2D67, 2D6F, 10570–1057A, 1057C–1058A, 1058C–10592, 10594–10595, 10597–105A1, 105A3–105B1, 105B3–105B9, 105BB–105BC, 10AC0–10AC7, 10AC9–10AE4, 10D00–10D23, 10D4A–10D65, 10D6F, 10D70–10D85, 10E80–10EA9, 10EB0–10EB1, 10F30–10F45, 10F70–10F81, 111DA, 16B00–16B2F, 16F00–16F4A, 16FE4, 18B00–18CD5, 18CFF, 1BC00–1BC6A, 1BC70–1BC7C, 1BC80–1BC88, 1BC90–1BC99, 1E100–1E12C, 1E137–1E13D, 1E14E–1E14F, 1E290–1E2AD, 1E2C0–1E2EB, 1E4D0–1E4EB, 1E5D0–1E5ED, 1E5F0, 1E900–1E943, 1E94B |
+| UISC | Consonant_Dead | 0F7F |
+| UISC | Consonant_Final_Modifier | 1C36 |
+| UISC | Consonant_Placeholder | 1880–1884 |
+| UISC | Consonant_Subjoined | 11A3B–11A3E |
+| UISC | Gemination_Mark | 10D27, 11134 |
+| UISC | Modifying_Letter | FE00–FE0F, 16F50 |
+| UISC | Nukta | 0859–085B, 0F39, 0F71, 1885–1886, 18A9, 10AE5–10AE6, 10F82–10F85, 113CF, 16F4F, 1BC9D–1BC9E, 1E944–1E94A |
+| UISC | Number | 10D30–10D39, 10F51–10F54, 16AC0–16AC9, 1E140–1E149, 1E2F0–1E2F9, 1E4F0–1E4F9, 1E5F1–1E5FA, 1E950–1E959 |
+| UISC | Symbol_Modifier | 1B6B–1B73 |
+| UISC | Tone_Mark | 07EB–07F3, 07FD, 0F86–0F87, 17CF, 1A7B–1A7C, 1A7F, 10D24–10D26, 10F46–10F50, 16B30–16B36, 16F8F–16F92, 1E130–1E136, 1E2AE, 1E2EC–1E2EF |
+| UISC | Cantillation_Mark | 1CF8–1CF9 |
+| UISC | Virama | 2D7F |
+| UISC | Vowel_Dependent | 0B55, 10D69–10D6D, 10EAB–10EAC, 16F51–16F87, 1E4EC–1E4EF, 1E5EE–1E5EF |
+| UISC | Vowel_Independent | AAB1, AABA, AABD |
+| ESC | Hieroglyph | 13000–1342F, 1343C–1343F, 13441–13446, 13460–143FA |
+| ESC | Hieroglyph_Joiner | 13430–13436, 13439–1343B |
+| ESC | `Hieroglyph_Mark_Begin` | 005B, 007B, 27E6, 27E8, 2E22, 2E24 |
+| ESC | `Hieroglyph_Segment_Begin` | 13437 |
+| ESC | `Hieroglyph_Mark_End` | 005D, 007D, 27E7, 27E9, 2E23, 2E25 |
+| ESC | `Hieroglyph_Segment_End` | 13438 |
+| ESC | `Hieroglyph_Mirror` | 13440 |
+| ESC | `Hieroglyph_Modifier` | 13447–13455 |
+| UIPC | Bottom | 0859–085B, 0F72, 0F7A–0F7D, 0F80, 18A9, 1BF2–1BF3, A9BF, AAB0, AAB2–AAB3, AAB7–AAB8, AABE, 10A38, 10AE5–10AE6, 10F46–10F50, 10F82–10F85, 11127–11129, 1112D, 11130, 113CF, 16F4F, 16F51–16F87, 16F8F–16F92, 1E5EE–1E5EF |
+| UIPC | Left | 103C, 1C29 |
+| UIPC | Right | A9BE, 10A0C, 11942 |
+| UIPC | Top | 07EB–07F3, 07FD, 0F74, 1885–1886, 1A18, 1B6C, 1CF8–1CF9, AA35, AAB4, 10D24–10D27, 10D69–10D6D, 10EAB–10EAC, 1112A–1112B, 11131–11132, 16B30–16B36, 1E130–1E136, 1E2AE, 1E2EC–1E2EF, 1E4EC–1E4EF, 1E944–1E94A |
+| UIPC | Top_And_Right | 0E33, 0EB3 |
+| UIPC | Overstruck | 1BC9D–1BC9E |
+| UIPC | Not_Applicable | 180B–180D, 180F, 2D7F |
+
+`General_Category` is read for the five values the table names — Lo, Po, So,
+Sc and Zs — and for Mn and Mc, which *Defective clusters* and the `ZWNJ` rule
+read; `build.rs` compiles those seven from field 2 of `UnicodeData.txt` and
+nothing else of it.
+
+**Milestone 5's decisions, re-expressed.** The syllable rule, the reordering
+pause and `rphf`'s offer read a *role* of each class, so FT-08.4 moves no case:
+`B`, `GB`, `CS`, `N`, `R` and `G` are bases; `H` is the halant; `CGJ`, `IND`,
+`O`, `Rsv`, `S`, `SB`, `SE`, `VS` and `WJ` are outside every cluster, as
+milestone 5's `Other` was; every other class is a dependent, and a dependent
+whose subclass is `Pre` is the one the pause moves. On the corpus that is
+milestone 5's answer for every character; off it, the characters whose role
+moves are the ones the specification classes differently — Thai's and Lao's
+spacing vowels, which are `B`; a dead consonant and a modifying letter, which
+are `IND`; a `Vowel` that is a mark, which is `V` — each a script no fixture
+adjudicates.
+
+#### The cluster grammar (FT-08.5)
+
+*Cluster validation*'s seven cluster types, transcribed with the
+specification's sigla (`*` none or more, `[ ]` optional, `< | >` one of):
+
+| Type | Pattern |
+| --- | --- |
+| Independent | `< IND │ O │ Rsv │ WJ > [VS]` |
+| Standard | `[< R │ CS >] < B │ GB > [VS] (CMAbv)* (CMBlw)* (< H B [VS] │ SUB > (CMAbv)* (CMBlw)*)* [MPre] [MAbv] [MBlw] [MPst] (VPre)* (VAbv)* (VBlw)* (VPst)* (VMPre)* (VMAbv)* (VMBlw)* (VMPst)* (FAbv)* (FBlw)* (FPst)* [FM]` |
+| Virama-terminated | `[< R │ CS >] < B │ GB > [VS] (CMAbv)* (CMBlw)* (< H B [VS] │ SUB > (CMAbv)* (CMBlw)*)* < H │ RK >` |
+| Number-joiner-terminated | `N [VS] (HN N [VS])* HN` |
+| Numeral | `N [VS] (HN N [VS])*` |
+| Symbol | `< S │ GB > [VS] (CMAbv)* (CMBlw)*` |
+| Hieroglyph | `SB* G [VS] [HR] [HM] SE* (J SB* G [VS] [HR] [HM] SE*)*` |
+
+Around them: `CGJ` may stand anywhere inside a cluster and changes nothing;
+`ZWNJ` continues the cluster before it and ends it after itself unless a mark
+(UGC Mn or Mc) follows; `ZWJ` continues the cluster before it and joins it to
+what follows, unless that is another `ZWJ`; a `VS` outside a cluster stands
+alone, as `IND` and `WJ` do; a cluster that starts with an Mn or Mc character
+is **broken**, one cluster per mark (*Defective clusters*); and a cluster is cut
+after 31 characters (*Cluster length*), which also bounds the recogniser's
+work on any one cluster.
+
+**The recogniser** is a hand-written state machine over the classes, one state
+per position of the standard pattern and its siblings, walked once over the
+run: at each start it takes the longest cluster any type matches, and a start
+no type matches is one character of its own, broken when it is a mark. No
+regular-expression engine, no backtracking past the cluster's start, linear in
+the run (ruling 1). Each glyph carries its cluster's number and its type, the
+type being what FT-08.7 reads.
+
+**The corpus disagrees with the grammar in one script.** Read against
+*Cluster validation*, every `SHBALI` case parses as its fixture draws it, and
+the two broken clusters are exactly the two cases whose fixtures draw a
+dotted circle. Tai Tham does not: about half of `SHLANA`'s cases are typed in
+orders the standard pattern refuses — a tone mark before the vowel it
+follows in the pattern (`SHLANA-2/2`), `SAKOT` and a consonant after the
+vowels (`SHLANA-1/39`), an above vowel after a below one (`SHLANA-1/24`) —
+and every one of their fixtures draws them as one cluster with no dotted
+circle, as do the pre-base vowel after a tone mark of `SHLANA-2/16` and the
+vowel after a punctuation sign of `SHLANA-2/5`, which no reading of the
+grammar admits. The specification marks Tai Tham as supported only in part
+(its table of registered tags). So:
+
+- **A run whose script the specification's table of registered tags lists
+  takes the published grammar**, Tai Tham excepted. The table is transcribed
+  into `universal.rs` as `unicode::Script` values; the three it lists that
+  the pinned 17.0.0 does not encode (Jurchen, Proto-Cuneiform, Seal) are left
+  out, since no character can be in them.
+- **Tai Tham, and every Brahmic run of a script the table does not list**,
+  keeps milestone 5's cluster: a base and every dependent after it in any
+  order, a new cluster at each base a halant does not join. Two changes the
+  corpus states are made to it: a halant joins the next base with dependents
+  between them (`SHLANA-3/3`, `SHLANA-7/5`, the only two cases in either
+  corpus with a mark between a halant and its base), and `CGJ` continues the
+  cluster it stands in (`SHLANA-10/28`, `SHLANA-10/41`), as the grammar has
+  it. Its clusters are standard, or broken where a dependent has no base;
+  FT-08.7 draws no dotted circle in them. The nine Indic scripts leave it for
+  their own model at FT-08.11.
+
+#### What a cluster confines (FT-08.6)
+
+*OpenType feature application I* applies the default glyph pre-processing
+group (`locl`, `ccmp`, `nukt`, `akhn`) and the orthographic unit shaping group
+(`rkrf`, `abvf`, `blwf`, `half`, `pstf`, `vatu`, `cjct`) "one cluster at a
+time", `rphf` "scoped to the first three glyphs in a cluster" and `pref` to
+"the entire cluster"; *II* applies the topographical group per cluster and the
+standard typographic presentation group (`abvs`, `blws`, `calt`, `clig`,
+`haln`, `liga`, `pres`, `psts`, `rclt`, `rlig`) "all together to the entire
+run", as it does every `GPOS` feature. So each of `USE_GSUB_STAGES`' stages
+carries a flag, passed from `Shaper::shape`'s stage loop through `Layout` to
+the runner's `per_syllable`:
+
+| Stage | Features | Confined |
+| --- | --- | --- |
+| 0 | `locl ccmp nukt akhn` | yes |
+| 1 | `rphf` | yes, and offered only at a base and halant with a base after them (`repha_positions`) |
+| 2 | `pref` | yes |
+| 3 | `rkrf abvf blwf half pstf vatu cjct` | yes; the reordering pause follows it |
+| 4 | `abvs blws haln pres psts` | no |
+| 5 | `locl ccmp` | yes |
+| 6 | `rlig liga clig calt` | no |
+
+Stages 5 and 6 were one stage of the default features; they are split so that
+each stage is wholly one group or the other, `locl` and `ccmp` keeping the
+confinement their group has and the other four losing it. A lookup run in a
+confined stage matches its input inside the cluster it starts in, its context
+outside it as before; a nested lookup inherits its caller's confinement. The
+Joining and default plans are not confined at all, as before.
+
+#### Dotted circles (FT-08.7)
+
+*Defective clusters* and *Handling invalid combining marks*: a broken cluster
+"is displayed with the stand-alone mark positioned on a dotted circle". In a
+run of the published grammar, each broken cluster gets the face's U+25CC
+glyph inserted **before** its mark, as the cluster's base, before `GSUB` —
+the face's lookups then see a base and its mark, as they would for a typed
+U+25CC — and the reordering pause puts a pre-base vowel in front of it, as
+`SHBALI-1/14` draws `TALING` before the circle. The inserted glyph carries the
+cluster of the mark it stands under, so the text a consumer rebuilds for the
+cluster is the text typed, and it is marked inserted so a consumer gives it
+no text of its own. A face that does not map U+25CC gets none, and the mark
+is drawn as it stands. This reverses a decision milestone 5 recorded (below).
+
+#### Default-ignorables (FT-08.8)
+
+`DerivedCoreProperties.txt`'s `Default_Ignorable_Code_Point`, vendored at the
+pinned 17.0.0 and compiled by `build.rs`, replaces the two joiners: every
+default-ignorable character is mapped and carried through `GSUB`, and removed
+after it with the joiners by `Buffer::delete_ignorable`; the variation
+selectors are still consumed by `Shaper::map`. `CGJ` is one, so
+`SHLANA-10/28` shapes as `SHLANA-10/29` once FT-08.5 keeps it inside its
+cluster.
+
+#### FT-08.1's causes, and what closes each
+
+The causes in the table below are read from FT-08.1's trace, and the last
+column names the change that closes each.
 
 `crates/tinker-pdf-shape/src/trace.rs` is a test-only record of what
 `Shaper::shape` does to a run: the buffer after `cmap`, after each `GSUB`
@@ -670,10 +963,178 @@ Each row is attributed to one mechanism:
 | --- | --- | --- | --- |
 | `SHLANA-2/2`, `/3`, `/4`; `SHLANA-7/17`; `SHLANA-8/5`, `/6`; `SHLANA-10/8`, `/30`, `/38`, `/39`, `/40`, `/42`, `/45`, `/46`, `/47` | A glyph the vendored face cannot produce from the text | Each case types U+1A7B and wants gid311 (`uni1A78`) at its place, and the fixture's outline for that glyph is gid311's, a cross, not gid314's, the glyph `cmap` gives U+1A7B. **No sequence of the face's `lana` lookups yields gid311 from U+1A7B**, and none of all its lookups does either: taken over every script, language system and feature, every alternate of an alternate set, and with every context set aside, no substitution of the face puts gid311 in a buffer that starts as any of the fifteen texts' glyphs. The face's only substitutions that make gid311 out of another glyph take gid23, gid23 and gid46, or gid293, and none of those is derivable from these texts. Where the order differs as well (`SHLANA-2/3`), it is the face's `abvs` lookup 68 moving gid314 after the vowel that follows it, a rule gid311 would not match | H-146: nothing is declined; the fifteen stay in `TRIAGE` and `PASSING`'s shortfall (FT-08.9) |
 | `SHBALI-1/14`, `/15` | A broken cluster with no dotted circle | `KA ULU TALING` and `KA SUKU TALING`: each fixture ends with gid128, U+25CC in the face's `cmap`, which no lookup of the face emits. A pre-base vowel typed after an above or below vowel is a broken cluster of its own under USE's grammar, drawn before the dotted circle the shaper inserts for it; this crate keeps it in the base's syllable and moves it in front of the base | FT-08.5's grammar, FT-08.7's dotted circle |
-| `SHLANA-3/3`, `SHLANA-7/5` | A cluster boundary between a halant and the base it stacks | `U+1A43 U+1A60 U+1A7A U+1A3C` and `U+1A37 U+1A60 U+1A76 U+1A3E`: a mark is typed between `SAKOT` and its consonant, the one-character halant lookback starts a new syllable at the consonant, and `blwf`'s lookup 13, which forms the subjoined consonant, stops at it as in another cluster. With the confinement lifted both rows reproduce, and only `blwf` and the `blws` lookups that follow from it apply differently. They are the only two cases in either corpus with a mark between a halant and its base | FT-08.5's grammar |
+| `SHLANA-3/3`, `SHLANA-7/5` | A cluster boundary between a halant and the base it stacks | `U+1A43 U+1A60 U+1A7A U+1A3C` and `U+1A37 U+1A60 U+1A76 U+1A3E`: a mark is typed between `SAKOT` and its consonant, the one-character halant lookback starts a new syllable at the consonant, and `blwf`'s lookup 13, which forms the subjoined consonant, stops at it as in another cluster. With the confinement lifted both rows reproduce, and only `blwf` and the `blws` lookups that follow from it apply differently. They are the only two cases in either corpus with a mark between a halant and its base | FT-08.5: in the cluster Tai Tham keeps, a halant joins the next base across the dependents between them |
 | `SHLANA-4/2` | The presentation features confined to a cluster | `abvs` lookups 48 and 51 and `blws` lookup 71 move `U+1A58` past the next consonant, across a syllable boundary, and the confinement stops them. With it lifted the row reproduces. The specification applies the presentation group to the whole run | FT-08.6 |
 | `SHLANA-10/28` | `CGJ` ending a cluster | U+034F is `Other` to the cluster model, so the pre-base vowel typed after it is in a syllable of its own and is not moved in front of the base. Lifting the confinement changes nothing | FT-08.5 places `CGJ` inside its cluster and FT-08.8 removes it after `GSUB`; it then shapes as `SHLANA-10/29` |
-| `SHLANA-1/35`, `SHLANA-2/7`, `SHLANA-2/35`, `SHLANA-10/29` (`Advance`); `SHLANA-10/4` (`Offset`) | A mark attachment the fixture does not draw | The glyphs and their order are the fixture's. Each mark the fixture places elsewhere is where it is drawn **unattached** — at the pen, with no offset — and each mark stacked on it moves with it. The face's lookup 1 under `mark` is the only lookup that attaches it to its base, it applies as ISO/IEC 14496-22 states (the mark covered, the base the nearest glyph before it that is not a mark and covered, no lookup flag), and no mark lookup of the face attaches the mark where the fixture draws it. Each such syllable has a pre-base character typed after another of its marks, but cases of the same shape attach in their fixtures (`SHLANA-1/26`, `SHLANA-2/36`), so no rule the syllable's shape states separates them | FT-08.10, as FT-08.3 names it |
+| `SHLANA-1/35`, `SHLANA-2/7`, `SHLANA-2/35`, `SHLANA-10/29` (`Advance`); `SHLANA-10/4` (`Offset`) | A mark attachment the fixture does not draw | The glyphs and their order are the fixture's. Each mark the fixture places elsewhere is where it is drawn **unattached** — at the pen, with no offset — and each mark stacked on it moves with it. The face's lookup 1 under `mark` is the only lookup that attaches it to its base, it applies as ISO/IEC 14496-22 states (the mark covered, the base the nearest glyph before it that is not a mark and covered, no lookup flag), and no mark lookup of the face attaches the mark where the fixture draws it. Each such syllable has a pre-base character typed after another of its marks, but cases of the same shape attach in their fixtures (`SHLANA-1/26`, `SHLANA-2/36`), so no rule the syllable's shape states separates them | No positioning change: the face's `GPOS`, applied as the standard states, cannot draw the fixture's positions. FT-08.10 lands H-146's ruling on them as FT-08.9 does on the fifteen |
+
+#### The second cluster model: the OpenType Indic scripts (FT-08.11 to FT-08.14)
+
+`SHKNDA-2`'s six are the case milestone 5 priced: a Kannada matra has to be
+next to its base before the presentation features run, Tai Tham wants the
+opposite order for the same shape (`SHLANA-2/6`), and no property separates
+them. What separates them is which engine the script belongs to, and the
+OpenType Indic specifications define that engine for nine scripts. The USE
+specification's table of registered tags lists none of them.
+
+- **The scripts it takes.** Bengali, Devanagari, Gujarati, Gurmukhi, Kannada,
+  Malayalam, Odia, Tamil and Telugu: `Plan::Indic` is chosen for a run of one
+  of them whose face declares its script under either registry tag, the
+  version-2 (`knd2`) or the original (`knda`). A face declaring neither shapes
+  under `DFLT` as before.
+- **Its categories and syllables** (`indic.rs`, FT-08.11): *Find next syllable
+  in the input* — the consonant syllable, the vowel-based syllable and the
+  stand-alone cluster at a word's start, over consonant, vowel, nukta, halant,
+  joiner, matra, syllable modifier and Vedic classes read from
+  `Indic_Syllabic_Category` and `Indic_Positional_Category`. A sequence no
+  pattern takes is a broken syllable and takes FT-08.7's dotted circle, as
+  *Invalid combining marks* allows.
+- **Base finding** (FT-08.13), *Reorder characters* step 1: from the end of
+  the syllable backwards to the first consonant that has no below-base or
+  post-base form and is not a pre-base reordering Ra, or to the first
+  consonant; a syllable-initial Ra and halant is not a candidate when the
+  syllable holds another consonant. Whether a consonant has a form is the
+  face's: *Retrieving dynamic character properties* applies the feature with
+  `locl` to the consonant and halant (`rphf`, `half`) or the halant and
+  consonant (`pref`, `blwf`, `pstf`), and a ligature of the two with nothing
+  else in context says it does. That is FT-08.12's would-substitute query on
+  `Layout`, which answers without changing a buffer.
+- **Per-position masks.** `rphf` at the syllable-initial Ra and halant only;
+  `half` at the consonants before the base; `blwf`, `pstf` and `pref` at the
+  halant and consonant pairs after it — each a mask bit, as `rphf`'s is today,
+  so a feature reaches one position of a syllable and not all of it.
+- **Initial reordering**, step 2: the matras are decomposed and moved by each
+  script's *Character reordering classes* (Kannada's: `BeforeSubscript` for
+  U+0CBE, U+0CBF, U+0CC1, U+0CC2, U+0CC6, U+0CCC, U+0CE2, U+0CE3;
+  `AfterSubscript` for U+0CC3, U+0CC4, U+0CD5, U+0CD6), a pre-base matra
+  before the first half form; step 3 puts a nukta before an adjacent halant.
+- **The stage order** (*Shape glyph sequences*): `locl`; then `nukt`, `akhn`,
+  `rphf`, `pref`, `blwf`, `half`, `pstf`, `cjct`, each its own stage over the
+  syllable; final reordering; then `pres`, `abvs`, `blws`, `psts`, `haln` and
+  `calt` together over the cluster; positioning (`kern`, `dist`, `abvm`,
+  `blwm`) over the run.
+- **Final reordering** (FT-08.14), step 4: a pre-base matra moved after the
+  last standalone halant and before the main consonant; the reph to the
+  position its script's class gives it — for Kannada U+0CB0's `After
+  Postscript`, so through sub-steps 5 and 6 before the first post-base matra
+  or modifier with a later class, or to the end of the syllable — in place of
+  `move_repha`'s end of the syllable for every face, which stays only in the
+  USE plan; and a glyph `pref` produced, before the main consonant.
+- **Mark widths.** A spacing matra keeps the advance its face gives it, as
+  `Plan::Universal`'s marks do today and `SHKNDA-3` requires.
+
+#### Hangul (FT-08.15)
+
+§3.12's arithmetic, in `unicode.rs`: a precomposed syllable `S` in
+U+AC00–U+D7A3 is `LBase + (S − SBase) / NCount`, `VBase + ((S − SBase) %
+NCount) / TCount` and, where `(S − SBase) % TCount` is not 0, `TBase` plus it,
+with `SBase` U+AC00, `LBase` U+1100, `VBase` U+1161, `TBase` U+11A7, `TCount`
+28 and `NCount` 588; the standard's worked example takes U+D4DB to U+1111
+U+1171 U+11B6. `characters()` applies it, whatever the run's plan, to a
+syllable the face has no glyph for when it has a glyph for every jamo, each
+jamo keeping the syllable's cluster.
+
+#### Canonical ordering (FT-08.16, H-145)
+
+D108's reorderable pair — adjacent characters `A`, `B` with
+`Canonical_Combining_Class(A) > Canonical_Combining_Class(B) > 0` — exchanged
+until none is left is the Canonical Ordering Algorithm. FT-08.2's
+`canonical_ordering_price` finds every case it reorders in Tai Tham, each a
+class-230 mark typed before `SAKOT` (class 9), each passing as typed and
+failing reordered, and none gained. H-145 lands the ordering only where it
+loses no passing case, so it is **not** applied: FT-08.16 records the gap in
+[features/fonts.md](../features/fonts.md) with that price, and
+`canonical_ordering_price` stays as the price's regenerable record.
+
+#### Two decisions this reverses
+
+- **"The choice is made from the text, never from a transcribed list of
+  scripts"** (`Plan`, `shape.rs`). Both models are now chosen with a list:
+  the published grammar for the scripts USE's table of registered tags names,
+  and `Plan::Indic` for the nine scripts the Indic specifications define. Each
+  list is the specification's own, transcribed with its source beside it; the
+  text still chooses the plan's family (joining, Brahmic, default).
+- **"This crate never inserts a glyph the text did not ask for"**
+  ([features/fonts.md](../features/fonts.md)). FT-08.7 inserts U+25CC into a
+  broken cluster, carrying the cluster's text and no text of its own, so that
+  extraction gives back what was typed.
+
+### Milestones
+
+1. **FT-08.1, the trace** (landed): `trace.rs`'s
+   `every_unexplained_triage_row_is_traced`, read above.
+2. **FT-08.3, this section.**
+3. **FT-08.4, the categories.** `universal.rs`'s
+   `every_use_category_is_the_published_tables` asserts a character of each
+   class and subclass as the derivation and the overrides above give it, the
+   four readings among them; `text_rendering.rs`'s `PASSING` and `TRIAGE` and
+   `fingerprints.rs`'s `SHAPING` do not move.
+4. **FT-08.5, the grammar.** `universal.rs` holds one test per cluster type,
+   each on a sequence this section's patterns admit, and the corpus's own:
+   `SHBALI-1/14`'s pre-base vowel a broken cluster, `SHBALI-3/1` a symbol
+   cluster, `SHLANA-7/5`'s halant joining its base across a tone mark in the
+   cluster Tai Tham keeps, `CGJ` inside a cluster, a forced cut after 31
+   characters; `SHLANA-3/3` and `SHLANA-7/5` leave `TRIAGE` and their sections
+   rise by them; no `PASSING` row falls.
+5. **FT-08.6, the confinement.** `synthetic.rs`'s
+   `a_confined_feature_does_not_reach_across_a_cluster`: a hand-built `blwf`
+   ligature does not match across two clusters, and does with the confinement
+   off, and an `abvs` one does; `SHLANA-3/3`, `SHLANA-4/2` and `SHLANA-7/5` are
+   out of `TRIAGE` with the confinement kept; no `PASSING` row falls.
+6. **FT-08.7, dotted circles.** `SHBALI-1/14` and `/15` leave `TRIAGE` and
+   `SHBALI-1` reaches 22 of 22; `shaped_creation.rs`'s
+   `a_broken_cluster_round_trips_without_its_dotted_circle` draws the circle
+   and extracts the typed text without U+25CC, in the default and
+   `bundled-fonts` builds; a face without U+25CC gets no circle; the
+   `shape_text` fuzz corpus gains a Balinese broken cluster.
+7. **FT-08.8, default-ignorables.** `shape.rs`'s
+   `the_ignorable_characters_are_the_derived_property`;
+   `text_rendering.rs`'s `a_grapheme_joiner_changes_nothing_but_itself`
+   (`SHLANA-10/28` shapes as `SHLANA-10/29`); `ucd_version.rs` holds the new
+   file to the pin.
+8. **FT-08.9, the fifteen**, under H-146: kept in `TRIAGE` with the trace's
+   reason beside them, `PASSING`'s shortfall unchanged.
+9. **FT-08.10, the positions**, under H-146 likewise, and `WITHIN_TOLERANCE`
+   gains no row.
+10. **FT-08.11, the Indic frame.** `indic.rs`'s tests, one per syllable type;
+    `shape.rs`'s `an_indic_face_gets_the_indic_plan`; `PASSING`, `TRIAGE` and
+    `SHAPING` do not move.
+11. **FT-08.12, the query.** `synthetic.rs`'s
+    `would_substitute_answers_without_substituting`.
+12. **FT-08.13, base finding and initial reordering.** `SHKNDA-2` reaches 16
+    of 16 with `SHKNDA-1` at 34 and `SHKNDA-3` at 31, every `SHBALI` and
+    `SHLANA` row held; `indic.rs`'s base-finding tests over `NotoSansKannada`
+    syllables; a Kannada `shape_text` fuzz seed.
+13. **FT-08.14, final reordering.** `indic.rs`'s
+    `each_reph_position_is_the_specifications`; `SHKNDA-2/12` still passes.
+14. **FT-08.15, Hangul.** `unicode.rs`'s
+    `a_hangul_syllable_decomposes_by_arithmetic`; `shaped_creation.rs`'s
+    `a_syllable_the_face_cannot_draw_is_drawn_as_its_jamo`, in both builds.
+15. **FT-08.16, canonical ordering**, not applied: `fonts.md` carries
+    FT-08.2's figures and `canonical_ordering_price` stays.
+16. **FT-08.17, the fingerprint.** `fingerprints.rs`'s
+    `shaping_is_stable_across_targets` with `SHLANA-2`, `SHLANA-7`,
+    `SHLANA-10` and a Hangul syllable added and `LEAST_GLYPHS` raised to the
+    count measured, on Linux, Windows and `wasm32-wasip1`.
+17. **FT-08.18a and FT-08.18b, the speed rows.** `benches/fonts.rs` shapes
+    through both models, a Kannada and a Tai Tham paragraph beside MS-04's;
+    the figures are taken in the timing phase and committed to
+    `baseline.json`.
+18. **FT-08.19, the close.** `every_section_this_crate_claims_is_whole` counts
+    the Brahmic sections against what H-146 left in `TRIAGE`, and the row
+    leaves the roadmap as the ruling has it.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The published grammar and the Tai Tham corpus disagree, and a grammar fitted to Tai Tham would be a guess about every other USE script | The published grammar where the corpus agrees with it and for every script with no fixture; Tai Tham keeps the cluster the corpus adjudicates, by name, with the two changes the corpus states; the disagreement is a table above, so a later Tai Tham fixture or a revised specification reopens one row rather than a model |
+| The Indic scripts with no fixture change model and are no more verified than before | They stay on [features/fonts.md](../features/fonts.md)'s shaped-and-unverified list until H-64's person-written cases arrive (FT-09) |
+| A change of model moves the shaping fingerprint | Every `SHAPING` move is H-144's to review, against the cases the step names as moving it |
+| A case the face cannot produce reads as a defect still to fix | H-146: nothing is declined; such a case stays in `TRIAGE` and `PASSING`'s shortfall, with the trace's reason |
+| A second model costs time on every Brahmic run | FT-08.18 measures both models against P-26's targets in the timing phase |
+| An inserted dotted circle reaches extracted text | It carries its cluster's offset and no text of its own; `shaped_creation.rs` extracts the typed text in both builds |
+| The 31-character cut splits a cluster a reader would not | It is the specification's practical maximum; no case in either corpus comes near it |
 
 ## AAT shaping
 
