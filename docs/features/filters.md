@@ -130,7 +130,12 @@ level at every scale exactly; any other reduced sample is within one level of
 the definition evaluated in `f64`, which the tests hold. `max_output` bounds
 the frame's own samples at every scale, since the coefficients a decode holds
 are the frame's, and a twelve-bit frame is narrowed, and says so, at every
-scale. `jpeg_decode` is the full-size decode.
+scale. `jpeg_decode_strips_sized` is the same decode at the scale a chooser
+picks from the frame's own width and height, asked once, when the marker walk
+reaches the frame's first scan — the decode a renderer makes that sizes the
+image by the bytes rather than by what its dictionary says
+(`a_sized_decode_asks_its_scale_of_the_frames_own_size`). `jpeg_decode` is the
+full-size decode.
 `JpegColor` names what came out: greyscale, YCbCr already converted to RGB,
 and CMYK with the Adobe transform undone — including the inverted-CMYK
 convention, reported as its own variant.
@@ -889,7 +894,8 @@ and `jxr_decode_counted` counts each macroblock each band's walk decoded,
 every component of it, each sample each stage of the reconstruction passed
 over and each byte returned — none of which moves with what a picture shows.
 The image codecs are `jpeg_decode` (returns `JpegImage`)
-and `jpeg_decode_strips`, which takes a `JpegScale`, hands a `JpegSink` the
+and `jpeg_decode_strips`, which takes a `JpegScale` (`jpeg_decode_strips_sized`
+a chooser of one), hands a `JpegSink` the
 image's `JpegLayout` — its size, colour and precision, the scale, and the
 frame's own width and height — and then its strips, whole rows top to bottom,
 one MCU row each, and returns a `JpegFrame` — the layout, the warnings,

@@ -447,6 +447,98 @@ pub struct DecodedImage {
     /// screenshot says nothing and means it — so it is carried here rather
     /// than guessed at from the sample count.
     pub interpolate: bool,
+    /// Where the decode made the image smaller than it is, the image it
+    /// stands for (`docs/design/jpeg-speed.md`, "Placing the reduced grid");
+    /// `None` for an image decoded at its full size, which is every image but
+    /// a JPEG a draw asked for at a fraction of its size.
+    pub reduced: Option<Reduced>,
+}
+
+/// A reduced decode's grid: [`DecodedImage::width`] by
+/// [`DecodedImage::height`] samples standing for an image of
+/// `full_width` by `full_height`, each sample for `factor` of the image's own
+/// samples each way.
+///
+/// Sample `X` covers the image's columns `factor·X` up to `factor·(X + 1)`,
+/// the last cut where the image ends, and rows alike. So the draw maps the
+/// unit square onto `full_width / factor` by `full_height / factor` samples
+/// — the last column and row cut at the square's edge rather than stretched
+/// to it — and the resampler draws that, so the reduced image covers what the
+/// image covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Reduced {
+    /// The image's own width, which the unit square spans.
+    pub full_width: u32,
+    /// The image's own height.
+    pub full_height: u32,
+    /// How many of the image's samples each way one decoded sample stands
+    /// for: 2, 4 or 8 for a JPEG decoded at a half, a quarter or an eighth.
+    pub factor: u32,
+}
+
+/// What a draw asks of an image's decode (`docs/design/jpeg-speed.md`, "The
+/// drawn-size request"): the size the page draws it at.
+///
+/// Computed from the image's transform in the page frame — the frame a tile
+/// and a band share with the page (ruling 5), and the one a display list's
+/// replay computes from the transform it replays at — so every part of a page
+/// asks what the page asks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageRequest {
+    /// The device pixels the image's unit square spans along each of the
+    /// image's own axes, its width first: `√(a² + b²)` and `√(c² + d²)` of its
+    /// transform. A size that is not finite asks for the image at full size.
+    pub drawn: (f64, f64),
+}
+
+impl ImageRequest {
+    /// The image at its full size, whatever it is drawn at: what the SVG
+    /// writer, `Page::images` and recoding ask, and what an image with a mask
+    /// is decoded at.
+    pub const FULL: ImageRequest = ImageRequest {
+        drawn: (f64::INFINITY, f64::INFINITY),
+    };
+
+    /// The request a draw makes whose unit square `to_device` maps into the
+    /// page frame: the length of each of its two columns. `sqrt` is correctly
+    /// rounded, so every target asks for the same size (ruling 4).
+    #[must_use]
+    pub fn drawn_under(to_device: &Matrix) -> ImageRequest {
+        let across = (to_device.a * to_device.a + to_device.b * to_device.b).sqrt();
+        let down = (to_device.c * to_device.c + to_device.d * to_device.d).sqrt();
+        ImageRequest {
+            drawn: (across, down),
+        }
+    }
+}
+
+/// The transform of the square a reduced image's samples span, from the
+/// image's own unit square `unit` (`docs/design/jpeg-speed.md`, "Placing the
+/// reduced grid"), or `None` where the grid says nothing that can be drawn.
+///
+/// The `width` samples, each `factor` of the image's own, span
+/// `width · factor / full_width` of the unit square across — at least one —
+/// from its left edge, and `height · factor / full_height` down from its top
+/// edge, the image's first row (8.9.5.2). Each ratio is one division of two
+/// integers `f64` holds exactly, so it is correctly rounded on every target.
+fn reduced_square(unit: &Transform, width: u32, height: u32, grid: Reduced) -> Option<Transform> {
+    if grid.full_width == 0 || grid.full_height == 0 || grid.factor == 0 {
+        return None;
+    }
+    let span =
+        |samples: u32, full: u32| (f64::from(samples) * f64::from(grid.factor)) / f64::from(full);
+    let (across, down) = (span(width, grid.full_width), span(height, grid.full_height));
+    // The samples' square, `(s, t)` with `t` upward as the unit square's is,
+    // is the unit square's `(across · s, 1 − down · (1 − t))`: anchored at the
+    // image's top-left corner, where its first sample is.
+    Some(Transform {
+        a: unit.a * across,
+        b: unit.b * across,
+        c: unit.c * down,
+        d: unit.d * down,
+        e: unit.c * (1.0 - down) + unit.e,
+        f: unit.d * (1.0 - down) + unit.f,
+    })
 }
 
 /// An image of two colours, decoded: one byte a sample and the two colours
@@ -474,22 +566,31 @@ pub trait GlyphSource {
     /// reports rather than substituting a shape.
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline>;
 
-    /// A named image XObject, decoded to RGB.
+    /// A named image XObject, decoded to RGB, for a draw that asks for it as
+    /// `request` says: an implementor may decode it smaller, down to the
+    /// drawn size and never below it, and says so in
+    /// [`DecodedImage::reduced`].
     ///
     /// `Err` carries the codec's name so the warning can say what was missing;
     /// `Ok(None)` means the resource is not an image at all.
-    fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
-        let _ = name;
+    fn image(&self, name: &[u8], request: &ImageRequest) -> Result<Option<DecodedImage>, String> {
+        let _ = (name, request);
         Ok(None)
     }
 
-    /// An inline image (8.9.7), from the bytes between `BI`/`ID` and `EI`.
+    /// An inline image (8.9.7), from the bytes between `BI`/`ID` and `EI`,
+    /// asked for as [`GlyphSource::image`] is.
     ///
     /// Passed as bytes because the interpreter has no object parser; the
     /// implementor already reads dictionaries and runs filter chains for
     /// every other image, and an inline one differs only in where it lives.
-    fn inline_image(&self, dict: &[u8], data: &[u8]) -> Result<Option<DecodedImage>, String> {
-        let _ = (dict, data);
+    fn inline_image(
+        &self,
+        dict: &[u8],
+        data: &[u8],
+        request: &ImageRequest,
+    ) -> Result<Option<DecodedImage>, String> {
+        let _ = (dict, data, request);
         Ok(None)
     }
 
@@ -2557,6 +2658,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// pyramid, and nothing here can be tested without building a page.
     fn blit(&mut self, image: &DecodedImage, state: &GraphicsState) {
         let unit_to_device = transform(&state.ctm.then(&self.base));
+        // A reduced decode's samples span a square of their own, which reaches
+        // past the unit square where the last column and row stand for less
+        // than a whole sample; they are drawn over it and cut at the unit
+        // square, the image they stand for. Everything else here — the run,
+        // the knockout's shape — is the unit square's.
+        let samples_to_device = image
+            .reduced
+            .and_then(|grid| reduced_square(&unit_to_device, image.width, image.height, grid));
         // 8.9.6.2: a stencil selects where the *current fill colour* is
         // painted; it has no colour of its own. That colour is a flat fill
         // like any other, so a canvas compositing in ink is handed its own
@@ -2641,7 +2750,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     colours: two.colours,
                 }),
             },
-            unit_to_device,
+            unit_to_device: samples_to_device.unwrap_or(unit_to_device),
+            cut: samples_to_device.map(|_| unit_to_device),
             interpolate: image.interpolate,
             alpha: state.fill_alpha,
             blend: blend_mode(state.blend),
@@ -3518,17 +3628,20 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             return;
         }
 
+        // The size the page draws it at, in the page frame whatever canvas
+        // this is (ruling 5), so a tile, a band and a replay ask alike.
+        let request = ImageRequest::drawn_under(&state.ctm.then(&self.base));
         let decoded = if image.inline {
             match self
                 .glyphs
-                .inline_image(&image.inline_dict, &image.inline_data)
+                .inline_image(&image.inline_dict, &image.inline_data, &request)
             {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err("inline".to_string()),
                 Err(codec) => Err(codec),
             }
         } else {
-            match self.glyphs.image(&image.name) {
+            match self.glyphs.image(&image.name, &request) {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err(String::from_utf8_lossy(&image.name).into_owned()),
                 Err(codec) => Err(codec),
@@ -4870,7 +4983,11 @@ mod tests {
             None
         }
 
-        fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+        fn image(
+            &self,
+            name: &[u8],
+            _request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
             if name != b"Im0" {
                 return Ok(None);
             }
@@ -4883,6 +5000,7 @@ mod tests {
                 rgb: vec![0; 12],
                 alpha: Vec::new(),
                 two_colour: None,
+                reduced: None,
             }))
         }
     }
@@ -5105,7 +5223,11 @@ mod tests {
         fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
             None
         }
-        fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+        fn image(
+            &self,
+            name: &[u8],
+            _request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
             if name != b"Im0" {
                 return Ok(None);
             }
@@ -5118,6 +5240,7 @@ mod tests {
                 rgb: vec![r, g, b, r, g, b, r, g, b, r, g, b],
                 alpha: self.alpha.clone(),
                 two_colour: None,
+                reduced: None,
             }))
         }
     }
@@ -5132,7 +5255,11 @@ mod tests {
         fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
             None
         }
-        fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+        fn image(
+            &self,
+            name: &[u8],
+            _request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
             if name != b"Im0" {
                 return Ok(None);
             }
@@ -5148,6 +5275,7 @@ mod tests {
                 ],
                 alpha: Vec::new(),
                 two_colour: None,
+                reduced: None,
             }))
         }
     }
@@ -5187,6 +5315,215 @@ mod tests {
         );
     }
 
+    /// A source that records every image request it is asked, and answers
+    /// each with one grey sample.
+    #[derive(Default)]
+    struct Requests {
+        asked: std::sync::Mutex<Vec<(Vec<u8>, ImageRequest)>>,
+    }
+
+    impl Requests {
+        fn answer(&self, name: &[u8], request: &ImageRequest) -> Option<DecodedImage> {
+            if let Ok(mut asked) = self.asked.lock() {
+                asked.push((name.to_vec(), *request));
+            }
+            Some(DecodedImage {
+                width: 1,
+                height: 1,
+                rgb: vec![90, 90, 90],
+                alpha: Vec::new(),
+                two_colour: None,
+                stencil: false,
+                interpolate: false,
+                reduced: None,
+            })
+        }
+    }
+
+    impl GlyphSource for Requests {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+        fn image(
+            &self,
+            name: &[u8],
+            request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
+            Ok(self.answer(name, request))
+        }
+        fn inline_image(
+            &self,
+            _dict: &[u8],
+            _data: &[u8],
+            request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
+            Ok(self.answer(b"inline", request))
+        }
+    }
+
+    /// **A draw asks for an image at the size the page draws it**
+    /// (`docs/design/jpeg-speed.md`, "The drawn-size request"): the length of
+    /// each column of the image's transform in the page frame — scaled,
+    /// quarter-turned and mirrored, an image XObject and an inline image alike
+    /// — and a tile of the page, its canvas standing at a corner of the page,
+    /// asks exactly what the page asks.
+    #[test]
+    fn a_draw_asks_for_the_size_the_page_draws_it() {
+        let content: &[u8] = b"q 40 0 0 20 5 5 cm /Im0 Do Q \
+            q 0 30 -10 0 50 5 cm /Im1 Do Q \
+            q -12 0 0 9 30 30 cm /Im0 Do Q \
+            q 8 0 0 4 2 40 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x5a EI Q";
+        let asked = |canvas: Canvas| {
+            let source = Requests::default();
+            let mut renderer =
+                Renderer::new(canvas, page_transform(50.0, 2.0), &source).with_page_size(120, 100);
+            interpret(content, Matrix::IDENTITY, &mut renderer, &NoFonts);
+            let _ = renderer.finish();
+            source.asked.into_inner().expect("the record")
+        };
+        let page = asked(Canvas::new(120, 100, PixelFormat::Rgb8, Color::WHITE));
+        let expected: Vec<(Vec<u8>, (f64, f64))> = vec![
+            (b"Im0".to_vec(), (80.0, 40.0)),
+            (b"Im1".to_vec(), (60.0, 20.0)),
+            (b"Im0".to_vec(), (24.0, 18.0)),
+            (b"inline".to_vec(), (16.0, 8.0)),
+        ];
+        let drawn: Vec<(Vec<u8>, (f64, f64))> = page
+            .iter()
+            .map(|(name, request)| (name.clone(), request.drawn))
+            .collect();
+        assert_eq!(drawn, expected, "each draw's size in the page frame");
+        let tile = asked(Canvas::new(37, 23, PixelFormat::Rgb8, Color::WHITE).at_origin(41, 19));
+        assert_eq!(tile, page, "a tile asks what the page asks");
+
+        let infinite = ImageRequest::drawn_under(&Matrix {
+            a: f64::MAX,
+            b: f64::MAX,
+            c: 1.0,
+            d: 0.0,
+            e: 0.0,
+            f: 0.0,
+        });
+        assert!(
+            !infinite.drawn.0.is_finite() && infinite.drawn.1 == 1.0,
+            "a column past f64 is no finite size: {infinite:?}"
+        );
+        assert!(!ImageRequest::FULL.drawn.0.is_finite() && !ImageRequest::FULL.drawn.1.is_finite());
+    }
+
+    /// One image under two names: `Im0` three by two samples standing for a
+    /// five by three image, two of its samples a sample, and `Im1` the same
+    /// samples as an image of their own.
+    struct Halved;
+
+    impl GlyphSource for Halved {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+        fn image(
+            &self,
+            name: &[u8],
+            _request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
+            let reduced = match name {
+                b"Im0" => Some(Reduced {
+                    full_width: 5,
+                    full_height: 3,
+                    factor: 2,
+                }),
+                b"Im1" => None,
+                _ => return Ok(None),
+            };
+            Ok(Some(DecodedImage {
+                width: 3,
+                height: 2,
+                rgb: (0..18u32).map(|i| (i * 37 % 256) as u8).collect(),
+                alpha: Vec::new(),
+                two_colour: None,
+                stencil: false,
+                interpolate: false,
+                reduced,
+            }))
+        }
+    }
+
+    /// **A reduced image is drawn over the square its samples span and cut at
+    /// the image it stands for** (`docs/design/jpeg-speed.md`, "Placing the
+    /// reduced grid"). Three samples standing for five, two of the image's a
+    /// sample, span six of the image's five columns: drawn over its 50 by 30
+    /// pixel square they are the same samples drawn as an image of their own
+    /// over 60 by 40 pixels from the same top-left corner, under a clip of the
+    /// 50 by 30 square — pixel for pixel, the square's edges being whole
+    /// pixels — and nothing past the image's square is painted.
+    #[test]
+    fn a_reduced_image_is_drawn_over_its_samples_and_cut_at_the_image() {
+        let draw = |content: &[u8]| {
+            let canvas = Canvas::new(80, 60, PixelFormat::Rgb8, Color::WHITE);
+            let mut renderer = Renderer::new(canvas, page_transform(60.0, 1.0), &Halved);
+            interpret(content, Matrix::IDENTITY, &mut renderer, &NoFonts);
+            let (canvas, warnings) = renderer.finish();
+            assert!(warnings.is_empty(), "{warnings:?}");
+            canvas
+        };
+        let reduced = draw(b"q 50 0 0 30 4 24 cm /Im0 Do Q");
+        let twin = draw(b"q 4 24 50 30 re W n 60 0 0 40 4 14 cm /Im1 Do Q");
+        assert!(
+            reduced.data == twin.data,
+            "the reduced grid is its samples over their own square, cut at the image"
+        );
+        for y in 0..60usize {
+            for x in 0..80usize {
+                let at = (y * 80 + x) * 3;
+                let inside = (4..54).contains(&x) && (6..36).contains(&y);
+                assert_eq!(
+                    reduced.data[at..at + 3] != [255, 255, 255],
+                    inside,
+                    "({x}, {y}): painted exactly where the image is"
+                );
+            }
+        }
+
+        // The grid the samples stand on, and a grid that says nothing.
+        let unit = Transform {
+            a: 50.0,
+            b: 0.0,
+            c: 0.0,
+            d: -30.0,
+            e: 4.0,
+            f: 36.0,
+        };
+        let grid = Reduced {
+            full_width: 5,
+            full_height: 3,
+            factor: 2,
+        };
+        assert_eq!(
+            reduced_square(&unit, 3, 2, grid),
+            Some(Transform {
+                a: 60.0,
+                b: 0.0,
+                c: 0.0,
+                d: -40.0,
+                e: 4.0,
+                f: 46.0,
+            }),
+            "six of five columns across from the left, four of three rows down from the top"
+        );
+        for broken in [
+            Reduced {
+                full_width: 0,
+                ..grid
+            },
+            Reduced {
+                full_height: 0,
+                ..grid
+            },
+            Reduced { factor: 0, ..grid },
+        ] {
+            assert_eq!(reduced_square(&unit, 3, 2, broken), None, "{broken:?}");
+        }
+    }
+
     /// A source whose `Im0` and `Im1` are one bilevel image, held as its two
     /// colours or as their RGB expansion.
     struct Bilevel {
@@ -5203,7 +5540,11 @@ mod tests {
         fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
             None
         }
-        fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+        fn image(
+            &self,
+            name: &[u8],
+            _request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
             if name != b"Im0" && name != b"Im1" {
                 return Ok(None);
             }
@@ -5221,6 +5562,7 @@ mod tests {
                     }),
                     stencil,
                     interpolate,
+                    reduced: None,
                 }));
             }
             let mut rgb = Vec::new();
@@ -5238,6 +5580,7 @@ mod tests {
                 two_colour: None,
                 stencil,
                 interpolate,
+                reduced: None,
             }))
         }
     }

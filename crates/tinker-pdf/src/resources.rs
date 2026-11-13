@@ -16,15 +16,15 @@ use tinker_pdf_cos::{
     CosError, Counting, DecodedStreams, Dict, Name, ObjRef, Object,
 };
 use tinker_pdf_filters::{
-    ccitt_decode, jbig2_decode, jpeg_decode, jpeg_decode_strips, CcittParams, Jbig2Params,
+    ccitt_decode, jbig2_decode, jpeg_decode, jpeg_decode_strips_sized, CcittParams, Jbig2Params,
     JpegColor, JpegLayout, JpegScale, JpegSink, Warning as FilterWarning, MAX_JBIG2_SYMBOL_PIXELS,
     MAX_JBIG2_WORK_MULTIPLE,
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_raster::canvas::{Canvas, Color};
 use tinker_pdf_render::{
-    DecodedImage, FontIdentity, GlyphSource, Mesh, MeshParams, PatternPaint, Shading,
-    TilingPattern, TwoColourSamples,
+    DecodedImage, FontIdentity, GlyphSource, ImageRequest, Mesh, MeshParams, PatternPaint, Reduced,
+    Shading, TilingPattern, TwoColourSamples,
 };
 
 use crate::fonts::{self, FontProvider, FontRequest};
@@ -48,6 +48,7 @@ type OutlineCache = HashMap<(u64, u32), (Option<Arc<Outline>>, Option<String>)>;
 /// the image from the cache reports what the decode reported, rather than
 /// nothing (the damage) or the resource name standing in for a codec (the
 /// failure, which is what a cached `None` used to come back as).
+#[derive(Clone)]
 struct CachedImage {
     image: Result<Arc<DecodedImage>, String>,
     damage: Vec<(String, String)>,
@@ -55,6 +56,61 @@ struct CachedImage {
     /// while it decoded, said again by every render that meets the image
     /// here, as `damage` is.
     repairs: Vec<(String, String)>,
+}
+
+/// One image name's decodes in [`Caches::images`].
+///
+/// The first decode of a name reads what its frame is, and every later draw
+/// of the name reads the size it is decoded at from that: the frame's own
+/// width and height for a JPEG drawn with no mask (`jpeg_scale`), and `None`
+/// for every other image, which is decoded at full size whatever a draw asks.
+/// Each size's decode is kept under the reduction it was made at
+/// ([`reduction`]): 1 for full size, 2, 4 and 8 for a half, a quarter and an
+/// eighth.
+struct ImageEntry {
+    /// The frame a request can reduce, or `None` where none can.
+    frame: Option<(u32, u32)>,
+    /// The decodes made, by reduction.
+    decoded: HashMap<u32, CachedImage>,
+}
+
+/// An image XObject decoded for one draw ([`PageResources::decode_image`]),
+/// and the frame the draws after it read their size against
+/// ([`ImageEntry::frame`]).
+struct Decoded {
+    image: Result<DecodedImage, String>,
+    frame: Option<(u32, u32)>,
+}
+
+/// The scale a JPEG of `frame` samples, its own width and height, is decoded
+/// at for a draw that asks as `request` does (`docs/design/jpeg-speed.md`,
+/// "The scale rule"): the smallest of an eighth, a quarter and a half whose
+/// image still has at least as many samples as the draw has pixels along both
+/// axes, so the reduced grid is never drawn magnified, and full size where
+/// none has or where the drawn size is not finite.
+///
+/// `W·N/8` is compared as it stands rather than rounded up: it is exact in
+/// `f64` — a sixteen-bit width times at most four, over a power of two — so
+/// the comparison is the same on every target.
+fn jpeg_scale(frame: (u32, u32), request: &ImageRequest) -> JpegScale {
+    let (across, down) = request.drawn;
+    if !(across.is_finite() && down.is_finite()) {
+        return JpegScale::Full;
+    }
+    let holds = |samples: u32, scale: JpegScale, drawn: f64| {
+        f64::from(samples) * f64::from(scale.block_samples()) / 8.0 >= drawn
+    };
+    [JpegScale::Eighth, JpegScale::Quarter, JpegScale::Half]
+        .into_iter()
+        .find(|&scale| holds(frame.0, scale, across) && holds(frame.1, scale, down))
+        .unwrap_or(JpegScale::Full)
+}
+
+/// How many of an image's own samples each way one decoded sample stands for
+/// at `scale`: 1 at full size, 2, 4 and 8 at a half, a quarter and an eighth
+/// — what [`ImageEntry`] keys a decode by, and [`Reduced::factor`].
+fn reduction(scale: JpegScale) -> u32 {
+    8 / scale.block_samples()
 }
 
 /// What a page's resources work out once and every render of the page can
@@ -86,8 +142,11 @@ struct Caches {
     /// forms', or every page's of a save — is decoded once between them, and
     /// the entry here is the operation's bytes, not a copy of them.
     programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
-    /// Decoded images, kept because a page may draw one many times.
-    images: Mutex<HashMap<Vec<u8>, CachedImage>>,
+    /// Decoded images, kept because a page may draw one many times: by the
+    /// resource name, each name's decodes by the reduction they were made at
+    /// (`ImageEntry`), so a hit hands back exactly what that size's miss
+    /// computes (`docs/design/jpeg-speed.md`, "The scale rule").
+    images: Mutex<HashMap<Vec<u8>, ImageEntry>>,
     /// Compiled ICC transforms, by the profile stream's object number.
     ///
     /// A transform is three 4 096-entry tables, and a page may name the same
@@ -3588,7 +3647,12 @@ impl GlyphSource for PageResources {
         Some(tinker_pdf_render::Tile { canvas, warnings })
     }
 
-    fn inline_image(&self, dict: &[u8], data: &[u8]) -> Result<Option<DecodedImage>, String> {
+    fn inline_image(
+        &self,
+        dict: &[u8],
+        data: &[u8],
+        request: &ImageRequest,
+    ) -> Result<Option<DecodedImage>, String> {
         let text = expand_inline_abbreviations(dict);
 
         let mut sink = tinker_pdf_cos::WarningSink::new();
@@ -3599,12 +3663,20 @@ impl GlyphSource for PageResources {
 
         // Never cached, so every inline image is a decoder run.
         self.count(Counter::ImagesDecoded);
-        self.decode_inline(dict, data).map(Some)
+        self.decode_inline(dict, data, request).map(Some)
     }
 
-    fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+    fn image(&self, name: &[u8], request: &ImageRequest) -> Result<Option<DecodedImage>, String> {
         if let Ok(cache) = self.caches.images.lock() {
-            if let Some(hit) = cache.get(name) {
+            // The size this draw is decoded at, read off what the name's first
+            // decode found its frame to be.
+            let hit = cache.get(name).and_then(|entry| {
+                let at = entry
+                    .frame
+                    .map_or(1, |frame| reduction(jpeg_scale(frame, request)));
+                entry.decoded.get(&at)
+            });
+            if let Some(hit) = hit {
                 self.count(Counter::ImageHits);
                 // What the decode said, said again: a render that meets the
                 // image here met it as surely as the one that decoded it.
@@ -3624,7 +3696,10 @@ impl GlyphSource for PageResources {
         self.count(Counter::ImageMisses);
         self.count(Counter::ImagesDecoded);
         let label = String::from_utf8_lossy(name).into_owned();
-        let decoded = self.decode_image(name);
+        let Decoded {
+            image: decoded,
+            frame,
+        } = self.decode_image(name, request);
         // The damage this decode reported: every entry under this name, which
         // only this image's decode (and its soft mask's, part of it) writes.
         let damage: Vec<(String, String)> = self
@@ -3645,20 +3720,33 @@ impl GlyphSource for PageResources {
             .into_iter()
             .filter(|(named, _)| *named == label)
             .collect();
+        let at = match &decoded {
+            Ok(image) => image.reduced.map_or(1, |grid| grid.factor),
+            Err(_) => 1,
+        };
         let image = match &decoded {
             Ok(image) => Ok(Arc::new(image.clone())),
             Err(codec) => Err(codec.clone()),
         };
         if let Ok(mut cache) = self.caches.images.lock() {
-            if cache.len() < 256 {
-                cache.insert(
-                    name.to_vec(),
-                    CachedImage {
-                        image,
-                        damage,
-                        repairs,
-                    },
-                );
+            // Bounded by names, as a hostile page could name thousands; a
+            // name has at most four sizes.
+            if cache.len() < 256 || cache.contains_key(name) {
+                cache
+                    .entry(name.to_vec())
+                    .or_insert_with(|| ImageEntry {
+                        frame,
+                        decoded: HashMap::new(),
+                    })
+                    .decoded
+                    .insert(
+                        at,
+                        CachedImage {
+                            image,
+                            damage,
+                            repairs,
+                        },
+                    );
             }
         }
         decoded.map(Some)
@@ -4534,30 +4622,64 @@ impl PageResources {
         Some(scale(&outline, factor))
     }
 
-    /// Decodes one image XObject to RGB (8.9).
-    fn decode_image(&self, name: &[u8]) -> Result<DecodedImage, String> {
+    /// Decodes one image XObject to RGB (8.9) for a draw that asks as
+    /// `request` does, and says what the draws after it read their size from.
+    ///
+    /// Only a JPEG is decoded smaller than it is, and only one with no mask:
+    /// a soft mask (11.6.5.3) or a `/Mask` of either form (8.9.6.3, 8.9.6.4)
+    /// is sampled against the grid it was drawn for, so an image with one is
+    /// decoded at full size whatever the draw asks.
+    fn decode_image(&self, name: &[u8], request: &ImageRequest) -> Decoded {
         let Some((dict, reference)) = self.xobject(name) else {
-            return Err(String::from_utf8_lossy(name).into_owned());
+            return Decoded {
+                image: Err(String::from_utf8_lossy(name).into_owned()),
+                frame: None,
+            };
         };
         let label = String::from_utf8_lossy(name).into_owned();
         // An image a soft mask applies to is held as RGB, because the mask is
         // composed into its alpha a sample at a time; any other one-bit image
         // of one component is held as its two colours.
-        let form = if dict.get_ref(self.name(b"SMask")).is_some() {
+        let soft = dict.get_ref(self.name(b"SMask")).is_some();
+        let form = if soft {
             SampleForm::Rgb
         } else {
             SampleForm::TwoColour
         };
-        let mut image = self.decode_image_at(&dict, reference, &label, form)?;
-
-        // 11.6.5.3: /SMask is a greyscale image whose samples are this one's
-        // opacity. Without it every soft-masked image — a drop shadow, a
-        // feathered edge, anything composited in a design tool — paints as an
-        // opaque rectangle over the page.
-        if let Some(mask) = self.soft_mask(&dict) {
-            apply_soft_mask(&mut image, &mask);
-        }
-        Ok(image)
+        let masked = soft || dict.get(self.name(b"Mask")).is_some();
+        let jpeg = matches!(
+            self.last_filter(&dict).as_deref(),
+            Some(b"DCTDecode") | Some(b"DCT")
+        );
+        let reducible = jpeg && !masked;
+        let request = if reducible {
+            request
+        } else {
+            &ImageRequest::FULL
+        };
+        let image = self
+            .decode_image_at(&dict, reference, &label, form, request)
+            .map(|mut image| {
+                // 11.6.5.3: /SMask is a greyscale image whose samples are this
+                // one's opacity. Without it every soft-masked image — a drop
+                // shadow, a feathered edge, anything composited in a design
+                // tool — paints as an opaque rectangle over the page.
+                if let Some(mask) = self.soft_mask(&dict) {
+                    apply_soft_mask(&mut image, &mask);
+                }
+                image
+            });
+        // The frame a later draw's size is read against: the JPEG's own, which
+        // a reduced decode says it stands for and a full one is.
+        let frame = match &image {
+            Ok(image) if reducible => {
+                Some(image.reduced.map_or((image.width, image.height), |grid| {
+                    (grid.full_width, grid.full_height)
+                }))
+            }
+            _ => None,
+        };
+        Decoded { image, frame }
     }
 
     /// Records that an image decoded with something tolerated (ruling 10).
@@ -4809,6 +4931,7 @@ impl PageResources {
         interpolate: bool,
         named: Option<ColorSpace>,
         name: &[u8],
+        request: &ImageRequest,
     ) -> Result<DecodedImage, String> {
         let mut into = JpegInto {
             resources: self,
@@ -4820,20 +4943,33 @@ impl PageResources {
             width: 0,
             rgb: Vec::new(),
         };
-        let frame = jpeg_decode_strips(raw, JPEG_CEILING, JpegScale::Full, &mut into)
+        // The scale is the frame's own size against the drawn size, asked
+        // when the decode reads the frame, so it is sized by the bytes rather
+        // than by what the dictionary says they hold.
+        let choose = |width: u32, height: u32| jpeg_scale((width, height), request);
+        let frame = jpeg_decode_strips_sized(raw, JPEG_CEILING, &choose, &mut into)
             .map_err(|e| format!("{e:?}"))?;
-        stats::jpeg_held(self.op.work.as_deref(), frame.held.total());
-        let pixels = (frame.layout.width as usize) * (frame.layout.height as usize);
+        let work = self.op.work.as_deref();
+        stats::jpeg_held(work, frame.held.total());
+        stats::jpeg_transformed(work, frame.transformed);
+        let layout = frame.layout;
+        let pixels = (layout.width as usize) * (layout.height as usize);
         let mut rgb = into.rgb;
         rgb.resize(pixels * 3, 255);
+        let reduced = (layout.scale != JpegScale::Full).then(|| Reduced {
+            full_width: layout.full_width,
+            full_height: layout.full_height,
+            factor: reduction(layout.scale),
+        });
         Ok(DecodedImage {
-            width: frame.layout.width,
-            height: frame.layout.height,
+            width: layout.width,
+            height: layout.height,
             rgb,
             alpha: Vec::new(),
             stencil: false,
             interpolate,
             two_colour: None,
+            reduced,
         })
     }
 
@@ -4952,6 +5088,7 @@ impl PageResources {
             stencil: false,
             interpolate,
             two_colour: None,
+            reduced: None,
         })
     }
 
@@ -5114,6 +5251,7 @@ impl PageResources {
         reference: tinker_pdf_cos::ObjRef,
         name: &str,
         form: SampleForm,
+        request: &ImageRequest,
     ) -> Result<DecodedImage, String> {
         let dict = dict.clone();
         let name = name.as_bytes();
@@ -5182,7 +5320,7 @@ impl PageResources {
                 .image_input(reference)
                 .map_err(|_| "DCTDecode".to_string())?;
             let named = self.image_space(&dict, name);
-            return self.jpeg_image(&raw, &decode, interpolate, named, name);
+            return self.jpeg_image(&raw, &decode, interpolate, named, name, request);
         }
         if matches!(last_filter.as_deref(), Some(b"JPXDecode")) {
             // Like a JPEG and unlike a fax, a JPX codestream carries its own
@@ -5245,6 +5383,7 @@ impl PageResources {
             stencil: is_mask,
             interpolate,
             two_colour,
+            reduced: None,
         })
     }
 
@@ -5423,7 +5562,12 @@ impl PageResources {
     /// Separate from [`Self::decode_image_at`] because an inline image has no
     /// object number: its bytes are in hand rather than behind a stream tier,
     /// so the filter chain is run here instead of by the document.
-    fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
+    fn decode_inline(
+        &self,
+        dict: &Dict,
+        data: &[u8],
+        request: &ImageRequest,
+    ) -> Result<DecodedImage, String> {
         let int = |key: &[u8]| {
             self.doc
                 .resolve_key(dict, self.name(key))
@@ -5477,8 +5621,17 @@ impl PageResources {
             // a JPEG returns its own dimensions and its own colour, so it does
             // not join the sample loop below.
             InlineSamples::Jpeg(data) => {
+                // An inline image carries no mask (Table 93), so its JPEG is
+                // decoded at the size the draw asks.
                 let named = self.inline_space(dict);
-                return self.jpeg_image(&data, &decode, interpolate, named, INLINE_NAME.as_bytes());
+                return self.jpeg_image(
+                    &data,
+                    &decode,
+                    interpolate,
+                    named,
+                    INLINE_NAME.as_bytes(),
+                    request,
+                );
             }
             InlineSamples::Jpx(data) => {
                 // The same entry point the XObject path takes, for the same
@@ -5524,6 +5677,7 @@ impl PageResources {
             stencil: is_mask,
             interpolate,
             two_colour,
+            reduced: None,
         })
     }
 
@@ -5554,8 +5708,14 @@ impl PageResources {
         // A mask that is itself masked is not a thing the spec allows, and
         // decoding it through the top-level entry point would recurse. Held
         // as RGB, which `apply_soft_mask` reads its grey from.
-        self.decode_image_at(&mask, reference, "SMask", SampleForm::Rgb)
-            .ok()
+        self.decode_image_at(
+            &mask,
+            reference,
+            "SMask",
+            SampleForm::Rgb,
+            &ImageRequest::FULL,
+        )
+        .ok()
     }
 }
 
@@ -6959,7 +7119,7 @@ mod tests {
                 + image.two_colour.as_ref().map_or(0, |two| two.samples.len())
         };
         let decoded = |name: &str| {
-            res.image(name.as_bytes())
+            res.image(name.as_bytes(), &tinker_pdf_render::ImageRequest::FULL)
                 .unwrap_or_else(|codec| panic!("{name} decodes, not {codec}"))
                 .unwrap_or_else(|| panic!("{name} is an image"))
         };
@@ -7004,7 +7164,11 @@ mod tests {
         assert_eq!(held(&grey), 3 * samples, "an 8-bit grey image is RGB");
 
         let inline = res
-            .inline_image(b"/W 37 /H 23 /CS /G /BPC 1", &packed)
+            .inline_image(
+                b"/W 37 /H 23 /CS /G /BPC 1",
+                &packed,
+                &tinker_pdf_render::ImageRequest::FULL,
+            )
             .expect("the inline image decodes")
             .expect("it is an image");
         assert_eq!(held(&inline), samples, "an inline one-bit image");

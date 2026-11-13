@@ -147,7 +147,7 @@ use tinker_pdf_content::{
 use tinker_pdf_cos::pages as cos_pages;
 use tinker_pdf_render::{
     page_pixels, page_scale, page_view_transform, region_canvas_clear, user_space_pen,
-    DecodedImage, GlyphSource, PatternPaint, PixelRegion, Renderer, Shading,
+    DecodedImage, GlyphSource, ImageRequest, PatternPaint, PixelRegion, Renderer, Shading,
 };
 
 use crate::annots::{self, AppearanceDevice};
@@ -1330,16 +1330,17 @@ impl Device for Writer<'_> {
         // The renderer's answer and its words: `Ok(None)` is a name that is
         // not an image, reported under the name, and `Err` the codec.
         let decoded = if image.inline {
-            match self
-                .glyphs
-                .inline_image(&image.inline_dict, &image.inline_data)
-            {
+            match self.glyphs.inline_image(
+                &image.inline_dict,
+                &image.inline_data,
+                &ImageRequest::FULL,
+            ) {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err("inline".to_string()),
                 Err(codec) => Err(codec),
             }
         } else {
-            match self.glyphs.image(&image.name) {
+            match self.glyphs.image(&image.name, &ImageRequest::FULL) {
                 Ok(Some(decoded)) => Ok(decoded),
                 Ok(None) => Err(String::from_utf8_lossy(&image.name).into_owned()),
                 Err(codec) => Err(codec),
@@ -2198,6 +2199,7 @@ mod tests {
                         }),
                         stencil,
                         interpolate,
+                        reduced: None,
                     };
                     let expanded = DecodedImage {
                         width,
@@ -2207,6 +2209,7 @@ mod tests {
                         two_colour: None,
                         stencil,
                         interpolate,
+                        reduced: None,
                     };
                     let written = write(&two, &state);
                     assert!(
@@ -2234,6 +2237,7 @@ mod tests {
             }),
             stencil: false,
             interpolate: false,
+            reduced: None,
         };
         assert_eq!(
             write(&short, &state),

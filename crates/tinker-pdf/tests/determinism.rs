@@ -68,7 +68,7 @@ use tinker_pdf::{
 mod render_support;
 use render_support::{
     axial_page, bilevel_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink,
-    pen_page, radial_page,
+    jpeg_minified_page, pen_page, radial_page,
 };
 
 /// How a fixture's document is opened, and which of its pages is hashed.
@@ -2531,6 +2531,18 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 5_000,
     },
+    // A baseline and a progressive 4:2:0 JPEG, both odd-sized, each drawn at
+    // exactly a half, a quarter and an eighth of its size — one flipped, one
+    // quarter-turned, one clipped (`render_support::jpeg_minified_page`) — so
+    // each is decoded at the scale it is drawn at. The six draws cover about
+    // 4 300 of the page's 18 683 pixels; the floor is under half of that, and
+    // a draw that stops decoding takes the page under it.
+    Fixture {
+        name: "jpeg_minified",
+        build: jpeg_minified_page,
+        open: Open::Closed,
+        least_ink: 2_000,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2763,6 +2775,11 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // CMYK picture's pixels and of nothing else; `default_spaces`, whose
     // `/DefaultCMYK` is an `mft2` table too, is the other page it may move.
     ("icc", ""),
+    // The reduced JPEG decodes: every scale a draw asks for — a half, a
+    // quarter and an eighth — over a baseline and a progressive 4:2:0 frame
+    // whose last block column and row are partly past the image, and the
+    // reduced grid placed flipped, turned and clipped.
+    ("jpeg_minified", ""),
 ];
 
 #[test]
@@ -3059,6 +3076,7 @@ fn svg_output_is_stable_across_targets() {
             "17704be079071402a99457f13912c81f590ee940ff3625c311ec39ee19ac9f7f",
         ),
         ("icc", ""),
+        ("jpeg_minified", ""),
     ];
     assert_eq!(
         expected.len(),

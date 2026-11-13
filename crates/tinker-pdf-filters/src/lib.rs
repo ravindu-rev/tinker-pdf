@@ -90,9 +90,9 @@ pub use jbig2::{
 };
 pub use jpeg::{
     decode as jpeg_decode, decode_counted as jpeg_decode_counted,
-    decode_strips as jpeg_decode_strips, jpeg_encode, JpegColor, JpegEncodeError, JpegError,
-    JpegFrame, JpegHeld, JpegImage, JpegLayout, JpegOptions, JpegQuantisation, JpegSampling,
-    JpegScale, JpegSink, JpegSource, JpegSourceColour,
+    decode_strips as jpeg_decode_strips, decode_strips_sized as jpeg_decode_strips_sized,
+    jpeg_encode, JpegColor, JpegEncodeError, JpegError, JpegFrame, JpegHeld, JpegImage, JpegLayout,
+    JpegOptions, JpegQuantisation, JpegSampling, JpegScale, JpegSink, JpegSource, JpegSourceColour,
 };
 pub use jpx::{
     jpx_decode, jpx_decode_attributed, jpx_decode_counted, jpx_decode_request, jpx_header,

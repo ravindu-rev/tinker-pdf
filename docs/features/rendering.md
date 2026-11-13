@@ -296,6 +296,33 @@ colour exist beside the image, for an image XObject and an inline image alike
 (`a_jpeg_decodes_into_its_image_without_a_second_copy`); `Page::images` and
 image recoding keep the decoder's whole samples.
 
+**Images drawn smaller than they are.** Every image draw asks for the size it
+is drawn at (`ImageRequest`): the device pixels its unit square spans along
+each of the image's own axes, the lengths of the two columns of its transform
+in the page frame, which a tile, a band and a display list's replay compute as
+the page does (ruling 5). A JPEG is decoded at the smallest of an eighth, a
+quarter and a half whose image still has at least as many samples as drawn
+pixels on both axes — the scale chosen from the frame's own size as the decode
+reads it, so the reduced grid is never drawn magnified — and at full size when
+none has, when the drawn size is not finite, and whenever the image has a soft
+mask or a `/Mask`, which are sampled against the grid they were drawn for. A
+reduced image says which image it stands for (`DecodedImage::reduced`), and the
+draw maps the unit square onto the samples the full image's would span, so its
+last column and row are cut where the image ends rather than stretched to the
+square's edge. The image cache keeps each size's decode apart, so a hit is
+exactly what that size's miss computes. `Page::to_svg`, `Page::images` and
+recoding ask for the image whole. `images.rs` holds it:
+`a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel` (A7's JPEG half,
+through `Stats::jpeg_samples_transformed`),
+`a_jpeg_is_decoded_at_the_smallest_scale_that_covers_its_drawn_size`,
+`a_masked_jpeg_is_decoded_at_full_size`,
+`a_reduced_jpeg_covers_what_the_image_covers`,
+`each_scale_of_a_jpeg_is_cached_apart`,
+`an_inline_jpeg_is_decoded_at_its_drawn_size` and
+`the_svg_writer_and_the_image_list_take_a_jpeg_whole`; the `jpeg_minified`
+fingerprint ([determinism](determinism.md)) and `render_regions.rs` hold the
+reduced draws on every target and tile by tile.
+
 **Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
 pasted in from another document resolves its names in the dictionary it brought
 rather than in the page's. Both seams change scope together — the interpreter
@@ -857,7 +884,9 @@ with `most_decodes_of_one_stream`, the most runs any one stream had,
 of several that tie), and `bytes_decoded`, the bytes the runs returned
 ([filters](filters.md)); `jpeg_held`, the most bytes a JPEG decode held
 at once beside the image it decoded into — its coefficients, its planes and
-its strip; from `Bitmap::to_png_counted`, `png_image_scratch` and
+its strip; `jpeg_samples_transformed`, the samples the JPEG decodes' inverse
+transforms output, `N × N` for each block a decode at `N/8` transformed; from
+`Bitmap::to_png_counted`, `png_image_scratch` and
 `png_peak`, maxima of the bytes a PNG write held; `stream_seal_passes`, each
 pass of the AES core that sealed a save's streams side by side, which only a
 save that encrypts counts ([writing](writing.md)); and
@@ -865,7 +894,7 @@ save that encrypts counts ([writing](writing.md)); and
 ran — on one of the pool's workers or on the caller — counted into the first
 counted operation the page makes, its render or its counted text, and never
 into a page rendered outside a walk. `Stats::work()` totals the step counts,
-which leaves out those maxima, that quantity and the two pool counts — where
+which leaves out those maxima, those quantities and the two pool counts — where
 a part ran is no step, so a walked page totals what the page rendered alone
 does — and two `Stats` add with `+`, a maximum keeping the larger. Every
 render door counts the same way: `Page::render`, `Page::render_form` (the

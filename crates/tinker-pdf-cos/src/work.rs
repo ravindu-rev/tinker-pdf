@@ -336,6 +336,16 @@ pub struct Stats {
     /// a value (`JpegHeld`), and added by the facade's image path, which
     /// writes each strip into the image and holds nothing else beside it.
     pub jpeg_held: u64,
+    /// Samples the JPEG decodes' inverse transforms output, every component's
+    /// and every decode's summed: `N × N` for each block a decode at `N/8`
+    /// transformed, before any is replicated — what a decode at a fraction of
+    /// its size saves (`docs/design/jpeg-speed.md`, "Guard A7's JPEG half").
+    /// A quantity rather than a count of steps, so [`Stats::work`] leaves it
+    /// out.
+    ///
+    /// Counted by `tinker-pdf-filters`' strip decode, which hands it back as a
+    /// value (`JpegFrame::transformed`), and added by the facade's image path.
+    pub jpeg_samples_transformed: u64,
     /// Parts of a pooled operation that ran on one of the pool's worker
     /// threads (`tinker_pdf_pool::on_worker`): a page of a page walk, counted
     /// into that page's own operation, whose bitmap or text it is; and a page
@@ -443,14 +453,15 @@ impl Stats {
     /// The total of every counter that counts a step taken — the figure a
     /// guard compares at two sizes of one input.
     ///
-    /// The maxima and the quantity are left out — `most_decodes_of_one_stream`,
-    /// `bytes_decoded`, `png_image_scratch`, `png_peak` and `jpeg_held` —
-    /// because a byte total grows with the page and would hide a step count
-    /// that grows with the document. `bytes_scanned` is in: each of its
-    /// bytes is a step the repair scan took, not output. The two pool
-    /// counts are out too: they say on which thread a part ran, and the
-    /// part's own steps are counted where they were taken, so a page walked
-    /// on a pool totals what the same page rendered alone does.
+    /// The maxima and the quantities are left out —
+    /// `most_decodes_of_one_stream`, `bytes_decoded`, `png_image_scratch`,
+    /// `png_peak`, `jpeg_held` and `jpeg_samples_transformed` — because a
+    /// byte or sample total grows with the page and would hide a step count
+    /// that grows with the document. `bytes_scanned` is in: each of its bytes
+    /// is a step the repair scan took, not output. The two pool counts are
+    /// out too: they say on which thread a part ran, and the part's own steps
+    /// are counted where they were taken, so a page walked on a pool totals
+    /// what the same page rendered alone does.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -630,6 +641,9 @@ impl Add for Stats {
                 .stream_seal_passes
                 .saturating_add(other.stream_seal_passes),
             jpeg_held: self.jpeg_held.max(other.jpeg_held),
+            jpeg_samples_transformed: self
+                .jpeg_samples_transformed
+                .saturating_add(other.jpeg_samples_transformed),
             pool_items_on_workers: self
                 .pool_items_on_workers
                 .saturating_add(other.pool_items_on_workers),
@@ -736,6 +750,15 @@ impl Work {
         if let Ok(mut tally) = self.counts.lock() {
             let stats = &mut tally.stats;
             stats.jpeg_held = stats.jpeg_held.max(bytes);
+        }
+    }
+
+    /// Adds the samples a JPEG decode's inverse transforms output
+    /// ([`Stats::jpeg_samples_transformed`]), saturating.
+    pub fn jpeg_transformed(&self, samples: u64) {
+        if let Ok(mut tally) = self.counts.lock() {
+            let stats = &mut tally.stats;
+            stats.jpeg_samples_transformed = stats.jpeg_samples_transformed.saturating_add(samples);
         }
     }
 
@@ -968,6 +991,30 @@ mod tests {
         let sum = stats + other.stats();
         assert_eq!(sum.jpeg_held, 9_000);
         assert_eq!(other.stats() + stats, sum, "in either order");
+    }
+
+    /// A JPEG decode's transformed samples are a quantity: each decode's are
+    /// added, saturating, in a tally and across `+`, and they are no step
+    /// `work()` totals.
+    #[test]
+    fn a_jpeg_decodes_transformed_samples_sum_and_count_no_work() {
+        let work = Work::new();
+        work.jpeg_transformed(1_536);
+        work.jpeg_transformed(98_304);
+        let stats = work.stats();
+        assert_eq!(stats.jpeg_samples_transformed, 99_840);
+        assert_eq!(stats.work(), 0, "samples are no step");
+        let other = Work::new();
+        other.jpeg_transformed(64);
+        let sum = stats + other.stats();
+        assert_eq!(sum.jpeg_samples_transformed, 99_904);
+        assert_eq!(other.stats() + stats, sum, "in either order");
+        work.jpeg_transformed(u64::MAX);
+        assert_eq!(
+            work.stats().jpeg_samples_transformed,
+            u64::MAX,
+            "saturating"
+        );
     }
 
     #[test]

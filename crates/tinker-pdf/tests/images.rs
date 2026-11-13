@@ -816,3 +816,427 @@ fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
     written_support::authored(label, &bytes);
     bytes
 }
+
+// ---- The drawn-size request (P-09.8) ----------------------------------------
+//
+// A JPEG is decoded at the smallest of an eighth, a quarter and a half whose
+// image still has as many samples as the draw has pixels each way
+// (`docs/design/jpeg-speed.md`, "The drawn-size request"), and the samples the
+// inverse transforms output are counted (`Stats::jpeg_samples_transformed`).
+
+/// A 4:2:0 baseline JPEG of `width` by `height` samples from the engine's own
+/// encoder: a smooth, dark gradient, every channel of every sample under half
+/// of full scale, so a pixel the image covers at all — at the least coverage
+/// there is — is never the page's white.
+fn smooth_jpeg(width: u32, height: u32) -> Vec<u8> {
+    use tinker_pdf_filters::{JpegOptions, JpegSampling, JpegSource, JpegSourceColour};
+
+    let samples: Vec<u8> = (0..height)
+        .flat_map(|y| {
+            (0..width).flat_map(move |x| {
+                [
+                    (20 + x * 90 / width) as u8,
+                    (30 + y * 80 / height) as u8,
+                    (40 + (x + y) * 60 / (width + height)) as u8,
+                ]
+            })
+        })
+        .collect();
+    tinker_pdf_filters::jpeg_encode(
+        &JpegSource {
+            width,
+            height,
+            colour: JpegSourceColour::Rgb,
+            stride: width as usize * 3,
+            data: &samples,
+        },
+        &JpegOptions {
+            sampling: JpegSampling::FourTwoZero,
+            ..JpegOptions::default()
+        },
+    )
+    .expect("the raster encodes")
+}
+
+/// A page of `page` points drawing `content`, whose `/Im0` is the JPEG `jpeg`
+/// with `keys` in its dictionary beside `/Subtype /Image`, and whose `/Mk` is
+/// a 4 by 3 grey image a soft mask can name as `6 0 R`.
+fn jpeg_page(page: (f64, f64), content: &str, keys: &str, jpeg: &[u8]) -> Vec<u8> {
+    let (width, height) = page;
+    let mut file = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}]\n\
+   /Resources << /XObject << /Im0 5 0 R /Mk 6 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+6 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 3 /ColorSpace /DeviceGray \
+   /BitsPerComponent 8 /Length 12 >>\nstream\n",
+        content.len()
+    )
+    .into_bytes();
+    file.extend_from_slice(&[200, 180, 160, 140, 120, 100, 90, 110, 130, 150, 170, 190]);
+    file.extend_from_slice(b"\nendstream\nendobj\n");
+    file.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /XObject /Subtype /Image {keys} /Length {} >>\nstream\n",
+            jpeg.len()
+        )
+        .as_bytes(),
+    );
+    file.extend_from_slice(jpeg);
+    file.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n");
+    file
+}
+
+/// The dictionary keys a JPEG of `width` by `height` samples is drawn with.
+fn jpeg_keys(width: u32, height: u32) -> String {
+    format!(
+        "/Width {width} /Height {height} /ColorSpace /DeviceRGB /BitsPerComponent 8 \
+         /Filter /DCTDecode"
+    )
+}
+
+/// Page 0 of `bytes` rendered at `scale` with its work counted.
+fn counted_at(bytes: Vec<u8>, scale: f64) -> (tinker_pdf::Bitmap, tinker_pdf::Stats) {
+    let bitmap = Document::open(bytes)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions {
+            scale,
+            stats: true,
+            ..RenderOptions::default()
+        });
+    let stats = bitmap.stats.expect("the render counted");
+    (bitmap, stats)
+}
+
+/// Samples a 512 by 384 4:2:0 JPEG's inverse transforms output at `N/8`:
+/// 64 by 48 luma blocks and 32 by 24 of each chroma, 4 608 blocks, `N × N`
+/// samples each.
+fn transformed_512_by_384(n: u64) -> u64 {
+    4_608 * n * n
+}
+
+/// **A7, the JPEG half: a JPEG drawn at a quarter of its size each way
+/// transforms at most four samples a drawn pixel** (`docs/design/jpeg-speed.md`,
+/// "Guard A7's JPEG half"), read from the render's counted work. A 512 by 384
+/// 4:2:0 image drawn over 128 by 96 pixels is decoded at a quarter, which
+/// transforms a sample and a half a drawn pixel; its full decode, which the
+/// same image takes under a soft mask, transforms twenty-four.
+#[test]
+fn a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel() {
+    let jpeg = smooth_jpeg(512, 384);
+    let keys = jpeg_keys(512, 384);
+    let drawn_pixels = 128u64 * 96;
+    let content = "q 128 0 0 96 0 0 cm /Im0 Do Q";
+
+    let (bitmap, stats) = counted_at(jpeg_page((128.0, 96.0), content, &keys, &jpeg), 1.0);
+    assert_eq!((bitmap.width, bitmap.height), (128, 96));
+    assert!(stats.jpeg_samples_transformed > 0, "the decode was counted");
+    assert!(
+        stats.jpeg_samples_transformed <= 4 * drawn_pixels,
+        "A7: {} samples transformed for {drawn_pixels} drawn pixels",
+        stats.jpeg_samples_transformed
+    );
+    assert_eq!(
+        stats.jpeg_samples_transformed,
+        transformed_512_by_384(2),
+        "two by two samples a block: a sample and a half a drawn pixel"
+    );
+    assert_eq!(stats.images_decoded, 1);
+
+    let masked = format!("{keys} /SMask 6 0 R");
+    let (_, full) = counted_at(jpeg_page((128.0, 96.0), content, &masked, &jpeg), 1.0);
+    assert_eq!(
+        full.jpeg_samples_transformed,
+        transformed_512_by_384(8),
+        "the full decode: twenty-four samples a drawn pixel"
+    );
+    assert_eq!(full.jpeg_samples_transformed, 24 * drawn_pixels);
+}
+
+/// **The scale is the smallest whose image covers the draw on both axes**:
+/// drawn at its own size or a hair past half it is decoded whole; at a half,
+/// a quarter and an eighth at those; smaller than an eighth at an eighth, the
+/// smallest there is; at half its width and its whole height whole, since the
+/// height needs every row. A quarter-turned and a flipped draw ask the length
+/// of each of the image's own axes, and a render at twice the scale draws
+/// twice the pixels and asks twice the size.
+#[test]
+fn a_jpeg_is_decoded_at_the_smallest_scale_that_covers_its_drawn_size() {
+    let jpeg = smooth_jpeg(512, 384);
+    let keys = jpeg_keys(512, 384);
+    let transformed = |matrix: &str, scale: f64| {
+        let content = format!("q {matrix} cm /Im0 Do Q");
+        let bytes = jpeg_page((600.0, 600.0), &content, &keys, &jpeg);
+        counted_at(bytes, scale).1.jpeg_samples_transformed
+    };
+    for (matrix, scale, n, what) in [
+        ("512 0 0 384 0 0", 1.0, 8, "its own size"),
+        ("257 0 0 192 0 0", 1.0, 8, "a hair past half its width"),
+        ("256 0 0 192 0 0", 1.0, 4, "a half"),
+        ("128 0 0 96 0 0", 1.0, 2, "a quarter"),
+        ("64 0 0 48 0 0", 1.0, 1, "an eighth"),
+        ("10 0 0 7 0 0", 1.0, 1, "smaller than an eighth"),
+        (
+            "256 0 0 384 0 0",
+            1.0,
+            8,
+            "half its width and all its height",
+        ),
+        ("0 128 -96 0 96 0", 1.0, 2, "a quarter, quarter-turned"),
+        (
+            "-128 0 0 -96 128 96",
+            1.0,
+            2,
+            "a quarter, flipped both ways",
+        ),
+        (
+            "128 0 0 96 0 0",
+            2.0,
+            4,
+            "a quarter drawn at twice the scale",
+        ),
+        (
+            "64 0 0 48 0 0",
+            4.0,
+            4,
+            "an eighth drawn at four times the scale",
+        ),
+    ] {
+        assert_eq!(
+            transformed(matrix, scale),
+            transformed_512_by_384(n),
+            "{what}: decoded at {n}/8"
+        );
+    }
+}
+
+/// **A mask is sampled against the grid it was drawn for**: a JPEG with a
+/// soft mask, or with a `/Mask` of either form, is decoded at full size
+/// however small it is drawn, and the same JPEG with neither is not.
+#[test]
+fn a_masked_jpeg_is_decoded_at_full_size() {
+    let jpeg = smooth_jpeg(512, 384);
+    let keys = jpeg_keys(512, 384);
+    let content = "q 64 0 0 48 0 0 cm /Im0 Do Q";
+    for (extra, n) in [
+        ("", 1),
+        ("/SMask 6 0 R", 8),
+        ("/Mask [0 10 0 10 0 10]", 8),
+        ("/Mask 6 0 R", 8),
+    ] {
+        let bytes = jpeg_page((64.0, 48.0), content, &format!("{keys} {extra}"), &jpeg);
+        assert_eq!(
+            counted_at(bytes, 1.0).1.jpeg_samples_transformed,
+            transformed_512_by_384(n),
+            "{extra:?}"
+        );
+    }
+}
+
+/// **A reduced JPEG covers what the image covers.** An odd-sized JPEG, 333 by
+/// 217, drawn at a quarter at a fractional offset is decoded at a quarter, 84
+/// by 55 samples whose last column and row stand for less than four of the
+/// image's: it paints exactly the pixels the same image decoded whole paints
+/// — the grid is cut where the image ends, not stretched to the square's
+/// edge — and close to the same colours, the reduced transform standing in
+/// for the box filter.
+#[test]
+fn a_reduced_jpeg_covers_what_the_image_covers() {
+    let jpeg = smooth_jpeg(333, 217);
+    let keys = jpeg_keys(333, 217);
+    let content = "q 83.25 0 0 54.25 3.4 5.7 cm /Im0 Do Q";
+    let (reduced, stats) = counted_at(jpeg_page((95.0, 70.0), content, &keys, &jpeg), 1.0);
+    // 21 by 14 MCUs of four luma blocks and one of each chroma, two by two
+    // samples each.
+    assert_eq!(stats.jpeg_samples_transformed, 21 * 14 * 6 * 4, "a quarter");
+    let masked = format!("{keys} /Mask [0 0 0 0 0 0]");
+    let (whole, stats) = counted_at(jpeg_page((95.0, 70.0), content, &masked, &jpeg), 1.0);
+    assert_eq!(stats.jpeg_samples_transformed, 21 * 14 * 6 * 64, "whole");
+    assert_eq!((reduced.width, reduced.height), (whole.width, whole.height));
+
+    let (mut painted, mut differing, mut total) = (0usize, 0usize, 0u64);
+    for y in 0..reduced.height {
+        for x in 0..reduced.width {
+            let (a, b) = (pixel(&reduced, x, y), pixel(&whole, x, y));
+            let white = |p: (u8, u8, u8)| p == (255, 255, 255);
+            assert_eq!(
+                white(a),
+                white(b),
+                "({x}, {y}): the reduced grid covers {} what the image covers",
+                if white(a) { "less than" } else { "more than" }
+            );
+            if !white(a) {
+                painted += 1;
+                let diff = u64::from(a.0.abs_diff(b.0))
+                    + u64::from(a.1.abs_diff(b.1))
+                    + u64::from(a.2.abs_diff(b.2));
+                total += diff;
+                differing += usize::from(diff > 0);
+            }
+        }
+    }
+    assert!(painted > 4_000, "the image covers {painted} pixels");
+    assert!(
+        total <= 3 * 6 * painted as u64,
+        "the reduced decode is near the whole one: {total} levels over {painted} pixels, \
+         {differing} differing"
+    );
+}
+
+/// **Each scale's decode is kept apart.** A retained page drawn at 72 dpi
+/// decodes its JPEG at a quarter; at four times the scale it draws it at its
+/// own size and decodes it whole, a second miss; at 72 dpi again it meets the
+/// quarter in the cache and transforms nothing, and draws the same bytes. One
+/// page drawing the image at both sizes decodes it at both.
+#[test]
+fn each_scale_of_a_jpeg_is_cached_apart() {
+    let jpeg = smooth_jpeg(512, 384);
+    let keys = jpeg_keys(512, 384);
+    let bytes = jpeg_page((128.0, 96.0), "q 128 0 0 96 0 0 cm /Im0 Do Q", &keys, &jpeg);
+    let doc = Document::open(bytes).expect("it opens");
+    let list = doc.page(0).expect("a page").display_list();
+    let at = |scale: f64| {
+        let bitmap = list.render(&RenderOptions {
+            scale,
+            stats: true,
+            ..RenderOptions::default()
+        });
+        let stats = bitmap.stats.expect("counted");
+        (bitmap, stats)
+    };
+    let (first, stats) = at(1.0);
+    assert_eq!(
+        (
+            stats.image_misses,
+            stats.image_hits,
+            stats.jpeg_samples_transformed
+        ),
+        (1, 0, transformed_512_by_384(2)),
+        "a quarter, decoded"
+    );
+    let (_, stats) = at(4.0);
+    assert_eq!(
+        (
+            stats.image_misses,
+            stats.image_hits,
+            stats.jpeg_samples_transformed
+        ),
+        (1, 0, transformed_512_by_384(8)),
+        "its own size, decoded whole: another scale's miss"
+    );
+    let (again, stats) = at(1.0);
+    assert_eq!(
+        (
+            stats.image_misses,
+            stats.image_hits,
+            stats.jpeg_samples_transformed
+        ),
+        (0, 1, 0),
+        "the quarter, found"
+    );
+    assert!(again.data == first.data, "a hit is what the miss drew");
+    assert_eq!(again.warnings, first.warnings);
+
+    let both = jpeg_page(
+        (640.0, 480.0),
+        "q 128 0 0 96 0 0 cm /Im0 Do Q q 512 0 0 384 128 96 cm /Im0 Do Q \
+         q 128 0 0 96 0 384 cm /Im0 Do Q",
+        &keys,
+        &jpeg,
+    );
+    let (_, stats) = counted_at(both, 1.0);
+    assert_eq!(
+        (stats.image_misses, stats.image_hits),
+        (2, 1),
+        "a quarter, the whole image, then the quarter found"
+    );
+    assert_eq!(
+        stats.jpeg_samples_transformed,
+        transformed_512_by_384(2) + transformed_512_by_384(8)
+    );
+}
+
+/// An inline JPEG is decoded at the size it is drawn too (8.9.7 gives it no
+/// mask): a 128 by 96 4:2:0 image inline, drawn at a quarter, transforms a
+/// sixteenth of what it transforms drawn whole.
+#[test]
+fn an_inline_jpeg_is_decoded_at_its_drawn_size() {
+    let jpeg = smooth_jpeg(128, 96);
+    let hex: String = jpeg.iter().map(|byte| format!("{byte:02X}")).collect();
+    let drawn = |width: f64, height: f64| {
+        let content = format!(
+            "q {width} 0 0 {height} 0 0 cm BI /W 128 /H 96 /CS /RGB /BPC 8 \
+             /F [/AHx /DCT] ID {hex}> EI Q"
+        );
+        let (bitmap, stats) = counted_at(page_with_content(content.as_bytes()), 1.0);
+        assert!(bitmap.warnings.is_empty(), "{:?}", bitmap.warnings);
+        stats.jpeg_samples_transformed
+    };
+    // 16 by 12 luma blocks and 8 by 6 of each chroma: 288 blocks.
+    assert_eq!(drawn(128.0, 96.0), 288 * 64, "whole");
+    assert_eq!(drawn(32.0, 24.0), 288 * 4, "a quarter");
+}
+
+/// Minimal base64 (RFC 4648 §4), to read an SVG's `data:` URI back.
+fn unbase64(text: &str) -> Vec<u8> {
+    let value = |c: u8| -> u32 {
+        match c {
+            b'A'..=b'Z' => u32::from(c - b'A'),
+            b'a'..=b'z' => u32::from(c - b'a') + 26,
+            b'0'..=b'9' => u32::from(c - b'0') + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => panic!("not base64: {c}"),
+        }
+    };
+    let mut out = Vec::new();
+    for chunk in text.as_bytes().chunks(4) {
+        let pad = chunk.iter().filter(|&&c| c == b'=').count();
+        let n = chunk
+            .iter()
+            .take(4 - pad)
+            .fold(0u32, |n, &c| (n << 6) | value(c))
+            << (6 * pad);
+        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&bytes[..3 - pad]);
+    }
+    out
+}
+
+/// **What is not a draw asks for the image whole**: a JPEG drawn at a quarter
+/// is written into the page's SVG at its own 512 by 384, listed by
+/// `Page::images` at that size with every sample, and a render of the page
+/// that met it first changes neither.
+#[test]
+fn the_svg_writer_and_the_image_list_take_a_jpeg_whole() {
+    let jpeg = smooth_jpeg(512, 384);
+    let keys = jpeg_keys(512, 384);
+    let bytes = jpeg_page((128.0, 96.0), "q 128 0 0 96 0 0 cm /Im0 Do Q", &keys, &jpeg);
+    let doc = Document::open(bytes).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let list = page.display_list();
+    let _ = list.render(&RenderOptions::default());
+
+    for svg in [
+        page.to_svg(&tinker_pdf::SvgOptions::default()),
+        list.to_svg(&tinker_pdf::SvgOptions::default()),
+    ] {
+        let start = svg
+            .markup
+            .find("data:image/png;base64,")
+            .expect("the image is written as a PNG");
+        let data = &svg.markup[start + "data:image/png;base64,".len()..];
+        let end = data.find('"').expect("the URI ends");
+        let png = tinker_pdf::Bitmap::from_png(&unbase64(&data[..end])).expect("it decodes");
+        assert_eq!((png.width, png.height), (512, 384), "written whole");
+    }
+
+    let images = page.images();
+    let image = images.first().expect("the page lists its image");
+    assert_eq!((image.width, image.height), (512, 384));
+    assert_eq!(image.samples.len(), 512 * 384 * 3, "every sample");
+}

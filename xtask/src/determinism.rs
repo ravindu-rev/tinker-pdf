@@ -203,6 +203,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once",
     },
+    // MS-01's A7 guard, its JPEG half: a JPEG drawn at a quarter of its size
+    // each way transforms at most four samples a drawn pixel, on every target.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/images.rs",
+        test: "a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel",
+    },
     // MS-01's A8 guard: the PNG path's whole-image scratch, none, and its
     // peak with the file at most 1.2 x the image.
     Fingerprint {

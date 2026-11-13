@@ -101,6 +101,14 @@ pub(crate) fn jpeg_held(work: Option<&Work>, bytes: usize) {
     }
 }
 
+/// Adds the samples a JPEG decode's inverse transforms output, when the
+/// operation is counting.
+pub(crate) fn jpeg_transformed(work: Option<&Work>, samples: u64) {
+    if let Some(work) = work {
+        work.jpeg_transformed(samples);
+    }
+}
+
 /// Adds what a renderer counted — its glyphs shown, its outlines painted,
 /// its glyph masks rasterised and found in its cache, and its shading
 /// functions evaluated — to the operation's tally, when it is counting.

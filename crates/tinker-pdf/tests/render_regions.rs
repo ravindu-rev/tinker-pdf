@@ -42,6 +42,13 @@
 //!   the page `determinism.rs` fingerprints as `bilevel`): a fax, a palette,
 //!   an inverted `/Decode` and a stencil reach the sampler by the bilevel
 //!   paths, and minified they sample partial samples at a tile's edge.
+//! - **JPEGs decoded at the size they are drawn**
+//!   (`render_support::jpeg_minified_page`, the page `determinism.rs`
+//!   fingerprints as `jpeg_minified`): a baseline and a progressive frame at a
+//!   half, a quarter and an eighth, flipped, turned and clipped. A draw asks
+//!   for its size in the page frame, so a tile asks what the page asks and is
+//!   decoded at the same scale, and the reduced grid is cut where the image
+//!   ends in a tile as on the page.
 //! - **Canvases that stand somewhere in the page**: a non-isolated group under
 //!   a blend mode, a knockout group and a luminosity soft mask; a tiling
 //!   pattern's cell; a Gouraud mesh's own buffer. Each is a buffer the size of
@@ -141,7 +148,7 @@ use tinker_pdf::{
 };
 
 mod render_support;
-use render_support::{bilevel_page, curvy_font, ink, pen_page};
+use render_support::{bilevel_page, curvy_font, ink, jpeg_minified_page, pen_page};
 
 /// The fixture page, in points. Not round, and coprime with every tile size
 /// below, so no lattice in this file ever divides it evenly.
@@ -534,6 +541,10 @@ fn fixtures() -> Vec<Fixture> {
     // fingerprints as `bilevel`, built by the same function. A page of its own
     // size, 93 by 165, which no tile size here divides either.
     add("bilevel", bilevel_page(), 2_800);
+    // JPEGs drawn at a half, a quarter and an eighth: the page `determinism.rs`
+    // fingerprints as `jpeg_minified`, 119 by 157, which no tile size here
+    // divides.
+    add("jpeg minified", jpeg_minified_page(), 2_000);
     out
 }
 

@@ -294,6 +294,7 @@ const ROSTER: &[Guard] = &[
     },
     Guard {
         file: "images.rs",
+        state: State::Landed,
         ..owed(
             "A7",
             "IDCT output at most 4 x drawn pixels for a quarter-scale draw",

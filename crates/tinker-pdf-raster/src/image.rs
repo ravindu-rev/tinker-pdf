@@ -578,6 +578,14 @@ pub struct ImageDraw<'a> {
     /// Maps the image's unit square — `(0, 0)` at its bottom-left corner and
     /// `(1, 1)` at its top-right — to device space.
     pub unit_to_device: Transform,
+    /// The square the draw is cut at, where it is smaller than the one its
+    /// samples span: a reduced decode's samples reach past the image they
+    /// stand for wherever its last column and row stand for less than a whole
+    /// sample, so they are mapped by [`Self::unit_to_device`] onto the square
+    /// they span and cut here, at the image's own unit square. The coverage of
+    /// the image's edge is this square's; `None` cuts at
+    /// [`Self::unit_to_device`]'s own.
+    pub cut: Option<Transform>,
     /// Whether the image asked to be smoothed when it is magnified.
     ///
     /// The one bit of the policy the caller supplies; everything else is read
@@ -623,6 +631,7 @@ impl<'a> ImageDraw<'a> {
         ImageDraw {
             image,
             unit_to_device,
+            cut: None,
             interpolate: false,
             alpha: 1.0,
             blend: BlendMode::Normal,
@@ -777,8 +786,11 @@ fn walk(
     let Some(inverse) = draw.unit_to_device.invert() else {
         return; // A degenerate transform maps the image to nothing.
     };
+    // The square whose pixels the draw visits and whose coverage is its edge:
+    // the image's own, which a reduced decode's samples reach past.
+    let cut = draw.cut.as_ref().unwrap_or(&draw.unit_to_device);
 
-    let Some((x0, x1, y0, y1)) = device_bounds(&draw.unit_to_device, rect) else {
+    let Some((x0, x1, y0, y1)) = device_bounds(cut, rect) else {
         return;
     };
 
@@ -800,7 +812,7 @@ fn walk(
     // cancellation. `docs/design/image-edges.md` records what this trades.
     let mut shape = unit_quad(
         scratch,
-        &draw.unit_to_device,
+        cut,
         (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)),
         draw.stop,
     );
@@ -1587,6 +1599,110 @@ mod tests {
             canvas.data.iter().all(|byte| *byte == 255),
             "an image off every side of the canvas left ink on it"
         );
+    }
+
+    /// **A draw cut at a smaller square samples the square its samples span
+    /// and covers the cut** (P-09.8): three by two samples standing for a
+    /// five by three image, each two of its own, span 1.2 by 4/3 of the
+    /// image's square from its top-left corner. Drawn over that square and
+    /// cut at the image's own, they are the same samples drawn over the larger
+    /// square under a clip of the smaller one, pixel for pixel — the cut's
+    /// edges are whole pixels, so neither coverage is partial — and nothing
+    /// outside the cut is painted, where the same draw uncut paints the rest
+    /// of the larger square. The same holds for a run's accumulation.
+    #[test]
+    fn a_cut_draw_samples_its_square_and_covers_the_cut() {
+        let rgb: Vec<u8> = (0..3u32 * 2 * 3).map(|i| (i * 37 % 256) as u8).collect();
+        let image = ImageSource {
+            width: 3,
+            height: 2,
+            rgb: &rgb,
+            alpha: &[],
+            two_colour: None,
+        };
+        // The image's own square: 50 by 30 pixels at (4, 6), its first row at
+        // the top.
+        let unit = Transform {
+            a: 50.0,
+            b: 0.0,
+            c: 0.0,
+            d: -30.0,
+            e: 4.0,
+            f: 36.0,
+        };
+        // Its samples' square: 60 by 40 pixels from the same top-left corner.
+        let samples = Transform {
+            a: 60.0,
+            b: 0.0,
+            c: 0.0,
+            d: -40.0,
+            e: 4.0,
+            f: 46.0,
+        };
+        let paint = |draw: &ImageDraw<'_>| {
+            let mut canvas = Canvas::new(80, 60, PixelFormat::Rgb8, Color::WHITE);
+            draw_image(
+                &mut canvas,
+                draw,
+                &mut Pyramid::new(),
+                &mut FillScratch::new(),
+            );
+            canvas
+        };
+        let cut = paint(&ImageDraw {
+            cut: Some(unit),
+            ..ImageDraw::new(image, samples)
+        });
+        let clip = Mask::uniform(4, 6, 50, 30, 255);
+        let clipped = paint(&ImageDraw {
+            clip: Some(&clip),
+            ..ImageDraw::new(image, samples)
+        });
+        assert!(
+            cut.data == clipped.data,
+            "the cut draw is the larger square's samples clipped to the cut"
+        );
+        let uncut = paint(&ImageDraw::new(image, samples));
+        for y in 0..60usize {
+            for x in 0..80usize {
+                let at = (y * 80 + x) * 3;
+                let inside = (4..54).contains(&x) && (6..36).contains(&y);
+                if inside {
+                    assert_eq!(cut.data[at..at + 3], uncut.data[at..at + 3], "({x}, {y})");
+                } else {
+                    assert_eq!(
+                        cut.data[at..at + 3],
+                        [255, 255, 255],
+                        "({x}, {y}) is past the cut"
+                    );
+                }
+            }
+        }
+        assert!(
+            uncut.data != cut.data,
+            "uncut, the samples' square paints past the image"
+        );
+
+        // A run accumulates the cut square's fragments and no others.
+        let extent = (0, 0, 80, 60);
+        let mut fragments = Fragments::new(0, 0, 80, 60);
+        accumulate_image(
+            &mut fragments,
+            &ImageDraw {
+                cut: Some(unit),
+                ..ImageDraw::new(image, samples)
+            },
+            &mut Pyramid::new(),
+            extent,
+            &mut FillScratch::new(),
+        );
+        let outside = Mask::uniform(0, 36, 80, 24, 255);
+        assert!(
+            !fragments.would_overlap(&outside),
+            "nothing below the cut was accumulated"
+        );
+        let inside = Mask::uniform(10, 10, 4, 4, 255);
+        assert!(fragments.would_overlap(&inside), "the cut square was");
     }
 
     /// With anti-aliasing off, a rotated image's edge is whole or absent at

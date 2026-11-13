@@ -979,7 +979,7 @@ pub fn decode_counted(data: &[u8], max_output: usize) -> (Result<JpegImage, Jpeg
     let decoded = scan_frame_counted(
         data,
         max_output,
-        JpegScale::Full,
+        &|_, _| JpegScale::Full,
         Some(&mut image),
         &mut steps,
     )
@@ -1024,6 +1024,31 @@ pub fn decode_strips(
         held: 0,
     };
     let scanned = scan_frame(data, max_output, scale, Some(&mut forwarded))?;
+    finish(scanned, max_output, &mut forwarded)
+}
+
+/// [`decode_strips`] at the scale `choose` picks from the frame's own width
+/// and height, B.2.2's `X` and `Y` (`docs/design/jpeg-speed.md`, "The
+/// drawn-size request"): the decode a caller makes that sizes its image by
+/// the frame it reads rather than by anything said about the frame.
+///
+/// `choose` is asked once, when the marker walk reaches the frame's first scan
+/// — where the frame's coefficients are sized — and never for a stream that
+/// has no scan, which fails as [`decode_strips`] fails it. What it answers is
+/// the layout's [`JpegLayout::scale`]; the strips are then the ones
+/// [`decode_strips`] hands out at that scale, byte for byte.
+pub fn decode_strips_sized(
+    data: &[u8],
+    max_output: usize,
+    choose: &dyn Fn(u32, u32) -> JpegScale,
+    sink: &mut dyn JpegSink,
+) -> Result<JpegFrame, JpegError> {
+    let mut forwarded = Forwarded {
+        sink,
+        strip: Vec::new(),
+        held: 0,
+    };
+    let scanned = scan_frame_counted(data, max_output, choose, Some(&mut forwarded), &mut 0)?;
     finish(scanned, max_output, &mut forwarded)
 }
 
@@ -1084,16 +1109,18 @@ fn scan_frame(
     scale: JpegScale,
     stream: Option<&mut dyn Rows>,
 ) -> Result<Scanned, JpegError> {
-    scan_frame_counted(data, max_output, scale, stream, &mut 0)
+    scan_frame_counted(data, max_output, &|_, _| scale, stream, &mut 0)
 }
 
-/// [`scan_frame`], adding the steps it took to `steps`: what
+/// [`scan_frame`] at the scale `choose` picks from the frame's width and
+/// height as the walk has them at the frame's first scan, where its
+/// coefficients are sized, adding the steps it took to `steps`: what
 /// [`decode_counted`] names, but for the transform and the image, which the
 /// end of a decode counts.
 fn scan_frame_counted(
     data: &[u8],
     max_output: usize,
-    scale: JpegScale,
+    choose: &dyn Fn(u32, u32) -> JpegScale,
     mut stream: Option<&mut dyn Rows>,
     steps: &mut u64,
 ) -> Result<Scanned, JpegError> {
@@ -1119,6 +1146,9 @@ fn scan_frame_counted(
     let mut allocated = false;
     let mut truncated = false;
     let mut painting: Option<(Painter, JpegLayout)> = None;
+    // Chosen with the coefficients' sizes, at the first scan: a stream with
+    // no scan fails below and is never asked about.
+    let mut scale = JpegScale::Full;
 
     let mut at = 2usize;
     while at + 1 < data.len() {
@@ -1327,6 +1357,11 @@ fn scan_frame_counted(
                 let (ah, al) = (u32::from(a >> 4), u32::from(a & 0x0F));
 
                 if !allocated {
+                    // B.2.2's `X` and `Y` are sixteen bits.
+                    scale = choose(
+                        u32::try_from(width).unwrap_or(u32::MAX),
+                        u32::try_from(height).unwrap_or(u32::MAX),
+                    );
                     let streams = stream.is_some()
                         && streamable(&components, &parts, progressive, width, height)
                         && the_rest_is_inert(data, next_marker(data, segment_end, steps), steps);
@@ -6862,5 +6897,136 @@ mod tests {
             square(&natural, kept::<2>(&source, &table, kept_span(2)), case);
             square(&natural, kept::<1>(&source, &table, kept_span(1)), case);
         }
+    }
+
+    /// **A sized decode asks its scale of the frame's own size** (P-09.8): the
+    /// chooser is asked once, with B.2.2's `X` and `Y` as the frame states
+    /// them, and the decode is the strip decode at what it answered — layout,
+    /// strips, warnings and the samples transformed alike — for every scale,
+    /// over an encoded odd-sized 4:2:0 image and the generated streams of
+    /// every frame type. A stream that fails before its first scan is never
+    /// asked about, and fails as the strip decode fails it.
+    #[test]
+    fn a_sized_decode_asks_its_scale_of_the_frames_own_size() {
+        use std::cell::RefCell;
+
+        let raster: Vec<u8> = (0..37usize * 23 * 3).map(|i| (i * 7 % 251) as u8).collect();
+        let encoded = jpeg_encode(
+            &JpegSource {
+                width: 37,
+                height: 23,
+                colour: JpegSourceColour::Rgb,
+                stride: 37 * 3,
+                data: &raster,
+            },
+            &JpegOptions {
+                sampling: JpegSampling::FourTwoZero,
+                ..JpegOptions::default()
+            },
+        )
+        .expect("the raster encodes");
+        let mut inputs = vec![("encoded 37 x 23".to_string(), encoded.clone())];
+        let mut noise = streams::Noise(0x5132_ED00_0009_0008);
+        for _ in 0..200 {
+            let recipe = streams::random_recipe(&mut noise);
+            let bytes = streams::stream(&recipe, &mut noise);
+            inputs.push((format!("{recipe:?}"), bytes));
+        }
+
+        let mut decoded = 0usize;
+        for (label, bytes) in &inputs {
+            for answer in JpegScale::ALL {
+                let asked = RefCell::new(Vec::new());
+                let choose = |width: u32, height: u32| {
+                    asked.borrow_mut().push((width, height));
+                    answer
+                };
+                let mut sized = Kept::default();
+                let by_size = decode_strips_sized(bytes, CEILING, &choose, &mut sized);
+                let mut fixed = Kept::default();
+                let at_scale = decode_strips(bytes, CEILING, answer, &mut fixed);
+                match (by_size, at_scale) {
+                    (Ok(by_size), Ok(at_scale)) => {
+                        let layout = by_size.layout;
+                        assert_eq!(
+                            *asked.borrow(),
+                            vec![(layout.full_width, layout.full_height)],
+                            "{label}: asked once, of the frame's own size"
+                        );
+                        assert_eq!(layout, at_scale.layout, "{label} at {answer:?}");
+                        assert_eq!(layout.scale, answer, "{label}: the answer is the scale");
+                        assert_eq!(by_size.warnings, at_scale.warnings, "{label}");
+                        assert_eq!(by_size.transformed, at_scale.transformed, "{label}");
+                        assert_eq!(sized.layouts, fixed.layouts, "{label}");
+                        assert_eq!(sized.strips, fixed.strips, "{label} at {answer:?}");
+                        assert!(
+                            sized.data == fixed.data,
+                            "{label} at {answer:?}: the strips are that scale's"
+                        );
+                        decoded += 1;
+                    }
+                    (Err(by_size), Err(at_scale)) => {
+                        assert_eq!(by_size, at_scale, "{label} at {answer:?}: one refusal");
+                        assert!(asked.borrow().len() <= 1, "{label}: asked at most once");
+                    }
+                    (by_size, at_scale) => panic!(
+                        "{label} at {answer:?}: the sized decode gave {:?} and the strip \
+                         decode {:?}",
+                        by_size.map(|frame| frame.layout),
+                        at_scale.map(|frame| frame.layout)
+                    ),
+                }
+            }
+        }
+        assert!(decoded > 400, "{decoded} decodes were compared");
+
+        // The encoded image's own size, whatever the caller was told it is.
+        let asked = RefCell::new(Vec::new());
+        let quarter = decode_strips_sized(
+            &encoded,
+            CEILING,
+            &|width, height| {
+                asked.borrow_mut().push((width, height));
+                JpegScale::Quarter
+            },
+            &mut Kept::default(),
+        )
+        .expect("it decodes");
+        assert_eq!(*asked.borrow(), vec![(37, 23)]);
+        assert_eq!(
+            (quarter.layout.width, quarter.layout.height),
+            (10, 6),
+            "⌈37 / 4⌉ by ⌈23 / 4⌉"
+        );
+
+        // A stream that fails before a scan is never asked about.
+        let asked = RefCell::new(0usize);
+        let never = |_: u32, _: u32| {
+            *asked.borrow_mut() += 1;
+            JpegScale::Half
+        };
+        let sos = encoded
+            .windows(2)
+            .position(|pair| pair == [0xFF, 0xDA])
+            .expect("the encoded image has a scan");
+        for (cut, refusal) in [
+            (&b"not a JPEG"[..], JpegError::NotJpeg),
+            (&encoded[..sos], JpegError::Truncated),
+        ] {
+            let got = decode_strips_sized(cut, CEILING, &never, &mut Kept::default())
+                .map(|frame| frame.layout);
+            assert_eq!(got, Err(refusal));
+            assert_eq!(
+                decode_strips(cut, CEILING, JpegScale::Half, &mut Kept::default())
+                    .map(|frame| frame.layout),
+                Err(refusal),
+                "as the strip decode refuses it"
+            );
+        }
+        assert_eq!(
+            *asked.borrow(),
+            0,
+            "a stream with no scan is never asked about"
+        );
     }
 }

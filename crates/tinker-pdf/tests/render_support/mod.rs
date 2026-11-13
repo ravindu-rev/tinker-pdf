@@ -9,8 +9,8 @@
 //!
 //! It also builds the pages two files must agree on byte for byte: the analytic
 //! pages `determinism.rs` fingerprints and `render_analytic.rs` evaluates, and
-//! the pen and bilevel pages `determinism.rs` fingerprints and `render_regions.rs`
-//! tiles.
+//! the pen, bilevel and minified JPEG pages `determinism.rs` fingerprints and
+//! `render_regions.rs` tiles.
 //!
 //! Only the helpers those four need live here. The twenty-odd other test
 //! binaries that open a document and look at a pixel keep their own copies
@@ -485,6 +485,337 @@ pub fn bilevel_page() -> Vec<u8> {
             &plain,
         ),
         image("/ImageMask true /Filter /ASCIIHexDecode", &plain),
+    ];
+    let mut out = String::from("%PDF-1.7\n");
+    for (index, object) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        objects.len() + 1
+    ));
+    out.into_bytes()
+}
+
+// ---- the minified JPEG page --------------------------------------------------
+//
+// JPEGs drawn at a half, a quarter and an eighth of their size, which a render
+// decodes at those scales (`docs/design/jpeg-speed.md`, "The drawn-size
+// request"): the page `determinism.rs` fingerprints as `jpeg_minified` and
+// `render_regions.rs` tiles.
+
+/// The baseline JPEG's size: odd both ways, so its last block column and row
+/// are partly past the image and its reduced grid's last sample stands for
+/// less than a whole one at every scale.
+pub const MINIFIED_BASELINE: (u32, u32) = (101, 77);
+
+/// The progressive JPEG's size, odd both ways too.
+pub const MINIFIED_PROGRESSIVE: (u32, u32) = (93, 61);
+
+/// A 4:2:0 baseline JPEG of `width` by `height` samples from the engine's own
+/// encoder: hue and lightness ramps crossed by a ripple, so its blocks carry
+/// AC terms each reduced transform keeps a part of, and no sample is the
+/// page's white.
+pub fn minified_baseline_jpeg(width: u32, height: u32) -> Vec<u8> {
+    use tinker_pdf_filters::{JpegOptions, JpegSampling, JpegSource, JpegSourceColour};
+
+    let samples: Vec<u8> = (0..height)
+        .flat_map(|y| {
+            (0..width).flat_map(move |x| {
+                let ripple = ((x * 7 + y * 3) % 23) * 3;
+                [
+                    (30 + x * 150 / width + ripple) as u8,
+                    (20 + y * 120 / height + ripple / 2) as u8,
+                    (90 + (x * 5 + y * 11) % 70) as u8,
+                ]
+            })
+        })
+        .collect();
+    tinker_pdf_filters::jpeg_encode(
+        &JpegSource {
+            width,
+            height,
+            colour: JpegSourceColour::Rgb,
+            stride: width as usize * 3,
+            data: &samples,
+        },
+        &JpegOptions {
+            sampling: JpegSampling::FourTwoZero,
+            ..JpegOptions::default()
+        },
+    )
+    .expect("the raster encodes")
+}
+
+/// Bits written most significant first, with T.81 B.1.1.5's stuffed zero
+/// after every `X'FF'` and the last byte padded with ones.
+#[derive(Default)]
+struct EntropyBits {
+    out: Vec<u8>,
+    byte: u32,
+    filled: u32,
+}
+
+impl EntropyBits {
+    /// The low `count` bits of `value`, the highest first.
+    fn put(&mut self, value: u32, count: u32) {
+        for at in (0..count).rev() {
+            self.byte = (self.byte << 1) | ((value >> at) & 1);
+            self.filled += 1;
+            if self.filled == 8 {
+                self.flush_byte();
+            }
+        }
+    }
+
+    fn flush_byte(&mut self) {
+        let byte = (self.byte & 0xFF) as u8;
+        self.out.push(byte);
+        if byte == 0xFF {
+            self.out.push(0x00);
+        }
+        self.byte = 0;
+        self.filled = 0;
+    }
+
+    /// The segment, its last byte padded with ones.
+    fn finish(mut self) -> Vec<u8> {
+        while self.filled != 0 {
+            self.put(1, 1);
+        }
+        self.out
+    }
+}
+
+/// F.1.2.1's size category of a difference or coefficient `value`, and the
+/// bits that follow its code: the value itself, or one less than it for a
+/// negative one, in that many bits.
+fn magnitude(value: i32) -> (u32, u32) {
+    let size = 32 - value.unsigned_abs().leading_zeros();
+    let bits = if value < 0 {
+        value.wrapping_sub(1)
+    } else {
+        value
+    };
+    let mask = if size == 0 {
+        0
+    } else {
+        u32::MAX >> (32 - size)
+    };
+    (size, (bits as u32) & mask)
+}
+
+/// The AC table's symbols in the order the DHT segment lists them, each coded
+/// by its index in eight bits: end-of-band, the sixteen-zero run, then every
+/// run of 0 to 15 zeros before a coefficient of size 1 to 10.
+fn ac_symbols() -> Vec<u8> {
+    let mut symbols = vec![0x00, 0xF0];
+    for run in 0..16u8 {
+        for size in 1..=10u8 {
+            symbols.push((run << 4) | size);
+        }
+    }
+    symbols
+}
+
+/// A 4:2:0 progressive JPEG (SOF2) of `width` by `height` samples, written
+/// here because the engine's encoder writes baseline only: one interleaved DC
+/// first scan of the three components, then one AC first scan of each, the
+/// band 1 to 63 with no successive approximation (T.81 G.1.2).
+///
+/// The quantised coefficients are stated rather than transformed from a
+/// picture: each block's DC a ramp across the component, and the first six
+/// AC terms in zigzag order — all inside the four by four corner a half-scale
+/// decode keeps, three of them in the two by two a quarter keeps — a pattern
+/// of its position, between -5 and 5. The DC table codes each size in four
+/// bits and the AC table each symbol in eight, so the entropy coding is
+/// arithmetic a reader can follow, and T.81's own Huffman procedure is not
+/// what is under test.
+///
+/// The width and height must make each component's own block grid its share
+/// of the MCU grid — `⌈width / 8⌉` and `⌈height / 8⌉` even — so that the AC
+/// scans, which code a component's own blocks (A.2.2), code exactly the blocks
+/// the DC scan did.
+pub fn minified_progressive_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let (mcus_x, mcus_y) = (width.div_ceil(16), height.div_ceil(16));
+    assert_eq!(
+        (width.div_ceil(8), height.div_ceil(8)),
+        (mcus_x * 2, mcus_y * 2),
+        "each component's own grid is its share of the MCU grid"
+    );
+    // Each component's blocks across and down: luma two a unit each way,
+    // chroma one.
+    let grids = [(mcus_x * 2, mcus_y * 2), (mcus_x, mcus_y), (mcus_x, mcus_y)];
+    // A block's quantised coefficients in zigzag order, the first seven.
+    let block = |component: u32, bx: u32, by: u32| -> [i32; 7] {
+        let dc = match component {
+            0 => -60 + (bx * 5 + by * 4) as i32,
+            1 => -20 + (bx * 6) as i32,
+            _ => 30 - (by * 8) as i32,
+        };
+        let mut coefficients = [dc, 0, 0, 0, 0, 0, 0];
+        for (k, slot) in coefficients.iter_mut().enumerate().skip(1) {
+            let k = k as u32;
+            *slot = ((bx * 7 + by * 13 + component * 5 + k * 3) % 11) as i32 - 5;
+        }
+        coefficients
+    };
+
+    let mut out = vec![0xFF, 0xD8];
+    // DQT, table 0: 8 for the DC term and 4 for every AC one.
+    let mut quant = [4u8; 64];
+    quant[0] = 8;
+    out.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+    out.extend_from_slice(&quant);
+    // SOF2: eight bits, three components, luma at 2 x 2 and chroma at 1 x 1.
+    out.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x11, 0x08]);
+    out.extend_from_slice(&(height as u16).to_be_bytes());
+    out.extend_from_slice(&(width as u16).to_be_bytes());
+    out.extend_from_slice(&[0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00]);
+    // DHT: DC table 0, sizes 0 to 11 in four bits; AC table 0, every symbol in
+    // eight.
+    let mut dc = vec![0x00];
+    let mut counts = [0u8; 16];
+    counts[3] = 12;
+    dc.extend_from_slice(&counts);
+    dc.extend(0..12u8);
+    out.extend_from_slice(&[0xFF, 0xC4]);
+    out.extend_from_slice(&((dc.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&dc);
+    let symbols = ac_symbols();
+    let mut ac = vec![0x10];
+    let mut counts = [0u8; 16];
+    counts[7] = symbols.len() as u8;
+    ac.extend_from_slice(&counts);
+    ac.extend_from_slice(&symbols);
+    out.extend_from_slice(&[0xFF, 0xC4]);
+    out.extend_from_slice(&((ac.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&ac);
+
+    // The DC first scan: every component, MCU by MCU, each block's
+    // difference from the last DC of its component.
+    out.extend_from_slice(&[
+        0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    let mut bits = EntropyBits::default();
+    let mut predicted = [0i32; 3];
+    for my in 0..mcus_y {
+        for mx in 0..mcus_x {
+            let mut units = Vec::new();
+            for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                units.push((0u32, mx * 2 + dx, my * 2 + dy));
+            }
+            units.push((1, mx, my));
+            units.push((2, mx, my));
+            for (component, bx, by) in units {
+                let dc = block(component, bx, by)[0];
+                let (size, extra) = magnitude(dc - predicted[component as usize]);
+                predicted[component as usize] = dc;
+                bits.put(size, 4);
+                bits.put(extra, size);
+            }
+        }
+    }
+    out.extend_from_slice(&bits.finish());
+
+    // One AC first scan a component, over its own blocks in raster order.
+    for (component, &(across, down)) in grids.iter().enumerate() {
+        let component = component as u32;
+        out.extend_from_slice(&[
+            0xFF,
+            0xDA,
+            0x00,
+            0x08,
+            0x01,
+            component as u8 + 1,
+            0x00,
+            0x01,
+            0x3F,
+            0x00,
+        ]);
+        let mut bits = EntropyBits::default();
+        for by in 0..down {
+            for bx in 0..across {
+                let coefficients = block(component, bx, by);
+                let mut run = 0u8;
+                for &value in &coefficients[1..] {
+                    if value == 0 {
+                        run += 1;
+                        continue;
+                    }
+                    let (size, extra) = magnitude(value);
+                    let symbol = (run << 4) | size as u8;
+                    let code = symbols
+                        .iter()
+                        .position(|&s| s == symbol)
+                        .expect("every run and size is a symbol");
+                    bits.put(code as u32, 8);
+                    bits.put(extra, size);
+                    run = 0;
+                }
+                // The rest of the band is zero: end-of-band, a run of one.
+                bits.put(0, 8);
+            }
+        }
+        out.extend_from_slice(&bits.finish());
+    }
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
+/// The minified JPEG page: the baseline JPEG drawn at exactly a half, a
+/// quarter and an eighth of its size, and the progressive one at the same
+/// three — the half flipped left to right, the quarter turned a quarter, the
+/// eighth clipped through its middle — on a 119 by 157 page no tile size of
+/// `render_regions.rs` divides. Drawn at 72 dpi, each is decoded at the scale
+/// it is drawn at; at another scale each is decoded at the one that scale
+/// draws.
+pub fn jpeg_minified_page() -> Vec<u8> {
+    let (bw, bh) = MINIFIED_BASELINE;
+    let (pw, ph) = MINIFIED_PROGRESSIVE;
+    let baseline = ascii_hex(&minified_baseline_jpeg(bw, bh));
+    let progressive = ascii_hex(&minified_progressive_jpeg(pw, ph));
+    let (bw, bh, pw, ph) = (f64::from(bw), f64::from(bh), f64::from(pw), f64::from(ph));
+    let content = format!(
+        "q {} 0 0 {} 3.3 113.1 cm /B Do Q\n\
+         q {} 0 0 {} 106.7 118.4 cm /P Do Q\n\
+         q {} 0 0 {} 4.6 82.3 cm /B Do Q\n\
+         q 0 {} {} 0 56.4 78.7 cm /P Do Q\n\
+         q {} 0 0 {} 8.1 50.6 cm /B Do Q\n\
+         q 40.3 52.2 6.1 4.4 re W n {} 0 0 {} 40.3 52.2 cm /P Do Q\n",
+        bw / 2.0,
+        bh / 2.0,
+        -pw / 2.0,
+        ph / 2.0,
+        bw / 4.0,
+        bh / 4.0,
+        pw / 4.0,
+        -ph / 4.0,
+        bw / 8.0,
+        bh / 8.0,
+        pw / 8.0,
+        ph / 8.0,
+    );
+    let image = |width: u32, height: u32, data: &str| {
+        format!(
+            "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 \
+             /Filter [/ASCIIHexDecode /DCTDecode] /Length {} >>\nstream\n{data}\nendstream",
+            data.len()
+        )
+    };
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 119 157]\n   \
+         /Resources << /XObject << /B 5 0 R /P 6 0 R >> >> /Contents 4 0 R >>"
+            .to_string(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ),
+        image(MINIFIED_BASELINE.0, MINIFIED_BASELINE.1, &baseline),
+        image(MINIFIED_PROGRESSIVE.0, MINIFIED_PROGRESSIVE.1, &progressive),
     ];
     let mut out = String::from("%PDF-1.7\n");
     for (index, object) in objects.iter().enumerate() {
