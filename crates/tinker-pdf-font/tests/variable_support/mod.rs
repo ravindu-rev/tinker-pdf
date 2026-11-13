@@ -768,6 +768,300 @@ pub fn gasp(ranges: &[(u16, u16)]) -> Vec<u8> {
     out
 }
 
+// ---- CFF2 -----------------------------------------------------------------
+
+/// One item of a charstring as a test writes it.
+#[derive(Clone, Debug)]
+pub enum Cs {
+    /// A whole number, in the shortest encoding the CFF2 chapter's 'Encoded
+    /// number formats' gives it.
+    Int(i32),
+    /// A 16.16 number, in the five-byte form.
+    Fixed(i32),
+    /// A one-byte operator.
+    Op(u8),
+    /// A two-byte operator after the escape byte 12.
+    Esc(u8),
+    /// Raw bytes: a hint mask.
+    Bytes(Vec<u8>),
+}
+
+/// The CFF2 charstring operators the tests write, by name.
+pub mod op {
+    pub const HSTEM: u8 = 1;
+    pub const VSTEM: u8 = 3;
+    pub const VMOVETO: u8 = 4;
+    pub const RLINETO: u8 = 5;
+    pub const HLINETO: u8 = 6;
+    pub const VLINETO: u8 = 7;
+    pub const RRCURVETO: u8 = 8;
+    pub const CALLSUBR: u8 = 10;
+    pub const VSINDEX: u8 = 15;
+    pub const BLEND: u8 = 16;
+    pub const HSTEMHM: u8 = 18;
+    pub const HINTMASK: u8 = 19;
+    pub const RMOVETO: u8 = 21;
+    pub const HMOVETO: u8 = 22;
+    pub const VSTEMHM: u8 = 23;
+    pub const CALLGSUBR: u8 = 29;
+    pub const HVCURVETO: u8 = 31;
+    pub const FLEX: u8 = 35;
+}
+
+/// Encodes a charstring.
+pub fn charstring(items: &[Cs]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Cs::Int(value) => {
+                let value = *value;
+                if (-107..=107).contains(&value) {
+                    out.push(u8::try_from(value + 139).expect("one byte"));
+                } else if (108..=1_131).contains(&value) {
+                    let v = value - 108;
+                    out.push(u8::try_from(v / 256 + 247).expect("a lead byte"));
+                    out.push(u8::try_from(v % 256).expect("a byte"));
+                } else if (-1_131..=-108).contains(&value) {
+                    let v = -value - 108;
+                    out.push(u8::try_from(v / 256 + 251).expect("a lead byte"));
+                    out.push(u8::try_from(v % 256).expect("a byte"));
+                } else {
+                    out.push(28);
+                    push_i16(&mut out, i16::try_from(value).expect("sixteen bits"));
+                }
+            }
+            Cs::Fixed(bits) => {
+                out.push(255);
+                push_i32(&mut out, *bits);
+            }
+            Cs::Op(byte) => out.push(*byte),
+            Cs::Esc(byte) => {
+                out.push(12);
+                out.push(*byte);
+            }
+            Cs::Bytes(bytes) => out.extend_from_slice(bytes),
+        }
+    }
+    out
+}
+
+/// Whole numbers, for a charstring.
+pub fn ints(values: &[i32]) -> Vec<Cs> {
+    values.iter().map(|v| Cs::Int(*v)).collect()
+}
+
+/// A CFF2 INDEX (CFF2 chapter, 'INDEX data'): a 32-bit count, four-byte
+/// offsets, then the items; an empty one is its four-byte count.
+pub fn cff2_index(items: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push32(&mut out, u32::try_from(items.len()).expect("few"));
+    if items.is_empty() {
+        return out;
+    }
+    out.push(4);
+    let mut offset = 1u32;
+    push32(&mut out, offset);
+    for item in items {
+        offset += u32::try_from(item.len()).expect("small");
+        push32(&mut out, offset);
+    }
+    for item in items {
+        out.extend_from_slice(item);
+    }
+    out
+}
+
+/// One DICT entry, every operand in the five-byte 32-bit form so that an
+/// offset's width does not depend on its value.
+pub fn dict_entry(op: u16, operands: &[i32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in operands {
+        out.push(29);
+        push_i32(&mut out, *value);
+    }
+    if op > 0xFF {
+        out.push(12);
+        out.push((op & 0xFF) as u8);
+    } else {
+        out.push(u8::try_from(op).expect("a one-byte operator"));
+    }
+    out
+}
+
+/// An FDSelect as a test states it.
+#[derive(Clone, Debug)]
+pub enum FdSelectSpec {
+    /// Format 0: a Font DICT a glyph.
+    Format0(Vec<u8>),
+    /// Format 3: `(first, fd)` ranges and the sentinel.
+    Format3(Vec<(u16, u8)>, u16),
+    /// Format 4: `(first, fd)` ranges and the sentinel.
+    Format4(Vec<(u32, u16)>, u32),
+}
+
+impl FdSelectSpec {
+    /// The bytes.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            FdSelectSpec::Format0(fds) => {
+                out.push(0);
+                out.extend_from_slice(fds);
+            }
+            FdSelectSpec::Format3(ranges, sentinel) => {
+                out.push(3);
+                push16(&mut out, u16::try_from(ranges.len()).expect("few"));
+                for (first, fd) in ranges {
+                    push16(&mut out, *first);
+                    out.push(*fd);
+                }
+                push16(&mut out, *sentinel);
+            }
+            FdSelectSpec::Format4(ranges, sentinel) => {
+                out.push(4);
+                push32(&mut out, u32::try_from(ranges.len()).expect("few"));
+                for (first, fd) in ranges {
+                    push32(&mut out, *first);
+                    push16(&mut out, *fd);
+                }
+                push32(&mut out, *sentinel);
+            }
+        }
+        out
+    }
+}
+
+/// One Font DICT's Private DICT as a test states it: its entries, and its
+/// local subroutines, which the builder points `LocalSubrINDEXOffset` at.
+#[derive(Clone, Debug, Default)]
+pub struct PrivateSpec {
+    /// The DICT's entries, without `LocalSubrINDEXOffset`.
+    pub dict: Vec<u8>,
+    /// The local subroutines.
+    pub subrs: Vec<Vec<u8>>,
+}
+
+/// A CFF2 table as a test states it.
+#[derive(Clone, Debug, Default)]
+pub struct Cff2Spec {
+    pub charstrings: Vec<Vec<u8>>,
+    pub global_subrs: Vec<Vec<u8>>,
+    /// One Private DICT a Font DICT.
+    pub privates: Vec<PrivateSpec>,
+    pub fd_select: Option<FdSelectSpec>,
+    /// An item variation store's bytes, which the builder puts behind its
+    /// 16-bit length.
+    pub store: Option<Vec<u8>>,
+}
+
+impl Cff2Spec {
+    /// The Top DICT, its offsets as given.
+    pub fn top(&self, charstrings: i32, store: i32, font_dicts: i32, fd_select: i32) -> Vec<u8> {
+        let mut out = dict_entry(17, &[charstrings]);
+        if self.store.is_some() {
+            out.extend(dict_entry(24, &[store]));
+        }
+        out.extend(dict_entry(0x0C24, &[font_dicts]));
+        if self.fd_select.is_some() {
+            out.extend(dict_entry(0x0C25, &[fd_select]));
+        }
+        out
+    }
+
+    /// The table's bytes (CFF2 chapter, 'Header' and 'TopDICT'): the header,
+    /// the Top DICT, the Global Subr INDEX, the variation store, the
+    /// FDSelect, the CharStrings INDEX, the Font DICT INDEX and the Private
+    /// DICTs, each followed by its local subroutines.
+    pub fn build(&self) -> Vec<u8> {
+        let top_size = self.top(0, 0, 0, 0).len();
+        let gsubrs = cff2_index(&self.global_subrs);
+        let store = self.store.as_ref().map(|bytes| {
+            let mut block = Vec::new();
+            push16(&mut block, u16::try_from(bytes.len()).expect("small"));
+            block.extend_from_slice(bytes);
+            block
+        });
+        let fd_select = self.fd_select.as_ref().map(FdSelectSpec::bytes);
+        let charstrings = cff2_index(&self.charstrings);
+
+        let mut at = 5 + top_size + gsubrs.len();
+        let store_at = at;
+        at += store.as_ref().map_or(0, Vec::len);
+        let fd_select_at = at;
+        at += fd_select.as_ref().map_or(0, Vec::len);
+        let charstrings_at = at;
+        at += charstrings.len();
+        let font_dicts_at = at;
+        // Each Font DICT is one `PrivateDICTOffset` entry of two five-byte
+        // operands: eleven bytes, so the INDEX's length is known before the
+        // offsets in it are.
+        let font_dict_len = 11;
+        let index_len = 4 + if self.privates.is_empty() {
+            0
+        } else {
+            1 + 4 * (self.privates.len() + 1) + font_dict_len * self.privates.len()
+        };
+        at += index_len;
+        let mut font_dicts = Vec::new();
+        let mut bodies = Vec::new();
+        for private in &self.privates {
+            let mut body = private.dict.clone();
+            if !private.subrs.is_empty() {
+                // The entry is six bytes, so the INDEX starts six past the
+                // DICT it is in.
+                body.extend(dict_entry(
+                    19,
+                    &[i32::try_from(private.dict.len() + 6).expect("small")],
+                ));
+            }
+            let size = body.len();
+            font_dicts.push(dict_entry(
+                18,
+                &[
+                    i32::try_from(size).expect("small"),
+                    i32::try_from(at).expect("small"),
+                ],
+            ));
+            body.extend(cff2_index(&private.subrs));
+            at += body.len();
+            bodies.push(body);
+        }
+        let font_dict_index = cff2_index(&font_dicts);
+        assert_eq!(
+            font_dict_index.len(),
+            index_len,
+            "the Font DICT INDEX's size"
+        );
+
+        let top = self.top(
+            i32::try_from(charstrings_at).expect("small"),
+            i32::try_from(store_at).expect("small"),
+            i32::try_from(font_dicts_at).expect("small"),
+            i32::try_from(fd_select_at).expect("small"),
+        );
+        let mut out = vec![2, 0, 5];
+        push16(&mut out, u16::try_from(top.len()).expect("small"));
+        out.extend(top);
+        out.extend(gsubrs);
+        if let Some(store) = store {
+            assert_eq!(out.len(), store_at);
+            out.extend(store);
+        }
+        if let Some(fd_select) = fd_select {
+            assert_eq!(out.len(), fd_select_at);
+            out.extend(fd_select);
+        }
+        assert_eq!(out.len(), charstrings_at);
+        out.extend(charstrings);
+        assert_eq!(out.len(), font_dicts_at);
+        out.extend(font_dict_index);
+        for body in bodies {
+            out.extend(body);
+        }
+        out
+    }
+}
+
 // ---- The specification's arithmetic, a second time -------------------------
 
 /// The overview chapter's normalisation and interpolation, transcribed from

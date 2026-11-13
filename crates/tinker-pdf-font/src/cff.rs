@@ -73,13 +73,19 @@ pub struct Cff<'a> {
 }
 
 /// A Private DICT's contribution to running a charstring.
+///
+/// CFF2's Private DICTs build one too (`cff2.rs`): their local subroutines,
+/// no widths, and the `vsindex` a glyph's blends default to.
 #[derive(Clone, Debug)]
-struct Private<'a> {
-    local_subrs: Index<'a>,
+pub(crate) struct Private<'a> {
+    pub(crate) local_subrs: Index<'a>,
     /// The bias of `local_subrs`, resolved when the DICT was read.
-    local_bias: i32,
-    default_width: f64,
-    nominal_width: f64,
+    pub(crate) local_bias: i32,
+    pub(crate) default_width: f64,
+    pub(crate) nominal_width: f64,
+    /// CFF2's `vsindex` key: the item variation data a glyph's blends read
+    /// unless the glyph names another. Zero, and unread, in CFF.
+    pub(crate) vsindex: u16,
 }
 
 impl Default for Private<'_> {
@@ -90,6 +96,7 @@ impl Default for Private<'_> {
             local_bias: EMPTY_INDEX_BIAS,
             default_width: 0.0,
             nominal_width: 0.0,
+            vsindex: 0,
         }
     }
 }
@@ -101,19 +108,54 @@ pub(crate) struct Index<'a> {
     data: &'a [u8],
 }
 
+/// Why a CFF2 INDEX was not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IndexRefusal {
+    /// Its count, offsets or data run past the bytes.
+    Truncated,
+    /// It counts more entries than [`CFF2_INDEX_LIMIT`].
+    Count(u32),
+}
+
+/// The most entries a CFF2 INDEX is read with. Its count is 32 bits, and no
+/// glyph id, Font DICT number or biased subroutine number reaches past
+/// 65 536, so a larger count is refused before its offsets are read.
+pub(crate) const CFF2_INDEX_LIMIT: u32 = 65_536;
+
 impl<'a> Index<'a> {
     pub(crate) fn parse(data: &'a [u8], at: usize) -> Option<(Index<'a>, usize)> {
         let count = usize::from(u16::from_be_bytes([*data.get(at)?, *data.get(at + 1)?]));
+        Index::parse_after_count(data, count, at + 2)
+    }
+
+    /// A CFF2 INDEX (CFF2 chapter, 'INDEX data'): CFF's, with a 32-bit count,
+    /// and an empty one four bytes long.
+    pub(crate) fn parse_cff2(
+        data: &'a [u8],
+        at: usize,
+    ) -> Result<(Index<'a>, usize), IndexRefusal> {
+        let count = data
+            .get(at..at.checked_add(4).ok_or(IndexRefusal::Truncated)?)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or(IndexRefusal::Truncated)?;
+        if count > CFF2_INDEX_LIMIT {
+            return Err(IndexRefusal::Count(count));
+        }
+        Index::parse_after_count(data, count as usize, at + 4).ok_or(IndexRefusal::Truncated)
+    }
+
+    /// The rest of an INDEX once its count is read: `at` is its `offSize`.
+    fn parse_after_count(data: &'a [u8], count: usize, at: usize) -> Option<(Index<'a>, usize)> {
         if count == 0 {
-            return Some((Index::default(), at + 2));
+            return Some((Index::default(), at));
         }
 
-        let off_size = usize::from(*data.get(at + 2)?);
+        let off_size = usize::from(*data.get(at)?);
         if !(1..=4).contains(&off_size) {
             return None;
         }
 
-        let offsets_at = at + 3;
+        let offsets_at = at + 1;
         let mut offsets = Vec::with_capacity((count + 1).min(1 << 16));
         for i in 0..=count {
             let mut value = 0usize;
@@ -151,6 +193,70 @@ impl<'a> Index<'a> {
     }
 }
 
+/// One token of DICT data.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DictToken {
+    /// An operator; a two-byte one as `0x0C00` and its second byte.
+    Operator(u16),
+    /// A number.
+    Operand(f64),
+}
+
+/// The DICT token at `at`, and where the next one starts: `None` at the end,
+/// or where an operand is cut short, which ends the DICT; `Some((None, _))`
+/// for a reserved byte, read past. A byte up to `max_operator` is a
+/// one-byte operator — 21 in CFF, 24 in CFF2, whose DICTs add `vsindex`,
+/// `blend` and `VariationStoreOffset` — and 12 escapes a two-byte one.
+pub(crate) fn dict_token(
+    data: &[u8],
+    at: usize,
+    max_operator: u8,
+) -> Option<(Option<DictToken>, usize)> {
+    let b = *data.get(at)?;
+    let token = match b {
+        12 => {
+            let second = data.get(at + 1).copied().unwrap_or(0);
+            return Some((
+                Some(DictToken::Operator(0x0C00 | u16::from(second))),
+                at + 2,
+            ));
+        }
+        b if b <= max_operator => {
+            return Some((Some(DictToken::Operator(u16::from(b))), at + 1));
+        }
+        28 => {
+            let (Some(&a), Some(&c)) = (data.get(at + 1), data.get(at + 2)) else {
+                return None;
+            };
+            (f64::from(i16::from_be_bytes([a, c])), at + 3)
+        }
+        29 => {
+            let bytes = data.get(at + 1..at + 5)?;
+            let value = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            (f64::from(value), at + 5)
+        }
+        // A real number, packed as nibbles.
+        30 => parse_real(data, at + 1),
+        32..=246 => (f64::from(b) - 139.0, at + 1),
+        247..=250 => {
+            let next = *data.get(at + 1)?;
+            (
+                (f64::from(b) - 247.0) * 256.0 + f64::from(next) + 108.0,
+                at + 2,
+            )
+        }
+        251..=254 => {
+            let next = *data.get(at + 1)?;
+            (
+                -(f64::from(b) - 251.0) * 256.0 - f64::from(next) - 108.0,
+                at + 2,
+            )
+        }
+        _ => return Some((None, at + 1)),
+    };
+    Some((Some(DictToken::Operand(token.0)), token.1))
+}
+
 /// Reads a DICT into `(operator, operands)` pairs.
 pub(crate) fn parse_dict(data: &[u8]) -> Vec<(u16, Vec<f64>)> {
     let mut out = Vec::new();
@@ -158,55 +264,14 @@ pub(crate) fn parse_dict(data: &[u8]) -> Vec<(u16, Vec<f64>)> {
     let mut at = 0usize;
 
     while at < data.len() {
-        let Some(&b) = data.get(at) else { break };
-        match b {
-            // Operators.
-            0..=21 => {
-                let op = if b == 12 {
-                    at += 1;
-                    0x0C00 | u16::from(data.get(at).copied().unwrap_or(0))
-                } else {
-                    u16::from(b)
-                };
-                at += 1;
-                out.push((op, std::mem::take(&mut operands)));
-            }
-            28 => {
-                let (Some(&a), Some(&c)) = (data.get(at + 1), data.get(at + 2)) else {
-                    break;
-                };
-                operands.push(f64::from(i16::from_be_bytes([a, c])));
-                at += 3;
-            }
-            29 => {
-                let Some(bytes) = data.get(at + 1..at + 5) else {
-                    break;
-                };
-                let value = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                operands.push(f64::from(value));
-                at += 5;
-            }
-            30 => {
-                // A real number, packed as nibbles.
-                let (value, next) = parse_real(data, at + 1);
-                operands.push(value);
-                at = next;
-            }
-            32..=246 => {
-                operands.push(f64::from(b) - 139.0);
-                at += 1;
-            }
-            247..=250 => {
-                let Some(&next) = data.get(at + 1) else { break };
-                operands.push((f64::from(b) - 247.0) * 256.0 + f64::from(next) + 108.0);
-                at += 2;
-            }
-            251..=254 => {
-                let Some(&next) = data.get(at + 1) else { break };
-                operands.push(-(f64::from(b) - 251.0) * 256.0 - f64::from(next) - 108.0);
-                at += 2;
-            }
-            _ => at += 1,
+        let Some((token, next)) = dict_token(data, at, 21) else {
+            break;
+        };
+        at = next;
+        match token {
+            Some(DictToken::Operator(op)) => out.push((op, std::mem::take(&mut operands))),
+            Some(DictToken::Operand(value)) => operands.push(value),
+            None => {}
         }
         if operands.len() > 48 {
             operands.clear();
@@ -569,24 +634,21 @@ impl<'a> Cff<'a> {
         outline: Option<&'c mut Outline>,
         stack: &'c mut Vec<f64>,
     ) -> Charstring<'a, 'c> {
-        stack.clear();
-        Charstring {
-            cff: self,
-            private: match self.fd_for(glyph) {
-                Some((private, _)) => private,
-                None => &self.private,
+        let private = match self.fd_for(glyph) {
+            Some((private, _)) => private,
+            None => &self.private,
+        };
+        Charstring::new(
+            Flavour::Cff,
+            Subroutines {
+                global: &self.global_subrs,
+                global_bias: self.global_bias,
+                private,
             },
             outline,
             stack,
-            x: 0.0,
-            y: 0.0,
-            stems: 0,
-            width: None,
-            open: false,
-            depth: 0,
-            budget: CHARSTRING_BUDGET,
-            transient: [0.0; 32],
-        }
+            None,
+        )
     }
 
     /// The Font DICT a glyph draws from, in a CID-keyed font.
@@ -1745,6 +1807,122 @@ const CHARSTRING_BUDGET: u32 = 64_000;
 /// appendix B); a longer one is corruption, and the excess is dropped.
 const MAX_OPERANDS: usize = 48;
 
+/// The operands a CFF2 stack holds (CFF2 chapter: "The maximum number of
+/// operands on the CFF2 stack is 513"); a longer one refuses its glyph.
+pub(crate) const CFF2_MAX_OPERANDS: usize = 513;
+
+/// Which charstring language a machine runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flavour {
+    /// Type 2 charstrings in a CFF table.
+    Cff,
+    /// CFF2 charstrings (CFF2 chapter, 'CharString operators'): no width, no
+    /// `endchar` and no `return` — a charstring and a subroutine end where
+    /// their data does — no `put`, `get` or arithmetic, a stack of 513, and
+    /// `vsindex` and `blend`.
+    Cff2,
+}
+
+/// Why a CFF2 machine refused what it ran. CFF's machine stops silently
+/// where it always has; every bound a CFF2 charstring or DICT passes is
+/// refused by name instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// The operation budget ran out.
+    Budget,
+    /// Subroutines nested past ten levels.
+    SubroutineDepth,
+    /// More operands than the stack holds.
+    StackOverflow,
+    /// A `blend` whose `n` is not a whole number or whose operands are
+    /// fewer than `n + n·k + 1`.
+    BlendOperands,
+    /// `blend` or `vsindex` in a table with no variation store.
+    NoVariationStore,
+    /// `vsindex` naming no item variation data, or a non-integral one.
+    VsindexRange,
+    /// `vsindex` after a `blend`, or given twice.
+    VsindexMisplaced,
+    /// `vsindex` with no operand.
+    VsindexOperand,
+}
+
+/// What a CFF2 `blend` reads (CFF2 chapter, 'Variation operators'): each
+/// item variation data subtable's region count — the `k` a `blend` pops —
+/// and, at an instance, each subtable's region scalars in column order. At
+/// the default instance there are no scalars, and a `blend` keeps its
+/// defaults.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Blend<'b> {
+    pub(crate) region_counts: &'b [u16],
+    pub(crate) scalars: Option<&'b [Vec<f64>]>,
+}
+
+impl Blend<'_> {
+    /// `blend` over `stack`, under the data subtable `vsindex` selects: pops
+    /// `n`, then `n·k` deltas and `n` defaults, and pushes the `n` results —
+    /// each default plus its deltas times the scalars, in region order,
+    /// rounded to 16.16 (`docs/design/variable-fonts.md`, 'The numeric
+    /// model'), or the default itself where there are no scalars.
+    pub(crate) fn apply(&self, vsindex: u16, stack: &mut Vec<f64>) -> Result<(), Stop> {
+        if self.region_counts.is_empty() {
+            return Err(Stop::NoVariationStore);
+        }
+        let k = usize::from(
+            *self
+                .region_counts
+                .get(usize::from(vsindex))
+                .ok_or(Stop::VsindexRange)?,
+        );
+        let n_value = stack.pop().ok_or(Stop::BlendOperands)?;
+        if !(n_value >= 0.0 && n_value.trunc() == n_value && n_value <= stack.len() as f64) {
+            return Err(Stop::BlendOperands);
+        }
+        let n = n_value as usize;
+        let needed = n.checked_mul(k + 1).ok_or(Stop::BlendOperands)?;
+        let base = stack.len().checked_sub(needed).ok_or(Stop::BlendOperands)?;
+        let scalars = self.scalars.and_then(|all| all.get(usize::from(vsindex)));
+        for item in 0..n {
+            let default = stack.get(base + item).copied().unwrap_or(0.0);
+            let value = match scalars {
+                None => default,
+                Some(scalars) => {
+                    let mut value = default;
+                    for (region, scalar) in scalars.iter().enumerate().take(k) {
+                        let delta = stack
+                            .get(base + n + item * k + region)
+                            .copied()
+                            .unwrap_or(0.0);
+                        value += scalar * delta;
+                    }
+                    round_to_fixed(value)
+                }
+            };
+            if let Some(slot) = stack.get_mut(base + item) {
+                *slot = value;
+            }
+        }
+        stack.truncate(base + n);
+        Ok(())
+    }
+}
+
+/// An `f64` rounded to 16.16 by the overview's conversion: `floor(x · 65536
+/// + ½) / 65536`. Every step is exact in IEEE 754 for a value a charstring
+/// carries.
+pub(crate) fn round_to_fixed(value: f64) -> f64 {
+    (value * 65_536.0 + 0.5).floor() / 65_536.0
+}
+
+/// The subroutines a charstring calls: the global INDEX and its bias, and
+/// the Private DICT its local ones come from.
+#[derive(Clone, Copy)]
+pub(crate) struct Subroutines<'a, 'b> {
+    pub(crate) global: &'b Index<'a>,
+    pub(crate) global_bias: i32,
+    pub(crate) private: &'b Private<'a>,
+}
+
 /// The Type 2 machine's operand stack, kept across the glyphs a caller reads.
 ///
 /// [`Cff::outline_into`] runs each glyph it is handed on this one buffer, so
@@ -1753,7 +1931,7 @@ const MAX_OPERANDS: usize = 48;
 /// ends with operands left on it hands none of them on.
 #[derive(Debug)]
 pub struct Machine {
-    stack: Vec<f64>,
+    pub(crate) stack: Vec<f64>,
 }
 
 impl Machine {
@@ -1806,8 +1984,14 @@ mod counters {
     }
 }
 
-struct Charstring<'a, 'b> {
-    cff: &'b Cff<'a>,
+/// The one Type 2 machine, for both flavours (`docs/design/
+/// variable-fonts.md`, 'CFF2'): every CFF2 difference is gated on
+/// [`Flavour`], so a CFF charstring runs exactly as it always has.
+pub(crate) struct Charstring<'a, 'b> {
+    flavour: Flavour,
+    /// The global subroutines and their bias.
+    global_subrs: &'b Index<'a>,
+    global_bias: i32,
     /// The Private DICT this glyph runs under, which in a CID-keyed font is
     /// its Font DICT's rather than the top-level one.
     private: &'b Private<'a>,
@@ -1824,9 +2008,119 @@ struct Charstring<'a, 'b> {
     depth: u32,
     budget: u32,
     transient: [f64; 32],
+    /// CFF2: what a `blend` reads. `None` in CFF.
+    blend: Option<Blend<'b>>,
+    /// CFF2: the item variation data the glyph's blends read.
+    vsindex: u16,
+    /// CFF2: whether the charstring has set `vsindex` itself.
+    vsindex_set: bool,
+    /// CFF2: whether a `blend` has run, after which `vsindex` may not.
+    blended: bool,
+    /// CFF2: the bound the run stopped at, which refuses the glyph. CFF never
+    /// sets it.
+    stop: Option<Stop>,
+}
+
+impl<'a, 'b> Charstring<'a, 'b> {
+    /// A machine for one glyph, its stack cleared.
+    pub(crate) fn new(
+        flavour: Flavour,
+        subroutines: Subroutines<'a, 'b>,
+        outline: Option<&'b mut Outline>,
+        stack: &'b mut Vec<f64>,
+        blend: Option<Blend<'b>>,
+    ) -> Charstring<'a, 'b> {
+        stack.clear();
+        Charstring {
+            flavour,
+            global_subrs: subroutines.global,
+            global_bias: subroutines.global_bias,
+            private: subroutines.private,
+            outline,
+            stack,
+            x: 0.0,
+            y: 0.0,
+            stems: 0,
+            width: None,
+            open: false,
+            depth: 0,
+            budget: CHARSTRING_BUDGET,
+            transient: [0.0; 32],
+            blend,
+            vsindex: subroutines.private.vsindex,
+            vsindex_set: false,
+            blended: false,
+            stop: None,
+        }
+    }
+
+    /// Runs a whole charstring, closing a contour left open, and says where
+    /// a CFF2 run stopped short, if it did.
+    pub(crate) fn run_glyph(&mut self, code: &[u8]) -> Option<Stop> {
+        self.run(code);
+        if self.open {
+            self.emit(Segment::Close);
+            self.open = false;
+        }
+        self.stop
+    }
 }
 
 impl Charstring<'_, '_> {
+    /// The stack's capacity in this flavour.
+    fn max_operands(&self) -> usize {
+        match self.flavour {
+            Flavour::Cff => MAX_OPERANDS,
+            Flavour::Cff2 => CFF2_MAX_OPERANDS,
+        }
+    }
+
+    /// Records the bound a CFF2 run stopped at; CFF's silent stops stay
+    /// silent.
+    fn refuse(&mut self, stop: Stop) {
+        if self.flavour == Flavour::Cff2 && self.stop.is_none() {
+            self.stop = Some(stop);
+        }
+    }
+
+    /// CFF2's `vsindex`: one operand, the item variation data a later
+    /// `blend` reads, set once and before any `blend` (CFF2 chapter,
+    /// 'Variation operators').
+    fn select_variation_data(&mut self) {
+        if self.vsindex_set || self.blended {
+            self.refuse(Stop::VsindexMisplaced);
+            return;
+        }
+        let Some(value) = self.stack.pop() else {
+            self.refuse(Stop::VsindexOperand);
+            return;
+        };
+        self.stack.clear();
+        let count = self.blend.map_or(0, |blend| blend.region_counts.len());
+        if count == 0 {
+            self.refuse(Stop::NoVariationStore);
+            return;
+        }
+        if !(value >= 0.0 && value.trunc() == value && value < count as f64) {
+            self.refuse(Stop::VsindexRange);
+            return;
+        }
+        self.vsindex = value as u16;
+        self.vsindex_set = true;
+    }
+
+    /// CFF2's `blend`, over the stack.
+    fn blend_operands(&mut self) {
+        let Some(blend) = self.blend else {
+            self.refuse(Stop::NoVariationStore);
+            return;
+        };
+        match blend.apply(self.vsindex, self.stack) {
+            Ok(()) => self.blended = true,
+            Err(stop) => self.refuse(stop),
+        }
+    }
+
     /// Appends a segment to the outline, if there is one.
     fn emit(&mut self, segment: Segment) {
         if let Some(outline) = self.outline.as_deref_mut() {
@@ -1853,9 +2147,10 @@ impl Charstring<'_, '_> {
     }
 
     /// Takes the width if this is the first stack-clearing operator and the
-    /// stack holds one more operand than the operator needs.
+    /// stack holds one more operand than the operator needs. A CFF2
+    /// charstring carries no width.
     fn take_width(&mut self, even: bool) {
-        if self.width.is_some() {
+        if self.width.is_some() || self.flavour == Flavour::Cff2 {
             return;
         }
         let odd_extra = if even {
@@ -1873,7 +2168,7 @@ impl Charstring<'_, '_> {
     }
 
     fn take_width_for(&mut self, expected: usize) {
-        if self.width.is_some() {
+        if self.width.is_some() || self.flavour == Flavour::Cff2 {
             return;
         }
         if self.stack.len() > expected && !self.stack.is_empty() {
@@ -1898,7 +2193,10 @@ impl Charstring<'_, '_> {
     }
 
     fn run(&mut self, code: &[u8]) {
+        // Ten levels of subroutines, the cap both flavours' chapters state;
+        // CFF2 refuses a glyph that passes it, CFF skips the call.
         if self.depth > 10 {
+            self.refuse(Stop::SubroutineDepth);
             return;
         }
         let mut at = 0usize;
@@ -1909,8 +2207,14 @@ impl Charstring<'_, '_> {
             if self.done() {
                 return;
             }
+            // A CFF2 refusal ends every caller's loop as well. CFF never
+            // sets one.
+            if self.stop.is_some() {
+                return;
+            }
             self.budget = self.budget.saturating_sub(1);
             if self.budget == 0 {
+                self.refuse(Stop::Budget);
                 return;
             }
 
@@ -2113,20 +2417,23 @@ impl Charstring<'_, '_> {
                     let Some(index) = self.stack.pop() else {
                         return;
                     };
-                    let biased = index as i32 + self.cff.global_bias;
+                    let biased = index as i32 + self.global_bias;
                     if let Ok(index) = usize::try_from(biased) {
-                        if let Some(code) = self.cff.global_subrs.get(index) {
+                        if let Some(code) = self.global_subrs.get(index) {
                             self.depth += 1;
                             self.run(code);
                             self.depth -= 1;
                         }
                     }
                 }
-                // return
-                11 => return,
+                // return. CFF2 has none: a subroutine ends where its data
+                // does, and the byte is an unrecognised operator.
+                11 if self.flavour == Flavour::Cff => return,
                 // endchar: no operands, or `seac`'s four (5177, appendix
                 // C), so a width makes one or five, and four are not one.
-                14 => {
+                // CFF2 has none either: a charstring ends where its data
+                // does.
+                14 if self.flavour == Flavour::Cff => {
                     let expected = if self.stack.len() >= 4 { 4 } else { 0 };
                     self.take_width_for(expected);
                     if self.open {
@@ -2135,6 +2442,10 @@ impl Charstring<'_, '_> {
                     }
                     return;
                 }
+                // CFF2's vsindex and blend, which leave the stack to the
+                // operator after them.
+                15 if self.flavour == Flavour::Cff2 => self.select_variation_data(),
+                16 if self.flavour == Flavour::Cff2 => self.blend_operands(),
 
                 12 => {
                     let Some(&second) = code.get(at) else { return };
@@ -2185,8 +2496,8 @@ impl Charstring<'_, '_> {
                     }
                 }
             }),
-            // put/get, the transient array.
-            20 => {
+            // put/get, the transient array, which CFF2 does not have.
+            20 if self.flavour == Flavour::Cff => {
                 let (Some(index), Some(value)) = (self.stack.pop(), self.stack.pop()) else {
                     return;
                 };
@@ -2194,7 +2505,7 @@ impl Charstring<'_, '_> {
                     *slot = value;
                 }
             }
-            21 => {
+            21 if self.flavour == Flavour::Cff => {
                 let Some(index) = self.stack.pop() else {
                     return;
                 };
@@ -2228,9 +2539,15 @@ impl Charstring<'_, '_> {
     }
 
     fn push(&mut self, value: f64) {
-        // The specification caps the stack at 48; a longer one is corruption.
-        if self.stack.len() < MAX_OPERANDS && value.is_finite() {
+        // The specification caps the stack at 48, and CFF2's at 513; a longer
+        // one is corruption, whose excess CFF drops and CFF2 refuses.
+        if !value.is_finite() {
+            return;
+        }
+        if self.stack.len() < self.max_operands() {
             self.stack.push(value);
+        } else {
+            self.refuse(Stop::StackOverflow);
         }
     }
 

@@ -318,9 +318,10 @@ entries with its blends resolved, at the default or at an instance.
 
 **Bounds**: an INDEX of more than 65 536 entries is refused before it is
 read, since no glyph id, Font DICT number or biased subroutine number reaches
-past it; each distinct Private DICT is read once, and the distinct ones may
-not total more bytes than the table holds, which no font that does not
-overlap its own DICTs exceeds.
+past it; each distinct Private DICT is read once, and the distinct ones,
+with the Local Subr INDEX each reaches, may not total more bytes than the
+table holds, which no font that does not overlap its own structures exceeds
+— so the reading's work and memory are linear in the table.
 
 **Glyph selection** (FT-05.13). A CFF2 program carries no charset, encoding
 or glyph names. A simple font selects its glyphs through the face's `cmap`, as

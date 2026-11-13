@@ -10,6 +10,8 @@
 
 mod variable_support;
 
+use tinker_pdf_font::cff::Machine;
+use tinker_pdf_font::cff2::{Cff2, Cff2Error, Cff2Index};
 use tinker_pdf_font::variation::cvar::{cvt_at, Cvar};
 use tinker_pdf_font::variation::item_store::{DeltaSetIndex, DeltaSetIndexMap, ItemVariationStore};
 use tinker_pdf_font::variation::metrics::{metric_default, Hvar, Mvar, Vvar, METRIC_FIELDS};
@@ -20,11 +22,12 @@ use tinker_pdf_font::variation::{
     AxisValueMap, DesignSpace, Fixed, Instance, Location, Tag, UserCoordinate, VariationError,
     MAX_AXES,
 };
-use tinker_pdf_font::Sfnt;
+use tinker_pdf_font::{Outline, Segment, Sfnt};
 use variable_support::{
-    avar, cvar, cvt, f2dot14, fvar, fvar_with_sizes, gasp, hhea, hvar, identity_map, index_map,
-    item_store, metrics, mvar, os2, pack_deltas, pack_points, post, spec, tuple_store, vhea, vorg,
-    vvar, AxisSpec, DataSpec, Face, InstanceSpec, Points, RegionSpec, TupleSpec,
+    avar, cff2_index, charstring, cvar, cvt, dict_entry, f2dot14, fvar, fvar_with_sizes, gasp,
+    hhea, hvar, identity_map, index_map, ints, item_store, metrics, mvar, op, os2, pack_deltas,
+    pack_points, post, spec, tuple_store, vhea, vorg, vvar, AxisSpec, Cff2Spec, Cs, DataSpec, Face,
+    FdSelectSpec, InstanceSpec, Points, PrivateSpec, RegionSpec, TupleSpec,
 };
 
 // ---- The design space (FT-05.2) --------------------------------------------
@@ -2051,6 +2054,753 @@ fn every_truncation_and_byte_change_of_a_metrics_table_is_read_or_refused_withou
                     let _ = mvar.delta(field.tag, &scalars);
                 }
                 let _ = mvar.tags();
+            }
+        }
+    }
+}
+
+// ---- CFF2 (FT-05.6) -------------------------------------------------------------
+
+/// A charstring from its items.
+fn cs(items: &[Cs]) -> Vec<u8> {
+    charstring(items)
+}
+
+/// Numbers then an operator.
+fn call(numbers: &[i32], operator: u8) -> Vec<Cs> {
+    let mut items = ints(numbers);
+    items.push(Cs::Op(operator));
+    items
+}
+
+/// A box `size` units on a side from the current point, drawn with
+/// `rlineto`.
+fn box_subr(size: i32) -> Vec<u8> {
+    let mut items = call(&[0, 0], op::RMOVETO);
+    items.extend(call(&[size, 0, 0, size, -size, 0], op::RLINETO));
+    cs(&items)
+}
+
+/// The segments a box `size` units on a side at the origin draws.
+fn box_segments(size: f64) -> Vec<Segment> {
+    vec![
+        Segment::MoveTo { x: 0.0, y: 0.0 },
+        Segment::LineTo { x: size, y: 0.0 },
+        Segment::LineTo { x: size, y: size },
+        Segment::LineTo { x: 0.0, y: size },
+        Segment::Close,
+    ]
+}
+
+/// The glyphs of the plain CFF2 face: `.notdef`; local subroutine 0; global
+/// subroutine 0, a curve; global subroutine 1, which calls local subroutine
+/// 0; a hint mask over nine stems, one of them implicit; local subroutine 0
+/// again and global subroutine 1 again, under the other Font DICT; and the
+/// curve operators.
+fn plain_charstrings() -> Vec<Vec<u8>> {
+    let mut hinted = ints(&[
+        10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+    ]);
+    hinted.push(Cs::Op(op::HSTEMHM));
+    hinted.extend(ints(&[170, 180]));
+    hinted.push(Cs::Op(op::HINTMASK));
+    // Nine stems: two mask bytes. Read as one, the second, 0x80, would be
+    // the operand -11 and move the contour.
+    hinted.push(Cs::Bytes(vec![0xFF, 0x80]));
+    hinted.extend(call(&[0, 0], op::RMOVETO));
+    hinted.extend(call(&[30, 0, 0, 30], op::RLINETO));
+    let mut curves = call(&[0, 0], op::RMOVETO);
+    curves.extend(call(&[10, 20, 30, 40], op::HVCURVETO));
+    curves.extend(ints(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]));
+    curves.push(Cs::Esc(op::FLEX));
+    vec![
+        Vec::new(),
+        cs(&call(&[-107], op::CALLSUBR)),
+        cs(&call(&[-107], op::CALLGSUBR)),
+        cs(&call(&[-106], op::CALLGSUBR)),
+        cs(&hinted),
+        cs(&call(&[-107], op::CALLSUBR)),
+        cs(&call(&[-106], op::CALLGSUBR)),
+        cs(&curves),
+    ]
+}
+
+/// The two global subroutines: a curve, and a call to local subroutine 0 —
+/// whichever Font DICT's the calling glyph runs under.
+fn plain_global_subrs() -> Vec<Vec<u8>> {
+    let mut curve = call(&[50, 50], op::RMOVETO);
+    curve.extend(call(&[10, 20, 30, 40, 50, 60], op::RRCURVETO));
+    vec![cs(&curve), cs(&call(&[-107], op::CALLSUBR))]
+}
+
+/// A face with two Font DICTs, whose local subroutine 0 draws a box of 100
+/// and of 200, and the FDSelect given.
+fn plain_cff2(fd_select: Option<FdSelectSpec>) -> Vec<u8> {
+    Cff2Spec {
+        charstrings: plain_charstrings(),
+        global_subrs: plain_global_subrs(),
+        privates: vec![
+            PrivateSpec {
+                dict: Vec::new(),
+                subrs: vec![box_subr(100)],
+            },
+            PrivateSpec {
+                dict: Vec::new(),
+                subrs: vec![box_subr(200)],
+            },
+        ],
+        fd_select,
+        store: None,
+    }
+    .build()
+}
+
+/// The Font DICT each glyph of the plain face takes: glyphs 5 to 7 the
+/// second.
+fn plain_fds() -> Vec<u8> {
+    vec![0, 0, 0, 0, 0, 1, 1, 1]
+}
+
+/// The FDSelect of each format, all saying [`plain_fds`].
+fn fd_selects() -> Vec<FdSelectSpec> {
+    vec![
+        FdSelectSpec::Format0(plain_fds()),
+        FdSelectSpec::Format3(vec![(0, 0), (5, 1)], 8),
+        FdSelectSpec::Format4(vec![(0, 0), (2, 0), (5, 1)], 8),
+    ]
+}
+
+/// What each glyph of the plain face draws, the box sizes by its Font DICT.
+fn plain_expected(fds: &[u8]) -> Vec<Vec<Segment>> {
+    let local = |glyph: usize| box_segments(if fds[glyph] == 0 { 100.0 } else { 200.0 });
+    let curve = vec![
+        Segment::MoveTo { x: 50.0, y: 50.0 },
+        Segment::CurveTo {
+            c1x: 60.0,
+            c1y: 70.0,
+            c2x: 90.0,
+            c2y: 110.0,
+            x: 140.0,
+            y: 170.0,
+        },
+        Segment::Close,
+    ];
+    let hinted = vec![
+        Segment::MoveTo { x: 0.0, y: 0.0 },
+        Segment::LineTo { x: 30.0, y: 0.0 },
+        Segment::LineTo { x: 30.0, y: 30.0 },
+        Segment::Close,
+    ];
+    // hvcurveto 10 20 30 40: horizontal first, so (10, 0), then (20, 30),
+    // then (0, 40); flex's two curves from there.
+    let curves = vec![
+        Segment::MoveTo { x: 0.0, y: 0.0 },
+        Segment::CurveTo {
+            c1x: 10.0,
+            c1y: 0.0,
+            c2x: 30.0,
+            c2y: 30.0,
+            x: 30.0,
+            y: 70.0,
+        },
+        Segment::CurveTo {
+            c1x: 31.0,
+            c1y: 72.0,
+            c2x: 34.0,
+            c2y: 76.0,
+            x: 39.0,
+            y: 82.0,
+        },
+        Segment::CurveTo {
+            c1x: 46.0,
+            c1y: 90.0,
+            c2x: 55.0,
+            c2y: 100.0,
+            x: 66.0,
+            y: 112.0,
+        },
+        Segment::Close,
+    ];
+    vec![
+        Vec::new(),
+        local(1),
+        curve,
+        local(3),
+        hinted,
+        local(5),
+        local(6),
+        curves,
+    ]
+}
+
+#[test]
+fn a_cff2_program_outlines_its_glyphs() {
+    for fd_select in fd_selects() {
+        let table = plain_cff2(Some(fd_select.clone()));
+        let cff2 = Cff2::parse(&table).expect("a CFF2 table");
+        assert_eq!(cff2.glyph_count(), 8);
+        assert_eq!(cff2.font_dict_count(), 2);
+        assert_eq!(cff2.font_matrix(), [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
+        assert!(cff2.variation_store().is_none());
+        let expected = plain_expected(&plain_fds());
+        let mut outline = Outline::default();
+        let mut machine = Machine::new();
+        for glyph in 0u16..8 {
+            let fd = u16::from(plain_fds()[usize::from(glyph)]);
+            assert_eq!(cff2.font_dict_for(glyph), Ok(fd), "{fd_select:?}");
+            let drawn = cff2.outline(glyph).expect("an outline");
+            assert_eq!(
+                drawn.segments,
+                expected[usize::from(glyph)],
+                "glyph {glyph} under {fd_select:?}"
+            );
+            // The same segments through one reused machine and buffer.
+            cff2.outline_into(glyph, &mut outline, &mut machine)
+                .expect("an outline");
+            assert_eq!(outline.segments, expected[usize::from(glyph)]);
+        }
+    }
+    // With no FDSelect every glyph is in Font DICT 0, so the glyphs that
+    // called the second's subroutine draw the first's.
+    let table = plain_cff2(None);
+    let cff2 = Cff2::parse(&table).expect("a CFF2 table");
+    let expected = plain_expected(&[0; 8]);
+    for glyph in 0u16..8 {
+        assert_eq!(cff2.font_dict_for(glyph), Ok(0));
+        assert_eq!(
+            cff2.outline(glyph).expect("an outline").segments,
+            expected[usize::from(glyph)]
+        );
+    }
+    assert_eq!(
+        cff2.outline(8).err(),
+        Some(Cff2Error::NoSuchGlyph { glyph: 8 })
+    );
+}
+
+/// Two item variation data subtables, as CFF2 holds them: region indices
+/// and no rows. The first names two regions, the second three.
+fn cff2_store() -> Vec<u8> {
+    item_store(
+        2,
+        &regions(),
+        &[
+            Some(DataSpec {
+                regions: vec![0, 2],
+                word_count: 0,
+                long_words: false,
+                rows: Vec::new(),
+            }),
+            Some(DataSpec {
+                regions: vec![1, 3, 4],
+                word_count: 0,
+                long_words: false,
+                rows: Vec::new(),
+            }),
+        ],
+    )
+}
+
+/// Items `n` defaults, their deltas a group each, `n`, then `blend`.
+fn blended(defaults: &[i32], deltas: &[&[i32]]) -> Vec<Cs> {
+    let mut items = ints(defaults);
+    for group in deltas {
+        items.extend(ints(group));
+    }
+    items.push(Cs::Int(i32::try_from(defaults.len()).expect("few")));
+    items.push(Cs::Op(op::BLEND));
+    items
+}
+
+/// The glyphs of the blended face: two values blended at once; a glyph that
+/// selects the second data subtable; a blend inside a local subroutine; a
+/// glyph under the Font DICT whose Private DICT selects the second subtable;
+/// and a blend inside a global subroutine.
+fn blend_charstrings() -> Vec<Vec<u8>> {
+    let mut first = blended(&[100, 200], &[&[20, 30], &[40, 50]]);
+    first.push(Cs::Op(op::RMOVETO));
+    first.extend(blended(&[300], &[&[-10, 5]]));
+    first.push(Cs::Op(op::HLINETO));
+
+    let mut second = call(&[1], op::VSINDEX);
+    second.extend(blended(&[50], &[&[1, 2, 3]]));
+    second.extend(call(&[0], op::RMOVETO));
+    second.extend(call(&[20, 30], op::RLINETO));
+
+    let mut fourth = blended(&[70, 80], &[&[1, 1, 1], &[2, 2, 2]]);
+    fourth.push(Cs::Op(op::RMOVETO));
+
+    let mut fifth = call(&[-107], op::CALLGSUBR);
+    fifth.extend(call(&[10], op::HLINETO));
+    vec![
+        cs(&first),
+        cs(&second),
+        cs(&call(&[-107], op::CALLSUBR)),
+        cs(&fourth),
+        cs(&fifth),
+    ]
+}
+
+/// The local subroutine of the first Font DICT: a blended move and line.
+fn blend_local_subr() -> Vec<u8> {
+    let mut items = blended(&[10, 20], &[&[5, 5], &[6, 6]]);
+    items.push(Cs::Op(op::RMOVETO));
+    items.extend(blended(&[40], &[&[-2, 2]]));
+    items.push(Cs::Op(op::VLINETO));
+    cs(&items)
+}
+
+/// The global subroutine: a blended move, read under the caller's
+/// `vsindex`.
+fn blend_global_subr() -> Vec<u8> {
+    let mut items = blended(&[5], &[&[1, 1]]);
+    items.extend(call(&[5], op::RMOVETO));
+    cs(&items)
+}
+
+/// A Private DICT entry of 32-bit operands, after `blend`'s own.
+fn blended_entry(defaults: &[i32], deltas: &[&[i32]], operator: u16) -> Vec<u8> {
+    let mut operands: Vec<i32> = defaults.to_vec();
+    for group in deltas {
+        operands.extend_from_slice(group);
+    }
+    operands.push(i32::try_from(defaults.len()).expect("few"));
+    let mut out = dict_entry(23, &operands);
+    out.extend(dict_entry(operator, &[]));
+    out
+}
+
+/// The Private DICTs: the first blends `BlueValues` and `StdHW` over the
+/// first subtable; the second selects the second subtable and blends
+/// `StdVW` over it.
+fn blend_privates() -> Vec<PrivateSpec> {
+    let mut first = blended_entry(
+        &[-20, 0, 500, 520],
+        &[&[10, 0], &[0, 0], &[-5, -5], &[2, 2]],
+        6,
+    );
+    first.extend(blended_entry(&[50], &[&[10, -5]], 10));
+    let mut second = dict_entry(22, &[1]);
+    second.extend(blended_entry(&[80], &[&[1, 2, 3]], 11));
+    vec![
+        PrivateSpec {
+            dict: first,
+            subrs: vec![blend_local_subr()],
+        },
+        PrivateSpec {
+            dict: second,
+            subrs: Vec::new(),
+        },
+    ]
+}
+
+fn blend_cff2() -> Vec<u8> {
+    Cff2Spec {
+        charstrings: blend_charstrings(),
+        global_subrs: vec![blend_global_subr()],
+        privates: blend_privates(),
+        fd_select: Some(FdSelectSpec::Format3(vec![(0, 0), (3, 1), (4, 0)], 5)),
+        store: Some(cff2_store()),
+    }
+    .build()
+}
+
+/// What each blended glyph draws at the default: every blend its defaults.
+fn blend_defaults() -> Vec<Vec<Segment>> {
+    vec![
+        vec![
+            Segment::MoveTo { x: 100.0, y: 200.0 },
+            Segment::LineTo { x: 400.0, y: 200.0 },
+            Segment::Close,
+        ],
+        vec![
+            Segment::MoveTo { x: 50.0, y: 0.0 },
+            Segment::LineTo { x: 70.0, y: 30.0 },
+            Segment::Close,
+        ],
+        vec![
+            Segment::MoveTo { x: 10.0, y: 20.0 },
+            Segment::LineTo { x: 10.0, y: 60.0 },
+            Segment::Close,
+        ],
+        vec![Segment::MoveTo { x: 70.0, y: 80.0 }, Segment::Close],
+        vec![
+            Segment::MoveTo { x: 5.0, y: 5.0 },
+            Segment::LineTo { x: 15.0, y: 5.0 },
+            Segment::Close,
+        ],
+    ]
+}
+
+#[test]
+fn a_cff2_default_instance_ignores_its_blends() {
+    let table = blend_cff2();
+    let cff2 = Cff2::parse(&table).expect("a CFF2 table");
+    let store = cff2.variation_store().expect("a variation store");
+    assert_eq!(store.data_count(), 2);
+    assert_eq!(cff2.private_vsindex(3), Ok(1));
+    assert_eq!(cff2.private_vsindex(0), Ok(0));
+    for (glyph, expected) in blend_defaults().iter().enumerate() {
+        let glyph = u16::try_from(glyph).expect("few");
+        assert_eq!(
+            &cff2.outline(glyph).expect("an outline").segments,
+            expected,
+            "glyph {glyph} at the default"
+        );
+    }
+    // The Private DICTs' blends keep their defaults too.
+    let first = cff2.private_dict(0).expect("a Private DICT");
+    assert!(first.contains(&(6, vec![-20.0, 0.0, 500.0, 520.0])));
+    assert!(first.contains(&(10, vec![50.0])));
+    let second = cff2.private_dict(1).expect("a Private DICT");
+    assert_eq!(second, vec![(22, vec![1.0]), (11, vec![80.0])]);
+    assert_eq!(
+        cff2.private_dict(2).err(),
+        Some(Cff2Error::FontDict {
+            glyph: 0,
+            font_dict: 2
+        })
+    );
+}
+
+/// One charstring in a face with one Font DICT and no store.
+fn single_glyph(charstring: Vec<u8>, store: Option<Vec<u8>>) -> Vec<u8> {
+    Cff2Spec {
+        charstrings: vec![charstring],
+        global_subrs: Vec::new(),
+        privates: vec![PrivateSpec::default()],
+        fd_select: None,
+        store,
+    }
+    .build()
+}
+
+#[test]
+fn a_hostile_cff2_is_refused_by_name() {
+    let refuse = |table: &[u8]| Cff2::parse(table).err();
+    let good = plain_cff2(Some(FdSelectSpec::Format0(plain_fds())));
+    assert_eq!(refuse(&good[..4]), Some(Cff2Error::Header));
+    let mut version = good.clone();
+    version[0] = 3;
+    assert_eq!(
+        refuse(&version),
+        Some(Cff2Error::Version { major: 3, minor: 0 })
+    );
+    let mut long_top = good.clone();
+    long_top[3..5].copy_from_slice(&0x7FFFu16.to_be_bytes());
+    assert_eq!(refuse(&long_top), Some(Cff2Error::TopDict));
+    // A Top DICT with no CharStrings, or no Font DICTs.
+    let top_only = |entries: Vec<u8>| {
+        let mut out = vec![2, 0, 5];
+        out.extend_from_slice(&u16::try_from(entries.len()).expect("small").to_be_bytes());
+        out.extend(entries);
+        out.extend(cff2_index(&[]));
+        out
+    };
+    assert_eq!(
+        refuse(&top_only(dict_entry(0x0C24, &[0]))),
+        Some(Cff2Error::NoCharStrings)
+    );
+    // The header's five bytes, a six-byte Top DICT and an empty Global Subr
+    // INDEX put the CharStrings INDEX at 15.
+    let charstrings_only = {
+        let mut table = top_only(dict_entry(17, &[15]));
+        table.extend(cff2_index(&[vec![]]));
+        table
+    };
+    assert_eq!(refuse(&charstrings_only), Some(Cff2Error::NoFontDicts));
+    // A CharStrings INDEX counting past 65 536, and one cut short.
+    let huge = {
+        let mut table = top_only(dict_entry(17, &[15]));
+        table.extend_from_slice(&65_537u32.to_be_bytes());
+        table
+    };
+    assert_eq!(
+        refuse(&huge),
+        Some(Cff2Error::IndexCount {
+            which: Cff2Index::CharStrings,
+            count: 65_537
+        })
+    );
+    let cut = {
+        let mut table = top_only(dict_entry(17, &[15]));
+        table.extend_from_slice(&3u32.to_be_bytes());
+        table.push(4);
+        table
+    };
+    assert_eq!(
+        refuse(&cut),
+        Some(Cff2Error::Index {
+            which: Cff2Index::CharStrings
+        })
+    );
+    // An FDSelect of an undefined format, one not starting at glyph 0, one
+    // whose sentinel stops short of the glyphs, and one out of order.
+    for fd_select in [
+        FdSelectSpec::Format4(vec![(1, 0)], 8),
+        FdSelectSpec::Format3(vec![(0, 0), (5, 1)], 6),
+        FdSelectSpec::Format3(vec![(0, 0), (5, 1), (5, 0)], 8),
+    ] {
+        assert_eq!(
+            refuse(&plain_cff2(Some(fd_select.clone()))),
+            Some(Cff2Error::FdSelect),
+            "{fd_select:?}"
+        );
+    }
+    let mut unknown = plain_cff2(Some(FdSelectSpec::Format0(plain_fds())));
+    let at = 5
+        + Cff2Spec {
+            charstrings: plain_charstrings(),
+            global_subrs: plain_global_subrs(),
+            privates: Vec::new(),
+            fd_select: Some(FdSelectSpec::Format0(plain_fds())),
+            store: None,
+        }
+        .top(0, 0, 0, 0)
+        .len()
+        + cff2_index(&plain_global_subrs()).len();
+    assert_eq!(unknown[at], 0, "the FDSelect's format byte");
+    unknown[at] = 2;
+    assert_eq!(refuse(&unknown), Some(Cff2Error::FdSelect));
+    // A glyph whose FDSelect entry names a Font DICT past the INDEX.
+    let mut fds = plain_fds();
+    fds[4] = 7;
+    let table = plain_cff2(Some(FdSelectSpec::Format0(fds)));
+    let cff2 = Cff2::parse(&table).expect("parses");
+    assert_eq!(
+        cff2.outline(4).err(),
+        Some(Cff2Error::FontDict {
+            glyph: 4,
+            font_dict: 7
+        })
+    );
+    // Private DICTs that together read more than the table holds: both Font
+    // DICTs' pointed at nearly the whole table, at different offsets. With no
+    // store and no FDSelect, the Font DICT INDEX follows the CharStrings
+    // INDEX, and its two entries follow its count, offSize and three offsets.
+    let overlapping = {
+        let spec = Cff2Spec {
+            charstrings: plain_charstrings(),
+            global_subrs: plain_global_subrs(),
+            privates: Vec::new(),
+            fd_select: None,
+            store: None,
+        };
+        let font_dicts_at = 5
+            + spec.top(0, 0, 0, 0).len()
+            + cff2_index(&spec.global_subrs).len()
+            + cff2_index(&spec.charstrings).len();
+        let mut table = plain_cff2(None);
+        let size = i32::try_from(table.len() - 2).expect("small");
+        for (number, offset) in [(0usize, 0i32), (1, 1)] {
+            let entry = font_dicts_at + 5 + 4 * 3 + number * 11;
+            table[entry..entry + 11].copy_from_slice(&dict_entry(18, &[size, offset]));
+        }
+        table
+    };
+    assert_eq!(refuse(&overlapping), Some(Cff2Error::PrivateDictsOverlap));
+    // The local subroutines count too: a second Private DICT that is the
+    // first's six bytes and one more, so the two are distinct and reach one
+    // Local Subr INDEX larger than half the table.
+    let shared_subrs = {
+        let spec = Cff2Spec {
+            charstrings: vec![Vec::new()],
+            global_subrs: Vec::new(),
+            privates: vec![
+                PrivateSpec {
+                    dict: Vec::new(),
+                    subrs: (0..200).map(|_| vec![op::RMOVETO; 4]).collect(),
+                },
+                PrivateSpec::default(),
+            ],
+            fd_select: None,
+            store: None,
+        };
+        let font_dicts_at = 5
+            + spec.top(0, 0, 0, 0).len()
+            + cff2_index(&spec.global_subrs).len()
+            + cff2_index(&spec.charstrings).len();
+        // Two eleven-byte entries after a count, an offSize and three offsets.
+        let first_private = font_dicts_at + 5 + 4 * 3 + 2 * 11;
+        let mut table = spec.build();
+        assert!(
+            cff2_index(&spec.privates[0].subrs).len() * 2 > table.len(),
+            "the INDEX is more than half the table"
+        );
+        let entry = font_dicts_at + 5 + 4 * 3 + 11;
+        let at = i32::try_from(first_private).expect("small");
+        table[entry..entry + 11].copy_from_slice(&dict_entry(18, &[7, at]));
+        table
+    };
+    assert_eq!(refuse(&shared_subrs), Some(Cff2Error::PrivateDictsOverlap));
+
+    // The charstring bounds.
+    let outline_of = |charstring: Vec<u8>, store: Option<Vec<u8>>| {
+        let table = single_glyph(charstring, store);
+        Cff2::parse(&table).expect("parses").outline(0).err()
+    };
+    let mut overflow: Vec<Cs> = (0..514).map(|_| Cs::Int(1)).collect();
+    overflow.push(Cs::Op(op::RLINETO));
+    assert_eq!(
+        outline_of(cs(&overflow), None),
+        Some(Cff2Error::StackOverflow)
+    );
+    let mut full: Vec<Cs> = (0..512).map(|_| Cs::Int(1)).collect();
+    full.extend(ints(&[0]));
+    full.push(Cs::Op(op::RLINETO));
+    assert_eq!(
+        outline_of(cs(&full), None),
+        None,
+        "513 operands is the limit, not past it"
+    );
+    assert_eq!(
+        outline_of(cs(&blended(&[1], &[&[2, 3]])), None),
+        Some(Cff2Error::NoVariationStore)
+    );
+    assert_eq!(
+        outline_of(cs(&call(&[0], op::VSINDEX)), None),
+        Some(Cff2Error::NoVariationStore)
+    );
+    let store = Some(cff2_store());
+    assert_eq!(
+        outline_of(cs(&call(&[1, 2], op::BLEND)), store.clone()),
+        Some(Cff2Error::BlendOperands),
+        "n = 2 under k = 2 needs six more operands"
+    );
+    let mut fractional = vec![Cs::Int(1), Cs::Fixed(0x8000)];
+    fractional.push(Cs::Op(op::BLEND));
+    assert_eq!(
+        outline_of(cs(&fractional), store.clone()),
+        Some(Cff2Error::BlendOperands),
+        "half a value is no n"
+    );
+    assert_eq!(
+        outline_of(cs(&call(&[5], op::VSINDEX)), store.clone()),
+        Some(Cff2Error::VsindexRange)
+    );
+    let mut twice = call(&[0], op::VSINDEX);
+    twice.extend(call(&[1], op::VSINDEX));
+    assert_eq!(
+        outline_of(cs(&twice), store.clone()),
+        Some(Cff2Error::VsindexMisplaced)
+    );
+    let mut late = blended(&[1], &[&[2, 3]]);
+    late.extend(call(&[0], op::VSINDEX));
+    assert_eq!(
+        outline_of(cs(&late), store.clone()),
+        Some(Cff2Error::VsindexMisplaced)
+    );
+    assert_eq!(
+        outline_of(cs(&[Cs::Op(op::VSINDEX)]), store.clone()),
+        Some(Cff2Error::VsindexOperand)
+    );
+
+    // Subroutines nested past ten levels: a global subroutine calling
+    // itself.
+    let recursive = Cff2Spec {
+        charstrings: vec![cs(&call(&[-107], op::CALLGSUBR))],
+        global_subrs: vec![cs(&call(&[-107], op::CALLGSUBR))],
+        privates: vec![PrivateSpec::default()],
+        fd_select: None,
+        store: None,
+    }
+    .build();
+    assert_eq!(
+        Cff2::parse(&recursive).expect("parses").outline(0).err(),
+        Some(Cff2Error::SubroutineDepth)
+    );
+    // The operation budget: nine levels each calling the next twice, and a
+    // leaf of two hundred operators — 102 400 in all.
+    let mut levels: Vec<Vec<u8>> = (0..9)
+        .map(|level: i32| {
+            let mut items = call(&[level + 1 - 107], op::CALLGSUBR);
+            items.extend(call(&[level + 1 - 107], op::CALLGSUBR));
+            cs(&items)
+        })
+        .collect();
+    levels.push(vec![op::RMOVETO; 200]);
+    let expensive = Cff2Spec {
+        charstrings: vec![cs(&call(&[-107], op::CALLGSUBR))],
+        global_subrs: levels,
+        privates: vec![PrivateSpec::default()],
+        fd_select: None,
+        store: None,
+    }
+    .build();
+    assert_eq!(
+        Cff2::parse(&expensive).expect("parses").outline(0).err(),
+        Some(Cff2Error::Budget)
+    );
+    // A Private DICT naming item variation data the store does not have.
+    let bad_private = Cff2Spec {
+        charstrings: vec![Vec::new()],
+        global_subrs: Vec::new(),
+        privates: vec![PrivateSpec {
+            dict: dict_entry(22, &[4]),
+            subrs: Vec::new(),
+        }],
+        fd_select: None,
+        store: Some(cff2_store()),
+    }
+    .build();
+    assert_eq!(refuse(&bad_private), Some(Cff2Error::VsindexRange));
+    // Every refusal says what it is.
+    for error in [
+        Cff2Error::Header,
+        Cff2Error::IndexCount {
+            which: Cff2Index::LocalSubrs,
+            count: 70_000,
+        },
+        Cff2Error::VariationStore(VariationError::StorePastEnd),
+        Cff2Error::Budget,
+    ] {
+        assert!(!error.to_string().is_empty());
+    }
+}
+
+#[test]
+fn garbage_cff2_is_refused_without_panicking() {
+    for garbage in [
+        &[][..],
+        &[2][..],
+        &[2, 0, 5][..],
+        &[2, 0, 5, 0, 0][..],
+        &[2, 0, 5, 0, 1, 17][..],
+        &[0xFF; 64][..],
+        &b"OTTO but not a CFF2 table at all"[..],
+    ] {
+        if let Ok(cff2) = Cff2::parse(garbage) {
+            for glyph in 0..4 {
+                let _ = cff2.outline(glyph);
+            }
+        }
+    }
+    let faces = [
+        plain_cff2(Some(FdSelectSpec::Format3(vec![(0, 0), (5, 1)], 8))),
+        blend_cff2(),
+    ];
+    for face in &faces {
+        for cut in 0..=face.len() {
+            if let Ok(cff2) = Cff2::parse(&face[..cut]) {
+                for glyph in 0..9 {
+                    let _ = cff2.outline(glyph);
+                }
+                let _ = cff2.private_dict(0);
+            }
+        }
+        for at in 0..face.len() {
+            for value in [0x00, 0x0A, 0x0F, 0x10, 0x1D, 0x7F, 0x8B, 0xFF] {
+                let mut bytes = face.clone();
+                bytes[at] = value;
+                if let Ok(cff2) = Cff2::parse(&bytes) {
+                    let mut outline = Outline::default();
+                    let mut machine = Machine::new();
+                    for glyph in 0..9 {
+                        let _ = cff2.outline_into(glyph, &mut outline, &mut machine);
+                    }
+                    let _ = cff2.private_dict(0);
+                    let _ = cff2.private_dict(1);
+                }
             }
         }
     }

@@ -426,6 +426,37 @@ with no entries or an outer index past sixteen bits, a map of format 1 in
 `HVAR` or `VVAR`, which use format 0 only, a table with no store, an `MVAR`
 record under eight bytes, and a region list whose axis count is not `fvar`'s.
 
+**CFF2** (OpenType 1.9.1's CFF2 chapter). `Cff2::parse` reads the five-byte
+header, the Top DICT that is not in an INDEX, the Global Subr INDEX after it,
+the CharStrings and Font DICT INDEXes — INDEXes counting in 32 bits — each
+Font DICT's Private DICT, measured from the table, and its local subroutines,
+measured from the Private DICT, FDSelect in formats 0, 3 and 4, a table with
+none putting every glyph in Font DICT 0, and the variation store behind its
+16-bit length. CFF2 DICTs are read by the same tokeniser as CFF's with the
+operators running to 24, so that `vsindex`, `blend` and
+`VariationStoreOffset` are operators, and a stack of 513. The charstrings run
+through `cff.rs`'s one Type 2 machine, parameterised by flavour: no width, no
+`endchar` and no `return` — a charstring and a subroutine end where their
+data does — no `put`, `get` or arithmetic, and `vsindex` and `blend`; stems
+and hint masks count as CFF's do, so `cff_subset.rs`'s count still agrees,
+and a CFF charstring runs exactly as before. `Cff2::outline` is the default
+instance: every `blend` — `n` defaults, `n·k` deltas and `n`, `k` the region
+count of the item variation data the `vsindex` in force selects, the
+glyph's own or its Private DICT's — keeps its defaults, and so does
+`Cff2::private_dict`'s reading of a Private DICT. A CFF2 program has no
+charset, encoding or glyph names. Each distinct Private DICT is read once,
+and the distinct ones with the local subroutines each reaches may not read
+more bytes than the table holds. Refused by name (`Cff2Error`), where CFF's
+reader stops silently: a version other than 2, a header, Top DICT, INDEX or
+Private DICT past the table, an INDEX of more than 65 536 entries before its
+offsets are read, Private DICTs past that budget, an FDSelect of another
+format, cut short, out of order or short of the glyphs, a glyph naming a
+Font DICT that is not there, a stack past 513, a `blend` short of its
+operands or with a fractional `n`, subroutines nested past ten, the 64 000
+operation budget, `vsindex` after a `blend`, twice, without an operand or
+past the store's subtables, and `blend` or `vsindex` in a table with no
+store.
+
 ## API
 
 Everything reaches callers through the facade (ruling 11). Reading:
@@ -1256,7 +1287,17 @@ corpora already vendored here. So every name stays on the list.
   every named instance and at coordinates no instance names — each the
   default the test wrote plus the adjustment the test computed — with every
   refusal by name and every truncation and single-byte change of the three
-  tables read or refused without a panic.
+  tables read or refused without a panic. CFF2's: faces the builder writes
+  byte by byte, each glyph's outline equal to the segments its charstring
+  states — local and global subroutines, a global subroutine's local call
+  taking the caller's Font DICT, an FDSelect of each format and none, a hint
+  mask over nine stems one of them implicit, the curve and flex operators —
+  through a fresh machine and a reused one; the default instance keeping
+  every blend's defaults in charstrings, subroutines and Private DICTs under
+  both a glyph's and a Private DICT's `vsindex`; every refusal by name; and
+  every truncation and single-byte change of two faces read or refused
+  without a panic. Every `cff.rs` and `cff_subset/tests.rs` test holds
+  unchanged.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it
