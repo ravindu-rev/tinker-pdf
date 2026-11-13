@@ -225,32 +225,188 @@ fn spans(line: &TextLine) -> Vec<Span<'_>> {
 }
 
 /// Whether two numbers print the same at the precision they are written at.
+///
+/// Two values whose thousandths [`thousandths`] decides print alike exactly
+/// when those are equal, `-0` with `0`; any other pair is written, each into a
+/// buffer of its own, and the text compared. Nothing is allocated.
 fn same_number(a: f64, b: f64) -> bool {
-    number(a) == number(b)
+    if let (Some(a), Some(b)) = (signed_thousandths(a), signed_thousandths(b)) {
+        return a == b;
+    }
+    let (mut one, mut other) = (OneNumber::new(), OneNumber::new());
+    write_number(&mut one, a) == write_number(&mut other, b) && one.written() == other.written()
 }
 
-/// A number at three decimal places with trailing zeros dropped, or `None`
-/// when it is not finite.
+/// Where [`write_number`] writes: the output itself, which grows as it always
+/// does, or a [`OneNumber`] on the stack to compare a number in. Neither
+/// makes a `String` for a number.
+trait Digits: core::fmt::Write {
+    /// Everything written so far.
+    fn written(&self) -> &[u8];
+    /// Drops what was written past `len`, a length this writer had.
+    fn cut(&mut self, len: usize);
+}
+
+impl Digits for String {
+    fn written(&self) -> &[u8] {
+        self.as_bytes()
+    }
+
+    fn cut(&mut self, len: usize) {
+        // Only ever called inside text `write_number` wrote, which is ASCII,
+        // so `len` is a character boundary.
+        self.truncate(len);
+    }
+}
+
+/// The longest a finite `f64` writes at three places: the largest has 309
+/// digits before the point, and a sign, the point and three places beside.
+const NUMBER_BYTES: usize = 320;
+
+/// One number's text, held on the stack.
+struct OneNumber {
+    bytes: [u8; NUMBER_BYTES],
+    len: usize,
+}
+
+impl OneNumber {
+    fn new() -> OneNumber {
+        OneNumber {
+            bytes: [0; NUMBER_BYTES],
+            len: 0,
+        }
+    }
+}
+
+impl core::fmt::Write for OneNumber {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
+        let room = self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+        room.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+impl Digits for OneNumber {
+    fn written(&self) -> &[u8] {
+        self.bytes.get(..self.len).unwrap_or_default()
+    }
+
+    fn cut(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+}
+
+/// Writes `value` at three decimal places with trailing zeros dropped — the
+/// bytes `format!("{value:.3}")` and that trim give — and says whether it was
+/// finite; a value that is not writes nothing.
 ///
 /// `-0` is written `0`: a coordinate that rounds to zero from below is not a
 /// different place from one that rounds to it from above.
-fn number(value: f64) -> Option<String> {
+///
+/// The digits are written from integer arithmetic wherever it decides the
+/// rounding to a thousandth exactly ([`thousandths`]), so a character's ten
+/// numbers cost no `String` apiece; a tie at the fourth decimal and a
+/// magnitude of 2^52 or more are written by the formatter itself, into `out`,
+/// and trimmed there.
+fn write_number<D: Digits>(out: &mut D, value: f64) -> bool {
+    if !value.is_finite() {
+        return false;
+    }
+    match thousandths(value.abs()) {
+        Some(0) => {
+            let _ = out.write_char('0');
+        }
+        Some(thousandths) => {
+            if value < 0.0 {
+                let _ = out.write_char('-');
+            }
+            let _ = write!(out, "{}", thousandths / 1000);
+            let places = thousandths % 1000;
+            if places != 0 {
+                let digits = [places / 100, places / 10 % 10, places % 10];
+                let kept = if digits[2] != 0 {
+                    3
+                } else if digits[1] != 0 {
+                    2
+                } else {
+                    1
+                };
+                let _ = out.write_char('.');
+                for digit in digits.iter().take(kept) {
+                    let _ = out.write_char(char::from(b'0' + *digit as u8));
+                }
+            }
+        }
+        None => {
+            let start = out.written().len();
+            let _ = write!(out, "{value:.3}");
+            let text = out.written().get(start..).unwrap_or_default();
+            let mut kept = text;
+            if kept.contains(&b'.') {
+                while let Some(rest) = kept.strip_suffix(b"0") {
+                    kept = rest;
+                }
+                kept = kept.strip_suffix(b".").unwrap_or(kept);
+            }
+            let (len, negative_zero) = (kept.len(), kept == b"-0");
+            out.cut(start + len);
+            if negative_zero {
+                out.cut(start);
+                let _ = out.write_char('0');
+            }
+        }
+    }
+    true
+}
+
+/// `magnitude`, finite and not negative, in thousandths, rounded to the
+/// nearest as `{:.3}` rounds it, wherever that is decided exactly; `None` for
+/// a tie at the fourth decimal, which the formatter settles, and for a
+/// magnitude of 2^52 or more.
+///
+/// A double is its significand over a power of two, so a thousand times it,
+/// shifted down by that power, is its whole number of thousandths, and the
+/// bits shifted out, against half of what the last place is worth, say which
+/// way it rounds, with no rounding of its own.
+fn thousandths(magnitude: f64) -> Option<u64> {
+    let bits = magnitude.to_bits();
+    let exponent = (bits >> 52) & 0x7ff;
+    let fraction = bits & ((1 << 52) - 1);
+    // `magnitude` is `significand / 2^shift`; a shift of 0 or less is a
+    // magnitude of 2^52 or more.
+    let (significand, shift) = match exponent {
+        0 => (fraction, 1074),
+        _ => (
+            fraction | 1 << 52,
+            1075u64.checked_sub(exponent).filter(|shift| *shift > 0)?,
+        ),
+    };
+    // Under 2^53 a thousand times, so under 2^63: it cannot overflow.
+    let scaled = significand * 1000;
+    if shift >= 64 {
+        // Under 2^63 against a half of 2^63 or more: it rounds to nothing.
+        return Some(0);
+    }
+    let whole = scaled >> shift;
+    let rest = scaled & ((1 << shift) - 1);
+    let half = 1 << (shift - 1);
+    match rest.cmp(&half) {
+        core::cmp::Ordering::Less => Some(whole),
+        core::cmp::Ordering::Greater => Some(whole + 1),
+        core::cmp::Ordering::Equal => None,
+    }
+}
+
+/// `value`'s thousandths with its sign, where [`thousandths`] decides them,
+/// `-0` and `0` alike: the one integer the text written for it pictures.
+fn signed_thousandths(value: f64) -> Option<i64> {
     if !value.is_finite() {
         return None;
     }
-    let mut text = format!("{value:.3}");
-    if text.contains('.') {
-        while text.ends_with('0') {
-            text.pop();
-        }
-        if text.ends_with('.') {
-            text.pop();
-        }
-    }
-    if text == "-0" {
-        text = "0".to_string();
-    }
-    Some(text)
+    let magnitude = i64::try_from(thousandths(value.abs())?).ok()?;
+    Some(if value < 0.0 { -magnitude } else { magnitude })
 }
 
 /// The axis-aligned box around some characters' quads, as `[x0, y0, x1, y1]`.
@@ -283,6 +439,13 @@ fn wmode(mode: WritingMode) -> &'static str {
 /// A JSON string literal (RFC 8259 §7).
 fn json_string(out: &mut String, text: &str) {
     out.push('"');
+    json_escape(out, text);
+    out.push('"');
+}
+
+/// `text` escaped for the inside of a JSON string literal, a character at a
+/// time, so the text of several pieces is written by escaping each.
+fn json_escape(out: &mut String, text: &str) {
     for c in text.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -298,13 +461,11 @@ fn json_string(out: &mut String, text: &str) {
             c => out.push(c),
         }
     }
-    out.push('"');
 }
 
 fn json_number(out: &mut String, value: f64) {
-    match number(value) {
-        Some(text) => out.push_str(&text),
-        None => out.push_str("null"),
+    if !write_number(out, value) {
+        out.push_str("null");
     }
 }
 
@@ -376,10 +537,11 @@ fn json_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
                 json_number(out, span.size);
                 out.push_str(",\"bbox\":");
                 json_bbox(out, bbox(span.chars));
-                out.push_str(",\"text\":");
-                let text: String = span.chars.iter().map(|c| c.text.as_str()).collect();
-                json_string(out, &text);
-                out.push_str(",\"chars\":[");
+                out.push_str(",\"text\":\"");
+                for c in span.chars {
+                    json_escape(out, &c.text);
+                }
+                out.push_str("\",\"chars\":[");
                 for (i, c) in span.chars.iter().enumerate() {
                     if i > 0 {
                         out.push(',');
@@ -448,16 +610,21 @@ fn xml_escape(out: &mut String, text: &str) {
 }
 
 fn xml_numbers(out: &mut String, name: &str, values: &[f64]) {
-    let mut written = Vec::with_capacity(values.len());
-    for value in values {
-        match number(*value) {
-            Some(text) => written.push(text),
-            // One unwritable number makes the whole list unwritable: a bbox
-            // with three coordinates is not a bbox.
-            None => return,
-        }
+    // One unwritable number makes the whole list unwritable: a bbox with
+    // three coordinates is not a bbox.
+    if !values.iter().all(|value| value.is_finite()) {
+        return;
     }
-    let _ = write!(out, " {name}=\"{}\"", written.join(" "));
+    out.push(' ');
+    out.push_str(name);
+    out.push_str("=\"");
+    for (i, value) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        write_number(out, *value);
+    }
+    out.push('"');
 }
 
 fn xml_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
@@ -495,8 +662,9 @@ fn xml_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
                     xml_numbers(out, "bbox", &[a, b, c, d]);
                 }
                 out.push_str(" text=\"");
-                let text: String = span.chars.iter().map(|c| c.text.as_str()).collect();
-                xml_escape(out, &text);
+                for c in span.chars {
+                    xml_escape(out, &c.text);
+                }
                 out.push_str("\">\n");
                 for c in span.chars {
                     out.push_str("<char c=\"");
@@ -563,20 +731,24 @@ fn html_escape(out: &mut String, text: &str) {
 
 /// A length in points for a `style` attribute: digits, a point and a sign
 /// only, so it needs no escaping in either of the contexts it sits in.
-fn css_points(value: f64) -> String {
-    format!("{}pt", number(value).unwrap_or_else(|| "0".to_string()))
+fn css_points(out: &mut String, value: f64) {
+    if !write_number(out, value) {
+        out.push('0');
+    }
+    out.push_str("pt");
 }
 
 fn html_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
     let (x0, y0, x1, y1) = frame.bounds;
-    let _ = writeln!(
+    let _ = write!(
         out,
-        "<div class=\"page\" data-index=\"{}\" data-rotation=\"{}\" style=\"width:{};height:{}\">",
-        frame.index,
-        frame.rotation,
-        css_points(x1 - x0),
-        css_points(y1 - y0)
+        "<div class=\"page\" data-index=\"{}\" data-rotation=\"{}\" style=\"width:",
+        frame.index, frame.rotation,
     );
+    css_points(out, x1 - x0);
+    out.push_str(";height:");
+    css_points(out, y1 - y0);
+    out.push_str("\">\n");
     for block in &page.blocks {
         out.push_str("<div class=\"block\">\n");
         for line in &block.lines {
@@ -589,14 +761,16 @@ fn html_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
             // y downward from its top-left.
             let _ = write!(
                 out,
-                "<div class=\"line\" data-wmode=\"{}\" data-rtl=\"{}\" \
-                 style=\"left:{};top:{};font-size:{}\">",
+                "<div class=\"line\" data-wmode=\"{}\" data-rtl=\"{}\" style=\"left:",
                 wmode(line.wmode),
                 line.rtl,
-                css_points(lx0 - x0),
-                css_points(y1 - ly1),
-                css_points(line.size)
             );
+            css_points(out, lx0 - x0);
+            out.push_str(";top:");
+            css_points(out, y1 - ly1);
+            out.push_str(";font-size:");
+            css_points(out, line.size);
+            out.push_str("\">");
             for span in spans(line) {
                 out.push_str("<span");
                 if let Some(font) = span.font {
@@ -604,8 +778,10 @@ fn html_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
                     html_escape(out, font);
                     out.push('"');
                 }
-                if let Some(size) = number(span.size) {
-                    let _ = write!(out, " data-size=\"{size}\"");
+                if span.size.is_finite() {
+                    out.push_str(" data-size=\"");
+                    write_number(out, span.size);
+                    out.push('"');
                 }
                 out.push('>');
                 for c in span.chars {
@@ -672,15 +848,173 @@ mod tests {
         );
     }
 
+    /// What [`write_number`] writes for `value` into a `String` of its own,
+    /// or `None` where it writes nothing.
+    fn written(value: f64) -> Option<String> {
+        let mut out = String::new();
+        write_number(&mut out, value).then_some(out)
+    }
+
     #[test]
     fn numbers_are_three_places_trimmed_and_never_negative_zero() {
-        assert_eq!(number(12.0).as_deref(), Some("12"));
-        assert_eq!(number(0.1 + 0.2).as_deref(), Some("0.3"));
-        assert_eq!(number(-0.0001).as_deref(), Some("0"));
-        assert_eq!(number(-2.5).as_deref(), Some("-2.5"));
-        assert_eq!(number(1234.5678).as_deref(), Some("1234.568"));
-        assert_eq!(number(f64::NAN), None);
-        assert_eq!(number(f64::INFINITY), None);
+        assert_eq!(written(12.0).as_deref(), Some("12"));
+        assert_eq!(written(0.1 + 0.2).as_deref(), Some("0.3"));
+        assert_eq!(written(-0.0001).as_deref(), Some("0"));
+        assert_eq!(written(-2.5).as_deref(), Some("-2.5"));
+        assert_eq!(written(1234.5678).as_deref(), Some("1234.568"));
+        assert_eq!(written(f64::NAN), None);
+        assert_eq!(written(f64::INFINITY), None);
+    }
+
+    /// The number this writer replaced, kept to hold [`write_number`] to:
+    /// `format!` at three places and a trim, a `String` a number.
+    fn number(value: f64) -> Option<String> {
+        if !value.is_finite() {
+            return None;
+        }
+        let mut text = format!("{value:.3}");
+        if text.contains('.') {
+            while text.ends_with('0') {
+                text.pop();
+            }
+            if text.ends_with('.') {
+                text.pop();
+            }
+        }
+        if text == "-0" {
+            text = "0".to_string();
+        }
+        Some(text)
+    }
+
+    /// `value`, finite and not negative, and the two doubles on either side
+    /// of it that are finite.
+    fn around(value: f64) -> Vec<f64> {
+        let bits = value.to_bits();
+        [
+            bits.checked_sub(2),
+            bits.checked_sub(1),
+            Some(bits),
+            bits.checked_add(1),
+            bits.checked_add(2),
+        ]
+        .into_iter()
+        .flatten()
+        .map(f64::from_bits)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .collect()
+    }
+
+    /// **P-02.6**: every number writes the bytes `format!` and the trim wrote
+    /// — over every thousandth to 5 and the midpoints between them, the ties at
+    /// the fourth decimal (an odd number of sixteenths, the only doubles a
+    /// thousand times which ends in exactly a half) near zero and far out,
+    /// every power of two from the smallest subnormal to the largest, the
+    /// edge of the integer path at 2^52, the largest finite value, and seeded
+    /// values, the doubles beside each of them, each signed both ways — and
+    /// the ties are the formatter's to write.
+    #[test]
+    fn numbers_write_what_format_and_trim_wrote() {
+        let mut values = Vec::new();
+        for k in 0..5_000u32 {
+            values.extend(around(f64::from(k) / 1000.0));
+            values.extend(around(f64::from(2 * k + 1) / 2000.0));
+        }
+        let mut ties = Vec::new();
+        for odd in (1..2_000u32).step_by(2) {
+            ties.push(f64::from(odd) / 16.0);
+        }
+        for base in [1.0e3, 1.0e6, 1.0e9, 1.0e12, (1u64 << 40) as f64] {
+            for odd in [1.0, 3.0, 5.0, 15.0] {
+                ties.push(base + odd / 16.0);
+            }
+        }
+        for tie in &ties {
+            assert_eq!(
+                thousandths(*tie),
+                None,
+                "{tie} is a tie at the fourth decimal, the formatter's to round"
+            );
+            values.extend(around(*tie));
+        }
+        for exponent in 1..2047u64 {
+            values.extend(around(f64::from_bits(exponent << 52)));
+        }
+        for shift in 0..52 {
+            values.extend(around(f64::from_bits(1 << shift)));
+        }
+        for edge in [(1u64 << 52) as f64, (1u64 << 53) as f64, f64::MAX] {
+            values.extend(around(edge));
+        }
+        values.extend([0.0, f64::MIN_POSITIVE, 5e-324, 4.9e-4, 5e-4, 5.1e-4]);
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..50_000 {
+            let any = f64::from_bits(next());
+            if any.is_finite() {
+                values.push(any.abs());
+            }
+            // A coordinate on a page, to a millionth of a point and past it.
+            values.push((next() % 2_000_000_000) as f64 / 1.0e6);
+        }
+        let mut formatted = 0usize;
+        for value in &values {
+            for value in [*value, -*value] {
+                assert_eq!(
+                    written(value),
+                    number(value),
+                    "{value:e} ({:#018x})",
+                    value.to_bits()
+                );
+                formatted += usize::from(thousandths(value.abs()).is_none());
+            }
+        }
+        assert!(
+            formatted > 2 * ties.len(),
+            "the ties and the large magnitudes reach the formatter: {formatted}"
+        );
+        assert_eq!(written(-0.0).as_deref(), Some("0"));
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!((written(value), number(value)), (None, None));
+        }
+    }
+
+    /// Two numbers are the same where they print the same, whichever way
+    /// each is written: a tie the formatter rounds beside the two thousandths
+    /// it may round to, `-0` and `0`, magnitudes past the integer path, and
+    /// values that are not finite.
+    #[test]
+    fn same_number_is_what_prints_the_same() {
+        let pairs = [
+            (-0.0, 0.0, true),
+            (-0.0004, 0.0004, true),
+            (-0.0006, 0.0006, false),
+            (1.0005e15, 1.0005e15, true),
+            (1.0e300, 1.0e300, true),
+            (1.0e300, 2.0e300, false),
+            (12.0, 12.0001, true),
+            (12.0, 12.001, false),
+            (f64::NAN, f64::INFINITY, true),
+            (f64::NAN, 0.0, false),
+        ];
+        for (a, b, same) in pairs {
+            assert_eq!(same_number(a, b), same, "{a} against {b}");
+            assert_eq!(same_number(b, a), same, "{b} against {a}");
+            assert_eq!(same, number(a) == number(b), "{a} against {b}");
+        }
+        // A tie prints as one of the thousandths beside it, whichever the
+        // formatter rounds it to, and is the same as that one alone.
+        let tie = 0.0625;
+        let beside = [0.062, 0.063].map(|other| same_number(tie, other));
+        assert_eq!(beside.iter().filter(|same| **same).count(), 1, "{beside:?}");
+        for other in [0.062, 0.063] {
+            assert_eq!(same_number(tie, other), number(tie) == number(other));
+        }
     }
 
     fn quad(x: f64, width: f64) -> Quad {

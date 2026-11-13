@@ -721,8 +721,10 @@ and a size, and is where the font name is carried. The name is `/BaseFont` as
 the file writes it — subset tag included, since two subsets of one face are
 two fonts to the file — and absent (`null` in JSON) where the font states
 none. Coordinates are PDF user space, y upward, with `rotation` **not**
-applied, at three decimal places; a non-finite number is `null` in JSON and an
-absent attribute in XML. JSON has `pages` as an array, XML a `document`
+applied, at three decimal places, trailing zeros and a `-0`'s sign dropped —
+the bytes `format!("{value:.3}")` and that trim give, written straight into
+the output, so the ten numbers a character carries allocate nothing; a
+non-finite number is `null` in JSON and an absent attribute in XML. JSON has `pages` as an array, XML a `document`
 element of `page` elements with the model in attributes, and HTML a page of
 absolutely positioned lines with the model in `data-` attributes — the font
 name only ever in `data-font`, never in CSS.
@@ -1070,7 +1072,14 @@ one hostile string — every C0 control, DEL, NEL, U+2028/U+2029, markup
 characters, both noncharacters U+FFFE/U+FFFF, U+FDD0, and a character outside
 the BMP — and check that a whole document in each format, over a page whose
 text and font name are hostile, keeps them inside their quotes; spans split
-at a font or size change and nowhere else.
+at a font or size change and nowhere else. `numbers_write_what_format_and_trim_wrote`
+holds every number to the `format!` and trim it replaced, over every
+thousandth to 5 and the midpoints between, the ties at the fourth decimal,
+every power of two, the edge of the integer path, the largest finite value and
+seeded values, each with its neighbours and both signs; and
+`crates/tinker-pdf/tests/text_allocations.rs` counts a page's allocations in
+each format at 1 000 and 4 000 characters, a character costing none
+(`a_character_writes_its_numbers_without_allocating`).
 
 Facade integration tests: `crates/tinker-pdf/tests/text_options.rs` (the
 text options through `Page::text()` on a written document, every type named

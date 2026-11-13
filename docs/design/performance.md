@@ -2433,16 +2433,24 @@ Each is a step, in `Stats::work`, and A2's legs hold them as they hold the rest.
 
 #### The structured-text writer's numbers
 
-`number` renders a finite value as `format!("{value:.3}")` with its trailing
-zeros, its point and a `-0`'s sign trimmed, a `String` for each of the ten
-numbers a character carries. P-02.6 writes the same bytes straight into the
-output. The value scaled by a thousand is rounded by integer arithmetic where
-that rounding is decided exactly — the scaled value below 2^52, and its
-fractional part farther from a half than the scaling's rounding error — and its
-digits are written from the integer; every other value, ties at the fourth
-decimal among them, is written by the formatter itself into the output and
-trimmed there. So no number allocates and none is decided differently.
-`TEXT_FORMAT_VERSION` does not move, because no byte does.
+A finite value is written as `format!("{value:.3}")` with its trailing zeros,
+its point and a `-0`'s sign trimmed — the bytes `number`, a `String` for each
+of the ten numbers a character carries, used to make — and `write_number`
+writes them straight into the output. A double is its significand over a
+power of two, so for a magnitude below 2^52 a thousand times the significand,
+shifted down by that power, is the whole number of thousandths, and the bits
+shifted out, against half of what the last place is worth, decide the rounding
+exactly (`thousandths`); the digits are written from that integer. A tie at the
+fourth decimal — an odd number of sixteenths, the only doubles a thousand times
+which ends in exactly a half — and a magnitude of 2^52 or more are written by
+the formatter itself into the output and trimmed there. Two of a line's sizes
+are compared as they print: two values whose thousandths are decided print
+alike exactly when those are equal, and any other pair is written into stack
+buffers and compared. So no number allocates and none is decided differently;
+`numbers_write_what_format_and_trim_wrote` holds every path to the old `number`,
+kept test-only, and `text_allocations.rs`
+`a_character_writes_its_numbers_without_allocating` counts what a character
+costs. `TEXT_FORMAT_VERSION` does not move, because no byte does.
 
 #### Batch inference
 
