@@ -943,7 +943,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 182 operations over inputs the benches
+each, MS-09's `threads` among them: 184 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1011,6 +1011,8 @@ crates/tinker-pdf/benches/
                      level-6 byte counts beside them; inputs.rs re-exports it
   support/list.rs    the reader of baseline.json's lists
   support/cli.rs     the one spawner: this revision's tpdf, as a child
+  support/colour.rs  the page of colour glyphs the write and render groups
+                     share, and the planning baseline's arm of it
   open.rs  text.rs  analysis.rs  render.rs  encode.rs  decode.rs  write.rs
   sign.rs  layout.rs  fonts.rs  threads.rs  scripts.rs  ocr.rs
   calibration.rs
@@ -1167,6 +1169,7 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | `book(chapters)` | an EPUB of a heading and one paragraph of about 600 characters a chapter, each chapter a page at the default box, Liberation Serif embedded through `@font-face` in the one stylesheet every chapter links so its glyphs are drawn in both builds | `tests/epub_support`'s OCF writer (`crates/tinker-pdf/tests/epub_support/mod.rs:543`), by path | "a generated 30-chapter book", "10 chapters" |
 | `html_report()`, `markdown()` | 20 pages each at the default page box. The report is 20 sections, each a heading, two paragraphs and a ruled table of six rows on a page of its own; the Markdown is 20 sections, each a heading, three paragraphs and a list of five items, in one flow, CommonMark having no table | `FromHtml` (`crates/tinker-pdf/src/html.rs:181`); CommonMark for `Document::open_markdown` (`crates/tinker-pdf/src/lib.rs:1472`) | "a generated 20-page HTML report / 20-page Markdown document" |
 | `message()` | 10 000 000 seeded bytes, and their RSA-2048 PKCS #1 v1.5 signature made in the bench with `pss-vect.txt`'s Example 10 key (`crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt`) through `Modulus::pow` (`crates/tinker-pdf-crypto/src/bignum.rs:468`) | `inputs.rs` | "over 10 MB" |
+| `colour_face()`, `colour_lines()` | a TrueType face whose 26 capitals are each a `COLR` version 1 graph of three layers — a disc under a radial gradient, two eyes in a solid of the brown at one or three quarters, a mouth under a linear gradient — over a `CPAL` of eight entries, and their outlines the discs; and 25 lines of 21 of them, the `j`th of line `k` the `(7k + 11j) mod 26`th | `inputs.rs`, by integer formula | — (FT-06.17a's page of colour glyphs) |
 | committed | the nine books (`crates/tinker-pdf/tests/epub/`); the mesh and transparency fixtures (`fuzz/corpus/render_page/`); every `.svg` in `crates/tinker-pdf-svg/tests/fixtures/` (17), every `.xps` and `.oxps` under `crates/tinker-pdf/tests/` (19) and every `.cbz` in `crates/tinker-pdf/tests/cbz/` (9); the three Liberation Regular faces; the four bare CFF programs in `fuzz/corpus/cff/` and the `CFF ` tables of the 189 committed OpenType files (185 in `crates/tinker-pdf-shape/data/aots/fonts/`, three text-rendering-tests faces and `fuzz/corpus/sfnt/opentype-cff.otf`); `TestShapeAran.ttf`; `data/`'s four codestreams; the vendored Devanagari face | read by path | as named |
 
 #### The operations
@@ -1301,6 +1304,7 @@ no run has timed them, so their window is *untimed*.
 | `render/the half-size G4 scan page at 150 dpi` | pixels · 620×878 | `g4_page(2)` | 160 → 12.5, rescaled from A4's 641 → 50; 12.8× | in | built |
 | `render/the half-size JBIG2 scan page at 150 dpi` | pixels · 620×878 | `jbig2_page(2)` | 219 → 20, rescaled from A4's 875 → 80; 10.9× | in | built |
 | `render/the quarter-size Flate RGB image page at 72 dpi` | pixels · 149×211 | `flate_page(4)` | 57.8 → 14.4, rescaled from A4's 924 → 230; 4.01× | in | built |
+| `render/render a page of colour glyphs at 150 dpi` | pixels · 1240×1755 | `colour_lines()` in `colour_face()` at 24 pt on A4, written by `support/colour.rs`'s `colour_page` through the colour run writer: each glyph a Type 3 glyph whose procedure draws its graph; held before it is timed to its lines' text, no warning, and a quarter or more of its ink in colour; the planning baseline, which has no colour glyphs, draws the same lines in the face's outlines, embedded as a composite font, in its place | not in tier P's table; floor 1, against the planning baseline's same lines in outlines; a target is the owner's (H-77, H-141) | untimed | built |
 | `render/the half-size text page to PNG at 150 dpi, CLI` | pixels · 620×878 | `tpdf render` | 100.5 → 17.5, rescaled from A4's 402 → 70; 5.74× | in | built |
 | `render/the quarter-size text page to PNG at 300 dpi, CLI` | pixels · 620×878 | `tpdf render` | 73.8 → 12.5, rescaled from A4's 1 180 → 200; 5.9× | in | built |
 | `render/8 quarter-size pages to PNG at 150 dpi, 1 job, CLI` | pages · 8 | `tpdf render --jobs 1` | 171 → 32.5, rescaled from 20 A4 pages' 6 847 → 1 300; 5.26× | in | built |
@@ -1382,6 +1386,7 @@ set.
 | `write/edit an annotation, save, reopen, 1000 pages` | pages · 170 × 1 000 | `annotated(small(1000))`: the appearance replaced (`DocumentEditor::put_stream`) and appended through `write::append`, the update section written and the document reopened over it; the planning baseline saves under `WriteMode::Incremental` and reopens the bytes in its place | not measured → ≤ 2 plus output bytes; relation ≤ 2 × the 10-page one | ×170 | built |
 | `write/edit an annotation, save, reopen, 10 pages` | pages · 2 700 × 10 | `annotated(small(10))` | the relation's other side | ×2 700 | built |
 | `write/no-op incremental save of 100 pages` | pages · 2 000 × 100 | `small(100)`, its editor saved unchanged under `WriteMode::Incremental`, the original bytes its prefix | 0.015 → 0.02; held | ×2 000 | built |
+| `write/write a page of colour glyphs` | pages · 10 | the render group's page of colour glyphs, written by `support/colour.rs`'s `colour_page`, each glyph's procedure once a document; held before it is timed to reopen to its lines' text; the planning baseline writes the same lines in the face's outlines in its place | not in tier P's table; floor 1, against the planning baseline's same lines in outlines; a target is the owner's (H-77, H-141) | untimed | built |
 | `write/rewrite 100 pages, CLI` | pages · 26 × 100 | `tpdf merge`, one input | 14.8 → 8; 1.85× | ×26 | built |
 | `write/rewrite 1000 pages, CLI` | pages · 6 × 1 000 | `tpdf merge`, one input | 668 → 60; 11.1× | ×6 | built |
 | `write/subset-on-save of 4 pages, CLI` | pages · 4 | `tpdf merge --font-policy subset` | 48.3 → 4.8, rescaled from 100 pages' 1 208 → 120; 10× | in | built |
@@ -1393,6 +1398,16 @@ The merge keeps fonts because its target leaves no room for a subset pass —
 subset-on-save measures that pass on its own. The AES pair is tier P's "decrypt
 / encrypt", whose table states its targets as rates and no size, so the
 2.5 MB file re-states no tier P figure.
+
+The page of colour glyphs (FT-06.17a, `docs/design/colour-fonts.md`) is the
+colour fonts' speed rows: the write group writes it ten times an iteration,
+sized by estimate for the window, and the render group draws it at 150 dpi.
+The planning baseline's arm of `support/colour.rs` sets the same lines in
+the face's outlines, so the paired run holds each against the same text in
+plain glyphs, the comparison H-141 asks for; its page is stored under a name
+of its own, so no build reads another's. No run has timed either, so the
+named machine's entry names both unmeasured and their window is *untimed*:
+FT-06.17b takes their figures, in release and in debug, in the timing phase.
 
 **sign**
 

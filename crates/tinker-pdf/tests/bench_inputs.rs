@@ -29,6 +29,10 @@ mod inputs;
 #[path = "../benches/support/list.rs"]
 mod list;
 
+/// The page of colour glyphs the write and render groups time.
+#[path = "../benches/support/colour.rs"]
+mod colour;
+
 use inputs::{Fixture, Store};
 use tinker_pdf::RenderOptions;
 
@@ -493,4 +497,121 @@ fn the_hyphenated_book_is_a_page_a_chapter_and_breaks_at_its_points() {
             "a line broke inside a word with no dictionary: {lines:?}"
         );
     }
+}
+
+/// How many of a render's pixels are inked — a channel under half — and how
+/// many of those are a colour rather than a grey, their largest and smallest
+/// channels a quarter of the range apart or more.
+fn ink_and_colour(bitmap: &tinker_pdf::Bitmap) -> (usize, usize) {
+    let n = bitmap.components();
+    let pixels: Vec<&[u8]> = bitmap
+        .data
+        .chunks(bitmap.stride)
+        .flat_map(|row| row.chunks(n).take(bitmap.width as usize))
+        .collect();
+    let inked = pixels
+        .iter()
+        .filter(|pixel| pixel[..3].iter().any(|&v| v < 128))
+        .count();
+    let coloured = pixels
+        .iter()
+        .filter(|pixel| {
+            let most = pixel[..3].iter().max().copied().unwrap_or(0);
+            let least = pixel[..3].iter().min().copied().unwrap_or(0);
+            most - least >= 64
+        })
+        .count();
+    (inked, coloured)
+}
+
+/// **The page of colour glyphs** (FT-06.17a) is what its two operations say
+/// it is: the face is the same bytes every time and covers every capital the
+/// lines set, 21 different ones a line and all 26 on the page, each a colour
+/// glyph; the page `support/colour.rs` writes through the colour run writer
+/// draws every glyph's graph, reopens to its lines' text and draws in colour
+/// with no warning; and the same lines in the face's outlines, which the
+/// planning baseline's arm writes in its place, read as the same text and
+/// draw no colour.
+#[test]
+fn the_page_of_colour_glyphs_draws_its_lines_in_colour() {
+    use tinker_pdf::colour_glyphs::ColourFace;
+    use tinker_pdf::shaping::{write_run, Run};
+    use tinker_pdf_cos::build::DocumentBuilder;
+    use tinker_pdf_font::{PaletteChoice, Sfnt};
+    use tinker_pdf_shape::bidi::BaseDirection;
+    use tinker_pdf_shape::Shaper;
+
+    let program = inputs::colour_face();
+    assert_eq!(program, inputs::colour_face(), "by formula");
+    let lines = inputs::colour_lines();
+    assert_eq!(lines, inputs::colour_lines(), "by formula");
+    assert_eq!(lines.len(), 25, "25 lines");
+    for line in &lines {
+        let mut capitals: Vec<char> = line.chars().collect();
+        assert_eq!(capitals.len(), 21, "{line}: 21 glyphs");
+        capitals.sort_unstable();
+        capitals.dedup();
+        assert_eq!(capitals.len(), 21, "{line}: 21 different capitals");
+    }
+    let face = Sfnt::parse(&program).expect("the face parses");
+    for c in 'A'..='Z' {
+        assert!(
+            lines.iter().filter(|line| line.contains(c)).count() >= 20,
+            "{c} stands on 20 lines or more"
+        );
+        assert!(
+            face.glyph_for_char(c).is_some_and(|glyph| glyph != 0),
+            "{c} is a glyph of the face"
+        );
+    }
+    assert!(
+        ColourFace::new(&face, PaletteChoice::Default).has_colour(),
+        "the face carries colour glyphs"
+    );
+
+    // The head's page: `colour_page` holds every graph drawn.
+    let in_colour = colour::colour_page(&program, &lines);
+    colour::holds_its_lines(&in_colour, &lines);
+
+    // The same lines in the face's outlines, as the planning baseline's arm
+    // sets them, through the head's run writer with no colour face.
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"F0", b"BenchColour", &program));
+    let mut content = Vec::new();
+    for (line, text) in lines.iter().enumerate() {
+        let run = Run {
+            font: b"F0",
+            shaper: Shaper::new(&face),
+            size: inputs::COLOUR_SIZE,
+            matrix: inputs::colour_line_matrix(line),
+            text,
+            direction: BaseDirection::LeftToRight,
+            colour: None,
+        };
+        assert!(write_run(&mut builder, &mut content, &run), "line {line}");
+    }
+    builder.add_page(595.0, 842.0, |page| page.raw(&content));
+    let in_outlines = builder.finish();
+    colour::holds_its_lines(&in_outlines, &lines);
+
+    // Drawn with no warning, as the render group's setup holds its page.
+    let drawn = |bytes: Vec<u8>| {
+        let bitmap = tinker_pdf::Document::open(bytes)
+            .expect("the page opens")
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::at_dpi(36.0));
+        assert!(bitmap.warnings.is_empty(), "{:?}", bitmap.warnings);
+        bitmap
+    };
+    let (inked, coloured) = ink_and_colour(&drawn(in_colour));
+    assert!(
+        inked > 0 && coloured * 4 > inked,
+        "the colour glyphs are in colour: {coloured} of {inked} inked pixels"
+    );
+    let (inked, coloured) = ink_and_colour(&drawn(in_outlines));
+    assert!(
+        inked > 0 && coloured == 0,
+        "the outlines are in the text's black: {coloured} of {inked} inked pixels coloured"
+    );
 }

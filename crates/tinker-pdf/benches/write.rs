@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use support::cli::Cli;
-use support::{inputs, Group, Per};
+use support::{colour, inputs, Group, Per};
 #[cfg(not(tinker_planning_baseline))]
 use tinker_pdf::write::AppendOptions;
 use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
@@ -354,6 +354,25 @@ fn write(c: &mut Criterion) {
         op.iter(move || {
             for _ in 0..2000 {
                 black_box(doc.editor().save(&incremental));
+            }
+        });
+    });
+
+    // A page of colour glyphs (FT-06.17a), ten an iteration: 25 lines of 21
+    // capitals of `inputs::colour_face()`, each a `COLR` version 1 graph of
+    // three layers — a disc under a radial gradient, its eyes in a solid, its
+    // mouth under a linear gradient — written as Type 3 glyphs through the
+    // colour run writer (`support::colour`), each glyph's procedure once a
+    // document. The planning baseline, which has no colour glyphs, writes the
+    // same lines in the face's outlines in its place.
+    group.operation("write a page of colour glyphs", |op| {
+        let program = inputs::store().bytes("colour-face.ttf", inputs::colour_face);
+        let lines = inputs::colour_lines();
+        colour::holds_its_lines(&colour::colour_page(&program, &lines), &lines);
+        op.per(Per::Pages(10));
+        op.iter(move || {
+            for _ in 0..10 {
+                black_box(colour::colour_page(&program, &lines));
             }
         });
     });

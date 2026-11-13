@@ -130,7 +130,10 @@
 //! `--cfg tinker_planning_baseline`, which `Cargo.toml` declares to
 //! `check-cfg`. Under it an operation's body calls what `61adcde`'s facade
 //! has: where the head calls what that revision lacks, an item or arm
-//! marked with the `cfg` computes the same thing from what it has. An
+//! marked with the `cfg` computes the same thing from what it has. The page
+//! of colour glyphs the write and render groups share is such an item, in
+//! [`colour`]: that revision has no colour glyphs, and its arm sets the same
+//! lines in the same face's outlines. An
 //! operation the planning baseline lacks altogether is declared with
 //! [`Group::calibrated`], which that build leaves out: its gate in
 //! `baseline.json` holds it against the calibration operation the planning
@@ -162,6 +165,7 @@
 )]
 
 pub mod cli;
+pub mod colour;
 pub mod inputs;
 pub mod list;
 

@@ -1,0 +1,81 @@
+part	case	figure	value
+baseline	an empty page	document bytes	506
+vector	COLR version 0	bytes added as its outline	1544
+vector	COLR version 0	bytes added in colour	1553
+vector	COLR version 1	bytes added as its outline	1568
+vector	COLR version 1	bytes added in colour	3434
+vector	SVG	bytes added as its outline	1536
+vector	SVG	bytes added in colour	1784
+strike	sbix	bytes added as its outline	1544
+strike	sbix	bytes added at 16 ppem	1932
+strike	sbix	bytes added at 32 ppem	2487
+strike	sbix	bytes added at 64 ppem	3753
+strike	sbix	bytes added at 128 ppem	6472
+strike	CBDT	bytes added as its outline	1544
+strike	CBDT	bytes added at 16 ppem	1949
+strike	CBDT	bytes added at 32 ppem	2504
+strike	CBDT	bytes added at 64 ppem	3770
+strike	CBDT	bytes added at 128 ppem	6489
+inexpressible	COMPOSITE_SRC_ATOP	bytes added source-over	1687
+inexpressible	COMPOSITE_SRC_ATOP	bytes added as an image at 64 px/em	1785
+inexpressible	COMPOSITE_SRC_ATOP	bytes added as an image at 128 px/em	1920
+inexpressible	COMPOSITE_SRC_ATOP	bytes added as an image at 256 px/em	2693
+inexpressible	COMPOSITE_SRC_ATOP	bytes added as an image at 512 px/em	5509
+inexpressible	COMPOSITE_SRC_ATOP	largest error of source-over, levels	128.0
+inexpressible	COMPOSITE_DEST_ATOP	bytes added source-over	1687
+inexpressible	COMPOSITE_DEST_ATOP	bytes added as an image at 64 px/em	1783
+inexpressible	COMPOSITE_DEST_ATOP	bytes added as an image at 128 px/em	1920
+inexpressible	COMPOSITE_DEST_ATOP	bytes added as an image at 256 px/em	2519
+inexpressible	COMPOSITE_DEST_ATOP	bytes added as an image at 512 px/em	5011
+inexpressible	COMPOSITE_DEST_ATOP	largest error of source-over, levels	161.0
+inexpressible	COMPOSITE_XOR	bytes added source-over	1687
+inexpressible	COMPOSITE_XOR	bytes added as an image at 64 px/em	1818
+inexpressible	COMPOSITE_XOR	bytes added as an image at 128 px/em	2003
+inexpressible	COMPOSITE_XOR	bytes added as an image at 256 px/em	2990
+inexpressible	COMPOSITE_XOR	bytes added as an image at 512 px/em	6586
+inexpressible	COMPOSITE_XOR	largest error of source-over, levels	95.5
+inexpressible	COMPOSITE_PLUS	bytes added source-over	1687
+inexpressible	COMPOSITE_PLUS	bytes added as an image at 64 px/em	1818
+inexpressible	COMPOSITE_PLUS	bytes added as an image at 128 px/em	2004
+inexpressible	COMPOSITE_PLUS	bytes added as an image at 256 px/em	2990
+inexpressible	COMPOSITE_PLUS	bytes added as an image at 512 px/em	6586
+inexpressible	COMPOSITE_PLUS	largest error of source-over, levels	54.3
+encoded	COMPOSITE_SRC_OVER	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_DEST_OVER	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_SRC_ATOP	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_DEST_ATOP	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_XOR	largest difference from linear light, levels	39.7
+encoded	COMPOSITE_PLUS	largest difference from linear light, levels	75.9
+encoded	COMPOSITE_SCREEN	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_OVERLAY	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_DARKEN	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_LIGHTEN	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_COLOR_DODGE	largest difference from linear light, levels	173.4
+encoded	COMPOSITE_COLOR_BURN	largest difference from linear light, levels	170.0
+encoded	COMPOSITE_HARD_LIGHT	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_SOFT_LIGHT	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_DIFFERENCE	largest difference from linear light, levels	117.9
+encoded	COMPOSITE_EXCLUSION	largest difference from linear light, levels	117.9
+encoded	COMPOSITE_MULTIPLY	largest difference from linear light, levels	73.2
+encoded	COMPOSITE_HSL_HUE	largest difference from linear light, levels	151.9
+encoded	COMPOSITE_HSL_SATURATION	largest difference from linear light, levels	114.8
+encoded	COMPOSITE_HSL_COLOR	largest difference from linear light, levels	139.9
+encoded	COMPOSITE_HSL_LUMINOSITY	largest difference from linear light, levels	139.9
+books	calibre-book-cover.epub	faces	0
+books	calibre-book-cover.epub	colour tables	none
+books	calibre-book-nocover.epub	faces	0
+books	calibre-book-nocover.epub	colour tables	none
+books	calibre-embedded-font.epub	faces	2
+books	calibre-embedded-font.epub	colour tables	none
+books	kcc-fixed-layout.epub	faces	0
+books	kcc-fixed-layout.epub	colour tables	none
+books	pandoc-book-cover.epub	faces	0
+books	pandoc-book-cover.epub	colour tables	none
+books	pandoc-book-epub2.epub	faces	0
+books	pandoc-book-epub2.epub	colour tables	none
+books	pandoc-book-nocover.epub	faces	0
+books	pandoc-book-nocover.epub	colour tables	none
+books	pandoc-embedded-font.epub	faces	1
+books	pandoc-embedded-font.epub	colour tables	none
+books	pandoc-plates.epub	faces	0
+books	pandoc-plates.epub	colour tables	none

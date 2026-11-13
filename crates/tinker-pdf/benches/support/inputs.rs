@@ -2976,7 +2976,7 @@ pub fn column_face() -> Vec<u8> {
         ],
     );
 
-    let mut tables: Vec<([u8; 4], Vec<u8>)> = vec![
+    sfnt_of(vec![
         (*b"GPOS", gpos),
         (*b"GSUB", gsub),
         (*b"cmap", cmap),
@@ -2988,7 +2988,12 @@ pub fn column_face() -> Vec<u8> {
         (*b"maxp", maxp),
         (*b"vhea", vhea),
         (*b"vmtx", vmtx),
-    ];
+    ])
+}
+
+/// A TrueType face of `tables`: its directory, the records in tag order with
+/// no checksum, and the tables after it in the same order, unpadded.
+fn sfnt_of(mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
     tables.sort_by_key(|(tag, _)| *tag);
     let mut out = 0x0001_0000u32.to_be_bytes().to_vec();
     out.extend(be16s(&[
@@ -3013,4 +3018,298 @@ pub fn column_face() -> Vec<u8> {
     }
     out.extend(body);
     out
+}
+
+// ---- A page of colour glyphs (FT-06.17a) -----------------------------------
+
+/// The palette [`colour_face`]'s graphs paint in, each entry RGBA: a colour
+/// emoji's yellow and orange, a dark brown for its features, and five others
+/// the capitals take in turn.
+const COLOUR_PALETTE: [[u8; 4]; 8] = [
+    [255, 214, 82, 255],
+    [247, 152, 36, 255],
+    [92, 54, 24, 255],
+    [232, 80, 64, 255],
+    [64, 140, 222, 255],
+    [84, 182, 96, 255],
+    [146, 92, 204, 255],
+    [255, 255, 255, 255],
+];
+
+/// How many capitals [`colour_face`] draws in colour: `A` to `Z`, glyphs 1 to
+/// 26.
+const CAPITALS: u16 = 26;
+
+/// The type a page of colour glyphs is set in, in points: a glyph an em wide.
+pub const COLOUR_SIZE: f64 = 24.0;
+
+/// How many lines a page of colour glyphs sets, and how many glyphs a line:
+/// 21 glyphs at 24 points fill A4's width inside 36-point margins, and 25
+/// lines 30 points apart its height.
+const COLOUR_LINES: usize = 25;
+const COLOUR_COLUMNS: usize = 21;
+
+/// The lines of a page of colour glyphs: the `j`th glyph of line `k` the
+/// `(7k + 11j) mod 26`th capital, so that a line holds 21 different capitals
+/// and each of the 26 stands on 20 or 21 of the lines.
+pub fn colour_lines() -> Vec<String> {
+    (0..COLOUR_LINES)
+        .map(|line| {
+            (0..COLOUR_COLUMNS)
+                .map(|column| {
+                    let n = u8::try_from((7 * line + 11 * column) % 26).expect("under 26");
+                    char::from(b'A' + n)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Where line `line` of [`colour_lines`] stands on an A4 page, 595 by 842
+/// points: its text matrix, 36 points in from the left edge, the first
+/// baseline 60 points under the top edge and each 30 under the one before.
+pub fn colour_line_matrix(line: usize) -> [f64; 6] {
+    let down = f64::from(u32::try_from(line).expect("a line of the page"));
+    [1.0, 0.0, 0.0, 1.0, 36.0, 782.0 - 30.0 * down]
+}
+
+/// Big-endian `i16`s.
+fn words(values: &[i16]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect()
+}
+
+/// A simple TrueType glyph of `contours`, each a closed run of points
+/// `(x, y, on the curve)`: its contour count and box, the last point of each
+/// contour, no instructions, a flag a point, and every coordinate a word
+/// delta from the point before.
+fn simple_glyph(contours: &[Vec<(i16, i16, bool)>]) -> Vec<u8> {
+    let points: Vec<(i16, i16, bool)> = contours.iter().flatten().copied().collect();
+    let xs = points.iter().map(|&(x, _, _)| x);
+    let ys = points.iter().map(|&(_, y, _)| y);
+    let mut out = words(&[
+        i16::try_from(contours.len()).expect("few contours"),
+        xs.clone().min().expect("a point"),
+        ys.clone().min().expect("a point"),
+        xs.max().expect("a point"),
+        ys.max().expect("a point"),
+    ]);
+    let mut last = 0usize;
+    for contour in contours {
+        last += contour.len();
+        out.extend(be16s(&[u16::try_from(last - 1).expect("few points")]));
+    }
+    out.extend(be16s(&[0]));
+    out.extend(points.iter().map(|&(_, _, on)| u8::from(on)));
+    let mut previous = 0i16;
+    for &(x, _, _) in &points {
+        out.extend_from_slice(&(x - previous).to_be_bytes());
+        previous = x;
+    }
+    previous = 0;
+    for &(_, y, _) in &points {
+        out.extend_from_slice(&(y - previous).to_be_bytes());
+        previous = y;
+    }
+    out
+}
+
+/// The three outlines capital `n`'s graph fills, in font units at a thousand
+/// to the em: a disc of four quadratic arcs, clockwise from its top, its
+/// on-curve points at the compass points and its off-curve ones at its box's
+/// corners, its radius smaller with `n`; two eyes, higher with `n`; and a
+/// mouth, lower with it.
+fn capital_shapes(n: u16) -> [Vec<Vec<(i16, i16, bool)>>; 3] {
+    let n = i16::try_from(n).expect("a capital");
+    let (x, y, r) = (500, 450, 400 - n % 4 * 20);
+    let disc = vec![vec![
+        (x, y + r, true),
+        (x + r, y + r, false),
+        (x + r, y, true),
+        (x + r, y - r, false),
+        (x, y - r, true),
+        (x - r, y - r, false),
+        (x - r, y, true),
+        (x - r, y + r, false),
+    ]];
+    let rect = |x0: i16, y0: i16, x1: i16, y1: i16| {
+        vec![
+            (x0, y0, true),
+            (x0, y1, true),
+            (x1, y1, true),
+            (x1, y0, true),
+        ]
+    };
+    let lift = n % 3 * 20;
+    let eyes = vec![
+        rect(320, 480 + lift, 420, 640 + lift),
+        rect(580, 480 + lift, 680, 640 + lift),
+    ];
+    let low = n % 5 * 10;
+    [disc, eyes, vec![rect(300, 220 + low, 700, 300 + low)]]
+}
+
+/// `head`, a `COLR` version 1 paint table whose `Offset24` at `slot` names
+/// `child`, with the child written after it: *Paint tables* counts the
+/// offset from the naming table's own start.
+fn paint_naming(mut head: Vec<u8>, slot: usize, child: Vec<u8>) -> Vec<u8> {
+    let offset = u32::try_from(head.len())
+        .expect("a small paint")
+        .to_be_bytes();
+    head[slot..slot + 3].copy_from_slice(&offset[1..]);
+    head.extend(child);
+    head
+}
+
+/// A `ColorLine` padded at both ends (`EXTEND_PAD`) from palette entry `from`
+/// at offset 0 to `to` at 1, both opaque: an `F2DOT14` of 1 is `0x4000`.
+fn colour_line(from: u16, to: u16) -> Vec<u8> {
+    let mut out = vec![0];
+    out.extend(be16s(&[2, 0, from, 0x4000, 0x4000, to, 0x4000]));
+    out
+}
+
+/// `PaintGlyph` (format 10): `glyph`'s outline filled with `paint`.
+fn paint_glyph(glyph: u16, paint: Vec<u8>) -> Vec<u8> {
+    let mut head = vec![10, 0, 0, 0];
+    head.extend(be16s(&[glyph]));
+    paint_naming(head, 1, paint)
+}
+
+/// Capital `n`'s three layers, bottom first, over the glyphs `shapes` names:
+/// the disc under a radial gradient (format 6) from a highlight above its
+/// centre to its rim; the eyes in a solid (format 2) of the brown, opaque for
+/// an even capital and at three quarters for an odd one; and the mouth under
+/// a linear gradient (format 4) across it. The palette entries turn with `n`.
+fn capital_layers(n: u16, shapes: [u16; 3]) -> [Vec<u8>; 3] {
+    let k = i16::try_from(n).expect("a capital");
+    let mut radial = vec![6, 0, 0, 0];
+    radial.extend(words(&[420, 560]));
+    radial.extend(be16s(&[0]));
+    radial.extend(words(&[500, 450]));
+    radial.extend(be16s(&[u16::try_from(400 - k % 4 * 20).expect("a radius")]));
+    let radial = paint_naming(radial, 1, colour_line(n % 8, (n + 1) % 8));
+    let mut solid = vec![2];
+    solid.extend(be16s(&[2, if n % 2 == 0 { 0x4000 } else { 0x3000 }]));
+    let low = 220 + k % 5 * 10;
+    let mut linear = vec![4, 0, 0, 0];
+    linear.extend(words(&[300, low, 700, low, 300, low + 100]));
+    let linear = paint_naming(linear, 1, colour_line((n + 3) % 8, (n + 5) % 8));
+    [
+        paint_glyph(shapes[0], radial),
+        paint_glyph(shapes[1], solid),
+        paint_glyph(shapes[2], linear),
+    ]
+}
+
+/// A face that draws each capital as a colour glyph, generated as every
+/// input here is, by integer formula: capital `n` glyph `1 + n`, its outline
+/// its disc ([`capital_shapes`]), and its eyes and mouth glyphs `27 + 2n` and
+/// `28 + 2n`; every advance an em of a thousand units; a `cmap` from `A`–`Z`
+/// onto the capitals; and a `COLR` version 1 whose `BaseGlyphList` gives each
+/// capital a `PaintColrLayers` of its three layers in the `LayerList`
+/// ([`capital_layers`]), over a `CPAL` of one palette, [`COLOUR_PALETTE`].
+/// The capitals' own outlines are what a writer without colour glyphs draws.
+pub fn colour_face() -> Vec<u8> {
+    let glyphs = 1 + CAPITALS * 3;
+    let mut outlines: Vec<Vec<u8>> = vec![Vec::new(); usize::from(glyphs)];
+    for n in 0..CAPITALS {
+        let [disc, eyes, mouth] = capital_shapes(n);
+        outlines[usize::from(1 + n)] = simple_glyph(&disc);
+        outlines[usize::from(1 + CAPITALS + 2 * n)] = simple_glyph(&eyes);
+        outlines[usize::from(2 + CAPITALS + 2 * n)] = simple_glyph(&mouth);
+    }
+    let at = |glyf: &[u8]| {
+        u32::try_from(glyf.len())
+            .expect("a small glyf")
+            .to_be_bytes()
+    };
+    let mut glyf = Vec::new();
+    let mut loca = Vec::new();
+    for outline in &outlines {
+        loca.extend_from_slice(&at(&glyf));
+        glyf.extend_from_slice(outline);
+    }
+    loca.extend_from_slice(&at(&glyf));
+    let hmtx = be16s(&[1000, 0].repeat(usize::from(glyphs)));
+
+    let mut head = vec![0u8; 54];
+    head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+    head[36..44].copy_from_slice(&words(&[100, 50, 900, 850]));
+    head[50..52].copy_from_slice(&1i16.to_be_bytes());
+    let mut hhea = vec![0u8; 36];
+    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    hhea[4..8].copy_from_slice(&words(&[900, -100]));
+    hhea[10..12].copy_from_slice(&1000u16.to_be_bytes());
+    hhea[34..36].copy_from_slice(&glyphs.to_be_bytes());
+    let mut maxp = 0x0000_5000u32.to_be_bytes().to_vec();
+    maxp.extend_from_slice(&glyphs.to_be_bytes());
+    // Format 12 under (3, 10): one group, `A` to `Z` onto glyphs 1 to 26.
+    let mut cmap = be16s(&[0, 1, 3, 10]);
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend(be16s(&[12, 0]));
+    for value in [28u32, 0, 1, u32::from('A'), u32::from('Z'), 1] {
+        cmap.extend_from_slice(&value.to_be_bytes());
+    }
+
+    // The paints, each capital's `PaintColrLayers` and then its layers.
+    let mut area = Vec::new();
+    let mut roots = Vec::new();
+    let mut layers = Vec::new();
+    for n in 0..CAPITALS {
+        roots.push(area.len());
+        area.extend_from_slice(&[1, 3]);
+        area.extend_from_slice(&(3 * u32::from(n)).to_be_bytes());
+        let shapes = [1 + n, 1 + CAPITALS + 2 * n, 2 + CAPITALS + 2 * n];
+        for layer in capital_layers(n, shapes) {
+            layers.push(area.len());
+            area.extend(layer);
+        }
+    }
+    let base_list_at = 34usize;
+    let layer_list_at = base_list_at + 4 + 6 * roots.len();
+    let area_at = layer_list_at + 4 + 4 * layers.len();
+    let offset = |value: usize| u32::try_from(value).expect("a small COLR").to_be_bytes();
+    // *COLR header*: version 1, no version 0 records, the two lists, and no
+    // clip list, variation index map or variation store.
+    let mut colr = be16s(&[1, 0]);
+    colr.extend_from_slice(&[0; 8]);
+    colr.extend(be16s(&[0]));
+    colr.extend_from_slice(&offset(base_list_at));
+    colr.extend_from_slice(&offset(layer_list_at));
+    colr.extend_from_slice(&[0; 12]);
+    colr.extend_from_slice(&offset(roots.len()));
+    for (glyph, root) in (1u16..).zip(&roots) {
+        colr.extend(be16s(&[glyph]));
+        colr.extend_from_slice(&offset(area_at + root - base_list_at));
+    }
+    colr.extend_from_slice(&offset(layers.len()));
+    for layer in &layers {
+        colr.extend_from_slice(&offset(area_at + layer - layer_list_at));
+    }
+    colr.extend(area);
+
+    let entries = u16::try_from(COLOUR_PALETTE.len()).expect("a small palette");
+    let mut cpal = be16s(&[0, entries, 1, entries]);
+    cpal.extend_from_slice(&14u32.to_be_bytes());
+    cpal.extend(be16s(&[0]));
+    for [r, g, b, a] in COLOUR_PALETTE {
+        cpal.extend_from_slice(&[b, g, r, a]);
+    }
+
+    sfnt_of(vec![
+        (*b"COLR", colr),
+        (*b"CPAL", cpal),
+        (*b"cmap", cmap),
+        (*b"glyf", glyf),
+        (*b"head", head),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"loca", loca),
+        (*b"maxp", maxp),
+    ])
 }

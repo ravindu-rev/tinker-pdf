@@ -426,11 +426,13 @@ names no such form.
 **What this design does not write exactly**, the list FT-06.17a prices:
 
 - **(c), inexpressible**: `COMPOSITE_SRC_ATOP`, `COMPOSITE_DEST_ATOP`,
-  `COMPOSITE_XOR` and `COMPOSITE_PLUS`. Source-over agrees with the first
-  three wherever an alpha is zero or one, and differs where both are
-  fractional; nothing in 11.3 adds two results. H-141 (c) chooses between an
-  image of the glyph — at FT-06.17a's candidate resolutions, 64, 128, 256 and
-  512 pixels to the em — and source-over with the warning kept.
+  `COMPOSITE_XOR` and `COMPOSITE_PLUS`. Source-over agrees with
+  `SRC_ATOP` only where the source is absent or the backdrop opaque, with
+  `DEST_ATOP` only where the backdrop is absent, and with `XOR` and `PLUS`
+  only where either is; nothing in 11.3 adds two results. H-141 (c)
+  chooses between an image of the glyph — at FT-06.17a's candidate
+  resolutions, 64, 128, 256 and 512 pixels to the em — and source-over with
+  the warning kept.
 - **(d), the colour space of a composite**: *Format 32: PaintComposite* does
   its arithmetic "after applying the inverse transfer function to derive
   linear-light RGB values". ISO 32000-2 11.3.4 admits `CalRGB` as a blending
@@ -486,6 +488,39 @@ is a graphic its decoder refuses. A bitmap used by several glyphs or several
 runs — the same bytes, a `dupe` among them — is written once. Under a profile
 that forbids transparency a graphic that needs an `/SMask` falls to the next
 table and is named; one that needs none is drawn.
+
+### What a colour glyph costs
+
+H-141 rules with the figures `colour_fonts.rs`'s `colour_glyph_costs`
+measures (FT-06.17a). The census is ignored, prints every figure and
+`RAN`, and writes them to `crates/tinker-pdf/tests/colour_glyph_costs.tsv`,
+where they are committed (ruling 16) with the run, its revision and its day
+in the commit's message; `the_committed_cost_table_is_the_censuss_shape`
+holds the table to the census's rows. Each row is a part, a case, a figure
+and its value:
+
+```text
+cargo test -p tinker-pdf --test colour_fonts -- --ignored colour_glyph_costs --exact
+```
+
+| Part | What it measures | How |
+| --- | --- | --- |
+| `baseline` | the bytes of a document of one empty page | the page every figure below is written on, 900 by 100 points, its text colour set |
+| `vector` | per table — `COLR` version 0, version 1, `SVG ` — the bytes one fixture glyph adds as its outline and in colour | each a document of the glyph drawn at 50 points, less the empty page's: as its outline the face embedded as a composite font, cut to the glyph, as a writer without colour glyphs draws it; in colour through `ColourFace`. The fixtures are a glyph of three version 0 layers, a version 1 glyph of three layers — a radial gradient, a solid and a linear gradient — and an `SVG ` glyph of a gradient-filled rectangle and a `<use>` |
+| `strike` | per table — `sbix`, `CBDT` — the bytes one fixture glyph adds as its outline and at each strike, 16, 32, 64 and 128 pixels per em | the glyph's picture, a shaded disc with eyes and a mouth on a transparent ground drawn by integer formula at each strike's size, an RGBA PNG; drawn at each strike by `StrikeChoice::Nearest`, one image each |
+| `inexpressible` | per (c) mode, the bytes the composite glyph adds drawn source-over and as an image of the glyph at 64, 128, 256 and 512 pixels to the em, and source-over's largest error | the composite test's paints, a blue source at a half over an orange backdrop at three quarters. The image samples the paints' box at each pixel's centre by the mode's formula over encoded components, written as an RGBA PNG through `png_image` and painted by the glyph's procedure, and each is held to its formula within three levels before it counts. The error is the largest difference, in levels of 255 over the white page, between what the source-over glyph draws at the composite test's sample points — the backdrop alone, the source alone, both, neither — and the mode's formula there |
+| `encoded` | per mode that mixes colour — `SRC_OVER`, `DEST_OVER`, the four (c) modes and the fifteen blends — the largest difference between its encoded reading and its linear-light one | the formula over encoded components, as every composite is written until H-141 (d) rules, against the same over linear-light ones, its colour divided by its alpha and re-encoded, both over the white page in levels of 255: over every source and backdrop whose channels are multiples of 51 and whose alphas are a quarter, a half, three quarters or one |
+| `books` | each committed book under `crates/tinker-pdf/tests/epub`: its faces, and the colour tables they carry | every entry of the book's container that is a font — an sfnt, or a WOFF or WOFF2 unpacked — whatever its name says, a collection by its first face; the tables `COLR`, `CPAL`, `SVG `, `sbix`, `CBLC` and `CBDT` by tag, or `none` |
+
+**The time** to write and to draw a page of colour glyphs is the benchmark
+set's (MS-04): `write/write a page of colour glyphs` and
+`render/render a page of colour glyphs at 150 dpi`, over one page of 25
+lines of 21 capitals at 24 points, each capital a version 1 graph of three
+layers (`benches/support/inputs.rs`'s `colour_face` and `colour_lines`,
+`benches/support/colour.rs`). The planning baseline's arm of each sets the
+same lines in the face's outlines, so the paired run holds each against
+the same text in plain glyphs. `baseline.json`'s machine entry names both
+unmeasured until the timing phase takes their figures (FT-06.17b).
 
 ### How tests compare pixels
 

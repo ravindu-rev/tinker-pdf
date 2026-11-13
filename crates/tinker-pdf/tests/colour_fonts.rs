@@ -3258,3 +3258,697 @@ fn a_fan_out_past_the_walk_budget_is_named() {
         2
     ));
 }
+
+// ---- The price (FT-06.17a) ------------------------------------------------
+
+/// The table [`colour_glyph_costs`] writes, committed beside this file:
+/// ruling 16 puts a measured figure in data, and the design doc names this
+/// file and the rule each row is measured by.
+const COSTS: &str = include_str!("colour_glyph_costs.tsv");
+
+/// The cost table's header: the census's part, the case a row measures, the
+/// figure and its value.
+const COSTS_HEADER: &str = "part\tcase\tfigure\tvalue";
+
+/// The vector tables the census prices, in [`vector_fixtures`]' order.
+const VECTOR_CASES: [&str; 3] = ["COLR version 0", "COLR version 1", "SVG"];
+
+/// The bitmap tables the census prices, in [`strike_fixtures`]' order.
+const BITMAP_CASES: [&str; 2] = ["sbix", "CBDT"];
+
+/// The bitmap fixtures' strikes, in pixels per em, up to the largest whose
+/// top bearing a `CBDT` glyph's `SmallGlyphMetrics` can state.
+const COST_STRIKES: [u16; 4] = [16, 32, 64, 128];
+
+/// FT-06.1's candidate resolutions for an inexpressible composite drawn as
+/// an image of its glyph, in pixels to the em (`docs/design/colour-fonts.md`,
+/// (c)).
+const IMAGE_RESOLUTIONS: [u32; 4] = [64, 128, 256, 512];
+
+/// The composite modes that mix the source's colour with the backdrop's —
+/// one over the other, the four that sum two terms, and the fifteen blends —
+/// each of which (d) holds over encoded components against linear light.
+const MIXING: [u8; 21] = [
+    3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+];
+
+/// The name *Format 32: PaintComposite*'s `CompositeMode` enumeration gives
+/// mode `mode`.
+fn mode_name(mode: u8) -> &'static str {
+    const NAMES: [&str; 28] = [
+        "COMPOSITE_CLEAR",
+        "COMPOSITE_SRC",
+        "COMPOSITE_DEST",
+        "COMPOSITE_SRC_OVER",
+        "COMPOSITE_DEST_OVER",
+        "COMPOSITE_SRC_IN",
+        "COMPOSITE_DEST_IN",
+        "COMPOSITE_SRC_OUT",
+        "COMPOSITE_DEST_OUT",
+        "COMPOSITE_SRC_ATOP",
+        "COMPOSITE_DEST_ATOP",
+        "COMPOSITE_XOR",
+        "COMPOSITE_PLUS",
+        "COMPOSITE_SCREEN",
+        "COMPOSITE_OVERLAY",
+        "COMPOSITE_DARKEN",
+        "COMPOSITE_LIGHTEN",
+        "COMPOSITE_COLOR_DODGE",
+        "COMPOSITE_COLOR_BURN",
+        "COMPOSITE_HARD_LIGHT",
+        "COMPOSITE_SOFT_LIGHT",
+        "COMPOSITE_DIFFERENCE",
+        "COMPOSITE_EXCLUSION",
+        "COMPOSITE_MULTIPLY",
+        "COMPOSITE_HSL_HUE",
+        "COMPOSITE_HSL_SATURATION",
+        "COMPOSITE_HSL_COLOR",
+        "COMPOSITE_HSL_LUMINOSITY",
+    ];
+    NAMES[usize::from(mode)]
+}
+
+/// The books committed under `tests/epub`, by file name in byte order.
+fn committed_books() -> Vec<String> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("epub");
+    let mut books: Vec<String> = std::fs::read_dir(&dir)
+        .expect("tests/epub reads")
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".epub"))
+        .collect();
+    books.sort();
+    books
+}
+
+/// Every row the census writes, in its order: its part, its case and its
+/// figure. The committed table holds these and no others.
+fn cost_cases() -> Vec<[String; 3]> {
+    let row = |part: &str, case: &str, figure: &str| {
+        [part.to_owned(), case.to_owned(), figure.to_owned()]
+    };
+    let mut rows = vec![row("baseline", "an empty page", "document bytes")];
+    for case in VECTOR_CASES {
+        rows.push(row("vector", case, "bytes added as its outline"));
+        rows.push(row("vector", case, "bytes added in colour"));
+    }
+    for case in BITMAP_CASES {
+        rows.push(row("strike", case, "bytes added as its outline"));
+        for ppem in COST_STRIKES {
+            rows.push(row("strike", case, &format!("bytes added at {ppem} ppem")));
+        }
+    }
+    for mode in INEXPRESSIBLE {
+        let case = mode_name(mode);
+        rows.push(row("inexpressible", case, "bytes added source-over"));
+        for per_em in IMAGE_RESOLUTIONS {
+            rows.push(row(
+                "inexpressible",
+                case,
+                &format!("bytes added as an image at {per_em} px/em"),
+            ));
+        }
+        rows.push(row(
+            "inexpressible",
+            case,
+            "largest error of source-over, levels",
+        ));
+    }
+    for mode in MIXING {
+        rows.push(row(
+            "encoded",
+            mode_name(mode),
+            "largest difference from linear light, levels",
+        ));
+    }
+    for book in committed_books() {
+        rows.push(row("books", &book, "faces"));
+        rows.push(row("books", &book, "colour tables"));
+    }
+    rows
+}
+
+/// A page of the size every census document is, with the text colour every
+/// run here is shown in and nothing else: what each figure counts the bytes
+/// a glyph adds from.
+fn empty_document() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(900.0, 100.0, |page| page.raw(b"0 0.5 0 rg\n"));
+    builder.finish()
+}
+
+/// `text` in `face` as a writer without colour glyphs writes it: the face
+/// embedded as a composite font, cut to the glyphs drawn, and its outlines
+/// filled in the text's colour, through `shaping::write_run` with no colour
+/// face, on [`colour_document`]'s page.
+fn outline_document(face: &Face, text: &str) -> Vec<u8> {
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("the fixture face is a valid sfnt");
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"F0", b"FixtureOutlines", &program));
+    let mut content = b"0 0.5 0 rg\n".to_vec();
+    assert!(write_run(
+        &mut builder,
+        &mut content,
+        &Run {
+            font: b"F0",
+            shaper: Shaper::new(&sfnt),
+            size: RUN_SIZE,
+            matrix: [1.0, 0.0, 0.0, 1.0, RUN_ORIGIN.0, RUN_ORIGIN.1],
+            text,
+            direction: BaseDirection::LeftToRight,
+            colour: None,
+        },
+    ));
+    builder.add_page(900.0, 100.0, |page| page.raw(&content));
+    builder.finish()
+}
+
+/// The vector fixtures the census prices, each a face and the text whose one
+/// glyph it draws, in [`VECTOR_CASES`]' order: [`layered_face`]'s three
+/// version 0 layers; a version 1 glyph of three layers as a colour emoji is
+/// commonly built — the em under a radial gradient, a square in a solid and
+/// a bar under a linear gradient; and [`TWO_GLYPHS`]' second `SVG ` glyph, a
+/// rectangle under a gradient and a `<use>`.
+fn vector_fixtures() -> [(Face, &'static str); 3] {
+    let version_1 = v1_face(
+        "A",
+        |rect, _| {
+            vec![(
+                'A',
+                V1::Layers(vec![
+                    V1::Glyph(
+                        rect(2),
+                        Box::new(V1::Radial {
+                            line: line(PAD, &[(0.0, 3), (1.0, 0)]),
+                            circles: [([400, 600], 0), ([500, 500], 500)],
+                            variable: false,
+                        }),
+                    ),
+                    filled(rect(0), 1),
+                    V1::Glyph(
+                        rect(4),
+                        Box::new(V1::Linear {
+                            line: line(PAD, &[(0.0, 4), (1.0, 5)]),
+                            points: [[400, 100], [600, 100], [400, 400]],
+                            variable: false,
+                        }),
+                    ),
+                ]),
+            )]
+        },
+        &[],
+    );
+    [
+        (layered_face(), "A"),
+        (version_1, "A"),
+        (svg_face(TWO_GLYPHS.as_bytes().to_vec(), Vec::new()), "B"),
+    ]
+}
+
+/// A strike's picture, `size` pixels each way, row-major from the top, drawn
+/// by integer formula as a colour emoji commonly is: a disc shaded from a
+/// yellow centre to an orange rim, two brown eyes and a brown mouth on it,
+/// and transparent outside it.
+fn emoji_picture(size: u16) -> Vec<[u8; 4]> {
+    let s = i64::from(size);
+    // In half pixels from the centre: the rim, the eyes' centres and radius.
+    let rim = (s - 2) * (s - 2);
+    let (eye_x, eye_y, eye) = (7 * s / 10, -3 * s / 10, 16 * s / 100);
+    let mut out = Vec::new();
+    for y in 0..s {
+        for x in 0..s {
+            let (dx, dy) = (2 * x + 1 - s, 2 * y + 1 - s);
+            let reach = dx * dx + dy * dy;
+            let on_eye = |cx: i64| (dx - cx).pow(2) + (dy - eye_y).pow(2) <= eye * eye;
+            let on_mouth = (4 * s / 10..=6 * s / 10).contains(&dy) && dx.abs() <= 6 * s / 10;
+            out.push(if reach > rim {
+                [0, 0, 0, 0]
+            } else if on_eye(eye_x) || on_eye(-eye_x) || on_mouth {
+                [90, 50, 20, 255]
+            } else {
+                let t = reach * 255 / rim;
+                let fall = |from: i64, by: i64| u8::try_from(from - t * by / 255).expect("a level");
+                [255, fall(220, 90), fall(60, 40), 255]
+            });
+        }
+    }
+    out
+}
+
+/// The bitmap fixtures the census prices, in [`BITMAP_CASES`]' order, each
+/// with the glyph it draws: [`bitmap_face`]'s `A` carrying
+/// [`emoji_picture`] as a PNG at every strike of [`COST_STRIKES`], in an
+/// `sbix` with its origin at the glyph's box and in a `CBLC` and `CBDT` of
+/// format 17, the picture's top 13 sixteenths of the strike over the
+/// baseline.
+fn strike_fixtures() -> [(Face, u16); 2] {
+    let pictures: Vec<(u16, Vec<u8>)> = COST_STRIKES
+        .iter()
+        .map(|&ppem| {
+            let side = u32::from(ppem);
+            (ppem, rgba_png(side, side, &emoji_picture(ppem)))
+        })
+        .collect();
+    let (sbix, ids) = bitmap_face(|ids, count| {
+        let strikes: Vec<(u16, Vec<(u16, SbixRecord)>)> = pictures
+            .iter()
+            .map(|(ppem, png)| {
+                (
+                    *ppem,
+                    vec![(ids[1], SbixRecord::Graphic([0, 0], *b"png ", png.clone()))],
+                )
+            })
+            .collect();
+        Colour {
+            sbix: sbix_table(0x0001, &strikes, count),
+            ..Colour::default()
+        }
+    });
+    let (cbdt, _) = bitmap_face(|ids, _| {
+        let strikes: Vec<([u8; 2], Vec<CbdtEntry>)> = pictures
+            .iter()
+            .map(|(ppem, png)| {
+                let side = u8::try_from(*ppem).expect("a small strike");
+                (
+                    [side, side],
+                    vec![CbdtEntry {
+                        glyph: ids[1],
+                        format: 17,
+                        metrics: [side, side, 0, side / 16 * 13, side, 0, 0, 0],
+                        png: png.clone(),
+                    }],
+                )
+            })
+            .collect();
+        let (cblc, cbdt) = cbdt_tables(&strikes);
+        Colour {
+            cblc,
+            cbdt,
+            ..Colour::default()
+        }
+    });
+    [(sbix, ids[1]), (cbdt, ids[1])]
+}
+
+/// `colr_v1_composites_match_their_formulas`' paints, their colours over
+/// encoded components and their alphas the eight bits the writer states
+/// them in: the blue source at a half and the orange backdrop at three
+/// quarters.
+fn composite_paints() -> ([f64; 3], f64, [f64; 3], f64) {
+    let alpha = |paint: f64| (stored(paint) * 255.0).round() / 255.0;
+    let encoded = |c: [u8; 3]| c.map(|v| f64::from(v) / 255.0);
+    (encoded(BLUE), alpha(0.5), encoded(ORANGE), alpha(0.75))
+}
+
+/// A face whose `A` to `D` are each one inexpressible composite, in
+/// [`INEXPRESSIBLE`]'s order, of [`composite_paints`]' source over their
+/// backdrop, as `colr_v1_composites_match_their_formulas` draws them.
+fn inexpressible_face() -> Face {
+    v1_face(
+        "ABCD",
+        |rect, _| {
+            "ABCD"
+                .chars()
+                .zip(INEXPRESSIBLE)
+                .map(|(letter, mode)| {
+                    let source = V1::Glyph(rect(6), Box::new(V1::Solid(1, 0.5)));
+                    let backdrop = V1::Glyph(rect(5), Box::new(V1::Solid(3, 0.75)));
+                    (
+                        letter,
+                        V1::Composite(Box::new(source), mode, Box::new(backdrop)),
+                    )
+                })
+                .collect()
+        },
+        &[],
+    )
+}
+
+/// The composite test's sample points, in font units, with the source's and
+/// the backdrop's alpha at each: the backdrop alone, the source alone, both,
+/// and neither, twice.
+fn composite_samples(alpha_s: f64, alpha_b: f64) -> [([f64; 2], (f64, f64)); 5] {
+    [
+        ([250.0, 250.0], (0.0, alpha_b)),
+        ([750.0, 750.0], (alpha_s, 0.0)),
+        ([500.0, 500.0], (alpha_s, alpha_b)),
+        ([250.0, 750.0], (0.0, 0.0)),
+        ([750.0, 250.0], (0.0, 0.0)),
+    ]
+}
+
+/// What composite `mode` of the source `(cs, s)` over the backdrop `(cb, b)`
+/// shows over the white page, in levels of 255, unrounded.
+fn over_the_page(mode: u8, cs: [f64; 3], s: f64, cb: [f64; 3], b: f64) -> [f64; 3] {
+    let (colour, coverage) = composited(mode, cs, s, cb, b);
+    colour.map(|c| (c + (1.0 - coverage)) * 255.0)
+}
+
+/// The largest difference, in levels of 255, between what `bytes` draws at
+/// the composite test's sample points of its glyph at pen 0 and what W3C
+/// Compositing Level 1's formula for `mode` shows there over the white page.
+fn largest_error(bytes: Vec<u8>, mode: u8) -> f64 {
+    let (cs, alpha_s, cb, alpha_b) = composite_paints();
+    let (bitmap, _) = rendered(bytes);
+    composite_samples(alpha_s, alpha_b)
+        .iter()
+        .map(|&(unit, (s, b))| {
+            let want = over_the_page(mode, cs, s, cb, b);
+            let got = pixel(&bitmap, at_units(0.0, unit), 100.0);
+            (0..3)
+                .map(|i| (f64::from(got[i]) - want[i]).abs())
+                .fold(0.0, f64::max)
+        })
+        .fold(0.0, f64::max)
+}
+
+/// The inexpressible composite `mode` of [`composite_paints`] drawn as H-141
+/// (c)'s first option draws it, an image of its glyph: the paints' box, 100
+/// to 900 units each way, sampled at `per_em` pixels to the em at each
+/// pixel's centre by W3C Compositing Level 1's formula over encoded
+/// components, written as an RGBA PNG and embedded through
+/// `tinker_pdf_cos::png_image`, as a bitmap glyph's is, and painted over that
+/// box by a Type 3 glyph's procedure, on [`colour_document`]'s page.
+fn image_glyph_document(mode: u8, per_em: u32) -> Vec<u8> {
+    let (cs, alpha_s, cb, alpha_b) = composite_paints();
+    let side = (800 * per_em).div_ceil(1000);
+    let unit = 1000.0 / f64::from(per_em);
+    let inside = |rect: [i16; 4], x: f64, y: f64| {
+        x > f64::from(rect[0])
+            && x < f64::from(rect[2])
+            && y > f64::from(rect[1])
+            && y < f64::from(rect[3])
+    };
+    let pixels: Vec<[u8; 4]> = (0..side * side)
+        .map(|at| {
+            let x = 100.0 + (f64::from(at % side) + 0.5) * unit;
+            let y = 900.0 - (f64::from(at / side) + 0.5) * unit;
+            let s = if inside(V1_RECTS[6], x, y) {
+                alpha_s
+            } else {
+                0.0
+            };
+            let b = if inside(V1_RECTS[5], x, y) {
+                alpha_b
+            } else {
+                0.0
+            };
+            let (colour, coverage) = composited(mode, cs, s, cb, b);
+            if coverage <= 0.0 {
+                return [0, 0, 0, 0];
+            }
+            let level = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let [r, g, b] = colour.map(|c| level(c / coverage));
+            [r, g, b, level(coverage)]
+        })
+        .collect();
+    let png = rgba_png(side, side, &pixels);
+    let image = tinker_pdf_cos::png_image(&png, &tinker_pdf_filters::Limits::new(1 << 26))
+        .expect("the picture embeds");
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_colour_font(b"C0", b"FixtureImage", 1000));
+    assert!(builder.add_image(b"C0.i", &image.image()));
+    let extent = f64::from(side) * unit;
+    let content = format!(
+        "q {extent} 0 0 {extent} 100 {} cm /C0.i Do Q\n",
+        900.0 - extent
+    );
+    assert!(builder.add_colour_glyph(
+        b"C0",
+        &ColourGlyph {
+            id: 1,
+            advance: 1000.0,
+            bbox: [100.0, 900.0 - extent, 100.0 + extent, 900.0],
+            content: content.as_bytes(),
+        }
+    ));
+    let mut run = b"0 0.5 0 rg\n".to_vec();
+    assert!(builder.colour_glyph_run(
+        &mut run,
+        b"C0",
+        RUN_SIZE,
+        [1.0, 0.0, 0.0, 1.0, RUN_ORIGIN.0, RUN_ORIGIN.1],
+        &[PlacedGlyph {
+            glyph: Glyph { id: 1, text: "A" },
+            x: 0.0,
+            rise: 0.0,
+        }]
+    ));
+    builder.add_page(900.0, 100.0, |page| page.raw(&run));
+    builder.finish()
+}
+
+/// The largest difference, in levels of 255 over the white page, between
+/// composite mode `mode` evaluated over encoded components, as the design
+/// writes every composite until H-141 (d) rules, and over linear-light ones,
+/// as *Format 32: PaintComposite* states it, the result divided by its alpha
+/// and re-encoded: over every source and backdrop whose channels are
+/// multiples of 51 and whose alphas are a quarter, a half, three quarters or
+/// one.
+fn linear_light_difference(mode: u8) -> f64 {
+    let level = |n: u8| f64::from(n) * 51.0 / 255.0;
+    let colours: Vec<[f64; 3]> = (0..6u8)
+        .flat_map(|r| (0..6u8).flat_map(move |g| (0..6u8).map(move |b| [r, g, b])))
+        .map(|channels| channels.map(level))
+        .collect();
+    let alphas = [0.25, 0.5, 0.75, 1.0];
+    let mut largest = 0.0f64;
+    for cs in &colours {
+        for cb in &colours {
+            for &alpha_s in &alphas {
+                for &alpha_b in &alphas {
+                    let (encoded, coverage) = composited(mode, *cs, alpha_s, *cb, alpha_b);
+                    if coverage <= 0.0 {
+                        continue;
+                    }
+                    let (linear, _) =
+                        composited(mode, cs.map(to_linear), alpha_s, cb.map(to_linear), alpha_b);
+                    for i in 0..3 {
+                        let read_encoded = encoded[i] + (1.0 - coverage);
+                        let read_linear =
+                            to_encoded(linear[i] / coverage) * coverage + (1.0 - coverage);
+                        largest = largest.max((read_encoded - read_linear).abs() * 255.0);
+                    }
+                }
+            }
+        }
+    }
+    largest
+}
+
+/// The faces a committed book carries: every entry of its container that is
+/// a font — an sfnt, or a WOFF or WOFF2 unpacked to one — whatever its name
+/// or its manifest says, a collection read as its first face, as an
+/// embedding reads one.
+fn book_faces(book: &str) -> Vec<Vec<u8>> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("epub")
+        .join(book);
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {book}: {e}"));
+    let mut archive = tinker_pdf_zip::Archive::open(&bytes, &tinker_pdf_zip::Limits::default())
+        .unwrap_or_else(|e| panic!("{book} opens as a ZIP: {e}"));
+    let mut faces = Vec::new();
+    for index in 0..archive.entries().len() {
+        if archive.entries()[index].is_directory() {
+            continue;
+        }
+        let Ok(entry) = archive.read(index) else {
+            continue;
+        };
+        let face = if tinker_pdf_font::woff::packaging(&entry).is_some() {
+            match tinker_pdf_font::woff::decode(&entry, 1 << 26) {
+                Ok(face) => face,
+                Err(_) => continue,
+            }
+        } else {
+            entry.into_owned()
+        };
+        if Sfnt::parse(&face).is_some() {
+            faces.push(face);
+        }
+    }
+    faces
+}
+
+/// The colour tables `faces` carry between them, by tag in the order the
+/// design reads them — `COLR` and `CPAL`, `SVG `, `sbix`, `CBLC` and `CBDT` —
+/// or `none`.
+fn colour_tables(faces: &[Vec<u8>]) -> String {
+    const TAGS: [&[u8; 4]; 6] = [b"COLR", b"CPAL", b"SVG ", b"sbix", b"CBLC", b"CBDT"];
+    let carried: Vec<&str> = TAGS
+        .into_iter()
+        .filter(|tag| {
+            faces.iter().any(|face| {
+                Sfnt::parse(face)
+                    .is_some_and(|sfnt| sfnt.table(u32::from_be_bytes(**tag)).is_some())
+            })
+        })
+        .map(|tag| std::str::from_utf8(tag).expect("an ASCII tag").trim_end())
+        .collect();
+    if carried.is_empty() {
+        "none".to_owned()
+    } else {
+        carried.join(" ")
+    }
+}
+
+/// **FT-06.17a's census**: what colour glyphs cost, for H-141, each figure
+/// printed and the table written to `colour_glyph_costs.tsv`, where it is
+/// committed (ruling 16). Nothing is timed: the time to write and to draw a
+/// page of them is the benchmark set's (`write/write a page of colour
+/// glyphs`, `render/render a page of colour glyphs at 150 dpi`).
+///
+/// - **Bytes a glyph adds**, each a written document's length less
+///   [`empty_document`]'s: each vector fixture's glyph as its outline, today's
+///   writing, and in colour; each bitmap fixture's as its outline and at each
+///   strike; and each inexpressible composite drawn source-over and as an
+///   image of its glyph at each of FT-06.1's resolutions, every image held to
+///   its formula within three levels before it counts.
+/// - **Errors**: source-over's largest difference from each inexpressible
+///   mode's formula where its glyph is drawn, and each colour-mixing mode's
+///   largest difference between its encoded reading and its linear-light one.
+/// - **Books**: each committed book's faces and the colour tables they carry.
+///
+/// ```text
+/// cargo test -p tinker-pdf --test colour_fonts -- --ignored colour_glyph_costs --exact
+/// ```
+#[test]
+#[ignore = "the census: writes colour_glyph_costs.tsv, which is committed"]
+fn colour_glyph_costs() {
+    use tinker_pdf_font::colr::CompositeMode;
+    use tinker_pdf_font::StrikeChoice;
+
+    let empty = empty_document().len();
+    let added = |bytes: &[u8]| (bytes.len() as i64 - empty as i64).to_string();
+    let mut values = vec![empty.to_string()];
+
+    for (face, text) in vector_fixtures() {
+        values.push(added(&outline_document(&face, text)));
+        let (bytes, warnings) =
+            colour_document(&face, text, PaletteChoice::Default, DocumentBuilder::new());
+        assert!(warnings.is_empty(), "{text}: {warnings:?}");
+        values.push(added(&bytes));
+    }
+
+    for (face, glyph) in strike_fixtures() {
+        values.push(added(&outline_document(&face, "A")));
+        for ppem in COST_STRIKES {
+            let (bytes, warnings) = bitmap_document(
+                &face,
+                StrikeChoice::Nearest(ppem),
+                &[(glyph, 0.0)],
+                DocumentBuilder::new(),
+            );
+            assert!(warnings.is_empty(), "{ppem} ppem: {warnings:?}");
+            assert_eq!(colour_images(&bytes), 1, "{ppem} ppem: one picture");
+            values.push(added(&bytes));
+        }
+    }
+
+    let face = inexpressible_face();
+    let (cs, alpha_s, cb, alpha_b) = composite_paints();
+    for (letter, mode) in "ABCD".chars().zip(INEXPRESSIBLE) {
+        let (bytes, warnings) = colour_document(
+            &face,
+            &letter.to_string(),
+            PaletteChoice::Default,
+            DocumentBuilder::new(),
+        );
+        assert_eq!(
+            warnings,
+            [ColourWarning::CompositeDrawnSourceOver {
+                glyph: face.glyph_of(letter).expect("covered"),
+                mode: CompositeMode::from_raw(mode).expect("a mode"),
+            }]
+        );
+        values.push(added(&bytes));
+        for per_em in IMAGE_RESOLUTIONS {
+            let image = image_glyph_document(mode, per_em);
+            let (bitmap, _) = rendered(image.clone());
+            for (unit, (s, b)) in composite_samples(alpha_s, alpha_b) {
+                let want = over_the_page(mode, cs, s, cb, b).map(|v| v.round() as u8);
+                let got = pixel(&bitmap, at_units(0.0, unit), 100.0);
+                assert!(
+                    close(got, want, 3),
+                    "{} at {per_em} px/em, {unit:?}: {got:?}, not {want:?}",
+                    mode_name(mode)
+                );
+            }
+            values.push(added(&image));
+        }
+        values.push(format!("{:.1}", largest_error(bytes, mode)));
+    }
+
+    for mode in MIXING {
+        values.push(format!("{:.1}", linear_light_difference(mode)));
+    }
+
+    for book in committed_books() {
+        let faces = book_faces(&book);
+        values.push(faces.len().to_string());
+        values.push(colour_tables(&faces));
+    }
+
+    let cases = cost_cases();
+    assert_eq!(values.len(), cases.len(), "a value for every row");
+    let mut table = format!("{COSTS_HEADER}\n");
+    for ([part, case, figure], value) in cases.iter().zip(&values) {
+        println!("colour-glyph-costs {part}, {case}, {figure}: {value}");
+        table.push_str(&format!("{part}\t{case}\t{figure}\t{value}\n"));
+    }
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/colour_glyph_costs.tsv");
+    std::fs::write(&path, table).expect("the table is written beside this file");
+    println!("colour-glyph-costs: RAN, {} figures", values.len());
+}
+
+/// The committed cost table is the census's: its header, and a row for each
+/// of [`cost_cases`] in the census's order, each value a byte count, a
+/// number of levels of 255 for an error, or a book's colour tables by tag or
+/// `none`.
+#[test]
+fn the_committed_cost_table_is_the_censuss_shape() {
+    let mut lines = COSTS.lines();
+    assert_eq!(
+        lines.next(),
+        Some(COSTS_HEADER),
+        "the table's header is the census's"
+    );
+    let rows: Vec<Vec<&str>> = lines.map(|line| line.split('\t').collect()).collect();
+    let cases = cost_cases();
+    assert_eq!(
+        rows.len(),
+        cases.len(),
+        "a row for every figure the census measures"
+    );
+    for (row, case) in rows.iter().zip(&cases) {
+        assert_eq!(row.len(), 4, "{row:?}: four fields");
+        assert_eq!(
+            row[..3],
+            [case[0].as_str(), case[1].as_str(), case[2].as_str()],
+            "the census's order"
+        );
+        let value = row[3];
+        if case[2] == "colour tables" {
+            assert!(
+                value == "none"
+                    || value
+                        .split(' ')
+                        .all(|tag| ["COLR", "CPAL", "SVG", "sbix", "CBLC", "CBDT"].contains(&tag)),
+                "{row:?}: tags or none"
+            );
+        } else if case[2].ends_with("levels") {
+            assert!(
+                value
+                    .parse::<f64>()
+                    .is_ok_and(|levels| (0.0..=255.0).contains(&levels)),
+                "{row:?}: levels of 255"
+            );
+        } else {
+            assert!(value.parse::<i64>().is_ok(), "{row:?}: a count");
+        }
+    }
+}

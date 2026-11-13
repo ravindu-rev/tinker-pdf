@@ -22,7 +22,9 @@
 //! separations rows, a page's plates, whose pages the planning baseline's arm
 //! draws as their process inks in their place, and the two command stream
 //! rows, the text page's stream written and the page drawn from it, in whose
-//! place that arm draws the text page at 150 dpi.
+//! place that arm draws the text page at 150 dpi; and so is the page of
+//! colour glyphs, the write group's page (`support::colour`), which the
+//! planning baseline's arm sets in the face's outlines.
 
 mod support;
 
@@ -34,7 +36,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use support::cli::Cli;
-use support::{inputs, Group, Per};
+use support::{colour, inputs, Group, Per};
 #[cfg(not(tinker_planning_baseline))]
 use tinker_pdf::{
     write::{self, AppendOptions},
@@ -303,6 +305,67 @@ fn inked(bitmap: &Bitmap) -> usize {
         .flat_map(|row| row.chunks(n).take(bitmap.width as usize))
         .filter(|pixel| pixel.iter().take(3).any(|&v| v < 128))
         .count()
+}
+
+/// How many of a bitmap's pixels are a colour rather than a grey: their
+/// largest and smallest channels a quarter of the range apart or more.
+#[cfg(not(tinker_planning_baseline))]
+fn coloured(bitmap: &Bitmap) -> usize {
+    let n = bitmap.components();
+    bitmap
+        .data
+        .chunks(bitmap.stride)
+        .flat_map(|row| row.chunks(n).take(bitmap.width as usize))
+        .filter(|pixel| {
+            let channels = &pixel[..3];
+            let most = channels.iter().max().copied().unwrap_or(0);
+            let least = channels.iter().min().copied().unwrap_or(0);
+            most - least >= 64
+        })
+        .count()
+}
+
+/// The name the page of colour glyphs is stored under. The planning
+/// baseline's arm of `support::colour` writes the same lines in the face's
+/// outlines, so its page is stored under a name of its own, and no build of
+/// a paired run reads another build's page.
+#[cfg(not(tinker_planning_baseline))]
+const COLOUR_PAGE: &str = "colour-glyphs-page.pdf";
+#[cfg(tinker_planning_baseline)]
+const COLOUR_PAGE: &str = "colour-glyphs-page-in-outlines.pdf";
+
+/// The page of colour glyphs, written from the face's own generator and held
+/// before it is timed: its text its lines, drawn at 150 dpi with no warning
+/// and its glyphs inked — in the head, in colour.
+fn colour_glyphs_page() -> Page {
+    let lines = inputs::colour_lines();
+    let bytes = stored(COLOUR_PAGE, || {
+        colour::colour_page(&inputs::colour_face(), &lines)
+    });
+    colour::holds_its_lines(&bytes, &lines);
+    let page = Document::open(bytes)
+        .expect("the page of colour glyphs opens")
+        .page(0)
+        .expect("a page");
+    let drawn = page.render(&RenderOptions::at_dpi(150.0));
+    assert!(
+        drawn.warnings.is_empty(),
+        "the page of colour glyphs draws cleanly: {:?}",
+        drawn.warnings
+    );
+    assert!(
+        inked(&drawn) > 100_000,
+        "the page inks its glyphs: {} pixels",
+        inked(&drawn)
+    );
+    #[cfg(not(tinker_planning_baseline))]
+    assert!(
+        coloured(&drawn) * 4 > inked(&drawn),
+        "its glyphs are drawn in colour: {} of {} inked pixels",
+        coloured(&drawn),
+        inked(&drawn)
+    );
+    page
 }
 
 /// `bytes`' first page, its one image decoded whole by `codec` and drawn
@@ -1242,6 +1305,18 @@ fn render(c: &mut Criterion) {
         );
         op.per(renders(&flate_quarter, 72.0, 1));
         op.iter(move || black_box(flate_quarter.render(&RenderOptions::at_dpi(72.0))));
+    });
+
+    // The write group's page of colour glyphs (FT-06.17a): 25 lines of 21
+    // capitals of `inputs::colour_face()`, each a Type 3 glyph whose
+    // procedure fills its disc with a radial gradient, its eyes with a solid
+    // and its mouth with a linear gradient, every glyph drawn where it stands.
+    // The planning baseline, which has no colour glyphs, draws the same lines
+    // in the face's outlines in its place.
+    group.operation("render a page of colour glyphs at 150 dpi", |op| {
+        let colour_page = colour_glyphs_page();
+        op.per(renders(&colour_page, 150.0, 1));
+        op.iter(move || black_box(colour_page.render(&RenderOptions::at_dpi(150.0))));
     });
 
     // ---- through the CLI: the PNGs `tpdf render` writes ------------------
