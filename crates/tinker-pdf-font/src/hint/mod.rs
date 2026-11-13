@@ -23,10 +23,12 @@
 //!   answers a program asks of its engine, at a [`Size`].
 //! - [`state`]: the zones and their points, and the graphics state.
 //! - `moves`: measuring points and moving them along the vectors.
+//! - `shift`: shifting, aligning, interpolating and flipping points.
 
 pub mod fixed;
 mod flow;
 mod moves;
+mod shift;
 pub mod state;
 pub mod storage;
 pub mod vm;

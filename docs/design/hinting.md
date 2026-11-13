@@ -331,6 +331,35 @@ point, that point is marked as touched", *Instructing TrueType Glyphs*), and
   then keeps the minimum distance where `b` is set, in the distance's own
   direction, a distance of zero taking the original distance's, this
   engine's choice. `MSIRP` keeps its distance as popped.
+- **The shifts.** `SHP`, `SHC` and `SHZ` move each of their points by how
+  far their reference point — rp2 in `zp1`'s zone for `a = 0`, rp1 in `zp0`'s
+  for `a = 1` — stands from its original position on the projection vector;
+  `SHC` and `SHZ` leave the reference point where it is one of theirs, as
+  *SHC* says and *SHZ*, "similar to SHC", follows, and `SHZ` moves every
+  point of its zone, the phantom points among them. A contour exists only in
+  the glyph's zone. `SHPIX` moves its points by its amount along the freedom
+  vector alone, `amount · f / 16 384` to the nearest whole on each axis.
+- **The alignments.** `ALIGNRP` brings each point's distance from rp0 to
+  zero. `ALIGNPTS` pops p1, in `zp1`'s zone, then p2, in `zp0`'s, as the
+  OpenType text has it (Apple's manual gives the zones the other way round),
+  and moves both to the average of their coordinates on the projection
+  vector, rounded half away from zero.
+- **`IP`** moves each point so its distance from rp1 on the projection vector
+  is its original distance from rp1 on the dual, times the references'
+  current distance over their original one, to the nearest whole; an
+  original distance of zero is an error.
+- **`ISECT`** puts its point at the current lines' intersection, solved in
+  128 bits and each coordinate rounded half away from zero, touched on both
+  axes since it ignores the freedom vector; lines with no single
+  intersection — parallel, or one of no length — take the four points'
+  average, the OpenType text's middle.
+- **`UTP`** untouches a point across for a freedom vector with no component
+  up, up for one with none across, and both otherwise.
+- **The flips** change only the on-curve flag and touch nothing; a
+  `FLIPRGON` or `FLIPRGOFF` whose highest point is below its lowest names no
+  point, this engine's reading. `AA` pops its point and does nothing.
+- **The loop.** `SHP`, `SHPIX`, `IP`, `FLIPPT` and `ALIGNRP` repeat for the
+  loop count, popping a point each time, and leave it at one.
 
 ### The pipeline
 
@@ -424,11 +453,11 @@ a panic and never a wait:
 | --- | --- |
 | The stack | `maxStackElements` plus 32 entries, at least 256 and at most 65 536: a producer that under-declares still runs, and a hostile `maxp` holds 256 KiB |
 | The storage area, the CVT, the function and instruction definitions, the twilight zone | `maxStorage`, the `cvt ` table's entries, `maxFunctionDefs`, `maxInstructionDefs` (an opcode is a byte, so at most 256), `maxTwilightPoints` capped at 16 384; an index past any of them |
-| Instructions a run executes | 1 048 576 (2^20) for each run of `fpgm`, `prep`, a glyph's or a component's program, counting each instruction dispatched, each instruction `IF`, `ELSE`, `FDEF` and `IDEF` pass over, each stack element `MINDEX` moves, each point a loop-counted instruction moves, and each call `LOOPCALL` makes |
+| Instructions a run executes | 1 048 576 (2^20) for each run of `fpgm`, `prep`, a glyph's or a component's program, counting each instruction dispatched, each instruction `IF`, `ELSE`, `FDEF` and `IDEF` pass over, each stack element `MINDEX` moves, each point a loop-counted instruction moves, each point `SHC`, `SHZ`, `FLIPRGON` and `FLIPRGOFF` act on, and each call `LOOPCALL` makes |
 | Call depth | 64: `CALL`, `LOOPCALL` and a dispatch to an `IDEF` nest no deeper |
 | The instruction stream | a push that runs past its program's end, a jump outside it, an `IF` with no `EIF` or a definition with no `ENDF` |
 | Where definitions may stand | `FDEF` and `IDEF` in a glyph program or inside a definition, and `ENDF` outside one |
-| What instructions name | an undefined function, an `IDEF` of a value that is no opcode, an opcode with no instruction and no `IDEF`, a zero `DIV`, a loop count below one ("Setting the loop variable to zero is an error"), `SROUND`'s reserved period, an orthogonal freedom vector at a move, `IUP` in zone 0 |
+| What instructions name | an undefined function, an `IDEF` of a value that is no opcode, an opcode with no instruction and no `IDEF`, a zero `DIV`, a loop count below one ("Setting the loop variable to zero is an error"), `SROUND`'s reserved period, an orthogonal freedom vector at a move, a contour the zone lacks (the twilight zone has none), `IP` between reference points at one original position ("This instruction is not valid if rp1 and rp2 have the same position on the projection_vector"), `IUP` in zone 0 |
 
 `IDEF` affects only undefined opcodes and is ignored for a defined one, as
 the specification says: the 37 opcodes the instruction set summary assigns

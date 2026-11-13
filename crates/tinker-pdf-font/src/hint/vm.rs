@@ -214,6 +214,13 @@ pub enum Error {
     ReservedPeriod(i32),
     /// A move with the freedom vector orthogonal to the projection vector.
     OrthogonalVectors,
+    /// A contour the zone does not have: past the glyph's, or any in the
+    /// twilight zone, which has none.
+    ContourIndex(i32),
+    /// `IP` with rp1 and rp2 at one position on the dual projection vector
+    /// in the original outline: "This instruction is not valid if rp1 and rp2
+    /// have the same position on the projection_vector."
+    CoincidentReferences,
 }
 
 impl core::fmt::Display for Error {
@@ -251,6 +258,10 @@ impl core::fmt::Display for Error {
                     f,
                     "a move along a freedom vector orthogonal to the projection vector"
                 )
+            }
+            Error::ContourIndex(c) => write!(f, "contour {c} is past its zone"),
+            Error::CoincidentReferences => {
+                write!(f, "IP between reference points at one original position")
             }
         }
     }
@@ -529,6 +540,11 @@ impl Vm {
             // GC, SCFS, MD, MDAP, MIAP, MSIRP, MDRP, MIRP.
             0x46..=0x4A | 0x2E | 0x2F | 0x3E | 0x3F | 0x3A | 0x3B | 0xC0..=0xFF => {
                 self.measure_or_move(op)?;
+            }
+            // SHP, SHC, SHZ, SHPIX, IP, ALIGNRP, ALIGNPTS, ISECT, UTP, FLIPPT,
+            // FLIPRGON, FLIPRGOFF, AA.
+            0x32..=0x39 | 0x3C | 0x27 | 0x0F | 0x29 | 0x80..=0x82 | 0x7F => {
+                self.shift_or_flip(op)?;
             }
             _ => self.undefined(op, stop)?,
         }
