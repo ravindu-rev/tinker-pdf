@@ -66,6 +66,31 @@ immediately and named spaces through the resource seam, including `scn`'s
 trailing pattern name and the components a `PaintType 2` pattern paints with
 (8.7.3.2).
 
+**A colour carries its colorants, for a device that asks.** Beside a colour's
+light and its DeviceCMYK ink (`GraphicsState::fill_ink`), the state keeps
+`fill_colorants` and `stroke_colorants`, an `Option<Arc<ColorantTints>>` each:
+the kind of space the colour was chosen in — DeviceCMYK directly, a
+`/Separation` or plain `/DeviceN`, an `NChannel` one, `/All` or `/None` — each
+colorant it names with its tint as a byte, and the process ink it paints
+through its alternate, or component by component through each spot's own
+space and its process space, where a device has no colorant of a name it
+gives (8.6.6.4, 8.6.6.5). `k` and `K`, and four components with no space
+named, carry DeviceCMYK's four process colorants at their own components;
+`cs`/`CS` reset the colorants to the space's initial tints — a
+`/Separation`'s whole colorant, every component of a `/DeviceN` — with the
+colour; `sc`/`scn` set them, an uncoloured pattern's components their
+underlying space's; `g`, `rg` and every space that names no colorant carry
+none; and `Q` restores them with the rest of the state. They come from
+`FontSource::colorants`, `resolve_ink` generalised, asked — by the device
+space's own name under a default colour space, as the light and the ink are,
+in the rendering intent in force and again where the intent changes after
+the colour was set, since a light alternate's process ink is its light's —
+only where the device composites colorants (`Device::composites_colorants`,
+read once when interpretation starts; a `RecordingDevice` answers it as
+`recording_colorants` says). Every other device's states carry none and the
+resources are asked nothing, so a light render pays nothing for them
+(`a_colour_carries_the_colorants_its_space_answers`).
+
 **Recursion.** `Do` runs a form XObject with its `/Matrix` composed onto the
 CTM and its content clipped to `/BBox` (8.10.2); a transparency group is
 offered to the device, and only if accepted are the alphas and blend mode
@@ -586,14 +611,17 @@ its `Cull` drops — text, paths, clips, images and shadings, as
 [render controls](../design/render-controls.md) files them — and forces the
 text or the path class black when its `Black` says so (`forced_black`: what
 `0 0 0 1 k` sets — light's black, the `K` plate alone, DeviceCMYK's family,
-no pattern, no named space and no source for a rendering intent to resolve
-again — and every other field of the state as it was). Every call that draws
+no pattern, no named space, no source for a rendering intent to resolve
+again, and on a device that composites colorants DeviceCMYK's four process
+colorants at the `K` plate alone, as `k` carries them there — and every other
+field of the state as it was). Every call that draws
 or clips inside a text object is the text's, which is what makes a Type 3
 glyph's paints text: they arrive inside the text object that shows the glyph,
 with no `show_glyph` of their own. No text object outlives the stream or the
 `q` it was opened in, so a stream that never ends its text makes nothing after
 it text. The questions — `begin_form`, `begin_group`, `begin_soft_mask`,
-`is_cancelled` and `answers_alike` — are the inner device's, so the
+`is_cancelled`, `answers_alike` and `composites_colorants` — are the inner
+device's, so the
 interpreter runs through the filter exactly what it runs without it, a kept
 drawing of a form replayed where the inner device would answer as it records:
 the recording is of the calls the filter was handed, and its replay is

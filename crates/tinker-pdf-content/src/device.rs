@@ -392,6 +392,20 @@ pub trait Device {
         let _ = events;
         false
     }
+
+    /// Whether this device composites colorants on plates — separations, and
+    /// overprint simulated over them — so that each colour it is handed should
+    /// carry what it paints by colorant
+    /// ([`GraphicsState::fill_colorants`]). Asked once, when an
+    /// interpretation starts.
+    ///
+    /// The default, `false`, has the interpreter ask the resources nothing of
+    /// the kind: a light or ink render pays nothing for colorants.
+    ///
+    /// [`GraphicsState::fill_colorants`]: crate::GraphicsState::fill_colorants
+    fn composites_colorants(&self) -> bool {
+        false
+    }
 }
 
 /// One piece of a path, in device space.

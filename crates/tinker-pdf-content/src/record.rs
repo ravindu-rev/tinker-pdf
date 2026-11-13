@@ -583,6 +583,10 @@ pub struct RecordingDevice {
     events: Vec<Event>,
     capture: Capture,
     answers: Answers,
+    /// What [`Device::composites_colorants`] answers: whether the states it
+    /// records carry what each colour paints by colorant. The trait's default
+    /// is `false`.
+    colorants: bool,
 }
 
 impl RecordingDevice {
@@ -599,7 +603,18 @@ impl RecordingDevice {
             events: Vec::new(),
             capture,
             answers: Answers::default(),
+            colorants: false,
         }
+    }
+
+    /// The same recorder, telling the interpreter it composites colorants
+    /// when `colorants` is true ([`Device::composites_colorants`]): the states
+    /// it records then carry what each colour paints by colorant, for a
+    /// replay into a device that composites plates.
+    #[must_use]
+    pub fn recording_colorants(mut self, colorants: bool) -> RecordingDevice {
+        self.colorants = colorants;
+        self
     }
 
     /// The same recorder, answering the trait's questions as `answers` says.
@@ -968,6 +983,10 @@ impl Device for RecordingDevice {
                 Event::BeginSoftMask { entered, .. } => *entered == self.answers.soft_masks,
                 _ => true,
             })
+    }
+
+    fn composites_colorants(&self) -> bool {
+        self.colorants
     }
 }
 

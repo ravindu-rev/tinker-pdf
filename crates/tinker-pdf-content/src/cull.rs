@@ -19,17 +19,19 @@
 //! A culled call is not forwarded at all, so the device behind sees none of
 //! it — a renderer neither paints it, nor ends an image run for it, nor warns
 //! about it. The questions — [`Device::begin_form`], [`Device::begin_group`],
-//! [`Device::begin_soft_mask`], [`Device::is_cancelled`] and
-//! [`Device::answers_alike`] — are the inner device's to answer, so the
-//! interpreter runs exactly what it would run with the device unwrapped, and
-//! every other call that brackets or notices something is forwarded as it
-//! came. A form's drawing the interpreter keeps is of the calls this filter
-//! is handed, before it drops any, so a replay of one is filtered as the
-//! drawing was.
+//! [`Device::begin_soft_mask`], [`Device::is_cancelled`],
+//! [`Device::answers_alike`] and [`Device::composites_colorants`] — are the
+//! inner device's to answer, so the interpreter runs exactly what it would
+//! run with the device unwrapped, and every other call that brackets or
+//! notices something is forwarded as it came. A form's drawing the
+//! interpreter keeps is of the calls this filter is handed, before it drops
+//! any, so a replay of one is filtered as the drawing was.
+
+use std::sync::Arc;
 
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::interpret::{Group, MaskGroup};
-use crate::state::{ColorFamily, GraphicsState, Rgb};
+use crate::state::{ColorFamily, ColorantTints, GraphicsState, Rgb};
 
 /// The ink of forced black: `K` alone, at full (8.6.4.4's `0 0 0 1 k`), never a
 /// rich black.
@@ -158,12 +160,18 @@ impl Black {
 /// `state` with its paint forced black, and nothing else changed: the fill
 /// and stroke colours what `0 0 0 1 k` sets where no default space remaps
 /// DeviceCMYK — light's black, the `K` plate alone, DeviceCMYK's family, no
-/// pattern, no named colour space and no source for a rendering intent to
-/// resolve again. The alphas, the blend mode, the transform, the text state,
-/// the line parameters and the stored parameters are the state's own, so a
-/// forced mark still fades by its constant alpha.
+/// pattern, no named colour space, no source for a rendering intent to
+/// resolve again, and `colorants` what each paints by colorant: [`Culled`]
+/// hands DeviceCMYK's four process colorants at the `K` plate alone where its
+/// device composites colorants, which is what `k` carries there, and `None`
+/// where it does not. The alphas, the blend mode, the transform, the text
+/// state, the line parameters and the stored parameters are the state's own,
+/// so a forced mark still fades by its constant alpha.
 #[must_use]
-pub fn forced_black(state: &GraphicsState) -> GraphicsState {
+pub fn forced_black(
+    state: &GraphicsState,
+    colorants: Option<&Arc<ColorantTints>>,
+) -> GraphicsState {
     GraphicsState {
         fill_color: Rgb::BLACK,
         stroke_color: Rgb::BLACK,
@@ -177,6 +185,8 @@ pub fn forced_black(state: &GraphicsState) -> GraphicsState {
         stroke_pattern: None,
         fill_source: None,
         stroke_source: None,
+        fill_colorants: colorants.cloned(),
+        stroke_colorants: colorants.cloned(),
         ..state.clone()
     }
 }
@@ -197,6 +207,11 @@ pub struct Culled<'d, D: Device + ?Sized> {
     inner: &'d mut D,
     cull: Cull,
     black: Black,
+    /// What a colour forced black paints by colorant: DeviceCMYK's four
+    /// process colorants at the `K` plate alone where the inner device
+    /// composites colorants, as `0 0 0 1 k` carries them there, and none where
+    /// it does not — asked once, as the interpreter asks.
+    black_colorants: Option<Arc<ColorantTints>>,
     /// The text objects open.
     text_objects: u32,
     /// The count at each save the inner device holds, innermost last: what
@@ -211,10 +226,14 @@ impl<'d, D: Device + ?Sized> Culled<'d, D> {
     /// A filter dropping `cull`'s classes and forcing `black`'s in front of
     /// `inner`.
     pub fn new(inner: &'d mut D, cull: Cull, black: Black) -> Culled<'d, D> {
+        let black_colorants = inner
+            .composites_colorants()
+            .then(|| Arc::new(ColorantTints::device_cmyk(BLACK_INK)));
         Culled {
             inner,
             cull,
             black,
+            black_colorants,
             text_objects: 0,
             saves: Vec::new(),
             streams: Vec::new(),
@@ -240,7 +259,7 @@ impl<'d, D: Device + ?Sized> Culled<'d, D> {
     /// forced black when its class is.
     fn painted<'s>(&self, class: Class, state: &'s GraphicsState) -> PaintState<'s> {
         if self.black.forces(class) {
-            PaintState::Forced(forced_black(state))
+            PaintState::Forced(forced_black(state, self.black_colorants.as_ref()))
         } else {
             PaintState::Kept(state)
         }
@@ -428,6 +447,10 @@ impl<D: Device + ?Sized> Device for Culled<'_, D> {
     fn answers_alike(&self, events: &[crate::record::Event]) -> bool {
         self.inner.answers_alike(events)
     }
+
+    fn composites_colorants(&self) -> bool {
+        self.inner.composites_colorants()
+    }
 }
 
 #[cfg(test)]
@@ -442,7 +465,7 @@ mod tests {
         StateParameters, Type3Glyph,
     };
     use crate::record::{Answers, Event, EventKind, RecordingDevice};
-    use crate::state::{Matrix, RenderingIntent};
+    use crate::state::{ColorantKind, ColorantTint, Matrix, RenderingIntent};
 
     /// What `/CS0`, a three-component space only the resource seam reads,
     /// resolves every colour to.
@@ -828,6 +851,8 @@ mod tests {
             stroke_pattern: original.stroke_pattern.clone(),
             fill_source: original.fill_source.clone(),
             stroke_source: original.stroke_source.clone(),
+            fill_colorants: original.fill_colorants.clone(),
+            stroke_colorants: original.stroke_colorants.clone(),
             ..state.clone()
         }
     }
@@ -902,6 +927,9 @@ mod tests {
                         assert_eq!(state.stroke_pattern, None, "{class:?}");
                         assert_eq!(state.fill_space, None, "{class:?}");
                         assert_eq!(state.stroke_space, None, "{class:?}");
+                        // A recorder compositing no colorants: none, as `k`.
+                        assert_eq!(state.fill_colorants, None, "{class:?}");
+                        assert_eq!(state.stroke_colorants, None, "{class:?}");
                         assert_eq!(
                             &restored(state, original),
                             original,
@@ -947,7 +975,8 @@ mod tests {
     /// class; a recorder that is cancelled is cancelled through it; and
     /// whether a recording's answers are the ones a recorder would give
     /// (`answers_alike`) is the recorder's answer through the filter, for one
-    /// that would give them and one that would not.
+    /// that would give them and one that would not; and so is whether the
+    /// device composites colorants, for one that does and one that does not.
     #[test]
     fn the_questions_are_the_inner_devices() {
         let declining = Answers {
@@ -993,6 +1022,76 @@ mod tests {
                     alike,
                     "{answers:?}, {what} culled"
                 );
+            }
+        }
+
+        for colorants in [false, true] {
+            let mut recorder = RecordingDevice::new().recording_colorants(colorants);
+            for (what, cull) in culls() {
+                let culled = Culled::new(&mut recorder, cull, Black::NONE);
+                assert_eq!(
+                    culled.composites_colorants(),
+                    colorants,
+                    "{what} culled: whether the device composites colorants"
+                );
+            }
+        }
+    }
+
+    /// **Forced black paints black by colorant where the device composites
+    /// colorants**, as `0 0 0 1 k` carries it there: a fill and a stroke whose
+    /// colours carry a spot's colorants, forced, are forwarded with
+    /// DeviceCMYK's four process colorants at the `K` plate alone; on a device
+    /// compositing none, forced black carries none, as `k` does there; and
+    /// unforced, each keeps its own colorants on either device.
+    #[test]
+    fn forced_black_paints_black_by_colorant_where_the_device_composites_them() {
+        let spot = Arc::new(ColorantTints {
+            kind: ColorantKind::Colorants,
+            tints: vec![ColorantTint {
+                name: Arc::from(&b"PANTONE 131"[..]),
+                tint: 200,
+                alone: None,
+            }],
+            alternate: Some([0, 100, 200, 0]),
+            process: None,
+        });
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.fill_colorants = Some(Arc::clone(&spot));
+        state.stroke_colorants = Some(Arc::clone(&spot));
+        let path = [
+            PathSegment::MoveTo { x: 0.0, y: 0.0 },
+            PathSegment::LineTo { x: 10.0, y: 10.0 },
+        ];
+        let black = ColorantTints::device_cmyk([0, 0, 0, 255]);
+        let paths = Black {
+            text: false,
+            paths: true,
+        };
+        for composites in [true, false] {
+            for (forcing, want) in [
+                (paths, composites.then(|| black.clone())),
+                (Black::NONE, Some((*spot).clone())),
+            ] {
+                let mut recorder = RecordingDevice::new().recording_colorants(composites);
+                let mut culled = Culled::new(&mut recorder, Cull::NONE, forcing);
+                culled.fill_path(&path, &state, false);
+                culled.stroke_path(&path, &state);
+                let events = recorder.into_events();
+                assert_eq!(events.len(), 2, "{composites}, {forcing:?}: both forwarded");
+                for event in &events {
+                    let got = event.state().expect("a paint keeps its state");
+                    assert_eq!(
+                        got.fill_colorants.as_deref(),
+                        want.as_ref(),
+                        "{composites}, {forcing:?}: the fill colour's"
+                    );
+                    assert_eq!(
+                        got.stroke_colorants.as_deref(),
+                        want.as_ref(),
+                        "{composites}, {forcing:?}: the stroke colour's"
+                    );
+                }
             }
         }
     }

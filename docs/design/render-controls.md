@@ -101,7 +101,8 @@ These settle what the calls alone do not:
 Everything else always passes: `begin_text` and `end_text`, `save_state` and
 `restore_state`, marked content, forms, transparency groups, soft masks, the
 budget and recursion notices, and the three questions — `begin_form`,
-`begin_group`, `begin_soft_mask` — with `is_cancelled` and `answers_alike`, so
+`begin_group`, `begin_soft_mask` — with `is_cancelled`, `answers_alike` and
+`composites_colorants`, so
 the inner device answers each as it would unwrapped and the interpreter runs
 what it would have run. A form's drawing the interpreter keeps for a later
 invocation is of the calls the filter was handed, before it dropped any, so a
@@ -140,8 +141,10 @@ light's black, `Rgb::BLACK`; the fill and stroke inks become `K` alone,
 `[0, 0, 0, 255]` — 8.6.4.4's `0 0 0 1 k`, never a rich black; the patterns are
 taken away, so a pattern fill paints black; the colour spaces named are
 cleared, the colour being no longer theirs; and the colour is DeviceCMYK's,
-its family `ColorFamily::Cmyk` and no source kept for a rendering intent to
-resolve again — what `0 0 0 1 k` sets where no default space remaps
+its family `ColorFamily::Cmyk`, no source kept for a rendering intent to
+resolve again, and on a device that composites colorants DeviceCMYK's four
+process colorants at the `K` plate alone — what `0 0 0 1 k` sets where no
+default space remaps
 DeviceCMYK, so the device-dependent rules treat a forced mark as that
 operator's (11.7.5.3). The alphas, the blend mode, the
 transform, the text state, the line parameters, the soft mask and the stored

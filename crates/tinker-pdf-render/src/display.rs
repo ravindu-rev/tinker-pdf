@@ -76,8 +76,8 @@ use crate::{MAX_GROUP_BUFFERS, MAX_GROUP_DEPTH};
 /// | --- | --- |
 /// | The most any fixture in this repository spends | 67 108 864 |
 /// | A 200-page comic, whose largest page is one image | 1 000 |
-/// | A dense 200-page fixed document, 2 000 elements and 40 000 path segments a page | 3 232 000 |
-/// | A 300-page reflowable book, a page of 2 500 glyphs | 1 250 000 |
+/// | A dense 200-page fixed document, 2 000 elements and 40 000 path segments a page | 3 264 000 |
+/// | A 300-page reflowable book, a page of 2 500 glyphs | 1 290 000 |
 /// | **This cap** | **64 MiB** |
 ///
 /// The count is [`kept_bytes`]: each event's own size, the state it carries
@@ -86,9 +86,9 @@ use crate::{MAX_GROUP_BUFFERS, MAX_GROUP_DEPTH};
 /// copies — what the recording allocates, short of the allocator's own
 /// bookkeeping — and the stored parameters a state shares, once per change
 /// (`DisplayRecorder::count`). The yardsticks are on a 64-bit target, where an
-/// event is 168 bytes, a state 328 and a segment 56: a fixed page's two
-/// thousand elements and forty thousand segments are 3 232 000, a book page's
-/// glyphs 1.25 MB, and a comic page — `q`, the image's `cm` and `Do`, `Q` —
+/// event is 168 bytes, a state 344 and a segment 56: a fixed page's two
+/// thousand elements and forty thousand segments are 3 264 000, a book page's
+/// glyphs 1.29 MB, and a comic page — `q`, the image's `cm` and `Do`, `Q` —
 /// under a kilobyte. The cap clears the densest by 21x, and a page past it
 /// still draws. The fixtures' figure is the cap itself and is allowed, for
 /// `MAX_PAGE_PIXELS`'s reason: the test that fires it records past it, and the
@@ -96,8 +96,8 @@ use crate::{MAX_GROUP_BUFFERS, MAX_GROUP_DEPTH};
 /// before it.
 ///
 /// Reachable: `0 0 1 1 re f` is thirteen bytes of content and one recorded
-/// fill of five segments, 776 bytes, so a content stream as long as
-/// `MAX_DECODED_STREAM` records 7.5 GiB before any form multiplies it.
+/// fill of five segments, 792 bytes, so a content stream as long as
+/// `MAX_DECODED_STREAM` records 7.6 GiB before any form multiplies it.
 pub const MAX_DISPLAY_LIST_BYTES: usize = 64 << 20;
 
 /// What one recorded event holds, in bytes, as [`MAX_DISPLAY_LIST_BYTES`]

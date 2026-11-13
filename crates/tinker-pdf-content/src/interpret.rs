@@ -9,8 +9,8 @@ use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::record::{Answers, Event, RecordingDevice};
 use crate::replay::replay;
 use crate::state::{
-    BlackPointCompensation, BlendMode, ColorFamily, ColorSource, GraphicsState, Halftone, LineCap,
-    LineJoin, Matrix, RenderingIntent, Rgb, TextRenderMode, Transfer,
+    BlackPointCompensation, BlendMode, ColorFamily, ColorSource, ColorantTints, GraphicsState,
+    Halftone, LineCap, LineJoin, Matrix, RenderingIntent, Rgb, TextRenderMode, Transfer,
 };
 use crate::tokenizer::{Token, Tokenizer};
 use core::mem;
@@ -354,6 +354,16 @@ impl DeviceDefaults {
     }
 }
 
+/// A colour as the seam resolves it: its light, its DeviceCMYK components
+/// where it has them, what it was resolved from, and what it paints by
+/// colorant where the device asked.
+type Resolved = (
+    Rgb,
+    Option<[u8; 4]>,
+    Option<Arc<ColorSource>>,
+    Option<Arc<ColorantTints>>,
+);
+
 pub trait FontSource {
     /// Splits a string into `(code, text, advance in 1/1000 em)`.
     fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)>;
@@ -520,6 +530,29 @@ pub trait FontSource {
         None
     }
 
+    /// What a colour of the named space paints by colorant (8.6.6.4,
+    /// 8.6.6.5): its colorants' tints by name — a `/Separation`'s one, a
+    /// `/DeviceN`'s each, DeviceCMYK's four — and the process ink it paints
+    /// through its alternate where a device has no colorant of a name it
+    /// gives ([`ColorantTints`]), that ink's light converted in `intent`;
+    /// `None` for a space that names no colorant of its own, whose light a
+    /// device compositing colorants turns into ink.
+    ///
+    /// [`FontSource::resolve_ink`] generalised, and asked beside it only where
+    /// the device composites colorants ([`Device::composites_colorants`]) —
+    /// again, as the light is, when the intent changes after the colour was
+    /// set — so a light render pays nothing for it. The default answers
+    /// `None`.
+    fn colorants(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: RenderingIntent,
+    ) -> Option<Arc<ColorantTints>> {
+        let _ = (space, components, intent);
+        None
+    }
+
     /// The device space family a named space's colours are in
     /// ([`ColorFamily`]): an `/Indexed` space's base's, a `/Separation` or
     /// `/DeviceN` space's alternate's, a device space a default replaces its
@@ -629,12 +662,14 @@ pub trait FontSource {
 ///
 /// The state is everything the interpreter carries into a form and does not
 /// reset there: the whole graphics state — the transform, the colours and
-/// their spaces' names, the pen, the text state and its font's name, the
-/// alphas, the blend mode and the stored parameters — the text and line
-/// matrices, the current point and the subpath's start, a clip waiting for a
-/// path, the operands left on the stack before `Do`, how deep the form is
-/// and the streams running around it, and which device spaces the scope in
-/// force remaps. Every number is its bits, so two invocations are one key
+/// their spaces' names, what each paints by colorant, the pen, the text state
+/// and its font's name, the alphas, the blend mode and the stored parameters
+/// — the text and line matrices, the current point and the subpath's start,
+/// a clip waiting for a path, the operands left on the stack before `Do`, how
+/// deep the form is and the streams running around it, which device spaces
+/// the scope in force remaps, and whether the device composites colorants,
+/// since a drawing recorded for one carries them in every state and one
+/// recorded for any other carries none. Every number is its bits, so two invocations are one key
 /// exactly when nothing a form could read differs. A state holding a
 /// function or a halftone (`StoredParameters`' transfer, generation,
 /// removal and halftone) has no key, and its forms are interpreted.
@@ -858,6 +893,37 @@ impl Exact {
         }
     }
 
+    /// What a colour paints by colorant ([`ColorantTints`]), exactly: its
+    /// kind, each colorant's name, tint and own ink, and the inks it paints
+    /// through its alternate and its process space.
+    fn colorants(&mut self, colorants: &ColorantTints) {
+        let ColorantTints {
+            kind,
+            tints,
+            alternate,
+            process,
+        } = colorants;
+        self.named(kind);
+        self.word(tints.len() as u64);
+        for crate::state::ColorantTint { name, tint, alone } in tints {
+            self.bytes(name);
+            self.0.push(*tint);
+            self.maybe_ink(alone.as_ref());
+        }
+        self.maybe_ink(alternate.as_ref());
+        self.maybe_ink(process.as_ref());
+    }
+
+    fn maybe_ink(&mut self, value: Option<&[u8; 4]>) {
+        match value {
+            None => self.0.push(0),
+            Some(ink) => {
+                self.0.push(1);
+                self.0.extend_from_slice(ink);
+            }
+        }
+    }
+
     /// The whole graphics state, or `None` where it holds a function or a
     /// halftone, which no key writes. Every field is named, so a field the
     /// state gains is a field this must write before it compiles.
@@ -887,6 +953,8 @@ impl Exact {
             stored,
             fill_source,
             stroke_source,
+            fill_colorants,
+            stroke_colorants,
         } = state;
         self.matrix(ctm);
         let crate::state::TextState {
@@ -927,6 +995,16 @@ impl Exact {
         }
         self.named(fill_family);
         self.named(stroke_family);
+        // What each colour paints by colorant, where the device asked.
+        for colorants in [fill_colorants, stroke_colorants] {
+            match colorants.as_deref() {
+                None => self.0.push(0),
+                Some(colorants) => {
+                    self.0.push(1);
+                    self.colorants(colorants);
+                }
+            }
+        }
         // What each colour resolves again from when the intent changes.
         for source in [fill_source, stroke_source] {
             match source.as_deref() {
@@ -1663,6 +1741,11 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     /// What [`FontSource::device_defaults`] answered for the scope in force,
     /// asked when the scope came into force and never per operator (8.6.5.6).
     defaults: DeviceDefaults,
+    /// Whether the device composites colorants
+    /// ([`Device::composites_colorants`]), asked once: each colour is then
+    /// set with what it paints by colorant, and on any other device the
+    /// resources are asked nothing of the kind.
+    colorants: bool,
     stack: Vec<Token>,
     gs: GraphicsState,
     saved: Vec<GraphicsState>,
@@ -1720,6 +1803,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
     /// An interpretation of a stream of `len` bytes into `device` over
     /// `fonts`, from the initial state under `initial`.
     fn new(device: &'d mut D, fonts: &'d F, initial: Matrix, len: usize) -> Self {
+        let colorants = device.composites_colorants();
         Interpreter {
             device: Out {
                 device,
@@ -1727,6 +1811,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             },
             fonts: Scope::Borrowed(fonts),
             defaults: fonts.device_defaults(),
+            colorants,
             stack: Vec::new(),
             gs: GraphicsState::new(initial),
             saved: Vec::new(),
@@ -2332,16 +2417,16 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     } else {
                         ColorFamily::Gray
                     };
-                    let (color, ink, source) = remapped.unwrap_or_else(|| {
+                    let (color, ink, source, colorants) = remapped.unwrap_or_else(|| {
                         let value = to_byte(v);
                         let color = Rgb {
                             r: value,
                             g: value,
                             b: value,
                         };
-                        (color, None, None)
+                        (color, None, None, None)
                     });
-                    self.set_device_color(op == b"g", color, ink, source, family);
+                    self.set_device_color(op == b"g", color, ink, source, family, colorants);
                 }
             }
             b"rg" | b"RG" => {
@@ -2356,15 +2441,15 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     } else {
                         ColorFamily::Rgb
                     };
-                    let (color, ink, source) = remapped.unwrap_or_else(|| {
+                    let (color, ink, source, colorants) = remapped.unwrap_or_else(|| {
                         let color = Rgb {
                             r: to_byte(r),
                             g: to_byte(g),
                             b: to_byte(b),
                         };
-                        (color, None, None)
+                        (color, None, None, None)
                     });
-                    self.set_device_color(op == b"rg", color, ink, source, family);
+                    self.set_device_color(op == b"rg", color, ink, source, family, colorants);
                 }
             }
             b"k" | b"K" => {
@@ -2381,11 +2466,16 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     } else {
                         ColorFamily::Cmyk
                     };
-                    let (color, ink, source) = remapped.unwrap_or_else(|| {
+                    let (color, ink, source, colorants) = remapped.unwrap_or_else(|| {
                         let ink = [to_byte(c), to_byte(m), to_byte(y), to_byte(k)];
-                        (cmyk_to_rgb(c, m, y, k), Some(ink), None)
+                        (
+                            cmyk_to_rgb(c, m, y, k),
+                            Some(ink),
+                            None,
+                            self.device_cmyk_colorants(ink),
+                        )
                     });
-                    self.set_device_color(op == b"k", color, ink, source, family);
+                    self.set_device_color(op == b"k", color, ink, source, family, colorants);
                 }
             }
             b"cs" | b"CS" => {
@@ -2406,6 +2496,11 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 let ink = components
                     .as_ref()
                     .and_then(|c| self.fonts.resolve_ink(&space, c));
+                // And what that colour paints by colorant: a `/Separation`'s
+                // whole colorant, a `/DeviceN`'s every one (8.6.6.4, 8.6.6.5).
+                let colorants = components
+                    .as_ref()
+                    .and_then(|c| self.colorants_of(&space, c));
                 // The colour is the seam's, so an intent changing later asks
                 // it again; a colour the seam could not resolve stays black.
                 let source = resolved.and(components).map(|components| {
@@ -2416,7 +2511,15 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 });
                 let initial = resolved.unwrap_or(Rgb::BLACK);
                 let family = self.fonts.color_family(&space);
-                self.set_color(fill, initial, Some(space), ink, source, Some(family));
+                self.set_color(
+                    fill,
+                    initial,
+                    Some(space),
+                    ink,
+                    source,
+                    Some(family),
+                    colorants,
+                );
             }
             b"sc" | b"SC" | b"scn" | b"SCN" => {
                 let fill = op == b"sc" || op == b"scn";
@@ -2451,11 +2554,16 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                             .as_ref()
                             .and_then(|s| self.fonts.resolve_color(s, &components, intent))
                         {
+                            // An uncoloured pattern paints the colorants its
+                            // components give in the underlying space.
+                            let colorants = space
+                                .as_ref()
+                                .and_then(|s| self.colorants_of(s, &components));
                             let source = Arc::new(ColorSource {
                                 family: None,
                                 components,
                             });
-                            self.set_color(fill, color, None, None, Some(source), None);
+                            self.set_color(fill, color, None, None, Some(source), None, colorants);
                         }
                     }
                     self.set_pattern(fill, name);
@@ -2468,16 +2576,17 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 // A named space keeps the family `cs` gave it; a reading by
                 // count is in the family the count names, or its default's.
                 let mut family = None;
-                let (resolved, ink, source) = match &space {
+                let (resolved, ink, source, colorants) = match &space {
                     Some(space) => {
                         let intent = self.intent();
                         let color = self.fonts.resolve_color(space, &components, intent);
                         let ink = self.fonts.resolve_ink(space, &components);
+                        let colorants = self.colorants_of(space, &components);
                         let source = Arc::new(ColorSource {
                             family: None,
                             components,
                         });
-                        (color, ink, Some(source))
+                        (color, ink, Some(source), colorants)
                     }
                     // Without a named space the component count is the only
                     // clue, and it is a reliable one: four is DeviceCMYK. A
@@ -2495,22 +2604,28 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                             family = Some(ColorFamily::by_count(components.len()));
                         }
                         match remapped {
-                            Some((color, ink, source)) => (Some(color), ink, source),
-                            None => (
-                                Some(components_to_rgb(&components)),
-                                match components[..] {
+                            Some((color, ink, source, colorants)) => {
+                                (Some(color), ink, source, colorants)
+                            }
+                            None => {
+                                let ink = match components[..] {
                                     [c, m, y, k] => {
                                         Some([to_byte(c), to_byte(m), to_byte(y), to_byte(k)])
                                     }
                                     _ => None,
-                                },
-                                None,
-                            ),
+                                };
+                                (
+                                    Some(components_to_rgb(&components)),
+                                    ink,
+                                    None,
+                                    ink.and_then(|ink| self.device_cmyk_colorants(ink)),
+                                )
+                            }
                         }
                     }
                 };
                 if let Some(color) = resolved {
-                    self.set_color(fill, color, space, ink, source, family);
+                    self.set_color(fill, color, space, ink, source, family, colorants);
                 }
             }
 
@@ -2857,20 +2972,33 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
     /// changing later resolves it again in the default.
     #[cold]
     #[inline(never)]
-    fn remapped(
-        &self,
-        space: &'static [u8],
-        components: Vec<f64>,
-    ) -> Option<(Rgb, Option<[u8; 4]>, Option<Arc<ColorSource>>)> {
+    fn remapped(&self, space: &'static [u8], components: Vec<f64>) -> Option<Resolved> {
         let color = self
             .fonts
             .resolve_color(space, &components, self.intent())?;
         let ink = self.fonts.resolve_ink(space, &components);
+        let colorants = self.colorants_of(space, &components);
         let source = Arc::new(ColorSource {
             family: Some(space),
             components,
         });
-        Some((color, ink, Some(source)))
+        Some((color, ink, Some(source), colorants))
+    }
+
+    /// What the seam answers for a colour of `space` by colorant, in the
+    /// intent in force, asked only where the device composites colorants.
+    fn colorants_of(&self, space: &[u8], components: &[f64]) -> Option<Arc<ColorantTints>> {
+        if !self.colorants {
+            return None;
+        }
+        self.fonts.colorants(space, components, self.intent())
+    }
+
+    /// A DeviceCMYK colour's own components on the four process colorants,
+    /// where the device composites colorants.
+    fn device_cmyk_colorants(&self, ink: [u8; 4]) -> Option<Arc<ColorantTints>> {
+        self.colorants
+            .then(|| Arc::new(ColorantTints::device_cmyk(ink)))
     }
 
     /// The rendering intent in force (8.6.5.8).
@@ -2908,10 +3036,23 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             let Some(color) = self.fonts.resolve_color(space, &source.components, intent) else {
                 continue;
             };
+            // The process ink a colour paints through a light alternate is
+            // that light's, so its colorants are asked again with it.
+            let colorants = if self.colorants {
+                Some(self.fonts.colorants(space, &source.components, intent))
+            } else {
+                None
+            };
             if fill {
                 self.gs.fill_color = color;
+                if let Some(colorants) = colorants {
+                    self.gs.fill_colorants = colorants;
+                }
             } else {
                 self.gs.stroke_color = color;
+                if let Some(colorants) = colorants {
+                    self.gs.stroke_colorants = colorants;
+                }
             }
         }
     }
@@ -2925,6 +3066,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
     /// until October 2026. It holds no name instead, which is the reading by
     /// component count: the operands `sc` gives next are read in the family
     /// the operator selected, and allocate nothing.
+    #[allow(clippy::too_many_arguments)]
     fn set_device_color(
         &mut self,
         fill: bool,
@@ -2932,8 +3074,9 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         ink: Option<[u8; 4]>,
         source: Option<Arc<ColorSource>>,
         family: ColorFamily,
+        colorants: Option<Arc<ColorantTints>>,
     ) {
-        self.set_color(fill, color, None, ink, source, Some(family));
+        self.set_color(fill, color, None, ink, source, Some(family), colorants);
         if fill {
             self.gs.fill_space = None;
         } else {
@@ -2943,8 +3086,10 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
 
     /// Applies a colour to the fill or stroke slot, with its DeviceCMYK
     /// components when it has them, what it was resolved from where the
-    /// seam resolved it, and its family where the operator says one (`None`
-    /// keeps the slot's).
+    /// seam resolved it, its family where the operator says one (`None`
+    /// keeps the slot's), and what it paints by colorant where the device
+    /// asked.
+    #[allow(clippy::too_many_arguments)]
     fn set_color(
         &mut self,
         fill: bool,
@@ -2953,10 +3098,12 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         ink: Option<[u8; 4]>,
         source: Option<Arc<ColorSource>>,
         family: Option<ColorFamily>,
+        colorants: Option<Arc<ColorantTints>>,
     ) {
         if fill {
             self.gs.fill_color = color;
             self.gs.fill_ink = ink;
+            self.gs.fill_colorants = colorants;
             self.gs.fill_pattern = None;
             self.gs.fill_source = source;
             if let Some(space) = space {
@@ -2968,6 +3115,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         } else {
             self.gs.stroke_color = color;
             self.gs.stroke_ink = ink;
+            self.gs.stroke_colorants = colorants;
             self.gs.stroke_pattern = None;
             self.gs.stroke_source = source;
             if let Some(space) = space {
@@ -3242,6 +3390,9 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         }
         let mut out = Exact(Vec::with_capacity(512));
         out.word(u64::from(self.depth));
+        // A drawing recorded for a device compositing colorants carries them
+        // in every state, and one recorded for any other device carries none.
+        out.flag(self.colorants);
         out.flag(self.defaults.gray);
         out.flag(self.defaults.rgb);
         out.flag(self.defaults.cmyk);
@@ -3930,6 +4081,7 @@ mod tests {
 
     use super::*;
     use crate::record::{Answers, Event, EventKind, RecordingDevice};
+    use crate::state::{ColorantKind, ColorantTint};
 
     /// Every byte is one code, 500/1000 em wide, mapping to itself.
     struct Simple;
@@ -5260,6 +5412,286 @@ mod tests {
         assert_eq!(states[2].fill_color, Rgb::BLACK, "to black, not white");
         assert_eq!(states[3].stroke_ink, Some([128, 0, 0, 0]), "`SC`");
         assert_eq!(states[4].stroke_ink, None, "`G` is light");
+    }
+
+    /// Resources that name colorants, as the facade's will: `/Spot` a
+    /// `/Separation` of `Gold`, `/Inks` a `/DeviceN` of `Orange` and `Green`,
+    /// `/Pat` an uncoloured pattern space over `/Spot`, `/Rgb` a space that
+    /// names none, and DeviceCMYK by name; each colorants question counted.
+    struct ColorantSpaces {
+        asked: std::cell::Cell<usize>,
+        defaults: DeviceDefaults,
+    }
+
+    impl ColorantSpaces {
+        fn new(defaults: DeviceDefaults) -> ColorantSpaces {
+            ColorantSpaces {
+                asked: std::cell::Cell::new(0),
+                defaults,
+            }
+        }
+
+        /// The tints a test source answers: each name's byte, and the
+        /// alternate a recognisable function of the first.
+        fn tints(kind: ColorantKind, named: &[(&[u8], f64)]) -> Arc<ColorantTints> {
+            let first = named.first().map_or(0, |(_, tint)| to_byte(*tint));
+            Arc::new(ColorantTints {
+                kind,
+                tints: named
+                    .iter()
+                    .map(|(name, tint)| ColorantTint {
+                        name: Arc::from(*name),
+                        tint: to_byte(*tint),
+                        alone: None,
+                    })
+                    .collect(),
+                alternate: Some([0, first, 0, 0]),
+                process: None,
+            })
+        }
+    }
+
+    impl FontSource for ColorantSpaces {
+        fn decode(&self, _font: &[u8], _bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            Vec::new()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn device_defaults(&self) -> DeviceDefaults {
+            self.defaults
+        }
+        fn color_components(&self, space: &[u8]) -> Option<usize> {
+            match space {
+                b"Spot" | b"Pat" => Some(1),
+                b"Inks" => Some(2),
+                b"Rgb" => Some(3),
+                b"DeviceCMYK" => Some(4),
+                _ => None,
+            }
+        }
+        fn resolve_color(&self, space: &[u8], c: &[f64], _intent: RenderingIntent) -> Option<Rgb> {
+            match (space, c) {
+                (b"Spot" | b"Pat", [t]) => {
+                    let v = to_byte(1.0 - t);
+                    Some(Rgb { r: v, g: v, b: 0 })
+                }
+                (b"Inks", [a, b]) => Some(Rgb {
+                    r: to_byte(1.0 - a),
+                    g: to_byte(1.0 - b),
+                    b: 0,
+                }),
+                (b"Rgb", [r, g, b]) => Some(Rgb {
+                    r: to_byte(*r),
+                    g: to_byte(*g),
+                    b: to_byte(*b),
+                }),
+                (b"DeviceCMYK", [c, m, y, k]) => Some(cmyk_to_rgb(*c, *m, *y, *k)),
+                _ => None,
+            }
+        }
+        fn resolve_ink(&self, space: &[u8], c: &[f64]) -> Option<[u8; 4]> {
+            match (space, c) {
+                (b"DeviceCMYK", [c, m, y, k]) => {
+                    Some([to_byte(*c), to_byte(*m), to_byte(*y), to_byte(*k)])
+                }
+                _ => None,
+            }
+        }
+        fn colorants(
+            &self,
+            space: &[u8],
+            c: &[f64],
+            _intent: RenderingIntent,
+        ) -> Option<Arc<ColorantTints>> {
+            self.asked.set(self.asked.get() + 1);
+            match (space, c) {
+                (b"Spot" | b"Pat", [t]) => {
+                    Some(Self::tints(ColorantKind::Colorants, &[(b"Gold", *t)]))
+                }
+                (b"Inks", [a, b]) => Some(Self::tints(
+                    ColorantKind::Colorants,
+                    &[(b"Orange", *a), (b"Green", *b)],
+                )),
+                (b"DeviceCMYK", [c, m, y, k]) => Some(Arc::new(ColorantTints::device_cmyk([
+                    to_byte(*c),
+                    to_byte(*m),
+                    to_byte(*y),
+                    to_byte(*k),
+                ]))),
+                _ => None,
+            }
+        }
+        fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+            match space {
+                b"Spot" | b"Pat" => Some(vec![1.0]),
+                b"Inks" => Some(vec![1.0, 1.0]),
+                b"Rgb" => Some(vec![0.0; 3]),
+                b"DeviceCMYK" => Some(vec![0.0, 0.0, 0.0, 1.0]),
+                _ => None,
+            }
+        }
+    }
+
+    /// The tints a state's colorants hold, by name, or `None` for none.
+    fn tints_of(colorants: &Option<Arc<ColorantTints>>) -> Option<Vec<(Vec<u8>, u8)>> {
+        colorants.as_ref().map(|colorants| {
+            colorants
+                .tints
+                .iter()
+                .map(|tint| (tint.name.to_vec(), tint.tint))
+                .collect()
+        })
+    }
+
+    /// The content every colorants question is asked through: `k` and `K`,
+    /// `cs` resetting a separation to its whole colorant and `sc` tinting
+    /// it, `CS` and `SC` in a `/DeviceN`, `rg` and `G` inside a `q`, the
+    /// colours after its `Q`, a space naming no colorant, four components
+    /// with no space named, and an uncoloured pattern's components.
+    const COLORANT_CONTENT: &[u8] = b"1 0 0 0 k 0.2 0.4 0.6 0.1 K 0 0 m 10 10 l S \
+        /Spot cs 0 0 m 10 10 l S \
+        0.5 sc 0 0 m 10 10 l S \
+        /Inks CS 0.25 0.75 SC 0 0 m 10 10 l S \
+        q 1 0 0 rg 0.5 G 0 0 m 10 10 l S Q 0 0 m 10 10 l S \
+        /Rgb cs 0.1 0.2 0.3 sc 0 0 m 10 10 l S \
+        0.5 g 0 0 0 1 sc 0 0 m 10 10 l S \
+        /Pat cs 0.3 /P1 scn 0 0 m 10 10 l S";
+
+    /// **A colour carries the colorants its space answers** (RC-04.6), beside
+    /// `a_device_cmyk_colour_keeps_its_components_beside_its_light`: on a
+    /// device that composites colorants, `k` and `K` carry DeviceCMYK's four
+    /// process colorants at their own components; `cs` resets a `/Separation`
+    /// to its whole colorant (8.6.6.4) and `sc` tints it; `CS` and `SC` carry a
+    /// `/DeviceN`'s every colorant; `rg` and `G` carry none, and `Q` restores
+    /// what the `q` saved; a space that names no colorant carries none; four
+    /// components with no space named are DeviceCMYK's own; and an uncoloured
+    /// pattern's components carry their underlying space's colorants. A device
+    /// that composites none is handed none, and the resources are asked
+    /// nothing; under a `/DefaultCMYK` a `k` asks the resources by the device
+    /// space's name, as its light and ink are asked.
+    #[test]
+    fn a_colour_carries_the_colorants_its_space_answers() {
+        let source = ColorantSpaces::new(DeviceDefaults::NONE);
+        let mut d = RecordingDevice::new().recording_colorants(true);
+        interpret(COLORANT_CONTENT, Matrix::IDENTITY, &mut d, &source);
+        let states: Vec<&GraphicsState> = d
+            .of_kind(EventKind::StrokePath)
+            .filter_map(Event::state)
+            .collect();
+        assert_eq!(states.len(), 9);
+        let gold = |tint: u8| Some(vec![(b"Gold".to_vec(), tint)]);
+        let cmyk = |c: u8, m: u8, y: u8, k: u8| {
+            Some(vec![
+                (b"Cyan".to_vec(), c),
+                (b"Magenta".to_vec(), m),
+                (b"Yellow".to_vec(), y),
+                (b"Black".to_vec(), k),
+            ])
+        };
+        let inks = Some(vec![(b"Orange".to_vec(), 64), (b"Green".to_vec(), 191)]);
+
+        assert_eq!(
+            tints_of(&states[0].fill_colorants),
+            cmyk(255, 0, 0, 0),
+            "`k`"
+        );
+        assert_eq!(
+            tints_of(&states[0].stroke_colorants),
+            cmyk(51, 102, 153, 26),
+            "`K`"
+        );
+        assert_eq!(
+            states[0].fill_colorants.as_ref().map(|c| c.kind),
+            Some(ColorantKind::DirectCmyk)
+        );
+        assert_eq!(
+            tints_of(&states[1].fill_colorants),
+            gold(255),
+            "`cs` resets to the whole colorant"
+        );
+        assert_eq!(
+            tints_of(&states[1].stroke_colorants),
+            cmyk(51, 102, 153, 26),
+            "the stroke kept"
+        );
+        assert_eq!(tints_of(&states[2].fill_colorants), gold(128), "`sc`");
+        assert_eq!(
+            states[2].fill_colorants.as_ref().and_then(|c| c.alternate),
+            Some([0, 128, 0, 0]),
+            "the alternate the resources answered"
+        );
+        assert_eq!(tints_of(&states[3].stroke_colorants), inks, "`CS` and `SC`");
+        assert_eq!(states[4].fill_colorants, None, "`rg` carries none");
+        assert_eq!(states[4].stroke_colorants, None, "`G` carries none");
+        assert_eq!(states[4].fill_ink, None);
+        assert_eq!(
+            tints_of(&states[5].fill_colorants),
+            gold(128),
+            "`Q` restores the fill's"
+        );
+        assert_eq!(
+            tints_of(&states[5].stroke_colorants),
+            inks,
+            "and the stroke's"
+        );
+        assert_eq!(
+            states[6].fill_colorants, None,
+            "a space that names no colorant"
+        );
+        assert_eq!(
+            tints_of(&states[7].fill_colorants),
+            cmyk(0, 0, 0, 255),
+            "four with no space named"
+        );
+        assert_eq!(
+            tints_of(&states[8].fill_colorants),
+            gold(77),
+            "an uncoloured pattern's"
+        );
+        assert_eq!(states[8].fill_pattern.as_deref(), Some(b"P1".as_slice()));
+
+        // A device that composites no colorants: none, and nothing asked.
+        let quiet = ColorantSpaces::new(DeviceDefaults::NONE);
+        let mut light = RecordingDevice::new();
+        interpret(COLORANT_CONTENT, Matrix::IDENTITY, &mut light, &quiet);
+        let states: Vec<&GraphicsState> = light
+            .of_kind(EventKind::StrokePath)
+            .filter_map(Event::state)
+            .collect();
+        assert_eq!(states.len(), 9);
+        assert!(states
+            .iter()
+            .all(|state| state.fill_colorants.is_none() && state.stroke_colorants.is_none()));
+        assert_eq!(quiet.asked.get(), 0, "a light render asks nothing");
+        assert_eq!(
+            states[0].fill_ink,
+            Some([255, 0, 0, 0]),
+            "and keeps its ink"
+        );
+
+        // A `/DefaultCMYK`: `k` asks the resources by DeviceCMYK's name.
+        let remapping = ColorantSpaces::new(DeviceDefaults {
+            cmyk: true,
+            ..DeviceDefaults::NONE
+        });
+        let mut remapped = RecordingDevice::new().recording_colorants(true);
+        interpret(
+            b"0 0.5 0 0 k 0 0 m 10 10 l f",
+            Matrix::IDENTITY,
+            &mut remapped,
+            &remapping,
+        );
+        let state = remapped
+            .of_kind(EventKind::FillPath)
+            .find_map(Event::state)
+            .expect("the fill reached the device");
+        assert_eq!(tints_of(&state.fill_colorants), cmyk(0, 128, 0, 0));
+        assert_eq!(
+            remapping.asked.get(),
+            1,
+            "asked once, by the device space's name"
+        );
     }
 
     /// A colour carries the family its values are in: each device operator

@@ -34,9 +34,9 @@ pub use replay::{replay, Cursor, Replayed};
 pub use search::{fold_diacritics, SearchOptions};
 pub use serialize::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
 pub use state::{
-    BlackPointCompensation, BlendMode, ColorFamily, ColorSource, GraphicsState, Halftone, LineCap,
-    LineJoin, Matrix, RenderingIntent, Rgb, SpotFunction, StoredParameters, TextRenderMode,
-    TextState, Transfer,
+    BlackPointCompensation, BlendMode, ColorFamily, ColorSource, ColorantKind, ColorantTint,
+    ColorantTints, GraphicsState, Halftone, LineCap, LineJoin, Matrix, RenderingIntent, Rgb,
+    SpotFunction, StoredParameters, TextRenderMode, TextState, Transfer,
 };
 pub use text::{
     Quad, TextBlock, TextChar, TextDevice, TextLine, TextPage, TextWarning, WritingMode,

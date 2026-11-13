@@ -244,6 +244,103 @@ impl Default for Rgb {
     }
 }
 
+/// What a colour paints by colorant (8.6.6.4, 8.6.6.5), beside the light it
+/// is ([`GraphicsState::fill_color`]): how its space names colorants, each
+/// colorant it names with its tint, and the process ink it paints where a
+/// device has no colorant of a name it gives.
+///
+/// The generalisation of [`GraphicsState::fill_ink`], which carries a
+/// DeviceCMYK colour's four inks and nothing else. Asked for only where the
+/// device composites colorants ([`Device::composites_colorants`]); every other
+/// device's states carry none, and a colour of a space that names no colorant
+/// of its own — DeviceGray, DeviceRGB, a CIE-based or ICC space — carries
+/// none either, its light being what such a device turns into ink.
+///
+/// [`Device::composites_colorants`]: crate::Device::composites_colorants
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorantTints {
+    /// How the colour's space names its colorants.
+    pub kind: ColorantKind,
+    /// The colorants the colour names, each with its tint, in the space's
+    /// order: DeviceCMYK's four process colorants; a `/Separation`'s one; each
+    /// of a `/DeviceN`'s components but `/None`, an `NChannel` space's
+    /// components of a CMYK process space under the process colorant's name
+    /// and none of another process space's, which are [`ColorantTints::process`].
+    pub tints: Vec<ColorantTint>,
+    /// The process ink the whole colour paints through its space's alternate
+    /// (8.6.6.4, 8.6.6.5): a DeviceCMYK alternate's own components, any other
+    /// alternate's light turned into ink. What a `/Separation` or a plain
+    /// `/DeviceN` paints where a device has no colorant of a name it gives;
+    /// `None` for a DeviceCMYK colour, which is its own ink, and for `/All`
+    /// and `/None`, which never revert.
+    pub alternate: Option<[u8; 4]>,
+    /// An `NChannel` space's components of a process space other than CMYK,
+    /// converted together through that space — the components its names
+    /// leave out at the space's initial values — to light, and the light to
+    /// ink (8.6.6.5, Table 71); `None` where there are none.
+    pub process: Option<[u8; 4]>,
+}
+
+impl ColorantTints {
+    /// A DeviceCMYK colour's own components, as bytes, on the four process
+    /// colorants (8.6.4.4): `k`, `K` and four components read with no space
+    /// named.
+    #[must_use]
+    pub fn device_cmyk(ink: [u8; 4]) -> ColorantTints {
+        let names: [&[u8]; 4] = [b"Cyan", b"Magenta", b"Yellow", b"Black"];
+        ColorantTints {
+            kind: ColorantKind::DirectCmyk,
+            tints: names
+                .iter()
+                .zip(ink)
+                .map(|(name, tint)| ColorantTint {
+                    name: Arc::from(*name),
+                    tint,
+                    alone: None,
+                })
+                .collect(),
+            alternate: None,
+            process: None,
+        }
+    }
+}
+
+/// How a colour's space names its colorants (8.6.6.4, 8.6.6.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorantKind {
+    /// DeviceCMYK as the current colour — `k`, `K`, `cs`/`sc` in it, and such
+    /// a colour under a `/DefaultCMYK` — its four process colorants at the
+    /// colour's own components.
+    DirectCmyk,
+    /// A `/Separation` or a plain `/DeviceN` painting the colorants it names:
+    /// all of them where a device has every one, `/None` aside, and the whole
+    /// colour through its alternate where it has not.
+    Colorants,
+    /// An `NChannel` `/DeviceN`, read component by component: each colorant a
+    /// device has paints it, and each it has not paints its own process ink.
+    NChannel,
+    /// `/Separation /All`: every colorant of the device at the one tint.
+    All,
+    /// `/Separation /None`, or a `/DeviceN` whose every name is `/None`:
+    /// nothing at all.
+    None,
+}
+
+/// One colorant a colour names, and its tint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorantTint {
+    /// The colorant's name, `#` escapes decoded: `Cyan`, `Magenta`, `Yellow`
+    /// or `Black` for a process colorant, any other name for a spot.
+    pub name: Arc<[u8]>,
+    /// Its tint as a byte, `round(255 × tint)`: 0 no ink, 255 solid.
+    pub tint: u8,
+    /// An `NChannel` spot's own process ink — its tint through its
+    /// `/Colorants` space, the colorant alone — painted where a device has no
+    /// colorant of its name; `None` for a process colorant and for every
+    /// other kind's colorants, which revert as a whole.
+    pub alone: Option<[u8; 4]>,
+}
+
 /// How a stroke's ends are finished (8.4.3.3, Table 54).
 ///
 /// Restated here rather than imported: the rasterizer has the same three
@@ -661,6 +758,14 @@ pub struct GraphicsState {
     pub fill_family: ColorFamily,
     /// The same for the stroking colour.
     pub stroke_family: ColorFamily,
+    /// What the non-stroking colour paints by colorant, for a device that
+    /// composites colorants ([`ColorantTints`]): set with the colour by `k`,
+    /// `cs`, `sc` and `scn`, `None` for a colour of a space that names no
+    /// colorant and on every other device. One pointer, so a `q` copies one
+    /// word more, and shared, so the copy allocates nothing.
+    pub fill_colorants: Option<Arc<ColorantTints>>,
+    /// The same for the stroking colour: `K`, `CS`, `SC`, `SCN`.
+    pub stroke_colorants: Option<Arc<ColorantTints>>,
     /// `w`, the line width in user space.
     pub line_width: f64,
     /// `J`, the line cap.
@@ -728,11 +833,14 @@ impl GraphicsState {
             stroke_alpha: 1.0,
             fill_color: Rgb::BLACK,
             stroke_color: Rgb::BLACK,
-            // 8.6.8: the initial space is DeviceGray, so there is no ink.
+            // 8.6.8: the initial space is DeviceGray, so there is no ink, and
+            // it names no colorant.
             fill_ink: None,
             stroke_ink: None,
             fill_family: ColorFamily::Gray,
             stroke_family: ColorFamily::Gray,
+            fill_colorants: None,
+            stroke_colorants: None,
             // 8.4.3.2: the initial line width is 1.0 user-space units.
             line_width: 1.0,
             line_cap: LineCap::Butt,
