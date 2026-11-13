@@ -845,9 +845,13 @@ pub struct RenderOptions {
     /// file gives as not zero (`0.001` is not zero, though it is no ink); a
     /// `/Separation` or `/DeviceN` the plates of its colorants, process ones
     /// among them; `/All` every plate; and a colour of any other space, or a
-    /// separation reverting to its alternate, the four process plates. A
-    /// paint whose flag is clear erases every plate it names no ink for, and
-    /// `/None` paints nothing.
+    /// separation reverting to its alternate, the four process plates. An
+    /// image, an inline image, `sh`, a shading pattern and a mesh mark by
+    /// their own space in the same way under `/op` — a shading pattern by the
+    /// flag of the operation it fills or strokes — and DeviceCMYK marks its
+    /// four process plates there under either mode, since 8.6.7 keeps the
+    /// non-zero mode off images and shadings. A paint whose flag is clear
+    /// erases every plate it names no ink for, and `/None` paints nothing.
     ///
     /// Where a page's spots are more than [`MAX_SPOT_PLATES`], or than keep
     /// its plates inside [`MAX_PLATE_BYTES`] at its size, those past the cap,

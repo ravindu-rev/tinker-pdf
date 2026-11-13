@@ -1157,6 +1157,26 @@ the plates worked out from the table at the paint's own coverage;
 `separations_and_a_render_without_the_switch_knock_out`). A recorded colour's
 zero test travels in the command stream's `Colorants` record from minor 1.
 
+**Images and shadings overprint by their space** (8.6.7, 11.7.4.3's note 2).
+An image XObject or inline image in its own colours, `sh`, a shading pattern
+and a mesh mark the channels their own space names, under `/op` — a shading
+pattern under the flag of the operation it fills or strokes — worked out once
+a paint from the space's colorants at its initial colour, which name every
+colorant each of its colours names, with the non-zero mode off: 8.6.7 keeps
+it off images and shadings, so a DeviceCMYK image or shading marks its four
+process channels under `/OPM 1` as under 0. A decoded image's plates carry the
+set (`ImagePlates::Tints::marks`, from `ImageTints`, for a stored, inline,
+JPEG and JPEG 2000 image alike), a shading's and a mesh's road carries it
+(`SpaceTints::marks`), and an image of light, or a shading in a space naming
+no colorant, is light turned into ink and marks the process channels; an
+`/Indexed` image marks by its base. A stencil marks by its fill colour, as a
+fill does (`overprint.rs`: `images_and_shadings_overprint_by_their_space`,
+each of the five in DeviceCMYK, a spot's `/Separation`, a `/DeviceN` and
+DeviceRGB under each state, the paint's own tints read off the page's
+separations and every channel it leaves at the backdrop's; and
+`a_one_sample_image_paints_as_a_flat_fill_of_its_colour`, which also holds
+`/OPM 1` to the fill and not the image).
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and

@@ -384,6 +384,10 @@ pub(crate) struct SpaceTints {
     /// The plates canvas's spot channels.
     spots: Spots,
     road: Road,
+    /// The channels the space's colours mark when they overprint
+    /// ([`PlatePlan::marks`]), the non-zero mode never applying to a
+    /// shading (8.6.7).
+    marks: Channels,
     /// One colour's tints, a channel each, kept between pixels.
     out: Vec<u8>,
 }
@@ -437,8 +441,14 @@ impl SpaceTints {
         Some(SpaceTints {
             spots,
             road,
+            marks: plan.marks(&tints, spots, false),
             out: vec![0; width],
         })
+    }
+
+    /// The channels the space's colours mark when they overprint.
+    pub(crate) fn marks(&self) -> Channels {
+        self.marks
     }
 
     /// Whether colours of the space paint nothing at all.
@@ -931,5 +941,49 @@ mod tests {
         assert!(road.paints_nothing());
         assert_eq!(road.tints(&none, &[0.5], light), None);
         assert!(SpaceTints::of(&ColorSpace::DeviceRgb, &plan, spots).is_none());
+    }
+
+    /// **A space's road marks what its colours name** (RC-03.6): the set a
+    /// shading or a mesh composites through when it overprints is the one a
+    /// flat colour of the space at its initial colour marks with the non-zero
+    /// mode off — DeviceCMYK its four process channels even where its
+    /// initial colour's cyan, magenta and yellow are zero, a spot its plate,
+    /// a `/DeviceN` its colorants', one reverting its process channels, `/All`
+    /// every channel and `/None` none.
+    #[test]
+    fn a_space_s_road_marks_what_its_colours_name() {
+        let plan = Arc::new(plan());
+        let spots = spots(3);
+        for (what, space, marks) in [
+            ("DeviceCMYK", ColorSpace::DeviceCmyk, Channels::of(0..4)),
+            (
+                "a spot",
+                separation(&[b"Gold"], b"{ 0 0 0 }"),
+                Channels::of([4]),
+            ),
+            (
+                "spots and a process name",
+                separation(&[b"Orange", b"Cyan", b"None"], b"{ pop pop pop 0 0 0 0 }"),
+                Channels::of([0, 6]),
+            ),
+            (
+                "a composited spot",
+                separation(&[b"Gold", b"Violet"], b"{ pop pop 0 0 0 0 }"),
+                Channels::of(0..4),
+            ),
+            (
+                "/All",
+                separation(&[b"All"], b"{ dup dup dup }"),
+                Channels::ALL,
+            ),
+            (
+                "/None",
+                separation(&[b"None"], b"{ 0 0 0 }"),
+                Channels::NONE,
+            ),
+        ] {
+            let road = SpaceTints::of(&space, &plan, spots).expect("a space naming colorants");
+            assert_eq!(road.marks(), marks, "{what}");
+        }
     }
 }

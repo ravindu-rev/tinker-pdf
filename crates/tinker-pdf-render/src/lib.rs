@@ -621,6 +621,11 @@ pub enum ImagePlates {
         tints: Vec<u8>,
         /// Tints a sample.
         channels: usize,
+        /// The channels the image marks when it overprints
+        /// ([`PlatePlan::marks`]), by its space's kind: the non-zero mode
+        /// never applies to an image (8.6.7), so DeviceCMYK marks its four
+        /// process channels.
+        marks: Channels,
     },
     /// The image's space names only `/None`: the image has no effect on the
     /// page (8.6.6.4).
@@ -2599,6 +2604,25 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
     }
 
+    /// The colour channels a sampled source marks on the canvas drawn on
+    /// now — an image in its own colours, a shading, a mesh — whose space
+    /// marks `named` (its plates' or its road's marks), `None` for a space
+    /// naming no colorant, whose colours are light turned into ink: every
+    /// channel unless the render simulates overprint on plates by a plan and
+    /// `overprint`'s flag is set; then `named`, or the four process channels.
+    /// 8.6.7: the non-zero mode does not apply to images or shadings, which
+    /// `named` was worked out without.
+    fn sampled_marks(&self, overprint: Overprint, named: Option<Channels>) -> Channels {
+        if !self.overprint || !overprint.on {
+            return Channels::ALL;
+        }
+        let (Some(_), PixelFormat::Plates { .. }) = (self.plan.as_deref(), self.canvas.format)
+        else {
+            return Channels::ALL;
+        };
+        named.unwrap_or_else(|| Channels::of(0..4))
+    }
+
     /// How colours of `space` reach the canvas drawn on now by plate
     /// (RC-04.13, RC-04.14): on plates by a plan, the space's road to its
     /// tints ([`SpaceTints`]); `None` on every other canvas, and for a space
@@ -3814,8 +3838,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             Some(PatternPaint::Shading(shading, matrix)) => {
                 // A mesh too large to paint is reported as the unpainted
                 // pattern it is, exactly as an unreadable tiling cell is: the
-                // area is left alone rather than filled with black.
-                if !self.fill_with_shading(shape, &shading, matrix, state, alpha) {
+                // area is left alone rather than filled with black. It
+                // overprints by the flag of the operation it fills or strokes.
+                if !self.fill_with_shading(shape, &shading, matrix, state, alpha, paint.overprint) {
                     self.report_unpainted_pattern(name);
                 }
             }
@@ -3854,6 +3879,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         matrix: Matrix,
         state: &GraphicsState,
         alpha: f64,
+        overprint: Overprint,
     ) -> bool {
         let to_device = matrix.then(&self.base);
         let stop = self.stop_predicate();
@@ -3885,6 +3911,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 &set,
                 state.stored_parameters().smoothness,
                 conversion,
+                overprint,
             );
         }
 
@@ -3897,6 +3924,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if plates.as_ref().is_some_and(SpaceTints::paints_nothing) {
             return true;
         }
+        let marks = self.sampled_marks(overprint, plates.as_ref().map(SpaceTints::marks));
         self.record_shading(
             shading,
             &inverse,
@@ -3907,6 +3935,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.knockout_restore(&area);
         }
         let held = self.hold_removal(&set.removal);
+        let marked = self.canvas.set_marked(marks);
         // The shape's own rectangle. A shading is evaluated per pixel, so a
         // gradient-filled comma used to run the inverse transform and the
         // function over every pixel of the page to paint two hundred of them.
@@ -3922,6 +3951,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
         for row in y_start..y_end {
             if self.stopping() {
+                self.canvas.set_marked(marked);
                 self.release_removal(held);
                 self.count_evaluations(&scratch);
                 return true;
@@ -3961,6 +3991,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
         }
+        self.canvas.set_marked(marked);
         self.release_removal(held);
         self.count_evaluations(&scratch);
         true
@@ -3995,7 +4026,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// shape is recorded over for the plane (11.6.4.3), and `set` what the
     /// paint takes from the device-dependent state. The vertices' colours
     /// convert as `conversion` says, in the intent in force at the operator
-    /// that paints the mesh.
+    /// that paints the mesh, and it overprints by `overprint`'s flag, marking
+    /// what its space names ([`Renderer::with_overprint`]).
     ///
     /// `smoothness` is the `/SM` in force (10.7.3): a patch is subdivided until
     /// its colour is within it as well as by its device length
@@ -4021,11 +4053,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         set: &DeviceSet,
         smoothness: Option<f64>,
         conversion: Conversion,
+        overprint: Overprint,
     ) -> bool {
         let plates = self.shading_plates(&mesh.space);
         if plates.as_ref().is_some_and(SpaceTints::paints_nothing) {
             return true;
         }
+        let marks = self.sampled_marks(overprint, plates.as_ref().map(SpaceTints::marks));
         let Some(tessellation) = mesh.tessellate(&to_device, smoothness) else {
             return false;
         };
@@ -4174,8 +4208,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .coverage()
                 .overlap_at((ox, oy), self.canvas.width, self.canvas.height);
         let held = self.hold_removal(&set.removal);
+        let marked = self.canvas.set_marked(marks);
         for row in y_start..y_end {
             if self.stopping() {
+                self.canvas.set_marked(marked);
                 self.release_removal(held);
                 return true;
             }
@@ -4207,6 +4243,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
         }
+        self.canvas.set_marked(marked);
         self.release_removal(held);
         true
     }
@@ -4938,13 +4975,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if matches!(plating, Plating::Nothing) {
             return;
         }
-        // The channels the draw marks: a stencil's fill colour's
-        // (8.9.6.2), and every channel for an image of its own colours.
-        let marks = if image.stencil {
-            self.marks(Paint::fill(state), &plating)
-        } else {
-            Channels::ALL
-        };
+
         // An image whose samples name colorants is drawn on plates by them
         // (RC-04.12): in `/None` it has no effect on the page, and otherwise
         // its tints are sampled plate by plate through the raster's sampler
@@ -4954,13 +4985,27 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             (Some(plates), PixelFormat::Plates { spots }, Some(_)) if !image.stencil => {
                 match plates {
                     ImagePlates::Nothing => return,
-                    ImagePlates::Tints { tints, channels } if *channels == 4 + spots.count() => {
-                        Some((tints.as_slice(), *channels))
-                    }
+                    ImagePlates::Tints {
+                        tints, channels, ..
+                    } if *channels == 4 + spots.count() => Some((tints.as_slice(), *channels)),
                     ImagePlates::Tints { .. } => None,
                 }
             }
             _ => None,
+        };
+        // The channels the draw marks (`Renderer::with_overprint`): a
+        // stencil's fill colour's (8.9.6.2); an image of its own colours its
+        // space's by kind, under `/op`, the non-zero mode never applying to
+        // an image (8.6.7) — the colorants its plates name, or the process
+        // channels for one of light.
+        let marks = if image.stencil {
+            self.marks(Paint::fill(state), &plating)
+        } else {
+            let named = match (&image.plates, tints) {
+                (Some(ImagePlates::Tints { marks, .. }), Some(_)) => Some(*marks),
+                _ => None,
+            };
+            self.sampled_marks(Overprint::fill(state), named)
         };
         let unit_to_device = transform(&state.ctm.then(&self.base));
         // A reduced decode's samples span a square of their own, which reaches
@@ -6544,6 +6589,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // brings its own coverage and its own knockout restore with it.
         if let Some(mesh) = shading.mesh() {
             let limit = self.page_limit();
+            // `sh` overprints by `/op` (8.6.7).
             if self.paint_mesh(
                 mesh,
                 to_device,
@@ -6555,6 +6601,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 &set,
                 state.stored_parameters().smoothness,
                 conversion,
+                Overprint::fill(state),
             ) {
                 tally(&mut self.counts.drawn_shadings);
             } else {
@@ -6576,6 +6623,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if plates.as_ref().is_some_and(SpaceTints::paints_nothing) {
             return;
         }
+        // `sh` overprints by `/op` (8.6.7), marking what its space names.
+        let marks = self.sampled_marks(
+            Overprint::fill(state),
+            plates.as_ref().map(SpaceTints::marks),
+        );
         self.record_shading(&shading, &inverse, shape_area.as_ref(), set.entry);
         let (ox, oy, width, height) = self.device();
         let (x_start, y_start, x_end, y_end) =
@@ -6597,8 +6649,10 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             scratch.tabulate(space, function, 0.0, 1.0, self.page_limit().area());
         }
         let held = self.hold_removal(&set.removal);
+        let marked = self.canvas.set_marked(marks);
         for row in y_start..y_end {
             if self.stopping() {
+                self.canvas.set_marked(marked);
                 self.release_removal(held);
                 self.count_evaluations(&scratch);
                 return;
@@ -6638,6 +6692,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 }
             }
         }
+        self.canvas.set_marked(marked);
         self.release_removal(held);
         self.count_evaluations(&scratch);
     }

@@ -1652,6 +1652,7 @@ fn plate_samples(
     Some(ImagePlates::Tints {
         tints: out,
         channels,
+        marks: tints.marks(),
     })
 }
 
@@ -7643,6 +7644,7 @@ impl PageResources {
                 Some(ImagePlates::Tints {
                     tints: out,
                     channels,
+                    marks: tints.marks(),
                 })
             }
             (false, None) => None,
@@ -7931,6 +7933,7 @@ impl PageResources {
                     }
                     Some(ImagePlates::Tints {
                         channels: tints.channels(),
+                        marks: tints.marks(),
                         tints: out,
                     })
                 }
@@ -9270,6 +9273,11 @@ pub(crate) fn device_n_names(doc: &CosDocument, items: &[Object]) -> Vec<Vec<u8>
 pub(crate) struct ImageTints<'p> {
     plan: &'p PlatePlan,
     spots: tinker_pdf_raster::Spots,
+    /// The channels the image marks when it overprints
+    /// ([`PlatePlan::marks`]): its space's colorants at its initial colour,
+    /// which name every colorant each of its colours names, the non-zero
+    /// mode never applying to an image (8.6.7).
+    marks: tinker_pdf_raster::Channels,
     /// Tints a sample: the four process plates and the plan's spots.
     channels: usize,
     /// Whether the space is DeviceCMYK, whose components are its tints.
@@ -9307,6 +9315,7 @@ impl<'p> ImagePlating<'p> {
         Some(ImagePlating::Tints(ImageTints {
             plan,
             spots,
+            marks: plan.marks(&tints, spots, false),
             channels: 4 + spots.count(),
             cmyk: *space == ColorSpace::DeviceCmyk,
             remembered: HashMap::new(),
@@ -9319,6 +9328,11 @@ impl ImageTints<'_> {
     /// Tints a sample.
     pub(crate) fn channels(&self) -> usize {
         self.channels
+    }
+
+    /// The channels the image marks when it overprints.
+    pub(crate) fn marks(&self) -> tinker_pdf_raster::Channels {
+        self.marks
     }
 
     /// Appends the tints of the sample whose raw values are `values`, of

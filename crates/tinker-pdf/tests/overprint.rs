@@ -648,6 +648,22 @@ const PAINTS: [(&str, bool, &str); 5] = [
 /// mask, an uncoloured pattern — and `/DefaultCMYK` among the spaces where
 /// `default_cmyk` asks.
 fn case_page(content: &str, default_cmyk: bool) -> Document {
+    case_page_with(content, default_cmyk, &Extra::default())
+}
+
+/// What a case page holds beyond [`case_page`]'s: entries of its
+/// `/XObject`, `/Shading` and `/Pattern` dictionaries and the objects they
+/// name, numbered from 13.
+#[derive(Default)]
+struct Extra {
+    xobjects: String,
+    shadings: String,
+    patterns: String,
+    objects: Vec<Vec<u8>>,
+}
+
+/// [`case_page`] holding `extra` too.
+fn case_page_with(content: &str, default_cmyk: bool, extra: &Extra) -> Document {
     let ramp =
         |c1: &str| format!("<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{c1}] /N 1 >>");
     let mut spaces = format!(
@@ -687,7 +703,9 @@ fn case_page(content: &str, default_cmyk: bool) -> Document {
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {CASE_PAGE} {CASE_PAGE}] /Resources << \
              /ColorSpace << {spaces} >> /ExtGState << {states} >> /Font << /F0 5 0 R >> \
-             /XObject << /M0 8 0 R >> /Pattern << /P0 9 0 R >> >> /Contents 4 0 R >>"
+             /XObject << /M0 8 0 R {} >> /Pattern << /P0 9 0 R {} >> /Shading << {} >> >> \
+             /Contents 4 0 R >>",
+            extra.xobjects, extra.patterns, extra.shadings
         )
         .into_bytes(),
         raw_stream("", content.as_bytes()),
@@ -719,6 +737,7 @@ fn case_page(content: &str, default_cmyk: bool) -> Document {
     // Object 12: a profile no reader parses, so the default reads as a
     // four-component space of its own.
     objects.push(raw_stream("/N 4", b"not a profile"));
+    objects.extend(extra.objects.iter().cloned());
     Document::open(raw_pdf(&objects)).expect("it opens")
 }
 
@@ -1022,5 +1041,236 @@ fn separations_and_a_render_without_the_switch_knock_out() {
             plain.render(&render).data,
             "{paint}: the switch off"
         );
+    }
+}
+
+// ---- sampled sources overprint (RC-03.6) -------------------------------------
+
+/// A space a sampled case is drawn in: as an image XObject's and a shading's
+/// `/ColorSpace`, as an inline image's `/CS` names it, its components, an
+/// image's four samples, a ramp's two ends, a flat fill of the first
+/// sample's colour, and the channels it marks — by its kind alone, since
+/// 8.6.7 keeps the non-zero mode off images and shadings.
+struct Sampled {
+    name: &'static str,
+    space: String,
+    inline: &'static str,
+    samples: Vec<u8>,
+    ends: (&'static str, &'static str),
+    flat: &'static str,
+    marks: [bool; 6],
+}
+
+/// The spaces the sampled cases draw in: DeviceCMYK, a spot's
+/// `/Separation`, a `/DeviceN` of both spots, and DeviceRGB.
+fn sampled_spaces() -> Vec<Sampled> {
+    let process = [true, true, true, true, false, false];
+    vec![
+        Sampled {
+            name: "DeviceCMYK",
+            space: "/DeviceCMYK".to_string(),
+            inline: "/DeviceCMYK",
+            samples: vec![51, 0, 153, 0, 0, 102, 0, 204, 204, 51, 0, 0, 0, 0, 0, 51],
+            ends: ("0.2 0 0.6 0", "0 0.8 0.2 0.4"),
+            flat: "0.2 0 0.6 0 k",
+            marks: process,
+        },
+        Sampled {
+            name: "a /Separation of a spot",
+            space: "[/Separation /Gold /DeviceCMYK << /FunctionType 2 /Domain [0 1] \
+                    /C0 [0 0 0 0] /C1 [0 0 1 0] /N 1 >>]"
+                .to_string(),
+            inline: "/SG",
+            samples: vec![51, 102, 153, 204],
+            ends: ("0.2", "0.8"),
+            flat: "/SG cs 0.2 scn",
+            marks: [false, false, false, false, true, false],
+        },
+        Sampled {
+            name: "a /DeviceN of both spots",
+            space: "[/DeviceN [/Gold /Teal] /DeviceCMYK 11 0 R]".to_string(),
+            inline: "/DN",
+            samples: vec![51, 204, 102, 153, 153, 102, 204, 51],
+            ends: ("0.2 0.8", "0.8 0.2"),
+            flat: "/DN cs 0.2 0.8 scn",
+            marks: [false, false, false, false, true, true],
+        },
+        Sampled {
+            name: "DeviceRGB",
+            space: "/DeviceRGB".to_string(),
+            inline: "/DeviceRGB",
+            samples: vec![51, 102, 153, 204, 51, 0, 0, 0, 0, 255, 255, 255],
+            ends: ("0.2 0.4 0.6", "0.8 0.2 0"),
+            flat: "0.2 0.4 0.6 rg",
+            marks: process,
+        },
+    ]
+}
+
+/// What a sampled case's page holds for `space`: a two-by-two image and a
+/// one-sample one of its first colour (objects 13 and 14), an axial shading
+/// and a type 4 mesh (object 15) over the square the paints cover, and a
+/// shading pattern of the axial.
+fn sampled_extra(space: &Sampled) -> Extra {
+    let n = space.samples.len() / 4;
+    let image = |width: u32, samples: &[u8]| {
+        raw_stream(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width {width} /Height {width} \
+                 /ColorSpace {} /BitsPerComponent 8",
+                space.space
+            ),
+            samples,
+        )
+    };
+    let axial = format!(
+        "<< /ShadingType 2 /ColorSpace {} /Coords [4 0 20 0] /Function << /FunctionType 2 \
+         /Domain [0 1] /C0 [{}] /C1 [{}] /N 1 >> /Extend [true true] >>",
+        space.space, space.ends.0, space.ends.1
+    );
+    // Three vertices, a flag, x, y and the components a byte each: the
+    // first sample's colour, the last's, and the second's.
+    let vertex = |x: u8, y: u8, sample: usize| {
+        let mut bytes = vec![0, x, y];
+        bytes.extend_from_slice(&space.samples[sample * n..(sample + 1) * n]);
+        bytes
+    };
+    let mut mesh = vertex(4, 4, 0);
+    mesh.extend(vertex(20, 4, 3));
+    mesh.extend(vertex(12, 20, 1));
+    let decode = vec!["0 1"; n].join(" ");
+    Extra {
+        xobjects: "/Im 13 0 R /I1 14 0 R".to_string(),
+        shadings: format!("/Ax {axial} /Me 15 0 R"),
+        patterns: format!("/SP << /PatternType 2 /Shading {axial} >>"),
+        objects: vec![
+            image(2, &space.samples),
+            image(1, &space.samples[..n]),
+            raw_stream(
+                &format!(
+                    "/ShadingType 4 /ColorSpace {} /BitsPerCoordinate 8 /BitsPerComponent 8 \
+                     /BitsPerFlag 8 /Decode [0 255 0 255 {decode}]",
+                    space.space
+                ),
+                &mesh,
+            ),
+        ],
+    }
+}
+
+/// The paints a sampled case draws over the square from (4, 4) to (20, 20):
+/// an image XObject, an inline image of the same samples, `sh` clipped to
+/// the square, a shading pattern filling it, and a mesh by `sh`.
+fn sampled_paints(space: &Sampled) -> Vec<(&'static str, String)> {
+    let hex: String = space.samples.iter().map(|b| format!("{b:02X}")).collect();
+    vec![
+        ("an image", "q 16 0 0 16 4 4 cm /Im Do Q".to_string()),
+        (
+            "an inline image",
+            format!(
+                "q 16 0 0 16 4 4 cm BI /W 2 /H 2 /CS {} /BPC 8 /F /AHx ID {hex}> EI Q",
+                space.inline
+            ),
+        ),
+        ("sh", "q 4 4 16 16 re W n /Ax sh Q".to_string()),
+        (
+            "a shading pattern",
+            "/Pattern cs /SP scn 4 4 16 16 re f".to_string(),
+        ),
+        ("a mesh", "/Me sh".to_string()),
+    ]
+}
+
+/// **Images and shadings overprint by their space** (RC-03.6): an image
+/// XObject, an inline image, an axial shading by `sh` and as a pattern, and
+/// a type 4 mesh, each in DeviceCMYK, a spot's `/Separation`, a `/DeviceN`
+/// of both spots and DeviceRGB, over a backdrop with ink in every channel,
+/// under no overprint, `/OPM 0`, `/OPM 1` and `/OP` without `/op`, render as
+/// `Rgb8` and `CmykA8` the composite of the plates the test works out: where
+/// `/op` is set each channel the space names — DeviceCMYK's four process
+/// channels under both modes, 8.6.7 keeping the non-zero mode off images and
+/// shadings, and DeviceRGB's as light turned into ink — takes the paint's
+/// own tint, read off the page's separations, which knock out, and every
+/// other channel keeps its backdrop; where it is clear every channel takes
+/// the paint's.
+#[test]
+fn images_and_shadings_overprint_by_their_space() {
+    let backdrop = backdrop_operators();
+    let backdrop_tints = BACKDROP_TINTS.map(byte);
+    for space in sampled_spaces() {
+        let extra = sampled_extra(&space);
+        for (paint_name, paint) in sampled_paints(&space) {
+            for (state, _, fill_flag, nonzero) in STATES {
+                let page = case_page_with(&format!("{backdrop}/{state} gs {paint}"), false, &extra);
+                let page = page.page(0).expect("a page");
+                let knocked = plates(&page, &RenderOptions::default());
+                let marks = if fill_flag { space.marks } else { [true; 6] };
+                for format in [PixelFormat::Rgb8, PixelFormat::CmykA8] {
+                    let what = format!(
+                        "{paint_name} in {} under {state} (non-zero {nonzero}) as {format:?}",
+                        space.name
+                    );
+                    let bitmap = page.render(&simulated(format));
+                    let n = format.components();
+                    for at in 0..(CASE_PAGE * CASE_PAGE) as usize {
+                        let mut channels = [0u8; 6];
+                        for (channel, slot) in channels.iter_mut().enumerate() {
+                            *slot = if marks[channel] {
+                                knocked.plates[channel].tints[at]
+                            } else {
+                                backdrop_tints[channel]
+                            };
+                        }
+                        assert_eq!(
+                            &bitmap.data[at * n..(at + 1) * n],
+                            case_composite(channels, format).as_slice(),
+                            "{what}: pixel ({}, {})",
+                            at % CASE_PAGE as usize,
+                            at / CASE_PAGE as usize
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **A one-sample image paints as a flat fill of its colour** (RC-03.6): in
+/// each space, under `/OPM 0`, an image of one sample over the square and a
+/// fill of its colour over the same square render byte for byte alike; under
+/// `/OPM 1` a DeviceCMYK image still marks all four process channels, so it
+/// erases the backdrop's magenta and black where the fill, whose magenta and
+/// black are zero, keeps them.
+#[test]
+fn a_one_sample_image_paints_as_a_flat_fill_of_its_colour() {
+    let backdrop = backdrop_operators();
+    for space in sampled_spaces() {
+        let extra = sampled_extra(&space);
+        let render = |state: &str, paint: &str, format: PixelFormat| {
+            case_page_with(&format!("{backdrop}/{state} gs {paint}"), false, &extra)
+                .page(0)
+                .expect("a page")
+                .render(&simulated(format))
+                .data
+        };
+        for format in [PixelFormat::Rgb8, PixelFormat::CmykA8] {
+            let image = "q 16 0 0 16 4 4 cm /I1 Do Q";
+            let fill = format!("{} 4 4 16 16 re f", space.flat);
+            for state in ["G0", "G1"] {
+                assert_eq!(
+                    render(state, image, format),
+                    render(state, &fill, format),
+                    "{} under {state} as {format:?}",
+                    space.name
+                );
+            }
+            if space.name == "DeviceCMYK" {
+                assert_ne!(
+                    render("G2", image, format),
+                    render("G2", &fill, format),
+                    "/OPM 1 reaches the fill and not the image"
+                );
+            }
+        }
     }
 }
