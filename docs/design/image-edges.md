@@ -381,3 +381,248 @@ page of the answers is byte-equal tile by tile.
 | For an alpha other than 0 and 1 the answer is the `f64` expression's own roundings | The expression kept in its order, and held exhaustively over coverage, sample alpha and clip at a sweep of alphas |
 | The pyramid is not linear in coverage | A bilevel draw that reduces expands to RGB |
 | A table that forgets a `/Decode`, a polarity or a colour key | The table's two outcomes come from the loop's own expressions, and a test holds every byte value against the bit loop |
+
+## RC-21 — A run decided in the page's frame
+
+Ruling 5 draws a tile through the page's one frame, so every number a tile
+computes is the number the page computes. One decision is still taken on the
+canvas: whether an image draw *overlaps* what the run already holds, which
+ends the run (`Renderer::run_would_overlap`). The run's fragments cover the
+canvas and nothing else, so where the page finds an overlap outside a tile the
+tile keeps a run the page ended, and a seam inside the tile conflates on the
+page and not in the tile — ruling 5's named exception. This section states
+the class of pages that exception covers, three ways of answering the
+question in the page's frame, what each costs a tile and which whole-page
+renders each moves, and how they are priced before H-15 chooses one.
+
+### Scope
+
+- The run-membership question answered in the page's frame, so that every
+  shape of the class tiles byte-equal.
+- The class, one fixture per shape, pinned as it stands until the answer
+  moves (RC-21.2).
+- Three mechanisms, each shadowed beside today's answer by a test-only
+  implementation that decides nothing, and priced in one table (RC-21.3);
+  the one H-15 takes lands (RC-21.4) and a bench holds its price (RC-21.5).
+
+### Non-goals
+
+- What else ends a run. A change of alpha, blend mode, clip, soft mask or
+  ink, a knockout group, a frame past `MAX_IMAGE_RUN_PIXELS` and every call
+  `ends_image_run` names are decided from the graphics state and the frame's
+  area, which a tile and the page share already.
+- What a run is: fragments added and held to 255, `SLACK`, and the budget.
+- Banded renders. `DisplayList::render` cuts its bands where no run stands,
+  so a band never meets the exception, and its planner is unchanged.
+- `RunReach` and the patch that grows its rectangle by it (`patch.rs`).
+  Under a mechanism that answers in the page's frame a region still reports
+  what it could not see, and what it reports is still true.
+- The choice, which is H-15's.
+
+### Design
+
+**The question as the canvas asks it.** A draw that could join the run — no
+change of state, not drawn directly — takes its rectangle on the canvas
+(`image_bounds_in` against `device()`), meets it with the rectangle the run
+has put coverage in on the canvas (`ImageRun::covered`), fills its unit
+square over that band (`image_coverage`) and asks the fragments whether any
+pixel of the band would then hold more than `255 + SLACK` levels
+(`Fragments::would_overlap`). The fragments hold at each pixel the members'
+edge coverage times their samples' alpha, added and held to 255
+(`accumulate_image`). A draw with no rectangle on the canvas reads nothing,
+is answered no, and joins. What the question reads is the band: each of its
+pixels once for the square and once for the fragments.
+
+**Where a tile parts from the page.** The page asks the same question over
+its own band: the draw's bounds within the frame met with the hull of the
+members' bounds within the frame, which `ImageRun::framed` already keeps for
+`RunReach`. A tile's band is the page's band cut at the canvas, and while the
+two runs hold the same members the tile's fragments are the page's at every
+pixel the tile holds. So the first answer that parts is always one where the
+page finds an overlap outside the canvas and the tile, reading only the
+canvas, answers no. After it the tile's run holds members the page already
+composited, and later answers can part either way.
+
+**The class.** Each way a page can put the page's overlap outside a tile, on
+a 100 by 100 page of one-sample images, the abutting seam at a half pixel so
+that conflation shows:
+
+1. *Overlap outside the tile in y*: `A` at `40.5 0 0 40 0 60 cm`, `B` at
+   `40 0 0 40 40.5 0 cm`, `C` at `40 0 0 70 40.5 30 cm`, in that order. `A`
+   and `C` abut along column 40 in rows 0 to 39; `C` overlaps `B` in rows 60
+   to 69, below every tile that holds the seam's rows and not those.
+2. *Overlap outside the tile in x*: the same page transposed, `A` at
+   `40 0 0 40.5 0 59.5 cm`, `B` at `40 0 0 40 60 19.5 cm`, `C` at
+   `70 0 0 40 0 19.5 cm`: the seam along row 40, the overlap in columns 60
+   to 69.
+3. *A draw wholly outside the tile that overlaps a member*: `A` at
+   `40.5 0 0 100 0 0 cm`, `B` at `40 0 0 30 20 0 cm`, overlapping `A` in
+   rows 70 to 99, `C` at `40 0 0 40 40.5 60 cm`, abutting `A`. On the page
+   `B` ends `A`'s run and `C` joins `B`'s; in a tile above row 70 `B` has no
+   rectangle, joins, and `C` joins `A`.
+4. *Soft-masked images*: the first page's three images each with a
+   one-sample `/SMask` of 0.8, so the band holds coverage times an alpha the
+   samples set, and a mechanism that reads squares alone reads the wrong
+   number.
+5. *Stencil images*: the first page's three as `/ImageMask` stencils in one
+   fill colour, `B` two samples tall with only its upper sample painting, so
+   the overlap is in its painted half and the stencil route carries the ink.
+6. *A group's canvas*: the first page's three drawn inside a transparency
+   group's form whose `/BBox` is `[5 5 95 95]`, a buffer that stands inside
+   the page and, in a tile, inside the tile, with a frame of its own.
+7. *A soft mask's canvas*: the first page's three drawn white in a
+   luminosity soft mask's group, the page filled through the mask: the seam
+   is in the mask's luminosity and shows in the fill.
+8. *Turned*: the first page under `/Rotate 90`.
+9. *Cropped*: the first page under the crop box `[7 3 93 97]`, offset from
+   the media box on both axes.
+10. *Cropped and turned*: the same crop under `/Rotate 270`.
+11. *An annotation's appearance*: the first page's three drawn by a
+    `/Square` annotation's appearance over an empty content stream, after
+    the content and in the annotation's scope.
+
+And *display-list replay*: each tile drawn from `Page::display_list`. A
+replay delivers the calls the interpretation made, so its tiles are the
+direct tiles, exception and all. The class is tiled at the guard's lattices
+and scales: 64, 37 and 23 pixels at 1x, 53 at 0.5x, 0.75x, 1.5x, 2x, 3x and
+4x, and one pixel at 0.22x.
+
+**Mechanism A — the run's coverage held over the frame.** The row's own,
+and the reference H-15 names. The run accumulates each member over its
+bounds within the frame rather than the canvas, into fragments the frame's
+size, and asks the question over the page's band. The tile's answer is the
+page's by construction. Its price is the page's image work: a tile samples
+every member over all of its bounds within the frame, however little of it
+the tile shows, and holds the run's coverage over the frame, a byte a pixel
+of it at the least beside the canvas's four. A tile of a 300-dpi page of
+strips draws the page's strips whole. No whole-page render moves, because on
+a whole page the canvas is the frame and this is today's run; every
+fingerprint, golden and pin holds, and every shape of the class tiles
+byte-equal. RC-21.4's exit, which forbids a tile the page's image work, rules
+it out; it is priced as the bound the other two are read against.
+
+**Mechanism B — the members outside the canvas recomputed over the band.**
+The run keeps, for each member, what recomputes its coverage at a pixel: its
+transform and the square its samples are cut at, its edge level and rule, its
+bounds within the frame, and the samples that carry alpha — an image's soft
+mask or colour key, a stencil's or a two-colour image's samples; none for an
+opaque image, whose coverage is its square's. The question is asked over the
+page's band. Inside the canvas the fragments answer as today; outside it,
+each member whose bounds within the frame meet the band is sampled over the
+part of the band outside the canvas only, its edge coverage times its
+alpha exactly as `accumulate_image` adds it — a function of the page-frame
+pixel alone (ruling 5) — summed and held to 255 as fragments are, and the new
+square is filled over the whole band. A draw with no rectangle on the canvas
+is asked over its band like any other. Every number the tile reads is the
+page's number at that pixel, so its answer is the page's. Its price, per
+question, is the members' bounds scanned and the band outside the canvas read
+once for each member that meets it; it holds two transforms and a rectangle a
+member and the alpha samples of members that have them. A page of abutting
+strips meets each strip's predecessor in one row, so a tile reads, outside
+itself, one row of the page a strip. No whole-page render moves: on the page
+nothing is outside the canvas, and the question is today's. Every
+fingerprint, golden and pin holds.
+
+**Mechanism C — a rule from the page-frame geometry alone, shared by page
+and tile.** A draw overlaps the run when its unit square, as four device
+corners in the page's frame snapped to the 1/256 grid the coverage is snapped
+to, meets some member's in an area of more than `SLACK / 255` of a pixel.
+Nothing is read and no sample kept, and a page and a tile ask the same
+arithmetic of the same numbers, so every tile is its page. Its price, per
+question, is every member's square met with the draw's, a convex clip of two
+quadrilaterals, and it holds sixty-four bytes a member. It moves whole-page
+renders wherever coverage and geometry disagree, because the page then
+answers by geometry too:
+
+- *Alpha that leaves the overlap open*: a draw laid over a soft-masked,
+  colour-keyed or stencil member, or a two-colour member's transparent
+  colour, where the member's samples are transparent. Today it joins; under
+  C it ends the run, and seams of that run conflate.
+- *A sliver*: squares that overlap along an edge by less than `SLACK` in
+  every pixel and by more than `SLACK / 255` of a pixel in all. Today
+  abutment; under C an overlap.
+- *Quantised edges*: at an edge level below eight bits or with anti-aliasing
+  off, the fragments hold each member's edge quantised while the question's
+  square is not, so strips meeting at a fractional pixel can overlap today
+  and abut under C.
+
+The fingerprints and goldens that may move are those of pages drawing a run
+of two images or more, and which of them do is found by RC-21.4's run if
+H-15 takes C, each a finding the owner reviews and never an edit.
+
+**The bands.** A question's band on the page is the draw's bounds within the
+frame met with the hull of the members' bounds within the frame. Under B a
+tile reads, for one question, at most that band once and, outside its canvas,
+the band once more for each member whose bounds within the frame meet it —
+RC-21.4's bound on a tile's reads. Under A a tile reads every member's bounds
+within the frame, which no band bounds.
+
+**The counter.** `Renderer::run_pixels`, a `#[cfg(test)]` count beside
+`mask_pixels`: for each question asked, the area of the band
+`run_would_overlap` fills the square over and reads the fragments at. A draw
+answered no without a band adds nothing.
+
+**The shadows.** Each mechanism is shadowed by a test-only implementation
+beside the canvas's answer, switched on per renderer. A shadow keeps its own
+run as the page would hold it: ended where its own answer finds an overlap,
+and wherever the real run ends for anything else — a change of state, a draw
+made directly, any call that flushes. It answers every question the canvas is
+asked and counts the pixels it read, the members it scanned, the bytes it
+holds beyond today's run, and the answers that differ from the canvas's. It
+decides nothing the render uses, so no pin moves while it is there.
+
+**What RC-21.3 prices.** The class's eleven pages, drawn by the render crate's
+own interpreter from the same content; a page where a stencil is drawn over
+another's unpainted half, beside a third that abuts the first, which C moves
+and A and B do not; and a generated 300-dpi page of abutting strips, 4 by 6
+inches, 1200 by 1800 pixels, of forty-one full-width RGB strips each drawn
+from samples at 1:1 and meeting its neighbour at a fractional row. Each page
+whole, in four bands and on a 64-pixel lattice; for each mechanism and
+today's, per tile, the pixels read, the members scanned and the bytes held,
+the answers and the tiles whose answer changes, and the time against today's,
+in a release and a debug build. A time is a ratio to today's on one quiet
+machine, never a baseline. The table is `crates/tinker-pdf-render/data/run_prices.tsv`,
+which the probe rewrites:
+
+```bash
+cargo test -p tinker-pdf-render --release -- --ignored price_of_deciding_runs_in_the_page_frame
+cargo test -p tinker-pdf-render -- --ignored price_of_deciding_runs_in_the_page_frame
+```
+
+### Milestones
+
+1. **RC-21.2: the class, pinned.** Exit: `render_regions.rs`
+   `every_shape_of_the_image_run_exception_is_pinned` passes in the default
+   and `bundled-fonts` builds with one exact pin per shape and scale — the
+   differing tiles' pixels, worst level, first pixel and columns or rows, or
+   byte equality — and every tile of each shape drawn from
+   `Page::display_list` equal to its direct tile; ruling 5 and
+   `features/rendering.md` name the class.
+2. **RC-21.3: the prices.** Exit: `tinker-pdf-render`
+   `a_run_reads_only_the_band_where_a_draw_meets_it` pins today's counted
+   reads on abutting strips; `price_of_deciding_runs_in_the_page_frame`
+   (ignored, prints `RAN`) rewrites `run_prices.tsv` in release and debug,
+   and H-15 is decided from it.
+3. **RC-21.4: the mechanism H-15 takes.** Exit: the class joins `fixtures()`
+   and passes `every_tile_is_byte_equal_to_the_page_under_it`, the scale and
+   one-pixel lattices and `a_display_list_tiles_as_the_page_does` in both
+   builds, failing on the code before;
+   `an_image_run_that_overlaps_only_outside_a_tile_tiles_as_the_page_does`
+   asserts equality; `a_tile_reads_only_the_bands_its_runs_meet` holds a
+   tile's counted reads to the bands above; the probe re-run on the landed
+   code rewrites the table.
+4. **RC-21.5: the price held.** Exit: MS-04's render group gains "a 300-dpi
+   page of abutting image strips in four bands", generated in the bench and
+   sized 20–300 ms; `cargo xtask baseline` holds the bench file and
+   `baseline.json` to one list; a local MS-02 paired run is green.
+
+### Risks
+
+| Risk | Mitigation |
+|---|---|
+| A recomputed member's coverage rounds apart from the one the page accumulated | It is the same walk over a smaller rectangle: the edge filled and the sampler planned from page-frame pixel centres, which ruling 5 makes the same numbers on any canvas; the class is tiled to byte equality |
+| A shadow that answers wrongly prices a mechanism that does not exist | Mechanisms A and B answer as the page does by construction, so every tile whose answer each changes is a tile of the class; a shadow that changes an answer elsewhere is a finding about the shadow |
+| A page's runs hold hundreds of members, and B and C scan them all | The scan is counted per question in the table; RC-21.4 may index members by row where the table says the scan dominates |
+| The time of a debug build misleads | Both builds are priced, and a time is only ever a ratio to today's on the same machine |
+| C moves pages that render correctly today | Named as its price above; under C a moved fingerprint is a finding the owner reviews before anything is committed |
+| A soft mask's or a group's frame differs from the page's canvas | Every shadow asks in the frame of the canvas it is on, the rectangle that canvas would have on the whole page, and is reset where the canvas swaps |
