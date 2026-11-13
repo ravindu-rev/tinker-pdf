@@ -144,6 +144,11 @@ reports, so it adds no hash. Every kind the cache keeps is under it, since a
 page renders through every kind its document keeps, and so that it cannot
 stop exercising the cache unnoticed the warm second renders must find
 something kept between them and the starved ones nothing.
+`budgets_stated_at_open_render_the_fingerprints` does the same with each
+budget stated at open, which charges the document's parsed objects beside its
+cache: under a budget of zero no parsed object is kept and every read parses
+again, and each render is held to the page's fingerprint and warnings all the
+same.
 
 **A patched page is the page.**
 `a_patched_render_reproduces_the_edited_pages_fingerprint` appends an
@@ -219,7 +224,8 @@ not green".
 `determinism.rs`'s render fingerprints and the same pages drawn in bands, the
 patched page's, its SVG output's hashes, its three synthesised documents' byte
 hashes, its display list's replay of every fingerprinted page and the same
-pages drawn through a warm and a starved document cache;
+pages drawn through a warm and a starved document cache, and under a warm
+and a starved budget stated at open;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, hard-edged
 output and levels, rules and widths; the shaper's two fingerprints; and the guard suite's

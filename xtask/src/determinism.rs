@@ -52,6 +52,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "warm_and_starved_caches_render_the_fingerprints",
     },
+    // The same with each budget stated at open, which charges the parsed
+    // objects beside the cache: a budget of zero keeps no object (P-16.8).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "budgets_stated_at_open_render_the_fingerprints",
+    },
     // Every fingerprinted page's mark box, from the page analysis.
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",

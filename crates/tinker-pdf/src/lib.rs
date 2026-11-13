@@ -1594,8 +1594,14 @@ pub struct OpenOptions {
     pub fonts: Option<Arc<dyn FontProvider>>,
     /// The most bytes the document keeps across its renders
     /// ([`CacheLimits`]), or `None` — the default — to keep nothing past the
-    /// render that made it, as [`Document::open`] does. The same as
-    /// [`Document::with_cache_limits`] on the opened document.
+    /// render that made it, as [`Document::open`] does.
+    ///
+    /// Stated here, the budget holds the document's parsed objects too: they
+    /// and what its renders compute are charged to it together, and leave it
+    /// in one order, least recently requested first — an object only where no
+    /// caller holds it, to be parsed again, to an equal value, when it is next
+    /// read. [`Document::with_cache_limits`] on the opened document holds its
+    /// cache alone.
     pub cache_limits: Option<CacheLimits>,
 }
 
@@ -1639,6 +1645,16 @@ impl OpenOptions {
     fn cache(&self) -> Option<Arc<cache::DocumentCache>> {
         self.cache_limits
             .map(|limits| Arc::new(cache::DocumentCache::new(limits)))
+    }
+
+    /// The document cache these options ask for, with `inner`'s parsed objects
+    /// charged to its budget beside it (`docs/design/performance.md`, P-16,
+    /// "Parsed objects under pressure").
+    fn cache_over(&self, inner: &CosDocument) -> Option<Arc<cache::DocumentCache>> {
+        let cache = self.cache()?;
+        // A document just opened has never been charged, so this takes.
+        inner.charge_objects_to(cache.accountant());
+        Some(cache)
     }
 }
 
@@ -1903,11 +1919,12 @@ impl Document {
         }
 
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
+        let cache = options.cache_over(&inner);
         Ok(Document {
             inner: Arc::new(inner),
             fonts: fonts::effective(options.fonts.clone()),
             archive: None,
-            cache: options.cache(),
+            cache,
         })
     }
 
@@ -1924,11 +1941,12 @@ impl Document {
         // either way.
         let inner = CosDocument::open(pdf)
             .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
+        let cache = options.cache_over(&inner);
         Ok(Document {
             inner: Arc::new(inner),
             fonts: fonts::effective(options.fonts.clone()),
             archive: Some(Arc::new(report)),
-            cache: options.cache(),
+            cache,
         })
     }
 
@@ -2033,11 +2051,12 @@ impl Document {
             }
             tinker_pdf_cos::OpenError::NoObjects => OpenError::NotAPdf,
         })?;
+        let cache = options.cache_over(&inner);
         Ok(Document {
             inner: Arc::new(inner),
             fonts: fonts::effective(options.fonts.clone()),
             archive: None,
-            cache: options.cache(),
+            cache,
         })
     }
 
@@ -2116,7 +2135,8 @@ impl Document {
     ///
     /// A document with a cache budget ([`CacheLimits`]) is handed back with
     /// a cache of its own under the same budget: what the old one kept was
-    /// drawn with the old faces.
+    /// drawn with the old faces. The parsed objects are shared with this
+    /// document, and stay charged where they were.
     #[must_use]
     pub fn with_fonts(mut self, provider: Arc<dyn FontProvider>) -> Document {
         // Through the same seam `open_with` uses, so the two cannot disagree
@@ -2138,7 +2158,10 @@ impl Document {
     /// cache of its own: the decoded images of every render through it, its
     /// pages and their display lists, while the bytes fit.
     ///
-    /// The same as [`OpenOptions::cache_limits`] at open. Whatever the
+    /// The budget holds the cache alone. The parsed objects are shared with
+    /// this document and every other document handed back from its open, so
+    /// they are charged only by a budget stated at open
+    /// ([`OpenOptions::cache_limits`]), which holds both. Whatever the
     /// budget, a page draws the same pixels and reports the same warnings as
     /// it does with none: a kept entry is what computing it again would
     /// compute.

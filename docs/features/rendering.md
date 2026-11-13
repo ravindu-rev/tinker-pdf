@@ -906,7 +906,16 @@ recently requested first, through one ordered index, until it fits; an entry
 larger than the whole budget is used by the render that made it and not kept,
 so a budget of zero keeps nothing and every draw decodes. The maps are looked
 up and never iterated, so on one thread which entries leave is a function of
-the requests, the same on every run and every target. An inline image has no
+the requests, the same on every run and every target. **A budget stated at
+open holds the document's parsed objects beside the entries**
+([opening](opening.md)): the cache keeps its entries in a
+`tinker_pdf_cos::Accountant`'s ledger, which the object store charges too,
+every read of a kept object takes a number from the same counter, and a fill
+past the budget evicts whichever holding was requested longest ago, passing
+over an object a caller holds; an entry that what no caller holds cannot make
+room for is used by its render and not kept. `Stats::cache_bytes_held` and
+`Stats::cache_evictions` count the cache's own entries. A budget stated on an
+open document holds the entries alone. An inline image has no
 object and stays the render's. **Compiled ICC transforms** are kept beside the
 images under the profile stream's object, the key a scope's own cache keeps
 them under: a profile named on every page, in a form and by every render

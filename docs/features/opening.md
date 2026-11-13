@@ -334,6 +334,29 @@ back with a fresh cache under the same budget, since what the old one kept was
 drawn with the old faces. What is kept, and how, is
 [rendering](rendering.md)'s "The document's cache".
 
+**A budget stated at open holds the parsed objects too.** The object store
+is the open's, shared by every document handed back from it, so
+`OpenOptions::cache_limits` charges it to the cache's budget
+(`CosDocument::charge_objects_to`, `tinker_pdf_cos::Accountant`), and a budget
+stated on an open document holds its cache alone. Under one, each object a
+read parses is charged the extent of its tokens in the bytes it was parsed
+from — a stream its dictionary up to its data — and 64 bytes beside it, every
+read that reaches a kept object takes a number from the counter the cache's
+lookups take theirs from, and a charge past the budget evicts what was
+requested longest ago of either: the cache's entries, and an object only
+where no caller holds its `Arc`. A dropped object read again is parsed again,
+from the same immutable bytes, to an equal value; a streamed document fetches
+its bytes again where its source must. The cross-reference table, the decoded
+object streams and their indexes, the repair scanner's index, the page index
+and the hint tables are never charged and never dropped, and with no budget
+nothing is (`store.rs`'s
+`a_store_over_its_budget_drops_objects_and_parses_them_again_equal`,
+`caches.rs`'s `a_budget_stated_at_open_holds_the_parsed_objects_too`). A
+document `write::append` reopens over an update keeps the budget in a cache of
+its own, and where the budget was stated at open charges its own parsed
+objects to it, as the open did; an object it reads through the document it
+was appended to stays charged where it is held.
+
 On `CosDocument`: `get`, `resolve`, `trailer`,
 `revisions`, `xref`, and the tiers `stream_raw_encrypted` / `stream_raw` /
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an

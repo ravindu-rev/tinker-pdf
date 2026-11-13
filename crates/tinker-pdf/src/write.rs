@@ -675,19 +675,27 @@ pub fn append(
         .into();
     let reopened = stats::reopen(&document.inner, Arc::clone(&update), work.as_ref())
         .map_err(|error| AppendError::Reopen(reopen_error(error)))?;
+    let inner = reopened.document;
+    // A cache of its own under the document's budget: an entry the document
+    // kept may be of an object the update replaces. Where that budget was
+    // stated at open, so that it charges the document's parsed objects, it
+    // charges the reopened document's too, as an open does; an object read
+    // through the document stays charged where it is held.
+    let cache = document
+        .cache_limits()
+        .map(|limits| Arc::new(crate::cache::DocumentCache::new(limits)));
+    if let Some(cache) = cache.as_ref().filter(|_| document.cos().objects_charged()) {
+        inner.charge_objects_to(cache.accountant());
+    }
     Ok(Appended {
         update,
         document: crate::Document {
-            inner: Arc::new(reopened.document),
+            inner: Arc::new(inner),
             // The document's own, already made effective: a `bundled-fonts`
             // build's faces are chained behind a provider once, at open.
             fonts: document.fonts.clone(),
             archive: document.archive.clone(),
-            // A cache of its own under the document's budget: an entry the
-            // document kept may be of an object the update replaces.
-            cache: document
-                .cache_limits()
-                .map(|limits| Arc::new(crate::cache::DocumentCache::new(limits))),
+            cache,
         },
         full_open: reopened.full_open,
         changed: editor.changed_numbers(),

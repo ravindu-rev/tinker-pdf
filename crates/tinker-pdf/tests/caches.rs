@@ -22,7 +22,12 @@
 //!   is held as `3wh` bytes of samples and nothing else;
 //! - every lookup takes the next number of the cache's one counter, and a
 //!   fill that would pass the budget evicts the entries whose last lookup is
-//!   oldest until it fits.
+//!   oldest until it fits;
+//! - a budget stated at open charges the document's parsed objects to the
+//!   same counter and the same budget, and one stated on the open document
+//!   holds the cache alone: a test that counts the cache's evictions under a
+//!   budget the page's objects would crowd states it on the open document
+//!   ([`cache_only`]).
 
 use std::sync::Arc;
 
@@ -246,13 +251,23 @@ fn counted(page: &Page, dpi: f64) -> (Bitmap, Stats) {
     (bitmap, stats)
 }
 
-/// `bytes` opened under a budget of `budget` bytes.
+/// `bytes` opened under a budget of `budget` bytes, stated at open: the
+/// document's cache and its parsed objects charged to it together.
 fn budgeted(bytes: Vec<u8>, budget: u64) -> Document {
     Document::open_with(
         bytes,
         &OpenOptions::default().with_cache_limits(CacheLimits::new(budget)),
     )
     .expect("the fixture opens")
+}
+
+/// `bytes` opened, and given a budget of `budget` bytes on the open document:
+/// one its cache alone holds, the parsed objects being the open's, so that
+/// what a tight budget evicts is the cache's own.
+fn cache_only(bytes: Vec<u8>, budget: u64) -> Document {
+    Document::open(bytes)
+        .expect("the fixture opens")
+        .with_cache_limits(CacheLimits::new(budget))
 }
 
 /// Asserts two renders are one picture: size, format, every byte and every
@@ -445,8 +460,9 @@ fn rgb_charge(width: u64, height: u64) -> u64 {
 }
 
 /// One scripted sequence of renders over three pages, each drawing one image
-/// of its own, under a budget that holds two of them: per render, its image
-/// hits and misses, the entries it evicted and the most the cache held.
+/// of its own, under a budget that holds two of them, which the cache alone
+/// holds: per render, its image hits and misses, the entries it evicted and
+/// the most the cache held.
 fn scripted() -> Vec<(u64, u64, u64, u64)> {
     let bytes = document(
         &[
@@ -461,7 +477,7 @@ fn scripted() -> Vec<(u64, u64, u64, u64)> {
         ],
     );
     let budget = 2 * rgb_charge(10, 10);
-    let document = budgeted(bytes, budget);
+    let document = cache_only(bytes, budget);
     [0, 1, 0, 2, 0, 1]
         .into_iter()
         .map(|index| {
@@ -683,7 +699,7 @@ fn two_scopes_painting_one_image_in_different_defaults_keep_two_entries() {
 
 /// **Clones and pages share one cache; a new budget and new fonts each start
 /// a cache of their own**, and the same budget at open and on an open
-/// document is the same document.
+/// document keeps the same images.
 #[test]
 fn clones_share_the_cache_and_a_new_budget_or_new_fonts_start_another() {
     let budget = CacheLimits::new(1 << 20);
@@ -1031,10 +1047,10 @@ fn a_profile_that_will_not_parse_is_refused_once_a_document() {
 
 /// **Transforms and images share one budget and one order**: a page naming
 /// a profile and drawing an image under a budget with room for the image
-/// alone keeps the image and compiles the transforms at every render — the
-/// transforms, asked for first, are evicted for the image or never fit
-/// beside it — the bytes held never pass the budget, and every render draws
-/// what a document with no budget draws.
+/// alone — one the cache alone holds — keeps the image and compiles the
+/// transforms at every render — the transforms, asked for first, are evicted
+/// for the image or never fit beside it — the bytes held never pass the
+/// budget, and every render draws what a document with no budget draws.
 #[test]
 fn transforms_and_images_share_one_budget() {
     let bytes = document(
@@ -1048,7 +1064,7 @@ fn transforms_and_images_share_one_budget() {
         )],
     );
     let budget = rgb_charge(10, 10);
-    let document = budgeted(bytes.clone(), budget);
+    let document = cache_only(bytes.clone(), budget);
     let plain = Document::open(bytes)
         .expect("it opens")
         .page(0)
@@ -1394,8 +1410,8 @@ fn glyphs_page() -> Vec<u8> {
 /// drawn twice, are a render's own with no budget, and under a stated one the
 /// document's — kept beside the image, found by the second line and by a
 /// second render, and looked up with every other entry. Under a budget with
-/// room for the image and nothing beside it, the image and the masks take
-/// turns: every render decodes the image again, since the first mask kept
+/// room for the image and nothing beside it, which the cache alone holds, the
+/// image and the masks take turns: every render decodes the image again, since the first mask kept
 /// evicts it, and rasterises as the first render did, since the image kept
 /// again evicts every mask; the bytes held never pass the budget, and every
 /// render draws what a document with no budget draws, byte for byte.
@@ -1441,7 +1457,7 @@ fn glyph_masks_share_the_documents_budget() {
     same_render(&second, &alone, "the second render under a roomy budget");
 
     let budget = rgb_charge(8, 8) + ENTRY_BYTES;
-    let tight = curvy(bytes, Some(budget));
+    let tight = curvy(bytes, None).with_cache_limits(CacheLimits::new(budget));
     let page = tight.page(0).expect("a page");
     let mut rasterised = Vec::new();
     for render in 0..3 {
@@ -1469,5 +1485,175 @@ fn glyph_masks_share_the_documents_budget() {
     assert!(
         rasterised.iter().all(|&count| count == rasterised[0]),
         "each render evicted and rasterised again as the first: {rasterised:?}"
+    );
+}
+
+// ---- parsed objects ---------------------------------------------------------
+
+/// What reading `document`'s object `num` through the counted door parses:
+/// 0 where the object store keeps it, 1 where the read parses it again.
+fn parses(document: &Document, num: u32) -> u64 {
+    let work = tinker_pdf_cos::Work::new();
+    document
+        .cos()
+        .get_counted(tinker_pdf_cos::ObjRef::new(num, 0), &work)
+        .expect("the object reads");
+    work.stats().objects_parsed
+}
+
+/// **A budget stated at open holds the parsed objects too**
+/// (`docs/design/performance.md`, P-16.8): the document's objects are charged
+/// to its cache's budget, so under a budget of zero no object is kept — the
+/// catalog, the page and the image read through the counted door parse at
+/// every read, render after render — and under a roomy one what a render read
+/// is kept, so a read after it parses nothing. A budget stated on an open
+/// document leaves the objects as the open left them, kept as they always
+/// were, and so does a document handed back with new fonts. Every render
+/// draws what a document with no budget draws.
+#[test]
+fn a_budget_stated_at_open_holds_the_parsed_objects_too() {
+    let bytes = two_images_page();
+    let plain = Document::open(bytes.clone()).expect("it opens");
+    let alone = plain
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert!(!plain.cos().objects_charged(), "no budget, no charge");
+
+    // The catalog is object 1, the image `/A` object 3 and the page object 5.
+    let starved = budgeted(bytes.clone(), 0);
+    assert!(starved.cos().objects_charged());
+    for render in 0..3 {
+        let bitmap = starved
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        same_render(&bitmap, &alone, &format!("starved render {render}"));
+        for num in [1, 3, 5] {
+            assert_eq!(
+                (render, num, parses(&starved, num)),
+                (render, num, 1),
+                "a budget of zero keeps no object"
+            );
+        }
+    }
+
+    let roomy = budgeted(bytes.clone(), 1 << 20);
+    let bitmap = roomy
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    same_render(&bitmap, &alone, "the roomy render");
+    for num in [1, 3, 5] {
+        assert_eq!(parses(&roomy, num), 0, "object {num} kept from the render");
+    }
+    let refonted = roomy
+        .clone()
+        .with_fonts(Arc::new(SimpleFontProvider::new(Vec::new())));
+    assert!(
+        refonted.cos().objects_charged(),
+        "the same objects, charged where they were"
+    );
+    assert_eq!(parses(&refonted, 1), 0);
+
+    let later = cache_only(bytes, 0);
+    assert!(
+        !later.cos().objects_charged(),
+        "a budget stated on an open document holds its cache alone"
+    );
+    let bitmap = later
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    same_render(&bitmap, &alone, "the render under a budget stated later");
+    for num in [1, 3, 5] {
+        assert_eq!(
+            parses(&later, num),
+            0,
+            "object {num} kept, as with no budget"
+        );
+    }
+}
+
+/// **A document appended under a budget stated at open charges its own
+/// objects as its open did**: `write::append`'s reopened document keeps the
+/// budget in a cache of its own, and where the budget was stated at open its
+/// parsed objects are charged to that cache's, so a starved one parses the
+/// update's page at every read; one appended under a budget stated later, or
+/// none, charges nothing. Each reads the edit as made.
+#[test]
+fn an_appended_document_charges_its_objects_as_its_open_did() {
+    let bytes = two_images_page();
+    for (label, document, charged) in [
+        ("stated at open", budgeted(bytes.clone(), 0), true),
+        ("stated later", cache_only(bytes.clone(), 0), false),
+        (
+            "none",
+            Document::open(bytes.clone()).expect("it opens"),
+            false,
+        ),
+    ] {
+        let mut editor = document.editor();
+        assert!(editor.rotate_page(0, 90), "{label}: the page turns");
+        let appended = tinker_pdf::write::append(
+            &document,
+            &editor,
+            &tinker_pdf::write::AppendOptions::default(),
+        )
+        .expect("it appends");
+        let reopened = &appended.document;
+        assert_eq!(reopened.cos().objects_charged(), charged, "{label}");
+        assert_eq!(
+            reopened.page(0).expect("a page").rotation(),
+            90,
+            "{label}: the edit as made"
+        );
+        // The page object the update redefines is the reopened document's
+        // own, read once already by the page lookup above: a budget of zero
+        // stated at open keeps it nowhere, so each read parses it, and with
+        // the objects not charged it is kept as an open keeps it.
+        assert_eq!(
+            (0..2).map(|_| parses(reopened, 5)).sum::<u64>(),
+            if charged { 2 } else { 0 },
+            "{label}: the update's page read twice"
+        );
+    }
+}
+
+/// **Parsed objects and the cache's entries leave in one order** under a
+/// budget stated at open: a hundred stamped pages rendered one after another
+/// under a budget a few pages' objects fill keep the bytes held inside it —
+/// the images, transforms, drawings and masks the cache holds beside the
+/// objects never passing it — draw what a document with no budget draws, and
+/// parse objects again as they leave: the first page's content stream, read
+/// a hundred pages ago and held by nothing since, is gone.
+#[test]
+fn parsed_objects_and_entries_leave_one_budget_in_one_order() {
+    let bytes = stamped_pages(100, true);
+    let plain = Document::open(bytes.clone()).expect("it opens");
+    let budget = 4_096;
+    let document = budgeted(bytes, budget);
+    for index in 0..100 {
+        let (bitmap, stats) = counted(&document.page(index).expect("a page"), 72.0);
+        assert!(
+            stats.cache_bytes_held <= budget,
+            "page {index}: the cache's own share passed the budget: {stats:?}"
+        );
+        let alone = plain
+            .page(index)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        same_render(
+            &bitmap,
+            &alone,
+            &format!("page {index} under {budget} bytes"),
+        );
+    }
+    // The first page's content stream (object 6) was read a hundred pages
+    // ago, and nothing has held it since: dropped, it parses again.
+    assert_eq!(
+        parses(&document, 6),
+        1,
+        "an object least recently read left"
     );
 }

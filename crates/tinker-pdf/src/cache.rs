@@ -25,36 +25,44 @@
 //!
 //! # The budget, and the one order everything leaves in
 //!
-//! Every entry is charged its payload and [`ENTRY_BYTES`] beside it, and the
-//! bytes held never pass the budget: a charge is taken under the lock the
-//! eviction index is kept under, before the entry is published. Every
-//! request — a hit or a miss, of any kind — takes the next number of one
-//! counter, and the entry it reaches records it; a fill that would pass the
-//! budget evicts entries in the order of the numbers they record, oldest
-//! first, through one ordered index across every kind, until the new entry
-//! fits. An entry larger than the whole budget is never kept: it is handed to
-//! the request that made it alone. The maps are only ever looked up, never
-//! iterated, since their order is seeded per process; which entries leave is
-//! decided by the index alone, so on one thread the evictions are a function
-//! of the requests and the same on every run and every target.
+//! The entries are kept in a [`tinker_pdf_cos::Accountant`]'s ledger, and a
+//! budget stated at open charges the document's parsed objects to the same
+//! one ([`DocumentCache::accountant`], `docs/design/performance.md`, "Parsed
+//! objects under pressure"). Every entry is charged its payload and
+//! [`ENTRY_BYTES`] beside it, and the bytes held never pass the budget: a
+//! charge is taken under the ledger's one lock, before the entry is
+//! published. Every request — a hit or a miss, of any kind, and every read of
+//! a parsed object the ledger keeps — takes the next number of the ledger's
+//! one counter, and the holding it reaches records it; a fill that would pass
+//! the budget evicts what is held in the order of the numbers recorded,
+//! oldest first, through one ordered index across every kind and the parsed
+//! objects, until the new entry fits — passing over an object a caller holds.
+//! An entry larger than the whole budget is never kept: it is handed to the
+//! request that made it alone, as is one that what no caller holds cannot
+//! make room for. The maps are only ever looked up, never iterated, since
+//! their order is seeded per process; which holdings leave is decided by the
+//! index alone, so on one thread the evictions are a function of the requests
+//! and the same on every run and every target.
 //!
 //! # Filled single-flight
 //!
 //! A miss fills by `docs/design/parallelism.md`'s rules, which
 //! `tinker_pdf_cos::Flights` keeps for the maps it holds and this table keeps
-//! under its own lock: the first request for a key fills it while requests for
-//! it on other threads wait for the value; a thread already inside a fill —
-//! of this table or of any `Flights`, which [`tinker_pdf_cos::fill_open`]
-//! says — computes for itself and publishes nothing, so no thread waits on a
-//! thread that waits; and a fill that unwinds publishes nothing and wakes its
-//! waiters, the first of whom fills in turn.
+//! under the ledger's lock: the first request for a key fills it while
+//! requests for it on other threads wait for the value; a thread already
+//! inside a fill — of this table or of any `Flights`, which
+//! [`tinker_pdf_cos::fill_open`] says — computes for itself and publishes
+//! nothing, so no thread waits on a thread that waits; and a fill that unwinds
+//! publishes nothing and wakes its waiters, the first of whom fills in turn.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, MutexGuard, PoisonError};
 use std::thread::{self, ThreadId};
 
-use tinker_pdf_cos::{fill_open, limits, Counter, Dict, ObjRef, Object, OpenFill, Work};
+use tinker_pdf_cos::{
+    fill_open, limits, Accountant, Counter, Dict, Entries, Ledger, ObjRef, Object, OpenFill, Work,
+};
 
 use tinker_pdf_color::icc::Transforms;
 use tinker_pdf_content::{FormInvocation, FormRecording};
@@ -63,26 +71,31 @@ use tinker_pdf_raster::fill::Mask;
 use crate::resources::CachedImage;
 use crate::stats;
 
-/// A document's cache budget: the most bytes its cache holds at once
-/// (`docs/design/performance.md`, P-16).
+/// A document's cache budget: the most bytes what it keeps across its renders
+/// holds at once (`docs/design/performance.md`, P-16).
 ///
 /// Stated on [`crate::OpenOptions::cache_limits`] or with
 /// [`crate::Document::with_cache_limits`]. **With none stated, a document
 /// keeps nothing past the render that made it**, as it always has: a render's
 /// own resources hold what they decode and go with it. With one stated, the
 /// document keeps what its renders compute — decoded images, compiled ICC
-/// transforms and forms' recorded drawings — across
-/// renders, pages and clones of it, while the bytes fit, evicting the least
-/// recently requested entry first. A budget of zero is stated and keeps
-/// nothing at all: every request computes again.
+/// transforms, forms' recorded drawings and glyph masks — across renders,
+/// pages and clones of it, while the bytes fit, evicting the least recently
+/// requested first. **A budget stated at open charges the document's parsed
+/// objects to it too**, in the same order: past the budget an object no
+/// caller holds is dropped and parsed again, to an equal value, when it is
+/// next read. A budget stated on an open document holds its cache alone,
+/// since the parsed objects are the open's, shared by every document handed
+/// back from it. A budget of zero is stated and keeps nothing at all: every
+/// request computes again.
 ///
-/// The budget bounds what the cache holds, not what a render needs to run —
-/// its canvas, the page's content, a decoder's working set — and an entry a
-/// render is drawing from is its own copy until it lets it go.
+/// The budget bounds what the document keeps, not what a render needs to run —
+/// its canvas, the page's content, a decoder's working set — and an entry or
+/// an object a render is drawing from is its own copy until it lets it go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CacheLimits {
-    /// The most bytes the document's cache holds at once, each entry charged
-    /// its payload and 64 bytes beside it.
+    /// The most bytes the document keeps at once, each entry and each parsed
+    /// object charged its payload and 64 bytes beside it.
     pub bytes: u64,
 }
 
@@ -96,8 +109,9 @@ impl CacheLimits {
 
 /// What every entry is charged beside its payload: its key, its bookkeeping
 /// and its entry in the eviction index, so that a cache of empty entries is
-/// bounded too. P-06's glyph-mask cache charges a mask the same.
-pub(crate) const ENTRY_BYTES: u64 = 64;
+/// bounded too. P-06's glyph-mask cache charges a mask the same, and the
+/// object store an object.
+pub(crate) const ENTRY_BYTES: u64 = tinker_pdf_cos::accountant::ENTRY_BYTES;
 
 /// What a fill answered.
 pub(crate) enum Fill<V> {
@@ -113,21 +127,16 @@ pub(crate) enum Fill<V> {
 /// A document's cache. See the module documentation.
 pub(crate) struct DocumentCache {
     limits: CacheLimits,
-    table: Mutex<Table>,
+    /// The ledger the entries are kept in and charged to, beside the parsed
+    /// objects of a document whose budget was stated at open.
+    accountant: Arc<Accountant<Table>>,
     /// Signalled whenever a slot is published or released.
     settled: Condvar,
 }
 
-/// Everything behind the cache's one lock.
+/// The cache's entries, kept in the ledger behind its one lock.
 #[derive(Default)]
-struct Table {
-    /// The requests made so far, hits and misses alike, of every kind.
-    requests: u64,
-    /// What the published entries are charged, together.
-    held: u64,
-    /// Each published entry's last request, to its key: the order the cache
-    /// evicts in, least recently requested first.
-    order: BTreeMap<u64, Key>,
+pub(crate) struct Table {
     /// Decoded images.
     images: HashMap<ImageKey, Slot<Arc<CachedImage>>>,
     /// The frames of the images a draw's size reduces.
@@ -143,12 +152,8 @@ struct Table {
     tests: HashMap<u32, Slot<Arc<Vec<u8>>>>,
 }
 
-impl Table {
-    /// The next request's number.
-    fn next_request(&mut self) -> u64 {
-        self.requests = self.requests.saturating_add(1);
-        self.requests
-    }
+impl Entries for Table {
+    type Key = Key;
 
     /// Evicts the published entry under `key`, handing back what it was
     /// charged.
@@ -162,6 +167,10 @@ impl Table {
             #[cfg(test)]
             Key::Test(key) => remove_ready(&mut self.tests, key),
         }
+    }
+
+    fn clear(&mut self) {
+        *self = Table::default();
     }
 }
 
@@ -189,7 +198,7 @@ enum Slot<V> {
 
 /// An entry's key, of whichever kind: what the eviction index names.
 #[derive(Clone, Debug)]
-enum Key {
+pub(crate) enum Key {
     Image(ImageKey),
     Frame(FrameKey),
     Icc(IccKey),
@@ -291,18 +300,13 @@ enum Found<V> {
     Empty,
 }
 
-/// A lock that a panic elsewhere cannot poison: nothing panics while holding
-/// one, and a fill runs outside it.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 impl DocumentCache {
-    /// An empty cache under `limits`.
+    /// An empty cache under `limits`, keeping its entries in a ledger of its
+    /// own.
     pub(crate) fn new(limits: CacheLimits) -> DocumentCache {
         DocumentCache {
             limits,
-            table: Mutex::new(Table::default()),
+            accountant: Arc::new(Accountant::new(limits.bytes, Table::default())),
             settled: Condvar::new(),
         }
     }
@@ -310,6 +314,18 @@ impl DocumentCache {
     /// The budget this cache holds its entries to.
     pub(crate) fn limits(&self) -> CacheLimits {
         self.limits
+    }
+
+    /// The ledger this cache keeps its entries in, for the document's object
+    /// store to charge beside it where its budget is stated at open
+    /// (`tinker_pdf_cos::CosDocument::charge_objects_to`).
+    pub(crate) fn accountant(&self) -> Arc<Accountant<Table>> {
+        Arc::clone(&self.accountant)
+    }
+
+    /// The ledger, under its one lock.
+    fn ledger(&self) -> MutexGuard<'_, Ledger<Table>> {
+        self.accountant.lock()
     }
 
     /// The decoded image under `key`, and whether the request found it kept:
@@ -400,9 +416,9 @@ impl DocumentCache {
     /// marked as asked for by it; or, where there is none, the request's
     /// number, the request counted as a miss.
     fn get<K: Kind>(&self, key: &K, work: Option<&Work>) -> Result<K::Value, u64> {
-        let mut table = lock(&self.table);
-        let asked = table.next_request();
-        let found = match K::slots(&mut table).get_mut(key) {
+        let mut ledger = self.ledger();
+        let asked = ledger.request();
+        let found = match K::slots(ledger.entries()).get_mut(key) {
             Some(Slot::Ready {
                 value, asked: last, ..
             }) => {
@@ -412,16 +428,15 @@ impl DocumentCache {
             }
             _ => None,
         };
-        let held = table.held;
+        let held = ledger.entries_held();
         let found = match found {
             Some((value, previous)) => {
-                table.order.remove(&previous);
-                table.order.insert(asked, key.key());
+                ledger.reorder(previous, asked);
                 Ok(value)
             }
             None => Err(asked),
         };
-        drop(table);
+        drop(ledger);
         stats::count(
             work,
             if found.is_ok() {
@@ -439,12 +454,12 @@ impl DocumentCache {
     /// at under the lock the value is published under, so two renders that
     /// offer one key at once keep the first value, charged once.
     fn offer<K: Kind>(&self, key: K, value: K::Value, bytes: u64, asked: u64, work: Option<&Work>) {
-        let mut table = lock(&self.table);
-        if K::slots(&mut table).contains_key(&key) {
+        let mut ledger = self.ledger();
+        if K::slots(ledger.entries()).contains_key(&key) {
             return;
         }
-        let (evicted, held) = self.publish_in(&mut table, key, value, bytes, asked);
-        drop(table);
+        let (evicted, held) = publish_in(&mut ledger, key, value, bytes, asked);
+        drop(ledger);
         if let Some(work) = work {
             work.add(Counter::CacheEvictions, evicted);
         }
@@ -462,25 +477,24 @@ impl DocumentCache {
         fill: impl FnOnce() -> Fill<K::Value>,
     ) -> (K::Value, bool) {
         let me = thread::current().id();
-        let mut table = lock(&self.table);
+        let mut ledger = self.ledger();
         loop {
-            let found = match K::slots(&mut table).get(&key) {
+            let found = match K::slots(ledger.entries()).get(&key) {
                 Some(Slot::Ready { value, asked, .. }) => Found::Ready(value.clone(), *asked),
                 Some(Slot::Filling(owner)) => Found::Filling(*owner),
                 None => Found::Empty,
             };
             match found {
                 Found::Ready(value, last) => {
-                    let asked = table.next_request();
+                    let asked = ledger.request();
                     if let Some(Slot::Ready { asked: slot, .. }) =
-                        K::slots(&mut table).get_mut(&key)
+                        K::slots(ledger.entries()).get_mut(&key)
                     {
                         *slot = asked;
                     }
-                    table.order.remove(&last);
-                    table.order.insert(asked, key.key());
-                    let held = table.held;
-                    drop(table);
+                    ledger.reorder(last, asked);
+                    let held = ledger.entries_held();
+                    drop(ledger);
                     stats::count(work, Counter::CacheHits);
                     stats::cache_held(work, held);
                     return (value, true);
@@ -490,9 +504,9 @@ impl DocumentCache {
                     // filling this key, computes for itself and publishes
                     // nothing, so that it never waits on anyone.
                     if owner == me || fill_open() {
-                        table.next_request();
-                        let held = table.held;
-                        drop(table);
+                        ledger.request();
+                        let held = ledger.entries_held();
+                        drop(ledger);
                         stats::count(work, Counter::CacheMisses);
                         stats::cache_held(work, held);
                         let _open = OpenFill::enter();
@@ -501,15 +515,15 @@ impl DocumentCache {
                         };
                         return (value, false);
                     }
-                    table = self
+                    ledger = self
                         .settled
-                        .wait(table)
+                        .wait(ledger)
                         .unwrap_or_else(PoisonError::into_inner);
                 }
                 Found::Empty => {
-                    let asked = table.next_request();
-                    K::slots(&mut table).insert(key.clone(), Slot::Filling(me));
-                    drop(table);
+                    let asked = ledger.request();
+                    K::slots(ledger.entries()).insert(key.clone(), Slot::Filling(me));
+                    drop(ledger);
                     stats::count(work, Counter::CacheMisses);
                     let claim = Claim {
                         cache: self,
@@ -522,49 +536,49 @@ impl DocumentCache {
         }
     }
 
-    /// Publishes `value` under `key` for the request numbered `asked`,
-    /// charged `bytes` beside [`ENTRY_BYTES`], evicting the entries least
-    /// recently requested until it fits; or, for a value larger than the
-    /// whole budget, releases the slot and keeps nothing. Hands back how many
-    /// entries left for it and the bytes held after.
-    fn publish<K: Kind>(&self, key: K, value: K::Value, bytes: u64, asked: u64) -> (u64, u64) {
-        self.publish_in(&mut lock(&self.table), key, value, bytes, asked)
+    /// The bytes the published entries are charged, together.
+    #[cfg(test)]
+    fn held(&self) -> u64 {
+        self.ledger().entries_held()
     }
 
-    /// [`DocumentCache::publish`] under a lock already held.
-    fn publish_in<K: Kind>(
-        &self,
-        table: &mut Table,
-        key: K,
-        value: K::Value,
-        bytes: u64,
-        asked: u64,
-    ) -> (u64, u64) {
-        let charge = bytes.saturating_add(ENTRY_BYTES);
-        let budget = self.limits.bytes;
-        if charge > budget {
-            K::slots(table).remove(&key);
-            return (0, table.held);
-        }
-        let mut evicted = 0u64;
-        while table.held.saturating_add(charge) > budget {
-            let Some((_, oldest)) = table.order.pop_first() else {
-                break;
-            };
-            let freed = table.evict(&oldest);
-            table.held = table.held.saturating_sub(freed);
-            evicted = evicted.saturating_add(1);
-        }
-        if table.held.saturating_add(charge) > budget {
-            // Unreachable: the index holds every published entry, so an empty
-            // one leaves nothing held. Kept to the request rather than past
-            // the budget all the same.
-            K::slots(table).remove(&key);
-            return (evicted, table.held);
-        }
-        table.held = table.held.saturating_add(charge);
-        table.order.insert(asked, key.key());
-        K::slots(table).insert(
+    /// Whether `key` has a published entry, without requesting it.
+    #[cfg(test)]
+    fn holds<K: Kind>(&self, key: &K) -> bool {
+        matches!(
+            K::slots(self.ledger().entries()).get(key),
+            Some(Slot::Ready { .. })
+        )
+    }
+}
+
+impl Drop for DocumentCache {
+    /// A cache let go of leaves nothing in its ledger: a document whose
+    /// budget was stated at open keeps its parsed objects there after its
+    /// cache is replaced (`crate::Document::with_fonts`), and the entries of a
+    /// cache no document holds would be charged to it for nothing.
+    fn drop(&mut self) {
+        self.ledger().forget_entries();
+    }
+}
+
+/// Publishes `value` under `key` for the request numbered `asked`, charged
+/// `bytes` beside [`ENTRY_BYTES`], evicting what is held least recently
+/// requested first until it fits; or, for a value larger than the whole
+/// budget — or one that what no caller holds cannot make room for — releases
+/// the slot and keeps nothing. Hands back how many of the cache's entries
+/// left for it and the bytes its entries are charged after.
+fn publish_in<K: Kind>(
+    ledger: &mut Ledger<Table>,
+    key: K,
+    value: K::Value,
+    bytes: u64,
+    asked: u64,
+) -> (u64, u64) {
+    let charge = bytes.saturating_add(ENTRY_BYTES);
+    let admitted = ledger.admit(key.key(), charge, asked);
+    if admitted.kept {
+        K::slots(ledger.entries()).insert(
             key,
             Slot::Ready {
                 value,
@@ -572,23 +586,10 @@ impl DocumentCache {
                 charge,
             },
         );
-        (evicted, table.held)
+    } else {
+        K::slots(ledger.entries()).remove(&key);
     }
-
-    /// The bytes the published entries are charged, together.
-    #[cfg(test)]
-    fn held(&self) -> u64 {
-        lock(&self.table).held
-    }
-
-    /// Whether `key` has a published entry, without requesting it.
-    #[cfg(test)]
-    fn holds<K: Kind>(&self, key: &K) -> bool {
-        matches!(
-            K::slots(&mut lock(&self.table)).get(key),
-            Some(Slot::Ready { .. })
-        )
-    }
+    (admitted.entries_evicted, ledger.entries_held())
 }
 
 /// A slot this thread has claimed: published or released when its fill
@@ -617,13 +618,14 @@ impl<K: Kind> Claim<'_, K> {
         };
         let (value, evicted, held) = match filled {
             Fill::Keep(value, bytes) => {
-                let (evicted, held) = self.cache.publish(key, value.clone(), bytes, asked);
+                let (evicted, held) =
+                    publish_in(&mut self.cache.ledger(), key, value.clone(), bytes, asked);
                 (value, evicted, held)
             }
             Fill::Once(value) => {
-                let mut table = lock(&self.cache.table);
-                K::slots(&mut table).remove(&key);
-                (value, 0, table.held)
+                let mut ledger = self.cache.ledger();
+                K::slots(ledger.entries()).remove(&key);
+                (value, 0, ledger.entries_held())
             }
         };
         self.cache.settled.notify_all();
@@ -640,13 +642,13 @@ impl<K: Kind> Drop for Claim<'_, K> {
     /// fill it in turn.
     fn drop(&mut self) {
         if let Some(key) = self.key.take() {
-            K::slots(&mut lock(&self.cache.table)).remove(&key);
+            K::slots(self.cache.ledger().entries()).remove(&key);
             self.cache.settled.notify_all();
         }
     }
 }
 
-/// What a decoded image is kept under (`docs/design/performance.md`, P-16):
+// What a decoded image is kept under (`docs/design/performance.md`, P-16):
 /// the image XObject, the reduction its decode is made at, and the default
 /// colour spaces its scope paints device spaces in (8.6.5.6) — the one thing
 /// outside the object an image's decode reads, so two scopes that name one

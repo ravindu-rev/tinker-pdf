@@ -3515,8 +3515,12 @@ and its object store's dropped kinds hold at once. A caller states it where a
 document's other document-wide choices are stated: on `OpenOptions`, beside
 its fonts (`OpenOptions::with_cache_limits`), and on an open document by
 `Document::with_cache_limits`, which hands back a document sharing the bytes
-with a cache of its own, as `Document::with_fonts` does. The C ABI and the
-bindings project the two 1:1 (ruling 11), in the row that lands each.
+with a cache of its own, as `Document::with_fonts` does. The object store is
+the open's, shared by every document handed back from it, so only a budget
+stated at open charges the parsed objects beside the cache; one stated on an
+open document holds its cache alone, and the objects stay as the open left
+them. The C ABI and the bindings project the two 1:1 (ruling 11), in the row
+that lands each.
 
 With none stated the cache keeps nothing past the render or display list that
 made an entry: the render's own resources hold what they hold today, under
@@ -3606,24 +3610,43 @@ is. With no budget stated nothing changes, and every fingerprint and
 
 #### Parsed objects under pressure
 
-`tinker-pdf-cos`'s slot store (`crates/tinker-pdf-cos/src/store.rs`) keeps
-every parsed object for the document's life. P-16.8 charges each object an
-estimate of its bytes — its tokens' and its stream's extent, a count the
-parser already keeps — against the same budget, which the facade passes down
-from `CacheLimits`, through one accountant that both the store and the
-facade's cache charge. Every object a read reaches takes a number from the
-accountant's counter as an entry of the cache does, so one order covers both
-holders, and past the budget the oldest objects that **no caller holds** — an
-`Arc<Object>` whose only owner is the store — are dropped. A later read parses
+With no budget stated, `tinker-pdf-cos`'s slot store
+(`crates/tinker-pdf-cos/src/store.rs`) keeps every parsed object for the
+document's life. Under a budget stated at open, each object is charged an
+estimate of its bytes — the extent of its tokens in the bytes it was parsed
+from, a count the parser already keeps (for a stream, its dictionary up to its
+data, which a parsed stream does not hold), with the 64 bytes every entry is
+charged beside it — against the same budget, which the facade passes down
+from `CacheLimits` through one accountant that both the store and the
+facade's cache charge (`tinker_pdf_cos::Accountant`, handed to the store by
+`CosDocument::charge_objects_to`). Every object a read reaches takes a number
+from the accountant's counter as an entry of the cache does, so one order
+covers both holders, and a charge past the budget evicts the oldest holdings
+of either: an entry of the cache always, and an object only where **no caller
+holds it** — an `Arc<Object>` whose only owner is the store. A charge that what
+no caller holds cannot make room for is not kept, as one larger than the whole
+budget is not, so the bytes held never pass the budget. A later read parses
 again, from the same immutable bytes, so it gets an equal value
 (`store.rs`'s purity, `a_store_over_its_budget_drops_objects_and_parses_them_again_equal`).
 
-Never dropped: the cross-reference table and the object-stream index, which
-the reader cannot find anything without; an object a caller holds; and,
-with no budget stated, anything at all, so the parse count is today's. A
-streamed document whose object is dropped may fetch the object's bytes again
-from its source on the next read: the fetch is counted as every fetch is
-(`docs/design/streaming-open.md`), and is the price of the budget.
+**One lock.** The accountant keeps the store's objects and the cache's table
+inside its own ledger, behind one mutex, so an eviction of either is a step
+taken under the lock the charge is taken under, and no other lock is taken
+inside it; nothing is parsed or decoded under it. A document's objects are
+charged to the first accountant handed it, and the objects read before it
+took, the `/Encrypt` dictionary an open reads among them, are forgotten then.
+A cache let go of — the one `Document::with_fonts` replaces — forgets its
+entries from the ledger, which the store keeps alive.
+
+Never dropped: the cross-reference table, the decoded object streams and their
+indexes, the repair scanner's index, the page index and the hint tables, which
+the reader cannot find anything without and which are never charged; an object
+a caller holds; and, with no budget stated, anything at all, so the parse count
+is today's. An object a reopened document reads through its base is held by
+the base's store, and a budgeted store leaves it there rather than charging it
+twice. A streamed document whose object is dropped may fetch the object's
+bytes again from its source on the next read: the fetch is counted as every
+fetch is (`docs/design/streaming-open.md`), and is the price of the budget.
 
 #### MS-05's reading, and a stated budget
 
@@ -3681,7 +3704,9 @@ which P-16.11 holds at 30 % of the first.
    unchanged, in both builds.
 8. **P-16.8: parsed objects dropped under pressure.** Exit: `store.rs`
    `a_store_over_its_budget_drops_objects_and_parses_them_again_equal`;
-   `cargo test -p tinker-pdf-cos`.
+   `cargo test -p tinker-pdf-cos`; `caches.rs`
+   `a_budget_stated_at_open_holds_the_parsed_objects_too` and `determinism.rs`
+   `budgets_stated_at_open_render_the_fingerprints`.
 9. **P-16.9: reduced-resolution decode.** Exit: `caches.rs`
    `an_image_past_the_budget_draws_at_a_reduced_resolution_and_says_so`; with
    no budget every fingerprint and `render_regions.rs` unchanged.

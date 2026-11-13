@@ -3709,6 +3709,108 @@ fn warm_and_starved_caches_render_the_fingerprints() {
     assert_eq!(hits[1], 0, "a budget of zero keeps nothing to find");
 }
 
+/// `fixture` opened as [`opened`] opens it, with `limits` stated at open, so
+/// that the document's parsed objects are charged to the budget beside its
+/// cache.
+fn opened_under(fixture: &Fixture, limits: CacheLimits) -> (Document, u32) {
+    match fixture.open {
+        Open::Closed => (
+            converted(
+                "opened under a budget",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::default().with_cache_limits(limits),
+                )
+                .expect("it opens"),
+            ),
+            0,
+        ),
+        Open::Book { page, at } => (
+            converted(
+                "opened under a budget",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::at_page(page.0, page.1)
+                        .with_fonts(book_face())
+                        .with_cache_limits(limits),
+                )
+                .expect("it opens"),
+            ),
+            at,
+        ),
+    }
+}
+
+/// **A budget stated at open renders the fingerprints too**
+/// (`docs/design/performance.md`, P-16.8): every fingerprinted page, opened
+/// with a budget that keeps everything — its parsed objects charged beside
+/// its cache — and with a budget of zero, under which no parsed object is
+/// kept and every read parses again, rendered twice each, hashes to its
+/// committed fingerprint every time and reports what a render with no budget
+/// reports. A parse is a function of the document's immutable bytes, so an
+/// object dropped and read again is the object it was.
+///
+/// **Not a new fingerprint**: the table is untouched, and a page that
+/// disagrees with it here is a finding about the object store under a
+/// budget, never a reason to edit the table.
+#[test]
+fn budgets_stated_at_open_render_the_fingerprints() {
+    let budgets = [
+        ("warm at open", CacheLimits::new(256 << 20)),
+        ("starved at open", CacheLimits::new(0)),
+    ];
+    let mut wrong = Vec::new();
+    for fixture in GOLDEN {
+        let want = FINGERPRINTS
+            .iter()
+            .find(|(n, _)| *n == fixture.name)
+            .map(|(_, h)| *h)
+            .expect("every page has a fingerprint");
+        let (document, at) = opened(fixture);
+        let plain = document
+            .page(at)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        for (label, limits) in &budgets {
+            let (budgeted, page_at) = opened_under(fixture, *limits);
+            assert_eq!(page_at, at);
+            assert!(
+                budgeted.cos().objects_charged(),
+                "{} {label}: the parsed objects are charged",
+                fixture.name
+            );
+            for pass in ["first", "second"] {
+                let bitmap = budgeted
+                    .page(at)
+                    .expect("a page")
+                    .render(&RenderOptions::default());
+                let actual = hashed(fixture, &bitmap);
+                if actual != want {
+                    wrong.push(format!(
+                        "{} {label}, {pass} render: {actual}, committed {want}",
+                        fixture.name
+                    ));
+                }
+                if bitmap.warnings != plain.warnings {
+                    wrong.push(format!(
+                        "{} {label}, {pass} render: reported {:?} where a render with no \
+                         budget reports {:?}",
+                        fixture.name, bitmap.warnings, plain.warnings
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a render under a budget stated at open is not the page its fingerprint \
+         pins. A parsed object read again is the object it was, so this is a \
+         finding about the object store, or, where only one target disagrees, a \
+         determinism bug -- never a reason to edit the table:\n{}",
+        wrong.join("\n")
+    );
+}
+
 /// The bytes the EPUB reader hands `CosDocument::open`, hashed.
 ///
 /// *Added August 2026, with gap 31 milestone 13,* in the pair gap 29's

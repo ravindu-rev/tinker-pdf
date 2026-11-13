@@ -2222,12 +2222,23 @@ impl CosDocument {
     }
 
     /// Loads one object, publishing it with a compare-and-swap.
+    ///
+    /// Under a budget the object is charged its estimate
+    /// ([`CosDocument::charge_objects_to`]): the extent of its tokens in the
+    /// bytes it was parsed from — for a stream, its dictionary up to its
+    /// data, which a parsed stream does not hold — and
+    /// [`crate::accountant::ENTRY_BYTES`] beside it.
     fn load(&self, num: u32, ctx: &mut ResolveCtx, sink: &mut WarningSink) -> Arc<Object> {
         if let Some(object) = self.store.get(num) {
             return object;
         }
         if let Some(object) = self.through_base(num, sink) {
-            return self.store.publish(num, object);
+            // The base's store holds it; a store under a budget leaves it
+            // there rather than charging it a second time.
+            if self.store.is_budgeted() {
+                return object;
+            }
+            return self.store.publish(num, object, 0);
         }
         if ctx.contains(num) {
             sink.warn_at(
@@ -2248,7 +2259,7 @@ impl CosDocument {
         // No lock is held here: two threads racing on the same object both
         // parse it and one wins the swap.
         let missed_before = ctx.missed();
-        let object = ctx.enter(num, |ctx| self.load_uncached(num, ctx, sink));
+        let (object, extent) = ctx.enter(num, |ctx| self.load_uncached(num, ctx, sink));
         if ctx.missed() && !missed_before {
             // A miss never publishes. This load reads as null because the
             // bytes were absent, not because the object is; publishing it
@@ -2257,7 +2268,48 @@ impl CosDocument {
             self.misses.fetch_add(1, Ordering::Relaxed);
             return Arc::new(object);
         }
-        self.store.publish(num, Arc::new(object))
+        self.store.publish(
+            num,
+            Arc::new(object),
+            extent.saturating_add(crate::accountant::ENTRY_BYTES),
+        )
+    }
+
+    /// Charges this document's parsed objects to `accountant` from now on
+    /// (`docs/design/performance.md`, P-16, "Parsed objects under pressure"),
+    /// and says whether it took.
+    ///
+    /// Each object a read parses is charged an estimate of its bytes — the
+    /// extent of its tokens in the bytes it was parsed from, for a stream its
+    /// dictionary up to its data, and
+    /// [`ENTRY_BYTES`](crate::accountant::ENTRY_BYTES) beside it — and every
+    /// read that reaches a kept object takes a number from the accountant's
+    /// counter, as an entry of whatever cache shares the accountant does. Past
+    /// the budget the objects least recently requested that no caller holds
+    /// are dropped, and a later read parses the object again, from the same
+    /// immutable bytes, to an equal value; a streamed document fetches its
+    /// bytes again where its source no longer holds them. The cross-reference
+    /// table, the decoded object streams and their indexes, the repair
+    /// scanner's index, the page index and the hint tables are never charged
+    /// and never dropped.
+    ///
+    /// A document's objects are charged to the first accountant handed it and
+    /// to that one only: a later call changes nothing and answers `false`.
+    /// The objects read before it took, the `/Encrypt` dictionary an open
+    /// reads among them, are forgotten, so that none is held outside the
+    /// budget. With no accountant handed it, nothing is ever dropped.
+    pub fn charge_objects_to<E: crate::accountant::Entries>(
+        &self,
+        accountant: Arc<crate::accountant::Accountant<E>>,
+    ) -> bool {
+        self.store.charge_to(accountant)
+    }
+
+    /// Whether this document's parsed objects are charged to a budget
+    /// ([`CosDocument::charge_objects_to`]).
+    #[must_use]
+    pub fn objects_charged(&self) -> bool {
+        self.store.is_budgeted()
     }
 
     /// Object `num` as the base this document was reopened over has it, when
@@ -2354,7 +2406,15 @@ impl CosDocument {
         true
     }
 
-    fn load_uncached(&self, num: u32, ctx: &mut ResolveCtx, sink: &mut WarningSink) -> Object {
+    /// Object `num` read from the bytes, and the extent of the tokens it was
+    /// read from (`CosDocument::load`'s estimate); a null no bytes hold is of
+    /// no extent.
+    fn load_uncached(
+        &self,
+        num: u32,
+        ctx: &mut ResolveCtx,
+        sink: &mut WarningSink,
+    ) -> (Object, u64) {
         let entry = self.entry(num);
         if let Some(XrefEntry::InStream { stream_num, idx }) = entry {
             return self.load_from_objstm(num, stream_num, idx, ctx, sink);
@@ -2386,7 +2446,7 @@ impl CosDocument {
             sink.warn(self.entry_offset(num), WarningKind::ObjectMissing);
         }
         // 7.3.10: a reference to a non-existent object is a reference to null.
-        Object::Null
+        (Object::Null, 0)
     }
 
     /// How far a read that begins inside the first page may reach, on Annex
@@ -2548,20 +2608,28 @@ impl CosDocument {
     }
 
     /// Parses the object whose header sits at `offset`, if that header names
-    /// `num`. The header check is what makes level 1 of the ladder safe.
+    /// `num`, and the extent of the tokens it was read from: to the end of
+    /// `endobj`, or for a stream to the first byte of its data. The header
+    /// check is what makes level 1 of the ladder safe.
     fn parse_at(
         &self,
         num: u32,
         offset: u64,
         ctx: &mut ResolveCtx,
         sink: &mut WarningSink,
-    ) -> Option<Object> {
+    ) -> Option<(Object, u64)> {
         count::touched(num);
         let (parsed, warnings) = self.parse_windowed(offset, ctx, sink)?;
         if parsed.reference.num != num {
             return None;
         }
+        count::parsed();
         sink.extend(warnings);
+        let read_to = match &parsed.object {
+            Object::Stream(stream) => stream.data_start,
+            _ => parsed.end_offset,
+        };
+        let extent = read_to.saturating_sub(offset);
         let mut object = parsed.object;
 
         // 7.3.8.2: an indirect /Length is resolved on the load path, inside
@@ -2597,9 +2665,11 @@ impl CosDocument {
                 self.decryptor().as_ref(),
             );
         }
-        Some(object)
+        Some((object, extent))
     }
 
+    /// Member `num` of the object stream `stream_num`, read out of its
+    /// decoded data, and the extent of its tokens there.
     fn load_from_objstm(
         &self,
         num: u32,
@@ -2607,7 +2677,7 @@ impl CosDocument {
         idx: u32,
         ctx: &mut ResolveCtx,
         sink: &mut WarningSink,
-    ) -> Object {
+    ) -> (Object, u64) {
         count::touched(num);
         let Some(stm) = self.object_stream(stream_num, ctx, sink) else {
             sink.warn_at(
@@ -2615,17 +2685,19 @@ impl CosDocument {
                 Some(ObjRef::new(num, 0)),
                 WarningKind::ObjStmNotAStream,
             );
-            return Object::Null;
+            return (Object::Null, 0);
         };
         let at = self.entry_offset(stream_num);
         let Some(offset) = stm.locate(num, idx, at, sink) else {
-            return Object::Null;
+            return (Object::Null, 0);
         };
 
         let mut local = WarningSink::new();
         let parsed = parse_object_at(&stm.data, offset, &self.names.table, &mut local);
         sink.add_steps(local.steps());
         sink.parsed_object();
+        count::parsed();
+        let extent = parsed.end_offset.saturating_sub(offset);
         // 7.5.7: a contained object is never itself a stream.
         if objstm::is_stream_at(&stm.data, parsed.end_offset) {
             sink.warn_at(
@@ -2633,12 +2705,12 @@ impl CosDocument {
                 Some(ObjRef::new(num, 0)),
                 WarningKind::ObjStmEntryIsStream,
             );
-            return Object::Null;
+            return (Object::Null, extent);
         }
         sink.extend(local.take());
         // 7.6.2: no per-string decryption here — the container was decrypted
         // as a whole, and decrypting its contents again would corrupt them.
-        parsed.object
+        (parsed.object, extent)
     }
 
     /// The decompressed object stream `num`, decoded at most once.
@@ -3034,7 +3106,8 @@ fn first_id(trailer: &Dict) -> Option<&[u8]> {
 
 /// The object numbers an open touches — whose cross-reference row it reads,
 /// whose header it probes, whose body it parses — counted for the reopen's
-/// guard: compiled only under `cfg(test)` and kept per thread.
+/// guard, and the objects parsed out of the bytes, counted for the budget's
+/// (`store.rs`): compiled only under `cfg(test)` and kept per thread.
 #[cfg(test)]
 pub(crate) mod count {
     use std::cell::RefCell;
@@ -3042,6 +3115,7 @@ pub(crate) mod count {
 
     std::thread_local! {
         static TOUCHED: RefCell<BTreeSet<u32>> = const { RefCell::new(BTreeSet::new()) };
+        static PARSES: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
     }
 
     /// Object `num` touched.
@@ -3056,12 +3130,25 @@ pub(crate) mod count {
     pub(crate) fn take() -> BTreeSet<u32> {
         TOUCHED.with(|touched| core::mem::take(&mut *touched.borrow_mut()))
     }
+
+    /// One object parsed out of the bytes: an indirect object whose header
+    /// named it, or a member read out of its object stream.
+    pub(crate) fn parsed() {
+        PARSES.with(|parses| parses.set(parses.get().saturating_add(1)));
+    }
+
+    /// The objects parsed on this thread since the last call, which starts
+    /// the count again from nothing.
+    pub(crate) fn parses() -> u64 {
+        PARSES.with(|parses| parses.replace(0))
+    }
 }
 
 /// The counter outside tests: nothing.
 #[cfg(not(test))]
 pub(crate) mod count {
     pub(crate) fn touched(_num: u32) {}
+    pub(crate) fn parsed() {}
 }
 
 fn root_locatable(table: &XrefTable, trailer: &Dict) -> bool {

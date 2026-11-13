@@ -42,6 +42,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod accountant;
 pub mod appearance;
 pub mod bmp_embed;
 pub mod build;
@@ -92,6 +93,7 @@ mod repair;
 mod store;
 mod streams;
 
+pub use accountant::{Accountant, Admitted, Entries, Ledger, NoEntries};
 pub use appearance::synthesize as synthesize_appearance;
 pub use bmp_embed::bmp_image;
 pub use build::{
