@@ -47,9 +47,12 @@ open of this design — the refused profiles — is listed in the
 
 ## Non-goals
 
-- **Output intents and proofing** (14.11.5): `/OutputIntents` handling
-  belongs to [pdfa](pdfa.md); this design converts for the screen, to
-  sRGB, always. Soft proofing is [ROADMAP](../ROADMAP.md) row RC-05.
+- **Output intents outside proofing** (14.11.5): judging an intent against
+  the part it was claimed under belongs to [pdfa](pdfa.md) and
+  [pdfx](pdfx.md). An output intent's profile as the device a page is
+  rendered for, and a caller's profile in its place, are
+  [Soft proofing](#soft-proofing-rc-05) below; without one, every render
+  converts for the screen, to sRGB.
 - **N-channel output, overprint and spot-ink simulation.** `Separation` /
   `DeviceN` keep flowing through their tint transforms (8.6.6.4, 8.6.6.5);
   simulating ink interaction is a different renderer. Overprint simulation and
@@ -1684,3 +1687,310 @@ other pin P-22.4 may move, and H-76 reviews the two moves together.
 | Filling a grid passes P-16's budget | The entry is charged its whole node arrays at insertion, before any node is filled |
 | Until P-22.7, every render rebuilds what it reads | Each render's transforms fill only the nodes it reads, which is at most what today's per-pixel pipeline evaluates for a page of distinct colours, and P-22.7 keeps them per document |
 | The close times no profile at all | P-22.8's milestone names the refused seed and gives the operation a profile that compiles |
+
+## Soft proofing (RC-05)
+
+*For [ROADMAP](../ROADMAP.md) row RC-05.* A soft proof renders a page as a
+given output device would reproduce it, and shows that reproduction on the
+screen: each colour is taken into the device's colorants, the page composites
+there, and the result is taken back to the display. ISO 32000-2 names both
+halves. 14.11.5's `/DestOutputProfile` is "an ICC profile stream defining the
+transformation from the PDF document's source colours to output device
+colourants … The output transformation uses the profile's "from CIE"
+information (BToA in ICC terminology); the "to CIE" (AToB) information may
+optionally be used to remap source colour values to some other destination
+colour space, such as for screen preview or hardcopy proofing", and 10.1
+makes the device the clause renders for one that may be "just assumed (for
+example to simulate the colour appearance of PDF output on one raster output
+device by using some other raster output device)".
+
+### Scope
+
+- **One composition.** The proof transform of a colour is the display space,
+  from the proof profile's input direction, from its output direction, from
+  the colour's own space: `V(D(c))`, where the **device leg** `D` takes a
+  colour into the proof device's components and the **display leg** `V`
+  takes those components to the display.
+- **Where each leg runs**: `D` where a colour is read, at the resource seam,
+  and wherever the engine turns light into the device's values; the page
+  composites in the proof device's space; `V` per pixel on the finished page.
+- **Two intents and a paper**: `D` at the intent in force for the colour,
+  `V` relative colorimetric unless the caller asks for the paper.
+- **Two sources**: a profile the caller hands over, and the document's own
+  output intent, chosen by the rule below.
+- **The integer form**, its tables and the bound the tests hold it to.
+- **Its composition with RC-06's output pixel models**, and its refusals.
+
+### Non-goals
+
+- **A gamut warning.** RC-20.8 reads the `gamt` tag and answers in or out of
+  gamut; marking out-of-gamut pixels on a proof is no step of RC-05.
+- **Spot inks through an output intent's PDF 2.0 data** — `/MixingHints`,
+  `/SpectralData`, a `/DestOutputProfileRef`'s colorant table. 14.11.5 says
+  of the first two that "This document intentionally does not specify how a
+  PDF processor may make use of the data … and a PDF processor may ignore
+  such data altogether". A `/Separation` or `/DeviceN` reaches the proof
+  device through its alternate, as below.
+- **A profile by reference.** `/DestOutputProfileRef` names profiles by
+  checksum, URL or embedded file (Table 402); only the embedded
+  `/DestOutputProfile` stream is read.
+- **A standard production condition with no profile.** 14.11.5 lets an
+  intent name a registered condition by `/OutputConditionIdentifier` alone,
+  "the production software … responsible for providing the corresponding
+  ICC profile"; no registry's profiles are shipped, so such an intent proofs
+  nothing and says so.
+- **Proof profiles of more than four channels, device links, abstract and
+  named-colour profiles** (`link`, `abst`, `nmcl`): refused by name, below.
+- **Black-point compensation on either leg** is RC-02's parameter, which both
+  legs take when it lands; **overprint simulation** is RC-03's switch, drawn
+  on the same ink canvas a CMYK proof uses.
+
+### Design
+
+#### What a colour is on the proof device
+
+10.3.2 is the rule: "A PDF processor should establish CIE-based colour
+specifications for device colour spaces … when those device colour spaces do
+not match that of the raster output device. If the native device colour space
+is CMYK, then converting colours in the DeviceGray colour space to that CMYK
+should follow the method described in 10.4.2.3". So a device colour of the
+proof device's own family **is** the device's value, and every other colour
+is taken through the connection space. The engine's CIE-based reading of a
+device space is the one it renders the screen by: DeviceRGB as sRGB
+(`SRGB_TO_XYZ_D50`), DeviceGray as an sRGB grey, DeviceCMYK as its 8.6.4.4
+light read as sRGB.
+
+| The colour's space | Grey proof | RGB proof | CMYK proof |
+| --- | --- | --- | --- |
+| DeviceGray | its own grey | sRGB grey, through `D` | `0 0 0 1−g`, 10.4.2.3 |
+| DeviceRGB | sRGB, through `D` | its own components | sRGB, through `D` |
+| DeviceCMYK | its light, through `D` | its light, through `D` | its own components |
+| `ICCBased`, `CalGray`, `CalRGB`, `/Lab`, a default space (8.6.5.6) | its own connection-space value through the output direction | the same | the same |
+| `/Indexed` | its base's colour, by this table | the same | the same |
+| `/Separation`, `/DeviceN` | its alternate's colour, by this table | the same | the same, or its plates where RC-04 composites spots |
+| An uncoloured pattern's colour | its base's colour, by this table | the same | the same |
+
+**A DeviceCMYK colour under a CMYK proof is the proof device's own ink**: its
+components composite on the ink canvas as they are (`GraphicsState::fill_ink`,
+the slot RC-04.6 generalises to colorants), and only `V` converts them:
+10.3.2 remaps a device space only where it does not match the device's, so on
+a CMYK device DeviceCMYK is the device's own colorants. Under a `/DefaultCMYK`
+it is H-135's answer for an ink render too: the document's own components. Its light, which a buffer of another family reads, is `V` of
+those components, since the proof profile is what characterises DeviceCMYK on
+this device; the same holds for a DeviceGray colour under a CMYK proof, whose
+ink is 10.4.2.3's.
+
+A colour's own connection-space value is its profile's `A2B*` at the intent in
+force (RC-01), and a `CalGray`, `CalRGB` or `/Lab` colour's is its closed form
+(8.6.5.2–8.6.5.4), which `parse_space` already reads; so a wide-gamut colour
+reaches the proof device without being clipped to sRGB first. That is why `D`
+runs where the colour is read and not on a composited sRGB page.
+
+#### Where each leg runs
+
+1. **The page composites in the proof device's space.** The page canvas is
+   `Gray8`/`GrayA8` for a grey proof, `Rgb8`/`Rgba8` for an RGB one, and
+   RC-04's ink canvas — its four process plates, `CmykA8`'s layout — for a
+   CMYK one, and its values are the device's.
+2. **A colour arrives as its device value, computed at the resource seam**
+   from its own space by the table above: on a grey or RGB proof in the light
+   slot (`fill_color`), so that every buffer of the render holds the device's
+   light; on a CMYK proof in the ink slot, beside a light that is `V` of it.
+   The seam is asked for every colour — the interpreter's device operators
+   take the path they take under a default space (`FontSource::device_defaults`
+   answers that all three are remapped), so `g`, `rg` and `k` resolve through
+   `resolve_color` and `resolve_ink` like `sc`. Images decode to device values
+   at the seam, through the decoded-image cache keyed by the proof as it is by
+   the intent (RC-01.6); on a CMYK proof by RC-04.12's samples kept for plates.
+   Shadings and meshes are evaluated in the renderer (`shading.rs`, `mesh.rs`),
+   which is handed the compiled proof — a PDF-free value of `tinker-pdf-color` —
+   and converts each colour they evaluate through it, on a CMYK proof by
+   RC-04.13's and RC-04.14's colorant paths.
+3. **Light turned into ink on a CMYK proof goes through `D`**, not through
+   maximum undercolour removal: a group of another family composited onto an
+   ink buffer (11.6.6's boundary conversion), and a page whose `/Group` names
+   another family (11.4.7: the page group is composited and then converted to
+   the device). The ink canvas carries its light-to-ink conversion as a value
+   — the seam RC-08.2 gives black generation and undercolour removal — and a
+   proof sets it to `D` from sRGB light. A non-isolated group of another
+   family over device values starts from them through `V` (11.4.4).
+4. **On a grey or RGB proof a group of another family** — `/DeviceCMYK`,
+   `/Lab` — composites as it does today, its boundary conversions 8.6.4.4's
+   and Lab's relations applied to the device's values as light. They round
+   trip exactly (the CMYK relation's inverse is exact, [Stage 1](#stage-1-transparency-group-colour-spaces)),
+   so `Normal` compositing inside such a group is exact; a blend mode inside
+   it blends the device's values in that family's encoding, a reading this
+   design states rather than a conversion it performs.
+5. **`V` runs per pixel on the finished page canvas**, at the end of
+   `render_layer_with`, before any output conversion RC-06 makes. It reads the
+   pixel alone, so a tile's pixels are the page's there (ruling 5), and alpha
+   is kept.
+
+#### Intents and the paper
+
+- **`D` takes the intent in force for the colour** — `ri`, `/RI` and an
+  image's `/Intent` as RC-01 selects it — through the output direction's
+  table for that intent (`B2A0`, `B2A1`, `B2A2`; absolute colorimetric
+  through `B2A1` scaled by the media white, RC-01.3), with RC-01's fallback
+  where a table is absent. The output direction is compiled per intent as
+  [What compiling per intent costs](#what-compiling-per-intent-costs)
+  compiles the input direction: each distinct `B2A*` table the first time a
+  colour asks for it, absolute colorimetric's scaling applied after the
+  relative table's, so a proof holds at most one output transform a distinct
+  table.
+- **`V` is relative colorimetric**, so the paper the device prints on shows
+  as the display's white; **with the paper asked for, absolute colorimetric**,
+  the profile's media white scaled against D50 as RC-01.3 scales it, so a
+  newsprint condition shows its paper's colour. One display intent per
+  render, chosen with the proof; the page's own intents do not reach it,
+  since the display is not the content's destination.
+- **The page's background** is the device's own paper — no ink on a CMYK
+  proof, `1` on a grey one, `1 1 1` on an RGB one — and `V` shows it as
+  white, or as the paper.
+
+#### Which output intent proofs a page
+
+14.11.5 settles the page against the catalog and leaves the subtype to the
+workflow: "The choice of which output intent to use in a given workflow is
+outside the scope of ISO 32000-2 and therefore PDF intentionally does not
+include a selector for choosing a particular output intent from within the
+PDF file", and "If a PDF processor chooses to respect output intents, then
+when processing a page that has an associated (page-level) output intent,
+that page-level output intent shall be used." So the caller names the
+workflow's subtype — `GTS_PDFX`, `GTS_PDFA1`, `ISO_PDFE1` or another — or
+none, and:
+
+1. The **candidates** of a list are its entries of that subtype, in array
+   order; every entry when none is named.
+2. The page's own `/OutputIntents` (PDF 2.0, `Page::output_intents`) are
+   read first: **if they hold a candidate, the page's list is the one used**
+   and the catalog's is not read. A page whose intents are all of other
+   subtypes has no page-level intent for this workflow, and the catalog's list
+   (`Document::output_intents`) is used.
+3. In the list used, the **first candidate carrying a `/DestOutputProfile`**
+   proofs the page.
+4. A list whose candidates carry no profile, and a document with no
+   candidate at all, render the page unproofed and name it (ruling 2 and
+   10): `RenderWarning::ProofUnavailable`, with the intent's
+   `/OutputConditionIdentifier` where there is one and a reason —
+   `NoOutputIntent`, `NoDestinationProfile`, or `Refused` with the
+   `ProofError` its profile met. A refused profile is not passed over for the
+   next candidate: the next is another output condition.
+
+The choice is one function in `crates/tinker-pdf/src/output_intents.rs`.
+SD-16.6 implements how a page's intents combine with the catalog's for every
+reader from the same clause; if it reads the clause otherwise, the proof's
+choice moves with it in that one function.
+
+#### The proof's integer form, its tables, and the bound
+
+Ruling 4: no float and no transcendental per colour. The proof is
+`icc::Proof`, compiled once from profile bytes with its display intent, and
+each stage is a table or a fixed-point product built when it is compiled:
+
+| Stage | Integer form | Table | Why that size |
+| --- | --- | --- | --- |
+| sRGB light in (DeviceRGB, the grey and CMYK readings, light at a boundary) | IEC 61966-2-1's decode, s15.16 | 256 per channel | the domain is a byte: the table is the function at every input |
+| to the connection space | `SRGB_TO_XYZ_D50`, or the source profile's `A2B*` as RC-01 compiles it per intent | — | the source's own form |
+| the output direction | RC-20's `icc::Output` at the colour's intent: the inverted matrix in s15.16 and inverted curves, or a `B2A*` table | RC-20.1's | RC-20's own tables, not resampled |
+| device components | rounded to bytes | — | the canvas holds bytes |
+| `V`, a grey proof | the profile's grey to sRGB | 256 | the domain is a byte: exact |
+| `V`, an RGB matrix/TRC proof | per channel the curve to linear s15.16, the profile's columns times XYZ-to-sRGB in s15.16 as `Transform::compile` builds it | 256 per channel | the domain is a byte |
+| `V`, a lookup-table proof | the profile's `A2B*` in integers: input curves, the grid multilinear with 16-bit fractions at the profile's own nodes, output curves interpolated in 16 bits, a Lab connection space through XYZ with the cube in fixed point | the profile's own grid | resampling a grid adds an interpolation error on top of the one its author chose |
+| `V`'s sRGB encode | IEC 61966-2-1's encode, the index rounded | 2^14 + 1 | `12.92 × 255 / (2 × 16 384)` is 0.10 of a level: under an eighth at the steepest point of the curve |
+| `V` for three and four channels | a memo of 4 096 slots keyed by the pixel's bytes | — | it holds what the evaluation returns, so it changes no byte; the `/DeviceN` image path's table is the precedent |
+
+The encode table is the proof's own: the screen path's `encode_srgb`
+(4 096 entries, its index truncated, worth up to 0.8 of a level near black)
+keeps its bytes.
+
+**The bound is derived per sample, from the tables above.** The tests'
+reference is ICC.1's equations in `f64` — curves and matrices in closed form,
+a grid at its nodes and, between them, by the test's own multilinear
+interpolation, which pins this engine's interpolation (ruling 13's named
+limit for tables). Each stage quantises by half a step of its table where it
+rounds and a whole step where it truncates; the error a stage leaves is
+carried to the output through the slopes of the stages after it, at that
+sample. Summed over the stages and in levels of 255, that is `E`, and a
+sample is held to `|byte − 255 × exact| ≤ ½ + E`. The test computes `E` for
+the profiles it builds — their closed forms give their slopes — so the bound
+is a figure the test derives rather than one chosen to pass. For the matrix
+and grey profiles RC-05.2 builds, `E` stays under half a level away from
+black and the bound is one level of 255; near black an inverted gamma curve's
+slope makes `E`, and the bound there, larger, which is the derivation working
+rather than a tolerance widened. A proofed page's sample in RC-05.3 composes
+the two legs: the device byte the test computes, then `V` of it, each leg
+within its `E`, `V`'s carrying `D`'s error through `V`'s slope.
+
+#### With RC-06's output pixel models
+
+`V`'s display space is sRGB, or RC-06.5's destination when the render has
+one: then `V` is the proof's input direction composed with the destination's
+output direction, through the connection space once, compiled once per proof
+and destination, rather than `V` to sRGB and the destination after it, which
+would clip the proof to sRGB. The BGR orders (RC-06.2) reorder `V`'s result;
+a 1-bit render (RC-06.3, RC-06.4) screens the grey of `V`'s result.
+
+#### Refused by name
+
+`Proof::new(bytes, display)` is built once and returns `Result<Proof,
+ProofError>` (ruling 2: the caller hears why at once, rather than every page
+rendering unproofed):
+
+| `ProofError` | When |
+| --- | --- |
+| `Profile(IccError)` | `Profile::parse` refuses the bytes |
+| `NoOutputDirection` | no `B2A*` table and no matrix or curve the output direction can invert — an input profile carrying `A2B*` alone, a matrix with no inverse |
+| `NoInputDirection` | no `A2B*` table and no matrix: nothing takes the device to the display |
+| `DataSpace([u8; 4])` | a data space other than `GRAY`, `RGB ` and `CMYK`: no canvas holds its components |
+| `Class([u8; 4])` | a device link, an abstract or a named-colour profile, which has no device side to proof |
+
+A document's intent whose profile is refused is the `Refused` warning above;
+`MAX_ICC_BYTES` bounds a document's profile as it bounds any.
+
+### Milestones
+
+1. **RC-05.2, the proof compiled** in `tinker-pdf-color`. Exit: `icc.rs`'s
+   `a_proof_transform_is_its_legs_composed` — a matrix/TRC RGB, a grey and a
+   LUT CMYK proof profile built in the test, each intent, at the tables'
+   nodes and between them, within the derived bound; each `ProofError`
+   reached by a profile built for it; `cargo xtask libm` passes; the
+   `icc_profile` fuzz target compiles and applies a proof.
+2. **RC-05.3, a caller's profile renders**: `RenderOptions` carries the
+   compiled proof, and `Page::render`, `render_form`, `render_annotation` and
+   a display list's render proof alike. Exit: `soft_proof.rs`'s
+   `a_proofed_page_shows_its_colours_through_the_proof_transform` — fills in
+   DeviceRGB, DeviceGray, DeviceCMYK and an `ICCBased` space through a
+   matrix/TRC and a LUT CMYK profile, each sample the composition the test
+   computes within the bound, a DeviceCMYK fill under the CMYK proof its own
+   components through `V` and a DeviceGray fill 10.4.2.3's, a `/DeviceRGB`
+   group under the CMYK proof taken through `D` at its close, the paper shown
+   under absolute colorimetric; the same page unproofed byte-identical to
+   today's render; `render_regions.rs`'s `proofed_tiles_are_the_proofed_page`.
+3. **RC-05.4, the document's output intent.** Exit: `soft_proof.rs`'s
+   `a_page_proofed_through_its_output_intent_is_proofed_through_that_profile`
+   — a `GTS_PDFX` intent's page byte-identical to its twin proofed through
+   the same profile by the caller; a PDF 2.0 page's own candidate chosen over
+   the catalog's, and the catalog's chosen for a page whose intents are all of
+   another subtype; the first candidate with a profile chosen over one
+   without; no candidate, no profile and a refused profile each rendering the
+   page unproofed with its `ProofUnavailable`; the `render_page` fuzz target
+   proofs a page through its own intent.
+4. **RC-05.5, fingerprints**: `soft_proof.rs`'s
+   `proofed_pages_are_stable_across_targets` on four targets, entered in
+   K-07's roster.
+5. **RC-05.6a and RC-05.6b, the speed row**: a page of mixed fills and an
+   image at 150 dpi proofed through a LUT CMYK profile beside the same page
+   unproofed, in MS-04's render group; RC-05.6b takes its figure.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| No second colour engine says whether a proof is right (ruling 13) | Every stage is held to ICC.1's equations at a bound the test derives from the tables; between a grid's nodes the test pins this engine's interpolation, the limit [Verification](#verification) already names |
+| `V` per pixel through a four-channel table is slow | The memo makes a page of flat colours cost a lookup a pixel; RC-05.6 measures the page that is not |
+| A colour reaches the device by two paths that disagree — through the seam, and as light through `D` at a group's close | Both are `D`, from the colour's own space where it is read and from its light where only light is left; a proofed page's tests include a group of another family on each proof |
+| A CMYK proof needs RC-04's plates, and a grey or RGB proof only today's canvases | RC-05.3 depends on RC-04.10; the grey and RGB proofs reuse the canvases as they are |
+| The proof slows every render, proofed or not | Off by default and absent from every unproofed path: an unproofed page is byte-identical, and the seam's added question is asked only when a proof is in force |
+| A page-level intent read the other way by SD-16.6 | The choice is one function, which SD-16.6 moves if it reads 14.11.5 otherwise |
+| A hostile output intent profile | `MAX_ICC_BYTES`, the parser's refusals and the `icc_profile` and `render_page` fuzz targets, as for any profile |
