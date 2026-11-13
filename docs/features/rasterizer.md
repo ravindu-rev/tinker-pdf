@@ -458,6 +458,36 @@ white spots the composite is `extract`'s
 `a_spot_with_no_colour_composites_as_white`,
 `a_region_of_plates_composites_as_the_page_under_it`).
 
+*Channels a source marks.* `Channels` is a set of a canvas's colour channels,
+a bit a channel by index — the process channels and every spot channel at
+the cap, or a light format's own — and `Canvas::set_marked` puts one in force
+for every source composited onto the canvas until it is put back, as the ink
+tables are held in force (`docs/design/overprint-separations.md`, "The
+leaf's channel mask"). Every entry that composites a source reads it: a
+mask's fill (`fill_mask_inked`, `fill_mask_plates`), a sampled pixel
+(`blend_pixel_inked`, `blend_tints`, and the level forms images and runs of
+images draw through), and a canvas composited (`composite`,
+`composite_tinted`, `composite_inked`). A channel outside the set takes
+`B(Cb, Cs) = Cb` inside 11.3.6's formula, so over an opaque backdrop it is
+its backdrop byte for byte and over one that is not its erasing is reduced
+in proportion; a channel in the set takes the blend mode as before, a spot
+under a mode that does not preserve white taking `Normal`; the alpha
+composites the source's shape whatever the set. A non-separable mode over
+ink is still taken through light, and counted, a channel outside the set
+keeping its backdrop. The opaque shortcuts, which write every channel, are
+taken only where the set covers every channel the format carries, and a
+light format takes a set over its own channels by the same rule.
+`knock_out` restores every channel. `Channels::ALL`, what every canvas
+starts with, gives every format its bytes as before
+(`a_source_paints_only_its_channels`, worked out from 11.3.6 for each
+separable mode at two source and two backdrop alphas on `CmykA8` and on
+plates; `a_full_channel_mask_composites_as_before`;
+`a_light_canvas_takes_a_set_over_its_own_channels`;
+`a_non_separable_mode_under_a_set_keeps_what_it_does_not_mark`;
+`every_entry_that_composites_reads_the_set_in_force`;
+`a_channel_set_names_its_channels`; and in `image.rs`,
+`an_image_composites_through_the_channels_in_force`).
+
 *The opaque composite.* Under `Normal`, with the colour's alpha and the
 state's both whole, onto a canvas that holds no initial backdrop and is not
 ink, `fill_mask_inked` takes a path of its own, reading the mask's rows as

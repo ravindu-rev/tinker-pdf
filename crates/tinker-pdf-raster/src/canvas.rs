@@ -231,6 +231,91 @@ impl PlateInk {
     }
 }
 
+/// A set of a canvas's colour channels: the channels a source **marks**
+/// (`docs/design/overprint-separations.md`, "The leaf's channel mask") — bit
+/// `i` channel `i`: on plates cyan 0 to black 3 and spot `i` at `4 + i`, on
+/// `CmykA8` the four inks, on light red, green and blue or the grey — wide
+/// enough for every channel a plates canvas carries at [`MAX_SPOT_PLATES`].
+///
+/// A channel outside the set keeps its backdrop: the blend function there is
+/// `B(Cb, Cs) = Cb` inside 11.3.6's compositing formula, so over an opaque
+/// backdrop the channel is untouched and over one that is not opaque its
+/// erasing is reduced in proportion (11.7.4.2). A channel in it takes the
+/// blend mode in force. [`Channels::ALL`] marks every channel and composites
+/// every format exactly as a canvas with no set does. The set knows channels
+/// and nothing about colorants or overprint (ruling 8): which channels a
+/// paint marks is its caller's to work out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Channels(u128);
+
+impl Channels {
+    /// Every channel.
+    pub const ALL: Channels = Channels(u128::MAX);
+    /// No channel: a source in force with it changes no colour channel, its
+    /// shape still compositing into the alpha.
+    pub const NONE: Channels = Channels(0);
+
+    /// The set of `channels`; a channel past the widest a canvas carries is
+    /// none of any canvas's, and passed over.
+    #[must_use]
+    pub fn of(channels: impl IntoIterator<Item = usize>) -> Channels {
+        channels
+            .into_iter()
+            .fold(Channels::NONE, |set, channel| set.with(channel))
+    }
+
+    /// This set and `channel`.
+    #[must_use]
+    pub fn with(self, channel: usize) -> Channels {
+        match u32::try_from(channel)
+            .ok()
+            .and_then(|at| 1u128.checked_shl(at))
+        {
+            Some(bit) => Channels(self.0 | bit),
+            None => self,
+        }
+    }
+
+    /// Whether the set marks `channel`. [`Channels::ALL`] marks every one.
+    #[must_use]
+    pub fn contains(self, channel: usize) -> bool {
+        if self == Channels::ALL {
+            return true;
+        }
+        u32::try_from(channel)
+            .ok()
+            .and_then(|at| self.0.checked_shr(at))
+            .is_some_and(|bits| bits & 1 == 1)
+    }
+
+    /// Whether the set marks each of the first `count` channels: every colour
+    /// channel of a format of `count`, where it composites as one with no set.
+    #[must_use]
+    pub fn covers(self, count: usize) -> bool {
+        if self == Channels::ALL {
+            return true;
+        }
+        // Past the widest set no set but `ALL` covers them all.
+        match u32::try_from(count)
+            .ok()
+            .filter(|count| *count < u128::BITS)
+        {
+            Some(count) => {
+                let wanted = (1u128 << count) - 1;
+                self.0 & wanted == wanted
+            }
+            None => false,
+        }
+    }
+}
+
+impl Default for Channels {
+    /// Every channel, as a canvas composites with no set in force.
+    fn default() -> Self {
+        Channels::ALL
+    }
+}
+
 /// One spot channel's colour by itself, as the composite of a
 /// [`PixelFormat::Plates`] canvas reads it ([`Canvas::composite_plates_into`]):
 /// at each tint `t`, entry `t`, the light the channel's colorant alone shows
@@ -518,6 +603,11 @@ pub struct Canvas {
     /// light into ink by, while a caller holds them in force; `None` is
     /// maximum undercolour removal. Every other format never reads it.
     ink_tables: Option<std::sync::Arc<InkTables>>,
+    /// The colour channels the sources composited onto this canvas mark,
+    /// while a caller holds a set in force ([`Canvas::set_marked`]);
+    /// [`Channels::ALL`] otherwise, which composites as before any set
+    /// existed.
+    marked: Channels,
 }
 
 impl Canvas {
@@ -543,6 +633,7 @@ impl Canvas {
             backdrop: false,
             approximated_blends: 0,
             ink_tables: None,
+            marked: Channels::ALL,
         };
         canvas.clear(background);
         canvas
@@ -725,6 +816,42 @@ impl Canvas {
         std::mem::replace(&mut self.ink_tables, tables)
     }
 
+    /// Puts `channels` in force as the colour channels every source
+    /// composited onto this canvas from now on marks, and hands back the set
+    /// that was in force (`docs/design/overprint-separations.md`, "The leaf's
+    /// channel mask").
+    ///
+    /// Read by every entry that composites a source — a mask's fill
+    /// ([`Canvas::fill_mask_inked`], [`Canvas::fill_mask_plates`]), a
+    /// sampled pixel ([`Canvas::blend_pixel_inked`], [`Canvas::blend_tints`],
+    /// and the level forms an image and a run of images draw through), and a
+    /// canvas ([`Canvas::composite`], [`Canvas::composite_tinted`],
+    /// [`Canvas::composite_inked`]): a channel outside the set takes
+    /// `B = Cb` inside 11.3.6's formula, written at [`Channels`], and keeps
+    /// its backdrop over an opaque one. A channel in it takes the blend mode
+    /// as before, and so does every channel with [`Channels::ALL`], the set
+    /// a canvas starts with, so every format's bytes are what they were. A
+    /// non-separable mode over ink is still taken through light, a channel
+    /// outside the set then keeping its backdrop. [`Canvas::knock_out`]
+    /// restores every channel, marked or not. The light formats take a set
+    /// as plates do, over their own channels.
+    pub fn set_marked(&mut self, channels: Channels) -> Channels {
+        std::mem::replace(&mut self.marked, channels)
+    }
+
+    /// The colour channels in force ([`Canvas::set_marked`]).
+    #[must_use]
+    pub const fn marked(&self) -> Channels {
+        self.marked
+    }
+
+    /// Whether the set in force marks every colour channel this canvas
+    /// carries, so a source composites as one with no set: the opaque
+    /// shortcuts, which write every channel, are taken only then.
+    fn marks_every_channel(&self) -> bool {
+        self.marked.covers(color_channels(self.format))
+    }
+
     /// Composites `color` through `mask` onto the canvas.
     ///
     /// `alpha` scales the whole operation, which is what the graphics state's
@@ -802,6 +929,7 @@ impl Canvas {
             && mask.outside == 0
             && !self.backdrop
             && self.format != PixelFormat::CmykA8
+            && self.marks_every_channel()
         {
             self.fill_opaque(mask, &source, rect);
         } else {
@@ -882,8 +1010,9 @@ impl Canvas {
                 }
                 let base = (row as usize) * self.stride + (col as usize) * components;
                 let backdrop = self.backdrop_alpha(col, row);
+                let marked = self.marked;
                 if let Some(pixel) = self.data.get_mut(base..base + components) {
-                    blend_plates(pixel, &source, effective, channels, mode, backdrop);
+                    blend_plates(pixel, &source, effective, channels, mode, backdrop, marked);
                 }
             }
         }
@@ -907,6 +1036,11 @@ impl Canvas {
     ) {
         let components = self.format.components();
         let (ox, oy) = self.origin;
+        // Under a set naming fewer channels than the canvas has, a whole
+        // pixel under `Normal` still keeps its backdrop where it is not
+        // marked, so it takes the general composite.
+        let whole = self.marks_every_channel();
+        let marked = self.marked;
         for row in y0..y1 {
             for col in x0..x1 {
                 let coverage = u32::from(
@@ -923,20 +1057,21 @@ impl Canvas {
                 }
 
                 let base = (row as usize) * self.stride + (col as usize) * components;
-                if effective == 255 && mode == BlendMode::Normal {
+                if effective == 255 && mode == BlendMode::Normal && whole {
                     if let Some(pixel) = self.data.get_mut(base..base + components) {
                         opaque_normal(pixel, source, self.format);
                     }
                     continue;
                 }
                 let backdrop = self.backdrop_alpha(col, row);
-                blend(
+                blend_marked(
                     self.data.get_mut(base..base + components),
                     source,
                     effective,
                     self.format,
                     mode,
                     backdrop,
+                    marked,
                 );
             }
         }
@@ -1121,20 +1256,22 @@ impl Canvas {
             _ => self.encode(color),
         };
         let base = (y as usize) * self.stride + (x as usize) * components;
-        if effective == 255 && mode == BlendMode::Normal {
+        if effective == 255 && mode == BlendMode::Normal && self.marks_every_channel() {
             if let Some(pixel) = self.data.get_mut(base..base + components) {
                 opaque_normal(pixel, &source, self.format);
             }
             return;
         }
         let backdrop = self.backdrop_alpha(x, y);
-        blend(
+        let marked = self.marked;
+        blend_marked(
             self.data.get_mut(base..base + components),
             &source,
             effective,
             self.format,
             mode,
             backdrop,
+            marked,
         );
     }
 
@@ -1171,11 +1308,12 @@ impl Canvas {
         let components = self.format.components();
         let base = (y as usize) * self.stride + (x as usize) * components;
         let backdrop = self.backdrop_alpha(x, y);
+        let marked = self.marked;
         if let (Some(pixel), Some(source)) = (
             self.data.get_mut(base..base + components),
             source.get(..channels),
         ) {
-            blend_plates(pixel, source, effective, channels, mode, backdrop);
+            blend_plates(pixel, source, effective, channels, mode, backdrop, marked);
         }
     }
 
@@ -1240,11 +1378,12 @@ impl Canvas {
         let components = self.format.components();
         let base = (y as usize) * self.stride + (x as usize) * components;
         let backdrop = self.backdrop_alpha(x, y);
+        let marked = self.marked;
         if let (Some(pixel), Some(source)) = (
             self.data.get_mut(base..base + components),
             source.get(..channels),
         ) {
-            blend_plates(pixel, source, effective, channels, mode, backdrop);
+            blend_plates(pixel, source, effective, channels, mode, backdrop, marked);
         }
     }
 
@@ -1438,6 +1577,8 @@ impl Canvas {
         if mode.is_nonseparable() && self.format == PixelFormat::CmykA8 {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
         }
+        let whole = self.marks_every_channel();
+        let marked = self.marked;
         for row in y0..y1 {
             if row.wrapping_sub(y0) % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
                 return;
@@ -1467,20 +1608,21 @@ impl Canvas {
                 }
 
                 let base = (row as usize) * self.stride + (col as usize) * components;
-                if effective == 255 && mode == BlendMode::Normal {
+                if effective == 255 && mode == BlendMode::Normal && whole {
                     if let Some(pixel) = self.data.get_mut(base..base + components) {
                         opaque_normal(pixel, &source, self.format);
                     }
                     continue;
                 }
                 let backdrop = self.backdrop_alpha(col, row);
-                blend(
+                blend_marked(
                     self.data.get_mut(base..base + components),
                     &source,
                     effective,
                     self.format,
                     mode,
                     backdrop,
+                    marked,
                 );
             }
         }
@@ -1527,6 +1669,7 @@ impl Canvas {
         let channels = color_channels(format);
         // Light a source carries becomes ink here by the tables in force.
         let tables = self.ink_tables.clone();
+        let marked = self.marked;
         let mut word = vec![0u8; components];
         for row in y0..y1 {
             if row.wrapping_sub(y0) % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
@@ -1567,13 +1710,21 @@ impl Canvas {
                     continue;
                 };
                 if plates {
-                    blend_plates(pixel, &word, effective, channels, mode, backdrop);
+                    blend_plates(pixel, &word, effective, channels, mode, backdrop, marked);
                 } else {
                     let mut five = [0u8; 5];
                     for (slot, from) in five.iter_mut().zip(&word) {
                         *slot = *from;
                     }
-                    blend(Some(pixel), &five, effective, format, mode, backdrop);
+                    blend_marked(
+                        Some(pixel),
+                        &five,
+                        effective,
+                        format,
+                        mode,
+                        backdrop,
+                        marked,
+                    );
                 }
             }
         }
@@ -2870,6 +3021,8 @@ fn color_channels(format: PixelFormat) -> usize {
 /// the alpha channel must keep accumulating the group's *own* `ag` so that
 /// 11.4.7.2 can divide the backdrop out again afterwards. With `initial = 0`
 /// the two are the same number and every line below is what it was.
+///
+/// Every colour channel is marked: [`blend_marked`] with [`Channels::ALL`].
 fn blend(
     dst: Option<&mut [u8]>,
     source: &[u8; 5],
@@ -2877,6 +3030,28 @@ fn blend(
     format: PixelFormat,
     mode: BlendMode,
     initial: u32,
+) {
+    blend_marked(dst, source, alpha, format, mode, initial, Channels::ALL);
+}
+
+/// [`blend`], the source marking the colour channels in `marked` alone
+/// (`docs/design/overprint-separations.md`, "Overprint under transparency"):
+/// a channel outside the set takes `B(Cb, Cs) = Cb` inside 11.3.6's formula,
+/// `Cr = (1 − αs/αr)·Cb + (αs/αr)·((1 − αb)·Cs + αb·Cb)`, `Cs` that channel's
+/// source — so over an opaque backdrop it is the backdrop, and over one that
+/// is not its erasing is reduced in proportion (11.7.4.2). A non-separable
+/// mode over ink is taken through light as [`blend`] takes it, and a channel
+/// outside the set keeps its backdrop there too. The alpha channel
+/// composites the source's shape whatever the set (11.7.3: one shape and one
+/// opacity a point). With [`Channels::ALL`] every line is [`blend`]'s.
+fn blend_marked(
+    dst: Option<&mut [u8]>,
+    source: &[u8; 5],
+    alpha: u32,
+    format: PixelFormat,
+    mode: BlendMode,
+    initial: u32,
+    marked: Channels,
 ) {
     let Some(dst) = dst else { return };
     #[cfg(test)]
@@ -2917,7 +3092,10 @@ fn blend(
         };
         let cs = u32::from(*src);
         let cb = u32::from(*slot);
-        let mixed = if subtractive {
+        let mixed = if !marked.contains(i) {
+            // 11.7.4.3's `B = Cb`: a channel the source does not mark.
+            cb
+        } else if subtractive {
             255 - mode.apply(255 - cb, 255 - cs)
         } else {
             mode.apply(cb, cs)
@@ -2959,8 +3137,12 @@ fn blend(
             let (Some(out), Some(src)) = (blended.get_mut(i), source.get(i)) else {
                 continue;
             };
-            *out = mul255(255 - backdrop_alpha, u32::from(*src))
-                + mul255(backdrop_alpha, u32::from(mixed));
+            let mixed = if marked.contains(i) {
+                u32::from(mixed)
+            } else {
+                u32::from(dst.get(i).copied().unwrap_or(0))
+            };
+            *out = mul255(255 - backdrop_alpha, u32::from(*src)) + mul255(backdrop_alpha, mixed);
         }
     } else if mode.is_nonseparable() {
         // 11.3.5.3's four modes are defined over three components, and a
@@ -3005,7 +3187,12 @@ fn blend(
             let (Some(cs), Some(mixed)) = (cs.get(i), mixed.get(i)) else {
                 continue;
             };
-            *out = mul255(255 - backdrop_alpha, *cs) + mul255(backdrop_alpha, *mixed);
+            let mixed = if marked.contains(i) {
+                *mixed
+            } else {
+                u32::from(dst.get(i).copied().unwrap_or(0))
+            };
+            *out = mul255(255 - backdrop_alpha, *cs) + mul255(backdrop_alpha, mixed);
         }
     }
 
@@ -3061,6 +3248,10 @@ fn blend(
 /// to the process channels through light, as `CmykA8`'s `blend` takes them —
 /// 8.6.4.4 out of ink, 11.3.5.3 over the light, maximum undercolour removal
 /// back — while every spot channel takes `Normal`.
+///
+/// **A channel outside `marked` keeps its backdrop**: `B = Cb` inside the
+/// same formula, as [`blend_marked`] takes it, whatever the mode; with
+/// [`Channels::ALL`] every channel blends as above.
 fn blend_plates(
     dst: &mut [u8],
     source: &[u8],
@@ -3068,6 +3259,7 @@ fn blend_plates(
     channels: usize,
     mode: BlendMode,
     initial: u32,
+    marked: Channels,
 ) {
     #[cfg(test)]
     blends::counted();
@@ -3107,6 +3299,8 @@ fn blend_plates(
         let cs = u32::from(*src);
         let cb = u32::from(*slot);
         let blended = match lit {
+            // 11.7.4.3's `B = Cb`: a channel the source does not mark.
+            _ if !marked.contains(channel) => cb,
             Some(lit) if channel < 4 => u32::from(lit.get(channel).copied().unwrap_or(0)),
             _ if channel < 4 => 255 - mode.apply(255 - cb, 255 - cs),
             _ => 255 - spot_mode.apply(255 - cb, 255 - cs),
@@ -6246,6 +6440,529 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The test's own `a × b / 255` over wider values, rounded half up.
+    fn times_wide(a: u32, b: u32) -> u32 {
+        (2 * a * b + 255) / 510
+    }
+
+    /// 11.3.6's composite of one channel, written out here in 255ths:
+    /// backdrop `cb` at alpha `ab`, source `cs` at alpha `a_s`, the blend
+    /// function's value `b` —
+    /// `Cr = ((1 − αs)·αb·Cb + αs·((1 − αb)·Cs + αb·B)) / αr`, with
+    /// `αr = αs + αb·(1 − αs)`, each product rounded.
+    fn composite_channel(cb: u8, ab: u8, cs: u8, a_s: u8, b: u32) -> u8 {
+        let (cb, ab, cs, a_s) = (u32::from(cb), u32::from(ab), u32::from(cs), u32::from(a_s));
+        let mixed = times_wide(255 - ab, cs) + times_wide(ab, b);
+        if ab == 255 {
+            return (times_wide(mixed, a_s) + times_wide(cb, 255 - a_s)).min(255) as u8;
+        }
+        let union = a_s + times_wide(ab, 255 - a_s);
+        if union == 0 {
+            return 0;
+        }
+        let weighted = times_wide(mixed, a_s) + times_wide(times_wide(cb, ab), 255 - a_s);
+        ((weighted * 255 + union / 2) / union).min(255) as u8
+    }
+
+    /// **A source paints only its channels** (RC-03.2): on `CmykA8` and on
+    /// plates of two spots, for each separable blend mode, a source alpha of
+    /// 1 and 0.5 and a backdrop alpha of 1 and 0.5, over a backdrop of ink in
+    /// every channel, a fill under each of several channel sets — process
+    /// channels alone, a spot alone, a process channel and a spot, none —
+    /// gives each marked channel 11.3.6's composite under the mode (a spot
+    /// under `Difference` or `Exclusion` under `Normal`, 11.7.4.2), each
+    /// unmarked one the composite with `B = Cb`, and the alpha the source's
+    /// shape over the backdrop's, all worked out here from the formula; over
+    /// the opaque backdrop an unmarked channel is its backdrop exactly.
+    #[test]
+    fn a_source_paints_only_its_channels() {
+        let full = solid(0, 0, 1, 1, 255);
+        let backdrop_tints = [40u8, 90, 160, 210, 70, 230];
+        let source_tints = [200u8, 30, 120, 60, 250, 10];
+        for (format, sets) in [
+            (
+                PixelFormat::CmykA8,
+                vec![
+                    Channels::of([0, 1, 2, 3]),
+                    Channels::of([1]),
+                    Channels::of([0, 3]),
+                    Channels::NONE,
+                ],
+            ),
+            (
+                PixelFormat::Plates { spots: spots(2) },
+                vec![
+                    Channels::of([0, 1, 2, 3]),
+                    Channels::of([4]),
+                    Channels::of([2, 5]),
+                    Channels::of([0, 1, 2, 3, 4, 5]),
+                    Channels::NONE,
+                ],
+            ),
+        ] {
+            let channels = color_channels(format);
+            for mode in SEPARABLE {
+                for (alpha, a_s) in [(1.0, 255u8), (0.5, 128)] {
+                    for ab in [255u8, 128] {
+                        for &marked in &sets {
+                            let what =
+                                format!("{format:?} {mode:?} at {alpha} over {ab}, {marked:?}");
+                            let mut canvas = Canvas::new(1, 1, format, Color::TRANSPARENT);
+                            canvas.data[..channels].copy_from_slice(&backdrop_tints[..channels]);
+                            canvas.data[channels] = ab;
+                            assert_eq!(canvas.set_marked(marked), Channels::ALL);
+                            let tints: Vec<(usize, u8)> = source_tints[..channels]
+                                .iter()
+                                .copied()
+                                .enumerate()
+                                .collect();
+                            if format == PixelFormat::CmykA8 {
+                                let ink = [
+                                    source_tints[0],
+                                    source_tints[1],
+                                    source_tints[2],
+                                    source_tints[3],
+                                ];
+                                let (r, g, b) = cmyk_to_rgb(ink[0], ink[1], ink[2], ink[3]);
+                                canvas.fill_mask_inked(
+                                    &full,
+                                    Color::rgb(r, g, b),
+                                    Some(ink),
+                                    alpha,
+                                    mode,
+                                );
+                            } else {
+                                let ink = PlateInk::named(spots(2), &tints);
+                                canvas.fill_mask_plates(&full, &ink, alpha, mode);
+                            }
+                            assert_eq!(canvas.marked(), marked, "{what}: the set stays in force");
+                            for channel in 0..channels {
+                                let (cb, cs) = (backdrop_tints[channel], source_tints[channel]);
+                                let b = if !marked.contains(channel) {
+                                    u32::from(cb)
+                                } else if channel >= 4
+                                    && matches!(mode, BlendMode::Difference | BlendMode::Exclusion)
+                                {
+                                    u32::from(cs)
+                                } else {
+                                    255 - mode.apply(255 - u32::from(cb), 255 - u32::from(cs))
+                                };
+                                let want = composite_channel(cb, ab, cs, a_s, b);
+                                assert_eq!(canvas.data[channel], want, "{what}: channel {channel}");
+                                if !marked.contains(channel) && ab == 255 {
+                                    assert_eq!(
+                                        canvas.data[channel], cb,
+                                        "{what}: {channel} untouched"
+                                    );
+                                }
+                            }
+                            let alpha_out = (u32::from(a_s)
+                                + times_wide(u32::from(ab), 255 - u32::from(a_s)))
+                            .min(255) as u8;
+                            assert_eq!(canvas.data[channels], alpha_out, "{what}: the alpha");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A light canvas takes a set over its own channels**, by the same rule:
+    /// red alone marked keeps green and blue over an opaque backdrop exactly,
+    /// and composites them with `B = Cb` over a backdrop at half alpha; a
+    /// whole-pixel `Normal` fill, which takes the opaque shortcut with every
+    /// channel marked, takes the general composite under a set and writes the
+    /// marked channel alone.
+    #[test]
+    fn a_light_canvas_takes_a_set_over_its_own_channels() {
+        let full = solid(0, 0, 2, 2, 255);
+        for format in [PixelFormat::Rgb8, PixelFormat::Rgba8] {
+            let mut canvas = Canvas::new(2, 2, format, Color::rgb(10, 120, 200));
+            canvas.set_marked(Channels::of([0]));
+            canvas.fill_mask(&full, Color::rgb(250, 5, 5), 1.0);
+            assert_eq!(&canvas.data[..3], &[250, 120, 200], "{format:?}: red alone");
+            canvas.set_marked(Channels::ALL);
+            canvas.fill_mask(&full, Color::rgb(1, 2, 3), 1.0);
+            assert_eq!(
+                &canvas.data[..3],
+                &[1, 2, 3],
+                "{format:?}: every channel again"
+            );
+        }
+        let mut half = Canvas::new(1, 1, PixelFormat::Rgba8, Color::TRANSPARENT);
+        half.data.copy_from_slice(&[10, 120, 200, 128]);
+        half.set_marked(Channels::of([2]));
+        half.fill_mask(&solid(0, 0, 1, 1, 255), Color::rgb(250, 60, 7), 0.5);
+        for (channel, (cb, cs)) in [(10u8, 250u8), (120, 60), (200, 7)].into_iter().enumerate() {
+            let b = if channel == 2 {
+                u32::from(cs)
+            } else {
+                u32::from(cb)
+            };
+            assert_eq!(
+                half.data[channel],
+                composite_channel(cb, 128, cs, 128, b),
+                "channel {channel}"
+            );
+        }
+    }
+
+    /// **A non-separable mode under a set** keeps every channel it does not
+    /// mark: on `CmykA8` and on plates the marked process channels take the
+    /// mode through light as without a set, each unmarked one, process or
+    /// spot, its backdrop exactly over an opaque backdrop.
+    #[test]
+    fn a_non_separable_mode_under_a_set_keeps_what_it_does_not_mark() {
+        let full = solid(0, 0, 1, 1, 255);
+        for mode in [
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ] {
+            for format in [PixelFormat::CmykA8, PixelFormat::Plates { spots: spots(1) }] {
+                let channels = color_channels(format);
+                let backdrop = [30u8, 140, 60, 20, 90];
+                let paint = |canvas: &mut Canvas| {
+                    if format == PixelFormat::CmykA8 {
+                        canvas.fill_mask_inked(
+                            &full,
+                            Color::rgb(0, 0, 0),
+                            Some([200, 10, 90, 0]),
+                            1.0,
+                            mode,
+                        );
+                    } else {
+                        let ink = PlateInk::named(
+                            spots(1),
+                            &[(0, 200), (1, 10), (2, 90), (3, 0), (4, 180)],
+                        );
+                        canvas.fill_mask_plates(&full, &ink, 1.0, mode);
+                    }
+                };
+                let start = || {
+                    let mut canvas = Canvas::new(1, 1, format, Color::TRANSPARENT);
+                    canvas.data[..channels].copy_from_slice(&backdrop[..channels]);
+                    canvas.data[channels] = 255;
+                    canvas
+                };
+                let mut every = start();
+                paint(&mut every);
+                let marked = Channels::of([0, 2]);
+                let mut some = start();
+                some.set_marked(marked);
+                paint(&mut some);
+                for channel in 0..channels {
+                    let want = if marked.contains(channel) {
+                        every.data[channel]
+                    } else {
+                        backdrop[channel]
+                    };
+                    assert_eq!(
+                        some.data[channel], want,
+                        "{mode:?} {format:?} channel {channel}"
+                    );
+                }
+                assert_eq!(
+                    some.approximated_blends(),
+                    1,
+                    "{mode:?} {format:?}: still through light"
+                );
+            }
+        }
+    }
+
+    /// **Every entry that composites a source reads the set in force**: a
+    /// sampled pixel (`blend_pixel_inked`, `blend_tints`), a canvas
+    /// composited (`composite`, onto ink and onto plates), an uncoloured
+    /// cell's colour (`composite_tinted`, `composite_inked`) — each under a set
+    /// marking cyan alone leaves every other channel of an opaque backdrop as
+    /// it was, and writes cyan as the same entry does with every channel
+    /// marked; `knock_out` restores every channel whatever the set.
+    #[test]
+    fn every_entry_that_composites_reads_the_set_in_force() {
+        let backdrop = [30u8, 140, 60, 20, 90, 200];
+        let start = |format: PixelFormat| {
+            let channels = color_channels(format);
+            let mut canvas = Canvas::new(1, 1, format, Color::TRANSPARENT);
+            canvas.data[..channels].copy_from_slice(&backdrop[..channels]);
+            canvas.data[channels] = 255;
+            canvas
+        };
+        let mut cell = Canvas::plates(1, 1, 2, Color::TRANSPARENT).expect("under the cap");
+        cell.fill_mask_plates(
+            &solid(0, 0, 1, 1, 255),
+            &PlateInk::named(spots(2), &[(0, 250), (1, 5), (4, 255), (5, 128)]),
+            1.0,
+            BlendMode::Normal,
+        );
+        let ink_cell = cell.extract((0, 0), 1, 1, PixelFormat::CmykA8);
+        let ink = PlateInk::named(spots(2), &[(0, 250), (1, 5), (4, 255)]);
+        type Entry = Box<dyn Fn(&mut Canvas)>;
+        let entries: Vec<(&str, PixelFormat, Entry)> = vec![
+            (
+                "blend_pixel_inked",
+                PixelFormat::CmykA8,
+                Box::new(|canvas| {
+                    canvas.blend_pixel_inked(
+                        0,
+                        0,
+                        Color::BLACK,
+                        Some([250, 5, 7, 9]),
+                        0.7,
+                        BlendMode::Multiply,
+                    )
+                }),
+            ),
+            (
+                "blend_tints",
+                PixelFormat::Plates { spots: spots(2) },
+                Box::new(|canvas| {
+                    canvas.blend_tints(0, 0, &[250, 5, 7, 9, 255, 3], 0.7, BlendMode::Normal)
+                }),
+            ),
+            (
+                "composite onto plates",
+                PixelFormat::Plates { spots: spots(2) },
+                Box::new({
+                    let cell = cell.clone();
+                    move |canvas| {
+                        canvas.composite(&cell, (0, 0), 1.0, BlendMode::Normal, None, None)
+                    }
+                }),
+            ),
+            (
+                "composite onto ink",
+                PixelFormat::CmykA8,
+                Box::new({
+                    let cell = ink_cell.clone();
+                    move |canvas| {
+                        canvas.composite(&cell, (0, 0), 0.6, BlendMode::Screen, None, None)
+                    }
+                }),
+            ),
+            (
+                "composite_tinted",
+                PixelFormat::CmykA8,
+                Box::new({
+                    let cell = ink_cell.clone();
+                    move |canvas| {
+                        canvas.composite_tinted(
+                            &cell,
+                            Color::rgb(5, 250, 128),
+                            (0, 0),
+                            1.0,
+                            BlendMode::Normal,
+                            None,
+                            None,
+                        )
+                    }
+                }),
+            ),
+            (
+                "composite_inked",
+                PixelFormat::Plates { spots: spots(2) },
+                Box::new({
+                    let cell = cell.clone();
+                    let ink = ink.clone();
+                    move |canvas| {
+                        canvas.composite_inked(
+                            &cell,
+                            &ink,
+                            (0, 0),
+                            1.0,
+                            BlendMode::Normal,
+                            None,
+                            None,
+                        )
+                    }
+                }),
+            ),
+        ];
+        for (name, format, entry) in &entries {
+            let channels = color_channels(*format);
+            let mut every = start(*format);
+            entry(&mut every);
+            let mut cyan = start(*format);
+            cyan.set_marked(Channels::of([0]));
+            entry(&mut cyan);
+            assert_eq!(
+                cyan.data[0], every.data[0],
+                "{name}: cyan as with every channel"
+            );
+            assert_eq!(
+                &cyan.data[1..channels],
+                &backdrop[1..channels],
+                "{name}: the rest untouched"
+            );
+            assert_eq!(
+                cyan.data[channels], every.data[channels],
+                "{name}: the alpha"
+            );
+        }
+
+        // A knockout's restore is every channel's.
+        let mut group = Canvas::plates(1, 1, 2, Color::TRANSPARENT).expect("under the cap");
+        group.fill_mask_plates(&solid(0, 0, 1, 1, 255), &ink, 1.0, BlendMode::Normal);
+        group.set_marked(Channels::of([0]));
+        group.knock_out(&solid(0, 0, 1, 1, 255));
+        let clear = Canvas::plates(1, 1, 2, Color::TRANSPARENT).expect("under the cap");
+        assert_eq!(group.data, clear.data, "knocked out whatever the set");
+    }
+
+    /// **A full channel set composites as before** (RC-03.2): every format,
+    /// under every blend mode at two alphas, over a backdrop at two alphas
+    /// and in a non-isolated group's buffer, through every compositing entry
+    /// — a fill, a sampled pixel, a canvas composited — gives the same bytes
+    /// with `Channels::ALL` in force, with a set naming exactly the format's
+    /// channels, and with no set ever put in force, and so do the opaque
+    /// shortcuts a whole pixel takes.
+    #[test]
+    fn a_full_channel_mask_composites_as_before() {
+        let formats = [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::Bgr8,
+            PixelFormat::Bgra8,
+            PixelFormat::CmykA8,
+            PixelFormat::LabA8,
+            PixelFormat::Plates { spots: spots(3) },
+        ];
+        let mask = ramp();
+        let modes = SEPARABLE.iter().copied().chain([
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ]);
+        for format in formats {
+            let channels = color_channels(format);
+            let exactly = Channels::of(0..channels);
+            for mode in modes.clone() {
+                for alpha in [1.0, 0.45] {
+                    for background in [
+                        Color::rgb(30, 160, 90),
+                        Color {
+                            r: 200,
+                            g: 20,
+                            b: 120,
+                            a: 128,
+                        },
+                    ] {
+                        let paint = |set: Option<Channels>| {
+                            let mut canvas = Canvas::new(8, 8, format, background);
+                            if let Some(set) = set {
+                                canvas.set_marked(set);
+                            }
+                            canvas.fill_mask_inked(
+                                &mask,
+                                Color::rgb(220, 40, 10),
+                                Some([10, 200, 30, 40]),
+                                alpha,
+                                mode,
+                            );
+                            canvas.fill_mask(&solid(2, 2, 4, 4, 255), Color::rgb(5, 90, 250), 1.0);
+                            if let PixelFormat::Plates { spots } = format {
+                                let ink = PlateInk::named(spots, &[(0, 30), (4, 200), (6, 90)]);
+                                canvas.fill_mask_plates(&mask, &ink, alpha, mode);
+                                canvas.blend_tints(1, 1, &[9, 8, 7, 6, 5, 4, 3], alpha, mode);
+                            }
+                            canvas.blend_pixel_inked(
+                                3,
+                                4,
+                                Color::rgb(1, 250, 3),
+                                Some([90, 0, 250, 0]),
+                                alpha,
+                                mode,
+                            );
+                            let cell = Canvas::new(
+                                3,
+                                3,
+                                PixelFormat::Rgba8,
+                                Color {
+                                    r: 250,
+                                    g: 120,
+                                    b: 3,
+                                    a: 200,
+                                },
+                            );
+                            canvas.composite(&cell, (4, 1), alpha, mode, Some(&mask), None);
+                            canvas.composite_tinted(
+                                &cell,
+                                Color::rgb(40, 50, 60),
+                                (0, 5),
+                                alpha,
+                                mode,
+                                None,
+                                None,
+                            );
+                            // A non-isolated group's buffer over the canvas.
+                            let mut group = Canvas::new(8, 8, format, Color::TRANSPARENT);
+                            if let Some(set) = set {
+                                group.set_marked(set);
+                            }
+                            group.adopt_backdrop(canvas);
+                            group.fill_mask_inked(
+                                &mask,
+                                Color::rgb(90, 200, 10),
+                                Some([0, 0, 200, 10]),
+                                alpha,
+                                mode,
+                            );
+                            let parent = group.release_parent().expect("the parent");
+                            group.remove_backdrop(&parent);
+                            (group.data, parent.data)
+                        };
+                        let unset = paint(None);
+                        assert_eq!(
+                            paint(Some(Channels::ALL)),
+                            unset,
+                            "{format:?} {mode:?} at {alpha}: ALL"
+                        );
+                        assert_eq!(
+                            paint(Some(exactly)),
+                            unset,
+                            "{format:?} {mode:?} at {alpha}: every channel by name"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The channel sets themselves: `of` and `with` name channels, one past
+    /// the widest is passed over, `contains` and `covers` read them, and
+    /// `ALL`, the default, marks and covers every count.
+    #[test]
+    fn a_channel_set_names_its_channels() {
+        let set = Channels::of([0, 3, 67]);
+        assert!(set.contains(0) && set.contains(3) && set.contains(67));
+        assert!(!set.contains(1) && !set.contains(68) && !set.contains(10_000));
+        assert_eq!(set.with(1), Channels::of([0, 1, 3, 67]));
+        assert_eq!(Channels::of([200]), Channels::NONE, "past the widest set");
+        assert_eq!(Channels::NONE.with(usize::MAX), Channels::NONE);
+        assert!(Channels::of([0, 1, 2]).covers(3) && !Channels::of([0, 1, 2]).covers(4));
+        assert!(Channels::NONE.covers(0) && !Channels::NONE.covers(1));
+        assert!(Channels::of(0..68).covers(68) && !Channels::of(0..68).covers(69));
+        assert!(Channels::ALL.contains(127) && Channels::ALL.contains(100_000));
+        assert!(Channels::ALL.covers(68) && Channels::ALL.covers(usize::MAX));
+        assert_eq!(
+            Channels::of(0..128),
+            Channels::ALL,
+            "every bit is every channel"
+        );
+        assert!(!Channels::of(0..127).covers(128));
+        assert_eq!(Channels::default(), Channels::ALL);
+        let canvas = Canvas::new(1, 1, PixelFormat::Rgb8, Color::WHITE);
+        assert_eq!(
+            canvas.marked(),
+            Channels::ALL,
+            "a canvas starts marking every channel"
+        );
     }
 
     /// Recolouring plates paints the colour as process ink on every colour

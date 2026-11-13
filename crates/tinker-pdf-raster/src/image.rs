@@ -5483,6 +5483,153 @@ mod tests {
         );
     }
 
+    /// **An image composites through the channels in force** (RC-03.2): a
+    /// light image drawn on ink, a plate image drawn on plates, and a run of
+    /// each composited, under a set naming one channel, write that channel
+    /// as the same draw does with every channel marked and leave every other
+    /// channel of an opaque backdrop as it was; the alpha is the image's
+    /// shape over the backdrop either way.
+    #[test]
+    fn an_image_composites_through_the_channels_in_force() {
+        let rgb: Vec<u8> = (0..4u8).flat_map(|i| [250 - 40 * i, 30 * i, 90]).collect();
+        let light = ImageSource {
+            width: 2,
+            height: 2,
+            rgb: &rgb,
+            alpha: &[],
+            two_colour: None,
+            window: None,
+        };
+        let channels = 4 + PLATE_SPOTS;
+        let tints: Vec<u8> = (0..4 * channels).map(|i| (i * 37 % 256) as u8).collect();
+        let plates_source = PlateSource {
+            width: 2,
+            height: 2,
+            tints: &tints,
+            channels,
+            alpha: &[],
+            window: None,
+        };
+        // The image over the whole 4 by 4 canvas, two device pixels a sample.
+        let whole = Transform {
+            a: 4.0,
+            b: 0.0,
+            c: 0.0,
+            d: 4.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let draw = ImageDraw {
+            alpha: 0.8,
+            ..ImageDraw::new(light, whole)
+        };
+        let backdrop = |format: PixelFormat| {
+            let mut canvas = Canvas::new(4, 4, format, Color::TRANSPARENT);
+            let width = format.components();
+            for (i, pixel) in canvas.data.chunks_exact_mut(width).enumerate() {
+                for (c, slot) in pixel.iter_mut().enumerate() {
+                    *slot = ((i * 13 + c * 41) % 200) as u8 + 20;
+                }
+                if let Some(alpha) = pixel.last_mut() {
+                    *alpha = 255;
+                }
+            }
+            canvas
+        };
+        type Draw<'d> = Box<dyn Fn(&mut Canvas) + 'd>;
+        let cases: Vec<(&str, PixelFormat, usize, Draw<'_>)> = vec![
+            (
+                "a light image on ink",
+                PixelFormat::CmykA8,
+                1,
+                Box::new(|canvas| {
+                    draw_image(canvas, &draw, &mut Pyramid::new(), &mut FillScratch::new())
+                }),
+            ),
+            (
+                "a plate image on plates",
+                PixelFormat::Plates {
+                    spots: crate::canvas::Spots::new(PLATE_SPOTS).expect("under the cap"),
+                },
+                4,
+                Box::new(|canvas| {
+                    draw_plate_image(
+                        canvas,
+                        &draw,
+                        &plates_source,
+                        &mut PlatePyramid::new(),
+                        &mut FillScratch::new(),
+                    )
+                }),
+            ),
+            (
+                "a run of light on ink",
+                PixelFormat::CmykA8,
+                2,
+                Box::new(|canvas| {
+                    let mut run = Fragments::new(0, 0, 4, 4);
+                    accumulate_image(
+                        &mut run,
+                        &draw,
+                        &mut Pyramid::new(),
+                        (0, 0, 4, 4),
+                        &mut FillScratch::new(),
+                    );
+                    run.composite(canvas, 0.8, BlendMode::Normal, None, None);
+                }),
+            ),
+            (
+                "a run of tints on plates",
+                PixelFormat::Plates {
+                    spots: crate::canvas::Spots::new(PLATE_SPOTS).expect("under the cap"),
+                },
+                0,
+                Box::new(|canvas| {
+                    let mut run = Fragments::with_channels(0, 0, 4, 4, channels);
+                    accumulate_plate_image(
+                        &mut run,
+                        &draw,
+                        &plates_source,
+                        &mut PlatePyramid::new(),
+                        (0, 0, 4, 4),
+                        &mut FillScratch::new(),
+                    );
+                    run.composite(canvas, 0.8, BlendMode::Normal, None, None);
+                }),
+            ),
+        ];
+        for (name, format, marked, paint) in &cases {
+            let width = format.components();
+            let start = backdrop(*format);
+            let mut every = start.clone();
+            paint(&mut every);
+            let mut one = start.clone();
+            one.set_marked(crate::canvas::Channels::of([*marked]));
+            paint(&mut one);
+            assert_ne!(every.data, start.data, "{name}: the image drew");
+            for (pixel, ((mine, all), before)) in one
+                .data
+                .chunks_exact(width)
+                .zip(every.data.chunks_exact(width))
+                .zip(start.data.chunks_exact(width))
+                .enumerate()
+            {
+                for channel in 0..width - 1 {
+                    let want = if channel == *marked {
+                        all[channel]
+                    } else {
+                        before[channel]
+                    };
+                    assert_eq!(
+                        mine[channel], want,
+                        "{name}: pixel {pixel}, channel {channel}"
+                    );
+                }
+                assert_eq!(mine.last(), all.last(), "{name}: pixel {pixel}'s alpha");
+            }
+        }
+    }
+
     /// **A run of plate images holds a tint a channel and composites them**:
     /// a run made for six channels is seven bytes a pixel, adds tints
     /// premultiplied with their coverage held to a whole pixel, composites

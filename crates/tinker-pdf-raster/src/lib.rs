@@ -19,8 +19,8 @@ pub mod stroke;
 pub mod toolbox;
 
 pub use canvas::{
-    Canvas, Color, InkTables, MaskKind, PixelFormat, PlateInk, SpotColour, Spots, TooManySpots,
-    MAX_SPOT_PLATES,
+    Canvas, Channels, Color, InkTables, MaskKind, PixelFormat, PlateInk, SpotColour, Spots,
+    TooManySpots, MAX_SPOT_PLATES,
 };
 pub use fill::{
     fill, fill_hard, fill_hard_with, fill_outline, fill_outline_hard, fill_with, FillScratch,

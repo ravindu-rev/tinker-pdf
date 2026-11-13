@@ -266,11 +266,15 @@ form.
 `tinker-pdf-raster` gains `Channels`, the set of a canvas's colour channels a
 source marks: a bit per channel, channel `i` being bit `i`, wide enough for
 the four process channels and every spot plate the cap admits. `Channels::ALL`
-marks every channel. Every entry that composites a source takes one —
-`Canvas::fill_mask_inked`, `Canvas::blend_pixel_inked` and the level form
-images draw through, and `Canvas::composite` — and the light entries that
-wrap them (`fill_mask`, `fill_mask_with`, `blend_pixel`, `blend_pixel_with`)
-pass `Channels::ALL`. In `blend`, a channel outside the set takes `B = Cb`
+marks every channel. A caller puts a set in force on a canvas
+(`Canvas::set_marked`), as it holds ink tables in force, and every entry that
+composites a source reads it — `Canvas::fill_mask_inked`,
+`Canvas::fill_mask_plates`, `Canvas::blend_pixel_inked` and the level forms
+images and runs draw through, and `Canvas::composite` with its tinted and
+inked forms — so the light entries that wrap them (`fill_mask`,
+`fill_mask_with`, `blend_pixel`, `blend_pixel_with`) composite under the set
+in force, `Channels::ALL` on every canvas no caller has put one on. In
+`blend`, a channel outside the set takes `B = Cb`
 inside 11.3.6's formula, written above; a channel in it takes the mode's `B`
 as today; with `Channels::ALL` every line is today's, so every format's bytes
 are unchanged. A non-separable mode over ink is computed through light, as
