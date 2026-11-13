@@ -229,8 +229,8 @@ A plain field starts at the value 8.4.1's tables (Tables 52 and 53) or 9.3.8
 give, which K-01.2 transcribes from the text and `state.rs`'s tests pin. An
 `Option` field's `None` is **the device's own**: what the renderer does with
 no key — its fixed flattening tolerance (`Renderer::tolerance`,
-`crates/tinker-pdf-render/src/lib.rs:813-814`), maximum undercolour removal
-(`rgb_to_cmyk`, `crates/tinker-pdf-raster/src/canvas.rs:1042`), no transfer
+`crates/tinker-pdf-render/src/lib.rs:846`), maximum undercolour removal
+(`rgb_to_cmyk`, `crates/tinker-pdf-raster/src/canvas.rs:1225`), no transfer
 function, and the screen RC-06 gives its 1-bit output — and what `/Default`
 restores where a key admits it. That is what lets each of RC-08's steps say
 that a page without its key moves no byte: a plain field holding the
@@ -275,7 +275,7 @@ chosen because:
 
 - it fixes the precision at the `gs`, where the applying row is the one that
   knows the stage and the depth (an ink device's components; RC-07's 16-bit
-  samples) — RC-08.2 samples with `sample_transfer` (`resources.rs:4880`)
+  samples) — RC-08.2 samples with `sample_transfer` (`resources.rs:6211`)
   where it applies a function;
 - `/UCR` maps into −1 to 1, which a `[u8; 256]` cannot hold without an
   encoding of its own;
