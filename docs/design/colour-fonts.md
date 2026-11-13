@@ -336,7 +336,15 @@ point the root's viewport mapping gives, with `y` negated:
 `[1 0 0 −1 0 0]` composed after `tinker_pdf_svg::transform::view_box` from
 the root's `viewBox` onto `0 0 unitsPerEm unitsPerEm`. The elements *SVG
 capability requirements and restrictions* forbids are not drawn, and the
-scene names each it passes over, as it names them in a book.
+scene names each it passes over, as it names them in a book: the read is
+handed the chapter's list as the elements its caller restricts, the chosen
+palette as `var(--colorN)`'s values, and `currentColor` with no `color` set
+left to the caller, which the scene writer draws by setting no colour. The
+procedure is the book's scene writer's operators (`epub/svg.rs`), the one
+place a scene becomes operators, under the flip; its form's box is the
+scene's ink, strokes widened by their reach, since the chapter records no
+glyph box and leaves the viewport unclipped. An `<image>` is a `data:` URL's
+PNG or JPEG, the only source a document inside a font names.
 
 ### Which table draws a glyph
 

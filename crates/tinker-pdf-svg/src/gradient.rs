@@ -276,7 +276,7 @@ fn stops(tree: &Tree, chain: &[usize], style: &Style) -> Vec<Stop> {
             out.push(Stop {
                 offset,
                 colour: own.stop_colour,
-                opacity: own.stop_opacity,
+                opacity: own.stop_opacity * own.stop_alpha,
             });
         }
         if !out.is_empty() {

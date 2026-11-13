@@ -168,6 +168,12 @@ struct Walk<'a> {
     /// last — a `<text>` can open inside another's paint, mask or clip. Empty
     /// without a measurer. See [`Walk::settle`].
     waiting: Vec<Waiting>,
+    /// The elements the caller's profile forbids
+    /// ([`crate::Context::restricted`]).
+    restricted: &'a [&'a str],
+    /// The style the root resolves against: §11's initial values, with the
+    /// caller's palette and foreground ([`Style::initial`]).
+    initial: Style,
 }
 
 /// A `<text>`'s runs whose paint needs the box of the whole `<text>` — SVG 2
@@ -777,6 +783,12 @@ impl Walk<'_> {
             self.warn(Warning::ElementUnknown(node.name.clone()));
             return Ok(());
         }
+        // An element the caller's profile of SVG forbids is drawn as nothing,
+        // its content with it, and named.
+        if self.restricted.contains(&node.name.as_str()) {
+            self.warn(Warning::ElementRestricted(node.name.clone()));
+            return Ok(());
+        }
 
         // §6.4's three sources, resolved against the parent's own resolved
         // style. Done before the element is dispatched, because a container
@@ -953,7 +965,7 @@ impl Walk<'_> {
                 miter_limit: style.miter_limit,
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
-                opacity: style.stroke_opacity.clamp(0.0, 1.0),
+                opacity: (style.stroke_opacity * style.stroke_alpha).clamp(0.0, 1.0),
                 // The outline is taken through this matrix below and the
                 // width is not: §11.4's width is in the shape's user space.
                 matrix,
@@ -1004,7 +1016,7 @@ impl Walk<'_> {
             outline: outline.transformed(matrix),
             fill,
             rule: style.fill_rule,
-            fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
+            fill_opacity: (style.fill_opacity * style.fill_alpha).clamp(0.0, 1.0),
             stroke,
             clip: clip.clone(),
         };
@@ -1219,7 +1231,7 @@ impl Walk<'_> {
             chain.push(parent);
             cursor = parent;
         }
-        let mut style = Style::default();
+        let mut style = self.initial.clone();
         for index in chain.iter().rev() {
             let resolved = style::resolve(self.tree, *index, &self.sheet, &style, &mut self.css)
                 .map_err(|_| Refusal::TooMuchStyle)?;
@@ -1333,6 +1345,9 @@ impl Walk<'_> {
         Ok(match spec {
             PaintSpec::None => Paint::None,
             PaintSpec::Solid(colour) => Paint::Solid(*colour),
+            // `currentColor` is `color`, or the caller's where no `color` is
+            // set and the caller keeps it (`Context::foreground`).
+            PaintSpec::Current if style.foreground && !style.colour_set => Paint::Current,
             PaintSpec::Current => Paint::Solid(style.colour),
             PaintSpec::Reference(name, fallback) => {
                 let target = self.tree.by_id(name);
@@ -2057,7 +2072,7 @@ impl Walk<'_> {
                 miter_limit: style.miter_limit,
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
-                opacity: style.stroke_opacity.clamp(0.0, 1.0),
+                opacity: (style.stroke_opacity * style.stroke_alpha).clamp(0.0, 1.0),
                 matrix,
             }))
         };
@@ -2075,7 +2090,7 @@ impl Walk<'_> {
                 anchor: style.text_anchor,
             },
             fill,
-            fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
+            fill_opacity: (style.fill_opacity * style.fill_alpha).clamp(0.0, 1.0),
             stroke,
             hidden,
         })
@@ -2856,6 +2871,8 @@ fn build_from(
         pushed: 0,
         measure: context.measure,
         waiting: Vec::new(),
+        restricted: context.restricted,
+        initial: Style::initial(context),
     };
     if walk.sheet.at_rules > 0 {
         walk.warn(Warning::AtRuleIgnored);
@@ -2874,7 +2891,7 @@ fn build_from(
     let frame = Frame {
         matrix: IDENTITY,
         viewport,
-        style: Style::default(),
+        style: walk.initial.clone(),
         depth: 0,
     };
     match target {

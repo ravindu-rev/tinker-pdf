@@ -71,6 +71,9 @@ use icc_support::transforms;
 
 mod type1_support;
 
+mod colour_support;
+mod epub_support;
+
 mod render_support;
 use render_support::{
     axial_page, bilevel_page, blend_grid_page, curvy_font, fallback_face,
@@ -2863,6 +2866,21 @@ const GOLDEN: &[Fixture] = &[
         },
         least_ink: 4_000,
     },
+    // A colour face's glyphs written as Type 3 procedures (FT-06.16): a
+    // `COLR` version 1 graph — a reflected linear gradient multiplied over a
+    // padded radial one with a translucent stop, a calculator function each,
+    // a soft mask and a blend mode — an `sbix` PNG with an alpha, and an
+    // `SVG ` element of a path, a gradient and a `<use>`, through
+    // `colour_support::colour_glyphs_page`. The three glyphs cover about 2 400
+    // of the page's 16 000 pixels and the floor is under half: a glyph drawn
+    // as its outline keeps some ink, which is the hash's, and one drawn as
+    // nothing paints none.
+    Fixture {
+        name: "colour_glyphs",
+        build: colour_support::colour_glyphs_page,
+        open: Open::Closed,
+        least_ink: 1_000,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -3128,6 +3146,9 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // `hyphenation` feature, which the page needs; its value is a run's.
     #[cfg(feature = "hyphenation")]
     ("hyphenation", ""),
+    // A colour face's `COLR` version 1, `sbix` and `SVG ` glyphs written as
+    // Type 3 procedures, on every target.
+    ("colour_glyphs", ""),
 ];
 
 #[test]
@@ -3519,6 +3540,7 @@ fn svg_output_is_stable_across_targets() {
         ("multiple_master", ""),
         #[cfg(feature = "hyphenation")]
         ("hyphenation", ""),
+        ("colour_glyphs", ""),
     ];
     assert_eq!(
         expected.len(),
@@ -4756,6 +4778,7 @@ const MARK_BOXES: &[(&str, &str)] = &[
     ("multiple_master", ""),
     #[cfg(feature = "hyphenation")]
     ("hyphenation", ""),
+    ("colour_glyphs", ""),
 ];
 
 /// **The page analysis's box is the same number on every target.** The box is
@@ -5002,6 +5025,7 @@ const COMMAND_STREAMS: &[(&str, &str)] = &[
     ("multiple_master", ""),
     #[cfg(feature = "hyphenation")]
     ("hyphenation", ""),
+    ("colour_glyphs", ""),
 ];
 
 /// **The command stream is the same bytes on every target** (RC-18.4): every

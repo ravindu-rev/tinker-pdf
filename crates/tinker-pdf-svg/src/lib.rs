@@ -134,6 +134,24 @@ pub struct Context<'a> {
     /// effect on it is drawn without the effect and named
     /// [`Warning::TextBoxUnmeasured`].
     pub measure: Option<&'a dyn MeasureText>,
+    /// Elements the caller's profile of SVG forbids, by local name: each is
+    /// drawn as nothing, its content with it, and named
+    /// [`Warning::ElementRestricted`] — so a format that admits less than SVG
+    /// 1.1 is read as that format, with no word about the format here.
+    pub restricted: &'a [&'a str],
+    /// The values of the custom properties `--color0`, `--color1` and on, in
+    /// order, each `[r, g, b, alpha]` in `[0, 1]`, which `var()` names in a
+    /// `fill`, a `stroke`, a `stop-color` or a `color`: the colour stands for
+    /// the value and the alpha is multiplied into the element's own
+    /// `fill-opacity`, `stroke-opacity` or `stop-opacity` where it is used,
+    /// carried with the paint as it is inherited. A `var()` naming no value
+    /// here takes its fallback, and one with none is an unreadable value.
+    pub palette: &'a [[f64; 4]],
+    /// Whether `currentColor` where no `color` is set is left to the caller,
+    /// as [`Paint::Current`], rather than read as `color`'s initial black:
+    /// the colour a host sets before the document begins. A `stop-color` of
+    /// it is then a colour no stop can hold, and an unreadable value.
+    pub foreground: bool,
 }
 
 impl<'a> Context<'a> {
@@ -142,6 +160,9 @@ impl<'a> Context<'a> {
     pub const NONE: Context<'static> = Context {
         imports: &tinker_pdf_css::NoImports,
         measure: None,
+        restricted: &[],
+        palette: &[],
+        foreground: false,
     };
 
     /// `@import` resolved through `imports`.
@@ -150,6 +171,9 @@ impl<'a> Context<'a> {
         Context {
             imports,
             measure: None,
+            restricted: &[],
+            palette: &[],
+            foreground: false,
         }
     }
 
@@ -158,6 +182,30 @@ impl<'a> Context<'a> {
     pub fn with_measure(self, measure: &'a dyn MeasureText) -> Self {
         Context {
             measure: Some(measure),
+            ..self
+        }
+    }
+
+    /// The same reach, the elements `restricted` names drawn as nothing and
+    /// named ([`Context::restricted`]).
+    #[must_use]
+    pub fn with_restricted(self, restricted: &'a [&'a str]) -> Self {
+        Context { restricted, ..self }
+    }
+
+    /// The same reach, `var(--colorN)` reading entry `N` of `palette`
+    /// ([`Context::palette`]).
+    #[must_use]
+    pub fn with_palette(self, palette: &'a [[f64; 4]]) -> Self {
+        Context { palette, ..self }
+    }
+
+    /// The same reach, `currentColor` left to the caller where no `color` is
+    /// set ([`Context::foreground`]).
+    #[must_use]
+    pub fn with_foreground(self) -> Self {
+        Context {
+            foreground: true,
             ..self
         }
     }
@@ -285,9 +333,12 @@ pub enum Refusal {
 ///
 /// Ruling 10: every one names what it affected, and a caller that renders an
 /// SVG with warnings has a picture that is incomplete in a way it can report.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Warning {
+    /// An element [`Context::restricted`] names, drawn as nothing, its
+    /// content with it.
+    ElementRestricted(String),
     /// `<filter>` and every `filter=` that names one. A filter is a raster
     /// pipeline and this crate produces geometry.
     FilterUnsupported,
@@ -429,6 +480,9 @@ pub enum Paint {
     None,
     /// A flat colour.
     Solid(Colour),
+    /// `currentColor` where no `color` is set, left to the caller
+    /// ([`Context::foreground`]): the colour its host sets.
+    Current,
     /// `<linearGradient>`.
     ///
     /// The geometry is in **gradient space** and `matrix` maps that space into

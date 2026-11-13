@@ -70,7 +70,7 @@ use tinker_pdf_font::colr::{
 };
 use tinker_pdf_font::{
     glyf, CbdtRefusal, Cff, ColourBitmaps, ColourIndex, Colr, Cpal, Graphic, Layer, LayerColour,
-    Outline, PaletteChoice, Sbix, SbixRefusal, Segment, Sfnt, StrikeChoice,
+    Outline, PaletteChoice, Sbix, SbixRefusal, Segment, Sfnt, StrikeChoice, SvgRefusal, SvgTable,
 };
 use tinker_pdf_svg::{transform, Spread};
 
@@ -90,6 +90,39 @@ const SBIX: u32 = u32::from_be_bytes(*b"sbix");
 const CBLC: u32 = u32::from_be_bytes(*b"CBLC");
 /// `CBDT`.
 const CBDT: u32 = u32::from_be_bytes(*b"CBDT");
+/// `SVG `.
+const SVG: u32 = u32::from_be_bytes(*b"SVG ");
+
+/// The elements the SVG chapter's *SVG capability requirements and
+/// restrictions* forbids in a glyph's document, which a conforming
+/// application "must ignore and not render": `<text>`, `<font>` and the
+/// elements of each, `<foreignObject>`, `<switch>`, `<script>`, `<a>` and
+/// `<view>`.
+const OPENTYPE_RESTRICTED: &[&str] = &[
+    "text",
+    "tspan",
+    "tref",
+    "textPath",
+    "altGlyph",
+    "altGlyphDef",
+    "altGlyphItem",
+    "glyphRef",
+    "font",
+    "font-face",
+    "font-face-src",
+    "font-face-uri",
+    "font-face-format",
+    "font-face-name",
+    "glyph",
+    "missing-glyph",
+    "hkern",
+    "vkern",
+    "foreignObject",
+    "switch",
+    "script",
+    "a",
+    "view",
+];
 
 /// The most bytes one bitmap glyph's graphic may decode to: 64 MiB, a strike
 /// of four thousand pixels to the em in RGBA, past any a face carries. One
@@ -203,6 +236,46 @@ pub enum ColourWarning {
         /// Why.
         refusal: BitmapRefusal,
     },
+    /// An `SVG ` glyph whose document was not read — the table refused it,
+    /// or the scene did: the glyph is drawn as its next table, or its
+    /// outline.
+    SvgRefused {
+        /// The glyph.
+        glyph: u16,
+        /// Which refused it, and why.
+        refusal: SvgGlyphRefusal,
+    },
+    /// What reading an `SVG ` glyph's element passed over, as the scene names
+    /// it: an element the SVG chapter forbids, a filter, a value that is not
+    /// its property's grammar. The rest of the element is drawn.
+    SvgWarning {
+        /// The glyph.
+        glyph: u16,
+        /// The scene's warning.
+        warning: tinker_pdf_svg::Warning,
+    },
+    /// Nodes of an `SVG ` glyph's scene the writer could not write — a
+    /// shading the builder refused, an `<image>` no `data:` URL resolved —
+    /// drawn as nothing, the rest of the element drawn.
+    SvgNodesUnwritten {
+        /// The glyph.
+        glyph: u16,
+        /// How many.
+        nodes: usize,
+    },
+}
+
+/// Why an `SVG ` glyph's document was not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SvgGlyphRefusal {
+    /// The document index refused it: an offset or length of zero, one past
+    /// the table, or a gzip-encoded document that does not inflate within
+    /// its cap.
+    Document(SvgRefusal),
+    /// `tinker_pdf_svg` refused the document or the element: markup it does
+    /// not read, past a limit, or no element of the glyph's id.
+    Scene(tinker_pdf_svg::Refusal),
 }
 
 /// Why a bitmap glyph's bitmap was not drawn.
@@ -240,6 +313,8 @@ pub struct ColourFace<'a> {
     sbix: Option<Sbix<'a>>,
     /// The `CBLC`/`CBDT` strikes.
     bitmaps: Option<ColourBitmaps<'a>>,
+    /// The `SVG ` document index.
+    svg: Option<SvgTable<'a>>,
     /// Which strike a bitmap glyph is drawn at.
     strike: StrikeChoice,
     /// The paint alphas whose `/ExtGState` this face has registered.
@@ -278,6 +353,7 @@ impl core::fmt::Debug for ColourFace<'_> {
             .field("colr", &self.colr.as_ref().map(Colr::version))
             .field("cpal", &self.cpal.is_some())
             .field("palette", &self.palette)
+            .field("svg", &self.svg.is_some())
             .field("sbix", &self.sbix.is_some())
             .field("cbdt", &self.bitmaps.is_some())
             .field("strike", &self.strike)
@@ -312,6 +388,7 @@ impl<'a> ColourFace<'a> {
             .table(CBLC)
             .zip(sfnt.table(CBDT))
             .and_then(|(cblc, cbdt)| ColourBitmaps::parse(cblc, cbdt));
+        let svg = sfnt.table(SVG).and_then(SvgTable::parse);
         ColourFace {
             sfnt,
             colr,
@@ -319,6 +396,7 @@ impl<'a> ColourFace<'a> {
             palette,
             sbix,
             bitmaps,
+            svg,
             strike: StrikeChoice::Largest,
             alphas: RefCell::new(BTreeSet::new()),
             blends: RefCell::new(BTreeSet::new()),
@@ -345,10 +423,10 @@ impl<'a> ColourFace<'a> {
     }
 
     /// Whether the face carries colour glyphs this module draws: a `COLR`
-    /// with its `CPAL`, an `sbix`, or a `CBLC` with its `CBDT`.
+    /// with its `CPAL`, an `SVG `, an `sbix`, or a `CBLC` with its `CBDT`.
     #[must_use]
     pub fn has_colour(&self) -> bool {
-        self.colr.is_some() || self.sbix.is_some() || self.bitmaps.is_some()
+        self.colr.is_some() || self.svg.is_some() || self.sbix.is_some() || self.bitmaps.is_some()
     }
 
     /// The palette the glyphs are drawn in.
@@ -428,6 +506,9 @@ impl<'a> ColourFace<'a> {
                 }
             }
         }
+        if let Some(drawn) = self.svg_glyph(builder, resource, glyph) {
+            return drawn;
+        }
         if let Some(drawn) = self.sbix_bitmap(builder, resource, glyph) {
             return drawn;
         }
@@ -435,6 +516,122 @@ impl<'a> ColourFace<'a> {
             return drawn;
         }
         self.plain(glyph)
+    }
+
+    /// The glyph's `SVG ` description (*Glyph Identifiers*): the element
+    /// `glyph<id>` of its document, read by `tinker_pdf_svg::read_element` as
+    /// a `<use>` of it would draw it, in the em square as the initial
+    /// viewport, and written through `epub/svg.rs`'s scene writer under the
+    /// flip the chapter's *Coordinate systems and glyph metrics* states — the
+    /// document's units are font units, its origin the glyph's and its y axis
+    /// downward — so `[1 0 0 −1 0 0]`, the root's `viewBox` and size already
+    /// mapped onto the em by the read, the viewport unclipped.
+    ///
+    /// The read takes the chapter's restrictions — the elements it forbids
+    /// drawn as nothing and named by the scene — the chosen palette as
+    /// `var(--colorN)`'s values, each entry's alpha multiplied into the
+    /// opacity of what it colours (*Color palettes*), and `currentColor`
+    /// where no `color` is set left as the text's own colour (*Colors*),
+    /// which the procedure then sets no colour for. The form's box is the
+    /// scene's ink, strokes widened by their reach. An `<image>` resolves
+    /// only from a `data:` URL, the one source a font's document has.
+    ///
+    /// `None` where no record holds the glyph, where the table or the scene
+    /// refuses its document, and, under a profile that forbids transparency,
+    /// where the scene needs an alpha, a group, a mask or an image's;
+    /// each named.
+    fn svg_glyph(
+        &self,
+        builder: &mut DocumentBuilder,
+        resource: &[u8],
+        glyph: u16,
+    ) -> Option<Drawn> {
+        let table = self.svg.as_ref()?;
+        let document = match table.document(glyph) {
+            Ok(Some(document)) => document,
+            Ok(None) => return None,
+            Err(refusal) => {
+                self.warn(ColourWarning::SvgRefused {
+                    glyph,
+                    refusal: SvgGlyphRefusal::Document(refusal),
+                });
+                return None;
+            }
+        };
+        let em = f64::from(self.sfnt.units_per_em.max(1));
+        let palette = self.svg_palette();
+        let context = tinker_pdf_svg::Context::NONE
+            .with_restricted(OPENTYPE_RESTRICTED)
+            .with_palette(&palette)
+            .with_foreground();
+        let scene = match tinker_pdf_svg::read_element_with(
+            &document.data,
+            &document.element,
+            Some((em, em)),
+            &tinker_pdf_svg::Limits::DEFAULT,
+            &context,
+        ) {
+            Ok(scene) => scene,
+            Err(refusal) => {
+                self.warn(ColourWarning::SvgRefused {
+                    glyph,
+                    refusal: SvgGlyphRefusal::Scene(refusal),
+                });
+                return None;
+            }
+        };
+        for warning in &scene.warnings {
+            self.warn(ColourWarning::SvgWarning {
+                glyph,
+                warning: warning.clone(),
+            });
+        }
+        let Some([x0, y0, x1, y1]) = scene_bounds(&scene.nodes).filter(is_area) else {
+            // An element that draws nothing: the glyph is its width.
+            return Some(Drawn {
+                content: Vec::new(),
+                bbox: None,
+            });
+        };
+        if forbids_transparency(builder) && scene_transparent(&scene.nodes) {
+            self.warn(ColourWarning::TransparencyForbidden { glyph });
+            return None;
+        }
+        let bbox = [x0, -y1, x1, -y0];
+        let mut prefix = resource.to_vec();
+        prefix.extend_from_slice(format!(".g{glyph}v").as_bytes());
+        let (content, drawn) = crate::epub::svg::scene_operators(
+            builder,
+            &scene,
+            [1.0, 0.0, 0.0, -1.0, 0.0, 0.0],
+            bbox,
+            &prefix,
+            MAX_BITMAP_BYTES,
+            data_image,
+        );
+        let unwritten = drawn.refused + drawn.images_unresolved;
+        if unwritten > 0 {
+            self.warn(ColourWarning::SvgNodesUnwritten {
+                glyph,
+                nodes: unwritten,
+            });
+        }
+        Some(Drawn {
+            content,
+            bbox: Some(bbox),
+        })
+    }
+
+    /// The chosen palette's entries as `var(--colorN)`'s values, each
+    /// `[r, g, b, alpha]` in `[0, 1]`, as far as the palette's records reach.
+    fn svg_palette(&self) -> Vec<[f64; 4]> {
+        let Some(cpal) = self.cpal.as_ref() else {
+            return Vec::new();
+        };
+        (0..cpal.entry_count())
+            .map_while(|entry| cpal.colour(self.palette, entry))
+            .map(|rgba| [rgba.red, rgba.green, rgba.blue, rgba.alpha].map(|c| f64::from(c) / 255.0))
+            .collect()
     }
 
     /// The glyph's `sbix` bitmap at the strike [`ColourFace::with_strike`]
@@ -2254,6 +2451,89 @@ fn place_image(out: &mut Vec<u8>, name: &[u8], rect: [f64; 4]) {
     );
     crate::form_data::write_name(out, name);
     out.extend_from_slice(b" Do\nQ\n");
+}
+
+/// An `SVG ` glyph's `<image>`, from a `data:` URL: the one source a
+/// document inside a font can name.
+fn data_image(href: &str) -> Option<Vec<u8>> {
+    let scheme = href.get(..5)?;
+    if !scheme.eq_ignore_ascii_case("data:") {
+        return None;
+    }
+    crate::standalone::data_url(href)
+}
+
+/// The box of everything a scene draws, in its own coordinates: each path's
+/// points — control points among them, which hold its curves — widened by its
+/// stroke's reach, each image's rectangle through its matrix, and every
+/// group's nodes; `None` for a scene that draws nothing.
+fn scene_bounds(nodes: &[tinker_pdf_svg::Node]) -> Option<[f64; 4]> {
+    use tinker_pdf_svg::path::Segment as Step;
+    use tinker_pdf_svg::Node;
+    let mut out: Option<[f64; 4]> = None;
+    for node in nodes {
+        let reached = match node {
+            Node::Path {
+                outline, stroke, ..
+            } => {
+                let mut points: Option<[f64; 4]> = None;
+                for segment in &outline.segments {
+                    let mut add = |p: &[f64; 2]| {
+                        points = union(points, Some([p[0], p[1], p[0], p[1]]));
+                    };
+                    match segment {
+                        Step::Move(p) | Step::Line(p) => add(p),
+                        Step::Cubic(a, b, c) => {
+                            add(a);
+                            add(b);
+                            add(c);
+                        }
+                        _ => {}
+                    }
+                }
+                points.map(|[x0, y0, x1, y1]| {
+                    // A stroke reaches half its width past the outline, and a
+                    // miter join `miter_limit` times that, in its own space.
+                    let reach = stroke.as_ref().map_or(0.0, |stroke| {
+                        let [a, b, c, d, ..] = stroke.matrix;
+                        let scale = (a * a + b * b + c * c + d * d).sqrt();
+                        stroke.width.abs() / 2.0 * stroke.miter_limit.max(1.0) * scale
+                    });
+                    [x0 - reach, y0 - reach, x1 + reach, y1 + reach]
+                })
+            }
+            Node::Image { rect, matrix, .. } => {
+                let [x, y, w, h] = *rect;
+                Some(mapped(*matrix, [x, y, x + w, y + h]))
+            }
+            Node::Group { nodes, .. } => scene_bounds(nodes),
+            _ => None,
+        };
+        out = union(out, reached.filter(|r| r.iter().all(|v| v.is_finite())));
+    }
+    out
+}
+
+/// Whether a scene needs transparency to be drawn as it is: a translucent
+/// fill or stroke, a translucent or masked group, or an image, whose alpha is
+/// the decoder's to find.
+fn scene_transparent(nodes: &[tinker_pdf_svg::Node]) -> bool {
+    use tinker_pdf_svg::Node;
+    nodes.iter().any(|node| match node {
+        Node::Path {
+            fill_opacity,
+            stroke,
+            ..
+        } => *fill_opacity < 1.0 || stroke.as_ref().is_some_and(|s| s.opacity < 1.0),
+        Node::Group {
+            nodes,
+            opacity,
+            mask,
+            ..
+        } => *opacity < 1.0 || mask.is_some() || scene_transparent(nodes),
+        Node::Image { .. } => true,
+        _ => false,
+    })
 }
 
 /// A graphic type as one byte, for the face's map of its images.

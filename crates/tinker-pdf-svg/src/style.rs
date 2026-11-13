@@ -40,6 +40,8 @@
 //! `display`, `clip-path`, `mask` and `filter`, and getting that split wrong is
 //! invisible in a flat document and wrong in every real one.
 
+use std::sync::Arc;
+
 use tinker_pdf_css::font_face::{self, FontFace};
 use tinker_pdf_css::media::{self, MediaContext, MediaType};
 use tinker_pdf_css::parser::{component_values, BlockKind, ComponentValue};
@@ -670,6 +672,22 @@ pub struct Style {
     pub font_italic: bool,
     /// §10.9's `text-anchor`.
     pub text_anchor: TextAnchor,
+    /// The alpha a `var()` colour brought with `fill`, which multiplies the
+    /// element's `fill-opacity` where it is used and is inherited with the
+    /// paint: one for every other `fill`.
+    pub fill_alpha: f64,
+    /// The same for `stroke`.
+    pub stroke_alpha: f64,
+    /// The same for `stop-color`, not inherited, as `stop-color` is not.
+    pub stop_alpha: f64,
+    /// Whether a `color` was set, here or above: the caller's `currentColor`
+    /// stands only where none was ([`crate::Context::foreground`]).
+    pub colour_set: bool,
+    /// The values `var(--colorN)` reads ([`crate::Context::palette`]),
+    /// carried down from the root so every element resolves against them.
+    pub palette: Arc<[[f64; 4]]>,
+    /// Whether `currentColor` with no `color` set is left to the caller.
+    pub foreground: bool,
 }
 
 impl Default for Style {
@@ -712,6 +730,26 @@ impl Default for Style {
             font_weight: 400,
             font_italic: false,
             text_anchor: TextAnchor::Start,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
+            stop_alpha: 1.0,
+            colour_set: false,
+            palette: Arc::from(Vec::new()),
+            foreground: false,
+        }
+    }
+}
+
+impl Style {
+    /// The initial style of a document read with `context`: §11's initial
+    /// values, with the palette `var()` reads and whether `currentColor` is
+    /// the caller's.
+    #[must_use]
+    pub fn initial(context: &crate::Context<'_>) -> Style {
+        Style {
+            palette: Arc::from(context.palette.to_vec()),
+            foreground: context.foreground,
+            ..Style::default()
         }
     }
 }
@@ -784,11 +822,66 @@ impl Style {
         Style {
             stop_colour: initial.stop_colour,
             stop_opacity: initial.stop_opacity,
+            stop_alpha: initial.stop_alpha,
             clip_path: None,
             mask: None,
             opacity: initial.opacity,
             ..self.clone()
         }
+    }
+
+    /// A colour-valued property whose value is `var(<custom-property-name>
+    /// [, <fallback>])` (CSS Custom Properties for Cascading Variables 1, §3):
+    /// `--color` and a decimal number name the palette's entry of that
+    /// number, which stands for the value, its alpha carried with it; one the
+    /// palette has not is the fallback, read as the value would be, and with
+    /// no fallback an unreadable value.
+    fn apply_var(&mut self, name: &str, arguments: &[ComponentValue]) -> Applied {
+        let comma = arguments
+            .iter()
+            .position(|value| matches!(value, ComponentValue::Token(Token::Comma)));
+        let (named, fallback) = match comma {
+            Some(at) => (&arguments[..at], arguments.get(at + 1..).unwrap_or(&[])),
+            None => (arguments, &[][..]),
+        };
+        let named: Vec<&ComponentValue> = named.iter().filter(|v| !v.is_whitespace()).collect();
+        let entry = match named[..] {
+            [ComponentValue::Token(Token::Ident(custom))] => custom
+                .strip_prefix("--color")
+                .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|digits| digits.parse::<usize>().ok())
+                .and_then(|n| self.palette.get(n).copied()),
+            _ => None,
+        };
+        let Some([r, g, b, alpha]) = entry else {
+            if fallback.iter().all(ComponentValue::is_whitespace) {
+                return Applied::Unreadable;
+            }
+            return self.apply(name, fallback);
+        };
+        let colour = Colour {
+            rgb: [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)],
+        };
+        let alpha = alpha.clamp(0.0, 1.0);
+        match name {
+            "fill" => {
+                self.fill = PaintSpec::Solid(colour);
+                self.fill_alpha = alpha;
+            }
+            "stroke" => {
+                self.stroke = PaintSpec::Solid(colour);
+                self.stroke_alpha = alpha;
+            }
+            "stop-color" => {
+                self.stop_colour = colour;
+                self.stop_alpha = alpha;
+            }
+            _ => {
+                self.colour = colour;
+                self.colour_set = true;
+            }
+        }
+        Applied::Set
     }
 
     /// Applies one declaration.
@@ -810,13 +903,28 @@ impl Style {
             }
             _ => None,
         };
+        // CSS Custom Properties' `var()` in a colour-valued property: the value
+        // the caller gave the custom property stands for it (`Context::palette`).
+        if matches!(name, "fill" | "stroke" | "stop-color" | "color") {
+            if let [ComponentValue::Function {
+                name: function,
+                arguments,
+            }] = significant[..]
+            {
+                if function.eq_ignore_ascii_case("var") {
+                    return self.apply_var(name, arguments);
+                }
+            }
+        }
         let ok = match name {
             "fill" | "stroke" => match paint(&significant) {
                 Some(spec) => {
                     if name == "fill" {
                         self.fill = spec;
+                        self.fill_alpha = 1.0;
                     } else {
                         self.stroke = spec;
+                        self.stroke_alpha = 1.0;
                     }
                     true
                 }
@@ -825,16 +933,20 @@ impl Style {
             "stop-color" => match colour(values) {
                 Some(read) => {
                     self.stop_colour = read;
+                    self.stop_alpha = 1.0;
                     true
                 }
                 // §13.2.4 allows `currentColor` here too, and it means the
                 // `color` in force on the `<stop>` — which is the one the
-                // gradient element inherited, since a `<stop>` sets none.
+                // gradient element inherited, since a `<stop>` sets none. One
+                // left to the caller is a colour no stop can hold.
                 None => match significant.first() {
                     Some(ComponentValue::Token(Token::Ident(word)))
-                        if word.eq_ignore_ascii_case("currentColor") =>
+                        if word.eq_ignore_ascii_case("currentColor")
+                            && (self.colour_set || !self.foreground) =>
                     {
                         self.stop_colour = self.colour;
+                        self.stop_alpha = 1.0;
                         true
                     }
                     _ => false,
@@ -902,6 +1014,7 @@ impl Style {
                 // the same answer.
                 Some(read) => {
                     self.colour = read;
+                    self.colour_set = true;
                     true
                 }
                 None => false,

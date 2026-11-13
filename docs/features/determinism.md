@@ -57,8 +57,8 @@ each page of its table — `text`, `curves`, `shading`, `pattern`, `optional`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
 `analytic_image`, `default_spaces`, `gs_text`, `strokes`, `bilevel`, `icc`,
 `jpeg_minified`, `jpx_minified`, `intents`, `substituted_cjk`,
-`substituted_symbols`, `multiple_master`, and in a build with the
-`hyphenation` feature `hyphenation` — each a hash of
+`substituted_symbols`, `multiple_master`, `colour_glyphs`, and in a build
+with the `hyphenation` feature `hyphenation` — each a hash of
 rendered pixels
 plus the page dimensions and
 ink counts it is computed from. `strokes` is the stroker's whole pen: the
@@ -122,7 +122,16 @@ Type 1 program, built in `tests/type1_support/`, drawn at the instance its
 the program's maps, the masters weighted by their corners and blended by the
 blend othersubrs ([fonts](fonts.md)), so the instance is one picture on every
 target; `multiple_master.rs` holds the same page to a plain Type 1 twin drawn
-from the instance's outlines.
+from the instance's outlines. `colour_glyphs` is a colour face's glyphs
+written as Type 3 procedures ([fonts](fonts.md)), built in
+`tests/colour_support/`: a `COLR` version 1 graph — a reflected linear
+gradient multiplied over a padded radial one with a translucent stop, each a
+calculator of the colour line in linear light, a soft mask and a blend mode
+— an `sbix` PNG with an alpha placed by its strike's metrics, and an `SVG `
+element of a path, a gradient and a `<use>` through the book's scene writer,
+so the shadings' programs, the transparency they need and the scene's
+operators are one picture on every target; `colour_fonts.rs` holds each kind
+to its formulas.
 `hyphenation` is the first page of a book generated in the test, one
 chapter in British English whose paragraph of long words is set in
 `hyphens: auto`, opened at 288 × 360 points: its lines break at the vendored

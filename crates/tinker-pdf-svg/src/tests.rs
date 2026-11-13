@@ -999,3 +999,132 @@ fn an_element_read_by_id_inherits_from_the_root_and_not_from_its_ancestors() {
     let scene = crate::read_element(hidden_root, "glyph3", None, &limits).expect("reads");
     assert!(scene.nodes.is_empty(), "{:?}", scene.nodes);
 }
+
+/// Every node's fill, in order, descending into groups.
+fn fills(nodes: &[crate::Node]) -> Vec<(crate::Paint, f64)> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            crate::Node::Path {
+                fill, fill_opacity, ..
+            } => out.push((fill.clone(), *fill_opacity)),
+            crate::Node::Group { nodes, .. } => out.extend(fills(nodes)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// **An element the caller's profile forbids is drawn as nothing**, its
+/// content with it, and named once by its local name; the rest of the
+/// document is drawn, and a document read with no profile draws all of it.
+#[test]
+fn an_element_the_caller_restricts_is_drawn_as_nothing_and_named() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+        <a><rect width="10" height="10"/></a>
+        <rect x="20" width="10" height="10" fill="#00ff00"/>
+        <switch><rect x="40" width="10" height="10"/></switch>
+    </svg>"##;
+    let limits = crate::Limits::DEFAULT;
+    let context = crate::Context::NONE.with_restricted(&["a", "switch"]);
+    let scene = crate::read_with(svg, None, &limits, &context).expect("reads");
+    let painted = fills(&scene.nodes);
+    assert_eq!(painted.len(), 1, "{:?}", scene.nodes);
+    assert_eq!(
+        painted[0].0,
+        crate::Paint::Solid(crate::Colour {
+            rgb: [0.0, 1.0, 0.0]
+        })
+    );
+    assert!(scene
+        .warnings
+        .contains(&crate::Warning::ElementRestricted("a".to_owned())));
+    assert!(scene
+        .warnings
+        .contains(&crate::Warning::ElementRestricted("switch".to_owned())));
+    // `<switch>` is no element this build reads; `<a>` is a group.
+    let open = crate::read(svg, None, &limits).expect("reads");
+    assert_eq!(fills(&open.nodes).len(), 2, "{:?}", open.nodes);
+    // An element read by its id that the profile forbids draws nothing.
+    let by_id = br##"<svg xmlns="http://www.w3.org/2000/svg">
+        <a id="glyph4"><rect width="10" height="10"/></a></svg>"##;
+    let scene = crate::read_element_with(by_id, "glyph4", None, &limits, &context).expect("reads");
+    assert!(scene.nodes.is_empty(), "{:?}", scene.nodes);
+}
+
+/// **`var(--colorN)` reads the caller's palette** in a fill, a stroke, a
+/// stop and a `color`: the entry's colour stands for the value and its alpha
+/// multiplies the element's own opacity where the paint is used, inherited
+/// with the paint; a name past the palette or not of the form takes its
+/// fallback, and one with no fallback is an unreadable value. A document read
+/// with no palette takes every fallback.
+#[test]
+fn a_palette_variable_reads_the_callers_entry_and_its_alpha() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+        <rect width="10" height="10" fill="var(--color1, #ff0000)" fill-opacity="0.5"/>
+        <g fill="var(--color0)"><rect x="20" width="10" height="10"/></g>
+        <rect x="40" width="10" height="10" fill="var(--color7, #0000ff)"/>
+        <rect x="60" width="10" height="10" fill="var(--other, #ff00ff)"/>
+        <rect x="80" width="10" height="10" fill="var(--color9)"/>
+    </svg>"##;
+    let palette = [[1.0, 1.0, 0.0, 1.0], [0.0, 0.5, 1.0, 0.5]];
+    let limits = crate::Limits::DEFAULT;
+    let context = crate::Context::NONE.with_palette(&palette);
+    let scene = crate::read_with(svg, None, &limits, &context).expect("reads");
+    let solid = |rgb| crate::Paint::Solid(crate::Colour { rgb });
+    let painted = fills(&scene.nodes);
+    assert_eq!(
+        painted,
+        vec![
+            // Entry 1's alpha times the element's own half.
+            (solid([0.0, 0.5, 1.0]), 0.25),
+            // Entry 0, inherited from the group with its alpha of one.
+            (solid([1.0, 1.0, 0.0]), 1.0),
+            // Past the palette, and not a palette name: the fallbacks.
+            (solid([0.0, 0.0, 1.0]), 1.0),
+            (solid([1.0, 0.0, 1.0]), 1.0),
+            // No entry and no fallback: the inherited black, named.
+            (solid([0.0, 0.0, 0.0]), 1.0),
+        ]
+    );
+    assert!(scene.warnings.contains(&crate::Warning::ValueUnreadable {
+        attribute: "fill".to_owned()
+    }));
+    let unthemed = crate::read(svg, None, &limits).expect("reads");
+    assert_eq!(fills(&unthemed.nodes)[0], (solid([1.0, 0.0, 0.0]), 0.5));
+}
+
+/// **`currentColor` with no `color` set is the caller's** where it keeps it:
+/// [`crate::Paint::Current`]; where a `color` is set, here or above, it is
+/// that colour; a `stop-color` of the caller's colour is unreadable, a stop
+/// holding no colour it can name. Read without the caller keeping it,
+/// `currentColor` is `color`'s initial black, as before.
+#[test]
+fn current_colour_is_left_to_a_caller_that_keeps_it() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+        <defs><linearGradient id="g"><stop offset="0" stop-color="currentColor"/>
+            <stop offset="1" stop-color="#ffffff"/></linearGradient></defs>
+        <rect width="10" height="10" fill="currentColor"/>
+        <g color="#00ff00"><rect x="20" width="10" height="10" fill="currentColor"/></g>
+        <rect x="40" width="10" height="10" fill="url(#g)"/>
+    </svg>"##;
+    let limits = crate::Limits::DEFAULT;
+    let context = crate::Context::NONE.with_foreground();
+    let scene = crate::read_with(svg, None, &limits, &context).expect("reads");
+    let painted = fills(&scene.nodes);
+    assert_eq!(painted[0].0, crate::Paint::Current);
+    assert_eq!(
+        painted[1].0,
+        crate::Paint::Solid(crate::Colour {
+            rgb: [0.0, 1.0, 0.0]
+        })
+    );
+    assert!(scene.warnings.contains(&crate::Warning::ValueUnreadable {
+        attribute: "stop-color".to_owned()
+    }));
+    let plain = crate::read(svg, None, &limits).expect("reads");
+    assert_eq!(
+        fills(&plain.nodes)[0].0,
+        crate::Paint::Solid(crate::Colour { rgb: [0.0; 3] })
+    );
+}

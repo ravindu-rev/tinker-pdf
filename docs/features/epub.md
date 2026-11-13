@@ -1214,6 +1214,22 @@ own id is the whole document. An id no element has is
 `Limits::max_uses` (`crates/tinker-pdf-svg/src/tests.rs`). The `svg` fuzz
 target reads every input again by the first id it holds.
 
+**What a caller's profile of SVG asks.** `tinker_pdf_svg::Context` carries
+three more reaches, none of which a book's read sets, so a book's scene is the
+same: `with_restricted` names elements the caller's format forbids, each
+drawn as nothing, its content with it, and named
+`Warning::ElementRestricted`; `with_palette` gives the values of
+`var(--color0)`, `var(--color1)` and on in a `fill`, `stroke`, `stop-color`
+or `color` — the entry's colour stands for the value and its alpha is
+multiplied into the element's own `fill-opacity`, `stroke-opacity` or
+`stop-opacity` where the paint is used, inherited with the paint — a variable
+the palette lacks taking its fallback, and one with none an unreadable value;
+and `with_foreground` leaves `currentColor` where no `color` is set to the
+caller as `Paint::Current`, which the scene writer draws by setting no colour,
+so the shape paints in the colour of the stream it is drawn in, a
+`stop-color` of it being an unreadable value. A colour glyph's `SVG `
+description is read with all three ([fonts](fonts.md)).
+
 **Resources are registered before a page begins.**
 `DocumentBuilder::begin_page` snapshots the document's resource set, so a
 pattern, an `/ExtGState` or an image registered while *drawing* is invisible

@@ -13,8 +13,14 @@
 //! (`epub_support::typeface`), their colour tables written here field by
 //! field from the OpenType chapters' layouts.
 
+mod colour_support;
 mod epub_support;
 mod pdfa_support;
+
+use colour_support::{
+    cbdt_tables, colr_v0, colr_v1, cpal, f2dot14, gzip, line, rgb_png, rgb_tiff, rgba_png,
+    sbix_table, svg_table, CbdtEntry, Line, SbixRecord, PAD, REFLECT, REPEAT, V1,
+};
 
 use epub_support::typeface::{Colour, Face};
 use tinker_pdf::colour_glyphs::{ColourFace, ColourWarning};
@@ -794,59 +800,6 @@ fn a_colour_run_refuses_what_it_cannot_write() {
 
 // ---- COLR version 0, through `shaping::write_run` --------------------------
 
-/// A version 0 `COLR` (*COLR header*, *BaseGlyph and Layer records*): each
-/// base glyph with its layers, bottom first, as glyph ids and palette
-/// indices, the records in increasing glyph order as the chapter requires.
-fn colr_v0(bases: &[(u16, Vec<(u16, u16)>)]) -> Vec<u8> {
-    let layer_count: usize = bases.iter().map(|(_, layers)| layers.len()).sum();
-    let base_at = 14usize;
-    let layers_at = base_at + 6 * bases.len();
-    let mut out = Vec::new();
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&(bases.len() as u16).to_be_bytes());
-    out.extend_from_slice(&(base_at as u32).to_be_bytes());
-    out.extend_from_slice(&(layers_at as u32).to_be_bytes());
-    out.extend_from_slice(&(layer_count as u16).to_be_bytes());
-    let mut first = 0u16;
-    for (glyph, layers) in bases {
-        out.extend_from_slice(&glyph.to_be_bytes());
-        out.extend_from_slice(&first.to_be_bytes());
-        out.extend_from_slice(&(layers.len() as u16).to_be_bytes());
-        first += layers.len() as u16;
-    }
-    for (_, layers) in bases {
-        for (glyph, index) in layers {
-            out.extend_from_slice(&glyph.to_be_bytes());
-            out.extend_from_slice(&index.to_be_bytes());
-        }
-    }
-    out
-}
-
-/// A version 0 `CPAL` (*Palette table header*, *Palette entries and color
-/// records*): palettes of the same number of entries, each given as RGBA and
-/// written in the table's blue-green-red-alpha order, each palette's records
-/// after the one before.
-fn cpal(palettes: &[Vec<[u8; 4]>]) -> Vec<u8> {
-    let entries = palettes.first().map_or(0, Vec::len);
-    let records_at = 12 + 2 * palettes.len();
-    let mut out = Vec::new();
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&(entries as u16).to_be_bytes());
-    out.extend_from_slice(&(palettes.len() as u16).to_be_bytes());
-    out.extend_from_slice(&((entries * palettes.len()) as u16).to_be_bytes());
-    out.extend_from_slice(&(records_at as u32).to_be_bytes());
-    for palette in 0..palettes.len() {
-        out.extend_from_slice(&((palette * entries) as u16).to_be_bytes());
-    }
-    for palette in palettes {
-        for [r, g, b, a] in palette {
-            out.extend_from_slice(&[*b, *g, *r, *a]);
-        }
-    }
-    out
-}
-
 /// The palette index that is no index: the text's own colour.
 const FOREGROUND: u16 = 0xFFFF;
 
@@ -1134,364 +1087,6 @@ fn a_face_without_a_palette_has_no_colour_glyph() {
 }
 
 // ---- COLR version 1, through `shaping::write_run` --------------------------
-
-/// A `COLR` version 1 paint to write (*Paint tables*): a tree, each node one
-/// table, a subtree written twice two tables — but for
-/// [`V1::LayersOfOne`], whose layer slots all name one table.
-#[derive(Clone, Debug)]
-enum V1 {
-    /// Format 1: a slice of the `LayerList`, bottom first.
-    Layers(Vec<V1>),
-    /// Format 1, its `n` slots all naming one table, so the reader reads one
-    /// node with `n` parents.
-    LayersOfOne(usize, Box<V1>),
-    /// Format 2: a palette entry and an alpha.
-    Solid(u16, f64),
-    /// Format 3, at the default instance.
-    VarSolid(u16, f64),
-    /// Formats 4 and 5, the second at the default instance: `p0`, `p1` and
-    /// `p2`, and the colour line.
-    Linear {
-        line: Line,
-        points: [[i16; 2]; 3],
-        variable: bool,
-    },
-    /// Formats 6 and 7: two circles, centre and radius each.
-    Radial {
-        line: Line,
-        circles: [([i16; 2], u16); 2],
-        variable: bool,
-    },
-    /// Formats 8 and 9: the centre, and the start and end angles in degrees,
-    /// counter-clockwise, written biased as the formats store them.
-    Sweep {
-        line: Line,
-        centre: [i16; 2],
-        angles: [f64; 2],
-        variable: bool,
-    },
-    /// Format 10: a glyph's outline as the child's clip.
-    Glyph(u16, Box<V1>),
-    /// Format 11: another base glyph's graph.
-    ColrGlyph(u16),
-    /// Format 12: an `Affine2x3`, `xx yx xy yy dx dy`.
-    Transform([f64; 6], Box<V1>),
-    /// Formats 14: a translation in font units.
-    Translate(i16, i16, Box<V1>),
-    /// Formats 16 and 18: scales along x and y, about a centre for 18.
-    Scale(f64, f64, Option<[i16; 2]>, Box<V1>),
-    /// Formats 20 and 22.
-    ScaleUniform(f64, Option<[i16; 2]>, Box<V1>),
-    /// Formats 24 and 26: an angle in units of 180°, counter-clockwise.
-    Rotate(f64, Option<[i16; 2]>, Box<V1>),
-    /// Formats 28 and 30: the x and y skew angles in units of 180°.
-    Skew(f64, f64, Option<[i16; 2]>, Box<V1>),
-    /// Format 32: source, `compositeMode`, backdrop.
-    Composite(Box<V1>, u8, Box<V1>),
-}
-
-/// A colour line to write (*Color references, ColorStop and ColorLine*): its
-/// `extend` byte, and its stops in the order the table gives them, each an
-/// offset, a palette entry and an alpha.
-#[derive(Clone, Debug)]
-struct Line {
-    extend: u8,
-    stops: Vec<(f64, u16, f64)>,
-}
-
-/// `EXTEND_PAD`, `EXTEND_REPEAT` and `EXTEND_REFLECT`.
-const PAD: u8 = 0;
-const REPEAT: u8 = 1;
-const REFLECT: u8 = 2;
-
-/// A line of opaque stops.
-fn line(extend: u8, stops: &[(f64, u16)]) -> Line {
-    Line {
-        extend,
-        stops: stops.iter().map(|&(at, entry)| (at, entry, 1.0)).collect(),
-    }
-}
-
-/// An `F2DOT14`.
-fn f2dot14(value: f64) -> [u8; 2] {
-    ((value * 16384.0).round() as i16).to_be_bytes()
-}
-
-/// A `Fixed`.
-fn fixed(value: f64) -> [u8; 4] {
-    ((value * 65536.0).round() as i32).to_be_bytes()
-}
-
-/// The paint tables of a `COLR`, written into one area, and the `LayerList`
-/// slots its layer lists filled, each the area offset of a table.
-#[derive(Default)]
-struct V1Writer {
-    area: Vec<u8>,
-    layers: Vec<usize>,
-}
-
-impl V1Writer {
-    /// Puts `value` as an `Offset24` at `at`.
-    fn patch(&mut self, at: usize, value: usize) {
-        let bytes = u32::try_from(value).expect("an offset").to_be_bytes();
-        self.area[at..at + 3].copy_from_slice(&bytes[1..]);
-    }
-
-    /// A child offset to fill at `at`, from the table at `table`, with the
-    /// child written now, after it.
-    fn child(&mut self, table: usize, at: usize, child: &V1) {
-        let written = self.write(child);
-        self.patch(at, written - table);
-    }
-
-    fn centre(&mut self, centre: Option<[i16; 2]>) {
-        if let Some([x, y]) = centre {
-            self.area.extend_from_slice(&x.to_be_bytes());
-            self.area.extend_from_slice(&y.to_be_bytes());
-        }
-    }
-
-    /// A variable format's `varIndexBase`: no delta set, so the table draws
-    /// at its default.
-    fn var_index(&mut self, variable: bool) {
-        if variable {
-            self.area.extend_from_slice(&u32::MAX.to_be_bytes());
-        }
-    }
-
-    /// The colour line of the gradient table at `table`, written now, after
-    /// it, its offset patched into the table's `Offset24` at one: a
-    /// `ColorLine`, or a `VarColorLine` whose stops each carry a
-    /// `varIndexBase`.
-    fn line(&mut self, table: usize, line: &Line, variable: bool) {
-        let here = self.area.len();
-        self.patch(table + 1, here - table);
-        self.area.push(line.extend);
-        self.area.extend_from_slice(
-            &u16::try_from(line.stops.len())
-                .expect("few stops")
-                .to_be_bytes(),
-        );
-        for &(offset, entry, alpha) in &line.stops {
-            self.area.extend_from_slice(&f2dot14(offset));
-            self.area.extend_from_slice(&entry.to_be_bytes());
-            self.area.extend_from_slice(&f2dot14(alpha));
-            self.var_index(variable);
-        }
-    }
-
-    /// Writes `paint` at the area's end, its children after it, each offset
-    /// from the table that names it as *Paint tables* has it; returns where it
-    /// starts.
-    fn write(&mut self, paint: &V1) -> usize {
-        let at = self.area.len();
-        match paint {
-            V1::Layers(children) => {
-                let first = self.layers.len();
-                self.layers.extend(std::iter::repeat_n(0, children.len()));
-                self.area.extend_from_slice(&[1, children.len() as u8]);
-                self.area.extend_from_slice(&(first as u32).to_be_bytes());
-                for (i, child) in children.iter().enumerate() {
-                    let written = self.write(child);
-                    self.layers[first + i] = written;
-                }
-            }
-            V1::LayersOfOne(count, child) => {
-                let first = self.layers.len();
-                self.layers.extend(std::iter::repeat_n(0, *count));
-                self.area.extend_from_slice(&[1, *count as u8]);
-                self.area.extend_from_slice(&(first as u32).to_be_bytes());
-                let written = self.write(child);
-                for slot in &mut self.layers[first..first + count] {
-                    *slot = written;
-                }
-            }
-            V1::Solid(entry, alpha) | V1::VarSolid(entry, alpha) => {
-                let variable = matches!(paint, V1::VarSolid(..));
-                self.area.push(if variable { 3 } else { 2 });
-                self.area.extend_from_slice(&entry.to_be_bytes());
-                self.area.extend_from_slice(&f2dot14(*alpha));
-                if variable {
-                    self.area.extend_from_slice(&0u32.to_be_bytes());
-                }
-            }
-            V1::Linear {
-                line,
-                points,
-                variable,
-            } => {
-                // *Formats 4 and 5*: the format, an `Offset24` to the colour
-                // line, `x0 y0 x1 y1 x2 y2`, and for 5 a `varIndexBase`.
-                self.area
-                    .extend_from_slice(&[if *variable { 5 } else { 4 }, 0, 0, 0]);
-                for [x, y] in points {
-                    self.area.extend_from_slice(&x.to_be_bytes());
-                    self.area.extend_from_slice(&y.to_be_bytes());
-                }
-                self.var_index(*variable);
-                self.line(at, line, *variable);
-            }
-            V1::Radial {
-                line,
-                circles,
-                variable,
-            } => {
-                // *Formats 6 and 7*: `x0 y0 radius0 x1 y1 radius1`.
-                self.area
-                    .extend_from_slice(&[if *variable { 7 } else { 6 }, 0, 0, 0]);
-                for ([x, y], radius) in circles {
-                    self.area.extend_from_slice(&x.to_be_bytes());
-                    self.area.extend_from_slice(&y.to_be_bytes());
-                    self.area.extend_from_slice(&radius.to_be_bytes());
-                }
-                self.var_index(*variable);
-                self.line(at, line, *variable);
-            }
-            V1::Sweep {
-                line,
-                centre,
-                angles,
-                variable,
-            } => {
-                // *Formats 8 and 9*: the centre, and `startAngle` and
-                // `endAngle` as `F2DOT14`s biased by one, 180° a unit.
-                self.area
-                    .extend_from_slice(&[if *variable { 9 } else { 8 }, 0, 0, 0]);
-                for value in centre {
-                    self.area.extend_from_slice(&value.to_be_bytes());
-                }
-                for degrees in angles {
-                    self.area.extend_from_slice(&f2dot14(degrees / 180.0 - 1.0));
-                }
-                self.var_index(*variable);
-                self.line(at, line, *variable);
-            }
-            V1::Glyph(glyph, child) => {
-                self.area.extend_from_slice(&[10, 0, 0, 0]);
-                self.area.extend_from_slice(&glyph.to_be_bytes());
-                self.child(at, at + 1, child);
-            }
-            V1::ColrGlyph(glyph) => {
-                self.area.push(11);
-                self.area.extend_from_slice(&glyph.to_be_bytes());
-            }
-            V1::Transform(matrix, child) => {
-                self.area.extend_from_slice(&[12, 0, 0, 0, 0, 0, 0]);
-                let affine = self.area.len();
-                for value in matrix {
-                    self.area.extend_from_slice(&fixed(*value));
-                }
-                self.patch(at + 4, affine - at);
-                self.child(at, at + 1, child);
-            }
-            V1::Translate(dx, dy, child) => {
-                self.area.extend_from_slice(&[14, 0, 0, 0]);
-                self.area.extend_from_slice(&dx.to_be_bytes());
-                self.area.extend_from_slice(&dy.to_be_bytes());
-                self.child(at, at + 1, child);
-            }
-            V1::Scale(x, y, centre, child) => {
-                self.area
-                    .extend_from_slice(&[if centre.is_some() { 18 } else { 16 }, 0, 0, 0]);
-                self.area.extend_from_slice(&f2dot14(*x));
-                self.area.extend_from_slice(&f2dot14(*y));
-                self.centre(*centre);
-                self.child(at, at + 1, child);
-            }
-            V1::ScaleUniform(scale, centre, child) => {
-                self.area
-                    .extend_from_slice(&[if centre.is_some() { 22 } else { 20 }, 0, 0, 0]);
-                self.area.extend_from_slice(&f2dot14(*scale));
-                self.centre(*centre);
-                self.child(at, at + 1, child);
-            }
-            V1::Rotate(angle, centre, child) => {
-                self.area
-                    .extend_from_slice(&[if centre.is_some() { 26 } else { 24 }, 0, 0, 0]);
-                self.area.extend_from_slice(&f2dot14(*angle));
-                self.centre(*centre);
-                self.child(at, at + 1, child);
-            }
-            V1::Skew(x, y, centre, child) => {
-                self.area
-                    .extend_from_slice(&[if centre.is_some() { 30 } else { 28 }, 0, 0, 0]);
-                self.area.extend_from_slice(&f2dot14(*x));
-                self.area.extend_from_slice(&f2dot14(*y));
-                self.centre(*centre);
-                self.child(at, at + 1, child);
-            }
-            V1::Composite(source, mode, backdrop) => {
-                self.area.extend_from_slice(&[32, 0, 0, 0, *mode, 0, 0, 0]);
-                self.child(at, at + 1, source);
-                self.child(at, at + 5, backdrop);
-            }
-        }
-        at
-    }
-}
-
-/// A version 1 `COLR` (*COLR header*, *BaseGlyphList, LayerList and
-/// ClipList*): the 34-byte header, a `BaseGlyphList` of `bases` (in
-/// increasing glyph order, as the chapter requires), the `LayerList` their
-/// layer lists filled, a format 1 `ClipList` of `clips` where there are any,
-/// and then every paint table.
-fn colr_v1(bases: &[(u16, V1)], clips: &[(u16, u16, [i16; 4])]) -> Vec<u8> {
-    let mut writer = V1Writer::default();
-    let roots: Vec<(u16, usize)> = bases
-        .iter()
-        .map(|(glyph, paint)| (*glyph, writer.write(paint)))
-        .collect();
-    let base_list_at = 34usize;
-    let layer_list_at = base_list_at + 4 + 6 * roots.len();
-    let clip_list_at = layer_list_at + 4 + 4 * writer.layers.len();
-    let clip_list_len = if clips.is_empty() {
-        0
-    } else {
-        5 + 16 * clips.len()
-    };
-    let area_at = clip_list_at + clip_list_len;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u16.to_be_bytes());
-    out.extend_from_slice(&(base_list_at as u32).to_be_bytes());
-    out.extend_from_slice(&(layer_list_at as u32).to_be_bytes());
-    let clip_offset = if clips.is_empty() { 0 } else { clip_list_at };
-    out.extend_from_slice(&(clip_offset as u32).to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-
-    out.extend_from_slice(&(roots.len() as u32).to_be_bytes());
-    for (glyph, root) in &roots {
-        out.extend_from_slice(&glyph.to_be_bytes());
-        out.extend_from_slice(&((area_at + root - base_list_at) as u32).to_be_bytes());
-    }
-    out.extend_from_slice(&(writer.layers.len() as u32).to_be_bytes());
-    for layer in &writer.layers {
-        out.extend_from_slice(&((area_at + layer - layer_list_at) as u32).to_be_bytes());
-    }
-    if !clips.is_empty() {
-        out.push(1);
-        out.extend_from_slice(&(clips.len() as u32).to_be_bytes());
-        for (i, (start, end, _)) in clips.iter().enumerate() {
-            out.extend_from_slice(&start.to_be_bytes());
-            out.extend_from_slice(&end.to_be_bytes());
-            let box_at = 5 + 7 * clips.len() + 9 * i;
-            out.extend_from_slice(&(box_at as u32).to_be_bytes()[1..]);
-        }
-        for (_, _, rect) in clips {
-            out.push(1);
-            for value in rect {
-                out.extend_from_slice(&value.to_be_bytes());
-            }
-        }
-    }
-    out.extend_from_slice(&writer.area);
-    out
-}
 
 /// The rectangles a version 1 face's graphs clip to, at
 /// `Face::colour_glyph(n)`.
@@ -2741,88 +2336,6 @@ fn a_composite_needing_transparency_under_a_profile_without_it_is_drawn_as_the_o
 
 // ---- Bitmap glyphs: sbix, CBLC and CBDT -----------------------------------
 
-/// A PNG of `width` × `height` RGBA pixels, row-major from the top: colour
-/// type 6 at eight bits (11.2.2), every row of filter type 0 (9.2), one
-/// `IDAT`, each chunk's CRC over its type and data (5.3).
-fn rgba_png(width: u32, height: u32, pixels: &[[u8; 4]]) -> Vec<u8> {
-    png(width, height, pixels, true)
-}
-
-/// [`rgba_png`]'s picture with its alpha dropped: colour type 2, which a
-/// writer can pass through with no soft mask.
-fn rgb_png(width: u32, height: u32, pixels: &[[u8; 4]]) -> Vec<u8> {
-    png(width, height, pixels, false)
-}
-
-/// A PNG of `pixels`, colour type 6 where `alpha` and 2 where not.
-fn png(width: u32, height: u32, pixels: &[[u8; 4]], alpha: bool) -> Vec<u8> {
-    let chunk = |kind: &[u8; 4], data: &[u8]| {
-        let mut out = Vec::new();
-        out.extend_from_slice(&u32::try_from(data.len()).expect("small").to_be_bytes());
-        out.extend_from_slice(kind);
-        out.extend_from_slice(data);
-        let mut both = kind.to_vec();
-        both.extend_from_slice(data);
-        out.extend_from_slice(&tinker_pdf_filters::crc32(&both).to_be_bytes());
-        out
-    };
-    let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, if alpha { 6 } else { 2 }, 0, 0, 0]);
-    let mut raw = Vec::new();
-    for row in pixels.chunks(width as usize) {
-        raw.push(0);
-        for pixel in row {
-            raw.extend_from_slice(if alpha { &pixel[..] } else { &pixel[..3] });
-        }
-    }
-    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    out.extend_from_slice(&chunk(b"IHDR", &ihdr));
-    out.extend_from_slice(&chunk(b"IDAT", &tinker_pdf_filters::zlib_compress(&raw)));
-    out.extend_from_slice(&chunk(b"IEND", b""));
-    out
-}
-
-/// A baseline RGB TIFF (TIFF 6.0, section 6), little-endian, uncompressed,
-/// one strip: its nine required fields in tag order, `BitsPerSample`'s three
-/// values after the directory, and the samples after them.
-fn rgb_tiff(width: u16, height: u16, pixels: &[[u8; 3]]) -> Vec<u8> {
-    let entries: u16 = 9;
-    let directory_end = 8 + 2 + 12 * usize::from(entries) + 4;
-    let bits_at = u32::try_from(directory_end).expect("small");
-    let strip_at = bits_at + 6;
-    let strip_len = u32::from(width) * u32::from(height) * 3;
-    let mut out = b"II".to_vec();
-    out.extend_from_slice(&42u16.to_le_bytes());
-    out.extend_from_slice(&8u32.to_le_bytes());
-    out.extend_from_slice(&entries.to_le_bytes());
-    // tag, type (3 SHORT, 4 LONG), count, value or offset.
-    let mut entry = |tag: u16, kind: u16, count: u32, value: u32| {
-        out.extend_from_slice(&tag.to_le_bytes());
-        out.extend_from_slice(&kind.to_le_bytes());
-        out.extend_from_slice(&count.to_le_bytes());
-        out.extend_from_slice(&value.to_le_bytes());
-    };
-    entry(256, 3, 1, u32::from(width)); // ImageWidth
-    entry(257, 3, 1, u32::from(height)); // ImageLength
-    entry(258, 3, 3, bits_at); // BitsPerSample, at its offset
-    entry(259, 3, 1, 1); // Compression: none
-    entry(262, 3, 1, 2); // PhotometricInterpretation: RGB
-    entry(273, 4, 1, strip_at); // StripOffsets
-    entry(277, 3, 1, 3); // SamplesPerPixel
-    entry(278, 3, 1, u32::from(height)); // RowsPerStrip: one strip
-    entry(279, 4, 1, strip_len); // StripByteCounts
-    out.extend_from_slice(&0u32.to_le_bytes()); // no next directory
-    for _ in 0..3 {
-        out.extend_from_slice(&8u16.to_le_bytes());
-    }
-    for pixel in pixels {
-        out.extend_from_slice(pixel);
-    }
-    out
-}
-
 /// A baseline JPEG of `width` × `height` RGB pixels, by this engine's own
 /// encoder: the claim here is where a glyph's graphic is drawn, and the
 /// colour each of its pixels is held to is the one this engine's decoder
@@ -2870,154 +2383,6 @@ fn quadrants(corner: [u8; 3], last: [u8; 3]) -> Vec<[u8; 4]> {
 /// Each quadrant's middle pixel, `(i, j)` from the top left: a pixel whose
 /// eight neighbours share its colour, where the design samples a bitmap.
 const QUADRANT_MIDDLES: [(usize, usize); 4] = [(1, 1), (6, 1), (1, 6), (6, 6)];
-
-/// One glyph's record in an `sbix` strike (*Glyph data*).
-#[derive(Clone, Debug)]
-enum SbixRecord {
-    /// A graphic: its origin offsets in the strike's pixels, its type and its
-    /// bytes.
-    Graphic([i16; 2], [u8; 4], Vec<u8>),
-    /// `dupe`: the glyph whose bitmap this one uses.
-    Dupe(u16),
-}
-
-/// An `sbix` (*Header*, *Strikes*, *Glyph data*): `flags`, and each strike's
-/// ppem and the records of the glyphs it holds, over a face of `count`
-/// glyphs, a glyph with no record holding no data.
-fn sbix_table(flags: u16, strikes: &[(u16, Vec<(u16, SbixRecord)>)], count: u16) -> Vec<u8> {
-    let mut bodies: Vec<Vec<u8>> = Vec::new();
-    for (ppem, records) in strikes {
-        let first = 4 + 4 * (usize::from(count) + 1);
-        let mut offsets = Vec::new();
-        let mut data = Vec::new();
-        for glyph in 0..count {
-            offsets.push(first + data.len());
-            if let Some((_, record)) = records.iter().find(|(g, _)| *g == glyph) {
-                match record {
-                    SbixRecord::Graphic([x, y], tag, bytes) => {
-                        data.extend_from_slice(&x.to_be_bytes());
-                        data.extend_from_slice(&y.to_be_bytes());
-                        data.extend_from_slice(tag);
-                        data.extend_from_slice(bytes);
-                    }
-                    SbixRecord::Dupe(named) => {
-                        data.extend_from_slice(&[0, 0, 0, 0]);
-                        data.extend_from_slice(b"dupe");
-                        data.extend_from_slice(&named.to_be_bytes());
-                    }
-                }
-            }
-        }
-        offsets.push(first + data.len());
-        let mut body = Vec::new();
-        body.extend_from_slice(&ppem.to_be_bytes());
-        body.extend_from_slice(&72u16.to_be_bytes()); // ppi
-        for offset in offsets {
-            body.extend_from_slice(&u32::try_from(offset).expect("small").to_be_bytes());
-        }
-        body.extend_from_slice(&data);
-        bodies.push(body);
-    }
-    let mut out = Vec::new();
-    out.extend_from_slice(&1u16.to_be_bytes()); // version
-    out.extend_from_slice(&flags.to_be_bytes());
-    out.extend_from_slice(&u32::try_from(strikes.len()).expect("few").to_be_bytes());
-    let mut at = 8 + 4 * strikes.len();
-    for body in &bodies {
-        out.extend_from_slice(&u32::try_from(at).expect("small").to_be_bytes());
-        at += body.len();
-    }
-    for body in bodies {
-        out.extend_from_slice(&body);
-    }
-    out
-}
-
-/// One glyph of a `CBDT` strike (*Glyph bitmap data formats*): its id, its
-/// data format, its metrics as `BigGlyphMetrics` lays them out — height,
-/// width, horizontal bearings and advance, vertical bearings and advance — and
-/// its PNG. Format 17 writes the first five as `SmallGlyphMetrics`, 18 all
-/// eight, and 19 none, its index subtable (format 2) carrying them.
-#[derive(Clone, Debug)]
-struct CbdtEntry {
-    glyph: u16,
-    format: u16,
-    metrics: [u8; 8],
-    png: Vec<u8>,
-}
-
-/// A `CBLC` and its `CBDT` (*CblcHeader*, *BitmapSize record*,
-/// *IndexSubtableList*): each strike its `ppemX` and `ppemY`, its glyphs each
-/// one index subtable of a one-glyph range — format 1 for data formats 17 and
-/// 18, format 2 for 19 — at bit depth 32 with horizontal metrics.
-fn cbdt_tables(strikes: &[([u8; 2], Vec<CbdtEntry>)]) -> (Vec<u8>, Vec<u8>) {
-    let mut cbdt = vec![0, 3, 0, 0];
-    let mut lists: Vec<(Vec<u8>, u32, u16, u16)> = Vec::new();
-    for (_, entries) in strikes {
-        let records = 8 * entries.len();
-        let mut array = Vec::new();
-        let mut subtables = Vec::new();
-        for entry in entries {
-            let at = cbdt.len();
-            match entry.format {
-                17 => cbdt.extend_from_slice(&entry.metrics[..5]),
-                18 => cbdt.extend_from_slice(&entry.metrics),
-                _ => {}
-            }
-            cbdt.extend_from_slice(&u32::try_from(entry.png.len()).expect("small").to_be_bytes());
-            cbdt.extend_from_slice(&entry.png);
-            let size = u32::try_from(cbdt.len() - at).expect("small");
-            let at = u32::try_from(at).expect("small");
-            array.extend_from_slice(&entry.glyph.to_be_bytes());
-            array.extend_from_slice(&entry.glyph.to_be_bytes());
-            array.extend_from_slice(
-                &u32::try_from(records + subtables.len())
-                    .expect("small")
-                    .to_be_bytes(),
-            );
-            if entry.format == 19 {
-                subtables.extend_from_slice(&2u16.to_be_bytes());
-                subtables.extend_from_slice(&19u16.to_be_bytes());
-                subtables.extend_from_slice(&at.to_be_bytes());
-                subtables.extend_from_slice(&size.to_be_bytes());
-                subtables.extend_from_slice(&entry.metrics);
-            } else {
-                subtables.extend_from_slice(&1u16.to_be_bytes());
-                subtables.extend_from_slice(&entry.format.to_be_bytes());
-                subtables.extend_from_slice(&at.to_be_bytes());
-                subtables.extend_from_slice(&0u32.to_be_bytes());
-                subtables.extend_from_slice(&size.to_be_bytes());
-            }
-        }
-        array.extend_from_slice(&subtables);
-        let first = entries.iter().map(|e| e.glyph).min().unwrap_or(0);
-        let last = entries.iter().map(|e| e.glyph).max().unwrap_or(0);
-        lists.push((
-            array,
-            u32::try_from(entries.len()).expect("few"),
-            first,
-            last,
-        ));
-    }
-    let mut cblc = vec![0, 3, 0, 0];
-    cblc.extend_from_slice(&u32::try_from(strikes.len()).expect("few").to_be_bytes());
-    let mut at = 8 + 48 * strikes.len();
-    for (([ppem_x, ppem_y], _), (list, count, first, last)) in strikes.iter().zip(&lists) {
-        cblc.extend_from_slice(&u32::try_from(at).expect("small").to_be_bytes());
-        cblc.extend_from_slice(&u32::try_from(list.len()).expect("small").to_be_bytes());
-        cblc.extend_from_slice(&count.to_be_bytes());
-        cblc.extend_from_slice(&0u32.to_be_bytes()); // colorRef
-        cblc.extend_from_slice(&[0; 24]); // hori and vert SbitLineMetrics
-        cblc.extend_from_slice(&first.to_be_bytes());
-        cblc.extend_from_slice(&last.to_be_bytes());
-        cblc.extend_from_slice(&[*ppem_x, *ppem_y, 32, 0x01]);
-        at += list.len();
-    }
-    for (list, ..) in &lists {
-        cblc.extend_from_slice(list);
-    }
-    (cblc, cbdt)
-}
 
 /// The face the bitmap tests draw: `ABCD` at a thousand units, a full em
 /// each, and one rectangle glyph whose box starts at (100, 200), its tables
@@ -3453,6 +2818,276 @@ fn bitmap_glyphs_the_writer_cannot_draw_as_given_are_named() {
     ));
     assert!(close(
         pixel(&bitmap, at_units(1.2, [350.0, 350.0]), 100.0),
+        TEXT_GREEN,
+        2
+    ));
+}
+
+// ---- SVG glyphs ------------------------------------------------------------
+
+/// A face covering `ABCD`, a full em each, whose `SVG ` table holds
+/// `document` for glyphs 1 to 4 — `A` to `D` — and whose `CPAL` is `cpal`.
+fn svg_face(document: Vec<u8>, cpal: Vec<u8>) -> Face {
+    let base = Face::new("Fixture SVG", "ABCD").with_advance(1000);
+    let (first, last) = (
+        base.glyph_of('A').expect("covered"),
+        base.glyph_of('D').expect("covered"),
+    );
+    base.with_colour(Colour {
+        svg: svg_table(&[(first, last, document)]),
+        cpal,
+        ..Colour::default()
+    })
+}
+
+/// Two glyphs of one document, each with what it references: `glyph1` a
+/// blue path and a `<use>` of a green square, `glyph2` a rectangle filled
+/// with a red-to-blue gradient across its own box and the square again,
+/// moved, over it. Font units, the y axis down, the baseline at 0.
+const TWO_GLYPHS: &str = r##"<svg version="1.1" xmlns="http://www.w3.org/2000/svg"
+    xmlns:xlink="http://www.w3.org/1999/xlink">
+  <defs>
+    <linearGradient id="grad"><stop offset="0" stop-color="#ff0000"/>
+      <stop offset="1" stop-color="#0000ff"/></linearGradient>
+    <rect id="square" width="300" height="300" fill="#00ff00"/>
+  </defs>
+  <g id="glyph1">
+    <path d="M100 -100 H500 V-500 H100 Z" fill="#0000ff"/>
+    <use xlink:href="#square" x="100" y="-900"/>
+  </g>
+  <g id="glyph2">
+    <rect x="100" y="-800" width="800" height="600" fill="url(#grad)"/>
+    <use xlink:href="#square" x="600" y="-900"/>
+  </g>
+</svg>"##;
+
+/// The colour [`TWO_GLYPHS`] gives glyph `n` at `unit`, glyph space with
+/// the y axis up, over the white page: its markup read by hand — the
+/// shapes' boxes flipped about the baseline, the gradient SVG's sRGB ramp
+/// across its rectangle's box (§13.2.2, `objectBoundingBox`), and what is
+/// drawn later over what is drawn earlier.
+fn two_glyphs_at(n: u16, [x, y]: [f64; 2]) -> [u8; 3] {
+    let inside = |rect: [f64; 4]| x > rect[0] && x < rect[2] && y > rect[1] && y < rect[3];
+    match n {
+        1 if inside([100.0, 600.0, 400.0, 900.0]) => GREEN,
+        1 if inside([100.0, 100.0, 500.0, 500.0]) => BLUE,
+        2 if inside([600.0, 600.0, 900.0, 900.0]) => GREEN,
+        2 if inside([100.0, 200.0, 900.0, 800.0]) => {
+            let t = (x - 100.0) / 800.0;
+            [
+                (255.0 * (1.0 - t)).round() as u8,
+                0,
+                (255.0 * t).round() as u8,
+            ]
+        }
+        _ => WHITE,
+    }
+}
+
+/// **FT-06.16's exit.** Two glyphs of one `SVG ` document — a filled path,
+/// a gradient and a `<use>` — each drawn through the book's scene writer
+/// under the flip into font units, plain and gzip-encoded alike: at sample
+/// points in each shape and outside them, each at a device pixel's centre,
+/// the colour the test reads off the markup, within FT-06.1's two levels for
+/// a fill and three for the gradient; and the text `AB` extracts.
+#[test]
+fn svg_glyphs_draw_their_document() {
+    for document in [TWO_GLYPHS.as_bytes().to_vec(), gzip(TWO_GLYPHS.as_bytes())] {
+        let face = svg_face(document, Vec::new());
+        let (bytes, warnings) =
+            colour_document(&face, "AB", PaletteChoice::Default, DocumentBuilder::new());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (bitmap, text) = rendered(bytes);
+        assert_eq!(text, "AB");
+        let samples: [(u16, [f64; 2], u8); 9] = [
+            (1, [300.0, 300.0], 2),
+            (1, [250.0, 750.0], 2),
+            (1, [700.0, 300.0], 2),
+            (1, [700.0, 750.0], 2),
+            (2, [300.0, 400.0], 3),
+            (2, [500.0, 300.0], 3),
+            (2, [820.0, 450.0], 3),
+            (2, [750.0, 750.0], 2),
+            (2, [300.0, 850.0], 2),
+        ];
+        for (n, unit, tolerance) in samples {
+            let pen = f64::from(n - 1);
+            let point = at_units(pen, unit);
+            let (x, y) = (
+                (point.0 * SCALE) as usize,
+                ((100.0 - point.1) * SCALE) as usize,
+            );
+            let want = two_glyphs_at(n, unit_at(pen, x, y));
+            let got = pixel_at(&bitmap, x, y);
+            assert!(
+                close(got, want, tolerance),
+                "glyph {n} at {unit:?}: {got:?}, not {want:?}"
+            );
+        }
+    }
+}
+
+/// An `SVG ` glyph takes its palette and the text's colour as the SVG
+/// chapter's *Color palettes* and *Colors* say: `var(--color1)` the chosen
+/// palette's entry 1, its alpha multiplied into the shape's opacity, a
+/// variable past the palette its fallback, and `currentColor` the colour the
+/// text is shown in — unless the document sets a `color`, which it then is.
+#[test]
+fn svg_glyphs_take_the_palette_and_the_text_colour() {
+    let document = r##"<svg version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <rect id="glyph1" x="100" y="-900" width="800" height="800" fill="var(--color1, #000000)"/>
+  <rect id="glyph2" x="100" y="-900" width="800" height="800" fill="currentColor"/>
+  <rect id="glyph3" x="100" y="-900" width="800" height="800" fill="var(--color9, #ff0000)"/>
+  <g id="glyph4" color="#0000ff">
+    <rect x="100" y="-900" width="800" height="800" fill="currentColor"/>
+  </g>
+</svg>"##;
+    let palette = cpal(&[vec![[255, 0, 0, 255], [AZURE[0], AZURE[1], AZURE[2], HALF]]]);
+    let face = svg_face(document.as_bytes().to_vec(), palette);
+    let (bytes, warnings) = colour_document(
+        &face,
+        "ABCD",
+        PaletteChoice::Default,
+        DocumentBuilder::new(),
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (bitmap, text) = rendered(bytes);
+    assert_eq!(text, "ABCD");
+    for (pen, want) in [
+        (0.0, over(AZURE, HALF, WHITE)),
+        (1.0, TEXT_GREEN),
+        (2.0, RED),
+        (3.0, BLUE),
+    ] {
+        let got = pixel(&bitmap, at_units(pen, [500.0, 500.0]), 100.0);
+        assert!(close(got, want, 2), "{pen}: {got:?}, not {want:?}");
+    }
+}
+
+/// What an `SVG ` glyph's document cannot give is named as the table or the
+/// scene names it: the elements the SVG chapter forbids drawn as nothing —
+/// `<text>`, and `<a>` with what it holds — the rest drawn; a glyph whose
+/// element is missing, a document past its table and a gzip member that does
+/// not check drawn as the outline.
+#[test]
+fn what_an_svg_glyphs_document_cannot_give_is_named() {
+    use tinker_pdf::colour_glyphs::SvgGlyphRefusal;
+    use tinker_pdf_font::SvgRefusal;
+    let document = r##"<svg version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <g id="glyph1">
+    <text x="0" y="-100">x</text>
+    <a><rect x="100" y="-900" width="800" height="800"/></a>
+    <rect x="100" y="-500" width="300" height="300" fill="#00ff00"/>
+  </g>
+</svg>"##;
+    let face = svg_face(document.as_bytes().to_vec(), Vec::new());
+    let (bytes, warnings) =
+        colour_document(&face, "AB", PaletteChoice::Default, DocumentBuilder::new());
+    let a = face.glyph_of('A').expect("covered");
+    let b = face.glyph_of('B').expect("covered");
+    for name in ["text", "a"] {
+        assert!(
+            warnings.contains(&ColourWarning::SvgWarning {
+                glyph: a,
+                warning: tinker_pdf_svg::Warning::ElementRestricted(name.to_owned()),
+            }),
+            "{name}: {warnings:?}"
+        );
+    }
+    assert!(warnings.contains(&ColourWarning::SvgRefused {
+        glyph: b,
+        refusal: SvgGlyphRefusal::Scene(tinker_pdf_svg::Refusal::IdUnresolved),
+    }));
+    let (bitmap, _) = rendered(bytes);
+    // `A`: the green square alone, the `<a>`'s black rectangle nowhere.
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, [250.0, 350.0]), 100.0),
+        GREEN,
+        2
+    ));
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, [700.0, 700.0]), 100.0),
+        WHITE,
+        2
+    ));
+    // `B`: its outline, the box from 0 to 700, in the text's colour.
+    assert!(close(
+        pixel(&bitmap, at_units(1.0, [350.0, 350.0]), 100.0),
+        TEXT_GREEN,
+        2
+    ));
+
+    // A document the table cannot hand back: one whose length runs past the
+    // table, and a gzip member whose CRC does not check.
+    let mut past = svg_table(&[(1, 4, document.as_bytes().to_vec())]);
+    let length_at = 10 + 2 + 8;
+    let longer = u32::try_from(document.len() + 100).expect("small");
+    past[length_at..length_at + 4].copy_from_slice(&longer.to_be_bytes());
+    let mut broken = gzip(document.as_bytes());
+    let crc_at = broken.len() - 8;
+    broken[crc_at] ^= 0xFF;
+    for (table, malformed) in [(past, true), (svg_table(&[(1, 4, broken)]), false)] {
+        let base = Face::new("Fixture SVG", "ABCD").with_advance(1000);
+        let face = base.with_colour(Colour {
+            svg: table,
+            ..Colour::default()
+        });
+        let (bytes, warnings) =
+            colour_document(&face, "A", PaletteChoice::Default, DocumentBuilder::new());
+        let refused = warnings.iter().any(|w| match w {
+            ColourWarning::SvgRefused {
+                glyph,
+                refusal: SvgGlyphRefusal::Document(why),
+            } if *glyph == a => {
+                if malformed {
+                    *why == SvgRefusal::Malformed
+                } else {
+                    matches!(why, SvgRefusal::Gzip(_))
+                }
+            }
+            _ => false,
+        });
+        assert!(refused, "{warnings:?}");
+        let (bitmap, _) = rendered(bytes);
+        assert!(close(
+            pixel(&bitmap, at_units(0.0, [350.0, 350.0]), 100.0),
+            TEXT_GREEN,
+            2
+        ));
+    }
+}
+
+/// Under a profile that forbids transparency an opaque `SVG ` glyph is drawn,
+/// and one whose shape is translucent is drawn as its outline and named.
+#[test]
+fn a_translucent_svg_glyph_under_a_profile_without_transparency_is_drawn_as_the_outline() {
+    let document = r##"<svg version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <rect id="glyph1" x="100" y="-900" width="800" height="800" fill="#ff0000"/>
+  <rect id="glyph2" x="100" y="-900" width="800" height="800" fill="#ff0000" fill-opacity="0.5"/>
+</svg>"##;
+    let face = svg_face(document.as_bytes().to_vec(), Vec::new());
+    let builder = DocumentBuilder::archival(tinker_pdf_cos::ArchivalProfile {
+        part: tinker_pdf_cos::ArchivalPart::One,
+        level: Some(tinker_pdf_cos::ArchivalLevel::B),
+        destination_profile: pdfa_support::srgb_like(),
+        destination_space: tinker_pdf_cos::DeviceSpace::Rgb,
+        output_condition: "Custom".to_string(),
+        language: None,
+    });
+    let (bytes, warnings) = colour_document(&face, "AB", PaletteChoice::Default, builder);
+    let b = face.glyph_of('B').expect("covered");
+    assert_eq!(
+        warnings,
+        [ColourWarning::TransparencyForbidden { glyph: b }]
+    );
+    let (bitmap, _) = rendered(bytes);
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, [500.0, 500.0]), 100.0),
+        RED,
+        2
+    ));
+    assert!(close(
+        pixel(&bitmap, at_units(1.0, [350.0, 350.0]), 100.0),
         TEXT_GREEN,
         2
     ));

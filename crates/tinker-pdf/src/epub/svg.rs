@@ -185,6 +185,7 @@ pub fn register(
         metrics,
         resolve,
         entry_limit: placement.entry_limit,
+        prefix: b"Svg".to_vec(),
         next: 0,
         alphas: HashMap::new(),
         images: HashMap::new(),
@@ -195,6 +196,53 @@ pub fn register(
         content,
         drawn: writer.drawn,
     }
+}
+
+/// A scene's operators for a caller that draws it in a space of its own
+/// rather than on a page: a colour glyph's procedure (`colour_glyphs`), the
+/// one other place a scene is written, through this writer rather than a
+/// copy of it.
+///
+/// `base` maps the scene's coordinates into that space, and `extent` is the
+/// space's visible box, which a group's form takes as its `/BBox` and a spread
+/// gradient reaches across. Every resource the scene registers is named from
+/// `prefix`, so two scenes written into one document name nothing alike, and
+/// an `<image>` resolves through `resolve`, at most `entry_limit` bytes. The
+/// scene's text is set in the standard faces, which is what a scene with no
+/// faces of its own has; a caller whose format forbids text has the scene
+/// drop it ([`tinker_pdf_svg::Context::restricted`]).
+pub(crate) fn scene_operators(
+    builder: &mut DocumentBuilder,
+    scene: &Scene,
+    base: [f64; 6],
+    extent: [f64; 4],
+    prefix: &[u8],
+    entry_limit: usize,
+    resolve: impl FnMut(&str) -> Option<Vec<u8>>,
+) -> (Vec<u8>, Drawn) {
+    let fonts = Fonts::new(super::typeface::FaceSet::EMPTY);
+    let metrics = BookMetrics::STANDARD;
+    let mut writer = Writer {
+        builder,
+        fonts: &fonts,
+        metrics: &metrics,
+        resolve,
+        entry_limit,
+        prefix: prefix.to_vec(),
+        next: 0,
+        alphas: HashMap::new(),
+        images: HashMap::new(),
+        drawn: Drawn::default(),
+    };
+    let content = writer.stream(
+        &scene.nodes,
+        Space {
+            base,
+            extent,
+            grey: false,
+        },
+    );
+    (content, writer.drawn)
 }
 
 /// Where a scene goes on a page.
@@ -289,6 +337,8 @@ struct Writer<'b, 'f, 'm, R> {
     metrics: &'b BookMetrics<'m>,
     resolve: R,
     entry_limit: usize,
+    /// What every resource name this writer hands out begins with.
+    prefix: Vec<u8>,
     /// The next resource number this page hands out.
     next: usize,
     /// `(fill alpha, stroke alpha)` to the `/ExtGState` already registered
@@ -304,9 +354,10 @@ struct Writer<'b, 'f, 'm, R> {
 impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
     /// A resource name no other resource on this page has.
     fn name(&mut self, kind: &str) -> Vec<u8> {
-        let name = format!("Svg{kind}{}", self.next);
+        let mut name = self.prefix.clone();
+        name.extend_from_slice(format!("{kind}{}", self.next).as_bytes());
         self.next += 1;
-        name.into_bytes()
+        name
     }
 
     /// One whole content stream: the space's mapping, the nodes, and the `Q`
@@ -894,6 +945,9 @@ fn set_paint(
             out.extend_from_slice(format!("{} {} {} {op}\n", c(r), c(g), c(b)).as_bytes());
             true
         }
+        // The caller's colour (`Context::foreground`): none set, so the shape
+        // paints in whatever colour the stream it is drawn in was given.
+        Paint::Current => true,
         Paint::Linear { .. } | Paint::Radial { .. } | Paint::Pattern(_) => match pattern {
             // A gradient whose pattern the builder refused paints **nothing**
             // rather than falling back to a colour. §13.2's fallback is for a

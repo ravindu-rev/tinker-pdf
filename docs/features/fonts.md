@@ -1572,7 +1572,19 @@ What it does:
   so a fan-out writes its tables and not its paths. COLR version 0's layers
   come next, bottom first, each layer's outline filled under `q`/`Q` in its
   palette colour and alpha, a foreground layer setting no colour so it paints
-  in the text's own. Then the bitmaps, `sbix` before `CBLC`/`CBDT`, at the
+  in the text's own. Then the `SVG ` description: the element `glyph<id>` of
+  the glyph's document — gzip-encoded or not — read by
+  `tinker_pdf_svg::read_element` in the em square as a `<use>` of it draws it,
+  and written through `epub/svg.rs`'s scene writer
+  (`epub::svg::scene_operators`, the book's writer and not a copy) under
+  `[1 0 0 −1 0 0]`, the document's y axis down onto the em's up, its
+  resources named from the face and the glyph; the read drops the elements
+  the SVG chapter forbids — `<text>`, `<font>`, `<foreignObject>`,
+  `<switch>`, `<script>`, `<a>`, `<view>` and theirs — and names each, takes
+  the chosen palette as `var(--colorN)`'s values, each entry's alpha
+  multiplied into what it colours, and leaves `currentColor` where no
+  `color` is set as the text's own colour; the form's box is the scene's ink;
+  and an `<image>` resolves from a `data:` URL alone. Then the bitmaps, `sbix` before `CBLC`/`CBDT`, at the
   strike `ColourFace::with_strike`'s `StrikeChoice` picks among those that
   hold the glyph — `Largest` until a caller names another: the graphic an
   image XObject through `tinker_pdf_cos::png_image`, `tiff_image` or as a
@@ -1595,10 +1607,15 @@ What it does:
   (`ForegroundStop`), a bitmap a strike's data the reader refused, whose
   graphic its decoder refuses or that nothing places — a strike of no size,
   a `CBDT` glyph with no horizontal bearings (`BitmapRefused`, with a
-  `BitmapRefusal` saying which) — and, under a profile that forbids
+  `BitmapRefusal` saying which) — an `SVG ` document the table or the scene
+  refused, or a glyph whose element it does not hold (`SvgRefused`, with an
+  `SvgGlyphRefusal`) — and, under a profile that forbids
   transparency, one needing an alpha, a soft mask, a group or a blend mode,
-  a bitmap's `/SMask` among them (`TransparencyForbidden`, the builder
-  refusing nothing). A composite is
+  a bitmap's `/SMask` and an `SVG ` scene's translucent or masked shapes and
+  images among them (`TransparencyForbidden`, the builder refusing nothing).
+  What an `SVG ` element's read passed over is named as the scene names it
+  (`SvgWarning`), and nodes the scene writer could not write
+  (`SvgNodesUnwritten`), the rest drawn. A composite is
   its mode's construct, over the region it paints inside: `CLEAR` nothing,
   `SRC` and `DEST` the one paint, `SRC_OVER` and `DEST_OVER` the two one
   over the other; the `IN` and `OUT` modes the paint they keep, in an
@@ -2410,7 +2427,12 @@ corpora already vendored here. So every name stays on the list.
   17, 18 and 19 — a `dupe`, a JPEG and a TIFF graphic, and a bitmap drawn by
   two glyphs and twice written once; the outline over the bitmap where the
   flags ask, a graphic no decoder reads, a `pdf ` graphic and a `dupe` chain
-  named, and an alpha bitmap under a part 1 profile drawn as the outline; a
+  named, and an alpha bitmap under a part 1 profile drawn as the outline;
+  two glyphs of one `SVG ` document, plain and gzip-encoded, each its path,
+  gradient and `<use>` at points the test reads off the markup, the palette
+  and the text's colour, the forbidden elements, a missing element, a
+  document past its table and a gzip member that does not check named, and a
+  translucent glyph under a part 1 profile drawn as the outline; a
   gradient stop in the text's colour, an unbounded
   graph and a missing palette entry falling to the outline, named; a cycle
   named and the rest drawn; a

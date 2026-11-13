@@ -84,7 +84,7 @@ fn rectangle_glyph(rect: [i16; 4]) -> Vec<u8> {
 }
 
 /// A colour face's tables (`docs/design/colour-fonts.md`): the outline glyphs
-/// its colour descriptions draw, and the `COLR`, `CPAL`, `sbix` and
+/// its colour descriptions draw, and the `COLR`, `CPAL`, `SVG `, `sbix` and
 /// `CBLC`/`CBDT` a test writes byte by byte from the chapters' layouts. A
 /// table left empty is not written.
 #[derive(Clone, Debug, Default)]
@@ -105,6 +105,8 @@ pub struct Colour {
     pub cblc: Vec<u8>,
     /// The `CBDT` table, written as given.
     pub cbdt: Vec<u8>,
+    /// The `SVG ` table, written as given.
+    pub svg: Vec<u8>,
 }
 
 /// How a synthesised face is described: what it covers and how wide it is.
@@ -657,6 +659,7 @@ fn build(face: &Face) -> Vec<u8> {
             (b"sbix", &colour.sbix),
             (b"CBLC", &colour.cblc),
             (b"CBDT", &colour.cbdt),
+            (b"SVG ", &colour.svg),
         ] {
             if !table.is_empty() {
                 tables.push((tag, table));
