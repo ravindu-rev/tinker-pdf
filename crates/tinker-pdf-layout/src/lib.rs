@@ -114,6 +114,7 @@ pub mod flex;
 pub mod floats;
 pub mod flow;
 pub mod fragment;
+pub mod hyphenate;
 pub mod limits;
 pub mod metrics;
 mod position;

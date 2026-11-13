@@ -632,6 +632,7 @@ dependencies = [
 name = "tinker-pdf-layout"
 version = "0.0.1"
 dependencies = [
+ "proptest",
  "tinker-pdf-css",
 ]
 

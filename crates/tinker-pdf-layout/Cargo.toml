@@ -27,3 +27,8 @@ exclude = ["target/"]
 # there would be. Nothing here is transcendental; see `limits.rs`'s header and
 # the amendment.
 tinker-pdf-css = { workspace = true }
+
+[dev-dependencies]
+# Property tests, the exempt dev tooling CONTRIBUTING rule 1 names: arbitrary
+# pattern files and words against `hyphenate`'s reader and walk.
+proptest = "1"

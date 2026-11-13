@@ -34,6 +34,8 @@
 //! [`MAX_LAYOUT_PAGES`] is per-book and bounds an output.
 //! [`MAX_EMBEDDING_DEPTH`] is per-item and bounds a copy: UAX #9's own depth,
 //! which every run's stack of bidi levels stops at.
+//! [`MAX_HYPHENATED_WORD`] is per-item and bounds a lookup: the longest word a
+//! hyphenation dictionary is asked about.
 //!
 //! # `MAX_BOX_DEPTH` exists where gap 31's plan said a depth cap would not
 //!
@@ -322,6 +324,27 @@ pub const MAX_LAYOUT_WORK: usize = 16_000_000;
 /// of its 256 levels opens one each.
 pub const MAX_EMBEDDING_DEPTH: usize = 125;
 
+/// The longest word, in characters, a hyphenation dictionary is asked about
+/// (`crate::hyphenate`, `hyphens: auto`).
+///
+/// | | Characters |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 65 (the word built *past* this cap; the longest word the vendored dictionaries publish is shorter than half of it) |
+/// | A 400-page novel | about 20, its longest word |
+/// | A 200-page comic | 0 |
+/// | A 200-page fixed document | 0 |
+/// | **This cap** | **64** |
+///
+/// A per-item cap on a **lookup**, and a word past it gets no points: it is
+/// set as `hyphens: manual` sets it. Patterns are made from a language's
+/// words, and a run of letters past sixty-four is not one a reader breaks by
+/// syllable but a string — a URL, a sequence, a hostile book's one-letter
+/// paragraph. The lookup's work is bounded without it — each letter is
+/// charged to [`MAX_LINE_BREAK_WORK`] and walks at most the dictionary's
+/// longest pattern — so what the cap buys is the word on the stack: a lookup
+/// is three fixed buffers of about this size and allocates nothing.
+pub const MAX_HYPHENATED_WORD: usize = 64;
+
 /// The relations, in a `const` block so a build that broke one **does not
 /// compile**.
 ///
@@ -361,5 +384,10 @@ const _: () = {
         MAX_LAYOUT_PAGES < MAX_LINE_BREAK_WORK,
         "a page needs at least one line box and a line box needs at least one character, so \
          a page cap at or above the break total could never fire"
+    );
+    assert!(
+        MAX_HYPHENATED_WORD < MAX_LINE_BREAK_WORK,
+        "a word's letters are charged as break work, so a word cap at or above the break \
+         total could never fire"
     );
 };

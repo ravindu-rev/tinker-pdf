@@ -213,14 +213,21 @@ inside it — `abc (de` in a right-to-left paragraph draws `(de` on its second
 line, as it does unwrapped. A line whose runs are not all of one paragraph
 is resolved by itself.
 
-**`hyphens`** (`css-text-3` §5.4) is read at `none` and `manual`, its initial
+**`hyphens`** (`css-text-3` §5.3) is read at `none` and `manual`, its initial
 value: a soft hyphen (U+00AD) stays in a run's text, since the text is the
 book's, measures nothing and is not drawn where no line breaks at it; a line
 that breaks at one is measured with room for a hyphen and draws one there
 (`TextRun::hyphenated`, `paint::hyphenate`); and `none` takes the break
 away, and shows no hyphen where `overflow-wrap` breaks a word just after
-one. `auto` asks for a hyphenation dictionary this build does not have and
-is refused by value.
+one. `auto` asks for a hyphenation dictionary this build does not carry and
+is refused by value. The hyphenator such a dictionary is read with is
+`tinker_pdf_layout::hyphenate`: Liang's patterns and exception list compiled
+into one trie, each gap taking the highest level any matching pattern gives
+it and its odd levels the word's points, none inside the dictionary's
+minimums and none before a combining mark, a word with a letter the
+dictionary does not know, or longer than
+`tinker_pdf_layout::limits::MAX_HYPHENATED_WORD`, getting none
+([design/hyphenation.md](../design/hyphenation.md)).
 
 **`direction` and `unicode-bidi`** (`css-writing-modes-3` §2) decide the
 line, not each line's first letter: every run carries its block's direction

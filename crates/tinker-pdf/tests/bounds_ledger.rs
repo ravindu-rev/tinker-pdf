@@ -628,6 +628,9 @@ const CSS_LIMITS: &str = include_str!("../../tinker-pdf-css/src/limits.rs");
 const CSS_BOUNDS_TESTS: &str = include_str!("../../tinker-pdf-css/src/tests/bounds.rs");
 const LAYOUT_LIMITS: &str = include_str!("../../tinker-pdf-layout/src/limits.rs");
 const LAYOUT_TESTS: &str = include_str!("../../tinker-pdf-layout/src/tests.rs");
+/// The hyphenator, whose cap is in `LAYOUT_LIMITS` and whose tests are beside
+/// it rather than in `LAYOUT_TESTS`.
+const LAYOUT_HYPHENATE: &str = include_str!("../../tinker-pdf-layout/src/hyphenate.rs");
 const XPS: &str = include_str!("../src/xps.rs");
 const XPS_TESTS: &str = include_str!("xps_opc.rs");
 const XPS_MARKUP_TESTS: &str = include_str!("xps_markup.rs");
@@ -2783,6 +2786,28 @@ fn ledger() -> Vec<Bound> {
                 OCR_IMPORT_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_HYPHENATED_WORD",
+            cap: layout_limits::MAX_HYPHENATED_WORD as u128,
+            published: "64",
+            // The test that fires it asks about a word one letter past the
+            // cap, so it spends the cap before the word is refused.
+            fixtures: layout_limits::MAX_HYPHENATED_WORD as u128,
+            // Neither a comic nor a fixed document lays out a word.
+            comic: 0,
+            document: 0,
+            // No committed book declares `hyphens: auto` (`epub_css.rs`'s
+            // census), so nothing in either corpus asks; a Dutch or Afrikaans
+            // compound, the longest words the vendored languages make, is
+            // under forty letters.
+            book: 40,
+            // A word is a run of a paragraph's letters, and every character
+            // of a paragraph is charged as break work.
+            reachable: layout_limits::MAX_LINE_BREAK_WORK as u128,
+            reachable_because: "one word of letters, the whole of MAX_LINE_BREAK_WORK",
+            declared_in: LAYOUT_LIMITS,
+            fires_in: ("a_word_past_the_cap_has_no_points", LAYOUT_HYPHENATE),
+        },
     ]
 }
 
@@ -2834,8 +2859,8 @@ fn segment_size() -> u128 {
 /// and the review of lane 8C adds `MAX_EMBEDDING_DEPTH`; and the `jbig2` fuzz
 /// sweep adds `MAX_JBIG2_WORK_MULTIPLE`; and the OCR import seam adds
 /// `MAX_IMPORTED_WORDS`; and the formats-in tier's Netpbm decoder adds
-/// `MAX_NETPBM_SAMPLES`. All **sixty-eight** are here, and a bound added
-/// without a row fails this.
+/// `MAX_NETPBM_SAMPLES`; and the hyphenation row adds `MAX_HYPHENATED_WORD`.
+/// All **sixty-nine** are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2910,6 +2935,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_CSS_GRADIENT_STOPS",
             "MAX_EMBEDDING_DEPTH",
             "MAX_IMPORTED_WORDS",
+            "MAX_HYPHENATED_WORD",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -3015,7 +3041,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 68, "the ledger is sixty-eight rows");
+    assert_eq!(measured, 69, "the ledger is sixty-nine rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -3047,7 +3073,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 68, "the ledger is sixty-eight rows");
+    assert_eq!(ledger().len(), 69, "the ledger is sixty-nine rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -3347,6 +3373,7 @@ fn every_bound_names_a_test_that_exists() {
         EPUB_TESTS,
         CSS_BOUNDS_TESTS,
         LAYOUT_TESTS,
+        LAYOUT_HYPHENATE,
         ICC,
         JBIG2,
         PAGE_GEOMETRY_TESTS,
