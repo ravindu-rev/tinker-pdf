@@ -446,7 +446,7 @@ fn every_implemented_name_is_defaultable() {
             panic!("`{name}: inherit` names a property nothing here can default");
         }
     }
-    assert_eq!(longhands, 116, "a hundred and sixteen longhands");
+    assert_eq!(longhands, 117, "a hundred and seventeen longhands");
     assert_eq!(
         shorthands, 23,
         "twenty shorthands and `css-break-3` §3.4's three aliases"

@@ -224,6 +224,8 @@ pub struct ComputedStyle {
     pub box_shadow: Vec<Shadow>,
     /// `text-transform`, `css-text-3` §2.1.
     pub text_transform: TextTransform,
+    /// `text-justify`, `css-text-3` §6.4.
+    pub text_justify: TextJustify,
     /// `color-scheme`, `css-color-adjust-1` §2.1: what a printed page reads
     /// of it, which is whether the scheme is the light one (see
     /// [`ColorScheme`]).
@@ -415,6 +417,7 @@ impl ComputedStyle {
             text_shadow: Vec::new(),
             box_shadow: Vec::new(),
             text_transform: TextTransform::None,
+            text_justify: TextJustify::Auto,
             color_scheme: ColorScheme::Normal,
             font_kerning: FontKerning::Auto,
             font_feature_settings: Vec::new(),
@@ -522,6 +525,7 @@ impl ComputedStyle {
         style.text_indent = parent.text_indent;
         style.white_space = parent.white_space;
         style.text_transform = parent.text_transform;
+        style.text_justify = parent.text_justify;
         style.color_scheme = parent.color_scheme;
         style.font_kerning = parent.font_kerning;
         style.font_feature_settings = parent.font_feature_settings.clone();
@@ -618,6 +622,7 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
             style.box_shadow = computed_shadows(list, font_size, root_font_size);
         }
         Property::TextTransform(value) => style.text_transform = *value,
+        Property::TextJustify(value) => style.text_justify = *value,
         Property::ColorScheme(value) => style.color_scheme = *value,
         Property::FontKerning(value) => style.font_kerning = *value,
         Property::FontFeatureSettings(value) => style.font_feature_settings = value.clone(),
@@ -2571,6 +2576,7 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::TextShadow => into.text_shadow = from.text_shadow.clone(),
         Longhand::BoxShadow => into.box_shadow = from.box_shadow.clone(),
         Longhand::TextTransform => into.text_transform = from.text_transform,
+        Longhand::TextJustify => into.text_justify = from.text_justify,
         Longhand::ColorScheme => into.color_scheme = from.color_scheme,
         Longhand::FontKerning => into.font_kerning = from.font_kerning,
         Longhand::FontFeatureSettings => {

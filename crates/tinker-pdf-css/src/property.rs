@@ -968,6 +968,31 @@ pub enum Hyphens {
     Auto,
 }
 
+/// `text-justify`, `css-text-3` §6.4: the justification method a justified
+/// line may use, at the four values the property defines.
+///
+/// `inter-character`, and the legacy `distribute`, which computes to it, are
+/// **refused by value**. Their method in this build is a joining run's
+/// elongation, by its face's `JSTF` and by kashida through the shaper's
+/// justify call (`docs/design/shaping.md`, *Justification*), and no
+/// provider in this build answers the call — so a book that asks is counted
+/// rather than justified over its spaces and called honoured. The variant is
+/// here for layout, whose callers may set it on a computed style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextJustify {
+    /// `auto`, the initial value: the slack over the line's spaces, whatever
+    /// the script.
+    Auto,
+    /// `none`: no justification opportunity, so the text's spaces take none
+    /// of a justified line's slack.
+    None,
+    /// `inter-word`: word separators only.
+    InterWord,
+    /// `inter-character`: in a run that joins, elongation; elsewhere the
+    /// spaces.
+    InterCharacter,
+}
+
 /// `text-transform`, `css-text-3` §2.1, at the four values this build sets.
 ///
 /// `full-width` and `full-size-kana` are refused by value rather than
@@ -1843,6 +1868,8 @@ pub enum Property {
     TextDecoration(TextDecoration),
     /// `text-transform`, `css-text-3` §2.1.
     TextTransform(TextTransform),
+    /// `text-justify`, `css-text-3` §6.4.
+    TextJustify(TextJustify),
     /// `color-scheme`, `css-color-adjust-1` §2.1. See [`ColorScheme`].
     ColorScheme(ColorScheme),
     /// `font-kerning`, `css-fonts-4` §6.4.
@@ -2042,6 +2069,7 @@ impl Property {
             Property::TextShadow(_) => "text-shadow",
             Property::BoxShadow(_) => "box-shadow",
             Property::TextTransform(_) => "text-transform",
+            Property::TextJustify(_) => "text-justify",
             Property::ColorScheme(_) => "color-scheme",
             Property::FontKerning(_) => "font-kerning",
             Property::Direction(_) => "direction",
@@ -2183,6 +2211,9 @@ impl Property {
             // lets `h1 { text-transform: uppercase }` reach the text inside an
             // `<em>` in the heading.
             | Property::TextTransform(_)
+            // `css-text-3` §6.4: *inherited: yes*, from a block container to
+            // the text of the inline boxes inside it.
+            | Property::TextJustify(_)
             // `css-color-adjust-1` §2.1: *inherited: yes*, which is how
             // pandoc's one `:root { color-scheme: light dark }` reaches every
             // element of the book.
@@ -3494,6 +3525,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "text-align",
     "text-decoration",
     "text-indent",
+    "text-justify",
     "text-shadow",
     "text-transform",
     "top",
@@ -3921,6 +3953,16 @@ fn implemented(
             }))
         }),
         "font-feature-settings" => font_feature_settings(values, significant),
+        // `inter-character` and `distribute` are inside the grammar and
+        // refused by value; see [`TextJustify`].
+        "text-justify" => keyword(one, single, |word| {
+            Some(Property::TextJustify(match word {
+                "auto" => TextJustify::Auto,
+                "none" => TextJustify::None,
+                "inter-word" => TextJustify::InterWord,
+                _ => return None,
+            }))
+        }),
         "font-variation-settings" => font_variation_settings(values, significant),
         "font-optical-sizing" => keyword(one, single, |word| {
             Some(Property::FontOpticalSizing(match word {

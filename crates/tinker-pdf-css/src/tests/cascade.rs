@@ -1096,6 +1096,63 @@ fn font_optical_sizing_is_auto_unless_none() {
     assert_eq!(report.unsupported, vec![("font-optical-sizing", 1)]);
 }
 
+/// **`text-justify` cascades as `docs/design/shaping.md`'s *Justification*
+/// reads it** (`css-text-3` §6.4): inherited, initial `auto`, defaulted like
+/// any inherited property; a refused `inter-character` or `distribute`
+/// leaves the value it would have replaced and is counted by element.
+#[test]
+fn text_justify_cascades_as_the_design_reads() {
+    use crate::property::TextJustify;
+    let nodes = tree(&[
+        ("div", None),
+        ("em", Some(0)),
+        ("p", Some(0)),
+        ("span", Some(2)),
+        ("h1", None),
+        ("h2", None),
+        ("q", Some(5)),
+    ]);
+    let parsed = sheet(
+        "div { text-justify: none } p { text-justify: inter-word }          h1 { text-justify: inter-character } h2 { text-justify: none }          h2 { text-justify: distribute } q { text-justify: initial }",
+    );
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let cascaded = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    let styled = &cascaded.styles;
+    assert_eq!(styled[0].text_justify, TextJustify::None);
+    assert_eq!(styled[1].text_justify, TextJustify::None, "inherited");
+    assert_eq!(styled[2].text_justify, TextJustify::InterWord);
+    assert_eq!(styled[3].text_justify, TextJustify::InterWord, "inherited");
+    assert_eq!(
+        styled[4].text_justify,
+        TextJustify::Auto,
+        "refused, so the initial value stands"
+    );
+    assert_eq!(
+        styled[5].text_justify,
+        TextJustify::None,
+        "refused, so the declaration before it stands"
+    );
+    assert_eq!(styled[6].text_justify, TextJustify::Auto, "initial");
+    // The two refused declarations reached an element each.
+    assert_eq!(cascaded.report.unsupported, vec![("text-justify", 2)]);
+    // `unset` inherits it, and `inherit` takes the parent's.
+    let nodes = tree(&[("div", None), ("p", Some(0))]);
+    for keyword in ["unset", "inherit"] {
+        let styled = styles(
+            &format!("div {{ text-justify: none }} p {{ text-justify: {keyword} }}"),
+            &nodes,
+        );
+        assert_eq!(styled[1].text_justify, TextJustify::None, "{keyword}");
+    }
+    assert_eq!(
+        styles("p { color: red }", &one("p"))[0].text_justify,
+        TextJustify::Auto,
+        "the initial value"
+    );
+}
+
 /// **A gradient's lengths are computed with its element's font size**: an
 /// `em` in a stop, a radius or a centre is pixels once cascaded, and a
 /// percentage stays for the box the painter is given.

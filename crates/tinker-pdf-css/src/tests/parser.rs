@@ -2607,6 +2607,60 @@ fn hyphens_reads_its_three_keywords() {
     );
 }
 
+/// **`text-justify` at the values `docs/design/shaping.md`'s
+/// *Justification* reads** (`css-text-3` §6.4): `auto`, `none` and
+/// `inter-word` are read, in any case; `inter-character`, and `distribute`,
+/// which computes to it, are refused by value, since no provider here answers
+/// the justify call their method needs; a word the grammar does not have is
+/// refused by value as every keyword property's is; and more than one word is
+/// not CSS at all.
+#[test]
+fn text_justify_parses_the_values_the_design_reads() {
+    use crate::property::TextJustify;
+    for (value, expected) in [
+        ("auto", TextJustify::Auto),
+        ("none", TextJustify::None),
+        ("inter-word", TextJustify::InterWord),
+        ("Inter-Word", TextJustify::InterWord),
+        ("AUTO", TextJustify::Auto),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ text-justify: {value} }}")),
+            vec![Property::TextJustify(expected)],
+            "text-justify: {value}"
+        );
+    }
+    for value in [
+        "inter-character",
+        "distribute",
+        "INTER-CHARACTER",
+        "kashida",
+        "3",
+    ] {
+        assert_eq!(
+            declarations(&format!("p {{ text-justify: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "text-justify",
+                value: value.to_owned(),
+            },
+            "text-justify: {value} is refused by value"
+        );
+    }
+    for value in ["auto none", "inter-word inter-word"] {
+        let parsed = sheet(&format!("p {{ text-justify: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "text-justify: {value} is not CSS and is discarded"
+        );
+    }
+    // It is no longer somebody else's property.
+    let parsed = sheet("p { text-justify: inter-word }");
+    assert!(!parsed.rules[0]
+        .declarations
+        .iter()
+        .any(|d| matches!(d.declaration, Declaration::Unknown { .. })));
+}
+
 /// **`font-kerning` at its three keywords** (`css-fonts-4` §6.4).
 #[test]
 fn font_kerning_reads_its_three_keywords() {

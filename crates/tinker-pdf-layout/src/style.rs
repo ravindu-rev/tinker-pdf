@@ -42,8 +42,8 @@ use tinker_pdf_css::property::{
     FontFamily, FontKerning, FontStyle, FontVariant, Gap, Hyphens, Image, Inset, JustifyContent,
     LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
     OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow,
-    Side, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, UnicodeBidi,
-    VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    Side, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextJustify, TextTransform,
+    UnicodeBidi, VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -103,6 +103,10 @@ pub struct Consumed {
     pub word_spacing: f64,
     /// `text-align`.
     pub text_align: TextAlign,
+    /// `text-justify`, `css-text-3` §6.4: which of a justified line's
+    /// opportunities this element's text offers — its spaces, or, under
+    /// `inter-character` in a run that joins, its shaper's elongation first.
+    pub text_justify: TextJustify,
     /// `text-indent`, still a percentage if that is what it was.
     pub text_indent: LengthPercentage,
     /// `white-space`.
@@ -318,6 +322,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         text_shadow: _,
         box_shadow,
         text_transform,
+        text_justify,
         // `css-color-adjust-1`'s `color-scheme` chooses a scheme for the
         // canvas and the system colours, and a printed page's is the light one
         // (`mediaqueries-5` §12.5): every value that reaches a computed style
@@ -468,6 +473,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         letter_spacing: spacing(letter_spacing),
         word_spacing: spacing(word_spacing),
         text_align: *text_align,
+        text_justify: *text_justify,
         text_indent: *text_indent,
         white_space: *white_space,
         text_transform: *text_transform,

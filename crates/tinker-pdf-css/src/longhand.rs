@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence a hundred and sixteen unit variants, one per name this build implements as a
+//! Hence a hundred and seventeen unit variants, one per name this build implements as a
 //! longhand. The twenty shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! A hundred and sixteen variants across four consumers is not hand-written code, and a
+//! A hundred and seventeen variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -71,6 +71,8 @@ pub enum Longhand {
     BoxShadow,
     /// `text-transform`
     TextTransform,
+    /// `text-justify`
+    TextJustify,
     /// `color-scheme`
     ColorScheme,
     /// `font-kerning`
@@ -297,6 +299,7 @@ impl Longhand {
         Longhand::TextShadow,
         Longhand::BoxShadow,
         Longhand::TextTransform,
+        Longhand::TextJustify,
         Longhand::ColorScheme,
         Longhand::FontKerning,
         Longhand::FontFeatureSettings,
@@ -419,6 +422,7 @@ impl Longhand {
             Longhand::TextShadow => "text-shadow",
             Longhand::BoxShadow => "box-shadow",
             Longhand::TextTransform => "text-transform",
+            Longhand::TextJustify => "text-justify",
             Longhand::ColorScheme => "color-scheme",
             Longhand::FontKerning => "font-kerning",
             Longhand::FontFeatureSettings => "font-feature-settings",
@@ -545,6 +549,7 @@ impl Longhand {
             | Longhand::TextAlign
             | Longhand::TextIndent
             | Longhand::TextTransform
+            | Longhand::TextJustify
             | Longhand::ColorScheme
             | Longhand::FontKerning
             | Longhand::FontFeatureSettings
@@ -688,6 +693,7 @@ impl Property {
             Property::TextShadow(..) => Longhand::TextShadow,
             Property::BoxShadow(..) => Longhand::BoxShadow,
             Property::TextTransform(..) => Longhand::TextTransform,
+            Property::TextJustify(..) => Longhand::TextJustify,
             Property::ColorScheme(..) => Longhand::ColorScheme,
             Property::FontKerning(..) => Longhand::FontKerning,
             Property::FontFeatureSettings(..) => Longhand::FontFeatureSettings,
