@@ -3059,3 +3059,262 @@ decoded samples, so P-04.5's change of PNG bytes moves no hash.
 | A dynamic code is incomplete or longer than the format allows | `code_lengths_are_complete_and_at_most_fifteen` holds Kraft equality within the limit, and every block round-trips through this crate's inflate |
 | A fast-level PNG is larger than today's | P-04.5 records each PNG input's bytes at today's encoder and at both levels, and one larger than today's stops the step for H-42 |
 | Written bytes move unseen | Only P-04.7 moves them, the two hashes above with them, under H-138 |
+
+## P-06 — Glyph coverage cache
+
+*For [ROADMAP](../ROADMAP.md) row P-06.* A filled glyph is drawn by
+transforming its outline into the page's device frame and filling it there
+(`Renderer::show_glyph`), so every glyph shown rasterises its outline again,
+though a page of text shows a few dozen shapes at a handful of sizes thousands
+of times. This section fixes how a glyph's shape is separated from where it
+stands, so that one mask serves every glyph of one shape; the key a mask is
+kept under, with a font identity no two scopes can share; the two steps the
+shape is quantised to and the pixels each moves; which glyphs take masks and
+which keep the path route; how a mask is composited through the clip, the
+soft mask and a knockout group; the cache's byte bound and its eviction order;
+A4's counts; and how P-16's budgets later take the bound over.
+
+### Scope
+
+- **The mask route** (P-06.2): a filled glyph's outline rasterised in its own
+  frame under a quantised 2x2 and phase, and placed at a whole pixel.
+- **The key** a mask is kept under, and the font identity in it (P-06.3).
+- **The cache** (P-06.3): one render's masks, bounded by bytes and evicted in
+  an order the sequence of requests alone decides.
+- **A4's counts**, and the pins the route moves once.
+
+### Non-goals
+
+- **A cache across renders or pages**: P-16's. A mask lives as long as the
+  render that rasterised it, and P-16.7 moves the masks under the document's
+  budget.
+- **Threads**: P-15's. One render's cache is one thread's.
+- **Strokes, pattern fills, the clipping modes and Type 3 glyphs.** A stroked
+  glyph's pen is the graphics state's and a pattern fill reads pattern space,
+  so neither is a function of the glyph alone; a clipping mode adds the
+  outline to the text clip, which wants the path; a Type 3 glyph is a content
+  stream the interpreter runs, never an outline. All keep the path route.
+- **Hinting, or any shape the font does not state.** The quantised 2x2 is the
+  glyph's own transform rounded to a fine grid, and nothing more.
+
+### Design
+
+#### The mask route
+
+`crates/tinker-pdf-render/src/glyph.rs` splits a glyph's em-to-device
+transform — its `Glyph::transform` then the renderer's `base`, the page's
+transform for every canvas — into what its shape depends on and where it
+stands:
+
+- **the 2x2**, `a`, `b`, `c` and `d`, each rounded to the nearest 1/256 of a
+  pixel an em (`MATRIX_STEPS`);
+- **the phase**, the fraction of a pixel the origin `(e, f)` stands past the
+  whole pixel `(floor(e), floor(f))`, rounded to the nearest quarter on each
+  axis (`PHASES`); a fraction that rounds to four quarters is the next pixel's
+  phase 0, so there are four phases an axis and no fifth;
+- **the origin**, that whole pixel, in the page's frame.
+
+`floor` and `round` are correctly rounded by IEEE 754 and `e - floor(e)` is
+exact, so a placement is the same on every target (ruling 4). The outline is
+transformed by the quantised 2x2 and the phase alone — every entry a dyadic
+fraction a few bits long, so each is the number it names — and filled non-zero
+over its own bounds, widened by the paint region's pixel of slack, into a mask
+whose pixel (0, 0) stands for the origin's pixel. `antialias` off hardens it,
+as `coverage` hardens a path's. A mask that would hold more than 65 536 pixels
+(`MAX_GLYPH_MASK_PIXELS`), or stand outside `i32`, is not made: that glyph
+keeps the path route, which rasterises only the pixels its clip and its canvas
+can show, so a heading at 300 dpi or a glyph far larger than its page is never
+rasterised whole. Whether a glyph takes the route is a function of its outline
+and its placement, never of the canvas.
+
+**Ruling 5.** The phase and the origin come from the glyph's position in the
+page's frame, which `base` gives every canvas alike, and placing a mask is an
+integer offset; a tile subtracts its corner only when it indexes the placed
+mask. So a glyph on a phase boundary rounds the same way in a tile and on the
+page under it, and `render_regions.rs`'s text page holds that at every scale it
+tiles.
+
+#### Which glyphs take it
+
+A glyph takes the route when 9.3.6's mode is 0, its fill is a colour rather
+than a pattern, its outline is not empty, its transform is finite and places,
+and its mask is within the bound. Mode 2's fill keeps the path route with its
+stroke, so the fill and the pen are rasterised at one position; modes 1 and 4
+to 7, a pattern fill and a Type 3 glyph keep it as the non-goals say.
+
+#### The blit
+
+`Renderer::paint_glyph_mask` composites a mask as `paint_inked` composites a
+path's coverage. The placed mask is windowed to the region `coverage` would
+have asked `fill` for — its rectangle met with the canvas's, the clip's and the
+soft mask's — the clip and then the soft mask multiply into the window, after
+any hardening, a knockout group restores its backdrop under it (11.4.5), and
+`Canvas::fill_mask_inked` composites it with the fill colour, its ink, the fill
+alpha and the blend mode. Nothing of the clip, the soft mask or the group is in
+the mask, so one mask serves a glyph wherever it is clipped.
+
+#### The key, and the font in it
+
+A mask is a function of four things, and they are its key: **the font**, **the
+code**, **the quantised 2x2** and **the phase**. The origin is not in it.
+
+The font id a glyph carries cannot be the font: it is the interned id of the
+resource name a content stream selects the font by (`ScopeFont::id`), and a
+form's scope replaces the page's while the form draws (`Renderer::begin_form`),
+so `/F1` in a form and `/F1` on its page are one id naming two fonts. The glyph
+source says what the font is, so the renderer stays free of PDF dictionaries:
+
+```rust
+/// What a glyph-mask cache keys a font by.
+pub enum FontIdentity {
+    /// The font's object, `num << 16 | gen`: one font wherever a scope names it.
+    Object(u64),
+    /// A font written into the scope's own resource dictionary, which has no
+    /// object: one font only within the scope the renderer holds it in.
+    Scoped,
+}
+
+pub trait GlyphSource {
+    // ...
+    /// `None` keeps the glyph's mask out of the cache: it is rasterised at
+    /// every request, to the same pixels.
+    fn font_identity(&self, font_id: u64) -> Option<FontIdentity> {
+        None
+    }
+}
+```
+
+The facade answers from the scope's font table (P-02.3): an entry's reference,
+or the object a reserved name spells (`PageResources::font_object`), is
+`Object`; a font written into the dictionary is `Scoped`; an id that selects no
+font is `None`. The renderer keys a `Scoped` font by the font id beside its own
+serial for the scope it holds — 0 for the page's, and the next number at each
+`begin_form` that brings a scope and at each scope a caller pushes — so a font
+written into a dictionary is shared only within one scope's turn, and two
+scopes naming two fonts alike never share a mask.
+
+#### The cache
+
+`crates/tinker-pdf-render/src/glyph_cache.rs` holds one render's masks, owned
+by its `Renderer` and dropped with it. **A hit is the mask a miss rasterises**:
+a mask is a function of its key, and is kept only when its rasterisation ran
+to the end — a mask a cancelled render stopped short is drawn and never kept —
+so whether a glyph hit moves no pixel. The outline is still asked for at every
+glyph, so what the glyph source reports — a glyph it could not resolve, a font
+it could not read — and its own counts do not depend on a hit; a hit saves
+building the path and filling it.
+
+**Bounded by bytes.** Each entry is charged its mask's pixels and 64 bytes
+beside them (`ENTRY_BYTES`), so a page of empty masks is bounded too, against
+4 MiB a render (`MAX_GLYPH_CACHE_BYTES`). A mask is at most 64 KiB, so the
+cache keeps sixty-three of the largest at once.
+
+**Evicted by the sequence of requests alone.** Every request, hit or miss,
+takes the next number of a counter, and an entry records the number of the
+request that last asked for it. When a mask would not fit, entries are evicted
+least recently asked first, through an ordered index from that number to the
+key, until it does. A `HashMap` finds an entry by its key and is never
+iterated, since its order is seeded per process, so which entries a full cache
+evicts is the same on every run and every target.
+
+#### A4's counts
+
+P-06.3 adds `glyph_masks_rasterised` and `glyph_mask_hits` to `RenderCounts`,
+and to `Stats` through `stats.rs` (`Counter::GlyphMasksRasterised`,
+`Counter::GlyphMaskHits`), and `outlines_filled` comes to count an outline
+built into a path: on the path route, and at a mask's miss. A4 renders
+MS-01.6's page (`guards.rs`'s `glyph_page`) at 72 dpi and holds
+`glyph_masks_rasterised` to at most the page's distinct keys and
+`glyph_mask_hits / (glyph_mask_hits + glyph_masks_rasterised)` to at least
+98 %. The page is built so that its keys can be counted: 5 600 glyphs of 80
+codes in one embedded face at 12.5 points, every line starting on a whole point
+and every advance eight points, so at a pixel a point every origin is a whole
+pixel — phase 0 on both axes — and every glyph's 2x2 is `[3200, 0, 0, -3200]`
+in steps of 1/256. Its distinct keys at these steps are its 80 codes, within
+the 112 that 98 % of 5 600 leaves; 80 masks are far inside the byte bound, so
+none is evicted: 80 are rasterised and 5 520 hit.
+
+#### What the steps move
+
+A kept mask is the mask a miss computes for its key, so only the quantisation
+moves pixels, and it moves them once, in P-06.2, under H-76's and H-133's
+review:
+
+- **The phase step.** A glyph stands at most an eighth of a pixel from where
+  its outline says on each axis, so only a pixel an edge passes through
+  changes, by at most a quarter of its area; with anti-aliasing off, where
+  every pixel is whole or empty, such a pixel may turn from one to the
+  other.
+- **The 2x2 step.** A point within an em of the origin moves at most 1/256 of a
+  pixel — one unit of the scanline's horizontal resolution and a sixteenth of a
+  sub-scanline — so a crossing moves at most one unit, and a horizontal edge
+  crosses a sub-scanline only where it lay within 1/256 of one.
+- **The frame.** The outline is transformed at the magnitude of its own em, not
+  the page's, so an edge that sat exactly where a rounding turns may land one
+  unit over.
+- **The byte bound** moves nothing.
+
+So P-06.2 re-records, once, every pin that fills an outline glyph in mode 0 in
+a colour, in both builds alike, since every face they draw is embedded:
+
+| Pin | The glyphs it fills |
+| --- | --- |
+| `determinism.rs`'s `rendering_is_stable_across_targets`: `text`, `gs_text`, `xps` and `epub` | the embedded face's two lines, the same lines selected by graphics states, the XPS package's glyph runs, the book's text |
+| `epub_shaped.rs`'s `the_shaped_page_renders_to_the_bytes_it_always_did` | the Arabic page's shaped runs |
+| `render_options.rs`'s `ink_output_is_pinned`, `transparent_and_premultiplied_output_is_pinned`, `hard_edged_output_is_pinned` and `the_default_is_unchanged` | the ink, layer and hard-edge pages' lines |
+| `render_goldens.rs`'s `text` golden | its line of text |
+
+The other pins draw no glyph, or draw one only through a stroke, a pattern, a
+clip or a Type 3 procedure — the `type3-glyph` golden among them — and do not
+move. MS-01.6's pinned render counts do not move in P-06.2 either: a mask is an
+outline built into a path and filled, once a glyph, which is what
+`outlines_filled` counts; they move in P-06.3, where a hit builds none, each
+with its reason.
+
+#### How P-16 takes the bound over
+
+P-16.7 makes the masks a kind of the document cache. The key stays — font
+identity, code, quantised 2x2 and phase, a `Scoped` font keyed by the
+document's scope rather than a render's serial — and only who holds the bytes
+changes: a mask is charged what it is charged here and evicted in P-16.1's
+order with the document's images, transforms and recordings under
+`CacheLimits { bytes }`, and a mask evicted and drawn again is the same bytes,
+which P-16.3's starved render holds. With no budget stated each render keeps
+its own cache under this section's bound, as P-16.2 keeps an image for the
+render that decoded it.
+
+### Milestones
+
+1. **P-06.1: this section.**
+2. **P-06.2: the mask route.** Exit: `tinker-pdf-render`'s
+   `a_glyph_moved_by_whole_pixels_draws_the_same_mask` (new);
+   `render_regions.rs`'s `every_tile_is_byte_equal_to_the_page_under_it` and
+   its siblings, with the text page's tiles at every scale they test; the pins
+   above re-recorded once after H-76's and H-133's review, agreeing under
+   `cargo test` on linux and windows and under `--target wasm32-wasip1`
+   locally; `text_render_modes.rs`, `render_differential.rs` and `stats.rs`'s
+   render counts unchanged, in both builds.
+3. **P-06.3: the cache.** Exit: `guards.rs`
+   `a4_glyph_masks_rasterised_are_at_most_their_distinct_keys` flips from owed
+   and joins K-07's roster; `glyph_cache.rs`
+   `a_full_cache_evicts_the_same_entries_on_every_run` and
+   `two_scopes_naming_two_fonts_alike_never_share_a_mask` (new); `stats.rs`'s
+   render counts restated, each with its reason; P-06.2's pins unchanged on the
+   measured targets and `render_regions.rs`'s tiles byte-equal, in both builds.
+4. **P-06.4: the row's close** in MS-02's paired run: the text page rendered at
+   72, 150 and 300 dpi (pixels only) at 9×, 5.86× and 4.88× the planning
+   baseline, with A4 and the determinism fingerprints green on linux and
+   windows in CI's tests and on `wasm32-wasip1` locally.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A tile and its page round a glyph's phase apart | The phase is the page frame's, the offset an integer and the route a function of the glyph alone; `render_regions.rs`'s text page at every scale |
+| A hit draws other pixels than its miss | A mask is a function of its key, and a cancelled rasterisation is never kept; P-06.3's pins are P-06.2's, and P-16.3 renders through a starved cache |
+| Two fonts share a mask because their resource names intern alike | The key's font is the glyph source's identity, an object or a scope's turn, never the name's id; `two_scopes_naming_two_fonts_alike_never_share_a_mask` |
+| Eviction depends on hash order | Entries are evicted through the request counter's ordered index and the `HashMap` is never iterated; `a_full_cache_evicts_the_same_entries_on_every_run` |
+| A huge glyph, or a hostile one, is rasterised whole | A mask past 65 536 pixels, or outside `i32`, is not made, and the path route bounds such a glyph by its clip and canvas (ruling 1) |
+| A mode 2 glyph's fill and stroke part | Mode 2 keeps the path route for both |
+| What the glyph source reports depends on hits | The outline is asked for at every glyph, hit or miss |
+| The quantisation moves pixels nobody reviews | It moves them once, in P-06.2, in the pins above, under H-76 and H-133; a later step that moves a glyph pin is a finding |
