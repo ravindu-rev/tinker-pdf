@@ -51,4 +51,6 @@ include = [
     "TpdfDeviceSpace",
     "TpdfTilingType",
     "TpdfTagText",
+    "TpdfCommandKind",
+    "TpdfCommandFieldTag",
 ]

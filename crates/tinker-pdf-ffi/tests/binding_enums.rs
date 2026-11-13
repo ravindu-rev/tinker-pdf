@@ -349,18 +349,59 @@ fn compare(
 /// reason; anything else absent is a binding that lost an enum, or this
 /// reader failing to see one, and either fails.
 ///
-/// The same two in every binding, both two-armed and both written as a
+/// The same five in every binding. Two are two-armed and written as a
 /// literal 0 or 1 at the one place each crosses: a target's kind where the
 /// binding packs a `TpdfTarget` (1 for a URI), and a sanitise report's list
 /// where it reads the report (0 removed, 1 deleted). Neither is checked here;
 /// both arms of each cross in a parity script -- `build-a-document` links a
 /// page and a URI, `sanitise-report` lists removed entries and deleted
-/// objects -- so a swapped pair changes a recorded hash.
+/// objects -- so a swapped pair changes a recorded hash. Three are the
+/// command stream's -- `TpdfCommandKind`, `TpdfCommandFieldTag` and
+/// `TpdfImageAnswer` -- which no binding over the C ABI projects yet: the
+/// stream's row in `docs/features/bindings.md`'s refusal table names that
+/// gap, and the step that projects the stream in a binding takes its enums
+/// off this list.
 const NOT_CARRIED: &[(&str, &[&str])] = &[
-    ("ruby", &["TpdfSanitiseList", "TpdfTargetKind"]),
-    ("java", &["TpdfSanitiseList", "TpdfTargetKind"]),
-    ("dotnet", &["TpdfSanitiseList", "TpdfTargetKind"]),
-    ("go", &["TpdfSanitiseList", "TpdfTargetKind"]),
+    (
+        "ruby",
+        &[
+            "TpdfCommandFieldTag",
+            "TpdfCommandKind",
+            "TpdfImageAnswer",
+            "TpdfSanitiseList",
+            "TpdfTargetKind",
+        ],
+    ),
+    (
+        "java",
+        &[
+            "TpdfCommandFieldTag",
+            "TpdfCommandKind",
+            "TpdfImageAnswer",
+            "TpdfSanitiseList",
+            "TpdfTargetKind",
+        ],
+    ),
+    (
+        "dotnet",
+        &[
+            "TpdfCommandFieldTag",
+            "TpdfCommandKind",
+            "TpdfImageAnswer",
+            "TpdfSanitiseList",
+            "TpdfTargetKind",
+        ],
+    ),
+    (
+        "go",
+        &[
+            "TpdfCommandFieldTag",
+            "TpdfCommandKind",
+            "TpdfImageAnswer",
+            "TpdfSanitiseList",
+            "TpdfTargetKind",
+        ],
+    ),
 ];
 
 #[test]

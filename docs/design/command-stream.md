@@ -325,6 +325,15 @@ Handle-based and engine-owned, as `TpdfBitmap` is (`docs/design/bindings-write.m
   parsing the format itself.
 - `tpdf_command_stream_render(stream, scale, format, out)` replays it.
 
+`TpdfCommandKind` numbers the kinds from zero, as every enum on the ABI is
+numbered for the bindings that pass an enum by its ordinal, so a command
+carries its kind's number on the wire beside it, and -1 for a kind a newer
+minor version added. `tpdf_command_stream_count`, `_rewind` and `_record`
+count, rewind and read by place beside the cursor; `_to_bytes`, `_version`,
+`_page_index` and `_size` project the facade's own. Bytes the reader refuses,
+and commands whose stream it would refuse, are `BadArgument` with the
+reader's sentence.
+
 A command is read through a pointer the caller passes, so Ruby's Fiddle,
 which passes no struct by value, can call every function. No callback crosses
 the boundary (H-28 untouched).

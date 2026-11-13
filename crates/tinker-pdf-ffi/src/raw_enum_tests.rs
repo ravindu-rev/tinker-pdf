@@ -87,7 +87,75 @@ fn every_enum_a_caller_supplies_reads_its_own_numbers_and_refuses_every_other() 
         TpdfDeviceSpace,
         TpdfTilingType,
         TpdfTagText,
+        TpdfCommandKind,
+        TpdfCommandFieldTag,
     );
+}
+
+/// **The command stream's kinds are the facade's** (RC-18.5): one arm of
+/// `TpdfCommandKind` for every kind `CommandKind` lists, each by the kind's
+/// own name and none other, numbered from zero as every enum here is — so
+/// the arm's number is not the kind's number on the wire, which the cursor
+/// carries beside it — and a kind or a field's tag its enum does not
+/// declare is refused where a caller hands one over, the encoder's push,
+/// naming the enum.
+#[test]
+fn the_command_kinds_are_the_facade_s_and_an_undeclared_one_is_refused() {
+    let facade = tinker_pdf::CommandKind::ALL;
+    assert_eq!(
+        TpdfCommandKind::ALL.len(),
+        facade.len(),
+        "one arm for every kind the facade lists"
+    );
+    for kind in facade {
+        let arm = TpdfCommandKind::of(*kind).unwrap_or_else(|| panic!("{kind:?} has an arm"));
+        assert_eq!(arm.kind(), *kind);
+        assert_eq!(
+            format!("{arm:?}"),
+            kind.name(),
+            "each arm by its kind's name"
+        );
+    }
+    assert_eq!(
+        (
+            TpdfCommandKind::Page as c_int,
+            tinker_pdf::CommandKind::Page.number()
+        ),
+        (29, 64),
+        "an arm's number and its kind's on the wire are two numbers"
+    );
+
+    let mut encoder = ptr::null_mut();
+    assert_eq!(
+        unsafe { tpdf_command_encoder_new(&mut encoder) },
+        TpdfStatus::Ok
+    );
+    let past = c_int::try_from(TpdfCommandKind::ALL.len()).expect("a handful of kinds");
+    for kind in [-1, past, past + 1, 64, 79, c_int::MAX, c_int::MIN] {
+        refused_naming(
+            unsafe { tpdf_command_encoder_push(encoder, kind, ptr::null(), 0) },
+            "TpdfCommandKind",
+            &format!("a push of kind {kind}"),
+        );
+    }
+    for tag in [-1, 8, 255, c_int::MAX] {
+        let field = TpdfCommandField {
+            tag,
+            natural: 0,
+            integer: 0,
+            real: 0.0,
+            data: ptr::null(),
+            count: 0,
+        };
+        refused_naming(
+            unsafe {
+                tpdf_command_encoder_push(encoder, TpdfCommandKind::Page as c_int, &field, 1)
+            },
+            "TpdfCommandFieldTag",
+            &format!("a field of tag {tag}"),
+        );
+    }
+    unsafe { tpdf_command_encoder_free(encoder) };
 }
 
 fn fixture() -> Vec<u8> {

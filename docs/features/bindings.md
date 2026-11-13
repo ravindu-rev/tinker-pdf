@@ -35,7 +35,8 @@ caller supplies — `TpdfPixelFormat`, `TpdfWriteMode`,
 `TpdfDestKind`, `TpdfTargetKind`, `TpdfImageKind`, `TpdfInfoKey`,
 `TpdfTrapped`, `TpdfLabelStyle`, `TpdfPageBoundary`, `TpdfSanitiseList`,
 `TpdfFieldValueKind`, `TpdfBlendMode`, `TpdfSoftMask`, `TpdfMaskKind`,
-`TpdfDeviceSpace`, `TpdfTilingType` and `TpdfTagText` — cross as an `int`
+`TpdfDeviceSpace`, `TpdfTilingType`, `TpdfTagText`, `TpdfCommandKind` and
+`TpdfCommandFieldTag` — cross as an `int`
 parameter or struct field, with the enum still in the header naming the
 numbers, and a number the enum does not declare is `BadArgument` with a
 message naming the enum and the number, exactly as a null pointer is. The
@@ -64,7 +65,8 @@ from any thread.
 validating, writing, running form scripts (`tpdf_editor_recalculate` and the
 calls of its report, `tpdf_editor_formatted_value`, `_keystroke` and
 `_validate`), reading signatures, the read surface, document operations, the
-forms surface, the builder's graphics resources and tagged writing.
+forms surface, the builder's graphics resources, tagged writing and the
+command stream.
 Validating is the strict validator the write surface leans on
 (`tpdf_document_validate`, `tpdf_defects_count`, `tpdf_defect_rule`,
 `tpdf_defect_message`, `tpdf_defects_free` — an owned `TpdfDefects` on the
@@ -315,6 +317,45 @@ the C ABI. A tag's table attributes, namespace and associated files, and
 `continue_at`, `map_role_in`, `add_namespace` and `duplicate_element_ids`,
 are not here: each takes or returns a shape of its own.
 
+**The command stream** ([design](../design/command-stream.md)) is in
+`src/commands.rs`, each function a projection of a facade call.
+`tpdf_page_command_stream` hands back `Page::command_stream`'s bytes as a
+`TpdfBuffer`, and `tpdf_command_stream_parse` reads bytes into a
+`TpdfCommandStream` (`CommandStream::parse`, under the design's budgets);
+bytes the reader refuses are `BadArgument` with its sentence, naming the
+refusal and where. The handle's cursor, `tpdf_command_stream_next`, fills one
+`TpdfCommand` per call — its kind a `TpdfCommandKind`, or -1 for a kind a
+newer minor version added, its kind's number on the wire, its place and its
+field count — and after the last record fills `End` at the number of records
+until `tpdf_command_stream_rewind`; `tpdf_command_stream_record` reads one by
+its place and `tpdf_command_stream_count` counts them. `TpdfCommandKind`
+numbers the kinds from zero, as every enum on this ABI is numbered, which is
+why the wire's number crosses beside it. `tpdf_command_stream_field` fills a
+`TpdfCommandField` with one field as plain values: a `TpdfCommandFieldTag`,
+and an unsigned, a signed or a real, or a pointer and a count into the
+handle's storage for bytes, reals, naturals or strings (each string a
+`TpdfCommandBytes`), borrowed until the handle is freed; a reference is an
+unsigned like any other. Two accessors read the tables a host draws from
+without reading their fields one at a time: `tpdf_command_stream_outline`
+fills a `TpdfCommandOutline` with a glyph's scope, font, code and segments,
+and `tpdf_command_stream_image` a `TpdfCommandImage` with a decode's answer
+(`TpdfImageAnswer`), size, window, samples and colours; asked about a record
+of another kind, each refuses naming both kinds. `tpdf_command_stream_to_bytes`,
+`_version`, `_page_index`, `_size` and `_render` project the facade's own —
+the render at a scale and a `TpdfPixelFormat`, as `tpdf_page_render` takes
+them — and `tpdf_command_stream_free` releases the handle. The encoder,
+`TpdfCommandEncoder` (`tpdf_command_encoder_new`, `_push`, `_finish`,
+`_free`), takes commands back: each pushed as its kind and an array of
+`TpdfCommandField`s, copied, and the finish writes them as a stream at this
+build's version and reads it back as a parse does
+(`CommandStream::from_records`), handing over the bytes or the reader's
+refusal; it keeps its commands, so it finishes again. A kind or a tag its
+enum does not declare, the end pushed, and null data with a count are
+refused at the push, naming them. A command is read through a pointer the
+caller passes, so Ruby's Fiddle could call every function, and no callback
+crosses the boundary. Python, JavaScript and the four wrappers carry no
+stream yet (the refusal table's row).
+
 **The write surface, and its shape.** What separates it from the read
 surface is shape, not capability: `DocumentEditor::transaction(|tx| ..)` and
 `DocumentBuilder::add_page(w, h, |page| ..)` take closures, and a closure does
@@ -547,7 +588,9 @@ constant it names, which must be its own arm and never a literal — and
 Swift's statuses each to its own constant. The two enums no binding
 keeps as a table, `TpdfTargetKind` and `TpdfSanitiseList`, are a literal 0
 or 1 at the one place each crosses, and both arms of each cross in a parity
-script. Python and JavaScript name arms by string over the facade, so no
+script; the command stream's three, `TpdfCommandKind`,
+`TpdfCommandFieldTag` and `TpdfImageAnswer`, are carried by no wrapper,
+since none projects the stream yet. Python and JavaScript name arms by string over the facade, so no
 number crosses there; the same file holds each of their string-to-arm
 lines, both directions, to the rule that the string is the arm's own name
 (the page boundaries' `"trim"` for `TrimBox` the one stated exception).
@@ -1089,7 +1132,7 @@ cargo xtask bindings-coverage
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
 | Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats`; `Document::page_counted`, `Page::text_counted`, `Page::images_counted`, `SaveOptions::stats`, `Saved::stats`, `DocumentEditor::count_work`, `Document::inferred_orders_counted`, `Bitmap::to_png_counted`, and `Document::validate_pdfa_counted`, `Document::validate_pdfua_counted` and `Document::validate_pdfx_counted` | not projected; `tpdf_page_render`, every binding's render, text, save and validation count nothing and hand back no stats | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, as each counted sibling does, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [performance](../design/performance.md) |
 | Render parts, placement, usage and layers: `RenderOptions::content`, `RenderOptions::widgets`, `RenderOptions::other_annotations`, `RenderOptions::magnification`, `RenderOptions::usage`, `RenderOptions::layers` and `LayerOptions::*` | not projected; `tpdf_page_render` and every binding's render draw the page's content and every annotation, as a render naming no usage draws them, at magnification 1, in `/D`'s states | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so each needs an entry point of its own or a struct of options that can grow, as `RenderOptions::stats` does. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [design/render-usage.md](../design/render-usage.md) |
-| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | not projected; the C ABI, the wrappers, Python and JavaScript hand back no stream and read none | RC-18 projects it: RC-18.5 on the C ABI, with a cursor and an encoder, and RC-18.6 to RC-18.8 in each binding; until each lands, its surface carries no stream | [design](../design/command-stream.md) |
+| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; the wrappers, Python and JavaScript hand back no stream and read none | RC-18.6 projects it in Python and JavaScript, and RC-18.7 and RC-18.8 in the wrappers over the C ABI; until each lands, its surface carries no stream | [design](../design/command-stream.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge; a CommonJS entry that re-exports the one ESM build cannot | [ROADMAP](../ROADMAP.md) SU-14 |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
@@ -1231,6 +1274,22 @@ cargo xtask bindings-coverage
   nothing, so the finished document equals the facade's built from the
   calls that were taken; null on every entry point and a spent builder are
   refused; the enums' numbers and both structs' layouts are pinned.
+- **The command stream is pinned by equality with the facade**
+  (`src/commands/tests.rs`): `the_command_stream_round_trips_through_the_c_abi`
+  reads the stream of a page holding every kind a page's stream is written
+  with through the cursor and the fields as the facade's records — every
+  kind, number and field, the reals to the bit — and pushes them back
+  through the encoder to the facade's bytes, and a stream of the three kinds
+  no page there writes (`Colorants`, `GroupBudgetSpent`,
+  `NestedBudgetSpent`), pushed by hand, round-trips the same way. Around it:
+  the cursor's end and rewind, a field and a record past the end, each
+  accessor against its record's fields and against a record of another kind,
+  the encoder's refusals and a finish twice, bytes the reader refuses, a
+  newer minor's record read as -1, the stream's version, page, size and
+  bytes, its render against the page's, and null on every entry point.
+  `src/raw_enum_tests.rs` pins `TpdfCommandKind`'s arms to the facade's
+  kinds by name and its refusal of a number it does not declare, and
+  `tests/layout.rs` the five structs' layouts.
 - **Tagged writing is pinned by byte equality with the facade**
   (`src/tagging/tests.rs`): the *tagged* script's document built through the
   C ABI equals the facade's, passes the strict validator and reads back

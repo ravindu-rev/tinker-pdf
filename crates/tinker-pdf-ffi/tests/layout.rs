@@ -17,10 +17,72 @@
 use std::mem::{offset_of, size_of};
 
 use tinker_pdf_ffi::{
+    TpdfCommand, TpdfCommandBytes, TpdfCommandField, TpdfCommandImage, TpdfCommandOutline,
     TpdfDate, TpdfDestination, TpdfDestinationRead, TpdfEmbeddedFile, TpdfEncryption,
     TpdfExtGState, TpdfImage, TpdfPageLabelRange, TpdfRadioButton, TpdfSanitise, TpdfSourceVtable,
     TpdfTarget, TpdfTransparencyGroup, TpdfWriteOptions,
 };
+
+#[test]
+fn a_command_is_four_four_byte_numbers() {
+    assert_eq!(size_of::<TpdfCommand>(), 16);
+    assert_eq!(offset_of!(TpdfCommand, kind), 0);
+    assert_eq!(offset_of!(TpdfCommand, number), 4);
+    assert_eq!(offset_of!(TpdfCommand, index), 8);
+    assert_eq!(offset_of!(TpdfCommand, field_count), 12);
+}
+
+#[test]
+fn command_bytes_are_a_pointer_and_a_length() {
+    assert_eq!(size_of::<TpdfCommandBytes>(), 16);
+    assert_eq!(offset_of!(TpdfCommandBytes, data), 0);
+    assert_eq!(offset_of!(TpdfCommandBytes, len), 8);
+}
+
+#[test]
+fn a_command_field_pads_after_its_tag_and_ends_on_its_array() {
+    assert_eq!(size_of::<TpdfCommandField>(), 48);
+    assert_eq!(offset_of!(TpdfCommandField, tag), 0);
+    assert_eq!(offset_of!(TpdfCommandField, natural), 8);
+    assert_eq!(offset_of!(TpdfCommandField, integer), 16);
+    assert_eq!(offset_of!(TpdfCommandField, real), 24);
+    assert_eq!(offset_of!(TpdfCommandField, data), 32);
+    assert_eq!(offset_of!(TpdfCommandField, count), 40);
+}
+
+#[test]
+fn an_outline_is_its_keys_then_its_two_arrays() {
+    assert_eq!(size_of::<TpdfCommandOutline>(), 56);
+    assert_eq!(offset_of!(TpdfCommandOutline, scope), 0);
+    assert_eq!(offset_of!(TpdfCommandOutline, font_id), 8);
+    assert_eq!(offset_of!(TpdfCommandOutline, code), 16);
+    assert_eq!(offset_of!(TpdfCommandOutline, found), 20);
+    assert_eq!(offset_of!(TpdfCommandOutline, operators), 24);
+    assert_eq!(offset_of!(TpdfCommandOutline, numbers), 40);
+    assert_eq!(offset_of!(TpdfCommandOutline, number_count), 48);
+}
+
+#[test]
+fn an_image_decode_pads_before_its_samples_and_ends_on_its_colours() {
+    assert_eq!(size_of::<TpdfCommandImage>(), 128);
+    assert_eq!(offset_of!(TpdfCommandImage, image), 0);
+    assert_eq!(offset_of!(TpdfCommandImage, reduction), 8);
+    assert_eq!(offset_of!(TpdfCommandImage, answer), 12);
+    assert_eq!(offset_of!(TpdfCommandImage, width), 16);
+    assert_eq!(offset_of!(TpdfCommandImage, height), 20);
+    assert_eq!(offset_of!(TpdfCommandImage, has_window), 24);
+    assert_eq!(offset_of!(TpdfCommandImage, window_x), 28);
+    assert_eq!(offset_of!(TpdfCommandImage, window_y), 32);
+    assert_eq!(offset_of!(TpdfCommandImage, window_width), 36);
+    assert_eq!(offset_of!(TpdfCommandImage, window_height), 40);
+    assert_eq!(offset_of!(TpdfCommandImage, stencil), 44);
+    assert_eq!(offset_of!(TpdfCommandImage, interpolate), 48);
+    assert_eq!(offset_of!(TpdfCommandImage, codec), 56);
+    assert_eq!(offset_of!(TpdfCommandImage, rgb), 72);
+    assert_eq!(offset_of!(TpdfCommandImage, alpha), 88);
+    assert_eq!(offset_of!(TpdfCommandImage, two_colour), 104);
+    assert_eq!(offset_of!(TpdfCommandImage, colours), 120);
+}
 
 #[test]
 fn a_destination_is_a_kind_and_five_doubles() {

@@ -69,6 +69,7 @@ macro_rules! raw_enum {
     };
 }
 
+mod commands;
 mod docops;
 mod forms;
 mod graphics;
@@ -76,6 +77,7 @@ mod graphics;
 mod raw_enum_tests;
 mod read;
 mod tagging;
+pub use commands::*;
 pub use docops::*;
 pub use forms::*;
 pub use graphics::*;

@@ -264,6 +264,18 @@ typedef enum TpdfWidgetDefect {
   TPDF_WIDGET_DEFECT_RECT_MISSING = 0,
 } TpdfWidgetDefect;
 
+// What the page's resources answered for an image at one reduction
+// ([`TpdfCommandImage::answer`]).
+typedef enum TpdfImageAnswer {
+  // No image: the name named none.
+  TPDF_IMAGE_ANSWER_ABSENT = 0,
+  // The image, decoded.
+  TPDF_IMAGE_ANSWER_IMAGE = 1,
+  // A decode this build refused; the codec's name is in
+  // [`TpdfCommandImage::codec`].
+  TPDF_IMAGE_ANSWER_REFUSED = 2,
+} TpdfImageAnswer;
+
 // What a metadata write did to the other statement of the same metadata.
 typedef enum TpdfMetadataSync {
   // The other half does not exist, so nothing can disagree.
@@ -612,6 +624,133 @@ typedef enum TpdfTagText {
   TPDF_TAG_TEXT_EXPANSION = 4,
 } TpdfTagText;
 
+// Every kind of record a command stream holds, as the facade's
+// `CommandKind` lists them, numbered from zero in the order the kinds were
+// added. A kind's number on the wire is another number, which
+// [`TpdfCommand::number`] carries; a kind added by a later version is
+// appended here.
+typedef enum TpdfCommandKind {
+  // `End`, kind 0 on the wire: the stream's end, which the cursor reads
+  // after its last record and which the encoder writes itself.
+  TPDF_COMMAND_KIND_END = 0,
+  // `Function`, kind 1: a function a state or a definition refers to.
+  TPDF_COMMAND_KIND_FUNCTION = 1,
+  // `Halftone`, kind 2.
+  TPDF_COMMAND_KIND_HALFTONE = 2,
+  // `Stored`, kind 3: a state's stored parameters.
+  TPDF_COMMAND_KIND_STORED = 3,
+  // `Colorants`, kind 4: what a colour paints by colorant.
+  TPDF_COMMAND_KIND_COLORANTS = 4,
+  // `Source`, kind 5: what a colour was resolved from.
+  TPDF_COMMAND_KIND_SOURCE = 5,
+  // `State`, kind 6: a graphics state a command refers to.
+  TPDF_COMMAND_KIND_STATE = 6,
+  // `BeginText`, kind 16.
+  TPDF_COMMAND_KIND_BEGIN_TEXT = 7,
+  // `GlyphRun`, kind 17: consecutive glyphs of one font, size, writing
+  // mode and state.
+  TPDF_COMMAND_KIND_GLYPH_RUN = 8,
+  // `EndText`, kind 18.
+  TPDF_COMMAND_KIND_END_TEXT = 9,
+  // `FillPath`, kind 19.
+  TPDF_COMMAND_KIND_FILL_PATH = 10,
+  // `StrokePath`, kind 20.
+  TPDF_COMMAND_KIND_STROKE_PATH = 11,
+  // `ClipPath`, kind 21.
+  TPDF_COMMAND_KIND_CLIP_PATH = 12,
+  // `SaveState`, kind 22.
+  TPDF_COMMAND_KIND_SAVE_STATE = 13,
+  // `RestoreState`, kind 23.
+  TPDF_COMMAND_KIND_RESTORE_STATE = 14,
+  // `DrawImage`, kind 24: an image XObject or an inline image.
+  TPDF_COMMAND_KIND_DRAW_IMAGE = 15,
+  // `DrawShading`, kind 25: `sh`.
+  TPDF_COMMAND_KIND_DRAW_SHADING = 16,
+  // `BeginMarkedContent`, kind 26.
+  TPDF_COMMAND_KIND_BEGIN_MARKED_CONTENT = 17,
+  // `EndMarkedContent`, kind 27.
+  TPDF_COMMAND_KIND_END_MARKED_CONTENT = 18,
+  // `BeginForm`, kind 28.
+  TPDF_COMMAND_KIND_BEGIN_FORM = 19,
+  // `EndForm`, kind 29.
+  TPDF_COMMAND_KIND_END_FORM = 20,
+  // `BeginGroup`, kind 30: a transparency group.
+  TPDF_COMMAND_KIND_BEGIN_GROUP = 21,
+  // `EndGroup`, kind 31.
+  TPDF_COMMAND_KIND_END_GROUP = 22,
+  // `BeginSoftMask`, kind 32.
+  TPDF_COMMAND_KIND_BEGIN_SOFT_MASK = 23,
+  // `EndSoftMask`, kind 33.
+  TPDF_COMMAND_KIND_END_SOFT_MASK = 24,
+  // `ClearSoftMask`, kind 34.
+  TPDF_COMMAND_KIND_CLEAR_SOFT_MASK = 25,
+  // `GroupBudgetSpent`, kind 35: the interpretation offered no further
+  // group.
+  TPDF_COMMAND_KIND_GROUP_BUDGET_SPENT = 26,
+  // `RecursionRefused`, kind 36: a stream not run again inside itself.
+  TPDF_COMMAND_KIND_RECURSION_REFUSED = 27,
+  // `NestedBudgetSpent`, kind 37: the interpretation ran no further
+  // nested content.
+  TPDF_COMMAND_KIND_NESTED_BUDGET_SPENT = 28,
+  // `Page`, kind 64: the page's crop box, rotation, group space, usage
+  // and index, a page stream's first record.
+  TPDF_COMMAND_KIND_PAGE = 29,
+  // `Annotation`, kind 65: an appearance's calls follow, in its scope.
+  TPDF_COMMAND_KIND_ANNOTATION = 30,
+  // `MissingFont`, kind 66: a font no name resolved, where the
+  // interpretation met it.
+  TPDF_COMMAND_KIND_MISSING_FONT = 31,
+  // `RepairedSpace`, kind 67: a colour space read with a repair.
+  TPDF_COMMAND_KIND_REPAIRED_SPACE = 32,
+  // `Scope`, kind 68: a form's or an appearance's resource scope.
+  TPDF_COMMAND_KIND_SCOPE = 33,
+  // `Outline`, kind 69: a glyph's outline in a scope
+  // ([`tpdf_command_stream_outline`]).
+  TPDF_COMMAND_KIND_OUTLINE = 34,
+  // `FontIdentity`, kind 70.
+  TPDF_COMMAND_KIND_FONT_IDENTITY = 35,
+  // `Profile`, kind 71: an ICC profile's bytes.
+  TPDF_COMMAND_KIND_PROFILE = 36,
+  // `ColorSpace`, kind 72.
+  TPDF_COMMAND_KIND_COLOR_SPACE = 37,
+  // `Image`, kind 73: an image XObject a scope names.
+  TPDF_COMMAND_KIND_IMAGE = 38,
+  // `InlineImage`, kind 74: an inline image of the stream's calls.
+  TPDF_COMMAND_KIND_INLINE_IMAGE = 39,
+  // `ImageDecode`, kind 75: an image's decode at one reduction
+  // ([`tpdf_command_stream_image`]).
+  TPDF_COMMAND_KIND_IMAGE_DECODE = 40,
+  // `ShadingDefinition`, kind 76.
+  TPDF_COMMAND_KIND_SHADING_DEFINITION = 41,
+  // `Shading`, kind 77: what a shading name answers in a scope.
+  TPDF_COMMAND_KIND_SHADING = 42,
+  // `Pattern`, kind 78: what a pattern name answers in a scope.
+  TPDF_COMMAND_KIND_PATTERN = 43,
+  // `Cell`, kind 79: a tiling cell, its own stream.
+  TPDF_COMMAND_KIND_CELL = 44,
+} TpdfCommandKind;
+
+// What a field holds: its tag on the wire, the facade's `CommandField`.
+typedef enum TpdfCommandFieldTag {
+  // An absent value.
+  TPDF_COMMAND_FIELD_TAG_NOTHING = 0,
+  // An unsigned integer, in [`TpdfCommandField::natural`]. A reference to
+  // a record is one of these.
+  TPDF_COMMAND_FIELD_TAG_UNSIGNED = 1,
+  // A signed integer, in [`TpdfCommandField::integer`].
+  TPDF_COMMAND_FIELD_TAG_SIGNED = 2,
+  // A real, in [`TpdfCommandField::real`], its bits as written.
+  TPDF_COMMAND_FIELD_TAG_REAL = 3,
+  // Bytes: [`TpdfCommandField::data`] points to `count` of them.
+  TPDF_COMMAND_FIELD_TAG_BYTES = 4,
+  // Reals: `data` points to `count` `double`s.
+  TPDF_COMMAND_FIELD_TAG_REALS = 5,
+  // Unsigned integers: `data` points to `count` `uint64_t`s.
+  TPDF_COMMAND_FIELD_TAG_NATURALS = 6,
+  // Byte strings: `data` points to `count` [`TpdfCommandBytes`].
+  TPDF_COMMAND_FIELD_TAG_STRINGS = 7,
+} TpdfCommandFieldTag;
+
 // Every file attached to a document, in name order. Opaque to callers.
 //
 // Holds its own clone of the document — an `Arc` bump, not a copy — because
@@ -641,6 +780,12 @@ typedef struct TpdfBuilder TpdfBuilder;
 // state here to leave dangling: taking one changes nothing, freeing one
 // commits nothing because nothing was pending, and restoring is idempotent.
 typedef struct TpdfCheckpoint TpdfCheckpoint;
+
+// Commands pushed to be written as a stream. Opaque to callers.
+typedef struct TpdfCommandEncoder TpdfCommandEncoder;
+
+// A command stream read. Opaque to callers.
+typedef struct TpdfCommandStream TpdfCommandStream;
 
 // What the strict structural validator found. Opaque to callers.
 //
@@ -905,6 +1050,117 @@ typedef struct TpdfTarget {
   // [`TpdfTargetKind::Uri`].
   const char *uri;
 } TpdfTarget;
+
+// One record, as the cursor reads it.
+typedef struct TpdfCommand {
+  // The record's kind, a [`TpdfCommandKind`], or -1 for a kind this build
+  // does not know, which a stream of a newer minor version holds.
+  int kind;
+  // The kind's number on the wire, known or not.
+  uint32_t number;
+  // The record's place among the stream's records, from 0: what
+  // [`tpdf_command_stream_field`] and the accessors name it by. The end
+  // stands at the number of records.
+  uint32_t index;
+  // How many fields the record holds.
+  uint32_t field_count;
+} TpdfCommand;
+
+// One field, as plain values: its tag, and the one of the values the tag
+// says holds it. The cursor's reads borrow the stream's storage; the
+// encoder copies what it is handed.
+typedef struct TpdfCommandField {
+  // A [`TpdfCommandFieldTag`].
+  int tag;
+  // An unsigned field's value.
+  uint64_t natural;
+  // A signed field's value.
+  int64_t integer;
+  // A real field's value.
+  double real;
+  // A bytes field's bytes, a reals field's `double`s, a naturals field's
+  // `uint64_t`s, or a strings field's [`TpdfCommandBytes`]; null for any
+  // other tag and for an empty array.
+  const void *data;
+  // How many of them `data` points to.
+  size_t count;
+} TpdfCommandField;
+
+// Bytes: a pointer and a length. Null with a length of 0 for none.
+typedef struct TpdfCommandBytes {
+  // The first byte.
+  const uint8_t *data;
+  // How many.
+  size_t len;
+} TpdfCommandBytes;
+
+// A glyph's outline record ([`TpdfCommandKind::Outline`]), as a host draws
+// it.
+typedef struct TpdfCommandOutline {
+  // The scope the glyph was asked in: 0 the page's, `n` the `n`th scope
+  // record's.
+  uint64_t scope;
+  // The font the glyph is of, as the stream's glyph runs name it.
+  uint64_t font_id;
+  // The glyph's code.
+  uint32_t code;
+  // 1 when the font gave the glyph an outline, 0 when it gave none and
+  // both arrays are empty.
+  int found;
+  // The outline's segments, a byte each: 0 a move, 1 a line, 2 a
+  // quadratic, 3 a cubic, 4 a close.
+  struct TpdfCommandBytes operators;
+  // Their numbers in order, in a space where one unit is one em: two for
+  // a move or a line, four for a quadratic, six for a cubic, none for a
+  // close.
+  const double *numbers;
+  // How many numbers.
+  size_t number_count;
+} TpdfCommandOutline;
+
+// An image's decode at one reduction ([`TpdfCommandKind::ImageDecode`]),
+// as a host draws it.
+typedef struct TpdfCommandImage {
+  // The image the decode is of: the `n`th image record, inline or not,
+  // from 0.
+  uint64_t image;
+  // The reduction it is at: 1 the whole image, or what a draw at a
+  // smaller size asks a JPEG or a codestream for.
+  uint32_t reduction;
+  // What the page's resources answered.
+  enum TpdfImageAnswer answer;
+  // The decode's width in samples.
+  uint32_t width;
+  // Its height in samples.
+  uint32_t height;
+  // 1 when the samples are a window of the decode, 0 when they are all
+  // of it.
+  int has_window;
+  // The window's left edge, in samples.
+  uint32_t window_x;
+  // The window's top edge, in samples, counting down.
+  uint32_t window_y;
+  // The window's width.
+  uint32_t window_width;
+  // The window's height.
+  uint32_t window_height;
+  // 1 for a stencil mask, which paints the fill colour where it is set.
+  int stencil;
+  // The image's `/Interpolate`.
+  int interpolate;
+  // A refused decode's codec, as UTF-8.
+  struct TpdfCommandBytes codec;
+  // Red, green and blue, three bytes a sample, row-major from the top;
+  // empty where `two_colour` holds the samples.
+  struct TpdfCommandBytes rgb;
+  // Opacity, a byte a sample; empty for an opaque image.
+  struct TpdfCommandBytes alpha;
+  // A byte a sample choosing between `colours`' two, zero the first;
+  // empty for an image held as RGB.
+  struct TpdfCommandBytes two_colour;
+  // Red, green, blue and alpha of a sample of zero, then of any other.
+  uint8_t colours[8];
+} TpdfCommandImage;
 
 // One run of page labels, as C sees `PageLabelRange`.
 typedef struct TpdfPageLabelRange {
@@ -2565,6 +2821,211 @@ enum TpdfStatus tpdf_builder_set_outline(struct TpdfBuilder *builder,
 //
 // `builder` must be a live handle and `out` a valid pointer.
 enum TpdfStatus tpdf_builder_finish(struct TpdfBuilder *builder, struct TpdfBuffer **out);
+
+// The page's drawing as a command stream: `Page::command_stream`, its
+// display list's for no usage.
+//
+// The caller frees the result with [`crate::tpdf_buffer_free`].
+//
+// # Safety
+//
+// `doc` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_page_command_stream(const struct TpdfDocument *doc,
+                                         uint32_t index,
+                                         struct TpdfBuffer **out);
+
+// Reads a command stream: `CommandStream::parse`, under the design's
+// budgets.
+//
+// The bytes are read, not kept: the caller may free theirs at once. Bytes
+// that are no stream this build reads — no command stream, a newer major
+// version, cut short or running on, a kind this minor does not define, a
+// record whose fields are not its kind's, no page record, past a budget —
+// are [`TpdfStatus::BadArgument`] with the reader's sentence. The caller
+// frees the result with [`tpdf_command_stream_free`].
+//
+// # Safety
+//
+// `bytes` must point to at least `len` readable bytes and `out` must be a
+// valid pointer.
+enum TpdfStatus tpdf_command_stream_parse(const uint8_t *bytes,
+                                          size_t len,
+                                          struct TpdfCommandStream **out);
+
+// How many records the stream holds before its end: the records the
+// cursor reads, and 0 for a null handle.
+//
+// # Safety
+//
+// `stream` must be a live handle or null.
+uint32_t tpdf_command_stream_count(const struct TpdfCommandStream *stream);
+
+// The cursor: fills `out` with the next record's command and moves past
+// it. After the last record it fills [`TpdfCommandKind::End`], at the
+// number of records, and stays there until
+// [`tpdf_command_stream_rewind`].
+//
+// # Safety
+//
+// `stream` must be a live handle, used from one thread at a time, and
+// `out` a valid pointer.
+enum TpdfStatus tpdf_command_stream_next(struct TpdfCommandStream *stream, struct TpdfCommand *out);
+
+// Puts the cursor back on the stream's first record.
+//
+// # Safety
+//
+// `stream` must be a live handle, used from one thread at a time.
+enum TpdfStatus tpdf_command_stream_rewind(struct TpdfCommandStream *stream);
+
+// Fills `out` with record `index`'s command, wherever the cursor stands.
+//
+// # Safety
+//
+// `stream` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_command_stream_record(const struct TpdfCommandStream *stream,
+                                           uint32_t index,
+                                           struct TpdfCommand *out);
+
+// Fills `out` with field `field` of record `index`, as plain values; a
+// pointer in it borrows the stream until [`tpdf_command_stream_free`].
+// `CommandKind::fields` names each place, as the design does.
+//
+// # Safety
+//
+// `stream` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_command_stream_field(const struct TpdfCommandStream *stream,
+                                          uint32_t index,
+                                          uint32_t field,
+                                          struct TpdfCommandField *out);
+
+// Fills `out` with outline record `index`'s glyph: its scope, font and
+// code, and its segments' operators and numbers, borrowed from the stream.
+// A record of another kind is [`TpdfStatus::BadArgument`] naming it.
+//
+// # Safety
+//
+// `stream` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_command_stream_outline(const struct TpdfCommandStream *stream,
+                                            uint32_t index,
+                                            struct TpdfCommandOutline *out);
+
+// Fills `out` with image decode record `index`: what the page's resources
+// answered, and for an image its size, its window, its samples and its
+// colours, borrowed from the stream. A record of another kind is
+// [`TpdfStatus::BadArgument`] naming it.
+//
+// # Safety
+//
+// `stream` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_command_stream_image(const struct TpdfCommandStream *stream,
+                                          uint32_t index,
+                                          struct TpdfCommandImage *out);
+
+// The stream's bytes, written back at its own version: for a stream this
+// build wrote, the bytes it was read from. The caller frees the result
+// with [`crate::tpdf_buffer_free`].
+//
+// # Safety
+//
+// `stream` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_command_stream_to_bytes(const struct TpdfCommandStream *stream,
+                                             struct TpdfBuffer **out);
+
+// The stream's major and minor version.
+//
+// # Safety
+//
+// `stream` must be a live handle; `major` and `minor` valid pointers.
+enum TpdfStatus tpdf_command_stream_version(const struct TpdfCommandStream *stream,
+                                            uint16_t *major,
+                                            uint16_t *minor);
+
+// Which page of its document the stream is of.
+//
+// # Safety
+//
+// `stream` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_command_stream_page_index(const struct TpdfCommandStream *stream,
+                                               uint32_t *out);
+
+// The page's size in points after rotation, as [`crate::tpdf_page_size`]
+// gives it for the page the stream is of.
+//
+// # Safety
+//
+// `stream` must be a live handle; `width` and `height` valid pointers.
+enum TpdfStatus tpdf_command_stream_size(const struct TpdfCommandStream *stream,
+                                         double *width,
+                                         double *height);
+
+// Draws the stream as [`crate::tpdf_page_render`] draws its page, at
+// `scale` in `format` (a [`TpdfPixelFormat`]; any other number is
+// [`TpdfStatus::BadArgument`]), through the engine's own renderer with no
+// document behind it. The caller frees the result with
+// [`crate::tpdf_bitmap_free`].
+//
+// # Safety
+//
+// `stream` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_command_stream_render(const struct TpdfCommandStream *stream,
+                                           double scale,
+                                           int format,
+                                           struct TpdfBitmap **out);
+
+// Frees a command stream. Null is accepted and does nothing.
+//
+// # Safety
+//
+// `stream` must have come from [`tpdf_command_stream_parse`], and neither
+// it nor any pointer borrowed from it may be used afterwards.
+void tpdf_command_stream_free(struct TpdfCommandStream *stream);
+
+// Starts an encoder, holding no commands. The caller frees it with
+// [`tpdf_command_encoder_free`].
+//
+// # Safety
+//
+// `out` must be a valid pointer.
+enum TpdfStatus tpdf_command_encoder_new(struct TpdfCommandEncoder **out);
+
+// Appends a record: `kind` (a [`TpdfCommandKind`] other than `End`, which
+// [`tpdf_command_encoder_finish`] writes) and its `count` fields, copied.
+// A kind or a tag its enum does not declare, `End`, and null data with a
+// count are [`TpdfStatus::BadArgument`] naming them, and nothing is
+// appended. Whether the fields are their kind's is the parse's question,
+// which the finish asks.
+//
+// # Safety
+//
+// `encoder` must be a live handle, used from one thread at a time, and
+// `fields` must point to `count` fields, each `data` to what its tag says,
+// aligned for it.
+enum TpdfStatus tpdf_command_encoder_push(struct TpdfCommandEncoder *encoder,
+                                          int kind,
+                                          const struct TpdfCommandField *fields,
+                                          size_t count);
+
+// The commands pushed so far as a stream's bytes at this build's version,
+// read back as [`tpdf_command_stream_parse`] reads them:
+// `CommandStream::from_records`. Commands whose stream the reader refuses
+// are [`TpdfStatus::BadArgument`] with its sentence. The encoder keeps its
+// commands, so more may be pushed and the stream finished again. The
+// caller frees the result with [`crate::tpdf_buffer_free`].
+//
+// # Safety
+//
+// `encoder` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_command_encoder_finish(const struct TpdfCommandEncoder *encoder,
+                                            struct TpdfBuffer **out);
+
+// Frees an encoder. Null is accepted and does nothing.
+//
+// # Safety
+//
+// `encoder` must have come from [`tpdf_command_encoder_new`] and must not
+// be used afterwards.
+void tpdf_command_encoder_free(struct TpdfCommandEncoder *encoder);
 
 // Sets the document's page labels (12.4.2), replacing any it had.
 //
