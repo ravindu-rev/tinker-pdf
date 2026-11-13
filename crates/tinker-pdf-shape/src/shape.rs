@@ -211,6 +211,53 @@ pub const VRT2: Tag = Tag::new(b"vrt2");
 /// sideways runs in vertical writing mode".
 pub const VRTR: Tag = Tag::new(b"vrtr");
 
+/// The `GPOS` features an upright run turns on.
+///
+/// [`DEFAULT_GPOS_FEATURES`] with `vkrn` in place of `kern` — the OpenType
+/// feature registry's `kern` "is not intended for use in vertical text
+/// layout", and `vkrn` "should be active by default" in most of it — and
+/// `valt`, which the registry has "active by default in vertical-setting
+/// contexts". `abvm`, `blwm`, `dist`, `curs`, `mark` and `mkmk` are a line's,
+/// none of them restricted to horizontal text.
+///
+/// The registry's other vertical positioning features are off: `vhal`,
+/// `vpal` and `vapk`, which it has off by default, and `vchw`, which it turns
+/// on only for a layout engine that does no CJK layout of its own — a leaf
+/// crate cannot know that of its caller, and `chws` is off along a line for
+/// the same reason. Each is turned on through [`Shaper::with_settings`], and
+/// the interactions the registry states among them are applied there; see
+/// `docs/design/shaping.md`, *Vertical shaping*.
+///
+/// # What a fixture adjudicates
+///
+/// Nothing yet: no face in either vendored corpus carries a vertical
+/// feature, and every column test is a synthetic face whose expectations
+/// the test computes from its own tables. H-64's person-written fixtures
+/// (FT-07b.10) are what would.
+pub const VERTICAL_GPOS_FEATURES: &[Tag] = &[
+    Tag::new(b"abvm"),
+    Tag::new(b"blwm"),
+    VALT,
+    VKRN,
+    Tag::new(b"dist"),
+    Tag::new(b"curs"),
+    Tag::new(b"mark"),
+    Tag::new(b"mkmk"),
+];
+
+/// `valt`, the alternate vertical metrics: on by default in a column.
+const VALT: Tag = Tag::new(b"valt");
+/// `vkrn`, vertical kerning: on by default in a column.
+const VKRN: Tag = Tag::new(b"vkrn");
+/// `vapk`, kerning for `vpal`'s proportional heights: off by default.
+const VAPK: Tag = Tag::new(b"vapk");
+/// `vhal`, the alternate half heights: off by default.
+const VHAL: Tag = Tag::new(b"vhal");
+/// `vpal`, the proportional heights: off by default.
+const VPAL: Tag = Tag::new(b"vpal");
+/// `vchw`, the contextual half-width spacing: off by default.
+const VCHW: Tag = Tag::new(b"vchw");
+
 /// What a glyph stands on in a column, in the face's design units.
 ///
 /// The metrics an upright run gives each glyph before `GPOS` runs —
@@ -810,20 +857,60 @@ impl<'a> Shaper<'a> {
         }
     }
 
-    /// The positioning features with the settings applied.
-    fn gpos_plan(&self) -> Vec<Tag> {
-        let base = self.gpos_features.unwrap_or(DEFAULT_GPOS_FEATURES);
+    /// The positioning features with the settings applied: a line's, or
+    /// [`VERTICAL_GPOS_FEATURES`] with the registry's interactions for an
+    /// upright run, or exactly what a caller named.
+    fn gpos_plan(&self, orientation: Orientation, gpos: &LayoutTable<'a>, script: Tag) -> Vec<Tag> {
+        let upright = orientation == Orientation::Upright;
+        let base = match self.gpos_features {
+            Some(asked) => asked,
+            None if upright => VERTICAL_GPOS_FEATURES,
+            None => DEFAULT_GPOS_FEATURES,
+        };
         let mut out: Vec<Tag> = base
             .iter()
             .copied()
             .filter(|tag| self.setting(*tag) != Some(0))
             .collect();
+        if upright && self.gpos_features.is_none() {
+            self.glyph_heights(&mut out, gpos, script);
+        }
         for tag in self.turned_on() {
             if !out.contains(&tag) {
                 out.push(tag);
             }
         }
         out
+    }
+
+    /// The interactions the OpenType feature registry states among a
+    /// column's glyph-height features, applied to an upright run's
+    /// positioning list before the settings' own additions.
+    ///
+    /// - `valt`, `vhal`, `vpal` and `vchw` exclude one another: a caller who
+    ///   turns on one of the last three has chosen it, and `valt`, which is
+    ///   on only by default, is withdrawn.
+    /// - Where `valt` applies — the face carries it for the run's script and
+    ///   language — or `vhal` or `vchw` is on, `vkrn` and `vapk` "should be
+    ///   disabled for that run": both are withdrawn, and a caller who turns
+    ///   either on puts it back, as a setting does anywhere. `vpal` keeps
+    ///   them, which the registry allows.
+    ///
+    /// Not applied: `vkrn` standing off, by default, from the glyphs a face's
+    /// `vpal` covers where `vpal` is off and the face has no `vapk` — the
+    /// exception `kern` has with `palt`, which a line does not apply either.
+    fn glyph_heights(&self, out: &mut Vec<Tag>, gpos: &LayoutTable<'a>, script: Tag) {
+        let on = |tag: Tag| self.setting(tag).is_some_and(|value| value > 0);
+        if on(VHAL) || on(VPAL) || on(VCHW) {
+            out.retain(|tag| *tag != VALT);
+        }
+        let valt = out.contains(&VALT)
+            && !gpos
+                .lookups_for_masked(script, self.language, &[(VALT, Buffer::GLOBAL)])
+                .is_empty();
+        if valt || on(VHAL) || on(VCHW) {
+            out.retain(|tag| *tag != VKRN && *tag != VAPK);
+        }
     }
 
     /// The OpenType language system to ask for, such as `TRK ` for Turkish.
@@ -1026,16 +1113,14 @@ impl<'a> Shaper<'a> {
             }
         }
 
-        if orientation == Orientation::Upright {
-            // A column's positioning plan is its own; until it runs here, the
-            // marks still give up the advance their face gave them.
-            if plan.mark_widths() == MarkWidths::ZeroByGdef {
-                self.layout.zero_marks(&mut buffer);
-            }
-        } else if let Some(gpos) = self.layout.gpos() {
+        // A column's positioning runs on the buffer's direction: a value
+        // record's advance is a height there, and a cursive join and a
+        // mark's attachment are resolved down the column (`crate::gpos`'s
+        // `adjust` and `join`, `Buffer::propagate_attachments`).
+        if let Some(gpos) = self.layout.gpos() {
             let script = self.script_tag(gpos, run.script);
             let wanted: Vec<(Tag, u32)> = self
-                .gpos_plan()
+                .gpos_plan(orientation, gpos, script)
                 .into_iter()
                 .map(|tag| (tag, Buffer::GLOBAL))
                 .collect();

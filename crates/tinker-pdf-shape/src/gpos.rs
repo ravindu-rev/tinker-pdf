@@ -120,14 +120,35 @@ fn value(data: Bytes<'_>, at: usize, format: u16) -> Value {
 }
 
 /// Adds a value record to a glyph.
+///
+/// # Down a column the advance is a height
+///
+/// A placement adds to the offset in every direction: the `GPOS` clause
+/// writes placements in the glyph's own coordinates "regardless of the
+/// writing direction". The advances do not. In a column the pen moves down by
+/// the advance height, and the clause's own example is that "for a
+/// top-to-bottom feature, to increase the advance height of a glyph by 100,
+/// the YAdvance = 100" — so a `YAdvance` there lengthens the height, which is
+/// a `y_advance` further below zero, and an `XAdvance`, "only used for
+/// horizontal layout", is not applied, so no glyph of a column advances
+/// across it.
+///
+/// Along a line both advances add as written, the `YAdvance` as a y
+/// displacement: aots's `gpos1_1_simple_t4` states one in a horizontal run
+/// and its expected deltas accumulate it so.
 fn adjust(buffer: &mut Buffer, at: usize, value: Value) -> bool {
+    let column = buffer.direction().is_vertical();
     let Some(glyph) = buffer.glyph_mut(at) else {
         return false;
     };
     glyph.x_offset = glyph.x_offset.saturating_add(value.x_placement);
     glyph.y_offset = glyph.y_offset.saturating_add(value.y_placement);
-    glyph.x_advance = glyph.x_advance.saturating_add(value.x_advance);
-    glyph.y_advance = glyph.y_advance.saturating_add(value.y_advance);
+    if column {
+        glyph.y_advance = glyph.y_advance.saturating_sub(value.y_advance);
+    } else {
+        glyph.x_advance = glyph.x_advance.saturating_add(value.x_advance);
+        glyph.y_advance = glyph.y_advance.saturating_add(value.y_advance);
+    }
     true
 }
 
@@ -417,6 +438,10 @@ fn join(
     entry: (i32, i32),
     flags: u16,
 ) {
+    if buffer.direction().is_vertical() {
+        join_down_a_column(buffer, first, second, exit, entry, flags);
+        return;
+    }
     // Along the line: the advances close the gap, and which glyph's advance
     // shrinks is which way the pen is travelling. Both arms leave the pair
     // overlapping by the same amount; they differ in which side of the pair
@@ -457,6 +482,51 @@ fn join(
     };
     if let Some(glyph) = buffer.glyph_mut(child) {
         glyph.y_offset = across;
+    }
+    buffer.attach_cursive(child, parent);
+}
+
+/// [`join`] down a column: a line's arithmetic with the two axes exchanged.
+///
+/// The column is drawn in buffer order, as a left-to-right line is, and its
+/// pen moves along y, so the line-direction half — the first glyph's advance
+/// carries the pen to its exit point, and the second's offset and advance
+/// give up the distance from its origin to its entry — is the forward arm
+/// above written on y. Each offset already carries its glyph's vertical
+/// origin (`docs/design/shaping.md`, *The convention*), and the arithmetic
+/// reads it the way the forward arm reads an `XPlacement`. Across the column,
+/// on x, one glyph's placement makes the anchors meet, `RIGHT_TO_LEFT`
+/// choosing which as along a line; the child's own origin offset gives way
+/// to its parent's, which `propagate_attachments` adds.
+fn join_down_a_column(
+    buffer: &mut Buffer,
+    first: usize,
+    second: usize,
+    exit: (i32, i32),
+    entry: (i32, i32),
+    flags: u16,
+) {
+    let (first_offset, second_offset) = (
+        buffer.glyph(first).map_or(0, |glyph| glyph.y_offset),
+        buffer.glyph(second).map_or(0, |glyph| glyph.y_offset),
+    );
+    if let Some(glyph) = buffer.glyph_mut(first) {
+        glyph.y_advance = exit.1.saturating_add(first_offset);
+    }
+    let shift = entry.1.saturating_add(second_offset);
+    if let Some(glyph) = buffer.glyph_mut(second) {
+        glyph.y_advance = glyph.y_advance.saturating_sub(shift);
+        glyph.y_offset = glyph.y_offset.saturating_sub(shift);
+    }
+
+    let across = entry.0.saturating_sub(exit.0);
+    let (child, parent, across) = if flags & RIGHT_TO_LEFT != 0 {
+        (first, second, across)
+    } else {
+        (second, first, across.saturating_neg())
+    };
+    if let Some(glyph) = buffer.glyph_mut(child) {
+        glyph.x_offset = across;
     }
     buffer.attach_cursive(child, parent);
 }

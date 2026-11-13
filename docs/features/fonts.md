@@ -620,8 +620,18 @@ What it does:
   pen: half its advance width in, and the `vmtx` clause's origin down. A face
   without vertical metrics is set on a synthesized em box — one em down, the
   origin 880/1000 of an em above the baseline — and the run records
-  `Warning::VerticalMetricsSynthesized` once. An upright run runs no `GPOS`
-  lookup; a `GDEF` mark's advance is zeroed. A `Sideways` run is shaped
+  `Warning::VerticalMetricsSynthesized` once. Its `GPOS` features are
+  `shape::VERTICAL_GPOS_FEATURES` — `vkrn` in place of `kern`, `valt` beside
+  `abvm`, `blwm`, `dist`, `curs`, `mark` and `mkmk` — with `vhal`, `vpal`,
+  `vapk` and `vchw` turned on through settings and the registry's
+  interactions applied: one of `vhal`, `vpal`, `vchw` turned on withdraws
+  `valt`, and `valt` where the face carries it, `vhal` or `vchw` withdraws
+  `vkrn` and `vapk` unless a setting puts them back. Down a column a
+  `YAdvance` lengthens the advance height and an `XAdvance` is not applied;
+  a placement adds to the offset as along a line; a mark meets its base by
+  the line's forward arithmetic on both axes and its advance is zeroed; and
+  a cursive join closes the gap along the column and makes the anchors meet
+  across it. A `Sideways` run is shaped
   along a line, Mongolian's joining included, with `vrtr` added and `vert`
   and `vrt2` kept out whatever the settings, and `ShapedRun::orientation`
   marks it for its consumer to turn 90° clockwise. `ShapedRun::advance` is a
@@ -949,6 +959,17 @@ What it does **not** do, each named so it is a backlog and not a mystery:
   form stands upright with its horizontal glyph. CSS Writing Modes 3 §5.1.1
   does not expect a layout engine to synthesize the fallback, and the itemizer
   sees text and no face.
+- **Kerning's two exceptions for proportional metrics.** The registry asks
+  that `vkrn` stand off, by default, from the glyphs a face's `vpal` covers
+  where `vpal` is off and the face has no `vapk`, and `kern` likewise from the
+  glyphs `palt` covers. Neither is applied: `vkrn` runs over a whole column
+  and `kern` over a whole line, and a caller switches either off.
+- **Vertical shaping is unverified.** No face in either vendored corpus
+  carries a vertical feature or vertical metrics, so every vertical test is a
+  synthetic face whose expected glyphs and positions the test computes from
+  the tables it wrote: it shows the reading in `design/shaping.md`'s
+  *Vertical shaping* is the one applied, not that the reading is right. H-64's
+  person-written fixtures are what would say so.
 
 **A `cmap` subtable in its format's order is bisected, and one out of order
 is read as written.** `glyph_for_char` chooses its subtable at a face's first
@@ -1075,6 +1096,18 @@ corpora already vendored here. So every name stays on the list.
   order or overcounted are read as written; and `glyf::bounds` reads the
   header as written, bounds an empty glyph at its origin and a missing one
   not at all. The `sfnt` fuzz target asks for each of them.
+- `crates/tinker-pdf-shape/tests/vertical.rs` — vertical shaping. The
+  compiled `Vertical_Orientation` against the vendored file at every code
+  point; a column of CJK, Latin and Mongolian cut by orientation, clusters
+  with enclosing and combining marks, joiners and selectors among them; and,
+  against synthetic faces whose expected glyphs and positions the test
+  computes from the tables it wrote, an upright run's `vert` and `vmtx`
+  metrics, a synthesized em box and its warning, `vrt2` in `vert`'s place,
+  a sideways run's line plan and `vrtr`, Mongolian joined sideways and
+  isolated upright, `vkrn` down a column, `vhal`, `vpal` and `valt` with
+  their interactions, a mark on its base and a cursive join down a column,
+  each anchor pair drawn at one point. The `shape_text` fuzz target shapes
+  every paragraph as a column too.
 - `crates/tinker-pdf/src/fontlist.rs` — unit tests beside the listing:
   9.6.4's subset-tag shape in both directions (seven strings that are not a
   tag, each for its own reason), a descriptor deciding embedding, a

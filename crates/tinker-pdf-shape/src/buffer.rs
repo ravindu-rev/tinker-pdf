@@ -691,6 +691,17 @@ impl Buffer {
     ///
     /// A cursive join takes neither form; see [`Props::attached_cursively`].
     ///
+    /// # A column is the third case
+    ///
+    /// A top-to-bottom run is drawn in buffer order, as a left-to-right one
+    /// is, and its pen moves down by each `y_advance`, so a mark down a
+    /// column takes the forward form on both axes: the walk subtracts the
+    /// base's advance and everything between, which is a y displacement there
+    /// and an x one along a line. Each offset in a column already carries its
+    /// glyph's vertical origin, so the mark's anchor meets its base's on the
+    /// base's outline. A cursive join down a column inherits its parent's
+    /// placement *across* the column, on x.
+    ///
     /// The parent's own offset is inherited first, which is what makes a mark
     /// on a mark on a base land where the base did, and a chain of cursively
     /// joined letters rise and fall as one. Each glyph is resolved once and a
@@ -742,10 +753,16 @@ impl Buffer {
         }
         if self.props(at).attached_cursively {
             // A cursive join was already paid for in the advances, so the only
-            // thing left to inherit is the parent's placement across the line.
+            // thing left to inherit is the parent's placement across the line
+            // — across a column, which is x, the column being the third case.
             // Adding the advance walk as well would subtract the join twice.
+            let column = self.direction.is_vertical();
             if let Some(glyph) = self.glyphs.get_mut(at) {
-                glyph.y_offset = glyph.y_offset.saturating_add(parent.y_offset);
+                if column {
+                    glyph.x_offset = glyph.x_offset.saturating_add(parent.x_offset);
+                } else {
+                    glyph.y_offset = glyph.y_offset.saturating_add(parent.y_offset);
+                }
             }
             return;
         }

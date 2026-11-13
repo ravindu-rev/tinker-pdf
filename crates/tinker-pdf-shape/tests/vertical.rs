@@ -1004,3 +1004,407 @@ fn named_features_are_taken_at_their_word_in_a_column() {
     let runs = column_runs(&shaper, "\u{6F22}\u{3001}");
     assert_eq!(runs[0].glyphs()[1].glyph, 3, "and is applied where it is");
 }
+
+// --- GPOS down a column ----------------------------------------------------
+
+/// An anchor of format 1, in the glyph's own outline coordinates.
+fn anchor((x, y): (i16, i16)) -> Vec<u8> {
+    let mut out = u16s(&[1]);
+    out.extend(x.to_be_bytes());
+    out.extend(y.to_be_bytes());
+    out
+}
+
+/// A value record's fields, in the order the format's bits say.
+fn values(values: &[i16]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect()
+}
+
+/// `SinglePosFormat1`: one value record of `format` for every glyph covered.
+fn single_pos(glyphs: &[u16], format: u16, record: &[i16]) -> Vec<u8> {
+    let mut head = u16s(&[1, 0, format]);
+    head.extend(values(record));
+    assemble(head, &[2], &[coverage(glyphs)])
+}
+
+/// `PairPosFormat1`: one pair, `first` then `second`, the first glyph's
+/// record of `format1` and the second's of `format2`.
+fn pair_pos(
+    first: u16,
+    second: u16,
+    format1: u16,
+    one: &[i16],
+    format2: u16,
+    two: &[i16],
+) -> Vec<u8> {
+    let mut pair_set = u16s(&[1, second]);
+    pair_set.extend(values(one));
+    pair_set.extend(values(two));
+    assemble(
+        u16s(&[1, 0, format1, format2, 1, 0]),
+        &[2, 10],
+        &[coverage(&[first]), pair_set],
+    )
+}
+
+/// `MarkBasePosFormat1` — and `MarkMarkPosFormat1`, which is the same bytes
+/// with a mark for the base: one mark of class 0 on one base.
+fn mark_pos(mark: u16, mark_anchor: (i16, i16), base: u16, base_anchor: (i16, i16)) -> Vec<u8> {
+    let mark_array = assemble(u16s(&[1, 0, 0]), &[4], &[anchor(mark_anchor)]);
+    let base_array = assemble(u16s(&[1, 0]), &[2], &[anchor(base_anchor)]);
+    assemble(
+        u16s(&[1, 0, 0, 1, 0, 0]),
+        &[2, 4, 8, 10],
+        &[coverage(&[mark]), coverage(&[base]), mark_array, base_array],
+    )
+}
+
+/// `CursivePosFormat1` for two glyphs, `first` below `second` in glyph
+/// order: the first glyph's exit anchor and the second's entry anchor.
+fn cursive_pos(first: u16, exit: (i16, i16), second: u16, entry: (i16, i16)) -> Vec<u8> {
+    assert!(first < second, "the records are in coverage order");
+    // Record 0 is `first`: entry NULL at 6, exit at 8; record 1 is
+    // `second`: entry at 10, exit NULL at 12.
+    let head = u16s(&[1, 0, 2, 0, 0, 0, 0]);
+    assemble(
+        head,
+        &[2, 8, 10],
+        &[coverage(&[first, second]), anchor(exit), anchor(entry)],
+    )
+}
+
+/// A `GDEF` whose glyph class definition gives each glyph listed its class.
+fn gdef(classes: &[(u16, u16)]) -> Vec<u8> {
+    let mut sorted = classes.to_vec();
+    sorted.sort_unstable();
+    let mut class_def = u16s(&[2, u16::try_from(sorted.len()).expect("a small class def")]);
+    for (glyph, class) in sorted {
+        class_def.extend(u16s(&[glyph, glyph, class]));
+    }
+    assemble(u16s(&[1, 0, 0, 0, 0, 0]), &[4], &[class_def])
+}
+
+/// Where each glyph of a run is drawn — the pen plus its offset — walking
+/// the pen by every advance, which is how a consumer draws a column.
+fn drawn(glyphs: &[ShapedGlyph]) -> Vec<(i32, i32)> {
+    let (mut x, mut y) = (0i32, 0i32);
+    glyphs
+        .iter()
+        .map(|glyph| {
+            let at = (x + glyph.x_offset, y + glyph.y_offset);
+            x += glyph.x_advance;
+            y += glyph.y_advance;
+            at
+        })
+        .collect()
+}
+
+/// Katakana ス and ト at one em each, their vertical origins 880 above the
+/// baseline.
+fn katakana() -> Face {
+    Face::new(3, &[('\u{30B9}', 1), ('\u{30C8}', 2)]).with_vertical(&[(1000, 120); 3], &[760; 3])
+}
+
+/// **`vkrn` adjusts a pair down the column.**
+///
+/// The registry's own example pair, ス then ト, kerned under `vkrn` with a
+/// first record of `XAdvance` −300 and `YAdvance` −200 and a second of
+/// `YPlacement` −40; and the same pair under `kern` with a `YPlacement` of
+/// −33 and an `XAdvance` of −77. Down a column, per the `GPOS` clause:
+///
+/// - the `YAdvance` lengthens the advance *height* — "to increase the
+///   advance height of a glyph by 100, the YAdvance = 100" — so −200 takes
+///   200 off ス's, and its `y_advance` is 200 nearer zero;
+/// - the `XAdvance`, "only used for horizontal layout", moves nothing, and no
+///   glyph of the column advances across it;
+/// - the placement adds to ト's offset as written;
+/// - and `kern`, "not intended for use in vertical text layout", does not
+///   run at all.
+///
+/// Along a line it is the other way round: `kern` runs and `vkrn` does not.
+#[test]
+fn vkrn_adjusts_a_pair_down_the_column() {
+    let mut face = katakana();
+    face.gpos = Some(layout_table(
+        &[*b"DFLT"],
+        &[(*b"vkrn", vec![0]), (*b"kern", vec![1])],
+        &[
+            lookup(
+                2,
+                0,
+                &[pair_pos(1, 2, 0x000C, &[-300, -200], 0x0002, &[-40])],
+            ),
+            lookup(2, 0, &[pair_pos(1, 2, 0x0006, &[-33, -77], 0, &[])]),
+        ],
+    ));
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let shaper = Shaper::new(&sfnt);
+    // ス ト ス: the pair kerns once, and the last ス, with nothing after it,
+    // stands as it would alone.
+    let text = "\u{30B9}\u{30C8}\u{30B9}";
+    let at = clusters(text);
+
+    let runs = column_runs(&shaper, text);
+    assert_eq!(runs.len(), 1);
+    let mut su = face.upright(1, at[0]);
+    su.y_advance -= -200;
+    let mut to = face.upright(2, at[1]);
+    to.y_offset += -40;
+    let expected = vec![su, to, face.upright(1, at[2])];
+    assert_eq!(runs[0].glyphs(), expected.as_slice());
+    assert_eq!(runs[0].advance(), 800 + 1000 + 1000);
+    assert!(runs[0].glyphs().iter().all(|glyph| glyph.x_advance == 0));
+
+    let line = shaper.shape_text(text, BaseDirection::Auto).1;
+    let mut su = face.along(1, at[0]);
+    su.y_offset = -33;
+    su.x_advance -= 77;
+    let expected = vec![su, face.along(2, at[1]), face.along(1, at[2])];
+    assert_eq!(line[0].glyphs(), expected.as_slice());
+}
+
+/// 漢 and the ideographic comma, with three positioning features the comma
+/// may take — `vhal` and `vpal` as single adjustments of its placement and
+/// its height, `valt` as a placement alone where it is carried — and `vkrn`
+/// kerning 漢 before it.
+fn comma_heights(with_valt: bool) -> Face {
+    let mut face = Face::new(3, &[('\u{3001}', 1), ('\u{6F22}', 2)])
+        .with_vertical(&[(1000, 120), (1000, 700), (1000, 120)], &[760, 150, 760]);
+    let mut features = vec![
+        (*b"vhal", vec![0]),
+        (*b"vpal", vec![1]),
+        (*b"vkrn", vec![2]),
+    ];
+    let mut lookups = vec![
+        lookup(1, 0, &[single_pos(&[1], 0x000A, &[250, -500])]),
+        lookup(1, 0, &[single_pos(&[1], 0x000A, &[100, -300])]),
+        lookup(2, 0, &[pair_pos(2, 1, 0x0008, &[-111], 0, &[])]),
+    ];
+    if with_valt {
+        features.push((*b"valt", vec![3]));
+        lookups.push(lookup(1, 0, &[single_pos(&[1], 0x0002, &[-60])]));
+    }
+    face.gpos = Some(layout_table(&[*b"DFLT"], &features, &lookups));
+    face
+}
+
+/// `漢、` as a column through `face` under `settings`: 漢's advance height
+/// and the comma's offset down the column and advance height.
+fn comma_column(face: &Face, settings: &[(Tag, u32)]) -> (i32, i32, i32) {
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let shaper = Shaper::new(&sfnt).with_settings(settings);
+    let runs = column_runs(&shaper, "\u{6F22}\u{3001}");
+    assert_eq!(runs.len(), 1);
+    let glyphs = runs[0].glyphs();
+    (
+        -glyphs[0].y_advance,
+        glyphs[1].y_offset,
+        -glyphs[1].y_advance,
+    )
+}
+
+/// **`vhal` and `vpal` take their adjustments when switched on**, and only
+/// then: the registry has both off by default.
+///
+/// The comma's vertical origin is 150 + 700 = 850 above its baseline, so its
+/// offset down the column starts at −850 and each feature's `YPlacement` is
+/// added to it as written, its `YAdvance` taken off its height (−500 is a
+/// height of 500). And the registry's interactions: `vhal` gives fixed half
+/// heights, under which `vkrn` "should be disabled for that run" unless the
+/// caller asks for it, while `vpal` gives proportional heights that `vkrn` is
+/// meant to kern, so it stays.
+#[test]
+fn vhal_and_vpal_take_their_adjustments_when_switched_on() {
+    let face = comma_heights(false);
+    let tag = |name: &[u8; 4], value: u32| (Tag::new(name), value);
+    let kerned = 1000 - 111;
+    assert_eq!(
+        comma_column(&face, &[]),
+        (kerned, -850, 1000),
+        "neither by default"
+    );
+    assert_eq!(
+        comma_column(&face, &[tag(b"vhal", 1)]),
+        (1000, -850 + 250, 1000 - 500),
+        "vhal's, and vkrn withdrawn"
+    );
+    assert_eq!(
+        comma_column(&face, &[tag(b"vpal", 1)]),
+        (kerned, -850 + 100, 1000 - 300),
+        "vpal's, and vkrn kept"
+    );
+    assert_eq!(
+        comma_column(&face, &[tag(b"vhal", 1), tag(b"vkrn", 1)]),
+        (kerned, -850 + 250, 1000 - 500),
+        "vkrn put back by a caller who asks for it"
+    );
+    assert_eq!(
+        comma_column(&face, &[tag(b"vkrn", 0)]),
+        (1000, -850, 1000),
+        "vkrn switched off"
+    );
+}
+
+/// **`valt` is on by default where the face carries it, and withdraws
+/// `vkrn`.**
+///
+/// The registry has `valt` "active by default in vertical-setting contexts"
+/// and `vkrn` "disabled" for a run it applies to: with a face that carries
+/// it, the comma takes `valt`'s placement and 漢 no kerning. A face that does
+/// not carry it keeps `vkrn`; so does a caller who switches `valt` off, or
+/// turns `vkrn` on; and a caller who turns on `vpal` has chosen another
+/// glyph-height feature, which withdraws `valt`.
+#[test]
+fn valt_is_on_where_the_face_carries_it_and_withdraws_vkrn() {
+    let tag = |name: &[u8; 4], value: u32| (Tag::new(name), value);
+    let with = comma_heights(true);
+    let kerned = 1000 - 111;
+    assert_eq!(
+        comma_column(&with, &[]),
+        (1000, -850 - 60, 1000),
+        "valt, no vkrn"
+    );
+    assert_eq!(
+        comma_column(&comma_heights(false), &[]),
+        (kerned, -850, 1000),
+        "a face without valt keeps vkrn"
+    );
+    assert_eq!(
+        comma_column(&with, &[tag(b"valt", 0)]),
+        (kerned, -850, 1000),
+        "valt off"
+    );
+    assert_eq!(
+        comma_column(&with, &[tag(b"vkrn", 1)]),
+        (kerned, -850 - 60, 1000),
+        "vkrn asked for"
+    );
+    assert_eq!(
+        comma_column(&with, &[tag(b"vpal", 1)]),
+        (kerned, -850 + 100, 1000 - 300),
+        "vpal chosen: valt withdrawn, vkrn kept"
+    );
+}
+
+/// か and the combining voiced sound mark, which is `Mn`, so the two are one
+/// grapheme cluster standing upright; the mark is a `GDEF` mark with a full
+/// advance height of its own in `vmtx`, which a column zeroes.
+fn kana_with_mark() -> Face {
+    let mut face = Face::new(3, &[('\u{304B}', 1), ('\u{3099}', 2)])
+        .with_vertical(&[(1000, 120), (1000, 120), (1000, 0)], &[760, 760, 900]);
+    face.advances[2] = 600;
+    face.gdef = Some(gdef(&[(1, 1), (2, 3)]));
+    face.gpos = Some(layout_table(
+        &[*b"DFLT"],
+        &[(*b"mark", vec![0])],
+        &[lookup(4, 0, &[mark_pos(2, (300, 900), 1, (900, 800))])],
+    ));
+    face
+}
+
+/// **A mark attaches to its base in a column.**
+///
+/// The mark's anchor (300, 900) must meet the base's (900, 800), each in its
+/// own glyph's outline coordinates. Down a column the pen has moved past the
+/// base by its advance height when the mark is drawn, so the mark's offset is
+/// the base's, plus the base's height back up the column, plus the anchors'
+/// difference — `Buffer::propagate_attachments`'s forward arithmetic on both
+/// axes — and its own advance is zeroed, as `GDEF` says it is a mark. The
+/// test computes the offset from the tables, and then checks the geometry it
+/// stands for: drawn where the pen and the offsets put them, the two anchors
+/// are one point.
+#[test]
+fn a_mark_attaches_to_its_base_in_a_column() {
+    let face = kana_with_mark();
+    let bytes = face.build();
+    let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+    let shaper = Shaper::new(&sfnt);
+    let text = "\u{304B}\u{3099}";
+    let at = clusters(text);
+    let runs = column_runs(&shaper, text);
+    assert_eq!(runs.len(), 1, "a base and its mark stand as one cluster");
+
+    let base = face.upright(1, at[0]);
+    let mark = ShapedGlyph {
+        glyph: 2,
+        cluster: at[1],
+        x_advance: 0,
+        y_advance: 0,
+        x_offset: base.x_offset + (900 - 300),
+        y_offset: base.y_offset - base.y_advance + (800 - 900),
+    };
+    assert_eq!(runs[0].glyphs(), &[base, mark]);
+
+    let points = drawn(runs[0].glyphs());
+    assert_eq!(
+        (points[0].0 + 900, points[0].1 + 800),
+        (points[1].0 + 300, points[1].1 + 900),
+        "the base's anchor and the mark's are one point"
+    );
+}
+
+/// Two ideographs joined by a cursive lookup down the column: 一's exit at
+/// (520, −100) and 二's entry at (450, 900), the second's advance width
+/// narrower so the two vertical origins sit at different x, and the anchors
+/// 70 apart across the column so that the glyph that moves across moves.
+fn cursive_pair(flags: u16) -> Face {
+    let mut face = Face::new(3, &[('\u{4E00}', 1), ('\u{4E8C}', 2)])
+        .with_vertical(&[(1000, 120), (1000, 120), (1100, 60)], &[760, 760, 840]);
+    face.advances[2] = 900;
+    face.gpos = Some(layout_table(
+        &[*b"DFLT"],
+        &[(*b"curs", vec![0])],
+        &[lookup(
+            3,
+            flags,
+            &[cursive_pos(1, (520, -100), 2, (450, 900))],
+        )],
+    ));
+    face
+}
+
+/// **A cursive join closes the gap down a column**, the column being the
+/// join's third case.
+///
+/// Along the column the first glyph's advance carries the pen to its exit
+/// and the second gives up the distance from its origin to its entry; across
+/// it one glyph's placement makes the anchors meet. Whichever way
+/// `RIGHT_TO_LEFT` chooses the glyph that moves across, the exit and the
+/// entry are drawn at one point, and the glyph that does not move keeps its
+/// place across the column.
+#[test]
+fn a_cursive_join_closes_the_gap_down_a_column() {
+    for (flags, keeps) in [(0u16, 0usize), (1, 1)] {
+        let face = cursive_pair(flags);
+        let bytes = face.build();
+        let sfnt = Sfnt::parse(&bytes).expect("the face parses");
+        let shaper = Shaper::new(&sfnt);
+        let text = "\u{4E00}\u{4E8C}";
+        let runs = column_runs(&shaper, text);
+        assert_eq!(runs.len(), 1);
+        let glyphs = runs[0].glyphs();
+        let points = drawn(glyphs);
+        assert_eq!(
+            (points[0].0 + 520, points[0].1 - 100),
+            (points[1].0 + 450, points[1].1 + 900),
+            "the exit and the entry are one point, under flags {flags}"
+        );
+        let stays = face.upright(glyphs[keeps].glyph, glyphs[keeps].cluster);
+        assert_eq!(
+            glyphs[keeps].x_offset, stays.x_offset,
+            "the glyph that does not move across keeps its place, under flags {flags}"
+        );
+        let moves = face.upright(glyphs[1 - keeps].glyph, glyphs[1 - keeps].cluster);
+        assert_ne!(
+            glyphs[1 - keeps].x_offset,
+            moves.x_offset,
+            "the other glyph moved across, under flags {flags}"
+        );
+        assert!(glyphs.iter().all(|glyph| glyph.x_advance == 0));
+    }
+}
