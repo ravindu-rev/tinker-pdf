@@ -603,21 +603,46 @@ const fn floor_div(a: i64, b: i64) -> i64 {
     a.div_euclid(b)
 }
 
-/// Builds every tile's geometry and reads every packet.
+/// [`decode_tiles_counted`] with its count dropped, the door the module's
+/// tests read tier-2 through.
+#[cfg(test)]
 pub(crate) fn decode_tiles(stream: &Codestream<'_>) -> Result<Vec<Tile>, Refusal> {
-    let count = u64::from(stream.siz.tiles_x) * u64::from(stream.siz.tiles_y);
+    decode_tiles_counted(stream, &mut 0)
+}
+
+/// Builds every tile's geometry and reads every packet, adding to `steps` the
+/// work it did (`docs/design/resource-exhaustion.md`, "The counters"): what
+/// its budget was charged — each precinct and code-block laid out, each
+/// packet and progression volume ordered — and each packet read and each
+/// code-block its header examined, which a packet that includes nothing
+/// still walks.
+pub(crate) fn decode_tiles_counted(
+    stream: &Codestream<'_>,
+    steps: &mut u64,
+) -> Result<Vec<Tile>, Refusal> {
     let mut budget = MAX_JPX_CODE_BLOCKS;
+    let tiles = read_tiles(stream, &mut budget, steps);
+    *steps = steps.saturating_add(MAX_JPX_CODE_BLOCKS.saturating_sub(budget));
+    tiles
+}
+
+fn read_tiles(
+    stream: &Codestream<'_>,
+    budget: &mut u64,
+    steps: &mut u64,
+) -> Result<Vec<Tile>, Refusal> {
+    let count = u64::from(stream.siz.tiles_x) * u64::from(stream.siz.tiles_y);
     let mut tiles = Vec::new();
     for t in 0..count {
         let t = u32::try_from(t).map_err(|_| Refusal::Budget("tiles"))?;
         let index = u16::try_from(t).map_err(|_| Refusal::Budget("tiles"))?;
-        let mut tile = build_tile(stream, t, index, &mut budget)?;
+        let mut tile = build_tile(stream, t, index, budget)?;
         // A tile whose declared parts did not all arrive has no complete set
         // of coefficients. Its geometry is still built, so the picture keeps
         // its shape and the tile stays at the value the plane was initialised
         // to; only the packet read is skipped. See `check_tile_parts`.
         if !stream.short_tiles.get(t as usize).copied().unwrap_or(false) {
-            read_tile_packets(stream, &mut tile, &mut budget)?;
+            read_tile_packets(stream, &mut tile, budget, steps)?;
         }
         tiles.push(tile);
     }
@@ -951,11 +976,14 @@ impl Volume {
     }
 }
 
-/// Reads every packet of one tile, over the concatenation of its tile-parts.
+/// Reads every packet of one tile, over the concatenation of its tile-parts,
+/// adding to `steps` each packet read and each code-block its header
+/// examined.
 fn read_tile_packets(
     stream: &Codestream<'_>,
     tile: &mut Tile,
     budget: &mut u64,
+    steps: &mut u64,
 ) -> Result<(), Refusal> {
     let cod = stream.cod_for(tile.index).clone();
     // B.9: the packets of a tile run across its tile-parts as one sequence,
@@ -995,7 +1023,16 @@ fn read_tile_packets(
     // seam falls before the first header rather than after one.
     check_seams(&headers, seams, &mut seam)?;
     for packet in order {
-        at = read_packet(tile, &cod, &schedules, &packet, &data, at, &mut headers)?;
+        at = read_packet(
+            tile,
+            &cod,
+            &schedules,
+            &packet,
+            &data,
+            at,
+            &mut headers,
+            steps,
+        )?;
         check_seams(&headers, seams, &mut seam)?;
     }
     // The integrity check, in its plainest form: the packets of a tile
@@ -1407,6 +1444,9 @@ const EPH: [u8; 2] = [0xFF, 0x92];
 /// `at` and the returned offset are always in the **bit stream**, because
 /// that is where a packet's body is in all three of B.10's arrangements.
 /// Only the header bits move, and `headers` says where they moved to.
+///
+/// Adds to `steps` the packet and each code-block its header examined.
+#[allow(clippy::too_many_arguments)]
 fn read_packet(
     tile: &mut Tile,
     cod: &super::codestream::Cod,
@@ -1415,7 +1455,9 @@ fn read_packet(
     data: &[u8],
     mut at: usize,
     headers: &mut HeaderSource<'_>,
+    steps: &mut u64,
 ) -> Result<usize, Refusal> {
+    *steps = steps.saturating_add(1);
     if cod.sop {
         // Signalled and absent is a refusal, not a shrug: SOP is the one
         // thing in the format that says where a packet begins, and a decoder
@@ -1478,6 +1520,7 @@ fn read_packet(
                 ));
             };
             for i in 0..pb.blocks.len() {
+                *steps = steps.saturating_add(1);
                 let (gx, gy) = (i as u32 % pb.w.max(1), i as u32 / pb.w.max(1));
                 let included = if pb.blocks[i].included {
                     // B.10.4: an already-included block costs one bit.

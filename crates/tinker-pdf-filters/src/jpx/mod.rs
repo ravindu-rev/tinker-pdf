@@ -565,7 +565,24 @@ pub fn jpx_decode(
     limits: &Limits,
     warnings: &mut Vec<Warning>,
 ) -> Result<JpxImage, FilterError> {
-    jpx_decode_request(input, limits, &JpxRequest::default(), warnings).map(|(image, _)| image)
+    jpx_decode_counted(input, limits, warnings).0
+}
+
+/// [`jpx_decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): what tier-2's budget was charged — each precinct and
+/// code-block laid out and each packet ordered — with each packet read and
+/// each code-block its header examined; what tier-1's work budget was
+/// charged, each coefficient once a coding pass; each sample of every
+/// reconstructed tile-component; and each byte of the image returned.
+pub fn jpx_decode_counted(
+    input: &[u8],
+    limits: &Limits,
+    warnings: &mut Vec<Warning>,
+) -> (Result<JpxImage, FilterError>, u64) {
+    let mut steps = 0u64;
+    let decoded = request_counted(input, limits, &JpxRequest::default(), warnings, &mut steps)
+        .map(|(image, _)| image);
+    (decoded, steps)
 }
 
 /// [`jpx_decode`], asked for what `request` names — the full image at
@@ -582,9 +599,21 @@ pub fn jpx_decode_request(
     request: &JpxRequest,
     warnings: &mut Vec<Warning>,
 ) -> Result<(JpxImage, JpxCounts), FilterError> {
+    request_counted(input, limits, request, warnings, &mut 0)
+}
+
+/// [`jpx_decode_request`], adding the steps [`jpx_decode_counted`] names to
+/// `steps`.
+fn request_counted(
+    input: &[u8],
+    limits: &Limits,
+    request: &JpxRequest,
+    warnings: &mut Vec<Warning>,
+    steps: &mut u64,
+) -> Result<(JpxImage, JpxCounts), FilterError> {
     let mut clamped = false;
     let mut counts = JpxCounts::default();
-    let decoded = decode_inner(input, limits, request, &mut clamped, &mut counts);
+    let decoded = decode_inner(input, limits, request, &mut clamped, &mut counts, steps);
     let truncated = matches!(&decoded, Ok(image) if image.truncated);
     // Recorded whether the decode went on to succeed or not: E.1's clamp is a
     // leniency, and ruling 10 wants a leniency to survive the result it led
@@ -634,6 +663,7 @@ pub fn jpx_decode_attributed(input: &[u8], limits: &Limits) -> Result<JpxImage, 
         &JpxRequest::default(),
         &mut clamped,
         &mut JpxCounts::default(),
+        &mut 0,
     )
 }
 
@@ -716,6 +746,7 @@ fn decode_inner(
     request: &JpxRequest,
     clamped: &mut bool,
     counts: &mut JpxCounts,
+    steps: &mut u64,
 ) -> Result<JpxImage, Refusal> {
     let container = boxes::parse(input)?;
     let stream = codestream::parse(container.codestream)?;
@@ -729,7 +760,7 @@ fn decode_inner(
     // it is what makes the refusal below honest: `tier-1` names the one stage
     // that is missing, where "tier-2 and everything after it" named five and
     // would have gone on naming five after tier-2 was written.
-    let mut tiles = tier2::decode_tiles(&stream)?;
+    let mut tiles = tier2::decode_tiles_counted(&stream, steps)?;
     // The levels dropped: the request's, clamped to the fewest any
     // tile-component has, so every plane comes out at one scale and no
     // tile-component is asked for a resolution it does not have.
@@ -767,7 +798,7 @@ fn decode_inner(
         ),
     };
     counts.code_blocks_decoded +=
-        tier1::decode_tiles(&stream, &mut tiles, discard, needs.as_deref())?;
+        tier1::decode_tiles_counted(&stream, &mut tiles, discard, needs.as_deref(), steps)?;
 
     // Annex I's boxes and Annex A's components together decide what a channel
     // *is*, and that has to be settled before a single sample is written: a
@@ -836,6 +867,11 @@ fn decode_inner(
         let mut planes =
             wavelet::reconstruct_tile(&stream, tile, discard, need.map(Vec::as_slice), clamped)?;
         counts.levels_synthesised += wavelet::levels_synthesised(tile, discard);
+        let reconstructed = planes
+            .iter()
+            .map(|plane| plane.samples.len())
+            .fold(0usize, usize::saturating_add);
+        *steps = steps.saturating_add(u64::try_from(reconstructed).unwrap_or(u64::MAX));
         for (c, plane) in planes.iter_mut().enumerate() {
             let component = &stream.siz.components[c];
             // G.1, and *after* G.2 rather than before it — which is what
@@ -882,6 +918,10 @@ fn decode_inner(
         }
     }
 
+    let returned = samples
+        .len()
+        .saturating_add(opacity.as_ref().map_or(0, Vec::len));
+    *steps = steps.saturating_add(u64::try_from(returned).unwrap_or(u64::MAX));
     Ok(JpxImage {
         width,
         height,

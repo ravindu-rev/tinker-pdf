@@ -188,6 +188,15 @@ pub struct QmDecoder<'a> {
     /// [`QmDecoder::position`] keeps naming the `X'FF'`, which is what a
     /// caller that has to carry on parsing needs.
     marker: bool,
+    /// The steps taken (`docs/design/resource-exhaustion.md`, "The
+    /// counters"): each decision decoded and each byte a restart's search
+    /// examined, across every restart.
+    ///
+    /// Not a register of the coder, and nothing in [`QmDecoder::decode`]
+    /// reads it: an adaptive coder's decisions per byte are bounded by
+    /// nothing a caller can see, so a caller that has to know what a scan
+    /// cost counts decisions rather than bytes.
+    steps: u64,
 }
 
 impl<'a> QmDecoder<'a> {
@@ -201,6 +210,7 @@ impl<'a> QmDecoder<'a> {
             a: 0x1_0000,
             ct: 0,
             marker: false,
+            steps: 0,
         };
         d.byte_in();
         d.c <<= 8;
@@ -229,6 +239,13 @@ impl<'a> QmDecoder<'a> {
     #[must_use]
     pub fn overran(&self) -> bool {
         self.marker && self.next >= self.data.len()
+    }
+
+    /// The decisions this coder has decoded and the bytes its restarts'
+    /// searches examined, since [`QmDecoder::new`].
+    #[must_use]
+    pub fn steps(&self) -> u64 {
+        self.steps
     }
 
     /// `Byte_in` (Figure D.20) with `Unstuff_0` (Figure D.21) folded in.
@@ -299,6 +316,7 @@ impl<'a> QmDecoder<'a> {
 
     /// `Decode(S)` (T.81 D.2.4, Figure D.16): one decision against one context.
     pub fn decode(&mut self, cx: &mut QmContext) -> u8 {
+        self.steps = self.steps.saturating_add(1);
         // `index` is only ever written from the table's own Next_Index
         // columns, so this cannot miss; a corrupt state decodes as the MPS
         // rather than panicking (ruling 1).
@@ -379,10 +397,15 @@ impl<'a> QmDecoder<'a> {
         // begin; in every other case it is the first byte not yet consumed.
         let mut at = self.position();
         while at + 1 < self.data.len() {
+            self.steps = self.steps.saturating_add(1);
             if self.data.get(at) == Some(&0xFF) {
                 if let Some(&m) = self.data.get(at + 1) {
                     if (0xD0..=0xD7).contains(&m) {
+                        // A fresh `Initdec`, and the count carried across it:
+                        // the steps are the scan's, not the interval's.
+                        let steps = self.steps;
                         *self = QmDecoder::new(self.data.get(at + 2..).unwrap_or_default());
+                        self.steps = steps;
                         return true;
                     }
                 }
@@ -828,5 +851,50 @@ mod tests {
         }
         assert_eq!(got, K_4_1_DECISIONS);
         assert!(!decoder.restart());
+    }
+
+    /// **The count is the decisions and the searches, across restarts**
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): K.4.1's 256
+    /// decisions are 256 steps, a fixed-estimate decision is one more, and a
+    /// restart adds the bytes its search examined without dropping what came
+    /// before it.
+    #[test]
+    fn the_steps_are_every_decision_and_every_byte_a_restart_searched() {
+        let (decoder, _) = decode_all();
+        assert_eq!(decoder.steps(), 256, "one step a decision");
+
+        let mut decoder = QmDecoder::new(&K_4_1_COMPRESSED);
+        decoder.decode_fixed();
+        assert_eq!(decoder.steps(), 1, "a fixed-estimate decision is one");
+
+        // Eight decisions, then a restart whose search starts where the
+        // coder stopped and walks to the marker.
+        let mut data = Vec::new();
+        data.extend_from_slice(&K_4_1_COMPRESSED[..4]);
+        data.extend_from_slice(&[0xFF, 0xD0]);
+        data.extend_from_slice(&K_4_1_COMPRESSED);
+        let mut decoder = QmDecoder::new(&data);
+        let mut cx = QmContext::default();
+        for _ in 0..8 {
+            decoder.decode(&mut cx);
+        }
+        let stopped = decoder.position();
+        assert!(decoder.restart());
+        let searched = (4 - stopped.min(4)) as u64 + 1;
+        assert_eq!(
+            decoder.steps(),
+            8 + searched,
+            "the decisions, and each byte from where the coder stopped to the marker"
+        );
+        // A search that finds nothing counts every byte it examined.
+        let mut cx = QmContext::default();
+        for _ in 0..256 {
+            decoder.decode(&mut cx);
+        }
+        let before = decoder.steps();
+        let tail = decoder.position();
+        assert!(!decoder.restart());
+        let rest = (K_4_1_COMPRESSED.len() - 1).saturating_sub(tail) as u64;
+        assert_eq!(decoder.steps(), before + rest);
     }
 }

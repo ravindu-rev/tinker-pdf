@@ -205,6 +205,23 @@ struct Frame {
 /// # Errors
 /// Any [`WebpError`].
 pub fn webp_decode(bytes: &[u8], limits: &Limits) -> Result<WebpImage, WebpError> {
+    webp_decode_counted(bytes, limits).0
+}
+
+/// [`webp_decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): for a lossless frame, each entry of each prefix code's
+/// alphabet built, each code length read, each literal, copy or cache hit
+/// decoded and each pixel a copy wrote, and each pixel every transform
+/// undid; for a lossy one, each boolean every partition decoded, each sample
+/// of each macroblock predicted and rebuilt, and each sample the loop filter
+/// passed over; and each byte of the picture returned.
+pub fn webp_decode_counted(bytes: &[u8], limits: &Limits) -> (Result<WebpImage, WebpError>, u64) {
+    let mut steps = 0u64;
+    let image = decode_with(bytes, limits, &mut steps);
+    (image, steps)
+}
+
+fn decode_with(bytes: &[u8], limits: &Limits, steps: &mut u64) -> Result<WebpImage, WebpError> {
     if !(bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP".as_slice())) {
         return Err(WebpError::NotWebp);
     }
@@ -244,6 +261,8 @@ pub fn webp_decode(bytes: &[u8], limits: &Limits) -> Result<WebpImage, WebpError
                 .collect(),
         )
     };
+    w.step_len(pixels.data().len());
+    *steps = w.steps();
     Ok(WebpImage {
         width: width as u32,
         height: height as u32,
@@ -376,6 +395,9 @@ fn alpha_plane(data: &[u8], width: usize, height: usize, w: &mut Warnings) -> Op
         1 => {
             let mut inner = Warnings::default();
             let (argb, complete) = vp8l::image_stream(stream, width, height, &mut inner).ok()?;
+            // The plane's leniencies are its own, and its work is the
+            // picture's.
+            w.step_by(inner.steps());
             if !complete {
                 w.push(Warning::TruncatedInput);
             }
@@ -385,6 +407,7 @@ fn alpha_plane(data: &[u8], width: usize, height: usize, w: &mut Warnings) -> Op
         _ => return None,
     };
     unfilter(&mut plane, width, height, filtering);
+    w.step_len(plane.len());
     Some(plane)
 }
 

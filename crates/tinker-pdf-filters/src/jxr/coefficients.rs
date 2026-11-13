@@ -77,6 +77,9 @@ pub(crate) struct Planes {
     pub(crate) width: u32,
     /// `ExtendedHeight[0]`.
     pub(crate) height: u32,
+    /// The steps the decode took (`docs/design/resource-exhaustion.md`, "The
+    /// counters"): what [`PlaneDecoder::steps`] counts.
+    pub(crate) steps: u64,
 }
 
 /// Decodes one image plane's coefficient layers and reconstructs its samples.
@@ -98,6 +101,7 @@ pub(crate) fn decode_image(
         samples: d.plane,
         width: h.image.extended_width,
         height: h.image.extended_height,
+        steps: d.steps,
     })
 }
 
@@ -652,6 +656,12 @@ pub(crate) struct PlaneDecoder<'a> {
     /// recorded by the decoder rather than reconstructed by a test because
     /// only the decoder knows where it actually stopped.
     pub(crate) packet_ends: Vec<Option<u64>>,
+    /// The steps taken (`docs/design/resource-exhaustion.md`, "The
+    /// counters"): each macroblock each band's walk decoded, every component
+    /// of it, and each sample each stage of the reconstruction passed over.
+    /// A picture's content moves neither, so two pictures of one pixel format
+    /// whose areas are four times one another cost four times as much.
+    pub(crate) steps: u64,
 }
 
 impl<'a> PlaneDecoder<'a> {
@@ -689,7 +699,15 @@ impl<'a> PlaneDecoder<'a> {
             mb_dc_mode: vec![3; mbs],
             mb_hp_mode: 2,
             packet_ends: Vec::new(),
+            steps: 0,
         })
+    }
+
+    /// `n` steps more, saturating.
+    fn step_by(&mut self, n: usize) {
+        self.steps = self
+            .steps
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
     }
 
     fn dclp_at(&self, mb: usize, i: usize, j: usize) -> i32 {
@@ -1073,6 +1091,7 @@ impl PlaneDecoder<'_> {
         let mut ctx = Context::new();
         for n in 0..mb_count {
             let pos = self.mb_pos(tile, n)?;
+            self.step_by(self.g.components);
             self.read_qp_indices(r, plane, &qp, &pos)?;
             self.mb_dc(r, &mut ctx, plane, &pos, scratch)?;
             self.decode_dc(&qp, plane, &pos, scratch);
@@ -1106,6 +1125,7 @@ impl PlaneDecoder<'_> {
         let mut ctx = Context::new();
         for n in 0..mb_count {
             let pos = self.mb_pos(tile, n)?;
+            self.step_by(self.g.components);
             self.mb_dc(r, &mut ctx, plane, &pos, scratch)?;
             self.decode_dc(&qp, plane, &pos, scratch);
         }
@@ -1126,6 +1146,7 @@ impl PlaneDecoder<'_> {
         let mut ctx = Context::new();
         for n in 0..mb_count {
             let pos = self.mb_pos(tile, n)?;
+            self.step_by(self.g.components);
             if qp.num_lp_qps > 1 && !qp.use_dc_qp {
                 self.qp_index_lp[pos.index] = Self::decode_qp_index(r, qp.num_lp_qps)?;
             }
@@ -1151,6 +1172,7 @@ impl PlaneDecoder<'_> {
         let mut ctx = Context::new();
         for n in 0..mb_count {
             let pos = self.mb_pos(tile, n)?;
+            self.step_by(self.g.components);
             if qp.num_hp_qps > 1 && !qp.use_lp_qp {
                 self.qp_index_hp[pos.index] = Self::decode_qp_index(r, qp.num_hp_qps)?;
             } else if qp.use_lp_qp {
@@ -2332,18 +2354,28 @@ impl PlaneDecoder<'_> {
         let mb_count = self.g.mb_width * self.g.mb_height;
         let (width, height) = (self.g.ext_width, self.g.ext_height);
         let geometry = self.geometry();
+        // Each stage passes over every coefficient it holds: the first level
+        // over sixteen of each macroblock's components, the combination and
+        // the second level over every sample of every plane.
+        let first = mb_count.saturating_mul(components).saturating_mul(16);
+        let samples = width.saturating_mul(height).saturating_mul(components);
         super::transform::first_level(&mut self.dclp, components, scaled, mb_count);
+        self.step_by(first);
         if self.g.overlap_mode == 2 {
             super::overlap::first_level(&mut self.dclp, &geometry);
+            self.step_by(first);
         }
         self.combine_dclp();
+        self.step_by(first);
         for plane in &mut self.plane {
             super::transform::second_level(plane, width, height);
         }
+        self.step_by(samples);
         if self.g.overlap_mode != 0 && !disable_second_level {
             for plane in &mut self.plane {
                 super::overlap::second_level(plane, &geometry);
             }
+            self.step_by(samples);
         }
     }
 

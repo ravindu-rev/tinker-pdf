@@ -871,7 +871,24 @@ symbol, code, field or length byte read, each byte a row unfiltered, each row,
 strip, run or reference change, and each byte returned. The steps ride the
 decode path's own context, the warnings accumulator every decoder is handed,
 or the decoder's own bit reader where it has no other; `jbig2_decode_measured`
-is JBIG2's, its `Jbig2SymbolExtent::work`. The image codecs are `jpeg_decode` (returns `JpegImage`)
+is JBIG2's, its `Jbig2SymbolExtent::work`. The transform codecs have theirs:
+`jpeg_decode_counted` counts each byte or segment the marker walk and its
+searches examined, each Huffman table entry built, each Huffman symbol, field
+and bit and each arithmetic decision read, each block every scan visited,
+each sample the inverse transforms output and each byte returned, so a frame
+of many scans pays for every block each one visits; `jpx_decode_counted`
+counts what tier-2's budget was charged (each precinct and code-block laid
+out, each packet ordered), each packet read and each code-block its header
+examined, what tier-1's work budget was charged (each coefficient once a
+coding pass), each sample of every reconstructed tile-component and each byte
+returned; `webp_decode_counted` counts, for a lossless frame, each prefix
+code's alphabet built, each literal, copy or cache hit and each pixel a copy
+or a transform wrote, and for a lossy one each boolean every partition
+decoded, each sample each macroblock rebuilt and the loop filter passed over;
+and `jxr_decode_counted` counts each macroblock each band's walk decoded,
+every component of it, each sample each stage of the reconstruction passed
+over and each byte returned — none of which moves with what a picture shows.
+The image codecs are `jpeg_decode` (returns `JpegImage`)
 and `jpeg_decode_strips`, which takes a `JpegScale`, hands a `JpegSink` the
 image's `JpegLayout` — its size, colour and precision, the scale, and the
 frame's own width and height — and then its strips, whole rows top to bottom,
@@ -1064,8 +1081,18 @@ wants the reason to survive it.
   stored blocks, LZW's codes, ASCIIHex's digits, ASCII85's groups,
   RunLength's runs, the PNG and TIFF predictors' rows, brotli's meta-blocks,
   CCITT's G4 rows, a G4 row of more changes and G3 rows, a JBIG2 generic
-  region's rows, and the rows of a PNG, a TIFF, a GIF and a BMP. Each decode
-  gives back what was written, alike through the uncounted door.
+  region's rows, and the rows of a PNG, a TIFF, a GIF and a BMP; the MCUs of a
+  baseline 4:2:0 JPEG from `jpeg_encode` and of a progressive one in four
+  scans written from T.81 G.1, and the restart intervals of an arithmetic one
+  repeating the interval `tests/complexity/arithmetic.rs` commits, which
+  `jpeg.rs`'s unit test holds to the QM encoder that wrote it; the tiles of a
+  JPEG 2000 codestream written from T.800 Annexes A and B around a code-block
+  the MQ encoder codes; the pixels of a lossless WebP and the macroblocks of a
+  lossy one, written from RFC 9649 and RFC 6386; and three pairs of the
+  committed lossless JPEG XR pictures whose areas are four times one another.
+  Each decode gives back what was written, alike through the uncounted door,
+  and each transform codec's counted door answers as its uncounted one over
+  every cut of its shapes.
 - `crates/tinker-pdf-filters/tests/vectors.rs` — byte-vector fixtures for
   the byte filters and predictors, each with recorded provenance: genuine zlib output,
   a libtiff-produced LZW strip, the `-----A---B` example of 7.4.4.2 verbatim.

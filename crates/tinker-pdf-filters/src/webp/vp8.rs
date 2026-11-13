@@ -40,6 +40,11 @@ struct BoolDecoder<'a> {
     range: u32,
     bit_count: u32,
     phantom: u32,
+    /// Booleans decoded (`docs/design/resource-exhaustion.md`, "The
+    /// counters"). Not a register of §7's decoder and nothing here reads it:
+    /// a boolean of a probability near 255 spends almost no data, so what a
+    /// partition cost is counted in booleans rather than bytes.
+    decisions: u64,
 }
 
 impl<'a> BoolDecoder<'a> {
@@ -51,6 +56,7 @@ impl<'a> BoolDecoder<'a> {
             range: 255,
             bit_count: 0,
             phantom: 0,
+            decisions: 0,
         };
         d.value = (d.next_byte() << 8) | d.next_byte();
         d
@@ -71,6 +77,7 @@ impl<'a> BoolDecoder<'a> {
 
     /// One boolean whose probability of being zero is `prob / 256`.
     fn get(&mut self, prob: u8) -> bool {
+        self.decisions = self.decisions.saturating_add(1);
         let split = 1 + (((self.range - 1) * u32::from(prob)) >> 8);
         let big_split = split << 8;
         let bit = if self.value >= big_split {
@@ -1346,6 +1353,9 @@ pub(super) fn decode(
                 fixup_above(v, at, 8, mbx, mb.uv_mode);
             }
             reconstruct(&mut planes, mbx, mby, mb, &mut coeffs);
+            // Each of the macroblock's 256 luma and 128 chroma samples,
+            // predicted and rebuilt.
+            w.step_len(384);
             infos.push(FilterInfo {
                 segment: mb.segment,
                 b_pred: !has_y2,
@@ -1364,6 +1374,13 @@ pub(super) fn decode(
 
     if level > 0 {
         loop_filter(&mut planes, &filter, mbc, &infos);
+        // Each sample of each macroblock the filter passed over.
+        w.step_len(infos.len().saturating_mul(384));
+    }
+    // Every boolean each partition decoded.
+    w.step_by(bd.decisions);
+    for part in &partitions {
+        w.step_by(part.decisions);
     }
     if !complete {
         w.push(Warning::TruncatedInput);

@@ -378,6 +378,9 @@ fn entropy_image(
     let mut groups = Vec::new();
     for _ in 0..groups_needed {
         groups.push(read_group(bits, cache_size)?);
+        // Each of the five codes is built over its whole alphabet, however
+        // few bits described it: a step an entry.
+        w.step_len(256 + 24 + cache_size + 3 * 256 + 40);
     }
 
     let total = width.saturating_mul(height);
@@ -395,6 +398,9 @@ fn entropy_image(
     };
 
     while pos < total {
+        // A literal, a copy or a cache hit: a step each, and a copy's pixels
+        // a step each besides.
+        w.step_by(1);
         let (x, y) = (pos % width.max(1), pos / width.max(1));
         let group = match &meta {
             Some((pb, mw, image)) => {
@@ -459,6 +465,7 @@ fn entropy_image(
                     insert(&mut cache, argb);
                 }
             }
+            w.step_len(length);
             pos += length;
         } else {
             let key = (green - 256 - 24) as usize;
@@ -642,6 +649,8 @@ fn stream(
                 palette,
             } => unindex(&pixels, *width, height, *bits, palette),
         };
+        // Every pixel each transform undid.
+        w.step_len(pixels.len());
     }
     Ok((pixels, image.complete))
 }

@@ -354,6 +354,21 @@ impl JxrImage {
 /// that costs pixels leaves a [`JxrWarning`] and a partial image instead
 /// (ruling 2).
 pub fn jxr_decode(bytes: &[u8], limits: &Limits) -> Result<JxrImage, JxrError> {
+    jxr_decode_counted(bytes, limits).0
+}
+
+/// [`jxr_decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each macroblock each band's walk decoded, every
+/// component of it, each sample each stage of the reconstruction passed over,
+/// the alpha plane's alike, and each byte of the image returned. None of them
+/// moves with what a picture shows.
+pub fn jxr_decode_counted(bytes: &[u8], limits: &Limits) -> (Result<JxrImage, JxrError>, u64) {
+    let mut steps = 0u64;
+    let image = decode_with(bytes, limits, &mut steps);
+    (image, steps)
+}
+
+fn decode_with(bytes: &[u8], limits: &Limits, steps: &mut u64) -> Result<JxrImage, JxrError> {
     let mut warnings: Vec<JxrWarning> = Vec::new();
 
     // A bare codestream is recognised by 8.3.2's signature; anything else is
@@ -428,6 +443,7 @@ pub fn jxr_decode(bytes: &[u8], limits: &Limits) -> Result<JxrImage, JxrError> {
     }
 
     let planes = coefficients::decode_image(&mut reader, &headers, &mut warnings)?;
+    *steps = steps.saturating_add(planes.steps);
 
     // A.3.2's separate alpha image plane: a second, complete `CODED_IMAGE( )`
     // at `ALPHA_OFFSET`, with its own header, its own `SCALED_FLAG` and its
@@ -450,11 +466,15 @@ pub fn jxr_decode(bytes: &[u8], limits: &Limits) -> Result<JxrImage, JxrError> {
         }
         None => None,
     };
+    if let Some((plane, _)) = &alpha {
+        *steps = steps.saturating_add(plane.steps);
+    }
 
     let complete = !warnings.contains(&JxrWarning::TileDroppedAsZero)
         && !warnings.contains(&JxrWarning::AlphaPlaneDropped);
     let alpha_ref = alpha.as_ref().map(|(p, h)| (p, &h.primary));
     let data = colour::format_output(&planes, &headers, format, alpha_ref)?;
+    *steps = steps.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
 
     warnings.sort();
     warnings.dedup();

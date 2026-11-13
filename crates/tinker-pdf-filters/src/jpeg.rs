@@ -543,6 +543,11 @@ struct BitReader<'a> {
     /// Set when `bit` walked over a restart marker by itself, so `restart`
     /// knows not to skip a second one and lose a whole interval.
     crossed_restart: bool,
+    /// The steps this reader took (`docs/design/resource-exhaustion.md`, "The
+    /// counters"): each symbol, field and bit it was asked for, and each byte
+    /// a restart's search examined. Added to the decode's count when the scan
+    /// ends; nothing here reads it.
+    steps: u64,
     /// Lookup entries read, for the probe count's test.
     #[cfg(test)]
     probes: u64,
@@ -560,6 +565,7 @@ impl<'a> BitReader<'a> {
             count: 0,
             exhausted: false,
             crossed_restart: false,
+            steps: 0,
             #[cfg(test)]
             probes: 0,
             #[cfg(test)]
@@ -627,6 +633,7 @@ impl<'a> BitReader<'a> {
 
     /// One bit, MSB first. Past the end this returns zeros.
     fn bit(&mut self) -> u32 {
+        self.steps = self.steps.saturating_add(1);
         if self.count == 0 && !self.fill() {
             return 0;
         }
@@ -643,6 +650,7 @@ impl<'a> BitReader<'a> {
         if n == 0 {
             return 0;
         }
+        self.steps = self.steps.saturating_add(1);
         if self.count < n {
             self.refill();
         }
@@ -669,6 +677,7 @@ impl<'a> BitReader<'a> {
     /// `exhausted` is set, because that search stops at the first length that
     /// fails past the end.
     fn huffman(&mut self, table: &HuffmanTable) -> Option<u8> {
+        self.steps = self.steps.saturating_add(1);
         if self.count < 16 {
             self.refill();
         }
@@ -756,6 +765,7 @@ impl<'a> BitReader<'a> {
 
         // Skip to just past the next RSTn marker.
         while self.at + 1 < self.data.len() {
+            self.steps = self.steps.saturating_add(1);
             if self.data.get(self.at) == Some(&0xFF) {
                 if let Some(&m) = self.data.get(self.at + 1) {
                     if (0xD0..=0xD7).contains(&m) {
@@ -798,10 +808,12 @@ fn extend(value: i32, length: u32) -> i32 {
 /// A scan's entropy-coded data has no length field, so the only way to reach
 /// the segment after it is to look for the next thing that cannot occur inside
 /// it. Trusting the bit reader's position instead would put a corrupt scan's
-/// desynchronisation into the marker stream as well.
-fn next_marker(data: &[u8], from: usize) -> usize {
+/// desynchronisation into the marker stream as well. Each byte examined is a
+/// step.
+fn next_marker(data: &[u8], from: usize, steps: &mut u64) -> usize {
     let mut at = from;
     while at + 1 < data.len() {
+        *steps = steps.saturating_add(1);
         if data.get(at) == Some(&0xFF) {
             if let Some(&marker) = data.get(at + 1) {
                 if marker != 0x00 && marker != 0xFF && !(0xD0..=0xD7).contains(&marker) {
@@ -893,9 +905,11 @@ fn streamable(
 /// resume, meets no frame header, no further scan, no quantisation table and
 /// no Adobe marker before EOI or the end. A later `DQT` would change the
 /// dequantisation and a later Adobe marker the colour, both of which the end
-/// of a decode reads, and a later scan or frame anything at all.
-fn the_rest_is_inert(data: &[u8], mut at: usize) -> bool {
+/// of a decode reads, and a later scan or frame anything at all. Each byte or
+/// segment the walk steps over is a step.
+fn the_rest_is_inert(data: &[u8], mut at: usize, steps: &mut u64) -> bool {
     while at + 1 < data.len() {
+        *steps = steps.saturating_add(1);
         if data.get(at) != Some(&0xFF) {
             at += 1;
             continue;
@@ -947,17 +961,44 @@ fn colour_of(components: usize, adobe_seen: bool) -> Option<JpegColor> {
 
 /// Decodes a JPEG, at full size.
 pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
+    decode_counted(data, max_output).0
+}
+
+/// [`decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): each byte or segment the marker walk and its searches
+/// examined, each Huffman table entry built, each Huffman symbol, field and
+/// bit read, each arithmetic decision decoded, each block decoded, each
+/// sample the inverse transforms output and each byte of the image returned.
+///
+/// A scan visits every block it names whatever its bytes say, so a frame of
+/// many scans over a large image costs blocks times scans: the block count is
+/// where that repeats, and it is counted there.
+pub fn decode_counted(data: &[u8], max_output: usize) -> (Result<JpegImage, JpegError>, u64) {
+    let mut steps = 0u64;
     let mut image = Collected::default();
-    let scanned = scan_frame(data, max_output, JpegScale::Full, Some(&mut image))?;
-    let frame = finish(scanned, max_output, &mut image)?;
-    Ok(JpegImage {
-        width: frame.layout.width,
-        height: frame.layout.height,
-        color: frame.layout.color,
-        data: image.data,
-        precision: frame.layout.precision,
-        warnings: frame.warnings,
-    })
+    let decoded = scan_frame_counted(
+        data,
+        max_output,
+        JpegScale::Full,
+        Some(&mut image),
+        &mut steps,
+    )
+    .and_then(|scanned| finish(scanned, max_output, &mut image));
+    let decoded = decoded.map(|frame| {
+        let returned = u64::try_from(image.data.len()).unwrap_or(u64::MAX);
+        steps = steps
+            .saturating_add(frame.transformed)
+            .saturating_add(returned);
+        JpegImage {
+            width: frame.layout.width,
+            height: frame.layout.height,
+            color: frame.layout.color,
+            data: image.data,
+            precision: frame.layout.precision,
+            warnings: frame.warnings,
+        }
+    });
+    (decoded, steps)
 }
 
 /// Decodes a JPEG a strip at a time, at `scale` (`docs/design/jpeg-speed.md`,
@@ -1041,7 +1082,20 @@ fn scan_frame(
     data: &[u8],
     max_output: usize,
     scale: JpegScale,
+    stream: Option<&mut dyn Rows>,
+) -> Result<Scanned, JpegError> {
+    scan_frame_counted(data, max_output, scale, stream, &mut 0)
+}
+
+/// [`scan_frame`], adding the steps it took to `steps`: what
+/// [`decode_counted`] names, but for the transform and the image, which the
+/// end of a decode counts.
+fn scan_frame_counted(
+    data: &[u8],
+    max_output: usize,
+    scale: JpegScale,
     mut stream: Option<&mut dyn Rows>,
+    steps: &mut u64,
 ) -> Result<Scanned, JpegError> {
     if data.get(..2) != Some(&[0xFF, 0xD8]) {
         return Err(JpegError::NotJpeg);
@@ -1068,6 +1122,7 @@ fn scan_frame(
 
     let mut at = 2usize;
     while at + 1 < data.len() {
+        *steps = steps.saturating_add(1);
         if data.get(at) != Some(&0xFF) {
             at += 1;
             continue;
@@ -1199,6 +1254,10 @@ fn scan_frame(
                     i += total;
 
                     let table = HuffmanTable::build(&counts, values.to_vec());
+                    // A table's lookup is built whole whatever its segment
+                    // holds, so each entry is a step.
+                    let entries = table.first.len().saturating_add(table.second.len());
+                    *steps = steps.saturating_add(u64::try_from(entries).unwrap_or(u64::MAX));
                     let target = if class == 0 {
                         &mut dc_tables
                     } else {
@@ -1270,7 +1329,7 @@ fn scan_frame(
                 if !allocated {
                     let streams = stream.is_some()
                         && streamable(&components, &parts, progressive, width, height)
-                        && the_rest_is_inert(data, next_marker(data, segment_end));
+                        && the_rest_is_inert(data, next_marker(data, segment_end, steps), steps);
                     let Some(grid) = allocate(&mut components, width, height, max_output, streams)
                     else {
                         warnings.push(Warning::OutputCapHit);
@@ -1339,6 +1398,7 @@ fn scan_frame(
                                 (ah, al),
                                 mcus,
                                 Some(&mut row),
+                                steps,
                             )
                         };
                         for strip in next..painter.strips() {
@@ -1358,13 +1418,14 @@ fn scan_frame(
                         (ah, al),
                         mcus,
                         None,
+                        steps,
                     ),
                 };
                 truncated |= !complete;
 
                 // Entropy data carries no length; the next segment starts at
                 // the next marker that cannot appear inside it.
-                at = next_marker(data, segment_end);
+                at = next_marker(data, segment_end, steps);
                 continue;
             }
 
@@ -1451,6 +1512,10 @@ enum Coder<'a> {
 /// was decoded stays in place either way: a progressive file that loses its
 /// last refinement still shows an image, just a coarser one, which is exactly
 /// the degradation the format was designed around (ruling 2).
+///
+/// Adds to `steps` each block the scan decoded and the steps its entropy
+/// decoder took: a scan visits every block it names, so this is where a
+/// frame of many scans repeats its work.
 #[allow(clippy::too_many_arguments)]
 fn decode_scan(
     data: &[u8],
@@ -1463,6 +1528,7 @@ fn decode_scan(
     approximation: (u32, u32),
     mcus: (usize, usize),
     mut row_done: Option<RowDone<'_>>,
+    steps: &mut u64,
 ) -> bool {
     if parts.is_empty() {
         return false;
@@ -1508,6 +1574,7 @@ fn decode_scan(
 
     let mut unit = 0usize;
     let mut complete = true;
+    let mut blocks = 0u64;
 
     'outer: for uy in 0..units_y {
         for ux in 0..units_x {
@@ -1542,6 +1609,7 @@ fn decode_scan(
                 let Some(component) = components.get_mut(index) else {
                     break 'outer;
                 };
+                blocks += 1;
                 if !decode_block(
                     &mut coder,
                     conditioning,
@@ -1570,6 +1638,7 @@ fn decode_scan(
                             complete = false;
                             break 'outer;
                         };
+                        blocks += 1;
                         if !decode_block(
                             &mut coder,
                             conditioning,
@@ -1596,6 +1665,12 @@ fn decode_scan(
             row_done(uy, components);
         }
     }
+
+    let coded = match &coder {
+        Coder::Huffman(reader) => reader.steps,
+        Coder::Arithmetic(qm) => qm.steps(),
+    };
+    *steps = steps.saturating_add(blocks).saturating_add(coded);
 
     complete
         && match &coder {
@@ -4917,6 +4992,125 @@ mod tests {
 
         let image = decode(&data, 1 << 20).expect("what decoded is kept");
         assert!(image.warnings.contains(&Warning::TruncatedInput));
+    }
+
+    // The restart interval `tests/complexity.rs` repeats, committed beside
+    // that test because this module's QM encoder is the only one that writes
+    // it.
+    include!("../tests/complexity/arithmetic.rs");
+
+    /// **The committed interval is this encoder's output**
+    /// (`docs/design/resource-exhaustion.md`, "The families"): the flat
+    /// block's two decisions in fresh contexts code to exactly the bytes
+    /// `tests/complexity/arithmetic.rs` holds, so the complexity test's shape
+    /// cannot drift from the coder that made it. And two such intervals
+    /// between a restart marker decode to two flat mid-grey blocks, clean, as
+    /// that test reads hundreds of them.
+    #[test]
+    fn the_complexity_shapes_arithmetic_interval_is_the_qm_encoders_flat_block() {
+        let coded = arith_segment(&[(arith::Bin::Dc(0), 0), (arith::Bin::Ac(0), 1)]);
+        assert_eq!(coded, FLAT_INTERVAL, "the committed interval has drifted");
+
+        let mut scan = FLAT_INTERVAL.to_vec();
+        scan.extend_from_slice(&[0xFF, 0xD0]);
+        scan.extend_from_slice(FLAT_INTERVAL);
+        let data = arithmetic_gray(0xC9, 16, 8, Some(1), None, &[(0x00, 0x3F, 0x00, scan)]);
+        let image = decode(&data, 1 << 20).expect("two flat intervals decode");
+        assert_eq!((image.width, image.height), (16, 8));
+        assert_eq!(
+            image.warnings,
+            Vec::new(),
+            "a clean frame warns about nothing"
+        );
+        assert!(
+            image.data.iter().all(|&s| s == 128),
+            "a zero DC difference after every restart is mid-grey"
+        );
+    }
+
+    /// The counted door answers what the uncounted one does, on every frame
+    /// type, and counts something for each.
+    #[test]
+    fn the_counted_door_answers_as_the_uncounted_one() {
+        let frames = [
+            tiny_gray(),
+            huffman_flat_gray(16, 16, 144, 1),
+            arithmetic_gray(
+                0xC9,
+                16,
+                8,
+                None,
+                None,
+                &[(0x00, 0x3F, 0x00, arith_segment(&diff_of_eight()))],
+            ),
+        ];
+        for frame in &frames {
+            let (counted, steps) = decode_counted(frame, 1 << 20);
+            let plain = decode(frame, 1 << 20);
+            assert_eq!(
+                counted.as_ref().map(|i| (&i.data, &i.warnings)),
+                plain.as_ref().map(|i| (&i.data, &i.warnings)),
+            );
+            assert!(steps > 0, "a decode that ran counted nothing");
+        }
+        // A refusal is the same refusal through both doors.
+        let refused = [0xFF, 0xD8, 0xFF, 0xC3, 0x00, 0x02];
+        assert_eq!(
+            decode_counted(&refused, 1 << 20).0.err(),
+            Some(JpegError::Lossless)
+        );
+        assert_eq!(
+            decode_counted(b"not a jpeg", 1 << 20).0.err(),
+            Some(JpegError::NotJpeg)
+        );
+    }
+
+    /// **A scan visits every block it names, and the count sees each visit**:
+    /// the same frame with its one band scanned again — an AC scan that is all
+    /// end-of-band, which changes no coefficient — costs at least one step
+    /// more for every block, though its image is the same.
+    #[test]
+    fn a_scan_repeated_costs_a_step_a_block_more() {
+        let first = arith_segment(&diff_of_eight());
+        let refine = arith_segment(&[(arith::Bin::Fixed, 1)]);
+        let band = arith_segment(&[(arith::Bin::Ac(0), 1)]);
+        let once = arithmetic_gray(
+            0xCA,
+            8,
+            8,
+            None,
+            None,
+            &[
+                (0x00, 0x00, 0x04, first.clone()),
+                (0x00, 0x00, 0x43, refine.clone()),
+                (0x01, 0x3F, 0x03, band.clone()),
+            ],
+        );
+        let twice = arithmetic_gray(
+            0xCA,
+            8,
+            8,
+            None,
+            None,
+            &[
+                (0x00, 0x00, 0x04, first),
+                (0x00, 0x00, 0x43, refine),
+                (0x01, 0x3F, 0x03, band.clone()),
+                (0x01, 0x3F, 0x03, band),
+            ],
+        );
+        let (a, once_steps) = decode_counted(&once, 1 << 20);
+        let (b, twice_steps) = decode_counted(&twice, 1 << 20);
+        assert_eq!(
+            a.expect("three scans decode").data,
+            b.expect("four scans decode").data,
+            "an end-of-band scan changes no coefficient"
+        );
+        // One block, so at least one step for its visit and one decision.
+        assert!(
+            twice_steps >= once_steps + 2,
+            "{twice_steps} steps for four scans against {once_steps} for three"
+        );
     }
 
     // ---- The look-ahead reader ------------------------------------------

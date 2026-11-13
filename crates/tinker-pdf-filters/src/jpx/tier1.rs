@@ -1424,13 +1424,43 @@ fn charge(work: &mut u64, n: u64) -> Result<(), Refusal> {
 /// product not. `5adf502` landed that lesson one layer up — an 1 851-byte
 /// page that took 19.3 seconds inside a depth cap that never fired — and a
 /// per-code-block cap here would be exactly that mistake again.
+///
+/// What the work budget was charged is added to `steps`
+/// (`docs/design/resource-exhaustion.md`, "The counters"): each coefficient
+/// of each code-block once a coding pass, the whole of every block the decode
+/// reached, charged before its first decision.
+pub(crate) fn decode_tiles_counted(
+    stream: &Codestream<'_>,
+    tiles: &mut [Tile],
+    discard: u8,
+    needs: Option<&[Option<Vec<Needs>>]>,
+    steps: &mut u64,
+) -> Result<u64, Refusal> {
+    let mut work = MAX_JPX_WORK;
+    let decoded = decode_within(stream, tiles, discard, needs, &mut work);
+    *steps = steps.saturating_add(MAX_JPX_WORK.saturating_sub(work));
+    decoded
+}
+
+/// [`decode_tiles_counted`] with its count dropped, the door the module's
+/// tests read tier-1 through.
+#[cfg(test)]
 pub(crate) fn decode_tiles(
     stream: &Codestream<'_>,
     tiles: &mut [Tile],
     discard: u8,
     needs: Option<&[Option<Vec<Needs>>]>,
 ) -> Result<u64, Refusal> {
-    let mut work = MAX_JPX_WORK;
+    decode_tiles_counted(stream, tiles, discard, needs, &mut 0)
+}
+
+fn decode_within(
+    stream: &Codestream<'_>,
+    tiles: &mut [Tile],
+    discard: u8,
+    needs: Option<&[Option<Vec<Needs>>]>,
+    work: &mut u64,
+) -> Result<u64, Refusal> {
     // One context array for the whole codestream, reset per code-block. That
     // is what `MqContexts::reset` is for, and the 64 KB it avoids
     // reallocating for JBIG2 is nineteen entries here — what matters is that
@@ -1473,7 +1503,7 @@ pub(crate) fn decode_tiles(
                             if !read {
                                 continue;
                             }
-                            decode_one(block, orientation, style, &mut contexts, &mut work)?;
+                            decode_one(block, orientation, style, &mut contexts, work)?;
                             decoded += 1;
                         }
                     }

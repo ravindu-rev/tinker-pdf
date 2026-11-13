@@ -89,16 +89,18 @@ pub use jbig2::{
     MAX_JBIG2_TEXT_INSTANCES, MAX_JBIG2_WORK_MULTIPLE,
 };
 pub use jpeg::{
-    decode as jpeg_decode, decode_strips as jpeg_decode_strips, jpeg_encode, JpegColor,
-    JpegEncodeError, JpegError, JpegFrame, JpegHeld, JpegImage, JpegLayout, JpegOptions,
-    JpegQuantisation, JpegSampling, JpegScale, JpegSink, JpegSource, JpegSourceColour,
+    decode as jpeg_decode, decode_counted as jpeg_decode_counted,
+    decode_strips as jpeg_decode_strips, jpeg_encode, JpegColor, JpegEncodeError, JpegError,
+    JpegFrame, JpegHeld, JpegImage, JpegLayout, JpegOptions, JpegQuantisation, JpegSampling,
+    JpegScale, JpegSink, JpegSource, JpegSourceColour,
 };
 pub use jpx::{
-    jpx_decode, jpx_decode_attributed, jpx_decode_request, jpx_header, JpxColour, JpxCounts,
-    JpxHeader, JpxImage, JpxRequest, JpxWindow, Refusal as JpxRefusal,
+    jpx_decode, jpx_decode_attributed, jpx_decode_counted, jpx_decode_request, jpx_header,
+    JpxColour, JpxCounts, JpxHeader, JpxImage, JpxRequest, JpxWindow, Refusal as JpxRefusal,
 };
 pub use jxr::{
-    jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,
+    jxr_decode, jxr_decode_counted, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal,
+    JxrWarning,
 };
 pub use mq::{encoder::MqEncoder, MqContext, MqContexts, MqDecoder};
 pub use png::{
@@ -113,7 +115,7 @@ pub use tiff::{
     TiffCompression, TiffError, TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution,
     TiffSampleFormat, TiffSampleRange, TiffScan, MAX_TIFF_SAMPLES,
 };
-pub use webp::{webp_decode, WebpError, WebpImage, MAX_WEBP_SAMPLES};
+pub use webp::{webp_decode, webp_decode_counted, WebpError, WebpImage, MAX_WEBP_SAMPLES};
 pub use xxhash::xxh64;
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to

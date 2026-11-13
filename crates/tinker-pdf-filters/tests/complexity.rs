@@ -13,16 +13,35 @@
 //! Every shape is held to what it is as well as to what it costs: what comes
 //! back is what was written, through the counted and the uncounted doors
 //! alike. No clock is read here.
+//!
+//! The transform codecs' shapes need coders the crate has no encoder for,
+//! and each says where its bytes come from: the baseline JPEG is
+//! `jpeg_encode`'s; the progressive one is written here from T.81 G.1's scan
+//! syntax under Huffman tables of a code or two; the arithmetic one repeats
+//! one restart interval `qm.rs`'s test-only QM encoder wrote, committed in
+//! `complexity/arithmetic.rs` and held to that encoder by `jpeg.rs`'s unit
+//! test; the JPEG 2000 codestream's tiles are written here from T.800 Annex
+//! A's markers and B.10's packet headers, around a code-block the crate's MQ
+//! encoder codes from Annex D's contexts; both WebP bitstreams are written
+//! here from RFC 9649 §3 and RFC 6386; and JPEG XR, which this repository
+//! cannot encode, is read from the committed lossless pictures whose areas
+//! are four times one another.
+
+#[path = "complexity/arithmetic.rs"]
+mod arithmetic;
 
 use tinker_pdf_filters::{
     ascii85_decode, ascii85_decode_counted, ascii_hex_decode, ascii_hex_decode_counted, bmp_decode,
     bmp_decode_counted, brotli_decode, brotli_decode_counted, ccitt_decode, ccitt_decode_counted,
     ccitt_g4_encode, flate_decode, flate_decode_counted, gif_decode, gif_decode_counted,
-    jbig2_decode, jbig2_decode_measured, jbig2_generic_region_segment, lzw_decode,
-    lzw_decode_counted, png_decode, png_decode_counted, png_encode, predictor_decode,
-    predictor_decode_counted, run_length_decode, run_length_decode_counted, tiff_decode,
-    tiff_decode_counted, zlib_compress, CcittParams, CcittSource, Jbig2GenericSource, Jbig2Params,
-    Limits, PngColour, PngSource, PredictorParams,
+    jbig2_decode, jbig2_decode_measured, jbig2_generic_region_segment, jpeg_decode,
+    jpeg_decode_counted, jpeg_encode, jpx_decode, jpx_decode_counted, jxr_decode,
+    jxr_decode_counted, lzw_decode, lzw_decode_counted, png_decode, png_decode_counted, png_encode,
+    predictor_decode, predictor_decode_counted, run_length_decode, run_length_decode_counted,
+    tiff_decode, tiff_decode_counted, webp_decode, webp_decode_counted, zlib_compress, CcittParams,
+    CcittSource, ImagePixels, Jbig2GenericSource, Jbig2Params, JpegColor, JpegOptions,
+    JpegQuantisation, JpegSampling, JpegSource, JpegSourceColour, Limits, MqEncoder, PngColour,
+    PngSource, PredictorParams,
 };
 
 /// Four times the size: the factor the law is stated for.
@@ -733,4 +752,628 @@ fn bmp_costs_work_linear_in_its_rows() {
         steps
     };
     holds_the_law("BMP", at(100), at(400));
+}
+
+// ---------------------------------------------------------------------------
+// JPEG: baseline, progressive and arithmetic.
+// ---------------------------------------------------------------------------
+
+/// A marker segment: `X'FF'`, `code`, a length that counts itself, `body`.
+fn segment(out: &mut Vec<u8>, code: u8, body: &[u8]) {
+    out.extend_from_slice(&[0xFF, code]);
+    let length = u16::try_from(body.len() + 2).expect("a short segment");
+    out.extend_from_slice(&length.to_be_bytes());
+    out.extend_from_slice(body);
+}
+
+/// An MSB-first writer of entropy-coded data: a zero stuffed after every
+/// `X'FF'` (T.81 F.1.2.3) and the last byte padded with ones (F.1.2.3's
+/// "1-bits" before a marker).
+struct ScanBits {
+    out: Vec<u8>,
+    acc: u32,
+    used: u32,
+}
+
+impl ScanBits {
+    fn new() -> ScanBits {
+        ScanBits {
+            out: Vec::new(),
+            acc: 0,
+            used: 0,
+        }
+    }
+
+    fn put(&mut self, value: u32, width: u32) {
+        for bit in (0..width).rev() {
+            self.acc = (self.acc << 1) | ((value >> bit) & 1);
+            self.used += 1;
+            if self.used == 8 {
+                let byte = self.acc as u8;
+                self.out.push(byte);
+                if byte == 0xFF {
+                    self.out.push(0x00);
+                }
+                self.acc = 0;
+                self.used = 0;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        while self.used != 0 {
+            self.put(1, 1);
+        }
+        self.out
+    }
+}
+
+/// What a JPEG decodes to through the counted door, held to the uncounted
+/// one, and the steps it took.
+fn jpeg_decoded(file: &[u8]) -> (tinker_pdf_filters::JpegImage, u64) {
+    let (image, steps) = jpeg_decode_counted(file, 1 << 26);
+    let image = image.expect("the frame decodes");
+    let plain = jpeg_decode(file, 1 << 26).expect("alike uncounted");
+    assert_eq!(
+        (plain.width, plain.height, &plain.data, &plain.warnings),
+        (image.width, image.height, &image.data, &image.warnings),
+        "alike uncounted"
+    );
+    assert_eq!(
+        image.warnings,
+        Vec::new(),
+        "a clean frame warns about nothing"
+    );
+    (image, steps)
+}
+
+/// `n` MCUs of a baseline 4:2:0 frame side by side, each the same 16 × 16
+/// tile of a pattern, from `jpeg_encode`.
+fn baseline(n: u32) -> Vec<u8> {
+    let (width, height) = (16 * n, 16u32);
+    let mut raster = Vec::with_capacity((width * height * 3) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let (u, v) = (x % 16, y);
+            raster.extend_from_slice(&[(u * 16) as u8, (v * 16) as u8, ((u + v) * 8) as u8]);
+        }
+    }
+    jpeg_encode(
+        &JpegSource {
+            width,
+            height,
+            colour: JpegSourceColour::Rgb,
+            stride: (width * 3) as usize,
+            data: &raster,
+        },
+        &JpegOptions {
+            quantisation: JpegQuantisation::AnnexK,
+            sampling: JpegSampling::FourTwoZero,
+            restart_interval: 0,
+        },
+    )
+    .expect("a baseline frame")
+}
+
+/// A progressive grey frame of `n` blocks in a row, every block the same flat
+/// one, in G.1.1.1.1's four scans: the DC coefficients at `Al = 1`, their
+/// last bit, the AC band at `Al = 1`, and its refinement, each band ending
+/// at once.
+///
+/// The tables are a code or two each, which C.2 permits: DC category 0 is
+/// `00` and category 3 is `01`; the AC end of band is `0`. The first block's
+/// DC difference is 4 at `Al = 1`, so every block's coefficient is 8, and the
+/// quantiser of 16 makes it 128 — sixteen levels above mid-grey.
+fn progressive(n: u16) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8];
+    let mut dqt = vec![0x00];
+    dqt.extend_from_slice(&[16; 64]);
+    segment(&mut out, 0xDB, &dqt);
+    let mut sof = vec![8, 0, 8];
+    sof.extend_from_slice(&(8 * n).to_be_bytes());
+    sof.extend_from_slice(&[1, 1, 0x11, 0]);
+    segment(&mut out, 0xC2, &sof);
+    let mut dc = vec![0x00, 0, 2];
+    dc.extend_from_slice(&[0; 14]);
+    dc.extend_from_slice(&[0, 3]);
+    segment(&mut out, 0xC4, &dc);
+    let mut ac = vec![0x10, 1];
+    ac.extend_from_slice(&[0; 15]);
+    ac.push(0x00);
+    segment(&mut out, 0xC4, &ac);
+
+    let mut scan = |ss: u8, se: u8, a: u8, code: &dyn Fn(&mut ScanBits, u16)| {
+        segment(&mut out, 0xDA, &[1, 1, 0x00, ss, se, a]);
+        let mut bits = ScanBits::new();
+        for block in 0..n {
+            code(&mut bits, block);
+        }
+        out.extend_from_slice(&bits.finish());
+    };
+    // DC, first: category 3 and the value 4 for the first block, a
+    // difference of zero for each after it.
+    scan(0, 0, 0x01, &|bits, block| {
+        if block == 0 {
+            bits.put(0b01, 2);
+            bits.put(0b100, 3);
+        } else {
+            bits.put(0b00, 2);
+        }
+    });
+    // DC, refined: the bit below, zero.
+    scan(0, 0, 0x10, &|bits, _| bits.put(0, 1));
+    // The AC band, first and refined: an end of band each block.
+    scan(1, 63, 0x01, &|bits, _| bits.put(0, 1));
+    scan(1, 63, 0x10, &|bits, _| bits.put(0, 1));
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
+/// An arithmetic grey frame of `n` blocks in a row with a restart interval
+/// of one MCU, every interval the committed flat block, between `RST0` to
+/// `RST7` in turn (T.81 B.2.1).
+fn arithmetic_frame(n: u16) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8];
+    let mut dqt = vec![0x00];
+    dqt.extend_from_slice(&[1; 64]);
+    segment(&mut out, 0xDB, &dqt);
+    segment(&mut out, 0xDD, &1u16.to_be_bytes());
+    let mut sof = vec![8, 0, 8];
+    sof.extend_from_slice(&(8 * n).to_be_bytes());
+    sof.extend_from_slice(&[1, 1, 0x11, 0]);
+    segment(&mut out, 0xC9, &sof);
+    segment(&mut out, 0xDA, &[1, 1, 0x00, 0, 63, 0]);
+    for block in 0..n {
+        if block > 0 {
+            out.extend_from_slice(&[0xFF, 0xD0 + ((block - 1) % 8) as u8]);
+        }
+        out.extend_from_slice(arithmetic::FLAT_INTERVAL);
+    }
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
+#[test]
+fn jpeg_costs_work_linear_in_its_mcus_and_restart_intervals() {
+    let baseline_at = |n: u32| {
+        let (image, steps) = jpeg_decoded(&baseline(n));
+        assert_eq!((image.width, image.height), (16 * n, 16));
+        assert_eq!(image.color, JpegColor::Rgb);
+        // Every MCU coded the same coefficients, so every MCU is the first.
+        let row = (16 * n * 3) as usize;
+        for y in 0..16usize {
+            let line = &image.data[y * row..(y + 1) * row];
+            for (x, pixel) in line.chunks_exact(3).enumerate() {
+                let first = &line[(x % 16) * 3..(x % 16) * 3 + 3];
+                assert_eq!(pixel, first, "pixel ({x}, {y}) is not its MCU's");
+            }
+        }
+        steps
+    };
+    holds_the_law("JPEG baseline MCUs", baseline_at(64), baseline_at(256));
+
+    let progressive_at = |n: u16| {
+        let (image, steps) = jpeg_decoded(&progressive(n));
+        assert_eq!((image.width, image.height), (8 * u32::from(n), 8));
+        let level = image.data[0];
+        assert_ne!(level, 128, "the four scans placed no coefficient");
+        assert!(
+            image.data.iter().all(|&s| s == level),
+            "every block is the one flat block"
+        );
+        steps
+    };
+    holds_the_law(
+        "JPEG progressive MCUs",
+        progressive_at(64),
+        progressive_at(256),
+    );
+
+    let arithmetic_at = |n: u16| {
+        let (image, steps) = jpeg_decoded(&arithmetic_frame(n));
+        assert_eq!((image.width, image.height), (8 * u32::from(n), 8));
+        assert!(
+            image.data.iter().all(|&s| s == 128),
+            "a zero DC difference after every restart is mid-grey"
+        );
+        steps
+    };
+    holds_the_law(
+        "JPEG arithmetic intervals",
+        arithmetic_at(64),
+        arithmetic_at(256),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JPEG 2000.
+// ---------------------------------------------------------------------------
+
+/// A packet header's bits, most significant first, packed into bytes: the
+/// byte after an `X'FF'` carries seven, its first a stuffed zero (T.800
+/// B.10.1), and the last is filled out with zeros.
+fn packet_header(bits: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < bits.len() {
+        let width = if out.last() == Some(&0xFF) { 7 } else { 8 };
+        let mut byte = 0u8;
+        for k in 0..width {
+            byte = (byte << 1) | bits.get(at + k).copied().unwrap_or(0);
+        }
+        at += width;
+        out.push(byte);
+    }
+    out
+}
+
+/// The data of one tile of [`jpx_tiles`]: its two packets.
+///
+/// The tile is 2 × 2 samples under one level of the reversible 5/3 (T.800
+/// Annex F), so its LL, HL, LH and HH bands are one coefficient each. The LL
+/// band's coefficient is 1 and the others are 0, which F.3.7's synthesis
+/// turns into four samples of 1 and G.1's level shift into four of 129.
+///
+/// The LL code-block is coded in one cleanup pass (D.2.4) on its only
+/// bit-plane: the coefficient becomes significant in the all-insignificant
+/// zero-coding context, context 0 of Table D.1, which Table D.7 starts at
+/// state 4, and its sign is coded 0 in Table D.3's context 9, whose XOR bit
+/// is 0. The crate's MQ encoder codes the two decisions; T.88's flush ends
+/// with the `X'FF' X'AC'` JBIG2's segments close with, which T.800 C.2.9 does
+/// not write, so it is taken off.
+///
+/// The first packet's header (B.10) says: not empty; the block included in
+/// layer 0, one bit of its tag tree; eight missing bit-planes, eight zeros
+/// and a one, since QCD's exponent of 8 and two guard bits give the LL band
+/// `Mb = 9` (E-2) and the coefficient is one plane deep; one coding pass,
+/// `0` (Table B.4); no change to `Lblock`, `0`; and the segment's length in
+/// `Lblock = 3` bits (B.10.7.1). The second packet, the high-pass bands', is
+/// empty: one zero bit.
+fn jpx_tile_data() -> Vec<u8> {
+    let mut mq = MqEncoder::new(19);
+    mq.set_state(0, 4, 0);
+    mq.set_state(17, 3, 0);
+    mq.set_state(18, 46, 0);
+    mq.encode_at(0, 1);
+    mq.encode_at(9, 0);
+    let mut segment = mq.flush();
+    assert!(
+        segment.ends_with(&[0xFF, 0xAC]),
+        "T.88's flush ends every segment it writes this way"
+    );
+    segment.truncate(segment.len() - 2);
+    let length = u8::try_from(segment.len()).expect("a short segment");
+    assert!(length <= 7, "the length fits Lblock's three bits");
+
+    let mut bits = vec![1, 1];
+    bits.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    bits.extend_from_slice(&[0, 0]);
+    bits.extend((0..3).rev().map(|k| (length >> k) & 1));
+    let mut data = packet_header(&bits);
+    data.extend_from_slice(&segment);
+    data.push(0x00);
+    data
+}
+
+/// A bare JPEG 2000 codestream of `cols` by `rows` tiles of 2 × 2 samples,
+/// one component of eight bits, every tile [`jpx_tile_data`]: SIZ, COD and
+/// QCD as T.800 A.5 and A.6 lay them out, then one tile-part a tile.
+fn jpx_tiles(cols: u32, rows: u32) -> Vec<u8> {
+    let mut out = vec![0xFF, 0x4F];
+    // SIZ: Lsiz = 41 for one component, Rsiz = 0, the image and tile grids,
+    // then Ssiz = 7 (eight bits, unsigned) with no subsampling.
+    out.extend_from_slice(&[0xFF, 0x51, 0x00, 41, 0x00, 0x00]);
+    for value in [2 * cols, 2 * rows, 0, 0, 2, 2, 0, 0] {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+    out.extend_from_slice(&[0x00, 0x01, 0x07, 0x01, 0x01]);
+    // COD: no precincts, SOP or EPH; LRCP; one layer; no component
+    // transform; one decomposition level; 64 × 64 code-blocks; no style
+    // bits; the 5/3.
+    out.extend_from_slice(&[
+        0xFF, 0x52, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x04, 0x00, 0x01,
+    ]);
+    // QCD: two guard bits, no quantisation, exponents 8, 9, 9, 10.
+    out.extend_from_slice(&[0xFF, 0x5C, 0x00, 0x07, 0x40, 0x40, 0x48, 0x48, 0x50]);
+    let data = jpx_tile_data();
+    let psot = u32::try_from(12 + 2 + data.len()).expect("a short tile-part");
+    for tile in 0..cols * rows {
+        out.extend_from_slice(&[0xFF, 0x90, 0x00, 0x0A]);
+        out.extend_from_slice(&u16::try_from(tile).expect("a tile index").to_be_bytes());
+        out.extend_from_slice(&psot.to_be_bytes());
+        out.extend_from_slice(&[0x00, 0x01, 0xFF, 0x93]);
+        out.extend_from_slice(&data);
+    }
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
+#[test]
+fn jpx_costs_work_linear_in_its_tiles() {
+    let at = |cols: u32, rows: u32| {
+        let stream = jpx_tiles(cols, rows);
+        let mut warnings = Vec::new();
+        let (image, steps) = jpx_decode_counted(&stream, &ROOM, &mut warnings);
+        let image = image.expect("the codestream decodes");
+        assert_eq!(
+            warnings,
+            Vec::new(),
+            "a clean codestream warns about nothing"
+        );
+        assert_eq!((image.width, image.height), (2 * cols, 2 * rows));
+        assert_eq!((image.components, image.precision), (1, 8));
+        assert!(!image.truncated);
+        assert!(
+            image.samples.iter().all(|&s| s == 129),
+            "every tile is its LL coefficient of 1, level-shifted"
+        );
+        let mut again = Vec::new();
+        assert_eq!(
+            jpx_decode(&stream, &ROOM, &mut again),
+            Ok(image),
+            "alike uncounted"
+        );
+        assert_eq!(again, warnings);
+        steps
+    };
+    holds_the_law("JPX tiles", at(10, 10), at(20, 20));
+}
+
+// ---------------------------------------------------------------------------
+// WebP: lossless and lossy.
+// ---------------------------------------------------------------------------
+
+/// A RIFF container of one `kind` chunk (RFC 9649 §2.3, §2.5, §2.6).
+fn riff(kind: &[u8; 4], chunk: &[u8]) -> Vec<u8> {
+    let pad = chunk.len() % 2;
+    let mut out = b"RIFF".to_vec();
+    let size = u32::try_from(4 + 8 + chunk.len() + pad).expect("a short file");
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(kind);
+    let length = u32::try_from(chunk.len()).expect("a short chunk");
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(chunk);
+    if pad == 1 {
+        out.push(0);
+    }
+    out
+}
+
+/// The red, the blue and the two greens of [`webp_lossless`]'s pixels.
+const WEBP_RED: u8 = 200;
+const WEBP_BLUE: u8 = 40;
+const WEBP_GREENS: [u8; 2] = [10, 240];
+
+/// A lossless WebP of `width` by `height` pixels, each one bit of the image
+/// data: RFC 9649 §3.4's header, no transform, no colour cache and one
+/// prefix code group (§3.7.2) of five simple codes (§3.7.2.1.1) — green of
+/// two symbols, each a code of one bit, the smaller `0`; red, blue and alpha
+/// of one symbol each, which take no bits; distance of one. A pixel `i` is
+/// green `WEBP_GREENS[green(i)]`.
+fn webp_lossless(width: u32, height: u32, green: impl Fn(u32) -> usize) -> Vec<u8> {
+    let mut bits = Bits {
+        out: vec![0x2f],
+        used: 0,
+    };
+    bits.put(width - 1, 14);
+    bits.put(height - 1, 14);
+    bits.put(0, 1); // alpha_is_used
+    bits.put(0, 3); // version
+    bits.put(0, 1); // no transform
+    bits.put(0, 1); // no colour cache
+    bits.put(0, 1); // no meta prefix codes
+                    // Green: simple, two symbols, the first of eight bits.
+    bits.put(1, 1);
+    bits.put(1, 1);
+    bits.put(1, 1);
+    bits.put(u32::from(WEBP_GREENS[0]), 8);
+    bits.put(u32::from(WEBP_GREENS[1]), 8);
+    // Red, blue and alpha: simple, one symbol of eight bits.
+    for value in [WEBP_RED, WEBP_BLUE, 255] {
+        bits.put(1, 1);
+        bits.put(0, 1);
+        bits.put(1, 1);
+        bits.put(u32::from(value), 8);
+    }
+    // Distance: simple, one symbol of one bit.
+    bits.put(1, 1);
+    bits.put(0, 1);
+    bits.put(0, 1);
+    bits.put(0, 1);
+    for i in 0..width * height {
+        bits.put(green(i) as u32, 1);
+    }
+    riff(b"VP8L", &bits.out)
+}
+
+/// A lossy WebP of `cols` by `rows` macroblocks whose every boolean decodes
+/// as zero: both partitions are zero bytes, so the decoder's value register
+/// stays below every split (RFC 6386 §7.3) and each boolean is `false`
+/// whatever its probability.
+///
+/// Read that way the frame header (§9.2 to §9.11) asks for no segmentation,
+/// a loop filter of level 0, one token partition, quantiser index 0, no
+/// coefficient probability updates and no skip flags; every macroblock is
+/// `B_PRED` with `B_DC_PRED` subblocks and `DC_PRED` chroma (§11.2 to §11.4,
+/// the first branch of each tree); and every block's first token is
+/// `DCT_EOB_TOKEN` (§13.2). The partitions are long enough that no boolean
+/// reads past them: a macroblock spends a few bits of the first and under a
+/// byte of the second, and gets a byte and four.
+fn webp_lossy(cols: u32, rows: u32) -> Vec<u8> {
+    let macroblocks = (cols * rows) as usize;
+    let first = 64 + macroblocks;
+    let tag = (1u32 << 4) | (u32::try_from(first).expect("a short partition") << 5);
+    let mut frame = tag.to_le_bytes()[..3].to_vec();
+    frame.extend_from_slice(&[0x9d, 0x01, 0x2a]);
+    frame.extend_from_slice(&(u16::try_from(16 * cols).expect("a width")).to_le_bytes());
+    frame.extend_from_slice(&(u16::try_from(16 * rows).expect("a height")).to_le_bytes());
+    frame.resize(frame.len() + first + 4 * macroblocks, 0);
+    riff(b"VP8 ", &frame)
+}
+
+/// What a WebP decodes to through the counted door, held to the uncounted
+/// one, and the steps it took.
+fn webp_decoded(file: &[u8]) -> (tinker_pdf_filters::WebpImage, u64) {
+    let (image, steps) = webp_decode_counted(file, &ROOM);
+    let image = image.expect("the file decodes");
+    assert!(image.complete, "the picture decoded whole");
+    assert_eq!(
+        image.warnings,
+        Vec::new(),
+        "a clean file warns about nothing"
+    );
+    assert_eq!(
+        webp_decode(file, &ROOM),
+        Ok(image.clone()),
+        "alike uncounted"
+    );
+    (image, steps)
+}
+
+#[test]
+fn webp_costs_work_linear_in_its_pixels_and_macroblocks() {
+    let green = |i: u32| ((i * 7 + i / 64) % 3 == 0) as usize;
+    let lossless = |rows: u32| {
+        let (image, steps) = webp_decoded(&webp_lossless(64, rows, green));
+        assert_eq!((image.width, image.height), (64, rows));
+        let ImagePixels::Rgb(rgb) = &image.pixels else {
+            panic!("an opaque picture decodes to RGB");
+        };
+        for (i, pixel) in rgb.chunks_exact(3).enumerate() {
+            let want = [WEBP_RED, WEBP_GREENS[green(i as u32)], WEBP_BLUE];
+            assert_eq!(pixel, want, "pixel {i} comes back");
+        }
+        steps
+    };
+    holds_the_law("WebP lossless pixels", lossless(100), lossless(400));
+
+    let lossy = |side: u32| {
+        let (image, steps) = webp_decoded(&webp_lossy(side, side));
+        assert_eq!((image.width, image.height), (16 * side, 16 * side));
+        let ImagePixels::Rgb(rgb) = &image.pixels else {
+            panic!("an opaque picture decodes to RGB");
+        };
+        // Every macroblock of a row of them is predicted alike from what is
+        // above and to its left, so every row of pixels is one colour.
+        for (y, row) in rgb.chunks_exact((16 * side * 3) as usize).enumerate() {
+            let first = &row[..3];
+            assert!(
+                row.chunks_exact(3).all(|pixel| pixel == first),
+                "row {y} is not one colour"
+            );
+        }
+        steps
+    };
+    holds_the_law("WebP lossy macroblocks", lossy(8), lossy(16));
+}
+
+// ---------------------------------------------------------------------------
+// JPEG XR.
+// ---------------------------------------------------------------------------
+
+/// The committed lossless pictures whose areas are four times one another,
+/// each pair one pixel format and one codestream layout: 48 × 32 in one tile
+/// and 96 × 64 in four (`tests/jxr/manifest.txt`). What each picture holds is
+/// `jxr_fixtures.rs`'s to check, bit for bit; here each decodes whole, at its
+/// size, alike through both doors.
+const JXR_PAIRS: [(&str, &[u8], &[u8]); 3] = [
+    (
+        "JPEG XR RGB, spatial",
+        include_bytes!("jxr/rgb24.jxr"),
+        include_bytes!("jxr/tiled.jxr"),
+    ),
+    (
+        "JPEG XR grey, spatial",
+        include_bytes!("jxr/gray8.jxr"),
+        include_bytes!("jxr/tiled_gray.jxr"),
+    ),
+    (
+        "JPEG XR RGB, frequency",
+        include_bytes!("jxr/frequency.jxr"),
+        include_bytes!("jxr/frequency_tiled.jxr"),
+    ),
+];
+
+#[test]
+fn jpeg_xr_costs_work_linear_in_its_macroblocks_and_samples() {
+    let at = |file: &[u8], size: (u32, u32)| {
+        let (image, steps) = jxr_decode_counted(file, &ROOM);
+        let image = image.expect("the picture decodes");
+        assert!(image.complete, "the picture decoded whole");
+        assert_eq!((image.width, image.height), size);
+        assert_eq!(jxr_decode(file, &ROOM), Ok(image), "alike uncounted");
+        steps
+    };
+    for (shape, small, large) in JXR_PAIRS {
+        holds_the_law(shape, at(small, (48, 32)), at(large, (96, 64)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The transform codecs' doors on damage.
+// ---------------------------------------------------------------------------
+
+/// Every way a shape above can be cut short: each prefix of a step through
+/// it, and the whole with its last bytes lost.
+fn cuts(file: &[u8]) -> Vec<&[u8]> {
+    let step = (file.len() / 64).max(1);
+    (0..file.len())
+        .step_by(step)
+        .map(|end| &file[..end])
+        .chain([&file[..file.len().saturating_sub(1)]])
+        .collect()
+}
+
+/// **A counted door answers what its uncounted sibling answers on damage
+/// too**: a refusal is the same refusal, and a picture drawn around damage
+/// the same picture, through each of the four.
+#[test]
+fn every_transform_codec_door_answers_as_its_uncounted_sibling_on_damage() {
+    for file in [baseline(4), progressive(4), arithmetic_frame(4)] {
+        for cut in cuts(&file) {
+            let (counted, _) = jpeg_decode_counted(cut, 1 << 26);
+            let plain = jpeg_decode(cut, 1 << 26);
+            assert_eq!(
+                counted.map(|i| (i.width, i.height, i.data, i.warnings)),
+                plain.map(|i| (i.width, i.height, i.data, i.warnings)),
+                "a JPEG cut at {}",
+                cut.len()
+            );
+        }
+    }
+    let stream = jpx_tiles(3, 2);
+    for cut in cuts(&stream) {
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let (counted, _) = jpx_decode_counted(cut, &ROOM, &mut a);
+        assert_eq!(
+            counted,
+            jpx_decode(cut, &ROOM, &mut b),
+            "a codestream cut at {}",
+            cut.len()
+        );
+        assert_eq!(a, b, "the same warnings");
+    }
+    for file in [webp_lossless(16, 4, |i| (i % 2) as usize), webp_lossy(2, 2)] {
+        for cut in cuts(&file) {
+            let (counted, _) = webp_decode_counted(cut, &ROOM);
+            assert_eq!(
+                counted,
+                webp_decode(cut, &ROOM),
+                "a WebP cut at {}",
+                cut.len()
+            );
+        }
+    }
+    for (_, small, _) in JXR_PAIRS {
+        for cut in cuts(small) {
+            let (counted, _) = jxr_decode_counted(cut, &ROOM);
+            assert_eq!(
+                counted,
+                jxr_decode(cut, &ROOM),
+                "a JPEG XR file cut at {}",
+                cut.len()
+            );
+        }
+    }
 }
