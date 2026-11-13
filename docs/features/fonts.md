@@ -182,8 +182,22 @@ charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
 side bearing, `seac` accent composition, and `flex` through the
 `callothersubr`/`pop` callback protocol. A `seac` component is drawn as its
 own charstring and never composed again, so a `seac` that names itself
-draws rather than recursing. Glyphs are addressed by name, via the encoding
-the font dictionary specifies or the program's built-in one. The cipher is
+draws rather than recursing. Glyphs are addressed by name
+([design](../design/subsetting.md), *Which glyphs a Type 1 code selects*),
+one choice for drawing, `to_svg` and the subset walk (`type1_selection` in
+`resources.rs`): the name the document's `/Encoding` gives the code, where the
+program has that charstring; then the code's text, by its first character's
+Adobe Glyph List name; then the program's built-in encoding — its `dup`
+entries, or the Standard Encoding where the program says `/Encoding
+StandardEncoding` (chapter 10.3). So a `/Differences` name with no Unicode
+meaning, and a `/ToUnicode` naming another letter, draw the glyph the
+encoding names. `PageResources::selection` answers a Type 1 program with the
+charstring chosen and whether the font stated it — the document's name, or
+the built-in encoding's where the document names nothing or names a glyph
+the program lacks — and, where the text reaches one glyph and the built-in
+encoding another for a code the document names nothing for, the built-in
+encoding's as a second glyph to keep. The parsed program is kept beside the
+scope's font, so a page decrypts it once. The cipher is
 public, both ways (`type1::encrypt`, `type1::decrypt`, with `EEXEC_KEY` and
 `CHARSTRING_KEY`), and every test that builds a program builds it with it.
 
@@ -1979,7 +1993,11 @@ corpora already vendored here. So every name stays on the list.
   inside a form, with nothing drawn changed by it; `vertical_metrics.rs` —
   `/W2` both forms, the `/DW2` default, and the position vector;
   `substitute_fonts.rs` — the `FontProvider` seam, including declining
-  symbolic fonts, and a composite
+  symbolic fonts; a Type 1 code drawn by the name its encoding gives
+  (`a_type1_glyph_is_chosen_by_its_encoding_name`: a `/Differences` name with
+  no Unicode meaning and a `/ToUnicode` naming another letter, each pixel for
+  pixel the twin that reaches the glyph by a route nothing disputes); and a
+  composite
   font's request carrying its character collection
   (`the_provider_is_told_the_character_collection`), which
   `crates/tinker-pdf-cos/tests/fonts.rs`'s

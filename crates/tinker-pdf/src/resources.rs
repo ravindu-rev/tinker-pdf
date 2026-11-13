@@ -895,6 +895,16 @@ pub(crate) struct ScopeFont {
     /// A Type 3 font's procedures, read on its first glyph and kept for every
     /// render over the scope.
     procedures: OnceLock<Type3Procedures>,
+    /// The font's program parsed as Type 1 and drawn from, read on its first
+    /// glyph drawn and kept for every render over the scope, so a page's
+    /// glyphs decrypt it once rather than once a glyph; `None` inside for a
+    /// program that is not one. An embedded multiple-master program is held
+    /// at the instance its font names (`PageResources::type1_program`).
+    type1: OnceLock<Option<Type1<'static>>>,
+    /// The same program as read, at its default instance, for the glyph
+    /// selection the usage walk asks for, which no instance moves and which
+    /// sets none.
+    type1_read: OnceLock<Option<Type1<'static>>>,
 }
 
 /// What a Type 3 font's glyphs are drawn from (9.6.5), read once a scope on
@@ -1104,12 +1114,18 @@ type IccCache = Flights<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transforms
 /// its program whole.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Selection {
-    /// The glyph index in the embedded program.
+    /// The glyph index in the embedded program — for a Type 1 program, its
+    /// charstring's position in the order `Type1::parse` reads them.
     pub glyph: u16,
     /// Whether a mapping the font itself states chose it — its `cmap` through
-    /// a character, its `/CIDToGIDMap` through a CID, or its CFF charset
-    /// through a name — rather than 9.6.6.4's closing guess.
+    /// a character, its `/CIDToGIDMap` through a CID, its CFF charset or its
+    /// Type 1 encoding through a name — rather than 9.6.6.4's closing guess.
     pub stated: bool,
+    /// A second glyph a subset keeps for the same code: the one a Type 1
+    /// program's built-in encoding names where this renderer draws the
+    /// code's text instead (`docs/design/subsetting.md`), which a reader that
+    /// follows ISO 32000-2 9.6.5.2 draws.
+    pub also: Option<u16>,
 }
 
 impl Selection {
@@ -1117,6 +1133,7 @@ impl Selection {
         Selection {
             glyph,
             stated: true,
+            also: None,
         }
     }
 
@@ -1124,6 +1141,7 @@ impl Selection {
         Selection {
             glyph,
             stated: false,
+            also: None,
         }
     }
 }
@@ -6567,6 +6585,8 @@ impl PageResources {
             font: Arc::new(font),
             type3,
             procedures: OnceLock::new(),
+            type1: OnceLock::new(),
+            type1_read: OnceLock::new(),
         })
     }
 
@@ -6761,8 +6781,6 @@ impl PageResources {
         // The font's own character mapping decides which glyph a code means.
         let found = self.font_by_id(font_id)?;
         let (name, font) = (&found.name, &found.font);
-        let text = font.text_of(code);
-        let ch = text.chars().next();
 
         if let Some(sfnt) = Sfnt::parse(&program) {
             // An OpenType font may carry its outlines in a `CFF ` table
@@ -6816,33 +6834,38 @@ impl PageResources {
         // reached the two parsers above, both declined them correctly, and the
         // glyph was silently absent — an embedded Type 1 font drew nothing and
         // said nothing about why.
-        if let Some(mut type1) = Type1::parse(&program) {
-            // An embedded multiple-master program is drawn at the instance
-            // its font names, or at its default; every other program has no
-            // weight vector and is drawn as it always was.
-            if type1.is_multiple_master() && !substituted {
-                self.instance_multiple_master(&found, &mut type1);
-            }
-            // Type 1 addresses glyphs by *name*: through the encoding the PDF
-            // font dictionary specifies, or through the font's own built-in
-            // one. The index is not a glyph id.
-            let glyph = ch
-                .and_then(|c| {
-                    let name = tinker_pdf_font::glyph_name_for_char(c)?;
-                    type1.glyph_for_name(name.as_bytes())
-                })
-                .or_else(|| {
-                    u8::try_from(code)
-                        .ok()
-                        .and_then(|b| type1.glyph_for_code(b))
-                })?;
-
+        if let Some(type1) = self.type1_program(&found, &program, substituted) {
+            // Type 1 addresses glyphs by *name*, the one decision
+            // [`PageResources::selection`] makes too.
+            let glyph = type1_selection(type1, font, code)?.glyph;
             let outline = type1.outline(glyph)?;
             let scale_factor = type1.font_matrix.first().copied().unwrap_or(0.001);
             return Some(scale(&outline, scale_factor));
         }
 
         None
+    }
+
+    /// The font's Type 1 program as drawn, parsed on its first glyph drawn
+    /// and kept for every glyph after it: an embedded multiple-master program
+    /// set to the instance its font names, or to its default, and every other
+    /// program, which has no weight vector, as it is read.
+    fn type1_program<'f>(
+        &self,
+        found: &'f ScopeFont,
+        program: &[u8],
+        substituted: bool,
+    ) -> Option<&'f Type1<'static>> {
+        found
+            .type1
+            .get_or_init(|| {
+                let mut type1 = Type1::parse(program)?;
+                if type1.is_multiple_master() && !substituted {
+                    self.instance_multiple_master(found, &mut type1);
+                }
+                Some(type1)
+            })
+            .as_ref()
     }
 
     /// Sets an embedded multiple-master program to the instance its font
@@ -6902,11 +6925,12 @@ impl PageResources {
     /// [`Selection::stated`] is what subsetting actually rests on; see its own
     /// documentation.
     ///
-    /// `None` where no glyph index exists to keep: no embedded program, a
-    /// program neither parser reads, or a Type 1 program — which addresses its
-    /// charstrings by name, so the index [`PageResources::extract_outline`]
-    /// uses above is an index into *that* font's private ordering and not a
-    /// glyph id any subsetter could act on.
+    /// A Type 1 program answers with its charstring's position in the order
+    /// `Type1::parse` reads them, which nothing outside the program addresses
+    /// and the Type 1 subsetter takes; a code no route reaches answers the
+    /// guess `.notdef`, so a program any shown code of which reaches nothing
+    /// is left whole. `None` where no glyph index exists to keep: no embedded
+    /// program, or one no parser here reads.
     pub(crate) fn selection(&self, font_id: u64, code: u32) -> Option<Selection> {
         let FontProgram {
             bytes: program,
@@ -6929,6 +6953,13 @@ impl PageResources {
         }
         if let Some(cff) = Cff::parse(&program) {
             return Some(self.cff_selection(&cff, font, name, code));
+        }
+        // The program as read: no instance moves which glyph a code chooses,
+        // and none is set where nothing is drawn.
+        if let Some(type1) = found.type1_read.get_or_init(|| Type1::parse(&program)) {
+            return Some(type1_selection(type1, font, code).unwrap_or_else(|| {
+                Selection::guessed(type1.glyph_for_name(b".notdef").unwrap_or(0))
+            }));
         }
         None
     }
@@ -9887,6 +9918,59 @@ pub(crate) fn cff_glyph(cff: &Cff<'_>, font: &cos_font::Font, code: u32) -> Opti
         })
 }
 
+/// Which charstring of a Type 1 program a code selects, and on whose
+/// authority (`docs/design/subsetting.md`, *Which glyphs a Type 1 code
+/// selects*): the renderer, `to_svg` and the usage walk all ask this.
+///
+/// A Type 1 program names its charstrings, and ISO 32000-2 9.6.5.2 reaches
+/// one through the document's `/Encoding` where it names the code
+/// ([`cos_font::Font::glyph_name`]) and otherwise through the program's
+/// built-in encoding. The order is:
+///
+/// 1. the document's name, where the program has a charstring of it;
+/// 2. the code's text — its first character's Adobe Glyph List name;
+/// 3. the built-in encoding's glyph for the code.
+///
+/// Steps 2 and 3 are the route a Type 1 program was drawn by before the
+/// first existed, so a page moves only where the document's encoding and the
+/// code's text disagree. The answer is stated where the font says it — the
+/// document's name, or the built-in encoding's where the document names
+/// nothing, or a name the program lacks falling through to it as
+/// [`cff_glyph`] falls through — and a guess where only the text reaches it;
+/// where the text reaches one glyph and the built-in encoding another for a
+/// code the document names nothing for, the built-in encoding's is
+/// [`Selection::also`], which a reader following 9.6.5.2 draws. `None` where
+/// no step reaches a glyph.
+fn type1_selection(type1: &Type1<'_>, font: &cos_font::Font, code: u32) -> Option<Selection> {
+    let named = font.glyph_name(code);
+    if let Some(glyph) = named.and_then(|name| type1.glyph_for_name(name.as_bytes())) {
+        return Some(Selection::stated(glyph));
+    }
+    let by_text = font.text_of(code).chars().next().and_then(|c| {
+        let name = tinker_pdf_font::glyph_name_for_char(c)?;
+        type1.glyph_for_name(name.as_bytes())
+    });
+    let by_code = u8::try_from(code)
+        .ok()
+        .and_then(|byte| type1.glyph_for_code(byte));
+    let drawn = by_text.or(by_code)?;
+    Some(if named.is_none() {
+        match (by_text, by_code) {
+            (Some(text), Some(built_in)) if text != built_in => Selection {
+                glyph: text,
+                stated: true,
+                also: Some(built_in),
+            },
+            (_, Some(_)) => Selection::stated(drawn),
+            _ => Selection::guessed(drawn),
+        }
+    } else if by_text.is_none() {
+        Selection::stated(drawn)
+    } else {
+        Selection::guessed(drawn)
+    })
+}
+
 /// Scales an outline from font units into em units.
 fn scale(outline: &Outline, factor: f64) -> Outline {
     use tinker_pdf_font::Segment;
@@ -12417,5 +12501,96 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
             let _ = page.render(&RenderOptions::default());
             assert_eq!(read(), ITEMS, "a render, one scope");
         }
+    }
+
+    /// `type1_selection`'s table (`docs/design/subsetting.md`, *Which glyphs a
+    /// Type 1 code selects*), row by row, over a program whose built-in
+    /// encoding puts `A` at 65, `B` at 66 and `ornament` at 70 and which also
+    /// carries `C`, read through four font dictionaries.
+    #[test]
+    fn a_type1_code_is_selected_as_the_design_tables_it() {
+        use super::{type1_selection, Selection};
+        use tinker_pdf_cos::{font as cos_font, CosDocument};
+        use tinker_pdf_font::type1::{encrypt, CHARSTRING_KEY, EEXEC_KEY};
+        use tinker_pdf_font::Type1;
+
+        // `0 500 hsbw endchar` for every glyph: the names are what is read.
+        let charstring = encrypt(&[139, 248, 136, 13, 14], CHARSTRING_KEY, &[0; 4]);
+        let mut private = b"/CharStrings 5 dict dup begin\n".to_vec();
+        for name in [".notdef", "A", "B", "C", "ornament"] {
+            private.extend_from_slice(format!("/{name} {} RD ", charstring.len()).as_bytes());
+            private.extend_from_slice(&charstring);
+            private.extend_from_slice(b" ND\n");
+        }
+        private.extend_from_slice(b"end\nmark currentfile closefile\n");
+        let mut program = b"/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n\
+            /Encoding 256 array\ndup 65 /A put\ndup 66 /B put\ndup 70 /ornament put\n\
+            readonly def\ncurrentfile eexec\n"
+            .to_vec();
+        program.extend(encrypt(&private, EEXEC_KEY, &[0; 4]));
+        let type1 = Type1::parse(&program).expect("the program parses");
+        let glyph = |name: &[u8]| type1.glyph_for_name(name).expect("in the program");
+        let (a, b, c, ornament) = (glyph(b"A"), glyph(b"B"), glyph(b"C"), glyph(b"ornament"));
+
+        let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+            1 begincodespacerange <00> <FF> endcodespacerange \
+            1 beginbfchar <41> <0042> endbfchar endcmap end end";
+        let mut bytes = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+            2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n"
+            .to_vec();
+        bytes.extend_from_slice(
+            format!("3 0 obj\n<< /Length {} >>\nstream\n", cmap.len()).as_bytes(),
+        );
+        bytes.extend_from_slice(cmap);
+        bytes.extend_from_slice(
+            b"\nendstream\nendobj\n\
+            4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /F >>\nendobj\n\
+            5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /F \
+            /Encoding << /Differences [65 /B 66 /missing 71 /missing] >> >>\nendobj\n\
+            6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /F /ToUnicode 3 0 R >>\nendobj\n\
+            7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /F \
+            /Encoding << /Differences [65 /missing] >> /ToUnicode 3 0 R >>\nendobj\n\
+            trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n",
+        );
+        let doc = CosDocument::open(bytes).expect("it opens");
+        let font = |number: u32| {
+            let object = doc.get(ObjRef::new(number, 0)).expect("the font");
+            cos_font::read(&doc, object.as_dict().expect("a dictionary"))
+        };
+        let stated = |glyph| Some(Selection::stated(glyph));
+        let guessed = |glyph| Some(Selection::guessed(glyph));
+
+        // No `/Encoding`: the text and the built-in encoding agree on A; the
+        // built-in encoding alone reaches 70; the text alone reaches C; and
+        // nothing reaches 71.
+        let plain = font(4);
+        assert_eq!(type1_selection(&type1, &plain, 65), stated(a));
+        assert_eq!(type1_selection(&type1, &plain, 70), stated(ornament));
+        assert_eq!(type1_selection(&type1, &plain, 67), guessed(c));
+        assert_eq!(type1_selection(&type1, &plain, 71), None);
+
+        // `/Differences`: a name the program has is drawn; a name it lacks
+        // falls through to the built-in encoding as `cff_glyph` falls
+        // through, or reaches nothing.
+        let differences = font(5);
+        assert_eq!(type1_selection(&type1, &differences, 65), stated(b));
+        assert_eq!(type1_selection(&type1, &differences, 66), stated(b));
+        assert_eq!(type1_selection(&type1, &differences, 71), None);
+
+        // `/ToUnicode` says 65 is B: drawn by its text, the built-in
+        // encoding's A kept beside it.
+        let unicode = font(6);
+        assert_eq!(
+            type1_selection(&type1, &unicode, 65),
+            Some(Selection {
+                glyph: b,
+                stated: true,
+                also: Some(a),
+            })
+        );
+
+        // A name the program lacks, and the text reaching B: a guess.
+        let guessing = font(7);
+        assert_eq!(type1_selection(&type1, &guessing, 65), guessed(b));
     }
 }

@@ -1,11 +1,16 @@
-//! Type 1 programs written byte by byte, and pages that embed them, for the
-//! facade's multiple-master tests.
+//! Type 1 programs written byte by byte through `tinker_pdf_font::type1`'s
+//! own cipher, and pages that embed them, for the facade's tests, so a test
+//! knows every glyph, subroutine and encoding entry of the program it embeds.
 //!
-//! `multiple_master.rs` and `determinism.rs` share it. The program is the
-//! one `tinker-pdf-font`'s own instancing tests build: two axes — a weight
-//! axis mapped linearly from 100 to 900, a width axis of three points — and
-//! four masters at the corners of the blend space, every operand of its one
-//! glyph, `A`, blended. Beside it, [`instance_program`] writes a plain program
+//! `multiple_master.rs`, `substitute_fonts.rs`, `subset_breadth.rs` and
+//! `determinism.rs` share it, so the program a fingerprint is taken over is
+//! the program a test reads. [`program`] writes a plain program of chosen
+//! glyphs, subroutines and built-in encoding.
+//!
+//! The multiple-master program is the one `tinker-pdf-font`'s own instancing
+//! tests build: two axes — a weight axis mapped linearly from 100 to 900, a
+//! width axis of three points — and four masters at the corners of the blend
+//! space, every operand of its one glyph, `A`, blended. Beside it, [`instance_program`] writes a plain program
 //! of one master whose operands are an instance's, blended **here**, from the
 //! blend design, by the supplement's arithmetic: a page embedding the first
 //! under `/MMType1` and one embedding the second under `/Type1` are held to
@@ -22,33 +27,14 @@
 
 #![allow(
     dead_code,
-    reason = "shared by two test binaries; each uses a different subset"
+    reason = "shared by four test binaries; each uses a different subset"
 )]
 
-/// The eexec key (the Type 1 book's chapter 7).
-const EEXEC_KEY: u16 = 55_665;
-/// The charstring key.
-const CHARSTRING_KEY: u16 = 4330;
+use tinker_pdf_font::type1::{encrypt, CHARSTRING_KEY, EEXEC_KEY};
 
-/// Adobe's cipher in the encrypting direction, `pad` leading bytes first, as
-/// a font tool writes it.
-fn encrypt(plain: &[u8], key: u16, pad: usize) -> Vec<u8> {
-    const C1: u16 = 52_845;
-    const C2: u16 = 22_719;
-    let mut r = key;
-    let mut out = Vec::with_capacity(plain.len() + pad);
-    for byte in core::iter::repeat(0x55u8)
-        .take(pad)
-        .chain(plain.iter().copied())
-    {
-        let cipher = byte ^ (r >> 8) as u8;
-        r = (u16::from(cipher).wrapping_add(r))
-            .wrapping_mul(C1)
-            .wrapping_add(C2);
-        out.push(cipher);
-    }
-    out
-}
+/// The lead bytes the programs' charstrings and eexec sections carry, as a
+/// font tool might choose them; a reader discards them.
+const PAD: [u8; 4] = [0x55; 4];
 
 /// One charstring number, in the shortest of the Type 1 encodings.
 fn number(v: i32, out: &mut Vec<u8>) {
@@ -209,8 +195,8 @@ fn mix(group: &[Vec<i32>], weights: &[f64; 4]) -> Vec<f64> {
 
 /// A program whose cleartext carries `keys` and whose `/CharStrings` holds
 /// `A`, its built-in `/Encoding` putting `A` at 65.
-fn program(keys: &str, charstring: &[u8]) -> Vec<u8> {
-    let encrypted = encrypt(charstring, CHARSTRING_KEY, 4);
+fn keyed_program(keys: &str, charstring: &[u8]) -> Vec<u8> {
+    let encrypted = encrypt(charstring, CHARSTRING_KEY, &PAD);
     let mut private = Vec::new();
     private.extend_from_slice(b"dup /Private 8 dict dup begin\n/lenIV 4 def\n");
     private.extend_from_slice(b"/Subrs 0 array ND\n/CharStrings 1 dict dup begin\n");
@@ -224,7 +210,7 @@ fn program(keys: &str, charstring: &[u8]) -> Vec<u8> {
     out.extend_from_slice(b"/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n");
     out.extend_from_slice(b"/Encoding 256 array\ndup 65 /A put\nreadonly def\n");
     out.extend_from_slice(b"currentfile eexec\n");
-    out.extend_from_slice(&encrypt(&private, EEXEC_KEY, 4));
+    out.extend_from_slice(&encrypt(&private, EEXEC_KEY, &PAD));
     out
 }
 
@@ -247,7 +233,7 @@ pub fn multiple_master_program() -> Vec<u8> {
     cs.push(8); // rrcurveto
     cs.push(9); // closepath
     cs.push(14); // endchar
-    program(
+    keyed_program(
         "/FontInfo 5 dict dup begin\n\
          /BlendAxisTypes [/Weight /Width ] def\n\
          /BlendDesignPositions [[0 0] [1 0] [0 1] [1 1]] def\n\
@@ -285,7 +271,7 @@ pub fn instance_program(weights: &[f64; 4]) -> Vec<u8> {
     cs.push(8);
     cs.push(9);
     cs.push(14);
-    program("/FontName /TestMMInstance def\n", &cs)
+    keyed_program("/FontName /TestMMInstance def\n", &cs)
 }
 
 /// One page, `width` by `height`, its font `/F0` of `subtype` named
@@ -374,4 +360,142 @@ pub const CONTENT: &str = "BT /F0 40 Tf 8 12 Td (A) Tj ET BT /F0 24 Tf 52.5 20 T
 /// The page every test here draws: [`CONTENT`] on a 100 by 60 page.
 pub fn content_page(subtype: &str, base_font: &str, program: &[u8]) -> Vec<u8> {
     page(subtype, base_font, program, CONTENT, 100, 60)
+}
+
+// ---------------------------------------------------------------------------
+// Plain programs of chosen glyphs.
+// ---------------------------------------------------------------------------
+
+pub const HSTEM: u8 = 1;
+pub const RLINETO: u8 = 5;
+pub const HLINETO: u8 = 6;
+pub const VLINETO: u8 = 7;
+pub const CLOSEPATH: u8 = 9;
+pub const CALLSUBR: u8 = 10;
+pub const RETURN: u8 = 11;
+pub const HSBW: u8 = 13;
+pub const ENDCHAR: u8 = 14;
+pub const RMOVETO: u8 = 21;
+pub const SEAC: [u8; 2] = [12, 6];
+pub const CALLOTHERSUBR: [u8; 2] = [12, 16];
+pub const POP: [u8; 2] = [12, 17];
+
+/// Type 1 numbers in their shortest forms (Type 1 Font Format, 6.2).
+pub fn n(values: &[i32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &v in values {
+        if (-107..=107).contains(&v) {
+            out.push((v + 139) as u8);
+        } else if (108..=1131).contains(&v) {
+            let v = v - 108;
+            out.push((v / 256 + 247) as u8);
+            out.push((v % 256) as u8);
+        } else if (-1131..=-108).contains(&v) {
+            let v = -v - 108;
+            out.push((v / 256 + 251) as u8);
+            out.push((v % 256) as u8);
+        } else {
+            out.push(255);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// A glyph `width` wide drawing a filled `w` by `h` box at `(x, y)`.
+pub fn rect(width: i32, x: i32, y: i32, w: i32, h: i32) -> Vec<u8> {
+    [
+        n(&[0, width]),
+        vec![HSBW],
+        n(&[x, y]),
+        vec![RMOVETO],
+        n(&[w]),
+        vec![HLINETO],
+        n(&[h]),
+        vec![VLINETO],
+        n(&[-w]),
+        vec![HLINETO, CLOSEPATH, ENDCHAR],
+    ]
+    .concat()
+}
+
+/// A program and Table 125's three lengths.
+pub struct Program {
+    pub bytes: Vec<u8>,
+    pub lengths: [usize; 3],
+}
+
+/// A Type 1 program of `glyphs` (names and plaintext charstrings, in order)
+/// and `subrs` (`dup` indices and plaintext charstrings), whose built-in
+/// encoding is `encoding`, ending in chapter 2.3's 512 zeros and
+/// `cleartomark`.
+pub fn program(
+    glyphs: &[(&str, Vec<u8>)],
+    subrs: &[(i64, Vec<u8>)],
+    encoding: &[(u8, &str)],
+) -> Program {
+    let mut clear = b"%!PS-AdobeFont-1.0: Fixture 001.000\n\
+        11 dict begin\n\
+        /FontName /Fixture def\n\
+        /FontType 1 def\n\
+        /FontMatrix [0.001 0 0 0.001 0 0] readonly def\n\
+        /FontBBox {0 0 1000 1000} readonly def\n\
+        /Encoding 256 array\n\
+        0 1 255 {1 index exch /.notdef put} for\n"
+        .to_vec();
+    for (code, name) in encoding {
+        clear.extend_from_slice(format!("dup {code} /{name} put\n").as_bytes());
+    }
+    clear.extend_from_slice(b"readonly def\ncurrentdict end\ncurrentfile eexec\n");
+
+    let mut private = b"dup /Private 8 dict dup begin\n/lenIV 4 def\n".to_vec();
+    private.extend_from_slice(format!("/Subrs {} array\n", subrs.len()).as_bytes());
+    for (index, code) in subrs {
+        let encrypted = encrypt(code, CHARSTRING_KEY, &PAD);
+        private.extend_from_slice(format!("dup {index} {} RD ", encrypted.len()).as_bytes());
+        private.extend_from_slice(&encrypted);
+        private.extend_from_slice(b" NP\n");
+    }
+    private.extend_from_slice(b"ND\n");
+    private.extend_from_slice(
+        format!("2 index /CharStrings {} dict dup begin\n", glyphs.len()).as_bytes(),
+    );
+    for (name, code) in glyphs {
+        let encrypted = encrypt(code, CHARSTRING_KEY, &PAD);
+        private.extend_from_slice(format!("/{name} {} RD ", encrypted.len()).as_bytes());
+        private.extend_from_slice(&encrypted);
+        private.extend_from_slice(b" ND\n");
+    }
+    private.extend_from_slice(
+        b"end\nend\nreadonly put\nnoaccess put\n\
+          dup /FontName get exch definefont pop\nmark currentfile closefile\n",
+    );
+    let encrypted = encrypt(&private, EEXEC_KEY, &PAD);
+
+    let mut trailer = b"\n".to_vec();
+    for _ in 0..8 {
+        trailer.extend_from_slice(&[b'0'; 64]);
+        trailer.push(b'\n');
+    }
+    trailer.extend_from_slice(b"cleartomark\n");
+
+    let lengths = [clear.len(), encrypted.len(), trailer.len()];
+    let mut bytes = clear;
+    bytes.extend(encrypted);
+    bytes.extend(trailer);
+    Program { bytes, lengths }
+}
+
+/// A `/FontFile` stream object's text for `program`, its three lengths
+/// stated.
+pub fn font_file(program: &Program) -> Vec<u8> {
+    let [one, two, three] = program.lengths;
+    let mut out = format!(
+        "<< /Length {} /Length1 {one} /Length2 {two} /Length3 {three} >>\nstream\n",
+        program.bytes.len()
+    )
+    .into_bytes();
+    out.extend_from_slice(&program.bytes);
+    out.extend_from_slice(b"\nendstream");
+    out
 }

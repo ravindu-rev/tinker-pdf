@@ -1287,8 +1287,7 @@ fn show(usage: &mut Usage, doc: &CosDocument, scope: &PageResources, font_id: u6
             usage.glyphs.entry(object).or_default().insert(chosen.glyph);
         }
         Some(_) => usage.refuse(object, UntouchedReason::CodeNotMapped),
-        // No embedded program, or one neither parser reads, or a Type 1
-        // program whose charstring index is not a glyph id. Nothing here can
+        // No embedded program, or one no parser here reads. Nothing here can
         // be subsetted; the sweep reports whatever the subsetter says about
         // the bytes.
         None => {}

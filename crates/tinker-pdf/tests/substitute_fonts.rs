@@ -11,6 +11,7 @@
 //! is identical on every platform and the repository carries no font anyone
 //! has to licence.
 
+mod type1_support;
 mod written_support;
 
 use std::sync::Arc;
@@ -502,6 +503,113 @@ endobj
             .contains(&tinker_pdf::RenderWarning::UnreadableFont),
         "and the font is no longer unreadable"
     );
+}
+
+/// A page drawing `shown` at 50 points in a Type 1 font embedding
+/// [`encoded_type1`]: `encoding` its `/Encoding` entry, if any, and
+/// `to_unicode` its `/ToUnicode` CMap's one `bfchar` line, if any.
+fn type1_page(encoding: Option<&str>, to_unicode: Option<&str>, shown: &str) -> Vec<u8> {
+    let program = encoded_type1();
+    let encoding = encoding
+        .map(|encoding| format!(" /Encoding {encoding}"))
+        .unwrap_or_default();
+    let unicode = if to_unicode.is_some() {
+        " /ToUnicode 8 0 R"
+    } else {
+        ""
+    };
+    let cmap = format!(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+         1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+         1 beginbfchar\n{}\nendbfchar\nendcmap\n\
+         CMapName currentdict /CMap defineresource pop\nend\nend\n",
+        to_unicode.unwrap_or("<20> <0020>")
+    );
+    let content = format!("BT /F0 50 Tf 10 20 Td ({shown}) Tj ET");
+    render_support::raw_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 80] \
+          /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        render_support::raw_stream("", content.as_bytes()),
+        format!(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /FirstChar 65 \
+             /LastChar 70 /Widths [800 800 800 800 800 800] /FontDescriptor 6 0 R\
+             {encoding}{unicode} >>"
+        )
+        .into_bytes(),
+        b"<< /Type /FontDescriptor /FontName /Fixture /Flags 32 \
+          /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0 \
+          /CapHeight 700 /StemV 80 /FontFile 7 0 R >>"
+            .to_vec(),
+        type1_support::font_file(&program),
+        render_support::raw_stream("", cmap.as_bytes()),
+    ])
+}
+
+/// A Type 1 program of three glyphs of three shapes — `A` tall, `B` wide,
+/// and `ornament1`, a name with no Unicode meaning, a small square high up —
+/// whose built-in encoding puts `A` at 65, `B` at 66 and `ornament1` at 70.
+fn encoded_type1() -> type1_support::Program {
+    use type1_support::{n, rect, ENDCHAR, HSBW};
+    type1_support::program(
+        &[
+            (".notdef", [n(&[0, 800]), vec![HSBW, ENDCHAR]].concat()),
+            ("A", rect(800, 0, 0, 300, 700)),
+            ("B", rect(800, 0, 0, 700, 300)),
+            ("ornament1", rect(800, 300, 500, 200, 200)),
+        ],
+        &[],
+        &[(65, "A"), (66, "B"), (70, "ornament1")],
+    )
+}
+
+/// The page's pixels.
+fn pixels(bytes: Vec<u8>) -> Vec<u8> {
+    let doc = Document::open(bytes).expect("it opens");
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert!(ink(&bitmap) > 0, "it drew: {:?}", bitmap.warnings);
+    bitmap.data
+}
+
+/// **The encoding's glyph name chooses a Type 1 charstring** (ISO 32000-2
+/// 9.6.5.2): before this, the code's *text* chose it, so a `/Differences` name
+/// with no Unicode meaning fell through to the built-in encoding and drew
+/// that code's glyph, and a `/ToUnicode` naming another letter drew that
+/// letter. Each now draws the glyph the encoding names, pixel for pixel the
+/// page that reaches the same glyph by a route nothing disputes.
+#[test]
+fn a_type1_glyph_is_chosen_by_its_encoding_name() {
+    // `/Differences` names `ornament1` for code 65, whose built-in glyph is
+    // `A`; the twin reaches `ornament1` through the built-in encoding's 70.
+    let named = pixels(type1_page(
+        Some("<< /Differences [65 /ornament1] >>"),
+        None,
+        "A",
+    ));
+    let twin = pixels(type1_page(None, None, "F"));
+    assert_eq!(
+        named, twin,
+        "code 65 draws ornament1, as the encoding names"
+    );
+    let a = pixels(type1_page(None, None, "A"));
+    assert_ne!(named, a, "and not the built-in encoding's A");
+
+    // `/ToUnicode` says code 66 is the letter A, and `/Differences` names B;
+    // the twin draws B with nothing to dispute.
+    let disputed = pixels(type1_page(
+        Some("<< /Differences [66 /B] >>"),
+        Some("<42> <0041>"),
+        "B",
+    ));
+    let twin = pixels(type1_page(None, None, "B"));
+    assert_eq!(disputed, twin, "code 66 draws B, as the encoding names");
+    assert_ne!(disputed, a, "and not the A its text names");
 }
 
 // ---- the bundled faces (roadmap Tier 1) ----------------------------------

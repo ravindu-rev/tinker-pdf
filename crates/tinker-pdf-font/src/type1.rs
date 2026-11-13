@@ -115,6 +115,9 @@ pub struct Type1<'a> {
     subrs: Vec<Vec<u8>>,
     /// `/Encoding`, when the font carries a built-in one: code to glyph name.
     encoding: Vec<(u8, Vec<u8>)>,
+    /// Whether `/Encoding` is the token `StandardEncoding` (chapter 10.3),
+    /// which assigns the Adobe Standard Encoding as the built-in one.
+    standard: bool,
     /// `/FontMatrix`, which is usually 1/1000 but need not be.
     pub font_matrix: [f64; 6],
     /// `/WeightVector`, where the program is a multiple-master one: its
@@ -413,6 +416,7 @@ impl Type1<'_> {
             glyphs: read_charstrings(&layout.private, len_iv, steps),
             subrs: read_subrs(&layout.private, len_iv, steps),
             encoding: read_encoding(clear),
+            standard: says_standard_encoding(clear),
             font_matrix: read_font_matrix(clear).unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]),
             blend: read_blend(clear),
             weights: weight_vector.clone(),
@@ -501,15 +505,24 @@ impl Type1<'_> {
     }
 
     /// The glyph a character code selects through the font's built-in
-    /// `/Encoding`, when it has one.
+    /// `/Encoding`, when it has one: its `dup <code> /<name> put` entries, or
+    /// the Adobe Standard Encoding where the program says `/Encoding
+    /// StandardEncoding` (chapter 10.3).
     #[must_use]
     pub fn glyph_for_code(&self, code: u8) -> Option<u16> {
         let name = self
             .encoding
             .iter()
             .find(|(c, _)| *c == code)
-            .map(|(_, n)| n.as_slice())?;
-        self.glyph_for_name(name)
+            .map(|(_, n)| n.as_slice());
+        match name {
+            Some(name) => self.glyph_for_name(name),
+            None if self.standard => {
+                let name = crate::encoding::base_glyph_name(crate::BaseEncoding::Standard, code)?;
+                self.glyph_for_name(name.as_bytes())
+            }
+            None => None,
+        }
     }
 
     /// The outline of one glyph, in font units.
@@ -1390,6 +1403,24 @@ fn read_blend(clear: &[u8]) -> Option<Blend> {
     })
 }
 
+/// Whether the clear text's `/Encoding` is the token `StandardEncoding`.
+fn says_standard_encoding(clear: &[u8]) -> bool {
+    let Some(at) = find(clear, b"/Encoding") else {
+        return false;
+    };
+    let rest = &clear[at + b"/Encoding".len()..];
+    let start = rest
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(rest.len());
+    let token = &rest[start..];
+    let word = b"StandardEncoding";
+    token.starts_with(word)
+        && token
+            .get(word.len())
+            .is_none_or(|b| b.is_ascii_whitespace() || b"()<>[]{}/%".contains(b))
+}
+
 /// `dup <code> /<name> put` entries of a built-in `/Encoding`.
 fn read_encoding(clear: &[u8]) -> Vec<(u8, Vec<u8>)> {
     let Some(at) = find(clear, b"/Encoding") else {
@@ -1894,6 +1925,7 @@ mod tests {
             glyphs: vec![(b"g".to_vec(), cs)],
             subrs: Vec::new(),
             encoding: Vec::new(),
+            standard: false,
             font_matrix: [0.001, 0.0, 0.0, 0.001, 0.0, 0.0],
             weight_vector: None,
             blend: None,
@@ -2047,6 +2079,64 @@ mod tests {
         cs.push(9); // closepath
         cs.push(14); // endchar
         cs
+    }
+
+    /// 10.3: `/Encoding StandardEncoding def` assigns the Adobe Standard
+    /// Encoding, so a code reaches the glyph its Standard name names; a
+    /// program with `dup` entries reads those, and one with neither reads
+    /// nothing.
+    #[test]
+    fn a_program_that_says_standard_encoding_reads_its_codes_through_it() {
+        let glyphs: [(&[u8], Vec<u8>); 3] = [
+            (b"A", box_charstring(0, 600, 500)),
+            (b"quoteright", box_charstring(0, 300, 50)),
+            (b"B", box_charstring(0, 600, 400)),
+        ];
+        let standard = {
+            let mut out = program(&glyphs, &[]);
+            let at = find(&out, b"currentfile eexec").expect("the clear text");
+            out.splice(at..at, b"/Encoding StandardEncoding def\n".iter().copied());
+            out
+        };
+        let font = Type1::parse(&standard).expect("it parses");
+        assert_eq!(font.glyph_for_code(b'A'), Some(0));
+        assert_eq!(font.glyph_for_code(b'B'), Some(2));
+        // StandardEncoding's code 39 is `quoteright`, not `quotesingle`.
+        assert_eq!(font.glyph_for_code(39), Some(1));
+        assert_eq!(font.glyph_for_code(b'C'), None, "no glyph C");
+
+        let none = program(&glyphs, &[]);
+        let font = Type1::parse(&none).expect("it parses");
+        assert_eq!(font.glyph_for_code(b'A'), None, "no /Encoding, no code");
+
+        let named = {
+            let mut out = program(&glyphs, &[]);
+            let at = find(&out, b"currentfile eexec").expect("the clear text");
+            out.splice(
+                at..at,
+                b"/Encoding 256 array\ndup 65 /B put\nreadonly def\n"
+                    .iter()
+                    .copied(),
+            );
+            out
+        };
+        let font = Type1::parse(&named).expect("it parses");
+        assert_eq!(
+            font.glyph_for_code(b'A'),
+            Some(2),
+            "the entry, not Standard's"
+        );
+        assert_eq!(font.glyph_for_code(b'B'), None);
+
+        // `StandardEncodingX` is another name.
+        let other = {
+            let mut out = program(&glyphs, &[]);
+            let at = find(&out, b"currentfile eexec").expect("the clear text");
+            out.splice(at..at, b"/Encoding StandardEncodingX def\n".iter().copied());
+            out
+        };
+        let font = Type1::parse(&other).expect("it parses");
+        assert_eq!(font.glyph_for_code(b'A'), None);
     }
 
     /// A box drawn from `(x, 0)` by `side` units, as a charstring after
