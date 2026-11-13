@@ -1624,6 +1624,25 @@ exclusions, whole: a tree short of an operation the list does not exclude is
 refused by that operation, and so is one that holds an excluded operation's
 estimate, which no wasm build times, so the tree holds another run's.
 
+**`cargo xtask bench-check --wasm` holds the run to committed figures.** It
+reads the three trees — `target/criterion`, `target/criterion-wasm32-wasip1`
+and `target/criterion-wasm32-wasip1-simd128` — by their listed ids, refuses
+the run when the native tree or either leg is short of the set less the
+exclusions, and prints each operation's wasm/native ratio, the plain leg's
+mean over native's, and its `+simd128`/plain gain, the plain leg's mean over
+the `+simd128` leg's, beside its figures in `wasm.json`'s `figures`. It fails
+when a ratio exceeds its figure or a gain falls below its own; each is
+one-sided, so faster on wasm is never a failure, and an operation with no
+figure yet is reported and not failed. The ratio is the plain leg's because a
+gain is a floor: a slower plain build raises the ratio and a slower
+`+simd128` build lowers the gain, so both legs are held, where on the
+`+simd128` leg a plain build that slowed would only raise its gain.
+`cargo xtask baseline` reads the figures too: it refuses a figure for an
+operation the set does not define or `wasm.json` excludes, an operation given
+figures twice, an entry with neither figure, and a ratio above 1.94x that
+carries no approval — an `approved` beside it, the H-78 record that admits
+it. Only H-78 raises a committed ratio or lowers a committed gain.
+
 ## Counted work, guarded
 
 A speed claim that can hold on a shared runner and under every target is a

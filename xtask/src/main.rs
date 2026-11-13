@@ -137,6 +137,18 @@ bindings-parity options:
                                          a run that recorded four CPUs, and the
                                          render group's four bands at least
                                          2.6x one thread
+  cargo xtask bench-check --wasm
+                                         hold one run's three trees, {native},
+                                         {plain} and
+                                         {simd}, to
+                                         benches/wasm.json: print each
+                                         operation's plain wasm/native ratio
+                                         and +simd128/plain gain, and fail a
+                                         ratio over its figure or a gain under
+                                         its own; an operation with no figure
+                                         yet is reported, and a tree short of
+                                         the set less wasm.json's exclusions
+                                         is refused before anything is compared
   cargo xtask bench-check --paired BASE HEAD
                                          hold the head's ten rounds to the base's:
                                          the median paired ratio against 1 + the
@@ -223,6 +235,9 @@ fn usage() -> String {
     USAGE
         .replace("{timeout}", &corpus::DEFAULT_TIMEOUT_SECONDS.to_string())
         .replace("{work}", count::WORK_DIR)
+        .replace("{native}", bench::NATIVE_TREE)
+        .replace("{plain}", bench::PLAIN_TREE)
+        .replace("{simd}", bench::SIMD_TREE)
         .replace("{rise}", &count::RISE_PERCENT.to_string())
         .replace(
             "{session}",
@@ -1753,6 +1768,23 @@ mod tests {
         assert!(text.contains(&format!("built under {}, each", count::WORK_DIR)));
         assert!(text.contains(&format!("more than {} % above", count::RISE_PERCENT)));
         for placeholder in ["{work}", "{rise}"] {
+            assert!(
+                !text.contains(placeholder),
+                "{placeholder} is left unfilled"
+            );
+        }
+    }
+
+    /// `bench-check --wasm`'s usage text names the mode and the three trees
+    /// it reads, from the constants it reads them by.
+    #[test]
+    fn the_usage_text_names_the_wasm_mode_and_its_trees() {
+        let text = usage();
+        assert!(text.contains("cargo xtask bench-check --wasm"));
+        for tree in [bench::NATIVE_TREE, bench::PLAIN_TREE, bench::SIMD_TREE] {
+            assert!(text.contains(tree), "the usage text names {tree}");
+        }
+        for placeholder in ["{native}", "{plain}", "{simd}"] {
             assert!(
                 !text.contains(placeholder),
                 "{placeholder} is left unfilled"

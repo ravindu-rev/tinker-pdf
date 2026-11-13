@@ -9,7 +9,16 @@
     "one that times `tpdf` as a child, or `threads`, for one that runs on",
     "threads it starts. No operation is left out for any other reason. A",
     "wasm build of the harness leaves these out, and a wasm leg is every",
-    "other operation of the set."
+    "other operation of the set.",
+    "",
+    "`figures` holds what `bench-check --wasm` holds one run of the legs to,",
+    "an operation an entry, by id: `ratio`, the most the plain wasm leg's",
+    "time may be over native's, and `gain`, the least the plain leg's time",
+    "may be over the +simd128 leg's, each a comparison of one iteration's",
+    "mean on one machine in one run. An operation with no entry, or an entry",
+    "short of a figure, is reported and not failed. A ratio above 1.94",
+    "stands only with the owner's approval beside it, `approved`, the H-78",
+    "record that admits it; only H-78 raises a ratio or lowers a gain."
   ],
   "excluded": [
     { "id": "open/open and count the 23 MB image file, CLI", "why": "a child process" },
@@ -42,5 +51,6 @@
     { "id": "threads/24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI", "why": "a child process" },
     { "id": "threads/24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI", "why": "a child process" },
     { "id": "threads/24 quarter-size text pages to PNG at 150 dpi, 8 jobs, CLI", "why": "a child process" }
-  ]
+  ],
+  "figures": []
 }

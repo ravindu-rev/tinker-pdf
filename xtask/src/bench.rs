@@ -90,6 +90,18 @@
 //! exclusion to an operation the lists hold, and [`wasm_leg`] holds a leg's
 //! tree to the set less them, so a leg that ran short is refused rather
 //! than compared on what it happened to time.
+//!
+//! # Why the wasm ratio is the plain leg's
+//!
+//! `bench-check --wasm` holds two figures an operation, both one-sided: the
+//! plain leg's time over native's at most its committed ratio, and the
+//! plain leg's time over the `+simd128` leg's at least its committed gain.
+//! The ratio is taken on the plain leg because a gain is a floor: a slower
+//! plain build then raises the ratio, and a slower `+simd128` build lowers
+//! the gain, so each leg is held, where on the `+simd128` leg a plain build
+//! that slowed would only raise its gain. A committed ratio above
+//! [`RATIO_CEILING`] stands only beside the owner's recorded approval
+//! (H-78), and only H-78 raises a ratio or lowers a gain.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -130,6 +142,22 @@ pub const WASM_PATH: &str = "crates/tinker-pdf/benches/wasm.json";
 /// the only reasons `wasm.json` may exclude one for: a child process, for an
 /// operation that times `tpdf`, and threads it starts.
 pub const WASM_LACKS: [&str; 2] = ["a child process", "threads"];
+
+/// The most a committed wasm/native ratio may be without the owner's
+/// recorded approval beside it (H-78): the slowest operation's ratio the
+/// planning measurement showed, which P-19 lowers toward 1.5.
+pub const RATIO_CEILING: f64 = 1.94;
+
+/// The tree the native leg of a wasm run writes, under the repository root:
+/// criterion's own, as a plain `cargo bench -p tinker-pdf` leaves it.
+pub const NATIVE_TREE: &str = "target/criterion";
+
+/// The tree the plain wasm leg writes, the `CRITERION_HOME` its runner
+/// grants (`docs/verification.md`, "The wasm legs").
+pub const PLAIN_TREE: &str = "target/criterion-wasm32-wasip1";
+
+/// The tree the `+simd128` wasm leg writes.
+pub const SIMD_TREE: &str = "target/criterion-wasm32-wasip1-simd128";
 
 /// The ten characters criterion 0.5.1 writes as `_` in each part of an
 /// operation's directory (`make_filename_safe`, its `src/report.rs`).
@@ -2269,11 +2297,16 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
             "cannot read {WASM_PATH}: {error}; a wasm build of the harness leaves out \
              what it excludes, and the wasm legs are held to the set less those"
         )),
-        Ok(text) => match wasm_excluded(&text) {
-            Err(problem) => problems.push(problem),
-            Ok(excluded) => {
+        Ok(text) => match (wasm_excluded(&text), wasm_figures(&text)) {
+            (Err(problem), figures) => {
+                problems.push(problem);
+                problems.extend(figures.err());
+            }
+            (Ok(_), Err(problem)) => problems.push(problem),
+            (Ok(excluded), Ok(figures)) => {
                 if let Some(lists) = &lists {
                     problems.extend(exclusion_problems(&excluded, lists));
+                    problems.extend(figure_problems(&figures, &excluded, lists));
                 }
             }
         },
@@ -2402,6 +2435,286 @@ pub fn wasm_leg(
         }
     }
     problems
+}
+
+/// One operation's committed wasm figures: what one run of the legs holds
+/// it to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WasmFigure {
+    /// Its id, `<group>/<name>`.
+    pub id: String,
+    /// The most the plain wasm leg's time may be over native's; `None`
+    /// until one is committed.
+    pub ratio: Option<f64>,
+    /// The least the plain wasm leg's time may be over the `+simd128`
+    /// leg's; `None` until one is committed.
+    pub gain: Option<f64>,
+    /// The owner's approval of a ratio above [`RATIO_CEILING`], as it is
+    /// recorded beside it (H-78).
+    pub approved: Option<String>,
+}
+
+/// The `figures` list of `text`, a `wasm.json`, in its order. An entry is
+/// refused with no `id`, with neither figure, with a figure that is no
+/// positive number, with a ratio above [`RATIO_CEILING`] and no approval
+/// beside it, and with an approval that is not the owner's (one that does
+/// not begin `H-78`) or stands beside no ratio above the ceiling.
+pub fn wasm_figures(text: &str) -> Result<Vec<WasmFigure>, String> {
+    let root = json::parse(text).map_err(|error| format!("{WASM_PATH}: {error}"))?;
+    let entries = root
+        .get("figures")
+        .and_then(Json::as_array)
+        .ok_or_else(|| format!("{WASM_PATH} holds no `figures` list"))?;
+    entries
+        .iter()
+        .enumerate()
+        .map(|(at, entry)| {
+            let id = entry
+                .get("id")
+                .and_then(Json::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!("{WASM_PATH}: the `figures` list's entry {at} has no `id` string")
+                })?;
+            let figure = |key: &str| -> Result<Option<f64>, String> {
+                match entry.get(key) {
+                    None => Ok(None),
+                    Some(Json::Number(n)) if n.is_finite() && *n > 0.0 => Ok(Some(*n)),
+                    Some(_) => Err(format!(
+                        "{WASM_PATH} gives `{id}` a `{key}` that is no positive number"
+                    )),
+                }
+            };
+            let (ratio, gain) = (figure("ratio")?, figure("gain")?);
+            if ratio.is_none() && gain.is_none() {
+                return Err(format!(
+                    "{WASM_PATH} lists `{id}` with neither a `ratio` nor a `gain`; an \
+                     operation with no figure yet is left out of the list"
+                ));
+            }
+            let approved = match entry.get("approved") {
+                None => None,
+                Some(Json::String(text)) if text.starts_with("H-78") => Some(text.clone()),
+                Some(_) => {
+                    return Err(format!(
+                        "{WASM_PATH} gives `{id}` an `approved` that is not the owner's: an \
+                         approval is the H-78 record that admits it, and begins `H-78`"
+                    ))
+                }
+            };
+            let over = ratio.is_some_and(|ratio| ratio > RATIO_CEILING);
+            if over && approved.is_none() {
+                return Err(format!(
+                    "{WASM_PATH} commits `{id}` at a ratio of {}x, above {RATIO_CEILING}x, \
+                     with no approval beside it; such a ratio is the owner's (H-78), put to \
+                     the owner and never committed unapproved",
+                    ratio.unwrap_or_default()
+                ));
+            }
+            if approved.is_some() && !over {
+                return Err(format!(
+                    "{WASM_PATH} records an approval beside `{id}`, whose ratio is not above \
+                     {RATIO_CEILING}x; an approval stands beside the ratio it admits"
+                ));
+            }
+            Ok(WasmFigure {
+                id,
+                ratio,
+                gain,
+                approved,
+            })
+        })
+        .collect()
+}
+
+/// What is wrong with `figures` against the set: a figure for an operation
+/// no list holds, which no run compares, one for an operation `excluded`
+/// names, which no wasm leg times, and an operation given figures twice.
+#[must_use]
+pub fn figure_problems(
+    figures: &[WasmFigure],
+    excluded: &[Excluded],
+    lists: &[Group],
+) -> Vec<String> {
+    let ids: Vec<String> = lists
+        .iter()
+        .flat_map(|list| list.operations.iter().map(|o| list.id(&o.name)))
+        .collect();
+    let mut problems = Vec::new();
+    for (index, figure) in figures.iter().enumerate() {
+        if figures[..index].iter().any(|other| other.id == figure.id) {
+            problems.push(format!("{WASM_PATH} gives `{}` figures twice", figure.id));
+        } else if !ids.contains(&figure.id) {
+            problems.push(format!(
+                "{WASM_PATH} gives figures for `{}`, an operation the set does not define",
+                figure.id
+            ));
+        } else if excluded.iter().any(|exclusion| exclusion.id == figure.id) {
+            problems.push(format!(
+                "{WASM_PATH} gives figures for `{}`, which it excludes, so no wasm leg \
+                 times it",
+                figure.id
+            ));
+        }
+    }
+    problems
+}
+
+/// What one run of the legs made of one operation: its two ratios, beside
+/// the figures they are held to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WasmReading {
+    /// Its id, `<group>/<name>`.
+    pub id: String,
+    /// The plain wasm leg's mean over the native leg's.
+    pub ratio: f64,
+    /// The plain wasm leg's mean over the `+simd128` leg's.
+    pub gain: f64,
+    /// The committed ratio it is held under, where there is one.
+    pub ratio_figure: Option<f64>,
+    /// The committed gain it is held over, where there is one.
+    pub gain_figure: Option<f64>,
+}
+
+impl WasmReading {
+    /// Whether its ratio exceeds its committed figure. Faster on wasm, or a
+    /// ratio under its figure, is never a failure.
+    #[must_use]
+    pub fn ratio_fails(&self) -> bool {
+        self.ratio_figure.is_some_and(|figure| self.ratio > figure)
+    }
+
+    /// Whether its gain falls below its committed figure. A larger gain is
+    /// never a failure.
+    #[must_use]
+    pub fn gain_fails(&self) -> bool {
+        self.gain_figure.is_some_and(|figure| self.gain < figure)
+    }
+
+    /// Whether the run fails on it.
+    #[must_use]
+    pub fn fails(&self) -> bool {
+        self.ratio_fails() || self.gain_fails()
+    }
+
+    /// Its line: both ratios, each beside its figure or reported as having
+    /// none yet.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let held = |figure: Option<f64>, fails: bool, word: &str| match figure {
+            Some(figure) => format!("{word} {figure:.3}x{}", if fails { ", FAILS" } else { "" }),
+            None => "no committed figure yet, reported".to_string(),
+        };
+        format!(
+            "  wasm/native {:.3}x ({})  +simd128/plain {:.3}x ({})  {}",
+            self.ratio,
+            held(self.ratio_figure, self.ratio_fails(), "at most"),
+            self.gain,
+            held(self.gain_figure, self.gain_fails(), "at least"),
+            self.id
+        )
+    }
+}
+
+/// Each operation of `set` read from the three legs' estimates and held to
+/// its figure in `figures`, in `set`'s order; an operation a leg holds no
+/// estimate for is left out, since [`wasm_leg`] refuses that leg first.
+#[must_use]
+pub fn wasm_readings(
+    set: &[String],
+    native: &BTreeMap<String, f64>,
+    plain: &BTreeMap<String, f64>,
+    simd: &BTreeMap<String, f64>,
+    figures: &[WasmFigure],
+) -> Vec<WasmReading> {
+    set.iter()
+        .filter_map(|id| {
+            let (native, plain, simd) = (native.get(id)?, plain.get(id)?, simd.get(id)?);
+            let figure = figures.iter().find(|figure| &figure.id == id);
+            Some(WasmReading {
+                id: id.clone(),
+                ratio: plain / native,
+                gain: plain / simd,
+                ratio_figure: figure.and_then(|figure| figure.ratio),
+                gain_figure: figure.and_then(|figure| figure.gain),
+            })
+        })
+        .collect()
+}
+
+/// `bench-check --wasm`: one run's three trees under `root`, each read as
+/// its listed ids, held to the set less `wasm.json`'s exclusions — a native
+/// tree short of one, or a wasm leg's [`wasm_leg`] refuses, is refused
+/// before anything is compared — and then each operation's ratio and gain
+/// printed beside its figures and held to them.
+fn run_wasm(root: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(root.join(BASELINE_PATH))
+        .map_err(|error| format!("cannot read {BASELINE_PATH}: {error}"))?;
+    let lists = groups(&text, BASELINE_PATH).map_err(|error| error.to_string())?;
+    let wasm = std::fs::read_to_string(root.join(WASM_PATH))
+        .map_err(|error| format!("cannot read {WASM_PATH}: {error}"))?;
+    let excluded = wasm_excluded(&wasm)?;
+    let figures = wasm_figures(&wasm)?;
+    let tree = |dir: &str| by_listed_id(measured(&root.join(dir)), &lists);
+    let (native, plain, simd) = (tree(NATIVE_TREE), tree(PLAIN_TREE), tree(SIMD_TREE));
+    let set = wasm_set(&lists, &excluded);
+
+    let mut refused: Vec<String> = set
+        .iter()
+        .filter(|id| !native.contains_key(*id))
+        .map(|id| format!("the native ({NATIVE_TREE}) leg holds no estimate for `{id}`"))
+        .collect();
+    refused.extend(wasm_leg(
+        &format!("plain wasm ({PLAIN_TREE})"),
+        &lists,
+        &excluded,
+        &plain,
+    ));
+    refused.extend(wasm_leg(
+        &format!("+simd128 wasm ({SIMD_TREE})"),
+        &lists,
+        &excluded,
+        &simd,
+    ));
+    if !refused.is_empty() {
+        return Err(format!(
+            "the three trees are not one run of the set less {WASM_PATH}'s exclusions:\n{}",
+            refused.join("\n")
+        ));
+    }
+
+    let readings = wasm_readings(&set, &native, &plain, &simd, &figures);
+    println!(
+        "bench-check: wasm, each operation's plain wasm leg over native and over the \
+         +simd128 leg, beside its figures in {WASM_PATH}"
+    );
+    for reading in &readings {
+        println!("{}", reading.line());
+    }
+    let unfigured = readings
+        .iter()
+        .filter(|reading| reading.ratio_figure.is_none() || reading.gain_figure.is_none())
+        .count();
+    if unfigured > 0 {
+        println!(
+            "bench-check: {unfigured} of {} operations lack a committed figure, reported and \
+             not failed",
+            readings.len()
+        );
+    }
+    let failing: Vec<String> = readings
+        .iter()
+        .filter(|reading| reading.fails())
+        .map(WasmReading::line)
+        .collect();
+    if failing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "a wasm ratio over its figure, or a +simd128 gain under its own:\n{}",
+            failing.join("\n")
+        ))
+    }
 }
 
 /// How many rounds a paired run times each operation in on each side: a sign
@@ -3001,6 +3314,12 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
                 if sizes_mode == Some(true) {
                     index += 1;
                 }
+            }
+            "--wasm" => {
+                if args.len() != 1 {
+                    return Err("bench-check --wasm takes nothing else".to_string());
+                }
+                return run_wasm(root);
             }
             "--paired" => {
                 let planning = args.get(index + 1).map(String::as_str) == Some("--planning");
@@ -3644,12 +3963,16 @@ mod tests {
         wasm: String,
     }
 
-    /// The wasm legs' exclusions in a tree that agrees: one of its three
-    /// operations, as a CLI-marked one would be.
+    /// The wasm legs' facts in a tree that agrees: one of its three
+    /// operations excluded, as a CLI-marked one would be, and figures for
+    /// one of the other two.
     const WASM: &str = r#"{
-  "note": ["One operation a wasm target cannot run."],
+  "note": ["One operation a wasm target cannot run, and one with figures."],
   "excluded": [
     { "id": "render/render a full-page axial shading at 150 dpi", "why": "a child process" }
+  ],
+  "figures": [
+    { "id": "render/render text at 150 dpi", "ratio": 1.5, "gain": 1.1 }
   ]
 }"#;
 
@@ -3890,6 +4213,237 @@ fn render(c: &mut Criterion) {
                 .iter()
                 .any(|p| p.contains(&format!("cannot read {WASM_PATH}"))),
             "{problems:?}"
+        );
+    }
+
+    /// One reading of the agreeing tree's figured operation, at `ratio` and
+    /// `gain`.
+    fn reading(ratio: f64, gain: f64) -> WasmReading {
+        let lists = groups(LISTS, "x").expect("the lists parse");
+        let excluded = wasm_excluded(WASM).expect("the exclusions parse");
+        let figures = wasm_figures(WASM).expect("the figures parse");
+        let set = wasm_set(&lists, &excluded);
+        let at = |nanos: f64| -> BTreeMap<String, f64> {
+            set.iter().map(|id| (id.clone(), nanos)).collect()
+        };
+        let (native, plain) = (at(10.0e6), at(10.0e6 * ratio));
+        let simd = at(10.0e6 * ratio / gain);
+        let readings = wasm_readings(&set, &native, &plain, &simd, &figures);
+        assert_eq!(readings.len(), 2, "every operation of the set is read");
+        readings
+            .into_iter()
+            .find(|reading| reading.id == "render/render text at 150 dpi")
+            .expect("the figured operation")
+    }
+
+    #[test]
+    fn a_wasm_ratio_over_its_figure_fails() {
+        let over = reading(1.6, 1.2);
+        assert!((over.ratio - 1.6).abs() < 1e-9);
+        assert_eq!(over.ratio_figure, Some(1.5));
+        assert!(over.ratio_fails() && over.fails(), "{}", over.line());
+        assert!(!over.gain_fails(), "its gain is over its figure");
+        assert!(over
+            .line()
+            .contains("wasm/native 1.600x (at most 1.500x, FAILS)"));
+        assert!(!reading(1.5, 1.2).fails(), "a ratio at its figure passes");
+    }
+
+    #[test]
+    fn a_simd_gain_under_its_figure_fails() {
+        let under = reading(1.2, 1.0);
+        assert!((under.gain - 1.0).abs() < 1e-9);
+        assert_eq!(under.gain_figure, Some(1.1));
+        assert!(under.gain_fails() && under.fails(), "{}", under.line());
+        assert!(!under.ratio_fails());
+        assert!(under
+            .line()
+            .contains("+simd128/plain 1.000x (at least 1.100x, FAILS)"));
+        assert!(!reading(1.2, 1.1).fails(), "a gain at its figure passes");
+    }
+
+    /// Each comparison is one-sided: a wasm leg faster than its figure, or
+    /// than native itself, and a gain past its figure, pass.
+    #[test]
+    fn faster_on_wasm_is_never_a_failure() {
+        for (ratio, gain) in [(1.0, 1.1), (0.5, 1.1), (1.2, 3.0), (0.25, 10.0)] {
+            let faster = reading(ratio, gain);
+            assert!(!faster.fails(), "{}", faster.line());
+            assert!(!faster.line().contains("FAILS"));
+        }
+    }
+
+    /// A ratio above 1.94x is the owner's to admit (H-78): committed with no
+    /// approval beside it, the file is refused by the reader `cargo xtask
+    /// baseline` runs, and with one it reads. An approval that is not the
+    /// owner's, or that stands beside no ratio it admits, is refused too.
+    #[test]
+    fn a_ratio_over_1_94_without_approval_is_refused() {
+        let with = |entry: &str| format!(r#"{{ "excluded": [], "figures": [ {entry} ] }}"#);
+        let refused = wasm_figures(&with(
+            r#"{ "id": "render/render text at 150 dpi", "ratio": 2.1, "gain": 1.0 }"#,
+        ))
+        .expect_err("a ratio over the ceiling, unapproved");
+        assert!(
+            refused.contains("at a ratio of 2.1x, above 1.94x"),
+            "{refused}"
+        );
+        assert!(wasm_figures(&with(
+            r#"{ "id": "render/render text at 150 dpi", "ratio": 1.94 }"#
+        ))
+        .is_ok());
+        let approved = wasm_figures(&with(
+            r#"{ "id": "render/render text at 150 dpi", "ratio": 2.1, "approved": "H-78: the owner's word" }"#,
+        ))
+        .expect("an approved ratio over the ceiling");
+        assert_eq!(
+            approved[0].approved.as_deref(),
+            Some("H-78: the owner's word")
+        );
+        for (entry, words) in [
+            (
+                r#"{ "id": "x/y", "ratio": 2.1, "approved": "fine by me" }"#,
+                "not the owner's",
+            ),
+            (
+                r#"{ "id": "x/y", "ratio": 1.2, "approved": "H-78: early" }"#,
+                "not above 1.94x",
+            ),
+            (r#"{ "id": "x/y" }"#, "neither a `ratio` nor a `gain`"),
+            (r#"{ "id": "x/y", "gain": -1 }"#, "no positive number"),
+            (r#"{ "ratio": 1.2 }"#, "entry 0 has no `id` string"),
+        ] {
+            let problem = wasm_figures(&with(entry)).expect_err(entry);
+            assert!(problem.contains(words), "{entry}: {problem}");
+        }
+
+        let mut tree = Tree::agreeing();
+        tree.wasm = tree.wasm.replace("\"ratio\": 1.5", "\"ratio\": 2.5");
+        let problems = tree.problems("wasm-unapproved");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("above 1.94x, with no approval")),
+            "cargo xtask baseline runs the reader: {problems:?}"
+        );
+        refuses(
+            "wasm-figures",
+            &[
+                (
+                    "a figure for an operation the set does not define",
+                    |tree| {
+                        tree.wasm = tree
+                            .wasm
+                            .replace("render/render text at 150 dpi", "render/render no text");
+                    },
+                    "figures for `render/render no text`, an operation the set does not define",
+                ),
+                (
+                    "a figure for an excluded operation",
+                    |tree| {
+                        tree.wasm = tree.wasm.replace(
+                            "{ \"id\": \"render/render text at 150 dpi\"",
+                            "{ \"id\": \"render/render a full-page axial shading at 150 dpi\"",
+                        );
+                    },
+                    "which it excludes, so no wasm leg times it",
+                ),
+                (
+                    "no figures list",
+                    |tree| {
+                        tree.wasm = tree.wasm.replace("\"figures\"", "\"numbers\"");
+                    },
+                    "holds no `figures` list",
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn an_operation_without_a_figure_is_reported_not_failed() {
+        let lists = groups(LISTS, "x").expect("the lists parse");
+        let excluded = wasm_excluded(WASM).expect("the exclusions parse");
+        let set = wasm_set(&lists, &excluded);
+        let at = |nanos: f64| -> BTreeMap<String, f64> {
+            set.iter().map(|id| (id.clone(), nanos)).collect()
+        };
+        let readings = wasm_readings(&set, &at(1.0e6), &at(9.0e6), &at(9.0e6), &[]);
+        assert_eq!(readings.len(), set.len());
+        for unfigured in &readings {
+            assert_eq!(
+                (unfigured.ratio_figure, unfigured.gain_figure),
+                (None, None)
+            );
+            assert!(
+                !unfigured.fails(),
+                "a ratio of 9x with no figure is reported"
+            );
+            assert!(
+                unfigured
+                    .line()
+                    .contains("wasm/native 9.000x (no committed figure yet, reported)"),
+                "{}",
+                unfigured.line()
+            );
+        }
+        let half = wasm_figures(
+            r#"{ "figures": [ { "id": "open/open a 3-page document", "gain": 1.0 } ] }"#,
+        )
+        .expect("a gain alone");
+        let readings = wasm_readings(&set, &at(1.0e6), &at(9.0e6), &at(9.0e6), &half);
+        let open = &readings[0];
+        assert_eq!((open.ratio_figure, open.gain_figure), (None, Some(1.0)));
+        assert!(
+            !open.fails(),
+            "its ratio has no figure and its gain is at its own"
+        );
+    }
+
+    /// The three trees are read where the legs write them, by their listed
+    /// ids, and a leg short of the set is refused before anything is
+    /// compared; a whole run prints every operation it ran.
+    #[test]
+    fn the_wasm_run_reads_three_trees_and_refuses_a_short_one() {
+        let root = Tree::agreeing().stage("wasm-run");
+        let estimates = |tree: &str, id: &str, nanos: f64| {
+            let dir = root.join(tree).join(id).join("new");
+            std::fs::create_dir_all(&dir).expect("a directory");
+            std::fs::write(
+                dir.join("estimates.json"),
+                format!(r#"{{"mean":{{"point_estimate":{nanos}}}}}"#),
+            )
+            .expect("a file");
+        };
+        for tree in [NATIVE_TREE, PLAIN_TREE] {
+            estimates(tree, "open/open a 3-page document", 1.0e6);
+            estimates(tree, "render/render text at 150 dpi", 1.0e6);
+        }
+        estimates(
+            NATIVE_TREE,
+            "render/render a full-page axial shading at 150 dpi",
+            1.0e6,
+        );
+        estimates(SIMD_TREE, "open/open a 3-page document", 1.0e6);
+        let short = run_wasm(&root).expect_err("the +simd128 leg is short");
+        assert!(
+            short.contains("the +simd128 wasm (")
+                && short.contains("`render/render text at 150 dpi`"),
+            "{short}"
+        );
+        estimates(SIMD_TREE, "render/render text at 150 dpi", 0.8e6);
+        let held = run_wasm(&root);
+        estimates(PLAIN_TREE, "render/render text at 150 dpi", 2.0e6);
+        let slow = run_wasm(&root);
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            held,
+            Ok(()),
+            "a ratio of 1x under 1.5x and a gain of 1.25x over 1.1x"
+        );
+        let slow = slow.expect_err("a ratio of 2x over its figure of 1.5x");
+        assert!(
+            slow.contains("wasm/native 2.000x (at most 1.500x, FAILS)"),
+            "{slow}"
         );
     }
 
